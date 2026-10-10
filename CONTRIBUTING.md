@@ -45,6 +45,18 @@ Tests with a machine (`server/testMachine.ts`, a real daemon with git worktrees)
   EBUSY, ENOTEMPTY and EPERM but not Windows' access-denied (`std::errc::permission_denied`), and wait 0 ms between tries
   (nodejs/node#64698). CI runs Node 24.21 or later; a Windows PC with an older Node shows the failures CI does not.
 
+Two more rules from flakes (w858):
+
+- **A test and the code under it read one clock.** `ledgerSweep.test.ts` dated its requests against a fixed NOW and the
+  ledger's own rules (`updateProblem`: no reopening a request closed more than 7 days ago) read the wall clock, so two
+  tests failed on main from the day NOW was a week old. Pin the code's clock (`o.now = () => new Date(NOW)`) or date
+  everything from `Date.now()`. Never write the month or year into an expected string that the code builds from `new Date()`.
+  `SKEW_DAYS=30 node --import ./scripts/clock-skew.mjs --test server/<file>.test.ts` runs a file a month ahead.
+- **A node process a test starts and then ends by force must not inherit `NODE_V8_COVERAGE`** (`node --test
+  --experimental-test-coverage` sets it): its coverage file is left empty and node exits 1 with every test green
+  ("coverage file is empty", Windows CI). Start it with the variable removed (`withoutCoverage()` in
+  `machineDeployWin.test.ts`).
+
 ### End-to-end tests (Playwright)
 
 ```bash

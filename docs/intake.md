@@ -469,8 +469,48 @@ ledger request, or a line on the request already fixing it.
 - **Approval and caps.** `intake.nightly.autoApprove` (default off, 10 a day) as for the other sources: off, each
   request waits on the Intake tab for a reviewer; on, it goes to the dispatcher at once unless a strong overlap is in
   flight. At most `intake.nightly.dailyCap` (default 10) a day, inside the intake's own `workLimits.intake`.
-- **Off by default** (`intake.nightly.enabled`). Off, the endpoint still checks the key and the report, files nothing,
-  and answers `{enabled: false}`; the lab prints that in its log.
+- **Off by default** (`intake.nightly.enabled`). Off, the endpoint still checks the key and the report, records the
+  night ([The nightly run](#the-nightly-run)), files nothing, and answers `{enabled: false}`; the lab prints that in
+  its log.
+
+## The nightly run
+
+Lothsahn, 2026-10-10 (w864): "Let's restructure the nightly desync run. It shouldn't be a scheduled windows task. Let's
+make it something the portal fires off, like any other worker task", then "Create a portal timer that happens and when
+it does it triggers a run on LothDesktop to do the desync run", "Let's schedule that nightly desync run to run at 3am
+eastern time on LothDesktop", and "regardless of whether the run passes or fails you get feedback from LothDesktop. We
+shouldn't assume silence means a successful (or failed) run." The Windows tasks `ff-nightly-e2e` and
+`ff-nightly-e2e-watchdog` on LothDesktop were removed the same day.
+
+- **The schedule** (`IntakeManager.checkNightlyRun`, every minute; `intake.nightly.run`). At `time` in `tz` (default
+  03:00 America/New_York, so daylight saving moves with it: `nextDaily` in `server/timers.ts`) it files one request per
+  night, `Nightly e2e run <date> on <machine>`, source `nightly-run` (key `nightly-run:<date>`), for `person` (else the
+  system payer), approved by the schedule itself, with `constraints` that name the machine. The dispatcher places it like
+  any request, in a sandbox of that machine: LothDesktop is Lothsahn's chosen exception to his rule for this job. No
+  intake cap applies to it. A night is fired once; a fire the portal was down for still starts up to 3 hours late, and
+  a night due before the schedule was first switched on is never fired late.
+- **The worker** (`workerRules`, `nightly-run`) stops its sandbox's editor, starts the night with FinalFactory's
+  `scripts/nightly/nightly_worker.sh start <date> <request>` (detached, in the lab's own root and clone,
+  `FF_NIGHTLY_ROOT`, with the lab's player slots), checks it every 25 minutes with `nightly_worker.sh check <date>`
+  (a night that died or hung gets its NO VERDICT note posted and is reported broken), reads the report, and ends with
+  `RESOLVED: nightly <date> <passed|failed|broken>: <TL;DR>`. It posts nothing and files nothing by hand.
+- **Every night reports** (`POST /api/intake/nightly`, the nightly-scoped key in `~/.config/ffnightly/ffactory.json` on
+  the lab, written there by the ops worker): a green night too, with `status` passed, failed or broken, `counts`, a
+  `cause` for a broken one and `request` (the run request). The night is recorded whether or not `intake.nightly.enabled`
+  files regressions (`recordNight`), its run request gets a log line, and the answer says `recorded: "<date>, <request>"`.
+  A lab from before w864 sends no status: its results decide (red when any is new or still failing).
+- **A broken night** is one cause across the battery (FinalFactory `report.py` `night_status`: at least half of the
+  scenarios that ran, and 10, failed the same way before their first step or could not run; or the build or checkout
+  failed). It is never filed as N regressions: one request, `Nightly e2e <date>: the night broke ...`, asks for the
+  cause, the game or the lab (`brokenNightDraft`, key `nightly:night-broken`, so a later broken night joins the open
+  one), and the person hears it. 2026-10-09 was 136 "new regressions" from one startup NullReferenceException.
+- **The missing-night alarm.** No report by `reportWithinHours` after the fire (default 5: 08:00 New York time; a night
+  took 136 minutes on 2026-10-10), or the run request closing with no report for 15 minutes, makes the night `missing`:
+  the person's orchestrator gets one `[nightly]` message and the run request a log line. A report that comes after that
+  is recorded and told as late. A night the schedule could not file, or one the portal was down for, is missing at once.
+- **Where to see it.** The Intake tab's Nightly run line (schedule, person, next fire) and the last 14 nights with their
+  status, counts, cause and requests (`summary().nightly.nights`, kept in `intake.json`, 60 nights); `list_work` with
+  `source: "nightly"` lists the run requests with the regressions.
 
 ## FFBox, both ways (later, optional)
 
@@ -579,7 +619,8 @@ setting under the same guard as `intake.ffbox`, and it applies at once, with no 
   },
   "ffbox": { "enabled": false, "branches": true, "diagnoses": true, "requests": true, "boardCheck": false, "match": { "high": 0.7, "medium": 0.45 }, "repo": "Final-Factory/FinalFactory", "dailyCap": 10, "autoApprove": { "enabled": false, "maxPerDay": 3 }, "desync": { "enabled": true, "maxPerDay": 10 } },
   "release": { "enabled": false, "delayMinutes": 60 },
-  "nightly": { "enabled": false, "autoApprove": { "enabled": false, "maxPerDay": 10 }, "dailyCap": 10, "flakyNights": 3, "batchOver": 4 },
+  "nightly": { "enabled": false, "autoApprove": { "enabled": false, "maxPerDay": 10 }, "dailyCap": 10, "flakyNights": 3, "batchOver": 4,
+               "run": { "enabled": false, "time": "03:00", "tz": "America/New_York", "machine": "lothdesktop", "person": "lothsahn", "reportWithinHours": 5 } },
   "reviewers": ["ben", "lothsahn"],
   "lookbackDays": 14
 },
@@ -614,7 +655,10 @@ snowflakes; an entry that is not one trusts nobody.
    `autoApprove` off for the first nights) and restart. After the next night, the Intake tab's Nightly line shows the
    last report and what it came to. Turn on `intake.nightly.autoApprove.enabled` once the requests look right. The
    nightly-regression-sentry standing agent now duplicates this: narrow its charter to what the intake does not do, or
-   pause it.
+   pause it. **The nightly run** (w864): the ops worker mints the key on the portal host and writes it straight into
+   `%USERPROFILE%\.config\ffnightly\ffactory.json` on LothDesktop (`{"url": "<public Funnel URL>", "key": "<key>"}`),
+   never through chat; then set `intake.nightly.run: { "enabled": true, "person": "lothsahn" }` and restart. The next
+   03:00 New York time files the first run request.
 10. **Escalations from Max** (w94; after Lothsahn merges the ffbox side and the w54 prerequisites): mint FFBox's key on
    BEAST, `node server/apikey.ts ffbox --scope ffbox`, and hand it to Lothsahn out of band with the public URL. Set
    `intake.ffbox: { enabled: true, escalations: true }` (leave `autoApprove` off) and restart. The first escalation

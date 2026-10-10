@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { intakeSettings, identityKeys, workerRules } from './intakeRules.ts';
-import { mentionsScenario, nightlyDraft, nightlyPriority, nightlySkip, parseNightlyReport, releaseLine, type NightlyReport } from './nightlyRules.ts';
+import { mentionsScenario, nightlyDraft, nightStatus, nightlyPriority, nightlySkip, parseNightlyReport, releaseLine, type NightlyReport } from './nightlyRules.ts';
 
 /** The nightly e2e lab's report, checked and turned into requests (docs/intake.md, "Nightly e2e regressions"). */
 
@@ -202,4 +202,29 @@ test("a person's request names a scenario only by its whole id", () => {
   assert.equal(mentionsScenario('see S3-save-ui-client', 'S3-save-ui'), false);
   assert.equal(mentionsScenario('smoke-3peer.', 'smoke-3peer'), true);
   assert.equal(mentionsScenario('a.b', 'a-b'), false);
+});
+
+test('nightly report (w864): every night says passed, failed or broken; a broken one may have no commit; its run request is read', () => {
+  const green = parse(body([], { status: 'passed', counts: { ran: 136, passed: 134, failed: 0, flaky: 2, env: 0, extra: 9 }, request: 'w901' }));
+  assert.deepEqual([green.status, green.counts, green.request], ['passed', { ran: 136, passed: 134, failed: 0, flaky: 2, env: 0 }, 'w901']);
+  assert.equal(nightStatus(green), 'passed');
+  const broken = parse(body([], { sha: '', status: 'broken', cause: 'the win build of 7c43c32aa failed' }));
+  assert.deepEqual([broken.sha, broken.status, broken.cause], ['', 'broken', 'the win build of 7c43c32aa failed']);
+  assert.match((parseNightlyReport(body([], { sha: '', status: 'failed' })) as { error: string }).error, /40-character/, 'only a broken night may lack its commit');
+  assert.match((parseNightlyReport(body([], { status: 'green' })) as { error: string }).error, /passed, failed or broken/);
+  assert.equal(parse(body([], { request: 'rm -rf /' })).request, undefined);
+  // A lab from before w864 says no status: its results decide.
+  assert.equal(nightStatus(parse(body([{ scenario: 'S1', class: 'new' }]))), 'failed');
+  assert.equal(nightStatus(parse(body([{ scenario: 'S1', class: 'flaky', flakyNights: 4 }]))), 'passed');
+});
+
+test('nightly run (w864): its worker is told to start, check and report the night, and to post and file nothing', () => {
+  const r = workerRules({ id: 'w901', brief: 'run it', source: { kind: 'nightly-run', untrusted: false, nightlyRun: { date: '2026-10-11', machine: 'lothdesktop' } } });
+  assert.match(r, /bash scripts\/nightly\/nightly_worker\.sh start 2026-10-11 w901/);
+  assert.match(r, /bash scripts\/nightly\/nightly_worker\.sh check 2026-10-11/);
+  assert.match(r, /RESOLVED: nightly 2026-10-11 <passed\|failed\|broken>/);
+  assert.match(r, /Never post to Discord yourself/);
+  assert.deepEqual(identityKeys({ kind: 'nightly-run', untrusted: false, nightlyRun: { date: '2026-10-11', machine: 'lothdesktop' } }), ['nightly-run:2026-10-11']);
+  const s = intakeSettings({ intake: { nightly: { run: { enabled: true, time: '25:00', tz: 'Mars/Olympus', machine: 'a b' } } } });
+  assert.deepEqual(s.nightly.run, { enabled: true, time: '03:00', tz: 'America/New_York', machine: 'lothdesktop', reportWithinHours: 5 }, 'bad values fall back to the defaults');
 });

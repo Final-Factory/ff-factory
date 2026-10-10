@@ -39,6 +39,8 @@ export function sourceLabel(s: WorkSource): string {
       return 'Release follow-up';
     case 'nightly':
       return `Nightly e2e${s.nightly?.date ? ` ${s.nightly.date}` : ''}`;
+    case 'nightly-run':
+      return `Nightly run${s.nightlyRun?.date ? ` ${s.nightlyRun.date}` : ''}`;
   }
 }
 
@@ -418,6 +420,31 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
               {n.last ? `; last report ${n.last.date} from ${n.last.lab} (develop ${n.last.sha.slice(0, 9)}): ${n.last.filed} filed, ${n.last.attached} added to open requests, ${n.last.skipped} skipped` : ''}
             </span>
           </div>
+        )}
+        {n?.run && (
+          <div className="intake-source" data-testid="nightly-run">
+            <Chip tone={n.run.enabled ? 'green' : 'grey'}>Nightly run {onOff(n.run.enabled)}</Chip>
+            <span className="dim small">
+              the portal starts the lab every night at {n.run.time} {n.run.tz} on {n.run.machine}
+              {n.run.person ? ` for ${n.run.person}` : ''}; no report within {n.run.reportWithinHours} h is an alarm{n.run.next ? `; next ${fmtRelative(n.run.next, now)}` : ''}
+            </span>
+          </div>
+        )}
+        {!!n?.nights?.length && (
+          <ul className="small intake-nights" data-testid="nightly-nights">
+            {n.nights.map((x) => (
+              <li key={x.date}>
+                <Chip tone={x.status === 'passed' ? 'green' : x.status === 'running' ? 'grey' : 'red'}>{x.date} {x.status}</Chip>{' '}
+                <span className="dim">
+                  {x.counts ? `${x.counts.passed} of ${x.counts.ran} passed${x.counts.failed ? `, ${x.counts.failed} failed` : ''}${x.counts.flaky ? `, ${x.counts.flaky} flaky` : ''}` : ''}
+                  {x.cause ? ` ${x.cause}` : ''}
+                  {x.sha ? ` (develop ${x.sha.slice(0, 9)})` : ''}
+                  {x.workId ? ` run ${x.workId}` : ''}
+                  {x.work?.length ? `; filed on ${x.work.join(', ')}` : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
         )}
         <p className="dim small">
           Today: {s.today.filed} filed, {s.today.autoApproved} auto-approved, {s.today.skipped} skipped, {s.today.pending} need a human. Reviewers (approve, decline, answer design questions): {s.reviewers.join(', ') || 'the owner'}. Only obvious bugs and nightly regressions are ever worked without them, and only with their auto-approve on.{' '}

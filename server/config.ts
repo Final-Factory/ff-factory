@@ -105,6 +105,12 @@ export interface IntakeConfig {
     flakyNights?: number;
     /** More new requests than this from one night become one batched request for the night (default 4). */
     batchOver?: number;
+    /**
+     * The portal's nightly schedule (w864; docs/intake.md, "The nightly run"): every day at `time` in `tz` it files a
+     * request to run the lab on `machine`, for `person` (a user id; they hear when a night is missing or broken). No
+     * report within `reportWithinHours` of the fire is the alarm. Default off, 03:00 America/New_York, lothdesktop, 5.
+     */
+    run?: { enabled?: boolean; time?: string; tz?: string; machine?: string; person?: string; reportWithinHours?: number };
   };
   /**
    * The people who decide (user ids, e.g. ["ben", "lothsahn"]): they approve or decline what needs a human and answer
@@ -171,6 +177,13 @@ export interface Config {
      * useHostClaudeEnv: true, false, or per machine with "*" for the rest. A person's own token still wins for their work.
      */
     claudeFromVault?: boolean | Record<string, boolean>;
+    /**
+     * Per-person GitHub tokens (docs/vault.md section 13, w868; default false): a machine's runs get their person's vault
+     * GitHub entry as GH_TOKEN (and the daemon's pushes for them use it); the machine id "portal" is the portal's own gh
+     * reads for a request. Off: GitHub entries are given to nobody and every caller keeps its own gh login. Same shape as
+     * claudeFromVault.
+     */
+    githubFromVault?: boolean | Record<string, boolean>;
     /**
      * Each machine daemon's own clean-up (docs/self-recovery.md): a pass every `everyMinutes` (default 60) and
      * sooner below `softFreeGB` (default 80). A number for every machine, or per machine with "*" for the rest.
@@ -802,7 +815,7 @@ export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machine
       if (v === 'tokenfile' && !(cfg as Partial<Pick<Config, 'claudeTokenFile'>>).claudeTokenFile) throw new Error(`config claudeAccounts.${role} is "tokenfile" but config claudeTokenFile names no file`);
     }
   }
-  for (const key of ['useHostClaudeEnv', 'claudeFromVault'] as const) {
+  for (const key of ['useHostClaudeEnv', 'claudeFromVault', 'githubFromVault'] as const) {
     const u: unknown = cfg.machines?.[key];
     if (u === undefined || typeof u === 'boolean') continue;
     if (typeof u !== 'object' || u === null || Array.isArray(u)) throw new Error(`config machines.${key} is true, false or { "<machine id>" | "*": true | false }`);

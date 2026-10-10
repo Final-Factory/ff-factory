@@ -190,7 +190,7 @@ const shell = spawn(process.execPath, ['-e', '${keep}'], { stdio: 'ignore' });
 const host = spawn(process.execPath, ['-e', ${JSON.stringify(host)}, hostMark, out + '.agent'], { detached: true, stdio: 'ignore' });
 host.unref();
 require('fs').writeFileSync(out, JSON.stringify({ daemon: process.pid, shell: shell.pid, host: host.pid })); ${keep}`;
-  spawn(process.execPath, ['-e', daemon, daemonMark, out], { stdio: 'ignore', windowsHide: true }).unref();
+  spawn(process.execPath, ['-e', daemon, daemonMark, out], { stdio: 'ignore', windowsHide: true, env: withoutCoverage() }).unref();
   const pids: number[] = [];
   t.after(() => {
     for (const p of pids) {
@@ -404,6 +404,18 @@ test('windows unity: the editor binary from the Hub (a custom install folder fir
 const onWindowsCi = process.platform === 'win32' && process.env.CI === 'true';
 
 /**
+ * The environment for a process that starts a node of its own and later ends it (a daemon stand-in, the real daemon a
+ * script starts). `node --test --experimental-test-coverage` sets NODE_V8_COVERAGE for the test file and every node below
+ * it inherits it; one ended abruptly leaves its coverage file empty, and the runner then fails the whole run with
+ * "coverage file is empty" though every test passed (w858: 2 of 20 shard runs on a Windows runner).
+ */
+function withoutCoverage(env: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const e = { ...process.env, ...env };
+  delete e.NODE_V8_COVERAGE;
+  return e;
+}
+
+/**
  * Run a script the way psScript does over ssh, but locally: the same encoded bootstrap, fed on stdin. `shell`
  * stands in for sshd's default shell: sshd runs the command line through `cmd.exe /c` or `powershell.exe -c`.
  */
@@ -411,7 +423,7 @@ function runPs(script: string, opts: { data?: string; env?: NodeJS.ProcessEnv; t
   return new Promise((resolve) => {
     const line = win.psCommand().join(' ');
     const [exe, ...args] = opts.shell === 'cmd' ? ['cmd.exe', '/c', line] : opts.shell === 'powershell' ? ['powershell.exe', '-c', line] : win.psCommand();
-    const child = spawn(exe, args, { env: { ...process.env, ...opts.env }, windowsHide: true });
+    const child = spawn(exe, args, { env: withoutCoverage(opts.env), windowsHide: true });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d));
@@ -548,7 +560,7 @@ test('windows (real PowerShell): probe, unpack, npm ci, install into an app_dir,
   const within = <T,>(pr: Promise<T>, ms: number) => Promise.race([pr, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
   let h = /started=True/.test(inst.stdout) ? await within(hello, 30_000) : undefined;
   if (!h) {
-    const sup = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', path.join(appDir, 'run-daemon.ps1')], { detached: true, stdio: 'ignore', windowsHide: true });
+    const sup = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', path.join(appDir, 'run-daemon.ps1')], { detached: true, stdio: 'ignore', windowsHide: true, env: withoutCoverage() });
     sup.unref();
     h = await within(hello, 90_000);
   }

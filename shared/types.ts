@@ -1698,11 +1698,12 @@ export interface WorkFfboxDev {
 /**
  * Where an intake request came from: a Discord #bug-reports thread, a trusted person's request to Max in #dev-chat,
  * an FFBox fix branch or diagnosis, a request FFBox filed, an operator's ffdev turn FFBox handed over (ffbox-dev,
- * docs/ffbox.md "Dev requests"), a release follow-up the server filed itself, or a regression the nightly e2e lab found
- * (docs/intake.md, "Nightly e2e regressions").
+ * docs/ffbox.md "Dev requests"), a release follow-up the server filed itself, a regression the nightly e2e lab found
+ * (docs/intake.md, "Nightly e2e regressions"), or the night's run of that lab, which the portal's nightly schedule files
+ * itself (nightly-run, w864; docs/intake.md, "The nightly run").
  */
-export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly';
-export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly'];
+export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run';
+export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run'];
 
 export interface WorkSource {
   kind: WorkSourceKind;
@@ -1743,6 +1744,35 @@ export interface WorkSource {
   release?: { version: string; workIds: string[] };
   /** A nightly e2e regression: the scenarios, the develop commit tested and the release that carries it. */
   nightly?: WorkNightly;
+  /** The night's run of the nightly e2e lab (w864): the night (its date where the schedule fired) and the machine it runs on. */
+  nightlyRun?: { date: string; machine: string };
+}
+
+/**
+ * One night of the nightly e2e lab as the portal saw it (w864): fired by the schedule, then reported by the lab, or
+ * missing. Lothsahn: "We shouldn't assume silence means a successful (or failed) run."
+ */
+export interface NightlyNight {
+  /** The night, as YYYY-MM-DD in the schedule's time zone. */
+  date: string;
+  /** running: fired, no report yet; passed, failed, broken: what the lab reported; missing: no report by dueBy. */
+  status: 'running' | 'passed' | 'failed' | 'broken' | 'missing';
+  /** When the schedule fired it and the run request it filed (absent for a report the schedule did not fire). */
+  firedAt?: string;
+  workId?: string;
+  /** No report by then is the alarm. */
+  dueBy?: string;
+  reportedAt?: string;
+  lab?: string;
+  sha?: string;
+  /** The lab's counts: scenarios that ran, passed, failed (new and still), flaky, could not run. */
+  counts?: { ran: number; passed: number; failed: number; flaky: number; env: number };
+  /** Why it broke, why it is missing, or why the schedule could not file it. */
+  cause?: string;
+  /** Requests the night's regressions were filed as or added to. */
+  work?: string[];
+  /** When its person was told it is missing or broken. */
+  alarmAt?: string;
 }
 
 /** One file of an FFBox diagnosis (w361): a report's zip or manifest (by report id) or the diagnosis summary (by conversation). */
@@ -1901,6 +1931,10 @@ export interface IntakeSummary {
     batchOver: number;
     /** The last report the lab posted, and what it came to. */
     last?: { at: string; date: string; lab: string; sha: string; filed: number; attached: number; skipped: number };
+    /** The portal's nightly schedule (w864, config intake.nightly.run) and its next fire; optional for an older page. */
+    run?: { enabled: boolean; time: string; tz: string; machine: string; person?: string; reportWithinHours: number; next?: string };
+    /** The last nights, newest first (w864). */
+    nights?: NightlyNight[];
   };
   /** Who approves what needs a human and answers design questions (config intake.reviewers; default the owner). */
   reviewers: string[];
@@ -2103,6 +2137,33 @@ export interface VaultStatus {
   entries: number;
 }
 
+/** What one probe read says a GitHub token may read (w868): read, denied (403), the repository not selected (404), or no answer. */
+export type GithubAccess = 'read' | 'denied' | 'not-selected' | 'error';
+
+/**
+ * A vault GitHub token's health (w868, server/githubTokens.ts), by fingerprint: whose it is, the GitHub account it acts as,
+ * its expiry, which reads it has per repository (write permissions cannot be read without writing), its last use and last
+ * error. Never its value.
+ */
+export interface GithubTokenHealth {
+  fingerprint: string;
+  name: string;
+  last4: string;
+  owner?: string;
+  disabled?: boolean;
+  /** GET /user: the account the token acts as. */
+  login?: string;
+  userId?: number;
+  /** The GitHub-Authentication-Token-Expiration header, as ISO; absent for a token without one. */
+  expiresAt?: string;
+  checkedAt?: string;
+  /** Why no run gets it now (GitHub answered 401); cleared by a probe that passes. */
+  bad?: string;
+  repos?: { repo: string; metadata: GithubAccess; contents?: GithubAccess; pulls?: GithubAccess; actions?: GithubAccess; statuses?: GithubAccess }[];
+  lastUse?: { at: string; what: string };
+  lastError?: { at: string; what: string };
+}
+
 /** What the owner's vault dialog shows (GET /api/vault). */
 export interface VaultView {
   status: VaultStatus;
@@ -2110,7 +2171,10 @@ export interface VaultView {
   kinds: VaultKind[];
   roles: VaultRole[];
   people: { userId: string; displayName: string }[];
-  machines: { id: string; online: boolean; claudeFromVault: boolean }[];
+  machines: { id: string; online: boolean; claudeFromVault: boolean; githubFromVault?: boolean }[];
   /** Machines that hold a credential now. */
   enrolled: string[];
+  /** The GitHub tokens' health (w868), and whether the portal's own reads use them (machines.githubFromVault "portal"). */
+  github?: GithubTokenHealth[];
+  githubPortal?: boolean;
 }

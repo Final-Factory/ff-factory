@@ -194,6 +194,10 @@ export const test = base.extend<{ authed: Page }>({
     await page.goto('/');
     await expect(page.locator('.sidebar')).toBeAttached();
     await use(page);
+    // A test may end while a page.route handler is still inside route.fetch (banner.spec.ts patches /api/state, which the
+    // page keeps polling): Playwright then fails the test with "route.fetch: Test ended" or "Response has been disposed".
+    // Taking the routes down waits for the handlers in flight and ignores what they throw.
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
   },
 });
 
