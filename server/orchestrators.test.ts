@@ -437,7 +437,7 @@ test("w677: an owner's note on another owner's request reaches the dispatcher an
   assert.equal(w().notes!.length, 1);
 });
 
-test("w891: an owner answers another owner's worker's permission request; the transcript, the log and its owner's orchestrator say who; a member still answers only their own", async (t) => {
+test("w891: an owner answers another owner's worker's permission request; the transcript, the log and its owner's orchestrator say who; a member answers as before", async (t) => {
   const { store, sessions, agents, o, dispatcher, chat, call, heard } = await setupOnMachine(t, { people: OWNERS });
   const ben = chat(BEN).info;
   const loth = chat(LOTH).info;
@@ -447,11 +447,6 @@ test("w891: an owner answers another owner's worker's permission request; the tr
   await until('the Bash prompt', () => w.info.pendingPermissions.length === 1);
   const first = w.info.pendingPermissions[0];
   const permEvent = (requestId: string) => store.readTranscript(id).find((e) => e.kind === 'permission' && e.requestId === requestId) as Extract<TranscriptEvent, { kind: 'permission' }>;
-
-  // A member who is not on the request cannot answer it: 403, and it stays pending.
-  const cara = () => o.answerWorkerPermission(CARA, w, first.requestId, true);
-  assert.throws(cara, (e: Error & { status?: number }) => e.status === 403 && /works for Ben: only they, or an owner, answer its permission requests/.test(e.message));
-  assert.equal(w.info.pendingPermissions.length, 1);
 
   // Lothsahn, an owner, answers Ben's worker.
   o.answerWorkerPermission(LOTH, w, first.requestId, true);
@@ -475,6 +470,14 @@ test("w891: an owner answers another owner's worker's permission request; the tr
 
   // An answer nobody asked for is a 404, whoever gives it.
   assert.throws(() => o.answerWorkerPermission(BEN, w, 'no-such-request', true), (e: Error & { status?: number }) => e.status === 404);
+
+  // A member answers another person's worker exactly as before (w891 changes nothing for members); Ben still hears who.
+  sessions.send(id, 'Third #perm');
+  await until('the third prompt', () => w.info.pendingPermissions.length === 1);
+  const third = w.info.pendingPermissions[0];
+  o.answerWorkerPermission(CARA, w, third.requestId, true);
+  await until('the third event says who', () => permEvent(third.requestId).decision === 'allow' && permEvent(third.requestId).decidedBy?.userId === 'cara');
+  await until('Ben is told by Cara', () => heard(ben.id, '[from another person]').some((e) => e.text.startsWith(`[from another person] Cara approved a Bash command for your worker ${id} "w1: Disk clean-up" on w1: rm -rf build\n`)));
 
   // A member answers their own worker's request, and an owner answers it too: the member hears who.
   const hers = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Look #perm', title: 'Cara look', from: 'human', requestedBy: CARA });

@@ -6,18 +6,20 @@ export type PermissionAccess =
   /** The worker works for them (their request is on it, or they started it). */
   | 'own'
   /** Another person's worker, answered by the owner role (w677: owners act on each other's work). */
-  | 'owner';
+  | 'owner'
+  /** Another person's worker, answered by a member: allowed as it always was (w891 changes nothing for members). */
+  | 'other';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 /**
- * How `me` may answer a permission request of this worker, or undefined when they may not: a worker's own people always
- * (`audience`: the people its open requests are for, else whoever started it), and anyone with the owner role for any
- * worker, whoever's it is. A member answers only workers they work for.
+ * How `me` answers a permission request of this worker. Anyone signed in may (the rule before w891 stays for members); this
+ * says whose work it is, so the answer is recorded and its people told: their own worker ('own'), another person's answered
+ * by an owner ('owner'), or by a member ('other'). `audience`: the people its open requests are for, else whoever started it.
  */
-export function permissionAccess(me: { userId: string; role: UserRole | undefined }, worker: { requestedBy?: Requester }, audience: readonly Pick<Requester, 'userId'>[]): PermissionAccess | undefined {
+export function permissionAccess(me: { userId: string; role: UserRole | undefined }, worker: { requestedBy?: Requester }, audience: readonly Pick<Requester, 'userId'>[]): PermissionAccess {
   if (audience.some((r) => same(r.userId, me.userId)) || (worker.requestedBy && same(worker.requestedBy.userId, me.userId))) return 'own';
-  return me.role === 'owner' ? 'owner' : undefined;
+  return me.role === 'owner' ? 'owner' : 'other';
 }
 
 /** The first line of a tool call for a notice: a shell command's own text, else the tool and its input, short. */

@@ -9,7 +9,7 @@ import { FFBOX_LAN_LABEL, ffboxConversationHref, isFfboxConversationId } from '.
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
 import { CostChip, RequestSpendBlock, SpendTab, useSpendSummary } from './Spend';
-import { contextGlance, dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, permissionAnswerer, useNow, workLabel, workTone, type Tone } from '../util';
+import { contextGlance, dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, useNow, workLabel, workTone, type Tone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
 import { PermissionCard } from './Transcript';
@@ -694,10 +694,10 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             x.pendingPermissions.map((p) => (
               <div key={p.requestId} data-testid={`work-permission-${w.id}`}>
                 <p className="small tone-amber">
-                  {x.title} ({x.id}) waits for {permissionAnswerer(app, x) ? `${permissionAnswerer(app, x)}'s` : 'your'} OK
+                  {x.title} ({x.id}) waits for an OK
                   {x.requestedBy && x.requestedBy.userId.toLowerCase() !== app.me?.userId.toLowerCase() ? `, for ${x.requestedBy.displayName}` : ''}:
                 </p>
-                {!permissionAnswerer(app, x) && <PermissionCard sessionId={x.id} requestId={p.requestId} toolName={p.toolName} input={p.input} reason={p.reason} pending />}
+                <PermissionCard sessionId={x.id} requestId={p.requestId} toolName={p.toolName} input={p.input} reason={p.reason} pending />
               </div>
             )),
           )}

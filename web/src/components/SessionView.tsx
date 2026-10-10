@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import type { PermissionMode, SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, openSession, useStore } from '../store';
-import { agentView, fmtCost, fmtRelative, navigate, PERMISSION_MODES, permissionAnswerer, useNow } from '../util';
+import { agentView, fmtCost, fmtRelative, navigate, PERMISSION_MODES, useNow } from '../util';
 import { Composer } from './Composer';
 import { Transcript } from './Transcript';
 import { Confirm, Dot, Icon, StateText } from './ui';
@@ -32,7 +32,6 @@ export function SessionView({
   answeredBy?: string;
 }) {
   useEffect(() => openSession(session.id), [session.id]);
-  const notYours = useStore((st) => (st.app ? permissionAnswerer(st.app, session) : undefined));
   const [details, setDetails] = useDetailsOpen('session');
 
   return (
@@ -53,7 +52,7 @@ export function SessionView({
         </>
       )}
       {session.status === 'error' && session.statusDetail && <div className="banner banner-error">{session.statusDetail}</div>}
-      <Transcript session={session} size={fullWidth ? 'large' : 'normal'} readOnlyFor={answeredBy ?? notYours} />
+      <Transcript session={session} size={fullWidth ? 'large' : 'normal'} readOnlyFor={answeredBy} />
       {readOnly ? (
         <p className="orch-readonly-note" data-testid="read-only-note">
           {readOnly}

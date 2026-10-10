@@ -1,8 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { agentState, type AgentState, type WaitKind } from '../../shared/agentState.ts';
-import type { AppState, AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+import type { AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
-import { permissionAccess } from '../../shared/permissionAccess';
 import { updaterHealth } from '../../shared/updaterHealth';
 import { devRequestsHealth } from '../../shared/devRequestsHealth';
 
@@ -664,16 +663,4 @@ export async function copyText(text: string): Promise<boolean> {
 /** "v0.1.0 · 1a2b3c4": the running server's version and commit. */
 export function versionLabel(v: AppVersion): string {
   return `v${v.version}${v.sha ? ` · ${v.sha}` : ''}`;
-}
-
-/**
- * Who answers this worker's permission requests when you may not (w891: its own people and any owner may; a member answers
- * only their own workers), as names for "Waiting for …"; undefined when you may, or for anything but a worker.
- */
-export function permissionAnswerer(app: Pick<AppState, 'me' | 'work'>, s: Pick<SessionInfo, 'id' | 'kind' | 'requestedBy'>): string | undefined {
-  if (s.kind !== 'worker' || !app.me) return undefined;
-  const people = (app.work ?? []).filter((w) => w.sessionIds.includes(s.id) && isOpenWork(w)).flatMap((w) => w.requesters);
-  const audience = people.length ? people : s.requestedBy ? [s.requestedBy] : [];
-  if (permissionAccess(app.me, s, audience)) return undefined;
-  return [...new Set(audience.map((r) => r.displayName))].join(' and ') || 'its owner';
 }

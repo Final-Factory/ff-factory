@@ -416,8 +416,8 @@ export class DispatcherChatRefused extends Error {
 
 /** A refused or failed answer to a worker's permission request, with the HTTP status the route answers. */
 export class PermissionAnswerRefused extends Error {
-  readonly status: 403 | 404;
-  constructor(status: 403 | 404, message: string) {
+  readonly status: 404;
+  constructor(status: 404, message: string) {
     super(message);
     this.status = status;
   }
@@ -3382,13 +3382,12 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   }
 
   /**
-   * Answer a worker's permission request for a person (w891): its own people may, and so may any owner, whoever's worker it
-   * is (w677); a member may not answer another person's worker (403). Then `permissionAnswered` records and tells.
+   * Answer a worker's permission request for a person (w891). Anyone signed in may, as before; an owner answering another
+   * person's worker is the new case (w677: owners act on each other's work). `permissionAnswered` records and tells.
    */
   answerWorkerPermission(by: Requester, s: SessionHandle, requestId: string, allow: boolean, message?: string) {
     const audience = this.audienceOf(s.info);
     const access = permissionAccess({ userId: by.userId, role: this.d.identity.get(by.userId)?.role }, s.info, audience);
-    if (!access) throw new PermissionAnswerRefused(403, `${s.info.id} works for ${names(audience)}: only they, or an owner, answer its permission requests`);
     const asked = s.info.pendingPermissions.find((p) => p.requestId === requestId);
     if (!s.decide(requestId, allow, message)) throw new PermissionAnswerRefused(404, 'no such pending request');
     if (asked) this.permissionAnswered(by, s.info, asked, allow, access);
@@ -3408,15 +3407,15 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const kind = perm.toolName === 'Bash' || perm.toolName === 'PowerShell' ? `${perm.toolName} command` : `${perm.toolName} request`;
     const what = permissionWhat(perm.toolName, perm.input);
     for (const w of items) {
-      this.stamp(w, `${by.displayName} ${verb} a ${kind} for ${worker.id}${access === 'owner' ? " (an owner, on another person's work)" : ''}: ${clip(what, 120)}`);
+      this.stamp(w, `${by.displayName} ${verb} a ${kind} for ${worker.id}${access === 'owner' ? " (an owner, on another person's work)" : access === 'other' ? " (on another person's work)" : ''}: ${clip(what, 120)}`);
       this.store.putWork(w);
     }
     for (const p of this.audienceOf(worker).filter((r) => !same(r.userId, by.userId))) {
       const on = items.filter((w) => isFor(w, p.userId)).map((w) => w.id);
       this.toPeople(
         [p],
-        `[from another owner] ${by.displayName} ${verb} a ${kind} for your worker ${worker.id} "${clip(worker.title, 80)}"${on.length ? ` on ${on.join(', ')}` : ''}: ${clip(what, 200)}\n` +
-          `${by.displayName} has the owner role, which lets them answer any worker's permission requests (w891). The worker stays ${p.displayName}'s. Tell ${p.displayName} in a line; nothing to do unless they say so.`,
+        `${access === 'owner' ? '[from another owner]' : '[from another person]'} ${by.displayName} ${verb} a ${kind} for your worker ${worker.id} "${clip(worker.title, 80)}"${on.length ? ` on ${on.join(', ')}` : ''}: ${clip(what, 200)}\n` +
+          `${by.displayName} ${access === 'owner' ? 'has the owner role, which lets them answer any worker\'s permission requests (w891).' : 'answered it from the dashboard (w891).'} The worker stays ${p.displayName}'s. Tell ${p.displayName} in a line; nothing to do unless they say so.`,
       );
     }
   }
