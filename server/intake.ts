@@ -143,6 +143,11 @@ export interface IntakeDeps {
   prInfo?: (n: number) => Promise<MergeRecord | undefined>;
   /** Tell FFBox a player's report is fixed (server/providers.ts pushReportFixed); false when it could not go. */
   pushReportFixed?: (fix: ReportFix) => boolean;
+  /**
+   * Mint the nightly run's API key (w864): `--scope nightly`, under one name, so each mint revokes the night before's.
+   * server/index.ts: Auth.createApiKey("nightly-run", undefined, "nightly"). Unset, the run gets no key.
+   */
+  mintNightlyKey?: () => string;
   /** Tell FFBox a player's report is obsolete, or no longer (server/providers.ts pushReportObsolete); false when it could not go. */
   pushReportObsolete?: (o: ReportObsolete & { withdrawn?: true }) => boolean;
   now?: () => number;
@@ -198,6 +203,8 @@ export class IntakeManager {
   private data: Persisted;
   private readonly timers: NodeJS.Timeout[] = [];
   private polling = false;
+  /** The night's key, in memory only (its hash is in the API key store): never written to disk, a brief or a log. */
+  private runKey?: { date: string; key: string };
   private checking = false;
   private resolving = false;
   private closing = false;
@@ -1330,6 +1337,7 @@ export class IntakeManager {
     this.outcome('nightly-run', draft.title, undefined, res);
     const n: NightlyNight = { date, status: 'running', firedAt: iso(now), dueBy: iso(dueBy), ...(res.item ? { workId: res.item.id } : {}) };
     this.putNight(n);
+    if (res.item) this.mintRunKey(date);
     if (!res.item) {
       n.status = 'missing';
       n.cause = `the schedule could not file the run: ${res.skipped ?? 'no request was made'}`;
@@ -1375,6 +1383,38 @@ export class IntakeManager {
       if (status === 'broken' || late) this.nightAlarm(n, late ? `The report of the nightly e2e run of ${n.date} came after all, late: ${line}` : line);
     }
     this.changed();
+  }
+
+  /** A new key for the night, replacing the night before's (one name); false when there is no minter or it failed. */
+  private mintRunKey(date: string): boolean {
+    if (!this.d.mintNightlyKey) return false;
+    try {
+      this.runKey = { date, key: this.d.mintNightlyKey() };
+      return true;
+    } catch (e) {
+      this.data.error = `nightly key: ${cleanLine((e as Error).message, 160)}`;
+      this.changed();
+      return false;
+    }
+  }
+
+  /**
+   * The environment of a worker on a nightly run request (w864; server/agents.ts machineSandboxSpec): FF Factory's URL as
+   * that machine reaches it, and the night's nightly-scoped key, which the lab's `ffnightly.py deliver` reads
+   * (FF_FACTORY_URL, FF_FACTORY_NIGHTLY_KEY) and passes on to nothing else. Only for a night fired in the last day. After a
+   * portal restart the key is gone from memory: a night whose worker already got it keeps it in the lab's running
+   * process (the stored key is still valid), and one whose worker never did gets a fresh one now.
+   */
+  nightlyRunEnv(workIds: readonly string[], portalUrl: string): Record<string, string> | undefined {
+    const now = this.now();
+    const n = this.nights().find((x) => x.workId && workIds.includes(x.workId) && x.firedAt && now - Date.parse(x.firedAt) < 86_400_000);
+    if (!n || !/^https?:\/\/[^\s]+$/.test(portalUrl)) return undefined;
+    if (this.runKey?.date !== n.date && (n.keyGivenAt || !this.mintRunKey(n.date))) return undefined;
+    if (!n.keyGivenAt) {
+      n.keyGivenAt = iso(now);
+      this.changed();
+    }
+    return { FF_FACTORY_URL: portalUrl.replace(/\/+$/, ''), FF_FACTORY_NIGHTLY_KEY: this.runKey!.key };
   }
 
   /** What the lab's POST is answered with: the night as recorded, and its run request. */

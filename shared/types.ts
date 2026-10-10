@@ -1773,6 +1773,8 @@ export interface NightlyNight {
   work?: string[];
   /** When its person was told it is missing or broken. */
   alarmAt?: string;
+  /** When its worker was first given the night's API key (w864); the key itself is never stored here. */
+  keyGivenAt?: string;
 }
 
 /** One file of an FFBox diagnosis (w361): a report's zip or manifest (by report id) or the diagnosis summary (by conversation). */
