@@ -10,6 +10,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The chat's message box empties when you send, every time** (w893, lothsahn: "Sometimes when I send you a message, the message doesn't clear
+  and I have to manually clear it."). The box (and its saved draft) cleared only when the server answered, so a page that reloaded or
+  closed with the message on its way wrote the sent text back as a draft. It now empties at once, and a text-only message goes with
+  `keepalive` so a reload does not cancel it. A send that fails puts the message back (text, pictures, files, the reply) and says
+  "Not sent"; one with no answer at all is sent again under the same id, which the server takes once (`clientId`). Tests:
+  `e2e/composerClears.spec.ts`.
+
 - **Owners' answers to each other's workers' permission requests are recorded and told** (w891, lothsahn: "I should be able to
   approve Ben's shell command requests and vice versa."). w876's Bash approval waited over 15 minutes and Lothsahn saw nothing:
   the server never refused him, but the push notice for a worker on a machine always threw (`Notifier` read `toolName` of the
