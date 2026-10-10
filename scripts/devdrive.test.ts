@@ -95,7 +95,7 @@ function boot(sc: Scenario, o: { letter?: string; flex?: boolean; skip?: string[
 
 test('boot mount: a detached drive is attached and gets its letter back; an attached one is left alone', { skip: needPwsh }, () => {
   const a = boot({ attached: false, autoLetter: '', state: { letter: 'V' } });
-  assert.deepEqual(a.calls, ['Mount-DiskImage', 'Set-Partition V']);
+  assert.deepEqual(a.calls, ['Mount-DiskImage', 'Set-Partition V'], a.log);
   assert.equal(a.result?.ok, true);
   assert.match(a.result!.detail, /attached .* as V:$/, 'no letter change to report');
   // Windows put it at some letter of its own on the way up (the lowest free one): it is moved to V:.
