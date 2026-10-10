@@ -1223,6 +1223,9 @@ test('w731: a request reopened twice counts only what came after its latest reop
 
 test('w731: an idle reopened request is not closed on its worker’s old "delivered" report; one that reports again after the reopen is', async (t) => {
   const { request, worker, sweep, o, get } = setup(t);
+  // The ledger's clock is the sweep's here: a request closed at ago(5) must not age with the wall clock (this began
+  // failing at 2026-10-10T07:00Z, 7 days after NOW, when updateProblem refused to reopen a request "closed a week ago").
+  (o as unknown as { now: () => Date }).now = () => new Date(NOW);
   request('w1', { sessionIds: ['s1'], status: 'done', updatedAt: ago(5) });
   worker('s1', { lastResult: 'All done. The copy is in Screenshots.', lastActivityAt: ago(5) });
   const ben = o.personalFor(BEN);
