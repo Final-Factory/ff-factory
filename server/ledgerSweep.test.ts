@@ -959,6 +959,32 @@ test('w631: a request whose only step left after the merge is a portal deploy cl
   await until('its person hears', () => heard().some((h) => /closed as done 1: w1/.test(h.text)));
 });
 
+test("w890: w889 as it happened: its report puts a check of its own after the deploy, so the deploy landing resumes the worker instead of closing the request", async (t) => {
+  const { request, worker, pr, world, sweep, get, o } = setup(t);
+  // The worker's check-in (Agents.waker, which needs a live session handle this test does not build).
+  const woke: { id: string; note: string }[] = [];
+  (o as unknown as { d: { restoreWake: (id: string, note: string) => boolean } }).d.restoreWake = (id, note) => (woke.push({ id, note }), true);
+  request('w1', { sessionIds: ['s1'], title: "FF Factory can't read GitHub CI on PRs" });
+  worker('s1', { status: 'stopped', lastResult: 'w1: still open: waiting on Ben to give the go-ahead for the portal deploy of 65b1d27 and to add "Actions: Read-only" to the portal\'s D7 token; then I verify a live PR read and the health check' });
+  world.prs = [pr(193, { repo: APP, body: 'Request: w1', sha: 'a'.repeat(40) })];
+  world.portal = 'b0b0b0b';
+  await sweep.checkPrs();
+  assert.equal(get('w1').status, 'blocked', 'the cleanup blocks it on the deploy, as before');
+  assert.equal(get('w1').blocked?.by, 'ledger cleanup');
+  // The deploy lands: not closed. Its worker is resumed (a check-in within a minute) for the step it named.
+  world.portal = 'c1c1c1c';
+  world.ancestors.add(`${'a'.repeat(40)}:c1c1c1c`);
+  assert.deepEqual(await sweep.checkPrs(), []);
+  const w = get('w1');
+  assert.equal(w.status, 'active');
+  assert.equal(w.blocked, undefined);
+  assert.equal(w.autoClosed, undefined);
+  assert.equal(woke.length, 1);
+  assert.equal(woke[0].id, 's1');
+  assert.match(woke[0].note, /^w1: the deploy you waited for has happened \(the portal runs c1c1c1c\)\. Your report put a step after it: "then I verify a live PR read and the health check"\. Do it now, then report\.$/);
+  assert.match(w.log.at(-1)!, /^.*the deploy happened \(the portal runs c1c1c1c\); its worker s1 resumes within a minute for its step after it: then I verify a live PR read and the health check \(it was blocked on a portal deploy\)/);
+});
+
 test('w631: the deploy re-check is strict: another step left, a game-repo PR, a Part of: PR, machines not updated, or an unknown portal keep it open', async (t) => {
   const { request, worker, pr, world, sweep, get } = setup(t);
   const sha = (n: number) => String(n).padStart(2, '0').repeat(20);
