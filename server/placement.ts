@@ -177,7 +177,7 @@ export const pinnedWork = (reviewRoot?: string) =>
 
 /**
  * A note for start_agent or create_sandbox when the computer it places new work on is not the one pickComputer names,
- * or undefined. A soft hint: the work may need this computer (pinnedWork, Max posting on LothDesktop), and a worker
+ * or undefined. A soft hint: the work may need this computer (pinnedWork), and a worker
  * going on in its own sandbox stays there.
  */
 export function placementHint(target: string, places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, reviewRoot?: string): string | undefined {
@@ -188,5 +188,5 @@ export function placementHint(target: string, places: readonly Computer[], last?
   const avoided = avoidOf(prefs).get(target);
   const busy = busyReasons(here).filter((w) => w !== 'offline');
   const state = avoided ? `${target} is avoided (${avoided})` : busy.length ? `${target} is busy (${busy.join('; ')})` : `${target} has ${pctOf(roomOf(here))} room`;
-  return ` Note: ${state}; the next new game-repo work goes to ${p.pick.id} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, Max posting, which only LothDesktop has, or a worker going on in its own sandbox), put it there.`;
+  return ` Note: ${state}; the next new game-repo work goes to ${p.pick.id} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, or a worker going on in its own sandbox), put it there.`;
 }

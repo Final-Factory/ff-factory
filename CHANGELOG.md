@@ -20,6 +20,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   Intake tab` line. The chips have a pointer cursor, a hover outline and a tooltip saying what they toggle. Request titles ("Nightly
   e2e <date>: ...") are unchanged. Tests: `server/appConfig.test.ts`, `e2e/intake.spec.ts`.
 
+- **Workers post as Max from any machine, through FFBox** (w901, lothsahn: "at some point, a worker on LothDesktop didn't have
+  access to publish the notes. Please make sure that workers can request FFBox send a discord message and has what they
+  need."). Posting a release's patch notes needed the ffdiscord config and the bot token, which only LothDesktop had, so a
+  release stayed open when no such machine was free. FFBox holds the bot: the machine tool `post_as_max` (channel
+  `dev_patch_notes`, `dev_chat` or `agent_testing`; `text`, or a `file` the daemon reads with `skip_lines`; `thread`; a
+  dedupe `key`, required for patch notes) asks FFBox's new `post_message` query (`server/ffboxPost.ts`), which runs the guards
+  (channel allowlist, never the bug channels; no mention of anyone; secret scan; 2000 characters; the key posts once; 12 an
+  hour; every attempt logged) and answers the message link. A post that was made is a Max event, so the Max page and
+  `max_activity` show it. The dispatcher's and orchestrators' text no longer says posting needs LothDesktop
+  (docs/ffbox.md, "Posting as Max"; docs/machines.md, docs/max.md, docs/vault.md, docs/worker-root.md). Needs a portal deploy,
+  and FFBox on ffbox master with `post_message` (connector 2.9.0); each machine's daemon needs it only for `file`.
 - **The chat's message box empties when you send, every time** (w893, lothsahn: "Sometimes when I send you a message, the message doesn't clear
   and I have to manually clear it."). The box (and its saved draft) cleared only when the server answered, so a page that reloaded or
   closed with the message on its way wrote the sent text back as a draft. It now empties at once, and a text-only message goes with

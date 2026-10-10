@@ -118,7 +118,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 | `~/.ssh/` | keys for ssh peers (`beast`, `m3`) used by lab and audit scripts; the portal's deploy key on BEAST | a person | M | not read | **yes** | `scripts/nightly/lab.py:97-111`; `server/secretGuard.ts:170` |
 | `C:\ProgramData\ssh\administrators_authorized_keys` | the portal's public key for deploys over ssh | the owner (admin) | M | — | no (public key) | docs/machines.md "Setting up a Windows PC" step 3 |
 | `~/.config/ffdiscord/config.json` (or `FFDISCORD_HOME`) | the Discord bot token for posting as Max | a person | M | present on BEAST | **yes** | `scripts/nightly/nightly.sh:42-43` |
-| `~/.config/ffbox/` (`config.json`, `secrets.env`, `githubrunners/secrets.env`) | FFBox config; LothDesktop is the Max poster (docs/machines.md "The rule") | a person | M | present on BEAST | **yes** (`secrets.env`) | ff-agents `project-memory/memories/feedback-never-print-a-secret-file.md:8-22`, `ci-release/SKILL.md:240` |
+| `~/.config/ffbox/` (`config.json`, `secrets.env`, `githubrunners/secrets.env`) | FFBox config; Max is posted through FFBox for every machine (`post_as_max`, w901); this config is only for the ffdiscord CLI's reads | a person | M | present on BEAST | **yes** (`secrets.env`) | ff-agents `project-memory/memories/feedback-never-print-a-secret-file.md:8-22`, `ci-release/SKILL.md:240` |
 | `~/.config/ffnightly/ffactory.json` | the nightly's FF Factory URL and API key | a person | M | not seen | **yes** | `scripts/nightly/ffactory_intake.py:8-9,22` |
 | `~/.steamcmd-home/` (M5) | steamcmd's own login cache (last-resort uploads) | a person | M | not seen | **yes** | ff-agents `mp-beta-deploy/SKILL.md:157-175` |
 | `~/.codex/` (BEAST) | Codex's config | a person | M | not sized | yes | — |
@@ -480,7 +480,7 @@ its admin entry, which step 4 never removed. Everything copied was a copy.
   install.
 - Move `D:\work\ff-players` → `players`, `D:\work\.ff-factory` → `daemon` (state) and `agents`, and `D:\work\ff-nightly`
   → `nightly` (by rename; the lab's own clone moves with it).
-- Copy into `secrets/`: the ffbox and ffdiscord configs; it stays the Max poster.
+- Copy into `secrets/`: the ffbox and ffdiscord configs.
 - After: `D:\work\FFFRepo` is lothsahn's alone. Its `worktrees/` entries for the moved sandboxes are pruned with his
   OK.
 
