@@ -10,6 +10,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Test only: Windows CI no longer fails with every test green ("coverage file is empty")** (w858, lothsahn: "look for
+  flaky CI tests in FFFactory and fix them"). `node --test --experimental-test-coverage` exits 1 when a coverage file is
+  empty, and `machineDeployWin.test.ts` started node processes (the daemon stand-ins of the w605 test, the PowerShell the
+  scripts run, the real daemon of the install test) that inherited `NODE_V8_COVERAGE` and were then ended abruptly. 8 of
+  the 86 failed CI runs since 2026-09-30 were this (4 since the Windows jobs were split on 2026-10-07: 4 of 126 runs of
+  the "1/2" job). Those processes now start without `NODE_V8_COVERAGE`. No portal deploy.
+
 - **A declined request's player reports read obsolete on FFBox** (w853, lothsahn: "Yes, you can mark declined reports
   obsolete on FFBox"). w720 and w825, crash reports from internal Macs, were declined and their reports still read
   NEEDS-INFO on FFBox. Now every report a `rejected` request claims, when no open or finished request claims it, goes to
