@@ -1534,7 +1534,7 @@ test('nightly run: no report by its due time is an alarm to its person, and a la
   assert.match(run.log.at(-1)!, /sent no report/);
   intake.onNightly({ ...night('2026-10-11', NSHA('c'), [fail('MP-slow-client-catchup')]), status: 'failed' });
   assert.match(heard(o.personalFor(LOTH).info.id, '[nightly]').at(-1)!.text, /came after all, late: the night 2026-10-11 failed/);
-  assert.equal(intake.summary().nightly!.nights![0].status, 'failed');
+  assert.deepEqual([intake.summary().nightly!.nights![0].status, intake.summary().nightly!.nights![0].cause], ['failed', undefined], 'the stale cause goes');
 });
 
 test('nightly run: a run request that closes without a report is a missing night', (t) => {

@@ -1363,7 +1363,8 @@ export class IntakeManager {
       lab: rep.lab,
       ...(rep.sha ? { sha: rep.sha } : {}),
       ...(rep.counts ? { counts: rep.counts } : {}),
-      ...(rep.cause ? { cause: rep.cause } : status !== 'broken' && !late ? { cause: undefined } : {}),
+      // The lab's own cause; a stale one ("no report by ...") goes once the report is in.
+      cause: rep.cause ?? (status === 'broken' ? n.cause : undefined),
       ...(work.length ? { work } : {}),
     });
     if (!n.workId && rep.request && this.d.store.work.has(rep.request)) n.workId = rep.request;
