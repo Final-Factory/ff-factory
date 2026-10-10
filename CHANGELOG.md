@@ -22,6 +22,39 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   scrolls the chat to it. `shared/replies.ts`, `Orchestrators.quoteOf` and `react`, `POST /api/sessions/<id>/react`;
   docs/orchestrators.md, "Replies and reactions". Needs a portal deploy.
 
+- **Test only: CONTRIBUTING's two flake rules from w858, and `scripts/clock-skew.mjs`** (`SKEW_DAYS=30 node --import
+  ./scripts/clock-skew.mjs --test <file>` runs a test file a month ahead to find tests that only pass in the month they
+  were written). No portal deploy.
+- **The portal fires the nightly e2e lab itself, and every night reports** (w864, lothsahn: "Create a portal timer that
+  happens and when it does it triggers a run on LothDesktop to do the desync run", "at 3am eastern time", "We
+  shouldn't assume silence means a successful (or failed) run."). `intake.nightly.run` files a `nightly-run` request
+  every night at 03:00 America/New_York for its person, approved, with constraints that place it on lothdesktop; its
+  worker starts the lab with FinalFactory's `scripts/nightly/nightly_worker.sh` and checks it. The lab now posts every
+  night, green ones too, with `status` passed, failed or broken; the portal records each night (`intake.json`
+  `nights`, the Intake tab), files a broken night as one request to find its cause instead of a regression per scenario,
+  and tells the person when a night is broken, or missing: no report within 5 hours of the fire, or its run request
+  closed without one. Replaces LothDesktop's Windows tasks `ff-nightly-e2e` and `ff-nightly-e2e-watchdog` (removed
+  2026-10-10). Needs a portal deploy, then `intake.nightly.run.enabled` (and `intake.nightly.enabled` for the
+  regressions) in config.json and a restart (docs/intake.md, "The nightly run").
+
+- **Test only: a test that would have failed from 2026-11-01** (w858, lothsahn: "look for flaky CI tests in FFFactory and
+  fix them"). The w830 test in `intakeFlow.test.ts` matched the ledger line "decision of 10-DD hh:mm UTC" with the month
+  written in; it passes in October only. Found by running the suite with the clock moved forward 30 days. No portal deploy.
+
+- **Test only: Windows CI no longer fails with every test green ("coverage file is empty")** (w858, lothsahn: "look for
+  flaky CI tests in FFFactory and fix them"). `node --test --experimental-test-coverage` exits 1 when a coverage file is
+  empty, and `machineDeployWin.test.ts` started node processes (the daemon stand-ins of the w605 test, the PowerShell the
+  scripts run, the real daemon of the install test) that inherited `NODE_V8_COVERAGE` and were then ended abruptly. 8 of
+  the 86 failed CI runs since 2026-09-30 were this (4 since the Windows jobs were split on 2026-10-07: 4 of 126 runs of
+  the "1/2" job). Those processes now start without `NODE_V8_COVERAGE`. No portal deploy.
+- **Test only: two Playwright flakes on main** (w858, lothsahn: "look for flaky CI tests in FFFactory and fix them").
+  The `authed` fixture now takes the page's routes down after each test (`unrouteAll` with `ignoreErrors`, which waits
+  for a handler still inside `route.fetch`): banner.spec.ts patches `/api/state`, which the page keeps polling, and a test
+  ending in the middle of one failed with "route.fetch: Test ended" or "Response has been disposed" (2 flaky runs of 378
+  since 2026-10-07, on main and a PR). The vault test waits for the add form to close before it reads `page.content()`:
+  the new row shows when the list comes back, the form a tick later, and its controlled password input still carried the
+  token in its `value` attribute (1 flaky run, WebKit). No portal deploy.
+
 - **Test only: the ledger test that began failing on main at 2026-10-10T08:00Z** (w858, lothsahn: "look for flaky CI
   tests in FFFactory and fix them"). `ledgerSweep.test.ts` dates its requests against a fixed NOW (2026-10-03T12:00Z) while
   the ledger's own rules read the wall clock, so 7 days later `updateProblem` refused to reopen a request "closed more
@@ -37,7 +70,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   after the deploy (requests declined in the last 30 days). Needs a portal deploy and ffbox master with
   `report_obsolete` (docs/ffbox-connector-contract.md, "Reports obsolete").
 
-||||||| 722eb38
 
 - **FFBox shell and ffweb operators' own words count as their turn too; the two dead config keys leave config.json**
   (w852, lothsahn: "FFBox shell and ffweb messages are trusted like operator messages" and "Yes, remove unused config
@@ -308,7 +340,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   stored DONE from before still closes on a re-check). A person's orchestrator keeps one memory line per correction
   (verbatim, by kind) and files the harness work on the second of a kind, and its briefs quote the person and label
   its own reading (w732). docs/orchestrators.md "Learning". Needs a portal deploy.
-||||||| 777ffd0
 
 - **A worker's session holds one piece of work: related requests stay in it, unrelated ones get a fresh session** (w740, Lothsahn
   and Ben: "every time the dispatcher hands out a new work request to a worker, it should be in a new session … updates to an
