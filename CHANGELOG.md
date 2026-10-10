@@ -10,6 +10,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Test only: CONTRIBUTING's two flake rules from w858, and `scripts/clock-skew.mjs`** (`SKEW_DAYS=30 node --import
+  ./scripts/clock-skew.mjs --test <file>` runs a test file a month ahead to find tests that only pass in the month they
+  were written). No portal deploy.
+
 - **Test only: a test that would have failed from 2026-11-01** (w858, lothsahn: "look for flaky CI tests in FFFactory and
   fix them"). The w830 test in `intakeFlow.test.ts` matched the ledger line "decision of 10-DD hh:mm UTC" with the month
   written in; it passes in October only. Found by running the suite with the clock moved forward 30 days. No portal deploy.
