@@ -14,6 +14,7 @@ import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { requestAsFiled } from './work.ts';
 import { BlockerWatch } from './blockerWatch.ts';
+import type { PrHealth } from '../shared/blockers.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
@@ -2433,5 +2434,75 @@ test('w890: a deploy gate clearing resumes its worker within a minute, in any fr
   assert.ok(w.log.at(-1)!.includes(`unblocked (its worker ${a.id} resumes within a minute)`), w.log.at(-1)!);
   await new Promise((r) => setTimeout(r, 200));
   assert.equal(heard(dispatcher().info.id, '[ledger] w1').length, 0, 'no dispatcher round trip');
+  agents.waker.cancel(a.id);
+});
+
+// ---------------------------------------------------------------- w907: a ci: wait is checked, and a PR that cannot get CI wakes its worker
+
+test('w907: blocked_on ci: refuses a PR that conflicts or whose head is not the pushed commit, warns without head; a conflict that shows up later clears the gate and resumes the worker with what to do', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  const pr = 'Final-Factory/ff-factory#283';
+  let health: PrHealth | undefined = { state: 'open', head: '312570ce0fd425e0', headRef: 'w890', conflict: { base: 'main' } };
+  agents.prHealth = async () => health;
+  const a = await startedFor(env, 'w1');
+  // w890 as it happened: the PR conflicts with main, so no CI will start: nothing is recorded, the worker is told to fix it.
+  await assert.rejects(async () => a.h.blocked_on!({ prs: [`ci:${pr}`], head: '312570ce0fd4', what: 'CI on #283' }), /^Error: PR #283 conflicts with main \(CI can't run\): merge main in, resolve, push; then call blocked_on again\. Nothing was recorded\.$/);
+  assert.equal(store.work.get('w1')!.status, 'active');
+  // The push did not land: its head is another commit than the one the worker pushed.
+  health = { state: 'open', head: '1111111aaaa', headRef: 'w890' };
+  await assert.rejects(async () => a.h.blocked_on!({ prs: [`ci:${pr}`], head: '312570ce0fd4', what: 'CI on #283' }), /PR #283's head is 1111111aaaa, not 312570ce0fd4, the commit you say you pushed: your push did not land \(check git push's output and git ls-remote origin w890\)/);
+  assert.equal(store.work.get('w1')!.status, 'active');
+  // Its head is the pushed commit (a short sha is enough): recorded, no warning.
+  health = { state: 'open', head: '312570ce0fd425e0', headRef: 'w890' };
+  const ok = String(await a.h.blocked_on!({ prs: [`ci:${pr}`], head: '312570c', what: 'CI on #283' }));
+  assert.match(ok, /^Recorded: w1 is Blocked on CI on Final-Factory\/ff-factory#283\./);
+  assert.doesNotMatch(ok, /WARNING/);
+  // No head given: recorded, with a warning that the push was not checked. A PR that cannot be read warns too.
+  putRequests(store, [{ id: 'w2' }]);
+  const b = await startedFor(env, 'w2', { override_duplicate: 'another request' });
+  const warned = String(await b.h.blocked_on!({ prs: ['ci:Final-Factory/ff-factory#284'], what: 'CI on #284' }));
+  assert.match(warned, /WARNING: FF Factory did not check that your push landed: pass head \(git rev-parse HEAD\) with a ci: wait/);
+  agents.prHealth = async () => undefined;
+  putRequests(store, [{ id: 'w3' }]);
+  const c = await startedFor(env, 'w3', { override_duplicate: 'another request' });
+  assert.match(String(await c.h.blocked_on!({ prs: ['ci:Final-Factory/ff-factory#285'], head: 'abc1234', what: 'CI on #285' })), /WARNING: FF Factory could not read PR #285, so it did not check that your push landed/);
+  // A pr: wait is not checked at block time; only ci: ones are.
+  // The block clears by itself when a conflict shows up while it waits and no check has started.
+  let clock = Date.now();
+  let seen: PrHealth | undefined = { state: 'open', head: '312570ce0fd425e0', headRef: 'w890' };
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, ci: async (ref) => ({ done: false, text: `${ref} has no checks yet`, none: true }), prHealth: async () => seen });
+  assert.equal((await watch.tick()).has('w1'), false, 'mergeable, young head: it waits');
+  seen = { state: 'open', head: '312570ce0fd425e0', headRef: 'w890', conflict: { base: 'main' } };
+  clock += 3 * 60_000;
+  const did = await watch.tick();
+  assert.equal(did.get('w1'), "clear: PR #283 conflicts with main (CI can't run): merge main in, resolve, push, and wait again");
+  const w = store.work.get('w1')!;
+  assert.equal(w.status, 'active');
+  const wake = agents.waker.pending(a.id)!;
+  assert.ok(Date.parse(wake.at) - Date.now() <= 61_000, 'resumed within a minute');
+  assert.equal(wake.note, "w1 is unblocked: CI on Final-Factory/ff-factory#283 cleared (PR #283 conflicts with main (CI can't run): merge main in, resolve, push, and wait again). Carry on from where you left it.", 'no "read its checks" hint: there are none');
+  assert.ok(w.log.at(-1)!.includes("PR #283 conflicts with main (CI can't run): merge main in, resolve, push, and wait again"), w.log.at(-1)!);
+  for (const id of [a.id, b.id, c.id]) agents.waker.cancel(id);
+});
+
+test('w907: no CI run for a PR head after ten minutes clears the gate too, resuming the worker', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  const pr = 'Final-Factory/ff-factory#283';
+  const a = await startedFor(env, 'w1');
+  await a.h.blocked_on!({ prs: [`ci:${pr}`], what: 'CI on #283' });
+  let clock = Date.now();
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, ci: async (ref) => ({ done: false, text: `${ref} has no workflow runs yet`, none: true }), prHealth: async () => ({ state: 'open', head: 'deadbeefcafe' }) });
+  assert.equal((await watch.tick()).has('w1'), false);
+  clock += 9 * 60_000;
+  assert.equal((await watch.tick()).has('w1'), false, 'nine minutes: still within CI start-up');
+  clock += 2 * 60_000;
+  assert.match((await watch.tick()).get('w1')!, /^clear: no CI run exists for PR #283's head deadbee 11 min after it was pushed/);
+  assert.equal(store.work.get('w1')!.status, 'active');
   agents.waker.cancel(a.id);
 });

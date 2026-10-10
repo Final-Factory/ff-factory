@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { cutChangelog, nextVersion, setPackageVersion, unreleasedNotes } from './release.ts';
+import { cutChangelog, nextVersion, readFragments, setPackageVersion, unreleasedNotes } from './release.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 
@@ -47,6 +47,26 @@ test('changelog: the unreleased notes become the new version, links follow', () 
   // Cutting again with nothing new is refused, and so is a file without the heading.
   assert.throws(() => cutChangelog(out, '0.2.1', '0.2.0', '2026-10-02'), /nothing under \[Unreleased\]/);
   assert.throws(() => unreleasedNotes('# Changelog\n'), /no "## \[Unreleased\]"/);
+});
+
+test('w907: changelog fragments (changelog.d/) are read in name order, folded into the release notes and never conflict', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'release-frag-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  assert.deepEqual(readFragments(path.join(dir, 'nope')), [], 'no folder, no fragments');
+  fs.writeFileSync(path.join(dir, 'README.md'), 'How fragments work.');
+  fs.writeFileSync(path.join(dir, 'w907-b.md'), '- **Second.** Two.\n');
+  fs.writeFileSync(path.join(dir, 'w890-a.md'), '- **First.** One.\n');
+  fs.writeFileSync(path.join(dir, 'empty.md'), '  \n');
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'not a fragment');
+  const frags = readFragments(dir);
+  assert.deepEqual(frags.map((f) => f.file), ['w890-a.md', 'w907-b.md']);
+  // Only fragments, nothing under [Unreleased]: still a release.
+  const out = cutChangelog(LOG.replace('### Added\n- A thing.\n', ''), '0.2.0', '0.1.0', '2026-10-01', 'https://example.test/r', frags.map((f) => f.text));
+  assert.match(out, /## \[0\.2\.0\] - 2026-10-01\n\n- \*\*First\.\*\* One\.\n\n- \*\*Second\.\*\* Two\.\n\n## \[0\.1\.0\]/);
+  // Both: the section's own notes come first.
+  assert.match(cutChangelog(LOG, '0.2.0', '0.1.0', '2026-10-01', 'https://example.test/r', ['- Frag.']), /### Added\n- A thing\.\n\n- Frag\.\n\n## \[0\.1\.0\]/);
+  // Nothing anywhere is still refused.
+  assert.throws(() => cutChangelog(LOG.replace('### Added\n- A thing.\n', ''), '0.2.0', '0.1.0', '2026-10-01', 'https://example.test/r', []), /nothing under \[Unreleased\]/);
 });
 
 test('setPackageVersion: package.json and the lockfile root, CRLF kept', (t) => {

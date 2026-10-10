@@ -4,6 +4,9 @@
  *
  *   npm run release -- patch|minor|major|X.Y.Z [--dry-run]
  *
+ * The notes are CHANGELOG.md's [Unreleased] section plus the fragment files in changelog.d/ (w907: one file per change,
+ * so two pull requests never conflict on CHANGELOG.md); the fragments are folded in and removed in the release commit.
+ *
  * It does not push; it prints the command. Refuses on a dirty tree, an empty [Unreleased] section or
  * an existing tag.
  */
@@ -36,6 +39,20 @@ export function compare(a: string, b: string): number {
   return 0;
 }
 
+/** Where a pull request's changelog note lives until the next release (w907). */
+export const FRAGMENT_DIR = 'changelog.d';
+
+/** The fragment notes in `dir`, by file name (README.md and dotfiles aside), each trimmed; empty ones skipped. */
+export function readFragments(dir: string): { file: string; text: string }[] {
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith('.md') && f.toLowerCase() !== 'readme.md' && !f.startsWith('.'))
+    .sort()
+    .map((file) => ({ file, text: fs.readFileSync(path.join(dir, file), 'utf8').trim() }))
+    .filter((f) => f.text);
+}
+
 const UNRELEASED = /^## \[Unreleased\][^\n]*\n/m;
 
 /** The notes under [Unreleased], trimmed ("" when there are none). */
@@ -51,8 +68,8 @@ export function unreleasedNotes(changelog: string): string {
  * CHANGELOG.md with [Unreleased] cut as `version` on `date`: an empty [Unreleased] heading stays on top,
  * and the compare links at the bottom are updated (Keep a Changelog style).
  */
-export function cutChangelog(changelog: string, version: string, previous: string, date: string, repo = REPO_URL): string {
-  const notes = unreleasedNotes(changelog);
+export function cutChangelog(changelog: string, version: string, previous: string, date: string, repo = REPO_URL, fragments: readonly string[] = []): string {
+  const notes = [unreleasedNotes(changelog), ...fragments].filter(Boolean).join('\n\n');
   if (!notes) throw new Error('nothing under [Unreleased] in CHANGELOG.md; write the release notes first');
   const m = UNRELEASED.exec(changelog)!;
   const rest = changelog.slice(m.index + m[0].length);
@@ -97,8 +114,9 @@ function main(argv: string[]) {
   if (git(root, 'tag', '--list', tag)) throw new Error(`tag ${tag} already exists`);
   const clPath = path.join(root, 'CHANGELOG.md');
   const date = new Date().toISOString().slice(0, 10);
-  const changelog = cutChangelog(fs.readFileSync(clPath, 'utf8'), version, current, date);
-  const notes = unreleasedNotes(fs.readFileSync(clPath, 'utf8'));
+  const fragments = readFragments(path.join(root, FRAGMENT_DIR));
+  const changelog = cutChangelog(fs.readFileSync(clPath, 'utf8'), version, current, date, REPO_URL, fragments.map((f) => f.text));
+  const notes = [unreleasedNotes(fs.readFileSync(clPath, 'utf8')), ...fragments.map((f) => f.text)].filter(Boolean).join('\n\n');
   if (dry) {
     console.log(`would release ${current} -> ${version} (${tag}) with these notes:\n\n${notes}`);
     return;
@@ -106,7 +124,9 @@ function main(argv: string[]) {
   setPackageVersion(root, version);
   setPackageVersion(path.join(root, 'web'), version);
   fs.writeFileSync(clPath, changelog);
+  for (const f of fragments) fs.rmSync(path.join(root, FRAGMENT_DIR, f.file));
   git(root, 'add', 'package.json', 'package-lock.json', 'web/package.json', 'web/package-lock.json', 'CHANGELOG.md');
+  if (fragments.length) git(root, 'add', '--all', FRAGMENT_DIR);
   git(root, 'commit', '-m', `Release ${tag}`);
   git(root, 'tag', '-a', tag, '-m', `FF Factory ${tag}\n\n${notes}`);
   console.log(`Released ${tag}. Push it with:\n  git push origin HEAD ${tag}`);

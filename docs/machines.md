@@ -665,7 +665,23 @@ LothDesktop and Beast, not just when BEAST is full").
       with `wake_me`), or the dispatcher's `decide_work block` on CI. While its CI runs it does not take the sandbox
       back. The blocker watch reads the checks every 2 minutes; when they finish, green or red, the gate clears and the
       worker is resumed within a minute, its own check-in handed back (w829) or, with none, a new one (w846,
-      `Orchestrators.resumeGatedWorker`). It is then placed again like any released worker: its own sandbox if it is
+      `Orchestrators.resumeGatedWorker`). **A PR that cannot get CI** (w907, lothsahn: "Yes, file that and fix the CI merge clash"):
+      w890's PR #283 waited an hour behind a `ci:` gate because its push after merging main had silently failed, so the PR
+      head stayed on a commit that conflicted with main in CHANGELOG.md, and GitHub runs no CI on a conflicted PR. Three
+      guards, reading only what the portal's token can (Pull requests: read; no Checks, no Actions): (1) `blocked_on` with a
+      `ci:` PR reads the PR first (`Agents.ciWaitProblem`) and **refuses** it, recording nothing, when it conflicts with its
+      base or when its head is not the commit the worker passes as `head` (`git rev-parse HEAD`: the push did not land);
+      with no `head` it records the wait and **warns**, and so it does when the PR cannot be read; (2) the blocker watch
+      reads each waited-on PR's head and mergeability every 2 minutes (`ghPrHealth`, `gh pr view --json
+      state,mergeable,baseRefName,headRefOid`; `UNKNOWN`, GitHub still working it out, counts as no conflict) and clears
+      a `ci:` gate at once, resuming the worker, when the PR conflicts and no check has started: "PR #283 conflicts with
+      main (CI can't run): merge main in, resolve, push, and wait again" (also in the request's log; checks already
+      running keep it waiting); a `pr:` gate its worker set itself clears the same way on a conflict (a dispatcher's does
+      not: the PR may be another worker's); (3) it also clears when no CI run exists for the PR's head (`none` from the
+      checks or Actions read) `CI_NO_RUN_MS` = **10 minutes** after the portal first saw that head: the run for #283 was
+      created 18:30:39Z for a push made seconds before (measured), so ten minutes is far past any start-up and short
+      against the hour lost. It needs the checks to be readable to tell "no run" from "unread" (the w829 15-minute
+      clock still covers unreadable ones). It is then placed again like any released worker: its own sandbox if it is
       still free, else another free one **on the same machine**, switched to its branch, so red CI gets it a sandbox to
       fix in. Never another machine: its conversation lives there (the Claude Code session file), and placement rules
       are not touched;

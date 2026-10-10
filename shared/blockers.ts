@@ -34,6 +34,32 @@ export const BLOCKER_STUCK_MS: Record<WorkBlockerKind, number | undefined> = {
  */
 export const CI_UNREADABLE_MS = 15 * 60_000;
 
+/**
+ * How long a pull request's head commit may have no CI run before a ci gate stops waiting for it (w907). Measured on
+ * ff-factory PR #283 (2026-10-10): CI started 18:30:39Z for a push made seconds before, so a run normally exists within a
+ * minute; ten minutes is far past any queueing and short against the hour w890 sat on a head that never got one (its push
+ * had silently failed, the PR conflicted with main, and GitHub runs no CI on a conflicted PR).
+ */
+export const CI_NO_RUN_MS = 10 * 60_000;
+
+/** What a pull request says about its own head and mergeability (w907), read with the Pull requests permission only. */
+export interface PrHealth {
+  state: 'open' | 'merged' | 'closed';
+  /** GitHub's mergeability is CONFLICTING (REST: mergeable_state "dirty"): CI cannot run. The base branch it conflicts with. */
+  conflict?: { base: string };
+  /** The head commit, and its branch. */
+  head?: string;
+  headRef?: string;
+  /** Since when (ms) this portal has seen this head commit (set by the blocker watch). */
+  headSeenAt?: number;
+}
+
+/** "PR #283" from "owner/repo#283". */
+export const prLabel = (ref: string | undefined) => `PR #${(ref ?? '').split('#').pop()}`;
+
+/** The words a worker is resumed with when its pull request conflicts (w907); also what unblock reads to skip the "read the checks" hint. */
+export const conflictText = (ref: string | undefined, base: string) => `${prLabel(ref)} conflicts with ${base} (CI can't run): merge ${base} in, resolve, push, and wait again`;
+
 /** "16:29 UTC" or "10-08 16:29 UTC". */
 const utc = (iso: string | undefined, now: number) => {
   if (!iso) return 'a time';
@@ -110,7 +136,9 @@ export interface BlockerFacts {
   /** When the nightly lab last posted its results (ms), if ever. */
   nightlyAt?: number;
   /** A pull request's checks: done (none still running, or it merged or closed) and a line saying how. */
-  ci?: (ref: string) => { done: boolean; text: string } | undefined;
+  ci?: (ref: string) => { done: boolean; text: string; none?: boolean } | undefined;
+  /** w907: a pull request's head and mergeability; undefined when it cannot be read. */
+  prHealth?: (ref: string) => PrHealth | undefined;
   /** w829: since when (ms) a pull request's checks could not be read, and why; undefined while they can be. */
   ciUnreadable?: (ref: string) => { since: number; why: string } | undefined;
   /** A pull request's state (w754, the pr blocker): open, merged, or closed without merging; undefined when unknown. */
@@ -190,6 +218,13 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts): BlockerVerdict 
       // w829: checks FF Factory cannot read do not hold the request in silence: after CI_UNREADABLE_MS its worker looks.
       // The clock starts at the later of the first failed read and this block, so a request blocked again on the same
       // unreadable CI waits its own CI_UNREADABLE_MS (no clear-and-block-again loop every minute).
+      // w907: a pull request that conflicts with its base gets no CI (w890's #283 waited an hour for checks that could
+      // not start), nor one whose head has had no run for CI_NO_RUN_MS (a push that never reached it): the worker looks.
+      const h = b.ref ? f.prHealth?.(b.ref) : undefined;
+      if (h?.state === 'open' && h.conflict && (!c || c.none)) return { state: 'clear', why: conflictText(b.ref, h.conflict.base) };
+      if (h?.state === 'open' && c?.none && h.headSeenAt !== undefined && f.now - h.headSeenAt >= CI_NO_RUN_MS) {
+        return { state: 'clear', why: `no CI run exists for ${prLabel(b.ref)}'s head ${(h.head ?? '').slice(0, 7)} ${Math.round((f.now - h.headSeenAt) / 60_000)} min after it was pushed (${c.text}): check that your push reached it (gh pr view ${b.ref?.split('#')[1]} --json headRefOid), push, and wait again` };
+      }
       const u = !c && b.ref ? f.ciUnreadable?.(b.ref) : undefined;
       const unreadableFor = u ? f.now - Math.max(u.since, at) : 0;
       if (u && unreadableFor >= CI_UNREADABLE_MS) return { state: 'clear', why: `FF Factory could not read CI on ${b.ref} for ${Math.round(unreadableFor / 60_000)} min (${u.why}), so its worker checks CI itself` };
@@ -199,6 +234,9 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts): BlockerVerdict 
       const p = b.ref ? f.pr?.(b.ref) : undefined;
       if (p?.state === 'merged') return { state: 'clear', why: p.text };
       if (p?.state === 'closed') return { state: 'decide', why: `${p.text} without delivering ${b.what}` };
+      // w907: a PR its own worker waits on cannot merge while it conflicts: the worker is woken to merge the base in.
+      const h = b.ref && b.by.startsWith('worker ') ? f.prHealth?.(b.ref) : undefined;
+      if (h?.state === 'open' && h.conflict) return { state: 'clear', why: conflictText(b.ref, h.conflict.base) };
       return late(p?.text ?? `PR ${b.ref} is open`);
     }
   }
