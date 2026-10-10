@@ -21,6 +21,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   (`heldCheckIns`) and handed back to fire within a minute when the block clears, so the worker resumes itself. Needs a portal
   deploy.
 
+- **An FFBox operator's own words count as their own turn; players' text stays untrusted** (w831, lothsahn: "operator
+  messages are always trusted. Only some intake messages are untrusted."). Until now an operator's follow-up from Discord
+  or GitHub reached their orchestrator as relayed data, so "approve w814" written in a Discord thread could approve nothing.
+  Now FFBox sends the operator's own messages, matched by their Discord or GitHub author id against its operators block, in
+  a field of their own (`own` on `dev_message` and `dev_request`, ffbox's `message.body`: no embeds, no other author, no
+  notes). FF Factory hands that text alone, quoted lines taken out, to their orchestrator as a message of theirs
+  (`Agents.operatorTurn`), which opens a turn every personTurn gate reads as theirs. The rest of the FFBox turn (a player's
+  message posted before theirs, quotes, FFBox's notes) follows as data. A shell or ffweb message stays data: those logins
+  are not authenticated (`$USER`; one ffweb password for every login). It checks the matched id is the operator's, that
+  `intake.discord.trusted` gives that Discord id to nobody else, and `providers.ffbox.devRequests.operatorTurns` (default
+  true). A dev request whose turn held nothing but the operator's words is filed `humanAsked`. Needs a portal deploy and
+  the ffbox change that sends `own`; either alone changes nothing.
+
 - **The "dispatcher's Claude token buffer is in use" banner names the limit that tripped it** (w828, lothsahn: "It talks about having a
   26% reserve and being at 51% for the week. I think it's because the session is at like 90%?"). He was right: the token counts as inside
   its buffer when EITHER the week or the 5-hour window reaches it (`reserveOf`, `server/tokenPool.ts`), but the text only ever quoted the

@@ -329,6 +329,11 @@ export interface DevFiling {
   attachments: AttachmentRef[];
   /** File it even if it repeats work. */
   force?: boolean;
+  /**
+   * The whole turn was the operator's own words, authenticated by FFBox (w831, server/devRequests.ts operatorWords): a
+   * request filed new counts as said by its person (humanAsked), as if they had asked in FF Factory.
+   */
+  theirs?: boolean;
   lookbackDays: number;
   thresholds?: MatchThresholds;
 }
@@ -2656,8 +2661,9 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       keys,
       requestedBy: person,
       requesters: [person],
-      // Said on FFBox, not in FF Factory: the dispatcher's destructive tools still need the person here.
-      humanAsked: false,
+      // Said on FFBox: their own authenticated words alone count as said by them (w831); anything else FFBox's turn
+      // carried (another author, a quote, a note) leaves the dispatcher's destructive tools needing the person here.
+      humanAsked: f.theirs === true,
       status: 'new',
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),

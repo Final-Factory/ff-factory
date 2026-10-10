@@ -462,10 +462,24 @@ Connector → FF Factory:
 
 | message | fields |
 |---|---|
-| `dev_request` | `ref` (`^[A-Za-z0-9._:-]{1,80}$`, "dev-<conversation>-<turn>"); `operator` `{ name, discord?, github?, shell?, web? }`, the name as FFBox's config `operators` has it (`^[A-Za-z0-9._-]{1,40}$`); `conversation` `{ id, source (discord, codereview, shell, web), channel? (the watch alias), title (300), url?, threadId?, branch?, pr?, createdAt }`; `title` (1-120) and `brief` (1-8000), redacted on FFBox; `transcript` (optional, 24000, newest last); `keys` (up to 20: `discord:<thread>`, `branch:<name>`, `pr:<n>`, `report:<id>`; any other is dropped, not refused); `attachments` `[{ n, name, size, sha256, kind? }]`, `n` from 0, each once; `force` (optional: file it even if it repeats work, `!fff new`) |
+| `dev_request` | `ref` (`^[A-Za-z0-9._:-]{1,80}$`, "dev-<conversation>-<turn>"); `operator` `{ name, discord?, github?, shell?, web? }`, the name as FFBox's config `operators` has it (`^[A-Za-z0-9._-]{1,40}$`); `conversation` `{ id, source (discord, codereview, shell, web), channel? (the watch alias), title (300), url?, threadId?, branch?, pr?, createdAt }`; `title` (1-120) and `brief` (1-8000), redacted on FFBox; `transcript` (optional, 24000, newest last); `keys` (up to 20: `discord:<thread>`, `branch:<name>`, `pr:<n>`, `report:<id>`; any other is dropped, not refused); `attachments` `[{ n, name, size, sha256, kind? }]`, `n` from 0, each once; `force` (optional: file it even if it repeats work, `!fff new`); `own` (optional, w831, below) |
 | `dev_chunk` | `ref`, `n`, `offset`, `data`: file `n`'s bytes from `offset`, base64, at most 45000 bytes raw a frame, in order, file after file |
-| `dev_message` | `ref`; `request`, the work id the conversation is linked to (`^w\d+$`); `operator`; `conversation`, the id; `text` (1-4000), redacted; `attachments` (optional, w344) as on `dev_request`: the conversation's files no earlier hand-over delivered (FFBox's `fff_dev_file`), streamed as `dev_chunk`s after the `dev_ack` |
+| `dev_message` | `ref`; `request`, the work id the conversation is linked to (`^w\d+$`); `operator`; `conversation`, the id; `text` (1-4000), redacted; `attachments` (optional, w344) as on `dev_request`: the conversation's files no earlier hand-over delivered (FFBox's `fff_dev_file`), streamed as `dev_chunk`s after the `dev_ack`; `own` (optional, w831, below) |
 | `dev_received` | `id`: a `dev_reply` or `dev_update` was written for ffwatch, so FF Factory stops resending it |
+
+**`own`: the operator's own words (w831).** Optional on both `dev_request` and `dev_message`: `{ via, id, text }`,
+where `via` is `discord` or `github`, `id` the author id that matched (`^\d{1,25}$`: Discord's author snowflake,
+GitHub's numeric user id), and `text` (1-8000, redacted) only the bodies of the turn's messages whose stored author id
+is that operator's id for that service in FFBox's `operators` block, joined by blank lines: as typed, with no embed
+text, no file names, no other author's message and no FFBox notes. FFBox's host code (ffwatch, from the author ids
+Discord's and GitHub's APIs gave it) builds it and the connector checks it (`via` one of the two, `id` the operator's own
+id for `via`); no model output reaches it. FFBox sends it only for a turn from Discord or GitHub, never from the shell
+or ffweb, whose logins are not authenticated (a shell name is `getpass.getuser()`, which reads `$USER`; ffweb has one
+password for every login). `text`, `title`, `brief` and `transcript` stay as they were: everything the turn held, data.
+FF Factory gives authority to `own` alone (`operatorWords` in `server/devRequests.ts`): with `own.id` the operator's id for
+`own.via`, and no other login for that Discord id in `intake.discord.trusted`, the person's orchestrator gets `own.text`
+(quoted lines taken out) as a message of theirs, a turn of their own ([ffbox.md](ffbox.md#operators-own-words-w831)). A
+connector or FFBox without it changes nothing: every hand-over is relayed as data, as before.
 
 FF Factory → connector:
 

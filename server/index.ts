@@ -532,6 +532,8 @@ providers.dev = new DevRequests(
     attachments,
     sendFiles: (id, text, files, requestedBy) => agents.sendWithAttachments(id, text, 'system', { attachments: files, requestedBy }),
     sendText: (id, text, requestedBy) => void sessions.send(id, text, 'system', undefined, { requestedBy }),
+    // An operator's own authenticated words: a turn of theirs, as if typed in FF Factory (w831).
+    sendAsPerson: (person, text) => void agents.operatorTurn(person, text),
   },
   providers.devLink(),
 );
