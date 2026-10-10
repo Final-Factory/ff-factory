@@ -562,8 +562,8 @@ test('w363: a usage limit not yet reset stalls the request with the reason; a wo
 
 test('w370: auto-closed on a loose link, reopened by hand, closed by hand: the re-check leaves it closed', async (t) => {
   const { request, pr, world, sweep, get, o } = setup(t);
-  // The ledger's clock is the sweep's here, as in w731's test below: a request closed at ago(4) must not age with the wall
-  // clock (failing from 2026-10-10T08:00Z, 7 days after NOW, when updateProblem refused to reopen it; w864).
+  // The ledger's clock is the sweep's here: w50, closed at ago(4), must not age with the wall clock (this began failing at
+  // 2026-10-10T08:00Z, 7 days after NOW, when updateProblem refused to reopen a request "closed more than 7 days ago").
   (o as unknown as { now: () => Date }).now = () => new Date(NOW);
   const closedBy = { at: ago(4), how: 'prs' as const, pr: 1002, sha: 'a'.repeat(40), text: 'merged as #1002 (a684e5257e6b) on 2026-10-04' };
   request('w50', {

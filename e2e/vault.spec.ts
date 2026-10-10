@@ -46,6 +46,9 @@ test('vault: add a secret in the settings sheet; it shows only its last four, ne
   await expect(row).toContainText(`…${value.slice(-4)}`);
   await expect(row).toContainText('FFE2E_TOKEN');
   await expect(row).toContainText('any run; workers, standing on m3');
+  // The row shows as soon as the list comes back; the add form (a controlled input, whose value attribute holds the
+  // typed token) closes a tick later. page.content() read in between found the token (WebKit, 2026-10-09).
+  await expect(vault.getByLabel('value')).toHaveCount(0);
   expect(await page.content()).not.toContain(value);
   expect(await (await page.request.get('/api/vault')).text()).not.toContain(value);
 
