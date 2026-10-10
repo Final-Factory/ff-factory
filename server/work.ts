@@ -462,6 +462,7 @@ export function reopenWork(w: WorkItem, at: string): number[] {
   const dropped = (w.prs ?? []).map((p) => p.number);
   w.reopenedAt = at;
   w.done = undefined;
+  w.setAside = undefined;
   w.prs = w.prs ? [] : undefined;
   w.followUp = undefined;
   return dropped;

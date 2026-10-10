@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { asksAPerson, liveCounts, personWaitIn, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
+import { asksAPerson, holdsOf, liveCounts, personWaitIn, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
 import type { Requester, SessionInfo, WorkItem } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-05T06:00:00Z');
@@ -59,13 +59,13 @@ test('workState: working while a worker it serves is mid-turn (running, starting
 
 test('workState: a worker on several requests works on the one it was last sent, and those linked to it since', () => {
   // Before w418 nothing recorded the sends: the newer request stands in (w342 → w414, worker 49c5dc06).
-  const w342 = item('w342', { sessionIds: ['49c5dc06'], createdAt: ago(30), prs: [{ repo: 'Final-Factory/FinalFactory', number: 1024, state: 'merged', at: ago(4) }] });
+  const w342 = item('w342', { sessionIds: ['49c5dc06'], createdAt: ago(30), setAside: { '49c5dc06': { at: ago(3), kind: 'released' } }, prs: [{ repo: 'Final-Factory/FinalFactory', number: 1024, state: 'merged', at: ago(4) }] });
   const w414 = item('w414', { sessionIds: ['49c5dc06'], createdAt: ago(3) });
   const s = [session('49c5dc06', { status: 'running' })];
   assert.deepEqual([...servedBy('49c5dc06', [w342, w414])], ['w414']);
   const all = workLiveAll([w342, w414], { session: (id) => s.find((x) => x.id === id), now: NOW });
   assert.equal(all.get('w414')?.state, 'working');
-  assert.notEqual(all.get('w342')?.state, 'working', 'w342 is not working any more');
+  assert.notEqual(all.get('w342')?.state, 'working', 'w342 is not working any more: the worker let it go in its wrap-up (w915)');
   // Recorded sends win over creation times; a decide_work link after the last send shares the worker.
   const a = item('w10', { sessionIds: ['b'], createdAt: ago(5), links: { b: { at: ago(1), how: 'sent' } } });
   const b = item('w11', { sessionIds: ['b'], createdAt: ago(2), links: { b: { at: ago(4), how: 'sent' } } });
@@ -169,13 +169,13 @@ test('workState: stalled at once when nothing works on it and nothing waits on a
   assert.equal(one(item('w13', { stalled: { at: ago(1), kind: 'cut-off', reason: 'a usage limit' }, status: 'stalled' }))?.why, 'cut-off: a usage limit');
   assert.equal(one(item('w14', { prs: [{ repo: 'r/r', number: 7, state: 'open' }] }))?.why, 'PR #7 is open and no worker is on it');
   assert.equal(one(item('w14', { sessionIds: ['a'], prs: [{ repo: 'r/r', number: 7, state: 'open' }] }), [session('a', { lastActivityAt: ago(1) })])?.why, 'a finished its turn 1 h ago; PR #7 is open, nothing waits on a person', 'its worker is on it, idle');
-  const moved = workLiveAll([item('w15', { sessionIds: ['a'], createdAt: ago(10) }), item('w16', { sessionIds: ['a'], createdAt: ago(1) })], { session: () => session('a', { status: 'running' }), now: NOW });
+  const moved = workLiveAll([item('w15', { sessionIds: ['a'], createdAt: ago(10), setAside: { a: { at: ago(2), kind: 'released' } } }), item('w16', { sessionIds: ['a'], createdAt: ago(1) })], { session: () => session('a', { status: 'running' }), now: NOW });
   assert.equal(moved.get('w15')?.why, 'its worker a moved on to w16');
 });
 
 test('workState: counts per state', () => {
   const n = liveCounts([{ state: 'working', why: '' }, { state: 'stalled', why: '' }, { state: 'stalled', why: '' }]);
-  assert.deepEqual(n, { working: 1, waiting: 0, queued: 0, blocked: 0, followup: 0, stalled: 2 });
+  assert.deepEqual(n, { working: 1, waiting: 0, queued: 0, blocked: 0, paused: 0, followup: 0, stalled: 2 });
 });
 
 // ---- w691: a worker that waits on a person is Waiting on input, never Working; a dead agent host is Blocked ----
@@ -277,4 +277,80 @@ test("w754: w750 as it was: a request blocked on other requests' gates is Blocke
   assert.equal(one(w, [{ ...polling, backgroundJobs: [{ type: 'bash', description: 'CI on PR #5' }] }])?.state, 'working');
   // A person's hold beats it: a question to the requester is Waiting on input, with the gates kept underneath.
   assert.equal(one({ ...w, status: 'question', question: { text: 'Hold?', at: ago(1) } }, [polling])?.state, 'waiting');
+});
+
+// ---- w915: a worker holds every open request it was sent and has not let go of; w909 showed Stalled while its worker was on w911 ----
+
+const sentAt = (id: string, at: string, o: Partial<WorkItem> = {}) => item(id, { sessionIds: ['a'], createdAt: ago(10), links: { a: { at, how: 'sent' } }, ...o });
+const live915 = (items: WorkItem[], sessions: SessionInfo[]) => workLiveAll(items, { session: (id) => sessions.find((s) => s.id === id), now: NOW });
+
+test('w915: a worker sent wA, then wB, mid-turn on both: both show Working, each shared with the other', () => {
+  const wA = sentAt('w909', ago(5));
+  const wB = sentAt('w911', ago(1));
+  const all = live915([wA, wB], [session('a', { status: 'running' })]);
+  assert.equal(all.get('w909')?.state, 'working', 'w909 was Stalled "its worker moved on to w911" while the worker was mid-turn on its PR');
+  assert.equal(all.get('w911')?.state, 'working');
+  assert.match(all.get('w909')!.why, /^a mid-turn, shared with w911$/);
+  assert.match(all.get('w911')!.why, /^a mid-turn, shared with w909$/);
+  assert.deepEqual([...holdsOf('a', [wA, wB]).held].sort(), ['w909', 'w911']);
+  assert.deepEqual([...servedBy('a', [wA, wB])], ['w911'], 'the current turn still serves one (spend, the wrap-up and who a request waits on read that)');
+});
+
+test('w915: held between turns too: a background job or a check-in keeps the first request Working', () => {
+  const wA = sentAt('w909', ago(5));
+  const wB = sentAt('w911', ago(1));
+  const idleWithCheckIn = session('a', { status: 'idle', wakeAt: new Date(NOW + 20 * 60_000).toISOString(), wakeNote: 'CI on PR #1404' });
+  const all = live915([wA, wB], [idleWithCheckIn]);
+  assert.equal(all.get('w909')?.state, 'working');
+  assert.match(all.get('w909')!.why, /between turns: .*shared with w911/);
+  const idle = live915([wA, wB], [session('a', { status: 'idle', lastActivityAt: ago(0.1) })]);
+  assert.equal(idle.get('w909')?.state, 'stalled', 'nothing running and no check-in: nothing works on it');
+  assert.match(idle.get('w909')!.why, /^a finished its turn 6 min ago, nothing waits on a person$/);
+});
+
+test('w915: a worker that reported wA DONE and was then sent wB: wA is not Working', () => {
+  const wA = sentAt('w909', ago(5), { done: { a: { at: ago(2), report: 'Moved the jobs.\nDONE: w909' } } });
+  const wB = sentAt('w911', ago(1));
+  const all = live915([wA, wB], [session('a', { status: 'running' })]);
+  assert.equal(all.get('w909')?.state, 'stalled');
+  assert.equal(all.get('w909')?.why, 'its worker a moved on to w911');
+  assert.equal(all.get('w911')?.state, 'working');
+  assert.deepEqual([...holdsOf('a', [wA, wB]).held], ['w911']);
+});
+
+test('w915: a request the worker was asked to wrap up and said nothing about is released; being sent it again holds it again', () => {
+  const released = sentAt('w909', ago(5), { setAside: { a: { at: ago(0.9), kind: 'released' } } });
+  const wB = sentAt('w911', ago(1));
+  assert.equal(live915([released, wB], [session('a', { status: 'running' })]).get('w909')?.state, 'stalled');
+  const resent = { ...released, links: { a: { at: ago(0.5), how: 'sent' as const } } };
+  const all = live915([resent, wB], [session('a', { status: 'running' })]);
+  assert.equal(all.get('w909')?.state, 'working', 'sent w909 again, after letting it go');
+});
+
+test('w915: a request the worker set aside shows Paused: worker on wB first, not Stalled; it holds again when wB closes or is DONE', () => {
+  const paused = sentAt('w909', ago(5), { setAside: { a: { at: ago(0.9), kind: 'paused', for: 'w911' } } });
+  const wB = sentAt('w911', ago(1));
+  const run = [session('a', { status: 'running' })];
+  const all = live915([paused, wB], run);
+  assert.deepEqual([all.get('w909')?.state, all.get('w909')?.why], ['paused', 'worker a on w911 first']);
+  assert.equal(all.get('w911')?.state, 'working');
+  assert.deepEqual([...holdsOf('a', [paused, wB]).held], ['w911']);
+  // wB done by this worker: the pause is over, w909 is the worker's again (idle: nothing works on it).
+  const done = { ...wB, done: { a: { at: ago(0.2), report: 'DONE: w911' } } };
+  assert.equal(live915([paused, done], [session('a', { status: 'idle', lastActivityAt: ago(0.1) })]).get('w909')?.state, 'stalled');
+  assert.equal(live915([paused, done], run).get('w909')?.state, 'working');
+  assert.equal(live915([paused, { ...wB, status: 'done' }], run).get('w909')?.state, 'working', 'wB closed: held again');
+  // A stopped worker pausing nothing: no Paused label that nobody stands behind.
+  assert.equal(live915([paused, wB], [session('a', { status: 'stopped', lastActivityAt: ago(0.5) })]).get('w909')?.state, 'stalled');
+  const again = { ...paused, links: { a: { at: ago(0.5), how: 'sent' as const } } };
+  assert.equal(live915([again, wB], run).get('w909')?.state, 'working', 'sent w909 again: the pause is void');
+});
+
+test('w915: held does not borrow the other request\'s question for a person', () => {
+  const wA = sentAt('w909', ago(5));
+  const wB = sentAt('w911', ago(1));
+  const ask = [session('a', { status: 'idle', lastResult: 'Merged #9. Should I also bump the version?', lastActivityAt: ago(0.1) })];
+  const all = live915([wA, wB], ask);
+  assert.equal(all.get('w911')?.state, 'waiting');
+  assert.equal(all.get('w909')?.state, 'stalled', 'the question is about the request the turn was on');
 });

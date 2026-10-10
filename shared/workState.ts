@@ -17,13 +17,14 @@ import type { SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
 
-export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'followup' | 'stalled';
-export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'waiting', 'queued', 'blocked', 'followup', 'stalled'];
+export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'paused' | 'followup' | 'stalled';
+export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'waiting', 'queued', 'blocked', 'paused', 'followup', 'stalled'];
 export const WORK_LIVE_LABEL: Record<WorkLiveState, string> = {
   working: 'Working',
   waiting: 'Waiting on input',
   queued: 'Queued',
   blocked: 'Blocked',
+  paused: 'Paused',
   followup: 'Merged, follow-up pending',
   stalled: 'Stalled',
 };
@@ -71,13 +72,54 @@ function linkOf(w: WorkItem, sessionId: string): { at: number; how: 'sent' | 'li
 
 /**
  * The requests a worker's current turn serves: the one it was last sent (a start or a message with its work_id), and
- * those linked to it since (decide_work link: small reports sharing one worker). A worker on several requests is working
- * on these only, not on the ones it moved on from.
+ * those linked to it since (decide_work link: small reports sharing one worker). What the worker is turning to, not all it
+ * has in hand: for what it holds, with the older requests it goes on with (w915), see holdsOf. Spend, the wrap-up, and
+ * who a request waits on (stillOn) read this one.
  */
 export function servedBy(sessionId: string, items: readonly WorkItem[]): Set<string> {
   const mine = items.filter((w) => live(w) && w.sessionIds.includes(sessionId)).map((w) => ({ w, l: linkOf(w, sessionId) }));
   const lastSent = Math.max(-1, ...mine.filter((x) => x.l.how === 'sent').map((x) => x.l.at));
   return new Set(mine.filter((x) => (x.l.how === 'sent' ? x.l.at === lastSent : x.l.at >= lastSent)).map((x) => x.w.id));
+}
+
+/** What a worker has of the open requests it was sent (w915): see holdsOf. */
+export interface Holds {
+  /** The requests its current turn serves: servedBy. */
+  served: Set<string>;
+  /** Every request it holds: those it serves, and those it was sent earlier and has not let go of. */
+  held: Set<string>;
+  /** Requests it set aside (`<id>: paused: …`), with the request it is on first ('' when unknown). */
+  paused: Map<string, string>;
+}
+
+/**
+ * The open requests worker `sessionId` holds (w915; w909 showed Stalled "its worker moved on to w911" while that worker was
+ * mid-turn on w909's own PR, because only the request it was last sent counted). A worker holds a request when it was sent
+ * it, the request is open, and the worker has not reported it DONE. Sending it a second request does not take the first
+ * away: it shows Working while the worker is busy (a worker that goes on with both is the common case). Held stops when
+ * the worker says DONE, writes `<id>: paused: …` (Paused, below), or was asked to wrap it up and said nothing about it
+ * (`released`, WorkItem.setAside); being sent the request again, or the one it paused for closing, holds it again.
+ * The request it serves now (servedBy) is held whatever else is recorded: a refused DONE leaves its worker on it.
+ */
+export function holdsOf(sessionId: string, items: readonly WorkItem[]): Holds {
+  const served = servedBy(sessionId, items);
+  const held = new Set(served);
+  const paused = new Map<string, string>();
+  const byId = new Map(items.map((w) => [w.id, w]));
+  for (const w of items) {
+    if (served.has(w.id) || !live(w) || !w.sessionIds.includes(sessionId) || w.done?.[sessionId]) continue;
+    const a = w.setAside?.[sessionId];
+    if (a && (Date.parse(a.at) || 0) > linkOf(w, sessionId).at) {
+      if (a.kind === 'released') continue;
+      const first = a.for ? byId.get(a.for) : undefined;
+      if (!a.for || (first && live(first) && !first.done?.[sessionId])) {
+        paused.set(w.id, a.for ?? '');
+        continue;
+      }
+    }
+    held.add(w.id);
+  }
+  return { served, held, paused };
 }
 
 const NEEDS_PERSON =
@@ -155,19 +197,27 @@ function blockedLive(gates: readonly NonNullable<WorkItem['blocked']>[], now: nu
 }
 
 /** The live state of one request, or undefined once it is closed. */
-export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: string) => Set<string>): WorkLive | undefined {
+export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string) => Holds): WorkLive | undefined {
   if (!live(w)) return undefined;
-  const serves = served ?? ((sid: string) => servedBy(sid, f.items));
+  const holds = holdsFor ?? ((sid: string) => holdsOf(sid, f.items));
   const workers = w.sessionIds.map((id) => f.session(id)).filter((s): s is SessionInfo => !!s);
-  const mine = workers.filter((s) => serves(s.id).has(w.id));
-  const others = workers.filter((s) => !serves(s.id).has(w.id));
+  // Mine: the workers that hold it, serving it now or not (w915). Only the report- and message-based signals below read
+  // `serving`: what a worker said last, and what waits to be sent it, is about the request it is on now.
+  const mine = workers.filter((s) => holds(s.id).held.has(w.id));
+  const serving = mine.filter((s) => holds(s.id).served.has(w.id));
+  const others = workers.filter((s) => !mine.includes(s));
+  const movedTo = (s: SessionInfo) => [...holds(s.id).served][0];
+  const sharedWith = (list: readonly SessionInfo[]) => {
+    const ids = [...new Set(list.flatMap((s) => [...holds(s.id).held]))].filter((id) => id !== w.id).sort();
+    return ids.length ? `, shared with ${ids.join(', ')}` : '';
+  };
 
   // Working: one of its workers is mid-turn on it, or FFBox runs it. Not one whose agent host never started (w691): an
   // older daemon went on reporting it mid-turn, and nothing runs.
   const busy = mine.filter((s) => BUSY.has(s.status) && !s.hostFailure);
   if (busy.length) {
     const tool = busy.find((s) => s.activeTool)?.activeTool;
-    return { state: 'working', why: `${busy.map((s) => s.id).join(', ')} ${busy[0].status === 'starting' ? 'starting' : 'mid-turn'}${tool ? `, in ${tool.name} since ${ago(tool.since, f.now)}` : ''}` };
+    return { state: 'working', why: `${busy.map((s) => s.id).join(', ')} ${busy[0].status === 'starting' ? 'starting' : 'mid-turn'}${tool ? `, in ${tool.name} since ${ago(tool.since, f.now)}` : ''}${sharedWith(busy)}` };
   }
   if (w.ffbox && (w.ffbox.state === 'sent' || w.ffbox.state === 'accepted')) return { state: 'working', why: `on FFBox${w.ffbox.conversation ? ` (conversation ${w.ffbox.conversation})` : ''}` };
 
@@ -211,13 +261,13 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
   const gates = gatesOf(w);
   if (w.status === 'blocked' && gates.length && !(coming && coming.a.kind === 'job')) return blockedLive(gates, f.now);
 
-  if (coming) return { state: 'working', why: coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}` };
+  if (coming) return { state: 'working', why: `${coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}`}${sharedWith([coming.s])}` };
 
-  const decide = mine.find((s) => asksAPerson(s.lastResult));
+  const decide = serving.find((s) => asksAPerson(s.lastResult));
   if (decide) return { state: 'waiting', why: `${decide.id} stopped asking for a decision`, waitsOn: names(w.requesters) };
 
   // A message to one of its workers waits in the send queue: for a free slot (Queued) or for its machine (Blocked).
-  const held = mine.map((s) => ({ s, why: f.queuedSend?.(s.id) ?? s.queuedSend, on: s.queuedOn })).find((x) => x.why);
+  const held = serving.map((s) => ({ s, why: f.queuedSend?.(s.id) ?? s.queuedSend, on: s.queuedOn })).find((x) => x.why);
   if (held?.on === 'machine') return { state: 'blocked', why: `a message to ${held.s.id} waits for its machine (${held.why})`, waitsOn: [held.s.machineId ?? 'its machine'] };
   if (held) return { state: 'queued', why: `a message to ${held.s.id} waits for a free agent slot (${held.why})` };
 
@@ -236,6 +286,14 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
     return { state: 'queued', why: `queued ${what}${f.room ? ': no computer that could take it has room' : ''}` };
   }
 
+  // Paused (w915): its worker wrote `<id>: paused: …`, set it aside for the request it is on first. Not Stalled: someone
+  // decided to wait, and said on what.
+  const pausing = workers.find((s) => holds(s.id).paused.has(w.id) && s.status !== 'stopped' && s.status !== 'error');
+  if (pausing) {
+    const first = holds(pausing.id).paused.get(w.id);
+    return { state: 'paused', why: `worker ${pausing.id} on ${first || 'other work'} first` };
+  }
+
   // The cleanup stalled it: its own reason, which says more than anything derived here (w418: kept as it is).
   if (w.stalled) return { state: 'stalled', why: `${w.stalled.kind}: ${w.stalled.reason}` };
 
@@ -248,11 +306,11 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
   // Stalled: nothing works on it and nothing waits on a person.
   const open = prs.find((p) => p.state === 'open');
   const pr = open ? `; PR #${open.number} is open` : '';
-  if (open && !mine.length) return { state: 'stalled', why: `PR #${open.number} is open and no worker is on it${others.length ? ` (its worker ${others[0].id} moved on${[...serves(others[0].id)][0] ? ` to ${[...serves(others[0].id)][0]}` : ''})` : ''}` };
+  if (open && !mine.length) return { state: 'stalled', why: `PR #${open.number} is open and no worker is on it${others.length ? ` (its worker ${others[0].id} moved on${movedTo(others[0]) ? ` to ${movedTo(others[0])}` : ''})` : ''}` };
   if (!workers.length && !w.sessionIds.length) return { state: 'stalled', why: 'no worker was ever started for it' };
   if (!mine.length && others.length) {
     const s = others[0];
-    const now = [...serves(s.id)][0];
+    const now = movedTo(s);
     return { state: 'stalled', why: `its worker ${s.id} moved on${now ? ` to ${now}` : ''}` };
   }
   if (!workers.length) return { state: 'stalled', why: 'its workers are gone' };
@@ -263,15 +321,15 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
 /** Every open (or stalled) request's live state, by id. */
 export function workLiveAll(items: readonly WorkItem[], f: Omit<WorkLiveFacts, 'items'>): Map<string, WorkLive> {
   const facts = { ...f, items };
-  const cache = new Map<string, Set<string>>();
-  const served = (sid: string) => {
-    let s = cache.get(sid);
-    if (!s) cache.set(sid, (s = servedBy(sid, items)));
-    return s;
+  const cache = new Map<string, Holds>();
+  const holds = (sid: string) => {
+    let h = cache.get(sid);
+    if (!h) cache.set(sid, (h = holdsOf(sid, items)));
+    return h;
   };
   const out = new Map<string, WorkLive>();
   for (const w of items) {
-    const l = workLive(w, facts, served);
+    const l = workLive(w, facts, holds);
     if (l) out.set(w.id, l);
   }
   return out;
