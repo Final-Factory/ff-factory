@@ -67,15 +67,18 @@ Two from hangs (w906):
 
 - **Never end a process by a stale id.** Windows reuses process ids and never clears a dead parent's id from
   `ParentProcessId`. A walk down a process tree takes a child only when it started no earlier than its parent
-  (`Get-FFKillSet` in `server/machineDeployWin.ts`), and a test forgets an id once it has seen that process gone. On a
-  GitHub runner, wininit.exe's parent id is free, and a walk that drew it would reach the runner's own processes.
+  (`Get-FFKillSet` in `server/machineDeployWin.ts`), and a test forgets an id once it has seen that process gone; an
+  id read from a file is checked to be above 0 (on Windows, node ending pid 0 ends the caller itself). On a GitHub
+  runner wininit.exe's parent id is free and gets reused (w906 saw OpenConsole.exe draw it), so a walk by parent id
+  alone can reach the runner's own processes. Any walk up a tree keeps a set of the ids seen, or it can loop.
 - **A hung unit-test run names itself.** CI runs the tests under `scripts/test-watchdog.ts` with
   `scripts/test-inflight-reporter.ts` and `--test-timeout=300000`: a test that runs 5 min fails by name, and a run past
   its deadline prints the tests still running and the processes under it, then fails its step. Read that before
   re-running a job; a test file listed with no test under it is a process that does not exit (an open handle).
-- **A Windows job that ran to its timeout with no log at all lost its runner**, not a test: GitHub's hosted Windows
-  runners sometimes stop communicating mid-job (actions/runner#4632; 6 of 60 probe jobs on 2026-10-10, three in a step
-  that only listed processes). `.github/workflows/rerun-lost-runner.yml` re-runs such a run's failed jobs once.
+- **A Windows job that ran to its timeout with no log at all lost its runner**, not to a slow test: the watchdog fails
+  our own hangs earlier with the log kept. GitHub's hosted Windows runners sometimes stop communicating mid-job
+  (actions/runner#4632, about 5% of long Windows jobs there), and a stale-id walk could end the runner's processes
+  (fixed above). `.github/workflows/rerun-lost-runner.yml` re-runs such a run's failed jobs once.
 
 ### End-to-end tests (Playwright)
 

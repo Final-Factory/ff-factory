@@ -1,10 +1,11 @@
 name: Re-run a job GitHub lost
 
-# w906: GitHub's hosted Windows runners sometimes stop communicating mid-job (actions/runner#4632, open: about 5% of long
-# Windows jobs there; 6 of 60 probe jobs here on 2026-10-10, three of them in a step that only listed processes). Such a
-# job runs to its timeout, the cancel reaches nobody, and its log is lost (BlobNotFound). Our own hangs end before the
-# timeout with their log kept (scripts/test-watchdog.ts fails the step first), so a job that hit its timeout and has no
-# log was lost by GitHub, not by a test: re-run the failed jobs once. Anything else is left for a person to read.
+# w906: a Windows job sometimes loses its runner mid-job: it runs to its timeout, the cancel reaches nobody, and its log
+# is lost (BlobNotFound). GitHub's hosted Windows runners do this on their own (actions/runner#4632, open: about 5% of
+# long Windows jobs there), and Stop-FFDaemon's old walk by parent id alone could end the runner's processes (fixed in
+# server/machineDeployWin.ts, Get-FFKillSet). Our own hangs end before the timeout with their log kept
+# (scripts/test-watchdog.ts fails the step first), so a job that hit its timeout and has no log lost its runner: re-run
+# the failed jobs once. Anything else is left for a person to read.
 
 on:
   workflow_run:
