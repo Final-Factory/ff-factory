@@ -8,7 +8,7 @@ name: Re-run a job GitHub lost
 
 on:
   workflow_run:
-    workflows: [CI, Worker update end to end]
+    workflows: [CI, Windows tests, Worker update end to end]
     types: [completed]
 
 permissions:

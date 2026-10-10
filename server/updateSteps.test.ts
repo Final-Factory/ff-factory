@@ -5,13 +5,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ROOT } from './config.ts';
+import { powershell } from './testPowershell.ts';
 
 /**
  * scripts/update-steps.ps1 when the upstream was rewritten (a force-push that cleaned commit identities):
  * it moves the checkout only when nothing here would be lost, and keeps the old HEAD on a branch.
+ * Windows PowerShell on Windows (as on the portal host); pwsh elsewhere, with an npm.cmd that runs npm (w910: these were
+ * Windows-only, and the script needs only git and npm).
  */
 
-const onWindows = process.platform === 'win32';
+const skip = !powershell && 'no PowerShell here';
 
 function setup(t: { after: (fn: () => void) => void }) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'update-steps-'));
@@ -63,9 +66,13 @@ function setup(t: { after: (fn: () => void) => void }) {
     git(work, 'push', '-q', '--force-with-lease=main:' + tip, 'origin', 'HEAD:main');
     return git(work, 'rev-parse', 'HEAD');
   };
+  const bin = path.join(tmp, 'bin');
+  fs.mkdirSync(bin);
+  if (process.platform !== 'win32') fs.writeFileSync(path.join(bin, 'npm.cmd'), '#!/bin/sh\nexec npm "$@"\n', { mode: 0o755 });
+  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` };
   const update = () => {
     try {
-      const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(app, 'scripts', 'update-steps.ps1')], { cwd: app, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      const out = execFileSync(powershell!, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(app, 'scripts', 'update-steps.ps1')], { cwd: app, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       return { ok: true, out };
     } catch (e) {
       const x = e as { stdout?: string; stderr?: string };
@@ -75,7 +82,7 @@ function setup(t: { after: (fn: () => void) => void }) {
   return { app, git, commit, rewriteUpstream, update };
 }
 
-test('update-steps: a rewritten upstream with the same content moves the checkout and keeps the old HEAD', { skip: !onWindows && 'Windows only', timeout: 120_000 }, (t) => {
+test('update-steps: a rewritten upstream with the same content moves the checkout and keeps the old HEAD', { skip, timeout: 120_000 }, (t) => {
   const { app, git, rewriteUpstream, update } = setup(t);
   const oldHead = git(app, 'rev-parse', 'HEAD');
   const newTip = rewriteUpstream('new work\n');
@@ -88,7 +95,7 @@ test('update-steps: a rewritten upstream with the same content moves the checkou
   assert.equal(fs.readFileSync(path.join(app, 'data', 'state.json'), 'utf8'), 'keep');
 });
 
-test('update-steps: a rewritten upstream is refused when a local commit or a local edit would be lost', { skip: !onWindows && 'Windows only', timeout: 120_000 }, (t) => {
+test('update-steps: a rewritten upstream is refused when a local commit or a local edit would be lost', { skip, timeout: 120_000 }, (t) => {
   const { app, git, commit, rewriteUpstream, update } = setup(t);
   fs.writeFileSync(path.join(app, 'local.txt'), 'only here\n');
   git(app, 'add', '-A');

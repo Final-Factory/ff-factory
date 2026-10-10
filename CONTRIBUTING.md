@@ -29,9 +29,13 @@ npm run test:coverage     # the same, with a coverage table (node's built-in cov
 node --test server/guard.test.ts    # one file
 ```
 
-Tests live next to the code as `*.test.ts` and use `node:test`. A few (`updateSteps`, `republish`,
-`elevation`) drive the PowerShell scripts and run only on Windows; CI runs the suite on Linux and
-Windows. `server/agentSession.test.ts` shows how to test session behaviour without Claude: it swaps
+Tests live next to the code as `*.test.ts` and use `node:test`. CI runs every test on Linux (`ci.yml`; PowerShell 7
+runs the scripts' tests that need no Windows, `server/testPowershell.ts`). The Windows job (`windows.yml`) runs only the
+files in `.github/windows-tests.txt`, each with what it covers and why it needs Windows (PowerShell 5.1, CIM, scheduled
+tasks, robocopy, taskkill, named pipes), and only when a pull request touches one of them or what they cover (w910). A
+test that needs Windows goes in that list, with its files in `windows.yml`'s paths; `scripts/windows-tests.test.ts`
+fails a Windows-only test left out, and a covered file missing from the paths. Prefer a test Linux can run: pass the
+platform in, or run the script under pwsh. `server/agentSession.test.ts` shows how to test session behaviour without Claude: it swaps
 the Agent SDK's `query()` for the scripted fake in `e2e/fakeAgent.ts` (`setQueryForTesting`).
 
 Tests with a machine (`server/testMachine.ts`, a real daemon with git worktrees) share two rules (w759):

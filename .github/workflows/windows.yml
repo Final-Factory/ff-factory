@@ -1,0 +1,118 @@
+name: Windows tests
+
+# The unit tests that need Windows, and only those (w910, lothsahn 2026-10-10: "we only run windows and mac specific tests
+# on those runners when needed. And if we have a valid linux test, don't run that test on windows and mac unless there's
+# a specific reason to test windows-specific differences"). Which files and why: .github/windows-tests.txt. Every test
+# also runs on Linux in ci.yml. This runs only when a pull request touches one of those tests or the code they cover on
+# Windows (the paths below, checked against the list by scripts/windows-tests.test.ts); main has no required checks, so a
+# run that never starts blocks nothing.
+#
+# Before w910 the whole suite ran here in two shards on every pull request; w906 found why shard 1/2 flaked: an empty
+# coverage file (a node ended mid-write by PowerShell; this job collects no coverage, Linux does) and runners GitHub lost
+# mid-job (actions/runner#4632; rerun-lost-runner.yml re-runs those once).
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.ps1'
+      - 'machine/**'
+      - 'package-lock.json'
+      - 'package.json'
+      - 'scripts/test-inflight-reporter.ts'
+      - 'scripts/test-watchdog.test.ts'
+      - 'scripts/test-watchdog.ts'
+      - 'server/copyTree.test.ts'
+      - 'server/elevation.test.ts'
+      - 'server/elevation.ts'
+      - 'server/hostWatch.test.ts'
+      - 'server/machineDeploy.ts'
+      - 'server/machineDeployWin.test.ts'
+      - 'server/machineDeployWin.ts'
+      - 'server/machineDialogs.test.ts'
+      - 'server/machineSandboxes.test.ts'
+      - 'server/machineUnityMcp.test.ts'
+      - 'server/opsWorker.test.ts'
+      - 'server/opsWorker.ts'
+      - 'server/orchestratorMemory.test.ts'
+      - 'server/orchestratorMemory.ts'
+      - 'server/ownLeftovers.test.ts'
+      - 'server/ownLeftovers.ts'
+      - 'server/proc.ts'
+      - 'server/republish.test.ts'
+      - 'server/sandboxes.test.ts'
+      - 'server/sandboxes.ts'
+      - 'server/testPowershell.ts'
+      - 'server/unityReaper.test.ts'
+      - 'server/updateSteps.test.ts'
+      - 'server/watchdog.ts'
+      - '.github/windows-tests.txt'
+      - '.github/workflows/windows.yml'
+  push:
+    branches: [main]
+    paths:
+      - '**/*.ps1'
+      - 'machine/**'
+      - 'package-lock.json'
+      - 'package.json'
+      - 'scripts/test-inflight-reporter.ts'
+      - 'scripts/test-watchdog.test.ts'
+      - 'scripts/test-watchdog.ts'
+      - 'server/copyTree.test.ts'
+      - 'server/elevation.test.ts'
+      - 'server/elevation.ts'
+      - 'server/hostWatch.test.ts'
+      - 'server/machineDeploy.ts'
+      - 'server/machineDeployWin.test.ts'
+      - 'server/machineDeployWin.ts'
+      - 'server/machineDialogs.test.ts'
+      - 'server/machineSandboxes.test.ts'
+      - 'server/machineUnityMcp.test.ts'
+      - 'server/opsWorker.test.ts'
+      - 'server/opsWorker.ts'
+      - 'server/orchestratorMemory.test.ts'
+      - 'server/orchestratorMemory.ts'
+      - 'server/ownLeftovers.test.ts'
+      - 'server/ownLeftovers.ts'
+      - 'server/proc.ts'
+      - 'server/republish.test.ts'
+      - 'server/sandboxes.test.ts'
+      - 'server/sandboxes.ts'
+      - 'server/testPowershell.ts'
+      - 'server/unityReaper.test.ts'
+      - 'server/updateSteps.test.ts'
+      - 'server/watchdog.ts'
+      - '.github/windows-tests.txt'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows tests
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: A git identity for the tests that commit
+        run: |
+          git config --global user.name "FF Factory CI"
+          git config --global user.email "ci@users.noreply.github.com"
+      - run: npm ci --no-audit --no-fund
+      - name: The tests that need Windows (.github/windows-tests.txt)
+        timeout-minutes: 11
+        shell: bash
+        run: |
+          mapfile -t files < <(grep -vE '^\s*(#|$)' .github/windows-tests.txt | cut -d'|' -f1 | tr -d ' ')
+          echo "${#files[@]} test files"
+          node scripts/test-watchdog.ts --minutes 9 -- node --test --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout "${files[@]}"
