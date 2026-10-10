@@ -80,6 +80,10 @@ export const SETTABLE_KEYS = [
   'intake.ffbox',
   // Who may approve or decline intake requests (docs/intake.md): login names known to identity. The owner's only.
   'intake.reviewers',
+  // The nightly e2e lab (w864, docs/intake.md "The nightly run"): whether its regressions are filed, and the portal's nightly
+  // schedule that starts it. Anyone may set them: they file the team's own lab work, never players' words.
+  'intake.nightly.enabled',
+  'intake.nightly.run',
   // Where new game-repo work goes first, and which computers it stays off (w428, docs/machines.md "Placing work").
   'placement.prefer',
   'placement.avoid',
@@ -116,6 +120,52 @@ function objectOf(value: unknown, key: string, example: string): Record<string, 
   }
   if (typeof o !== 'object' || o === null || Array.isArray(o)) throw new Error(`${key} is an object, e.g. ${example}`);
   return o as Record<string, unknown>;
+}
+
+const NIGHTLY_RUN_KEYS = ['enabled', 'time', 'tz', 'machine', 'person', 'reportWithinHours'];
+
+/**
+ * intake.nightly.run as set_app_config takes it (w864): the whole schedule block, known keys only, each checked; a key
+ * left out takes its default (03:00, America/New_York, lothdesktop, 5 hours; intakeRules.ts intakeSettings).
+ */
+export function checkNightlyRun(value: unknown, users: readonly string[]): NonNullable<NonNullable<IntakeConfig['nightly']>['run']> {
+  const example = '{ "enabled": true, "time": "03:00", "tz": "America/New_York", "machine": "lothdesktop", "person": "lothsahn" }';
+  const o = objectOf(value, 'intake.nightly.run', example);
+  const unknown = Object.keys(o).filter((k) => !NIGHTLY_RUN_KEYS.includes(k));
+  if (unknown.length) throw new Error(`intake.nightly.run: unknown key(s) ${unknown.map((k) => JSON.stringify(k.slice(0, 40))).join(', ')}; known: ${NIGHTLY_RUN_KEYS.join(', ')}`);
+  const out: NonNullable<NonNullable<IntakeConfig['nightly']>['run']> = {};
+  if (o.enabled !== undefined) {
+    if (typeof o.enabled !== 'boolean') throw new Error('intake.nightly.run.enabled is true or false');
+    out.enabled = o.enabled;
+  }
+  if (o.time !== undefined) {
+    if (typeof o.time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(o.time)) throw new Error('intake.nightly.run.time is HH:MM, 24-hour, e.g. "03:00"');
+    out.time = o.time;
+  }
+  if (o.tz !== undefined) {
+    let ok = typeof o.tz === 'string';
+    try {
+      if (ok) new Intl.DateTimeFormat('en-US', { timeZone: o.tz as string });
+    } catch {
+      ok = false;
+    }
+    if (!ok) throw new Error('intake.nightly.run.tz is an IANA time zone, e.g. "America/New_York"');
+    out.tz = o.tz as string;
+  }
+  if (o.machine !== undefined) {
+    if (typeof o.machine !== 'string' || !MACHINE_KEY.test(o.machine)) throw new Error('intake.nightly.run.machine is a machine id, e.g. "lothdesktop"');
+    out.machine = o.machine;
+  }
+  if (o.person !== undefined) {
+    const login = typeof o.person === 'string' ? users.find((u) => u.toLowerCase() === (o.person as string).trim().toLowerCase()) : undefined;
+    if (!login) throw new Error(`intake.nightly.run.person is a login; the logins are ${users.join(', ') || '(none)'}`);
+    out.person = login;
+  }
+  if (o.reportWithinHours !== undefined) {
+    if (!Number.isInteger(o.reportWithinHours) || (o.reportWithinHours as number) < 1 || (o.reportWithinHours as number) > 20) throw new Error('intake.nightly.run.reportWithinHours is a whole number from 1 to 20');
+    out.reportWithinHours = o.reportWithinHours as number;
+  }
+  return out;
 }
 
 /**
@@ -437,6 +487,13 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'intake.ffbox':
       return checkFfboxIntake(value);
+    case 'intake.nightly.enabled': {
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      throw new Error('intake.nightly.enabled is true or false');
+    }
+    case 'intake.nightly.run':
+      return checkNightlyRun(value, users ?? []);
     case 'providers.ffbox.devRequests':
       return checkDevRequests(value);
     case 'intake.reviewers':
@@ -614,6 +671,13 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   }
   else if (key === 'intake.ffbox') cfg.intake = { ...cfg.intake, ffbox: v as IntakeConfig['ffbox'] };
   else if (key === 'intake.reviewers') cfg.intake = { ...cfg.intake, reviewers: v as string[] | undefined };
+  else if (key === 'intake.nightly.enabled' || key === 'intake.nightly.run') {
+    // Live: the intake reads its settings at every look (intakeSettings), the schedule's every minute.
+    const nightly = { ...cfg.intake?.nightly };
+    if (key === 'intake.nightly.enabled') nightly.enabled = v as boolean | undefined;
+    else nightly.run = v as NonNullable<IntakeConfig['nightly']>['run'];
+    cfg.intake = { ...cfg.intake, nightly };
+  }
   else if (key === 'placement.prefer' || key === 'placement.avoid') {
     const p = { ...cfg.placement };
     if (key === 'placement.prefer') {

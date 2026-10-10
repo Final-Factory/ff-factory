@@ -1572,3 +1572,58 @@ test("nightly run: the night is the date in the schedule's zone, and 03:00 follo
   assert.equal(new Date(lastFire(ny, Date.UTC(2026, 9, 11, 6, 59))).toISOString(), '2026-10-10T07:00:00.000Z', 'just before: the night before');
   assert.equal(nightOf(Date.UTC(2026, 9, 11, 3, 0), 'America/New_York'), '2026-10-10', '23:00 the evening before in New York');
 });
+
+test('nightly run (w864): the night\'s key is minted at the fire and reaches only that night\'s worker, in its launch environment', async (t) => {
+  const env = await setupOnMachine(t, { nightly: { enabled: true, run: { enabled: true, person: 'lothsahn', machine: 'pc' } } });
+  const { cfg, store, agents, o, machines } = env;
+  const clock = { now: NY_0300_EDT - 60_000 };
+  let minted = 0;
+  const intake = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, now: () => clock.now, mintNightlyKey: () => `ffsb_night${++minted}_${'x'.repeat(30)}` });
+  t.after(() => intake.close());
+  agents.nightlyKeyFor = (ids, url) => intake.nightlyRunEnv(ids, url);
+  intake.checkNightlyRun();
+  assert.equal(minted, 0, 'nothing before the fire');
+  clock.now = NY_0300_EDT + 60_000;
+  intake.checkNightlyRun();
+  assert.equal(minted, 1, 'one key per night, at the fire');
+  const run = [...store.work.values()].find((w) => w.source?.kind === 'nightly-run')!;
+  const m = store.machines.get('pc')!;
+  // Its worker, titled with the request before the ledger links it (the first process starts first).
+  const w = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Run the night', title: `${run.id}: nightly e2e run`, from: 'orchestrator' });
+  const spec = machines.hooks!.specFor(w.info, m);
+  assert.equal(spec.env?.FF_FACTORY_NIGHTLY_KEY, `ffsb_night1_${'x'.repeat(30)}`);
+  assert.equal(spec.env?.FF_FACTORY_URL, m.portalUrl.replace(/\/+$/, ''));
+  assert.doesNotMatch(run.brief, /ffsb_/, 'never in the brief');
+  assert.doesNotMatch(JSON.stringify(intake.summary()), /ffsb_night/, 'never in what the Intake tab or intake.json show');
+  // Any other worker gets nothing.
+  const other = agents.startWorker({ sandbox: 'pc/beta', prompt: 'Something else', title: 'w9999: other work', from: 'orchestrator' });
+  assert.equal(machines.hooks!.specFor(other.info, m).env?.FF_FACTORY_NIGHTLY_KEY, undefined);
+  // A later process of the same worker gets the same key: the lab's running night holds it.
+  assert.equal(machines.hooks!.specFor(w.info, m).env?.FF_FACTORY_NIGHTLY_KEY, `ffsb_night1_${'x'.repeat(30)}`);
+  assert.equal(minted, 1);
+  // A restarted portal has no key in memory: a worker already given one is not given another (that would revoke the
+  // running night's), and the next night's fire mints a fresh one, which replaces it.
+  intake.close();
+  const again = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, now: () => clock.now, mintNightlyKey: () => `ffsb_night${++minted}_${'y'.repeat(30)}` });
+  t.after(() => again.close());
+  agents.nightlyKeyFor = (ids, url) => again.nightlyRunEnv(ids, url);
+  assert.equal(machines.hooks!.specFor(w.info, m).env?.FF_FACTORY_NIGHTLY_KEY, undefined);
+  assert.equal(minted, 1);
+  clock.now = NY_0300_EDT + 86_400_000 + 60_000;
+  again.checkNightlyRun();
+  assert.equal(minted, 2, 'the next night mints its own');
+});
+
+test('nightly run (w864): after a restart, a night whose worker never got its key gets a fresh one', (t) => {
+  const env = nightlyClock(t);
+  const { intake, clock, store, cfg, agents, o } = env;
+  firedRun(env);
+  const run = [...store.work.values()].find((w) => w.source?.kind === 'nightly-run')!;
+  intake.close();
+  let minted = 0;
+  const again = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, now: () => clock.now, mintNightlyKey: () => `ffsb_fresh${++minted}_${'z'.repeat(30)}` });
+  t.after(() => again.close());
+  assert.equal(again.nightlyRunEnv([run.id], 'https://portal.example')?.FF_FACTORY_NIGHTLY_KEY, `ffsb_fresh1_${'z'.repeat(30)}`);
+  assert.equal(again.nightlyRunEnv(['w9999'], 'https://portal.example'), undefined, 'not for another request');
+  assert.equal(again.nightlyRunEnv([run.id], 'not a url'), undefined);
+});

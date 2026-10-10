@@ -21,6 +21,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   hand). Off with `machines.autoUpdateAfterDeploy: false`. The ops worker's and the orchestrators' instructions now say an
   update needs no drain and that the deploy updates the machines. docs/ops-worker.md "After a verified deploy". Needs a portal
   deploy; the first deploy after it is its first run on real machines.
+- **The nightly run gets its key from the portal, and its schedule is settable live** (w864, lothsahn: no person runs
+  commands on machines). At each fire the portal mints a nightly-scoped API key under one name, `nightly-run` (so the
+  night before's is revoked), keeps it in memory only, and gives it to that night's worker alone in its launch
+  environment (`FF_FACTORY_URL`, `FF_FACTORY_NIGHTLY_KEY`), redacted like every `*_KEY` of a launch spec. No ops step,
+  no key file on the machine, no daemon update. `set_app_config` now takes `intake.nightly.run` and
+  `intake.nightly.enabled` (anyone, live). Needs a portal deploy (docs/intake.md, "The nightly run").
+
 - **What each request costs, and its transcripts kept** (w859, lothsahn: "I would like you to track the per workitem spend as well
   as the transcript so we can optimize token usage", and "We should keep worker transcripts and numbers for at least 7 days. But
   make sure we don't run the portal out of disk"). Every turn's result line now carries Claude Code's own usage (the SDK's

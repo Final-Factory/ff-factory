@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { SETTABLE_KEYS, checkReviewers, normalizeSetting, setAppConfig } from './appConfig.ts';
+import { OWNER_ONLY_KEYS, SETTABLE_KEYS, checkReviewers, normalizeSetting, setAppConfig } from './appConfig.ts';
 import { claudeFromVault } from './secrets.ts';
 import type { Config } from './config.ts';
 
@@ -218,4 +218,21 @@ test('set_app_config: machines.claudeFromVault switches one machine alone, true 
   // A value that is not true or false, and a machine id that is not one, are refused.
   assert.throws(() => setAppConfig(file, cfg, 'machines.claudeFromVault', 'maybe', { machine: 'm5' }), /machines\.claudeFromVault is true/);
   assert.throws(() => setAppConfig(file, cfg, 'machines.claudeFromVault', true, { machine: 'loth desktop' }), /machine id/);
+});
+
+test('set_app_config intake.nightly.run and .enabled (w864): checked, written, applied live; anyone may set them', (t) => {
+  const { file, cfg } = setup(t);
+  const users = ['ben', 'lothsahn'];
+  setAppConfig(file, cfg, 'intake.nightly.run', { enabled: true, time: '03:00', tz: 'America/New_York', machine: 'lothdesktop', person: 'Lothsahn' }, { users });
+  setAppConfig(file, cfg, 'intake.nightly.enabled', 'true', { users });
+  assert.deepEqual(cfg.intake?.nightly, { enabled: true, run: { enabled: true, time: '03:00', tz: 'America/New_York', machine: 'lothdesktop', person: 'lothsahn' } });
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+  assert.deepEqual(raw.intake.nightly.run.person, 'lothsahn');
+  assert.equal(raw.port, 8790, 'the rest kept');
+  assert.throws(() => normalizeSetting('intake.nightly.run', { enabled: true, time: '3am' }, undefined, users), /HH:MM/);
+  assert.throws(() => normalizeSetting('intake.nightly.run', { tz: 'Mars/Olympus' }, undefined, users), /IANA/);
+  assert.throws(() => normalizeSetting('intake.nightly.run', { person: 'nobody' }, undefined, users), /is a login/);
+  assert.throws(() => normalizeSetting('intake.nightly.run', { key: 'ffsb_x' }, undefined, users), /unknown key/);
+  assert.throws(() => normalizeSetting('intake.nightly.enabled', 'yes'), /true or false/);
+  assert.equal(OWNER_ONLY_KEYS.has('intake.nightly.run'), false);
 });
