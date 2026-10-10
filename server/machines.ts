@@ -718,6 +718,20 @@ export class MachineManager {
   portalHead: string | undefined = gitHead(ROOT);
   private readonly reportedOutdated = new Map<string, string>();
 
+  /** The agents each daemon said it runs in its last hello, and when (w887: the rollout checks an update adopted them). */
+  private readonly helloLive = new Map<string, { at: number; live: Set<string> }>();
+
+  /** The agent processes a daemon reported alive in a hello at or after `since` (epoch ms), or undefined when it has not said hello since. */
+  liveAtHello(id: string, since: number): ReadonlySet<string> | undefined {
+    const h = this.helloLive.get(id);
+    return h && h.at >= since ? h.live : undefined;
+  }
+
+  /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
+  daemonOf(id: string): string | undefined {
+    return this.isOnline(id) ? this.hellos.get(id)?.daemon : undefined;
+  }
+
   /** Whether a connected daemon runs its agents in agent hosts that outlive it (w605): its hello said so. */
   agentHostsOf(id: string): boolean {
     return this.isOnline(id) && !!this.hellos.get(id)?.agentHosts;
@@ -775,7 +789,7 @@ export class MachineManager {
         once(
           why
             ? `[machines] ${m.id}'s daemon is outdated (${why}). It is a worker root install (${m.root}): update it there by running its installer again (docs/worker-install.md, "Updating").`
-            : `[machines] ${m.id}'s daemon has an update available (${behind}). It keeps taking, starting and resuming agents meanwhile; to update it, run its installer again there (docs/worker-install.md, "Updating").`,
+            : `[machines] ${m.id}'s daemon has an update available (${behind}). It keeps taking, starting and resuming agents meanwhile; a verified portal deploy updates it by itself (docs/ops-worker.md, "After a verified deploy"); if it stays behind, ops_worker machine_update does it now. No drain or wait is needed: agents run on through an update (w605).`,
         );
         continue;
       }
@@ -1623,6 +1637,7 @@ export class MachineManager {
         this.store.putMachine(m);
         if (repool) this.links.get(id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
         const live = new Set(msg.live);
+        this.helloLive.set(id, { at: Date.now(), live });
         for (const sid of m.sessionIds) {
           const s = this.handle(sid);
           if (!s) continue;

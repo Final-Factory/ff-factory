@@ -200,6 +200,12 @@ export interface Config {
      * agents (it is redeployed once idle, as before). Turn it on once the host's own daemon has proven itself.
      */
     keepAgentsOnRestart?: boolean;
+    /**
+     * After a portal deploy has verified, FF Factory runs the worker installer's update on every worker root machine
+     * itself (server/machineRollout.ts, w887). On unless this is false: the kill switch, for when a machine must stay
+     * on its commit.
+     */
+    autoUpdateAfterDeploy?: boolean;
   };
   /**
    * Which Claude account THIS host's agents run on, per role (docs/accounts.md): "token" (the default) is

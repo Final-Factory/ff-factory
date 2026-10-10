@@ -32,7 +32,10 @@ claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnecto
   ([ops-worker.md](ops-worker.md), w597). Its `deploy` updates the portal, only when the person asks in their own turn.
   Its `machine_update` updates a machine's daemon and reruns its installer (a sandbox count, agent or editor limit, a
   reinstall) in any turn, for one of the person's own open requests (w855, lothsahn: "don't ask ben to run
-  installers"). "Update the machines" means this, for every machine; no person is ever asked to run an installer.
+  installers"). After a verified portal deploy FF Factory updates every worker-root machine's daemon by itself and sends the
+  deploy's requester one report ([ops-worker.md](ops-worker.md#after-a-verified-deploy-w887), w887), so no `machine_update`
+  is needed for that. Any other "update the machines" is this call, once per machine; no person is ever asked to run an
+  installer, and an update never needs a drain or a wait (agents run on through it, w605).
   The dispatcher and `/mcp` do not have it.
 
 It cannot start, stop or change anything else. To get work done it files a request.
@@ -926,7 +929,7 @@ allowlist, an unlisted file stays closed.
 | `intake.json`, `max.json`, `providers/` | the intake, Max's activity, the FFBox connector's state (a token's 12-hex fingerprint only) |
 | `usage.json`, `spend.json` | plan usage (account e-mail and organization, a token's 12-hex fingerprint) and spend |
 | `timers.json`, `wakes.json`, `ops-worker.json`, `orchestrator-inbox/` | timers, wakes, the ops worker's state, status notes |
-| `resume.json`, `update.result.json`, `update.prepared.json`, `update.verifying.json`, `relocate.result.json`, `restart.pending.json`, `alive.json`, `update.wanted`, `update.request`, `restart.request`, `drain.done`, `unclean-recovery.last`, `deelevate.last`, `*.pid` | the restart and update hand-off |
+| `resume.json`, `update.result.json`, `update.prepared.json`, `update.verifying.json`, `update.verified.json`, `machine-rollout.json`, `relocate.result.json`, `restart.pending.json`, `alive.json`, `update.wanted`, `update.request`, `restart.request`, `drain.done`, `unclean-recovery.last`, `deelevate.last`, `*.pid` | the restart and update hand-off |
 | `cleanup-log.jsonl`, `cleanup-state.json`, `cleanup/` | the clean-up logs |
 | `transcripts/` | every session's transcript, which `search_transcripts` and `agent_transcript` already read for every orchestrator |
 | `orchestrator-memory/dispatcher`, `orchestrator-memory/person-*` | every orchestrator's memory, read-only (below) |

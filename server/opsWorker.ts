@@ -58,6 +58,8 @@ export const OPS_LIMITS = {
   deployGrantMs: 15 * 60_000,
   /** After a deploy, the next portal start within this long tells the worker to report (the update's own restart). */
   deployReportMs: 60 * 60_000,
+  /** A verified portal deploy is attributed to a deploy asked for this long before it (build + drain + verify window). */
+  deployAskedMs: 3 * 60 * 60_000,
 };
 
 /** Where the portal leaves a deploy grant for fff-ops-priv (root reads it; fff-ops cannot reach the data folder). */
@@ -473,7 +475,7 @@ export function opsBrief(ownerName: string | undefined): string {
 You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux account fff-ops, with a real shell. You take jobs only from Lothsahn's and Ben's own orchestrators; each message says whose it is. ${ownerName ? `The portal's owner is ${ownerName}.` : ''} Your job is orchestration: reaching the machines (beast, lothdesktop, m3, m5, biscuit and new ones) over ssh and copying files to and from them with scp, reading the portal's state, pinning a new machine's host key, and issuing machine credentials. Anything heavy runs on the target machine over ssh, never here.
 
 What you have:
-- \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root <root>"'\`. An update needs no new credential: never issue one for it.
+- \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root <root>"'\`. An update needs no new credential: never issue one for it. An update never needs a drain or a wait (w605): it stops only the daemon, agents mid-turn run on in their own agent hosts and the new daemon adopts them, so run it at once. After a portal deploy you do not update the machines: FF Factory does that itself once the deploy has verified (w887).
 - An installer rerun is yours, never a person's (w855, lothsahn: "don't ask ben to run installers"): the same update command with \`--max-sandboxes N\`, \`--max-agents-per-sandbox N\` or \`--max-unity N\` (Windows \`-MaxSandboxes\`, …) changes only what it names, and a sandbox count on a worker-root install changes in no other way. You run it when the job's message says an owner's open request asks for it (a \`[machine update for wNNN, approved by <name> …]\` message from ops_worker machine_update, or a job in which Lothsahn or Ben asked for the change themselves); the settings are the ones the message names, not more. A change nobody asked for, or one the message does not name, is not yours to make: report it instead. After it, check that list_machines shows the machine online with the new limits.
 - \`scp\` and \`sftp\` (w612): files between your scratch folder and a machine, both ways, over the same ssh (the portal's key, pinned host keys, port 22): \`scp ./check.sh m5:/tmp/\`, \`scp m5:/tmp/install.log ./\`, \`sftp -b cmds m5\` (a batch file: there is no terminal). They run as you, so they copy only what you may read and write: never the portal's files. No ssh options (-o, -i, -F, -J, -S): the machine is all they take.
 - \`fffctl update\`: the portal deploy, only after a [deploy] message (Lothsahn or Ben asked for it in their own words: the portal leaves a grant good once for 15 minutes; without it the command is refused). Follow that message's steps.
@@ -526,6 +528,32 @@ interface OpsJob {
 export const opsWorkRule = (ids: readonly string[]) =>
   `\n\n[ledger] This job is the step left on ${ids.join(', ')}. When it is done and verified, end your report with a line \`DONE: <id>\` for each of them it finishes (one line each), and say in the report how you verified it. For one with something still left, end with a line \`<id>: still open: <what>\` instead.`;
 
+/** An ssh target and a root folder that may be put into a shell command (no spaces, no quotes). */
+export const SAFE_TARGET = /^[\w@.\-]+$/;
+export const SAFE_ROOT = /^[\w:\\/. \-]+$/;
+
+/** The settings an installer update may change (w855), as its command-line flags: only those named, whole numbers. */
+export function workerUpdateFlags(platform: string | undefined, nums: { maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number }): string[] {
+  const win = platform === 'win32';
+  return (
+    win
+      ? [nums.maxSandboxes !== undefined && `-MaxSandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `-MaxAgentsPerSandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `-MaxUnity ${nums.maxUnity}`]
+      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`]
+  ).filter((f): f is string => !!f);
+}
+
+/**
+ * What runs on the machine to update its worker install (docs/worker-install.md, "Updating"): the installer's update
+ * form, fetched from ff-factory's main, with the root folder and only the settings named in `extra`. Shared by
+ * ops_worker machine_update (the worker types it after `ssh <target>`) and the automatic rollout after a verified
+ * deploy (server/machineRollout.ts, which runs it over ssh itself).
+ */
+export function workerUpdateRemote(m: { root: string; platform?: string }, extra = ''): string {
+  return m.platform === 'win32'
+    ? `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root ${m.root}${extra ? ` ${extra}` : ''}"`
+    : `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root ${m.root}${extra ? ` ${extra}` : ''}`;
+}
+
 /** A deploy a person asked for (ops_worker deploy): reported after the portal's next start. */
 interface OpsDeploy {
   by: Requester;
@@ -541,6 +569,8 @@ export class OpsWorker {
   private readonly now: () => number;
   private job?: OpsJob;
   private deploying?: OpsDeploy;
+  /** The last deploy a person asked for, kept after the restart that reports it: the machine rollout (w887) reports to this person. */
+  private lastDeploy?: OpsDeploy;
   private timer?: NodeJS.Timeout;
 
   constructor(d: OpsDeps) {
@@ -550,6 +580,7 @@ export class OpsWorker {
       const saved = JSON.parse(fs.readFileSync(d.file, 'utf8'));
       this.job = saved.job;
       this.deploying = saved.deploy;
+      this.lastDeploy = saved.lastDeploy;
     } catch {
       this.job = undefined;
     }
@@ -579,7 +610,7 @@ export class OpsWorker {
       try {
         this.d.sessions.send(
           OPS_ID,
-          `[deploy] The portal has started again (${new Date(this.now()).toISOString()}), after the deploy ${dep.by.displayName} asked for at ${dep.at}: most likely the update's own restart. Run \`fffctl status\` and report to ${dep.by.displayName}: the commit before (what fffctl update printed), the commit running now, whether the update was verified or rolled back (\`fffctl logs 200\` says), and the status lines.${this.job?.workIds?.length ? opsWorkRule(this.job.workIds) : ''}`,
+          `[deploy] The portal has started again (${new Date(this.now()).toISOString()}), after the deploy ${dep.by.displayName} asked for at ${dep.at}: most likely the update's own restart. Run \`fffctl status\` and report to ${dep.by.displayName}: the commit before (what fffctl update printed), the commit running now, whether the update was verified or rolled back (\`fffctl logs 200\` says), and the status lines. Do not update the machines' daemons: when the portal is verified FF Factory does that itself and reports it.${this.job?.workIds?.length ? opsWorkRule(this.job.workIds) : ''}`,
           'system',
           undefined,
           { requestedBy: dep.by, ops: 'resume' },
@@ -595,9 +626,21 @@ export class OpsWorker {
     clearInterval(this.timer);
   }
 
+  /**
+   * Who asked for the portal deploy that was verified at `verifiedAt` (epoch ms): the person of the last ops_worker deploy
+   * if it was asked for within OPS_LIMITS.deployAskedMs before. Undefined for a deploy by hand or an old one (w887: the machine
+   * rollout then reports to the dispatcher).
+   */
+  deployRequester(verifiedAt: number): Requester | undefined {
+    const d = this.lastDeploy;
+    if (!d) return undefined;
+    const age = verifiedAt - Date.parse(d.at);
+    return age >= 0 && age <= OPS_LIMITS.deployAskedMs ? d.by : undefined;
+  }
+
   private save() {
     try {
-      fs.writeFileSync(this.d.file, JSON.stringify({ job: this.job, deploy: this.deploying }, null, 1), { mode: 0o600 });
+      fs.writeFileSync(this.d.file, JSON.stringify({ job: this.job, deploy: this.deploying, lastDeploy: this.lastDeploy }, null, 1), { mode: 0o600 });
     } catch (e) {
       console.warn('ops-worker: could not save its job:', (e as Error).message);
     }
@@ -685,15 +728,9 @@ export class OpsWorker {
     for (const [k, v] of Object.entries(nums)) {
       if (v !== undefined && (!Number.isInteger(v) || v < 1 || v > 16)) throw new Error(`${k}: a whole number from 1 to 16`);
     }
-    const win = m.platform === 'win32';
-    if (!/^[\w@.\-]+$/.test(m.target) || !/^[\w:\\/. \-]+$/.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
-    const flags = win
-      ? [nums.maxSandboxes !== undefined && `-MaxSandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `-MaxAgentsPerSandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `-MaxUnity ${nums.maxUnity}`]
-      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`];
-    const extra = flags.filter(Boolean).join(' ');
-    const command = win
-      ? `ssh ${m.target} 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root ${m.root}${extra ? ` ${extra}` : ''}"'`
-      : `ssh ${m.target} 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root ${m.root}${extra ? ` ${extra}` : ''}'`;
+    if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
+    const extra = workerUpdateFlags(m.platform, nums).join(' ');
+    const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, extra)}'`;
     const what = extra ? `with these settings changed: ${extra}` : 'with no setting changed';
     const text = `[machine update for ${id}, approved by ${person.displayName} through that request] Update ${m.id}'s worker install ${what}. Run exactly this, once, and nothing else on the machine (docs/worker-install.md, "Updating"; it asks nothing, keeps every other setting, the machine's own credential and the PATH, restarts the daemon; never issue a credential for it):\n\n${command}\n\nThen check with list_machines that ${m.id} is online again${extra ? ' and shows the new limits' : ''}, and report what the update printed (the \`~ key: before -> after\` lines) and what the portal sees.`;
     return this.send(caller, text, true, [id], true);
@@ -720,6 +757,7 @@ export class OpsWorker {
     const grant = { by: person.userId, name: person.displayName, at: at.toISOString(), expires: new Date(at.getTime() + OPS_LIMITS.deployGrantMs).toISOString() };
     fs.writeFileSync(path.join(path.dirname(this.d.file), OPS_GRANT), `${JSON.stringify(grant)}\n`, { mode: 0o600 });
     this.deploying = { by: person, at: at.toISOString() };
+    this.lastDeploy = this.deploying;
     this.job = { by: person, at: at.toISOString(), what: 'deploy the portal (fffctl update)', ...(ids.length ? { workIds: ids } : {}) };
     this.save();
     // A deploy is a new job too: a fresh conversation and process, on this person's token (the restart that follows resumes it).
@@ -735,6 +773,7 @@ export class OpsWorker {
 1. Run \`fffctl status\` and note the release and its commit.
 2. Run \`fffctl update\`, once. It is allowed until ${grant.expires} and only once, and it only asks for the update: the portal builds origin/main beside the running release, drains, restarts on the new one, verifies it and rolls back by itself if it does not answer. It prints the commit it starts from.
 3. End your turn with what it printed. Your process ends with the old portal; when the new one starts, FF Factory messages you to report. If no message comes within 20 minutes (already up to date, or the build failed), wake_me 20 before you end the turn covers it: then report from \`fffctl status\` and \`fffctl logs 200\`.
+Do not update the machines' daemons yourself: once the new portal is verified (never after a rollback), FF Factory updates every machine's daemon by itself and sends ${person.displayName}'s orchestrator one report of each machine (docs/ops-worker.md, "After a verified deploy"). Mention in your report only that this follows.
 Report to ${person.displayName}: the commit before, the commit after, whether it was verified or rolled back, and \`fffctl status\`.${ids.length ? `${opsWorkRule(ids)} Only in the report after the restart, once the new portal is verified: never in the turn that starts the update.` : ''}`;
     this.d.sessions.send(OPS_ID, text, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
     return `Asked the orchestration worker (${OPS_ID}) to deploy the portal: it may run fffctl update once until ${grant.expires}. The portal will drain and restart; its report (commit before and after, fffctl status) comes back to you as an [ops worker] message after the restart.`;

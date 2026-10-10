@@ -572,9 +572,9 @@ test('w605: a daemon one commit behind the portal (same protocol) takes new agen
   Object.assign(store.machines.get('mx')!, { root: 'D:\\work\\ffw' });
   mm.checkOutdated(Date.now() + 60 * 60_000);
   mm.checkOutdated(Date.now() + 120 * 60_000);
-  const told = reports.filter((r) => /has an update available.*run its installer again/.test(r));
+  const told = reports.filter((r) => /has an update available.*ops_worker machine_update/.test(r));
   assert.equal(told.length, 1, told.join('\n'));
-  assert.match(told[0], /keeps taking, starting and resuming agents meanwhile; to update it, run its installer again there/);
+  assert.match(told[0], /keeps taking, starting and resuming agents meanwhile; a verified portal deploy updates it by itself.*No drain or wait is needed/);
   assert.deepEqual(deployed, ['mx']);
 });
 

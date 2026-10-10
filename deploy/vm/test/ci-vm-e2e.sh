@@ -568,6 +568,10 @@ done
 echo "MEASURE update: $(($(date +%s) - t0)) s from fffctl update to the new version answering; health unanswered for about $down s of it"
 g 'sudo cat /srv/fff/data/update.result.json' | jq -e --arg w "$want" '.ok == true and (.headAfter | startswith($w)) and (.headBefore | length) > 0' || fail "update.result.json does not record the switch to $want"
 wait_for 300 "the update verified" g 'test ! -e /srv/fff/data/update.verifying.json'
+# A verified update leaves the marker the portal's machine rollout reads (server/machineRollout.ts, w887); the server
+# retires it to update.verified.done.json once it has taken it, so either file counts.
+marker() { g 'sudo sh -c "cat /srv/fff/data/update.verified.json /srv/fff/data/update.verified.done.json 2>/dev/null"' | jq -e --arg w "$1" 'select(.sha | startswith($w))' >/dev/null; }
+wait_for 120 "update.verified.json records the verified update to $want" marker "$want"
 echo "ok: $before -> $want"
 out=$(g 'sudo fffctl update --drain-minutes 0' 2>&1)
 echo "$out"
@@ -605,6 +609,7 @@ step "a broken update is rolled back by itself"
 good=$want
 sed -i '1i throw new Error("ci: broken on purpose");' "$ROOT/server/index.ts"
 git -C "$ROOT" -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q -am "ci: a broken update"
+bad=$(git -C "$ROOT" rev-parse --short=7 HEAD)
 main_at_head
 git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 g 'cat > /tmp/ff.bundle.new && mv /tmp/ff.bundle.new /tmp/ff.bundle && chmod 644 /tmp/ff.bundle' </tmp/ff.bundle
@@ -627,6 +632,9 @@ until g 'sudo cat /srv/fff/data/update.result.json' 2>/dev/null | jq -e '.ok == 
   sleep 5
 done
 echo "ok: rolled back to $good ($(($(date +%s) - t0)) s)"
+# A rollback is not a verification: no marker, so the machines are not updated to the release that failed.
+if marker "$bad"; then fail "a rolled-back update wrote update.verified.json for $bad"; fi
+echo "ok: no update.verified.json for the rolled-back $bad"
 wait_for 300 "the portal runs $good again" bash -c "[ \"\$(curl -fsS -m 10 http://$IP:8790/api/health | jq -r .sha)\" = $good ]"
 g 'ls /srv/fff/data/orchestrator-inbox/ 2>/dev/null | tail -n 3; sudo sh -c "cat /srv/fff/data/orchestrator-inbox/*.txt 2>/dev/null | tail -n 5"' || true
 git -C "$ROOT" reset -q --hard HEAD~1

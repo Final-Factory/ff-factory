@@ -10,6 +10,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A verified portal deploy now updates every machine's daemon by itself** (w887, lothsahn: "Update FFFactory so that after
+  updating the portal and validating, it automatically updated all the machines."). `fff-update verify` writes
+  `data/update.verified.json` when the new release answers (a rollback writes none); the portal (`server/machineRollout.ts`) then
+  runs the worker installer's update, the command `ops_worker machine_update` writes with no setting named, on each online
+  worker-root machine in turn over its ssh. Agents are not drained or waited for (an update stops only the daemon, w605): it
+  counts each machine's agents before and the new daemon's hello after, and names any that ended. An offline machine is updated
+  when it comes back; a failure on one is reported while the rest carry on, and a daemon left offline is put back on its old
+  commit. One `[machine updates]` report goes to the orchestrator of whoever asked for the deploy (the dispatcher for a deploy by
+  hand). Off with `machines.autoUpdateAfterDeploy: false`. The ops worker's and the orchestrators' instructions now say an
+  update needs no drain and that the deploy updates the machines. docs/ops-worker.md "After a verified deploy". Needs a portal
+  deploy; the first deploy after it is its first run on real machines.
 - **What each request costs, and its transcripts kept** (w859, lothsahn: "I would like you to track the per workitem spend as well
   as the transcript so we can optimize token usage", and "We should keep worker transcripts and numbers for at least 7 days. But
   make sure we don't run the portal out of disk"). Every turn's result line now carries Claude Code's own usage (the SDK's
