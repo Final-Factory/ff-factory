@@ -10,6 +10,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The chat's message box empties when you send, every time** (w893, lothsahn: "Sometimes when I send you a message, the message doesn't clear
+  and I have to manually clear it."). The box (and its saved draft) cleared only when the server answered, so a page that reloaded or
+  closed with the message on its way wrote the sent text back as a draft. It now empties at once, and a text-only message goes with
+  `keepalive` so a reload does not cancel it. A send that fails puts the message back (text, pictures, files, the reply) and says
+  "Not sent"; one with no answer at all is sent again under the same id, which the server takes once (`clientId`). Tests:
+  `e2e/composerClears.spec.ts`.
 - **A verified portal deploy now updates every machine's daemon by itself** (w887, lothsahn: "Update FFFactory so that after
   updating the portal and validating, it automatically updated all the machines."). `fff-update verify` writes
   `data/update.verified.json` when the new release answers (a rollback writes none); the portal (`server/machineRollout.ts`) then
