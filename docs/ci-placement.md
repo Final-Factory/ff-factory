@@ -7,7 +7,7 @@ Windows, macOS, root, systemd or KVM stays hosted.
 | Workflow, job | Runs on | Why |
 |---|---|---|
 | `ci.yml` `checks` (typecheck, unit tests with coverage, web build) | FFBox (`ffgithubrunners`) | Linux, Node |
-| `ci.yml` `e2e` (Playwright, Chromium and WebKit, 3 shards) | FFBox | Linux, Node, a browser download |
+| `ci.yml` `e2e` (Playwright, Chromium and WebKit, 3 shards) | FFBox | Linux, Node, the browsers in the image |
 | `ci.yml` `secrets` (gitleaks), `identity` (noreply emails) | FFBox | Linux, git |
 | `vm-scripts.yml` `plan` | FFBox | reads `git diff`; no API |
 | `ci.yml` `ops-socket` (w638) | hosted `ubuntu-latest` | `sudo` and a running systemd |
@@ -20,17 +20,18 @@ Windows, macOS, root, systemd or KVM stays hosted.
 
 A runner container is single-use, runs as root with every capability dropped, and sits behind an egress fence.
 
-- **Reaches from outside:** the npm registry, Playwright's browser CDN (`cdn.playwright.dev`,
-  `playwright.download.prss.microsoft.com`) and GitHub's Actions service. **Never `github.com` or `api.github.com`**: an
+- **Reaches from outside:** the npm registry and GitHub's Actions service. **Never `github.com` or `api.github.com`**: an
   SNI fence cannot limit those to one repository, so one POST to `/gists` with a credential lifted out of a test would
   leave through it. A job that needs a fact from GitHub asks the host (ffbox `scripts/ci_lane.py` `serve_github`).
 - **The checkout** comes from the host's mirror of this repository: `/opt/ffghr/ffghr-workspace.sh use-mirror "$sha"`,
   then `actions/checkout`, pinned by commit SHA (the image carries the archive of exactly that commit and cannot download
   any other action).
-- **In the image, not installed by the job:** Node 24, npm, gitleaks, jq, and the system libraries Chromium and WebKit
-  link against. There is no `actions/setup-node`, no `actions/cache` and no `sudo`. Versions: ffbox `scripts/Dockerfile`
-  (`NODE_VERSION`, `GITLEAKS_VERSION`, `PLAYWRIGHT_VERSION`). Upgrading Node, gitleaks or Playwright means bumping the
-  number there, and a Playwright that needs a library the image lacks fails with "error while loading shared libraries".
+- **In the image, not installed by the job:** Node 24, npm, gitleaks, jq, Playwright's Chromium and WebKit, and the system
+  libraries they link against. There is no `actions/setup-node`, no `actions/cache` and no `sudo`. Versions: ffbox
+  `scripts/Dockerfile` (`NODE_VERSION`, `GITLEAKS_VERSION`, `PLAYWRIGHT_VERSION`). **Upgrading Node, gitleaks or
+  Playwright means bumping the number there too**; the e2e job's first step fails and says so when `package-lock.json` and
+  the image's Playwright differ. The browsers are baked because Chromium's download is served from
+  `storage.googleapis.com`, every Google Cloud bucket, which the fence cannot name.
 - **Artifacts** go through `.github/actions/ffghr-artifact-handoff`: the host uploads them on the job's own credential.
 - **PowerShell 7** is not in the image, so the scripts' tests that need `pwsh` skip (`server/testPowershell.ts`); the
   Windows job (`windows.yml`) is where they run.

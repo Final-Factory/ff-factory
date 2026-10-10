@@ -28,8 +28,8 @@ env:
 
 # WHERE THESE JOBS RUN (w911, lothsahn 2026-10-10). The Linux jobs run on the FFBox build server's runner containers
 # (label ffgithubrunners), not on GitHub-hosted runners: the hosted minutes were most of the organisation's Actions use.
-# A container there has Node 24, npm, gitleaks and the browsers' system libraries in its image, reaches only the npm
-# registry and Playwright's browser CDN from outside (never github.com or api.github.com), and gets this repository from
+# A container there has Node 24, npm, gitleaks and Playwright's browsers and their system libraries in its image,
+# reaches only the npm registry from outside (never github.com or api.github.com), and gets this repository from
 # the host's mirror: `ffghr-workspace.sh use-mirror` before actions/checkout. Actions are pinned by commit SHA because the
 # image carries those archives and cannot download any other; there is no setup-node, no actions/cache and no sudo.
 # What stays on a hosted runner needs root, systemd or Windows/macOS: the ops-socket job below, windows.yml,
@@ -107,9 +107,9 @@ jobs:
   e2e:
     name: Playwright (Chromium + WebKit, ${{ matrix.shard }}/3)
     # The same tests, split across three runners by file (playwright test --shard); each starts its own servers.
-    # Each shard downloads its own browsers from Playwright's CDN (the only host this job reaches besides the npm registry). The browsers' system libraries are in the
-    # runner image (scripts/Dockerfile in ffbox, PLAYWRIGHT_VERSION): a Playwright upgrade that needs a library the image
-    # lacks fails with "error while loading shared libraries" and wants that version bumped there.
+    # The browsers are in the runner image, not downloaded: Chromium's build comes from storage.googleapis.com, which is every
+    # Google Cloud bucket and cannot be fenced by name. They are the ones for ONE Playwright version (ffbox scripts/Dockerfile,
+    # PLAYWRIGHT_VERSION); the first step below fails with that instruction when package-lock.json has moved on.
     runs-on: ffgithubrunners
     timeout-minutes: 20
     strategy:
@@ -126,8 +126,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: npm ci --no-audit --no-fund
       - run: npm ci --prefix web --no-audit --no-fund
-      - name: Install the browsers
-        run: npx playwright install chromium webkit
+      - name: The browsers in the runner image are this Playwright's
+        run: |
+          want=$(node -p "require('@playwright/test/package.json').version")
+          have=$(cat /opt/ms-playwright/PLAYWRIGHT_VERSION 2>/dev/null || echo none)
+          if [ "$want" != "$have" ]; then
+            echo "::error::package-lock.json has Playwright $want, the runner image has browsers for $have: bump PLAYWRIGHT_VERSION in ffbox scripts/Dockerfile (the host rebuilds the image on its next update), then re-run"
+            exit 1
+          fi
       - name: Build the web UI
         run: npm --prefix web run build
       - name: Snapshot mode
