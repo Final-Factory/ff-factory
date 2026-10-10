@@ -1670,7 +1670,7 @@ test('w643: a blocker that stalls stalls the request with the reason; one closed
   sha = 'bbb2222';
   assert.match((await watch.tick()).get('w4')!, /^clear: the portal runs bbb2222 now \(aaa1111 when it was blocked\)/);
   ci = { done: true, text: 'CI on Final-Factory/ff-factory#205 finished: all 13 checks passed or skipped' };
-  assert.equal((await watch.tick()).size, 0, 'the checks are read at most every 5 minutes');
+  assert.equal((await watch.tick()).size, 0, 'the checks are read at most every 2 minutes');
   clock += 5 * 60_000;
   const did = await watch.tick();
   assert.equal(store.work.get('w4')!.status, 'new', 'the deploy cleared it on the tick before');
@@ -2103,7 +2103,7 @@ test("w829: w814 as it happened: the dispatcher blocks a worker on CI and cancel
     assert.equal((await watch.tick()).size, 0, `still waiting at ${m} min`);
   }
   assert.equal(warned.length, 1, 'logged when it starts failing, not every read');
-  assert.equal(reads, 3, 'read every 5 minutes');
+  assert.equal(reads, 3, 'read on each tick 5 minutes apart');
   clock += 5 * 60_000;
   assert.match((await watch.tick()).get('w1')!, /^clear: FF Factory could not read CI on Final-Factory\/FinalFactory#1338 for 15 min \(its checks: GraphQL: Resource not accessible/);
   // The worker's own check-in is back, due in a minute, and the request is its again.
@@ -2137,6 +2137,55 @@ test("w829: w814 as it happened: the dispatcher blocks a worker on CI and cancel
   assert.ok(logged.includes('blocker watch: CI on Final-Factory/FinalFactory#1328 reads again after 5 min: CI on Final-Factory/FinalFactory#1328 finished: 1 of 2 workflow runs failed (Test Runner: cancelled)'), logged.join(' | '));
   assert.equal(store.work.get('w2')!.status, 'new');
   await until('the dispatcher is told to start w2', () => heard(dispatcher().info.id, '[ledger] w2').some((e) => /is unblocked: it waited on CI on Final-Factory\/FinalFactory#1328 \(CI on PR #1328\), and CI on .*Test Runner: cancelled.*Start it now: start_agent with work_id "w2"/.test(e.text)));
+});
+
+test('w846: a worker blocks on its own PR\'s CI (blocked_on prs "ci:…"); while it runs the worker waits on CI (its sandbox may go); when the checks finish, red or green, it is resumed within a minute with no dispatcher round trip', async (t) => {
+  const { store, machines, agents, o, dispatcher, call, heard } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  let clock = Date.now();
+  let checks: Record<string, { done: boolean; text: string }> = {};
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, ci: async (ref) => checks[ref] ?? { done: false, text: `CI on ${ref} running` } });
+  for (const [wid, pr, result] of [
+    ['w1', 'Final-Factory/FinalFactory#1354', { done: true, text: 'CI on Final-Factory/FinalFactory#1354 finished: 1 of 9 checks failed (Test in editmode)' }],
+    ['w2', 'Final-Factory/FinalFactory#1356', { done: true, text: 'CI on Final-Factory/FinalFactory#1356 finished: all 9 checks passed or skipped' }],
+  ] as const) {
+    const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: `${wid}: fix`, work_id: wid, ...(wid === 'w2' ? { override_duplicate: 'another request' } : {}) });
+    assert.equal(started.isError, false, started.text);
+    const id = /Started agent (\w+)/.exec(started.text)![1];
+    const info = store.sessions.get(id)!;
+    await until('its first turn', () => info.status === 'idle');
+    const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+    assert.equal(agents.ciWait(info), undefined, 'working, not waiting on CI');
+    // Today's polling (w833: a 10-minute check-in) would hold the sandbox; the gate replaces it (and holds it, w829).
+    if (wid === 'w1') await h.wake_me!({ minutes: 10, note: `${wid}: check CI on ${pr}` });
+    const said = String(await h.blocked_on!({ prs: [`ci:${pr}`], what: `CI on ${pr}` }));
+    assert.match(said, new RegExp(`^Recorded: ${wid} is Blocked on CI on ${pr}\\.`));
+    const w = store.work.get(wid)!;
+    assert.deepEqual([w.status, w.blocked?.kind, w.blocked?.ref, w.blocked?.by], ['blocked', 'ci', pr, `worker ${id}`]);
+    assert.equal(agents.waker.pending(id), undefined, 'no poll left');
+    assert.equal(agents.ciWait(info), `it waits on CI (${wid}: CI on ${pr})`, 'the signal the sandbox release reads');
+    // Still running: nothing. Finished (red for w1, green for w2): unblocked, the worker resumed within a minute.
+    assert.equal((await watch.tick()).has(wid), false);
+    checks = { [pr]: result };
+    clock += 5 * 60_000;
+    assert.equal((await watch.tick()).get(wid), `clear: ${result.text}`);
+    assert.equal(w.status, 'active');
+    const wake = agents.waker.pending(id)!;
+    assert.ok(Date.parse(wake.at) - Date.now() <= 61_000, 'within a minute');
+    // w1 had polled: its own check-in comes back (w829). w2 had none: it is resumed all the same (w846).
+    if (wid === 'w1') {
+      assert.equal(wake.note, `${wid} is unblocked: CI on ${pr} cleared (${result.text}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${wid}: check CI on ${pr}`);
+      assert.ok(w.log.at(-1)!.includes(`unblocked (handed back ${id}'s check-in, which resumes it now): CI on ${pr} cleared`), w.log.at(-1)!);
+    } else {
+      assert.equal(wake.note, `${wid} is unblocked: CI on ${pr} cleared (${result.text}). Read its checks now (gh pr checks): merge on green, fix on red. Carry on from where you left it.`);
+      assert.ok(w.log.at(-1)!.includes(`unblocked (its worker ${id} resumes within a minute): CI on ${pr} cleared`), w.log.at(-1)!);
+    }
+    assert.equal(agents.ciWait(info), undefined);
+    agents.waker.cancel(id);
+  }
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(heard(dispatcher().info.id, '[ledger] w1').length + heard(dispatcher().info.id, '[ledger] w2').length, 0, 'no dispatcher round trip');
 });
 
 test('w754: a gate that stalls stalls the request, naming that gate; one closed without delivering asks the requester, with no gate kept through the question', async (t) => {

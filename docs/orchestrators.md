@@ -220,8 +220,8 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 | `usage` | the Claude account (its email or label) | its meters are under 90% | 8 days |
 | `lock` | its name ("lab.lock"); `holder`: the request holding it; `until`: when to look again | the holder closes or reports, the nightly lab posts its next results (its run let go of the lock), or `until` passes | 1 day |
 | `time` | none; `until` | `until` passes | never |
-| `ci` | the pull request, "owner/repo#123" | none of its checks is still running (it says which failed: a failed, timed-out or cancelled run is finished too), or it merged or closed (`gh pr view`, at most every 5 minutes; where GitHub refuses the checks, its head commit's Actions runs, w829). Checks it cannot read for 15 minutes clear it too, and its worker looks itself | 6 hours |
-| `pr` (w754) | the pull request, "owner/repo#123" | it MERGED (`gh pr view`, at most every 5 minutes). Closed without merging: it asks its requester. For "wait for #1291 to merge"; `ci` also clears when the checks finish unmerged, and a request closes later than its PR merges | 7 days |
+| `ci` | the pull request, "owner/repo#123" | none of its checks is still running (it says which failed: a failed, timed-out or cancelled run is finished too), or it merged or closed (`gh pr view`, at most every 2 minutes, w846; where GitHub refuses the checks, its head commit's Actions runs, w829). Checks it cannot read for 15 minutes clear it too, and its worker looks itself | 6 hours |
+| `pr` (w754) | the pull request, "owner/repo#123" | it MERGED (`gh pr view`, at most every 2 minutes). Closed without merging: it asks its requester. For "wait for #1291 to merge"; `ci` also clears when the checks finish unmerged, and a request closes later than its PR merges | 7 days |
 
 The stuck times are judgments (`shared/blockers.ts` `BLOCKER_STUCK_MS`): a CI run takes minutes to an hour; a lock held
 a day is a run that never ended; a machine away three days is down, not asleep; a weekly usage limit resets within 7
@@ -283,7 +283,17 @@ days; a deploy is a person's call, and a week without one is worth their look.
      worker that serves it alone (`Orchestrators.cancelCheckIns`, via `Agents.cancelWake`; the log says which) and the
      worker brief says not to set one. A worker can also cancel its own with `cancel_wake`. The block clears by itself and
      the dispatcher resumes the worker (`[ledger] … is unblocked … message_agent with work_id to its worker`).
-  4. **A cancelled check-in is never lost** (w829: the dispatcher cancelled w814's worker's 8-minute check-in, and when the
+  4. **Waiting on CI frees the sandbox and wakes the worker** (w846). A worker whose only wait is CI on its own pull
+     request blocks on it (`blocked_on` with `prs: ["ci:owner/repo#123"]`, a `ci` gate: its checks finishing, green or
+     red, not its merge) instead of polling with `wake_me`. With its editor stopped and its work pushed its sandbox
+     takes other work meanwhile ([machines.md](machines.md#placing-work), "it waits on CI"), and when the checks finish
+     the worker is resumed within a minute: its own cancelled check-in handed back, or, for a CI gate or one it set
+     itself with none to hand back, a new one saying why (`resumeGatedWorker`), with no dispatcher round trip. Measured
+     before (2026-10-10): PR #1354's editmode run finished at 04:17:08Z and its worker, polling every 10 minutes,
+     merged at 04:24:34Z, 7.4 minutes later; a 30-minute poll can sit up to 30. After: the checks are read every 2
+     minutes (was 5), so a worker resumes about 4 minutes after its checks finish at worst (computed from the code: 2
+     to read, 1 for the watch, 1 for the check-in; not yet measured live).
+  5. **A cancelled check-in is never lost** (w829: the dispatcher cancelled w814's worker's 8-minute check-in, and when the
      block never cleared nothing was left to wake it). Each check-in a block cancels is kept on the request
      (`WorkItem.heldCheckIns`: worker, when it was due, its note). When the gates clear, `Orchestrators.unblock` hands
      each back to fire within a minute, its note prefixed with `wNNN is unblocked: <why>. This is your own check-in, which
@@ -1267,7 +1277,7 @@ turn and the server carries it out when the fact is met (`shared/conditional.ts`
   the note FF Factory appends to one (`HELD_MARK`); they are stored with it. The action must be one they could take now:
   a reviewer's approve or decline of a request still waiting for approval; a close of their own open request, or of
   another person's as an owner, with a note.
-- **Carried out by the server** when the blocker watch sees the fact (pull requests read at most every 5 minutes, through
+- **Carried out by the server** when the blocker watch sees the fact (pull requests read at most every 2 minutes, through
   `ghPr`, which also gives the merge commit): the action runs as the person would have run it, the request's log says
   `carried out Lothsahn's decision of 10-10 02:31 UTC: "…" (w811.c1: decline); condition met: PR
   Final-Factory/FinalFactory#1314 merged as 3c1cdbfa256b`, and the person's orchestrator gets a `[conditional decision]`

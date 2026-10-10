@@ -139,11 +139,25 @@ const dirtyOf = (sb: MachineSandbox) => (sb.git?.dirty ?? 0) > 0 || (sb.git?.unt
  */
 export type ReleaseStep = { do: 'release'; why: string; branch: string; save?: boolean } | { do: 'stop'; why: string; due?: boolean } | { do: 'reclaim' } | undefined;
 
-export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string }): ReleaseStep {
+/**
+ * Why a worker waiting on CI (w846) may give up its sandbox now, or undefined: its requests wait on a CI gate (`ciWait`,
+ * Agents.ciWait), its editor is stopped, and its branch has no commit its remote lacks. lothsahn: "When they're waiting
+ * for GithubCI with their unity editors off, they should free the slot." The gate clears when the checks finish, green
+ * or red (server/blockerWatch.ts), and its worker is resumed within minutes, placed again as any released worker is.
+ */
+export function ciReleaseWhy(sb: MachineSandbox, ciWait: string | undefined): string | undefined {
+  if (!ciWait || sb.unity.state !== 'stopped' || (sb.git?.ahead ?? 0) > 0) return undefined;
+  return ciWait;
+}
+
+export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string; ciWait?: string }): ReleaseStep {
   if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || !sb) return undefined;
   const live = f.live(s.id);
   const far = farWhy(s, f.now, f.workOver);
+  const ci = ciReleaseWhy(sb, f.ciWait);
   if (s.placeReleased) {
+    // While its CI runs it stays released (w846): its check-in or its unblock places it again.
+    if (f.ciWait) return undefined;
     // Its check-in is near again: back to its own sandbox, while that is still free and on its branch.
     if (live || far || !s.wakeAt || s.queuedSend || Date.parse(s.wakeAt) <= f.now - OVERDUE_MS) return undefined;
     if (s.placeReleased.sandbox !== sb.id || sb.status !== 'ready' || sb.git?.branch !== s.placeReleased.branch || (f.claimedBy && f.claimedBy !== s.id)) return undefined;
@@ -156,17 +170,18 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
     const st = agentState(s, undefined, f.now);
     let step: ReleaseStep;
     // Only a check-in pending, and it is far (or for work that is over).
-    if (st.state === 'between_turns') step = st.kind === 'timer' && far ? { do: 'stop', why: far } : undefined;
+    if (st.state === 'between_turns') step = st.kind === 'timer' && far ? { do: 'stop', why: far } : st.kind === 'timer' && ci ? { do: 'stop', why: ci, due: true } : undefined;
     else if (st.state === 'idle') {
       // Idle with nothing pending at all (w656: w650 waiting for a deploy, with no check-in): a message resumes it.
       const idle = f.now - Date.parse(s.lastActivityAt);
-      const why = f.workOver ? `its work is over: ${f.workOver}` : idle >= RELEASE_AFTER_MS ? `idle for ${span(idle)} with no check-in` : undefined;
+      const why = f.workOver ? `its work is over: ${f.workOver}` : ci ?? (idle >= RELEASE_AFTER_MS ? `idle for ${span(idle)} with no check-in` : undefined);
       step = why ? { do: 'stop', why, due: true } : undefined;
     }
     return step && !keptWhy(s, sb, f) ? step : undefined;
   }
   if (s.status !== 'stopped' || s.pendingPermissions.length) return undefined;
-  const why = releaseWhy(s, f.now, f.workOver);
+  // Waiting on CI (w846): released whatever its check-in, which places it again when it comes.
+  const why = (s.queuedSend ? undefined : ci) ?? releaseWhy(s, f.now, f.workOver);
   if (!why || keptWhy(s, sb, f)) return undefined;
   return { do: 'release', why, branch: sb.git!.branch, ...(dirtyOf(sb) ? { save: true } : {}) };
 }
@@ -231,6 +246,8 @@ export interface PlaceAgainDeps {
   unityHolders: (machineId: string) => string[];
   /** Why its work is over (its requests closed or with another worker), or undefined. */
   workOver: (s: SessionInfo) => string | undefined;
+  /** Why it waits on CI (its requests blocked on a CI gate, Agents.ciWait, w846), or undefined. */
+  ciWait?: (s: SessionInfo) => string | undefined;
   /** Why a live idle worker must keep its process, its check-in aside (Agents.keepIdle without the wake), or undefined. */
   keepLive: (id: string) => string | undefined;
   /** Whether a message to it waits in the send queue. */
@@ -330,7 +347,7 @@ export class PlaceAgain {
   keptLine(s: SessionInfo): string | undefined {
     if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || s.placeReleased || s.status !== 'stopped' || this.d.isLive(s.id)) return undefined;
     const sb = this.d.machine(s.machineId)?.sandboxes?.find((x) => x.id === s.machineSandbox);
-    const why = sb && releaseWhy(s, this.now(), this.d.workOver(s));
+    const why = sb && (ciReleaseWhy(sb, this.d.ciWait?.(s)) ?? releaseWhy(s, this.now(), this.d.workOver(s)));
     const kept = why && keptWhy(s, sb, this.facts(s.machineId));
     return kept ? `its sandbox stays held although ${why}: ${kept}` : undefined;
   }
@@ -352,7 +369,7 @@ export class PlaceAgain {
       let f = byMachine.get(m.id);
       if (!f) byMachine.set(m.id, (f = this.facts(m.id)));
       const live = this.d.isLive(s.id);
-      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), keepLive: live ? this.d.keepLive(s.id) : undefined, claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined });
+      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined });
       if (!step) continue;
       if (step.do === 'stop') {
         // Stopped while Idle: its sandbox stays its until the next pass releases it, its worktree clean (w656).
