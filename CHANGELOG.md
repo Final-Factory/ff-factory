@@ -14,7 +14,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   fix them"). The w830 test in `intakeFlow.test.ts` matched the ledger line "decision of 10-DD hh:mm UTC" with the month
   written in; it passes in October only. Found by running the suite with the clock moved forward 30 days. No portal deploy.
 
-||||||| 93135ed
 - **Test only: Windows CI no longer fails with every test green ("coverage file is empty")** (w858, lothsahn: "look for
   flaky CI tests in FFFactory and fix them"). `node --test --experimental-test-coverage` exits 1 when a coverage file is
   empty, and `machineDeployWin.test.ts` started node processes (the daemon stand-ins of the w605 test, the PowerShell the
@@ -44,7 +43,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   after the deploy (requests declined in the last 30 days). Needs a portal deploy and ffbox master with
   `report_obsolete` (docs/ffbox-connector-contract.md, "Reports obsolete").
 
-||||||| 722eb38
 
 - **FFBox shell and ffweb operators' own words count as their turn too; the two dead config keys leave config.json**
   (w852, lothsahn: "FFBox shell and ffweb messages are trusted like operator messages" and "Yes, remove unused config
@@ -315,7 +313,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   stored DONE from before still closes on a re-check). A person's orchestrator keeps one memory line per correction
   (verbatim, by kind) and files the harness work on the second of a kind, and its briefs quote the person and label
   its own reading (w732). docs/orchestrators.md "Learning". Needs a portal deploy.
-||||||| 777ffd0
 
 - **A worker's session holds one piece of work: related requests stay in it, unrelated ones get a fresh session** (w740, Lothsahn
   and Ben: "every time the dispatcher hands out a new work request to a worker, it should be in a new session … updates to an
