@@ -11,6 +11,15 @@ already under **[Unreleased]** stay until the next release. `npm run release -- 
 
 ## [Unreleased]
 
+- **The Nightly Regression Sentry is a job timer** (w905, lothsahn: "let's have the sentry be a separate timed job that gets
+  handed to a worker as well. But just have it under the job timers instead of a special thing to the side"; "Don't worry
+  about the cost limiting and such"). `intake.nightly.review` files a `nightly-review` request every day (default 06:00
+  America/New_York on lothdesktop) whose worker follows the game repo's `scripts/nightly/merge-review.md` (the Sentry's
+  charter carried over) and ends with `NIGHTLY-JOB` blocks; the portal files each as the Sentry's delegations were (same
+  constraints, auto-approved, same billing), with no cap, and starts the next review after its `REVIEWED-THROUGH` commit.
+  Settable live (`set_app_config intake.nightly.review`) and click-to-toggle on the Intake tab. Needs a portal deploy;
+  then the standing agent `nightly-regression-sentry` can be deleted (docs/intake.md, "The nightly merge review").
+
 - **A released sandbox's Burst and Build caches are trimmed before the next worker gets it** (w898, lothsahn: "almost all the space is in the work folder, specifically in the BuildCache and BurstCache folders of the various sandboxes"; "I would like the harness to trim the burst cache and build cache when a worker releases a slot"). Library/BuildCache and BurstCache were 87 GB over lothdesktop's six sandboxes. When a sandbox's last live agent goes, the daemon puts it in the new state `cleanup` (not free, no placement, no start, shown on the dashboard), keeps the files written in the last 24 h up to 4 GB per cache, and sets it `ready` again; a hung or failed trim times out after 10 min and frees it. Never with an editor or build on the project. The daemon's clean-up also ages out and caps the caches of sandboxes nobody releases, and a Library copied from a clone or sandbox leaves them behind. Measured: a build with the caches removed took 530 s against 112 s warm. Docs: self-recovery.md 5. Tests: `cacheTrim.test.ts`, `machineSandboxes.test.ts`, `agentState.test.ts`, `copyTree.test.ts`, `cleanup.test.ts`.
 - **A worker waiting on a deploy, a person or another request frees its sandbox at once, and the deploy wakes it** (w890,
   lothsahn: "Why is w889 holding a slot?  It's done with its work and it should free the slot." and "We should not wait for a

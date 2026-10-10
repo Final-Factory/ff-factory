@@ -112,7 +112,9 @@ How a request is approved:
   (default sonnet, high) are passed on to the dispatcher as a suggestion. The owner's orchestrator hears each one
   (`[auto-delegation] "<agent>" filed w12 ...`), to mention to its person. The nightly regression sentry
   (`nightly-regression-sentry`) gets auto-approve on by default (`AUTO_BY_DEFAULT`, server/schedule.ts) unless a
-  person set it either way.
+  person set it either way. Since w905 the Sentry is no standing agent: its duties are the nightly merge review, a job
+  timer of the intake ([intake.md](intake.md), "The nightly merge review"), which files its jobs through the same
+  delegation path under the same agent id.
 - **The person-only gate** (`personOnlyReason`, server/schedule.ts): a request whose title or task asks to spend
   money, publish or post outside, change a setting (app config, a Steam branch, secrets' homes), release or deploy,
   or merge into master waits for a person whatever the rules say. It matches the request's words, so it errs towards

@@ -187,6 +187,8 @@ export interface DelegationFiling {
   effort?: string;
   /** How long a finished request of the same agent and title still counts as the same work (default 2 days). */
   lookbackMs?: number;
+  /** No standing-agent cap (workLimits.standing): the nightly merge review's jobs (w905, lothsahn: "Don't worry about the cost limiting and such"). */
+  uncapped?: boolean;
 }
 
 /** How long a request may sit queued while a computer has room before it is flagged (w643; a judgment: two dispatcher turns). */
@@ -2253,7 +2255,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       this.store.putWork(repeat);
       return { item: repeat, repeat: true };
     }
-    const lim = limitsFor('standing', this.d.cfg.workLimits);
+    const lim = f.uncapped ? undefined : limitsFor('standing', this.d.cfg.workLimits);
     if (lim) {
       const mine = [...this.store.work.values()].filter((w) => w.delegation).map((w) => now.getTime() - Date.parse(w.createdAt));
       if (mine.filter((age) => age < 3_600_000).length >= lim.perHour) throw new Error(`standing agents' cap: ${lim.perHour} delegations filed an hour (config workLimits.standing)`);
@@ -2314,7 +2316,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const now = this.now().getTime();
     // Within one family only: an FFBox review request carries its Discord thread's key too, and is not a repeat of the
     // bug report filed from that thread (nor the other way round).
-    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' || k === 'nightly-run' ? k : 'release');
+    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' || k === 'nightly-run' || k === 'nightly-review' ? k : 'release');
     const prefix = family(kind);
     const ids = keys.filter((k) => k.startsWith(`${prefix}:`));
     if (!ids.length) return undefined;
@@ -2548,14 +2550,14 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    */
   private intakeCap(now: number, kind: WorkSourceKind): string | undefined {
     // The server's own filings (a release follow-up, the night's scheduled run) are no flood to cap.
-    if (kind === 'release' || kind === 'nightly-run') return undefined;
+    if (kind === 'release' || kind === 'nightly-run' || kind === 'nightly-review') return undefined;
     const lim = limitsFor('intake', this.d.cfg.workLimits);
     if (!lim) return undefined;
     let hour = 0;
     let day = 0;
     for (const w of this.store.work.values()) {
       // An operator's dev request is their own request (its own cap: providers.ffbox.devRequests.perHour).
-      if (!w.source || w.source.kind === 'release' || w.source.kind === 'nightly-run' || w.source.kind === 'ffbox-dev') continue;
+      if (!w.source || w.source.kind === 'release' || w.source.kind === 'nightly-run' || w.source.kind === 'nightly-review' || w.source.kind === 'ffbox-dev') continue;
       const age = now - Date.parse(w.createdAt);
       if (age < 3_600_000) hour++;
       if (age < 86_400_000) day++;

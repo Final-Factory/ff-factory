@@ -91,7 +91,7 @@ export function unattributedKind(w: Pick<WorkItem, 'source' | 'delegation' | 'un
   if (w.delegation?.agentId === NIGHTLY_SENTRY) return 'nightly';
   if (!w.unattributed || !w.source) return undefined;
   const k = w.source.kind;
-  return k === 'nightly' || k === 'nightly-run' ? 'nightly' : k.startsWith('ffbox-') ? 'ffbox' : 'intake';
+  return k === 'nightly' || k === 'nightly-run' || k === 'nightly-review' ? 'nightly' : k.startsWith('ffbox-') ? 'ffbox' : 'intake';
 }
 
 /** The user id whose vault tokens a kind of nobody's work runs on: config vault.unattributed, else the defaults. */

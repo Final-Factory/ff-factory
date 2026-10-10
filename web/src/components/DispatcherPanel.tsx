@@ -42,6 +42,8 @@ export function sourceLabel(s: WorkSource): string {
       return `Nightly regression${s.nightly?.date ? ` ${s.nightly.date}` : ''}`;
     case 'nightly-run':
       return `Nightly run${s.nightlyRun?.date ? ` ${s.nightlyRun.date}` : ''}`;
+    case 'nightly-review':
+      return `Nightly merge review${s.nightlyReview?.date ? ` ${s.nightlyReview.date}` : ''}`;
   }
 }
 
@@ -377,7 +379,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
   const rest = items.filter((w) => !pendingApproval(w) && !w.autoClosed);
   const anyOn = s.discord.enabled || s.ffbox.enabled || s.release.enabled || !!s.nightly?.enabled;
   // The nightly chips are switches (w903): config.json's setting flips live; the server pushes the new summary to every page.
-  const flip = (which: 'enabled' | 'run', on: boolean) => void act(`nightly-${which}`, () => api.toggleNightly(which, on));
+  const flip = (which: 'enabled' | 'run' | 'review', on: boolean) => void act(`nightly-${which}`, () => api.toggleNightly(which, on));
   const act = async (id: string, f: () => Promise<unknown>) => {
     setBusy(id);
     await attempt(f());
@@ -446,6 +448,25 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
             <span className="dim small">
               the portal starts the lab every night at {n.run.time} {n.run.tz} on {n.run.machine}
               {n.run.person ? ` for ${n.run.person}` : ''}; no report within {n.run.reportWithinHours} h is an alarm{n.run.next ? `; next ${fmtRelative(n.run.next, now)}` : ''}
+            </span>
+          </div>
+        )}
+        {n?.review && (
+          <div className="intake-source" data-testid="nightly-review">
+            <ToggleChip
+              tone={n.review.enabled ? 'green' : 'grey'}
+              testId="nightly-review-toggle"
+              disabled={busy === 'nightly-review'}
+              onClick={() => flip('review', !n.review!.enabled)}
+              title={`Click to turn ${n.review.enabled ? 'off' : 'on'}: whether the portal starts the nightly merge review (the Nightly Regression Sentry's duties) on its schedule (config intake.nightly.review, enabled). The time, zone, machine and person stay as they are.`}
+            >
+              Nightly merge review {onOff(n.review.enabled)}
+            </ToggleChip>
+            <span className="dim small">
+              regression checks on risky merges and a guarding test for every merged fix, filed every day at {n.review.time} {n.review.tz} on {n.review.machine}
+              {n.review.person ? ` for ${n.review.person}` : ''}
+              {n.review.next ? `; next ${fmtRelative(n.review.next, now)}` : ''}
+              {n.reviews?.[0] ? `; last ${n.reviews[0].date}: ${n.reviews[0].status}${n.reviews[0].jobs?.length ? `, filed ${n.reviews[0].jobs.join(', ')}` : ''}${n.reviews[0].cause ? ` (${n.reviews[0].cause})` : ''}` : ''}
             </span>
           </div>
         )}
