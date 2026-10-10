@@ -161,6 +161,27 @@ export function neverDelete(p: string, g: CleanupGuard, opts: { claudeWorktrees?
   return undefined;
 }
 
+/** Whether `p` is strictly inside `root` (the root itself is not). */
+export const strictlyWithin = (p: string, root: string) => norm(p).startsWith(norm(root) + '/');
+
+/** Why a pass only lists an item outside the worker install folder (w896). */
+export const OUTSIDE_ROOT_WHY = 'outside the worker install folder: clean-up deletes only inside it, so this is measured and listed, not removed';
+
+/**
+ * The install-folder fence (w896, lothsahn: "in general we should only be clearing data in the install folder for the worker"):
+ * the items strictly inside `root` stay, the rest come back with the reason they are only listed. A pass on a machine with a
+ * worker root removes nothing else, whatever its rules pick.
+ */
+export function fenceToRoot<T extends { path: string }>(items: T[], root: string): { inside: T[]; outside: { path: string; why: string }[] } {
+  const inside: T[] = [];
+  const outside: { path: string; why: string }[] = [];
+  for (const it of items) {
+    if (strictlyWithin(it.path, root)) inside.push(it);
+    else outside.push({ path: it.path, why: `${OUTSIDE_ROOT_WHY} (${root})` });
+  }
+  return { inside, outside };
+}
+
 // ---------------------------------------------------------------- the rules
 
 const H = 1;
@@ -664,6 +685,8 @@ export interface CleanupRunnerDeps {
   stale?(): Promise<{ path: string; days: number }[]>;
   /** The pass's full record, for the log file. */
   log(entry: object): void;
+  /** The machine's worker install folder (w896): clean-up deletes only inside it; the notice says so. Absent: none (the portal's host). */
+  root?(): string | undefined;
   /** The summary after every pass; `notice` only when clean-up could not get back above the soft threshold. */
   done(summary: CleanupSummary, notice?: string): void;
   now?(): number;
@@ -766,6 +789,7 @@ export class CleanupRunner {
         failed: r.failed.length,
         freeBytes: after,
         softFreeGB: s.softFreeGB,
+        ...(this.d.root?.() ? { root: this.d.root() } : {}),
         belowSoft,
         ...(vols.temp.length ? { temp: vols.temp } : {}),
         top: [...r.removed].sort((a, b) => b.bytes - a.bytes).slice(0, 5),
@@ -802,8 +826,15 @@ const gb = (b: number) => `${(b / GB).toFixed(1)} GB`;
 /** The notice text: what the pass freed, how far below the soft threshold it still is, and what holds the space. */
 export function describeShortfall(s: CleanupSummary): string {
   const free = s.freeBytes === undefined ? '?' : gb(s.freeBytes);
-  const biggest = s.consumers?.length ? ` Biggest remaining: ${s.consumers.map((c) => `${c.path} ${gb(c.bytes)}`).join(', ')}.` : '';
-  return `Clean-up freed ${gb(s.freedBytes ?? 0)} (${s.removed} item(s)) but only ${free} is free on disk, below the soft threshold of ${s.softFreeGB} GB. What is left is not on the clean-up's lists: file clean-up work for a worker on that computer to remove FF Factory's own leftovers among it and report what it freed; never ask its owner to free space (w626).${biggest}${staleLine(s)}`;
+  const root = s.root;
+  const tag = (p: string) => (root ? (strictlyWithin(p, root) ? ' [inside the install folder]' : ' [outside it: measure only]') : '');
+  const biggest = s.consumers?.length ? ` Biggest remaining: ${s.consumers.map((c) => `${c.path} ${gb(c.bytes)}${tag(c.path)}`).join(', ')}.` : '';
+  // The rule (w896, lothsahn: "in general we should only be clearing data in the install folder for the worker"). Without a root
+  // (the portal's own host) there is no folder to name, and the notice says nothing about one.
+  const rule = root
+    ? ` Clean-up work on this computer deletes only inside its worker install folder ${root} (w896). What is outside it (the home folder, AppData, system temp, caches, the game's data folder) a worker only measures and reports, with sizes, and it lists any setting or script that makes FF Factory write there so it can be moved inside the folder; it deletes nothing outside, whatever the sizes below suggest.`
+    : '';
+  return `Clean-up freed ${gb(s.freedBytes ?? 0)} (${s.removed} item(s)) but only ${free} is free on disk, below the soft threshold of ${s.softFreeGB} GB. What is left is not on the clean-up's lists: file clean-up work for a worker on that computer to remove FF Factory's own leftovers among it and report what it freed; never ask its owner to free space (w626).${rule}${biggest}${staleLine(s)}`;
 }
 
 /** The stale Unity Libraries, as a sentence (empty without any). */
@@ -817,7 +848,7 @@ export function describeCleanup(s: CleanupSummary): string {
   const free = s.freeBytes === undefined ? '' : `, ${gb(s.freeBytes)} free on disk${s.belowSoft ? ` (below the soft ${s.softFreeGB} GB)` : ''}`;
   const temp = s.temp?.length ? ` Temp, apart from the disk: ${s.temp.map((t) => `${t.path} ${t.freeBytes === undefined ? '?' : gb(t.freeBytes)} free of ${t.totalBytes === undefined ? '?' : gb(t.totalBytes)} (${t.ram ? 'RAM, tmpfs' : 'a disk volume of its own'})`).join(', ')}.` : '';
   const planned = s.planned?.length ? ` ${s.dryRun ? 'Would remove' : 'Stale output in dry-run mode, would remove'} ${s.planned.length} item(s), ${gb(s.plannedBytes ?? 0)}.` : '';
-  const listed = s.listed?.length ? ` ${s.listed.length} stale-looking item(s) it could not attribute, kept for a person.` : '';
+  const listed = s.listed?.length ? ` ${s.listed.length} stale-looking item(s) it kept for a person: not attributable to a request, or outside the worker install folder.` : '';
   return `${s.at.slice(0, 16).replace('T', ' ')} (${s.trigger}${s.dryRun ? ', dry run' : ''}${s.stale ? ', with stale output' : ''}): ${s.removed} item(s), ${gb(s.freedBytes ?? 0)}${s.failed ? `, ${s.failed} skipped` : ''}${free}.${temp}${planned}${listed}${staleLine(s)}`;
 }
 
@@ -850,7 +881,7 @@ export function describeCleanupItems(s: CleanupSummary, removed: { path: string;
   const parts = [describeCleanup(s)];
   if (!s.dryRun && removed.length) parts.push(`Removed (biggest first):`, ...removed.map(line));
   if (s.planned?.length) parts.push(`${s.dryRun ? 'Would remove' : 'Would remove (dry-run mode)'} (biggest first):`, ...s.planned.map(line));
-  if (s.listed?.length) parts.push('Kept, could not attribute (look at these):', ...s.listed.map((x) => `- ${x.path}  ${gb(x.bytes)}  (${x.why})`));
+  if (s.listed?.length) parts.push('Kept, for a person (not attributable to a request, or outside the worker install folder; look at these):', ...s.listed.map((x) => `- ${x.path}  ${gb(x.bytes)}  (${x.why})`));
   return parts.join('\n');
 }
 

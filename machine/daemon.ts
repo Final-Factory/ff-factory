@@ -393,11 +393,14 @@ export class Daemon {
           mode: settings.mode,
           regular: () => planCleanup({ rules, guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
           stale: () => planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, HOME), ctx: this.staleCtx, settings, guard }),
+          // w896: with a worker root, only what is inside it is removed; the rest is measured and listed.
+          root: this.cfg.root,
           // FF Factory's own leftovers (w626): only while free space is below the soft threshold, or asked for.
           ...(low || opts.dryRun ? { own: this.ownLeftovers(guard) } : {}),
         });
       },
       consumers: () => biggestConsumers(env),
+      root: () => this.cfg.root,
       staleAt: staleAtFile(appDirOfConfig(cfg)),
       stale: async () => (await staleUnityLibraries([HOME], DEFAULT_CLEANUP.libraryReportDays)).filter((l) => !neverDelete(l.path, this.cleanupGuard())),
       log: (e) => {
