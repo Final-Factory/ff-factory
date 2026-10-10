@@ -347,6 +347,20 @@ export function stillOpenIn(text: string): Map<string, string> {
   return out;
 }
 
+/**
+ * A worker's lines setting a request aside while it does other work first (w915): `w342: paused: waiting for w414's PR`,
+ * also `w342: set aside …` (markdown around it allowed), by request id, the line as written. The request shows Paused
+ * ("worker on w414 first") instead of Stalled; `<id>: still open: …` takes it up again.
+ */
+export function pausedIn(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of (text ?? '').matchAll(/^[\s*_>`-]*(w\d+)[*_`]*\s*[:—–-]\s*[*_`]*\s*(?:paused|set aside|on hold)\b.*$/gim)) {
+    const id = m[1].toLowerCase();
+    if (!out.has(id)) out.set(id, m[0].replace(/^[\s*_>`-]+/, '').trim());
+  }
+  return out;
+}
+
 /** The PRs the ledger holds as open that a worker's report says merged (w515: "PR #1089 was merged", ".../pull/1089 merged"). */
 export function mergedMentionsIn(text: string, prs: readonly WorkPr[]): WorkPr[] {
   if (!/\bmerged\b/i.test(text ?? '')) return [];

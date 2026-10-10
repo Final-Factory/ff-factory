@@ -13,6 +13,7 @@ import type { PrRecord } from './ledgerRules.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
+import { workLiveAll } from '../shared/workState.ts';
 
 /**
  * The ledger cleanup (docs/orchestrators.md, "Ledger cleanup") on a real Agents with the scripted fake SDK: pull requests
@@ -677,7 +678,7 @@ test('w419: sent to another request, a worker is asked first to wrap up the one 
   const s1 = worker('s1');
   assert.equal(o.wrapUpBefore('s1', 'w1'), '', 'the request it is on: no wrap-up');
   const pre = o.wrapUpBefore('s1', 'w2');
-  assert.match(pre, /^\[wrap-up\] Before the new work below: you were on w1 "Fix w1"\. .*`DONE: <id>`.*`<id>: still open: <what>`\. Then carry on with the new work/);
+  assert.match(pre, /^\[wrap-up\] Before the new work below: you were on w1 "Fix w1"\. .*`DONE: <id>`.*`<id>: still open: <what>` if you go on with it as well.*`<id>: paused: <why>` if you set it aside until w2 is done\. Then carry on with the new work/);
   assert.match(get('w1').log.at(-1)!, /worker s1 was sent w2: asked to wrap w1 up first/);
   o.linkWorker('w2', s1, 'sent to worker s1');
   o.workerTurnEnded(s1, 'Started w2: reading the save.\n\nw1: still open: the 2-peer check after the merge.');
@@ -693,13 +694,62 @@ test('w419: sent to another request, a worker is asked first to wrap up the one 
   assert.equal(get('w2').status, 'done');
 });
 
+test('w915: a request a busy worker holds is never stalled or asked about, even sent on to a later request; one it let go of still is', async (t) => {
+  const { request, worker, world, sweep, get } = setup(t);
+  // w909 on 2026-10-10: its worker was sent w911 and went on with w909's PR; the page said "Stalled, moved on to w911".
+  request('w1', { sessionIds: ['s1'], updatedAt: ago(40), createdAt: ago(80), links: { s1: { at: ago(80), how: 'sent' } }, prs: [{ repo: REPO, number: 21, state: 'merged', at: ago(8), via: 'line' }], brief: 'Fix it, then run the paired audit after the merge.' });
+  request('w2', { sessionIds: ['s1'], updatedAt: ago(1), createdAt: ago(2), links: { s1: { at: ago(2), how: 'sent' } } });
+  worker('s1', { status: 'running', lastActivityAt: ago(0.1) });
+  request('w3', { sessionIds: ['s3'], updatedAt: ago(40), createdAt: ago(80), links: { s3: { at: ago(80), how: 'sent' } }, setAside: { s3: { at: ago(3), kind: 'paused', for: 'w4' } } });
+  request('w4', { sessionIds: ['s3'], updatedAt: ago(1), createdAt: ago(3), links: { s3: { at: ago(4), how: 'sent' } } });
+  worker('s3', { status: 'running', lastActivityAt: ago(0.1) });
+  request('w5', { sessionIds: ['s5'], updatedAt: ago(40), createdAt: ago(80), links: { s5: { at: ago(80), how: 'sent' } } });
+  request('w6', { sessionIds: ['s5'], updatedAt: ago(1), createdAt: ago(2), links: { s5: { at: ago(2), how: 'sent' } } });
+  worker('s5', { status: 'stopped', lastActivityAt: ago(40) });
+  await sweep.run();
+  assert.equal(get('w1').status, 'active', 'held by a busy worker: not stalled');
+  assert.equal(get('w1').followUp, undefined, 'and not asked "Is it done?"');
+  assert.equal(get('w3').status, 'active', 'paused by a busy worker: not stalled');
+  assert.equal(get('w5').status, 'stalled', 'its worker stopped: nothing works on it');
+  assert.deepEqual(world.resumed, []);
+});
+
+test('w915: the wrap-up asks about everything the worker holds; paused sets it aside for the new request, silence lets it go, still open keeps it', async (t) => {
+  const { request, worker, o, get, store } = setup(t);
+  request('w1', { sessionIds: ['s1'], links: { s1: { at: ago(30), how: 'sent' } } });
+  request('w2', { sessionIds: ['s1'], links: { s1: { at: ago(20), how: 'sent' } } });
+  request('w3', { sessionIds: ['s1'], links: { s1: { at: ago(10), how: 'sent' } } });
+  request('w4', { status: 'new', createdAt: ago(1) });
+  const s1 = worker('s1', { status: 'running' });
+  const pre = o.wrapUpBefore('s1', 'w4');
+  assert.match(pre, /you were on w1 "Fix w1", w2 "Fix w2", w3 "Fix w3"\./, 'also the older ones it held on to, not only the request its turn was on');
+  assert.match(pre, /`w1: paused: <why>` if you set it aside until w4 is done|`<id>: paused: <why>` if you set it aside until w4 is done/);
+  o.linkWorker('w4', s1, 'sent to worker s1');
+  o.workerTurnEnded(s1, 'On w4 now.\n\nw1: paused: the runner group needs an admin; back on it after w4\nw3: still open: the 2-peer check');
+  assert.equal(get('w1').setAside?.s1?.kind, 'paused');
+  assert.equal(get('w1').setAside?.s1?.for, 'w4');
+  assert.equal(get('w2').setAside?.s1?.kind, 'released', 'asked, it said nothing about w2');
+  assert.match(get('w2').log.at(-1)!, /did not say how w2 stands in its wrap-up; no longer counted as working on it/);
+  assert.equal(get('w3').setAside, undefined, 'still open: it goes on with it');
+  const live = workLiveAll([get('w1'), get('w2'), get('w3'), get('w4')], { session: (id) => store.sessions.get(id), now: NOW });
+  assert.deepEqual([...live].map(([id, l]) => `${id}:${l.state}`), ['w1:paused', 'w2:stalled', 'w3:working', 'w4:working']);
+  assert.equal(live.get('w1')?.why, 'worker s1 on w4 first');
+  // A paused line outside a wrap-up counts too, for the request the turn is on; "still open" takes it up again.
+  o.workerTurnEnded(s1, 'w3: paused: waiting on the audit slot');
+  assert.equal(get('w3').setAside?.s1?.for, 'w4');
+  o.workerTurnEnded(s1, 'w3: still open: the audit slot came');
+  assert.equal(get('w3').setAside, undefined);
+});
+
 test('w419: merged and open for a step after the merge, quiet 6 hours: its worker is asked once a day, also while busy on another request; gone, it stalls', async (t) => {
   const { request, worker, pr, world, sweep, get, store } = setup(t);
   const brief = 'Fix it, then run the paired audit after the merge.';
   request('w1', { brief, sessionIds: ['s1'] });
   worker('s1', { lastActivityAt: ago(10) });
   // w2's worker moved on to w5 (newer) and is running there: the PR pass skips w2, so its PR is linked as an earlier pass left it.
-  request('w2', { brief, sessionIds: ['s2'], createdAt: ago(72), prs: [{ repo: REPO, number: 22, state: 'merged', at: ago(8), via: 'line' }], log: ['04:00 PR #22 merged; still open: its brief asks for a step after the merge (a check, an audit, a verification)'] });
+  // It let w2 go in the wrap-up (said nothing about it); w6 it still holds (w915), so the cleanup leaves w6 alone.
+  request('w2', { brief, sessionIds: ['s2'], createdAt: ago(72), setAside: { s2: { at: ago(4), kind: 'released' } }, prs: [{ repo: REPO, number: 22, state: 'merged', at: ago(8), via: 'line' }], log: ['04:00 PR #22 merged; still open: its brief asks for a step after the merge (a check, an audit, a verification)'] });
+  request('w6', { brief, sessionIds: ['s2'], createdAt: ago(80), prs: [{ repo: REPO, number: 26, state: 'merged', at: ago(8), via: 'line' }], log: ['04:00 PR #26 merged; still open: its brief asks for a step after the merge (a check, an audit, a verification)'] });
   request('w5', { sessionIds: ['s2'], createdAt: ago(3) });
   worker('s2', { status: 'running', lastActivityAt: ago(0.1) });
   request('w3', { brief, sessionIds: ['gone'] });
@@ -717,6 +767,7 @@ test('w419: merged and open for a step after the merge, quiet 6 hours: its worke
   assert.match(get('w3').stalled!.reason, /^follow-up unconfirmed: its brief asks for a step after the merge .*no worker is left to ask/);
   assert.equal(get('w4').followUp, undefined, 'word 2 hours ago: not asked yet');
   assert.equal(get('w5').followUp, undefined);
+  assert.equal(get('w6').followUp, undefined, 'its worker s2 is mid-turn and still holds it: not asked, not stalled');
   // Once a day: the next pass asks nobody again.
   await sweep.run();
   assert.equal(world.resumed.length, 2);

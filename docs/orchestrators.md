@@ -205,17 +205,18 @@ workers are working on vs which are waiting on input"). It is derived live from 
 
 | state | when | the line says |
 |---|---|---|
-| **Working** | a worker it serves is `running` or `starting` (in a long command too) and has an agent host (`hostFailure`, below), or FFBox runs it (`ffbox` sent or accepted) | which worker, and the tool it has been in since when |
+| **Working** | a worker that holds it (below) is `running` or `starting` (in a long command too) and has an agent host (`hostFailure`, below), or FFBox runs it (`ffbox` sent or accepted) | which worker, and the tool it has been in since when |
 | **Waiting on input** | a PERSON must act: an intake approval is pending, the dispatcher's question or a design question is open, a worker it serves waits for a permission | what, and on whom: "a reviewer", the requester, the design question's people, the worker's person |
 | **Blocked** | a worker it serves has no agent host: its message found none to run in (`hostFailure`, w691) | on that machine; goes when its host's first event arrives |
 | **Waiting on input** | a worker it serves declared it waits on a person (`waiting_on_person`, w691), or its report's `wNNN: still open:` line says one must act (the backstop) | on the person named, or its requesters |
-| **Working** (between turns) | a worker it serves is between turns with its own work still going: a background job (CI it watches, a build, a test run) or a check-in it set with `wake_me` (w475's Waiting, renamed by w643), also while it is stopped until that check-in | "ab12cd34 between turns: CI on PR #1098 · check-in 06:10 UTC" |
+| **Working** (between turns) | a worker that holds it is between turns with its own work still going: a background job (CI it watches, a build, a test run) or a check-in it set with `wake_me` (w475's Waiting, renamed by w643), also while it is stopped until that check-in | "ab12cd34 between turns: CI on PR #1098 · check-in 06:10 UTC" |
 | **Waiting on input** | a worker it serves stopped asking for a decision (its last report ends asking a person to decide, or with a question) | on its requesters |
 | **Blocked** | a message to a worker it serves waits in the send queue for its machine (offline, its daemon outdated, the host guard) | on that machine |
 | **Queued** | a message to a worker it serves waits in the send queue for a free agent slot or sandbox | the queue's reason |
 | **Blocked** | the dispatcher blocked it on a thing (status `blocked`, `blocked` below), or the cleanup did (a merged request whose only step left is a deploy) | on what ("w633 finishing", "a portal deploy", "lothdesktop coming back online", "CI on owner/repo#12"), what for, since when and who set it |
 | **Working** | not decided yet (`new`): the dispatcher has it, its `[work request]` went out when it was filed or reopened | since when |
 | **Queued** | queued for capacity (`queued`) | for which computers; and, flagged in red (`WRONG` in list_work), the computers that have room when one that could take it does |
+| **Paused** | its worker wrote `wNNN: paused: <why>` (or answered a wrap-up with it): it set the request aside until the request it is on first is done (w915) | "worker ab12cd34 on w911 first"; ends when that request closes or the worker says DONE for it, or the worker is sent this one again |
 | **Merged, follow-up pending** | its PRs merged, none is open, and it is still open | the cleanup's own reason ("still open: its brief asks for a step after the merge"), or that the cleanup has not looked yet |
 | **Stalled** | anything else: nothing works on it and nothing waits on a person, as soon as that is true | why: the cleanup's stall reason, an open PR nobody is on, its worker moved on to another request, finished its turn or stopped (and when), or no worker was ever started |
 
@@ -410,14 +411,36 @@ days; a deploy is a person's call, and a week without one is worth their look.
 | `web/src/util.ts` `standingLabel`, `standingGlance` | a standing agent's run due with no free slot (was "Waiting for a slot") | Queued for a slot |
 | `web/src/components/DispatcherPanel.tsx`, `Fleet.tsx`, `web/src/util.ts` | the live states and agent states above, tones: Working blue, Waiting on input amber, Queued grey, Blocked violet | as above |
 
-**A worker on several requests works only on the one it was last given** (and those linked to it since). Each request
-records when each worker was last given it (`links`: `sent` by `start_agent`/`message_agent` with its `work_id`,
-`linked` by `decide_work link`). A worker's current turn serves the request it was last *sent*, plus any *linked* to it
-after that (related requests sharing a worker, [One session per request](#one-session-per-request)). For links made before w418, the request's creation time stands in, so a
-worker that moved on to a newer request (w342's worker on w414) no longer makes the old one look worked on.
+**A worker holds every open request it was sent and has not let go of** (w915, Lothsahn, 2026-10-10: "Please fix the
+status labelling mixup to prevent that from happening in the future."). w909 read "Stalled (its worker moved on to
+w911)" while that worker was mid-turn on w909's own PR, with three background jobs: the rule was that a worker works only
+on the request it was last sent. Held means: the worker was sent it (`links`: `sent` by `start_agent`/`message_agent`
+with its `work_id`, `linked` by `decide_work link`; before w418 the request's creation time stands in), the request is
+open, and the worker has not said DONE for it. A busy worker (mid-turn, or between turns with a background job or a
+check-in) shows every request it holds Working, `shared with wNNN` when it holds others (`holdsOf`,
+`shared/workState.ts`). Stalled is left for "nothing is working on it".
+
+What ends a hold, each recorded on the request (`setAside`, per worker):
+
+- **DONE** from that worker (`done`), or the request closing.
+- **Released**: the worker was asked to wrap the request up (below) and its reply said nothing about it. This is what
+  keeps a request from looking worked on for as long as its worker is busy elsewhere (w342's worker on w414). It shows
+  Stalled, "its worker moved on to wNNN".
+- **Paused**: its line `wNNN: paused: <why>` (also `set aside`), in a wrap-up reply or any report. It shows **Paused:
+  worker on wNNN first**, not Stalled. `wNNN: still open: …` takes it up again; the pause also ends when the request it
+  waits for closes or the worker says DONE for that one.
+- Being sent the request again voids a release or a pause.
+
+The worker's current turn (`servedBy`: the request it was last sent, plus those linked since) is what the report- and
+message-based signals read (its last report asking a person to decide, a message waiting in the send queue), and spend
+(`docs/spend.md`) and who a request waits on (`stillOn`) still read it too. A held request that is not served gets only
+the signals that name it: Working while the worker is busy or has its own work going, Waiting on input for a permission
+the worker waits on, a `waiting_on_person` declaration or its `wNNN: still open:` line.
 
 **The cleanup still decides; this only shows.** The stored status, and the cleanup's own `stalled` with its reason and
-its 24 hours ([Ledger cleanup](#ledger-cleanup)), are unchanged and still decide what is closed, resumed or stalled.
+its 24 hours ([Ledger cleanup](#ledger-cleanup)), are unchanged and still decide what is closed, resumed or stalled. Its
+stall pass reads the same hold (w915): a request a busy worker holds, or one it paused, is never stalled, resumed or
+asked "Is it done?"; a busy worker that let the request go (released, DONE) can still be asked about it (w419).
 The live state can say Stalled for a request whose status is `active` (a day before the cleanup would stall it), and
 Working for one the cleanup stalled whose worker picked it up again.
 
@@ -705,9 +728,11 @@ already in the ledger (links, `servedBy`, session state).
 
 **The wrap-up** (w419). When the dispatcher sends a worker a related request that is not yet one of its own (`message_agent` with `work_id`, [One session per request](#one-session-per-request)) and the
 worker's current turn is on other requests (`servedBy`, [What a request is doing now](#what-a-request-is-doing-now)),
-the message starts with `[wrap-up]`: for each request it was on, end the reply with `DONE: <id>`, or one line
-`<id>: still open: <what>`, then carry on with the new work. Those requests' logs say so; the worker's next report closes
-them on a DONE, or its line naming the request becomes that request's log entry and latest line. Nothing waits on it.
+the message starts with `[wrap-up]`: for each request it holds (not only the one its turn was on, w915), end the reply
+with `DONE: <id>`, or one line `<id>: still open: <what>` (it goes on with it as well: the request stays Working), or
+`<id>: paused: <why>` (set aside until the new request is done: Paused). Those requests' logs say so; the worker's next
+report closes them on a DONE, or its line naming the request becomes that request's log entry and latest line. A request
+the reply does not mention is released (above). Nothing waits on it.
 
 `scripts/ledger-dry-run.ts <copy of data>` prints what rules 1 and 4 would do now (close, ask, stall, or wait), and which
 refused DONEs would close now, changing nothing.

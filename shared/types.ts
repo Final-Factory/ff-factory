@@ -1458,6 +1458,14 @@ export interface WorkItem {
    */
   links?: Record<string, { at: string; how: 'sent' | 'linked' }>;
   /**
+   * Workers that let this request go while still on other work (w915), by session id. A worker that was sent it and has not
+   * said DONE holds it (shared/workState.ts holdsOf) and shows Working while it is busy, even on a later request; this is
+   * how that ends. `paused`: the worker wrote `<id>: paused: <why>` (set it aside until `for` is done; shown Paused).
+   * `released`: asked to wrap it up (wrapUpBefore), it said nothing about it. Void once the worker is sent it again
+   * (links[session].at after `at`); a pause also ends when `for` closes or the worker says DONE for it.
+   */
+  setAside?: Record<string, { at: string; kind: 'paused' | 'released'; for?: string; text?: string }>;
+  /**
    * Its workers that said `DONE: <id>` for their part, by session id, with when and the report's first line (w434): the
    * request closes once none of its workers is still on it (each said DONE, ended, or moved on to newer work). `text`:
    * the full text of that worker's DONE reports on it, newest last (the last 4000 characters), which a refused DONE is

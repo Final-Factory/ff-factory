@@ -45,8 +45,8 @@ import {
 } from './work.ts';
 import { autoApproveProblem, cleanBlock, cleanLine, identityKeys, parseMarkers, quoteUntrusted, sourceTag } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
-import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
-import { asksAPerson, servedBy } from '../shared/workState.ts';
+import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, pausedIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
+import { asksAPerson, holdsOf, servedBy } from '../shared/workState.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
 import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionText, replyText, type Quoted } from '../shared/replies.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
@@ -1801,6 +1801,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     this.mergedMentions(s, text);
     const wrapped = this.wrapUpAnswers(s, text);
     const open = stillOpenIn(text);
+    this.setAsideLines(s, text, served, wrapped);
     const line = clip(firstLine(text), 300);
     for (const w of this.itemsOf(s.id)) {
       if (wrapped.has(w.id)) continue;
@@ -1814,6 +1815,27 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     this.askStatus(s, text, served);
     this.retireCheck(s.id);
     this.capacityMayHaveFreed(`worker ${s.id} "${clip(s.title, 60)}" finished a turn`);
+  }
+
+  /**
+   * A worker's own lines about requests it holds (w915), outside a wrap-up: `<id>: paused: …` sets one aside for the request
+   * it is on now, and `<id>: still open: …` takes a paused one up again (a worker that goes back to it says so).
+   */
+  private setAsideLines(s: SessionInfo, text: string, served: ReadonlySet<string>, wrapped: ReadonlySet<string>) {
+    const paused = pausedIn(text);
+    const open = stillOpenIn(text);
+    const first = [...served].filter((id) => !paused.has(id)).sort()[0];
+    for (const w of this.itemsOf(s.id)) {
+      if (wrapped.has(w.id) || !isOpen(w)) continue;
+      const a = w.setAside?.[s.id];
+      if (paused.has(w.id) && !served.has(w.id)) this.setAside(w, s.id, 'paused', { for: first, text: paused.get(w.id) });
+      else if (open.has(w.id) && a) {
+        const rest = Object.entries(w.setAside!).filter(([k]) => k !== s.id);
+        w.setAside = rest.length ? Object.fromEntries(rest) : undefined;
+      }
+      else continue;
+      this.store.putWork(w);
+    }
   }
 
   /**
@@ -1912,8 +1934,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * cleanup starts; w515). Answers the open PRs gh could not read. Unset (tests, a dry run): the cached states stand.
    */
   prsLive?: (id: string) => Promise<{ unverified: number[] }>;
-  /** Workers asked to wrap up their requests before new work (wrapUpBefore), by session id: the request ids asked about. */
-  private readonly wrapUps = new Map<string, Set<string>>();
+  /** Workers asked to wrap up their requests before new work (wrapUpBefore), by session id: the request ids asked about, and the new request. */
+  private readonly wrapUps = new Map<string, { ids: Set<string>; next: string }>();
 
   /**
    * The workers still on a request, apart from `except` (w434): linked to it, still serving it (servedBy: not moved on to
@@ -2132,42 +2154,57 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   }
 
   /**
-   * The dispatcher is about to send worker `sessionId` work for `workId`: when its current turn is on other requests
-   * (shared/workState.ts servedBy), the text to put first, asking it to close each with DONE or say what is still open.
-   * Each of those requests' logs says so, and the worker's next report is recorded on them (wrapUpAnswers). Empty when
-   * it is no switch.
+   * The dispatcher is about to send worker `sessionId` work for `workId`: when it holds other requests (shared/workState.ts
+   * holdsOf: the ones its current turn serves, and the ones it went on with from before), the text to put first, asking it
+   * to close each with DONE, say it is still open (it goes on with it alongside, and the request keeps showing Working,
+   * w915), or set it aside (`<id>: paused: …`, shown Paused). Each of those requests' logs says so, and the worker's next
+   * report is recorded on them (wrapUpAnswers). Empty when it is no switch.
    */
   wrapUpBefore(sessionId: string, workId: string): string {
-    const serving = servedBy(sessionId, [...this.store.work.values()]);
-    if (serving.has(workId)) return '';
-    const old = [...serving].map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
+    const all = [...this.store.work.values()];
+    const { served, held } = holdsOf(sessionId, all);
+    if (served.has(workId)) return '';
+    const old = [...held].sort().filter((id) => id !== workId).map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
     if (!old.length) return '';
     for (const w of old) {
-      this.stamp(w, `worker ${sessionId} was sent ${workId}: asked to wrap ${w.id} up first (DONE or what is still open)`);
+      this.stamp(w, `worker ${sessionId} was sent ${workId}: asked to wrap ${w.id} up first (DONE, still open, or paused)`);
       this.store.putWork(w);
     }
-    this.wrapUps.set(sessionId, new Set(old.map((w) => w.id)));
+    this.wrapUps.set(sessionId, { ids: new Set(old.map((w) => w.id)), next: workId });
     const list = old.map((w) => `${w.id} "${clip(w.title, 80)}"`).join(', ');
-    return `[wrap-up] Before the new work below: you were on ${list}. For each, end your reply with a line \`DONE: <id>\` if every step of it is finished (the steps after the merge included), or one line \`<id>: still open: <what>\`. Then carry on with the new work; don't wait for an answer.\n\n`;
+    return `[wrap-up] Before the new work below: you were on ${list}. For each, end your reply with a line \`DONE: <id>\` if every step of it is finished (the steps after the merge included), or one line \`<id>: still open: <what>\` if you go on with it as well, or \`<id>: paused: <why>\` if you set it aside until ${workId} is done. Then carry on with the new work; don't wait for an answer.\n\n`;
   }
 
-  /** A worker's report after a wrap-up request: each asked-about request gets the line that names it (its DONE is doneMarkers'). */
+  /**
+   * A worker's report after a wrap-up request: each asked-about request gets the line that names it (its DONE is
+   * doneMarkers'). `<id>: paused: …` sets it aside for the new request (WorkItem.setAside, shown Paused); a request it
+   * names otherwise stays held (it is on it); one it says nothing about is released, and shows what it is: not worked on.
+   */
   private wrapUpAnswers(s: SessionInfo, text: string): Set<string> {
     const asked = this.wrapUps.get(s.id);
     if (!asked) return new Set();
     this.wrapUps.delete(s.id);
     const done = new Set(doneIdsIn(text));
+    const paused = pausedIn(text);
     const recorded = new Set<string>();
-    for (const id of asked) {
+    for (const id of asked.ids) {
       const w = this.store.work.get(id);
       if (!w || done.has(id) || !isOpen(w)) continue;
       const line = text.split('\n').map((l) => l.trim()).find((l) => new RegExp(`\\b${id}\\b`, 'i').test(l));
       if (line) w.outcome = clip(line.replace(/^[\s*_>`-]+/, ''), 300);
-      this.stamp(w, line ? `wrap-up from worker ${s.id}: ${clip(line, 280)}` : `worker ${s.id} did not say how ${id} stands in its wrap-up`);
+      if (paused.has(id)) this.setAside(w, s.id, 'paused', { for: asked.next, text: paused.get(id) });
+      else if (!line) this.setAside(w, s.id, 'released');
+      this.stamp(w, line ? `wrap-up from worker ${s.id}: ${clip(line, 280)}` : `worker ${s.id} did not say how ${id} stands in its wrap-up; no longer counted as working on it`);
       this.store.putWork(w);
       recorded.add(id);
     }
     return recorded;
+  }
+
+  /** Record that a worker set a request aside or let it go (w915), void once it is sent the request again. */
+  private setAside(w: WorkItem, sessionId: string, kind: 'paused' | 'released', o: { for?: string; text?: string } = {}) {
+    const text = o.text ? clip(o.text, 300) : undefined;
+    w.setAside = { ...w.setAside, [sessionId]: { at: this.now().toISOString(), kind, ...(o.for ? { for: o.for } : {}), ...(text ? { text } : {}) } };
   }
 
 // ---------------------------------------------------------------- one session per request (w740)

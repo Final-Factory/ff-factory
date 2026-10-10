@@ -49,7 +49,7 @@ import {
   type PrRecord,
 } from './ledgerRules.ts';
 import type { LedgerCleanupState, Requester, SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
-import { servedBy } from '../shared/workState.ts';
+import { holdsOf, servedBy } from '../shared/workState.ts';
 import { BLOCKER_STUCK_MS } from '../shared/blockers.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { appVersion } from './version.ts';
@@ -236,9 +236,15 @@ export class LedgerSweep {
         // one its check-in or a queued message resumes (w509): as good as busy here.
         const busy = workers.filter((s) => BUSY.has(s.status) || holdsItsPlace(s, this.now()));
         if (busy.length) {
-          // A worker busy on ANOTHER request (it moved on, w418) can still be asked about this one (w419): the question
-          // waits until its turn ends. Nothing else touches a request with a running worker.
-          if (full && !busy.some((s) => servedBy(s.id, work).has(live.id))) this.followUpStep(live, workers, acts);
+          // Nothing touches a request a busy worker holds (w915: w909 showed Stalled while its worker, sent w911 after it, was
+          // mid-turn on its PR): the worker it was sent, has not said DONE for or let go of, and that paused it. A worker busy
+          // on ANOTHER request that has let this one go (it moved on, w418) can still be asked about it (w419): the question
+          // waits until its turn ends.
+          const holding = busy.some((s) => {
+            const h = holdsOf(s.id, work);
+            return h.held.has(live.id) || h.paused.has(live.id);
+          });
+          if (full && !holding) this.followUpStep(live, workers, acts);
           continue;
         }
         try {
