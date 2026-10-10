@@ -72,6 +72,17 @@ test('notify: events become notices, pushed to each device that wants that kind'
   assert.equal(sent[0].payload.url, '#/session/s1');
 });
 
+test('notify (w891): a machine worker\'s permission signal carries no request, and still pushes, naming the newest pending tool', async (t) => {
+  const { n, sessions, sent, notices } = setup(t);
+  n.subscribe('alice', sub('desk'), {}, 'Edge on Windows');
+  const pending = { requestId: 'r1', toolName: 'Bash', input: { command: 'rm -rf build' }, createdAt: '' };
+  assert.doesNotThrow(() => sessions.events.emit('permission', { info: info({ pendingPermissions: [pending] }) }, undefined));
+  await flush();
+  assert.deepEqual(notices, ['permission:Belt fix needs you']);
+  assert.equal(sent.at(-1)?.payload.kind, 'permission');
+  assert.equal((sent.at(-1)?.payload as unknown as { body: string }).body, 'Wants to use Bash');
+});
+
 test('notify: an automatic compaction (w535) is no finished turn; a person\'s /compact still says it is done', async (t) => {
   const { sessions, notices } = setup(t);
   const h = { info: info({}) };
