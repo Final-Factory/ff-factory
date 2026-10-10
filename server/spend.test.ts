@@ -470,6 +470,7 @@ test('the store reads a compressed transcript, and writes to it again after unzi
   store.append('s1', { kind: 'result', ok: true, text: 'done', costUsd: 1, turns: 1, durationMs: 1 });
   const t = path.join(dir, 'transcripts', 's1.jsonl');
   assert.ok(gzipFile(t));
+  store.noteCompressed('s1'); // what the data guard does after it compresses one
   assert.ok(store.hasTranscript('s1'));
   assert.equal(store.readTranscript('s1').length, 2);
   assert.equal(store.countResults('s1'), 1);

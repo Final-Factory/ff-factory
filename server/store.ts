@@ -291,6 +291,12 @@ export class Store {
     return fs.existsSync(f) || fs.existsSync(`${f}.gz`);
   }
 
+  /** Transcripts the data guard compressed in this process: the next append to one restores its plain file. */
+  private readonly compressed = new Set<string>();
+  noteCompressed(sessionId: string) {
+    this.compressed.add(sessionId);
+  }
+
   /** A compressed transcript is written to again (the session was resumed): the plain file comes back first. */
   private unzip(sessionId: string) {
     const f = this.transcriptPath(sessionId);
@@ -305,7 +311,9 @@ export class Store {
    */
   private appendLine(sessionId: string, line: string) {
     const f = this.transcriptPath(sessionId);
-    this.unzip(sessionId);
+    // A compressed transcript (server/dataGuard.ts) gets its plain file back before an append: on the first append of this process,
+    // and again whenever the guard compressed it since (noteCompressed), so a stat per event is not needed.
+    if (!this.tailChecked.has(sessionId) || this.compressed.delete(sessionId)) this.unzip(sessionId);
     let prefix = '';
     if (!this.tailChecked.has(sessionId)) {
       this.tailChecked.add(sessionId);

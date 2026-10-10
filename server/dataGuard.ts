@@ -168,7 +168,7 @@ export function gzipFile(file: string): { from: number; to: number } | undefined
 }
 
 /** One pass: measure, plan, compress, prune, record in the spend record which transcripts are which. */
-export function runDataGuard(o: { dir: string; spend: SpendStore; store: Pick<Store, 'sessions'>; config: DataGuardConfig; now?: number; disk?: () => { usedBytes: number; totalBytes: number } | undefined }): GuardRun {
+export function runDataGuard(o: { dir: string; spend: SpendStore; store: Pick<Store, 'sessions'> & { noteCompressed?: (sessionId: string) => void }; config: DataGuardConfig; now?: number; disk?: () => { usedBytes: number; totalBytes: number } | undefined }): GuardRun {
   const now = o.now ?? Date.now();
   const c = o.config;
   const run: GuardRun = { at: new Date(now).toISOString(), level: 'ok', gzipped: 0, gzippedFrom: 0, gzippedTo: 0, pruned: 0, prunedBytes: 0 };
@@ -207,6 +207,7 @@ export function runDataGuard(o: { dir: string; spend: SpendStore; store: Pick<St
       run.gzippedFrom += r.from;
       run.gzippedTo += r.to;
       o.spend.setTranscript(id, { state: 'gz', bytes: r.to });
+      o.store.noteCompressed?.(id);
     } catch (e) {
       run.error = (e as Error).message;
     }
