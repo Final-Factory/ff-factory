@@ -406,17 +406,17 @@ test('worker install: a nightly lab task left on an old root is named, with the 
   const old = String.raw`<Actions Context="Author">
     <Exec>
       <Command>"C:\Program Files\Git\bin\bash.exe"</Command>
-      <Arguments>-lc "FF_NIGHTLY_ROOT="/d/work/ff-nightly" bash "/d/work/ff-nightly/FinalFactory/scripts/nightly/nightly.sh""</Arguments>
+      <Arguments>-lc "FF_NIGHTLY_ROOT="/d/work/old-nightly" bash "/d/work/old-nightly/FinalFactory/scripts/nightly/nightly.sh""</Arguments>
     </Exec>
   </Actions>`;
   const root = String.raw`D:\work\ffw\nightly`;
   const said = nightlyTaskProblem(old, root) ?? '';
   assert.ok(said.includes(`does not run from ${root}`), said);
-  assert.ok(said.includes('(it runs: -lc "FF_NIGHTLY_ROOT="/d/work/ff-nightly" bash'), said);
+  assert.ok(said.includes('(it runs: -lc "FF_NIGHTLY_ROOT="/d/work/old-nightly" bash'), said);
   assert.ok(said.includes(`FF_NIGHTLY_ROOT="${root}" bash scripts/nightly/install_schedule.sh`), said);
   // Re-pointed: Git Bash's form or Windows' form of the root, any case, a trailing separator: nothing to say.
-  assert.equal(nightlyTaskProblem(old.replaceAll('/d/work/ff-nightly', '/d/work/ffw/nightly'), root), undefined);
-  assert.equal(nightlyTaskProblem(old.replaceAll('/d/work/ff-nightly', String.raw`D:\Work\FFW\nightly`), root + '/'), undefined);
+  assert.equal(nightlyTaskProblem(old.replaceAll('/d/work/old-nightly', '/d/work/ffw/nightly'), root), undefined);
+  assert.equal(nightlyTaskProblem(old.replaceAll('/d/work/old-nightly', String.raw`D:\Work\FFW\nightly`), root + '/'), undefined);
   // No task, no line.
   assert.equal(nightlyTaskProblem(undefined, root), undefined);
   assert.equal(nightlyTaskProblem('', root), undefined);
@@ -425,7 +425,7 @@ test('worker install: a nightly lab task left on an old root is named, with the 
 test("worker install: each sandbox owns two player folders, and a new count adds or removes pairs (w576)", () => {
   assert.deepEqual(playerFolders(2), ['slot1-0', 'slot1-1', 'slot2-0', 'slot2-1', 'slotnightly-0', 'slotnightly-1']);
   assert.equal(playerFolders(5).length, 12, "5 sandboxes' pairs and the nightly lab's");
-  const players = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-players-'));
+  const players = fs.mkdtempSync(path.join(os.tmpdir(), 'players-'));
   try {
     // LothDesktop before: the old pool slot0..slot7, one with a leftover build and its lease files.
     for (let k = 0; k < 8; k++) fs.mkdirSync(path.join(players, `slot${k}`, 'leases'), { recursive: true });
