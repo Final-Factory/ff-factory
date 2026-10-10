@@ -260,6 +260,38 @@ export function checksState(pr: { state?: string; statusCheckRollup?: GhCheck[] 
   return { done: true, text: failed.length ? `CI on ${ref} finished: ${failed.length} of ${checks.length} checks failed (${failed.slice(0, 3).map((c) => c.name ?? c.context).join(', ')})` : `CI on ${ref} finished: all ${checks.length} checks passed or skipped` };
 }
 
+/** A pull request's merge state as REST gives it (GET /repos/{owner}/{repo}/pulls/{n}), with its head commit. */
+export interface MergeState {
+  mergeable_state?: string | null;
+  head?: string;
+}
+
+/** Pull requests whose merge state this portal saw "unstable" (checks pending or failing), by "<ref>@<head sha>" (w889). */
+const sawUnstable = new Map<string, number>();
+
+/**
+ * CI's end read from a pull request's merge state, the reading for a token that can read neither checks nor Actions runs
+ * (w889; it needs only "Pull requests: read"). GitHub calls a PR "unstable" while a check is pending or failing and
+ * "clean" (or "has_hooks") once every check passed (measured 2026-10-10 on Final-Factory/FinalFactory #1393, CI running:
+ * unstable; #1387, CI green: clean). "clean" counts only after "unstable" was seen on the same head commit, so a PR whose
+ * checks have not started yet is never taken for green. Running and failed CI look the same ("unstable"): undefined, and
+ * the caller treats the checks as unreadable, so a red CI still clears after CI_UNREADABLE_MS.
+ */
+export function mergeStateCi(pr: MergeState, ref: string, seen: Map<string, number> = sawUnstable, now = Date.now()): CiState | undefined {
+  const key = `${ref}@${pr.head ?? ''}`;
+  const state = (pr.mergeable_state ?? '').toLowerCase();
+  if (state === 'unstable') {
+    seen.set(key, now);
+    for (const [k, at] of seen) if (now - at > 7 * 86_400_000) seen.delete(k);
+    return undefined;
+  }
+  if ((state === 'clean' || state === 'has_hooks') && seen.has(key)) {
+    seen.delete(key);
+    return { done: true, text: `CI on ${ref} finished: every check passed (read from the pull request's merge state, "${state}" after "unstable": FF Factory's GitHub token cannot read the checks themselves, docs/vault.md section 13.2)` };
+  }
+  return undefined;
+}
+
 interface GhRun {
   name?: string;
   status?: string;
@@ -327,7 +359,15 @@ export async function ghChecks(ref: string, run: Runner = runProc): Promise<CiSt
   if (pr.state === 'MERGED' || pr.state === 'CLOSED') return checksState(pr, ref);
   if (!pr.headRefOid) throw new Error(`gh pr view ${ref} gave no head commit; its checks: ${ghSaid(r)}`);
   const a = await run('gh', ['api', `repos/${m[1]}/actions/runs?head_sha=${pr.headRefOid}&per_page=100`], opts);
-  if (a.code !== 0) throw new Error(`its checks: ${ghSaid(r)}; its Actions runs: ${ghSaid(a)}`);
+  if (a.code !== 0) {
+    // w889: the last reading, the PR's merge state (Pull requests: read), which tells a green finish from a running CI.
+    const ms = await run('gh', ['api', `repos/${m[1]}/pulls/${m[2]}`, '--jq', '{mergeable_state: .mergeable_state, head: .head.sha}'], opts);
+    const said = `its checks: ${ghSaid(r)}; its Actions runs: ${ghSaid(a)}`;
+    if (ms.code !== 0) throw new Error(`${said}; its merge state: ${ghSaid(ms)}`);
+    const green = mergeStateCi(JSON.parse(ms.stdout) as MergeState, ref);
+    if (green) return green;
+    throw new Error(`${said}; its merge state: ${(JSON.parse(ms.stdout) as MergeState).mergeable_state ?? 'unknown'} (pending or failed checks cannot be told apart from it)`);
+  }
   if (!rollupRefusedLogged) {
     rollupRefusedLogged = true;
     console.warn(`blocker watch: gh cannot read pull requests' checks (${ghSaid(r)}); CI blocks read their GitHub Actions runs instead`);

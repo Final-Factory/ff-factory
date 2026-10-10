@@ -659,6 +659,27 @@ account → Settings → Developer settings → Fine-grained tokens → the port
 the VM changes. If the organization requires approval for fine-grained tokens, an owner approves the change first.
 Alternatively, the switchover below puts the portal's reads on the person tokens, which have Actions read.
 
+**Until then (w889).** Ben, 2026-10-10: "Yes fix it", after every PR that day waited the 15-minute fallback. Two changes in
+the portal, neither a token change:
+
+- **A third reading, the merge state** (`mergeStateCi`, `server/blockerWatch.ts`). When checks and Actions runs are both
+  refused, `ghChecks` reads the PR's REST `mergeable_state` (Pull requests: read, which D7 has). GitHub calls a PR
+  `unstable` while a check is pending or failing and `clean` once all pass *(measured 2026-10-10 with a token that reads
+  everything: #1393 with "Test in editmode" in progress, `unstable`; #1387 with every check done and green, `clean`)*. So
+  `clean` after `unstable` on the same head commit is a green finish, and its wait clears at the next read (within about
+  4 minutes). A PR seen `clean` without an `unstable` before it (checks not started yet) is not taken for green. Running and
+  failed CI both read `unstable`, so a red CI still waits the 15 minutes. *Not measured:* that GitHub gives a token without
+  Checks or Actions the same `mergeable_state`; the health check below shows what the live token gets.
+- **A loud health check** (`server/ciReadHealth.ts`). At start (after a minute) and every 30 minutes the portal reads CI on
+  the game repo's newest PR with the credential the watch uses for work no request is behind (D7, or the system payer's
+  token with the `portal` switch on), and records the best it reads: `checks`, `actions`, `merge-state` or `none`. Below
+  `actions`: a `WARNING: GitHub CI reads (w889)` line in `system_status` with GitHub's words and the fix, a dashboard banner
+  for everyone ("FF Factory cannot read CI on pull requests."), and a `[host]` notice to the dispatcher plus the host
+  notification, once when it turns bad and once when it recovers. Tested in `server/ciReadHealth.test.ts`.
+- **The fix, in one line:** the portal's D7 token, on Final-Factory/FinalFactory: **Actions: Read-only** (Pull requests:
+  Read-only and Metadata: Read-only, which it has); Commit statuses: Read-only is optional. Checks cannot be granted to a
+  fine-grained token. Edit the token in place on github.com; its value stays, so nothing goes into the VM.
+
 **One permission set per token.** A fine-grained token has one list of permissions for all the repositories it is given;
 "repo by repo" is which repositories to select. Each person's token:
 

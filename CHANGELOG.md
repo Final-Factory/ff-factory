@@ -10,6 +10,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **CI the portal cannot read is said loudly, and a green finish is seen without Actions access** (w889, Ben: "Yes fix
+  it"). The portal's GitHub token (D7) cannot read check runs (no fine-grained token can) nor Actions runs ("Actions:
+  Read" is missing), so every `ci:` wait sat the 15-minute fallback. `ghChecks` now falls back to the pull request's merge
+  state (`unstable` then `clean` on the same head commit is a green finish), and a health check (`server/ciReadHealth.ts`)
+  measures what the portal reads at start and every 30 minutes: a `system_status` WARNING, a dashboard banner and a
+  `[host]` notice when it cannot read checks or Actions runs. The real fix is one permission on D7 (docs/vault.md 13.2).
+  Needs a portal deploy.
+
 - **The nightly run gets its key from the portal, and its schedule is settable live** (w864, lothsahn: no person runs
   commands on machines). At each fire the portal mints a nightly-scoped API key under one name, `nightly-run` (so the
   night before's is revoked), keeps it in memory only, and gives it to that night's worker alone in its launch
