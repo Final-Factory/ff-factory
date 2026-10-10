@@ -20,7 +20,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   clearing resumes its worker within a minute; the ledger cleanup resumes (not closes) a worker whose report puts a check
   after the deploy. Needs a portal deploy (docs/machines.md "Released sandboxes").
 
-
 - **A verified portal deploy now updates every machine's daemon by itself** (w887, lothsahn: "Update FFFactory so that after
   updating the portal and validating, it automatically updated all the machines."). `fff-update verify` writes
   `data/update.verified.json` when the new release answers (a rollback writes none); the portal (`server/machineRollout.ts`) then
