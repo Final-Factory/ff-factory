@@ -1,0 +1,25 @@
+# The unit-test files the Windows job runs (.github/workflows/windows.yml), and nothing else (w910, lothsahn 2026-10-10:
+# "we only run windows and mac specific tests on those runners when needed"). Every test also runs on Linux in ci.yml;
+# a file is here only when its Windows run exercises something Linux cannot: Windows PowerShell 5.1, cmd.exe, CIM,
+# scheduled tasks, robocopy, rd, taskkill, named pipes, NTFS locks.
+#
+#   <test file> | <the production files it covers on Windows> | <why it needs Windows>
+#
+# windows.yml runs when a pull request touches a test or a covered file here (its paths list, checked against this file
+# by scripts/windows-tests.test.ts). A test skipped everywhere but Windows must be listed here, or it would never run.
+server/machineDeployWin.test.ts | server/machineDeployWin.ts, server/machineDeploy.ts, machine/** | Windows PowerShell 5.1 for real: the stop with Win32_Process and scheduled tasks, the probe, every script parsing in 5.1, the bootstrap under cmd.exe and PowerShell, install, the daemon saying hello as win32, uninstall
+server/machineDialogs.test.ts | server/watchdog.ts, scripts/unity-windows.ps1 | real WinForms windows listed and closed
+server/republish.test.ts | scripts/republish-public.ps1, scripts/common.ps1 | Windows PowerShell 5.1 with Win32_Process (Get-Supervisor) and .cmd shims
+server/updateSteps.test.ts | scripts/update-steps.ps1 | the portal host's updater under Windows PowerShell 5.1 with the real npm.cmd (Linux runs it under pwsh 7)
+server/machineSandboxes.test.ts | server/proc.ts, machine/sandboxes.ts | git worktrees copied with robocopy and removed with rd on NTFS
+server/copyTree.test.ts | server/proc.ts | copyTree's robocopy /XD and Copy-Item branches
+server/hostWatch.test.ts | machine/hostWatch.ts | taskkill /T /F, and Windows locking a live process's folder
+server/unityReaper.test.ts | machine/unityReaper.ts | the process list from CIM
+server/sandboxes.test.ts | server/sandboxes.ts | a file held without delete sharing gives EPERM
+server/elevation.test.ts | server/elevation.ts | the real signed-in-desktop check through CIM
+server/opsWorker.test.ts | server/opsWorker.ts | named pipes, as on the Windows portal host
+server/orchestratorMemory.test.ts | server/orchestratorMemory.ts | the memory guard's Windows path rules on a real NTFS file system
+server/cleanup.test.ts | server/cleanup.ts | path rules on a real Windows host, where a /-rooted path resolves under C: (abea9f5: a Windows-only bug this caught on a PR)
+server/ownLeftovers.test.ts | server/ownLeftovers.ts | the clean-up plan on a real Windows file system
+server/machineUnityMcp.test.ts | machine/sandboxes.ts | the real sandbox pool's Windows commands (realPoolDeps('win32'))
+scripts/test-watchdog.test.ts | scripts/test-watchdog.ts, scripts/test-inflight-reporter.ts | the process list from CIM and taskkill /T when a run hangs
