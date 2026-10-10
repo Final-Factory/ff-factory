@@ -225,8 +225,12 @@ jobs:
             range="$PR_BASE..$PR_HEAD"
           elif [ "$EVENT" = push ] && [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]] && git merge-base --is-ancestor "$BEFORE" "$AFTER" 2>/dev/null; then
             range="$BEFORE..$AFTER"
+          elif [ "$EVENT" = workflow_dispatch ]; then
+            # A manual run checks what this branch adds to main. Main's own commits were checked when they were pushed, and
+            # 11 of 2026-10-05/06 that are public for good would fail every manual run (w922: 16 such failures in 14 days).
+            range="origin/main..$AFTER"
           else
-            # A new branch, a manual run or a rewritten history: check everything reachable.
+            # A rewritten history: check everything reachable.
             range="$AFTER"
           fi
           node scripts/check-identity.ts "$range"
