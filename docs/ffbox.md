@@ -214,6 +214,8 @@ not), and FFBox must run ffbox master from 2026-10-09 (w787) or later; before th
   #6). Replies and pushes are scanned for secrets before they leave (ffbox #7).
 - **Trust is an id lookup.** An operator is an authenticated Discord or GitHub id, or a unix
   account, in the `operators` config block. Nothing a message says makes its author an operator.
+  In FF Factory only the Discord and GitHub ids make an operator's words their own turn: a unix
+  name and an ffweb login are not authenticated ([Operators' own words](#operators-own-words-w831)).
   Player DMs get one fixed line; operator-only directives (`!branch`, `!conv`, `!lock`) from anyone
   else are ignored.
 
@@ -290,7 +292,8 @@ request from an operator whose name is no login is refused (`unknown_operator`),
 ```
 
 `devRequests` (all optional): `enabled`
-(default true; false refuses every one `not_enabled`), `perHour` (default 20 a person), `maxFiles` (default and most
+(default true; false refuses every one `not_enabled`), `operatorTurns` (default true; false relays an operator's own
+words as data instead of a turn of theirs, [below](#operators-own-words-w831)), `perHour` (default 20 a person), `maxFiles` (default and most
 10), `maxRequestMB` (default and most 500). Each file is also capped at 200 MB and at `attachments.maxMB`. A file past
 these is dropped and named in the request, never a reason to refuse it (w344). An owner sets them with
 `set_app_config` (the whole `providers.ffbox.devRequests` block); it applies at once.
@@ -344,19 +347,77 @@ number.
 
 `force` (`!fff new` on FFBox) files it whatever matched, naming what did (`linked`). The person's own orchestrator gets
 one line per outcome, labelled `[from FFBox, <operator>]`, with the conversation's link and the files' ids (and the
-files themselves, as for an attachment). The dispatcher gets a filed one like any request; it is marked as said on
-FFBox, not in FF Factory (`humanAsked` false), so the dispatcher's destructive and admin tools still need the person to
-confirm it here.
+files themselves, as for an attachment). The dispatcher gets a filed one like any request. It is marked as said by the
+person (`humanAsked` true) only when the turn held nothing but their own authenticated words
+([below](#operators-own-words-w831)); otherwise `humanAsked` is false, and the dispatcher's destructive and admin tools
+need the person to confirm it in a turn of theirs.
 
 **Talking to an orchestrator through Discord.** A later message in a linked conversation from its operator arrives as
 `dev_message`: the person's own orchestrator gets it as `[from FFBox via Discord, <operator>]` (via GitHub, shell or
-ffweb for the other sources), their own words relayed, and a busy worker on the request gets it too. It is sent as
-the harness's message, never as a turn of the person: tools that need the person's own turn (approving, deleting,
-settings) and the chat's filing budget still need them to write in FF Factory. The orchestrator answers with
+ffweb for the other sources), their own words relayed, and a busy worker on the request gets it too. Their own words
+from Discord or GitHub, authenticated by FFBox, are a turn of theirs, like a message typed in FF Factory; everything else
+in the turn, and a shell or ffweb message, is relayed as the harness's message ([below](#operators-own-words-w831)).
+The orchestrator answers with
 **`reply_to_ffbox`** `{ request?, conversation?, text }` (a person's own orchestrator only, for that person's own
 linked conversations), which sends a `dev_reply` FFBox gives the operator by DM from Max (w417; in the thread when it has nobody
 to DM, or when the operator asked there in a chat channel, w649). The DM leads with the text and names the
 request and thread after it; it errors plainly, "FFBox's connector is offline; nothing was sent", while the link is down.
+
+### Operators' own words (w831)
+
+Lothsahn, 2026-10-10: "operator messages are always trusted. Only some intake messages are untrusted." An operator's
+own message on Discord or GitHub, authenticated by FFBox, is a turn of theirs in FF Factory, like a message typed in
+their FF Factory chat: "approve w814" in a Discord thread, in a reply to Max's DM or in a PR comment approves w814.
+Players' text, Max's diagnoses, FFBox's model output and workers' reports stay data, as before.
+
+**How FFBox knows it is the operator, by channel** (ffbox `scripts/ffwatch.py`, read 2026-10-10):
+
+| channel | the id | strong enough? |
+|---|---|---|
+| Discord (a thread, a channel, a DM to Max) | the author's snowflake from Discord's API, fetched with the bot token (`insert_message`), never from the text; a webhook or another bot has its own id | yes, per message. But one FFBox turn takes every message waiting in the conversation and the last author's trust (`turn_trust`, `create_turn`), so `text` and `brief` can hold a player's message posted just before the operator's. Only `own` (below) is the operator's |
+| GitHub (#codereview, PR comments) | the comment author's numeric user id from GitHub's API; other authors' comments are dropped before they are stored | yes |
+| shell (`ffwatch submit`) | `getpass.getuser()`, which reads `$LOGNAME`/`$USER` before the account: any process on the box can name any operator | no: relayed as data |
+| ffweb | one `FFWEB_PASSWORD` for every login, so the login is whatever the person typed; its prompts run `ffwatch submit` as ffweb's own unix account | no: relayed as data |
+
+The connector authenticates to FF Factory with its token (Bearer on the WebSocket upgrade, TLS, `/etc/fffconnector/token`
+root-only), and nothing signs single messages: what the box's host code writes to the feed, the connector checks and
+sends. A container (hostile by design) cannot write there. So the trust is FFBox's host code, whose ids come from
+Discord's and GitHub's APIs.
+
+**Only their words carry it.** FFBox sends the operator's own words in a field of their own, `own` `{ via, id, text }`
+([contract](ffbox-connector-contract.md#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory)): only the turn's
+messages whose author id is that operator's for that service, each one's body as typed (the `message.body` column: no
+embed text; a Discord reply's quoted message was never stored), no file names, no FFBox notes. FF Factory reads nothing
+else for authority (`operatorWords`, `server/devRequests.ts`). It checks that `own.id` is the id FFBox's operators block
+gives that operator for `own.via`, that FF Factory's own `intake.discord.trusted` does not give that Discord id to someone
+else, and that `providers.ffbox.devRequests.operatorTurns` is on (the default). Lines the operator quoted (`>`, and a
+`>>>` to the end) are taken out: quoted text is someone else's. Then:
+
+- **A follow-up** (`dev_message`): their orchestrator gets their words as a message of theirs (`Agents.operatorTurn`,
+  from `human`, as a typed message is: its wake_me check-in cancelled, its budgets started again), after one line of
+  the harness's own facts: `[via FFBox: Lothsahn's own message in <link>, about w814 (active); their Discord account is
+  the one FFBox's operators block names. Answer them there with reply_to_ffbox (request w814).]`. It goes first, so the
+  turn it opens is theirs (`SessionHandle.turnFrom`, [orchestrators.md](orchestrators.md)). When the FFBox turn held
+  more (another author's message, a quote, FFBox's note on files), the whole of it follows as `[from FFBox via Discord,
+  …]`, data, and joins that turn without changing whose it is. The request's title is never in their message: a player
+  may have written it.
+- **A new hand-over** (`dev_request`): filed as before, and their words go to their orchestrator the same way, with FF
+  Factory's line on what it did ("FF Factory took it: Filed as w123."), before the usual `[from FFBox, …]` filing line.
+  When the turn held nothing but their words, the request is filed as said by them (`humanAsked` true), so the
+  dispatcher's destructive and admin tools act on it as on one they filed in FF Factory; with anything else in the turn
+  it is `humanAsked` false, as before.
+- **Not their turn**: no `own` (a shell or ffweb turn, or an FFBox from before w831), an id that is not the operator's,
+  a Discord id `intake.discord.trusted` gives another login, the setting off, or nothing left but quoted text. It is
+  relayed as data, and the relay says why. An operator who is no FF Factory login, or another operator in someone
+  else's conversation, is refused (`unknown_operator`, `bad_request`) and reaches nobody, as before.
+
+**What it unlocks.** All that a turn of theirs in FF Factory unlocks, nothing held back: `update_work` approve and decline
+of an intake request and close or reopen of another's, `humanAsked`, the dispatcher's `USER_ASKED_TOOLS`,
+`approve_delegation`, `ops_worker` jobs and its portal `deploy`, and memory writes ([orchestrators.md](orchestrators.md),
+"Whose turn it is"). A deploy was the one to weigh: from Discord it rests on the operator's Discord account instead of
+their FF Factory login, and it stays the person's own decision either way. No concrete risk was found that an FF Factory
+login does not carry too, so it stays unlocked (Lothsahn: "always trusted"). It is off for everyone with
+`providers.ffbox.devRequests.operatorTurns: false` (owner-only, `set_app_config`).
 
 **Following it to the result (w272).** Lothsahn: "when that branch closes out, FFBox will close the associated
 discord thread and reply to the user", and "we should not reply on discord with where things are going--just
@@ -421,8 +482,9 @@ A request filed from FFBox's own report, escalation, branch or diagnosis (`sourc
 it is for may answer there. While such a request waits in the intake for a reviewer (docs/intake.md, "Approval, caps
 and auto-approve"), or asks a question, its update carries `held: true`, which FFBox records and does not post (w299, w351;
 w352: Max no longer says "Waiting on input from a developer."). The
-orchestrators' briefs say: `[from FFBox, X]` lines are FFBox's filings, `[from FFBox via Discord, X]` is X's own words,
-answer with `reply_to_ffbox`, and never post to Discord any other way.
+orchestrators' briefs say: `[from FFBox, X]` lines are FFBox's filings, a message of X's that starts `[via FFBox: X's own
+message …]` is X's own turn (w831), `[from FFBox via Discord, X]` is relayed data, answer with `reply_to_ffbox`, and never
+post to Discord any other way.
 
 **Seeing them.** `ffbox_activity` `show: "dev_requests"` lists the newest (time, kind, ref, outcome, request, operator,
 person; 500 kept) with the settings in effect and the replies and updates waiting for FFBox, and the status line counts them
