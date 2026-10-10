@@ -113,10 +113,18 @@ export const CATEGORY_LABEL: Record<string, string> = {
   other: 'Other tools',
 };
 
-/** Characters of a tool result per token: a guess for code, logs and JSON (settled in docs/spend.md by the week's real numbers). */
-export const CHARS_PER_TOKEN = 3.5;
+/**
+ * Characters of tool output and messages per newly written context token, MEASURED on a week of beast's sessions: a least-squares
+ * fit over 52,187 calls of the tokens a call wrote (cache write plus uncached input) on the characters of tool results and
+ * messages since the previous call and that call's output tokens gave 0.431 tokens per character (2.32 characters per token),
+ * 1.01 tokens per output token and 96 tokens per call of nothing visible (docs/spend.md "Calibration"). It is lower than the 3 to 4
+ * of plain text because paths, JSON and escapes tokenize densely. The 96 a call (system reminders, hook output) fall in `base`.
+ */
+export const CHARS_PER_TOKEN = 2.3;
+/** Output tokens per visible character of the agent's text and tool calls: thinking is output no transcript shows (MEASURED on the same week: 30.8M output tokens for 40.9M visible characters). */
+export const OUTPUT_TOKENS_PER_CHAR = 0.75;
 /** What an image in a tool result costs the context, in characters at CHARS_PER_TOKEN (a guess: about 1,500 tokens). */
-export const IMAGE_CHARS = 5200;
+export const IMAGE_CHARS = 3200;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // List prices, USD per million tokens (the claude-api skill's table, 2026-10-06; cache reads 0.1x input except where the
@@ -279,14 +287,14 @@ export class ContextMeter {
   addUser(chars: number) {
     this.add('brief', chars);
   }
-  /** The agent's text, thinking or a tool call's input. */
-  addAssistant(chars: number) {
-    this.add('assistant', chars);
-  }
-  addToolUse(id: string, name: string, input: unknown, inputChars: number) {
+  /**
+   * The agent's text, thinking or a tool call's input: nothing to add. The next call writes the previous call's output tokens
+   * to the context, and those are exact (a call's usage), thinking included; they are added when the call is seen.
+   */
+  addAssistant(_chars: number) {}
+  addToolUse(id: string, name: string, input: unknown, _inputChars: number) {
     this.tools.set(id, toolKind(name, input));
     if (this.tools.size > 4000) this.tools.delete(this.tools.keys().next().value as string);
-    this.add('assistant', inputChars);
   }
   addToolResult(id: string, chars: number, images = 0) {
     const kind = this.tools.get(id) ?? { cat: 'other' as Category };
@@ -318,14 +326,14 @@ export class ContextMeter {
    */
   call(u: CallUsage) {
     if (this.cur && this.cur.id === u.id) {
-      this.chargeOutput(u.out - this.cur.out, u.model);
+      this.chargeOutput(u.out - this.cur.out, u.model, true);
       this.cur.out = Math.max(this.cur.out, u.out);
       return;
     }
     const ctx = u.in + u.cr + u.cw;
     if (ctx <= 0) return;
     this.cur = { id: u.id, model: u.model, out: u.out };
-    this.chargeOutput(u.out, u.model);
+    this.chargeOutput(u.out, u.model, false);
     this.turn.calls++;
     this.turn.ctxMax = Math.max(this.turn.ctxMax, ctx);
     this.turn.ctxEnd = ctx;
@@ -366,16 +374,21 @@ export class ContextMeter {
       c.usd += (s.r * p.cr + s.w * wPrice) / 1e6;
       c.tok += s.r + s.w;
     }
-    // Everything of this call is in the context of the next one.
+    // Everything this call read is in the context of the next one, and so is what it wrote (added by chargeOutput: first message of the call below).
     for (const [k, v] of this.fresh) this.held.set(k, (this.held.get(k) ?? 0) + v);
     this.fresh = new Map();
+    this.add('assistant', u.out * CHARS_PER_TOKEN);
   }
-  /** The output of a call is the agent's own text: charged when first seen, and again for what a later message of the same call adds. */
-  private chargeOutput(tokens: number, model: string | undefined) {
+  /**
+   * The output of a call is the agent's own text: charged when first seen, and again for what a later message of the same call adds.
+   * It reaches the context with the next call; a rise after the call was seen is added to what that call will write.
+   */
+  private chargeOutput(tokens: number, model: string | undefined, late: boolean) {
     if (tokens <= 0) return;
     const c = (this.turn.cats.assistant ??= { usd: 0, tok: 0 });
     c.usd += (tokens * priceOf(model).out) / 1e6;
     c.tok += tokens;
+    if (late) this.add('assistant', tokens * CHARS_PER_TOKEN);
   }
 
   /** The reading of the turn that just ended, and a fresh start for the next one (what the context holds is kept). */

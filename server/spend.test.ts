@@ -353,7 +353,7 @@ test('protectedUntil: open requests keep their transcripts, closed ones 7 days a
 test('estimateTurn: tokens from dollars, labelled by the caller; the dollars are kept', () => {
   const t = estimateTurn('claude-sonnet-5-5', 0.5, 7000, 35_000);
   assert.equal(t.usd, 0.5);
-  assert.ok(t.out > 1500 && t.out < 2500);
+  assert.ok(t.out > 5000 && t.out < 5500);
   assert.ok(t.cr > 0);
   // the dollars add back up at list prices
   assert.ok(Math.abs(listUsd('claude-sonnet-5-5', t) - 0.5) < 0.02);

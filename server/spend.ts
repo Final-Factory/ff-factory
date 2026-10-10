@@ -19,7 +19,7 @@ import path from 'node:path';
 import { SnapshotFile, readJsonDurable, checkObject } from './durable.ts';
 import type { SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { WORK_OPEN } from '../shared/types.ts';
-import { addCats, addModels, addTok, fmtTokens, fmtUsd, listUsd, priceOf, scaleTok, sumTok, zeroTok, CATEGORY_LABEL, CHARS_PER_TOKEN, type Cats, type MeterTurn, type ModelTok, type Tok, type TurnUsage } from '../shared/spend.ts';
+import { addCats, addModels, addTok, fmtTokens, fmtUsd, listUsd, priceOf, scaleTok, sumTok, zeroTok, CATEGORY_LABEL, CHARS_PER_TOKEN, OUTPUT_TOKENS_PER_CHAR, type Cats, type MeterTurn, type ModelTok, type Tok, type TurnUsage } from '../shared/spend.ts';
 
 export type SpendRole = 'worker' | 'dispatcher' | 'personal' | 'ops' | 'standing';
 
@@ -108,8 +108,8 @@ export const isBucket = (id: string) => id.startsWith('_');
  */
 export function estimateTurn(model: string, usd: number, outChars: number, freshChars: number): Tok {
   const p = priceOf(model);
-  let out = outChars / CHARS_PER_TOKEN;
-  let cw = (freshChars + outChars) / CHARS_PER_TOKEN;
+  let out = outChars * OUTPUT_TOKENS_PER_CHAR;
+  let cw = freshChars / CHARS_PER_TOKEN + out;
   const known = (out * p.out + cw * 2 * p.in) / 1e6;
   if (known > usd) {
     const f = usd / known;
