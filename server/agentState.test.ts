@@ -304,3 +304,20 @@ test('w691: an agent whose agent host did not start is Blocked on its machine, w
   assert.equal(st(s('a', { status: 'running', machineId: 'm3' })).state, 'working', 'once the failure is cleared it is what its status says');
   assert.equal(holdsItsPlace(s('a', { status: 'running', ...failed }), NOW), false, 'a dead host holds no place');
 });
+
+test('w898: a sandbox in cleanup (its caches are being trimmed) is not free, placement does not count it, and no worker starts there', async (t) => {
+  const { store, agents } = await setup(t);
+  const beta = () => store.machines.get('pc')!.sandboxes!.find((x) => x.id === 'beta')!;
+  const free = () => agents.places().find((p) => p.id === 'pc')?.freeSandboxes;
+  assert.match(agents.describeAllSandboxes(), /- pc\/beta FREE/);
+  const before = free();
+  Object.assign(beta(), { status: 'cleanup', statusDetail: 'trimming the Burst and Build caches (released)' });
+  const text = agents.describeAllSandboxes();
+  assert.doesNotMatch(text, /pc\/beta FREE/);
+  assert.match(text, /- pc\/beta: cleanup \(trimming the Burst and Build caches \(released\)\)/, 'list_sandboxes shows the state');
+  assert.equal(free(), before! - 1, 'the capacity count and placement do not count it free');
+  assert.throws(() => agents.startWorker({ sandbox: 'pc/beta', prompt: 'x', from: 'orchestrator' }), /is being cleaned up .* use another free sandbox/);
+  Object.assign(beta(), { status: 'ready', statusDetail: undefined });
+  assert.match(agents.describeAllSandboxes(), /- pc\/beta FREE/, 'free again when the trim ends');
+  assert.equal(free(), before);
+});

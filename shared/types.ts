@@ -57,7 +57,11 @@ export interface UnityDismissal {
   by?: 'agent';
 }
 
-export type SandboxStatus = 'creating' | 'ready' | 'error' | 'deleting';
+/**
+ * 'cleanup' (w898): the released sandbox's Library caches (BuildCache, BurstCache) are being trimmed before it goes to the next
+ * worker. Not free, takes no agent and no editor; it goes back to 'ready' by itself when the trim ends or times out.
+ */
+export type SandboxStatus = 'creating' | 'ready' | 'error' | 'deleting' | 'cleanup';
 
 export interface Sandbox {
   id: string;

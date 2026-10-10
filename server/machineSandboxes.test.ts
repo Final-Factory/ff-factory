@@ -16,7 +16,7 @@ import { daemonConfig } from './machineDeploy.ts';
 import { describeCleanupItems } from './cleanup.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { UnitySlots } from '../machine/unitySlots.ts';
-import { SandboxPool, deletable, idleSandboxEditors, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
+import { SandboxPool, type PoolOptions, deletable, idleSandboxEditors, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
@@ -145,24 +145,34 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer'] } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
+  /** The status of each sandbox at every change the portal would be sent, consecutive repeats dropped (w898: the cleanup state's order). */
+  const statuses: string[] = [];
   const { d, running } = deps(r.main, o);
+  const created: { p?: SandboxPool } = {};
   const p = new SandboxPool(
     {
       repoPath: r.main,
       stateFile: path.join(r.root, 'app', 'sandboxes.json'),
       settings: SETTINGS(r.sbRoot, o.settings),
       activity: o.activity ?? (() => ({ busy: false, lastActivityMs: Date.now() })),
-      onChange: () => undefined,
+      onChange: () => {
+        const s = created.p?.list().map((x) => `${x.id}:${x.status}`).join(',') ?? '';
+        if (s && statuses.at(-1) !== s) statuses.push(s);
+      },
       onEvent: (e) => events.push(e),
       idleStopMinutes: o.idle,
+      ...(o.liveAgents ? { liveAgents: o.liveAgents } : {}),
+      ...(o.trim !== undefined ? { trim: o.trim } : {}),
+      ...(o.trimmer ? { trimmer: o.trimmer } : {}),
       librarySeedGB: 1,
       ...(o.slots ? { editorSlot: (id: string) => o.slots!().startRefusal(`sandbox:${id}`), slotsStatus: async () => (await o.slots!().tick(), o.slots!().describe()) } : {}),
     },
     d,
   );
-  return { p, events, running };
+  created.p = p;
+  return { p, events, running, statuses };
 }
 
 const ready = (p: SandboxPool, id: string) => until(`${id} ready`, () => {
@@ -483,7 +493,7 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 1, maxUnity: 1 });
   const { d: poolDeps, running } = deps(r.main);
-  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null, sandboxCacheTrim: false }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
     daemon.shutdown();
     server.close();
@@ -605,7 +615,7 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 3, maxUnity: 1 });
   const { d: poolDeps } = deps(r.main);
-  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 3, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 3, maxEventsFile: null, sandboxCacheTrim: false }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
     agents.orchestrators.close();
     daemon.shutdown();
@@ -696,7 +706,7 @@ test('stale output on a machine: the portal sends the ledger facts, a dry run co
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 1, maxUnity: 1 });
   const { d: poolDeps } = deps(r.main);
-  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null, sandboxCacheTrim: false }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
     daemon.shutdown();
     server.close();
@@ -801,7 +811,7 @@ async function twoSandboxes(t: { after: (fn: () => void | Promise<void>) => void
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1 });
   const { d: poolDeps } = deps(r.main);
-  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 4, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 4, maxEventsFile: null, sandboxCacheTrim: false }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
     agents.orchestrators.close();
     daemon.shutdown();
@@ -879,4 +889,130 @@ test('w640: a worker stopped with a far check-in frees its sandbox; new work the
   n.stop();
   w.stop();
   await until('both stopped', () => !n.live && !w.live);
+});
+
+// ---------------------------------------------------------------- release trims the Library caches (w898)
+
+/** Library/BuildCache and Library/BurstCache files in a sandbox: some days old, some fresh. */
+function fillCaches(dir: string) {
+  const make = (rel: string, hours: number) => {
+    const f = path.join(dir, 'Library', rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, 'x'.repeat(2000));
+    const at = new Date(Date.now() - hours * 3_600_000);
+    fs.utimesSync(f, at, at);
+  };
+  make('BuildCache/ab/old', 24 * 9);
+  make('BuildCache/ab/new', 2);
+  make('BurstCache/Windows-Intel/old.dll', 24 * 9);
+  make('BurstCache/Windows-Intel/new.dll', 2);
+  make('ArtifactDB/keep', 24 * 9);
+  return { gone: ['BuildCache/ab/old', 'BurstCache/Windows-Intel/old.dll'], kept: ['BuildCache/ab/new', 'BurstCache/Windows-Intel/new.dll', 'ArtifactDB/keep'] };
+}
+
+test("w898: the last agent leaving a sandbox sends it to 'cleanup', trims the caches, then frees it; a start in between is refused", async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  let live = 1;
+  const { p, statuses } = pool(r, { liveAgents: () => live });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  const files = fillCaches(dir);
+  const exists = (rel: string) => fs.existsSync(path.join(dir, 'Library', rel));
+  await p.tick();
+  assert.equal(p.list()[0].status, 'ready', 'an agent lives there: nothing happens');
+  assert.ok(files.gone.every(exists));
+  live = 0; // the request closed, the worker stopped, or it waits for CI: its session is gone
+  await p.tick();
+  assert.equal(p.list()[0].status, 'cleanup', 'released: cleanup at once, before anyone can be handed the sandbox');
+  assert.match(p.list()[0].statusDetail ?? '', /trimming/);
+  await assert.rejects(p.unity('sb1', 'start'), /cleanup.*not ready/, 'an editor start in between is refused');
+  await assert.rejects(p.switch('sb1', 'other'), /is cleanup/, 'so is a branch switch (the hand-over)');
+  await until('the trim to end', () => p.list()[0].status === 'ready');
+  assert.deepEqual(statuses.filter((s) => s.startsWith('sb1:')), ['sb1:creating', 'sb1:ready', 'sb1:cleanup', 'sb1:ready'], 'ready, cleanup, ready: in that order and once');
+  assert.ok(files.gone.every((f) => !exists(f)) && files.kept.every(exists), 'old cache files gone, recent ones and the rest of Library kept');
+  await p.tick();
+  assert.equal(p.list()[0].status, 'ready', 'it does not trim again until the next release');
+  assert.equal((await p.trim('sb1')).files, 0);
+});
+
+test('w898: no trim while an agent is live, an editor is up, or a build has the project open; a release with the editor up trims when it stops', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  let live = 1;
+  const { p, running } = pool(r, { liveAgents: () => live });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  const files = fillCaches(dir);
+  const gone = () => files.gone.every((f) => !fs.existsSync(path.join(dir, 'Library', f)));
+  assert.match((await p.trim('sb1')).skipped ?? '', /agent is live/);
+  live = 0;
+  await p.unity('sb1', 'start');
+  await p.tick();
+  assert.match((await p.trim('sb1')).skipped ?? '', /editor is up/);
+  assert.equal(p.list()[0].status, 'ready', 'the editor holds the caches: no cleanup state either');
+  assert.ok(!gone());
+  // The last agent left while the editor was up: the trim waits for the editor, then runs.
+  live = 1;
+  await p.tick();
+  live = 0;
+  await p.tick();
+  assert.ok(!gone());
+  running.delete(dir);
+  await p.tick();
+  await until('the trim after the editor stopped', () => gone());
+  await until('free again', () => p.list()[0].status === 'ready');
+  // A batchmode build (a lock file, no pool editor).
+  const again = fillCaches(dir);
+  fs.mkdirSync(path.join(dir, 'Temp'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'Temp', 'UnityLockfile'), '');
+  assert.match((await p.trim('sb1')).skipped ?? '', /editor or build has the project open/);
+  assert.ok(again.gone.every((f) => fs.existsSync(path.join(dir, 'Library', f))));
+});
+
+test('w898: a trim that hangs, fails or ignores its abort times out and the sandbox goes back to free, with the reason told', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  let mode: 'hang' | 'fail' | 'slow-abort' = 'hang';
+  let aborted = false;
+  const trimmer: PoolOptions['trimmer'] = (_project, _policy, o) =>
+    mode === 'hang'
+      ? new Promise(() => undefined)
+      : mode === 'fail'
+        ? Promise.reject(new Error('EBUSY: file locked'))
+        : new Promise((resolve) => o?.signal?.addEventListener('abort', () => ((aborted = true), resolve({ stopped: 'timed out', files: 1, removedBytes: 5, keptBytes: 0 }))));
+  const { p, events, statuses } = pool(r, { liveAgents: () => 0, trim: { timeoutMs: 80 }, trimmer });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const t0 = Date.now();
+  const hung = p.trim('sb1', 'test');
+  assert.equal(p.list()[0].status, 'cleanup');
+  const res = await hung;
+  assert.match(res.stopped ?? '', /timed out after/);
+  assert.ok(Date.now() - t0 >= 70 && Date.now() - t0 < 5000, 'given up after the timeout, not stuck');
+  assert.equal(p.list()[0].status, 'ready', 'a hung trim must not leave the sandbox in cleanup');
+  assert.match(events.at(-1)?.text ?? '', /sandbox sb1: Library cache trim \(test\).*stopped early \(timed out after .*handed back as it is/);
+  mode = 'fail';
+  assert.match((await p.trim('sb1')).stopped ?? '', /failed: EBUSY/);
+  assert.equal(p.list()[0].status, 'ready');
+  mode = 'slow-abort';
+  await p.trim('sb1');
+  assert.ok(aborted, 'the timeout aborts the trim so it stops at its next file');
+  assert.equal(p.list()[0].status, 'ready');
+  assert.deepEqual(statuses.filter((s) => s.startsWith('sb1:')), ['sb1:creating', 'sb1:ready', 'sb1:cleanup', 'sb1:ready', 'sb1:cleanup', 'sb1:ready', 'sb1:cleanup', 'sb1:ready']);
+});
+
+test('w898: a daemon restart in the middle of a trim leaves nothing stuck: the pool reads cleanup back as ready', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const { p } = pool(r, { liveAgents: () => 0, trim: { timeoutMs: 300 }, trimmer: () => new Promise(() => undefined) });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const cut = p.trim('sb1');
+  assert.equal(p.list()[0].status, 'cleanup');
+  const { p: restarted } = pool(r, { liveAgents: () => 0 });
+  assert.equal(restarted.list().find((s) => s.id === 'sb1')?.status, 'ready');
+  await cut; // let the first pool's trim time out, so no timer outlives the test
 });

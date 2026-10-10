@@ -501,6 +501,45 @@ inside the root (candidates, not verified here: `NUGET_PACKAGES`, `npm_config_ca
 folder has no override, [worker-root.md](worker-root.md) section 2). Moving one is a request for lothsahn to decide, not
 clean-up work.
 
+### Sandbox Library caches: trim on release (w898)
+
+Lothsahn (2026-10-10): "almost all the space is in the work folder, specifically in the BuildCache and BurstCache folders of
+the various sandboxes", then: "I would like the harness to trim the burst cache and build cache when a worker releases a
+slot. The worker should not have to do this--it should be built into the code", and "Slots should have a new state called
+'cleanup' and the dispatcher should not allocate workers to cleanup. Once the trim finishes, the slot should go idle".
+
+**Measured (lothdesktop, 2026-10-10).** `Library/BuildCache` 6.2-12.7 GB and `Library/BurstCache` 4.8-6.7 GB in each of the six
+sandboxes (87 GB; a fresh seed holds 0.7 and 2.5). Unity never removes entries, so every code change adds some. NTFS keeps
+last-access times (`disablelastaccess` 2) but a build reads the whole BuildCache, so only write times tell old from current:
+about half of each cache was written more than 2 days before. One commit's working set is small: after a build from
+nothing, BuildCache is 0.4 GB and BurstCache 3.2 GB. Player build of one commit in slot6 (`scripts/nightly/build_player.sh`,
+Burst SSE2+SSE4, no other build running): fully warm 112 s; with every file older than a day pruned (6.3 GB) 106 s; both caches
+removed (the rest of `Library` warm) 530 s, 5 times longer. A wipe costs that on the next worker's first build; a trim does not.
+
+**The trim** (`server/cacheTrim.ts`, `TRIM_DEFAULTS`: keep files written within 24 h, then each cache cut oldest-first to 4 GB, give up
+after 10 min; the numbers are a guess on top of the measurements above, kept above one commit's working set): removes cache
+*files*, never a whole cache folder and nothing else under `Library`. **When**: `SandboxPool.trimReleased`
+(`machine/sandboxes.ts`) watches each sandbox's live agents (the daemon's own sessions, `liveIn`) at every 30 s look and trims the
+moment the last one is gone, whichever way the worker left (request closed, a wait for CI or a person, a stop, the idle
+reaper): the portal needs no new message. **State**: the sandbox is `cleanup` (`SandboxStatus`) from that moment: not free
+(`Agents.free`, the capacity count and placement all need `ready`), refused by `startWorker`, by the daemon's start check and by
+editor starts and branch switches, shown as `cleanup` in `list_sandboxes` and "Cleanup" on the dashboard; it is `ready` again
+when the trim ends. **Safety**: never with an agent live there, a pool editor up, or `Temp/UnityLockfile` present (an editor or a
+batchmode build); a release with the editor up waits (`pendingTrim`) and trims after the editor stops; a trim stops between
+two files when a lock file appears. **Failure**: a hung, failing or slow trim is cut off after `timeoutMs`, the sandbox goes
+back to `ready` and the pool logs why (and tells the orchestrator when it stopped early); a daemon restart reads `cleanup` back
+as `ready`. `daemon.json` `sandboxCacheTrim` sets the limits or `false` for never.
+
+**Backstop** (`cleanupRules`, for sandboxes nobody releases): `sandbox-lib-cache-idle` (whole `BuildCache`/`BurstCache`, unused
+for `libraryCacheIdleHours` 48), `sandbox-lib-cache-cap` (a cache over `libraryCacheCapGB` 6, idle an hour) and
+`sandbox-lib-cache-low` (all idle ones, while free space is below the soft threshold), each only while the project has no
+`Temp/UnityLockfile` and, as every rule, with the entry renamed first so one with an open file is skipped.
+
+**Seeds.** A new sandbox's Library comes from the configured `librarySeed`, which keeps its caches (a warm start; lothdesktop's is
+0.7 + 2.5 GB). When the seed is missing the copy falls back to the main clone's or a sandbox's Library, and now leaves their
+`BuildCache` and `BurstCache` behind (`copyTree` `exclude`; robocopy `/XD`, elsewhere removed after the copy). D: on lothdesktop is NTFS,
+so copies are full; a block-cloning volume (w900's Dev Drive) would make the six copies share blocks but not stop each from growing.
+
 ## 6. Crash-safe data files
 
 On 2026-09-30 BEAST hard-crashed (a WHEA hardware error) while the server was saving `data/state.json`. The save wrote a
