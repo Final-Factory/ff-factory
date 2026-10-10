@@ -263,6 +263,7 @@ test('nightly merge review (w905): its worker reads merge-review.md, writes the 
   assert.match(r, /NIGHTLY-JOB: <title/);
   assert.match(r, /REVIEWED-THROUGH: <the full sha/);
   assert.match(r, /Do not run the jobs yourself/);
+  assert.match(r, /The one pull request you open is merge-review\.md's one-time archive/);
   assert.deepEqual(identityKeys({ kind: 'nightly-review', untrusted: false, nightlyReview: { date: '2026-10-11', machine: 'lothdesktop' } }), ['nightly-review:2026-10-11']);
   assert.deepEqual(intakeSettings({ intake: { nightly: { review: { enabled: true, time: '9am' } } } }).nightly.review, { enabled: true, time: '06:00', tz: 'America/New_York', machine: 'lothdesktop' });
 });
