@@ -272,6 +272,11 @@ changed for that long (a bounded walk, so a folder something still writes to sta
 | stale Unity Libraries | `<project>/Library` up to three folders below the home folder, for a project not opened (its Library entries, Temp, Logs, UserSettings) for `libraryDeleteDays` (180); never while `Temp/UnityLockfile` exists, never a linked Library (a ParrelSync clone) | 180 days; **reported** from 30 (`libraryReportDays`) |
 | age rules | `hostGuard.cleanup.ageRules` | as configured |
 
+**On a machine with a worker install, a rule only removes what is inside the install folder** (w896, lothsahn: "in general we should
+only be clearing data in the install folder for the worker"): the rows whose folder is outside it (system temp, crash dumps,
+Unity's and the tools' caches, the game's data folder, `~/ff-worker`, runner jobs) are measured and listed, not removed; see
+[Where clean-up may delete](#where-clean-up-may-delete-w896).
+
 **Never deleted**, whatever a rule says (`neverDelete`, checked again right before each removal):
 a drive root, the home folder and its top-level folders; system folders (`C:\Windows`, `Program Files`,
 `ProgramData`, `/Applications`, `/System`, `/Library`, …); the sandbox root and every sandbox (a Builds
@@ -389,7 +394,7 @@ cleans nothing itself (`machines.cleanupFor`); a `machine_cleanup` there still r
 `server/ownLeftovers.test.ts` (each pick and each keep, removal and pruning with real git).
 
 **People are never asked to free disk.** A pass that cannot get back above the soft threshold says, in its notice to
-the dispatcher, to file clean-up work for that computer; the dispatcher's and the orchestrators' briefs say low disk is
+the dispatcher, to file clean-up work for that computer, and that such work deletes only inside the worker install folder (w896); the dispatcher's and the orchestrators' briefs say low disk is
 fixed by `machine_cleanup` and a clean-up worker on that machine, never by asking its owner (`server/agents.ts`), and
 every sandbox worker's brief carries the clean-up of its own leftovers before it reports a request done
 (`DISK_HYGIENE`). The worker's checklist is the ff-agents evidence-gate lesson `clean-up-after-yourself.md`.
@@ -397,6 +402,104 @@ every sandbox worker's brief carries the clean-up of its own leftovers before it
 What clean-up cannot fix is reported, not removed: user data (OneDrive, Videos, Downloads), the audit
 artifacts, and on BEAST the Dev Drive VHDX, which grows but never shrinks by itself (634 GB for 334 GB used
 on 2026-09-28): compact it by hand (section 3).
+
+### Install-folder leftovers (w899)
+
+On 2026-10-10 LothDesktop's D: fell from 104 GB to 60 GB free while the clean-up kept most of the cause as "not
+attributable": w876 (the disk clean-up that day) removed it by hand. The biggest item was one Claude task `.output`
+file of 99.6 GB, written for a day by a leftover `python -` whose heredoc was lost in an `eval`, so Python opened its
+interactive console and looped on `WinError 123`; deleting the file freed nothing until the process ended. Lothsahn
+(2026-10-10): "in general we should only be clearing data in the install folder for the worker". The rules in
+`server/installLeftovers.ts` (wired as the daemon's stale-output plan, merged with `planStaleOutput`'s in
+`machine/daemon.ts`) take these, only inside the worker root (`cfg.root`; a machine without one takes nothing), on the
+stale-output schedule (daily, and in every pass while free space is low, asked for, or a dry run):
+
+| What | Where | Goes when |
+|---|---|---|
+| per-commit builds | each sandbox's `.nightly-builds/cache/*` and `Builds/cache/*` | beyond the newest 2 (by last activity), once idle 6 h |
+| benchmark builds, captures | `Builds/bench*`; `.nightly-builds/clips`, `shots` | untouched 2 / 3 days |
+| the nightly lab | `<root>/nightly`: `builds/*` beyond the newest 2, `runs/*` but the newest, `rehearsals/*`, `logs/*` | idle 6 h / 3 days / 2 days / 3 days |
+| stale scratch | `<root>/scratch/*` | untouched 3 days and no open request (ledger context) named in it |
+| stopped sessions' temp | `<temp root>/ffa-<session>` | the session is not live (the guard's inUse), untouched 2 h; a clone inside with unpushed work is listed, kept (the app's own `ffbox-test-*` fixture repos do not hold it) |
+| runaway task output | `<ffa>/claude…/<project>/<session>/tasks/*.output` past 2 GB | a stopped session's: the file goes **and the processes naming that session's folder (and their children) are ended first**, `taskkill /T /F` or SIGKILL (`machine/hostWatch.ts` `killTree`), logged. A live session's is only **listed** |
+
+`StalePlan.strays` carries the processes; `cleanupPass` ends them just before the items go, never in a dry run, and the
+rest of the pass is unchanged (the guard, the rename, the log). The defaults are `INSTALL_LEFTOVER_DEFAULTS`
+(`keepBuilds`, `buildUntouchedHours`, `benchDays`, `captureDays`, `nightlyRunDays`, `rehearsalDays`,
+`sessionTempHours`, `scratchDays`, `outputCapGB`); the portal does not send them yet. Never looked into: `Library`,
+`Assets`, `ProjectSettings`, `Packages`, `Inbox`, `.git`, the sandbox folders themselves, the nightly lab's scripts and
+`state`, anything outside the root. A worktree with uncommitted work is never a candidate (only the named children above
+are). Tests: `server/installLeftovers.test.ts`, laid out from the recorded listing
+`server/fixtures/lothdesktop-2026-10-10.json` (what each rule takes and keeps, the strays named from the real
+command lines, a dry run and a real pass). The `python -` itself is guarded at the harness (the ff-agents lesson
+`python-dash-heredoc.md`: a Bash command must not feed `python -` through `eval`/a heredoc that can be lost), the daemon
+is the backstop that frees the space.
+
+### Where clean-up may delete (w896)
+
+**The rule** (lothsahn, 2026-10-10: "Why are you clearing C: on LothDesktop?  How much space are the unity caches using?  In
+general we should only be clearing D:", then "Sorry, in general we should only be clearing data in the install folder for
+the worker"): clean-up deletes only inside the machine's worker install folder, the `root` of its `root.json`
+(`D:\work\ffw` on LothDesktop, `F:\ffw` on BEAST, `~/ffw` or `/Users/Shared/ffw` on a Mac; `FF_WORKER_ROOT` in every
+agent's environment). Outside it a worker only **measures and reports** sizes, and lists every setting, script or
+tool that makes FF Factory write outside the folder, so the write can be moved inside (a request of its own). A brief that
+tells a worker to delete outside the folder is wrong, whoever wrote it.
+
+**What happened.** On 2026-10-10 w876 (LothDesktop's low-disk clean-up) deleted on C:, outside `D:\work\ffw`: dotnet
+workload temp, the Unity Hub installer, Temp entries past three days, `LocalLow\Never Games\finalfactory` test output and
+`~/.claude` transcripts past seven days (sourced from worker 37a50761's transcript). The dispatcher's own brief told it to;
+w892 was then filed to clear outside the folder too, and became measure-only. The w626 rule above ("remove FF Factory's own
+leftovers, never ask a person") had no boundary, and the notice built on it listed `C:\Users\...\AppData` as "biggest
+remaining", which reads as an invitation.
+
+**Where it is written down, and what enforces it** (every layer says the same, quoting lothsahn):
+
+| Layer | Where | What it does |
+|---|---|---|
+| every worker's brief | `DISK_HYGIENE`, `server/agents.ts` | delete only inside the root; measure and report outside; a brief that says otherwise is wrong; only a save copy in the game's saves folder is removed outside |
+| the dispatcher's and the orchestrators' instructions | `server/agents.ts` (the low-disk lines of both) | a clean-up worker's brief says the same and never contains a delete outside the folder; `list_machines` shows each machine's install folder (`describeDirs`) |
+| the notice "Clean-up cannot free enough disk space" | `describeShortfall`, `server/cleanup.ts` | states the rule with the machine's root, and tags every "biggest remaining" consumer `[inside the install folder]` or `[outside it: measure only]` |
+| the daemon's own pass | `cleanupPass` `root`, `fenceToRoot`; `machine/daemon.ts` | on a machine with a root, only entries strictly inside it are removed, whatever rule picked them; the rest is measured and listed in the pass's log, `machine_cleanup` and the dashboard ("Kept, for a person") |
+| a worker's shell | `server/rootFence.ts` via `sandboxGuard` (`workerRoot`, set from the machine's `root`) | refuses `rm`, `rmdir`, `del`, `rd`, `Remove-Item`, `find -delete`, `xargs rm` and a listing piped into a removal that name a path outside the root |
+| the harness lesson | ff-agents evidence-gate `lessons/delete-only-inside-the-worker-root.md` and its delete checklist | the check a worker meets before any delete |
+
+**The daemon's own rules, by place** (the audit asked for in w896; `server/installFolderFence.test.ts` pins this table for
+a root-install shape). Before w896 every row below the first removed things on C: that FF Factory does not keep inside the
+root. Now only the first group removes anything on a machine with a root.
+
+| Group | Rules (`id`) | Where | Now |
+|---|---|---|---|
+| **inside the root** | agent temp, temp scratch, agent clones, old temp (`agent-temp`, `temp-scratch`, `temp-clones`, `temp-old`), Claude Code task files (`claude-edit-diff`, `claude-temp`) in the agents' temp, the sandboxes' `Builds`, `Temp` and `Logs` (`sandbox-builds`, stale output), the nightly lab, player slots and agent worktrees under the root | `<root>/tmp` (the agents' `TMP`), `<root>/sandboxes`, `<root>/players`, `<root>/nightly` | removed, as before |
+| system temp, crash dumps | the same `temp-*` and `claude-*` rules on `%TEMP%` / `/tmp`, `unity-crashes`, `crash-dumps`, `diagnostic-reports` | `%LOCALAPPDATA%\Temp`, `%LOCALAPPDATA%\CrashDumps`, `~/Library/Logs` | **listed, not removed** |
+| Unity's own stores | `unity-logs`, `unity-gi-cache`, `unity-cache`, `unity-cache-low` | `%LOCALAPPDATA%\Unity`, `LocalLow\Unity\Caches\GiCache`, `~/Library/Unity` | **listed** |
+| tool caches | `npx`, `npm-cache`, `nuget-http`, `pip-cache`, `uv-cache`, `go-build-cache`, `homebrew-cache`, `xcode-derived`, `playwright`, `edge-webview` | the user's profile and `~/Library` | **listed** |
+| the game's data folder | `playtest-sessions` | `LocalLow\Never Games\finalfactory*\PlaytestSessions` | **listed** |
+| other | `worker-archives` (`~/ff-worker`), `actions-work` (runner job folders), `stale-library` (Unity Libraries of projects under the home folder) | the home folder, `C:\` | **listed** |
+| own leftovers outside the root | player slots in the old default roots (`~/nevergames/ff-players`, `D:\workf-players`, ...), Unity editors in Unity Hub's folders, worktrees of a clone outside the root | | **listed** |
+
+A machine **without** a root (the portal's own host, an install from before w513) is not fenced: nothing tells the daemon
+which folder is the worker's. Nothing is configurable: a person who wants a rule outside the root back says so, and it
+comes back as a named exception in this table. Flagged for lothsahn: on a root machine nothing now empties the Unity,
+npm, NuGet, Playwright and crash-dump stores on C: by itself (they were the hourly rules above); they grow until someone
+moves them inside the root or approves an exception.
+
+**What the guard does not see**: a script, `python shutil.rmtree`, a variable it cannot expand (`rm $X`), a `$(...)`
+value, a path on a mount it cannot map. It is a seatbelt like the rest of `server/guard.ts`; the instructions carry the rule,
+the guard catches the plain commands. It judges sandbox workers only (`workerRoot` is in their launch spec). It applies to
+every request, not only a clean-up one: a session's guard is fixed when it starts and a request can be handed to it later,
+and no ledger field says which requests are clean-ups, so "during a clean-up request" cannot be told apart. A worker has
+no other reason to delete outside its folder; the one it does have, the save copy it put in the game's saves folder (one
+entry, never `saves/*`), is allowed.
+
+**What a clean-up worker reports for what is outside the root**, each with a size (`du`, `Get-ChildItem | Measure-Object`):
+Unity Hub's editors and installers; `%LOCALAPPDATA%\Unity` (logs, package cache, licences); `LocalLow\Unity\Caches\GiCache`;
+`LocalLow\Never Games\finalfactory` (saves, `DeterminismAudit`, `AgentControl`, `TestResults.xml`, `PlaytestSessions`);
+`~/.claude` (transcripts, plugins); dotnet workload temp; the system temp; the npm, NuGet, pip, uv and Playwright caches;
+Windows crash dumps. For each: which setting or script makes FF Factory write there, and whether a variable could move it
+inside the root (candidates, not verified here: `NUGET_PACKAGES`, `npm_config_cache`, `PLAYWRIGHT_BROWSERS_PATH`,
+`DOTNET_CLI_HOME`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `CLAUDE_CONFIG_DIR`; Unity's own folders have none and the game's data
+folder has no override, [worker-root.md](worker-root.md) section 2). Moving one is a request for lothsahn to decide, not
+clean-up work.
 
 ## 6. Crash-safe data files
 

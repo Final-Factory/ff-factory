@@ -129,7 +129,9 @@ before redeploying by hand.
   `set_app_config ... machine: "<id>"`); the daemon keeps them in `cleanup.json` in its folder, so it goes on
   while the portal is down. After each pass it reports a summary (`cleanup`), shown by `list_machines` and
   the dashboard's meters; one that cannot get back above the soft threshold also tells the orchestrator,
-  with the biggest remaining consumers. Every pass is logged to `cleanup-log.jsonl` in the daemon's folder.
+  with the biggest remaining consumers. Every pass is logged to `cleanup-log.jsonl` in the daemon's folder. On a machine with a
+  worker install (`root`), clean-up removes only what is inside the install folder; what its rules pick outside it is measured
+  and listed ([self-recovery.md](self-recovery.md#where-clean-up-may-delete-w896), w896).
   `machine_cleanup` runs a pass now.
 - **Standing agents** run on a machine and need one ([standing-agents.md](standing-agents.md)): their folder is `agents/<id>` in the daemon's folder
   (`~/.ff-factory/agents/<id>` by default) on that Mac, runs wait (like a full slot) while the machine is offline, and budgets work unchanged.
