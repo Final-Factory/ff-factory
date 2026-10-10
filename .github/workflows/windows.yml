@@ -4,8 +4,8 @@ name: Windows tests
 # on those runners when needed. And if we have a valid linux test, don't run that test on windows and mac unless there's
 # a specific reason to test windows-specific differences"). Which files and why: .github/windows-tests.txt. Every test
 # also runs on Linux in ci.yml. This runs only when a pull request touches one of those tests or the code they cover on
-# Windows (the paths below, checked against the list by scripts/windows-tests.test.ts); main has no required checks, so a
-# run that never starts blocks nothing.
+# Windows (the paths below, checked against the list by scripts/windows-tests.test.ts), and once a day with every test
+# (the schedule below). main has no required checks, so a run that never starts blocks nothing.
 #
 # Before w910 the whole suite ran here in two shards on every pull request; w906 found why shard 1/2 flaked: an empty
 # coverage file (a node ended mid-write by PowerShell; this job collects no coverage, Linux does) and runners GitHub lost
@@ -22,6 +22,8 @@ on:
       - 'scripts/test-inflight-reporter.ts'
       - 'scripts/test-watchdog.test.ts'
       - 'scripts/test-watchdog.ts'
+      - 'server/cleanup.test.ts'
+      - 'server/cleanup.ts'
       - 'server/copyTree.test.ts'
       - 'server/elevation.test.ts'
       - 'server/elevation.ts'
@@ -58,6 +60,8 @@ on:
       - 'scripts/test-inflight-reporter.ts'
       - 'scripts/test-watchdog.test.ts'
       - 'scripts/test-watchdog.ts'
+      - 'server/cleanup.test.ts'
+      - 'server/cleanup.ts'
       - 'server/copyTree.test.ts'
       - 'server/elevation.test.ts'
       - 'server/elevation.ts'
@@ -84,7 +88,18 @@ on:
       - 'server/watchdog.ts'
       - '.github/windows-tests.txt'
       - '.github/workflows/windows.yml'
+  # The safety net: the whole suite on Windows once a day, for what no list names. In the 30 days to 2026-10-10 the
+  # Windows runs caught 2 real bugs Linux missed, both before merge: a path rule in server/cleanup.ts (now listed) and a
+  # timing one in server/machines.ts (a slow fsync on Windows held a handshake back: 3d56a5b) that only the whole
+  # suite would have met. About 80 other Windows-only failures were flakes or test fixes (w910).
+  schedule:
+    - cron: '17 9 * * *'
   workflow_dispatch:
+    inputs:
+      all:
+        description: Every test file, as the daily run does
+        type: boolean
+        default: false
 
 concurrency:
   group: windows-${{ github.event.pull_request.number || github.ref }}
@@ -95,9 +110,9 @@ permissions:
 
 jobs:
   windows:
-    name: Windows tests
+    name: Windows tests${{ (github.event_name == 'schedule' || inputs.all) && ' (the whole suite)' || '' }}
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -109,10 +124,15 @@ jobs:
           git config --global user.name "FF Factory CI"
           git config --global user.email "ci@users.noreply.github.com"
       - run: npm ci --no-audit --no-fund
-      - name: The tests that need Windows (.github/windows-tests.txt)
-        timeout-minutes: 11
+      - name: The tests that need Windows (.github/windows-tests.txt), or every test once a day
+        # The whole suite took about 6 min of tests on one runner before w910; the listed files, about 2.
+        timeout-minutes: 17
         shell: bash
+        env:
+          ALL: ${{ github.event_name == 'schedule' || inputs.all }}
         run: |
-          mapfile -t files < <(grep -vE '^\s*(#|$)' .github/windows-tests.txt | cut -d'|' -f1 | tr -d ' ')
+          if [ "$ALL" = true ]; then files=(server/*.test.ts scripts/*.test.ts); else
+            mapfile -t files < <(grep -vE '^\s*(#|$)' .github/windows-tests.txt | cut -d'|' -f1 | tr -d ' ')
+          fi
           echo "${#files[@]} test files"
-          node scripts/test-watchdog.ts --minutes 9 -- node --test --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout "${files[@]}"
+          node scripts/test-watchdog.ts --minutes $([ "$ALL" = true ] && echo 15 || echo 9) -- node --test --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout "${files[@]}"

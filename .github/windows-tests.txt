@@ -19,6 +19,7 @@ server/sandboxes.test.ts | server/sandboxes.ts | a file held without delete shar
 server/elevation.test.ts | server/elevation.ts | the real signed-in-desktop check through CIM
 server/opsWorker.test.ts | server/opsWorker.ts | named pipes, as on the Windows portal host
 server/orchestratorMemory.test.ts | server/orchestratorMemory.ts | the memory guard's Windows path rules on a real NTFS file system
+server/cleanup.test.ts | server/cleanup.ts | path rules on a real Windows host, where a /-rooted path resolves under C: (abea9f5: a Windows-only bug this caught on a PR)
 server/ownLeftovers.test.ts | server/ownLeftovers.ts | the clean-up plan on a real Windows file system
 server/machineUnityMcp.test.ts | machine/sandboxes.ts | the real sandbox pool's Windows commands (realPoolDeps('win32'))
 scripts/test-watchdog.test.ts | scripts/test-watchdog.ts, scripts/test-inflight-reporter.ts | the process list from CIM and taskkill /T when a run hangs
