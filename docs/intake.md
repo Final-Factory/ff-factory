@@ -418,10 +418,11 @@ a Development build on an internal Mac) were declined, and their reports still r
   answered `skipped` ("its reports were declined in wNNN") and not filed; one that also holds a report nobody declined is
   filed as before.
 - **The backfill** is the same pass: every request declined in the last 30 days is told at the first start with it.
-- **Measuring it from a worker** (no `ffbox_activity` there): `fetch_ffbox_report` with `file: "crash.json"` (or any
-  small file) puts `<id>.manifest.json` in `Inbox/`; its `report` object is FFBox's own `reports` view of that report,
-  raw (`obsolete`, `fixed`, `conversation`), before the portal renders it, so it shows a field a portal without the
-  change does not print yet.
+- **Measuring it from a worker** (no `ffbox_activity` there): `fetch_ffbox_report` with `file: "details.json"` (or any
+  small file) puts `<id>.manifest.json` in `Inbox/`; its `report` object is FFBox's own `report` query view of that
+  report, raw (`obsolete`, `fixed`, `conversation`), before the portal renders it, so it shows a field a portal without
+  the change does not print yet. `fixed` and `obsolete` are in it since ffbox 373c523 (2026-10-10); before that only
+  the `reports` list carried them.
 
 ## Nightly e2e regressions
 
