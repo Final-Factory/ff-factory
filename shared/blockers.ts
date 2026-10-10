@@ -188,8 +188,11 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts): BlockerVerdict 
       const c = b.ref ? f.ci?.(b.ref) : undefined;
       if (c?.done) return { state: 'clear', why: c.text };
       // w829: checks FF Factory cannot read do not hold the request in silence: after CI_UNREADABLE_MS its worker looks.
+      // The clock starts at the later of the first failed read and this block, so a request blocked again on the same
+      // unreadable CI waits its own CI_UNREADABLE_MS (no clear-and-block-again loop every minute).
       const u = !c && b.ref ? f.ciUnreadable?.(b.ref) : undefined;
-      if (u && f.now - u.since >= CI_UNREADABLE_MS) return { state: 'clear', why: `FF Factory could not read CI on ${b.ref} for ${Math.round((f.now - u.since) / 60_000)} min (${u.why}), so its worker checks CI itself` };
+      const unreadableFor = u ? f.now - Math.max(u.since, at) : 0;
+      if (u && unreadableFor >= CI_UNREADABLE_MS) return { state: 'clear', why: `FF Factory could not read CI on ${b.ref} for ${Math.round(unreadableFor / 60_000)} min (${u.why}), so its worker checks CI itself` };
       return late(c?.text ?? `CI on ${b.ref} is running`);
     }
     case 'pr': {

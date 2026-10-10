@@ -2062,6 +2062,83 @@ test('w754: w750 as it happened: block on A, a hold, the hold lifted with A stil
   assert.equal(ok.isError, false, ok.text);
 });
 
+test("w829: w814 as it happened: the dispatcher blocks a worker on CI and cancels its check-in; the checks can't be read; it is logged, and after 15 minutes the worker gets its check-in back. CI read red clears too", async (t) => {
+  const { store, machines, agents, o, dispatcher, call, heard } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Construction bots', title: 'w1: bots', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+
+  // 00:16 the worker sets itself an 8-minute check-in to merge #1338 on green; 00:17 the dispatcher blocks it on that CI.
+  await h.wake_me!({ minutes: 8, note: 'w1: merge #1338 when Test in editmode is green' });
+  const ref = 'Final-Factory/FinalFactory#1338';
+  const blocked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'only CI left', blocker: { kind: 'ci', ref, what: 'CI on PR #1338' } });
+  assert.equal(blocked.isError, false, blocked.text);
+  assert.equal(agents.waker.pending(id), undefined, 'cancelled, as before');
+  const w1 = () => store.work.get('w1')!;
+  assert.equal(w1().status, 'blocked');
+  assert.deepEqual(w1().heldCheckIns?.map((c) => [c.session, c.note]), [[id, 'w1: merge #1338 when Test in editmode is green']], 'but kept on the request');
+
+  // The portal's gh cannot read the checks. Before w829: undefined in silence, for hours. Now: logged once, then cleared.
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (...a: unknown[]) => void warned.push(a.join(' '));
+  t.after(() => {
+    console.warn = warn;
+  });
+  let clock = Date.now();
+  let reads = 0;
+  let ci: () => { done: boolean; text: string } = () => {
+    throw new Error('its checks: GraphQL: Resource not accessible by personal access token; its Actions runs: HTTP 403');
+  };
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, ci: async () => (reads++, ci()) });
+  assert.equal((await watch.tick()).size, 0);
+  assert.deepEqual(warned, [`blocker watch: cannot read CI on ${ref}: its checks: GraphQL: Resource not accessible by personal access token; its Actions runs: HTTP 403`]);
+  for (const m of [5, 10]) {
+    clock += 5 * 60_000;
+    assert.equal((await watch.tick()).size, 0, `still waiting at ${m} min`);
+  }
+  assert.equal(warned.length, 1, 'logged when it starts failing, not every read');
+  assert.equal(reads, 3, 'read every 5 minutes');
+  clock += 5 * 60_000;
+  assert.match((await watch.tick()).get('w1')!, /^clear: FF Factory could not read CI on Final-Factory\/FinalFactory#1338 for 15 min \(its checks: GraphQL: Resource not accessible/);
+  // The worker's own check-in is back, due in a minute, and the request is its again.
+  assert.equal(w1().status, 'active');
+  assert.equal(w1().blocked, undefined);
+  const back = agents.waker.pending(id)!;
+  assert.ok(Date.parse(back.at) - Date.now() <= 61_000, 'fires within a minute');
+  assert.match(back.note, /^w1 is unblocked: CI on Final-Factory\/FinalFactory#1338 cleared \(FF Factory could not read CI on .* so its worker checks CI itself\)\. This is your own check-in, which the block cancelled; carry on from it\. Its note was: w1: merge #1338 when Test in editmode is green$/);
+  assert.ok(w1().log.at(-1)!.includes(` unblocked (handed back ${id}'s check-in, which resumes it now): CI on Final-Factory/FinalFactory#1338 cleared (FF Factory could not read CI`), w1().log.at(-1)!);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(heard(dispatcher().info.id, '[ledger] w1').length, 0);
+
+  // w2: blocked on CI with no worker and no check-in. Its first read fails too; the next reads, and CI finished red (#1328:
+  // its editmode run cancelled at its 90-minute limit). Red is finished: it clears, the recovery is logged, and the dispatcher
+  // is told to start it.
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'x', blocker: { kind: 'ci', ref: 'Final-Factory/FinalFactory#1328', what: 'CI on PR #1328' } })).isError, false);
+  clock += 5 * 60_000;
+  assert.equal((await watch.tick()).size, 0);
+  assert.equal(warned.length, 2);
+  assert.match(warned[1], /^blocker watch: cannot read CI on Final-Factory\/FinalFactory#1328: /);
+  ci = () => ({ done: true, text: 'CI on Final-Factory/FinalFactory#1328 finished: 1 of 2 workflow runs failed (Test Runner: cancelled)' });
+  const logged: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => void logged.push(a.join(' '));
+  try {
+    clock += 5 * 60_000;
+    assert.match((await watch.tick()).get('w2')!, /^clear: CI on Final-Factory\/FinalFactory#1328 finished: 1 of 2 workflow runs failed \(Test Runner: cancelled\)$/);
+  } finally {
+    console.log = log;
+  }
+  assert.ok(logged.includes('blocker watch: CI on Final-Factory/FinalFactory#1328 reads again after 5 min: CI on Final-Factory/FinalFactory#1328 finished: 1 of 2 workflow runs failed (Test Runner: cancelled)'), logged.join(' | '));
+  assert.equal(store.work.get('w2')!.status, 'new');
+  await until('the dispatcher is told to start w2', () => heard(dispatcher().info.id, '[ledger] w2').some((e) => /is unblocked: it waited on CI on Final-Factory\/FinalFactory#1328 \(CI on PR #1328\), and CI on .*Test Runner: cancelled.*Start it now: start_agent with work_id "w2"/.test(e.text)));
+});
+
 test('w754: a gate that stalls stalls the request, naming that gate; one closed without delivering asks the requester, with no gate kept through the question', async (t) => {
   const { store, agents, o, dispatcher, call } = setup(t);
   agentsRoom(agents, []);
@@ -2143,9 +2220,15 @@ test('w754: a worker whose request waits only on a PR and another request calls 
   assert.match(await live(), /Blocked on w1 finishing/);
   store.work.get('w1')!.status = 'done';
   await watch.tick();
-  assert.equal(store.work.get('w2')!.status, 'new');
-  await until('the dispatcher is told to resume the worker', () => heard(dispatcher().info.id, '[ledger] w2').some((e) => e.text.includes(`Start it now: start_agent with work_id "w2", or message_agent with work_id to its worker ${id}`)));
-  // The resume goes through, with no override: nothing is gated any more.
+  // w829: the check-in the block cancelled (the latest, "w2: again") is handed back to fire in a minute: the worker resumes
+  // itself and the request is its again, with no dispatcher round trip.
+  assert.equal(store.work.get('w2')!.status, 'active');
+  assert.equal(store.work.get('w2')!.heldCheckIns, undefined);
+  assert.equal(agents.waker.pending(id)?.note, "w2 is unblocked: w1 finishing cleared (w1 closed as done). This is your own check-in, which the block cancelled; carry on from it. Its note was: w2: again");
+  assert.ok(store.work.get('w2')!.log.at(-1)!.endsWith(`unblocked (handed back ${id}'s check-in, which resumes it now): w1 finishing cleared (w1 closed as done)`), store.work.get('w2')!.log.at(-1)!);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(heard(dispatcher().info.id, '[ledger] w2').length, 0, 'the dispatcher is not asked to start it as well');
+  // A message to the worker goes through, with no override: nothing is gated any more.
   const resumed = await call(dispatcher().info, 'message_agent', { session_id: id, text: 'w1 and the PR merged: go on.', work_id: 'w2' });
   assert.equal(resumed.isError, false, resumed.text);
   assert.equal(store.work.get('w2')!.status, 'active');

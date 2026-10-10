@@ -24,6 +24,8 @@ import type { SessionInfo, WorkItem } from '../shared/types.ts';
 const EVERY_MS = 60_000;
 /** A pull request's checks are read at most this often each (gh; GitHub's rate limit is 5000 calls an hour). */
 const CI_EVERY_MS = 5 * 60_000;
+/** A pull request that cannot be read is logged when it starts failing and again this often while it does (w829). */
+const READ_FAIL_LOG_MS = 30 * 60_000;
 const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
 
 export type CiState = { done: boolean; text: string };
@@ -60,6 +62,7 @@ export class BlockerWatch {
   /** w829: pull requests whose checks could not be read: since when, why, and when that was last logged. */
   private readonly ciFailing = new Map<string, { since: number; why: string; logged: number }>();
   private readonly prSeen = new Map<string, { at: number; state?: PrState }>();
+  private readonly prFailing = new Map<string, { since: number; why: string; logged: number }>();
   private readonly d: BlockerWatchDeps;
 
   constructor(d: BlockerWatchDeps) {
@@ -160,13 +163,36 @@ export class BlockerWatch {
     };
   }
 
-  /** A pull request's state, read at most every CI_EVERY_MS (w754). */
+  /** A pull request's state, read at most every CI_EVERY_MS (w754). A read that fails is logged as for CI (w829). */
   private async prOf(ref: string): Promise<PrState | undefined> {
     const seen = this.prSeen.get(ref);
-    if (seen && this.now() - seen.at < CI_EVERY_MS) return seen.state;
-    const state = await (this.d.pr ?? ghPr)(ref).catch(() => undefined);
-    this.prSeen.set(ref, { at: this.now(), state });
+    const now = this.now();
+    if (seen && now - seen.at < CI_EVERY_MS) return seen.state;
+    let state: PrState | undefined;
+    let why = 'no answer';
+    try {
+      state = await (this.d.pr ?? ghPr)(ref);
+    } catch (e) {
+      why = clipLine((e as Error).message, 300);
+    }
+    this.prSeen.set(ref, { at: now, state });
+    this.noteRead(this.prFailing, 'the state of', ref, now, state?.text, why);
     return state;
+  }
+
+  /**
+   * Remembers and logs a read of a pull request that failed: the first time, every 30 minutes after, and when it reads
+   * again (w829: CI reads failed in silence for hours).
+   */
+  private noteRead(failing: Map<string, { since: number; why: string; logged: number }>, what: string, ref: string, now: number, read: string | undefined, why: string) {
+    const was = failing.get(ref);
+    if (read !== undefined) {
+      if (was) console.log(`blocker watch: ${what} ${ref} reads again after ${Math.round((now - was.since) / 60_000)} min: ${read}`);
+      failing.delete(ref);
+    } else if (!was || now - was.logged >= READ_FAIL_LOG_MS) {
+      console.warn(`blocker watch: cannot read ${what} ${ref}${was ? ` (for ${Math.round((now - was.since) / 60_000)} min)` : ''}: ${why}`);
+      failing.set(ref, { since: was?.since ?? now, why, logged: now });
+    } else failing.set(ref, { ...was, why });
   }
 
   /**
@@ -185,14 +211,7 @@ export class BlockerWatch {
       why = clipLine((e as Error).message, 300);
     }
     this.ciSeen.set(ref, { at: now, state });
-    const was = this.ciFailing.get(ref);
-    if (state) {
-      if (was) console.log(`blocker watch: CI on ${ref} reads again after ${Math.round((now - was.since) / 60_000)} min: ${state.text}`);
-      this.ciFailing.delete(ref);
-    } else if (!was || now - was.logged >= 30 * 60_000) {
-      console.warn(`blocker watch: cannot read CI on ${ref}${was ? ` (for ${Math.round((now - was.since) / 60_000)} min)` : ''}: ${why}`);
-      this.ciFailing.set(ref, { since: was?.since ?? now, why, logged: now });
-    } else this.ciFailing.set(ref, { ...was, why });
+    this.noteRead(this.ciFailing, 'CI on', ref, now, state?.text, why);
     return state;
   }
 }
@@ -248,15 +267,19 @@ export function prState(pr: { state?: string }, ref: string): PrState {
   return { state: 'open', text: `${ref} is still open` };
 }
 
-async function ghPr(ref: string): Promise<PrState | undefined> {
+/** A pull request's state through gh; throws, saying what gh said, when it cannot be read (w829). */
+export async function ghPr(ref: string, run: Runner = runProc): Promise<PrState> {
   const m = CI_REF.exec(ref);
-  if (!m) return undefined;
-  const r = await runProc('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
-  if (r.code !== 0) return undefined;
+  if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
+  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  if (r.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(r)}`);
   return prState(JSON.parse(r.stdout) as { state?: string }, ref);
 }
 
 type Runner = (cmd: string, args: string[], opts?: RunOptions) => Promise<RunResult>;
+
+/** What a failed gh call said, on one line. */
+const ghSaid = (r: RunResult) => clipLine(r.stderr || r.stdout || `exit ${r.code}`, 200);
 
 /** Logged once per server: statusCheckRollup is refused, so CI is read from Actions runs (w829). */
 let rollupRefusedLogged = false;
@@ -271,19 +294,18 @@ export async function ghChecks(ref: string, run: Runner = runProc): Promise<CiSt
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
   const opts = { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } };
-  const said = (r: RunResult) => clipLine(r.stderr || r.stdout || `exit ${r.code}`, 200);
   const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,statusCheckRollup'], opts);
   if (r.code === 0) return checksState(JSON.parse(r.stdout) as { state?: string; statusCheckRollup?: GhCheck[] }, ref);
   const p = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,headRefOid'], opts);
-  if (p.code !== 0) throw new Error(`gh pr view ${ref}: ${said(p)}`);
+  if (p.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(p)}`);
   const pr = JSON.parse(p.stdout) as { state?: string; headRefOid?: string };
   if (pr.state === 'MERGED' || pr.state === 'CLOSED') return checksState(pr, ref);
-  if (!pr.headRefOid) throw new Error(`gh pr view ${ref} gave no head commit; its checks: ${said(r)}`);
+  if (!pr.headRefOid) throw new Error(`gh pr view ${ref} gave no head commit; its checks: ${ghSaid(r)}`);
   const a = await run('gh', ['api', `repos/${m[1]}/actions/runs?head_sha=${pr.headRefOid}&per_page=100`], opts);
-  if (a.code !== 0) throw new Error(`its checks: ${said(r)}; its Actions runs: ${said(a)}`);
+  if (a.code !== 0) throw new Error(`its checks: ${ghSaid(r)}; its Actions runs: ${ghSaid(a)}`);
   if (!rollupRefusedLogged) {
     rollupRefusedLogged = true;
-    console.warn(`blocker watch: gh cannot read pull requests' checks (${said(r)}); CI blocks read their GitHub Actions runs instead`);
+    console.warn(`blocker watch: gh cannot read pull requests' checks (${ghSaid(r)}); CI blocks read their GitHub Actions runs instead`);
   }
   return runsState(JSON.parse(a.stdout) as { workflow_runs?: GhRun[] }, ref);
 }

@@ -3117,7 +3117,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     w.blocked = undefined;
     w.alsoBlocked = undefined;
     w.heldCheckIns = undefined;
-    this.stamp(w, `unblocked: ${name} cleared (${why})${back.length ? `; handed back ${back.map((sid) => `${sid}'s check-in`).join(', ')}, which resumes it now` : ''}`);
+    // The hand-back goes first: a log line is clipped, and a CI reason can be long.
+    this.stamp(w, `unblocked${back.length ? ` (handed back ${back.map((sid) => `${sid}'s check-in`).join(', ')}, which resumes it now)` : ''}: ${name} cleared (${why})`);
     this.store.putWork(w);
     console.log(`ledger: unblocked ${w.id}: ${name} cleared (${why})${back.length ? `; handed back the check-in of ${back.join(', ')}` : ''}`);
     if (back.length) {

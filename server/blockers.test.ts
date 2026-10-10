@@ -1,9 +1,10 @@
 // w643: what a Blocked request waits on, and when each kind of blocker clears, stays open, gets stuck or needs a person.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BLOCKER_STUCK_MS, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { BLOCKER_STUCK_MS, CI_UNREADABLE_MS, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
 import type { WorkBlocker, WorkItem } from '../shared/types.ts';
-import { checksState } from './blockerWatch.ts';
+import { checksState, ghChecks, ghPr, runsState } from './blockerWatch.ts';
+import type { RunResult } from './proc.ts';
 
 const NOW = Date.parse('2026-10-07T12:00:00Z');
 const ago = (h: number) => new Date(NOW - h * 3_600_000).toISOString();
@@ -163,4 +164,117 @@ test('w754: a request with several gates is named by all of them; gates are the 
   // Two requests waiting on each other through a second gate are caught too.
   const work = [item('w750', { status: 'blocked', blocked: block({ kind: 'request', ref: 'w1' }), alsoBlocked: [block({ kind: 'request', ref: 'w752' })] }), item('w752')];
   assert.match(blockerProblem({ kind: 'request', ref: 'w750', what: 'x' }, 'w752', facts(work))!, /wait on each other/);
+});
+
+// ---------------------------------------------------------------- w829: CI blocks that never cleared
+
+/** The rollup of #1338 (w814) as gh read it on 2026-10-10 (measured, BEAST's gh); #1335's (w818) had the same nine checks. */
+const ROLLUP_1338 = ['docs/Lessons-Index.md freshness:SUCCESS', 'Mode-2 nightly freshness:SUCCESS', 'Nightly e2e ledger:SUCCESS', 'Is this push a version bump:SKIPPED', 'Test in editmode:SUCCESS', 'Release:SKIPPED', 'Branch tip for the cache refresh:SKIPPED', 'Refresh the branch entry after the release:SKIPPED', 'editmode Test Results:SUCCESS'].map((c) => {
+  const [name, conclusion] = c.split(':');
+  return { name, status: 'COMPLETED', conclusion };
+});
+
+test('w829: the checks of #1338 (w814) and #1335 (w818) as they finished read as done, so their blocks held only because the read failed', () => {
+  // Both PRs' rollups had every check COMPLETED (Test in editmode at 00:26Z and 00:06Z): checksState clears them at once.
+  for (const ref of ['Final-Factory/FinalFactory#1338', 'Final-Factory/FinalFactory#1335']) {
+    assert.deepEqual(checksState({ state: 'OPEN', statusCheckRollup: ROLLUP_1338 }, ref), { done: true, text: `CI on ${ref} finished: all 9 checks passed or skipped` });
+  }
+  // #1328 (w808): its editmode job hung and was cancelled after 90 minutes: done, and named as failed.
+  const cancelled = checksState({ state: 'OPEN', statusCheckRollup: [{ name: 'Test in editmode', status: 'COMPLETED', conclusion: 'CANCELLED' }, { name: 'Release', status: 'COMPLETED', conclusion: 'SKIPPED' }] }, 'Final-Factory/FinalFactory#1328');
+  assert.deepEqual(cancelled, { done: true, text: 'CI on Final-Factory/FinalFactory#1328 finished: 1 of 2 checks failed (Test in editmode)' });
+});
+
+test('w829: Actions runs, the reading without Checks permission: running, green, red, cancelled (#1328), none yet', () => {
+  const ref = 'Final-Factory/FinalFactory#1328';
+  assert.deepEqual(runsState({ workflow_runs: [] }, ref), { done: false, text: `${ref} has no workflow runs yet` });
+  assert.deepEqual(runsState({ workflow_runs: [{ name: 'Lessons index freshness', status: 'completed', conclusion: 'success' }, { name: 'Test Runner', status: 'in_progress', conclusion: null }] }, ref), { done: false, text: `1 of 2 workflow runs on ${ref} still running (Test Runner)` });
+  assert.equal(runsState({ workflow_runs: [{ name: 'Test Runner', status: 'queued' }] }, ref).done, false);
+  assert.equal(runsState({ workflow_runs: [{ name: 'Test Runner', status: 'waiting' }] }, ref).done, false, 'waiting for an approval is not finished');
+  // Green: every run completed with success or skipped.
+  assert.deepEqual(runsState({ workflow_runs: [{ name: 'Lessons index freshness', status: 'completed', conclusion: 'success' }, { name: 'Test Runner', status: 'completed', conclusion: 'success' }, { name: 'Release', status: 'completed', conclusion: 'skipped' }] }, ref), { done: true, text: `CI on ${ref} finished: all 3 workflow runs passed or skipped` });
+  // Red: a failure, and #1328's first attempt, cancelled at its 90-minute limit (run 37997522857, 23:38Z): both done, both named.
+  assert.deepEqual(runsState({ workflow_runs: [{ name: 'Test Runner', status: 'completed', conclusion: 'failure' }] }, ref), { done: true, text: `CI on ${ref} finished: 1 of 1 workflow runs failed (Test Runner: failure)` });
+  assert.deepEqual(runsState({ workflow_runs: [{ name: 'Lessons index freshness', status: 'completed', conclusion: 'success' }, { name: 'Test Runner', status: 'completed', conclusion: 'cancelled' }] }, ref), { done: true, text: `CI on ${ref} finished: 1 of 2 workflow runs failed (Test Runner: cancelled)` });
+  for (const conclusion of ['timed_out', 'startup_failure', 'action_required']) assert.match(runsState({ workflow_runs: [{ name: 'T', status: 'completed', conclusion }] }, ref).text, /1 of 1 workflow runs failed/, conclusion);
+});
+
+/** A fake gh: answers by the command's words; anything else is a failure. */
+function fakeGh(answers: { match: RegExp; out?: unknown; err?: string }[]) {
+  const calls: string[] = [];
+  const run = async (cmd: string, args: string[]): Promise<RunResult> => {
+    const line = [cmd, ...args].join(' ');
+    calls.push(line);
+    const a = answers.find((x) => x.match.test(line));
+    if (!a) return { code: 1, stdout: '', stderr: `unexpected: ${line}` };
+    return a.err !== undefined ? { code: 1, stdout: '', stderr: a.err } : { code: 0, stdout: JSON.stringify(a.out), stderr: '' };
+  };
+  return { run, calls };
+}
+
+/** What gh says when a fine-grained token reads a check run (representative; GitHub gives those tokens no Checks permission). */
+const REFUSED = 'GraphQL: Resource not accessible by personal access token (repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes.0)';
+
+test("w829: ghChecks reads the rollup; where GitHub refuses it, the PR state and its head commit's Actions runs; it throws with gh's words when neither reads", async () => {
+  const ref = 'Final-Factory/FinalFactory#1328';
+  // A token with Checks permission: the rollup, one call.
+  const ok = fakeGh([{ match: /statusCheckRollup/, out: { state: 'OPEN', statusCheckRollup: ROLLUP_1338 } }]);
+  assert.equal((await ghChecks(ref, ok.run)).done, true);
+  assert.deepEqual(ok.calls, ['gh pr view 1328 -R Final-Factory/FinalFactory --json state,statusCheckRollup']);
+
+  // The portal's fine-grained token: the rollup is refused, the runs are read instead.
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (...a: unknown[]) => void warned.push(a.join(' '));
+  try {
+    const fg = (runs: unknown, state = 'OPEN') =>
+      fakeGh([
+        { match: /statusCheckRollup/, err: REFUSED },
+        { match: /--json state,headRefOid$/, out: { state, headRefOid: 'b29072e5bb888423364803d52718e93542b53001' } },
+        { match: /^gh api repos\/Final-Factory\/FinalFactory\/actions\/runs\?head_sha=b29072e5bb888423364803d52718e93542b53001&per_page=100$/, out: { workflow_runs: runs } },
+      ]);
+    const running = fg([{ name: 'Test Runner', status: 'in_progress', conclusion: null }]);
+    assert.deepEqual(await ghChecks(ref, running.run), { done: false, text: `1 of 1 workflow runs on ${ref} still running (Test Runner)` });
+    assert.equal(running.calls.length, 3);
+    assert.equal(warned.length, 1);
+    assert.match(warned[0], /^blocker watch: gh cannot read pull requests' checks \(GraphQL: Resource not accessible by personal access token .*\); CI blocks read their GitHub Actions runs instead$/);
+    assert.equal((await ghChecks(ref, fg([{ name: 'Test Runner', status: 'completed', conclusion: 'cancelled' }]).run)).text, `CI on ${ref} finished: 1 of 1 workflow runs failed (Test Runner: cancelled)`);
+    assert.equal((await ghChecks(ref, fg([{ name: 'Test Runner', status: 'completed', conclusion: 'success' }]).run)).done, true);
+    assert.equal(warned.length, 1, 'said once per server, not per read');
+    // Merged (w818: #1335 merged while its block held): done from the PR state alone, no runs read.
+    const merged = fg([], 'MERGED');
+    assert.deepEqual(await ghChecks(ref, merged.run), { done: true, text: `${ref} is merged` });
+    assert.equal(merged.calls.length, 2);
+  } finally {
+    console.warn = warn;
+  }
+
+  // Nothing reads (gh logged out, the network down): it throws, saying what gh said, never a silent undefined.
+  const down = fakeGh([{ match: /./, err: 'HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login' }]);
+  await assert.rejects(ghChecks(ref, down.run), { message: 'gh pr view Final-Factory/FinalFactory#1328: HTTP 401: Bad credentials (https://api.github.com/graphql) Try authenticating with: gh auth login' });
+  const noRuns = fakeGh([
+    { match: /statusCheckRollup/, err: REFUSED },
+    { match: /--json state,headRefOid$/, out: { state: 'OPEN', headRefOid: 'abc' } },
+    { match: /actions\/runs/, err: 'HTTP 403: Resource not accessible by personal access token' },
+  ]);
+  await assert.rejects(ghChecks(ref, noRuns.run), /its checks: GraphQL: Resource not accessible.*; its Actions runs: HTTP 403: Resource not accessible by personal access token/);
+  await assert.rejects(ghChecks('#1328', ok.run), /"#1328" is not a pull request/);
+  // The pr blocker's read throws the same way.
+  await assert.rejects(ghPr(ref, down.run), /gh pr view Final-Factory\/FinalFactory#1328: HTTP 401: Bad credentials/);
+  assert.deepEqual(await ghPr(ref, fakeGh([{ match: /--json state$/, out: { state: 'MERGED' } }]).run), { state: 'merged', text: `${ref} merged` });
+});
+
+test('w829: CI that cannot be read clears its block after CI_UNREADABLE_MS so its worker looks itself; the clock restarts with a new block', () => {
+  assert.equal(CI_UNREADABLE_MS, 15 * 60_000);
+  const ref = 'Final-Factory/FinalFactory#1338';
+  const ci = block({ kind: 'ci', ref, what: "#1338's checks", at: ago(2) });
+  const unreadable = (minutes: number) => ({ ci: () => undefined, ciUnreadable: () => ({ since: NOW - minutes * 60_000, why: REFUSED }) });
+  assert.deepEqual(blockerVerdict(ci, facts([], unreadable(10))), { state: 'open', why: `CI on ${ref} is running` });
+  assert.deepEqual(blockerVerdict(ci, facts([], unreadable(15))), { state: 'clear', why: `FF Factory could not read CI on ${ref} for 15 min (${REFUSED}), so its worker checks CI itself` });
+  // A request blocked again on the same CI 5 minutes ago waits its own 15 minutes, not a clear every minute.
+  const again = { ...ci, at: new Date(NOW - 5 * 60_000).toISOString() };
+  assert.equal(blockerVerdict(again, facts([], unreadable(60))).state, 'open');
+  assert.match(blockerVerdict({ ...again, at: new Date(NOW - 16 * 60_000).toISOString() }, facts([], unreadable(60))).why, /could not read CI on .* for 16 min/);
+  // A read that works wins: running stays open, done clears with its words.
+  assert.equal(blockerVerdict(ci, facts([], { ci: () => ({ done: false, text: 'running' }), ciUnreadable: () => undefined })).state, 'open');
+  assert.deepEqual(blockerVerdict(ci, facts([], { ci: () => ({ done: true, text: 'all passed' }) })), { state: 'clear', why: 'all passed' });
 });

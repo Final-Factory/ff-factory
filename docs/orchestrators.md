@@ -218,7 +218,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 | `usage` | the Claude account (its email or label) | its meters are under 90% | 8 days |
 | `lock` | its name ("lab.lock"); `holder`: the request holding it; `until`: when to look again | the holder closes or reports, the nightly lab posts its next results (its run let go of the lock), or `until` passes | 1 day |
 | `time` | none; `until` | `until` passes | never |
-| `ci` | the pull request, "owner/repo#123" | none of its checks is still running (it says which failed), or it merged or closed (`gh pr view`, at most every 5 minutes) | 6 hours |
+| `ci` | the pull request, "owner/repo#123" | none of its checks is still running (it says which failed: a failed, timed-out or cancelled run is finished too), or it merged or closed (`gh pr view`, at most every 5 minutes; where GitHub refuses the checks, its head commit's Actions runs, w829). Checks it cannot read for 15 minutes clear it too, and its worker looks itself | 6 hours |
 | `pr` (w754) | the pull request, "owner/repo#123" | it MERGED (`gh pr view`, at most every 5 minutes). Closed without merging: it asks its requester. For "wait for #1291 to merge"; `ci` also clears when the checks finish unmerged, and a request closes later than its PR merges | 7 days |
 
 The stuck times are judgments (`shared/blockers.ts` `BLOCKER_STUCK_MS`): a CI run takes minutes to an hour; a lock held
@@ -226,9 +226,21 @@ a day is a run that never ended; a machine away three days is down, not asleep; 
 days; a deploy is a person's call, and a week without one is worth their look.
 
 - **It unblocks by itself.** The blocker watch (`server/blockerWatch.ts`) looks at every blocked request each minute,
-  and at once when one is blocked or the nightly lab reports. When the blocker clears, the request goes back to the
-  dispatcher (`new`), which gets `[ledger] w634 "…" is unblocked: it waited on w633 finishing (…), and w633 closed as
-  done. Start it now: …`, and its people hear why. No person nudges it.
+  and at once when one is blocked or the nightly lab reports. When the blocker clears, a worker whose check-in the block
+  cancelled gets it back (below, "No poll is left behind") and the request is its again (`active`); otherwise the request
+  goes back to the dispatcher (`new`), which gets `[ledger] w634 "…" is unblocked: it waited on w633 finishing (…), and
+  w633 closed as done. Start it now: …`. Its people hear why either way. No person nudges it.
+- **CI it cannot read does not hold a request in silence** (w829). On 2026-10-10 w814, w818 and w808 sat Blocked on CI for
+  2 to 3 hours after their checks had finished (#1338 green at 00:26Z, #1335 at 00:06Z, #1328's editmode run cancelled at
+  23:38Z): every `gh pr view --json statusCheckRollup` failed, and the watch took a failed read for "still running" and
+  said nothing. The likely cause (sourced, not measured on the portal): the portal's `gh` logs in with a fine-grained
+  token ([portal-on-ffbox-host.md](portal-on-ffbox-host.md) D7), and GitHub gives fine-grained tokens no Checks
+  permission. Now `ghChecks` reads the rollup first and, where GitHub refuses it, the PR's state and its head commit's
+  GitHub Actions runs (`GET /repos/{owner}/{repo}/actions/runs?head_sha=…`, "Actions: read"; `runsState`), saying once in
+  the server log that it does. A read that still fails is logged with what `gh` said (`blocker watch: cannot read CI on
+  …`, again every 30 minutes, and `… reads again after N min` when it recovers; the `pr` gate's reads log the same way),
+  and after `CI_UNREADABLE_MS` (15 minutes, counted from the later of the first failed read and the block) the block
+  clears with that reason, so its worker checks CI itself.
 - **If the blocker fails, it is flagged.** What it waited on stalled, or did not clear in its time: the request stalls
   (`stalled.kind` `blocked`) with the reason, for its people to close or reopen. What it waited on was declined or
   cancelled without delivering: a person must decide now, so it becomes a question to its requester (Waiting on input).
@@ -269,6 +281,14 @@ days; a deploy is a person's call, and a week without one is worth their look.
      worker that serves it alone (`Orchestrators.cancelCheckIns`, via `Agents.cancelWake`; the log says which) and the
      worker brief says not to set one. A worker can also cancel its own with `cancel_wake`. The block clears by itself and
      the dispatcher resumes the worker (`[ledger] … is unblocked … message_agent with work_id to its worker`).
+  4. **A cancelled check-in is never lost** (w829: the dispatcher cancelled w814's worker's 8-minute check-in, and when the
+     block never cleared nothing was left to wake it). Each check-in a block cancels is kept on the request
+     (`WorkItem.heldCheckIns`: worker, when it was due, its note). When the gates clear, `Orchestrators.unblock` hands
+     each back to fire within a minute, its note prefixed with `wNNN is unblocked: <why>. This is your own check-in, which
+     the block cancelled; carry on from it`, and the request goes `active` with no dispatcher round trip; the log says
+     `unblocked (handed back <worker>'s check-in, which resumes it now): …`. A worker that is gone, or a check-in that
+     cannot be armed, falls back to the dispatcher. Any other end of the block (a start, a message, a stall, a close)
+     drops the held check-ins with the gates (`Orchestrators.stamp`).
 - **Any other decision ends the block** (`decide_work` reject, done, merge): the capacity note and the gates belong to an open
   request only (`Orchestrators.stamp`).
 - **Workers between turns are Working** (w643's decision). A worker waiting for CI or a long run on a check-in it set,
