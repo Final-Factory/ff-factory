@@ -76,7 +76,8 @@ before redeploying by hand.
 - **The main clone is the owner's** (w536): the daemon runs no editor, hang/crash watch, Unity MCP place, Unity slot
   place or git status report for it. A `unity` or `switch` message without a sandbox (from an older portal) is answered
   "a machine's main clone takes no agents (w536): give a sandbox", and `status_now` with nothing. A person's own editor
-  there still counts against `max_unity`, as started outside the gate. The machine record's `git` is only what a daemon
+  there still counts against `max_unity`, as started outside the gate; it does not stop a request that must change the clone:
+  the work closes it cleanly, does the step and reopens it, and no person is asked to (w935, Ben: "You can close Unity."). The machine record's `git` is only what a daemon
   from before w536 last sent; `list_machines` and the machine page leave it out when there is none.
 - **Guard.** The workers' guard runs in the daemon (the sandbox rules, [below](#machine-sandboxes)). The
   backup-before-discard rule for the user's own clone (2026-09-25: copy local changes to `ff-local-backups/` beside

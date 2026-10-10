@@ -1819,6 +1819,8 @@ test('w691: a worker that needs a person declares it (waiting_on_person) and its
   assert.ok(tool, 'a worker has waiting_on_person');
   assert.match(tool!.description, /Do not poll with wake_me for a person/);
   assert.match(spec.append, /## Waiting on a person[\s\S]*mcp__machine__waiting_on_person[\s\S]*Never poll for a person with `wake_me`/);
+  // w935: an editor open on a project the worker must change is the worker's to close and reopen, never a question for a person.
+  assert.match(spec.append, /Machine steps are yours, not a person's[\s\S]*close cleanly[\s\S]*reopen it if a person was using it[\s\S]*never handed to a person/);
   assert.match(spec.mcp!.tools.find((x) => x.name === 'wake_me')!.description, /Not for waiting on a person: use waiting_on_person/);
 
   // Before it declares anything, an idle worker with a check-in pending is Working (a machine's job), as before.
