@@ -217,7 +217,7 @@ export interface InstallOptions {
   /** An update that sets the drive up also moves the sandboxes and the seed onto it (needs no agent and no editor in them). */
   moveToDevDrive?: boolean;
   /** Set during install(): the drive's folders, which daemon.json then points at. */
-  devDriveDirs?: { sandboxes: string; seed: string; seedReady: boolean };
+  devDriveDirs?: { sandboxes: string; seed: string; seedReady: boolean; blockClone: boolean };
 }
 
 /**
@@ -577,14 +577,16 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     diskWarnGB: DISK_WARN_GB_DEFAULT,
     diskCriticalGB: DISK_CRITICAL_GB_DEFAULT,
     ...(dd ? (dd.seedReady ? { librarySeed: path.win32.join(dd.seed, 'Library') } : {}) : fs.existsSync(path.join(l.seed, 'Library')) ? { librarySeed: path.join(l.seed, 'Library') } : {}),
-    ...(dd ? { librarySeedCopy: 'clone' as const } : {}),
+    // Copy-Item block-clones only where the volume can (Dev Drive: Windows 11 24H2 and Server 2025, Microsoft Learn "Set up a Dev Drive");
+    // elsewhere it is a full copy that the pool's free-space check would count as 30 GB, so robocopy's honest accounting stays.
+    ...(dd?.blockClone ? { librarySeedCopy: 'clone' as const } : {}),
   };
   // A migration keeps the old daemon's settings (its host guard, protected paths, MCP server, idle stop); the root's
   // folders and the credential file replace its own, the token never goes into daemon.json, and max_agents is gone (w536).
   const { token: _t, appDir: _a, tempDir: _d, repoPath: _r, sandboxes: oldPool, unitySlotsDir: _u, maxEventsFile: _m, configFile: _c, maxSessions: _ms, ...carried } = (o.carry ?? {}) as Record<string, unknown>;
   if (oldPool && typeof oldPool === 'object') {
     const { root: _pr, librarySeed: oldSeed, ...poolRest } = oldPool as Record<string, unknown>;
-    Object.assign(sandboxes, { ...poolRest, root: sandboxes.root, ...(sandboxes.librarySeed ? { librarySeed: sandboxes.librarySeed } : {}), ...(dd ? { librarySeedCopy: 'clone' as const } : {}) });
+    Object.assign(sandboxes, { ...poolRest, root: sandboxes.root, ...(sandboxes.librarySeed ? { librarySeed: sandboxes.librarySeed } : {}), ...(dd?.blockClone ? { librarySeedCopy: 'clone' as const } : {}) });
     // An update keeps the seed the daemon had (w613: BEAST's block-cloned Library) when the root holds none of its own.
     if (o.update && !sandboxes.librarySeed && !dd && typeof oldSeed === 'string' && oldSeed) sandboxes.librarySeed = oldSeed;
   }
@@ -1003,7 +1005,8 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
   const links = linkRootFolders(l.root, dirs);
   for (const k of links) say(`Dev Drive: ${k.name}: ${k.action} (${k.detail}).`);
   if (links.some((k) => k.action === 'blocked')) throw new Error(`the root's ${links.filter((k) => k.action === 'blocked').map((k) => k.detail).join('; ')}: it cannot become a junction to the Dev Drive`);
-  o.devDriveDirs = { ...dirs, seedReady: fs.existsSync(path.join(dirs.seed, 'Library')) && fs.readdirSync(path.join(dirs.seed, 'Library')).length > 0 };
+  if (!state.blockClone) say(`Dev Drive: ${state.letter}: does not report block cloning (Microsoft: Dev Drive supports it from Windows 11 24H2 and Windows Server 2025), so each sandbox's Library is a full copy of the seed and the pool counts it so. The drive still keeps the sandboxes together and fast.`);
+  o.devDriveDirs = { ...dirs, seedReady: fs.existsSync(path.join(dirs.seed, 'Library')) && fs.readdirSync(path.join(dirs.seed, 'Library')).length > 0, blockClone: !!state.blockClone };
 }
 
 /** Run scripts/worker/firewall.ps1 elevated (one UAC prompt): the slot rules, the editors' rules, the slot config. */

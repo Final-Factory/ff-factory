@@ -38,6 +38,7 @@ fs.rmSync(scratch, { recursive: true, force: true });
 fs.mkdirSync(path.join(root, 'daemon'), { recursive: true });
 
 let failed = 0;
+let letterTaken: string | undefined;
 const check = (ok: boolean, what: string, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}: ${what}${detail ? ` (${detail})` : ''}`);
   if (!ok) failed++;
@@ -56,22 +57,18 @@ const user = ps('[Security.Principal.WindowsIdentity]::GetCurrent().Name').stdou
 const usedLetters = (): string[] =>
   ps(`$l = @([IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0,1) })
 $l += @((Get-Item 'HKLM:\\SYSTEM\\MountedDevices').GetValueNames() | ForEach-Object { if ($_ -match '^\\\\DosDevices\\\\([A-Za-z]):$') { $Matches[1].ToUpper() } })
+$l += @((Get-ChildItem 'HKCU:\\Network' -ErrorAction SilentlyContinue).PSChildName)
 ($l | Select-Object -Unique) -join ','`)
     .stdout.trim()
     .split(',')
     .filter(Boolean);
-/** Another volume takes a letter, for every session and SYSTEM too (subst would be this session's only): a small NTFS VHDX. */
-const holderVhdx = path.join(scratch, 'holder.vhdx');
-const takeLetter = (l: string) => {
-  const dp = path.join(scratch, 'holder.txt');
-  fs.writeFileSync(dp, [`create vdisk file="${holderVhdx}" maximum=200 type=expandable`, 'attach vdisk', 'create partition primary', 'format fs=ntfs quick label=holder', `assign letter=${l}`].join('\r\n'));
-  return spawnSync('diskpart', ['/s', dp], { encoding: 'utf8' });
-};
-const releaseLetter = () => {
-  const dp = path.join(scratch, 'holder-off.txt');
-  fs.writeFileSync(dp, [`select vdisk file="${holderVhdx}"`, 'detach vdisk'].join('\r\n'));
-  spawnSync('diskpart', ['/s', dp], { encoding: 'utf8' });
-};
+/**
+ * Another claim on a letter. Windows keeps a letter for the volume that had it (MountedDevices), so no other volume can be given
+ * the letter of a detached Dev Drive; what can take it is a persistent network mapping (HKCU\\Network), which the boot task, running
+ * as SYSTEM with no user logged on, can only know by reading the profiles' registry hives.
+ */
+const takeLetter = (l: string) => spawnSync('net', ['use', `${l}:`, '\\\\127.0.0.1\\C$', '/persistent:yes'], { encoding: 'utf8' });
+const releaseLetter = (l: string) => void spawnSync('net', ['use', `${l}:`, '/delete', '/y'], { encoding: 'utf8' });
 const letterOrder = [...'VUTSRQPONMLKJIHGFEDC', 'B', 'A'];
 const firstFree = (taken: string[]) => letterOrder.find((l) => !taken.includes(l));
 const attached = () => ps(`(Get-DiskImage -ImagePath '${vhdx}').Attached`).stdout.trim() === 'True';
@@ -89,7 +86,7 @@ const bootTask = () => {
   if (r.status !== 0) return { ok: false, detail: `schtasks: ${r.stdout}${r.stderr}` };
   for (let i = 0; i < 180; i++) {
     const res = helperResult();
-    if (res && Date.parse(res.at) >= start - 2000) return res as { ok: boolean; detail: string };
+    if (res && Date.parse(res.at) >= start) return res as { ok: boolean; detail: string };
     spawnSync('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep 2']);
   }
   return { ok: false, detail: 'no result in 6 minutes' };
@@ -143,7 +140,9 @@ try {
   // 4. The letter is taken by the next boot: another letter, and everything is repointed.
   ps(`Dismount-DiskImage -ImagePath '${vhdx}' | Out-Null`);
   const sub = takeLetter(letter);
-  check(sub.status === 0 && fs.existsSync(`${letter}:\\`), `another volume takes ${letter}:`, `${sub.stdout}${sub.stderr}`.replace(/\s+/g, ' ').trim().slice(-200));
+  letterTaken = letter;
+  const mapped = spawnSync('reg', ['query', `HKCU\\Network\\${letter}`], { encoding: 'utf8' }).status === 0;
+  check(sub.status === 0 && mapped, `a persistent network drive takes ${letter}:`, `${sub.stdout}${sub.stderr}`.replace(/\s+/g, ' ').trim().slice(-200));
   const taken4 = usedLetters();
   const b2 = bootTask();
   const state = JSON.parse(fs.readFileSync(path.join(root, 'devdrive.json'), 'utf8').replace(/^\uFEFF/, ''));
@@ -155,7 +154,8 @@ try {
   check(dj.sandboxes.root === `${moved}:\\sandboxes` && dj.sandboxes.librarySeed === `${moved}:\\seed\\Library`, 'daemon.json follows', JSON.stringify(dj.sandboxes));
   const pool = JSON.parse(fs.readFileSync(path.join(root, 'daemon', 'sandboxes.json'), 'utf8').replace(/^\uFEFF/, ''));
   check(pool[0].path === `${moved}:\\sandboxes\\slot1`, "the pool's record follows", pool[0].path);
-  releaseLetter();
+  releaseLetter(letter);
+  letterTaken = undefined;
 
   // 5. Remove.
   const rem = run(['-Action', 'remove', '-Root', root]);
@@ -165,7 +165,7 @@ try {
   console.log(`FAIL: ${(e as Error).message}`);
   failed++;
 } finally {
-  releaseLetter();
+  if (letterTaken) releaseLetter(letterTaken);
   spawnSync('powershell.exe', ['-NoProfile', '-Command', `Dismount-DiskImage -ImagePath '${vhdx}' -ErrorAction SilentlyContinue | Out-Null; Get-ScheduledTask -TaskName 'ffsb-helper-*' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false`]);
   fs.rmSync(scratch, { recursive: true, force: true });
 }

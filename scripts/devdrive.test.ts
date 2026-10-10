@@ -227,7 +227,7 @@ const MANIFEST: Manifest = { installId: 'i', layout: 1, machineId: 'lothdesktop'
 
 test('daemon.json on the Dev Drive: the drive’s own paths, block-clone copies, and a host guard that watches the volume the VHDX grows on', () => {
   const l = layoutOf('D:\\work\\ffw');
-  const o = { ...OPTS, token: 'ffm_x', repoUrl: 'u', service: 'FFFactoryDaemon', firewall: false, devDriveDirs: { ...devDriveDirs('v'), seedReady: true } } as InstallOptions;
+  const o = { ...OPTS, token: 'ffm_x', repoUrl: 'u', service: 'FFFactoryDaemon', firewall: false, devDriveDirs: { ...devDriveDirs('v'), seedReady: true, blockClone: true } } as InstallOptions;
   const cfg = daemonJson(o, l, 'lothdesktop', undefined) as any;
   assert.equal(cfg.sandboxes.root, 'V:\\sandboxes', 'never the junction D:\\work\\ffw\\sandboxes');
   assert.equal(cfg.sandboxes.librarySeed, 'V:\\seed\\Library');
@@ -235,13 +235,15 @@ test('daemon.json on the Dev Drive: the drive’s own paths, block-clone copies,
   assert.equal(cfg.root, 'D:\\work\\ffw');
   assert.deepEqual(cfg.hostGuard, { pollSeconds: 30, warnFreeGB: 20, criticalFreeGB: 10, hysteresisGB: 10, remountMinFreeGB: 30, hostDiskPaths: ['D:/'], reapBrowsersAfterHours: 0, reapEveryMinutes: 15 });
   // No seed yet: no librarySeed (the pool then copies a sandbox's Library once).
-  assert.equal((daemonJson({ ...o, devDriveDirs: { ...devDriveDirs('V'), seedReady: false } }, l, 'lothdesktop', undefined) as any).sandboxes.librarySeed, undefined);
+  assert.equal((daemonJson({ ...o, devDriveDirs: { ...devDriveDirs('V'), seedReady: false, blockClone: true } }, l, 'lothdesktop', undefined) as any).sandboxes.librarySeed, undefined);
   // A host guard the machine already has (BEAST's, tuned) is kept as it is; a carried old root and seed never beat the drive's.
   const carried = daemonJson({ ...o, update: true, carry: { hostGuard: { pollSeconds: 60, hostDiskPaths: ['C:/'] }, sandboxes: { root: 'D:\\work\\ffw\\sandboxes', librarySeed: 'D:\\work\\ffw\\seed\\Library', diskWarnGB: 50 } } }, l, 'lothdesktop', undefined) as any;
   assert.deepEqual(carried.hostGuard, { pollSeconds: 60, hostDiskPaths: ['C:/'] });
   assert.equal(carried.sandboxes.root, 'V:\\sandboxes');
   assert.equal(carried.sandboxes.librarySeed, 'V:\\seed\\Library');
   assert.equal(carried.sandboxes.diskWarnGB, 50);
+  // A volume that does not report block cloning keeps robocopy's honest accounting of a full copy.
+  assert.equal((daemonJson({ ...o, devDriveDirs: { ...devDriveDirs('V'), seedReady: true, blockClone: false } }, l, 'lothdesktop', undefined) as any).sandboxes.librarySeedCopy, undefined);
   // The guard uses the pool's own thresholds, so it never refuses work sooner than the pool does.
   assert.equal((devDriveGuard('D:\\', { diskWarnGB: 50, diskCriticalGB: 25 }) as any).warnFreeGB, 50);
   // Without a Dev Drive nothing changes: the root's own folders, no clone mode, no guard of its own.

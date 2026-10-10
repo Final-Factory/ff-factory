@@ -2023,15 +2023,18 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             max_sandboxes: z.number().int().min(1).max(16).optional().describe('action machine_update: set the machine\'s sandbox count (a worker-root install gets it only from its installer). Omitted: kept.'),
             max_agents_per_sandbox: z.number().int().min(1).max(16).optional().describe('action machine_update: set its agents per sandbox. Omitted: kept.'),
             max_unity: z.number().int().min(1).max(16).optional().describe('action machine_update: set its Unity editor limit. Omitted: kept.'),
+            dev_drive: z.boolean().optional().describe('action machine_update, a Windows PC (w900): make its Dev Drive (a VHDX in the install folder, mounted at the first free letter from V: down) if it has none. An update makes none on its own. The sandboxes stay where they are.'),
+            move_to_dev_drive: z.boolean().optional().describe('action machine_update, a Windows PC (w900): also re-create its sandboxes and the Library seed on the Dev Drive (work saved on each branch first). Refused by the installer, naming them, while an agent is in a sandbox or a Unity editor runs from one.'),
+            dev_drive_max_gb: z.number().int().min(50).max(65536).optional().describe('action machine_update with dev_drive or move_to_dev_drive: the VHDX maximum in GB (default 90 % of the root volume, 100 to 1024).'),
           },
-          wrap(async ({ action, text, fresh, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity }) => {
+          wrap(async ({ action, text, fresh, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? []);
             if (action === 'deploy') return this.ops.deploy(caller, text ?? '', work_ids ?? []);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb });
             }
             if (action === 'status') return `${this.ops.status()}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
