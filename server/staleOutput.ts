@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { OwnLeftoverPlan } from './ownLeftovers.ts';
-import { hasLocalWork, neverDelete, runCleanup, sizeOf, sizePlan, touchedSince, type CleanupGuard, type CleanupItem, type CleanupRun, type PassOptions } from './cleanup.ts';
+import { fenceToRoot, hasLocalWork, neverDelete, runCleanup, sizeOf, sizePlan, touchedSince, type CleanupGuard, type CleanupItem, type CleanupRun, type PassOptions } from './cleanup.ts';
 
 /**
  * Stale, rebuildable output in the places agents work (w459, docs/self-recovery.md "Stale build output"): player builds
@@ -118,6 +118,8 @@ export interface StalePlace {
 export interface StalePlan {
   items: CleanupItem[];
   listed: { path: string; why: string }[];
+  /** Processes still writing into a stopped session's folder (server/installLeftovers.ts, w899): ended before the items go. */
+  strays?: { pid: number; cmd: string; dir: string; why: string }[];
 }
 
 const DAY = 86_400_000;
@@ -274,17 +276,36 @@ export async function cleanupPass(o: {
   stale: () => Promise<StalePlan>;
   /** FF Factory's own leftovers (server/ownLeftovers.ts, w626): the caller passes them only while free space is low. */
   own?: { plan(): Promise<OwnLeftoverPlan>; run(plan: OwnLeftoverPlan): Promise<CleanupRun> };
+  /** Ends the plan's strays, before its items go (a deleted file's space comes back only when its writer ends); not in a dry run. */
+  endStrays?: (strays: NonNullable<StalePlan['strays']>) => Promise<void>;
+  /**
+   * The machine's worker install folder (root.json's root; w896, lothsahn: "in general we should only be clearing data in the
+   * install folder for the worker"). Given, a pass removes only what is strictly inside it: whatever a rule picks outside
+   * (system temp, caches, crash dumps, Unity Hub's editors, the game's data folder) is measured and listed with the reason,
+   * not removed. Absent (a machine without a root, the portal's own host): no fence.
+   */
+  root?: string;
 }): Promise<CleanupRun> {
-  const regular = await o.regular();
-  const plan = o.opts.stale && o.mode !== 'off' ? await o.stale() : { items: [], listed: [] };
+  const outside: { path: string; why: string }[] = [];
+  const fence = <T extends { path: string }>(items: T[]): T[] => {
+    if (!o.root) return items;
+    const f = fenceToRoot(items, o.root);
+    outside.push(...f.outside);
+    return f.inside;
+  };
+  const regular = fence(await o.regular());
+  const planned = o.opts.stale && o.mode !== 'off' ? await o.stale() : { items: [], listed: [] };
+  const plan = { ...planned, items: fence(planned.items) };
   const none: OwnLeftoverPlan = { items: [], listed: [] };
   // A failure there must not cost the regular pass: nothing of it is removed then.
-  const own = o.own ? await o.own.plan().catch(() => none) : none;
+  const own0 = o.own ? await o.own.plan().catch(() => none) : none;
+  const own = { ...own0, items: fence(own0.items) };
   const listed: NonNullable<CleanupRun['listed']> = [];
-  for (const l of [...plan.listed, ...own.listed]) listed.push({ ...l, bytes: await sizeOf(l.path, 300_000) });
+  for (const l of [...plan.listed, ...own.listed, ...outside]) listed.push({ ...l, bytes: await sizeOf(l.path, 300_000) });
   listed.sort((a, b) => b.bytes - a.bytes);
   if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await sizePlan([...regular, ...plan.items, ...own.items]), listed };
   const live = o.mode === 'on' ? plan.items : [];
+  if (o.mode === 'on' && plan.strays?.length && o.endStrays) await o.endStrays(plan.strays).catch(() => undefined);
   const r = await runCleanup([...regular, ...live], o.guard);
   if (o.own && own.items.length) {
     const r2 = await o.own.run(own).catch((e) => ({ removed: [], failed: [{ path: '(own leftovers)', why: (e as Error).message }], bytes: 0 }) as CleanupRun);

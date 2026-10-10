@@ -32,6 +32,7 @@ import { publishFromMachine } from './review.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
+import { mergePlans, planInstallLeftovers } from '../server/installLeftovers.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
@@ -241,7 +242,7 @@ export class Daemon {
   /** The watch over host folders nobody follows: orphaned hosts stopped, gone hosts' folders removed (w799). */
   private hostWatch?: HostWatch;
   /** The processes running now (the pool's cached listing). */
-  private readonly procs: () => Promise<{ cmd: string }[]>;
+  private readonly procs: () => Promise<{ pid: number; ppid: number; cmd: string }[]>;
   private readonly events = new EventEmitter();
   private readonly outbox: string[] = [];
   private readonly rpcs = new Map<string, { resolve: (t: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
@@ -392,12 +393,34 @@ export class Daemon {
           guard,
           mode: settings.mode,
           regular: () => planCleanup({ rules, guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
-          stale: () => planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, HOME), ctx: this.staleCtx, settings, guard }),
+          // Plus the install folder's own leftovers (w899): build caches, the nightly lab, stopped sessions' temp, runaway task output.
+          stale: async () =>
+            mergePlans(
+              await planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, HOME), ctx: this.staleCtx, settings, guard }),
+              await planInstallLeftovers({
+                root: this.cfg.root,
+                sandboxes: this.pool.list().map((x) => x.path),
+                tempRoots: [agentTempRoot(this.cfg.tempDir)],
+                guard,
+                ctx: this.staleCtx,
+                procs: await this.procs().catch(() => undefined),
+                                self: [process.pid, process.ppid],
+              }),
+            ),
+          endStrays: async (strays) => {
+            for (const st of strays) {
+              log(`clean-up: ending process ${st.pid} of a stopped session (${st.why}): ${st.cmd.slice(0, 120)}`);
+              await realHostProcs().killTree(st.pid).catch(() => undefined);
+            }
+          },
+          // w896: with a worker root, only what is inside it is removed; the rest is measured and listed.
+          root: this.cfg.root,
           // FF Factory's own leftovers (w626): only while free space is below the soft threshold, or asked for.
           ...(low || opts.dryRun ? { own: this.ownLeftovers(guard) } : {}),
         });
       },
       consumers: () => biggestConsumers(env),
+      root: () => this.cfg.root,
       staleAt: staleAtFile(appDirOfConfig(cfg)),
       stale: async () => (await staleUnityLibraries([HOME], DEFAULT_CLEANUP.libraryReportDays)).filter((l) => !neverDelete(l.path, this.cleanupGuard())),
       log: (e) => {

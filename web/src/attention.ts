@@ -36,12 +36,14 @@ export function attentionItems(app: AppState): AttentionItem[] {
   for (const s of app.sessions) {
     // Someone else's orchestrator is theirs to answer; the dispatcher is the owner's.
     if (s.kind === 'orchestrator' && s.id !== app.orchestratorId && (s.orchestratorRole === 'personal' || app.me?.role !== 'owner')) continue;
+    // The line says whose worker it is when it is not yours (w891: an owner answers any).
+    const forOther = s.kind === 'worker' && s.requestedBy && s.requestedBy.userId.toLowerCase() !== app.me?.userId.toLowerCase() ? ` · for ${s.requestedBy.displayName}` : '';
     for (const p of s.pendingPermissions) {
       const what = summarizeToolInput(p.toolName, p.input);
       items.push({
         key: `p:${p.requestId}`,
         kind: 'permission',
-        title: s.id === app.orchestratorId ? 'Orchestrator' : s.kind === 'orchestrator' ? 'Dispatcher' : s.title,
+        title: s.id === app.orchestratorId ? 'Orchestrator' : s.kind === 'orchestrator' ? 'Dispatcher' : `${s.title}${forOther}`,
         detail: `Allow ${toolDisplayName(p.toolName).tool}${what ? `: ${what}` : '?'}`,
         at: p.createdAt,
         open: () => {

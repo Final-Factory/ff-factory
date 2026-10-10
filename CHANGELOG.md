@@ -22,6 +22,38 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   `move_to_dev_drive`) re-creates an existing install's sandboxes on it from the seed, saving each one's work first, and refuses
   while an agent or an editor is in one. Tested on a real Windows runner (`.github/workflows/dev-drive.yml`) and with the disks
   faked under PowerShell 7. docs/worker-install.md "The Dev Drive". Needs a portal deploy and, for LothDesktop, the move.
+- **The chat's message box empties when you send, every time** (w893, lothsahn: "Sometimes when I send you a message, the message doesn't clear
+  and I have to manually clear it."). The box (and its saved draft) cleared only when the server answered, so a page that reloaded or
+  closed with the message on its way wrote the sent text back as a draft. It now empties at once, and a text-only message goes with
+  `keepalive` so a reload does not cancel it. A send that fails puts the message back (text, pictures, files, the reply) and says
+  "Not sent"; one with no answer at all is sent again under the same id, which the server takes once (`clientId`). Tests:
+  `e2e/composerClears.spec.ts`.
+
+- **Owners' answers to each other's workers' permission requests are recorded and told** (w891, lothsahn: "I should be able to
+  approve Ben's shell command requests and vice versa."). w876's Bash approval waited over 15 minutes and Lothsahn saw nothing:
+  the server never refused him, but the push notice for a worker on a machine always threw (`Notifier` read `toolName` of the
+  signal's missing request, fixed), no page put an Allow button where he looked, and only Ben's orchestrator was told. Who may
+  answer is unchanged (any login, members included). The request's row on the Dispatcher page now carries the Allow and Deny
+  card, the sidebar's "Needs you" names whose worker it is, the transcript card reads "Allowed by Lothsahn" (`decidedBy` on
+  the permission event), the request's log says who answered, and the worker's other people hear it in one line (`[from
+  another owner] Lothsahn approved a Bash command for your worker …`). docs/orchestrators.md, "Owners across each other's
+  work". Needs a portal deploy.
+- **Disk clean-up deletes only inside the machine's worker install folder; outside it, workers measure and report** (w896,
+  lothsahn: "Why are you clearing C: on LothDesktop?  How much space are the unity caches using?  In general we should only be
+  clearing D:", then "Sorry, in general we should only be clearing data in the install folder for the worker"). w876
+  (LothDesktop's low-disk clean-up) had deleted dotnet workload temp, the Unity Hub installer, Temp entries, the game's test
+  output and old Claude transcripts on C:, because the w626 rule and the dispatcher's brief had no boundary. Now: every
+  worker's brief, the dispatcher's and the orchestrators' instructions and the `machine_cleanup` text carry the rule, and a
+  clean-up worker's brief asks for sizes and a list of what makes FF Factory write outside the folder, never a delete; the
+  "Clean-up cannot free enough disk space" notice states it with the machine's root and tags each biggest consumer inside or
+  outside it, and `list_machines` shows the install folder; the daemon's own pass removes only what is strictly inside the root
+  on a machine that has one (system temp, crash dumps, Unity's and the tools' caches, the game's data folder, Unity Hub's
+  editors and the old slot roots are measured and listed, `fenceToRoot`); and the sandbox guard refuses an `rm`,
+  `Remove-Item`, `del`, `rd`, `find -delete`, `xargs rm` or a listing piped into one outside the root (`server/rootFence.ts`;
+  a save copy in the game's saves folder and the agent's own temp stay allowed). A machine without a root is not fenced.
+  docs/self-recovery.md "Where clean-up may delete". Flag: on a root machine nothing now empties the Unity, npm, NuGet,
+  Playwright and crash-dump stores on C: by itself. Needs a portal deploy (instructions, guard spec) and then each machine's
+  daemon update (the fence), which a verified deploy does by itself (w887).
 - **A verified portal deploy now updates every machine's daemon by itself** (w887, lothsahn: "Update FFFactory so that after
   updating the portal and validating, it automatically updated all the machines."). `fff-update verify` writes
   `data/update.verified.json` when the new release answers (a rollback writes none); the portal (`server/machineRollout.ts`) then
