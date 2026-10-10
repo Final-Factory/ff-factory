@@ -188,6 +188,10 @@ fs.writeFileSync(path.join(dataDir, 'transcripts', 'gallery1.jsonl'), events.map
 // No stored claude.ai login here, so the plan meter reports "unavailable" instead of starting a CLI;
 // and no agents' token from the environment this runs in, which the meter would poll for real.
 process.env.CLAUDE_CONFIG_DIR = path.join(base, 'claude');
+// No GitHub login (w904): the portal probes its own gh login at start, and a developer's would show a token banner here.
+process.env.GH_CONFIG_DIR = path.join(base, 'gh');
+delete process.env.GH_TOKEN;
+delete process.env.GITHUB_TOKEN;
 delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 // Nor a real Discord token: Max reads only the scratch ffbox config above.
 for (const k of ['DISCORD_TOKEN', 'FFDISCORD_APP_TOKEN', 'FFDISCORD_SERVER_ID', 'FFBOX_SECRETS', 'FFBOX_CONFIG_DIR']) delete process.env[k];

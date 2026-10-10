@@ -2,6 +2,7 @@
 // free of runtime code other than constants so the browser bundle and Node's type stripping
 // can both load it.
 import type { TurnUsage } from './spend.ts';
+import type { GithubPermissionId } from './githubRequirements.ts';
 
 /** 'blocked': the editor is alive but stuck on a modal dialog, or silent for too long while starting (see unity.blocked). */
 /** A working tree's real state, read from git (docs: server/gitStatus.ts). */
@@ -1106,11 +1107,14 @@ export interface TokenWarning {
   id: string;
   /**
    * exhausted: every token of the person is used up; held: every token is at a limit (new work waits); reserve: runs are
-   * inside the dispatcher's buffer; ci-read: the portal's GitHub token cannot read CI on pull requests (w889).
+   * inside the dispatcher's buffer; ci-read: the portal's GitHub token cannot read CI on pull requests (w889); github-token:
+   * a GitHub token lacks a required repository or permission, or nears its expiry (w904).
    */
-  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read';
+  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token';
   /** The user id whose pool it is: only that person's pages show it (server/index.ts hostForUser). Absent: for everyone. */
   person?: string;
+  /** The owners see it too, besides `person` (w904: a GitHub token that lacks a requirement). */
+  owners?: boolean;
   text: string;
 }
 
@@ -2182,7 +2186,14 @@ export interface GithubTokenHealth {
   checkedAt?: string;
   /** Why no run gets it now (GitHub answered 401); cleared by a probe that passes. */
   bad?: string;
-  repos?: { repo: string; metadata: GithubAccess; contents?: GithubAccess; pulls?: GithubAccess; actions?: GithubAccess; statuses?: GithubAccess }[];
+  /** Per required repository (shared/githubRequirements.ts), each permission's read half as probed (w904). */
+  repos?: { repo: string; access: Partial<Record<GithubPermissionId, GithubAccess>> }[];
+  /** The organization's reads: Self-hosted runners and Artifact metadata. */
+  org?: Partial<Record<GithubPermissionId, GithubAccess>>;
+  /** What it lacks of the requirements, as a person fixes it; empty when nothing (w904). */
+  problems?: string[];
+  /** The portal's own gh login (D7), not a vault entry. */
+  portal?: boolean;
   lastUse?: { at: string; what: string };
   lastError?: { at: string; what: string };
 }

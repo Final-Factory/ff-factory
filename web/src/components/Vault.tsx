@@ -58,6 +58,27 @@ export function VaultSettings() {
         GitHub tokens from the vault on: {[...(view.githubPortal ? ['the portal\'s own reads'] : []), ...view.machines.filter((m) => m.githubFromVault).map((m) => m.id)].join(', ') || 'nowhere yet: every caller uses its own gh login'}{' '}
         <small>(set_app_config machines.githubFromVault, per machine; machine "portal" for the portal's reads; docs/vault.md section 13)</small>
       </p>
+      {view.github?.filter((h) => h.portal).map((h) => (
+        <GithubHealth key={h.fingerprint} h={h} name="portal-login" />
+      ))}
+      <p className="small dim">
+        Every GitHub token is checked against the required repositories and permissions (docs/vault.md 13.2) every 6 hours.{' '}
+        <button
+          className="btn btn-ghost btn-sm"
+          data-testid="vault-github-recheck"
+          onClick={async () => {
+            try {
+              const r = await api.githubRecheck();
+              setView(await api.vault());
+              toast(r.ran ? 'GitHub tokens checked again' : 'Checked less than 30 seconds ago; try again shortly');
+            } catch (e) {
+              toastError(e);
+            }
+          }}
+        >
+          Re-check now
+        </button>
+      </p>
       <MachineCredentials view={view} onChange={act} />
     </div>
   );
@@ -247,21 +268,14 @@ const minute = (iso: string) => `${iso.slice(0, 16).replace('T', ' ')}Z`;
 function GithubHealth({ h, name }: { h?: GithubTokenHealth; name: string }) {
   if (!h?.checkedAt) return <div className="small dim" data-testid={`vault-github-${name}`}>GitHub: not probed yet{h?.lastUse ? `; last used ${minute(h.lastUse.at)} (${h.lastUse.what})` : ''}</div>;
   const days = h.expiresAt ? Math.floor((Date.parse(h.expiresAt) - Date.now()) / 86_400_000) : undefined;
-  const lacking = (h.repos ?? []).flatMap((r) => {
-    const short = r.repo.split('/')[1];
-    if (r.metadata !== 'read') return [`${short}: ${r.metadata === 'not-selected' ? 'not selected' : r.metadata}`];
-    const no = (['contents', 'pulls', 'actions', 'statuses'] as const).filter((k) => r[k] !== 'read');
-    return no.length ? [`${short}: no ${no.join(', ')}`] : [];
-  });
-  const warn = !!h.bad || (days !== undefined && days < 14) || lacking.length > 0;
+  const lacking = h.problems ?? [];
   return (
-    <div className={`small ${warn ? 'tone-amber' : 'dim'}`} data-testid={`vault-github-${name}`}>
+    <div className={`small ${lacking.length ? 'tone-amber' : 'dim'}`} data-testid={`vault-github-${name}`}>
       GitHub {h.login ? `account ${h.login}` : 'account unknown'}
-      {h.bad ? `; not used: ${h.bad}` : ''}
-      {days === undefined ? '; no expiry given' : days < 0 ? `; expired ${h.expiresAt!.slice(0, 10)}` : `; expires ${h.expiresAt!.slice(0, 10)} (${days} days)`}
-      {h.repos ? (lacking.length ? `; reads lacking: ${lacking.join('; ')}` : `; reads ok on ${h.repos.length} repositories`) : ''}
+      {days === undefined ? (h.bad ? '' : '; no expiry given') : `; expires ${h.expiresAt!.slice(0, 10)} (${days} days)`}
+      {lacking.length ? `; lacks: ${lacking.join('; ')}` : h.repos ? `; has every required read on ${h.repos.length} repositories` : ''}
       ; probed {minute(h.checkedAt)}
-      {h.lastUse ? `; last used ${minute(h.lastUse.at)} (${h.lastUse.what})` : '; not used since the portal started'}
+      {h.portal ? '' : h.lastUse ? `; last used ${minute(h.lastUse.at)} (${h.lastUse.what})` : '; not used since the portal started'}
       {h.lastError ? `; last error ${minute(h.lastError.at)}: ${h.lastError.what}` : ''}
     </div>
   );
