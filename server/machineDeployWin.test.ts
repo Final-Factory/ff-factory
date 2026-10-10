@@ -87,7 +87,7 @@ test('windows: the stop spares the Unity editor and Hub (the user\'s), and holds
 });
 
 /** Windows PowerShell on Windows, else PowerShell 7 when installed (GitHub's Ubuntu runners have it): for script functions fed made-up input. */
-const powershell = process.platform === 'win32' ? 'powershell.exe' : ['/usr/bin/pwsh', '/usr/local/bin/pwsh', '/opt/homebrew/bin/pwsh', '/snap/bin/pwsh'].find((p) => fs.existsSync(p));
+const powershell = process.platform === 'win32' ? 'powershell.exe' : [...(process.env.PATH ?? '').split(path.delimiter).map((d) => path.join(d, 'pwsh')), '/usr/bin/pwsh'].find((p) => fs.existsSync(p));
 
 test('windows (real PowerShell): the stop walks to real children only; a process whose dead parent\'s id was reused is not one (w906)', { skip: !powershell && 'no PowerShell here' }, () => {
   // wininit.exe as on a GitHub runner: started at boot, its parent's id long free, then drawn by the daemon stand-in.
@@ -106,7 +106,7 @@ test('windows (real PowerShell): the stop walks to real children only; a process
   const run = (agents: boolean) => {
     const script = `${win.KILL_SET}
 $procs = ConvertFrom-Json $env:FF_PROCS
-$all = @($procs | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; Name = $_.Name; CommandLine = $_.CommandLine; CreationDate = [datetime]::new(1970, 1, 1, 0, 0, 0, 'Utc').AddSeconds($_.At) } })
+$all = @($procs | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; Name = $_.Name; CommandLine = $_.CommandLine; CreationDate = [DateTimeOffset]::FromUnixTimeSeconds($_.At).UtcDateTime } })
 (Get-FFKillSet $all @('C:\\ff\\app\\machine\\daemon.ts') @('C:\\ff\\app\\machine\\agentHost.ts') $${agents ? 'true' : 'false'}) -join ','`;
     return execFileSync(powershell!, ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FF_PROCS: JSON.stringify(procs) }, encoding: 'utf8' }).trim();
   };
