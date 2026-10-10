@@ -570,7 +570,7 @@ g 'sudo cat /srv/fff/data/update.result.json' | jq -e --arg w "$want" '.ok == tr
 wait_for 300 "the update verified" g 'test ! -e /srv/fff/data/update.verifying.json'
 # A verified update leaves the marker the portal's machine rollout reads (server/machineRollout.ts, w887); the server
 # retires it to update.verified.done.json once it has taken it, so either file counts.
-marker() { g 'sudo sh -c "cat /srv/fff/data/update.verified.json /srv/fff/data/update.verified.done.json 2>/dev/null"' | jq -e --arg w "$1" 'select(.sha | startswith($w))' >/dev/null; }
+marker() { g 'sudo sh -c "cat /srv/fff/data/update.verified.json /srv/fff/data/update.verified.done.json 2>/dev/null; true"' | jq -e --arg w "$1" 'select(.sha | startswith($w))' >/dev/null; }
 wait_for 120 "update.verified.json records the verified update to $want" marker "$want"
 echo "ok: $before -> $want"
 out=$(g 'sudo fffctl update --drain-minutes 0' 2>&1)
