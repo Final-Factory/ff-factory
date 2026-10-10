@@ -89,6 +89,8 @@ interface ReportView {
   conversation?: number;
   /** FF Factory's word that a finished request fixed it (w502, report_fixed): the request, its PR, the release. */
   fixed?: { work?: string; pr?: number; version?: string };
+  /** FF Factory's word that the request it filed was declined (w853, report_obsolete): the request. */
+  obsolete?: { work?: string };
   files?: { name?: string; bytes?: number }[];
   files_more?: number;
   files_note?: string;
@@ -116,6 +118,7 @@ function reportLines(r: ReportView, maxFiles: number): string[] {
     r.crash_signature && `crash signature "${clean(r.crash_signature, 300)}"`,
     r.conversation && `diagnosed in FFBox conversation ${r.conversation}`,
     r.fixed && typeof r.fixed === 'object' && `FIXED by ${clean(r.fixed.work, 16)}${typeof r.fixed.pr === 'number' ? ` (PR #${r.fixed.pr})` : ''}${r.fixed.version ? `, in ${clean(r.fixed.version, 40)}` : ''}`,
+    r.obsolete && typeof r.obsolete === 'object' && !r.fixed && `OBSOLETE: declined in ${clean(r.obsolete.work, 16)}`,
     r.withheld && `withheld: ${clean(r.withheld, 80)}`,
   ].filter(Boolean);
   const out = [`- ${clean(r.id, 64)}: ${facts.join(', ')}`];

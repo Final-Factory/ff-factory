@@ -10,6 +10,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A declined request's player reports read obsolete on FFBox** (w853, lothsahn: "Yes, you can mark declined reports
+  obsolete on FFBox"). w720 and w825, crash reports from internal Macs, were declined and their reports still read
+  NEEDS-INFO on FFBox. Now every report a `rejected` request claims, when no open or finished request claims it, goes to
+  FFBox as `report_obsolete {reportId, workId}` (`pushReportObsoletes`, every minute, kept in `intake.json` and sent on
+  every link; a reopen sends `withdrawn`). FFBox records it apart from fixed and posts nothing. A new FFBox diagnosis of
+  only declined reports, with no fix pushed, is answered `skipped` and not filed again. The backfill is the first pass
+  after the deploy (requests declined in the last 30 days). Needs a portal deploy and ffbox master with
+  `report_obsolete` (docs/ffbox-connector-contract.md, "Reports obsolete").
+
+||||||| 722eb38
+
 - **FFBox shell and ffweb operators' own words count as their turn too; the two dead config keys leave config.json**
   (w852, lothsahn: "FFBox shell and ffweb messages are trusted like operator messages" and "Yes, remove unused config
   keys"). `own` now also takes `via` `shell` and `web` (the opener's unix login or ffweb login; ffbox `aceb8e5` sends it),

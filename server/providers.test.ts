@@ -965,3 +965,21 @@ test('w502: report_fixed goes only to a connector whose hello lists it, once per
   assert.equal(pm.pushReportFixed(fix), true);
   assert.deepEqual(await again.next('report_fixed'), { type: 'report_fixed', ...fix }, 'a new link hears it again');
 });
+
+test('w853: report_obsolete goes only to a connector whose hello lists it, once per link for the same facts; a withdrawal goes again', async (t) => {
+  const { connect, pm } = await setup(t);
+  const o = { reportId: '20261008T213823Z-crash-fcd5598639', workId: 'w720' };
+  assert.equal(pm.pushReportObsolete(o), false, 'offline');
+  const old = connect();
+  await old.hello({ accepts: ['board', 'report_fixed', 'query'] });
+  assert.equal(pm.pushReportObsolete(o), false, 'a connector that does not take it gets nothing');
+  old.close();
+  await until('offline', () => !pm.online);
+  const c = connect();
+  await c.hello({ accepts: ['board', 'report_fixed', 'report_obsolete', 'query'] });
+  assert.equal(pm.pushReportObsolete(o), true);
+  assert.deepEqual(await c.next('report_obsolete'), { type: 'report_obsolete', ...o });
+  assert.equal(pm.pushReportObsolete(o), true, 'the same facts again: already sent on this link');
+  assert.equal(pm.pushReportObsolete({ ...o, withdrawn: true }), true);
+  assert.deepEqual(await c.next('report_obsolete'), { type: 'report_obsolete', ...o, withdrawn: true }, 'a withdrawal goes');
+});

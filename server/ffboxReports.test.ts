@@ -230,3 +230,19 @@ test('no write path: the reports surface is two read-only queries and two inboun
   assert.ok(!/\.send\(/.test(src), 'it sends no frame of its own');
   assert.match(src, /queryTransfer\('report'/, 'the one thing it asks FFBox is the report query');
 });
+
+test('w853: a report whose request was declined reads OBSOLETE, and a fixed one only FIXED', () => {
+  const text = describeReports({
+    what: 'reports',
+    live: true,
+    ok: true,
+    data: {
+      reports: [
+        { id: '20261008T213823Z-crash-fcd5598639', kind: 'crash', conversation: 752, obsolete: { work: 'w720' } },
+        { id: '20261005T035612Z-crash-6102d405dc', kind: 'crash', fixed: { work: 'w414' }, obsolete: { work: 'w700' } },
+      ],
+    },
+  });
+  assert.match(text, /- 20261008T213823Z-crash-fcd5598639: crash, diagnosed in FFBox conversation 752, OBSOLETE: declined in w720/);
+  assert.match(text, /- 20261005T035612Z-crash-6102d405dc: crash, FIXED by w414$/m);
+});
