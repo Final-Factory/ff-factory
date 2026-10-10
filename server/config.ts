@@ -286,6 +286,13 @@ export interface Config {
   /** Where state.json and transcripts live. */
   dataDir: string;
   /**
+   * The data folder's disk guard (w859, server/dataGuard.ts, docs/spend.md "Data guard"): transcripts are kept `retainDays`
+   * (default 7) after the last request they served closed; from `gzipAtUsedPercent` (50) of the disk used, idle ones are
+   * compressed, from `pruneAtUsedPercent` (75) those past their retention are deleted, and from `alertAtUsedPercent` (90)
+   * it says so when it cannot get below. `gzipIdleHours` (24), `everyMinutes` (60). Set in config.json.
+   */
+  dataGuard?: { retainDays?: number; gzipAtUsedPercent?: number; pruneAtUsedPercent?: number; alertAtUsedPercent?: number; gzipIdleHours?: number; everyMinutes?: number };
+  /**
    * The portal holds no sandboxes of its own (w510): this is the folder this host's own machine daemon keeps its
    * sandboxes in (add_machine local takes it as its sandbox_root; BEAST's F:\ffsb), and the default parent of
    * `review.root` and `standingRoot`. Optional (default <dataDir>/sandboxes).

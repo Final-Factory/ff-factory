@@ -325,7 +325,7 @@ export const liveLine = (now: WorkLive) =>
   `${WORK_LIVE_LABEL[now.state]}${now.waitsOn?.length ? ` on ${now.waitsOn.join(', ')}` : ''}${now.roomOn?.length ? ` [WRONG: ${now.roomOn.join(', ')} ${now.roomOn.length > 1 ? 'have' : 'has'} room]` : ''} (${clip(oneLine(now.why), 200)})`;
 
 /** One line per item for list_work: id, status, priority, title, whose, workers, outcome. */
-export function describeItem(w: WorkItem, workerLine: (id: string) => string, now?: WorkLive): string {
+export function describeItem(w: WorkItem, workerLine: (id: string) => string, now?: WorkLive, cost = ''): string {
   const who = names(w.requesters);
   const workers = w.sessionIds.length ? ` workers: ${w.sessionIds.map(workerLine).join(', ')}.` : '';
   const merged = w.mergedInto ? ` → ${w.mergedInto}` : '';
@@ -333,7 +333,7 @@ export function describeItem(w: WorkItem, workerLine: (id: string) => string, no
   const stalled = w.stalled ? ` Stalled (${w.stalled.kind}): ${clip(oneLine(w.stalled.reason), 200)}.` : '';
   const prs = w.prs?.length ? ` PRs: ${w.prs.map((p) => `#${p.number} ${p.state}`).join(', ')}.` : '';
   const state = now ? ` ${liveLine(now)}:` : '';
-  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${workers}${prs}${stalled}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
+  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
 }
 
 /**

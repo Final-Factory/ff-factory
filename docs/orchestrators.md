@@ -14,7 +14,7 @@ claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnecto
 "claude.ai connectors"), and neither does the dispatcher. Its tools, as listed in
 `server/belts.ts` `PERSONAL_TOOLS`:
 
-- read everything: `list_sandboxes`, `list_machines`, `list_branches`, `agent_transcript`, `search_transcripts`,
+- read everything: `list_sandboxes`, `list_machines`, `list_branches`, `agent_transcript`, `search_transcripts`, `spend_report` (what each request costs, [docs/spend.md](spend.md)),
   `system_status`, `ffbox_activity`, `max_activity`, `list_standing_agents`, `list_delegation_requests`;
 - its own `wake_me`, its own timers (`set_timer`, `list_timers`, `update_timer`, `cancel_timer`; [Timers](#timers)), and
   its person's heartbeat (`set_heartbeat`);
