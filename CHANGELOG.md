@@ -14,6 +14,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   fix them"). The w830 test in `intakeFlow.test.ts` matched the ledger line "decision of 10-DD hh:mm UTC" with the month
   written in; it passes in October only. Found by running the suite with the clock moved forward 30 days. No portal deploy.
 
+||||||| 93135ed
+- **Test only: Windows CI no longer fails with every test green ("coverage file is empty")** (w858, lothsahn: "look for
+  flaky CI tests in FFFactory and fix them"). `node --test --experimental-test-coverage` exits 1 when a coverage file is
+  empty, and `machineDeployWin.test.ts` started node processes (the daemon stand-ins of the w605 test, the PowerShell the
+  scripts run, the real daemon of the install test) that inherited `NODE_V8_COVERAGE` and were then ended abruptly. 8 of
+  the 86 failed CI runs since 2026-09-30 were this (4 since the Windows jobs were split on 2026-10-07: 4 of 126 runs of
+  the "1/2" job). Those processes now start without `NODE_V8_COVERAGE`. No portal deploy.
 - **Test only: two Playwright flakes on main** (w858, lothsahn: "look for flaky CI tests in FFFactory and fix them").
   The `authed` fixture now takes the page's routes down after each test (`unrouteAll` with `ignoreErrors`, which waits
   for a handler still inside `route.fetch`): banner.spec.ts patches `/api/state`, which the page keeps polling, and a test
