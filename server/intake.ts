@@ -62,13 +62,15 @@ import {
   type DiscordMessage,
   type IntakeSettings,
 } from './intakeRules.ts';
-import { mentionsScenario, nightlyAgainLine, nightlyDraft, nightlyKey, nightlySkip, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
+import { brokenNightDraft, mentionsScenario, NIGHT_BROKEN, nightlyAgainLine, nightlyDraft, nightlyKey, nightlyRunDraft, nightlySkip, nightStatus, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
+import { nextDaily } from './timers.ts';
+import type { NightlyRunSettings } from './intakeRules.ts';
 import { isOpen } from './work.ts';
 import { linkedClosed, linkedDone, mergeCandidates, mergedBy, mergedText, parseLog, prNumberOf, type MergeRecord } from './mergedIntake.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 import { escalationCatchUp, escalationRef, fixLearnable, fixedByPr, followed, reportFixesOf, reportIdsOf, reportLines, reportObsoletesOf, reportSweep, type BoardWatch, type CatchUpLine, type ReportFix, type ReportObsolete, type ReportSweep } from './boardFollow.ts';
-import type { IntakeEntry, IntakeSummary, MaxEvent, ProviderConversation, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
+import type { IntakeEntry, IntakeSummary, MaxEvent, NightlyNight, ProviderConversation, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
 import { ffboxConversationHref } from '../shared/ffboxLinks.ts';
 
 const DISCORD_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request'];
@@ -76,6 +78,14 @@ const FFBOX_KINDS: readonly WorkSourceKind[] = ['ffbox-branch', 'ffbox-diagnosis
 const NIGHTLY_KINDS: readonly WorkSourceKind[] = ['nightly'];
 const KEEP_RECENT = 200;
 const RELEASE_EVERY_MS = 10 * 60_000;
+/** The nightly schedule's look (w864): fires and missing-night alarms within a minute. */
+const NIGHTLY_RUN_EVERY_MS = 60_000;
+/** A fire the portal was down for still starts up to this late (back by 06:00 for a 03:00 night); later, it is missing. */
+const NIGHTLY_FIRE_LATE_MS = 3 * 3_600_000;
+/** A run request that closed this long ago with no report from its night: that night is missing (its worker gave up). */
+const NIGHTLY_CLOSED_GRACE_MS = 15 * 60_000;
+/** Nights kept, newest first; the Intake tab shows the last 14. */
+const NIGHTS_KEEP = 60;
 const MERGED_EVERY_MS = 5 * 60_000;
 /** Commits read from each base branch, and merged PRs read from GitHub, when looking for what a request's work became. */
 const MERGED_LOG = 400;
@@ -154,6 +164,10 @@ interface Persisted {
   maybes?: Record<string, { ids: string[]; scores: number[]; at: number }>;
   /** The last nightly report and what it came to (the Intake tab). */
   nightly?: NonNullable<IntakeSummary['nightly']>['last'];
+  /** Every night the schedule fired or the lab reported, newest first (w864). */
+  nights?: NightlyNight[];
+  /** When the nightly schedule was first seen on: nights due before it are never fired late nor called missing. */
+  nightlyRunSince?: number;
   /** Board answers FFBox follows, by ref (w480: kept across restarts, escalated threads' watches among them). */
   boards?: Record<string, BoardWatch>;
   /** When the resolver last looked for a followed request's fix (its PR, its release), by request. */
@@ -219,6 +233,8 @@ export class IntakeManager {
     };
     if (s.discord.enabled) every(s.discord.pollMinutes * 60_000, () => void this.pollDiscord(), 20_000);
     if (s.release.enabled) every(RELEASE_EVERY_MS, () => void this.checkReleases(), 60_000);
+    // The nightly e2e lab's run, fired by the portal every night, and its missing-night alarm (w864).
+    every(NIGHTLY_RUN_EVERY_MS, () => this.checkNightlyRun(), 15_000);
     // Requests whose branch or PR merged some other way close themselves (docs/intake.md, "Closed when it merged").
     every(MERGED_EVERY_MS, () => void this.checkMerged(), 90_000);
     // Board answers FFBox still follows are re-checked every minute; a change goes to it at once (docs/intake.md).
@@ -253,7 +269,7 @@ export class IntakeManager {
     try {
       const d = readJsonDurable<Partial<Persisted>>(this.file, { check: checkObject });
       if (!d) throw new Error('none yet');
-      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, escalations: d.escalations, maybes: d.maybes, boards: d.boards, fixTried: d.fixTried, catchUp: d.catchUp, reportFixes: d.reportFixes, reportSweep: d.reportSweep, reportObsoletes: d.reportObsoletes };
+      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, nights: Array.isArray(d.nights) ? d.nights : undefined, nightlyRunSince: typeof d.nightlyRunSince === 'number' ? d.nightlyRunSince : undefined, escalations: d.escalations, maybes: d.maybes, boards: d.boards, fixTried: d.fixTried, catchUp: d.catchUp, reportFixes: d.reportFixes, reportSweep: d.reportSweep, reportObsoletes: d.reportObsoletes };
     } catch {
       return { cursors: {}, recent: [], versions: {} };
     }
@@ -1160,8 +1176,14 @@ export class IntakeManager {
    * Undefined while intake.nightly is off.
    */
   onNightly(rep: NightlyReport): { scenario: string; action: 'filed' | 'attached' | 'skipped'; workId?: string; why?: string }[] | undefined {
+    const out = !this.settings.nightly.enabled ? undefined : nightStatus(rep) === 'broken' ? this.fileBrokenNight(rep) : this.fileNightly(rep);
+    // Every night is recorded, whether its regressions are filed or not (w864).
+    this.recordNight(rep, out);
+    return out;
+  }
+
+  private fileNightly(rep: NightlyReport): { scenario: string; action: 'filed' | 'attached' | 'skipped'; workId?: string; why?: string }[] {
     const s = this.settings;
-    if (!s.nightly.enabled) return undefined;
     const now = this.now();
     const lookbackMs = s.lookbackDays * 86_400_000;
     const out: { scenario: string; action: 'filed' | 'attached' | 'skipped'; workId?: string; why?: string }[] = [];
@@ -1207,10 +1229,166 @@ export class IntakeManager {
         else out.push({ scenario: r.scenario, action: res.repeat ? 'attached' : 'filed', workId: res.item?.id, ...(g.length > 1 ? { why: `the night's batch of ${g.length}` } : {}) });
       }
     }
-    const count = (a: string) => out.filter((o) => o.action === a).length;
-    this.data.nightly = { at: new Date(now).toISOString(), date: rep.date, lab: rep.lab, sha: rep.sha, filed: count('filed'), attached: count('attached'), skipped: count('skipped') };
-    this.changed();
+    this.lastNightly(rep, out);
     return out;
+  }
+
+  private lastNightly(rep: NightlyReport, out: { action: string }[]) {
+    const count = (a: string) => out.filter((o) => o.action === a).length;
+    this.data.nightly = { at: new Date(this.now()).toISOString(), date: rep.date, lab: rep.lab, sha: rep.sha, filed: count('filed'), attached: count('attached'), skipped: count('skipped') };
+    this.changed();
+  }
+
+  /**
+   * A broken night (w864): one cause stopped the battery, so its scenarios are not filed one by one. The open request on
+   * a broken night takes it (one line), else one request is filed to find the cause, the game or the lab.
+   */
+  private fileBrokenNight(rep: NightlyReport): { scenario: string; action: 'filed' | 'attached' | 'skipped'; workId?: string; why?: string }[] {
+    const s = this.settings;
+    const now = this.now();
+    const key = nightlyKey(NIGHT_BROKEN);
+    const target = [...this.d.store.work.values()].find((w) => isOpen(w) && !w.mergedInto && w.keys.includes(key));
+    let out: { scenario: string; action: 'filed' | 'attached' | 'skipped'; workId?: string; why?: string };
+    if (target) {
+      const added = this.d.orchestrators.attachNightly(target.id, { key, line: `nightly ${rep.date}: the night broke again${rep.sha ? ` on develop ${rep.sha.slice(0, 9)}` : ''}: ${cleanLine(rep.cause, 200)}`, night: rep.date, scenario: NIGHT_BROKEN, urgent: rep.release?.shipped === 'yes' });
+      out = { scenario: NIGHT_BROKEN, action: 'attached', workId: target.id, why: added ? `added to ${target.id}, open on a broken night` : `already on ${target.id} for ${rep.date}` };
+    } else {
+      const run = this.data.nights?.find((n) => n.date === rep.date)?.workId ?? rep.request;
+      const draft = brokenNightDraft(rep, run);
+      const res = this.d.orchestrators.fileIntake({
+        ...draft,
+        requestedBy: this.d.identity.systemPayer(),
+        autoApprove: s.nightly.autoApprove,
+        kinds: NIGHTLY_KINDS,
+        lookbackDays: s.lookbackDays,
+        limit: () => capProblem(this.d.store.work.values(), NIGHTLY_KINDS, s.nightly.dailyCap, now),
+      });
+      this.outcome('nightly', draft.title, undefined, res);
+      out = res.skipped ? { scenario: NIGHT_BROKEN, action: 'skipped', why: res.skipped } : { scenario: NIGHT_BROKEN, action: res.repeat ? 'attached' : 'filed', workId: res.item?.id };
+    }
+    this.lastNightly(rep, [out]);
+    return [out];
+  }
+
+  // ---------------------------------------------------------------- the nightly run (w864)
+
+  /**
+   * The portal's nightly schedule (config intake.nightly.run; docs/intake.md, "The nightly run"). Once a night, at its
+   * time in its time zone, it files the run request that the dispatcher places on its machine; and it raises the
+   * missing-night alarm for a night with no report by its due time, or whose run request closed without one. Lothsahn:
+   * "We shouldn't assume silence means a successful (or failed) run."
+   */
+  checkNightlyRun(): void {
+    const r = this.settings.nightly.run;
+    if (!r.enabled) return;
+    const now = this.now();
+    if (this.data.nightlyRunSince === undefined) {
+      this.data.nightlyRunSince = now;
+      this.changed();
+    }
+    const fire = lastFire(r, now);
+    const date = nightOf(fire, r.tz);
+    if (fire >= this.data.nightlyRunSince && !this.nights().some((n) => n.date === date)) {
+      if (now - fire <= NIGHTLY_FIRE_LATE_MS) this.fireNightlyRun(r, date, fire);
+      else {
+        const n: NightlyNight = { date, status: 'missing', dueBy: iso(fire + r.reportWithinHours * 3_600_000), cause: `not started: FF Factory was not running at ${r.time} ${r.tz} and came back more than ${NIGHTLY_FIRE_LATE_MS / 3_600_000} hours later` };
+        this.putNight(n);
+        this.nightAlarm(n, `No nightly e2e run tonight (${date}): ${n.cause}.`);
+      }
+    }
+    for (const n of this.nights()) {
+      if (n.status !== 'running' || n.alarmAt) continue;
+      const w = n.workId ? this.d.store.work.get(n.workId) : undefined;
+      if (n.dueBy && now > Date.parse(n.dueBy)) {
+        n.status = 'missing';
+        n.cause = `no report from the lab by ${at(Date.parse(n.dueBy), r.tz)}`;
+        this.nightAlarm(n, `The nightly e2e run of ${n.date}${n.workId ? ` (${n.workId})` : ''} sent no report by ${at(Date.parse(n.dueBy), r.tz)}: ${w ? `its request is ${w.status}${w.sessionIds.length ? '' : ', no worker ever started on it'}` : 'its request is gone'}. Silence is not a verdict: find out whether it ran.`);
+      } else if (w && !isOpen(w) && now - Date.parse(w.updatedAt) > NIGHTLY_CLOSED_GRACE_MS) {
+        n.status = 'missing';
+        n.cause = `its run request ${w.id} closed (${w.status}) with no report from the lab`;
+        this.nightAlarm(n, `The nightly e2e run of ${n.date} (${w.id}) ended as ${w.status} without a report from the lab reaching FF Factory. Silence is not a verdict: find out whether it ran.`);
+      }
+    }
+  }
+
+  private fireNightlyRun(r: NightlyRunSettings, date: string, fire: number) {
+    const now = this.now();
+    const dueBy = fire + r.reportWithinHours * 3_600_000;
+    const draft = nightlyRunDraft({ date, machine: r.machine, time: r.time, tz: r.tz, dueBy: at(dueBy, r.tz) });
+    const person = this.d.identity.requester(r.person);
+    const res = this.d.orchestrators.fileIntake({
+      ...draft,
+      requestedBy: person ?? this.d.identity.systemPayer(),
+      person: !!person,
+      autoApprove: { enabled: false, maxPerDay: 0 },
+      kinds: ['nightly-run'],
+      lookbackDays: this.settings.lookbackDays,
+      // Switched on in config by a person: the schedule is the approval, like a release follow-up.
+      approved: true,
+    });
+    this.outcome('nightly-run', draft.title, undefined, res);
+    const n: NightlyNight = { date, status: 'running', firedAt: iso(now), dueBy: iso(dueBy), ...(res.item ? { workId: res.item.id } : {}) };
+    this.putNight(n);
+    if (!res.item) {
+      n.status = 'missing';
+      n.cause = `the schedule could not file the run: ${res.skipped ?? 'no request was made'}`;
+      this.nightAlarm(n, `No nightly e2e run tonight (${date}): ${n.cause}.`);
+    }
+  }
+
+  /** The person the nightly run is for hears it (their orchestrator), and the run request's log has it. */
+  private nightAlarm(n: NightlyNight, text: string) {
+    n.alarmAt = iso(this.now());
+    const r = this.settings.nightly.run;
+    this.d.orchestrators.toPeople([this.d.identity.requester(r.person) ?? this.d.identity.systemPayer()], `[nightly] ${text}`);
+    if (n.workId) this.d.orchestrators.noteIntake(n.workId, `nightly: ${text}`);
+    this.changed();
+  }
+
+  /** The night a report is for (its date, else its run request), with what it said; a broken or late one is told. */
+  private recordNight(rep: NightlyReport, out?: { action: string; workId?: string }[]) {
+    const now = this.now();
+    const status = nightStatus(rep);
+    let n = this.nights().find((x) => x.date === rep.date) ?? (rep.request ? this.nights().find((x) => x.workId === rep.request) : undefined);
+    const late = n?.status === 'missing';
+    const again = !!n?.reportedAt && n.status === status && n.sha === (rep.sha || undefined);
+    if (!n) {
+      n = { date: rep.date, status };
+      this.putNight(n);
+    }
+    const work = [...new Set((out ?? []).filter((o) => o.workId && o.action !== 'skipped').map((o) => o.workId!))];
+    Object.assign(n, {
+      status,
+      reportedAt: iso(now),
+      lab: rep.lab,
+      ...(rep.sha ? { sha: rep.sha } : {}),
+      ...(rep.counts ? { counts: rep.counts } : {}),
+      // The lab's own cause; a stale one ("no report by ...") goes once the report is in.
+      cause: rep.cause ?? (status === 'broken' ? n.cause : undefined),
+      ...(work.length ? { work } : {}),
+    });
+    if (!n.workId && rep.request && this.d.store.work.has(rep.request)) n.workId = rep.request;
+    if (!again) {
+      const line = nightLine(n);
+      if (n.workId) this.d.orchestrators.noteIntake(n.workId, `nightly: ${line}`);
+      if (status === 'broken' || late) this.nightAlarm(n, late ? `The report of the nightly e2e run of ${n.date} came after all, late: ${line}` : line);
+    }
+    this.changed();
+  }
+
+  /** What the lab's POST is answered with: the night as recorded, and its run request. */
+  nightLabel(date: string): string | undefined {
+    const n = this.nights().find((x) => x.date === date);
+    return n ? `${n.date}${n.workId ? `, ${n.workId}` : ''}` : undefined;
+  }
+
+  private nights(): NightlyNight[] {
+    return (this.data.nights ??= []);
+  }
+
+  private putNight(n: NightlyNight) {
+    this.data.nights = [n, ...this.nights().filter((x) => x !== n && x.date !== n.date)].sort((a, b) => b.date.localeCompare(a.date)).slice(0, NIGHTS_KEEP);
+    this.changed();
   }
 
   // ---------------------------------------------------------------- releases
@@ -1468,7 +1646,12 @@ export class IntakeManager {
         desync: s.ffbox.desync,
       },
       release: { enabled: s.release.enabled, delayMinutes: s.release.delayMinutes, ...(this.data.lastVersion ? { lastVersion: this.data.lastVersion } : {}), ...(this.data.checkedAt ? { checkedAt: this.data.checkedAt } : {}) },
-      nightly: { ...s.nightly, ...(this.data.nightly ? { last: this.data.nightly } : {}) },
+      nightly: {
+        ...s.nightly,
+        run: { ...s.nightly.run, ...(s.nightly.run.enabled ? { next: iso(nextDaily(s.nightly.run.time, s.nightly.run.tz, now)) } : {}) },
+        ...(this.data.nightly ? { last: this.data.nightly } : {}),
+        nights: this.nights().slice(0, 14),
+      },
       reviewers: this.d.orchestrators.reviewers().map((r) => r.displayName),
       reviewerIds: this.d.orchestrators.reviewers().map((r) => r.userId),
       today: {
@@ -1480,4 +1663,35 @@ export class IntakeManager {
       recent: this.data.recent.slice(0, 50),
     };
   }
+}
+
+// ---------------------------------------------------------------- the nightly run's clock (w864)
+
+const iso = (ms: number) => new Date(ms).toISOString();
+
+/** The night of a moment: its date (YYYY-MM-DD) in the schedule's time zone. */
+export function nightOf(ms: number, tz: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
+}
+
+/** The schedule's latest fire at or before `now`. */
+export function lastFire(r: Pick<NightlyRunSettings, 'time' | 'tz'>, now: number): number {
+  let fire = nextDaily(r.time, r.tz, now - 2 * 86_400_000);
+  for (let next = nextDaily(r.time, r.tz, fire); next <= now; next = nextDaily(r.time, r.tz, fire)) fire = next;
+  return fire;
+}
+
+/** "2026-10-11 08:00 America/New_York (12:00 UTC)". */
+function at(ms: number, tz: string): string {
+  const hm = (zone: string) => new Intl.DateTimeFormat('en-GB', { timeZone: zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));
+  return `${nightOf(ms, tz)} ${hm(tz)} ${tz} (${hm('UTC')} UTC)`;
+}
+
+/** One line for a night: "the night 2026-10-11 passed: 130 of 136 passed, 2 flaky (lothdesktop, develop 7c43c32aa)". */
+export function nightLine(n: NightlyNight): string {
+  const c = n.counts;
+  const counts = c ? `: ${c.passed} of ${c.ran} passed${c.failed ? `, ${c.failed} failed` : ''}${c.flaky ? `, ${c.flaky} flaky` : ''}${c.env ? `, ${c.env} could not run` : ''}` : '';
+  const why = n.status === 'broken' && n.cause ? `: ${cleanLine(n.cause, 300)}` : counts;
+  const filed = n.work?.length ? `; its regressions are on ${n.work.join(', ')}` : '';
+  return `the night ${n.date} ${n.status === 'broken' ? 'broke' : n.status}${why} (${n.lab ?? 'the lab'}${n.sha ? `, develop ${n.sha.slice(0, 9)}` : ''})${filed}`;
 }
