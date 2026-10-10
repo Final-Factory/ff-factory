@@ -11,6 +11,34 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 ## [Unreleased]
 
 - **A released sandbox's Burst and Build caches are trimmed before the next worker gets it** (w898, lothsahn: "almost all the space is in the work folder, specifically in the BuildCache and BurstCache folders of the various sandboxes"; "I would like the harness to trim the burst cache and build cache when a worker releases a slot"). Library/BuildCache and BurstCache were 87 GB over lothdesktop's six sandboxes. When a sandbox's last live agent goes, the daemon puts it in the new state `cleanup` (not free, no placement, no start, shown on the dashboard), keeps the files written in the last 24 h up to 4 GB per cache, and sets it `ready` again; a hung or failed trim times out after 10 min and frees it. Never with an editor or build on the project. The daemon's clean-up also ages out and caps the caches of sandboxes nobody releases, and a Library copied from a clone or sandbox leaves them behind. Measured: a build with the caches removed took 530 s against 112 s warm. Docs: self-recovery.md 5. Tests: `cacheTrim.test.ts`, `machineSandboxes.test.ts`, `agentState.test.ts`, `copyTree.test.ts`, `cleanup.test.ts`.
+- **The Intake tab's two nightly chips are switches** (w903, lothsahn: "Please modify FF Factory so I can toggle those settings on
+  the intake panel by clicking on them"). Click "Nightly run" to turn the portal's nightly schedule on or off
+  (`intake.nightly.run`, `enabled`; the time, zone, machine, person and report window stay), and the other chip, now named "File
+  regressions based on Nightly run" (it was "Nightly e2e", lothsahn's wording), to file or stop filing the lab's regressions
+  (`intake.nightly.enabled`). `POST /api/intake/nightly/toggle` goes through `set_app_config`'s checks and write
+  (`toggleNightly`, `server/appConfig.ts`), applies live with no restart and pushes the new summary to every page; any signed-in
+  person may click, as `set_app_config` allows for these keys. The portal's log gets an `app config: ... set by <person> from the
+  Intake tab` line. The chips have a pointer cursor, a hover outline and a tooltip saying what they toggle. Request titles ("Nightly
+  e2e <date>: ...") are unchanged. Tests: `server/appConfig.test.ts`, `e2e/intake.spec.ts`.
+
+
+- **The deleted pre-install-folder places are no longer assumed anywhere** (w897, lothsahn, 2026-10-10: "Please remove references to
+  [the old clone, slot pool and nightly lab]. Those folders are all gone"). The stale-output pass's nightly lab default is `FF_NIGHTLY_ROOT`,
+  else the worker root's `nightly/` (`defaultNightlyRoots`), not a hard-coded place; the own-leftovers pass no longer looks for the
+  old slot pools; `docs/worker-root.md`, `worker-install.md`, `self-recovery.md` and `beast-machine.md` say the old places are gone
+  (the per-machine migration section now lists only the generic steps), and the test fixtures name no deleted folder. Earlier entries
+  below keep the old names: they record what happened then.
+- **Workers post as Max from any machine, through FFBox** (w901, lothsahn: "at some point, a worker on LothDesktop didn't have
+  access to publish the notes. Please make sure that workers can request FFBox send a discord message and has what they
+  need."). Posting a release's patch notes needed the ffdiscord config and the bot token, which only LothDesktop had, so a
+  release stayed open when no such machine was free. FFBox holds the bot: the machine tool `post_as_max` (channel
+  `dev_patch_notes`, `dev_chat` or `agent_testing`; `text`, or a `file` the daemon reads with `skip_lines`; `thread`; a
+  dedupe `key`, required for patch notes) asks FFBox's new `post_message` query (`server/ffboxPost.ts`), which runs the guards
+  (channel allowlist, never the bug channels; no mention of anyone; secret scan; 2000 characters; the key posts once; 12 an
+  hour; every attempt logged) and answers the message link. A post that was made is a Max event, so the Max page and
+  `max_activity` show it. The dispatcher's and orchestrators' text no longer says posting needs LothDesktop
+  (docs/ffbox.md, "Posting as Max"; docs/machines.md, docs/max.md, docs/vault.md, docs/worker-root.md). Needs a portal deploy,
+  and FFBox on ffbox master with `post_message` (connector 2.9.0); each machine's daemon needs it only for `file`.
 - **The chat's message box empties when you send, every time** (w893, lothsahn: "Sometimes when I send you a message, the message doesn't clear
   and I have to manually clear it."). The box (and its saved draft) cleared only when the server answered, so a page that reloaded or
   closed with the message on its way wrote the sent text back as a draft. It now empties at once, and a text-only message goes with

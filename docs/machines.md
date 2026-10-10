@@ -508,7 +508,7 @@ sandbox agents in all), `max_unity: 2`.
 **Agents in a machine sandbox** get their own brief (the worktree, their editor's instance name) and the `machine`
 tools `wake_me`, `cancel_wake` and `blocked_on` (w754: a request that waits only on other requests or PRs is Blocked and its worker stops polling, [orchestrators.md](orchestrators.md#waiting-queued-blocked)), `waiting_on_person` (w691: only a person can move them on; the ledger shows Waiting on input), `unity` (their sandbox's editor), `switch_branch`, `fetch_attachment`, `publish_attachment` (a file of theirs as an attachment id another worker
 gets, [attachments.md](attachments.md#agents-files)), `publish_review` (review media to the
-portal's computer over the daemon's link, [review.md](review.md)), `fetch_ffbox_report` and `fetch_discord_thread_files` (a Discord bug thread's files, read from FFBox so no Discord token is needed on the machine; [ffbox.md](ffbox.md)) and
+portal's computer over the daemon's link, [review.md](review.md)), `fetch_ffbox_report` and `fetch_discord_thread_files` (a Discord bug thread's files, read from FFBox so no Discord token is needed on the machine; [ffbox.md](ffbox.md)), `post_as_max` (a message posted as Max by FFBox, a release's patch notes included, from any machine; w901, [ffbox.md](ffbox.md#posting-as-max-from-any-machine-w901)) and
 `read_work` (the ledger, read-only: their own requests and the ones they name, the open and stalled ones with a grant;
 [orchestrators.md](orchestrators.md#workers-read-the-ledger)). Their guard
 is the sandbox one: their worktree is theirs, the main clone and the daemon's
@@ -626,8 +626,8 @@ LothDesktop and Beast, not just when BEAST is full").
   one was picked ("first with room in placement.prefer (lothdesktop > m5 > m3)", "only avoided computers have room").
   The dispatcher's prompt shows the setting in force.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
-  Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max goes to
-  LothDesktop (only it has the ffdiscord config). A computer that is avoided or not next keeps only what needs it: FF
+  Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
+  computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: FF
   Factory's own repo or its deploys, `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it. A worker going on in its own sandbox stays
   there, and running workers are never moved.
 - **Released sandboxes** (w640, Lothsahn on 2026-10-07: "Can we not reserve slots for workers that resume a long time

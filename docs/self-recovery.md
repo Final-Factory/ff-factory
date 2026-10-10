@@ -337,7 +337,7 @@ deploy), on every pass while free space is below the soft threshold, and on ever
 | `Builds/<entry>` (any case) and `.nightly-builds/<entry>` named after requests (`w95`, `w393-facing`) | every request it names is merged, done, rejected or cancelled in the ledger, and nothing in it changed for `untouchedHours` (24) |
 | `Builds/<sha>[-win\|-mac]`, `.nightly-builds/<sha>-<platform>` | a player build of one commit (rebuildable), untouched for `shaBuildDays` (2) |
 | `.nightly-builds/runs/<run>` | named after closed requests as above, else untouched for `runRetentionDays` (14) |
-| the nightly lab (`D:/work/ff-nightly`, `~/nevergames/ff-nightly`, or `nightlyRoots`) | `builds/` beyond the newest `nightlyKeep` (2), `runs/` and `logs/` past `runRetentionDays` |
+| the nightly lab (`FF_NIGHTLY_ROOT`, the install folder's `nightly/`, or `nightlyRoots`; the old default places outside the install folder are gone, 2026-10-10) | `builds/` beyond the newest `nightlyKeep` (2), `runs/` and `logs/` past `runRetentionDays` |
 | a sandbox's `Temp/` | its editor is known to be stopped, no `Temp/UnityLockfile`, untouched for `tempHours` (6) |
 | a sandbox's `Logs/<file>` | its editor is known to be stopped, untouched for `logRetentionDays` (14) |
 
@@ -369,7 +369,7 @@ rule), `server/machineSandboxes.test.ts` (a dry run through a daemon).
 ### FF Factory's own leftovers (w626)
 
 On 2026-10-07 the m3 drifted under its 50 GB guard holding about 78 GB of what FF Factory itself had left there: old
-player slots in `~/nevergames/ff-players`, an old agent worktree, and Unity editor versions no project used. A worker
+player slots outside the install folder, an old agent worktree, and Unity editor versions no project used. A worker
 found them (w596) and asked people for a go instead of removing them, and the question reached Ben and Lothsahn. Ben:
 "no YOU free up disk space, like you are instructed to in this harness. stop making us tell you to do it." Now a
 machine's daemon removes these by itself (`server/ownLeftovers.ts`, wired in `machine/daemon.ts` `ownLeftovers`) in
@@ -378,7 +378,7 @@ It reports what it removed in the pass's log like every other rule; it asks nobo
 
 | What | Where it looks | Goes when |
 |---|---|---|
-| player slots (`scripts/nightly/player_slots.py` in the game repo) | every slot root the machine may have: `<root>/players` of a worker root, the root in the slot config (`%ProgramData%\FinalFactory\player-slots.json`, `~/.config/finalfactory/player-slots.json`), and the script's old defaults (`~/nevergames/ff-players`; `D:\workf-players`, `<D..J>:f-players`, `C:f-players`) | a `slot*` folder holding a player copy (or an earlier fill's `trash-*`) with no live lease (a lease lives as the script judges it: younger than 12 h and, on this host, its pid alive) and nothing inside changed for 24 h. The whole slot folder goes; the next launch makes it again at the same path, so the firewall rule that names it still fits |
+| player slots (`scripts/nightly/player_slots.py` in the game repo) | every slot root the machine may have: `<root>/players` of a worker root, the root in the slot config (`%ProgramData%\FinalFactory\player-slots.json`, `~/.config/finalfactory/player-slots.json`) (the script's old default places outside the install folder are gone, 2026-10-10) | a `slot*` folder holding a player copy (or an earlier fill's `trash-*`) with no live lease (a lease lives as the script judges it: younger than 12 h and, on this host, its pid alive) and nothing inside changed for 24 h. The whole slot folder goes; the next launch makes it again at the same path, so the firewall rule that names it still fits |
 | agent worktrees | the linked worktrees of the machine's clone and a worker root's `repo/` (`git worktree list`) | not a sandbox nor holding one, not locked, not inside a sandbox an agent works in now, no process naming it, unused for 2 days (its git HEAD, index and reflog, its top-level entries, a Unity project's Library entries, Temp, Logs, UserSettings), and nothing uncommitted, untracked or on no remote. One with work of its own is **listed** for its owner, never removed. Inside the clone or the sandbox root only a Claude Code worktree (`<x>/.claude/worktrees/<name>`) is taken, so a sandbox the pool does not list is never picked; paths are compared in their real form (Windows 8.3 short names and links resolved). After the removal `git worktree prune` drops git's record; the branch stays |
 | Unity editors | Unity Hub's editor folders (its chosen install path and the defaults), the machine's `unity_editor_root`, and the folders of the editors the Hub lists | a `<version>` folder holding `Editor/Unity.exe` or `Unity.app` whose version no sandbox's or the main clone's `ProjectSettings/ProjectVersion.txt` names, nor the clone's `HEAD`, `origin/develop` or `origin/master`, nor a Unity project up to three folders under the home folder opened within 30 days (a person's own), and that no process runs from. When no version could be read at all, none goes |
 | finished agents' temp folders | the temp folders (the regular `agent-temp` rule above) | two hours after the session stopped, never while it runs |
@@ -475,7 +475,7 @@ root. Now only the first group removes anything on a machine with a root.
 | tool caches | `npx`, `npm-cache`, `nuget-http`, `pip-cache`, `uv-cache`, `go-build-cache`, `homebrew-cache`, `xcode-derived`, `playwright`, `edge-webview` | the user's profile and `~/Library` | **listed** |
 | the game's data folder | `playtest-sessions` | `LocalLow\Never Games\finalfactory*\PlaytestSessions` | **listed** |
 | other | `worker-archives` (`~/ff-worker`), `actions-work` (runner job folders), `stale-library` (Unity Libraries of projects under the home folder) | the home folder, `C:\` | **listed** |
-| own leftovers outside the root | player slots in the old default roots (`~/nevergames/ff-players`, `D:\workf-players`, ...), Unity editors in Unity Hub's folders, worktrees of a clone outside the root | | **listed** |
+| own leftovers outside the root | player slots outside the root (the old default places are gone, 2026-10-10), Unity editors in Unity Hub's folders, worktrees of a clone outside the root | | **listed** |
 
 A machine **without** a root (the portal's own host, an install from before w513) is not fenced: nothing tells the daemon
 which folder is the worker's. Nothing is configurable: a person who wants a rule outside the root back says so, and it

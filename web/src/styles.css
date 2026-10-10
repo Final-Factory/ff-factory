@@ -241,6 +241,28 @@ code,
   white-space: nowrap;
 }
 
+/* A chip that is a button (ToggleChip): the same pill, plainly clickable. */
+.chip-toggle {
+  border: 1px solid transparent;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.chip-toggle:hover:not(:disabled) {
+  border-color: currentColor;
+  filter: brightness(1.12);
+}
+
+.chip-toggle:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.chip-toggle:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 .chip-green { color: var(--green); background: var(--green-soft); }
 .chip-blue { color: var(--blue); background: var(--blue-soft); }
 .chip-red { color: var(--red); background: var(--red-soft); }

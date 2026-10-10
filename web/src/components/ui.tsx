@@ -15,6 +15,16 @@ export function Chip({ tone, children, title }: { tone: Tone; children: ReactNod
   );
 }
 
+/** A chip that is a switch (w903): click it to flip the setting it shows; `title` says what it toggles. */
+export function ToggleChip({ tone, children, title, onClick, disabled, testId }: { tone: Tone; children: ReactNode; title: string; onClick: () => void; disabled?: boolean; testId?: string }) {
+  return (
+    <button type="button" className={`chip chip-${tone} chip-toggle`} title={title} aria-label={title} onClick={onClick} disabled={disabled} data-testid={testId}>
+      <Dot tone={tone} />
+      {children}
+    </button>
+  );
+}
+
 export type IconName =
   | 'menu' | 'plus' | 'send' | 'stop' | 'trash' | 'copy' | 'check' | 'x' | 'chevron' | 'back'
   | 'expand' | 'play' | 'power' | 'log' | 'refresh' | 'bell' | 'chat' | 'branch' | 'folder' | 'bot' | 'logout'

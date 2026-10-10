@@ -208,10 +208,10 @@ test('convert_machine (live): BEAST becomes an ssh machine and back with its dae
   mm.convertMachine('beast', 'local', {});
 
   // Only one machine is the portal's own host, and only one whose clone is on this computer.
-  mm.register({ id: 'lothdesktop', host: 'lothdesktop', purpose: 'unused', status: 'ready', repoPath: 'D:\\work\\FFFRepo', home: 'C:\\Users\\Loth', portalUrl: 'https://fff.example.ts.net' });
+  mm.register({ id: 'lothdesktop', host: 'lothdesktop', purpose: 'unused', status: 'ready', repoPath: 'D:\\work\\mainrepo', home: 'C:\\Users\\Loth', portalUrl: 'https://fff.example.ts.net' });
   assert.throws(() => mm.convertMachine('lothdesktop', 'local'), /beast is already the portal's own host as a machine/);
   mm.convertMachine('beast', 'ssh', { sshHost: 'beast', portalUrl: 'https://fff.example.ts.net' });
-  assert.throws(() => mm.convertMachine('lothdesktop', 'local'), /D:\\work\\FFFRepo is not on this computer/);
+  assert.throws(() => mm.convertMachine('lothdesktop', 'local'), /D:\\work\\mainrepo is not on this computer/);
 
   // With no agent running, a redeploy goes out the new way: over ssh, with the extras it kept.
   sessions.sessions.get(s.info.id)!.stop();
