@@ -13,6 +13,7 @@ import { checkShell } from './guard.ts';
 import { keepAwakeCommand } from '../machine/daemon.ts';
 import { editorBinary, editorLogPath, editorTree, editorsFor, parseWinProcs, reportersFor, winLaunchScript } from '../machine/unity.ts';
 import { ROOT } from './config.ts';
+import { powershell } from './testPowershell.ts';
 
 // Windows machines (docs/machines.md, "Windows machines"): the scripts the portal sends over ssh, the platform
 // branching, and (on a Windows CI runner only) the scripts run for real by Windows PowerShell.
@@ -85,9 +86,6 @@ test('windows: the stop spares the Unity editor and Hub (the user\'s), and holds
   assert.match(s, /'app\\machine\\daemon\.ts'/);
   assert.match(s, /run-daemon\.ps1/);
 });
-
-/** Windows PowerShell on Windows, else PowerShell 7 when installed (GitHub's Ubuntu runners have it): for script functions fed made-up input. */
-const powershell = process.platform === 'win32' ? 'powershell.exe' : [...(process.env.PATH ?? '').split(path.delimiter).map((d) => path.join(d, 'pwsh')), '/usr/bin/pwsh'].find((p) => fs.existsSync(p));
 
 test('windows (real PowerShell): the stop walks to real children only; a process whose dead parent\'s id was reused is not one (w906)', { skip: !powershell && 'no PowerShell here' }, () => {
   // wininit.exe as on a GitHub runner: started at boot, its parent's id long free, then drawn by the daemon stand-in.
@@ -221,7 +219,8 @@ require('fs').writeFileSync(out, JSON.stringify({ daemon: process.pid, shell: sh
   spawn(process.execPath, ['-e', daemon, daemonMark, out], { stdio: 'ignore', windowsHide: true, env: withoutCoverage() }).unref();
   const pids: number[] = [];
   t.after(() => {
-    for (const p of pids) {
+    // Only real ids: on Windows node's kill of pid 0 ends this very process (libuv takes 0 as the current one).
+    for (const p of pids.filter((x) => x > 0)) {
       try {
         process.kill(p, 'SIGKILL');
       } catch {
@@ -238,10 +237,26 @@ require('fs').writeFileSync(out, JSON.stringify({ daemon: process.pid, shell: sh
       return false;
     }
   };
+  // Until both files hold their ids, not merely exist: one read between its creation and its write gave agent pid 0, and
+  // alive(0) and a kill of 0 are this test's own process (w906: the whole file died silently, exit 1).
+  const read = () => {
+    try {
+      const ids = JSON.parse(fs.readFileSync(out, 'utf8')) as { daemon: number; shell: number; host: number };
+      const agent = Number(fs.readFileSync(out + '.agent', 'utf8'));
+      return [ids.daemon, ids.shell, ids.host, agent].every((x) => Number.isInteger(x) && x > 0) ? { ...ids, agent } : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const end = Date.now() + 30_000;
-  while (!(fs.existsSync(out) && fs.existsSync(out + '.agent')) && Date.now() < end) await new Promise((r) => setTimeout(r, 100));
-  const p = JSON.parse(fs.readFileSync(out, 'utf8')) as { daemon: number; shell: number; host: number };
-  const agent = Number(fs.readFileSync(out + '.agent', 'utf8'));
+  let got = read();
+  while (!got && Date.now() < end) {
+    await new Promise((r) => setTimeout(r, 100));
+    got = read();
+  }
+  assert.ok(got, 'the stand-ins wrote their ids');
+  const p = got;
+  const agent = got.agent;
   pids.push(p.daemon, p.shell, p.host, agent);
 
   const restart = await runPs(win.stopScript(false, appDir, service), { timeoutMs: 60_000 });

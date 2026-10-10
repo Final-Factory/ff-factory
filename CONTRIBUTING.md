@@ -29,9 +29,13 @@ npm run test:coverage     # the same, with a coverage table (node's built-in cov
 node --test server/guard.test.ts    # one file
 ```
 
-Tests live next to the code as `*.test.ts` and use `node:test`. A few (`updateSteps`, `republish`,
-`elevation`) drive the PowerShell scripts and run only on Windows; CI runs the suite on Linux and
-Windows. `server/agentSession.test.ts` shows how to test session behaviour without Claude: it swaps
+Tests live next to the code as `*.test.ts` and use `node:test`. CI runs every test on Linux (`ci.yml`; PowerShell 7
+runs the scripts' tests that need no Windows, `server/testPowershell.ts`). The Windows job (`windows.yml`) runs only the
+files in `.github/windows-tests.txt`, each with what it covers and why it needs Windows (PowerShell 5.1, CIM, scheduled
+tasks, robocopy, taskkill, named pipes), and only when a pull request touches one of them or what they cover (w910). A
+test that needs Windows goes in that list, with its files in `windows.yml`'s paths; `scripts/windows-tests.test.ts`
+fails a Windows-only test left out, and a covered file missing from the paths. Prefer a test Linux can run: pass the
+platform in, or run the script under pwsh. `server/agentSession.test.ts` shows how to test session behaviour without Claude: it swaps
 the Agent SDK's `query()` for the scripted fake in `e2e/fakeAgent.ts` (`setQueryForTesting`).
 
 Tests with a machine (`server/testMachine.ts`, a real daemon with git worktrees) share two rules (w759):
@@ -63,15 +67,18 @@ Two from hangs (w906):
 
 - **Never end a process by a stale id.** Windows reuses process ids and never clears a dead parent's id from
   `ParentProcessId`. A walk down a process tree takes a child only when it started no earlier than its parent
-  (`Get-FFKillSet` in `server/machineDeployWin.ts`), and a test forgets an id once it has seen that process gone. On a
-  GitHub runner, wininit.exe's parent id is free, and a walk that drew it would reach the runner's own processes.
+  (`Get-FFKillSet` in `server/machineDeployWin.ts`), and a test forgets an id once it has seen that process gone; an
+  id read from a file is checked to be above 0 (on Windows, node ending pid 0 ends the caller itself). On a GitHub
+  runner wininit.exe's parent id is free and gets reused (w906 saw OpenConsole.exe draw it), so a walk by parent id
+  alone can reach the runner's own processes. Any walk up a tree keeps a set of the ids seen, or it can loop.
 - **A hung unit-test run names itself.** CI runs the tests under `scripts/test-watchdog.ts` with
   `scripts/test-inflight-reporter.ts` and `--test-timeout=300000`: a test that runs 5 min fails by name, and a run past
   its deadline prints the tests still running and the processes under it, then fails its step. Read that before
   re-running a job; a test file listed with no test under it is a process that does not exit (an open handle).
-- **A Windows job that ran to its timeout with no log at all lost its runner**, not a test: GitHub's hosted Windows
-  runners sometimes stop communicating mid-job (actions/runner#4632; 6 of 60 probe jobs on 2026-10-10, three in a step
-  that only listed processes). `.github/workflows/rerun-lost-runner.yml` re-runs such a run's failed jobs once.
+- **A Windows job that ran to its timeout with no log at all lost its runner**, not to a slow test: the watchdog fails
+  our own hangs earlier with the log kept. GitHub's hosted Windows runners sometimes stop communicating mid-job
+  (actions/runner#4632, about 5% of long Windows jobs there), and a stale-id walk could end the runner's processes
+  (fixed above). `.github/workflows/rerun-lost-runner.yml` re-runs such a run's failed jobs once.
 
 ### End-to-end tests (Playwright)
 
