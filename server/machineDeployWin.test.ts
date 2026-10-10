@@ -87,6 +87,10 @@ test('windows: the stop spares the Unity editor and Hub (the user\'s), and holds
   assert.match(s, /run-daemon\.ps1/);
 });
 
+||||||| fdbc28b
+/** Windows PowerShell on Windows, else PowerShell 7 when installed (GitHub's Ubuntu runners have it): for script functions fed made-up input. */
+const powershell = process.platform === 'win32' ? 'powershell.exe' : ['/usr/bin/pwsh', '/usr/local/bin/pwsh', '/opt/homebrew/bin/pwsh', '/snap/bin/pwsh'].find((p) => fs.existsSync(p));
+
 test('windows (real PowerShell): the stop walks to real children only; a process whose dead parent\'s id was reused is not one (w906)', { skip: !powershell && 'no PowerShell here' }, () => {
   // wininit.exe as on a GitHub runner: started at boot, its parent's id long free, then drawn by the daemon stand-in.
   // Start times in Unix seconds; the list goes to a variable first, as Windows PowerShell's ConvertFrom-Json pipes an

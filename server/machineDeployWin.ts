@@ -176,7 +176,7 @@ function Invoke-Native([string]$Exe, [string[]]$Argv) {
  * ParentProcessId is the parent's id AND that started no earlier than the parent: Windows never clears a dead parent's
  * id and reuses ids. On a GitHub runner wininit.exe's parent id names no process (w906, measured), so a process of ours
  * that drew that id would "have" wininit as a child, and the walk would end services.exe's tree with the runner's own
- * processes in it: a job that hangs to its timeout and loses its whole log, as two Windows CI jobs did.
+ * processes in it (and on a PC, whatever a reused id reaches).
  */
 export const KILL_SET = `
 function Get-FFKillSet($all, $marks, $hosts, [bool]$Agents) {

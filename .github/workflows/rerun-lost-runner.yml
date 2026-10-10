@@ -1,0 +1,42 @@
+name: Re-run a job GitHub lost
+
+# w906: GitHub's hosted Windows runners sometimes stop communicating mid-job (actions/runner#4632, open: about 5% of long
+# Windows jobs there; 6 of 60 probe jobs here on 2026-10-10, three of them in a step that only listed processes). Such a
+# job runs to its timeout, the cancel reaches nobody, and its log is lost (BlobNotFound). Our own hangs end before the
+# timeout with their log kept (scripts/test-watchdog.ts fails the step first), so a job that hit its timeout and has no
+# log was lost by GitHub, not by a test: re-run the failed jobs once. Anything else is left for a person to read.
+
+on:
+  workflow_run:
+    workflows: [CI, Worker update end to end]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  rerun:
+    name: Re-run jobs lost with their runner
+    # The first attempt only, so a lost runner gets one more try and never a loop.
+    if: github.event.workflow_run.run_attempt == 1 && contains(fromJSON('["failure", "cancelled", "timed_out"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN: ${{ github.event.workflow_run.id }}
+    steps:
+      - name: A job that hit its timeout with no log
+        run: |
+          lost=0
+          for job in $(gh api "repos/$REPO/actions/runs/$RUN/attempts/1/jobs?per_page=100" --jq '.jobs[] | select(.conclusion == "cancelled" or .conclusion == "failure" or .conclusion == "timed_out") | .id'); do
+            notes=$(gh api "repos/$REPO/check-runs/$job/annotations" --jq '.[].message' || true)
+            grep -qE 'exceeded the maximum execution time|lost communication with the server' <<<"$notes" || continue
+            if gh api "repos/$REPO/actions/jobs/$job/logs" >/dev/null 2>&1; then
+              echo "job $job hit its timeout but kept its log: a hang of ours, left for a person"
+            else
+              echo "::warning::job $job hit its timeout and its log is gone: its runner was lost (actions/runner#4632)"
+              lost=1
+            fi
+          done
+          if [ "$lost" = 1 ]; then gh run rerun "$RUN" --failed -R "$REPO"; else echo "nothing lost with its runner"; fi
