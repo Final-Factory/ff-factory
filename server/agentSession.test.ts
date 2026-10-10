@@ -122,6 +122,32 @@ test('permission: the prompt waits for the user; Allow runs the tool', async (t)
   assert.equal(s.decide(p.requestId, false), false);
 });
 
+test("w913: a worker's clean-up of its own temp folder is answered by the session, anything else still asks a person", async (t) => {
+  const { dir, store, sessions } = setup(t);
+  const tmp = path.join(dir, 'ffa-aaaa1111');
+  fs.mkdirSync(tmp);
+  const make = (env: Record<string, string>) => sessions.create({ kind: 'worker', title: 'w', permissionMode: 'bypassPermissions', options: () => ({ model: 'opus', env }) });
+  const s = make({ TMPDIR: tmp });
+  sessions.send(s.info.id, '#permcmd rm -rf "$TMPDIR/ff-factory" $TMPDIR/*.log; du -sh $TMPDIR');
+  await until(() => s.info.status === 'idle', 'idle');
+  assert.equal(s.info.pendingPermissions.length, 0, 'nobody was asked');
+  assert.ok(texts(store, s.info.id).includes('Allowed: ran it.'), JSON.stringify(texts(store, s.info.id)));
+  // Outside it, or the folder itself: a person is asked, as before.
+  sessions.send(s.info.id, '#permcmd rm -rf $TMPDIR/../other');
+  await until(() => s.info.pendingPermissions.length === 1, 'the prompt for a path outside');
+  s.decide(s.info.pendingPermissions[0].requestId, false);
+  await until(() => s.info.status === 'idle', 'idle');
+  sessions.send(s.info.id, '#permcmd rm -rf /tmp/ffb-w901');
+  await until(() => s.info.pendingPermissions.length === 1, 'the prompt for /tmp');
+  s.decide(s.info.pendingPermissions[0].requestId, false);
+  await until(() => s.info.status === 'idle', 'idle');
+  // A session whose TMPDIR is not one of ours (no ffa- name) has no such rule.
+  const other = make({ TMPDIR: path.join(dir, 'tmp') });
+  sessions.send(other.info.id, `#permcmd rm -rf "$TMPDIR/x"`);
+  await until(() => other.info.pendingPermissions.length === 1, 'the prompt without an ffa- folder');
+  other.decide(other.info.pendingPermissions[0].requestId, false);
+});
+
 test('permission: Deny tells the agent why', async (t) => {
   const { store, sessions, worker } = setup(t);
   const s = worker('default');

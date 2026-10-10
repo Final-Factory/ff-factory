@@ -11,6 +11,7 @@ import { accountKeyOf } from './usage.ts';
 import { senderOf, type SessionSnapshot, type Unanswered } from './restart.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun, dryRunStartRefusal } from './dryRun.ts';
+import { tempOnlyDelete } from './tempDelete.ts';
 import { ContextMeter, IMAGE_CHARS, type Cumulative, type TurnUsage } from '../shared/spend.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
@@ -435,6 +436,7 @@ export class AgentSession implements SessionHandle {
       // `git fetch` once sat at an askpass prompt for hours).
       env: { ...(base.env ?? process.env), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' },
     };
+    this.tempDir = typeof options.env?.TMPDIR === 'string' ? options.env.TMPDIR : undefined;
     this.costBase = this.info.costUsd;
     this.firstResult = true;
     // A new process: the last one's background tasks ended with it.
@@ -675,7 +677,22 @@ export class AgentSession implements SessionHandle {
     return out;
   }
 
+  /** This session's own temp folder (TMPDIR of its process), when it is one of ours (`ffa-<session>`). */
+  private tempDir?: string;
+
+  /**
+   * A worker's clean-up of its own temp folder is answered here, not by a person (w913, lothsahn: "Random clean up commands
+   * take a lot of approvals"): a plain rm / Remove-Item whose every path is inside `$TMPDIR` (or a save copy named with this
+   * session's tag) is allowed. Anything else, or anything this cannot judge, is asked as before (server/tempDelete.ts).
+   */
+  private ownTempDelete(toolName: string, input: Record<string, unknown>): boolean {
+    if ((toolName !== 'Bash' && toolName !== 'PowerShell') || typeof input.command !== 'string' || !this.tempDir) return false;
+    if (!/^ffa-/i.test(path.basename(this.tempDir))) return false;
+    return tempOnlyDelete(input.command, { tmp: this.tempDir }).ok;
+  }
+
   private askPermission(toolName: string, input: Record<string, unknown>, signal: AbortSignal, blockedPath?: string): Promise<PermissionResult> {
+    if (this.ownTempDelete(toolName, input)) return Promise.resolve({ behavior: 'allow', updatedInput: input });
     const requestId = randomUUID();
     const ev = this.store.append(this.info.id, { kind: 'permission', requestId, toolName, input });
     const p: PendingPermission = {

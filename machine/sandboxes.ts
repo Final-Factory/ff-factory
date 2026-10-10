@@ -82,6 +82,12 @@ export interface PoolOptions {
   trim?: Partial<TrimPolicy> | false;
   /** The trim itself (tests put a hung or failing one here). */
   trimmer?: typeof trimLibraryCaches;
+  /**
+   * What else leaves with the Library trim when a sandbox is released (w913): the build and capture output its last worker made
+   * (server/installLeftovers.ts RELEASE_SETTINGS). Runs in the same 'cleanup' state, under the same timeout, only while no agent
+   * is live there and no editor or build has the project open.
+   */
+  releaseSweep?(sandboxPath: string): Promise<{ files: number; bytes: number }>;
   /** A line for the daemon's log. */
   log?(line: string): void;
   /** Why a sandbox editor may not start now (the machine's host guard, w466: the drive is gone, disk space is low), or undefined. */
@@ -595,7 +601,19 @@ export class SandboxPool {
     const run = (async (): Promise<TrimResult> => {
       let res: TrimResult;
       try {
-        res = await Promise.race([(this.o.trimmer ?? trimLibraryCaches)(r.path, policy, { signal: ac.signal }), timedOut]);
+        res = await Promise.race([
+          (async () => {
+            const t = await (this.o.trimmer ?? trimLibraryCaches)(r.path, policy, { signal: ac.signal });
+            if (t.skipped || t.stopped || ac.signal.aborted || !this.o.releaseSweep) return t;
+            // The released sandbox's own build and capture output (w913); a failure here must not fail the trim.
+            const swept = await this.o.releaseSweep(r.path).catch((e: Error) => {
+              this.o.log?.(`sandbox ${id}: release sweep failed: ${e.message}`);
+              return undefined;
+            });
+            return swept ? { ...t, swept } : t;
+          })(),
+          timedOut,
+        ]);
       } catch (e) {
         res = { stopped: `failed: ${(e as Error).message}`, files: 0, removedBytes: 0, keptBytes: 0 };
       } finally {
@@ -606,7 +624,7 @@ export class SandboxPool {
         if (this.recs.get(id) === r && r.status === 'cleanup') this.changed(r, { status: 'ready', statusDetail: undefined });
       }
       const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} GB`;
-      const line = `sandbox ${id}: Library cache trim (${why}): removed ${res.files} files, ${gb(res.removedBytes)}, kept ${gb(res.keptBytes)}${res.stopped ? `; stopped early (${res.stopped}), handed back as it is` : ''}${res.skipped ? `; skipped (${res.skipped})` : ''}`;
+      const line = `sandbox ${id}: Library cache trim (${why}): removed ${res.files} files, ${gb(res.removedBytes)}, kept ${gb(res.keptBytes)}${res.swept ? `; build and capture output: ${res.swept.files} entries, ${gb(res.swept.bytes)}` : ''}${res.stopped ? `; stopped early (${res.stopped}), handed back as it is` : ''}${res.skipped ? `; skipped (${res.skipped})` : ''}`;
       this.o.log?.(line);
       if (res.stopped) this.o.onEvent({ text: line, sandbox: id });
       return res;

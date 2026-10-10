@@ -73,6 +73,13 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
   };
 }
 
+/**
+ * The limits when a sandbox is released (w913): its last worker is gone and its editor is down, so what that worker built is
+ * not wanted again: the newest build per cache stays (the next worker's first run), the rest, benchmark builds and capture
+ * output go once nothing changed in them for 15 minutes (a detached build still writing keeps its folder).
+ */
+export const RELEASE_SETTINGS: InstallLeftoverSettings = { ...INSTALL_LEFTOVER_DEFAULTS, keepBuilds: 1, buildUntouchedHours: 0.25, benchDays: 0.25 / 24, captureDays: 0.25 / 24 };
+
 /** A process as the plan needs it. */
 export interface ProcLite {
   pid: number;
@@ -162,6 +169,8 @@ export async function planInstallLeftovers(o: {
   /** Pids never named a stray (this daemon and its parents). */
   self?: number[];
   localWork?: (dir: string) => Promise<boolean>;
+  /** 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). */
+  scope?: 'all' | 'sandboxes';
 }): Promise<InstallPlan> {
   const plan: InstallPlan = { items: [], listed: [], strays: [] };
   if (!o.root) return plan; // not a worker-root install: nothing here is the install folder
@@ -223,6 +232,12 @@ export async function planInstallLeftovers(o: {
     for (const e of await children(path.join(sb, '.nightly-builds'))) {
       if (e.isDirectory() && /^(clips|shots)$/i.test(e.name)) await take(path.join(sb, '.nightly-builds', e.name), sb, 'capture-output', `capture output (${e.name}) untouched for ${s.captureDays} days`, s.captureDays * DAY);
     }
+  }
+
+  if (o.scope === 'sandboxes') {
+    plan.items = [...items.values()];
+    plan.listed = [...listed].map(([p, why]) => ({ path: p, why }));
+    return plan;
   }
 
   // ---- the nightly lab inside the install folder

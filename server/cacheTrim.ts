@@ -28,6 +28,8 @@ export interface TrimResult {
   files: number;
   removedBytes: number;
   keptBytes: number;
+  /** The build and capture output of the released sandbox taken with it (w913): entries and bytes. */
+  swept?: { files: number; bytes: number };
 }
 
 /** Whether an editor or a batchmode build has the project open. */
