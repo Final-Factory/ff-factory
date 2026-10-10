@@ -23,8 +23,12 @@ import { conditionalVerdict } from '../shared/conditional.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
 
 const EVERY_MS = 60_000;
-/** A pull request's checks are read at most this often each (gh; GitHub's rate limit is 5000 calls an hour). */
-const CI_EVERY_MS = 5 * 60_000;
+/**
+ * A pull request's checks are read at most this often each (gh; GitHub's rate limit is 5000 calls an hour, and a read is
+ * 1 call, 3 where the checks are refused: 10 gates cost at most 900 an hour). Two minutes (w846, was 5): a worker waiting
+ * on CI is resumed within about 4 minutes of its checks finishing (2 to read, 1 for the watch, 1 for its check-in).
+ */
+const CI_EVERY_MS = 2 * 60_000;
 /** A pull request that cannot be read is logged when it starts failing and again this often while it does (w829). */
 const READ_FAIL_LOG_MS = 30 * 60_000;
 const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);

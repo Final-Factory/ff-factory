@@ -1548,6 +1548,19 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     return back;
   }
 
+  /**
+   * A request unblocked with no check-in to hand back (w846): when a gate was CI or one its worker set itself (blocked_on),
+   * that worker is resumed within a minute with why, instead of waiting for the dispatcher to pass the word on. Its
+   * latest worker only, and only one that still exists. Returns it, or [].
+   */
+  private resumeGatedWorker(w: WorkItem, gates: readonly WorkBlocker[], cleared: string): string[] {
+    const sid = [...w.sessionIds].reverse().find((x) => this.store.sessions.get(x));
+    if (!sid || !gates.some((g) => g.kind === 'ci' || g.by === `worker ${sid}`)) return [];
+    const ci = gates.some((g) => g.kind === 'ci');
+    const note = `${w.id} is unblocked: ${cleared}.${ci ? ' Read its checks now (gh pr checks): merge on green, fix on red.' : ''} Carry on from where you left it.`;
+    return this.d.restoreWake?.(sid, note) ? [sid] : [];
+  }
+
   /** Whether a gate may still be open: judged here only where the facts are at hand; the rest waits for the blocker watch. */
   private gateOpen(g: WorkBlocker): boolean {
     if (!['request', 'time', 'machine', 'lock'].includes(g.kind)) return true;
@@ -1584,9 +1597,11 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const asked: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[] = [];
     for (const id of a.requests ?? []) asked.push({ kind: 'request', ref: id.trim(), what: `${id.trim().toLowerCase()} finishing` });
     for (const pr of a.prs ?? []) {
-      const ref = prRefOf(pr);
-      if (!ref) throw new Error(`"${pr}" is not a pull request: give owner/repo#123 or its github.com link`);
-      asked.push({ kind: 'pr', ref, what: `PR ${ref} merged` });
+      // "ci:owner/repo#123" (w846): its checks finishing, green or red, not its merge.
+      const ci = /^\s*ci:\s*/i.exec(pr);
+      const ref = prRefOf(ci ? pr.slice(ci[0].length) : pr);
+      if (!ref) throw new Error(`"${pr}" is not a pull request: give owner/repo#123 or its github.com link (ci:owner/repo#123 for its checks finishing)`);
+      asked.push(ci ? { kind: 'ci', ref, what: `CI on ${ref} finished` } : { kind: 'pr', ref, what: `PR ${ref} merged` });
     }
     if (!asked.length) throw new Error('name what it waits for: requests (ids) and/or prs (owner/repo#123 or a github.com link). A person is waiting_on_person; a time is wake_me');
     asked[0] = { ...asked[0], what: clip(what, 200) };
@@ -3346,13 +3361,19 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const b = { what: gates.map((g) => g.what).join('; ') };
     const name = gatesName(gates, this.now().getTime());
     // w829: a worker whose check-in the block cancelled gets it back and resumes by itself; the request is its again.
-    const back = this.handBackCheckIns(w, `${name} cleared (${why})`);
+    let back = this.handBackCheckIns(w, `${name} cleared (${why})`);
+    // w846: with none to hand back, the worker of a CI gate or of a gate it set itself is resumed the same way, within a minute.
+    let resumed = false;
+    if (!back.length) {
+      back = this.resumeGatedWorker(w, gates, `${name} cleared (${why})`);
+      resumed = back.length > 0;
+    }
     w.status = back.length ? 'active' : 'new';
     w.blocked = undefined;
     w.alsoBlocked = undefined;
     w.heldCheckIns = undefined;
     // The hand-back goes first: a log line is clipped, and a CI reason can be long.
-    this.stamp(w, `unblocked${back.length ? ` (handed back ${back.map((sid) => `${sid}'s check-in`).join(', ')}, which resumes it now)` : ''}: ${name} cleared (${why})`);
+    this.stamp(w, `unblocked${back.length ? (resumed ? ` (its worker ${back.join(', ')} resumes within a minute)` : ` (handed back ${back.map((sid) => `${sid}'s check-in`).join(', ')}, which resumes it now)`) : ''}: ${name} cleared (${why})`);
     this.store.putWork(w);
     console.log(`ledger: unblocked ${w.id}: ${name} cleared (${why})${back.length ? `; handed back the check-in of ${back.join(', ')}` : ''}`);
     if (back.length) {

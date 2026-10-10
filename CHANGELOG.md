@@ -10,6 +10,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A worker waiting on CI frees its sandbox and is woken within minutes of its checks finishing** (w846, lothsahn: "When
+  they're waiting for GithubCI with their unity editors off, they should free the slot", and "How long do workers wait on
+  CI? Most of the CI runs are complete"). At about 04:20 UTC on 2026-10-10 BEAST had 0 of 5 sandboxes free, three held by
+  w836, w834 and w833 polling CI with their editors stopped, while six requests queued for BEAST. Now a worker blocks on
+  its own PR's CI (`blocked_on` with `prs: ["ci:owner/repo#123"]`; its brief's new "Waiting on CI" says to, instead of
+  polling); with every open request of its Blocked on a CI gate, its editor stopped, no batch run in flight and its work
+  pushed, its sandbox is released at once and it is placed again (its own sandbox if free, else another on the same
+  machine, on its branch) when it resumes. The checks are read every 2 minutes (was 5), and when they finish, green or
+  red, the worker is resumed within a minute, its own check-in handed back or a new one armed, with no dispatcher round
+  trip: about 4 minutes at worst, against 7.4 measured for PR #1354 on a 10-minute poll. Needs a portal deploy only (the
+  `ci:` form rides in `blocked_on`'s existing `prs`, so no daemon update).
+
 - **A person's decision for later is recorded and carried out by the server, and a call a gate refused is never asked
   again** (w830, lothsahn: "Yes, let's do that", and "Can you check your instructions because you keep making a similar
   mistake"). On 2026-10-10 lothsahn said "Close w811 as a duplicate once 1314 is merged"; #1314 merged, the orchestrator's

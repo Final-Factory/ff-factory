@@ -409,3 +409,47 @@ test('w656: a dirty sandbox is saved by its daemon first, then released for ever
   assert.match(savedNote(a.savedWork!), /^\[saved\] While you were stopped, FF Factory committed your uncommitted work \(3 file\(s\), new ones included\) on your branch `feature\/slot1` as abc1234, and pushed it/);
   assert.match(savedNote(a.savedWork!), /`git reset HEAD~1` gives it back uncommitted/);
 });
+
+// ---------------------------------------------------------------- w846: a worker waiting on CI gives up its sandbox
+
+test("w846: a worker waiting on CI with its editor stopped gives up its sandbox at once, branch kept; never with its editor on, a batch run in flight or commits not pushed; it stays released while CI runs and is placed again after, green or red", () => {
+  const ci = 'it waits on CI (w836: CI on Final-Factory/FinalFactory#1354)';
+  const sb = sandbox('slot1');
+  const withCi = (f: PlaceFacts) => ({ ...f, ciWait: ci });
+  // Stopped, its check-in cancelled by the block (w829 holds it): released now, not after 30 minutes, on its branch.
+  const w = worker('w1');
+  assert.equal(releaseStep(w, sb, facts([w])), undefined, 'without the CI gate it holds nothing to release');
+  assert.deepEqual(releaseStep(w, sb, withCi(facts([w]))), { do: 'release', why: ci, branch: 'feature/slot1' });
+  // A near check-in of its own (a poll it set anyway) does not keep it: the check-in places it again when it comes.
+  const polling = worker('w1', { wakeAt: iso(NOW + 8 * MIN) });
+  assert.equal(releaseStep(polling, sb, facts([polling])), undefined, 'today: an 8-minute poll holds the sandbox');
+  assert.equal(releaseStep(polling, sb, withCi(facts([polling])))?.do, 'release');
+  // Never with its editor on (lothsahn: "with their unity editors off"), a batch run of its in flight, or commits not pushed.
+  for (const state of ['running', 'starting', 'crashed'] as const) assert.equal(releaseStep(w, sandbox('slot1', { unity: { state } }), withCi(facts([w]))), undefined, `editor ${state}`);
+  assert.equal(releaseStep(w, sb, withCi(facts([w], { unityHolders: ['sandbox:slot1'] }))), undefined, 'batch run');
+  assert.equal(releaseStep(w, sandbox('slot1', {}, { ahead: 2 }), withCi(facts([w]))), undefined, '2 commits its remote lacks');
+  // Uncommitted work: its daemon commits and pushes it first (w656), or it stays held.
+  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), { ...withCi(facts([w])), canSave: true }), { do: 'release', why: ci, branch: 'feature/slot1', save: true });
+  assert.equal(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), withCi(facts([w]))), undefined);
+  // A message queued for it resumes it now: kept.
+  assert.equal(releaseStep(worker('w1', { queuedSend: 'x' }), sb, withCi(facts([w]))), undefined);
+  // Alive between turns: Idle, or with a near poll, it is stopped first (due), and the next pass releases it; editor on, never.
+  const idle = worker('w1', { status: 'idle', lastActivityAt: iso(NOW - 2 * MIN) });
+  assert.equal(releaseStep(idle, sb, facts([idle], { liveIds: ['w1'] })), undefined, 'idle 2 min, no CI gate: kept');
+  assert.deepEqual(releaseStep(idle, sb, withCi(facts([idle], { liveIds: ['w1'] }))), { do: 'stop', why: ci, due: true });
+  const poll = worker('w1', { status: 'idle', wakeAt: iso(NOW + 8 * MIN), lastActivityAt: iso(NOW - 2 * MIN) });
+  assert.deepEqual(releaseStep(poll, sb, withCi(facts([poll], { liveIds: ['w1'] }))), { do: 'stop', why: ci, due: true });
+  assert.equal(releaseStep(idle, sandbox('slot1', { unity: { state: 'running' } }), withCi(facts([idle], { liveIds: ['w1'] }))), undefined, 'editor on: not even stopped');
+  assert.equal(releaseStep(worker('w1', { status: 'running' }), sb, withCi(facts([idle], { liveIds: ['w1'] }))), undefined, 'mid-turn');
+  // Released: while CI runs it does not take its sandbox back, even with a check-in near.
+  const rel = worker('w1', { wakeAt: iso(NOW + MIN), placeReleased: { at: iso(NOW - 20 * MIN), sandbox: 'slot1', branch: 'feature/slot1', why: ci } });
+  assert.equal(releaseStep(rel, sb, withCi(facts([rel]))), undefined);
+  // CI finished (green or red, the gate clears either way) and its resume is near: back to its own sandbox, still free.
+  assert.deepEqual(releaseStep(rel, sb, facts([rel])), { do: 'reclaim' });
+  // Its own took other work meanwhile: placed in another free one on this machine, switched to its branch (red: to fix it there).
+  const other = worker('o1', { status: 'idle' });
+  const m = { id: 'pc', sandboxes: [sandbox('slot1', {}, { branch: 'sandbox/slot1-new' }), sandbox('slot2', {}, { branch: 'sandbox/slot2-x' })] };
+  const p = placeFor(rel, m, facts([rel, other], { liveIds: ['o1'] }));
+  assert.ok('sandbox' in p && p.sandbox.id === 'slot2', JSON.stringify(p));
+  assert.equal(rel.placeReleased!.branch, 'feature/slot1', 'its branch is what it is placed on');
+});

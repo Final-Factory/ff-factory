@@ -644,6 +644,22 @@ LothDesktop and Beast, not just when BEAST is full").
     - **Idle with nothing pending** (alive, no check-in, no job, nothing queued or unanswered; w650 waiting for a
       deploy): stopped after 30 minutes without activity, with a line in its transcript, and marked `releaseDue`;
       the idle reaper's stops (an hour idle, or its request over) are marked the same way. A message resumes it;
+    - **it waits on CI** (w846, lothsahn on 2026-10-10: "When they're waiting for GithubCI with their unity editors
+      off, they should free the slot"; at about 04:20 UTC BEAST had 0 of 5 sandboxes free, three of them held by w836,
+      w834 and w833 polling CI with their editors stopped, while six requests queued for BEAST): released **at once**,
+      whatever its check-in, when every open request it is the latest worker on is Blocked with a **CI gate**
+      (`Agents.ciWait`), its editor is **stopped**, no batch run of that sandbox is in flight and its branch has **no
+      commit its remote lacks** (`ciReleaseWhy`); the usual rules below still hold (clean worktree, or its uncommitted
+      work saved and pushed first). Alive between turns, Idle or with only a check-in, it is stopped first (`releaseDue`).
+      The gate is the signal, never a check-in's words: a worker gets onto it with `blocked_on` and `prs:
+      ["ci:owner/repo#123"]` (its checks finishing, green or red; its brief's "Waiting on CI" says to, instead of polling
+      with `wake_me`), or the dispatcher's `decide_work block` on CI. While its CI runs it does not take the sandbox
+      back. The blocker watch reads the checks every 2 minutes; when they finish, green or red, the gate clears and the
+      worker is resumed within a minute, its own check-in handed back (w829) or, with none, a new one (w846,
+      `Orchestrators.resumeGatedWorker`). It is then placed again like any released worker: its own sandbox if it is
+      still free, else another free one **on the same machine**, switched to its branch, so red CI gets it a sandbox to
+      fix in. Never another machine: its conversation lives there (the Claude Code session file), and placement rules
+      are not touched;
     - **several stopped workers in one sandbox**, each with its own release due, no longer keep it for each other
       ("agent … works there too"): they release it together, and when they resume each is placed back on the shared
       branch, the second joining the first.

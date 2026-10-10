@@ -30,7 +30,7 @@ export const BLOCKER_STUCK_MS: Record<WorkBlockerKind, number | undefined> = {
 /**
  * How long a CI blocker may go without FF Factory being able to read the checks before it gives up and lets the worker
  * look for itself (w829: the portal's fine-grained GitHub token could not read statusCheckRollup, every read failed in
- * silence, and w814, w818 and w808 sat Blocked for hours after their CI finished). Three 5-minute reads.
+ * silence, and w814, w818 and w808 sat Blocked for hours after their CI finished). Several failed reads in a row.
  */
 export const CI_UNREADABLE_MS = 15 * 60_000;
 
