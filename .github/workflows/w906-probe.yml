@@ -31,6 +31,7 @@ jobs:
       - name: The three slowest files, three times
         shell: bash
         run: |
+          set +e +o pipefail
           P="$RUNNER_TEMP/probe"; mkdir -p "$P/procs"
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .github/w906-probe/trace.ps1 -Out "$(cygpath -w "$P/trace.txt")" -StopFile "$(cygpath -w "$P/stop")" &
           sleep 5
