@@ -226,6 +226,8 @@ export interface IntakeFiling {
   triage: WorkTriage;
   /** A cap (daily, per reporter), checked only for something new: why it may not be filed now, or undefined. */
   limit?: () => string | undefined;
+  /** Placement and other limits for the dispatcher (WorkItem.constraints): the nightly run's machine (w864). */
+  constraints?: string;
 }
 
 /**
@@ -2220,7 +2222,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const now = this.now().getTime();
     // Within one family only: an FFBox review request carries its Discord thread's key too, and is not a repeat of the
     // bug report filed from that thread (nor the other way round).
-    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' ? 'nightly' : 'release');
+    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' || k === 'nightly-run' ? k : 'release');
     const prefix = family(kind);
     const ids = keys.filter((k) => k.startsWith(`${prefix}:`));
     if (!ids.length) return undefined;
@@ -2391,6 +2393,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       log: [],
       source: f.source,
       triage: f.triage,
+      ...(f.constraints ? { constraints: f.constraints } : {}),
     };
     // Two players reporting the same bug: one request, both threads.
     const twin =
@@ -2452,14 +2455,15 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * 40 a day by default), on top of each source's own daily cap. The release follow-up is not counted.
    */
   private intakeCap(now: number, kind: WorkSourceKind): string | undefined {
-    if (kind === 'release') return undefined;
+    // The server's own filings (a release follow-up, the night's scheduled run) are no flood to cap.
+    if (kind === 'release' || kind === 'nightly-run') return undefined;
     const lim = limitsFor('intake', this.d.cfg.workLimits);
     if (!lim) return undefined;
     let hour = 0;
     let day = 0;
     for (const w of this.store.work.values()) {
       // An operator's dev request is their own request (its own cap: providers.ffbox.devRequests.perHour).
-      if (!w.source || w.source.kind === 'release' || w.source.kind === 'ffbox-dev') continue;
+      if (!w.source || w.source.kind === 'release' || w.source.kind === 'nightly-run' || w.source.kind === 'ffbox-dev') continue;
       const age = now - Date.parse(w.createdAt);
       if (age < 3_600_000) hour++;
       if (age < 86_400_000) day++;

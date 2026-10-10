@@ -1456,3 +1456,119 @@ test('w853: a declined diagnosis\'s reports go to FFBox as obsolete, a new diagn
   restarted.pushReportObsoletes();
   assert.deepEqual(told.sort((a, b) => a.reportId.localeCompare(b.reportId)), [{ reportId: crash, workId: w2.id, withdrawn: true }, { reportId: other, workId: w2.id, withdrawn: true }]);
 });
+
+// ---------------------------------------------------------------- the nightly run (w864)
+
+/** An intake on the setup's ledger with its own clock, for the nightly schedule. */
+function nightlyClock(t: Parameters<typeof setup>[0], run: NonNullable<NonNullable<Config['intake']>['nightly']>['run'] = {}) {
+  const env = setup(t, { nightly: { enabled: true, run: { enabled: true, person: 'lothsahn', ...run } } });
+  const clock = { now: 0 };
+  const intake = new IntakeManager({ cfg: env.cfg, store: env.store, identity: env.agents.identity, orchestrators: env.o, now: () => clock.now });
+  t.after(() => intake.close());
+  return { ...env, intake, clock };
+}
+/** 2026-10-11 03:00 America/New_York (EDT, UTC-4). */
+const NY_0300_EDT = Date.UTC(2026, 9, 11, 7, 0);
+const firedRun = (env: ReturnType<typeof nightlyClock>) => {
+  env.clock.now = NY_0300_EDT - 60_000;
+  env.intake.checkNightlyRun();
+  env.clock.now = NY_0300_EDT + 60_000;
+  env.intake.checkNightlyRun();
+  return env.work()[0];
+};
+
+test('nightly run: fires once at 03:00 New York time, for its person, on its machine, approved; a night due before it was switched on is not fired late', async (t) => {
+  const { intake, clock, work, heard, dispatcher } = nightlyClock(t);
+  clock.now = NY_0300_EDT - 60 * 60_000; // 02:00: switched on now; the 10-10 night was before
+  intake.checkNightlyRun();
+  assert.equal(work().length, 0);
+  clock.now = NY_0300_EDT + 30_000;
+  intake.checkNightlyRun();
+  intake.checkNightlyRun();
+  const [w] = work();
+  assert.equal(work().length, 1, 'once a night');
+  assert.deepEqual(
+    [w.title, w.source?.kind, w.source?.nightlyRun, w.requestedBy.userId, w.unattributed, w.approval?.state, w.status],
+    ['Nightly e2e run 2026-10-11 on lothdesktop', 'nightly-run', { date: '2026-10-11', machine: 'lothdesktop' }, 'lothsahn', undefined, 'approved', 'new'],
+  );
+  assert.match(w.constraints ?? '', /Run it on lothdesktop, in one of its sandboxes, and nowhere else/);
+  assert.match(w.brief, /must reach FF Factory by 2026-10-11 08:00 America\/New_York \(12:00 UTC\)/);
+  assert.ok(w.keys.includes('nightly-run:2026-10-11'));
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(heard(dispatcher().info.id, '[work request]').length, 1, 'the dispatcher places it like any request');
+  const n = intake.summary().nightly!;
+  assert.deepEqual(n.nights?.map((x) => [x.date, x.status, x.workId]), [['2026-10-11', 'running', w.id]]);
+  assert.equal(n.run?.next, '2026-10-12T07:00:00.000Z');
+});
+
+test('nightly run: every report is recorded on its night and its run request, a green one too', (t) => {
+  const env = nightlyClock(t);
+  const { intake, clock, heard, o } = env;
+  const run = firedRun(env);
+  clock.now = NY_0300_EDT + 140 * 60_000;
+  const out = intake.onNightly({ ...night('2026-10-11', NSHA('c'), []), status: 'passed', counts: { ran: 136, passed: 134, failed: 0, flaky: 2, env: 0 }, request: run.id });
+  assert.deepEqual(out, []);
+  assert.equal(intake.nightLabel('2026-10-11'), `2026-10-11, ${run.id}`);
+  const [n] = intake.summary().nightly!.nights!;
+  assert.deepEqual([n.status, n.counts?.passed, n.sha], ['passed', 134, NSHA('c')]);
+  assert.match(run.log.at(-1)!, /nightly: the night 2026-10-11 passed: 134 of 136 passed, 2 flaky \(lothdesktop, develop ccccccccc\)/);
+  clock.now = NY_0300_EDT + 9 * 3_600_000;
+  intake.checkNightlyRun();
+  assert.equal(heard(o.personalFor(LOTH).info.id, '[nightly]').length, 0, 'a delivered night raises no alarm');
+});
+
+test('nightly run: no report by its due time is an alarm to its person, and a late report is told too', (t) => {
+  const env = nightlyClock(t);
+  const { intake, clock, heard, o } = env;
+  const run = firedRun(env);
+  clock.now = NY_0300_EDT + 5 * 3_600_000 - 60_000;
+  intake.checkNightlyRun();
+  assert.equal(heard(o.personalFor(LOTH).info.id, '[nightly]').length, 0, 'not before 08:00');
+  clock.now = NY_0300_EDT + 5 * 3_600_000 + 60_000;
+  intake.checkNightlyRun();
+  intake.checkNightlyRun();
+  const said = heard(o.personalFor(LOTH).info.id, '[nightly]');
+  assert.equal(said.length, 1, 'once');
+  assert.match(said[0].text, new RegExp(`The nightly e2e run of 2026-10-11 \\(${run.id}\\) sent no report by 2026-10-11 08:00 America/New_York .*no worker ever started on it.*Silence is not a verdict`));
+  assert.equal(intake.summary().nightly!.nights![0].status, 'missing');
+  assert.match(run.log.at(-1)!, /sent no report/);
+  intake.onNightly({ ...night('2026-10-11', NSHA('c'), [fail('MP-slow-client-catchup')]), status: 'failed' });
+  assert.match(heard(o.personalFor(LOTH).info.id, '[nightly]').at(-1)!.text, /came after all, late: the night 2026-10-11 failed/);
+  assert.equal(intake.summary().nightly!.nights![0].status, 'failed');
+});
+
+test('nightly run: a run request that closes without a report is a missing night', (t) => {
+  const env = nightlyClock(t);
+  const { intake, clock, heard, o, store } = env;
+  const run = firedRun(env);
+  store.putWork({ ...run, status: 'cancelled', updatedAt: new Date(NY_0300_EDT + 2 * 60_000).toISOString() });
+  clock.now = NY_0300_EDT + 30 * 60_000;
+  intake.checkNightlyRun();
+  assert.match(heard(o.personalFor(LOTH).info.id, '[nightly]')[0].text, new RegExp(`2026-10-11 \\(${run.id}\\) ended as cancelled without a report`));
+});
+
+test('nightly run: a broken night is one request to find its cause, not one per scenario, and its person hears it', (t) => {
+  const { intake, clock, work, heard, o } = nightlyClock(t);
+  clock.now = NY_0300_EDT + 60_000;
+  const results = Array.from({ length: 30 }, (_, i) => fail(`S${i}`));
+  const cause = '130 of 136 scenarios failed the same way before their first step: host: new error outside the allow-list while the peers started: NullReferenceException';
+  const out = intake.onNightly({ ...night('2026-10-09', NSHA('d'), results), status: 'broken', cause })!;
+  assert.deepEqual(out.map((r) => [r.scenario, r.action]), [['night-broken', 'filed']]);
+  const filed = work().filter((w) => w.source?.kind === 'nightly');
+  assert.equal(filed.length, 1);
+  assert.match(filed[0].title, /^Nightly e2e 2026-10-09: the night broke on develop ddddddddd: 130 of 136/);
+  assert.match(filed[0].brief, /find whether the cause is in the game .* or in the lab/);
+  assert.match(heard(o.personalFor(LOTH).info.id, '[nightly]')[0].text, /the night 2026-10-09 broke: 130 of 136 scenarios/);
+  // The next broken night joins it.
+  const again = intake.onNightly({ ...night('2026-10-10', '', []), status: 'broken', cause: 'the win build failed' })!;
+  assert.deepEqual(again.map((r) => [r.action, r.workId]), [['attached', filed[0].id]]);
+});
+
+test("nightly run: the night is the date in the schedule's zone, and 03:00 follows daylight saving", async () => {
+  const { lastFire, nightOf } = await import('./intake.ts');
+  const ny = { time: '03:00', tz: 'America/New_York' };
+  assert.equal(new Date(lastFire(ny, Date.UTC(2026, 9, 11, 7, 30))).toISOString(), '2026-10-11T07:00:00.000Z', 'EDT');
+  assert.equal(new Date(lastFire(ny, Date.UTC(2026, 10, 2, 9, 0))).toISOString(), '2026-11-02T08:00:00.000Z', 'EST after the change');
+  assert.equal(new Date(lastFire(ny, Date.UTC(2026, 9, 11, 6, 59))).toISOString(), '2026-10-10T07:00:00.000Z', 'just before: the night before');
+  assert.equal(nightOf(Date.UTC(2026, 9, 11, 3, 0), 'America/New_York'), '2026-10-10', '23:00 the evening before in New York');
+});

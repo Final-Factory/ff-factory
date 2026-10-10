@@ -3,7 +3,7 @@
 // against the ledger and files them. The lab is the team's own (FinalFactory scripts/nightly/ffnightly.py) and posts
 // with a scoped API key, but its text is still cleaned and cut before it reaches a brief.
 import { cleanLine, type IntakeDraft, type IntakeSettings } from './intakeRules.ts';
-import type { NightlyRelease, WorkPriority, WorkTriage } from '../shared/types.ts';
+import type { NightlyNight, NightlyRelease, WorkPriority, WorkTriage } from '../shared/types.ts';
 
 export const NIGHTLY_REPORT_VERSION = 1;
 const MAX_RESULTS = 60;
@@ -49,6 +49,16 @@ export interface NightlyReport {
   /** Where the night's report.md is: on the lab, and BEAST's copy. */
   report?: { lab?: string; beast?: string };
   results: NightlyResult[];
+  /**
+   * How the night went (w864; a lab from before says nothing, and its results decide): passed, failed (a new or still
+   * failing scenario), or broken (one cause, a failed build or a startup error across the battery, the lab; its
+   * results are not filed one by one). A broken night may have no commit yet (sha "").
+   */
+  status?: 'passed' | 'failed' | 'broken';
+  cause?: string;
+  counts?: NonNullable<NightlyNight['counts']>;
+  /** The portal's run request that started the night ("w901"), when a worker did. */
+  request?: string;
 }
 
 const SCENARIO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
@@ -97,7 +107,10 @@ export function parseNightlyReport(body: unknown): { report: NightlyReport } | {
   const sha = str(b.sha, 40).toLowerCase();
   if (!DATE.test(date)) return { error: 'date must be YYYY-MM-DD' };
   if (!/^[\w.-]{1,40}$/.test(lab)) return { error: 'lab must be a name (letters, digits, . _ -)' };
-  if (!/^[0-9a-f]{40}$/.test(sha)) return { error: 'sha must be the full 40-character commit' };
+  const status = ['passed', 'failed', 'broken'].includes(b.status as string) ? (b.status as NightlyReport['status']) : undefined;
+  if (b.status !== undefined && !status) return { error: 'status must be passed, failed or broken' };
+  // A broken night may end before it knows the commit (the fetch failed).
+  if (!/^[0-9a-f]{40}$/.test(sha) && !(status === 'broken' && sha === '')) return { error: 'sha must be the full 40-character commit' };
   if (!Array.isArray(b.results)) return { error: 'results must be a list' };
   const results: NightlyResult[] = [];
   for (const raw of b.results.slice(0, MAX_RESULTS)) {
@@ -148,12 +161,19 @@ export function parseNightlyReport(body: unknown): { report: NightlyReport } | {
   }
   const rep = obj(b.report);
   const rel = release(b.release);
+  const c = obj(b.counts);
+  const count = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(10_000, Math.round(v))) : 0);
+  const request = str(b.request, 12);
   return {
     report: {
       v: NIGHTLY_REPORT_VERSION,
       date,
       lab,
       sha,
+      ...(status ? { status } : {}),
+      ...(str(b.cause, 600) ? { cause: str(b.cause, 600) } : {}),
+      ...(c ? { counts: { ran: count(c.ran), passed: count(c.passed), failed: count(c.failed), flaky: count(c.flaky), env: count(c.env) } } : {}),
+      ...(/^w\d{1,7}$/.test(request) ? { request } : {}),
       ...(rel ? { release: rel } : {}),
       ...(rep
         ? {
@@ -289,6 +309,60 @@ export function nightlyDraft(rep: NightlyReport, results: readonly NightlyResult
 /** The line a later night adds to the open request already on a scenario (once per night and scenario). */
 export function nightlyAgainLine(rep: NightlyReport, r: NightlyResult): string {
   return `nightly ${rep.date}: ${r.scenario} ${r.class === 'flaky' ? `flaky again (${r.flakyNights ?? '?'} nights running)` : 'failed again'} on develop ${short(rep.sha)}${r.reason ? `: ${clip(r.reason, 160)}` : ''}; ${releaseLine(r.release)}`;
+}
+
+/** How the night went: what the lab said, else (a lab from before w864) red when a scenario is new or still failing. */
+export function nightStatus(rep: NightlyReport): 'passed' | 'failed' | 'broken' {
+  return rep.status ?? (rep.results.some((r) => r.class !== 'flaky') ? 'failed' : 'passed');
+}
+
+/** The key of a broken night's request: later broken nights join the open one (one cause until someone fixes it). */
+export const NIGHT_BROKEN = 'night-broken';
+
+/** The one request for a broken night (w864): find the cause, the game or the lab, instead of N regressions. */
+export function brokenNightDraft(rep: NightlyReport, runId?: string): IntakeDraft & { priority: WorkPriority; triage: WorkTriage } {
+  const at = rep.sha ? ` on develop ${short(rep.sha)}` : '';
+  return {
+    title: clip(`Nightly e2e ${rep.date}: the night broke${at}: ${rep.cause ?? 'no reason given'}`, 120),
+    brief: clip(
+      [
+        `The nightly e2e lab \`${rep.lab}\` reported the night ${rep.date} broken${at}: one cause stopped the battery, so its scenarios have no verdict and none is filed as a regression.`,
+        `- Cause, as the lab saw it: ${rep.cause ?? 'none given'}`,
+        ...(rep.counts ? [`- Counts: ${rep.counts.ran} ran, ${rep.counts.passed} passed, ${rep.counts.failed} failed, ${rep.counts.env} could not run.`] : []),
+        ...(rep.report?.lab ? [`- The night's report (or its no-verdict note) on ${rep.lab}: \`${rep.report.lab}\`; its log is logs/nightly-${rep.date}.log in the same nightly root.`] : []),
+        ...(runId ? [`- The run request: ${runId}.`] : []),
+        `- The commit tested is ${releaseLine(rep.release)}.`,
+        '',
+        'What to do: find whether the cause is in the game (a startup error, a failed build of develop: fix it like any regression, red before and green after) or in the lab (the machine, the scripts in scripts/nightly, a missing tool or file: fix the lab). Rerun a few scenarios on a player built from that commit to show which (python3 scripts/nightly/ffnightly.py run --scenario <id> --no-retry). Do not change any oracle or allowlist to make the night pass.',
+      ].join('\n'),
+      7800,
+    ),
+    priority: rep.release?.shipped === 'yes' ? 'urgent' : 'high',
+    triage: { class: 'regression', reason: `nightly e2e: the night ${rep.date} broke${at}` },
+    source: {
+      kind: 'nightly',
+      untrusted: false,
+      channel: 'nightly e2e',
+      nightly: { scenarios: [NIGHT_BROKEN], date: rep.date, lab: rep.lab, sha: rep.sha, nights: [`${rep.date} ${NIGHT_BROKEN}`], ...(rep.release ? { release: rep.release } : {}) },
+    },
+  };
+}
+
+/** The night's run request the portal's nightly schedule files (w864; docs/intake.md, "The nightly run"). */
+export function nightlyRunDraft(a: { date: string; machine: string; time: string; tz: string; dueBy: string }): IntakeDraft & { priority: WorkPriority; triage: WorkTriage; constraints: string } {
+  return {
+    title: `Nightly e2e run ${a.date} on ${a.machine}`,
+    brief: [
+      `Run the nightly e2e lab for the night ${a.date} on ${a.machine}, filed by the portal's nightly schedule (${a.time} ${a.tz}). The intake rules below say how: start it with scripts/nightly/nightly_worker.sh, check it at every check-in, and end with its outcome once it has delivered.`,
+      `- Its report must reach FF Factory by ${a.dueBy}; with none by then, the portal raises the missing-night alarm.`,
+      '- The lab posts its own summary in #dev-chat as Max and files its regressions through the nightly intake: nothing to post or file by hand.',
+      '- For the dispatcher: the worker mostly waits and reads a report (a check every 25 minutes for about two and a half hours), so start it on Sonnet at medium effort.',
+    ].join('\n'),
+    priority: 'normal',
+    triage: { class: 'follow-up', reason: `the nightly e2e run of ${a.date}, filed by the portal's schedule` },
+    constraints: `Run it on ${a.machine}, in one of its sandboxes, and nowhere else: Lothsahn chose ${a.machine} for the nightly run ("Create a portal timer that happens and when it does it triggers a run on LothDesktop to do the desync run", 2026-10-10), the one exception to his rule that work avoids it.`,
+    source: { kind: 'nightly-run', untrusted: false, channel: 'nightly e2e', nightlyRun: { date: a.date, machine: a.machine } },
+  };
 }
 
 /** Whether open work names a scenario: its id as a whole word in the title or brief (a person filed the fix by hand). */

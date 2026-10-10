@@ -105,6 +105,12 @@ export interface IntakeConfig {
     flakyNights?: number;
     /** More new requests than this from one night become one batched request for the night (default 4). */
     batchOver?: number;
+    /**
+     * The portal's nightly schedule (w864; docs/intake.md, "The nightly run"): every day at `time` in `tz` it files a
+     * request to run the lab on `machine`, for `person` (a user id; they hear when a night is missing or broken). No
+     * report within `reportWithinHours` of the fire is the alarm. Default off, 03:00 America/New_York, lothdesktop, 5.
+     */
+    run?: { enabled?: boolean; time?: string; tz?: string; machine?: string; person?: string; reportWithinHours?: number };
   };
   /**
    * The people who decide (user ids, e.g. ["ben", "lothsahn"]): they approve or decline what needs a human and answer
