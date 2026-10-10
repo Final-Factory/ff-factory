@@ -19,26 +19,26 @@ $global:Attached = [bool]$sc.attached
 $global:Gave = ''
 
 # The Windows cmdlets the library calls. Functions win over cmdlets of the same name.
-function global:Start-Sleep { }
-function global:Get-DiskImage { param([string]$ImagePath) [pscustomobject]@{ ImagePath = $ImagePath; Attached = $global:Attached } }
-function global:Mount-DiskImage { param([string]$ImagePath) [void]$global:Calls.Add('Mount-DiskImage'); $global:Attached = $true; $global:Held = [string]$global:Sc.autoLetter }
-function global:Get-Disk { param([Parameter(ValueFromPipeline)]$In) process { [pscustomobject]@{ Number = 7; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT' } } }
-function global:Set-Disk { }
-function global:Get-Partition { param([int]$DiskNumber, [Parameter(ValueFromPipeline)]$In)
+function global:Start-Sleep { [CmdletBinding()] param($Seconds, $Milliseconds) }
+function global:Get-DiskImage { [CmdletBinding()] param([string]$ImagePath) [pscustomobject]@{ ImagePath = $ImagePath; Attached = $global:Attached } }
+function global:Mount-DiskImage { [CmdletBinding()] param([string]$ImagePath) [void]$global:Calls.Add('Mount-DiskImage'); $global:Attached = $true; $global:Held = [string]$global:Sc.autoLetter }
+function global:Get-Disk { [CmdletBinding()] param([Parameter(ValueFromPipeline)]$In) process { [pscustomobject]@{ Number = 7; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT' } } }
+function global:Set-Disk { [CmdletBinding()] param($Number, $IsOffline, $IsReadOnly) }
+function global:Get-Partition { [CmdletBinding()] param([int]$DiskNumber, [Parameter(ValueFromPipeline)]$In)
   process { if ($global:Attached) { [pscustomobject]@{ Type = 'Basic'; Size = 900GB; DriveLetter = $(if ($global:Held) { [char]$global:Held } else { [char]0 }); PartitionNumber = 2 } } } }
-function global:Set-Partition { param([Parameter(ValueFromPipeline)]$In, [string]$NewDriveLetter)
+function global:Set-Partition { [CmdletBinding()] param([Parameter(ValueFromPipeline)]$In, [string]$NewDriveLetter)
   process { [void]$global:Calls.Add("Set-Partition $NewDriveLetter"); $global:Held = $NewDriveLetter.ToUpper(); $global:Gave = $NewDriveLetter.ToUpper() } }
-function global:Test-Path { param([string]$Path, [string]$LiteralPath, $PathType)
+function global:Test-Path { [CmdletBinding()] param([string]$Path, [string]$LiteralPath, $PathType)
   $p = if ($LiteralPath) { $LiteralPath } else { $Path }
   if ($p -match '^([A-Za-z]):\\$') { return ($global:Held -eq $Matches[1].ToUpper()) -or ($global:Sc.inUse -contains $Matches[1].ToUpper()) }
   Microsoft.PowerShell.Management\Test-Path @PSBoundParameters }
 
 # Which letters exist, as the library asks (the library's own Get-*Letters functions run; only what they read is faked).
-function global:Get-PSDrive { param($PSProvider)
+function global:Get-PSDrive { [CmdletBinding()] param($PSProvider)
   foreach ($l in @($global:Sc.inUse) + $(if ($global:Held) { @($global:Held) } else { @() })) { [pscustomobject]@{ Name = $l } } }
-function global:Get-CimInstance { param([Parameter(Position = 0)]$ClassName, $Filter)
+function global:Get-CimInstance { [CmdletBinding()] param([Parameter(Position = 0)]$ClassName, $Filter)
   if ($ClassName -eq 'Win32_LogicalDisk') { foreach ($l in @($global:Sc.mapped)) { [pscustomobject]@{ DeviceID = "${l}:" } } } }
-function global:Get-Item { param([Parameter(Position = 0)]$Path, $LiteralPath, [switch]$Force)
+function global:Get-Item { [CmdletBinding()] param([Parameter(Position = 0)]$Path, $LiteralPath, [switch]$Force)
   if ($Path -like 'HKLM:*MountedDevices') {
     $o = [pscustomobject]@{}
     $o | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { @($global:Sc.reserved | ForEach-Object { "\DosDevices\${_}:" }) }
@@ -63,6 +63,7 @@ $out = [ordered]@{
   held   = $global:Held
   result = $(if (Test-Path -LiteralPath $res) { Get-Content -Raw -LiteralPath $res | ConvertFrom-Json } else { $null })
   thrown = $global:Thrown
+  log    = $(if (Test-Path -LiteralPath (Join-Path $Work 'results/mount.log')) { Get-Content -Raw -LiteralPath (Join-Path $Work 'results/mount.log') } else { '' })
   state  = $(if (Test-Path -LiteralPath $StateFile) { Get-Content -Raw -LiteralPath $StateFile | ConvertFrom-Json } else { $null })
   daemon = $(if (Test-Path -LiteralPath (Join-Path $Work 'daemon/daemon.json')) { Get-Content -Raw -LiteralPath (Join-Path $Work 'daemon/daemon.json') | ConvertFrom-Json } else { $null })
   pool   = $(if (Test-Path -LiteralPath (Join-Path $Work 'daemon/sandboxes.json')) { , @(Get-Content -Raw -LiteralPath (Join-Path $Work 'daemon/sandboxes.json') | ConvertFrom-Json) } else { $null })

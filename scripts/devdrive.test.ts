@@ -88,7 +88,7 @@ function boot(sc: Scenario, o: { letter?: string; flex?: boolean; skip?: string[
   if (o.skip) args.push('-Skip', o.skip.join(','));
   const out = execFileSync(PWSH, args, { encoding: 'utf8', env: { ...process.env, DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: '1' } });
   fs.rmSync(work, { recursive: true, force: true });
-  return JSON.parse(out) as { calls: string[]; held: string; result: { ok: boolean; detail: string } | null; state: { letter: string } | null; daemon: any; pool: PoolRec[] | null };
+  return JSON.parse(out) as { log: string; calls: string[]; held: string; result: { ok: boolean; detail: string } | null; state: { letter: string } | null; daemon: any; pool: PoolRec[] | null };
 }
 
 test('boot mount: a detached drive is attached and gets its letter back; an attached one is left alone', { skip: needPwsh }, () => {
@@ -335,6 +335,7 @@ function oldInstall() {
   git(base, 'clone', '-q', '--bare', origin, repo);
   git(repo, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*');
   // saveWork commits in a worktree: the identity comes from the clone's own config (a bare machine has none).
+  git(repo, 'config', 'core.autocrlf', 'false'); // a Windows runner would check files out with CRLF
   git(repo, 'config', 'user.name', 'FF Factory test');
   git(repo, 'config', 'user.email', 'test@example.invalid');
   git(repo, 'fetch', '-q', 'origin');
