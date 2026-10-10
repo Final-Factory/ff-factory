@@ -77,7 +77,7 @@ test('w920: every secret form is masked, and ordinary lines stay', () => {
     [`token ${FAKE.gh} used`, FAKE.gh],
     [`credential ${FAKE.machine}`, 'd'.repeat(40)],
     [`session ${FAKE.jwt}`, FAKE.jwt],
-    ['-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----', 'b3BlbnNzaC1rZXktdjEAAAAA'],
+    [['-----BEGIN OPENSSH', 'PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH', 'PRIVATE KEY-----'].join(' '), 'b3BlbnNzaC1rZXktdjEAAAAA'],
   ];
   for (const [line, secret] of cases) {
     const out = redactLogText(line);

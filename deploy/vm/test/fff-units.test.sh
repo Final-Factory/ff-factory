@@ -86,6 +86,7 @@ dropin=$U/fff-portal-journal.conf
 [ "$(value "$dropin" Service SupplementaryGroups)" = systemd-journal ] || fail "$dropin does not give fff-portal.service SupplementaryGroups=systemd-journal"
 ! grep -qE '^(Group|User|AmbientCapabilities|CapabilityBoundingSet|NoNewPrivileges)=' "$dropin" || fail "$dropin changes more than the supplementary group"
 grep -qF 'getent group systemd-journal' $G/install.sh || fail "install.sh does not check that the systemd-journal group exists before using it"
+# shellcheck disable=SC2016
 grep -qF 'fff-portal.service.d/20-journal.conf 0644 <"$here/units/fff-portal-journal.conf"' $G/install.sh || fail "install.sh does not write the journal drop-in"
 ok "fff-portal.service gets the systemd-journal group through a drop-in that install.sh writes only where the group exists"
 

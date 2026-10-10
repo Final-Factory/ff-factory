@@ -11,3 +11,5 @@ d41697a9e6214ca92c3738ff93b6f8027976712e:e2e/meters.spec.ts:generic-api-key:62
 a060765e066b7201e68c747c278bb988aec58262:docs/worker-root.md:generic-api-key:156
 # The portal unit's empty default credential (SetCredential=fff-vault-key:, docs/vault.md): systemd syntax, no secret.
 deploy/vm/guest/units/fff-portal.service:generic-api-key:40
+# A fake private-key block in a redaction test (w920); the next commit builds it from pieces.
+4d37c413988e450efa953adaacc23dd15f89c194:server/portalLogs.test.ts:generic-api-key:80
