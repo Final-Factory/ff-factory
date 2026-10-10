@@ -1,0 +1,65 @@
+name: w906 probe
+# Probe only (w906): the Windows 1/2 shard's command, three times per job on 20 runners, with every node process and
+# every process exit recorded, to name the empty coverage file's process and any hang. Never merged.
+on:
+  push:
+    branches: [w906-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: probe ${{ matrix.n }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: |
+          git config --global user.name "FF Factory CI"
+          git config --global user.email "ci@users.noreply.github.com"
+      - run: npm ci --no-audit --no-fund
+      - name: Orphans and the runner's ancestry
+        shell: pwsh
+        run: .github/w906-probe/orphans.ps1
+      - name: The three slowest files, three times
+        shell: bash
+        run: |
+          P="$RUNNER_TEMP/probe"; mkdir -p "$P/procs"
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .github/w906-probe/trace.ps1 -Out "$(cygpath -w "$P/trace.txt")" -StopFile "$(cygpath -w "$P/stop")" &
+          sleep 5
+          export FF_PROCLOG="$(cygpath -w "$P/procs")"
+          export NODE_OPTIONS="--import=file:///$(cygpath -m "$PWD")/.github/w906-probe/proclog.mjs"
+          slow=(server/machineDeployWin.test.ts server/machines.test.ts server/orchestrators.test.ts)
+          fails=0
+          for i in 1 2 3; do
+            echo "::group::iteration $i"
+            start=$(date +%s)
+            node scripts/test-watchdog.ts --minutes 8 -- node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' "${slow[@]}" > "$P/run$i.txt" 2>&1
+            code=$?
+            cat "$P/run$i.txt"
+            echo "::endgroup::"
+            echo "iteration $i: exit $code in $(( $(date +%s) - start )) s"
+            f=$(grep -oE 'coverage-[0-9]+-[0-9]+-[0-9]+\.json' "$P/run$i.txt" | head -1)
+            if [ -n "$f" ]; then
+              pid=$(echo "$f" | cut -d- -f2)
+              echo "::warning::iteration $i: empty coverage file $f (pid $pid)"
+              for r in "$P"/procs/$pid-*.json; do echo "$r: $(cat "$r")"; done
+              grep -E "pid=$pid " "$P/trace.txt" || true
+            fi
+            [ "$code" = 0 ] || fails=$((fails + 1))
+          done
+          touch "$P/stop"; sleep 3
+          exit $fails
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: probe-${{ matrix.n }}
+          path: ${{ runner.temp }}/probe
+          retention-days: 7
