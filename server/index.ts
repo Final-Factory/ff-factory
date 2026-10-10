@@ -16,7 +16,7 @@ import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
 import { toggleNightly } from './appConfig.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
-import { BlockerWatch } from './blockerWatch.ts';
+import { BlockerWatch, ghPrHealth } from './blockerWatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
@@ -414,7 +414,7 @@ agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));
 // The portal's host guard (docs/self-recovery.md): its data volume, RAM and the clean-up of this computer. No sandbox
 // drive: the portal holds no sandboxes (w510); a machine's drive is its daemon's guard's (machine/hostGuard.ts, w466).
-const cleanupEnv = { ...hostCleanupEnv(), sandboxRoots: [cfg.sandboxRoot] };
+const cleanupEnv = { ...hostCleanupEnv(), sandboxRoots: [cfg.sandboxRoot], cacheRoots: [cfg.sandboxRoot] };
 /**
  * What clean-up never touches here: the sandbox root (this host's own daemon's), the old standing agents' folders, the
  * base clone, this app and its data, and the temp folders of agents running now.
@@ -609,6 +609,8 @@ const blockerWatch = new BlockerWatch({
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
 agents.blockerWatch = blockerWatch;
+// A ci: wait is checked against its pull request when set (w907): a conflict or a push that did not land is refused.
+agents.prHealth = (ref) => ghPrHealth(ref, ghRunner(undefined, `the head of ${ref}`));
 // Whether the blocker watch can read CI at all (w889): measured at start and every half hour, said loudly when it cannot.
 const ciRead = new CiReadWatch({
   repo: () => repoSlug(cfg.repo.url),

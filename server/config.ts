@@ -635,6 +635,10 @@ export interface CleanupPolicy {
   libraryReportDays: number;
   /** ...and removed past this many (Unity rebuilds it on open). 0: never removed. */
   libraryDeleteDays: number;
+  /** A sandbox's Library/BuildCache and Library/BurstCache (rebuilt on demand) go once unused this many hours while no editor or build has the project open. 0: never by age. */
+  libraryCacheIdleHours: number;
+  /** ...and when either grows past this many GB (while idle for an hour). 0: no cap. */
+  libraryCacheCapGB: number;
   /** Agent temp clones (fff-*, ffsb-*), removed when older than this and without uncommitted or unpushed work. 0: never. */
   cloneOlderThanDays: number;
   clonePatterns: string[];
@@ -658,6 +662,8 @@ export const DEFAULT_CLEANUP: CleanupPolicy = {
   runnerWorkDays: 14,
   libraryReportDays: 30,
   libraryDeleteDays: 180,
+  libraryCacheIdleHours: 48,
+  libraryCacheCapGB: 6,
   cloneOlderThanDays: 3,
   clonePatterns: ['fff-*', 'ffsb-*'],
   ageRules: [],

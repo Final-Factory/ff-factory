@@ -4,7 +4,8 @@ All notable changes to FF Factory are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Until 1.0 a minor bump may break things.
 
-Add your change under **[Unreleased]** in the same pull request. `npm run release -- minor` (or
+Add your change as a note file in `changelog.d/` in the same pull request (not here: see changelog.d/README.md). Notes
+already under **[Unreleased]** stay until the next release. `npm run release -- minor` (or
 `patch`, `major`, `X.Y.Z`) moves those notes under a new version, bumps `package.json` and
 `web/package.json`, commits and tags `vX.Y.Z`.
 
@@ -18,6 +19,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   constraints, auto-approved, same billing), with no cap, and starts the next review after its `REVIEWED-THROUGH` commit.
   Settable live (`set_app_config intake.nightly.review`) and click-to-toggle on the Intake tab. Needs a portal deploy;
   then the standing agent `nightly-regression-sentry` can be deleted (docs/intake.md, "The nightly merge review").
+
+- **A released sandbox's Burst and Build caches are trimmed before the next worker gets it** (w898, lothsahn: "almost all the space is in the work folder, specifically in the BuildCache and BurstCache folders of the various sandboxes"; "I would like the harness to trim the burst cache and build cache when a worker releases a slot"). Library/BuildCache and BurstCache were 87 GB over lothdesktop's six sandboxes. When a sandbox's last live agent goes, the daemon puts it in the new state `cleanup` (not free, no placement, no start, shown on the dashboard), keeps the files written in the last 24 h up to 4 GB per cache, and sets it `ready` again; a hung or failed trim times out after 10 min and frees it. Never with an editor or build on the project. The daemon's clean-up also ages out and caps the caches of sandboxes nobody releases, and a Library copied from a clone or sandbox leaves them behind. Measured: a build with the caches removed took 530 s against 112 s warm. Docs: self-recovery.md 5. Tests: `cacheTrim.test.ts`, `machineSandboxes.test.ts`, `agentState.test.ts`, `copyTree.test.ts`, `cleanup.test.ts`.
+- **A worker waiting on a deploy, a person or another request frees its sandbox at once, and the deploy wakes it** (w890,
+  lothsahn: "Why is w889 holding a slot?  It's done with its work and it should free the slot." and "We should not wait for a
+  worker waiting for a deploy ... once the deploy has happened, the worker can get rescheduled by the dispatcher"). w889
+  sat Idle for hours on m3's only sandbox after its PR merged, waiting for the portal deploy and a token permission. The
+  release pass (`server/placeAgain.ts`) now releases at once the sandbox of a worker whose open requests all wait on a
+  deploy, a request, a PR merging or a person (`Agents.waitOn`), as it does for CI; it still never releases unsaved work,
+  unpushed commits, a batch run, a worker mid-turn or one with a job it needs. `blocked_on` takes `deploys`; a deploy gate
+  clearing resumes its worker within a minute; the ledger cleanup resumes (not closes) a worker whose report puts a check
+  after the deploy. Needs a portal deploy (docs/machines.md "Released sandboxes").
+
 
 - **The Intake tab's two nightly chips are switches** (w903, lothsahn: "Please modify FF Factory so I can toggle those settings on
   the intake panel by clicking on them"). Click "Nightly run" to turn the portal's nightly schedule on or off
@@ -79,6 +92,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   docs/self-recovery.md "Where clean-up may delete". Flag: on a root machine nothing now empties the Unity, npm, NuGet,
   Playwright and crash-dump stores on C: by itself. Needs a portal deploy (instructions, guard spec) and then each machine's
   daemon update (the fence), which a verified deploy does by itself (w887).
+
 - **A verified portal deploy now updates every machine's daemon by itself** (w887, lothsahn: "Update FFFactory so that after
   updating the portal and validating, it automatically updated all the machines."). `fff-update verify` writes
   `data/update.verified.json` when the new release answers (a rollback writes none); the portal (`server/machineRollout.ts`) then

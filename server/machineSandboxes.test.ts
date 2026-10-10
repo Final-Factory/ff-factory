@@ -9,24 +9,96 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, midTurnRefusal, othersMidTurn, type SessionHandle, type SessionSink } from './sessions.ts';
 import { Agents } from './agents.ts';
+import { BlockerWatch } from './blockerWatch.ts';
 import { Identity } from './identity.ts';
 import { MachineManager, limitOptions, machineForPath, mergeSandboxes, parseSandboxRef, poolSettingsOf } from './machines.ts';
 import { daemonConfig } from './machineDeploy.ts';
 import { describeCleanupItems } from './cleanup.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { UnitySlots } from '../machine/unitySlots.ts';
-import { SandboxPool, deletable, idleSandboxEditors, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
+import { SandboxPool, type PoolOptions, deletable, idleSandboxEditors, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { testRepos } from './testMachine.ts';
 import type { Config } from './config.ts';
-import type { ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
+import type { ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo, WorkItem } from '../shared/types.ts';
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
 process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
 
 const GB = 1024 ** 3;
+
+test('w890: the whole loop: a worker that ends its turn waiting on a deploy frees its sandbox within a minute, new work takes it, the deploy lands, the block clears and the worker resumes and is placed again, on its branch, in the other sandbox', async (t) => {
+  const { r, store, sessions, mm, agents, sbOf, path1, path2, gitNow, onDaemon } = await twoSandboxes(t);
+
+  // A worker on feature/w1 has its PR merged and its work pushed; its request is Blocked on the portal deploy, which only a
+  // person starts (it declared the wait itself, blocked_on deploys ["portal"]). It ends its turn: Idle, no check-in.
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w1 work', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  fs.writeFileSync(path.join(path1, 'work.txt'), 'w1');
+  r.git(path1, 'add', 'work.txt');
+  r.git(path1, 'commit', '-q', '-m', 'w1 work');
+  r.git(path1, 'push', '-q', '-u', 'origin', 'HEAD');
+  // No requesters: the notices to a person's orchestrator would start a real agent session in this harness.
+  const by = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const item: WorkItem = { id: 'w1', title: 'Fix the CI read', brief: 'Do it.', priority: 'normal', keys: [], requestedBy: by, requesters: [], humanAsked: true, status: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), sessionIds: [w.info.id], overlaps: [], asks: 0, log: [] };
+  store.putWork(item);
+  store.workSeq = Math.max(store.workSeq, 1);
+  let portal = 'aaa1111';
+  const o = agents.orchestrators;
+  (o as unknown as { d: { deploySha?: (id?: string) => string | undefined } }).d.deploySha = () => portal;
+  assert.match(o.workerBlocked(w.info.id, { deploys: ['portal'], what: 'the portal deploy of 65b1d27' }), /^Recorded: w1 is Blocked on a portal deploy\./);
+  assert.equal(item.blocked?.sha, 'aaa1111');
+  await gitNow('sb1');
+
+  // The first pass stops it (it holds nothing to do), the next, which the server runs 5 s later, frees the sandbox. (The
+  // timer is the server's: here the test asks for the pass itself, and checks that the first one asked for it.)
+  let soon = 0;
+  (agents.placeAgain as unknown as { d: { soon?: () => void } }).d.soon = () => void soon++;
+  assert.match(agents.placeAgain.tick().join('\n'), /stopped .*\(it waits on w1: a portal deploy\)/);
+  assert.equal(soon, 1, 'the next pass is asked for at once, not left a minute away');
+  await until('w stopped', () => !w.live && w.info.status === 'stopped');
+  await gitNow('sb1');
+  assert.match(agents.placeAgain.tick().join('\n'), /released pc\/sb1 of .* \(it waits on w1: a portal deploy\)/);
+  assert.equal(w.info.placeReleased?.branch, 'feature/w1');
+  assert.match(agents.describeAllSandboxes(), /pc\/sb1 FREE/);
+
+  // New work takes the sandbox (feature/w1 is left first, nothing lost).
+  const prep = await agents.prepareForNewWork('pc/sb1', undefined, 'W999');
+  assert.equal(prep.branch, 'sandbox/sb1-w999');
+  const n = agents.startWorker({ sandbox: 'pc/sb1', prompt: 'new work', from: 'orchestrator' });
+  await until('n live', () => n.live);
+  await gitNow('sb1');
+
+  // The deploy lands: a different commit runs. The blocker watch clears the gate and resumes the worker.
+  const watch = new BlockerWatch({ store, orchestrators: o, portalSha: () => portal });
+  assert.equal((await watch.tick()).has('w1'), false, 'the same commit still runs: it waits');
+  assert.equal(item.status, 'blocked');
+  portal = 'bbb2222';
+  assert.match((await watch.tick()).get('w1')!, /^clear: the portal runs bbb2222 now \(aaa1111 when it was blocked\)$/);
+  assert.equal(item.status, 'active');
+  const wake = agents.waker.pending(w.info.id)!;
+  assert.ok(wake && Date.parse(wake.at) - Date.now() <= 61_000, 'its check-in is within a minute');
+  assert.match(wake.note, /The deploy you waited for has happened: do the check that comes after it now/);
+
+  // The check-in fires (what the waker does when its time comes): the worker is placed again in sb2, on its branch.
+  agents.waker.cancel(w.info.id);
+  sessions.send(w.info.id, `[wake_me] Time is up. Your note: ${wake.note}`, 'system');
+  await until('w resumed in sb2', () => w.live && w.info.machineSandbox === 'sb2', 30_000);
+  assert.equal(r.git(path2, 'branch', '--show-current'), 'feature/w1');
+  assert.equal(r.git(path2, 'log', '-1', '--format=%s'), 'w1 work');
+  assert.equal(onDaemon(w.info.id)?.spec?.cwd, path2, 'its process runs in sb2');
+  assert.equal(w.info.placeReleased, undefined);
+  const said = store.readTranscript(w.info.id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text).at(-1) ?? '';
+  assert.match(said, /^\[moved\] While you were stopped your sandbox pc\/sb1 went to other work/);
+  assert.ok(said.includes('do the check that comes after it now'), said);
+  assert.ok(!sbOf('sb1')!.sessionIds.includes(w.info.id));
+  n.stop();
+  w.stop();
+  await until('both stopped', () => !n.live && !w.live);
+});
 
 const until = async (what: string, cond: () => boolean, ms = 60_000) => {
   const end = Date.now() + ms;
@@ -73,24 +145,34 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer'] } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
+  /** The status of each sandbox at every change the portal would be sent, consecutive repeats dropped (w898: the cleanup state's order). */
+  const statuses: string[] = [];
   const { d, running } = deps(r.main, o);
+  const created: { p?: SandboxPool } = {};
   const p = new SandboxPool(
     {
       repoPath: r.main,
       stateFile: path.join(r.root, 'app', 'sandboxes.json'),
       settings: SETTINGS(r.sbRoot, o.settings),
       activity: o.activity ?? (() => ({ busy: false, lastActivityMs: Date.now() })),
-      onChange: () => undefined,
+      onChange: () => {
+        const s = created.p?.list().map((x) => `${x.id}:${x.status}`).join(',') ?? '';
+        if (s && statuses.at(-1) !== s) statuses.push(s);
+      },
       onEvent: (e) => events.push(e),
       idleStopMinutes: o.idle,
+      ...(o.liveAgents ? { liveAgents: o.liveAgents } : {}),
+      ...(o.trim !== undefined ? { trim: o.trim } : {}),
+      ...(o.trimmer ? { trimmer: o.trimmer } : {}),
       librarySeedGB: 1,
       ...(o.slots ? { editorSlot: (id: string) => o.slots!().startRefusal(`sandbox:${id}`), slotsStatus: async () => (await o.slots!().tick(), o.slots!().describe()) } : {}),
     },
     d,
   );
-  return { p, events, running };
+  created.p = p;
+  return { p, events, running, statuses };
 }
 
 const ready = (p: SandboxPool, id: string) => until(`${id} ready`, () => {
@@ -411,7 +493,7 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 1, maxUnity: 1 });
   const { d: poolDeps, running } = deps(r.main);
-  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null, sandboxCacheTrim: false }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
     daemon.shutdown();
     server.close();
@@ -533,7 +615,7 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 3, maxUnity: 1 });
   const { d: poolDeps } = deps(r.main);
-  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 3, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 3, maxEventsFile: null, sandboxCacheTrim: false }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
     agents.orchestrators.close();
     daemon.shutdown();
@@ -624,7 +706,7 @@ test('stale output on a machine: the portal sends the ledger facts, a dry run co
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 1, maxUnity: 1 });
   const { d: poolDeps } = deps(r.main);
-  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null, sandboxCacheTrim: false }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
     daemon.shutdown();
     server.close();
@@ -694,9 +776,8 @@ test('machine sandboxes: an editor start takes a Unity slot: batch builds starte
   assert.match(await p.unity('a', 'status'), /\nUnity on this machine: editors 3 of 2: 0 interactive, 2 batch, 1 granted not started yet; OVER LIMIT: nothing more starts until it drops/);
 });
 
-// ---------------------------------------------------------------- far check-ins release their sandbox (w640)
-
-test('w640: a worker stopped with a far check-in frees its sandbox; new work there starts on a fresh branch; the worker resumes in another sandbox on its branch, nothing lost', async (t) => {
+/** A portal with a machine `pc` (a real daemon and git) holding two ready sandboxes, sb1 on feature/w1 and sb2 (w640, w890). */
+async function twoSandboxes(t: { after: (fn: () => void | Promise<void>) => void }) {
   const r = repos();
   const cfg = {
     dataDir: path.join(r.root, 'data'),
@@ -730,7 +811,7 @@ test('w640: a worker stopped with a far check-in frees its sandbox; new work the
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1 });
   const { d: poolDeps } = deps(r.main);
-  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 4, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 4, maxEventsFile: null, sandboxCacheTrim: false }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
     agents.orchestrators.close();
     daemon.shutdown();
@@ -752,6 +833,13 @@ test('w640: a worker stopped with a far check-in frees its sandbox; new work the
     sbOf(id)!.git = await readGitStatus(sbOf(id)!.path);
   };
   const onDaemon = (id: string) => (daemon as unknown as { entries: Map<string, { spec?: { cwd: string } }> }).entries.get(id);
+  return { r, store, sessions, mm, agents, sbOf, path1, path2, gitNow, onDaemon };
+}
+
+// ---------------------------------------------------------------- far check-ins release their sandbox (w640)
+
+test('w640: a worker stopped with a far check-in frees its sandbox; new work there starts on a fresh branch; the worker resumes in another sandbox on its branch, nothing lost', async (t) => {
+  const { r, store, sessions, mm, agents, sbOf, path1, path2, gitNow, onDaemon } = await twoSandboxes(t);
 
   // A worker on feature/w1 commits work no remote has, then sets a check-in two hours out and ends its turn.
   const w = mm.createSession('pc', { kind: 'worker', title: 'w1 work', permissionMode: 'default', sandbox: 'sb1' });
@@ -801,4 +889,130 @@ test('w640: a worker stopped with a far check-in frees its sandbox; new work the
   n.stop();
   w.stop();
   await until('both stopped', () => !n.live && !w.live);
+});
+
+// ---------------------------------------------------------------- release trims the Library caches (w898)
+
+/** Library/BuildCache and Library/BurstCache files in a sandbox: some days old, some fresh. */
+function fillCaches(dir: string) {
+  const make = (rel: string, hours: number) => {
+    const f = path.join(dir, 'Library', rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, 'x'.repeat(2000));
+    const at = new Date(Date.now() - hours * 3_600_000);
+    fs.utimesSync(f, at, at);
+  };
+  make('BuildCache/ab/old', 24 * 9);
+  make('BuildCache/ab/new', 2);
+  make('BurstCache/Windows-Intel/old.dll', 24 * 9);
+  make('BurstCache/Windows-Intel/new.dll', 2);
+  make('ArtifactDB/keep', 24 * 9);
+  return { gone: ['BuildCache/ab/old', 'BurstCache/Windows-Intel/old.dll'], kept: ['BuildCache/ab/new', 'BurstCache/Windows-Intel/new.dll', 'ArtifactDB/keep'] };
+}
+
+test("w898: the last agent leaving a sandbox sends it to 'cleanup', trims the caches, then frees it; a start in between is refused", async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  let live = 1;
+  const { p, statuses } = pool(r, { liveAgents: () => live });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  const files = fillCaches(dir);
+  const exists = (rel: string) => fs.existsSync(path.join(dir, 'Library', rel));
+  await p.tick();
+  assert.equal(p.list()[0].status, 'ready', 'an agent lives there: nothing happens');
+  assert.ok(files.gone.every(exists));
+  live = 0; // the request closed, the worker stopped, or it waits for CI: its session is gone
+  await p.tick();
+  assert.equal(p.list()[0].status, 'cleanup', 'released: cleanup at once, before anyone can be handed the sandbox');
+  assert.match(p.list()[0].statusDetail ?? '', /trimming/);
+  await assert.rejects(p.unity('sb1', 'start'), /cleanup.*not ready/, 'an editor start in between is refused');
+  await assert.rejects(p.switch('sb1', 'other'), /is cleanup/, 'so is a branch switch (the hand-over)');
+  await until('the trim to end', () => p.list()[0].status === 'ready');
+  assert.deepEqual(statuses.filter((s) => s.startsWith('sb1:')), ['sb1:creating', 'sb1:ready', 'sb1:cleanup', 'sb1:ready'], 'ready, cleanup, ready: in that order and once');
+  assert.ok(files.gone.every((f) => !exists(f)) && files.kept.every(exists), 'old cache files gone, recent ones and the rest of Library kept');
+  await p.tick();
+  assert.equal(p.list()[0].status, 'ready', 'it does not trim again until the next release');
+  assert.equal((await p.trim('sb1')).files, 0);
+});
+
+test('w898: no trim while an agent is live, an editor is up, or a build has the project open; a release with the editor up trims when it stops', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  let live = 1;
+  const { p, running } = pool(r, { liveAgents: () => live });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  const files = fillCaches(dir);
+  const gone = () => files.gone.every((f) => !fs.existsSync(path.join(dir, 'Library', f)));
+  assert.match((await p.trim('sb1')).skipped ?? '', /agent is live/);
+  live = 0;
+  await p.unity('sb1', 'start');
+  await p.tick();
+  assert.match((await p.trim('sb1')).skipped ?? '', /editor is up/);
+  assert.equal(p.list()[0].status, 'ready', 'the editor holds the caches: no cleanup state either');
+  assert.ok(!gone());
+  // The last agent left while the editor was up: the trim waits for the editor, then runs.
+  live = 1;
+  await p.tick();
+  live = 0;
+  await p.tick();
+  assert.ok(!gone());
+  running.delete(dir);
+  await p.tick();
+  await until('the trim after the editor stopped', () => gone());
+  await until('free again', () => p.list()[0].status === 'ready');
+  // A batchmode build (a lock file, no pool editor).
+  const again = fillCaches(dir);
+  fs.mkdirSync(path.join(dir, 'Temp'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'Temp', 'UnityLockfile'), '');
+  assert.match((await p.trim('sb1')).skipped ?? '', /editor or build has the project open/);
+  assert.ok(again.gone.every((f) => fs.existsSync(path.join(dir, 'Library', f))));
+});
+
+test('w898: a trim that hangs, fails or ignores its abort times out and the sandbox goes back to free, with the reason told', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  let mode: 'hang' | 'fail' | 'slow-abort' = 'hang';
+  let aborted = false;
+  const trimmer: PoolOptions['trimmer'] = (_project, _policy, o) =>
+    mode === 'hang'
+      ? new Promise(() => undefined)
+      : mode === 'fail'
+        ? Promise.reject(new Error('EBUSY: file locked'))
+        : new Promise((resolve) => o?.signal?.addEventListener('abort', () => ((aborted = true), resolve({ stopped: 'timed out', files: 1, removedBytes: 5, keptBytes: 0 }))));
+  const { p, events, statuses } = pool(r, { liveAgents: () => 0, trim: { timeoutMs: 80 }, trimmer });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const t0 = Date.now();
+  const hung = p.trim('sb1', 'test');
+  assert.equal(p.list()[0].status, 'cleanup');
+  const res = await hung;
+  assert.match(res.stopped ?? '', /timed out after/);
+  assert.ok(Date.now() - t0 >= 70 && Date.now() - t0 < 5000, 'given up after the timeout, not stuck');
+  assert.equal(p.list()[0].status, 'ready', 'a hung trim must not leave the sandbox in cleanup');
+  assert.match(events.at(-1)?.text ?? '', /sandbox sb1: Library cache trim \(test\).*stopped early \(timed out after .*handed back as it is/);
+  mode = 'fail';
+  assert.match((await p.trim('sb1')).stopped ?? '', /failed: EBUSY/);
+  assert.equal(p.list()[0].status, 'ready');
+  mode = 'slow-abort';
+  await p.trim('sb1');
+  assert.ok(aborted, 'the timeout aborts the trim so it stops at its next file');
+  assert.equal(p.list()[0].status, 'ready');
+  assert.deepEqual(statuses.filter((s) => s.startsWith('sb1:')), ['sb1:creating', 'sb1:ready', 'sb1:cleanup', 'sb1:ready', 'sb1:cleanup', 'sb1:ready', 'sb1:cleanup', 'sb1:ready']);
+});
+
+test('w898: a daemon restart in the middle of a trim leaves nothing stuck: the pool reads cleanup back as ready', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const { p } = pool(r, { liveAgents: () => 0, trim: { timeoutMs: 300 }, trimmer: () => new Promise(() => undefined) });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const cut = p.trim('sb1');
+  assert.equal(p.list()[0].status, 'cleanup');
+  const { p: restarted } = pool(r, { liveAgents: () => 0 });
+  assert.equal(restarted.list().find((s) => s.id === 'sb1')?.status, 'ready');
+  await cut; // let the first pool's trim time out, so no timer outlives the test
 });

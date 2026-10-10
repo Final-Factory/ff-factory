@@ -11,6 +11,8 @@ import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeInfo } from '../server/unityHang.ts';
 import { copyTree, lowerPriority, removeTree, run, type RunResult } from '../server/proc.ts';
+import { LIBRARY_CACHES } from '../server/cleanup.ts';
+import { TRIM_DEFAULTS, projectOpen, trimLibraryCaches, type TrimPolicy, type TrimResult } from '../server/cacheTrim.ts';
 import { checkArray, readJsonDurable, writeJsonDurable } from '../server/durable.ts';
 import { armScriptReimport } from './scriptReimport.ts';
 import { MacUnity, MacUnityWatch, realDeps, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
@@ -41,7 +43,7 @@ export interface SandboxEditor {
 
 export interface PoolDeps {
   git(args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<RunResult>;
-  copyTree(src: string, dst: string, signal?: AbortSignal, mode?: 'robocopy' | 'clone'): Promise<void>;
+  copyTree(src: string, dst: string, signal?: AbortSignal, mode?: 'robocopy' | 'clone', exclude?: string[]): Promise<void>;
   /**
    * Bytes a Library copy writes up front: the source's size when it is a full copy (robocopy on Windows), undefined
    * when it block-clones (APFS `cp -c`, Copy-Item on a ReFS Dev Drive), where librarySeedGB stands (w628).
@@ -71,6 +73,17 @@ export interface PoolOptions {
   /** For the orchestrator: an editor restarted or given up on, the disk guard, an idle editor stopped. */
   onEvent(e: { text: string; sandbox?: string; restarted?: boolean; unity?: boolean; checkpoint?: boolean }): void;
   idleStopMinutes?: number;
+  /**
+   * Live agents in a sandbox now (the daemon's own sessions). With it, the pool trims a sandbox's Library caches the moment its last
+   * live agent is gone (w898): status 'cleanup' while it runs, 'ready' after. Unset: no trim on release.
+   */
+  liveAgents?(id: string): number;
+  /** The trim's limits (server/cacheTrim.ts TRIM_DEFAULTS), or false to switch it off. */
+  trim?: Partial<TrimPolicy> | false;
+  /** The trim itself (tests put a hung or failing one here). */
+  trimmer?: typeof trimLibraryCaches;
+  /** A line for the daemon's log. */
+  log?(line: string): void;
   /** Why a sandbox editor may not start now (the machine's host guard, w466: the drive is gone, disk space is low), or undefined. */
   startGate?: () => string | undefined;
   /** Room a warm Library copy needs, in GB, on top of the warning threshold (a clone on APFS costs far less up front). */
@@ -194,7 +207,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
   const shared: UnityDeps = { ...base, procs };
   return {
     git: (args, opts = {}) => run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: ENV }),
-    copyTree: (src, dst, signal, mode) => copyTree(src, dst, { signal, mode }),
+    copyTree: (src, dst, signal, mode, exclude) => copyTree(src, dst, { signal, mode, exclude }),
     libraryCopyBytes: async (src, mode) => (platform === 'win32' && mode !== 'clone' ? treeBytes(src) : undefined),
     removeTree,
     freeBytes: async (p) => {
@@ -227,6 +240,12 @@ export class SandboxPool {
   private readonly git = new Map<string, GitStatus | undefined>();
   private readonly provisioning = new Map<string, AbortController>();
   private readonly busy = new Set<string>();
+  /** Sandboxes whose Library caches are being trimmed now (w898). */
+  private readonly trimming = new Map<string, Promise<TrimResult>>();
+  /** Per sandbox: whether it had a live agent at the last look, so the moment the last one goes is seen. */
+  private readonly occupied = new Map<string, boolean>();
+  /** Released sandboxes still to trim (the editor was up when the last agent left). */
+  private readonly pendingTrim = new Set<string>();
   private disk: { level: DiskLevel; freeBytes?: number } = { level: 'ok' };
   /** When each sandbox's editor was last stopped with the tool (its launches keep a holder's priority a while, w469). */
   private readonly stoppedAt = new Map<string, number>();
@@ -261,6 +280,8 @@ export class SandboxPool {
     for (const r of rows ?? []) {
       // A create or delete a daemon restart cut off: say so; delete_sandbox finishes it.
       if (r.status === 'creating' || r.status === 'deleting') Object.assign(r, { status: 'error', statusDetail: `interrupted while ${r.status} (the daemon restarted); delete it and create it again` });
+      // A trim a restart cut off: the caches are intact or partly trimmed, both fine; the sandbox is free again.
+      else if (r.status === 'cleanup') Object.assign(r, { status: 'ready', statusDetail: undefined });
       this.recs.set(r.id, r);
     }
   }
@@ -415,7 +436,9 @@ export class SandboxPool {
           step('checking disk space for the Library copy');
           await this.requireFreeSpace(gb, `the Library copy (~${gb} GB)`);
           step(`copying the warm Library from ${src} (a few minutes)`);
-          await this.d.copyTree(src, path.join(r.path, 'Library'), signal, settings.librarySeedCopy);
+          // The configured seed is cleaned on purpose and keeps its caches (a warm start); any other source (the main clone's, a sandbox's)
+          // may carry the BuildCache and BurstCache it grew over days: those stay behind (w898, 4.8-12.7 GB each on lothdesktop).
+          await this.d.copyTree(src, path.join(r.path, 'Library'), signal, settings.librarySeedCopy, src === settings.librarySeed ? undefined : LIBRARY_CACHES);
           // The copy keeps the other project's script-to-class mappings: the first editor start reimports the scripts.
           const common = await this.d.git(['-C', r.path, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { signal });
           if (common.code !== 0) throw new Error(`could not find the repo's git folder (${common.code}): ${tail(common.stderr)}`);
@@ -539,6 +562,82 @@ export class SandboxPool {
     this.git.delete(id);
     this.changed();
     return `Released sandbox ${id}; ${r.path} and its editor are left as they are.`;
+  }
+
+  /**
+   * Trim a sandbox's Library caches before it goes to the next worker (w898). The sandbox is 'cleanup' meanwhile: not free, no
+   * agent and no editor start there (the daemon and the portal refuse a sandbox that is not 'ready'), and 'ready' again when the
+   * trim ends, fails or `timeoutMs` passes (the timeout also stops the trim between two files). Skipped, saying why, while an agent
+   * lives there or an editor or build has the project open. A second call while one runs returns that run.
+   */
+  trim(id: string, why = 'released'): Promise<TrimResult> {
+    const r = this.recs.get(id);
+    const none = (skipped: string): Promise<TrimResult> => Promise.resolve({ skipped, files: 0, removedBytes: 0, keptBytes: 0 });
+    if (!r) return none('no such sandbox');
+    const running = this.trimming.get(id);
+    if (running) return running;
+    if (this.o.trim === false) return none('trim is off');
+    if (r.status !== 'ready') return none(`the sandbox is ${r.status}`);
+    if (this.busy.has(id)) return none('the sandbox is busy');
+    if ((this.o.liveAgents?.(id) ?? 0) > 0) return none('an agent is live there');
+    if (this.editorUp(id)) return none('its editor is up');
+    if (projectOpen(r.path)) return none('an editor or build has the project open');
+    const policy = { ...TRIM_DEFAULTS, ...(this.o.trim || {}) };
+    this.changed(r, { status: 'cleanup', statusDetail: `trimming the Burst and Build caches (${why})` });
+    const ac = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<TrimResult>((resolve) => {
+      timer = setTimeout(() => {
+        ac.abort();
+        resolve({ stopped: `timed out after ${Math.round(policy.timeoutMs / 1000)} s`, files: 0, removedBytes: 0, keptBytes: 0 });
+      }, policy.timeoutMs);
+    });
+    const run = (async (): Promise<TrimResult> => {
+      let res: TrimResult;
+      try {
+        res = await Promise.race([(this.o.trimmer ?? trimLibraryCaches)(r.path, policy, { signal: ac.signal }), timedOut]);
+      } catch (e) {
+        res = { stopped: `failed: ${(e as Error).message}`, files: 0, removedBytes: 0, keptBytes: 0 };
+      } finally {
+        clearTimeout(timer);
+        ac.abort(); // a trim that lost the race to the timeout stops at its next file
+        this.trimming.delete(id);
+        // Back to free, whatever happened: a failed or hung trim must not leave the sandbox stuck (w898).
+        if (this.recs.get(id) === r && r.status === 'cleanup') this.changed(r, { status: 'ready', statusDetail: undefined });
+      }
+      const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} GB`;
+      const line = `sandbox ${id}: Library cache trim (${why}): removed ${res.files} files, ${gb(res.removedBytes)}, kept ${gb(res.keptBytes)}${res.stopped ? `; stopped early (${res.stopped}), handed back as it is` : ''}${res.skipped ? `; skipped (${res.skipped})` : ''}`;
+      this.o.log?.(line);
+      if (res.stopped) this.o.onEvent({ text: line, sandbox: id });
+      return res;
+    })();
+    this.trimming.set(id, run);
+    return run;
+  }
+
+  /**
+   * Trim each sandbox whose last live agent just went (a request closed, a wait for CI or a person, a stop, the idle reaper: every
+   * way a worker leaves ends its session here), and each one still to trim once its editor is down. One look per tick; the trims
+   * run on, not awaited.
+   */
+  private trimReleased() {
+    if (!this.o.liveAgents || this.o.trim === false) return;
+    for (const r of this.recs.values()) {
+      const occupied = this.o.liveAgents(r.id) > 0;
+      const was = this.occupied.get(r.id);
+      this.occupied.set(r.id, occupied);
+      if (occupied) {
+        this.pendingTrim.delete(r.id);
+        continue;
+      }
+      if (was === true) this.pendingTrim.add(r.id);
+      if (!this.pendingTrim.has(r.id) || r.status !== 'ready') continue;
+      void this.trim(r.id).then((res) => {
+        // Waiting only for the editor or build to end: keep it for a later look. Any other answer is final.
+        if (!res.skipped || !/editor|build/.test(res.skipped)) this.pendingTrim.delete(r.id);
+      });
+    }
+    for (const id of [...this.pendingTrim]) if (!this.recs.has(id)) this.pendingTrim.delete(id);
   }
 
   /** The editor object of a sandbox for this log file, made anew when the log moves (a locked old log gets a fresh name). */
@@ -666,6 +765,7 @@ export class SandboxPool {
     this.ticking = true;
     try {
       await this.look();
+      this.trimReleased();
     } catch (e) {
       this.o.onEvent({ text: `sandbox pool look failed: ${(e as Error).message}` });
     } finally {
