@@ -468,14 +468,16 @@ Connector → FF Factory:
 | `dev_received` | `id`: a `dev_reply` or `dev_update` was written for ffwatch, so FF Factory stops resending it |
 
 **`own`: the operator's own words (w831).** Optional on both `dev_request` and `dev_message`: `{ via, id, text }`,
-where `via` is `discord` or `github`, `id` the author id that matched (`^\d{1,25}$`: Discord's author snowflake,
-GitHub's numeric user id), and `text` (1-8000, redacted) only the bodies of the turn's messages whose stored author id
+where `via` is `discord`, `github`, `shell` or `web` (w852), `id` the id that matched (`^[A-Za-z0-9._:@-]{1,64}$`:
+Discord's author snowflake, GitHub's numeric user id, the opener's unix login or ffweb login), and `text` (1-8000,
+redacted) only the bodies of the turn's messages whose stored author id
 is that operator's id for that service in FFBox's `operators` block, joined by blank lines: as typed, with no embed
 text, no file names, no other author's message and no FFBox notes. FFBox's host code (ffwatch, from the author ids
-Discord's and GitHub's APIs gave it) builds it and the connector checks it (`via` one of the two, `id` the operator's own
-id for `via`); no model output reaches it. FFBox sends it only for a turn from Discord or GitHub, never from the shell
-or ffweb, whose logins are not authenticated (a shell name is `getpass.getuser()`, which reads `$USER`; ffweb has one
-password for every login). `text`, `title`, `brief` and `transcript` stay as they were: everything the turn held, data.
+Discord's and GitHub's APIs gave it) builds it and the connector checks it (`via` one of the four, `id` the operator's
+own id for `via`); no model output reaches it. From the shell or ffweb (w852; Lothsahn, 2026-10-10: "FFBox shell and ffweb messages are trusted like operator messages") `text` is
+everything typed into the local turn, which FFBox gives to its opener; neither login is authenticated (a shell name is
+`getpass.getuser()`, which reads `$USER`; ffweb has one password for every login), and they are trusted by that
+decision. The portal reads `own` with `.catch(undefined)`: one it cannot read is dropped, never a refused frame. `text`, `title`, `brief` and `transcript` stay as they were: everything the turn held, data.
 FF Factory gives authority to `own` alone (`operatorWords` in `server/devRequests.ts`): with `own.id` the operator's id for
 `own.via`, and no other login for that Discord id in `intake.discord.trusted`, the person's orchestrator gets `own.text`
 (quoted lines taken out) as a message of theirs, a turn of their own ([ffbox.md](ffbox.md#operators-own-words-w831)). A

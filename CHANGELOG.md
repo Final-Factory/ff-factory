@@ -10,6 +10,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **FFBox shell and ffweb operators' own words count as their turn too; the two dead config keys leave config.json**
+  (w852, lothsahn: "FFBox shell and ffweb messages are trusted like operator messages" and "Yes, remove unused config
+  keys"). `own` now also takes `via` `shell` and `web` (the opener's unix login or ffweb login; ffbox `aceb8e5` sends it),
+  trusted by that decision though neither login is authenticated; an `own` the portal cannot read is dropped instead of
+  refusing the frame. At start the server takes the retired keys out of config.json (`pruneRetiredKeys`, config.json.prev
+  keeps the file as it was; a dry run only names them): on the live portal `claudeAccounts.workers` and
+  `hostGuard.compactWhenReclaimGB`, so system_status stops naming them after the deploy.
+
 - **Installer reruns and machine updates go through the ops worker, never a person** (w855, lothsahn: "don't ask ben to run
   installers.  Update your instructions.  Stop doing that.  When we say update the machines, do the update, including
   installers if necessary"). w847 (raising biscuit to 3 sandboxes) asked Ben to rerun biscuit's installer with
