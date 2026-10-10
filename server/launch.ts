@@ -165,6 +165,17 @@ export const CATALOG = {
     offset: z.number().int().min(0).optional().describe('Skip this many matching requests (the next page).'),
     limit: z.number().int().min(1).max(50).optional().describe('Requests per page, default 20, at most 50; a page also stops at 40,000 characters.'),
   },
+  /** docs/portal-logs.md (w920). Read-only: the portal answers from a fixed list of sources (server/portalLogs.ts). */
+  portal_logs: {
+    source: z.string().max(40).optional().describe('What to read (journal, portal, updater, health, cleanup, update_result, update_verified, update_prepared, update_verifying, machine_rollout, unit_watchdog). Absent: the list of sources and what is there now.'),
+    machine: z.string().max(41).optional().describe('cleanup only: a machine id ("lothdesktop", "m5"); absent: the portal host\'s own passes.'),
+    since: z.string().max(40).optional().describe('journal and cleanup: an ISO time with a zone, e.g. 2026-10-10T18:50:00Z. The journal defaults to the last hour.'),
+    until: z.string().max(40).optional().describe('journal and cleanup: an ISO time with a zone. Default: now.'),
+    grep: z.string().max(200).optional().describe('Only lines containing this text, any case.'),
+    regex: z.string().max(100).optional().describe('Only lines matching this pattern, any case (no quantified group, backreference or lookaround).'),
+    limit: z.number().int().min(1).max(2000).optional().describe('Lines per page, default 200, at most 2000; a page also stops at 48,000 characters.'),
+    offset: z.number().int().min(0).optional().describe('Matching lines to skip (the next page: the answer says which offset).'),
+  },
 } satisfies Record<string, z.ZodRawShape>;
 
 export type CatalogTool = keyof typeof CATALOG;

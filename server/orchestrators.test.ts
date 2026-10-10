@@ -1582,6 +1582,40 @@ test('w575: a sandbox label is its name and never changes: no set_label for work
   assert.doesNotMatch(listed, /w554/);
 });
 
+test('w920: a worker has portal_logs on the machine tool belt and in its brief, and it reads the portal list and a clean-up log without writing', async (t) => {
+  const { store, machines, dispatcher, chat, call, cfg } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Check the portal logs', brief: 'Read them.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Check the portal logs', title: 'Portal logs', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const m = store.machines.get('pc')!;
+  const info = store.sessions.get(id)!;
+  const spec = machines.hooks!.specFor(info, m);
+  const tool = spec.mcp?.tools.find((x) => x.name === 'portal_logs');
+  assert.ok(tool, 'a worker has portal_logs');
+  assert.match(tool.description, /read-only/);
+  assert.match(tool.description, /never state\.json, the vault, logins, sessions, keys/);
+  assert.match(spec.append, /mcp__machine__portal_logs/);
+  assert.match(spec.append, /Check what FF Factory itself did before you infer it/);
+  const h = machines.hooks!.handlersFor(info, m);
+  assert.equal(typeof h.portal_logs, 'function');
+
+  const dir = path.join(cfg.dataDir, 'cleanup', 'pc');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'cleanup-log.jsonl'), JSON.stringify({ at: '2026-10-10T09:00:00Z', trigger: 'hourly', removed: 1, softFreeGB: 20, top: [{ path: '/work/ffa-x', bytes: 2 * 1024 ** 3, rule: 'agent-temp', why: 'session ended' }] }) + '\n');
+  fs.writeFileSync(path.join(cfg.dataDir, 'state.json'), '{"secret":"not for workers"}');
+  const before = fs.readdirSync(cfg.dataDir).sort();
+
+  assert.match(await h.portal_logs!({}), /- cleanup: .*\n[\s\S]*Clean-up logs kept for: pc/);
+  const out = await h.portal_logs!({ source: 'cleanup', machine: 'pc' });
+  assert.match(out, /\[2026-10-10T09:00:00Z\] removed: \/work\/ffa-x {2}2\.0 GB {2}\(session ended\)/);
+  await assert.rejects(h.portal_logs!({ source: 'state.json' }), /is not one portal_logs reads/);
+  assert.deepEqual(fs.readdirSync(cfg.dataDir).sort(), before, 'reading wrote nothing');
+  // Through the wire the daemon uses: a call by name that is not a tool is not available to the session.
+  assert.equal('write_portal_logs' in h, false);
+});
+
 test('w642: a worker reads its own request and the ones it names, is refused others until its person grants ledger reading, and writes nothing', async (t) => {
   const { store, machines, dispatcher, chat, call } = await setupOnMachine(t);
   const ben = chat(BEN).info;
