@@ -10,6 +10,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The "dispatcher's Claude token buffer is in use" banner names the limit that tripped it** (w828, lothsahn: "It talks about having a
+  26% reserve and being at 51% for the week. I think it's because the session is at like 90%?"). He was right: the token counts as inside
+  its buffer when EITHER the week or the 5-hour window reaches it (`reserveOf`, `server/tokenPool.ts`), but the text only ever quoted the
+  weekly figure. Live it was at 5-hour 93% (buffer 20%, inside) and weekly 51% (buffer 26%, not inside). The banner and the
+  `system_status` line now give only the limit or limits that are inside, each with its figure, buffer and reset ("5-hour 93% (buffer
+  20%), resets in 10 min"; both when both are), and "no reading yet" when there is none. No threshold or limit changed.
+
 - **An agent host the daemon lets go of is ended, tree and all, and its sandbox is never handed out while it runs** (w799, Ben:
   "just keep going"; the harness learns from what breaks). On BEAST on 2026-10-09 the daemon dropped two agent hosts whose
   heartbeats were 30 s late under a release build while their processes ran (daemon.log 20:01:56Z), never ended them, and could not

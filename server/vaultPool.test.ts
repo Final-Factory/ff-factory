@@ -7,7 +7,7 @@ import { PoolHeldError, Vault, fingerprintOf, newKeyText, type KeySource, type V
 import { hostAccount, hostProcessEnv, machineRunEnv, poolRunEnv, reserveLines, reservedCredentials } from './secrets.ts';
 import { checkAccountConfig } from './config.ts';
 import { OWNER_ONLY_KEYS, normalizeSetting, setAppConfig } from './appConfig.ts';
-import { poolLimits } from './tokenPool.ts';
+import { clock, poolLimits } from './tokenPool.ts';
 import { tokenKey } from './usage.ts';
 import type { PlanUsage } from '../shared/types.ts';
 import type { Config } from './config.ts';
@@ -342,11 +342,11 @@ test("reserveLines: the dispatcher's token shows its reserve; runs inside it rai
   // Inside the buffer with another person's orchestrator on it (a person with no vault token yet): a warning, not a refusal.
   meters[file] = usage(12, 83, { weeklyDays: 5 });
   const busy = reserveLines(cfg, (k) => meters[k], (k, role) => (k === file && role === 'dispatcher' ? 2 : 0), NOW);
-  assert.match(busy[0].line, /inside its reserve, kept for the dispatcher; 2 other runs using it/);
-  assert.match(busy[0].warning ?? '', /dispatcher's token file …ffff is the last token with room for 2 runs and is inside the buffer kept for the dispatcher \(weekly 83%, reserve 25%, resets \w{3} \d\d:\d\dZ\)/);
+  assert.equal(busy[0].line, `dispatcher's token file …ffff: weekly 83%, reserve 25% (5 days to reset); 5-hour 12%, reserve 20%; inside its reserve (weekly 83% (buffer 25%), resets ${clock(iso(NOW + 5 * DAY))}), kept for the dispatcher; 2 other runs using it`);
+  assert.equal(busy[0].warning, `dispatcher's token file …ffff is the last token with room for 2 runs and is inside the buffer kept for the dispatcher: weekly 83% (buffer 25%), resets ${clock(iso(NOW + 5 * DAY))}`);
   // Inside the buffer and nobody else on it: the dispatcher alone uses it, as intended: no warning.
   const alone = reserveLines(cfg, (k) => meters[k], none, NOW);
-  assert.match(alone[0].line, /inside its reserve, kept for the dispatcher$/);
+  assert.match(alone[0].line, /inside its reserve \(weekly 83% .*\), kept for the dispatcher$/);
   assert.equal(alone[0].warning, undefined);
   // No reading yet: counted as inside its reserve.
   const unread = reserveLines(cfg, () => undefined, none, NOW);
@@ -355,6 +355,33 @@ test("reserveLines: the dispatcher's token shows its reserve; runs inside it rai
   const slow = reserveLines({ ...(cfg as object), vault: { pool: { reservePerDayPercent: 2 } } } as never, (k) => meters[k], none, NOW);
   assert.match(slow[0].line, /reserve 10% \(5 days to reset\)/);
   assert.ok(![calm, busy, alone, unread].some((x) => x.some((l) => l.line.includes(FILE.slice(13, 40)))), 'a line shows the last four characters only');
+});
+
+test("w828: the warning names the limit that put the token inside its buffer: 5-hour only, weekly only, both, no reading", (t) => {
+  const { tokenFile } = setup(t);
+  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST }, claudeTokenFile: tokenFile, claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' } } as never;
+  const two = (k: string, role: string) => (k === tokenKey(FILE) && role === 'dispatcher' ? 2 : 0);
+  const warn = (u: PlanUsage | undefined) => reserveLines(cfg, (k) => (k === tokenKey(FILE) ? u : undefined), two, NOW)[0];
+  const tail = /^dispatcher's token file …ffff is the last token with room for 2 runs and is inside the buffer kept for the dispatcher: /;
+  // The live case: weekly 51% (buffer 26%, not inside it) and 5-hour 93% (buffer 20%, inside it). The week is not blamed.
+  const sessionOnly = warn(usage(93, 51, { weeklyDays: 5.2, sessionHours: 1 / 6 }));
+  assert.match(sessionOnly.warning ?? '', tail);
+  assert.equal((sessionOnly.warning ?? '').replace(tail, ''), '5-hour 93% (buffer 20%), resets in 10 min');
+  assert.doesNotMatch(sessionOnly.warning ?? '', /weekly/);
+  assert.match(sessionOnly.line, /inside its reserve \(5-hour 93% \(buffer 20%\), resets in 10 min\), kept for the dispatcher/);
+  // Weekly only: 5-hour at 12% is not a reason.
+  const weeklyOnly = warn(usage(12, 83, { weeklyDays: 5, sessionHours: 2 }));
+  assert.equal((weeklyOnly.warning ?? '').replace(tail, ''), `weekly 83% (buffer 25%), resets ${clock(iso(NOW + 5 * DAY))}`);
+  assert.doesNotMatch(weeklyOnly.warning ?? '', /5-hour/);
+  // Both inside: both named, the 5-hour first.
+  const both = warn(usage(93, 97, { weeklyDays: 1, sessionHours: 1.5 }));
+  assert.equal((both.warning ?? '').replace(tail, ''), '5-hour 93% (buffer 20%), resets in 1 h 30 min; weekly 97% (buffer 5%), resets in 24 h');
+  // No reading: said plainly, with no figure invented.
+  const unread = warn(undefined);
+  assert.equal((unread.warning ?? '').replace(tail, ''), 'no reading yet (counted as inside the buffer)');
+  assert.doesNotMatch(unread.warning ?? '', /\d%/);
+  // A meter with no reset time says so rather than inventing one.
+  assert.match(warn(usage(93, 10)).warning ?? '', /5-hour 93% \(buffer 20%\), resets at an unknown time$/);
 });
 
 test("the dispatcher is never held by its own reserve: its environment is the token file whatever the meters say", (t) => {
@@ -366,7 +393,7 @@ test("the dispatcher is never held by its own reserve: its environment is the to
   // And the reserve is a line and a warning, never an exception: reserveLines returns even at 100%.
   const full = reserveLines(cfg, () => usage(100, 99.9, { weeklyDays: 0.1 }), () => 0, NOW);
   assert.equal(full.length, 2);
-  assert.match(full[0].line, /inside its reserve, kept for the dispatcher/);
+  assert.match(full[0].line, /inside its reserve \(.*\), kept for the dispatcher/);
 });
 
 // ---------------------------------------------------------------- config

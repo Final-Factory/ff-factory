@@ -278,6 +278,10 @@ export interface Reserve {
   noReading: boolean;
   /** Either meter has reached the buffer: runs other than the dispatcher's are eating into it. */
   inReserve: boolean;
+  /** The weekly meter has reached its buffer (a no-reading token is in neither: it is inside the reserve for want of a reading). */
+  weeklyIn: boolean;
+  /** The 5-hour meter has reached its buffer. */
+  sessionIn: boolean;
 }
 
 /**
@@ -293,6 +297,35 @@ export function reserveOf(u: PlanUsage | undefined, limits: PoolLimits, now: num
   const weekly = Math.min(100, limits.reservePerDay * daysLeft);
   const session = Math.min(100, limits.reserveSession);
   const noReading = !m.known;
-  const inReserve = noReading || m.weekly >= 100 - weekly || m.session >= 100 - session;
-  return { weekly, session, daysLeft, noReading, inReserve };
+  const weeklyIn = !noReading && m.weekly >= 100 - weekly;
+  const sessionIn = !noReading && m.session >= 100 - session;
+  const inReserve = noReading || weeklyIn || sessionIn;
+  return { weekly, session, daysLeft, noReading, inReserve, weeklyIn, sessionIn };
+}
+
+/** "in 10 min", "in 3 h 5 min", "in 2 days" for a reset time; the clock time when it is over 2 days off; "its reset time is unknown" without one. */
+export function resetIn(iso: string | undefined, now: number): string {
+  const t = iso ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(t)) return 'at an unknown time';
+  if (t - now < 60_000) return 'any moment now';
+  const min = Math.round((t - now) / 60_000);
+  if (min < 90) return `in ${min} min`;
+  if (min < 48 * 60) return `in ${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60} min` : ''}`;
+  return clock(iso);
+}
+
+/**
+ * Why a token is inside the dispatcher's buffer, naming only the limit or limits that put it there, each with its
+ * figure, its buffer and its reset: "5-hour 93% (buffer 20%), resets in 10 min". Both when both are inside. Without
+ * a reading, says so. Empty when the token is not inside the buffer.
+ */
+export function reserveReason(r: Reserve, u: PlanUsage | undefined, now: number): string {
+  if (r.noReading) return 'no reading yet (counted as inside the buffer)';
+  const m = metersOf(u);
+  const one = (name: string, read: number | undefined, buffer: number, resetsAt: string | undefined) =>
+    `${name} ${typeof read === 'number' ? `${pc(read)}%` : 'no reading (counted as 50%)'} (buffer ${Math.round(buffer)}%), resets ${resetIn(resetsAt, now)}`;
+  const parts: string[] = [];
+  if (r.sessionIn) parts.push(one('5-hour', u?.session?.percent, r.session, m.sessionResetsAt));
+  if (r.weeklyIn) parts.push(one('weekly', u?.weekly?.percent, r.weekly, m.weeklyResetsAt));
+  return parts.join('; ');
 }
