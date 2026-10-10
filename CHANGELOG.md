@@ -28,6 +28,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   Needs a portal deploy; a machine's daemon sends tokens and context readings only once it is updated (until then its turns are
   dollars only, labelled estimated).
 
+- **Test only: the ledger test that began failing on main at 2026-10-10T08:00Z** (w858, lothsahn: "look for flaky CI
+  tests in FFFactory and fix them"). `ledgerSweep.test.ts` dates its requests against a fixed NOW (2026-10-03T12:00Z) while
+  the ledger's own rules read the wall clock, so 7 days later `updateProblem` refused to reopen a request "closed more
+  than 7 days ago". The "auto-closed on a loose link, reopened by hand" test now pins the ledger's clock to NOW, as the
+  w731 test beside it already did (71f4331). No portal deploy.
+
 - **A declined request's player reports read obsolete on FFBox** (w853, lothsahn: "Yes, you can mark declined reports
   obsolete on FFBox"). w720 and w825, crash reports from internal Macs, were declined and their reports still read
   NEEDS-INFO on FFBox. Now every report a `rejected` request claims, when no open or finished request claims it, goes to
