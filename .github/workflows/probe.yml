@@ -4,14 +4,14 @@ on:
     branches: [w858-probe]
 jobs:
   cov:
-    name: shard1 #${{ matrix.rep }}
+    name: ${{ matrix.variant }} #${{ matrix.rep }}
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        file: ['server/machineDeployWin.test.ts server/machines.test.ts server/orchestrators.test.ts']
-        rep: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        variant: [base, fix]
+        rep: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -21,9 +21,17 @@ jobs:
           git config --global user.name "FF Factory CI"
           git config --global user.email "ci@users.noreply.github.com"
       - run: npm ci --no-audit --no-fund
+      - if: matrix.variant == 'fix'
+        shell: bash
+        run: git apply .github/wincov.patch
       - shell: bash
         run: |
-          node --test --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' ${{ matrix.file }} 2>&1 | tee out.txt
-          code=${PIPESTATUS[0]}
-          grep -E '^ℹ (tests|pass|fail) |Could not report' out.txt || true
-          exit $code
+          bad=0
+          for i in $(seq 1 15); do
+            node --test --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' --test-name-pattern='real PowerShell' server/machineDeployWin.test.ts > out.txt 2>&1
+            code=$?
+            echo "iteration $i exit=$code $(grep -c 'coverage file is empty' out.txt) empty"
+            [ $code -ne 0 ] && bad=$((bad+1))
+          done
+          echo "FAILED_ITERATIONS=$bad of 15"
+          [ $bad -eq 0 ]
