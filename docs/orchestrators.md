@@ -257,7 +257,8 @@ days; a deploy is a person's call, and a week without one is worth their look.
   closes it, as for any request.
 - **Merged, follow-up pending, on a deploy** is Blocked on that deploy (w631's `deployStep`: the only step left after the
   merge is a portal deploy or the machines' update). The cleanup records the blocker itself (`by: ledger cleanup`), and
-  closes the request once what runs there contains the merge (w631); with a week and no deploy, it stalls. Any other
+  closes the request once what runs there contains the merge (w631), unless the worker's last report puts a check of its own
+  after the deploy ("then I verify …", w889: `postDeployStep`), when the worker is resumed for it instead (w890); with a week and no deploy, it stalls. Any other
   step after the merge stays **Merged, follow-up pending**.
 - **Starting it ends the block; a hold does not** (w754). A blocker is a **gate**, kept on the request (`WorkItem.blocked`,
   and `alsoBlocked` for more) through a hold (`decide_work ask`: status `question`) and through a person's "go" or
@@ -289,6 +290,15 @@ days; a deploy is a person's call, and a week without one is worth their look.
      worker that serves it alone (`Orchestrators.cancelCheckIns`, via `Agents.cancelWake`; the log says which) and the
      worker brief says not to set one. A worker can also cancel its own with `cancel_wake`. The block clears by itself and
      the dispatcher resumes the worker (`[ledger] … is unblocked … message_agent with work_id to its worker`).
+  5. **Waiting on a deploy frees the sandbox and wakes the worker** (w890, lothsahn: "We should not wait for a worker waiting
+     for a deploy ... once the deploy has happened, the worker can get rescheduled by the dispatcher"). `blocked_on` also
+     takes `deploys` (`"portal"`, or a machine id for its daemon update): a `deploy` gate, cleared when a different commit
+     runs there. A worker whose open requests all wait on deploys, requests, PRs merging or a person releases its sandbox
+     at once ([machines.md](machines.md#placing-work), "it waits on a deploy, a person or another request"), and the gate
+     clearing resumes it within a minute with a note to do its check after the deploy (`resumeGatedWorker`, for a `deploy`
+     gate whoever set it), in any free sandbox on its machine. The ledger cleanup's own deploy block resumes the worker the
+     same way when its last report puts a check of its own after the deploy (`postDeployStep`); without one it closes the
+     request on the deploy, as before.
   4. **Waiting on CI frees the sandbox and wakes the worker** (w846). A worker whose only wait is CI on its own pull
      request blocks on it (`blocked_on` with `prs: ["ci:owner/repo#123"]`, a `ci` gate: its checks finishing, green or
      red, not its merge) instead of polling with `wake_me`. With its editor stopped and its work pushed its sandbox

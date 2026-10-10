@@ -1597,16 +1597,45 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   }
 
   /**
-   * A request unblocked with no check-in to hand back (w846): when a gate was CI or one its worker set itself (blocked_on),
+   * A request unblocked with no check-in to hand back (w846): when a gate was CI, a deploy (w890: the worker released its
+   * sandbox while it waited, and its check after the deploy is its next step) or one its worker set itself (blocked_on),
    * that worker is resumed within a minute with why, instead of waiting for the dispatcher to pass the word on. Its
    * latest worker only, and only one that still exists. Returns it, or [].
    */
   private resumeGatedWorker(w: WorkItem, gates: readonly WorkBlocker[], cleared: string): string[] {
     const sid = [...w.sessionIds].reverse().find((x) => this.store.sessions.get(x));
-    if (!sid || !gates.some((g) => g.kind === 'ci' || g.by === `worker ${sid}`)) return [];
+    if (!sid || !gates.some((g) => g.kind === 'ci' || g.kind === 'deploy' || g.by === `worker ${sid}`)) return [];
     const ci = gates.some((g) => g.kind === 'ci');
-    const note = `${w.id} is unblocked: ${cleared}.${ci ? ' Read its checks now (gh pr checks): merge on green, fix on red.' : ''} Carry on from where you left it.`;
+    // A deploy (w890): its worker was released while it waited, and does its check after the deploy now.
+    const deploy = gates.some((g) => g.kind === 'deploy');
+    const note = `${w.id} is unblocked: ${cleared}.${ci ? ' Read its checks now (gh pr checks): merge on green, fix on red.' : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.`;
     return this.d.restoreWake?.(sid, note) ? [sid] : [];
+  }
+
+  /**
+   * The deploy a worker waited for has happened, and its report puts a step of its own after it (w890: w889's "then I
+   * verify a live PR read and the health check"): the request is not finished. Its latest worker, released while it
+   * waited, is resumed within a minute with that step, the block (the ledger cleanup's own) is lifted, and the request is
+   * active again. Returns whether it was; false (no worker left, or the request is not open) leaves the closing to the
+   * caller.
+   */
+  resumeAfterDeploy(id: string, why: string, step: string): boolean {
+    const w = this.store.work.get(id);
+    if (!w || !['blocked', 'active', 'new'].includes(w.status)) return false;
+    const sid = [...w.sessionIds].reverse().find((x) => this.store.sessions.get(x));
+    if (!sid) return false;
+    const note = `${w.id}: the deploy you waited for has happened (${why}). Your report put a step after it: "${clip(step, 200)}". Do it now, then report.`;
+    if (!this.d.restoreWake?.(sid, note)) return false;
+    const was = w.blocked ? ` (it was blocked on ${gatesName(gatesOf(w), this.now().getTime())})` : '';
+    w.status = 'active';
+    w.blocked = undefined;
+    w.alsoBlocked = undefined;
+    w.heldCheckIns = undefined;
+    this.stamp(w, `the deploy happened (${why}); its worker ${sid} resumes within a minute for its step after it: ${clip(step, 160)}${was}`);
+    this.store.putWork(w);
+    this.toPeople(w.requesters, dispatchNotice(w, `the deploy happened (${why}); its worker ${sid} carries on with its step after it`));
+    console.log(`ledger: ${w.id}: the deploy happened (${why}); resumed ${sid} for: ${step}`);
+    return true;
   }
 
   /** Whether a gate may still be open: judged here only where the facts are at hand; the rest waits for the blocker watch. */
@@ -1628,11 +1657,11 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   }
 
   /**
-   * The blocked_on tool (w754): a worker says its request waits only on other requests or pull requests. The request is
+   * The blocked_on tool (w754): a worker says its request waits only on other requests, pull requests or a deploy (w890). The request is
    * Blocked on them, its pending check-ins are cancelled, and the worker ends its turn: it is resumed by the dispatcher
    * when they clear (unblock). No polling.
    */
-  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; prs?: string[]; what: string }): string {
+  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; prs?: string[]; deploys?: string[]; what: string }): string {
     const items = [...this.store.work.values()];
     const serves = [...servedBy(sessionId, items)].map((id) => this.store.work.get(id)).filter((x): x is WorkItem => !!x);
     const named = a.request?.trim().toLowerCase();
@@ -1651,7 +1680,13 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       if (!ref) throw new Error(`"${pr}" is not a pull request: give owner/repo#123 or its github.com link (ci:owner/repo#123 for its checks finishing)`);
       asked.push(ci ? { kind: 'ci', ref, what: `CI on ${ref} finished` } : { kind: 'pr', ref, what: `PR ${ref} merged` });
     }
-    if (!asked.length) throw new Error('name what it waits for: requests (ids) and/or prs (owner/repo#123 or a github.com link). A person is waiting_on_person; a time is wake_me');
+    // A deploy (w890): "portal", or a machine id for that machine's daemon update. Clears when a different commit runs there.
+    for (const d of a.deploys ?? []) {
+      const ref = d.trim().toLowerCase();
+      if (!ref) continue;
+      asked.push(ref === 'portal' ? { kind: 'deploy', what: 'a portal deploy' } : { kind: 'deploy', ref, what: `${ref}'s daemon update` });
+    }
+    if (!asked.length) throw new Error('name what it waits for: requests (ids), prs (owner/repo#123 or a github.com link) and/or deploys ("portal" or a machine id). A person is waiting_on_person; a time is wake_me');
     asked[0] = { ...asked[0], what: clip(what, 200) };
     const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) };
     for (const b of asked) {

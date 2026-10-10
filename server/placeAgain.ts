@@ -10,6 +10,11 @@
  * new work. A worker between turns with only a far check-in (its process up, nothing running) is stopped first, so the same
  * applies to it, and so is one Idle (alive, nothing pending at all) for RELEASE_AFTER_MS. docs/machines.md, "Placing work".
  *
+ * A worker that ends its turn with nothing left for it to do in its sandbox, because it waits only on a deploy, a person,
+ * another request or a pull request merging (w890, lothsahn: "We should not wait for a worker waiting for a deploy.
+ * Update FF Factory to free the slot immediately once work is done"), releases it at once, as one waiting on CI does
+ * (w846): `waitOn`, below.
+ *
  * Nothing is lost: only a clean worktree (no uncommitted change, no untracked file) is released, its branch stays in the
  * machine's repository (worktrees share it), and a switch away pushes commits no remote has first (switchBranch). A
  * dirty one is first saved by its daemon (w656, server/saveWork.ts): committed on the worker's branch and pushed; one it
@@ -150,14 +155,30 @@ export function ciReleaseWhy(sb: MachineSandbox, ciWait: string | undefined): st
   return ciWait;
 }
 
-export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string; ciWait?: string }): ReleaseStep {
+/**
+ * Why a worker that waits on something nobody in its sandbox can move may give up its sandbox now (w890), or undefined:
+ * its requests wait on a deploy, a person, another request or a pull request merging (`waitOn`, Agents.waitOn), and its
+ * branch has no commit its remote lacks. lothsahn, on w889 holding m3's only sandbox after its PR merged while it waited
+ * for the portal deploy and a token permission: "Why is w889 holding a slot? It's done with its work and it should free
+ * the slot." Unlike CI (ciReleaseWhy), a running editor does not keep it: nothing is about to be read or fixed in it, and
+ * the placement that takes the sandbox stops the editor first (as for any release, w656). A Unity batch run of its, and
+ * uncommitted work the daemon cannot save, still keep it (keptWhy). The block, the person or the deploy resumes it; it is
+ * then placed again like any released worker.
+ */
+export function waitReleaseWhy(sb: MachineSandbox, waitOn: string | undefined): string | undefined {
+  if (!waitOn || (sb.git?.ahead ?? 0) > 0) return undefined;
+  return waitOn;
+}
+
+export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string; ciWait?: string; waitOn?: string }): ReleaseStep {
   if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || !sb) return undefined;
   const live = f.live(s.id);
   const far = farWhy(s, f.now, f.workOver);
-  const ci = ciReleaseWhy(sb, f.ciWait);
+  // Waiting on CI (w846), else on a deploy, a person or another request (w890): its sandbox may go at once.
+  const ci = ciReleaseWhy(sb, f.ciWait) ?? waitReleaseWhy(sb, f.waitOn);
   if (s.placeReleased) {
-    // While its CI runs it stays released (w846): its check-in or its unblock places it again.
-    if (f.ciWait) return undefined;
+    // While its CI runs, or it waits on a deploy or a person, it stays released (w846, w890): its check-in, its unblock or a message places it again.
+    if (f.ciWait || f.waitOn) return undefined;
     // Its check-in is near again: back to its own sandbox, while that is still free and on its branch.
     if (live || far || !s.wakeAt || s.queuedSend || Date.parse(s.wakeAt) <= f.now - OVERDUE_MS) return undefined;
     if (s.placeReleased.sandbox !== sb.id || sb.status !== 'ready' || sb.git?.branch !== s.placeReleased.branch || (f.claimedBy && f.claimedBy !== s.id)) return undefined;
@@ -180,7 +201,7 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
     return step && !keptWhy(s, sb, f) ? step : undefined;
   }
   if (s.status !== 'stopped' || s.pendingPermissions.length) return undefined;
-  // Waiting on CI (w846): released whatever its check-in, which places it again when it comes.
+  // Waiting on CI, a deploy or a person (w846, w890): released whatever its check-in, which places it again when it comes.
   const why = (s.queuedSend ? undefined : ci) ?? releaseWhy(s, f.now, f.workOver);
   if (!why || keptWhy(s, sb, f)) return undefined;
   return { do: 'release', why, branch: sb.git!.branch, ...(dirtyOf(sb) ? { save: true } : {}) };
@@ -248,6 +269,10 @@ export interface PlaceAgainDeps {
   workOver: (s: SessionInfo) => string | undefined;
   /** Why it waits on CI (its requests blocked on a CI gate, Agents.ciWait, w846), or undefined. */
   ciWait?: (s: SessionInfo) => string | undefined;
+  /** Why it waits on a deploy, a person, another request or a pull request merging, nothing else (Agents.waitOn, w890), or undefined. */
+  waitOn?: (s: SessionInfo) => string | undefined;
+  /** Run the release pass again soon (a worker was just stopped to release its sandbox: w890 frees it within a minute of its turn's end). */
+  soon?: () => void;
   /** Why a live idle worker must keep its process, its check-in aside (Agents.keepIdle without the wake), or undefined. */
   keepLive: (id: string) => string | undefined;
   /** Whether a message to it waits in the send queue. */
@@ -347,7 +372,7 @@ export class PlaceAgain {
   keptLine(s: SessionInfo): string | undefined {
     if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || s.placeReleased || s.status !== 'stopped' || this.d.isLive(s.id)) return undefined;
     const sb = this.d.machine(s.machineId)?.sandboxes?.find((x) => x.id === s.machineSandbox);
-    const why = sb && (ciReleaseWhy(sb, this.d.ciWait?.(s)) ?? releaseWhy(s, this.now(), this.d.workOver(s)));
+    const why = sb && (ciReleaseWhy(sb, this.d.ciWait?.(s)) ?? waitReleaseWhy(sb, this.d.waitOn?.(s)) ?? releaseWhy(s, this.now(), this.d.workOver(s)));
     const kept = why && keptWhy(s, sb, this.facts(s.machineId));
     return kept ? `its sandbox stays held although ${why}: ${kept}` : undefined;
   }
@@ -360,6 +385,7 @@ export class PlaceAgain {
   tick(): string[] {
     const did: string[] = [];
     const freed = new Set<string>();
+    let stoppedDue = false;
     const byMachine = new Map<string, PlaceFacts>();
     for (const s of [...this.d.sessions()]) {
       if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox) continue;
@@ -369,13 +395,14 @@ export class PlaceAgain {
       let f = byMachine.get(m.id);
       if (!f) byMachine.set(m.id, (f = this.facts(m.id)));
       const live = this.d.isLive(s.id);
-      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined });
+      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined });
       if (!step) continue;
       if (step.do === 'stop') {
         // Stopped while Idle: its sandbox stays its until the next pass releases it, its worktree clean (w656).
         if (step.due) {
           s.releaseDue = { at: new Date(this.now()).toISOString(), why: step.why };
           this.d.save(s);
+          stoppedDue = true;
         }
         this.d.stopLive(s.id, step.why);
         did.push(`stopped ${s.id} (${step.why}): its sandbox ${m.id}/${sb.id} is released once it has stopped`);
@@ -404,6 +431,8 @@ export class PlaceAgain {
       }
     }
     for (const line of did) console.log(`place again: ${line}`);
+    // A worker stopped to release its sandbox is released by the next pass: do not leave that a minute away (w890).
+    if (stoppedDue) this.d.soon?.();
     // Queued work may take them now: the dispatcher hears it (w656, Orchestrators.capacityMayHaveFreed).
     if (freed.size) this.d.freed?.(`sandbox${freed.size > 1 ? 's' : ''} ${[...freed].join(', ')} released`);
     return did;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, ownerAt, partOfIdsIn, partOfReason, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -258,4 +258,17 @@ test('w741: the Learned: line of a DONE report', async () => {
   assert.match(learnedProblem({ reopenedAt: '2026-10-08T23:20:00Z' }, 'Learned: Nothing new.')!, /a person reopened it/);
   assert.equal(learnedProblem({ reopenedAt: '2026-10-08T23:20:00Z' }, 'Learned: no check possible: the bug was in the Steam client'), undefined);
   assert.equal(learnedProblem({ reopenedAt: '2026-10-08T23:20:00Z' }, 'Learned: done.md item 2 (final-factory-agents #19)'), undefined);
+});
+
+test('w890: postDeployStep finds the check a worker puts after a deploy, and nothing in a report that only waits for the deploy', () => {
+  const w889 = `w889: still open: waiting on Ben to give the go-ahead for the portal deploy of 65b1d27 and to add "Actions: Read-only" to the portal's D7 token; then I verify a live PR read and the health check`;
+  assert.equal(postDeployStep([w889]), 'then I verify a live PR read and the health check');
+  assert.equal(postDeployStep(['Merged. Once the portal is deployed, I verify the live read.']), 'Once the portal is deployed, I verify the live read');
+  assert.equal(postDeployStep(['Merged as #193. After the deploy I will check the health endpoint.']), 'After the deploy I will check the health endpoint');
+  // Only the deploy is waited for (w631's reports): nothing is left for the worker.
+  assert.equal(postDeployStep(["Merged as #193. Waiting on the portal deploy, which needs lothsahn's own words."]), undefined);
+  assert.equal(postDeployStep(['Merged. Waiting on the portal deploy.']), undefined);
+  // A check that is not about a deploy.
+  assert.equal(postDeployStep(['Then I verify the build. The deploy is lothsahn\'s.']), undefined);
+  assert.equal(postDeployStep([]), undefined);
 });

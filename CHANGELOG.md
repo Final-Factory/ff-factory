@@ -10,6 +10,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A worker waiting on a deploy, a person or another request frees its sandbox at once, and the deploy wakes it** (w890,
+  lothsahn: "Why is w889 holding a slot?  It's done with its work and it should free the slot." and "We should not wait for a
+  worker waiting for a deploy ... once the deploy has happened, the worker can get rescheduled by the dispatcher"). w889
+  sat Idle for hours on m3's only sandbox after its PR merged, waiting for the portal deploy and a token permission. The
+  release pass (`server/placeAgain.ts`) now releases at once the sandbox of a worker whose open requests all wait on a
+  deploy, a request, a PR merging or a person (`Agents.waitOn`), as it does for CI; it still never releases unsaved work,
+  unpushed commits, a batch run, a worker mid-turn or one with a job it needs. `blocked_on` takes `deploys`; a deploy gate
+  clearing resumes its worker within a minute; the ledger cleanup resumes (not closes) a worker whose report puts a check
+  after the deploy. Needs a portal deploy (docs/machines.md "Released sandboxes").
+
 - **CI the portal cannot read is said loudly, and a green finish is seen without Actions access** (w889, Ben: "Yes fix
   it"). The portal's GitHub token (D7) cannot read check runs (no fine-grained token can) nor Actions runs ("Actions:
   Read" is missing), so every `ci:` wait sat the 15-minute fallback. `ghChecks` now falls back to the pull request's merge
