@@ -57,6 +57,8 @@ export interface LaunchSpec {
     standing?: { folder: string; groups: StandingToolGroup[]; offLimits: string[]; secrets?: SecretRules };
     /** Public repos and their commit identity (config publicGitIdentity). */
     publicIdentity?: { repos: string[]; name?: string; email?: string };
+    /** The machine's worker install folder (w896): the guard refuses a delete outside it. An older daemon ignores it. */
+    workerRoot?: string;
   };
   env?: Record<string, string>;
   /**
@@ -202,6 +204,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       gameRepos: g.gameRepos,
       denyToolPrefixes: g.denyToolPrefixes,
       publicIdentity: g.publicIdentity,
+      workerRoot: g.workerRoot,
       editorRunning,
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
