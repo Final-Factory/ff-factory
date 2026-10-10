@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { escalationCatchUp, fixLearnable, fixedByPr, followed, reportFixesOf, reportLines, reportSweep } from './boardFollow.ts';
+import { escalationCatchUp, fixLearnable, fixedByPr, followed, reportFixesOf, reportLines, reportObsoletesOf, reportSweep } from './boardFollow.ts';
 import { catchUpReport } from '../scripts/escalation-catchup.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -107,4 +107,26 @@ test('w502: reportSweep: claimed reports are certain, mentioned ones are for a p
   const s = reportSweep(work, NOW, 30);
   assert.deepEqual(s.certain, [{ workId: 'w430', reportIds: ['20261004T000000Z-crash-aaaaaaaaaa'], released: false }]);
   assert.deepEqual(s.uncertain, [{ workId: 'w414', title: 'Fix the crash on load', reportIds: ['20261005T035612Z-crash-6102d405dc', '20261005T035747Z-crash-1216e47e7d'] }]);
+});
+
+test('w853: reportObsoletesOf: a declined request\'s reports, through a merge, recent only, never one other work still claims', () => {
+  const work = new Map<string, WorkItem>();
+  const put = (w: WorkItem) => work.set(w.id, w);
+  const r = (x: string) => `2026100${x}T000000Z-crash-${x.repeat(10)}`;
+  put(item('w720', { status: 'rejected', keys: [`report:${r('1')}`, 'ffbox:752'] }));
+  put(item('w721', { status: 'rejected', keys: [`report:${r('2')}`] }));
+  put(item('w722', { status: 'active', keys: [`report:${r('2')}`] })); // still worked
+  put(item('w723', { status: 'rejected', keys: [`report:${r('3')}`] }));
+  put(item('w724', { status: 'done', keys: [`report:${r('3')}`] })); // its fix says more
+  put(item('w725', { status: 'merged', mergedInto: 'w726', keys: [`report:${r('4')}`] }));
+  put(item('w726', { status: 'rejected', keys: [`report:${r('5')}`] }));
+  put(item('w727', { status: 'rejected', keys: [`report:${r('6')}`], updatedAt: daysAgo(40) }));
+  put(item('w728', { status: 'cancelled', keys: [`report:${r('1')}`] })); // a cancelled claim does not keep it live
+  put(item('w729', { status: 'done', keys: [`report:${r('7')}`] }));
+  assert.deepEqual(reportObsoletesOf(work, NOW, 30), [
+    { reportId: r('1'), workId: 'w720' },
+    { reportId: r('4'), workId: 'w726' },
+    { reportId: r('5'), workId: 'w726' },
+  ]);
+  assert.deepEqual(reportObsoletesOf(work, NOW, Infinity).map((x) => x.reportId), [r('1'), r('4'), r('5'), r('6')], 'an old decline still counts for a withdrawal');
 });

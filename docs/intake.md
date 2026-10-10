@@ -399,6 +399,26 @@ them (no `report:` key), and FFBox links nothing for an intake filing.
 - **Workers** put `Report: <report id>` in a fix PR for each report they confirmed it fixes (`DISCORD_RULES`, the
   intake end rules).
 
+## Players' reports a declined request leaves (w853)
+
+Lothsahn, 2026-10-10: "Yes, you can mark declined reports obsolete on FFBox". w720 (crash report
+20261008T213823Z-crash-fcd5598639, an FF Factory agent run on a developer Mac) and w825 (20261010T005243Z-crash-4f747e8bbe,
+a Development build on an internal Mac) were declined, and their reports still read NEEDS-INFO on FFBox.
+
+- **Told when declined.** `pushReportObsoletes` (every minute) sends FFBox `report_obsolete {reportId, workId}` for
+  every report a request closed `rejected` claims (a reviewer's decline of an intake request, or the dispatcher's
+  reject; through a merge into it; declined in the last 30 days), unless another request claims it while open or done
+  (`reportObsoletesOf`): that one is still somebody's work, or its fix says more. Kept in `intake.json`
+  (`reportObsoletes`) and sent on every link, once per link (`ProviderManager.pushReportObsolete`), only to a connector
+  whose hello lists `report_obsolete`. FFBox records it apart from fixed (verdict OBSOLETE, `obsolete {work}` in the
+  `reports` query; a FIXED verdict is never changed) and posts nothing.
+- **Withdrawn.** A report told obsolete whose request is reopened, or that an open or finished request now claims, is
+  told `report_obsolete {reportId, workId, withdrawn: true}`; FFBox puts back what its diagnosis had said.
+- **Not raised again.** A new FFBox diagnosis (`onDiagnosis`) whose reports are all obsolete, with no fix pushed, is
+  answered `skipped` ("its reports were declined in wNNN") and not filed; one that also holds a report nobody declined is
+  filed as before.
+- **The backfill** is the same pass: every request declined in the last 30 days is told at the first start with it.
+
 ## Nightly e2e regressions
 
 Ben, 2026-09-30: "stop this falling through the cracks." The nightly e2e lab (FinalFactory spec 075,

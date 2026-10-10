@@ -10,6 +10,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A declined request's player reports read obsolete on FFBox** (w853, lothsahn: "Yes, you can mark declined reports
+  obsolete on FFBox"). w720 and w825, crash reports from internal Macs, were declined and their reports still read
+  NEEDS-INFO on FFBox. Now every report a `rejected` request claims, when no open or finished request claims it, goes to
+  FFBox as `report_obsolete {reportId, workId}` (`pushReportObsoletes`, every minute, kept in `intake.json` and sent on
+  every link; a reopen sends `withdrawn`). FFBox records it apart from fixed and posts nothing. A new FFBox diagnosis of
+  only declined reports, with no fix pushed, is answered `skipped` and not filed again. The backfill is the first pass
+  after the deploy (requests declined in the last 30 days). Needs a portal deploy and ffbox master with
+  `report_obsolete` (docs/ffbox-connector-contract.md, "Reports obsolete").
+
 - **A worker waiting on CI frees its sandbox and is woken within minutes of its checks finishing** (w846, lothsahn: "When
   they're waiting for GithubCI with their unity editors off, they should free the slot", and "How long do workers wait on
   CI? Most of the CI runs are complete"). At about 04:20 UTC on 2026-10-10 BEAST had 0 of 5 sandboxes free, three held by

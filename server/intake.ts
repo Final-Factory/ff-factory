@@ -67,7 +67,7 @@ import { isOpen } from './work.ts';
 import { linkedClosed, linkedDone, mergeCandidates, mergedBy, mergedText, parseLog, prNumberOf, type MergeRecord } from './mergedIntake.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
-import { escalationCatchUp, escalationRef, fixLearnable, fixedByPr, followed, reportFixesOf, reportIdsOf, reportLines, reportSweep, type BoardWatch, type CatchUpLine, type ReportFix, type ReportSweep } from './boardFollow.ts';
+import { escalationCatchUp, escalationRef, fixLearnable, fixedByPr, followed, reportFixesOf, reportIdsOf, reportLines, reportObsoletesOf, reportSweep, type BoardWatch, type CatchUpLine, type ReportFix, type ReportObsolete, type ReportSweep } from './boardFollow.ts';
 import type { IntakeEntry, IntakeSummary, MaxEvent, ProviderConversation, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
 import { ffboxConversationHref } from '../shared/ffboxLinks.ts';
 
@@ -97,6 +97,8 @@ const FIX_HOLD_MS = 15 * 60_000;
 const CATCH_UP_DAYS = 14;
 /** Reports a finished request fixed (w502): told to FFBox for requests that changed this many days back. */
 const REPORT_FIX_DAYS = 30;
+/** Reports a declined request leaves (w853): told to FFBox for requests declined this many days back. */
+const REPORT_OBSOLETE_DAYS = 30;
 const VERSION_FILE = 'ProjectSettings/ProjectSettings.asset';
 
 /** What server/max.ts gives the intake: reads only, the token stays there. */
@@ -130,6 +132,8 @@ export interface IntakeDeps {
   prInfo?: (n: number) => Promise<MergeRecord | undefined>;
   /** Tell FFBox a player's report is fixed (server/providers.ts pushReportFixed); false when it could not go. */
   pushReportFixed?: (fix: ReportFix) => boolean;
+  /** Tell FFBox a player's report is obsolete, or no longer (server/providers.ts pushReportObsolete); false when it could not go. */
+  pushReportObsolete?: (o: ReportObsolete & { withdrawn?: true }) => boolean;
   now?: () => number;
 }
 
@@ -160,6 +164,8 @@ interface Persisted {
   reportFixes?: Record<string, ReportFix & { at: string }>;
   /** w502's one-time sweep: when it ran, and what it found. */
   reportSweep?: { at: string; certain: number; uncertain: string[] };
+  /** Players' reports a declined request leaves (w853), by report id: what FFBox is told, again on every link. */
+  reportObsoletes?: Record<string, ReportObsolete & { at: string; withdrawn?: true }>;
   polledAt?: string;
   error?: string;
 }
@@ -219,6 +225,8 @@ export class IntakeManager {
     every(BOARD_RECHECK_MS, () => this.recheckBoards(), BOARD_RECHECK_MS);
     // Players' reports a finished request fixed go to FFBox, recorded there and never posted (w502).
     every(BOARD_RECHECK_MS, () => this.pushReportFixes(), BOARD_RECHECK_MS);
+    // Players' reports a declined request leaves go to FFBox as obsolete, recorded there and never posted (w853).
+    every(BOARD_RECHECK_MS, () => this.pushReportObsoletes(), BOARD_RECHECK_MS);
     // A merged PR's `Report: <id>` lines make its request the work for those reports (w502).
     every(MERGED_EVERY_MS, () => void this.linkReportsFromPrs(), 120_000);
     // A followed request's fix: the PR that merged it and the release that carries it, for FFBox's notice (w480).
@@ -245,7 +253,7 @@ export class IntakeManager {
     try {
       const d = readJsonDurable<Partial<Persisted>>(this.file, { check: checkObject });
       if (!d) throw new Error('none yet');
-      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, escalations: d.escalations, maybes: d.maybes, boards: d.boards, fixTried: d.fixTried, catchUp: d.catchUp, reportFixes: d.reportFixes, reportSweep: d.reportSweep };
+      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, escalations: d.escalations, maybes: d.maybes, boards: d.boards, fixTried: d.fixTried, catchUp: d.catchUp, reportFixes: d.reportFixes, reportSweep: d.reportSweep, reportObsoletes: d.reportObsoletes };
     } catch {
       return { cursors: {}, recent: [], versions: {} };
     }
@@ -658,6 +666,15 @@ export class IntakeManager {
       }
       older.push(`${x.w.id} (fixed in ${f.version}, which game ${d.report.gameVersion} already had)`);
     }
+    // NOT RAISED AGAIN (w853): a new diagnosis of reports a person already declined, with no fix pushed, is not filed
+    // again; FFBox shows those reports obsolete (pushReportObsoletes). A report nobody declined still files the lot.
+    const obsolete = new Map(reportObsoletesOf(this.d.store.work, now, s.lookbackDays).map((x) => [x.reportId, x.workId]));
+    if (!d.pr && d.report.reportIds.length && d.report.reportIds.every((id) => obsolete.has(id))) {
+      const by = [...new Set(d.report.reportIds.map((id) => obsolete.get(id)!))];
+      const why = `its reports were declined in ${by.join(', ')}`;
+      this.record({ source: 'ffbox-diagnosis', action: 'skipped', title, workId: by[0], why, url: d.link });
+      return { status: 'skipped', why };
+    }
     const source = diagnosisSource(d);
     // A desync with a fix pushed or a root cause found is a desync PR (w358); anything else is a player's report (w299).
     const desync = d.report.kind === 'desync' && (d.pr || d.rootCause === 'found') ? this.desyncRoute({ key: source.key, title: d.title, opener: 'system', source: 'intake', agentClass: 'ffdiagnose' }) : undefined;
@@ -987,6 +1004,53 @@ export class IntakeManager {
     for (const f of Object.values(known)) {
       const { at: _at, ...fix } = f;
       if (this.d.pushReportFixed(fix)) sent++;
+    }
+    return sent;
+  }
+
+  /**
+   * Tell FFBox each player report a declined request leaves (w853): every report a request closed `rejected` claims,
+   * unless another request claims it while open or done (reportObsoletesOf). FFBox records it as obsolete on the report
+   * and its diagnosis, apart from fixed, and posts nothing. A report told obsolete whose request was reopened, or that an
+   * open or finished request now claims, is told `withdrawn`, and FFBox puts back what its diagnosis said. Kept in
+   * intake.json and sent on every link (providers.pushReportObsolete sends each once per link) for REPORT_OBSOLETE_DAYS.
+   * Returns how many went now.
+   */
+  pushReportObsoletes(): number {
+    const s = this.settings;
+    if (!s.ffbox.enabled) return 0;
+    const now = this.now();
+    const at = new Date(now).toISOString();
+    const known = { ...this.data.reportObsoletes };
+    let changed = false;
+    for (const o of reportObsoletesOf(this.d.store.work, now, REPORT_OBSOLETE_DAYS)) {
+      const was = known[o.reportId];
+      if (was && !was.withdrawn && was.workId === o.workId) continue;
+      known[o.reportId] = { ...o, at };
+      changed = true;
+      console.log(`intake: report ${o.reportId} obsolete: ${o.workId} was declined; FFBox is told (w853)`);
+    }
+    // Withdrawn only when no request declines it any more, however long ago: an old decline just stops being sent.
+    const still = new Set(reportObsoletesOf(this.d.store.work, now, Infinity).map((o) => o.reportId));
+    for (const [id, o] of Object.entries(known)) {
+      if (now - Date.parse(o.at) > REPORT_OBSOLETE_DAYS * 86_400_000) {
+        delete known[id];
+        changed = true;
+      } else if (!o.withdrawn && !still.has(id)) {
+        known[id] = { reportId: id, workId: o.workId, at, withdrawn: true };
+        changed = true;
+        console.log(`intake: report ${id} no longer obsolete: ${o.workId} is not declined any more, or other work claims it; FFBox is told (w853)`);
+      }
+    }
+    if (changed) {
+      this.data.reportObsoletes = known;
+      this.changed();
+    }
+    if (!this.d.pushReportObsolete) return 0;
+    let sent = 0;
+    for (const o of Object.values(known)) {
+      const { at: _at, ...msg } = o;
+      if (this.d.pushReportObsolete(msg)) sent++;
     }
     return sent;
   }

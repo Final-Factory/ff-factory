@@ -232,6 +232,7 @@ Never send the description, log lines, file names from inside the zip, or the se
 | `filed`, `board` | the answers to `request` and `board_check` ([The intake](#the-intake-requests-and-the-ledger-check)) |
 | `dev_ack`, `dev_filed`, `dev_reply` | the answers to an operator's `dev_request` and `dev_message`, and later replies to that conversation ([Dev requests](#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory)) |
 | `report_fixed` | a player's report a finished request fixed (w502; [Reports fixed](#reports-fixed-w502)), only to a connector whose hello lists it |
+| `report_obsolete` | a player's report a declined request leaves, or no longer (w853; [Reports obsolete](#reports-obsolete-w853)), only to a connector whose hello lists it |
 
 A type the connector does not know is not fatal: answer `error` `unsupported` with the type as `ref`, or ignore it.
 
@@ -538,6 +539,25 @@ applies it idempotently. FFBox writes it to `<status-dir>/dev/reports-fixed/<rep
 (table `report_fix`), sets the verdict of the report's diagnosis conversations (`intake:<id>`) to `FIXED` and shows
 `fixed {work, pr, version}` in the `reports` query. It posts NOTHING, on Discord or anywhere (an intake conversation has
 no thread). A connector without it skips the type (logged once per link).
+
+## Reports obsolete (w853)
+
+FF Factory → connector, only when the hello's `accepts` lists `report_obsolete`:
+
+```json
+{ "type": "report_obsolete", "reportId": "20261008T213823Z-crash-fcd5598639", "workId": "w720" }
+{ "type": "report_obsolete", "reportId": "20261008T213823Z-crash-fcd5598639", "workId": "w720", "withdrawn": true }
+```
+
+A player's crash or desync report a declined ledger request claims (its `report:<id>` key; the request closed
+`rejected`: a reviewer declined the intake request, or the dispatcher rejected it), when no open or finished request
+claims it. `withdrawn: true` when that is no longer so (the request was reopened, or other work claims the report). Sent
+again on every link (once per link for the same facts), with no receipt, for 30 days: FFBox applies it idempotently.
+FFBox writes it to `<status-dir>/dev/reports-obsolete/<report id>.json`; ffwatch records it (table `report_obsolete`),
+sets the verdict of the report's diagnosis conversation (`intake:<id>`) to `OBSOLETE` unless it reads `FIXED` (a fix
+says more, and `report_fixed` always sets FIXED), and shows `obsolete {work}` in the `reports` query. A withdrawal puts
+back the verdict it replaced. It posts NOTHING, on Discord or anywhere. A connector without it skips the type (logged
+once per link).
 
 ## Escalations from Max (HTTP, not the connector)
 

@@ -38,6 +38,7 @@ import {
   REPORT_LIMITS,
   type ReportChunkMessage,
   type ReportFixedMessage,
+  type ReportObsoleteMessage,
   type ReportEndMessage,
 } from './providerProtocol.ts';
 import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderConversationView, ProviderIntakeEvent, ProviderMetrics, ProviderTurn, ProviderUpdater, ProviderDevRequests } from '../shared/types.ts';
@@ -142,6 +143,8 @@ interface Link {
   unknownTypes: Set<string>;
   /** report_fixed messages sent on this link (w502), by report id: the facts sent, so each goes once per link. */
   reportsSent?: Map<string, string>;
+  /** report_obsolete messages sent on this link (w853), by report id: the facts sent, so each goes once per link. */
+  obsoleteSent?: Map<string, string>;
   /** Set when the portal closes the link: the code and reason it sent, and the line people see for a parse failure. */
   closedBy?: { code: number; reason: string; detail?: string };
 }
@@ -1041,6 +1044,22 @@ export class ProviderManager {
     if (link.reportsSent.get(fix.reportId) === facts) return true;
     this.send(link, { type: 'report_fixed', ...fix });
     link.reportsSent.set(fix.reportId, facts);
+    return true;
+  }
+
+  /**
+   * A player's report a declined request leaves (w853), or no longer (`withdrawn`), to a connector whose hello lists
+   * "report_obsolete": once per link for the same facts. True when it went now or already went on this link; false when
+   * it could not go (offline, or a connector that does not take it).
+   */
+  pushReportObsolete(o: Omit<ReportObsoleteMessage, 'type'>): boolean {
+    const link = this.link;
+    if (!link?.hello || link.ws.readyState !== link.ws.OPEN || !this.data.accepts?.includes('report_obsolete')) return false;
+    const facts = JSON.stringify([o.workId, o.withdrawn === true]);
+    link.obsoleteSent ??= new Map();
+    if (link.obsoleteSent.get(o.reportId) === facts) return true;
+    this.send(link, { type: 'report_obsolete', reportId: o.reportId, workId: o.workId, ...(o.withdrawn ? { withdrawn: true as const } : {}) });
+    link.obsoleteSent.set(o.reportId, facts);
     return true;
   }
 

@@ -215,6 +215,8 @@ export type ToConnector =
   | DevUpdate
   /** A player's report a finished request fixed (w502): sent only to a connector whose hello lists "report_fixed". */
   | ReportFixedMessage
+  /** A player's report a declined request leaves (w853): sent only to a connector whose hello lists "report_obsolete". */
+  | ReportObsoleteMessage
   /** The work messages (docs/ffbox-connector-contract.md), sent only to a connector that lists them in hello.accepts. */
   | ToConnectorWork;
 
@@ -727,6 +729,20 @@ export interface ReportFixedMessage {
   version?: string;
   /** `<target>@<sha>`. */
   mergedIn?: string;
+}
+
+/**
+ * portal → connector (w853): a player's crash or desync report a declined request claimed (a reviewer's decline of the
+ * intake request FFBox's diagnosis filed, or the dispatcher's reject), and no open or finished request claims. FFBox
+ * records it as obsolete on the report and its diagnosis, apart from fixed, and posts nothing. `withdrawn`: the request
+ * is not declined any more (reopened), or other work claims the report; FFBox puts back what its diagnosis said. Sent
+ * again on every link, once per link.
+ */
+export interface ReportObsoleteMessage {
+  type: 'report_obsolete';
+  reportId: string;
+  workId: string;
+  withdrawn?: true;
 }
 
 /**

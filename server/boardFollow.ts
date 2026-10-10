@@ -122,6 +122,34 @@ export function reportSweep(work: ReadonlyMap<string, WorkItem>, now: number, da
   return { certain: certain.sort(byId), uncertain: uncertain.sort(byId) };
 }
 
+// ---------------------------------------------------------------- players' reports a declined request leaves (w853)
+
+/** What FFBox records for a report its request was declined for (the report_obsolete message, less its type). */
+export interface ReportObsolete {
+  reportId: string;
+  workId: string;
+}
+
+/**
+ * Every report a declined request claims (w853, Lothsahn 2026-10-10: "Yes, you can mark declined reports obsolete on
+ * FFBox"): the `report:<id>` keys of a request closed `rejected` (a reviewer's decline of an intake request, or the
+ * dispatcher's reject), or of one merged into it, that changed in the last `days` days. Not a report another request
+ * still claims while open or done: that one is still somebody's work, or its fix (report_fixed) says more.
+ */
+export function reportObsoletesOf(work: ReadonlyMap<string, WorkItem>, now: number, days = 30): ReportObsolete[] {
+  const live = new Set<string>();
+  const declined: [WorkItem, WorkItem][] = [];
+  for (const w of work.values()) {
+    const f = followed(w.id, work);
+    if (!f || f.status === 'cancelled') continue;
+    if (f.status !== 'rejected') for (const id of reportIdsOf(w)) live.add(id);
+    else if (now - Date.parse(f.updatedAt) <= days * 86_400_000) declined.push([w, f]);
+  }
+  const out = new Map<string, ReportObsolete>();
+  for (const [w, f] of declined) for (const reportId of reportIdsOf(w)) if (!live.has(reportId)) out.set(reportId, { reportId, workId: f.id });
+  return [...out.values()].sort((a, b) => a.reportId.localeCompare(b.reportId));
+}
+
 /** An escalation's request FFBox may never have heard is done (w480's catch-up): one per escalated conversation. */
 export interface CatchUpLine {
   ref: string;

@@ -1406,3 +1406,53 @@ test("w830: w824 as it happened: the filings limit refuses Lothsahn's 4th note i
   assert.match(work()[3].log.at(-1)!, /Lothsahn: note: lothsahn, in his own words/);
   assert.equal(o.heldOffer(loth.info.id), '', 'nothing held any more');
 });
+
+// ---------------------------------------------------------------- w853: players' reports a declined request leaves
+
+test('w853: a declined diagnosis\'s reports go to FFBox as obsolete, a new diagnosis of them is not filed again, a reopen withdraws it', async (t) => {
+  const { intake, o, work, cfg, store, agents } = setup(t, { ffbox: { enabled: true, escalations: true } });
+  const crash = '20261008T213823Z-crash-fcd5598639';
+  const crashDiag = (turn: number) =>
+    diag(20, { ref: `intake-752-turn-${turn}`, conversation: '752', rootCause: 'not_found', verdict: 'NEEDS-INFO' }, { kind: 'crash', lead: crash, reportIds: [crash], group: undefined, signature: undefined, divergedSurfaces: undefined, heartbeat: undefined, role: undefined, paired: undefined, correlationId: undefined });
+  const held = intake.onDiagnosis(crashDiag(1));
+  assert.equal(held.status, 'held');
+  const w = work().find((x) => x.id === (held as { workId: string }).workId)!;
+  const pushed: { reportId: string; workId: string; withdrawn?: true }[] = [];
+  (intake as unknown as { d: { pushReportObsolete?: (x: (typeof pushed)[number]) => boolean } }).d.pushReportObsolete = (x) => (pushed.push(x), true);
+  assert.equal(intake.pushReportObsoletes(), 0, 'waiting for a reviewer: nothing');
+  o.declineIntake(w.id, BEN, 'an FF Factory agent run, not a player');
+  assert.equal(intake.pushReportObsoletes(), 1);
+  assert.deepEqual(pushed, [{ reportId: crash, workId: w.id }]);
+
+  // FFBox diagnoses the same report again (a follow-up turn): not filed again, and FFBox hears why.
+  const again = intake.onDiagnosis(crashDiag(2));
+  assert.deepEqual(again, { status: 'skipped', why: `its reports were declined in ${w.id}` });
+  assert.equal(work().filter((x) => x.source?.kind === 'ffbox-diagnosis').length, 1);
+  // Kept in intake.json: a restart tells FFBox again.
+  intake.close();
+  const told: (typeof pushed)[number][] = [];
+  const restarted = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, pushReportObsolete: (x) => (told.push(x), true) });
+  t.after(() => restarted.close());
+  assert.equal(restarted.pushReportObsoletes(), 1);
+  assert.deepEqual(told, [{ reportId: crash, workId: w.id }]);
+
+  // A diagnosis that also holds a report nobody declined is filed, and while it is open the report is not obsolete.
+  const other = '20261008T220000Z-crash-0123456789';
+  const both = restarted.onDiagnosis(diag(21, { ref: 'intake-760-turn-1', conversation: '760', rootCause: 'not_found', verdict: 'NEEDS-INFO' }, { kind: 'crash', lead: other, reportIds: [other, crash], group: undefined, signature: undefined }));
+  assert.equal(both.status, 'held');
+  told.length = 0;
+  restarted.pushReportObsoletes();
+  assert.deepEqual(told, [{ reportId: crash, workId: w.id, withdrawn: true }]);
+  // Declined too: both its reports are obsolete again.
+  const w2 = work().find((x) => x.id === (both as { workId: string }).workId)!;
+  o.declineIntake(w2.id, BEN, 'the same agent Mac');
+  told.length = 0;
+  restarted.pushReportObsoletes();
+  assert.deepEqual(told.map((x) => [x.reportId, x.withdrawn ?? false]).sort(), [[crash, false], [other, false]]);
+
+  // Reopened: no longer obsolete, and FFBox is told so.
+  w2.status = 'active';
+  told.length = 0;
+  restarted.pushReportObsoletes();
+  assert.deepEqual(told.sort((a, b) => a.reportId.localeCompare(b.reportId)), [{ reportId: crash, workId: w2.id, withdrawn: true }, { reportId: other, workId: w2.id, withdrawn: true }]);
+});
