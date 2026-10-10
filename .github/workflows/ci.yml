@@ -21,6 +21,10 @@ permissions:
 
 env:
   NODE_VERSION: 24
+  # Every unit-test run: a test that runs 5 min fails by name (none takes over 70 s; the few longer ones set their own
+  # timeout), and scripts/test-watchdog.ts ends a run that outlives its deadline, naming the tests still running and the
+  # processes under it. Before, a hung run was cancelled at the job's timeout with its whole log lost (w906).
+  TEST_FLAGS: --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout
 
 jobs:
   checks:
@@ -63,16 +67,19 @@ jobs:
         run: npm --prefix web run typecheck
       - name: Unit tests with coverage
         if: ${{ !matrix.shard }}
+        timeout-minutes: 11
         shell: bash
         run: |
           set -o pipefail
-          npm run test:coverage 2>&1 | tee coverage.txt
+          # npm run test:coverage, with TEST_FLAGS: node takes options only before the files.
+          node scripts/test-watchdog.ts --minutes 10 -- node --test $TEST_FLAGS --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' server/*.test.ts scripts/*.test.ts 2>&1 | tee coverage.txt
       - name: The orchestration worker's socket under real systemd (w638)
         # fff-ops.socket's settings, the real launcher and the portal's opsSpawner: a new process right after a stop runs.
         if: runner.os == 'Linux'
         run: sudo --preserve-env=PATH deploy/vm/test/fff-ops-socket.test.sh
       - name: Unit tests with coverage, ${{ matrix.shard == '1/2' && 'the three slowest files' || 'every other file' }}
         if: ${{ matrix.shard }}
+        timeout-minutes: 11
         shell: bash
         run: |
           slow=(server/machineDeployWin.test.ts server/machines.test.ts server/orchestrators.test.ts)
@@ -80,12 +87,13 @@ jobs:
             mapfile -t files < <(printf '%s\n' server/*.test.ts scripts/*.test.ts | grep -vxF -f <(printf '%s\n' "${slow[@]}"))
           fi
           echo "${#files[@]} test files"
-          node --test --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' "${files[@]}"
+          node scripts/test-watchdog.ts --minutes 9 -- node --test $TEST_FLAGS --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' "${files[@]}"
       - name: Machine sandboxes on Windows (git worktrees, robocopy, rd in a temp repo)
         # Also part of the unit tests above; its own step so a worktree regression on Windows is named as one.
         if: runner.os == 'Windows' && matrix.shard == '1/2'
+        timeout-minutes: 6
         shell: bash
-        run: node --test server/machineSandboxes.test.ts
+        run: node scripts/test-watchdog.ts --minutes 5 -- node --test $TEST_FLAGS server/machineSandboxes.test.ts
       - name: Coverage summary
         if: always() && runner.os == 'Linux'
         shell: bash

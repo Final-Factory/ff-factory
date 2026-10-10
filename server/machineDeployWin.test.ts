@@ -86,6 +86,31 @@ test('windows: the stop spares the Unity editor and Hub (the user\'s), and holds
   assert.match(s, /run-daemon\.ps1/);
 });
 
+/** Windows PowerShell on Windows, else PowerShell 7 when installed (GitHub's Ubuntu runners have it): for script functions fed made-up input. */
+const powershell = process.platform === 'win32' ? 'powershell.exe' : ['/usr/bin/pwsh', '/usr/local/bin/pwsh', '/opt/homebrew/bin/pwsh', '/snap/bin/pwsh'].find((p) => fs.existsSync(p));
+
+test('windows (real PowerShell): the stop walks to real children only; a process whose dead parent\'s id was reused is not one (w906)', { skip: !powershell && 'no PowerShell here' }, () => {
+  // wininit.exe as on a GitHub runner: started at boot, its parent's id long free, then drawn by the daemon stand-in.
+  const procs = [
+    { ProcessId: 748, ParentProcessId: 600, Name: 'node.exe', CommandLine: 'node C:\\ff\\app\\machine\\daemon.ts', At: '2026-10-10T18:00:10Z' },
+    { ProcessId: 760, ParentProcessId: 748, Name: 'node.exe', CommandLine: 'node -e shell', At: '2026-10-10T18:00:11Z' },
+    { ProcessId: 764, ParentProcessId: 760, Name: 'conhost.exe', CommandLine: 'conhost.exe 0x4', At: '2026-10-10T18:00:11Z' },
+    { ProcessId: 770, ParentProcessId: 748, Name: 'node.exe', CommandLine: 'node C:\\ff\\app\\machine\\agentHost.ts x', At: '2026-10-10T18:00:12Z' },
+    { ProcessId: 772, ParentProcessId: 748, Name: 'Unity.exe', CommandLine: 'Unity.exe -projectPath D:\\FF', At: '2026-10-10T18:00:12Z' },
+    { ProcessId: 860, ParentProcessId: 748, Name: 'wininit.exe', CommandLine: '', At: '2026-10-10T07:00:01Z' },
+    { ProcessId: 976, ParentProcessId: 860, Name: 'services.exe', CommandLine: '', At: '2026-10-10T07:00:02Z' },
+    { ProcessId: 6316, ParentProcessId: 976, Name: 'Runner.Worker.exe', CommandLine: 'Runner.Worker.exe spawnclient', At: '2026-10-10T17:59:00Z' },
+  ];
+  const run = (agents: boolean) => {
+    const script = `${win.KILL_SET}
+$all = @(ConvertFrom-Json $env:FF_PROCS | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; Name = $_.Name; CommandLine = $_.CommandLine; CreationDate = [datetime]::Parse($_.At).ToUniversalTime() } })
+(Get-FFKillSet $all @('C:\\ff\\app\\machine\\daemon.ts') @('C:\\ff\\app\\machine\\agentHost.ts') $${agents ? 'true' : 'false'}) -join ','`;
+    return execFileSync(powershell!, ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FF_PROCS: JSON.stringify(procs) }, encoding: 'utf8' }).trim();
+  };
+  assert.equal(run(false), '748,760,764', 'the daemon, its shell and the shell\'s console; not the agent host, Unity, nor wininit and the runner below it');
+  assert.equal(run(true), '748,760,770,764', 'a stop with -Agents takes the host too');
+});
+
 test('windows: the task runs at logon of this user, in their session, not elevated, at normal priority, forever', () => {
   const x = win.taskXml(SID, 'C:\\Users\\A&B\\');
   assert.match(x, /<LogonTrigger>\s*<Enabled>true<\/Enabled>\s*<UserId>S-1-5-21-[\d-]+<\/UserId>/);
@@ -221,12 +246,15 @@ require('fs').writeFileSync(out, JSON.stringify({ daemon: process.pid, shell: sh
   // The daemon and its shell, and the console hosts Windows gives console programs.
   assert.ok(Number(/stopped=(\d+)/.exec(restart.stdout)?.[1]) >= 2, restart.stdout);
   assert.deepEqual([alive(p.daemon), alive(p.shell)], [false, false], 'the daemon and its shell are stopped');
+  // Gone, so out of the clean-up's list: Windows reuses ids, and a kill by a stale one ends a stranger (w906).
+  pids.splice(0, 2);
   assert.deepEqual([alive(p.host), alive(agent)], [true, true], 'the agent host and its agent run on');
 
   // A stop (or the uninstall): the host too, though its daemon is gone and it is nobody's child any more.
   const stop = await runPs(win.stopScript(true, appDir, service), { timeoutMs: 60_000 });
   assert.equal(stop.code, 0, stop.stderr);
   assert.deepEqual([alive(p.host), alive(agent)], [false, false], 'a stop ends the host and its agent');
+  pids.length = 0;
   assert.match(win.controlScript('stop'), /Stop-FFDaemon -Agents/);
   assert.match(win.uninstallScript(), /Stop-FFDaemon -Agents/);
   assert.match(win.controlScript('restart'), /\(Stop-FFDaemon\)/);
@@ -408,12 +436,29 @@ const onWindowsCi = process.platform === 'win32' && process.env.CI === 'true';
  * script starts). `node --test --experimental-test-coverage` sets NODE_V8_COVERAGE for the test file and every node below
  * it inherits it; one ended abruptly leaves its coverage file empty, and the runner then fails the whole run with
  * "coverage file is empty" though every test passed (w858: 2 of 20 shard runs on a Windows runner).
+ *
+ * Empty, not deleted: node's spawn copies NODE_V8_COVERAGE into any env that has no such key (lib/child_process.js,
+ * copyProcessEnvToEnv), so a deleted one came straight back, and an empty one turns coverage off (w906: the probe's
+ * `node -p`, ended by `Select-Object -First 1` as it wrote its coverage, was the empty file in every failed run).
  */
 function withoutCoverage(env: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  const e = { ...process.env, ...env };
-  delete e.NODE_V8_COVERAGE;
-  return e;
+  return { ...process.env, ...env, NODE_V8_COVERAGE: '' };
 }
+
+test('withoutCoverage: a node started with it writes no coverage, though node copies NODE_V8_COVERAGE into every child (w906)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffwin-nocov-'));
+  const before = process.env.NODE_V8_COVERAGE;
+  process.env.NODE_V8_COVERAGE = before || dir;
+  try {
+    const out = execFileSync(process.execPath, ['-e', 'process.stdout.write(JSON.stringify(process.env.NODE_V8_COVERAGE ?? null))'], { env: withoutCoverage(), encoding: 'utf8' });
+    assert.ok(out === '""' || out === 'null', `the child still has NODE_V8_COVERAGE=${out}`);
+    assert.deepEqual(fs.readdirSync(dir), [], 'no coverage file');
+  } finally {
+    if (before === undefined) delete process.env.NODE_V8_COVERAGE;
+    else process.env.NODE_V8_COVERAGE = before;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 /**
  * Run a script the way psScript does over ssh, but locally: the same encoded bootstrap, fed on stdin. `shell`

@@ -171,20 +171,17 @@ function Invoke-Native([string]$Exe, [string[]]$Argv) {
 }`;
 
 /**
- * Stop the daemon: end the task, then kill the supervisor and the daemon with everything they started, except a Unity
- * editor or Unity Hub and what those started (the editor is the user's and outlives a daemon restart, as on a Mac) and,
- * unless -Agents, the agent hosts and what they run (w605: the agents, their shells and players outlive a reinstall or
- * restart, and the next daemon takes them back; machine/agentHost.ts). -Agents (a stop, the uninstall) ends those too,
- * a previous daemon's included. The task is disabled meanwhile so its restart-on-failure does not bring it back.
+ * The processes Stop-FFDaemon ends: those whose command line names a mark, and everything below them, except this
+ * PowerShell, the kept agent hosts, and a Unity editor or Hub and what those started. A child is a process whose
+ * ParentProcessId is the parent's id AND that started no earlier than the parent: Windows never clears a dead parent's
+ * id and reuses ids. On a GitHub runner wininit.exe's parent id names no process (w906, measured), so a process of ours
+ * that drew that id would "have" wininit as a child, and the walk would end services.exe's tree with the runner's own
+ * processes in it: a job that hangs to its timeout and loses its whole log, as two Windows CI jobs did.
  */
-const stopFns = (task: string) => `
-function Stop-FFDaemon([switch]$Agents) {
-  $task = Get-ScheduledTask -TaskName '${task}' -ErrorAction SilentlyContinue
-  if ($task) { $null = $task | Disable-ScheduledTask -ErrorAction SilentlyContinue; $task | Stop-ScheduledTask -ErrorAction SilentlyContinue }
-  $marks = @(); $hosts = @()
-  foreach ($d in $FFDirs) { $marks += (Join-Path $d 'app\\machine\\daemon.ts'); $marks += (Join-Path $d 'run-daemon.ps1'); $hosts += (Join-Path $d 'app\\machine\\agentHost.ts') }
-  if ($Agents) { $marks += $hosts }
-  $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine)
+export const KILL_SET = `
+function Get-FFKillSet($all, $marks, $hosts, [bool]$Agents) {
+  $born = @{}
+  foreach ($p in $all) { $born[[int]$p.ProcessId] = $p.CreationDate }
   $queue = New-Object System.Collections.Generic.Queue[int]
   $keep = New-Object System.Collections.Generic.HashSet[int]
   foreach ($p in $all) {
@@ -197,8 +194,31 @@ function Stop-FFDaemon([switch]$Agents) {
     $id = $queue.Dequeue()
     if ($kill.Contains($id) -or $id -eq $PID -or $keep.Contains($id)) { continue }
     $kill.Add($id)
-    foreach ($p in $all) { if ([int]$p.ParentProcessId -eq $id -and [string]$p.Name -notmatch '^Unity( Hub)?\\.exe$') { $queue.Enqueue([int]$p.ProcessId) } }
+    foreach ($p in $all) {
+      $older = $born[$id] -and (-not $p.CreationDate -or $p.CreationDate -lt $born[$id])
+      if ([int]$p.ParentProcessId -eq $id -and -not $older -and [string]$p.Name -notmatch '^Unity( Hub)?\\.exe$') { $queue.Enqueue([int]$p.ProcessId) }
+    }
   }
+  ,$kill
+}`;
+
+/**
+ * Stop the daemon: end the task, then kill the supervisor and the daemon with everything they started, except a Unity
+ * editor or Unity Hub and what those started (the editor is the user's and outlives a daemon restart, as on a Mac) and,
+ * unless -Agents, the agent hosts and what they run (w605: the agents, their shells and players outlive a reinstall or
+ * restart, and the next daemon takes them back; machine/agentHost.ts). -Agents (a stop, the uninstall) ends those too,
+ * a previous daemon's included. The task is disabled meanwhile so its restart-on-failure does not bring it back.
+ */
+const stopFns = (task: string) => `
+${KILL_SET}
+function Stop-FFDaemon([switch]$Agents) {
+  $task = Get-ScheduledTask -TaskName '${task}' -ErrorAction SilentlyContinue
+  if ($task) { $null = $task | Disable-ScheduledTask -ErrorAction SilentlyContinue; $task | Stop-ScheduledTask -ErrorAction SilentlyContinue }
+  $marks = @(); $hosts = @()
+  foreach ($d in $FFDirs) { $marks += (Join-Path $d 'app\\machine\\daemon.ts'); $marks += (Join-Path $d 'run-daemon.ps1'); $hosts += (Join-Path $d 'app\\machine\\agentHost.ts') }
+  if ($Agents) { $marks += $hosts }
+  $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, CreationDate)
+  $kill = Get-FFKillSet $all $marks $hosts $Agents.IsPresent
   foreach ($id in $kill) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
   for ($i = 0; $i -lt 30; $i++) {
     if (-not @($kill | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count) { break }
@@ -281,7 +301,8 @@ $best = ''; $bestv = [version]'0.0'
 foreach ($n in @($cands | Select-Object -Unique)) {
   if (-not $n -or -not (Test-Path -LiteralPath $n)) { continue }
   # "$(...)", not [string](...): Windows PowerShell casts a pipeline with no output to $null, and .Trim() on it throws.
-  $v = "$(& $n -p 'process.versions.node' 2>$null | Select-Object -First 1)"
+  # (& ...) first, then the first line: Select-Object -First 1 inside the pipeline ends node as it exits (w906).
+  $v = "$((& $n -p 'process.versions.node' 2>$null) | Select-Object -First 1)"
   $pv = $null
   if ([version]::TryParse($v.Trim(), [ref]$pv) -and $pv -gt $bestv) { $best = $n; $bestv = $pv }
 }
@@ -311,7 +332,7 @@ if ($git -and $slug) {
       if ($seen.ContainsKey($repo) -or $repo.StartsWith($appData, [StringComparison]::OrdinalIgnoreCase)) { continue }
       $seen[$repo] = $true
       # A repo without an origin prints nothing: "$(...)" keeps that an empty string (BEAST, w424: the probe died on one).
-      $u = "$(& $git -C $repo remote get-url origin 2>$null | Select-Object -First 1)"
+      $u = "$((& $git -C $repo remote get-url origin 2>$null) | Select-Object -First 1)"
       if ($u.Trim() -match $want) { Emit 'repo' $repo }
     }
   }

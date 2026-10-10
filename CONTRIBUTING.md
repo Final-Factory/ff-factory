@@ -45,7 +45,7 @@ Tests with a machine (`server/testMachine.ts`, a real daemon with git worktrees)
   EBUSY, ENOTEMPTY and EPERM but not Windows' access-denied (`std::errc::permission_denied`), and wait 0 ms between tries
   (nodejs/node#64698). CI runs Node 24.21 or later; a Windows PC with an older Node shows the failures CI does not.
 
-Two more rules from flakes (w858):
+Two more rules from flakes (w858, corrected by w906):
 
 - **A test and the code under it read one clock.** `ledgerSweep.test.ts` dated its requests against a fixed NOW and the
   ledger's own rules (`updateProblem`: no reopening a request closed more than 7 days ago) read the wall clock, so two
@@ -54,8 +54,22 @@ Two more rules from flakes (w858):
   `SKEW_DAYS=30 node --import ./scripts/clock-skew.mjs --test server/<file>.test.ts` runs a file a month ahead.
 - **A node process a test starts and then ends by force must not inherit `NODE_V8_COVERAGE`** (`node --test
   --experimental-test-coverage` sets it): its coverage file is left empty and node exits 1 with every test green
-  ("coverage file is empty", Windows CI). Start it with the variable removed (`withoutCoverage()` in
-  `machineDeployWin.test.ts`).
+  ("coverage file is empty", Windows CI). Set it to `''` (`withoutCoverage()` in `machineDeployWin.test.ts`); a deleted
+  one comes back, because node's spawn copies it into any env without the key (w906). A script a test runs ends its
+  node too when it cuts the output short: PowerShell's `& node ... | Select-Object -First 1` ends node mid-exit; take
+  `(& node ...) | Select-Object -First 1` (w906: the probe's `node -p` was every empty file).
+
+Two from hangs (w906):
+
+- **Never end a process by a stale id.** Windows reuses process ids and never clears a dead parent's id from
+  `ParentProcessId`. A walk down a process tree takes a child only when it started no earlier than its parent
+  (`Get-FFKillSet` in `server/machineDeployWin.ts`), and a test forgets an id once it has seen that process gone. On a
+  GitHub runner, wininit.exe's parent id is free, and a walk that drew it reaches the runner's own processes: the job
+  then hangs to its timeout and loses its whole log.
+- **A hung unit-test run names itself.** CI runs the tests under `scripts/test-watchdog.ts` with
+  `scripts/test-inflight-reporter.ts` and `--test-timeout=300000`: a test that runs 5 min fails by name, and a run past
+  its deadline prints the tests still running and the processes under it, then fails its step. Read that before
+  re-running a job; a test file listed with no test under it is a process that does not exit (an open handle).
 
 ### End-to-end tests (Playwright)
 
