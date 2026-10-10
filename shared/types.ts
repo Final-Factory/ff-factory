@@ -1512,6 +1512,12 @@ export interface WorkItem {
   blocked?: WorkBlocker;
   /** w754: the other gates of a request that waits on several things (w750: w727's PR and w752). Absent for one. */
   alsoBlocked?: WorkBlocker[];
+  /**
+   * w829: the workers' own wake_me check-ins a block cancelled (w814: the dispatcher blocked it on CI, cancelled its
+   * worker's 8-minute check-in, and the block never cleared). Kept while it is blocked so it is never left with nobody to
+   * wake it: when its gates clear, or its CI cannot be read, each is handed back and fires at once. Dropped with the gates.
+   */
+  heldCheckIns?: HeldCheckIn[];
   /** The computers the dispatcher said can take it when it queued it for capacity (decide_work queue `needs`, w643). */
   queuedFor?: { at: string; needs?: string[] };
   /** The cleanup's last "Is it done?" to a worker about this merged request (w419): at most one a day. */
@@ -1595,6 +1601,16 @@ export interface WorkBlocker {
   by: string;
   /** deploy: the commit the portal (or the machine's daemon) ran when it was set; a different one is the deploy. */
   sha?: string;
+}
+
+/** A worker's wake_me check-in that a block cancelled (w829), kept to be handed back when the block ends. */
+export interface HeldCheckIn {
+  /** The worker's session id. */
+  session: string;
+  /** When it was due (ISO). */
+  at: string;
+  /** Its note, as the worker wrote it. */
+  note: string;
 }
 
 /** Why a request is stalled, and what kind of stop it was. */
