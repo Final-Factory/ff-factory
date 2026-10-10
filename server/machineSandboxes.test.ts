@@ -145,7 +145,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer'] } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
   /** The status of each sandbox at every change the portal would be sent, consecutive repeats dropped (w898: the cleanup state's order). */
   const statuses: string[] = [];
@@ -166,6 +166,8 @@ function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined;
       ...(o.liveAgents ? { liveAgents: o.liveAgents } : {}),
       ...(o.trim !== undefined ? { trim: o.trim } : {}),
       ...(o.trimmer ? { trimmer: o.trimmer } : {}),
+      ...(o.releaseSweep ? { releaseSweep: o.releaseSweep } : {}),
+      ...(o.log ? { log: o.log } : {}),
       librarySeedGB: 1,
       ...(o.slots ? { editorSlot: (id: string) => o.slots!().startRefusal(`sandbox:${id}`), slotsStatus: async () => (await o.slots!().tick(), o.slots!().describe()) } : {}),
     },
@@ -935,6 +937,40 @@ test("w898: the last agent leaving a sandbox sends it to 'cleanup', trims the ca
   await p.tick();
   assert.equal(p.list()[0].status, 'ready', 'it does not trim again until the next release');
   assert.equal((await p.trim('sb1')).files, 0);
+});
+
+test("w913: the release sweep of build and capture output runs in the same 'cleanup' state, once, and a failing one does not fail the trim", async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  let live = 1;
+  const seen: string[] = [];
+  const logs: string[] = [];
+  let boom = false;
+  const { p } = pool(r, {
+    liveAgents: () => live,
+    log: (l) => logs.push(l),
+    releaseSweep: async (sb) => {
+      seen.push(`${path.basename(sb)}:${p.list()[0].status}`);
+      if (boom) throw new Error('disk gone');
+      return { files: 2, bytes: 3 * 1024 ** 3 };
+    },
+  });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  await p.tick();
+  assert.deepEqual(seen, [], 'an agent lives there: no sweep');
+  live = 0;
+  await p.tick();
+  await until('the trim to end', () => p.list()[0].status === 'ready');
+  assert.deepEqual(seen, ['sb1:cleanup'], 'swept while the sandbox was in cleanup, not free');
+  assert.ok(logs.some((l) => /build and capture output: 2 entries, 3\.0 GB/.test(l)), logs.join(' | '));
+  boom = true;
+  live = 1;
+  await p.tick();
+  live = 0;
+  await p.tick();
+  await until('the second trim to end', () => p.list()[0].status === 'ready' && seen.length === 2);
+  assert.ok(logs.some((l) => /release sweep failed: disk gone/.test(l)));
 });
 
 test('w898: no trim while an agent is live, an editor is up, or a build has the project open; a release with the editor up trims when it stops', async (t) => {

@@ -301,14 +301,13 @@ the next pass removes.
 `<temp>/ffa-<session>` (under the machine's `temp_dir` when it has one), as TMP, TEMP and TMPDIR. (`sessionTempEnv`, set by
 the daemon, `machine/daemon.ts`; the portal's orchestrators never had one, and its own workers, which did, are gone
 since w510.) It goes
-when the session is removed, and two hours after the session stopped otherwise. One exception on Windows (w603):
+when the session is removed, a few minutes after its process ends (w913, below), and in the daily pass otherwise. One exception on Windows (w603):
 the folder Git Bash maps `/tmp` to. Git for Windows mounts `/tmp` at the Windows temp folder of the user's first MSYS
 process and keeps that mount while any MSYS process of the user runs, so it is often some agent's `ffa-<session>`;
 removing it makes every bash print `could not find /tmp, please create!`. The daemon asks `cygpath -w /tmp` every
 5 minutes and before each clean-up pass, keeps that folder, and makes it again if anything removed it
-(`server/gitBashTmp.ts`). Every sandbox worker's brief (`DISK_HYGIENE` in `server/agents.ts`, w626) tells it to put
-builds, recordings and screenshot sets there, and to remove everything it made (builds, Captures, recordings, extra
-worktrees and clones, save copies, the player slots nobody holds) before it reports a request done.
+(`server/gitBashTmp.ts`). Every sandbox worker's brief (`DISK_HYGIENE` in `server/agents.ts`) tells it to put
+everything it makes there and to leave it: since w913 workers do not clean up, the harness does (below).
 
 **Visibility.** Every pass appends one line to `cleanup-log.jsonl` (the app's `dataDir` on the host, the
 daemon's folder on a machine): when, why, free space before and after, each entry removed with its size
@@ -440,6 +439,60 @@ are). Tests: `server/installLeftovers.test.ts`, laid out from the recorded listi
 command lines, a dry run and a real pass). The `python -` itself is guarded at the harness (the ff-agents lesson
 `python-dash-heredoc.md`: a Bash command must not feed `python -` through `eval`/a heredoc that can be lost), the daemon
 is the backstop that frees the space.
+
+### Workers do not clean up: the harness does (w913)
+
+Lothsahn (2026-10-10): "Random clean up commands take a lot of approvals. Is there some way we can build what those cleanup
+commands are doing into the harness (like we have for trimming the Burst Cache) so that they run every time a worker is
+done, and stop asking the workers to do cleanup and need approvals?"
+
+**Measured (beast, 2026-10-03 to 2026-10-10, the 711 local transcripts; a regex over the Bash and PowerShell commands, so a
+count of clean-up statements run, not of prompts: the portal's permission events, which `scripts/cleanup-approvals.ts` counts,
+are not on beast).** 1351 delete statements in 8 days (127 to 200 a day). By kind: the session's `$TMPDIR` or `/tmp` 388 (100
+sessions); other recursive `rm` 263; single files in the repo 325; sandbox scratch folders 86; captures, screenshots and clips
+79; save copies in the game's saves folder 61 (38 sessions); `player_slots.py prune` 57 (43 sessions); temp builds 42;
+`git worktree remove` 32. Claude Code asks about `rm -rf`, a wildcard or a path outside the working folder even in the
+portal's bypass mode (the session's `canUseTool` is called), so the `$TMPDIR` and scratch deletes are the ones that reached a
+person: `rm -rf $TMPDIR/ff-factory $TMPDIR/ffbox $TMPDIR/*.log $TMPDIR/*.out /tmp/ffb-w901` (w901), `rm -rf $TMPDIR/ff
+$TMPDIR/*.txt $TMPDIR/t.ts $TMPDIR/body.md` (w907, approved twice by Ben). On disk now (beast `F:\ffw\tmp`, `du`): 16 `ffa-*`
+folders, 21 GB, the biggest 8.8, 5.3 and 3.5 GB (builds, logs, clones of closed sessions).
+
+**What runs, and when**
+
+| What | Where | When | Why then |
+|---|---|---|---|
+| everything in the worker's temp folder but git clones | `<install>/tmp/ffa-<session>` | `graceMin` (10 min) after the session's process ended: a request closed, a wait for CI or a person, a stop, the idle reaper (`SessionSweeper`, `server/sessionSweep.ts`, a look every 30 s) | the process ending is "a worker is done"; the grace lets a worker that is resumed at once keep its files |
+| the git clones there | same | `cloneKeepHours` (6 h) after it ended, unless a clone holds work no remote has (uncommitted, or commits on no remote: listed, kept) | a wait for CI is minutes to hours and a red check needs the clone again |
+| the sandbox's own build and capture output | `<sandbox>/.nightly-builds/cache/*` and `Builds/cache/*` beyond the newest 1, `Builds/bench*`, `.nightly-builds/clips`, `shots` | when the sandbox is released, in the same `cleanup` state as the Library trim (w898; `releaseSweep` in `machine/sandboxes.ts`, limits `RELEASE_SETTINGS` in `server/installLeftovers.ts`: nothing changed in it for 15 min) | the last worker is gone and its editor down; a detached build still writing keeps its folder |
+| old per-commit builds, nightly runs and rehearsals, stale scratch, runaway task output | as w899 above | the daily pass and below the soft threshold | the backstop for sessions the daemon never saw end |
+| player slots nobody holds, pushed agent worktrees | as w626 above | below the soft threshold | unchanged |
+
+**Never**: outside the install folder (the plan is inside `root`, and every item still goes through `neverDelete` and the
+guard); a live session's folder; a folder a running process names (a build the worker left running: the whole sweep waits,
+`mentions`); an entry changed in the last 2 minutes; Git Bash's `/tmp` (the guard's `inUse`); a clone with work nothing else
+has; Library, Assets, `.git`, Inbox, the nightly lab's scripts. A session that comes back resets its clock. `daemon.json`
+`sessionSweep` ({ graceMin, cloneKeepHours, quietMin }) sets the numbers; they are a guess on top of the measurements above.
+
+**In-session, when a worker needs space now (a huge build mid-task)**: a permission rule, not a machine tool. The session
+(`Session.askPermission`, `server/sessions.ts`) answers a Bash or PowerShell command itself, with no prompt, when
+`tempOnlyDelete` (`server/tempDelete.ts`) says it is a list of `rm` / `rmdir` / `Remove-Item` (plus `du`, `ls`, `df`, `echo`)
+whose every path is written out under the session's own `$TMPDIR` (or the `/f/...`, `$env:TEMP`, `%TEMP%` spellings of it) and
+strictly inside it. Anything else goes to a person as before: the folder itself, `/tmp`, `..`, `~`, an unknown variable, a
+pipe, a redirect into a file, a command substitution, a flag it does not know, a link inside the folder that leads out of it
+(`realpath` of the literal prefix), a single-quoted variable. It applies only to a session whose `TMPDIR` is an `ffa-` folder.
+Why a rule and not a tool: the commands stay what workers type, nothing is added to three tool lists, and the rule is a few
+lines of text checks with the failing commands as tests; a tool needs a catalog entry, a schema, a portal handler and a
+daemon handler. The save copies a worker puts in the game's saves folder are outside the install folder, so no sweep takes
+them; the rule lets a worker remove exactly the files named `<its temp folder's name>-<name>.zip` there
+(`ffa-ee5b82dc-w913-test.zip`), and a save with any other name is a person's.
+
+**Tests**: `server/tempDelete.test.ts` (the w901, w907 and w883 commands allowed, every escape refused, a real junction),
+`server/agentSession.test.ts` (the session answers an in-folder delete, asks for an outside one), `server/sessionSweep.test.ts`
+(the two steps, the grace, a returning session, a process that names the folder, a live session, a clone with local work),
+`server/releaseSweep.test.ts` and `server/machineSandboxes.test.ts` (the release sweep inside `cleanup`, a failing one),
+`server/evidenceRules.test.ts` (the brief says leave it). **Measuring**: `node scripts/cleanup-approvals.ts <dataDir>
+--since 2026-10-03 --split <deploy date>` prints, per day, the prompts a person answered and the clean-up ones by kind
+(the session's own answer leaves no event, so a drop is real).
 
 ### Where clean-up may delete (w896)
 

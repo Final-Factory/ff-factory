@@ -32,8 +32,9 @@ import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
-import { mergePlans, planInstallLeftovers } from '../server/installLeftovers.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
+import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers } from '../server/installLeftovers.ts';
+import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
@@ -92,6 +93,8 @@ export interface DaemonConfig {
   sandboxIdleStopMinutes?: number;
   /** Trim a sandbox's Library caches when its last agent leaves (machine/sandboxes.ts trim, w898): the limits, or false for never. Default on. */
   sandboxCacheTrim?: Partial<TrimPolicy> | false;
+  /** The sweep of a stopped session's temp folder (server/sessionSweep.ts, w913): graceMin, cloneKeepHours, quietMin. */
+  sessionSweep?: Partial<{ graceMin: number; cloneKeepHours: number; quietMin: number }>;
   /**
    * The MCP-for-Unity server agents here get as "UnityMCP", each confined to its own editor (machine/unityMcp.ts).
    * Default: the UnityMCP entry the machine's own Claude Code has in ~/.claude.json.
@@ -282,6 +285,8 @@ export class Daemon {
   private lastStats?: { stats: HostStats; at: number };
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
+  /** Sweeps a stopped worker's temp folder (server/sessionSweep.ts, w913). */
+  private readonly sweeper: SessionSweeper;
   private cleanupSettings: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown } = { ...MACHINE_CLEANUP_DEFAULTS };
   /** The ledger's facts for the stale-output rules (w459), as the portal last sent them; kept in memory only. */
   private staleCtx?: StaleContext;
@@ -347,6 +352,7 @@ export class Daemon {
         activity: (id) => this.sandboxActivity(id),
         liveAgents: (id) => this.liveIn(id),
         trim: cfg.sandboxCacheTrim,
+        releaseSweep: (sandboxPath) => this.releaseSweep(sandboxPath),
         log,
         startGate: () => this.guard?.blockReason('editor'),
         onChange: () => this.reportSandboxes(),
@@ -387,6 +393,17 @@ export class Daemon {
       // never sent yet: the defaults
     }
     const env = hostCleanupEnv(cfg.tempDir);
+    this.sweeper = new SessionSweeper({
+      root: cfg.root,
+      tempRoot: () => agentTempRoot(cfg.tempDir),
+      sessions: () => [...this.entries.values()].map((e) => ({ id: e.s.info.id, live: e.s.live })),
+      dirOf: (id) => sessionTempDir(agentTempRoot(cfg.tempDir), id),
+      guard: () => this.cleanupGuard(),
+      procs: () => this.procs(),
+      self: () => [process.pid, process.ppid],
+      settings: () => sweepSettings(cfg.sessionSweep),
+      log,
+    });
     this.cleaner = new CleanupRunner({
       settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
       // The temp folder apart: a RAM-backed one (a Linux tmpfs) is never the disk (w566).
@@ -445,6 +462,19 @@ export class Daemon {
         this.out({ type: 'cleanup', summary, notice });
       },
     });
+  }
+
+  /**
+   * The build and capture output of a sandbox that was just released (w913, with the Library trim, machine/sandboxes.ts): its
+   * per-commit builds beyond the newest, benchmark builds and capture output, only inside the install folder and the sandbox.
+   */
+  private async releaseSweep(sandboxPath: string): Promise<{ files: number; bytes: number }> {
+    if (!this.cfg.root) return { files: 0, bytes: 0 };
+    const guard = this.cleanupGuard();
+    const plan = await planInstallLeftovers({ root: this.cfg.root, sandboxes: [sandboxPath], tempRoots: [], guard, settings: RELEASE_SETTINGS, scope: 'sandboxes' });
+    const run = await runCleanup(plan.items, guard);
+    if (run.removed.length) log(`sandbox release sweep ${sandboxPath}: ${run.removed.map((x) => path.basename(x.path)).slice(0, 6).join(', ')} (${run.removed.length} entries, ${(run.bytes / 2 ** 30).toFixed(2)} GB)`);
+    return { files: run.removed.length, bytes: run.bytes };
   }
 
   /**
@@ -670,6 +700,8 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.outsideWatch?.tick(), 60_000));
     this.timers.push(setInterval(() => this.heartbeat(), 20_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
+    // A stopped worker's temp folder (w913): swept a few minutes after its process ended, its clones after six hours.
+    this.timers.push(setInterval(() => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`)), 30_000));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
     this.timers.push(setInterval(() => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
     // Git Bash's /tmp (Windows, w603): kept out of clean-up and made again if anything else removes it.

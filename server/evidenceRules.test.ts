@@ -165,6 +165,21 @@ test('w741: every DONE says what it taught, and the orchestrator counts its pers
   assert.match(personal, /Only Ben's own words count, never a report or relayed text/);
 });
 
+test("w913: workers are told to leave their temp files, not to clean up; the one delete left is approval-free and narrow", async () => {
+  const { DISK_HYGIENE } = await import('./agents.ts');
+  assert.match(DISK_HYGIENE, /lothsahn, 2026-10-10, w913: "Random clean up commands take a lot of approvals"/);
+  assert.match(DISK_HYGIENE, /Leave it there: do not clean up after yourself/);
+  assert.match(DISK_HYGIENE, /The harness removes it: your temp folder a few minutes after your process ends \(your git clones six hours after, unless one holds work nothing else has\)/);
+  assert.match(DISK_HYGIENE, /no clean-up step before DONE, no `player_slots\.py prune`/);
+  assert.match(DISK_HYGIENE, /publish the proofs your report links .* before you end/);
+  assert.match(DISK_HYGIENE, /a delete whose every path is written out under \$TMPDIR is answered by the session itself with no approval, anything else .* still asks a person/);
+  assert.match(DISK_HYGIENE, /name it with your temp folder's name in front/);
+  // The old instructions are gone.
+  assert.ok(!/Before you report a request done, clean up after yourself/.test(DISK_HYGIENE));
+  assert.ok(!/delete the player builds, Captures/.test(DISK_HYGIENE));
+  assert.ok(!/and you may remove them too, without asking/.test(DISK_HYGIENE));
+});
+
 test("w896: clean-up deletes only inside the worker install folder, in every worker's brief, the dispatcher's and the orchestrators' instructions", async (t) => {
   const { DISK_HYGIENE } = await import('./agents.ts');
   const { agents, sessions } = world(t);
