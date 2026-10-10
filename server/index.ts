@@ -816,7 +816,9 @@ route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
     agents.waker.cancel(id);
     agents.orchestrators.personWrote(id);
   }
-  await agents.sendWithAttachments(id, String(text ?? '').trim(), 'human', { images: imgs, attachments: files, requestedBy: requesterOf(req) });
+  // The calls a gate refused in earlier turns ride along with the person's message (w830), marked as FF Factory's.
+  const said = String(text ?? '').trim() + (s.info.kind === 'orchestrator' ? agents.orchestrators.heldOffer(id) : '');
+  await agents.sendWithAttachments(id, said, 'human', { images: imgs, attachments: files, requestedBy: requesterOf(req) });
   return {};
 });
 

@@ -47,16 +47,38 @@ import { autoApproveProblem, cleanBlock, cleanLine, identityKeys, parseMarkers, 
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
 import { asksAPerson, servedBy } from '../shared/workState.ts';
+import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
-import type { AttachmentRef, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, ConditionalDecision, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 /** The statuses a request keeps its gates in (w754): blocked itself, a hold (question) and the dispatcher's turn after a "go" (new). */
 const GATE_STATUSES: ReadonlySet<WorkItem['status']> = new Set(['blocked', 'question', 'new']);
+
+/**
+ * A gate refused a call its person may already have decided (w830): the filings limit, or a call that needs the person's
+ * own turn made in a turn of the harness's. The call is held and offered back on the person's next message (heldOffer).
+ */
+class GateRefused extends Error {}
+
+/** A call a gate refused, held for the person's next message (w830). */
+interface HeldCall {
+  at: string;
+  tool: string;
+  args: Record<string, unknown>;
+  why: string;
+}
+/** update_work's input (Agents' tool). */
+type UpdateInput = { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; when?: ConditionInput; words?: string; expires_days?: number };
+
+/** Held calls kept per chat at most, and for how long. */
+const HELD_MAX = 10;
+const HELD_MS = 3 * 86_400_000;
+const utcShort = (iso: string) => `${iso.slice(5, 16).replace('T', ' ')} UTC`;
 /** How much of a worker's DONE reports on a request is kept for a later re-check (WorkItem.done text, w515). */
 const DONE_TEXT_CHARS = 4000;
 /** A worker is asked how a request stands at most this often (askStatus, w631). */
@@ -392,6 +414,8 @@ export class Orchestrators {
   private readonly now: () => Date;
   /** Per personal orchestrator: its filings since its person last wrote. */
   private readonly filed = new Map<string, number>();
+  /** w830: calls a gate refused, per chat, offered back on the person's next message (heldOffer). In memory only. */
+  private readonly held = new Map<string, HeldCall[]>();
   /** Per personal orchestrator and worker ("orch:worker"): follow-ups since the person last wrote. */
   private readonly followUps = new Map<string, number>();
   /** Per sender and recipient ("from:to", user ids): messages since either of them last wrote to their orchestrator. */
@@ -801,6 +825,14 @@ export class Orchestrators {
    * may repeat, stores it, and the dispatcher gets it (gathered for a moment with others from the same person).
    */
   file(chat: SessionHandle, input: WorkInput): string {
+    try {
+      return this.fileNow(chat, input);
+    } catch (e) {
+      throw this.refusedCall(chat, 'request_work', { title: input.title, brief: input.brief }, e);
+    }
+  }
+
+  private fileNow(chat: SessionHandle, input: WorkInput): string {
     const owner = this.ownerOf(chat.info);
     if (!owner) throw new Error('only a person’s own orchestrator files work requests');
     const title = input.title.replace(/\s+/g, ' ').trim();
@@ -880,7 +912,7 @@ export class Orchestrators {
   private spend(chatId: string, owner: Requester) {
     const n = this.filed.get(chatId) ?? 0;
     const max = loopGuards(this.d.cfg).filings;
-    if (n >= max) throw new Error(`${max} filings since ${owner.displayName} last wrote; ask them before filing more`);
+    if (n >= max) throw new GateRefused(`${max} filings since ${owner.displayName} last wrote (a limit against loops)`);
     this.filed.set(chatId, n + 1);
   }
 
@@ -895,7 +927,15 @@ export class Orchestrators {
   }
 
   /** A requester's update (update_work): a note (an answer to a question reopens it), a priority, closing or reopening. */
-  update(chat: SessionHandle, input: { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean }): string {
+  update(chat: SessionHandle, input: UpdateInput): string {
+    try {
+      return this.updateNow(chat, input);
+    } catch (e) {
+      throw this.refusedCall(chat, 'update_work', { ...input }, e);
+    }
+  }
+
+  private updateNow(chat: SessionHandle, input: UpdateInput): string {
     const owner = this.ownerOf(chat.info);
     if (!owner) throw new Error('only a person’s own orchestrator updates its requests');
     const w = this.requireWork(input.id);
@@ -917,10 +957,12 @@ export class Orchestrators {
       subjectLine = added.length ? `${w.id} is now the work for ${added.join(', ')}.` : `${w.id} already had ${keys.join(', ')}.`;
       if (!input.note?.trim() && !input.priority && !input.close && !input.reopen) return subjectLine;
     }
+    // A DECISION THAT WAITS FOR A FACT (w830): recorded now, carried out by the server when it is met.
+    if (input.when) return this.recordConditional(chat, owner, w, input);
     // A reviewer approves or declines an intake request from their own chat, in a turn of their own only: a harness
     // message (a relayed report, a worker's words) cannot approve anything.
     if (input.approve || input.decline) {
-      if ((chat.turnFrom ?? chat.lastFrom) !== 'human') throw new Error(`only ${owner.displayName}, in their own words, approves or declines ${w.id}: ask them`);
+      if ((chat.turnFrom ?? chat.lastFrom) !== 'human') throw new GateRefused(`only ${owner.displayName}, in their own words, approves or declines ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message). A decision of theirs that waits for a fact ("once #1314 merges") is recorded with update_work when, in their turn`);
       if (input.approve && input.decline) throw new Error('approve or decline, not both');
       const done = input.approve ? this.approveIntake(w.id, owner) : this.declineIntake(w.id, owner, input.note);
       return input.approve ? `${done.id} approved by ${owner.displayName}: the dispatcher decides it now.` : `${done.id} declined by ${owner.displayName}.`;
@@ -995,6 +1037,192 @@ export class Orchestrators {
     return `${readLine ? `${readLine} ` : ''}${subjectLine ? `${subjectLine} ` : ''}${w.id} is ${w.status}: ${what.join('; ')}.`;
   }
 
+  // ---------------------------------------------------------------- held calls and conditional decisions (w830)
+
+  /**
+   * A call a gate refused (GateRefused): held for the person's next message, and the refusal says so, so the orchestrator
+   * neither asks its person again nor forgets it (w830: lothsahn's w811 decline, refused in a timer's turn, and his 4th
+   * note on w824, refused by the filings limit, each became a question he had already answered). Other errors pass.
+   */
+  private refusedCall(chat: SessionHandle, tool: string, args: Record<string, unknown>, e: unknown): unknown {
+    if (!(e instanceof GateRefused)) return e;
+    const owner = this.ownerOf(chat.info);
+    const n = owner?.displayName ?? 'your person';
+    const now = this.now();
+    const key = `${tool} ${JSON.stringify(args)}`;
+    const kept = (this.held.get(chat.info.id) ?? []).filter((h) => now.getTime() - Date.parse(h.at) < HELD_MS && `${h.tool} ${JSON.stringify(h.args)}` !== key);
+    this.held.set(chat.info.id, [...kept, { at: now.toISOString(), tool, args, why: e.message }].slice(-HELD_MAX));
+    return new Error(`${e.message}. Held: FF Factory offers this call back to you on ${n}'s next message. If ${n} already decided it, do it on their next message; don't ask ${n} again.`);
+  }
+
+  /**
+   * The calls a gate refused in this chat, as a note for the end of its person's next message (w830), or ''. The note
+   * starts with HELD_MARK: it is FF Factory's, and conditional decisions never take their words from it. Offered once; a
+   * call refused again is held again.
+   */
+  heldOffer(sessionId: string): string {
+    const list = (this.held.get(sessionId) ?? []).filter((h) => this.now().getTime() - Date.parse(h.at) < HELD_MS);
+    this.held.delete(sessionId);
+    if (!list.length) return '';
+    const owner = this.ownerOf(this.sessions.sessions.get(sessionId)?.info ?? { kind: 'worker' });
+    const n = owner?.displayName ?? 'your person';
+    const lines = list.map((h) => `- ${utcShort(h.at)}: ${h.tool} ${clip(JSON.stringify(h.args), 600)}, refused: ${clip(h.why, 300)}`);
+    return `\n\n${HELD_MARK}\nCalls a gate refused in your earlier turns, offered again with this message of ${n}'s (w830). Make each one ${n} already decided in their own words, now, as it stands; don't ask ${n} again. Leave out any their words do not decide.\n${lines.join('\n')}`;
+  }
+
+  /** The person's own recent messages in this chat, newest last: where a conditional decision's words must be found. */
+  private personMessages(sessionId: string): string[] {
+    return this.store
+      .readTranscript(sessionId, 400)
+      .filter((e): e is Extract<typeof e, { kind: 'user' }> => e.kind === 'user' && e.from === 'human')
+      .slice(-20)
+      .map((e) => e.text);
+  }
+
+  /**
+   * A person's decision that waits for a fact (w830): recorded in a turn of theirs only, with their own words found in a
+   * message of theirs, and only what they could do now (a reviewer's approve or decline of a pending intake request; a
+   * close of their own request, or of another's as an owner with a note). The blocker watch carries it out when met.
+   */
+  private recordConditional(chat: SessionHandle, owner: Requester, w: WorkItem, input: UpdateInput): string {
+    const n = owner.displayName;
+    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') throw new GateRefused(`a decision that waits for a fact is recorded only in a turn ${n} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed message)`);
+    if (input.reopen || input.priority || input.subjects?.length || input.ledger_read !== undefined) throw new Error('when goes with one action (approve, decline or close) and its note, nothing else');
+    const actions = [input.approve ? 'approve' : '', input.decline ? 'decline' : '', input.close ?? ''].filter(Boolean) as ConditionalDecision['action'][];
+    if (actions.length !== 1) throw new Error('when needs exactly one action: approve, decline, or close (done or cancelled)');
+    const action = actions[0];
+    const when = parseCondition(input.when!, w.id);
+    if (when.kind === 'request_done' && !this.store.work.get(when.ref)) throw new Error(`no request "${when.ref}"; list_work shows them`);
+    const note = input.note?.trim() || undefined;
+    // What it will do must be theirs to do now: the same rules as doing it at once.
+    if (action === 'approve' || action === 'decline') {
+      this.requireReviewer(owner);
+      if (w.approval?.state !== 'pending') throw new Error(`${w.id} is not waiting for approval`);
+    } else {
+      if (!isFor(w, owner.userId)) {
+        if (!this.isOwnerRole(owner.userId)) throw new Error(`${w.id} is ${names(w.requesters)}'s request, not ${n}'s; only an owner closes another person's request`);
+        if (!note) throw new Error(`say why in a note: ${names(w.requesters)} will be told who closed ${w.id} and why`);
+      }
+      const problem = updateProblem(w, { close: action }, this.now().getTime());
+      if (problem) throw new Error(problem);
+    }
+    const words = input.words?.trim();
+    if (!words) throw new Error(`words: ${n}'s own words for this decision, verbatim from their message ("close w811 as a duplicate once 1314 is merged")`);
+    if (!inPersonWords(words, this.personMessages(chat.info.id))) throw new Error(`words: "${clip(words, 120)}" is not in ${n}'s own recent messages here; quote them verbatim (at least a few words), never your summary`);
+    const days = input.expires_days ?? CONDITIONAL_DAYS;
+    if (!Number.isInteger(days) || days < 1 || days > CONDITIONAL_MAX_DAYS) throw new Error(`expires_days: 1 to ${CONDITIONAL_MAX_DAYS}`);
+    // The same decision again replaces the one before (its words and note may have changed).
+    const others = (w.conditional ?? []).filter((d) => !(same(d.by.userId, owner.userId) && d.action === action && d.when.kind === when.kind && d.when.ref === when.ref));
+    if (others.length >= CONDITIONAL_PER_REQUEST) throw new Error(`${w.id} already has ${others.length} pending decisions; cancel one first (conditional_decisions)`);
+    const seq = Math.max(0, ...[...(w.conditional ?? []).map((d) => d.id), ...w.log].flatMap((t) => [...t.matchAll(/\bw\d+\.c(\d+)\b/g)].map((m) => Number(m[1])))) + 1;
+    const now = this.now();
+    const d: ConditionalDecision = { id: `${w.id}.c${seq}`, by: asRequester(owner), at: now.toISOString(), words: clip(words, 500), action, ...(note ? { note: clip(note, 1000) } : {}), when, expires: new Date(now.getTime() + days * 86_400_000).toISOString() };
+    w.conditional = [...others, d];
+    this.stamp(w, `${n}: conditional decision ${d.id} recorded in their own turn: ${actionName(action)} when ${conditionName(when)}: "${d.words}"`);
+    this.store.putWork(w);
+    return `Recorded ${conditionalLine(w, d)}. FF Factory checks it every few minutes and carries it out by itself once that is a fact, and tells you; it never does if that can no longer happen (you are told then). Don't ask ${n} again. conditional_decisions lists it, and cancels it if ${n} changes their mind.`;
+  }
+
+  /**
+   * A person's pending conditional decisions (w830), or one cancelled: cancelling, like recording, only in a turn of theirs.
+   */
+  conditionalDecisions(chat: SessionHandle, input: { cancel?: string }): string {
+    const owner = this.ownerOf(chat.info);
+    if (!owner) throw new Error('only a person’s own orchestrator has conditional decisions');
+    const mine = [...this.store.work.values()].flatMap((w) => (w.conditional ?? []).filter((d) => same(d.by.userId, owner.userId)).map((d) => ({ w, d })));
+    const id = input.cancel?.trim().toLowerCase();
+    if (!id) return mine.length ? `${owner.displayName}'s pending decisions:\n${mine.map(({ w, d }) => `- ${conditionalLine(w, d)}`).join('\n')}` : `${owner.displayName} has no pending decisions.`;
+    const hit = mine.find(({ d }) => d.id === id);
+    if (!hit) throw new Error(`no pending decision "${input.cancel}" of ${owner.displayName}'s${mine.length ? `; theirs are ${mine.map(({ d }) => d.id).join(', ')}` : ''}`);
+    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') throw new Error(`only ${owner.displayName}, in a turn of theirs, cancels a decision of theirs: ask them`);
+    const { w, d } = hit;
+    w.conditional = (w.conditional ?? []).filter((x) => x.id !== d.id);
+    if (!w.conditional.length) w.conditional = undefined;
+    this.stamp(w, `${owner.displayName}: conditional decision ${d.id} cancelled (${actionName(d.action)} when ${conditionName(d.when)})`);
+    this.store.putWork(w);
+    return `Cancelled ${d.id}: ${w.id} will not be ${d.action === 'approve' ? 'approved' : d.action === 'decline' ? 'declined' : d.action === 'done' ? 'closed as done' : 'cancelled'} when ${conditionName(d.when)}.`;
+  }
+
+  /** Take a pending decision off its request; undefined when it is gone already. */
+  private takeConditional(workId: string, decisionId: string): { w: WorkItem; d: ConditionalDecision } | undefined {
+    const w = this.store.work.get(workId);
+    const d = w?.conditional?.find((x) => x.id === decisionId);
+    if (!w || !d) return undefined;
+    w.conditional = w.conditional!.filter((x) => x.id !== d.id);
+    if (!w.conditional.length) w.conditional = undefined;
+    return { w, d };
+  }
+
+  /**
+   * A conditional decision's fact is met (server/blockerWatch.ts): carried out under its person's recorded authority, as
+   * they would have done it themselves then. If it can no longer be done (already approved, already closed, no longer a
+   * reviewer), nothing is done and its person hears why. Either way the request's log and its person's orchestrator say so.
+   */
+  carryOutConditional(workId: string, decisionId: string, why: string) {
+    const got = this.takeConditional(workId, decisionId);
+    if (!got) return;
+    const { w, d } = got;
+    const n = d.by.displayName;
+    const theirs = `${n}'s decision of ${utcShort(d.at)}: "${d.words}"`;
+    let problem: string | undefined;
+    try {
+      if (d.action === 'approve' || d.action === 'decline') {
+        if (w.approval?.state !== 'pending') problem = `${w.id} is no longer waiting for approval (${w.approval?.state ?? 'not an intake request'})`;
+        else if (d.action === 'approve') this.approveIntake(w.id, d.by);
+        else this.declineIntake(w.id, d.by, d.note);
+      } else {
+        problem = updateProblem(w, { close: d.action }, this.now().getTime());
+        if (!problem && !isFor(w, d.by.userId) && !this.isOwnerRole(d.by.userId)) problem = `${w.id} is not ${n}'s request, and ${n} is no longer an owner`;
+        if (!problem) this.closeByDecision(w, d, why);
+      }
+    } catch (e) {
+      problem = (e as Error).message;
+    }
+    if (problem) {
+      this.stamp(w, `conditional decision ${d.id} not carried out: ${why}, but ${problem} (${theirs})`);
+      this.store.putWork(w);
+      this.toPeople([d.by], `[conditional decision] ${d.id} on ${w.id} "${clip(w.title, 80)}" was not carried out: ${why}, but ${problem}. It was ${theirs}. Tell ${n} in a line.`);
+      return;
+    }
+    this.stamp(w, `carried out ${theirs} (${d.id}: ${actionName(d.action)}); condition met: ${why}`);
+    this.store.putWork(w);
+    this.toPeople([d.by], `[conditional decision] Carried out on ${w.id} "${clip(w.title, 80)}": ${actionName(d.action)}, ${theirs}. Condition met: ${why}. Tell ${n} in a line; there is nothing to do.`);
+  }
+
+  /** A close a conditional decision makes (w830): as the person's own close would, or an owner's of another's request. */
+  private closeByDecision(w: WorkItem, d: ConditionalDecision, why: string) {
+    const close = d.action as 'done' | 'cancelled';
+    const verb = close === 'done' ? 'closed as done' : 'cancelled';
+    const own = isFor(w, d.by.userId);
+    // A co-requester leaves it; it carries on for the others (as update_work does).
+    if (own && !same(w.requestedBy.userId, d.by.userId)) {
+      w.requesters = w.requesters.filter((r) => !same(r.userId, d.by.userId));
+      return;
+    }
+    settleByHand(w);
+    w.status = close;
+    if (d.note) w.outcome = clip(d.note, 300);
+    const others = w.requesters.filter((r) => !same(r.userId, d.by.userId));
+    const how = `by ${d.by.displayName}'s decision of ${utcShort(d.at)} ("${clip(d.words, 160)}"), once ${why}`;
+    if (others.length) this.toPeople(others, dispatchNotice(w, `${verb} ${how}${own ? '' : ' (it is your request; owners close each other\'s, w677)'}`, d.note));
+    if (close === 'cancelled') {
+      const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+      const hint = live.length ? ` Its workers ${live.join(', ')} are still working: stop or redirect them.` : '';
+      this.gatherForDispatcher(d.by, updateNotice(w, d.by, `${verb} ${how}.${hint}`));
+    }
+  }
+
+  /** A conditional decision that can no longer be met, or expired: dropped, never carried out; its person is told. */
+  dropConditional(workId: string, decisionId: string, why: string) {
+    const got = this.takeConditional(workId, decisionId);
+    if (!got) return;
+    const { w, d } = got;
+    const theirs = `${d.by.displayName}'s decision of ${utcShort(d.at)}: "${d.words}"`;
+    this.stamp(w, `conditional decision ${d.id} dropped, not carried out: ${why} (${theirs})`);
+    this.store.putWork(w);
+    this.toPeople([d.by], `[conditional decision] Dropped ${d.id} on ${w.id} "${clip(w.title, 80)}" (${actionName(d.action)} when ${conditionName(d.when)}): ${why}, so it was not carried out. It was ${theirs}. Tell ${d.by.displayName} in a line; it is theirs to decide again.`);
+  }
+
   /** A closed request is reopened (w731): its earlier DONEs and PR links no longer count (work.ts reopenWork). Returns the log's words. */
   private reopened(w: WorkItem): string {
     const dropped = reopenWork(w, this.now().toISOString());
@@ -1038,7 +1266,7 @@ export class Orchestrators {
     // member's request still needs the owner's own words in this turn.
     const own = (chat.turnFrom ?? chat.lastFrom) === 'human';
     const betweenOwners = this.isOwnerRole(w.requestedBy.userId);
-    if (!own && !betweenOwners) throw new Error(`only ${by.displayName}, in their own words in this turn, closes or reopens ${whose} request ${w.id}: ask them`);
+    if (!own && !betweenOwners) throw new GateRefused(`only ${by.displayName}, in their own words in this turn, closes or reopens ${whose} request ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message)`);
     const note = input.note?.trim();
     if (!note) throw new Error(`say why in a note: ${names(w.requesters)} will be told who ${input.close ? 'closed' : 'reopened'} ${w.id} and why`);
     const problem = updateProblem(w, input, this.now().getTime());

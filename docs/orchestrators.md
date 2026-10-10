@@ -121,7 +121,8 @@ Lothsahn today) may have their own orchestrator close (done or cancelled) or reo
   names;
 - **a non-owner's request** only in a turn the owner started with their own message, the guard approving an intake
   request uses; a turn a harness notice, a worker, a standing agent or relayed FFBox or Discord text started is refused
-  ("only Lothsahn, in their own words in this turn, closes or reopens Cara's request w234: ask them"). The owner's own
+  ("only Lothsahn, in their own words in this turn, closes or reopens Cara's request w234, and this turn is not theirs";
+  the call is held for the owner's next message, [Calls a gate refused](#calls-a-gate-refused-w830)). The owner's own
   words on Discord or GitHub, authenticated by FFBox, are a turn of theirs (w831, below);
 - only with a note saying why. A priority change on someone else's request stays refused: it is its people's to give.
   A note alone is the next section's (another owner's request only);
@@ -1195,6 +1196,8 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   (a worker's report, a timer, another orchestrator) cannot keep it going. A close (done or cancelled, their own request
   or, for an owner, another person's) in a turn the person started with their own message is not counted (w631:
   Lothsahn's one "close everything that's done" was refused after three closes); a close in a harness turn still is.
+  A call the limit refuses is held and offered back with the person's next message, never turned into a question for
+  them ([Calls a gate refused](#calls-a-gate-refused-w830)), and recording a conditional decision is not counted.
 - A person's orchestrator messages another person at most 10 times until its person or that person writes to their own
   orchestrator (`orchestrator.messagesPerPerson`). Two orchestrators answering each other with nobody writing stop
   there.
@@ -1243,7 +1246,52 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
     (`<request> was last filed or changed outside a turn of <person>'s`);
   - the dispatcher's own turn (`dispatcherHeardPerson`): `USER_ASKED_TOOLS` without a `work_id`, owner-only
     `set_app_config` keys, and `for_user` attribution;
-  - memory writes (`memoryGuard`, [Memory](#memory)).
+  - memory writes (`memoryGuard`, [Memory](#memory));
+  - recording and cancelling a conditional decision ([below](#conditional-decisions-w830)).
+
+### Conditional decisions (w830)
+
+A person often decides something for later: "Close w811 as a duplicate once 1314 is merged" (Lothsahn, 2026-10-10).
+Before w830 the orchestrator had to remember it and act in a later turn, and a later turn is the harness's (a check-in, a
+timer), where a decline is refused; w811 sat open after #1314 merged until Lothsahn asked "Why are you asking me about
+w811 if it's already merged? Why is this not closed out?". Now the orchestrator records the decision in the person's
+turn and the server carries it out when the fact is met (`shared/conditional.ts`, `Orchestrators.recordConditional`,
+`carryOutConditional`, `dropConditional`; the check is the blocker watch's, `server/blockerWatch.ts`).
+
+- **Recorded** with `update_work` on the request: the action (`approve` or `decline` an intake request, or `close` done
+  or cancelled, with its note), `when` (exactly one checked fact: `pr_merged` or `pr_closed` with "owner/repo#123" or
+  its link, or `request_done` with a request id) and `words`. Nothing else is a condition.
+- **Only the person's authority, as it stands now.** It is recorded only in a turn the person started (`turnFrom`, the
+  same gate as approving), so a relayed report, a worker, a timer or a check-in cannot create one. `words` must be the
+  person's own, verbatim (case, quotes and spacing aside), found in one of their last 20 messages in that chat, never in
+  the note FF Factory appends to one (`HELD_MARK`); they are stored with it. The action must be one they could take now:
+  a reviewer's approve or decline of a request still waiting for approval; a close of their own open request, or of
+  another person's as an owner, with a note.
+- **Carried out by the server** when the blocker watch sees the fact (pull requests read at most every 5 minutes, through
+  `ghPr`, which also gives the merge commit): the action runs as the person would have run it, the request's log says
+  `carried out Lothsahn's decision of 10-10 02:31 UTC: "…" (w811.c1: decline); condition met: PR
+  Final-Factory/FinalFactory#1314 merged as 3c1cdbfa256b`, and the person's orchestrator gets a `[conditional decision]`
+  message to relay. If it can no longer be done when the fact comes (already approved, closed by hand, no longer a
+  reviewer), nothing is done and they hear why.
+- **Dropped, never carried out**, when its fact can no longer happen (`pr_merged` and the PR closed unmerged;
+  `request_done` and the request was declined or cancelled) or it expires (14 days by default, `expires_days` 1 to 60):
+  the log and the person's orchestrator say so.
+- **Listed and cancelled** with `conditional_decisions` (cancel: only in the person's own turn); `list_work` with a
+  request's id shows its pending ones. A request carries at most 5; the same decision recorded again replaces it.
+
+### Calls a gate refused (w830)
+
+Lothsahn's second correction of one kind (w741): the orchestrator asked him for what he had already decided, once
+because a decline from a timer's turn was refused (w811), once because the filings limit refused his fourth note
+(w824): "Can you check your instructions because you keep making a similar mistake". Now a call the turn gate (approve
+and decline, closing a non-owner's request, recording a conditional decision) or the filings limit refuses
+(`GateRefused`) is held on the chat (`Orchestrators.refusedCall`; in memory, at most 10 for 3 days), and the refusal
+ends "Held: FF Factory offers this call back to you on Lothsahn's next message. If Lothsahn already decided it, do it on
+their next message; don't ask Lothsahn again." With the person's next message (typed in FF Factory, FFBox's
+authenticated operator turn, or the remote-session route), `heldOffer` appends the held calls under `HELD_MARK`
+("[FF Factory, not your person: held from earlier turns]"): that turn is the person's, the limit has started again, and
+the orchestrator makes each call their words decide, as it stands. The note is FF Factory's: a conditional decision's
+words are never taken from it. The orchestrator prompt's "How to work" says the same.
 - Only its person writes to a personal orchestrator (HTTP 403 otherwise). Nobody writes to the dispatcher, the owner
   included (Ben, 2026-10-03: people talk to their own orchestrator, which files work with it): `POST
   /api/sessions/<dispatcher id>/message` answers 403 "nobody chats with the dispatcher…" for every login and key

@@ -116,6 +116,11 @@ stop with a design question. The classification and its reason are on the reques
   /api/work/<id>/approve|decline`, or by telling their own orchestrator ("approve w41"), which calls `update_work
   approve` only in a turn the reviewer started (a relayed report or a worker's words cannot approve anything).
   Approved, it reaches the dispatcher like any request.
+- **A reviewer's decision for later** (w830): "decline w811 as a duplicate once #1314 is merged" is recorded in the
+  reviewer's own turn (`update_work` decline with `when` and the reviewer's verbatim `words`), and the server declines it
+  itself when #1314 merges, telling the reviewer; if #1314 closes unmerged it is dropped, never declined.
+  [orchestrators.md](orchestrators.md#conditional-decisions-w830) has the rules. An approve or decline refused in a
+  harness turn is held and offered back with the reviewer's next message, not asked again.
 - **"Needs a human" is a state, not a label that sticks** (w319). While a request waits, the Intake tab, the Requests tab
   and `list_work` say "needs a human" (or "awaiting approval"). Once a reviewer decides, they say "approved by Ben
   2026-10-03 20:51 UTC" or "declined by Ben …" instead, and a request the merged-work rule closed says "closed: merged as

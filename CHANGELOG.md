@@ -10,6 +10,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A person's decision for later is recorded and carried out by the server, and a call a gate refused is never asked
+  again** (w830, lothsahn: "Yes, let's do that", and "Can you check your instructions because you keep making a similar
+  mistake"). On 2026-10-10 lothsahn said "Close w811 as a duplicate once 1314 is merged"; #1314 merged, the orchestrator's
+  decline from a timer's turn was refused (approving and declining need the person's own turn), and w811 waited until he
+  asked "Why is this not closed out?". The same night the filings limit refused his 4th note on w824, and the
+  orchestrator asked him to say it again. Now `update_work` with `when` (`pr_merged`, `pr_closed` or `request_done`) and
+  his verbatim `words` records such a decision in his own turn; the blocker watch carries it out when the fact is met
+  (logged with his words and the merge commit, and his orchestrator told), drops it if it can no longer be met or after
+  14 days, and `conditional_decisions` lists and cancels them. A call the turn gate or the filings limit refuses is held
+  and offered back with the person's next message, marked as FF Factory's, and the refusal says "do it on their next
+  message; don't ask them again"; the orchestrator prompt says the same. Needs a portal deploy.
+
 - **A request Blocked on CI clears when CI finishes, even where the portal cannot read the checks, and a worker's cancelled
   check-in comes back** (w829, lothsahn: "Why was it stuck for so long if it was ready to merge?"). On 2026-10-10 w814 (PR #1338),
   w818 (#1335) and w808 (#1328) stayed Blocked on CI for 2 to 3 hours after their checks finished, green or cancelled: the blocker

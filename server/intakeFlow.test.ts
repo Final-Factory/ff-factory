@@ -22,6 +22,8 @@ import { run } from './proc.ts';
 import type { Config } from './config.ts';
 import type { ProviderConversation, Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
+import { BlockerWatch } from './blockerWatch.ts';
+import { HELD_MARK } from '../shared/conditional.ts';
 import { startTestMachine } from './testMachine.ts';
 
 /**
@@ -1259,4 +1261,148 @@ test('w502: the one-time sweep: requests that claim reports are marked, ones tha
   await until('Lothsahn hears the uncertain ones', () => heard(o.personalFor(LOTH).info.id, '[intake reports]').length === 1);
   assert.match(heard(o.personalFor(LOTH).info.id, '[intake reports]')[0].text, new RegExp(`${mentions.id} "Crash on load" mentions ${R2}`));
   assert.ok(!mentions.keys.includes(`report:${R2}`), 'never marked on a guess');
+});
+
+// ---------------------------------------------------------------- w830: decisions that wait for a fact; calls a gate refused
+
+/** A request of Lothsahn's, filed directly (request_work is capped per message). */
+function putMine(store: Store, id: string, title: string) {
+  store.putWork({ id, title, brief: 'Do it.', priority: 'normal', keys: [], requestedBy: LOTH, requesters: [LOTH], humanAsked: true, status: 'new', createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [] } as WorkItem);
+  store.workSeq = Math.max(store.workSeq, Number(id.slice(1)));
+}
+
+/** A message the person wrote in their own chat (what a conditional decision's words are checked against). */
+function personSaid(store: Store, chatId: string, text: string) {
+  store.append(chatId, { kind: 'user', text, from: 'human', uuid: `u${Math.random().toString(36).slice(2)}` });
+}
+
+test("w830: w811 as it happened: Lothsahn's \"close w811 as a duplicate once 1314 is merged\" is refused in a timer's turn (held, never asked again), recorded in his own turn with his words, and carried out when #1314 merges", async (t) => {
+  const { store, o, call, work, heard, intake } = setup(t, { discord: { enabled: true }, reviewers: ['lothsahn'] });
+  intake.fileBug(parseBugThread({ id: flake(1), parent_id: BUGS, name: 'Construction bots pick a farther tower' }, undefined, { channel: '#beta-bugs' }));
+  const [w] = work();
+  assert.equal(w.approval?.state, 'pending');
+  const loth = o.personalFor(LOTH);
+  const words = `Close ${w.id} as a duplicate once 1314 is merged`;
+  personSaid(store, loth.info.id, words);
+  const pr = 'Final-Factory/FinalFactory#1314';
+  const decline = { id: w.id, decline: true, note: 'duplicate of w814', when: { pr_merged: pr }, words };
+
+  // 2026-10-10: the orchestrator's decline from its wake_me turn was refused. Now it is held, and the refusal says not to ask.
+  loth.lastFrom = 'system';
+  const refused = await call(loth.info, 'update_work', { id: w.id, decline: true, note: 'duplicate of w814' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /only Lothsahn, in their own words, approves or declines w\d+, and this turn is not theirs .*recorded with update_work when, in their turn\. Held: FF Factory offers this call back to you on Lothsahn's next message\. If Lothsahn already decided it, do it on their next message; don't ask Lothsahn again\.$/);
+  // Recording it outside his turn is refused and held the same way.
+  assert.match((await call(loth.info, 'update_work', decline)).text, /a decision that waits for a fact is recorded only in a turn Lothsahn started .*Held: /);
+  assert.equal(w.conditional, undefined);
+  const offer = o.heldOffer(loth.info.id);
+  assert.ok(offer.startsWith(`\n\n${HELD_MARK}\n`), offer);
+  assert.match(offer, /Make each one Lothsahn already decided in their own words, now, as it stands; don't ask Lothsahn again/);
+  assert.match(offer, new RegExp(`update_work \\{"id":"${w.id}","decline":true,"note":"duplicate of w814"\\}, refused: only Lothsahn`));
+  assert.match(offer, /"when":\{"pr_merged":"Final-Factory\/FinalFactory#1314"\}/);
+  assert.equal(o.heldOffer(loth.info.id), '', 'offered once');
+
+  // In his own turn: his words are checked against his messages, the PR must name its repo, and it is recorded.
+  loth.lastFrom = 'human';
+  assert.match((await call(loth.info, 'update_work', { ...decline, words: `decline ${w.id} when 1314 merges` })).text, /is not in Lothsahn's own recent messages here; quote them verbatim/);
+  assert.match((await call(loth.info, 'update_work', { ...decline, when: { pr_merged: '#1314' } })).text, /a bare #1314 names no repo/);
+  assert.match((await call(loth.info, 'update_work', { ...decline, close: 'done' })).text, /exactly one action/);
+  const recorded = await call(loth.info, 'update_work', decline);
+  assert.equal(recorded.isError, false, recorded.text);
+  assert.match(recorded.text, new RegExp(`^Recorded ${w.id}\\.c1 on ${w.id}: decline when PR Final-Factory/FinalFactory#1314 merges \\(Lothsahn, .*: "${words}"; note: duplicate of w814; expires .*\\)\\. .*Don't ask Lothsahn again`));
+  assert.equal(w.approval?.state, 'pending', 'not declined yet');
+  assert.match(w.log.at(-1)!, new RegExp(`Lothsahn: conditional decision ${w.id}\\.c1 recorded in their own turn: decline when PR Final-Factory/FinalFactory#1314 merges: "${words}"`));
+  assert.match((await call(loth.info, 'conditional_decisions', {})).text, new RegExp(`^Lothsahn's pending decisions:\\n- ${w.id}\\.c1 on ${w.id}: decline when PR`));
+  assert.match((await call(loth.info, 'list_work', { id: w.id })).text, new RegExp(`Decisions waiting for a fact \\(w830; carried out by themselves when it is met\\):\\n  ${w.id}\\.c1 on ${w.id}`));
+
+  // The watch: still open, nothing; merged, it is declined with his words and the merge commit, and he is told.
+  let state: { state: 'open' | 'merged' | 'closed'; text: string; sha?: string } = { state: 'open', text: `${pr} is still open` };
+  let clock = Date.now();
+  const watch = new BlockerWatch({ store, orchestrators: o, pr: async () => state, now: () => clock });
+  assert.equal((await watch.tick()).size, 0);
+  state = { state: 'merged', text: `${pr} merged`, sha: '3c1cdbfa256b77c0ffee0000000000000000000' };
+  clock += 5 * 60_000;
+  assert.equal((await watch.tick()).get(`${w.id}.c1`), `run: PR ${pr} merged as 3c1cdbfa256b`);
+  assert.deepEqual([w.status, w.approval?.state, (w.approval?.by as Requester | undefined)?.userId, w.outcome, w.conditional], ['rejected', 'declined', 'lothsahn', 'duplicate of w814', undefined]);
+  assert.match(w.log.at(-1)!, new RegExp(`carried out Lothsahn's decision of 10-\\d\\d \\d\\d:\\d\\d UTC: "${words}" \\(${w.id}\\.c1: decline\\); condition met: PR ${pr} merged as 3c1cdbfa256b$`));
+  await until('Lothsahn is told', () => heard(loth.info.id, '[conditional decision] Carried out').some((e) => e.text.includes(`decline, Lothsahn's decision of`) && e.text.includes('Condition met: PR Final-Factory/FinalFactory#1314 merged as 3c1cdbfa256b')));
+  assert.equal((await watch.tick()).size, 0, 'once');
+});
+
+test('w830: a decision is dropped, never carried out, when its PR closes unmerged, or it expires; one is cancelled only in its person\'s turn; a request closing as done carries one out; one whose request was closed by hand meanwhile does nothing, and says so', async (t) => {
+  const { store, o, call, work, heard } = setup(t);
+  const loth = o.personalFor(LOTH);
+  loth.lastFrom = 'human';
+  for (const [i, title] of ['Deck layout', 'Bots', 'Tutorial', 'Audio', 'Fifth'].entries()) putMine(store, `w${i + 1}`, title);
+  const [a, b, c, d, e] = work();
+  const said = 'cancel the Deck one if 1336 gets closed, and close Bots once Tutorial is done, close Audio once 77 merges, close the fifth when 88 merges';
+  personSaid(store, loth.info.id, said);
+  const rec = async (id: string, close: string, when: Record<string, string>, words: string, extra: Record<string, unknown> = {}) => {
+    const r = await call(loth.info, 'update_work', { id, close, when, words, ...extra });
+    assert.equal(r.isError, false, r.text);
+  };
+  await rec(a.id, 'cancelled', { pr_merged: 'Final-Factory/FinalFactory#1336' }, 'cancel the Deck one if 1336 gets closed');
+  await rec(b.id, 'done', { request_done: c.id }, 'close Bots once Tutorial is done');
+  await rec(d.id, 'done', { pr_merged: 'Final-Factory/FinalFactory#77' }, 'close Audio once 77 merges', { expires_days: 1 });
+  await rec(e.id, 'done', { pr_merged: 'Final-Factory/FinalFactory#88' }, 'close the fifth when 88 merges');
+  e.status = 'cancelled';
+  // A second decision to cancel: refused outside his turn, done in it.
+  await rec(c.id, 'cancelled', { pr_closed: 'Final-Factory/FinalFactory#5' }, 'close Bots once Tutorial is done');
+  loth.lastFrom = 'system';
+  assert.match((await call(loth.info, 'conditional_decisions', { cancel: `${c.id}.c1` })).text, /only Lothsahn, in a turn of theirs, cancels a decision of theirs/);
+  loth.lastFrom = 'human';
+  assert.match((await call(loth.info, 'conditional_decisions', { cancel: `${c.id}.c1` })).text, new RegExp(`^Cancelled ${c.id}\\.c1: ${c.id} will not be cancelled when PR Final-Factory/FinalFactory#5 closes`));
+  assert.equal(c.conditional, undefined);
+  assert.match((await call(loth.info, 'conditional_decisions', { cancel: 'w999.c1' })).text, /no pending decision "w999.c1" of Lothsahn's; theirs are /);
+
+  const prs: Record<string, { state: 'open' | 'merged' | 'closed'; text: string }> = {
+    'Final-Factory/FinalFactory#1336': { state: 'closed', text: 'closed' },
+    'Final-Factory/FinalFactory#77': { state: 'open', text: 'open' },
+    'Final-Factory/FinalFactory#88': { state: 'merged', text: 'merged' },
+  };
+  let clock = Date.now();
+  const watch = new BlockerWatch({ store, orchestrators: o, pr: async (ref) => prs[ref], now: () => clock });
+  const did = await watch.tick();
+  // #1336 closed unmerged: a is NOT cancelled; the decision goes, and he is told.
+  assert.equal(did.get(`${a.id}.c1`), 'drop: PR Final-Factory/FinalFactory#1336 was closed without merging');
+  assert.deepEqual([a.status, a.conditional], ['new', undefined]);
+  assert.match(a.log.at(-1)!, /conditional decision w\d+\.c1 dropped, not carried out: PR Final-Factory\/FinalFactory#1336 was closed without merging \(Lothsahn's decision of/);
+  await until('told it was dropped', () => heard(loth.info.id, '[conditional decision] Dropped').some((e) => e.text.includes(`${a.id}.c1`)));
+  assert.equal(did.has(`${b.id}.c1`), false, 'Tutorial is still open');
+  // #88 merged, but the fifth was cancelled by hand meanwhile: nothing is done to it, and he hears why.
+  assert.equal(did.get(`${e.id}.c1`), 'run: PR Final-Factory/FinalFactory#88 merged');
+  assert.equal(e.status, 'cancelled');
+  assert.match(e.log.at(-1)!, /conditional decision w5\.c1 not carried out: PR Final-Factory\/FinalFactory#88 merged, but w5 is cancelled; reopen it first \(Lothsahn's decision of/);
+  await until('told it was not carried out', () => heard(loth.info.id, '[conditional decision] w5.c1').some((x) => x.text.includes('was not carried out')));
+  // Tutorial closes as done: Bots closes as done with his words.
+  c.status = 'done';
+  assert.equal((await watch.tick()).get(`${b.id}.c1`), `run: ${c.id} closed as done`);
+  assert.equal(b.status, 'done');
+  assert.match(b.log.at(-1)!, /carried out Lothsahn's decision of .*"close Bots once Tutorial is done" \(w\d+\.c1: close as done\); condition met: w\d+ closed as done/);
+  // A day later #77 is still open: the decision expires, Audio stays open, and he is told.
+  clock += 86_400_000 + 60_000;
+  assert.match((await watch.tick()).get(`${d.id}.c1`)!, /^drop: it expired at .* unmet \(PR Final-Factory\/FinalFactory#77 is still open\)$/);
+  assert.deepEqual([d.status, d.conditional], ['new', undefined]);
+});
+
+test("w830: w824 as it happened: the filings limit refuses Lothsahn's 4th note in his own turn; it is held, offered back with his next message (not his words), and goes through then without asking him", async (t) => {
+  const { store, agents, o, call, work } = setup(t);
+  const loth = o.personalFor(LOTH);
+  loth.lastFrom = 'human';
+  for (const [i, title] of ['One', 'Two', 'Three', 'Four'].entries()) putMine(store, `w${i + 1}`, title);
+  const note = (id: string) => call(loth.info, 'update_work', { id, note: 'lothsahn, in his own words: "Please move all work requests I\'ve created to beast"' });
+  for (const id of ['w1', 'w2', 'w3']) assert.equal((await note(id)).isError, false);
+  const fourth = await note('w4');
+  assert.equal(fourth.isError, true);
+  assert.match(fourth.text, /^ERROR: 3 filings since Lothsahn last wrote \(a limit against loops\)\. Held: FF Factory offers this call back to you on Lothsahn's next message\. If Lothsahn already decided it, do it on their next message; don't ask Lothsahn again\.$/);
+  // His next message (here through FFBox's authenticated operator turn) carries the held call, marked as FF Factory's.
+  agents.operatorTurn(LOTH, 'how is it going?');
+  const sent = store.readTranscript(loth.info.id).filter((e) => e.kind === 'user' && e.from === 'human').at(-1) as { text: string };
+  assert.ok(sent.text.startsWith(`how is it going?\n\n${HELD_MARK}\n`), sent.text);
+  assert.match(sent.text, /- \d\d-\d\d \d\d:\d\d UTC: update_work \{"id":"w4","note":"lothsahn, in his own words: .*"\}, refused: 3 filings since Lothsahn last wrote/);
+  // In that turn the call goes through as it stands: no second ask.
+  loth.lastFrom = 'human';
+  assert.equal((await note('w4')).isError, false);
+  assert.match(work()[3].log.at(-1)!, /Lothsahn: note: lothsahn, in his own words/);
+  assert.equal(o.heldOffer(loth.info.id), '', 'nothing held any more');
 });

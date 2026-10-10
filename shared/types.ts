@@ -1518,6 +1518,11 @@ export interface WorkItem {
    * wake it: when its gates clear, or its CI cannot be read, each is handed back and fires at once. Dropped with the gates.
    */
   heldCheckIns?: HeldCheckIn[];
+  /**
+   * w830: decisions a person gave on this request that wait for a fact ("close w811 as a duplicate once #1314 merges"),
+   * recorded in their own turn with their words; the blocker watch carries each out, or drops it, when its condition is met.
+   */
+  conditional?: ConditionalDecision[];
   /** The computers the dispatcher said can take it when it queued it for capacity (decide_work queue `needs`, w643). */
   queuedFor?: { at: string; needs?: string[] };
   /** The cleanup's last "Is it done?" to a worker about this merged request (w419): at most one a day. */
@@ -1601,6 +1606,28 @@ export interface WorkBlocker {
   by: string;
   /** deploy: the commit the portal (or the machine's daemon) ran when it was set; a different one is the deploy. */
   sha?: string;
+}
+
+/**
+ * A person's decision that waits for a checked fact (w830, docs/orchestrators.md "Conditional decisions"): recorded by
+ * their orchestrator in a turn of theirs, with their own words, and carried out by the server under their authority.
+ */
+export interface ConditionalDecision {
+  /** "c1", "c2", … unique on its request. */
+  id: string;
+  /** Whose decision it is, and when it was recorded (ISO). */
+  by: Requester;
+  at: string;
+  /** Their own words, verbatim from a message of theirs. */
+  words: string;
+  /** What is done: approve or decline an intake request, or close it as done or cancelled. */
+  action: 'approve' | 'decline' | 'done' | 'cancelled';
+  /** The note the action carries (a decline's or a close's reason). */
+  note?: string;
+  /** The fact it waits for: a pull request ("owner/repo#123") merged, or closed either way; a request closed as done. */
+  when: { kind: 'pr_merged' | 'pr_closed' | 'request_done'; ref: string };
+  /** When it is dropped unmet (ISO), its person told. */
+  expires: string;
 }
 
 /** A worker's wake_me check-in that a block cancelled (w829), kept to be handed back when the block ends. */
