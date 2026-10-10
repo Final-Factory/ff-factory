@@ -34,6 +34,16 @@ Known causes, so a future failure can be named at once:
 - **gitleaks `generic-api-key` in a test or doc**: every one in the window was a fake key in a fixture; add it to
   `.gitleaksignore` or make the fixture not look like a key.
 
+## Before you push
+
+`npm run prepush` (`scripts/prepush.ts`, w924) runs the typecheck, `deploy/vm/test/lint.sh --shellcheck-only`, gitleaks
+on `origin/main..HEAD` and `scripts/check-identity.ts origin/main..HEAD`: 13.5 s on biscuit (measured). A missing
+shellcheck or gitleaks (or bash, on Windows) skips that step with a `SKIPPED` line instead of failing; install them
+(the package manager, or the release binaries) to
+get the whole check. No git hook is installed: a sandbox is a worktree, so a hook would land in the hooks folder every
+worktree and the person's own clone share, and would run on pushes nobody asked it for. `scripts/prepush.test.ts` plants a
+shellcheck finding, a fake key and a personal email, and fails if the check misses any.
+
 ## Measuring
 
 - The runs list caps a search at 1,000 results: `actions/runs?created=>=DATE` silently stops there (it reached back only
