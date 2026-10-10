@@ -80,7 +80,7 @@ const byNumber = (a: string, b: string) => Number(a.slice(1)) - Number(b.slice(1
  * read_work for worker session `sessionId`: one request in full (`id`), the worker's own and named requests, or, with a
  * grant, the open and stalled ones (`all`), filtered and paged. Throws the refusal for anything outside its scope.
  */
-export function readWork(items: readonly WorkItem[], sessionId: string, a: ReadWorkArgs, live: ReadonlyMap<string, WorkLive>): string {
+export function readWork(items: readonly WorkItem[], sessionId: string, a: ReadWorkArgs, live: ReadonlyMap<string, WorkLive>, cost: (id: string) => string = () => ''): string {
   const scope = readScope(items, sessionId);
   const byId = new Map(items.map((w) => [w.id.toLowerCase(), w]));
   if (a.id !== undefined) {
@@ -90,7 +90,7 @@ export function readWork(items: readonly WorkItem[], sessionId: string, a: ReadW
     const mine = scope.own.some((x) => x.toLowerCase() === id) || scope.named.includes(id);
     if (!mine && !(scope.grantedBy.length && w && openOrStalled(w))) throw new Error(refusal(id, scope, w));
     if (!w) throw new Error(`no request ${id} in the ledger (it keeps every open request and the recently closed ones)`);
-    return clipAnswer(`${HEADER}\n\n${full(w, live.get(w.id))}`);
+    return clipAnswer(`${HEADER}\n\n${full(w, live.get(w.id), cost(w.id))}`);
   }
   const statuses = statusFilter(a.status ?? (a.all ? 'open_and_stalled' : 'any'));
   const states = a.state === undefined ? undefined : new Set(Array.isArray(a.state) ? a.state : [a.state]);
@@ -122,7 +122,7 @@ export function readWork(items: readonly WorkItem[], sessionId: string, a: ReadW
   const blocks: string[] = [];
   let size = head.length;
   for (const w of matching.slice(offset, offset + limit)) {
-    const b = brief(w, live.get(w.id));
+    const b = brief(w, live.get(w.id), cost(w.id));
     if (blocks.length && size + b.length + 2 > READ_MAX_CHARS - 200) break;
     blocks.push(b);
     size += b.length + 2;
@@ -185,12 +185,13 @@ function facts(w: WorkItem): string[] {
 }
 
 /** One request in full: its facts, PRs, brief, constraints, notes, latest report and log. */
-function full(w: WorkItem, now?: WorkLive): string {
+function full(w: WorkItem, now?: WorkLive, cost = ''): string {
   const notes = (w.notes ?? []).map((n) => `${n.at.slice(0, 16).replace('T', ' ')} ${n.by}: ${n.text}`).join('\n');
   const done = Object.entries(w.done ?? {}).map(([sid, d]) => `${sid} said DONE ${d.at.slice(0, 16).replace('T', ' ')}: ${d.report}`).join('\n');
   return [
     headLine(w, now),
     ...facts(w),
+    ...(cost ? [cost.trim()] : []),
     ...(w.prs?.length ? ['PRs:', ...prLines(w, 20)] : ['PRs: none']),
     'Brief:',
     fence(w, w.brief, 12_000, 400),
@@ -204,10 +205,11 @@ function full(w: WorkItem, now?: WorkLive): string {
 }
 
 /** One request in a list: its facts, the start of its brief, its latest report and its last log lines. */
-function brief(w: WorkItem, now?: WorkLive): string {
+function brief(w: WorkItem, now?: WorkLive, cost = ''): string {
   return [
     `- ${headLine(w, now)}`,
     ...facts(w),
+    ...(cost ? [cost.trim()] : []),
     ...(w.prs?.length ? ['PRs:', ...prLines(w, 5)] : []),
     'Brief (start):',
     fence(w, w.brief, 1_200, 25),

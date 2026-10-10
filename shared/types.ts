@@ -1,6 +1,7 @@
 // The wire contract between the server and the web UI. Both sides import this file; keep it
 // free of runtime code other than constants so the browser bundle and Node's type stripping
 // can both load it.
+import type { TurnUsage } from './spend.ts';
 
 /** 'blocked': the editor is alive but stuck on a modal dialog, or silent for too long while starting (see unity.blocked). */
 /** A working tree's real state, read from git (docs: server/gitStatus.ts). */
@@ -354,8 +355,9 @@ export type TranscriptEvent =
   | { seq: number; t: string; kind: 'thinking'; text: string }
   | { seq: number; t: string; kind: 'tool_use'; toolUseId: string; name: string; input: unknown; parentToolUseId?: string | null }
   | { seq: number; t: string; kind: 'tool_result'; toolUseId: string; isError: boolean; text: string; images?: ImageRef[] }
-  | { seq: number; t: string; kind: 'result'; ok: boolean; text: string; costUsd: number; turns: number; durationMs: number; answers?: string[] }
-  | { seq: number; t: string; kind: 'system'; text: string }
+  | { seq: number; t: string; kind: 'result'; ok: boolean; text: string; costUsd: number; turns: number; durationMs: number; answers?: string[]; usage?: TurnUsage }
+  /** usage: a compaction's own cost (w859), which is no turn: its text says so. */
+  | { seq: number; t: string; kind: 'system'; text: string; usage?: TurnUsage }
   | { seq: number; t: string; kind: 'error'; text: string }
   | { seq: number; t: string; kind: 'permission'; requestId: string; toolName: string; input: unknown; decision?: 'allow' | 'deny' };
 
