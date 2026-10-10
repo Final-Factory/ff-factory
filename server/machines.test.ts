@@ -710,7 +710,7 @@ test('machine: add_machine on a worker root install changes its settings in plac
   const send = link.ws.send.bind(link.ws);
   link.ws.send = (s: string) => (sent.push(s), send(s));
   // Its sandbox count is its installer's (w576: the installer also makes the player-folder pairs and their rules).
-  assert.throws(() => mm.deployMachine({ id: 'mx', maxSandboxes: 5 }), /sandbox count comes from its installer.*--max-sandboxes 5/);
+  assert.throws(() => mm.deployMachine({ id: 'mx', maxSandboxes: 5 }), /sandbox count comes from its installer.*ops worker reruns the installer there with --max-sandboxes 5/);
   assert.equal(mm.deployMachine({ id: 'mx', maxSandboxes: 6 }).maxSandboxes, 6, 'the same count is no change');
   const after = mm.deployMachine({ id: 'mx', maxUnity: 4 });
   assert.deepEqual([after.maxSandboxes, after.maxAgentsPerSandbox, after.maxUnity, after.maxSandboxAgents, after.status], [6, 2, 4, 5, 'ready'], 'only max_unity changed');

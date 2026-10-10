@@ -586,3 +586,52 @@ test('a deploy: only in a person\'s own turn, a grant good once for 15 minutes, 
   assert.equal(store.readTranscript(OPS_ID, 80).filter((e) => e.kind === 'user' && e.text.startsWith('[deploy] The portal has started again')).length, 1, 'reported once');
   again.close();
 });
+
+test('w855: machine_update opens a job in a harness turn, for the person\'s own open request, with a command the server wrote', async () => {
+  setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-m-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  const machines: Record<string, { id: string; root?: string; platform?: string; target: string; local?: boolean }> = {
+    biscuit: { id: 'biscuit', root: '/home/ben-ryding/ffw', platform: 'linux', target: 'ben-ryding@biscuit' },
+    beast: { id: 'beast', root: 'C:\\ffw', platform: 'win32', target: 'rydin@beast' },
+    old: { id: 'old', target: 'old' },
+    host: { id: 'host', root: '/x', target: 'host', local: true },
+  };
+  const ops = new OpsWorker({
+    sessions,
+    store,
+    options: () => ({}),
+    tellOrchestrator: () => {},
+    personTurn: () => false, // a [dispatch] or a timer: the harness's turn
+    file: path.join(dir, 'ops-worker.json'),
+    workProblem: () => undefined,
+    machine: (id) => machines[id],
+    ownRequestProblem: (id, who) => (id === 'w847' && who === 'ben' ? undefined : `${id} is not one of their own requests`),
+  });
+  const ben = orch('be', BEN);
+  // The plain send still needs a person's own turn; the request is the gate for machine_update.
+  assert.throws(() => ops.send(ben, 'ssh m5 whoami'), /needs a turn Ben started/);
+  // Not the dispatcher, not a stranger, not someone else's request, not a made-up machine or number.
+  assert.throws(() => ops.machineInstall(orch('d', undefined, 'dispatcher'), { machine: 'biscuit', workId: 'w847' }), /only from Lothsahn's and Ben's/);
+  assert.throws(() => ops.machineInstall(orch('lo', LOTH), { machine: 'biscuit', workId: 'w847' }), /not one of their own requests/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: '847' }), /request id like "w847"/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'nope', workId: 'w847' }), /no machine "nope"/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'old', workId: 'w847' }), /not a worker root install/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'host', workId: 'w847' }), /portal's own host/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', maxSandboxes: 2.5 }), /whole number/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', maxSandboxes: 99 }), /whole number/);
+  assert.match(ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', maxSandboxes: 3 }), /new job of Ben's/);
+  await new Promise((r) => setTimeout(r, 300));
+  const sent = store.readTranscript(OPS_ID, 20).find((e) => e.kind === 'user') as { text: string };
+  assert.match(sent.text, /^\[machine update for w847, approved by Ben through that request\]/);
+  assert.ok(sent.text.includes(`ssh ben-ryding@biscuit 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root /home/ben-ryding/ffw --max-sandboxes 3'`), sent.text);
+  assert.match(sent.text, /This job is the step left on w847/);
+  // Windows, and an update that changes nothing.
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847' });
+  await new Promise((r) => setTimeout(r, 300));
+  const win = store.readTranscript(OPS_ID, 40).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(win.text.includes(`-Update -Root C:\\ffw"'`), win.text);
+  assert.match(win.text, /with no setting changed/);
+  ops.close();
+});

@@ -10,6 +10,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Installer reruns and machine updates go through the ops worker, never a person** (w855, lothsahn: "don't ask ben to run
+  installers.  Update your instructions.  Stop doing that.  When we say update the machines, do the update, including
+  installers if necessary"). w847 (raising biscuit to 3 sandboxes) asked Ben to rerun biscuit's installer with
+  `--max-sandboxes 3`, a step the ops worker already could do. Now the dispatcher's and the orchestrators' prompts say an
+  installer rerun (a sandbox count, a daemon update, a reinstall) is sent to the ops worker, "update the machines" means
+  doing it for every machine, and add_machine's refusal of `max_sandboxes` on a worker-root install says the ops worker
+  reruns the installer. New `ops_worker` action `machine_update` (machine, one `work_ids` request, optional
+  `max_sandboxes`, `max_agents_per_sandbox`, `max_unity`) opens that job in any turn of Lothsahn's or Ben's orchestrator,
+  including a `[dispatch]` or a timer: the gate is that the request is one of the person's own open requests, and the
+  server writes the command. Docs: worker-install.md "Updating", ops-worker.md. Needs a portal deploy.
 - **A worker waiting on CI frees its sandbox and is woken within minutes of its checks finishing** (w846, lothsahn: "When
   they're waiting for GithubCI with their unity editors off, they should free the slot", and "How long do workers wait on
   CI? Most of the CI runs are complete"). At about 04:20 UTC on 2026-10-10 BEAST had 0 of 5 sandboxes free, three held by

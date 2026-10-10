@@ -127,6 +127,8 @@ today) shows "update available" and keeps taking, starting and resuming agents (
 "Versions"). The portal says once, in a `[machines]` line, that an update is available. Only a protocol out of range
 (outdated) stops new agents there until the install is updated.
 
+**The ops worker runs the update, and any installer rerun; a person never does** (lothsahn, 2026-10-10, w855: "don't ask ben to run installers.  Update your instructions.  Stop doing that.  When we say update the machines, do the update, including installers if necessary"). The commands below are what [the ops worker](ops-worker.md#updating-and-re-running-a-machines-installer-w855) types over ssh. A request that needs one (a daemon update, a sandbox count, an agent or editor limit, a reinstall) is sent to it by the requester's orchestrator, with `ops_worker machine_update` (`machine`, `max_sandboxes`, `max_agents_per_sandbox`, `max_unity`, and the `work_id` of the person's own open request that asks for it). The dispatcher and the orchestrators never ask a person to run these.
+
 **To update a worker, run its update** (w613). It is one command. It asks nothing, so it runs the same at the machine and
 over ssh (the orchestration worker's path, [ops-worker.md](ops-worker.md)). It is as safe to re-run as the install:
 
@@ -478,7 +480,7 @@ its worktree entries for the moved sandboxes. The M3's nightly watchdog task (`f
 - The workers' guard refuses a shell command that starts `finalfactory.exe` or a `finalfactory.app` outside a slot
   (`server/guard.ts` `checkPlayerLaunch`), naming the slot launcher to use; in sandbox slotK it also refuses another
   sandbox's pair.
-- **Changing the sandbox count:** run the installer again with `--max-sandboxes N` (it refuses N below the sandboxes
+- **Changing the sandbox count:** the ops worker runs the installer again with `--max-sandboxes N` (`ops_worker machine_update`, never a person; it refuses N below the sandboxes
   there). It adds or removes pairs (a folder a player still runs from stays, said), replaces the firewall group, writes
   the slot config, and the portal takes N from the daemon's next hello. `add_machine` on a root install changes its
   other limits in place and refuses `max_sandboxes`.
