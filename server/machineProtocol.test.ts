@@ -32,7 +32,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // portal ignores (it then may count that sandbox free, as before); an older daemon never sends it.
 // w868 (no bump): `githubToken` on `switch` and `save_work`, optional: an older daemon ignores it and pushes on its own
 // login, as before; an older portal never sends it, and the daemon then uses its own login.
-const DECIDED = { protocol: 9, fingerprint: '0743515d8a5edcaf' };
+// w896 (no bump): `workerRoot` on the launch spec's guard, optional: an older daemon ignores it and its guard does not check deletes until
+// it is updated (a verified deploy updates the machines, w887); an older portal never sends it, and the guard then checks nothing.
+const DECIDED = { protocol: 9, fingerprint: 'f654f7e26bb0bc47' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
