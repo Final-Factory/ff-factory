@@ -470,7 +470,7 @@ const EventRow = memo(function EventRow({ ev, sessionId, pending }: { ev: Transc
     case 'permission': {
       const isPending = !ev.decision && pending.has(ev.requestId);
       const p = pending.get(ev.requestId);
-      return <PermissionCard sessionId={sessionId} requestId={ev.requestId} toolName={ev.toolName} input={ev.input} reason={p?.reason} pending={isPending} decision={ev.decision} />;
+      return <PermissionCard sessionId={sessionId} requestId={ev.requestId} toolName={ev.toolName} input={ev.input} reason={p?.reason} pending={isPending} decision={ev.decision} decidedBy={ev.decidedBy?.displayName} />;
     }
     case 'tool_result':
       return (
@@ -748,7 +748,8 @@ function ToolInput({ name, input }: { name: string; input: unknown }) {
 
 // ---------------------------------------------------------------- permission requests
 
-function PermissionCard({
+/** A permission request: Allow and Deny while it waits, who answered it afterwards (w891). */
+export function PermissionCard({
   sessionId,
   requestId,
   toolName,
@@ -756,6 +757,7 @@ function PermissionCard({
   reason,
   pending,
   decision,
+  decidedBy,
 }: {
   sessionId: string;
   requestId: string;
@@ -764,6 +766,7 @@ function PermissionCard({
   reason?: string;
   pending: boolean;
   decision?: 'allow' | 'deny';
+  decidedBy?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [denyOpen, setDenyOpen] = useState(false);
@@ -785,7 +788,7 @@ function PermissionCard({
       <div className={`perm perm-${cls}`} data-request-id={requestId}>
         <div className="perm-head">
           <Icon name={decision === 'deny' ? 'x' : decision === 'allow' ? 'check' : 'bell'} size={13} />
-          <span className="perm-title">{decision === 'allow' ? 'Allowed' : decision === 'deny' ? 'Denied' : pending && answeredBy ? `Waiting for ${answeredBy}` : 'Permission request'}</span>
+          <span className="perm-title">{decision === 'allow' ? `Allowed${decidedBy ? ` by ${decidedBy}` : ''}` : decision === 'deny' ? `Denied${decidedBy ? ` by ${decidedBy}` : ''}` : pending && answeredBy ? `Waiting for ${answeredBy}` : 'Permission request'}</span>
           <span className="perm-tool">{toolLabel(toolName)}</span>
           {summary && <span className="perm-summary-inline">{summary}</span>}
         </div>
