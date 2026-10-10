@@ -21,7 +21,7 @@ import { Toasts } from './components/Toasts';
 import { Lightbox } from './components/Images';
 import { SearchView } from './components/SearchView';
 import { reloadNow, useNewVersion } from './freshness';
-import { setDrawer, useStore } from './store';
+import { setDrawer, toast, toastError, useStore } from './store';
 import { sessionRoute } from './attention';
 import { displayName, fmtBytes, fmtClock, href, navigate, useMediaQuery, useRoute, type Route } from './util';
 
@@ -97,6 +97,16 @@ function Shell({ app }: { app: AppState }) {
  * covers it). The text is cut to one line; hover shows it all (title), a click or tap unfolds it. `onDismiss`
  * adds a close button.
  */
+/** The GitHub token banner's "Re-check now" (w904): the probe runs at once; the banner clears by itself when it passes. */
+async function recheckGithub() {
+  try {
+    const r = await api.githubRecheck();
+    toast(r.ran ? 'GitHub tokens checked again: the banner clears if nothing is missing' : 'Checked less than 30 seconds ago; try again shortly');
+  } catch (e) {
+    toastError(e);
+  }
+}
+
 function Bar({ kind, text, children, onDismiss, busy, action }: { kind: 'warn' | 'error'; text: string; children: ReactNode; onDismiss?: () => void; busy?: boolean; action?: { label: string; onClick: () => void } }) {
   const [open, setOpen] = useState(false);
   return (
@@ -173,7 +183,7 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   const low = h?.disks.filter((d) => d.level !== 'ok').map((d) => `${d.path} ${d.freeBytes === undefined ? '?' : fmtBytes(d.freeBytes)} free`).join(', ');
   const title = (id: string) => app.sessions.find((s) => s.id === id)?.title ?? id;
   // `events`: the event keys closing the bar remembers for this person (on the server); other bars are forgotten on reload.
-  const bars: { key: string; kind: 'warn' | 'error'; lead: string; rest: string; fixed?: boolean; events?: string[] }[] = [];
+  const bars: { key: string; kind: 'warn' | 'error'; lead: string; rest: string; fixed?: boolean; events?: string[]; action?: { label: string; onClick: () => void } }[] = [];
   // Not dismissible: a dry run (FFSB_DRY_RUN=1) must never pass for the real portal.
   if (host.dryRun) bars.push({ key: 'dryrun', kind: 'error', lead: 'DRY RUN: this is a copy, not the real portal.', rest: host.dryRun, fixed: true });
   if (host.elevated) {
@@ -249,6 +259,11 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   // The Claude token pools (w739): a person's tokens used up or over their caps, and runs inside the dispatcher's reserve.
   // The text names no token but its last four characters; a banner returns when its text changes.
   for (const w of tokenWarnings) {
+    // A GitHub token that lacks a requirement (w904): its fix is on github.com; Re-check now reads it again at once.
+    if (w.kind === 'github-token') {
+      bars.push({ key: `token-${w.id}`, kind: 'warn', lead: 'A GitHub token needs updating.', rest: w.text, action: { label: 'Re-check now', onClick: () => void recheckGithub() } });
+      continue;
+    }
     bars.push({ key: `token-${w.id}`, kind: w.kind === 'exhausted' ? 'error' : 'warn', lead: w.kind === 'ci-read' ? 'FF Factory cannot read CI on pull requests.' : w.kind === 'reserve' ? 'The dispatcher\'s Claude token buffer is in use.' : w.kind === 'exhausted' ? 'All your Claude tokens are used up.' : 'All your Claude tokens are at a limit.', rest: w.text });
   }
   if (host.drain) {
@@ -269,7 +284,7 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   return (
     <>
       {shown.map((b) => (
-        <Bar key={b.key} kind={b.kind} text={`${b.lead} ${b.rest}`} onDismiss={b.fixed ? undefined : () => dismiss(b)}>
+        <Bar key={b.key} kind={b.kind} text={`${b.lead} ${b.rest}`} onDismiss={b.fixed ? undefined : () => dismiss(b)} action={b.action}>
           <b>{b.lead}</b> {b.rest}
         </Bar>
       ))}
