@@ -153,7 +153,7 @@ Details in [machines.md](machines.md), "Moving the portal".
 - The game repo's nightly scripts address BEAST by ssh and path, unaffected by this change (no folder moves):
   `scripts/nightly/lab.m3.json` (client B `root: F:/ffsb/nightly-e2e/Builds/nightly`, a folder outside the pool),
   `nightly.sh` and `beast_watchdog.sh` (`F:/ffsb/_nightly-e2e/reports`), `install_schedule.sh` (the watchdog task over
-  ssh), and `player_slots.py` / `setup_player_slot_firewall.ps1` (BEAST picks `F:\ff-players` because `F:\ffsb` exists).
+  ssh), and `player_slots.py` / `setup_player_slot_firewall.ps1` (BEAST's slot root is the `players` folder of its worker install folder; the old drive-probed default is gone, 2026-10-10).
 - Agents on machines have no `wait_for_unity` tool (they poll `unity status`), as on LothDesktop.
 
 ## Known limits

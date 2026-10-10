@@ -26,6 +26,12 @@ arguments. There is no arbitrary command path.
 | `ffsb-helper-reboot` | a reboot in 2 minutes (`shutdown /a` cancels it). Refused unless automatic logon is set up, and at most once per 6 hours |
 | `ffsb-helper-pagefile` | only with `-PagefileGB N`: a fixed pagefile of N GB, from the next boot |
 
+**A worker install's Dev Drive (w900)** uses the same three tasks (`mount`, `trim`, `compact`; the others are not
+registered), made by `scripts/install-privileged-helpers.ps1 -Flex …` from the installer. `-Flex` makes the letter a
+preference: if another claim has taken it, the next free letter from V: down is used and what stored the old one is
+repointed ([worker-install.md](worker-install.md#the-dev-drive-w900)). The helper's attach code now lives in
+`scripts/privileged/devdrive-lib.ps1` (copied beside it), unchanged for BEAST, which has no `-Flex`.
+
 Each writes `%ProgramData%\ffsb-helpers\results\<action>.json` (`ok`, `at`, `detail`). The app
 starts one with `schtasks /run /tn ffsb-helper-<action>` and waits for that file
 (`server/privileged.ts`). Since w510 the only caller is BEAST's daemon's guard, and it starts `ffsb-helper-mount`
@@ -337,7 +343,7 @@ deploy), on every pass while free space is below the soft threshold, and on ever
 | `Builds/<entry>` (any case) and `.nightly-builds/<entry>` named after requests (`w95`, `w393-facing`) | every request it names is merged, done, rejected or cancelled in the ledger, and nothing in it changed for `untouchedHours` (24) |
 | `Builds/<sha>[-win\|-mac]`, `.nightly-builds/<sha>-<platform>` | a player build of one commit (rebuildable), untouched for `shaBuildDays` (2) |
 | `.nightly-builds/runs/<run>` | named after closed requests as above, else untouched for `runRetentionDays` (14) |
-| the nightly lab (`D:/work/ff-nightly`, `~/nevergames/ff-nightly`, or `nightlyRoots`) | `builds/` beyond the newest `nightlyKeep` (2), `runs/` and `logs/` past `runRetentionDays` |
+| the nightly lab (`FF_NIGHTLY_ROOT`, the install folder's `nightly/`, or `nightlyRoots`; the old default places outside the install folder are gone, 2026-10-10) | `builds/` beyond the newest `nightlyKeep` (2), `runs/` and `logs/` past `runRetentionDays` |
 | a sandbox's `Temp/` | its editor is known to be stopped, no `Temp/UnityLockfile`, untouched for `tempHours` (6) |
 | a sandbox's `Logs/<file>` | its editor is known to be stopped, untouched for `logRetentionDays` (14) |
 
@@ -369,7 +375,7 @@ rule), `server/machineSandboxes.test.ts` (a dry run through a daemon).
 ### FF Factory's own leftovers (w626)
 
 On 2026-10-07 the m3 drifted under its 50 GB guard holding about 78 GB of what FF Factory itself had left there: old
-player slots in `~/nevergames/ff-players`, an old agent worktree, and Unity editor versions no project used. A worker
+player slots outside the install folder, an old agent worktree, and Unity editor versions no project used. A worker
 found them (w596) and asked people for a go instead of removing them, and the question reached Ben and Lothsahn. Ben:
 "no YOU free up disk space, like you are instructed to in this harness. stop making us tell you to do it." Now a
 machine's daemon removes these by itself (`server/ownLeftovers.ts`, wired in `machine/daemon.ts` `ownLeftovers`) in
@@ -378,7 +384,7 @@ It reports what it removed in the pass's log like every other rule; it asks nobo
 
 | What | Where it looks | Goes when |
 |---|---|---|
-| player slots (`scripts/nightly/player_slots.py` in the game repo) | every slot root the machine may have: `<root>/players` of a worker root, the root in the slot config (`%ProgramData%\FinalFactory\player-slots.json`, `~/.config/finalfactory/player-slots.json`), and the script's old defaults (`~/nevergames/ff-players`; `D:\workf-players`, `<D..J>:f-players`, `C:f-players`) | a `slot*` folder holding a player copy (or an earlier fill's `trash-*`) with no live lease (a lease lives as the script judges it: younger than 12 h and, on this host, its pid alive) and nothing inside changed for 24 h. The whole slot folder goes; the next launch makes it again at the same path, so the firewall rule that names it still fits |
+| player slots (`scripts/nightly/player_slots.py` in the game repo) | every slot root the machine may have: `<root>/players` of a worker root, the root in the slot config (`%ProgramData%\FinalFactory\player-slots.json`, `~/.config/finalfactory/player-slots.json`) (the script's old default places outside the install folder are gone, 2026-10-10) | a `slot*` folder holding a player copy (or an earlier fill's `trash-*`) with no live lease (a lease lives as the script judges it: younger than 12 h and, on this host, its pid alive) and nothing inside changed for 24 h. The whole slot folder goes; the next launch makes it again at the same path, so the firewall rule that names it still fits |
 | agent worktrees | the linked worktrees of the machine's clone and a worker root's `repo/` (`git worktree list`) | not a sandbox nor holding one, not locked, not inside a sandbox an agent works in now, no process naming it, unused for 2 days (its git HEAD, index and reflog, its top-level entries, a Unity project's Library entries, Temp, Logs, UserSettings), and nothing uncommitted, untracked or on no remote. One with work of its own is **listed** for its owner, never removed. Inside the clone or the sandbox root only a Claude Code worktree (`<x>/.claude/worktrees/<name>`) is taken, so a sandbox the pool does not list is never picked; paths are compared in their real form (Windows 8.3 short names and links resolved). After the removal `git worktree prune` drops git's record; the branch stays |
 | Unity editors | Unity Hub's editor folders (its chosen install path and the defaults), the machine's `unity_editor_root`, and the folders of the editors the Hub lists | a `<version>` folder holding `Editor/Unity.exe` or `Unity.app` whose version no sandbox's or the main clone's `ProjectSettings/ProjectVersion.txt` names, nor the clone's `HEAD`, `origin/develop` or `origin/master`, nor a Unity project up to three folders under the home folder opened within 30 days (a person's own), and that no process runs from. When no version could be read at all, none goes |
 | finished agents' temp folders | the temp folders (the regular `agent-temp` rule above) | two hours after the session stopped, never while it runs |
@@ -475,7 +481,7 @@ root. Now only the first group removes anything on a machine with a root.
 | tool caches | `npx`, `npm-cache`, `nuget-http`, `pip-cache`, `uv-cache`, `go-build-cache`, `homebrew-cache`, `xcode-derived`, `playwright`, `edge-webview` | the user's profile and `~/Library` | **listed** |
 | the game's data folder | `playtest-sessions` | `LocalLow\Never Games\finalfactory*\PlaytestSessions` | **listed** |
 | other | `worker-archives` (`~/ff-worker`), `actions-work` (runner job folders), `stale-library` (Unity Libraries of projects under the home folder) | the home folder, `C:\` | **listed** |
-| own leftovers outside the root | player slots in the old default roots (`~/nevergames/ff-players`, `D:\workf-players`, ...), Unity editors in Unity Hub's folders, worktrees of a clone outside the root | | **listed** |
+| own leftovers outside the root | player slots outside the root (the old default places are gone, 2026-10-10), Unity editors in Unity Hub's folders, worktrees of a clone outside the root | | **listed** |
 
 A machine **without** a root (the portal's own host, an install from before w513) is not fenced: nothing tells the daemon
 which folder is the worker's. Nothing is configurable: a person who wants a rule outside the root back says so, and it
@@ -500,6 +506,45 @@ inside the root (candidates, not verified here: `NUGET_PACKAGES`, `npm_config_ca
 `DOTNET_CLI_HOME`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `CLAUDE_CONFIG_DIR`; Unity's own folders have none and the game's data
 folder has no override, [worker-root.md](worker-root.md) section 2). Moving one is a request for lothsahn to decide, not
 clean-up work.
+
+### Sandbox Library caches: trim on release (w898)
+
+Lothsahn (2026-10-10): "almost all the space is in the work folder, specifically in the BuildCache and BurstCache folders of
+the various sandboxes", then: "I would like the harness to trim the burst cache and build cache when a worker releases a
+slot. The worker should not have to do this--it should be built into the code", and "Slots should have a new state called
+'cleanup' and the dispatcher should not allocate workers to cleanup. Once the trim finishes, the slot should go idle".
+
+**Measured (lothdesktop, 2026-10-10).** `Library/BuildCache` 6.2-12.7 GB and `Library/BurstCache` 4.8-6.7 GB in each of the six
+sandboxes (87 GB; a fresh seed holds 0.7 and 2.5). Unity never removes entries, so every code change adds some. NTFS keeps
+last-access times (`disablelastaccess` 2) but a build reads the whole BuildCache, so only write times tell old from current:
+about half of each cache was written more than 2 days before. One commit's working set is small: after a build from
+nothing, BuildCache is 0.4 GB and BurstCache 3.2 GB. Player build of one commit in slot6 (`scripts/nightly/build_player.sh`,
+Burst SSE2+SSE4, no other build running): fully warm 112 s; with every file older than a day pruned (6.3 GB) 106 s; both caches
+removed (the rest of `Library` warm) 530 s, 5 times longer. A wipe costs that on the next worker's first build; a trim does not.
+
+**The trim** (`server/cacheTrim.ts`, `TRIM_DEFAULTS`: keep files written within 24 h, then each cache cut oldest-first to 4 GB, give up
+after 10 min; the numbers are a guess on top of the measurements above, kept above one commit's working set): removes cache
+*files*, never a whole cache folder and nothing else under `Library`. **When**: `SandboxPool.trimReleased`
+(`machine/sandboxes.ts`) watches each sandbox's live agents (the daemon's own sessions, `liveIn`) at every 30 s look and trims the
+moment the last one is gone, whichever way the worker left (request closed, a wait for CI or a person, a stop, the idle
+reaper): the portal needs no new message. **State**: the sandbox is `cleanup` (`SandboxStatus`) from that moment: not free
+(`Agents.free`, the capacity count and placement all need `ready`), refused by `startWorker`, by the daemon's start check and by
+editor starts and branch switches, shown as `cleanup` in `list_sandboxes` and "Cleanup" on the dashboard; it is `ready` again
+when the trim ends. **Safety**: never with an agent live there, a pool editor up, or `Temp/UnityLockfile` present (an editor or a
+batchmode build); a release with the editor up waits (`pendingTrim`) and trims after the editor stops; a trim stops between
+two files when a lock file appears. **Failure**: a hung, failing or slow trim is cut off after `timeoutMs`, the sandbox goes
+back to `ready` and the pool logs why (and tells the orchestrator when it stopped early); a daemon restart reads `cleanup` back
+as `ready`. `daemon.json` `sandboxCacheTrim` sets the limits or `false` for never.
+
+**Backstop** (`cleanupRules`, for sandboxes nobody releases): `sandbox-lib-cache-idle` (whole `BuildCache`/`BurstCache`, unused
+for `libraryCacheIdleHours` 48), `sandbox-lib-cache-cap` (a cache over `libraryCacheCapGB` 6, idle an hour) and
+`sandbox-lib-cache-low` (all idle ones, while free space is below the soft threshold), each only while the project has no
+`Temp/UnityLockfile` and, as every rule, with the entry renamed first so one with an open file is skipped.
+
+**Seeds.** A new sandbox's Library comes from the configured `librarySeed`, which keeps its caches (a warm start; lothdesktop's is
+0.7 + 2.5 GB). When the seed is missing the copy falls back to the main clone's or a sandbox's Library, and now leaves their
+`BuildCache` and `BurstCache` behind (`copyTree` `exclude`; robocopy `/XD`, elsewhere removed after the copy). D: on lothdesktop is NTFS,
+so copies are full; a block-cloning volume (w900's Dev Drive) would make the six copies share blocks but not stop each from growing.
 
 ## 6. Crash-safe data files
 

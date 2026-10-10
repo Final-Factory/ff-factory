@@ -63,7 +63,7 @@ test('Discord reports and trusted requests land in the Intake tab, wait for a pe
   await expect(settings).toContainText('Discord on');
   await expect(settings).toContainText('FFBox off');
   await expect(settings).toContainText('Release follow-ups off');
-  await expect(settings).toContainText('Nightly e2e off');
+  await expect(settings).toContainText('File regressions based on Nightly run: off');
   await expect(settings).toContainText('from tester');
   await expect(settings).toContainText('auto-approve off');
   await expect(settings).toContainText("#bug-reports, #dev-bug-reports: FFBox's, never filed from");
@@ -199,4 +199,38 @@ test('the intake summary is served with the state, and a person can only approve
   const direct = await page.request.get('/api/intake');
   expect(direct.ok()).toBe(true);
   expect(((await direct.json()) as { release: { enabled: boolean } }).release.enabled).toBe(false);
+});
+
+test('the nightly chips on the Intake tab are switches: a click flips the setting live and the chip follows (w903)', async ({ authed: page }) => {
+  await go(page, '#/dispatcher/intake');
+  const regressions = page.getByTestId('nightly-regressions-toggle');
+  const schedule = page.getByTestId('nightly-run-toggle');
+  await expect(regressions).toContainText('File regressions based on Nightly run: off');
+  await expect(schedule).toContainText('Nightly run off');
+  await expect(regressions).toHaveAttribute('title', /Click to turn on: .*intake\.nightly\.enabled/);
+  await expect(schedule).toHaveAttribute('title', /Click to turn on: .*stay as they are/);
+  await expect(regressions).toHaveCSS('cursor', 'pointer');
+
+  await regressions.click();
+  await expect(regressions).toContainText('File regressions based on Nightly run: on');
+  expect((await appState(page.request)).intake?.nightly?.enabled).toBe(true);
+  await schedule.click();
+  await expect(schedule).toContainText('Nightly run on');
+  const on = (await appState(page.request)).intake?.nightly;
+  expect([on?.enabled, on?.run?.enabled]).toEqual([true, true]);
+  // Switching the schedule on left the rest of its block as it was.
+  expect([on?.run?.time, on?.run?.tz, on?.run?.machine]).toEqual(['03:00', 'America/New_York', 'lothdesktop']);
+
+  // The route itself: a refused body changes nothing.
+  const bad = await page.request.post('/api/intake/nightly/toggle', { data: { which: 'time', on: true } });
+  expect(bad.status()).toBe(400);
+  const notBool = await page.request.post('/api/intake/nightly/toggle', { data: { which: 'run', on: 'yes' } });
+  expect(notBool.status()).toBe(400);
+
+  await regressions.click();
+  await schedule.click();
+  await expect(regressions).toContainText('File regressions based on Nightly run: off');
+  await expect(schedule).toContainText('Nightly run off');
+  const off = (await appState(page.request)).intake?.nightly;
+  expect([off?.enabled, off?.run?.enabled, off?.run?.time]).toEqual([false, false, '03:00']);
 });

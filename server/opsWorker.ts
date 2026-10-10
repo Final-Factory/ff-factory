@@ -533,11 +533,23 @@ export const SAFE_TARGET = /^[\w@.\-]+$/;
 export const SAFE_ROOT = /^[\w:\\/. \-]+$/;
 
 /** The settings an installer update may change (w855), as its command-line flags: only those named, whole numbers. */
-export function workerUpdateFlags(platform: string | undefined, nums: { maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number }): string[] {
+export function workerUpdateFlags(
+  platform: string | undefined,
+  nums: { maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number },
+  dev: { devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number } = {},
+): string[] {
   const win = platform === 'win32';
   return (
     win
-      ? [nums.maxSandboxes !== undefined && `-MaxSandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `-MaxAgentsPerSandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `-MaxUnity ${nums.maxUnity}`]
+      ? [
+          nums.maxSandboxes !== undefined && `-MaxSandboxes ${nums.maxSandboxes}`,
+          nums.maxAgentsPerSandbox !== undefined && `-MaxAgentsPerSandbox ${nums.maxAgentsPerSandbox}`,
+          nums.maxUnity !== undefined && `-MaxUnity ${nums.maxUnity}`,
+          // The Dev Drive (w900, docs/worker-install.md "The Dev Drive"): Windows only; an update makes none unless one of these says so.
+          dev.devDrive && !dev.moveToDevDrive && '-DevDrive',
+          dev.moveToDevDrive && '-MoveToDevDrive',
+          dev.devDriveMaxGB !== undefined && `-DevDriveMaxGB ${dev.devDriveMaxGB}`,
+        ]
       : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`]
   ).filter((f): f is string => !!f);
 }
@@ -712,7 +724,7 @@ export class OpsWorker {
    */
   machineInstall(
     caller: SessionInfo | undefined,
-    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number },
+    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number },
   ): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
@@ -728,11 +740,14 @@ export class OpsWorker {
     for (const [k, v] of Object.entries(nums)) {
       if (v !== undefined && (!Number.isInteger(v) || v < 1 || v > 16)) throw new Error(`${k}: a whole number from 1 to 16`);
     }
+    const dev = { devDrive: o.devDrive, moveToDevDrive: o.moveToDevDrive, devDriveMaxGB: o.devDriveMaxGB };
+    if ((dev.devDrive || dev.moveToDevDrive || dev.devDriveMaxGB !== undefined) && m.platform !== 'win32') throw new Error(`dev_drive, move_to_dev_drive and dev_drive_max_gb: a Dev Drive is a Windows feature, and ${m.id} is not a Windows PC`);
+    if (dev.devDriveMaxGB !== undefined && (!Number.isInteger(dev.devDriveMaxGB) || dev.devDriveMaxGB < 50 || dev.devDriveMaxGB > 65536)) throw new Error('dev_drive_max_gb: a whole number of GB from 50 (Windows\' own minimum for a Dev Drive) to 65536');
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
-    const extra = workerUpdateFlags(m.platform, nums).join(' ');
+    const extra = workerUpdateFlags(m.platform, nums, dev).join(' ');
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, extra)}'`;
     const what = extra ? `with these settings changed: ${extra}` : 'with no setting changed';
-    const text = `[machine update for ${id}, approved by ${person.displayName} through that request] Update ${m.id}'s worker install ${what}. Run exactly this, once, and nothing else on the machine (docs/worker-install.md, "Updating"; it asks nothing, keeps every other setting, the machine's own credential and the PATH, restarts the daemon; never issue a credential for it):\n\n${command}\n\nThen check with list_machines that ${m.id} is online again${extra ? ' and shows the new limits' : ''}, and report what the update printed (the \`~ key: before -> after\` lines) and what the portal sees.`;
+    const text = `[machine update for ${id}, approved by ${person.displayName} through that request] Update ${m.id}'s worker install ${what}. Run exactly this, once, and nothing else on the machine (docs/worker-install.md, "Updating"; it asks nothing, keeps every other setting, the machine's own credential and the PATH, restarts the daemon; never issue a credential for it):\n\n${command}\n\nThen check with list_machines that ${m.id} is online again${extra ? ' and shows the new limits' : ''}, and report what the update printed (the \`~ key: before -> after\` lines) and what the portal sees.${dev.moveToDevDrive ? ` This one moves the sandboxes onto a Dev Drive (docs/worker-install.md, "The Dev Drive"): it refuses, naming them, while an agent is in a sandbox or a Unity editor runs from one, and then nothing has changed: report which and stop. When it can go ahead it takes an hour or more (it saves each sandbox's work on its branch first, moves the Library seed, and re-creates each sandbox): run it in the background and read its output until it ends, never twice at once, and never interrupt it; if it stops half way, run the same command again (it picks up where it stopped). Report the free space on the root's drive before and after (\`Get-PSDrive <letter>\` on the machine) and the sandboxes it moved.` : dev.devDrive ? ' This one also makes the Dev Drive (docs/worker-install.md, "The Dev Drive") but moves no sandbox; report the letter it chose and the size it printed.' : ''}`;
     return this.send(caller, text, true, [id], true);
   }
 

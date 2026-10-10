@@ -4,6 +4,9 @@
 #   .\install-privileged-helpers.ps1                       # defaults below
 #   .\install-privileged-helpers.ps1 -PagefileGB 48        # also offer a fixed-pagefile action
 #   .\install-privileged-helpers.ps1 -Uninstall
+#   .\install-privileged-helpers.ps1 -Vhdx D:\work\ffw\devdrive.vhdx -Letter V -Flex -StateFile D:\work\ffw\devdrive.json `
+#       -DaemonConfig D:\work\ffw\daemon\daemon.json -WorkerRoot D:\work\ffw -Actions mount,trim,compact
+#                                                          # a worker install's Dev Drive (w900, scripts/worker/devdrive.ps1 runs this)
 #
 # What it does: copies scripts\privileged\ffsb-helper.ps1 to %ProgramData%\ffsb-helpers (writable only by
 # SYSTEM and Administrators), and registers one SYSTEM task per action (ffsb-helper-mount, which also runs
@@ -16,7 +19,16 @@ param(
   # running this script. (Not USERDOMAIN\USERNAME: over OpenSSH USERDOMAIN is WORKGROUP, which is no account.)
   [string]$User = '',
   [int]$PagefileGB = 0,
-  [switch]$Uninstall
+  [switch]$Uninstall,
+  # A worker install's Dev Drive (w900): the letter is a preference; the helper picks the next free one if it is taken
+  # and repoints the state file, the daemon's config and pool state, the root's junctions and the worktrees. See
+  # ffsb-helper.ps1. -Actions limits the tasks to those named (default: all, which is what BEAST has).
+  [switch]$Flex,
+  [string]$StateFile = '',
+  [string]$DaemonConfig = '',
+  [string]$WorkerRoot = '',
+  [string]$Skip = '',
+  [string[]]$Actions = @()
 )
 $ErrorActionPreference = 'Stop'
 $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -40,7 +52,7 @@ $User = $who.name
 
 $dir = Join-Path $env:ProgramData 'ffsb-helpers'
 $results = Join-Path $dir 'results'
-$actions = @('mount', 'trim', 'compact', 'detach', 'reboot') + $(if ($PagefileGB -ge 4) { 'pagefile' } else { @() })
+$actions = if ($Actions.Count) { @($Actions | ForEach-Object { $_ -split ',' } | Where-Object { $_ }) } else { @('mount', 'trim', 'compact', 'detach', 'reboot') + $(if ($PagefileGB -ge 4) { 'pagefile' } else { @() }) }
 
 if ($Uninstall) {
   foreach ($a in 'mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile') { Unregister-ScheduledTask -TaskName "ffsb-helper-$a" -Confirm:$false -ErrorAction SilentlyContinue }
@@ -52,6 +64,7 @@ if ($Uninstall) {
 #    be turned into anything else). Everyone may read it and the results.
 New-Item -ItemType Directory -Force $dir, $results | Out-Null
 Copy-Item -Force (Join-Path $PSScriptRoot 'privileged\ffsb-helper.ps1') (Join-Path $dir 'ffsb-helper.ps1')
+Copy-Item -Force (Join-Path $PSScriptRoot 'privileged\devdrive-lib.ps1') (Join-Path $dir 'devdrive-lib.ps1')
 icacls $dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "icacls $dir failed" }
 
@@ -65,6 +78,13 @@ foreach ($a in $actions) {
   $name = "ffsb-helper-$a"
   $taskArgs = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$dir\ffsb-helper.ps1`" -Action $a -Vhdx `"$Vhdx`" -Letter $Letter -ResultDir `"$results`""
   if ($a -eq 'pagefile') { $taskArgs += " -PagefileGB $PagefileGB" }
+  if ($Flex) {
+    $taskArgs += ' -Flex'
+    if ($StateFile) { $taskArgs += " -StateFile `"$StateFile`"" }
+    if ($DaemonConfig) { $taskArgs += " -DaemonConfig `"$DaemonConfig`"" }
+    if ($WorkerRoot) { $taskArgs += " -WorkerRoot `"$WorkerRoot`"" }
+    if ($Skip) { $taskArgs += " -Skip `"$Skip`"" }
+  }
   $extra = @{}
   if ($a -eq 'mount') { $boot = New-ScheduledTaskTrigger -AtStartup; $boot.Delay = 'PT30S'; $extra.Trigger = $boot }
   $task = New-ScheduledTask @extra `

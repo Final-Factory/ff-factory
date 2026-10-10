@@ -4,22 +4,53 @@ All notable changes to FF Factory are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Until 1.0 a minor bump may break things.
 
-Add your change under **[Unreleased]** in the same pull request. `npm run release -- minor` (or
+Add your change as a note file in `changelog.d/` in the same pull request (not here: see changelog.d/README.md). Notes
+already under **[Unreleased]** stay until the next release. `npm run release -- minor` (or
 `patch`, `major`, `X.Y.Z`) moves those notes under a new version, bumps `package.json` and
 `web/package.json`, commits and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
-- **A banner when a GitHub token lacks a required repository or permission** (w904, lothsahn: "build checks that if the
-  necessary repos and permissions aren't present, a banner appears at the top asking for the github token to be updated").
-  The requirements are one list, `shared/githubRequirements.ts` (lothsahn's nine repositories, config `vault.githubRepos`,
-  and his permissions: Actions, Commit statuses, Contents, Discussions, Issues, Pull requests and Workflows read and write,
-  Artifact metadata and Metadata read, the organization's Self-hosted runners read), kept equal to docs/vault.md 13.2 by a
-  test. Every vault GitHub token and the portal's own gh login (D7, through `gh api -i`) are probed against them; one that
-  lacks anything, or nears or passes its expiry, gets a dashboard banner for its person and the owners naming what is
-  missing and the fix, a `system_status` WARNING and a `[host]` notice once when it turns bad and once when it recovers.
-  "Re-check now" on the banner and the vault page probes at once. Needs a portal deploy.
+- **A released sandbox's Burst and Build caches are trimmed before the next worker gets it** (w898, lothsahn: "almost all the space is in the work folder, specifically in the BuildCache and BurstCache folders of the various sandboxes"; "I would like the harness to trim the burst cache and build cache when a worker releases a slot"). Library/BuildCache and BurstCache were 87 GB over lothdesktop's six sandboxes. When a sandbox's last live agent goes, the daemon puts it in the new state `cleanup` (not free, no placement, no start, shown on the dashboard), keeps the files written in the last 24 h up to 4 GB per cache, and sets it `ready` again; a hung or failed trim times out after 10 min and frees it. Never with an editor or build on the project. The daemon's clean-up also ages out and caps the caches of sandboxes nobody releases, and a Library copied from a clone or sandbox leaves them behind. Measured: a build with the caches removed took 530 s against 112 s warm. Docs: self-recovery.md 5. Tests: `cacheTrim.test.ts`, `machineSandboxes.test.ts`, `agentState.test.ts`, `copyTree.test.ts`, `cleanup.test.ts`.
+- **A worker waiting on a deploy, a person or another request frees its sandbox at once, and the deploy wakes it** (w890,
+  lothsahn: "Why is w889 holding a slot?  It's done with its work and it should free the slot." and "We should not wait for a
+  worker waiting for a deploy ... once the deploy has happened, the worker can get rescheduled by the dispatcher"). w889
+  sat Idle for hours on m3's only sandbox after its PR merged, waiting for the portal deploy and a token permission. The
+  release pass (`server/placeAgain.ts`) now releases at once the sandbox of a worker whose open requests all wait on a
+  deploy, a request, a PR merging or a person (`Agents.waitOn`), as it does for CI; it still never releases unsaved work,
+  unpushed commits, a batch run, a worker mid-turn or one with a job it needs. `blocked_on` takes `deploys`; a deploy gate
+  clearing resumes its worker within a minute; the ledger cleanup resumes (not closes) a worker whose report puts a check
+  after the deploy. Needs a portal deploy (docs/machines.md "Released sandboxes").
 
+
+- **The Intake tab's two nightly chips are switches** (w903, lothsahn: "Please modify FF Factory so I can toggle those settings on
+  the intake panel by clicking on them"). Click "Nightly run" to turn the portal's nightly schedule on or off
+  (`intake.nightly.run`, `enabled`; the time, zone, machine, person and report window stay), and the other chip, now named "File
+  regressions based on Nightly run" (it was "Nightly e2e", lothsahn's wording), to file or stop filing the lab's regressions
+  (`intake.nightly.enabled`). `POST /api/intake/nightly/toggle` goes through `set_app_config`'s checks and write
+  (`toggleNightly`, `server/appConfig.ts`), applies live with no restart and pushes the new summary to every page; any signed-in
+  person may click, as `set_app_config` allows for these keys. The portal's log gets an `app config: ... set by <person> from the
+  Intake tab` line. The chips have a pointer cursor, a hover outline and a tooltip saying what they toggle. Request titles ("Nightly
+  e2e <date>: ...") are unchanged. Tests: `server/appConfig.test.ts`, `e2e/intake.spec.ts`.
+
+
+- **The deleted pre-install-folder places are no longer assumed anywhere** (w897, lothsahn, 2026-10-10: "Please remove references to
+  [the old clone, slot pool and nightly lab]. Those folders are all gone"). The stale-output pass's nightly lab default is `FF_NIGHTLY_ROOT`,
+  else the worker root's `nightly/` (`defaultNightlyRoots`), not a hard-coded place; the own-leftovers pass no longer looks for the
+  old slot pools; `docs/worker-root.md`, `worker-install.md`, `self-recovery.md` and `beast-machine.md` say the old places are gone
+  (the per-machine migration section now lists only the generic steps), and the test fixtures name no deleted folder. Earlier entries
+  below keep the old names: they record what happened then.
+- **Workers post as Max from any machine, through FFBox** (w901, lothsahn: "at some point, a worker on LothDesktop didn't have
+  access to publish the notes. Please make sure that workers can request FFBox send a discord message and has what they
+  need."). Posting a release's patch notes needed the ffdiscord config and the bot token, which only LothDesktop had, so a
+  release stayed open when no such machine was free. FFBox holds the bot: the machine tool `post_as_max` (channel
+  `dev_patch_notes`, `dev_chat` or `agent_testing`; `text`, or a `file` the daemon reads with `skip_lines`; `thread`; a
+  dedupe `key`, required for patch notes) asks FFBox's new `post_message` query (`server/ffboxPost.ts`), which runs the guards
+  (channel allowlist, never the bug channels; no mention of anyone; secret scan; 2000 characters; the key posts once; 12 an
+  hour; every attempt logged) and answers the message link. A post that was made is a Max event, so the Max page and
+  `max_activity` show it. The dispatcher's and orchestrators' text no longer says posting needs LothDesktop
+  (docs/ffbox.md, "Posting as Max"; docs/machines.md, docs/max.md, docs/vault.md, docs/worker-root.md). Needs a portal deploy,
+  and FFBox on ffbox master with `post_message` (connector 2.9.0); each machine's daemon needs it only for `file`.
 - **The chat's message box empties when you send, every time** (w893, lothsahn: "Sometimes when I send you a message, the message doesn't clear
   and I have to manually clear it."). The box (and its saved draft) cleared only when the server answered, so a page that reloaded or
   closed with the message on its way wrote the sent text back as a draft. It now empties at once, and a text-only message goes with
@@ -52,6 +83,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   docs/self-recovery.md "Where clean-up may delete". Flag: on a root machine nothing now empties the Unity, npm, NuGet,
   Playwright and crash-dump stores on C: by itself. Needs a portal deploy (instructions, guard spec) and then each machine's
   daemon update (the fence), which a verified deploy does by itself (w887).
+
 - **A verified portal deploy now updates every machine's daemon by itself** (w887, lothsahn: "Update FFFactory so that after
   updating the portal and validating, it automatically updated all the machines."). `fff-update verify` writes
   `data/update.verified.json` when the new release answers (a rollback writes none); the portal (`server/machineRollout.ts`) then

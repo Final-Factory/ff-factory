@@ -1,9 +1,10 @@
 # Max in FF Factory
 
 Max is the Discord bot Final Factory's agents post as, through the `ffdiscord` CLI of the ff-discord
-plugin (final-factory-agents). Max's own process runs on FFBox; FF Factory's agents post with the same
-bot token from BEAST and the Macs. FF Factory shows three things about it, read-only: nothing here
-posts.
+plugin (final-factory-agents). Max's own process runs on FFBox. FF Factory's agents post as Max in two ways: through
+FFBox, on any machine, with the machine tool `post_as_max` (w901; FFBox holds the bot, so no computer needs the token:
+[ffbox.md](ffbox.md#posting-as-max-from-any-machine-w901)), or with the `ffdiscord` CLI on a computer that has its
+config. FF Factory shows three things about Max, read-only: nothing on the Max page posts.
 
 | where | what |
 |---|---|
@@ -26,6 +27,9 @@ The code: `server/max.ts` (the manager), `server/maxEvents.ts` (the events file)
 (where the token is), `web/src/components/MaxPanel.tsx` and `External.tsx`.
 
 ## How activity gets here: the events file
+
+(A post made through FFBox with `post_as_max` is not written by the CLI: the portal adds the event itself when the post
+was made, `MaxManager.ingest` with the computer's id as `where`, so it shows here and in `max_activity` like the rest.)
 
 The CLI appends one JSON line per write it makes to the file named by `FF_MAX_EVENTS`. FF Factory puts
 that variable, and `FF_SESSION_ID`, in the environment of every agent it starts:

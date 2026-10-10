@@ -371,6 +371,7 @@ export function machineSandboxGlance(sb: MachineSandbox, sessions: SessionInfo[]
   const attention = sessions.reduce((n, s) => n + s.pendingPermissions.length, 0);
   if (sb.status === 'creating') return { tone: 'blue', label: 'Creating', detail: sb.statusDetail, attention, progress: true };
   if (sb.status === 'deleting') return { tone: 'blue', label: 'Deleting', detail: sb.statusDetail, attention, progress: true };
+  if (sb.status === 'cleanup') return { tone: 'blue', label: 'Cleanup', detail: sb.statusDetail, attention, progress: true };
   if (sb.status === 'error') return { tone: 'red', label: 'Failed', detail: firstLine(sb.statusDetail), attention };
   // Free when nobody works there (w575: the label is the sandbox's name and says nothing about use).
   return agentsGlance(sb.id, sessions, attention, sb.unity, sessions.length === 0);

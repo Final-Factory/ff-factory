@@ -1,9 +1,9 @@
 // w643: what a Blocked request waits on, and when each kind of blocker clears, stays open, gets stuck or needs a person.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BLOCKER_STUCK_MS, CI_UNREADABLE_MS, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import type { WorkBlocker, WorkItem } from '../shared/types.ts';
-import { checksState, ghChecks, ghPr, runsState } from './blockerWatch.ts';
+import { checksState, ghChecks, ghPr, ghPrHealth, prHealthOf, runsState } from './blockerWatch.ts';
 import type { RunResult } from './proc.ts';
 
 const NOW = Date.parse('2026-10-07T12:00:00Z');
@@ -186,7 +186,7 @@ test('w829: the checks of #1338 (w814) and #1335 (w818) as they finished read as
 
 test('w829: Actions runs, the reading without Checks permission: running, green, red, cancelled (#1328), none yet', () => {
   const ref = 'Final-Factory/FinalFactory#1328';
-  assert.deepEqual(runsState({ workflow_runs: [] }, ref), { done: false, text: `${ref} has no workflow runs yet` });
+  assert.deepEqual(runsState({ workflow_runs: [] }, ref), { done: false, text: `${ref} has no workflow runs yet`, none: true });
   assert.deepEqual(runsState({ workflow_runs: [{ name: 'Lessons index freshness', status: 'completed', conclusion: 'success' }, { name: 'Test Runner', status: 'in_progress', conclusion: null }] }, ref), { done: false, text: `1 of 2 workflow runs on ${ref} still running (Test Runner)` });
   assert.equal(runsState({ workflow_runs: [{ name: 'Test Runner', status: 'queued' }] }, ref).done, false);
   assert.equal(runsState({ workflow_runs: [{ name: 'Test Runner', status: 'waiting' }] }, ref).done, false, 'waiting for an approval is not finished');
@@ -277,4 +277,55 @@ test('w829: CI that cannot be read clears its block after CI_UNREADABLE_MS so it
   // A read that works wins: running stays open, done clears with its words.
   assert.equal(blockerVerdict(ci, facts([], { ci: () => ({ done: false, text: 'running' }), ciUnreadable: () => undefined })).state, 'open');
   assert.deepEqual(blockerVerdict(ci, facts([], { ci: () => ({ done: true, text: 'all passed' }) })), { state: 'clear', why: 'all passed' });
+});
+
+test('w907: a ci gate on a pull request that conflicts with its base, or whose head never got a run, clears at once and says what to do', () => {
+  const ref = 'Final-Factory/ff-factory#283';
+  const ci = block({ kind: 'ci', ref, what: 'CI on #283', by: 'worker abc12345' });
+  const health = (h: Partial<PrHealth>): Partial<BlockerFacts> => ({ prHealth: () => ({ state: 'open', head: '312570ce0fd4', ...h }) });
+  const none = { done: false, text: `${ref} has no checks yet`, none: true };
+  const running = { done: false, text: `3 of 8 checks on ${ref} still running` };
+  const WHY = "PR #283 conflicts with main (CI can't run): merge main in, resolve, push, and wait again";
+  assert.equal(conflictText(ref, 'main'), WHY);
+  // w890 as it happened: conflicting with main, no checks (GitHub starts none), or unreadable checks: wake the worker now.
+  assert.deepEqual(blockerVerdict(ci, facts([], { ci: () => none, ...health({ conflict: { base: 'main' } }) })), { state: 'clear', why: WHY });
+  assert.deepEqual(blockerVerdict(ci, facts([], { ci: () => undefined, ...health({ conflict: { base: 'main' } }) })), { state: 'clear', why: WHY });
+  // Checks already running (it conflicted only later): they run on, so it keeps waiting.
+  assert.equal(blockerVerdict(ci, facts([], { ci: () => running, ...health({ conflict: { base: 'main' } }) })).state, 'open');
+  // Finished checks win over everything: the gate clears on them as before.
+  assert.equal(blockerVerdict(ci, facts([], { ci: () => ({ done: true, text: 'CI finished' }), ...health({ conflict: { base: 'main' } }) })).why, 'CI finished');
+  // Merged or closed pull requests have no conflict to report; an unread pull request assumes none.
+  assert.equal(blockerVerdict(ci, facts([], { ci: () => none, ...health({ state: 'merged', conflict: { base: 'main' } }) })).state, 'open');
+  assert.equal(blockerVerdict(ci, facts([], { ci: () => none })).state, 'open');
+  // No run for the head: after CI_NO_RUN_MS (ten minutes) from when the portal first saw it, not before.
+  assert.equal(CI_NO_RUN_MS, 10 * 60_000);
+  const seen = (min: number) => health({ headSeenAt: NOW - min * 60_000 });
+  assert.equal(blockerVerdict(ci, facts([], { ci: () => none, ...seen(9) })).state, 'open');
+  const late = blockerVerdict(ci, facts([], { ci: () => none, ...seen(10) }));
+  assert.equal(late.state, 'clear');
+  assert.match(late.why, /^no CI run exists for PR #283's head 312570c 10 min after it was pushed \(Final-Factory\/ff-factory#283 has no checks yet\): check that your push reached it \(gh pr view 283 --json headRefOid\), push, and wait again$/);
+  assert.equal(blockerVerdict(ci, facts([], { ci: () => running, ...seen(60) })).state, 'open', 'a run exists: CI is running, not missing');
+  assert.equal(blockerVerdict(ci, facts([], { ci: () => undefined, ...seen(60) })).state, 'open', 'checks unreadable: cannot tell no run from unread (w829 clock decides)');
+  // A pr gate (waiting for a merge): only the one its worker set itself wakes on a conflict.
+  const pr = block({ kind: 'pr', ref, what: '#283 merged', by: 'worker abc12345' });
+  const open = { prs: () => ({ state: 'open' as const, text: `${ref} is still open` }) };
+  assert.deepEqual(blockerVerdict(pr, facts([], { pr: open.prs, ...health({ conflict: { base: 'develop' } }) })), { state: 'clear', why: "PR #283 conflicts with develop (CI can't run): merge develop in, resolve, push, and wait again" });
+  assert.equal(blockerVerdict({ ...pr, by: 'dispatcher' }, facts([], { pr: open.prs, ...health({ conflict: { base: 'develop' } }) })).state, 'open');
+  assert.equal(blockerVerdict(pr, facts([], { pr: open.prs, ...health({}) })).state, 'open');
+});
+
+test('w907: gh pr view is read for the head, the base and GitHub\'s mergeability; UNKNOWN is no conflict', async () => {
+  const ref = 'Final-Factory/ff-factory#283';
+  const view = (out: unknown) => fakeGh([{ match: /--json state,mergeable,baseRefName,headRefOid,headRefName$/, out }]);
+  assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'CONFLICTING', baseRefName: 'main', headRefOid: 'abc', headRefName: 'w890' }).run), { state: 'open', conflict: { base: 'main' }, head: 'abc', headRef: 'w890' });
+  assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'UNKNOWN', baseRefName: 'main', headRefOid: 'abc' }).run), { state: 'open', head: 'abc' });
+  assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'MERGEABLE', baseRefName: 'main', headRefOid: 'abc' }).run), { state: 'open', head: 'abc' });
+  assert.equal(prHealthOf({ state: 'MERGED' }).state, 'merged');
+  assert.equal(prHealthOf({ state: 'CLOSED' }).state, 'closed');
+  await assert.rejects(ghPrHealth(ref, fakeGh([{ match: /./, err: 'HTTP 401: Bad credentials' }]).run), /gh pr view Final-Factory\/ff-factory#283: HTTP 401: Bad credentials/);
+  await assert.rejects(ghPrHealth('#283'), /is not a pull request/);
+  // The checks themselves now say when there are none (the no-run rule reads that).
+  assert.equal(checksState({ state: 'OPEN', statusCheckRollup: [] }, ref).none, true);
+  assert.equal(runsState({ workflow_runs: [] }, ref).none, true);
+  assert.equal(runsState({ workflow_runs: [{ name: 'CI', status: 'in_progress' }] }, ref).none, undefined);
 });

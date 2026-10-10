@@ -639,5 +639,20 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   const win = store.readTranscript(OPS_ID, 40).filter((e) => e.kind === 'user').at(-1) as { text: string };
   assert.ok(win.text.includes(`-Update -Root C:\\ffw"'`), win.text);
   assert.match(win.text, /with no setting changed/);
+  assert.doesNotMatch(win.text, /Dev Drive/, 'an update without the flags says nothing of a drive, so the automatic rollout (w887) never makes one');
+  // The Dev Drive (w900): Windows only, the flags the installer takes and nothing free-form.
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', devDrive: true }), /Windows feature/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', devDriveMaxGB: 20 }), /from 50/);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', devDrive: true, devDriveMaxGB: 600 });
+  await new Promise((r) => setTimeout(r, 300));
+  const dd = store.readTranscript(OPS_ID, 60).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(dd.text.includes(`-Update -Root C:\\ffw -DevDrive -DevDriveMaxGB 600"'`), dd.text);
+  assert.doesNotMatch(dd.text, /MoveToDevDrive/);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', moveToDevDrive: true });
+  await new Promise((r) => setTimeout(r, 300));
+  const mv = store.readTranscript(OPS_ID, 80).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(mv.text.includes(`-Update -Root C:\\ffw -MoveToDevDrive"'`), mv.text);
+  assert.match(mv.text, /refuses, naming them, while an agent is in a sandbox/);
+  assert.match(mv.text, /free space on the root's drive before and after/);
   ops.close();
 });

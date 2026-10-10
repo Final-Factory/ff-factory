@@ -14,8 +14,9 @@ import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationV
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
+import { toggleNightly } from './appConfig.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
-import { BlockerWatch } from './blockerWatch.ts';
+import { BlockerWatch, ghPrHealth } from './blockerWatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
@@ -414,7 +415,7 @@ agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));
 // The portal's host guard (docs/self-recovery.md): its data volume, RAM and the clean-up of this computer. No sandbox
 // drive: the portal holds no sandboxes (w510); a machine's drive is its daemon's guard's (machine/hostGuard.ts, w466).
-const cleanupEnv = { ...hostCleanupEnv(), sandboxRoots: [cfg.sandboxRoot] };
+const cleanupEnv = { ...hostCleanupEnv(), sandboxRoots: [cfg.sandboxRoot], cacheRoots: [cfg.sandboxRoot] };
 /**
  * What clean-up never touches here: the sandbox root (this host's own daemon's), the old standing agents' folders, the
  * base clone, this app and its data, and the temp folders of agents running now.
@@ -476,7 +477,7 @@ const hostHealth = new HostHealthMonitor({
         guard,
         mode: settings.mode,
         regular: () => planCleanup({ rules: cleanupRules(env, cfg.hostGuard.cleanup), guard, low, libraries }),
-        stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, cleanupEnv.home), ctx: staleContextOf(store.work.values()), settings, guard }),
+        stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(), ctx: staleContextOf(store.work.values()), settings, guard }),
       });
       return r;
     },
@@ -607,6 +608,8 @@ const blockerWatch = new BlockerWatch({
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
 agents.blockerWatch = blockerWatch;
+// A ci: wait is checked against its pull request when set (w907): a conflict or a push that did not land is refused.
+agents.prHealth = (ref) => ghPrHealth(ref, ghRunner(undefined, `the head of ${ref}`));
 // Whether the blocker watch can read CI at all (w889): measured at start and every half hour, said loudly when it cannot.
 const ciRead = new CiReadWatch({
   repo: () => repoSlug(cfg.repo.url),
@@ -790,6 +793,25 @@ route('POST', '/api/max/refresh', async () => max.refresh());
 // ---- the intake (docs/intake.md): Discord and FFBox requests in the ledger; a person approves or declines them
 route('GET', '/api/intake', async () => intake.summary());
 route('POST', '/api/intake/poll', async () => intake.checkNow());
+// The Intake tab's nightly chips (w903): anyone signed in flips intake.nightly.enabled or .run's enabled flag, as set_app_config
+// lets anyone (appConfig.ts SETTABLE_KEYS); the same checks, the same write, live at once.
+route('POST', '/api/intake/nightly/toggle', async (req) => {
+  const b = await readJson<{ which?: unknown; on?: unknown }>(req);
+  if (b.which !== 'enabled' && b.which !== 'run') throw new HttpError(400, '"which" is "enabled" or "run"');
+  if (typeof b.on !== 'boolean') throw new HttpError(400, '"on" is true or false');
+  const me = requesterOf(req);
+  let r;
+  try {
+    r = toggleNightly(configPath(), cfg, b.which, b.on, identity.list().map((u) => u.userId));
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
+  console.log(`app config: ${r.key} ${r.before} -> ${r.after}, set by ${me.displayName} (${me.userId}) from the Intake tab`);
+  providers.configChanged();
+  const summary = intake.summary();
+  broadcast({ type: 'intake', intake: summary });
+  return { key: r.key, before: r.before, after: r.after, intake: summary };
+});
 // The ledger cleanup now (an owner's): what it closed, resumed and stalled, in a line.
 route('POST', '/api/ledger/cleanup', async (req) => {
   if (identity.get(requesterOf(req).userId)?.role !== 'owner') throw new HttpError(403, 'only the owner runs the ledger cleanup');

@@ -508,12 +508,18 @@ sandbox agents in all), `max_unity: 2`.
 **Agents in a machine sandbox** get their own brief (the worktree, their editor's instance name) and the `machine`
 tools `wake_me`, `cancel_wake` and `blocked_on` (w754: a request that waits only on other requests or PRs is Blocked and its worker stops polling, [orchestrators.md](orchestrators.md#waiting-queued-blocked)), `waiting_on_person` (w691: only a person can move them on; the ledger shows Waiting on input), `unity` (their sandbox's editor), `switch_branch`, `fetch_attachment`, `publish_attachment` (a file of theirs as an attachment id another worker
 gets, [attachments.md](attachments.md#agents-files)), `publish_review` (review media to the
-portal's computer over the daemon's link, [review.md](review.md)), `fetch_ffbox_report` and `fetch_discord_thread_files` (a Discord bug thread's files, read from FFBox so no Discord token is needed on the machine; [ffbox.md](ffbox.md)) and
+portal's computer over the daemon's link, [review.md](review.md)), `fetch_ffbox_report` and `fetch_discord_thread_files` (a Discord bug thread's files, read from FFBox so no Discord token is needed on the machine; [ffbox.md](ffbox.md)), `post_as_max` (a message posted as Max by FFBox, a release's patch notes included, from any machine; w901, [ffbox.md](ffbox.md#posting-as-max-from-any-machine-w901)) and
 `read_work` (the ledger, read-only: their own requests and the ones they name, the open and stalled ones with a grant;
 [orchestrators.md](orchestrators.md#workers-read-the-ledger)). Their guard
 is the sandbox one: their worktree is theirs, the main clone and the daemon's
 folder are protected, killing Unity by hand is refused (other sandboxes' editors share the machine), and a raw
 `git switch` is refused while their editor runs.
+
+**On a Windows PC, a Dev Drive** (w900, [worker-install.md](worker-install.md#the-dev-drive-w900)): a new worker install keeps
+`sandbox_root` and the Library seed on a VHDX in its install folder, mounted at the first free letter from V: down and
+mounted again at every boot. The seed is then cloned, not copied, so a new sandbox costs seconds and little disk; the daemon's
+host guard remounts the drive if it goes. LothDesktop's `D:` is NTFS with other data on it, which is why it is a file and
+not a reformat; BEAST keeps its own `F:`.
 
 **Warm Library.** A new sandbox's `Library` is copied from the main clone's, or, when that is empty (a clone that never
 opened Unity), from a ready sandbox's, preferring one whose editor is stopped: robocopy on Windows, an APFS clone
@@ -626,8 +632,8 @@ LothDesktop and Beast, not just when BEAST is full").
   one was picked ("first with room in placement.prefer (lothdesktop > m5 > m3)", "only avoided computers have room").
   The dispatcher's prompt shows the setting in force.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
-  Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max goes to
-  LothDesktop (only it has the ffdiscord config). A computer that is avoided or not next keeps only what needs it: FF
+  Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
+  computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: FF
   Factory's own repo or its deploys, `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it. A worker going on in its own sandbox stays
   there, and running workers are never moved.
 - **Released sandboxes** (w640, Lothsahn on 2026-10-07: "Can we not reserve slots for workers that resume a long time
@@ -644,7 +650,8 @@ LothDesktop and Beast, not just when BEAST is full").
     - **its daemon went away under it** (`heldSince`, w613): released **30 minutes** later (`HOLD_PLACE_MS`, a day
       before), unless a check-in within 30 minutes or a message resumes it first;
     - **Idle with nothing pending** (alive, no check-in, no job, nothing queued or unanswered; w650 waiting for a
-      deploy): stopped after 30 minutes without activity, with a line in its transcript, and marked `releaseDue`;
+      deploy, until w890: a worker that waits on a deploy or a person the ledger knows of now releases at once, below):
+      stopped after 30 minutes without activity, with a line in its transcript, and marked `releaseDue`;
       the idle reaper's stops (an hour idle, or its request over) are marked the same way. A message resumes it;
     - **it waits on CI** (w846, lothsahn on 2026-10-10: "When they're waiting for GithubCI with their unity editors
       off, they should free the slot"; at about 04:20 UTC BEAST had 0 of 5 sandboxes free, three of them held by w836,
@@ -658,10 +665,55 @@ LothDesktop and Beast, not just when BEAST is full").
       with `wake_me`), or the dispatcher's `decide_work block` on CI. While its CI runs it does not take the sandbox
       back. The blocker watch reads the checks every 2 minutes; when they finish, green or red, the gate clears and the
       worker is resumed within a minute, its own check-in handed back (w829) or, with none, a new one (w846,
-      `Orchestrators.resumeGatedWorker`). It is then placed again like any released worker: its own sandbox if it is
+      `Orchestrators.resumeGatedWorker`). **A PR that cannot get CI** (w907, lothsahn: "Yes, file that and fix the CI merge clash"):
+      w890's PR #283 waited an hour behind a `ci:` gate because its push after merging main had silently failed, so the PR
+      head stayed on a commit that conflicted with main in CHANGELOG.md, and GitHub runs no CI on a conflicted PR. Three
+      guards, reading only what the portal's token can (Pull requests: read; no Checks, no Actions): (1) `blocked_on` with a
+      `ci:` PR reads the PR first (`Agents.ciWaitProblem`) and **refuses** it, recording nothing, when it conflicts with its
+      base or when its head is not the commit the worker passes as `head` (`git rev-parse HEAD`: the push did not land);
+      with no `head` it records the wait and **warns**, and so it does when the PR cannot be read; (2) the blocker watch
+      reads each waited-on PR's head and mergeability every 2 minutes (`ghPrHealth`, `gh pr view --json
+      state,mergeable,baseRefName,headRefOid`; `UNKNOWN`, GitHub still working it out, counts as no conflict) and clears
+      a `ci:` gate at once, resuming the worker, when the PR conflicts and no check has started: "PR #283 conflicts with
+      main (CI can't run): merge main in, resolve, push, and wait again" (also in the request's log; checks already
+      running keep it waiting); a `pr:` gate its worker set itself clears the same way on a conflict (a dispatcher's does
+      not: the PR may be another worker's); (3) it also clears when no CI run exists for the PR's head (`none` from the
+      checks or Actions read) `CI_NO_RUN_MS` = **10 minutes** after the portal first saw that head: the run for #283 was
+      created 18:30:39Z for a push made seconds before (measured), so ten minutes is far past any start-up and short
+      against the hour lost. It needs the checks to be readable to tell "no run" from "unread" (the w829 15-minute
+      clock still covers unreadable ones). It is then placed again like any released worker: its own sandbox if it is
       still free, else another free one **on the same machine**, switched to its branch, so red CI gets it a sandbox to
       fix in. Never another machine: its conversation lives there (the Claude Code session file), and placement rules
       are not touched;
+    - **it waits on a deploy, a person or another request** (w890, lothsahn on 2026-10-10, after w889 held m3's only
+      sandbox, so m3 showed BUSY, for hours after its PR #281 merged while it waited on Ben's go for the portal deploy and a
+      GitHub token permission: "Why is w889 holding a slot?  It's done with its work and it should free the slot.", and
+      "We should not wait for a worker waiting for a deploy.  Update FF Factory to free the slot immediately once work is
+      done--once the deploy has happened, the worker can get rescheduled by the dispatcher"): released **at once**, the way
+      the CI wait is, not after 30 minutes idle (that rule, "Idle with nothing pending", stays for a worker that waits on
+      nothing the ledger knows). The signal is the ledger's own live state (`Agents.waitOn`, from `workLive`), and it holds
+      only when **every** open request the worker is the latest worker on waits on one of: a **Blocked** request whose gates
+      are all a `deploy` (the portal or a machine's daemon), a `request` or a `pr` merging (set by the worker's `blocked_on`,
+      `deploys: ["portal"]` for a deploy, by the dispatcher's `decide_work block`, or by the ledger cleanup on a merged
+      request whose only step left is a deploy); or **Waiting on input**, a person (its `waiting_on_person`, "still open:
+      waiting on Ben to …" in its report, or a question). Not a time, a machine, a usage limit or a lock (they clear by
+      themselves or are about this machine), and not CI (its own, stricter rule above). Unlike CI, a running editor does not
+      keep it (nothing is about to be read or fixed in it, and the placement that takes the sandbox stops the editor first,
+      as for every release). Never released (`waitReleaseWhy`, `keptWhy`): uncommitted or untracked work its daemon cannot
+      save and push first, a branch with a commit its remote lacks, a Unity batch run of that sandbox in flight, another
+      agent working there, a message queued for it, a worker mid-turn, with a permission open, or with a background job or
+      unanswered message it needs (`keepLive`). Alive between turns it is stopped first (`releaseDue`), and the release pass
+      runs again 5 seconds later (`PlaceAgainDeps.soon`), so the sandbox frees within about a minute of the turn's end (the
+      first pass is at most a minute away, the second 5 seconds after it; was up to 30 minutes plus a minute). While it
+      waits it does not take its sandbox back for a near check-in. **Resuming**: a person's message, its check-in, or the
+      block clearing places it again like any released worker (its own sandbox if free, else another free one on the same
+      machine, switched to its branch). A `deploy` gate clearing (a different commit runs there: `blockerVerdict`) resumes
+      its latest worker within a minute with a note to do the check that comes after the deploy
+      (`Orchestrators.resumeGatedWorker`), with no dispatcher round trip. The ledger cleanup's deploy block (a merged
+      request whose only step left is a deploy) used to close the request on the deploy; when the worker's report puts a
+      check of its own after the deploy ("then I verify a live PR read and the health check", w889's), the cleanup now
+      resumes the worker for it instead (`postDeployStep`, `Orchestrators.resumeAfterDeploy`) and the request closes on its
+      report;
     - **several stopped workers in one sandbox**, each with its own release due, no longer keep it for each other
       ("agent … works there too"): they release it together, and when they resume each is placed back on the shared
       branch, the second joining the first.

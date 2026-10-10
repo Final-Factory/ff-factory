@@ -24,7 +24,7 @@ import {
 /**
  * FF Factory's own leftovers (w626, server/ownLeftovers.ts): what the daemon's low-space clean-up picks by itself
  * (stale player slots, pushed agent worktrees, unused Unity editors) and what it must keep, laid out as the m3 held them
- * on 2026-10-07 (~/nevergames/ff-players, an old agent worktree, Unity versions no project used).
+ * on 2026-10-07 (player slots outside the install folder, an old agent worktree, Unity versions no project used).
  */
 
 const H = 3_600_000;
@@ -71,7 +71,7 @@ test('a lease holds its slot as player_slots.py judges it: young and alive here,
 
 test('player slots: picks the ones nobody holds and nothing touched for a day; keeps held, recent and empty ones', async (t) => {
   const root = tmp(t);
-  const slots = path.join(root, 'nevergames', 'ff-players');
+  const slots = path.join(root, 'ffw', 'players');
   const lease = (slot: string, l: object) => put(path.join(slots, slot, 'leases', `${slot}.json`), JSON.stringify(l));
   const sec = (msAgo: number) => (NOW - msAgo) / 1000;
   const fill = (slot: string) => {
@@ -112,7 +112,7 @@ test('player slots: picks the ones nobody holds and nothing touched for a day; k
 
 test('player slots: the recheck refuses a slot leased between the plan and the removal', async (t) => {
   const root = tmp(t);
-  const slots = path.join(root, 'ff-players');
+  const slots = path.join(root, 'players');
   put(path.join(slots, 'slot0', 'player', 'finalfactory.exe'));
   age(slots, 3 * D);
   const plan = await planPlayerSlots({ roots: [slots], guard: guardFor(root), host: 'beast', alive: () => true, now: NOW });
@@ -124,13 +124,13 @@ test('player slots: the recheck refuses a slot leased between the plan and the r
   assert.ok(fs.existsSync(path.join(slots, 'slot0', 'player', 'finalfactory.exe')));
 });
 
-test("player slot roots: the worker root's, the configured one and the old defaults, only those that exist", () => {
-  const there = new Set(['/Users/ben/ffw/players', '/Users/ben/nevergames/ff-players', '/Volumes/x/slots']);
+test("player slot roots: the worker root's and the configured one, only those that exist; the old default places are gone", () => {
+  const there = new Set(['/Users/ben/ffw/players', '/Volumes/x/slots']);
   const mac = playerSlotRoots({ platform: 'darwin', home: '/Users/ben', workerRoot: '/Users/ben/ffw', env: {}, read: () => '{"root":"/Volumes/x/slots"}', exists: (p) => there.has(p) });
-  assert.deepEqual(mac, ['/Users/ben/ffw/players', '/Volumes/x/slots', '/Users/ben/nevergames/ff-players']);
-  const winThere = new Set(['F:\\ffw\\players', 'F:\\ff-players', 'D:\\work\\ff-players']);
+  assert.deepEqual(mac, ['/Users/ben/ffw/players', '/Volumes/x/slots']);
+  const winThere = new Set(['F:\\ffw\\players']);
   const win = playerSlotRoots({ platform: 'win32', home: 'C:\\Users\\b', workerRoot: 'F:\\ffw', env: { ProgramData: 'C:\\ProgramData' }, read: () => '\ufeff{"root":"F:\\\\ffw\\\\players"}', exists: (p) => winThere.has(p) });
-  assert.deepEqual(win, ['F:\\ffw\\players', 'D:\\work\\ff-players', 'F:\\ff-players']);
+  assert.deepEqual(win, ['F:\\ffw\\players']);
 });
 
 // ---------------------------------------------------------------- agent worktrees
@@ -299,7 +299,7 @@ test('helpers: an editor binary to its version folder; a command line naming a p
 
 test('the pass: own leftovers are planned in a dry run and removed in a real one; a failure there spares the regular pass', async (t) => {
   const root = tmp(t);
-  const slots = path.join(root, 'ff-players');
+  const slots = path.join(root, 'players');
   put(path.join(slots, 'slot0', 'player', 'finalfactory.exe'), 'x'.repeat(1000));
   age(slots, 3 * D);
   const guard = guardFor(root);

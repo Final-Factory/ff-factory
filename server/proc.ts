@@ -1,5 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
 
 export const isWindows = process.platform === 'win32';
 
@@ -180,8 +182,11 @@ function runLowPriority(cmd: string, args: string[], opts: { signal?: AbortSigna
   });
 }
 
-/** Copy a large directory tree, using copy-on-write clones where the OS offers them. Runs at below-normal priority. */
-export async function copyTree(src: string, dst: string, opts: { signal?: AbortSignal; mode?: 'robocopy' | 'clone' } = {}) {
+/**
+ * Copy a large directory tree, using copy-on-write clones where the OS offers them. Runs at below-normal priority.
+ * `exclude`: top-level folder names that do not come along (robocopy skips them; the other copies drop them afterwards, w898).
+ */
+export async function copyTree(src: string, dst: string, opts: { signal?: AbortSignal; mode?: 'robocopy' | 'clone'; exclude?: string[] } = {}) {
   let cmd: string;
   let args: string[];
   let okCodes = [0];
@@ -197,7 +202,7 @@ export async function copyTree(src: string, dst: string, opts: { signal?: AbortS
     // robocopy exit codes below 8 are success. On a ReFS Dev Drive, Windows 11 block-clones.
     // /MT:8, not more: this machine is also a live game peer, and 32 copy threads saturate the disk.
     cmd = 'robocopy.exe';
-    args = [src, dst, '/E', '/MT:8', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'];
+    args = [src, dst, '/E', '/MT:8', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', ...(opts.exclude?.length ? ['/XD', ...opts.exclude.map((n) => path.join(src, n))] : [])];
     okCodes = [0, 1, 2, 3, 4, 5, 6, 7];
   } else if (process.platform === 'darwin') {
     cmd = 'cp';
@@ -211,6 +216,7 @@ export async function copyTree(src: string, dst: string, opts: { signal?: AbortS
     const tail = (r.stderr || r.stdout).trim().split('\n').slice(-6).join('\n');
     throw new Error(`${cmd} ${args.join(' ')} failed (${r.code}): ${tail}`);
   }
+  if (!(isWindows && opts.mode !== 'clone')) for (const n of opts.exclude ?? []) fs.rmSync(path.join(dst, n), { recursive: true, force: true });
 }
 
 /** Recursively delete a directory. Returns the command's result; callers check whether the directory is gone. */

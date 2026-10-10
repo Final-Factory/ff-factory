@@ -79,7 +79,7 @@ test('without a root (the portal host, an old install) the pass is unfenced, as 
 test('the stale-output rules and FF Factory\'s own leftovers are fenced too (a player slot outside the root, the old defaults)', async (t) => {
   const { root, outside, put } = world(t);
   const inSlots = path.join(root, 'players');
-  const oldSlots = path.join(outside, 'ff-players');
+  const oldSlots = path.join(outside, 'old-players');
   for (const dir of [inSlots, oldSlots]) {
     put(path.join(dir, 'slot0', 'player'), 'finalfactory.exe');
     const old = (Date.now() - 3 * D) / 1000;
