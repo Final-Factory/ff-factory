@@ -65,6 +65,12 @@ test('w913: a delete outside the temp folder, or one it cannot judge, still asks
   refused('rm -rf $TMPDIR/ffa-ee5b82dc2/x'.replace('$TMPDIR/ffa-ee5b82dc2', 'F:/ffw/tmp/ffa-ee5b82dc2')); // a longer name starting the same
 });
 
+test('w913: a Windows short name (RUNNER~1) in the temp folder is not a tilde', () => {
+  const ctx = { tmp: 'C:/Users/RUNNER~1/AppData/Local/Temp/ffa-aaaa1111', real: none };
+  ok('rm -rf "C:/Users/RUNNER~1/AppData/Local/Temp/ffa-aaaa1111/x" $TMPDIR/y', ctx);
+  refused('rm -rf ~/x', ctx);
+});
+
 test('w913: a link inside the temp folder that leads out of it is refused', () => {
   const real = (p: string) => (p.endsWith('/link') ? 'F:/other/place' : p);
   refused('rm -rf $TMPDIR/link/*', { ...win, real }, /link/);

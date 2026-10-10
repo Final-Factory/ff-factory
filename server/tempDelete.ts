@@ -158,7 +158,8 @@ export function tempOnlyDelete(cmd: string, ctx: TempDeleteContext): TempDeleteV
     const v = TMP_VAR.exec(p);
     if (v) p = tmpRaw + p.slice(v[0].length);
     else if (/[$%`]/.test(p)) return `${raw} has a variable that is not the temp folder`;
-    if (p.includes('~')) return `${raw} has a ~`;
+    // A tilde expands only at the start of a word; one inside a path is a Windows short name (C:/Users/RUNNER~1/...).
+    if (raw.startsWith('~')) return `${raw} has a ~`;
     const n = norm(p, drive);
     if (!n.startsWith(tmp + '/')) return `${raw} is not strictly inside your temp folder (${ctx.tmp})`;
     const rest = n.slice(tmp.length);
