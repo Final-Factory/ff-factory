@@ -86,6 +86,8 @@ const titleOf = (text: string): string | undefined => {
 
 /** What a session with no request id in its opening is, from that opening. */
 export function bucketOf(text: string): string {
+  // the dispatcher's own turns open with the harness's notices
+  if (/^\[(worker update|work request|work update|dispatch|heartbeat|ledger|restarted|resumed|intake escalation|run [0-9a-f]+)\b/i.test(text) && !/^\[run /i.test(text)) return '_dispatcher';
   if (/^\[from (ben|lothsahn|[a-z]+)\]/i.test(text)) return '_chat';
   if (/^Task delegated by the standing agent/i.test(text)) return '_delegation';
   if (/^\[run [0-9a-f]+\]/i.test(text)) return '_standing';
@@ -230,8 +232,9 @@ export function analyze(root: string, sinceMs: number): Result {
       const inWindow = Date.parse(at) >= sinceMs;
       if (d.type === 'cost-state' && d.totalCostUSD !== undefined) cli = Math.max(cli, d.totalCostUSD); // the CLI's running total only grows
       if (d.type === 'user' && d.message && typeof d.message.content === 'string') {
-        const r = requestOf(d.message.content, !firstSeen);
         if (!firstSeen) bucket = bucketOf(d.message.content);
+        // a worker's first message names its request in its opening; an orchestrator's or a chat's does not (what it names is the subject of one turn)
+        const r = requestOf(d.message.content, !firstSeen && (bucket === '_worker-no-id' || bucket === '_delegation' || bucket === '_other'));
         firstSeen = true;
         if (r) {
           cur = r;

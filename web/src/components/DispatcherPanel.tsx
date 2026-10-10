@@ -8,6 +8,7 @@ import { gatesName, gatesOf } from '../../../shared/blockers';
 import { FFBOX_LAN_LABEL, ffboxConversationHref, isFfboxConversationId } from '../../../shared/ffboxLinks';
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
+import { CostChip, RequestSpendBlock, SpendTab, useSpendSummary } from './Spend';
 import { contextGlance, dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, useNow, workLabel, workTone, type Tone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
@@ -15,7 +16,7 @@ import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu } from './ui';
 import { TimersButton } from './Timers';
 
-type Tab = 'requests' | 'intake' | 'conversation';
+type Tab = 'requests' | 'intake' | 'spend' | 'conversation';
 
 const names = (w: WorkItem) => w.requesters.map((r) => r.displayName).join(', ');
 
@@ -98,7 +99,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   const open = work.filter(isOpenWork);
   const stalled = work.filter((w) => w.status === 'stalled');
   const closed = work.filter((w) => !isOpenWork(w) && w.status !== 'stalled');
-  const current: Tab = tab === 'conversation' ? 'conversation' : tab === 'intake' ? 'intake' : 'requests';
+  const current: Tab = tab === 'conversation' ? 'conversation' : tab === 'intake' ? 'intake' : tab === 'spend' ? 'spend' : 'requests';
   const focus = tab && /^w\d+$/.test(tab) ? tab : undefined;
   const setTab = (t: Tab) => navigate({ view: 'dispatcher', tab: t === 'requests' ? undefined : t }, true);
   const owner = app.me?.role === 'owner';
@@ -177,6 +178,9 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
             Intake {waiting > 0 && <span className="tone-amber" title="Needs a human">{waiting}</span>}
           </button>
         )}
+        <button role="tab" aria-selected={current === 'spend'} className={`tab${current === 'spend' ? ' active' : ''}`} onClick={() => setTab('spend')}>
+          Spend
+        </button>
         <button role="tab" aria-selected={current === 'conversation'} className={`tab${current === 'conversation' ? ' active' : ''}`} onClick={() => setTab('conversation')}>
           Conversation
         </button>
@@ -184,6 +188,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
 
       {current === 'requests' && <Requests app={app} work={work} open={open} stalled={stalled} closed={closed} focus={focus} now={now} />}
       {current === 'intake' && app.intake && <IntakeTab app={app} intake={app.intake} work={work} now={now} />}
+      {current === 'spend' && <SpendTab />}
       {current === 'conversation' &&
         (session ? (
           <SessionView key={session.id} session={session} embedded readOnly={<TalkToYourOrchestrator />} answeredBy={owner ? undefined : 'the owner'} />
@@ -501,6 +506,7 @@ function deliveryLine(w: WorkItem): string {
 
 function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: WorkItem; live?: WorkLive; open: boolean; onToggle: () => void; now: number }) {
   const workers = sessionsByIds(app.sessions, w.sessionIds);
+  const spend = useSpendSummary();
   const tone = live ? LIVE_TONE[live.state] : w.approval?.state === 'pending' && isOpenWork(w) ? 'amber' : workTone(w.status);
   const s = w.source;
   const delivery = deliveryLine(w);
@@ -538,6 +544,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             {w.triage && w.triage.class !== 'needs-human' ? <span> · {triageLabel[w.triage.class]}</span> : null}
             {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : null}
             {w.flag ? <span className="tone-amber"> · design question</span> : null}
+            <CostChip id={w.id} summary={spend} />
           </span>
         </span>
         <span className="run-cost mono dim" title={new Date(w.updatedAt).toLocaleString()}>
@@ -624,6 +631,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
               Blocked on {gatesName(gatesOf(w), now)}: {gatesOf(w).map((g) => g.what).join('; ')} (set by {w.blocked.by}, {fmtRelative(w.blocked.at, now)}). It starts by itself when {w.alsoBlocked?.length ? 'all of them clear' : 'that clears'}.
             </p>
           )}
+          <RequestSpendBlock id={w.id} app={app} />
           {w.prs?.length ? (
             <p className="small dim" data-testid={`prs-${w.id}`}>
               Pull requests:{' '}

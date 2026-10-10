@@ -428,3 +428,156 @@ export function fmtUsd(n: number): string {
   if (n >= 100) return `$${n.toFixed(0)}`;
   return `$${n.toFixed(2)}`;
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// What the portal stores and answers (server/spend.ts); here so the web can type its replies
+// ---------------------------------------------------------------------------------------------------------------------
+
+export type SpendRole = 'worker' | 'dispatcher' | 'personal' | 'ops' | 'standing';
+
+/** How a turn was tied to a request: the `[about]` line, the request the worker was last sent, the ids a message named, or none. */
+export type How = 'about' | 'link' | 'message' | 'bucket' | 'backfill';
+
+/** One session's spend, over every request it served. */
+export interface SessionSpend {
+  id: string;
+  role: SpendRole;
+  title: string;
+  machine?: string;
+  /** Who it worked for (their display name), when known. */
+  person?: string;
+  firstAt: string;
+  lastAt: string;
+  turns: number;
+  total: Tok;
+  models: ModelTok;
+  /** The part of `total` that is estimated (see Estimated). */
+  estimated: Tok;
+  /** The SDK's cumulative totals at the last result, to take differences against. */
+  cum?: ModelTok;
+  lastCost?: number;
+  /** usd by request (or bucket) id. */
+  requests: Record<string, number>;
+  cats: Cats;
+  calls: number;
+  ctxMax: number;
+  compactions: number;
+  reread?: { n: number; chars: number; afterCompact: number };
+  /** The transcript: kept as is, compressed, or pruned (with when). The numbers above stay either way. */
+  transcript?: { state: 'full' | 'gz' | 'pruned'; bytes?: number; prunedAt?: string };
+  /** The seq of the first transcript event recorded live; the backfill takes only the events before it. */
+  liveFrom?: number;
+  /** The backfill has read this session's transcript. */
+  backfilled?: boolean;
+}
+
+/** One request's spend (or a bucket's: ids starting with "_"). */
+export interface RequestSpend {
+  id: string;
+  title: string;
+  status?: string;
+  kind: string;
+  person?: string;
+  firstAt: string;
+  lastAt: string;
+  closedAt?: string;
+  turns: number;
+  total: Tok;
+  models: ModelTok;
+  estimated: Tok;
+  sessions: Record<string, { role: SpendRole; total: Tok; models: ModelTok; turns: number; how: Partial<Record<How, number>>; shared?: number }>;
+  cats: Cats;
+  calls: number;
+  compactions: number;
+  reread?: { n: number; chars: number; afterCompact: number };
+  /** Tokens and dollars by UTC day, for a report over a window. */
+  days: Record<string, Tok>;
+}
+
+export interface ReportOptions {
+  /** Days back (default 7). */
+  days?: number;
+  top?: number;
+  includeBuckets?: boolean;
+}
+
+export interface SpendReport {
+  sinceDay: string;
+  untilDay: string;
+  total: Tok;
+  estimated: Tok;
+  /** Share of the window's dollars by model. */
+  models: ModelTok;
+  top: { id: string; title: string; kind: string; status?: string; person?: string; usd: number; tokens: Tok; estimatedUsd: number; sessions: number; closed: boolean; cats: { cat: string; usd: number; pct: number }[] }[];
+  kinds: { kind: string; usd: number; requests: number; avg: number }[];
+  /** Where the context tokens went across the window's requests, by category (list-price shares applied to the measured dollars). */
+  where: { cat: string; label: string; usd: number; pct: number }[];
+  /** Spend that is no request's: the dispatcher, orchestrators, ops, standing agents, unattributed. */
+  buckets: { id: string; title: string; usd: number }[];
+  measuredCats: number;
+  reread?: { n: number; chars: number; afterCompact: number };
+}
+
+
+export interface DataGuardConfig {
+  /** Days a transcript is kept after the last request it served closed (default 7). */
+  retainDays: number;
+  /** Compress idle transcripts from this share of the disk used (default 50). */
+  gzipAtUsedPercent: number;
+  /** Delete transcripts past their retention from this share (default 75). */
+  pruneAtUsedPercent: number;
+  /** Say so from this share, when the guard cannot get below (default 90). */
+  alertAtUsedPercent: number;
+  /** A transcript is idle (compressible) when untouched for this long (default 24). */
+  gzipIdleHours: number;
+  /** How often the guard runs, in minutes (default 60). */
+  everyMinutes: number;
+}
+/** What the transcripts weigh now, how fast they grow and what 7 more days would add (the measurements docs/spend.md reports). */
+export interface Footprint {
+  at: string;
+  files: number;
+  bytes: number;
+  gzFiles: number;
+  gzBytes: number;
+  /** Plain transcripts by the day they were started (file birth time, else last write), newest first, last 14 days. */
+  perDay: { day: string; files: number; bytes: number }[];
+  /** Average bytes a day over those days that had files. */
+  growthPerDay: number;
+  /** The largest ones. */
+  biggest: { id: string; bytes: number }[];
+  disk?: { usedBytes: number; totalBytes: number };
+  /** Plain transcripts + 7 days' growth, and the same if every plain transcript were compressed at `gzipRatio`. */
+  projected7d: { plain: number; compressed: number };
+  gzipRatio?: number;
+}
+
+
+/** GET /api/spend/summary: the cost of each request the page holds. */
+export interface SpendSummaryReply {
+  requests: Record<string, { usd: number; in: number; out: number; cr: number; cw: number; sessions: number; estimatedUsd: number }>;
+}
+/** GET /api/spend/request/<id>: one request's spend with its sessions and what happens to their transcripts. */
+export interface SpendRequestReply {
+  request: RequestSpend | null;
+  retainDays?: number;
+  sessions: {
+    id: string;
+    role: SpendRole;
+    title: string;
+    machine?: string;
+    share: RequestSpend['sessions'][string];
+    transcript: NonNullable<SessionSpend['transcript']>;
+    /** When its transcript may go (ISO), or null when it stays while the request is open or is a chat. */
+    keptUntil: string | null;
+    keptWhileOpen: boolean;
+    hasTranscript: boolean;
+  }[];
+}
+/** GET /api/spend/report: the analysis. */
+export interface SpendReportReply {
+  report: SpendReport;
+  footprint: Footprint;
+  guard: DataGuardConfig;
+  backfill: { at: string; sessions: number; turns: number; usd: number } | null;
+}

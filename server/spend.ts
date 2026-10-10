@@ -19,68 +19,9 @@ import path from 'node:path';
 import { SnapshotFile, readJsonDurable, checkObject } from './durable.ts';
 import type { SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { WORK_OPEN } from '../shared/types.ts';
+import type { How, ReportOptions, RequestSpend, SessionSpend, SpendReport, SpendRole } from '../shared/spend.ts';
+export type { How, ReportOptions, RequestSpend, SessionSpend, SpendReport, SpendRole };
 import { addCats, addModels, addTok, fmtTokens, fmtUsd, listUsd, priceOf, scaleTok, sumTok, zeroTok, CATEGORY_LABEL, CHARS_PER_TOKEN, OUTPUT_TOKENS_PER_CHAR, type Cats, type MeterTurn, type ModelTok, type Tok, type TurnUsage } from '../shared/spend.ts';
-
-export type SpendRole = 'worker' | 'dispatcher' | 'personal' | 'ops' | 'standing';
-
-/** How a turn was tied to a request: the `[about]` line, the request the worker was last sent, the ids a message named, or none. */
-export type How = 'about' | 'link' | 'message' | 'bucket' | 'backfill';
-
-/** One session's spend, over every request it served. */
-export interface SessionSpend {
-  id: string;
-  role: SpendRole;
-  title: string;
-  machine?: string;
-  /** Who it worked for (their display name), when known. */
-  person?: string;
-  firstAt: string;
-  lastAt: string;
-  turns: number;
-  total: Tok;
-  models: ModelTok;
-  /** The part of `total` that is estimated (see Estimated). */
-  estimated: Tok;
-  /** The SDK's cumulative totals at the last result, to take differences against. */
-  cum?: ModelTok;
-  lastCost?: number;
-  /** usd by request (or bucket) id. */
-  requests: Record<string, number>;
-  cats: Cats;
-  calls: number;
-  ctxMax: number;
-  compactions: number;
-  reread?: { n: number; chars: number; afterCompact: number };
-  /** The transcript: kept as is, compressed, or pruned (with when). The numbers above stay either way. */
-  transcript?: { state: 'full' | 'gz' | 'pruned'; bytes?: number; prunedAt?: string };
-  /** The seq of the first transcript event recorded live; the backfill takes only the events before it. */
-  liveFrom?: number;
-  /** The backfill has read this session's transcript. */
-  backfilled?: boolean;
-}
-
-/** One request's spend (or a bucket's: ids starting with "_"). */
-export interface RequestSpend {
-  id: string;
-  title: string;
-  status?: string;
-  kind: string;
-  person?: string;
-  firstAt: string;
-  lastAt: string;
-  closedAt?: string;
-  turns: number;
-  total: Tok;
-  models: ModelTok;
-  estimated: Tok;
-  sessions: Record<string, { role: SpendRole; total: Tok; models: ModelTok; turns: number; how: Partial<Record<How, number>>; shared?: number }>;
-  cats: Cats;
-  calls: number;
-  compactions: number;
-  reread?: { n: number; chars: number; afterCompact: number };
-  /** Tokens and dollars by UTC day, for a report over a window. */
-  days: Record<string, Tok>;
-}
 
 interface SpendFile {
   version: 1;
@@ -598,30 +539,6 @@ function bucketTitle(id: string): string {
 // ---------------------------------------------------------------------------------------------------------------------
 // Reports
 // ---------------------------------------------------------------------------------------------------------------------
-
-export interface ReportOptions {
-  /** Days back (default 7). */
-  days?: number;
-  top?: number;
-  includeBuckets?: boolean;
-}
-
-export interface SpendReport {
-  sinceDay: string;
-  untilDay: string;
-  total: Tok;
-  estimated: Tok;
-  /** Share of the window's dollars by model. */
-  models: ModelTok;
-  top: { id: string; title: string; kind: string; status?: string; person?: string; usd: number; tokens: Tok; estimatedUsd: number; sessions: number; closed: boolean; cats: { cat: string; usd: number; pct: number }[] }[];
-  kinds: { kind: string; usd: number; requests: number; avg: number }[];
-  /** Where the context tokens went across the window's requests, by category (list-price shares applied to the measured dollars). */
-  where: { cat: string; label: string; usd: number; pct: number }[];
-  /** Spend that is no request's: the dispatcher, orchestrators, ops, standing agents, unattributed. */
-  buckets: { id: string; title: string; usd: number }[];
-  measuredCats: number;
-  reread?: { n: number; chars: number; afterCompact: number };
-}
 
 const utcDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 

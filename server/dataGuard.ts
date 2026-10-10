@@ -20,22 +20,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import type { SpendStore } from './spend.ts';
+import type { DataGuardConfig, Footprint } from '../shared/spend.ts';
+export type { DataGuardConfig, Footprint };
 import type { Store } from './store.ts';
 
-export interface DataGuardConfig {
-  /** Days a transcript is kept after the last request it served closed (default 7). */
-  retainDays: number;
-  /** Compress idle transcripts from this share of the disk used (default 50). */
-  gzipAtUsedPercent: number;
-  /** Delete transcripts past their retention from this share (default 75). */
-  pruneAtUsedPercent: number;
-  /** Say so from this share, when the guard cannot get below (default 90). */
-  alertAtUsedPercent: number;
-  /** A transcript is idle (compressible) when untouched for this long (default 24). */
-  gzipIdleHours: number;
-  /** How often the guard runs, in minutes (default 60). */
-  everyMinutes: number;
-}
 export const DATA_GUARD_DEFAULTS: DataGuardConfig = { retainDays: 7, gzipAtUsedPercent: 50, pruneAtUsedPercent: 75, alertAtUsedPercent: 90, gzipIdleHours: 24, everyMinutes: 60 };
 /** A prune stops this many points of disk below pruneAtUsedPercent, so it does not run again an hour later. */
 export const PRUNE_MARGIN = 5;
@@ -237,25 +225,6 @@ export function runDataGuard(o: { dir: string; spend: SpendStore; store: Pick<St
   }
   if (plan.alert) run.alert = plan.alert;
   return run;
-}
-
-/** What the transcripts weigh now, how fast they grow and what 7 more days would add (the measurements docs/spend.md reports). */
-export interface Footprint {
-  at: string;
-  files: number;
-  bytes: number;
-  gzFiles: number;
-  gzBytes: number;
-  /** Plain transcripts by the day they were started (file birth time, else last write), newest first, last 14 days. */
-  perDay: { day: string; files: number; bytes: number }[];
-  /** Average bytes a day over those days that had files. */
-  growthPerDay: number;
-  /** The largest ones. */
-  biggest: { id: string; bytes: number }[];
-  disk?: { usedBytes: number; totalBytes: number };
-  /** Plain transcripts + 7 days' growth, and the same if every plain transcript were compressed at `gzipRatio`. */
-  projected7d: { plain: number; compressed: number };
-  gzipRatio?: number;
 }
 
 export function footprint(dir: string, now = Date.now(), sampleRatio?: number): Footprint {
