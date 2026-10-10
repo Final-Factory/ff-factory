@@ -57,7 +57,7 @@ export interface IntakeSettings {
     desync: { enabled: boolean; maxPerDay: number };
   };
   release: { enabled: boolean; delayMinutes: number };
-  nightly: { enabled: boolean; autoApprove: { enabled: boolean; maxPerDay: number }; dailyCap: number; flakyNights: number; batchOver: number; run: NightlyRunSettings };
+  nightly: { enabled: boolean; autoApprove: { enabled: boolean; maxPerDay: number }; dailyCap: number; flakyNights: number; batchOver: number; run: NightlyRunSettings; review: NightlyReviewSettings };
   reviewers: string[];
   lookbackDays: number;
 }
@@ -73,6 +73,16 @@ export interface NightlyRunSettings {
   person?: string;
   /** No report this long after the fire is the alarm. A night took 136 min on 2026-10-10 (build and battery). */
   reportWithinHours: number;
+}
+
+/** The nightly merge review's schedule (w905, config intake.nightly.review): the Sentry's duties as a job timer. */
+export interface NightlyReviewSettings {
+  enabled: boolean;
+  /** HH:MM in tz; default 06:00 America/New_York, after the 03:00 lab has usually reported (the Sentry ran at 09:00Z). */
+  time: string;
+  tz: string;
+  machine: string;
+  person?: string;
 }
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -146,6 +156,13 @@ export function intakeSettings(cfg: Pick<Config, 'intake' | 'providers'>): Intak
         machine: typeof n.run?.machine === 'string' && /^[\w.-]{1,40}$/.test(n.run.machine) ? n.run.machine : 'lothdesktop',
         ...(typeof n.run?.person === 'string' && /^[a-zA-Z0-9._-]{2,32}$/.test(n.run.person) ? { person: n.run.person } : {}),
         reportWithinHours: int(n.run?.reportWithinHours, 5, 1, 20),
+      },
+      review: {
+        enabled: n.review?.enabled === true,
+        time: typeof n.review?.time === 'string' && HHMM.test(n.review.time) ? n.review.time : '06:00',
+        tz: typeof n.review?.tz === 'string' && validZone(n.review.tz) ? n.review.tz : 'America/New_York',
+        machine: typeof n.review?.machine === 'string' && /^[\w.-]{1,40}$/.test(n.review.machine) ? n.review.machine : 'lothdesktop',
+        ...(typeof n.review?.person === 'string' && /^[a-zA-Z0-9._-]{2,32}$/.test(n.review.person) ? { person: n.review.person } : {}),
       },
     },
     reviewers: list(cfg.intake?.reviewers, []),
@@ -450,6 +467,7 @@ export function identityKeys(s: WorkSource): string[] {
   if (s.release) keys.push(`release:${s.release.version}`);
   for (const sc of s.nightly?.scenarios ?? []) keys.push(`nightly:${sc.toLowerCase()}`);
   if (s.nightlyRun) keys.push(`nightly-run:${s.nightlyRun.date}`);
+  if (s.nightlyReview) keys.push(`nightly-review:${s.nightlyReview.date}`);
   return keys;
 }
 
@@ -796,6 +814,27 @@ export function workerRules(w: Pick<WorkItem, 'id' | 'source' | 'brief' | 'triag
       'While the night is still running, end the turn without it, after a wake_me.',
     ].join('\n');
   }
+  if (s.kind === 'nightly-review') {
+    const d = s.nightlyReview?.date ?? '<date>';
+    return [
+      head,
+      '',
+      `This is the night ${d}'s merge review, the Nightly Regression Sentry's job (w905), filed by the portal's job timer (docs/intake.md, "The nightly merge review"). Your instructions are the game repo's \`scripts/nightly/merge-review.md\` on origin/develop: read it first and follow it. It holds the Sentry's charter, its two duties, the brief templates and the risk ranking.`,
+      '',
+      `- Review the merges to origin/develop ${s.nightlyReview?.since ? `after \`${s.nightlyReview.since}\` (where the last review got to): \`git log --first-parent ${s.nightlyReview.since}..origin/develop\`` : 'of the last 24 hours (no earlier review is on record)'}.`,
+      "- Do not run the jobs yourself, and do not open pull requests: you write their briefs. The portal files each one as a request, auto-approved, for the dispatcher to place, exactly as the Sentry's delegations were.",
+      "- Before you write a job, check that nothing already covers it: tonight's nightly lab regressions (the nightly intake files those itself; your brief lists the open ones, and the night's report is `$FF_NIGHTLY_ROOT/reports/<date>.md` on this machine), an open PR or branch on the same fix (`gh pr list`, `git branch -r --list 'origin/regress/*' 'origin/tests/*'`), and the requests your brief names. Name what you skipped and why.",
+      '',
+      'End your final message with one block per job, exactly in this form, each line on its own:',
+      '```',
+      'NIGHTLY-JOB: <title, under 120 characters>',
+      'Model: <opus|sonnet>, <high|medium>',
+      '<the full brief, as merge-review.md\'s templates write it>',
+      'END-NIGHTLY-JOB',
+      '```',
+      'then one line `REVIEWED-THROUGH: <the full sha of the newest origin/develop commit you reviewed>`, then `RESOLVED: nightly review <date>: <n> jobs (<the PRs they cover>)`. A night with nothing to check still ends with REVIEWED-THROUGH and RESOLVED: `RESOLVED: nightly review <date>: nothing to check`. The portal files the jobs once; a resent block is not filed twice.',
+    ].join('\n');
+  }
   if (s.kind === 'release') {
     return [head, '', POSTING_RULES, '', 'Post exactly one short follow-up in each thread listed in the brief, opening with the reporter\'s @-mention if the thread shows who they are, saying the fix is live in the version named. Do not reopen closed threads beyond what posting needs; post nowhere else.', '', 'End with `RESOLVED: announced <version> in <n> threads`.'].join('\n');
   }
@@ -835,7 +874,7 @@ export function sourceTag(w: Pick<WorkItem, 'source' | 'approval' | 'triage' | '
   const s = w.source;
   if (!s) return '';
   const where =
-    s.kind === 'discord-bug' ? `Discord ${s.channel ?? 'bug report'}` : s.kind === 'discord-request' ? `Discord request from ${s.reporter ?? '?'}` : s.kind === 'release' ? 'release follow-up' : s.kind === 'nightly' ? `nightly e2e ${s.nightly?.date ?? ''}`.trim() : s.kind === 'nightly-run' ? `nightly run ${s.nightlyRun?.date ?? ''}`.trim() : s.kind === 'ffbox-dev' ? `FFBox dev request from ${s.reporter ?? '?'}` : `FFBox ${s.kind === 'ffbox-diagnosis' ? 'diagnosis' : s.kind === 'ffbox-branch' ? 'branch' : 'request'}`;
+    s.kind === 'discord-bug' ? `Discord ${s.channel ?? 'bug report'}` : s.kind === 'discord-request' ? `Discord request from ${s.reporter ?? '?'}` : s.kind === 'release' ? 'release follow-up' : s.kind === 'nightly' ? `nightly e2e ${s.nightly?.date ?? ''}`.trim() : s.kind === 'nightly-run' ? `nightly run ${s.nightlyRun?.date ?? ''}`.trim() : s.kind === 'nightly-review' ? `nightly merge review ${s.nightlyReview?.date ?? ''}`.trim() : s.kind === 'ffbox-dev' ? `FFBox dev request from ${s.reporter ?? '?'}` : `FFBox ${s.kind === 'ffbox-diagnosis' ? 'diagnosis' : s.kind === 'ffbox-branch' ? 'branch' : 'request'}`;
   const triage = w.triage?.class === 'obvious-bug' ? ', obvious bug' : w.triage?.class === 'ffbox-desync' ? ', desync PR policy' : w.triage?.class === 'regression' ? `, ${w.triage.reason.replace(/^nightly e2e: /, '')}` : '';
   const d = withDecision ? decisionOf(w) : undefined;
   const approval = d ? `, ${d.text}` : '';

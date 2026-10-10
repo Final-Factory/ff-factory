@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { intakeSettings, identityKeys, workerRules } from './intakeRules.ts';
-import { mentionsScenario, nightlyDraft, nightStatus, nightlyPriority, nightlySkip, parseNightlyReport, releaseLine, type NightlyReport } from './nightlyRules.ts';
+import { mentionsScenario, NIGHTLY_JOBS_MAX, nightlyDraft, nightStatus, parseNightlyJobs, nightlyPriority, nightlySkip, parseNightlyReport, releaseLine, type NightlyReport } from './nightlyRules.ts';
 
 /** The nightly e2e lab's report, checked and turned into requests (docs/intake.md, "Nightly e2e regressions"). */
 
@@ -227,4 +227,42 @@ test('nightly run (w864): its worker is told to start, check and report the nigh
   assert.deepEqual(identityKeys({ kind: 'nightly-run', untrusted: false, nightlyRun: { date: '2026-10-11', machine: 'lothdesktop' } }), ['nightly-run:2026-10-11']);
   const s = intakeSettings({ intake: { nightly: { run: { enabled: true, time: '25:00', tz: 'Mars/Olympus', machine: 'a b' } } } });
   assert.deepEqual(s.nightly.run, { enabled: true, time: '03:00', tz: 'America/New_York', machine: 'lothdesktop', reportWithinHours: 5 }, 'bad values fall back to the defaults');
+});
+
+test('nightly merge review (w905): its jobs are read from the end of the worker\'s message, model line and all; a block with no end is not', () => {
+  const text = [
+    'Done.',
+    '**NIGHTLY-JOB: Regression check: #1315**',
+    'Model: Opus, high',
+    'You are an Opus verifier for the nightly regression sentry.',
+    '',
+    'Branch `regress/2026-10-11-comets`.',
+    'END-NIGHTLY-JOB',
+    'NIGHTLY-JOB: no model line',
+    'You are a test-writing worker for the nightly regression sentry.',
+    'END-NIGHTLY-JOB',
+    'NIGHTLY-JOB: never ended',
+    'half',
+    'REVIEWED-THROUGH: `ABCDEF1234567`',
+  ].join('\n');
+  const r = parseNightlyJobs(text);
+  assert.deepEqual(r.jobs, [
+    { title: 'Regression check: #1315', task: 'You are an Opus verifier for the nightly regression sentry.\n\nBranch `regress/2026-10-11-comets`.', model: 'opus', effort: 'high' },
+    { title: 'no model line', task: 'You are a test-writing worker for the nightly regression sentry.' },
+  ]);
+  assert.equal(r.reviewedThrough, 'abcdef1234567');
+  const many = Array.from({ length: 20 }, (_, i) => `NIGHTLY-JOB: job ${i}\nbrief ${i}\nEND-NIGHTLY-JOB`).join('\n');
+  assert.equal(parseNightlyJobs(many).jobs.length, NIGHTLY_JOBS_MAX);
+  assert.deepEqual(parseNightlyJobs('nothing here'), { jobs: [] });
+});
+
+test('nightly merge review (w905): its worker reads merge-review.md, writes the jobs as blocks, and ends with REVIEWED-THROUGH', () => {
+  const r = workerRules({ id: 'w950', brief: 'review', source: { kind: 'nightly-review', untrusted: false, nightlyReview: { date: '2026-10-11', machine: 'lothdesktop', since: 'a'.repeat(40) } } });
+  assert.match(r, /scripts\/nightly\/merge-review\.md/);
+  assert.match(r, /git log --first-parent a{40}\.\.origin\/develop/);
+  assert.match(r, /NIGHTLY-JOB: <title/);
+  assert.match(r, /REVIEWED-THROUGH: <the full sha/);
+  assert.match(r, /Do not run the jobs yourself/);
+  assert.deepEqual(identityKeys({ kind: 'nightly-review', untrusted: false, nightlyReview: { date: '2026-10-11', machine: 'lothdesktop' } }), ['nightly-review:2026-10-11']);
+  assert.deepEqual(intakeSettings({ intake: { nightly: { review: { enabled: true, time: '9am' } } } }).nightly.review, { enabled: true, time: '06:00', tz: 'America/New_York', machine: 'lothdesktop' });
 });

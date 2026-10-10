@@ -1627,3 +1627,110 @@ test('nightly run (w864): after a restart, a night whose worker never got its ke
   assert.equal(again.nightlyRunEnv(['w9999'], 'https://portal.example'), undefined, 'not for another request');
   assert.equal(again.nightlyRunEnv([run.id], 'not a url'), undefined);
 });
+
+// ---------------------------------------------------------------- the nightly merge review (w905)
+
+/** An intake whose nightly merge review timer is on, with its own clock. */
+function reviewClock(t: Parameters<typeof setup>[0]) {
+  const env = setup(t, { nightly: { enabled: true, review: { enabled: true, person: 'lothsahn' } } });
+  const clock = { now: 0 };
+  const intake = new IntakeManager({ cfg: env.cfg, store: env.store, identity: env.agents.identity, orchestrators: env.o, now: () => clock.now });
+  t.after(() => intake.close());
+  return { ...env, intake, clock };
+}
+/** 2026-10-11 06:00 America/New_York (EDT, UTC-4). */
+const NY_0600_EDT = Date.UTC(2026, 9, 11, 10, 0);
+const REVIEW_REPORT = [
+  'Reviewed 6 merges; two need checks.',
+  '',
+  'NIGHTLY-JOB: Regression check: comet kill rule (#1315) and bot assigner (#1338)',
+  'Model: opus, high',
+  'You are an Opus verifier for the nightly regression sentry. Repo Final-Factory/FinalFactory, base origin/develop. Work on branch `regress/2026-10-11-comets-bots`.',
+  '## Done criteria',
+  'For each of A-B, a verdict of REGRESSION / OK / UNSURE with evidence.',
+  'END-NIGHTLY-JOB',
+  '',
+  'NIGHTLY-JOB: Duty B tests: guard #1363 and #1361',
+  'Model: sonnet, high',
+  'You are a test-writing worker for the nightly regression sentry (Duty B: every merged fix gets an automated test that guards it). Work on branch `tests/2026-10-11-input-guards` from origin/develop.',
+  'END-NIGHTLY-JOB',
+  '',
+  'NIGHTLY-JOB: a block with no end line is not filed',
+  'half a brief',
+  '',
+  `REVIEWED-THROUGH: ${'e'.repeat(40)}`,
+  'RESOLVED: nightly review 2026-10-11: 2 jobs (#1315, #1338, #1363, #1361)',
+].join('\n');
+
+test('nightly merge review (w905): fires once at 06:00 New York time, for its person, on its machine, approved, listing the lab\'s open regressions', async (t) => {
+  const { intake, clock, work, store, heard, dispatcher } = reviewClock(t);
+  const now = new Date().toISOString();
+  store.putWork({ id: 'w50', title: 'Nightly e2e: SP-loot-panels-take-all fails on develop aaaaaaaaa', brief: 'x', priority: 'high', keys: ['nightly:sp-loot-panels-take-all'], requestedBy: BEN, requesters: [BEN], humanAsked: false, status: 'new', createdAt: now, updatedAt: now, sessionIds: [], overlaps: [], asks: 0, log: [], source: { kind: 'nightly', untrusted: false } });
+  clock.now = NY_0600_EDT - 60_000;
+  intake.checkNightlyReview();
+  clock.now = NY_0600_EDT + 60_000;
+  intake.checkNightlyReview();
+  intake.checkNightlyReview();
+  const reviews = work().filter((w) => w.source?.kind === 'nightly-review');
+  assert.equal(reviews.length, 1, 'once a day');
+  const [w] = reviews;
+  assert.deepEqual([w.title, w.requestedBy.userId, w.approval?.state, w.source?.nightlyReview], ['Nightly merge review 2026-10-11 on lothdesktop', 'lothsahn', 'approved', { date: '2026-10-11', machine: 'lothdesktop' }]);
+  assert.match(w.constraints ?? '', /Run it on lothdesktop/);
+  assert.match(w.brief, /w50: Nightly e2e: SP-loot-panels-take-all/, 'the lab\'s own regression requests, for the de-dupe');
+  assert.match(w.brief, /No earlier review is on record/);
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(heard(dispatcher().info.id, '[work request]').length, 1, 'the dispatcher places it');
+  const n = intake.summary().nightly!;
+  assert.deepEqual([n.review?.enabled, n.review?.time, n.review?.next, n.reviews?.[0]?.status], [true, '06:00', '2026-10-12T10:00:00.000Z', 'running']);
+});
+
+test('nightly merge review (w905): its worker\'s jobs are filed as the Sentry\'s delegations were, once; the next review starts where it got to', (t) => {
+  const { intake, clock, work, store } = reviewClock(t);
+  clock.now = NY_0600_EDT - 60_000;
+  intake.checkNightlyReview();
+  clock.now = NY_0600_EDT + 60_000;
+  intake.checkNightlyReview();
+  const review = work().find((w) => w.source?.kind === 'nightly-review')!;
+  intake.onNightlyWorkerTurn(['w9999'], REVIEW_REPORT);
+  assert.equal(work().filter((w) => w.delegation).length, 0, 'not from a worker that is not on the review');
+  intake.onNightlyWorkerTurn([review.id], REVIEW_REPORT);
+  const jobs = work().filter((w) => w.delegation);
+  assert.deepEqual(jobs.map((w) => w.title), ['Regression check: comet kill rule (#1315) and bot assigner (#1338)', 'Duty B tests: guard #1363 and #1361']);
+  const [a, b] = jobs;
+  assert.equal(a.delegation?.agentId, 'nightly-regression-sentry', 'billed and attributed as the Sentry\'s were (vault.ts NIGHTLY_SENTRY)');
+  assert.equal(a.delegation?.auto, true);
+  assert.equal(a.requestedBy.userId, 'ben', 'vault.unattributed.nightly: "Nightly sentry Ben"');
+  assert.match(a.constraints ?? '', /Merge your own pull request into develop once its verification is done and CI is green/);
+  assert.match(a.constraints ?? '', /Suggested worker: opus, high effort/);
+  assert.match(b.constraints ?? '', /Suggested worker: sonnet, high effort/);
+  assert.match(a.brief, /^You are an Opus verifier for the nightly regression sentry/);
+  assert.doesNotMatch(a.brief, /Model:|END-NIGHTLY-JOB/);
+  // The worker's message again (a resend, a later turn): nothing new.
+  intake.onNightlyWorkerTurn([review.id], REVIEW_REPORT);
+  assert.equal(work().filter((w) => w.delegation).length, 2);
+  const [x] = intake.summary().nightly!.reviews!;
+  assert.deepEqual([x.status, x.reviewedThrough, x.jobs], ['done', 'e'.repeat(40), [a.id, b.id]]);
+  assert.match(store.work.get(review.id)!.log.find((l) => l.includes('nightly review: filed'))!, new RegExp(`filed ${a.id}, ${b.id}; reviewed through develop eeeeeeeee`));
+  // The next day's review starts after that commit.
+  clock.now = NY_0600_EDT + 86_400_000 + 60_000;
+  intake.checkNightlyReview();
+  const next = work().find((w) => w.source?.kind === 'nightly-review' && w.id !== review.id)!;
+  assert.equal(next.source?.nightlyReview?.since, 'e'.repeat(40));
+  assert.match(next.brief, /The last review got to develop `eeeeeeee/);
+});
+
+test('nightly merge review (w905): a review that ends without reviewing tells its person', (t) => {
+  const { intake, clock, work, store, heard, o } = reviewClock(t);
+  clock.now = NY_0600_EDT - 60_000;
+  intake.checkNightlyReview();
+  clock.now = NY_0600_EDT + 60_000;
+  intake.checkNightlyReview();
+  const review = work().find((w) => w.source?.kind === 'nightly-review')!;
+  store.putWork({ ...review, status: 'cancelled', updatedAt: new Date(NY_0600_EDT + 2 * 60_000).toISOString() });
+  clock.now = NY_0600_EDT + 30 * 60_000;
+  intake.checkNightlyReview();
+  intake.checkNightlyReview();
+  const said = heard(o.personalFor(LOTH).info.id, '[nightly]');
+  assert.equal(said.length, 1);
+  assert.match(said[0].text, new RegExp(`merge review of 2026-10-11 \\(${review.id}\\): its request ${review.id} ended \\(cancelled\\) without a REVIEWED-THROUGH line`));
+});

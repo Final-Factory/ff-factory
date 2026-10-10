@@ -262,5 +262,17 @@ test('toggleNightly (w903): the Intake tab chips flip the flag through set_app_c
   assert.throws(() => toggleNightly(file, cfg, 'run', false, ['ben']), /is a login/);
   assert.equal(fs.readFileSync(file, 'utf8'), gone);
   assert.throws(() => toggleNightly(file, cfg, 'run', 'yes' as never, users), /true or false/);
-  assert.throws(() => toggleNightly(file, cfg, 'other' as never, true, users), /"enabled" or "run"/);
+  assert.throws(() => toggleNightly(file, cfg, 'other' as never, true, users), /"enabled", "run" or "review"/);
+});
+
+test('intake.nightly.review (w905): settable by anyone, checked like the run\'s, toggled from the Intake tab keeping its block', (t) => {
+  const { file, cfg } = setup(t);
+  const users = ['ben', 'lothsahn'];
+  setAppConfig(file, cfg, 'intake.nightly.review', { enabled: false, time: '06:00', tz: 'America/New_York', machine: 'lothdesktop', person: 'lothsahn' }, { users });
+  assert.deepEqual(toggleNightly(file, cfg, 'review', true, users), { key: 'intake.nightly.review', before: false, after: true });
+  assert.deepEqual(cfg.intake?.nightly?.review, { enabled: true, time: '06:00', tz: 'America/New_York', machine: 'lothdesktop', person: 'lothsahn' });
+  assert.throws(() => normalizeSetting('intake.nightly.review', { reportWithinHours: 5 }, undefined, users), /intake\.nightly\.review: unknown key/);
+  assert.throws(() => normalizeSetting('intake.nightly.review', { time: '6am' }, undefined, users), /intake\.nightly\.review\.time is HH:MM/);
+  assert.equal(OWNER_ONLY_KEYS.has('intake.nightly.review'), false);
+  assert.ok(SETTABLE_KEYS.includes('intake.nightly.review'));
 });

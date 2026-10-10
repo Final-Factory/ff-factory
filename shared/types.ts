@@ -1708,8 +1708,8 @@ export interface WorkFfboxDev {
  * (docs/intake.md, "Nightly e2e regressions"), or the night's run of that lab, which the portal's nightly schedule files
  * itself (nightly-run, w864; docs/intake.md, "The nightly run").
  */
-export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run';
-export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run'];
+export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run' | 'nightly-review';
+export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run', 'nightly-review'];
 
 export interface WorkSource {
   kind: WorkSourceKind;
@@ -1752,6 +1752,27 @@ export interface WorkSource {
   nightly?: WorkNightly;
   /** The night's run of the nightly e2e lab (w864): the night (its date where the schedule fired) and the machine it runs on. */
   nightlyRun?: { date: string; machine: string };
+  /**
+   * The night's merge review (w905, the Nightly Regression Sentry folded into the job timers): the night, its machine, and
+   * the develop commit the last review got to (it reviews the merges after it).
+   */
+  nightlyReview?: { date: string; machine: string; since?: string };
+}
+
+/** One night's merge review as the portal saw it (w905): fired, then done with what it filed, or missing. */
+export interface NightlyReview {
+  date: string;
+  /** running: fired, its worker not done yet; done: it reported REVIEWED-THROUGH; missing: it ended or timed out without. */
+  status: 'running' | 'done' | 'missing';
+  firedAt?: string;
+  workId?: string;
+  /** The develop commit the review started after (the last review's REVIEWED-THROUGH), and the one it got to. */
+  since?: string;
+  reviewedThrough?: string;
+  /** The verifier and test-writer requests it filed (Duty A and B). */
+  jobs?: string[];
+  cause?: string;
+  alarmAt?: string;
 }
 
 /**
@@ -1943,6 +1964,10 @@ export interface IntakeSummary {
     run?: { enabled: boolean; time: string; tz: string; machine: string; person?: string; reportWithinHours: number; next?: string };
     /** The last nights, newest first (w864). */
     nights?: NightlyNight[];
+    /** The nightly merge review's schedule (w905, config intake.nightly.review) and its next fire; optional for an older page. */
+    review?: { enabled: boolean; time: string; tz: string; machine: string; person?: string; next?: string };
+    /** The last reviews, newest first (w905). */
+    reviews?: NightlyReview[];
   };
   /** Who approves what needs a human and answers design questions (config intake.reviewers; default the owner). */
   reviewers: string[];

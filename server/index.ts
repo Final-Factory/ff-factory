@@ -582,6 +582,8 @@ const intake = new IntakeManager({
   },
 }).start();
 agents.nightlyKeyFor = (ids, portalUrl) => intake.nightlyRunEnv(ids, portalUrl);
+// The nightly merge review's jobs (w905): filed from its worker's final message, as the Sentry's delegations were.
+agents.nightlyWorkerTurn = (ids, text) => intake.onNightlyWorkerTurn(ids, text);
 // The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): requests whose PRs merged close, quiet ones stall.
 const ledgerSweep = new LedgerSweep({
   cfg,
@@ -792,7 +794,7 @@ route('POST', '/api/intake/poll', async () => intake.checkNow());
 // lets anyone (appConfig.ts SETTABLE_KEYS); the same checks, the same write, live at once.
 route('POST', '/api/intake/nightly/toggle', async (req) => {
   const b = await readJson<{ which?: unknown; on?: unknown }>(req);
-  if (b.which !== 'enabled' && b.which !== 'run') throw new HttpError(400, '"which" is "enabled" or "run"');
+  if (b.which !== 'enabled' && b.which !== 'run' && b.which !== 'review') throw new HttpError(400, '"which" is "enabled", "run" or "review"');
   if (typeof b.on !== 'boolean') throw new HttpError(400, '"on" is true or false');
   const me = requesterOf(req);
   let r;

@@ -111,6 +111,13 @@ export interface IntakeConfig {
      * report within `reportWithinHours` of the fire is the alarm. Default off, 03:00 America/New_York, lothdesktop, 5.
      */
     run?: { enabled?: boolean; time?: string; tz?: string; machine?: string; person?: string; reportWithinHours?: number };
+    /**
+     * The nightly merge review (w905; docs/intake.md, "The nightly merge review"): the Nightly Regression Sentry as a
+     * job timer. Every day at `time` in `tz` it files a request for `person` to review the merges to develop on `machine`;
+     * the worker's verifier and test-writer jobs are filed as the Sentry's were. Default off, 06:00 America/New_York,
+     * lothdesktop.
+     */
+    review?: { enabled?: boolean; time?: string; tz?: string; machine?: string; person?: string };
   };
   /**
    * The people who decide (user ids, e.g. ["ben", "lothsahn"]): they approve or decline what needs a human and answer

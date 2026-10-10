@@ -528,6 +528,41 @@ shouldn't assume silence means a successful (or failed) run." The Windows tasks 
   status, counts, cause and requests (`summary().nightly.nights`, kept in `intake.json`, 60 nights); `list_work` with
   `source: "nightly"` lists the run requests with the regressions.
 
+## The nightly merge review
+
+Lothsahn, 2026-10-10 (w905): "We had a thing where we wanted this to be a standard job sent to a worker on LothDesktop
+like any other so it didn't have a special folder, etc, and it just ran on a timer. Can we get that all merged into
+there and the sentry deleted? The prompt from the sentry and the instructions should carry over to this timered job.
+Don't worry about the cost limiting and such", then "let's have the sentry be a separate timed job that gets handed to a
+worker as well. But just have it under the job timers instead of a special thing to the side". The Nightly Regression
+Sentry, a standing agent (`nightly-regression-sentry`, cron 0 3 on LothDesktop, its folder
+`D:\work\.ff-factory\agents\nightly-regression-sentry`), becomes this job timer; the standing agent is deleted.
+
+- **The timer** (`IntakeManager.checkNightlyReview`, every minute; `intake.nightly.review`, settable live by anyone with
+  `set_app_config` or the Intake tab's "Nightly merge review" chip). At `time` in `tz` (default 06:00 America/New_York,
+  after the 03:00 lab has usually reported; the Sentry ran at 09:00Z) it files `Nightly merge review <date> on <machine>`,
+  source `nightly-review` (key `nightly-review:<date>`), for `person`, approved by the timer, with constraints that place
+  it on the machine (default lothdesktop), like the nightly run: fired once a day, up to 3 hours late after an outage,
+  never for a day due before it was switched on.
+- **The worker** follows the game repo's `scripts/nightly/merge-review.md` (the Sentry's charter, its two duties, the
+  brief templates and the risk ranking, carried over) and reviews the merges to develop after the last review's
+  `REVIEWED-THROUGH` commit (kept in `intake.json` `reviews`, given in the next brief; the Sentry kept it in its folder's
+  notes). Its brief lists the nightly lab's open regression requests, the de-dupe against the lab's own filing
+  (`intake.nightly.enabled`). It runs nothing and opens no PR: it ends its final message with one `NIGHTLY-JOB:` block per
+  job (title, an optional `Model: opus, high` line, the brief, `END-NIGHTLY-JOB`), `REVIEWED-THROUGH: <sha>`, and
+  `RESOLVED: nightly review <date>: ...`.
+- **The jobs** (`onNightlyWorkerTurn`, from `server/agents.ts` `onWorkerTurnEnd` for a worker serving the review, by link
+  or title) are filed exactly as the Sentry's delegations were (`Orchestrators.fileDelegation`): the brief verbatim, the
+  delegation constraints (deliver by PR into develop, merge your own PR on green when it fixes a demonstrated bug or only
+  adds tests or verdicts, a person for anything that spends, publishes or deploys, the suggested model), auto-approved,
+  placed by the dispatcher on any machine, and billed as the Sentry's were (`agentId` `nightly-regression-sentry`, so
+  `vault.unattributed.nightly`: "Nightly sentry Ben"). The same title within two days is the same job, so a resent block
+  is not filed twice. No standing-agent cap applies (`uncapped`; lothsahn: "Don't worry about the cost limiting and such");
+  at most 12 blocks are read from one message, a guard against a runaway message.
+- **Its alarm.** A review the timer could not file, one whose request ends without `REVIEWED-THROUGH` for 15 minutes, or
+  one still not reviewed 20 hours after the fire tells the person's orchestrator once (`[nightly]`) and logs on the
+  request. The Intake tab shows the timer, its next fire and the last review (status, the jobs it filed).
+
 ## FFBox, both ways (later, optional)
 
 FFBox is not wired into this portal yet (`providers.ffbox.enabled` is false). Everything below is built on FF

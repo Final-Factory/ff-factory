@@ -10,6 +10,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The Nightly Regression Sentry is a job timer** (w905, lothsahn: "let's have the sentry be a separate timed job that gets
+  handed to a worker as well. But just have it under the job timers instead of a special thing to the side"; "Don't worry
+  about the cost limiting and such"). `intake.nightly.review` files a `nightly-review` request every day (default 06:00
+  America/New_York on lothdesktop) whose worker follows the game repo's `scripts/nightly/merge-review.md` (the Sentry's
+  charter carried over) and ends with `NIGHTLY-JOB` blocks; the portal files each as the Sentry's delegations were (same
+  constraints, auto-approved, same billing), with no cap, and starts the next review after its `REVIEWED-THROUGH` commit.
+  Settable live (`set_app_config intake.nightly.review`) and click-to-toggle on the Intake tab. Needs a portal deploy;
+  then the standing agent `nightly-regression-sentry` can be deleted (docs/intake.md, "The nightly merge review").
+
 - **The Intake tab's two nightly chips are switches** (w903, lothsahn: "Please modify FF Factory so I can toggle those settings on
   the intake panel by clicking on them"). Click "Nightly run" to turn the portal's nightly schedule on or off
   (`intake.nightly.run`, `enabled`; the time, zone, machine, person and report window stay), and the other chip, now named "File

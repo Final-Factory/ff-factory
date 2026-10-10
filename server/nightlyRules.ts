@@ -365,6 +365,63 @@ export function nightlyRunDraft(a: { date: string; machine: string; time: string
   };
 }
 
+/** The night's merge review request the portal's job timer files (w905; docs/intake.md, "The nightly merge review"). */
+export function nightlyReviewDraft(a: { date: string; machine: string; time: string; tz: string; since?: string; covered?: readonly { id: string; title: string }[] }): IntakeDraft & { priority: WorkPriority; triage: WorkTriage; constraints: string } {
+  return {
+    title: `Nightly merge review ${a.date} on ${a.machine}`,
+    brief: [
+      `Review the merges to develop for the night ${a.date}, as the Nightly Regression Sentry did, filed by the portal's job timer (${a.time} ${a.tz}): Duty A, regression checks on risky merges; Duty B, a guarding test for every merged fix. The intake rules below say how; the instructions are scripts/nightly/merge-review.md in the game repo.`,
+      a.since ? `- The last review got to develop \`${a.since}\`: review the merges after it.` : '- No earlier review is on record: review the merges of the last 24 hours.',
+      '- You write the jobs; the portal files them as auto-approved requests for the dispatcher to place on any machine.',
+      ...(a.covered?.length
+        ? ['- Already in the ledger from the nightly lab (its own regression filing, intake.nightly.enabled): do not file a job for what these cover; name them instead.', ...a.covered.slice(0, 30).map((c) => `  - ${c.id}: ${clip(c.title, 140)}`)]
+        : ['- No nightly lab regression request is open now.']),
+      '- For the dispatcher: this is judgment work (ranking regression risk and writing briefs), so start it on Opus at high effort.',
+    ].join('\n'),
+    priority: 'normal',
+    triage: { class: 'follow-up', reason: `the nightly merge review of ${a.date}, filed by the portal's job timer` },
+    constraints: `Run it on ${a.machine}, in one of its sandboxes: Lothsahn asked for the Sentry's job to run on ${a.machine} as an ordinary job ("We had a thing where we wanted this to be a standard job sent to a worker on LothDesktop like any other", 2026-10-10). The jobs it files go through normal placement.`,
+    source: { kind: 'nightly-review', untrusted: false, channel: 'nightly e2e', nightlyReview: { date: a.date, machine: a.machine, ...(a.since ? { since: a.since } : {}) } },
+  };
+}
+
+/** One verifier or test-writer job a merge review wrote (Duty A or B), for the portal to file (w905). */
+export interface NightlyJob {
+  title: string;
+  task: string;
+  model?: string;
+  effort?: string;
+}
+
+/** At most this many jobs from one review's report: a guard against a runaway message, not a cost cap (the Sentry filed 2-5 a day). */
+export const NIGHTLY_JOBS_MAX = 12;
+
+/**
+ * The jobs and the REVIEWED-THROUGH commit at the end of a merge review's message (w905): `NIGHTLY-JOB: <title>`, an
+ * optional `Model: <model>, <effort>` line, the brief, `END-NIGHTLY-JOB`. A block without its end line is not filed.
+ */
+export function parseNightlyJobs(text: string): { jobs: NightlyJob[]; reviewedThrough?: string } {
+  const jobs: NightlyJob[] = [];
+  const re = /^[ \t>*_`-]*NIGHTLY-JOB:[ \t]*(.+?)[ \t]*\r?\n([\s\S]*?)^[ \t>*_`-]*END-NIGHTLY-JOB[ \t`*_]*$/gm;
+  for (const m of text.matchAll(re)) {
+    if (jobs.length >= NIGHTLY_JOBS_MAX) break;
+    const title = cleanLine(m[1].replace(/[`*_]+$/, ''), 120);
+    let body = m[2].replace(/\r/g, '');
+    let model: string | undefined;
+    let effort: string | undefined;
+    const head = /^[ \t]*Model:[ \t]*(opus|sonnet|haiku|fable)\b[ \t]*,?[ \t]*(low|medium|high|xhigh|max)?[ \t]*\n/i.exec(body);
+    if (head) {
+      model = head[1].toLowerCase();
+      effort = head[2]?.toLowerCase();
+      body = body.slice(head[0].length);
+    }
+    const task = body.trim().slice(0, 8000);
+    if (title && task) jobs.push({ title, task, ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
+  }
+  const sha = /^[\s*_>`-]*REVIEWED-THROUGH:?\s+`?([0-9a-f]{7,40})\b/im.exec(text)?.[1]?.toLowerCase();
+  return { jobs, ...(sha ? { reviewedThrough: sha } : {}) };
+}
+
 /** Whether open work names a scenario: its id as a whole word in the title or brief (a person filed the fix by hand). */
 export function mentionsScenario(text: string, scenario: string): boolean {
   const esc = scenario.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
