@@ -30,6 +30,17 @@ async function showActions(page: Page, message: Locator) {
   await expect(message.getByRole('toolbar', { name: 'Message actions' })).toBeVisible();
 }
 
+/**
+ * Press one of a message's buttons. Other tests share this chat and its answers scroll the page, which ends a hover, so
+ * showing the buttons and pressing one is retried together.
+ */
+async function press(page: Page, message: Locator, name: string) {
+  await expect(async () => {
+    await showActions(page, message);
+    await message.getByRole('button', { name, exact: true }).click({ timeout: 2_000 });
+  }).toPass({ timeout: 20_000 });
+}
+
 const answerTo = (page: Page, tag: string) => page.locator('.orch .msg-assistant', { hasText: `Echo: ${tag}` }).first();
 
 test('reply: Reply on the orchestrator’s answer quotes it above the new message, and the orchestrator is handed it after the words', async ({ authed: page }) => {
@@ -38,8 +49,7 @@ test('reply: Reply on the orchestrator’s answer quotes it above the new messag
   const first = answerTo(page, `first ${tag}`);
   await expect(first).toBeVisible();
 
-  await showActions(page, first);
-  await first.getByRole('button', { name: 'Reply' }).click();
+  await press(page, first, 'Reply');
   const bar = page.getByTestId('composer-reply');
   await expect(bar).toContainText('Replying to Orchestrator');
   await expect(bar).toContainText(`Echo: first ${tag}`);
@@ -48,8 +58,7 @@ test('reply: Reply on the orchestrator’s answer quotes it above the new messag
   await bar.getByRole('button', { name: 'Cancel the reply' }).click();
   await expect(bar).toHaveCount(0);
   await first.scrollIntoViewIfNeeded();
-  await showActions(page, first);
-  await first.getByRole('button', { name: 'Reply' }).click();
+  await press(page, first, 'Reply');
   await expect(bar).toBeVisible();
 
   await say(page, `yes, that one ${tag}`);
@@ -106,8 +115,7 @@ test('reply: your own message and a relayed worker update can be replied to too'
   const notice = page.locator('.orch .notice', { hasText: `Skip ${tag}` });
   await expect(notice).toBeVisible();
 
-  await showActions(page, notice);
-  await notice.getByRole('button', { name: 'Reply' }).click();
+  await press(page, notice, 'Reply');
   await expect(page.getByTestId('composer-reply')).toContainText('Replying to Worker update');
   await say(page, `thanks ${tag}`);
   const mine = page.locator('.orch .msg-user', { hasText: `thanks ${tag}` });
@@ -115,8 +123,7 @@ test('reply: your own message and a relayed worker update can be replied to too'
   await expect(mine.getByTestId('reply-quote')).toContainText(`Skip ${tag}`);
 
   // Your own message too.
-  await showActions(page, mine);
-  await mine.getByRole('button', { name: 'Reply' }).click();
+  await press(page, mine, 'Reply');
   await expect(page.getByTestId('composer-reply')).toContainText('Replying to You');
   await page.getByTestId('composer-reply').getByRole('button', { name: 'Cancel the reply' }).click();
 });
@@ -129,8 +136,7 @@ test('reaction: an emoji shows on the message, reaches the orchestrator as a sho
   const orchestratorId = (await appState(page.request)).orchestratorId;
   const before = (await transcript(page.request, orchestratorId)).length;
 
-  await showActions(page, asked);
-  await asked.getByRole('button', { name: 'React' }).click();
+  await press(page, asked, 'React');
   await asked.getByRole('button', { name: 'React 👍' }).click();
   const chip = asked.getByTestId('msg-reactions').getByRole('button', { name: 'Take back your 👍 reaction' });
   await expect(chip).toBeVisible();
