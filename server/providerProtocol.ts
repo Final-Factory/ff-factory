@@ -581,14 +581,16 @@ export const DevOperatorSchema = z.object({
  * The operator's OWN words in a hand-over (w831), apart from everything else the turn carries: only the messages whose
  * platform-authenticated author is this operator, matched by FFBox's host code against its `operators` block, each one's
  * body as its author typed it (no embeds, no quoted reply, no file names, no player's message, no model output). `via`
- * is the service whose id matched (Discord's author snowflake, GitHub's numeric user id) and `id` that id. FFBox sends it
- * only from Discord and GitHub; a shell or ffweb turn has none (their identity is not authenticated: docs/ffbox.md,
- * "Operators' own words"). What lets an operator's message count as their own turn in FF Factory (server/devRequests.ts
- * operatorWords); `text` and `brief` stay data.
+ * is the service whose id matched (Discord's author snowflake, GitHub's numeric user id) and `id` that id. From a shell
+ * or ffweb turn (w852; Lothsahn: "FFBox shell and ffweb messages are trusted like operator messages") `via` is `shell` or
+ * `web`, `id` the opener's shell login or ffweb login, and `text` what was typed into that local conversation. What lets
+ * an operator's message count as their own turn in FF Factory (server/devRequests.ts operatorWords); `text` and `brief`
+ * stay data. Read with `.catch(undefined)`: an `own` this portal cannot read is dropped, never a reason to refuse the
+ * hand-over (a newer FFBox may name another service).
  */
 export const DevOwnSchema = z.object({
-  via: z.enum(['discord', 'github']),
-  id: z.string().regex(/^\d{1,25}$/),
+  via: z.enum(['discord', 'github', 'shell', 'web']),
+  id: z.string().regex(/^[A-Za-z0-9._:@-]{1,64}$/),
   text: z.string().min(1).max(DEV_LIMITS.brief),
 });
 
@@ -630,7 +632,7 @@ export const DevRequestSchema = z.object({
   /** The operator asked to file it even if it repeats work (`!fff new`). */
   force: z.boolean().optional(),
   /** The operator's own words in the turn (w831), when FFBox authenticated them; title, brief and transcript stay data. */
-  own: DevOwnSchema.optional(),
+  own: DevOwnSchema.optional().catch(undefined),
 });
 
 /** connector → portal: file n's bytes from offset, base64, in order, file after file. */
@@ -657,7 +659,7 @@ export const DevMessageSchema = z.object({
   /** The conversation's files no earlier hand-over delivered (FFBox w344), streamed as dev_chunk after the ack. */
   attachments: z.array(DevAttachmentSchema).max(64).optional(),
   /** The operator's own words in the follow-up (w831), when FFBox authenticated them; `text` stays data. */
-  own: DevOwnSchema.optional(),
+  own: DevOwnSchema.optional().catch(undefined),
 });
 
 /** connector → portal: a dev_reply was written for ffwatch; the portal stops resending it. */

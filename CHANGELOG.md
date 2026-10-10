@@ -19,6 +19,26 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   after the deploy (requests declined in the last 30 days). Needs a portal deploy and ffbox master with
   `report_obsolete` (docs/ffbox-connector-contract.md, "Reports obsolete").
 
+||||||| 722eb38
+
+- **FFBox shell and ffweb operators' own words count as their turn too; the two dead config keys leave config.json**
+  (w852, lothsahn: "FFBox shell and ffweb messages are trusted like operator messages" and "Yes, remove unused config
+  keys"). `own` now also takes `via` `shell` and `web` (the opener's unix login or ffweb login; ffbox `aceb8e5` sends it),
+  trusted by that decision though neither login is authenticated; an `own` the portal cannot read is dropped instead of
+  refusing the frame. At start the server takes the retired keys out of config.json (`pruneRetiredKeys`, config.json.prev
+  keeps the file as it was; a dry run only names them): on the live portal `claudeAccounts.workers` and
+  `hostGuard.compactWhenReclaimGB`, so system_status stops naming them after the deploy.
+
+- **Installer reruns and machine updates go through the ops worker, never a person** (w855, lothsahn: "don't ask ben to run
+  installers.  Update your instructions.  Stop doing that.  When we say update the machines, do the update, including
+  installers if necessary"). w847 (raising biscuit to 3 sandboxes) asked Ben to rerun biscuit's installer with
+  `--max-sandboxes 3`, a step the ops worker already could do. Now the dispatcher's and the orchestrators' prompts say an
+  installer rerun (a sandbox count, a daemon update, a reinstall) is sent to the ops worker, "update the machines" means
+  doing it for every machine, and add_machine's refusal of `max_sandboxes` on a worker-root install says the ops worker
+  reruns the installer. New `ops_worker` action `machine_update` (machine, one `work_ids` request, optional
+  `max_sandboxes`, `max_agents_per_sandbox`, `max_unity`) opens that job in any turn of Lothsahn's or Ben's orchestrator,
+  including a `[dispatch]` or a timer: the gate is that the request is one of the person's own open requests, and the
+  server writes the command. Docs: worker-install.md "Updating", ops-worker.md. Needs a portal deploy.
 - **A worker waiting on CI frees its sandbox and is woken within minutes of its checks finishing** (w846, lothsahn: "When
   they're waiting for GithubCI with their unity editors off, they should free the slot", and "How long do workers wait on
   CI? Most of the CI runs are complete"). At about 04:20 UTC on 2026-10-10 BEAST had 0 of 5 sandboxes free, three held by

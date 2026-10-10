@@ -73,6 +73,33 @@ ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblo
 
 An update needs no new credential: never `fffctl credential issue` for one (issuing cuts the running daemon off).
 
+### Updating and re-running a machine's installer (w855)
+
+**This is the worker's job, never a person's** (lothsahn, 2026-10-10: "don't ask ben to run installers.  Update your
+instructions.  Stop doing that.  When we say update the machines, do the update, including installers if necessary").
+It covers a daemon update, a sandbox count on a worker-root install (add_machine refuses `max_sandboxes` there and now
+says so), an agent or editor limit that the installer owns, and a reinstall. w847 (raising biscuit to 3 sandboxes) asked
+Ben to run it; it should have been this.
+
+The route has two halves. The dispatcher makes the settings it can (`add_machine` `max_unity`, `max_agents_per_sandbox`,
+`max_sandbox_agents`) and sends the requester's orchestrator the step in a `decide_work` note, naming the exact action.
+The orchestrator then calls `ops_worker` with action **`machine_update`**: `machine`, exactly one `work_ids` entry (the
+person's own open request that asks for it), and `max_sandboxes`, `max_agents_per_sandbox` or `max_unity` for what
+changes. "Update the machines" is one such call per machine, with no setting named.
+
+**The gate** (`OpsWorker.machineInstall`, `server/opsWorker.ts`; tested in `server/opsWorker.test.ts`):
+
+- Only Lothsahn's or Ben's own orchestrator (as for every action here).
+- **Any turn of theirs**, a `[dispatch]`, a timer or a check-in included: the gate is the request, not the turn. The
+  request must exist, be open or stalled, and list that person among its requesters, so it is their own recorded
+  words (the same footing the dispatcher's `add_machine` runs on: "only for a request its person asked for in their own
+  words"). A plain `send` of a new job still needs a turn the person started.
+- The server writes the command itself from the machine's record (the `--update` form above, its ssh target and root,
+  plus only the settings named, whole numbers 1 to 16). The orchestrator's free text never reaches the worker's
+  shell on this path. A machine with no worker root (the portal's own host, or an older install) is refused.
+- The worker's own rules stay: it runs that command once and nothing else, issues no credential, and reports what the
+  update printed; the job is sent for the request, so its `DONE:` line closes it.
+
 Its `ssh`, `scp`, `sftp`, `fffctl` and `fff-machine-ssh` are wrappers on its PATH (`/usr/local/lib/fff/ops-bin`).
 `fffctl machine-ssh-check` still works: it is `fff-machine-ssh --check`. It also has `list_machines`,
 `list_sandboxes` and `system_status` (read only) and its own `wake_me`.
@@ -170,7 +197,7 @@ process of the portal: it would get the portal's account and everything that acc
 | It may | Enforced by |
 |---|---|
 | ssh to the enrolled machines with the portal's key | `sudoers.d/fff-ops` lets it run `fff-ops-ssh` as `fff`, and nothing else as `fff`. That wrapper takes a machine (`m5`, `user@host`) and never an ssh option: `-o ProxyCommand` or `-F` would run a command as `fff`. Its options are fixed: `StrictHostKeyChecking=yes` (only host keys pinned in `known_hosts` or `known_hosts2`), no agent, X11 or port forwarding, no `LocalCommand`, no proxy, no shared connection, `BatchMode`. The tailnet policy lets the portal's tag reach only the machines (beast, lothdesktop, m3, m5, biscuit) on port 22 (RUNBOOK section 1) |
-| run the worker installer on a machine | ssh, above. The installer runs on the machine, with the machine's disk and network |
+| run the worker installer on a machine (an update, a sandbox count, a reinstall: [Updating and re-running a machine's installer](#updating-and-re-running-a-machines-installer-w855)) | ssh, above. The installer runs on the machine, with the machine's disk and network. A setting change opens a job only from a turn its person started, or with `ops_worker machine_update` for one of that person's own open requests (the server writes the command) |
 | copy files to and from the machines with scp and sftp (w612) | `/usr/bin/scp` and `/usr/bin/sftp` run as `fff-ops` (its PATH's `scp` and `sftp` add `-S fff-ops-scp-ssh`), so the local side of a copy is only what `fff-ops` may read and write: its scratch, never `/srv/fff` or the vault key. `fff-ops-scp-ssh` takes the arguments scp and sftp give their ssh, lets through only their own fixed safe settings (no `-o ProxyCommand`, `-F`, `-i`, `-J`, `-S`, port 22 only) and hands the machine alone to `fff-ops-ssh --sftp TARGET`, the machine's sftp subsystem (or, for `scp -O`, scp's own `scp -t`/`scp -f` command). The machine side is the same ssh as above: the portal's key, pinned host keys, the same network. The guard refuses scp's ssh options and the portal's files as a source or destination, with a reason |
 | read the portal's state | `fff-ops-priv` (`status`, `state`, `units [--check]`, `logs N` redacted, `machine-ssh --check`, `credential list`) and the read-only tools `list_machines`, `list_sandboxes` and `system_status` |
 | read the vault, machine credentials and the migration's usage (w745) | `fffctl vault list` (the entries: name, kind, env, last four characters, a 12-character fingerprint of the value's hash, grants and the Claude pools' meters), `fffctl vault list --names`, `fffctl vault help`, `fffctl machine-credential list` (the same as `credential list`) and `fffctl migrate --help`. `fff-ops-priv` passes exactly these forms. Never a value: `vault list` shows what `show` in `server/vaultCli.ts` shows anyone who runs it, and there is no `vault get`. Every other vault form (`init`, `export-key`, `add`, `add-claude`, `put`, `rotate`, `grant`, `remove`, `rename`, `new-key`, and `export`, the one that prints a value, root to root for the FFBox host's nightly copy: docs/vault.md section 12), `machine-credential issue` and `revoke`, and every `migrate` mode stay a person's |

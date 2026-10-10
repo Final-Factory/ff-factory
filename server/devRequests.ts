@@ -308,7 +308,8 @@ const updateWords = (u: DevUpdate) =>
  * An operator's own words in a hand-over (w831), with the quoted lines taken out: what may count as a turn of theirs, or
  * why nothing does. Only `own` is read, never `text`, `title`, `brief` or `transcript` (which carry whatever the turn
  * held: a player's message posted before theirs, embeds, FFBox's notes). It counts when FFBox sent it (from Discord or
- * GitHub, matched by the author's platform id), the operator turns setting is on, the id FFBox matched is the one its
+ * GitHub, matched by the author's platform id; from the shell or ffweb, under the opener's login there, w852), the
+ * operator turns setting is on, the id FFBox matched is the one its
  * operators block gives this operator, and FF Factory's own intake.discord.trusted, when it knows that Discord id, maps it
  * to the same person. A line quoted with `>` (and everything after a `>>>`) is someone else's text the operator quoted,
  * and goes.
@@ -319,7 +320,7 @@ export function operatorWords(
   cfg: Config,
 ): { text: string; via: DevOwn['via']; quoted: boolean } | { why: string } {
   const own = m.own;
-  if (!own) return { why: 'FFBox sent no authenticated words of theirs (a shell or ffweb turn, or an FFBox without w831)' };
+  if (!own) return { why: 'FFBox sent no words of theirs it matched to the operator (an FFBox without w831, or one this portal cannot read)' };
   if (!devSettings(cfg.providers?.ffbox?.devRequests).operatorTurns) return { why: 'operator turns are off (providers.ffbox.devRequests.operatorTurns)' };
   const opId = m.operator[own.via];
   if (!opId || String(opId) !== own.id) return { why: `the ${own.via} id FFBox matched is not the one its operators block gives ${m.operator.name}` };
@@ -347,7 +348,8 @@ export function operatorWords(
   return { text, via: own.via, quoted };
 }
 
-const VIA_SERVICE = { discord: 'Discord', github: 'GitHub' } as const;
+/** How FFBox knew them, by `own.via`, for the line their words come with. */
+const VIA_SERVICE = { discord: 'Discord account', github: 'GitHub account', shell: 'FFBox shell login', web: 'ffweb login' } as const;
 /** Two texts the same but for whitespace: the turn held nothing but the operator's own words. */
 const sameWords = (a: string, b: string) => a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim();
 
@@ -815,7 +817,7 @@ export class DevRequests {
     const about = w ? `, about ${w.id} (${w.status})` : '';
     const answer = w ? ` Answer them there with reply_to_ffbox (request ${w.id}).` : '';
     const quoted = words.quoted ? ' Text they quoted is left out.' : '';
-    return `[via FFBox: ${person.displayName}'s own message in ${where}${about}; their ${VIA_SERVICE[words.via]} account is the one FFBox's operators block names.${filed ? ` ${filed}` : ''}${answer}${quoted}]\n${words.text}`;
+    return `[via FFBox: ${person.displayName}'s own message in ${where}${about}; their ${VIA_SERVICE[words.via]} is the one FFBox's operators block names.${filed ? ` ${filed}` : ''}${answer}${quoted}]\n${words.text}`;
   }
 
   /**

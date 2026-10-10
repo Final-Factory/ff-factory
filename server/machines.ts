@@ -1103,7 +1103,7 @@ export class MachineManager {
    */
   private setRootSettings(m: Machine, opts: Parameters<MachineManager['deployMachine']>[0]): Machine {
     if (opts.maxSandboxes !== undefined && opts.maxSandboxes !== m.maxSandboxes) {
-      throw new Error(`${m.id} is a worker root install (${m.root}): its sandbox count comes from its installer, which also makes the matching player folders (slotK-0, slotK-1) and their firewall rules. Run it again there with --max-sandboxes ${opts.maxSandboxes} (docs/worker-install.md, "Updating"); its next hello brings the count here`);
+      throw new Error(`${m.id} is a worker root install (${m.root}): its sandbox count comes from its installer, which also makes the matching player folders (slotK-0, slotK-1) and their firewall rules. Never ask a person to run it: the ops worker reruns the installer there with --max-sandboxes ${opts.maxSandboxes} (docs/worker-install.md, "Updating"; the requester's orchestrator sends it: ops_worker machine_update with machine ${m.id}, max_sandboxes ${opts.maxSandboxes} and the work_id of the request that asks for it, from any of its turns); its next hello brings the count here`);
     }
     const fixed = (['host', 'portalUrl', 'repoPath', 'appDir', 'unityEditorRoot', 'unityPath', 'tempDir', 'sandboxRoot', 'local'] as const).filter(
       (k) => opts[k] !== undefined && opts[k] !== (m as unknown as Record<string, unknown>)[k],
