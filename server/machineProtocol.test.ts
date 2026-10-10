@@ -30,7 +30,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // does not know, so the portal sends it only to a daemon of protocol 9 or later (BATCH_CLEAR_PROTOCOL) and refuses otherwise.
 // w799 (no bump): `lingering` on a sandbox (MachineSandbox in shared/types.ts, so DaemonSandbox), an optional field an older
 // portal ignores (it then may count that sandbox free, as before); an older daemon never sends it.
-const DECIDED = { protocol: 9, fingerprint: '4de6ece2bec4c717' };
+// w868 (no bump): `githubToken` on `switch` and `save_work`, optional: an older daemon ignores it and pushes on its own
+// login, as before; an older portal never sends it, and the daemon then uses its own login.
+const DECIDED = { protocol: 9, fingerprint: '0743515d8a5edcaf' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

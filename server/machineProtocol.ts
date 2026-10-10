@@ -118,8 +118,10 @@ export type ToDaemon =
   /**
    * Switch the clone's branch (server/switchBranch.ts); answered by switch_result. callerSessionId: the agent that called
    * switch_branch, mid-turn by definition, so not counted as busy (w422; older daemons ignore it and refuse their caller).
+   * githubToken (w868, no bump): the GitHub token of the person the work is for, from the vault, for the switch's push and
+   * fetch (as on save_work); absent, the machine's own login. An older daemon ignores it and uses its own login.
    */
-  | { type: 'switch'; id: string; branch: string; createFrom?: string; sandbox?: string; callerSessionId?: string }
+  | { type: 'switch'; id: string; branch: string; createFrom?: string; sandbox?: string; callerSessionId?: string; githubToken?: string }
   /**
    * A sandbox (protocol 5, machine/sandboxes.ts), answered by sandbox_result: create (returns once recorded; progress
    * comes in `sandboxes` snapshots), delete (returns when it is gone), log (the tail of its editor log).
@@ -171,7 +173,7 @@ export type ToDaemon =
    * answered by save_result. Refused while an agent there has a process. Sent only to a daemon whose hello offered
    * `saveWork`, so an older daemon never gets one.
    */
-  | { type: 'save_work'; id: string; sandbox: string; branch: string; message: string };
+  | { type: 'save_work'; id: string; sandbox: string; branch: string; message: string; githubToken?: string };
 
 export type FromDaemon =
   /**

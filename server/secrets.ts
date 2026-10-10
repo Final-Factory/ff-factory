@@ -5,6 +5,7 @@ import { HOST_ROLES, TOKEN_FILE_ROLES, roleNames, type ClaudeAccount, type Confi
 import type { Requester, SessionInfo, SessionKind } from '../shared/types.ts';
 import { claudeEnvFor, userToken } from './identity.ts';
 import { PoolHeldError, vaultContext, type VaultContext, type VaultRole } from './vault.ts';
+import { githubFromVault } from './githubTokens.ts';
 import { HOST_LOGIN, credentialsFile, loginUnusable, readStoredLogin, tokenKey, usageEnv } from './usage.ts';
 import { poolLimits, reserveOf, reserveReason, type PoolLimits, type Reserve } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
@@ -304,6 +305,8 @@ export interface MachineRunEnv {
   login: boolean;
   /** "vault token ben-max …abcd", "host token …abcd" or "Mac login", safe to show. */
   account: string;
+  /** The vault GitHub entry given as GH_TOKEN (w868), "vault-ben-github …abcd"; absent: the machine's own gh login. */
+  github?: string;
 }
 
 /**
@@ -330,17 +333,22 @@ export function machineRunEnv(
   const own = userToken(cfg, billed?.userId);
   if (!ctx) return plain;
   const wantClaude = vaultOn && !own;
-  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, sessionId: run.sessionId }, { claude: wantClaude, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits });
+  const wantGithub = githubFromVault(cfg, refId(machine));
+  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, sessionId: run.sessionId }, { claude: wantClaude, github: wantGithub, githubUsable: ctx.githubUsable, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits });
   for (const p of s.problems) ctx.onProblem?.(p);
+  // GitHub (w868): the person's own token, else the machine's own gh login as before; never another person's.
+  const github = s.github ? { github: `${s.github.name} …${s.github.last4}` } : {};
+  if (s.github) ctx.onGithubUse?.(s.github, `given to a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}`);
+  else if (wantGithub) ctx.onProblem?.(`no usable vault GitHub token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it uses the machine's own gh login`);
   if (s.claude) {
-    return { env: { ...usageEnv(base), ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person) };
+    return { env: { ...usageEnv(base), ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person), ...github };
   }
   // The person has Claude tokens and none may serve this run (every one over its caps or used up): the run waits for the
   // first to free up. No other person's token, no shared token, not the dispatcher's, not the host token (w739).
   if (wantClaude && s.claudeHold) throw new PoolHeldError(`${person ?? 'this run'}'s Claude token pool is held: ${s.claudeHold.why}`, s.claudeHold.next);
   // No token of their own (or the vault cannot open them): today's account, as before the pool (docs/vault.md, "Cut-over").
   if (wantClaude) ctx.onProblem?.(`no vault Claude token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it runs on ${plain.account} instead`);
-  return { ...plain, env: { ...base, ...s.env } };
+  return { ...plain, env: { ...base, ...s.env }, ...github };
 }
 
 /** "vault token ben-max …abcd" for a run's account line, safe to show. */

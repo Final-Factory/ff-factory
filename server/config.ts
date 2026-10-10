@@ -178,6 +178,13 @@ export interface Config {
      */
     claudeFromVault?: boolean | Record<string, boolean>;
     /**
+     * Per-person GitHub tokens (docs/vault.md section 13, w868; default false): a machine's runs get their person's vault
+     * GitHub entry as GH_TOKEN (and the daemon's pushes for them use it); the machine id "portal" is the portal's own gh
+     * reads for a request. Off: GitHub entries are given to nobody and every caller keeps its own gh login. Same shape as
+     * claudeFromVault.
+     */
+    githubFromVault?: boolean | Record<string, boolean>;
+    /**
      * Each machine daemon's own clean-up (docs/self-recovery.md): a pass every `everyMinutes` (default 60) and
      * sooner below `softFreeGB` (default 80). A number for every machine, or per machine with "*" for the rest.
      */
@@ -801,7 +808,7 @@ export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machine
       if (v === 'tokenfile' && !(cfg as Partial<Pick<Config, 'claudeTokenFile'>>).claudeTokenFile) throw new Error(`config claudeAccounts.${role} is "tokenfile" but config claudeTokenFile names no file`);
     }
   }
-  for (const key of ['useHostClaudeEnv', 'claudeFromVault'] as const) {
+  for (const key of ['useHostClaudeEnv', 'claudeFromVault', 'githubFromVault'] as const) {
     const u: unknown = cfg.machines?.[key];
     if (u === undefined || typeof u === 'boolean') continue;
     if (typeof u !== 'object' || u === null || Array.isArray(u)) throw new Error(`config machines.${key} is true, false or { "<machine id>" | "*": true | false }`);

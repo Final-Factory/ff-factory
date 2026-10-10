@@ -35,12 +35,13 @@ export interface SaveResult {
   notes: string[];
 }
 
-async function git(dir: string, args: string[], timeoutMs = 120_000) {
-  return run('git', ['-C', dir, ...args], { timeoutMs, env: ENV });
+/** `net`: the environment of a push or fetch (w868: a person's GitHub token from the vault), over ENV. */
+async function git(dir: string, args: string[], timeoutMs = 120_000, net?: NodeJS.ProcessEnv) {
+  return run('git', ['-C', dir, ...args], { timeoutMs, env: net ? { ...ENV, ...net } : ENV });
 }
 
-async function must(dir: string, args: string[], what: string, timeoutMs?: number) {
-  const r = await git(dir, args, timeoutMs);
+async function must(dir: string, args: string[], what: string, timeoutMs?: number, net?: NodeJS.ProcessEnv) {
+  const r = await git(dir, args, timeoutMs, net);
   if (r.code !== 0) throw new Error(`${what} failed: ${(r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ')}`);
   return r.stdout;
 }
@@ -66,7 +67,7 @@ export async function untrackedProblem(dir: string, limits = SAVE_LIMITS): Promi
   return undefined;
 }
 
-export async function saveWork(opts: { dir: string; branch: string; message: string; limits?: typeof SAVE_LIMITS }): Promise<SaveResult> {
+export async function saveWork(opts: { dir: string; branch: string; message: string; limits?: typeof SAVE_LIMITS; env?: NodeJS.ProcessEnv }): Promise<SaveResult> {
   const { dir, branch } = opts;
   const st = parseStatus(await must(dir, ['status', '--porcelain=v2', '--branch'], 'git status'));
   if (st.branch !== branch) throw new Error(`the sandbox is on ${st.branch}, not the worker's branch ${branch}: nothing was saved`);
@@ -79,7 +80,7 @@ export async function saveWork(opts: { dir: string; branch: string; message: str
   await must(dir, ['commit', '-q', '--no-verify', '-m', opts.message], 'git commit');
   const sha = (await must(dir, ['rev-parse', '--short', 'HEAD'], 'reading the commit')).trim();
   const notes = [`committed ${files} file(s) on ${branch} as ${sha}`];
-  const push = await git(dir, ['push', '-u', 'origin', `${branch}:${branch}`], 5 * 60_000);
+  const push = await git(dir, ['push', '-u', 'origin', `${branch}:${branch}`], 5 * 60_000, opts.env);
   if (push.code === 0) notes.push(`pushed ${branch}`);
   else notes.push(`not pushed (${(push.stderr || push.stdout).trim().split('\n').slice(-1)[0]}): the commit is in this machine's repository, and the next switch away pushes it`);
   return { sha, files, pushed: push.code === 0, notes };
