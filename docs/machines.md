@@ -510,7 +510,8 @@ tools `wake_me`, `cancel_wake` and `blocked_on` (w754: a request that waits only
 gets, [attachments.md](attachments.md#agents-files)), `publish_review` (review media to the
 portal's computer over the daemon's link, [review.md](review.md)), `fetch_ffbox_report` and `fetch_discord_thread_files` (a Discord bug thread's files, read from FFBox so no Discord token is needed on the machine; [ffbox.md](ffbox.md)), `post_as_max` (a message posted as Max by FFBox, a release's patch notes included, from any machine; w901, [ffbox.md](ffbox.md#posting-as-max-from-any-machine-w901)) and
 `read_work` (the ledger, read-only: their own requests and the ones they name, the open and stalled ones with a grant;
-[orchestrators.md](orchestrators.md#workers-read-the-ledger)). Their guard
+[orchestrators.md](orchestrators.md#workers-read-the-ledger)) and `portal_logs` (the portal's journal, any computer's
+clean-up passes and the update files, read-only and redacted; w920, [portal-logs.md](portal-logs.md)). Their guard
 is the sandbox one: their worktree is theirs, the main clone and the daemon's
 folder are protected, killing Unity by hand is refused (other sandboxes' editors share the machine), and a raw
 `git switch` is refused while their editor runs.

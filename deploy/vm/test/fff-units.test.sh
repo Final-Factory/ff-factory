@@ -79,6 +79,16 @@ grep -qF 'systemctl enable "${FFF_CRITICAL_UNITS[@]}"' $G/install.sh || fail "in
 grep -qF 'enable_state_ok "$(systemctl is-enabled "$u"' $G/install.sh || fail "install.sh does not check that each critical unit is enabled afterwards"
 ok "${#FFF_CRITICAL_UNITS[@]} critical units: each has an [Install] with the right WantedBy; install.sh enables all of them and checks"
 
+# ---------------------------------------------------------------- the portal's journal group (w920)
+# portal_logs reads the journal as the server's account: the systemd-journal group, for that service only, in a drop-in
+# install.sh writes only where the group exists (a unit naming a missing group does not start).
+dropin=$U/fff-portal-journal.conf
+[ "$(value "$dropin" Service SupplementaryGroups)" = systemd-journal ] || fail "$dropin does not give fff-portal.service SupplementaryGroups=systemd-journal"
+! grep -qE '^(Group|User|AmbientCapabilities|CapabilityBoundingSet|NoNewPrivileges)=' "$dropin" || fail "$dropin changes more than the supplementary group"
+grep -qF 'getent group systemd-journal' $G/install.sh || fail "install.sh does not check that the systemd-journal group exists before using it"
+grep -qF 'fff-portal.service.d/20-journal.conf 0644 <"$here/units/fff-portal-journal.conf"' $G/install.sh || fail "install.sh does not write the journal drop-in"
+ok "fff-portal.service gets the systemd-journal group through a drop-in that install.sh writes only where the group exists"
+
 # ---------------------------------------------------------------- Restart= and StartLimit
 for u in "${FFF_CRITICAL_UNITS[@]}"; do
   case $u in *.service) ;; *) continue ;; esac
