@@ -13,6 +13,7 @@ import { checkShell } from './guard.ts';
 import { keepAwakeCommand } from '../machine/daemon.ts';
 import { editorBinary, editorLogPath, editorTree, editorsFor, parseWinProcs, reportersFor, winLaunchScript } from '../machine/unity.ts';
 import { ROOT } from './config.ts';
+import { powershell } from './testPowershell.ts';
 
 // Windows machines (docs/machines.md, "Windows machines"): the scripts the portal sends over ssh, the platform
 // branching, and (on a Windows CI runner only) the scripts run for real by Windows PowerShell.
@@ -86,9 +87,6 @@ test('windows: the stop spares the Unity editor and Hub (the user\'s), and holds
   assert.match(s, /run-daemon\.ps1/);
 });
 
-/** Windows PowerShell on Windows, else PowerShell 7 when installed (GitHub's Ubuntu runners have it): for script functions fed made-up input. */
-const powershell = process.platform === 'win32' ? 'powershell.exe' : ['/usr/bin/pwsh', '/usr/local/bin/pwsh', '/opt/homebrew/bin/pwsh', '/snap/bin/pwsh'].find((p) => fs.existsSync(p));
-
 test('windows (real PowerShell): the stop walks to real children only; a process whose dead parent\'s id was reused is not one (w906)', { skip: !powershell && 'no PowerShell here' }, () => {
   // wininit.exe as on a GitHub runner: started at boot, its parent's id long free, then drawn by the daemon stand-in.
   // Start times in Unix seconds; the list goes to a variable first, as Windows PowerShell's ConvertFrom-Json pipes an
@@ -106,7 +104,7 @@ test('windows (real PowerShell): the stop walks to real children only; a process
   const run = (agents: boolean) => {
     const script = `${win.KILL_SET}
 $procs = ConvertFrom-Json $env:FF_PROCS
-$all = @($procs | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; Name = $_.Name; CommandLine = $_.CommandLine; CreationDate = [datetime]::new(1970, 1, 1, 0, 0, 0, 'Utc').AddSeconds($_.At) } })
+$all = @($procs | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; Name = $_.Name; CommandLine = $_.CommandLine; CreationDate = [DateTimeOffset]::FromUnixTimeSeconds($_.At).UtcDateTime } })
 (Get-FFKillSet $all @('C:\\ff\\app\\machine\\daemon.ts') @('C:\\ff\\app\\machine\\agentHost.ts') $${agents ? 'true' : 'false'}) -join ','`;
     return execFileSync(powershell!, ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FF_PROCS: JSON.stringify(procs) }, encoding: 'utf8' }).trim();
   };
