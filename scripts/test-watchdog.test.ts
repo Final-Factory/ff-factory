@@ -4,11 +4,13 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { descendants, inflightLines } from './test-watchdog.ts';
 import { track, type InflightTest } from './test-inflight-reporter.ts';
 
 const WATCHDOG = path.join(import.meta.dirname, 'test-watchdog.ts');
-const REPORTER = path.join(import.meta.dirname, 'test-inflight-reporter.ts');
+// A URL: node loads a reporter as a module, and on Windows an absolute path is not one.
+const REPORTER = pathToFileURL(path.join(import.meta.dirname, 'test-inflight-reporter.ts')).href;
 
 test('in-flight reporter: a test is listed from its dequeue until it passes or fails', () => {
   const running = new Map<string, InflightTest>();

@@ -91,19 +91,22 @@ const powershell = process.platform === 'win32' ? 'powershell.exe' : ['/usr/bin/
 
 test('windows (real PowerShell): the stop walks to real children only; a process whose dead parent\'s id was reused is not one (w906)', { skip: !powershell && 'no PowerShell here' }, () => {
   // wininit.exe as on a GitHub runner: started at boot, its parent's id long free, then drawn by the daemon stand-in.
+  // Start times in Unix seconds; the list goes to a variable first, as Windows PowerShell's ConvertFrom-Json pipes an
+  // array on as one object.
   const procs = [
-    { ProcessId: 748, ParentProcessId: 600, Name: 'node.exe', CommandLine: 'node C:\\ff\\app\\machine\\daemon.ts', At: '2026-10-10T18:00:10Z' },
-    { ProcessId: 760, ParentProcessId: 748, Name: 'node.exe', CommandLine: 'node -e shell', At: '2026-10-10T18:00:11Z' },
-    { ProcessId: 764, ParentProcessId: 760, Name: 'conhost.exe', CommandLine: 'conhost.exe 0x4', At: '2026-10-10T18:00:11Z' },
-    { ProcessId: 770, ParentProcessId: 748, Name: 'node.exe', CommandLine: 'node C:\\ff\\app\\machine\\agentHost.ts x', At: '2026-10-10T18:00:12Z' },
-    { ProcessId: 772, ParentProcessId: 748, Name: 'Unity.exe', CommandLine: 'Unity.exe -projectPath D:\\FF', At: '2026-10-10T18:00:12Z' },
-    { ProcessId: 860, ParentProcessId: 748, Name: 'wininit.exe', CommandLine: '', At: '2026-10-10T07:00:01Z' },
-    { ProcessId: 976, ParentProcessId: 860, Name: 'services.exe', CommandLine: '', At: '2026-10-10T07:00:02Z' },
-    { ProcessId: 6316, ParentProcessId: 976, Name: 'Runner.Worker.exe', CommandLine: 'Runner.Worker.exe spawnclient', At: '2026-10-10T17:59:00Z' },
+    { ProcessId: 748, ParentProcessId: 600, Name: 'node.exe', CommandLine: 'node C:\\ff\\app\\machine\\daemon.ts', At: 1791655210 },
+    { ProcessId: 760, ParentProcessId: 748, Name: 'node.exe', CommandLine: 'node -e shell', At: 1791655211 },
+    { ProcessId: 764, ParentProcessId: 760, Name: 'conhost.exe', CommandLine: 'conhost.exe 0x4', At: 1791655211 },
+    { ProcessId: 770, ParentProcessId: 748, Name: 'node.exe', CommandLine: 'node C:\\ff\\app\\machine\\agentHost.ts x', At: 1791655212 },
+    { ProcessId: 772, ParentProcessId: 748, Name: 'Unity.exe', CommandLine: 'Unity.exe -projectPath D:\\FF', At: 1791655212 },
+    { ProcessId: 860, ParentProcessId: 748, Name: 'wininit.exe', CommandLine: '', At: 1791615601 },
+    { ProcessId: 976, ParentProcessId: 860, Name: 'services.exe', CommandLine: '', At: 1791615602 },
+    { ProcessId: 6316, ParentProcessId: 976, Name: 'Runner.Worker.exe', CommandLine: 'Runner.Worker.exe spawnclient', At: 1791655140 },
   ];
   const run = (agents: boolean) => {
     const script = `${win.KILL_SET}
-$all = @(ConvertFrom-Json $env:FF_PROCS | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; Name = $_.Name; CommandLine = $_.CommandLine; CreationDate = [datetime]::Parse($_.At).ToUniversalTime() } })
+$procs = ConvertFrom-Json $env:FF_PROCS
+$all = @($procs | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; ParentProcessId = $_.ParentProcessId; Name = $_.Name; CommandLine = $_.CommandLine; CreationDate = [datetime]::new(1970, 1, 1, 0, 0, 0, 'Utc').AddSeconds($_.At) } })
 (Get-FFKillSet $all @('C:\\ff\\app\\machine\\daemon.ts') @('C:\\ff\\app\\machine\\agentHost.ts') $${agents ? 'true' : 'false'}) -join ','`;
     return execFileSync(powershell!, ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FF_PROCS: JSON.stringify(procs) }, encoding: 'utf8' }).trim();
   };
