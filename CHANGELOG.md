@@ -10,6 +10,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The Intake tab's two nightly chips are switches** (w903, lothsahn: "Please modify FF Factory so I can toggle those settings on
+  the intake panel by clicking on them"). Click "Nightly run" to turn the portal's nightly schedule on or off
+  (`intake.nightly.run`, `enabled`; the time, zone, machine, person and report window stay), and the other chip, now named "File
+  regressions based on Nightly run" (it was "Nightly e2e", lothsahn's wording), to file or stop filing the lab's regressions
+  (`intake.nightly.enabled`). `POST /api/intake/nightly/toggle` goes through `set_app_config`'s checks and write
+  (`toggleNightly`, `server/appConfig.ts`), applies live with no restart and pushes the new summary to every page; any signed-in
+  person may click, as `set_app_config` allows for these keys. The portal's log gets an `app config: ... set by <person> from the
+  Intake tab` line. The chips have a pointer cursor, a hover outline and a tooltip saying what they toggle. Request titles ("Nightly
+  e2e <date>: ...") are unchanged. Tests: `server/appConfig.test.ts`, `e2e/intake.spec.ts`.
+
+
 - **The deleted pre-install-folder places are no longer assumed anywhere** (w897, lothsahn, 2026-10-10: "Please remove references to
   [the old clone, slot pool and nightly lab]. Those folders are all gone"). The stale-output pass's nightly lab default is `FF_NIGHTLY_ROOT`,
   else the worker root's `nightly/` (`defaultNightlyRoots`), not a hard-coded place; the own-leftovers pass no longer looks for the
