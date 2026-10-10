@@ -26,6 +26,7 @@ jobs:
         run: git apply .github/e2e.patch
       - run: npx playwright install --with-deps chromium webkit
       - run: npm --prefix web run build
-      - name: Load the runner like a busy CI shard
-        run: for i in 1 2 3; do (while :; do :; done) & done
-      - run: npx playwright test e2e/banner.spec.ts e2e/vault.spec.ts --project=${{ matrix.project }} --repeat-each=30 --retries=0 --workers=3 --reporter=list
+      - name: Playwright on a runner loaded with busy loops
+        run: |
+          for i in 1 2 3; do (while :; do :; done) & done
+          npx playwright test e2e/banner.spec.ts e2e/vault.spec.ts --project=${{ matrix.project }} --repeat-each=30 --retries=0 --workers=3 --reporter=list
