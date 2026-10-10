@@ -246,6 +246,9 @@ days; a deploy is a person's call, and a week without one is worth their look.
   …`, again every 30 minutes, and `… reads again after N min` when it recovers; the `pr` gate's reads log the same way),
   and after `CI_UNREADABLE_MS` (15 minutes, counted from the later of the first failed read and the block) the block
   clears with that reason, so its worker checks CI itself.
+  Where Actions runs are refused too (w889), the PR's merge state is read: `clean` after `unstable` on the same head commit
+  is a green finish and clears the wait at once; a red one still waits `CI_UNREADABLE_MS`. Whether the portal can read CI
+  at all is measured at start and every 30 minutes and said loudly when it cannot ([vault.md](vault.md) section 13.2).
 - **If the blocker fails, it is flagged.** What it waited on stalled, or did not clear in its time: the request stalls
   (`stalled.kind` `blocked`) with the reason, for its people to close or reopen. What it waited on was declined or
   cancelled without delivering: a person must decide now, so it becomes a question to its requester (Waiting on input).
