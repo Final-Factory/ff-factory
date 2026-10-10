@@ -1,4 +1,4 @@
-# FF Factory
+# FF Factory (live demo 2 head, w907)
 
 [![CI](https://github.com/Final-Factory/ff-factory/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Final-Factory/ff-factory/actions/workflows/ci.yml)
 
