@@ -111,7 +111,22 @@ try {
   check(/refs/i.test(String(j1.fileSystem)), 'it is ReFS', `${j1.fileSystem}, Dev Drive format ${j1.devDrive}, block clone ${j1.blockClone}`);
   check(fs.statSync(vhdx).size < 2 * 1024 ** 3, 'the file is dynamic (small until written)', `${(fs.statSync(vhdx).size / 1024 ** 2).toFixed(0)} MB`);
   const letter = String(j1.letter);
-  fs.mkdirSync(`${letter}:\\sandboxes\\slot1`, { recursive: true });
+  // What the install puts on the drive: a real worktree of the root's clone, and the root's two junctions.
+  const gitenv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+  const g = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8', env: gitenv });
+  const src = path.join(scratch, 'src');
+  fs.mkdirSync(src);
+  g(src, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(src, 'a.txt'), 'a');
+  g(src, 'add', '.');
+  g(src, 'commit', '-q', '-m', 'first');
+  g(scratch, 'clone', '-q', '--bare', src, path.join(root, 'repo'));
+  const wt = g(path.join(root, 'repo'), 'worktree', 'add', '-q', '-b', 'sandbox/slot1', `${letter}:\\sandboxes\\slot1`);
+  check(wt.status === 0, `a worktree of the root's clone on ${letter}:`, `${wt.stderr}`.trim());
+  for (const name of ['sandboxes', 'seed']) {
+    fs.mkdirSync(`${letter}:\\${name}`, { recursive: true });
+    fs.symlinkSync(`${letter}:\\${name}`, path.join(root, name), 'junction');
+  }
   fs.writeFileSync(`${letter}:\\sandboxes\\slot1\\marker.txt`, 'kept');
   const created0 = fs.statSync(vhdx).birthtimeMs;
   const tasks = ps(`@(Get-ScheduledTask -TaskName 'ffsb-helper-*' | ForEach-Object { $_.TaskName }) -join ','`).stdout.trim();
@@ -154,6 +169,11 @@ try {
   check(dj.sandboxes.root === `${moved}:\\sandboxes` && dj.sandboxes.librarySeed === `${moved}:\\seed\\Library`, 'daemon.json follows', JSON.stringify(dj.sandboxes));
   const pool = JSON.parse(fs.readFileSync(path.join(root, 'daemon', 'sandboxes.json'), 'utf8').replace(/^\uFEFF/, ''));
   check(pool[0].path === `${moved}:\\sandboxes\\slot1`, "the pool's record follows", pool[0].path);
+  check(fs.readlinkSync(path.join(root, 'sandboxes')).replace(/\\+$/, '') === `${moved}:\\sandboxes` && fs.readlinkSync(path.join(root, 'seed')).replace(/\\+$/, '') === `${moved}:\\seed`, "the root's junctions follow", fs.readlinkSync(path.join(root, 'sandboxes')));
+  const top = g(`${moved}:\\sandboxes\\slot1`, 'rev-parse', '--abbrev-ref', 'HEAD');
+  check(top.status === 0 && top.stdout.trim() === 'sandbox/slot1', 'the worktree still opens, on its branch (git worktree repair ran as SYSTEM)', `${top.stdout}${top.stderr}`.trim());
+  const listed = g(path.join(root, 'repo'), 'worktree', 'list', '--porcelain').stdout.replace(/\\/g, '/').toLowerCase();
+  check(listed.includes(`${moved.toLowerCase()}:/sandboxes/slot1`) && !listed.includes(`${letter.toLowerCase()}:/sandboxes/slot1`), "the root's clone records the new path", listed.split('\n').filter((l) => l.startsWith('worktree')).join(' | '));
   releaseLetter(letter);
   letterTaken = undefined;
 
