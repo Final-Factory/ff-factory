@@ -169,6 +169,26 @@ Between owners (the `owner` role, `Orchestrators.isOwnerRole`; non-owners keep t
   notes.
 - **Limits stay per sender.** The follow-up count is per sender orchestrator and worker (`followUps`, keyed by the
   sender's chat): Lothsahn's three to Ben's worker use none of Ben's, and only Lothsahn writing starts his again.
+- **An owner answers any worker's permission request, and it is recorded** (w891, Lothsahn: "I should be able to
+  approve Ben's shell command requests and vice versa"). w876, Ben's disk clean-up worker, waited over 15 minutes for a Bash
+  approval and Lothsahn saw nothing: the server never refused him (`POST /api/sessions/<id>/permission` ran no check on a
+  worker, for owners and members alike) and no page filtered the request out, but the push notice never went out (a
+  machine's daemon sends the `permission` signal without the request, and `Notifier` read `toolName` of undefined, so no
+  worker on a machine ever pushed a "needs you"; fixed in `server/notify.ts`), nothing put an Allow button where he looked
+  (the request's row on the Dispatcher page said "Waiting on input on ben" and only linked to the sandbox), and only Ben's
+  orchestrator was told. Now:
+  - **Who may answer: unchanged.** Any signed-in login answers a worker's request, members included, as before (Lothsahn: non-owners
+    keep today's rule). `shared/permissionAccess.ts` `permissionAccess` only says whose work it is: `own` (the worker's
+    people), `owner` (an owner on another person's worker) or `other` (a member on another person's). The dispatcher's and
+    the orchestration worker's requests keep their rules (owner-only, `mayDrive`).
+  - **Where it shows.** The sandbox panel's card and the sidebar's "Needs you" list (which names whose worker it is: "Disk
+    clean-up · for Ben"); a request's row on the Dispatcher page carries the worker's Allow and Deny card itself.
+  - **Who answered is recorded** (`Orchestrators.answerWorkerPermission`). The permission event in the worker's transcript
+    gets `decidedBy` (the card reads "Allowed by Lothsahn"), and every open request the worker is on logs `Lothsahn approved a
+    Bash command for 37a50761 (an owner, on another person's work): <command>`.
+  - **Its people are told**, in one line in their own chat, unless they answered it themselves: `[from another owner]
+    Lothsahn approved a Bash command for your worker 37a50761 "…" on w876: <command>` (`[from another person]` when a member
+    answered). The worker's own `[worker update]` that it waits for a permission still goes to its people only.
 
 The ledger is `data/work.json`: every open request, every one closed in the last 7 days (the reopen window), and at least
 the newest 300 closed ones, 2,000 closed at most (`pruneIds`, `server/work.ts`; stalled ones are kept like open ones).
@@ -1127,7 +1147,7 @@ own job or check-in is Working; a message held for a slot is Queued, and one hel
 |---|---|---|
 | **Working** | mid-turn: `running` or `starting`, unless its agent host never started (next row) | blue |
 | **Blocked** (internal `error`) | its message found no agent host to run in (`SessionInfo.hostFailure`, w691): checked first, whatever its status says (an older daemon went on reporting it mid-turn, w665) | violet: "Blocked: its agent host did not start on m3" |
-| **Needs you** | a permission request waits for its person | amber |
+| **Needs you** | a permission request waits for its person (any owner may answer it too, w891) | amber |
 | **Working** (between turns, internal `between_turns`; w475's Waiting) | alive between turns (idle) with its own work still going, checked in this order: a **running job** (a background task or watcher the agent started, which a restart ends), or only a **timer** (its `wake_me` check-in, still ahead) | blue, with what it is on (w509): "Working: CI on PR #1098 · check-in 06:10 UTC" (a job, by the description the agent gave it), "Working: check-in 16:29 UTC: “merge #1083 when…”" (a timer, with its note's first words) |
 | **Queued** / **Blocked** (between turns) | a message for it held in the send queue: for a free agent slot or sandbox (Queued), or for its machine, offline or its daemon outdated (Blocked) | grey / violet: "Queued: a queued message (…)" |
 | **Idle** (available) | finished its turn with nothing pending: free for new work, and the idle reaper's candidate | grey; a worker reads "Idle (available)" |

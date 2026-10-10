@@ -36,7 +36,7 @@ import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealt
 import { withDismissed } from '../shared/dismissals.ts';
 import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './unitWatchdog.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
-import { DispatcherChatRefused } from './orchestrators.ts';
+import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
@@ -1179,8 +1179,19 @@ route('POST', '/api/sessions/([\\w-]+)/interrupt', async (req, [id]) => {
 route('POST', '/api/sessions/([\\w-]+)/permission', async (req, [id]) => {
   const b = await readJson<PermissionDecisionRequest>(req);
   const s = sessions.get(id);
+  const requestId = need(b.requestId, 'requestId');
+  // A worker's permission request (w891): its own people answer it, and so does any owner, whoever's worker it is (w677).
+  if (s.info.kind === 'worker') {
+    try {
+      agents.orchestrators.answerWorkerPermission(requesterOf(req), s, requestId, !!b.allow, b.message);
+    } catch (e) {
+      if (e instanceof PermissionAnswerRefused) throw new HttpError(e.status, e.message);
+      throw e;
+    }
+    return {};
+  }
   mayDrive(req, s.info);
-  if (!s.decide(need(b.requestId, 'requestId'), !!b.allow, b.message)) throw new HttpError(404, 'no such pending request');
+  if (!s.decide(requestId, !!b.allow, b.message)) throw new HttpError(404, 'no such pending request');
   return {};
 });
 

@@ -52,6 +52,7 @@ import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionTe
 import { NOTICE_TAG } from '../shared/notices.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
+import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
 import type { AttachmentRef, ConditionalDecision, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
@@ -410,6 +411,15 @@ export class DispatcherChatRefused extends Error {
   readonly status = 403;
   constructor() {
     super(DISPATCHER_CHAT_REFUSED);
+  }
+}
+
+/** A refused or failed answer to a worker's permission request, with the HTTP status the route answers. */
+export class PermissionAnswerRefused extends Error {
+  readonly status: 404;
+  constructor(status: 404, message: string) {
+    super(message);
+    this.status = status;
   }
 }
 
@@ -3367,6 +3377,45 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
         `[from another owner] ${sender.displayName} messaged your worker ${worker.id} "${clip(worker.title, 80)}"${on}: ${said}
 ` +
           `${sender.displayName} has the owner role, which lets them follow up on other owners' workers (w677). The worker stays ${p.displayName}'s: it keeps ${theirs.length ? 'the request, ' : ''}its requester and its account, and its answer reaches you both as a [worker update]. Tell ${p.displayName} in a line; nothing to do unless they say so.`,
+      );
+    }
+  }
+
+  /**
+   * Answer a worker's permission request for a person (w891). Anyone signed in may, as before; an owner answering another
+   * person's worker is the new case (w677: owners act on each other's work). `permissionAnswered` records and tells.
+   */
+  answerWorkerPermission(by: Requester, s: SessionHandle, requestId: string, allow: boolean, message?: string) {
+    const audience = this.audienceOf(s.info);
+    const access = permissionAccess({ userId: by.userId, role: this.d.identity.get(by.userId)?.role }, s.info, audience);
+    const asked = s.info.pendingPermissions.find((p) => p.requestId === requestId);
+    if (!s.decide(requestId, allow, message)) throw new PermissionAnswerRefused(404, 'no such pending request');
+    if (asked) this.permissionAnswered(by, s.info, asked, allow, access);
+  }
+
+  /**
+   * The worker's transcript records who answered (`decidedBy` on the permission event), each open request it is on has it in
+   * its log, and the worker's people other than the one who answered hear it in their own chat in a line: "[from another
+   * owner] Lothsahn approved a Bash command for your worker 37a50761 on w876: <command>". The worker's own people
+   * answering their own worker are not told about themselves.
+   */
+  private permissionAnswered(by: Requester, worker: SessionInfo, perm: { requestId: string; toolName: string; input: unknown }, allow: boolean, access: PermissionAccess) {
+    const ev = this.store.readTranscript(worker.id).find((e) => e.kind === 'permission' && e.requestId === perm.requestId);
+    if (ev) this.store.amend(worker.id, ev.seq, { decidedBy: asRequester(by) });
+    const items = this.itemsOf(worker.id);
+    const verb = allow ? 'approved' : 'denied';
+    const kind = perm.toolName === 'Bash' || perm.toolName === 'PowerShell' ? `${perm.toolName} command` : `${perm.toolName} request`;
+    const what = permissionWhat(perm.toolName, perm.input);
+    for (const w of items) {
+      this.stamp(w, `${by.displayName} ${verb} a ${kind} for ${worker.id}${access === 'owner' ? " (an owner, on another person's work)" : access === 'other' ? " (on another person's work)" : ''}: ${clip(what, 120)}`);
+      this.store.putWork(w);
+    }
+    for (const p of this.audienceOf(worker).filter((r) => !same(r.userId, by.userId))) {
+      const on = items.filter((w) => isFor(w, p.userId)).map((w) => w.id);
+      this.toPeople(
+        [p],
+        `${access === 'owner' ? '[from another owner]' : '[from another person]'} ${by.displayName} ${verb} a ${kind} for your worker ${worker.id} "${clip(worker.title, 80)}"${on.length ? ` on ${on.join(', ')}` : ''}: ${clip(what, 200)}\n` +
+          `${by.displayName} ${access === 'owner' ? 'has the owner role, which lets them answer any worker\'s permission requests (w891).' : 'answered it from the dashboard (w891).'} The worker stays ${p.displayName}'s. Tell ${p.displayName} in a line; nothing to do unless they say so.`,
       );
     }
   }

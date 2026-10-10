@@ -65,10 +65,10 @@ test('permission prompt: Allow lets the tool run, Deny stops it', async ({ authe
     await card.getByRole('button', { name: choice, exact: true }).click();
     if (choice === 'Allow') {
       await expect(panel.locator('.msg-assistant', { hasText: 'Allowed: I cleaned the build folder.' })).toBeVisible();
-      await expect(panel.locator('.perm-allowed .perm-title')).toHaveText('Allowed');
+      await expect(panel.locator('.perm-allowed .perm-title')).toHaveText(/^Allowed by \S/);
     } else {
       await expect(panel.locator('.msg-assistant', { hasText: 'Denied: I left the build folder alone.' })).toBeVisible();
-      await expect(panel.locator('.perm-denied .perm-title')).toHaveText('Denied');
+      await expect(panel.locator('.perm-denied .perm-title')).toHaveText(/^Denied by \S/);
     }
     await expect(panel.locator('.perm-pending')).toHaveCount(0);
     await expect(panel.locator('.attn-strip')).toHaveCount(0);

@@ -358,7 +358,8 @@ export type TranscriptEvent =
   | { seq: number; t: string; kind: 'result'; ok: boolean; text: string; costUsd: number; turns: number; durationMs: number; answers?: string[]; usage?: TurnUsage }
   | { seq: number; t: string; kind: 'system'; text: string }
   | { seq: number; t: string; kind: 'error'; text: string }
-  | { seq: number; t: string; kind: 'permission'; requestId: string; toolName: string; input: unknown; decision?: 'allow' | 'deny' };
+  /** decidedBy: the person who answered it in the portal (w891). */
+  | { seq: number; t: string; kind: 'permission'; requestId: string; toolName: string; input: unknown; decision?: 'allow' | 'deny'; decidedBy?: Requester };
 
 /** One computer's load: the portal's host (SystemStats) or a machine (its daemon reports it, server/system.ts). */
 export interface HostStats {
