@@ -10,18 +10,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
-- **The Windows worker installer makes a Dev Drive in the install folder** (w900, lothsahn: "Please modify the installer so that
-  it does this in the specified location when you request an install. The dev drive file would live there, and the dev drive
-  would grab a new file letter starting with V: and moving back towards A until it finds an available drive letter."). A new
-  install on Windows (`-NoDevDrive` opts out) makes `<root>\devdrive.vhdx`, a dynamically expanding ReFS Dev Drive mounted at
-  the first drive letter from V: down to A: that is not in use, a mapped network drive or reserved by Windows, and puts the
-  sandboxes and the Library seed on it, so each new sandbox's Library is a block clone of the seed. `ffsb-helper-mount` (SYSTEM,
-  also at every boot) mounts it again at the same letter, or the next free one with `daemon.json`, the pool's record, the junctions
-  and the worktrees repointed; the daemon's host guard remounts it if it goes. Running the installer again reuses the file and
-  formats nothing. An update makes no drive unless `-DevDrive`; `-Update -MoveToDevDrive` (and `ops_worker machine_update`
-  `move_to_dev_drive`) re-creates an existing install's sandboxes on it from the seed, saving each one's work first, and refuses
-  while an agent or an editor is in one. Tested on a real Windows runner (`.github/workflows/dev-drive.yml`) and with the disks
-  faked under PowerShell 7. docs/worker-install.md "The Dev Drive". Needs a portal deploy and, for LothDesktop, the move.
+- **A released sandbox's Burst and Build caches are trimmed before the next worker gets it** (w898, lothsahn: "almost all the space is in the work folder, specifically in the BuildCache and BurstCache folders of the various sandboxes"; "I would like the harness to trim the burst cache and build cache when a worker releases a slot"). Library/BuildCache and BurstCache were 87 GB over lothdesktop's six sandboxes. When a sandbox's last live agent goes, the daemon puts it in the new state `cleanup` (not free, no placement, no start, shown on the dashboard), keeps the files written in the last 24 h up to 4 GB per cache, and sets it `ready` again; a hung or failed trim times out after 10 min and frees it. Never with an editor or build on the project. The daemon's clean-up also ages out and caps the caches of sandboxes nobody releases, and a Library copied from a clone or sandbox leaves them behind. Measured: a build with the caches removed took 530 s against 112 s warm. Docs: self-recovery.md 5. Tests: `cacheTrim.test.ts`, `machineSandboxes.test.ts`, `agentState.test.ts`, `copyTree.test.ts`, `cleanup.test.ts`.
+- **A worker waiting on a deploy, a person or another request frees its sandbox at once, and the deploy wakes it** (w890,
+  lothsahn: "Why is w889 holding a slot?  It's done with its work and it should free the slot." and "We should not wait for a
+  worker waiting for a deploy ... once the deploy has happened, the worker can get rescheduled by the dispatcher"). w889
+  sat Idle for hours on m3's only sandbox after its PR merged, waiting for the portal deploy and a token permission. The
+  release pass (`server/placeAgain.ts`) now releases at once the sandbox of a worker whose open requests all wait on a
+  deploy, a request, a PR merging or a person (`Agents.waitOn`), as it does for CI; it still never releases unsaved work,
+  unpushed commits, a batch run, a worker mid-turn or one with a job it needs. `blocked_on` takes `deploys`; a deploy gate
+  clearing resumes its worker within a minute; the ledger cleanup resumes (not closes) a worker whose report puts a check
+  after the deploy. Needs a portal deploy (docs/machines.md "Released sandboxes").
+
+
 - **The Intake tab's two nightly chips are switches** (w903, lothsahn: "Please modify FF Factory so I can toggle those settings on
   the intake panel by clicking on them"). Click "Nightly run" to turn the portal's nightly schedule on or off
   (`intake.nightly.run`, `enabled`; the time, zone, machine, person and report window stay), and the other chip, now named "File
@@ -82,6 +82,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   docs/self-recovery.md "Where clean-up may delete". Flag: on a root machine nothing now empties the Unity, npm, NuGet,
   Playwright and crash-dump stores on C: by itself. Needs a portal deploy (instructions, guard spec) and then each machine's
   daemon update (the fence), which a verified deploy does by itself (w887).
+
 - **A verified portal deploy now updates every machine's daemon by itself** (w887, lothsahn: "Update FFFactory so that after
   updating the portal and validating, it automatically updated all the machines."). `fff-update verify` writes
   `data/update.verified.json` when the new release answers (a rollback writes none); the portal (`server/machineRollout.ts`) then
@@ -2374,6 +2375,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 - `web/mock`: a mock backend with a busy day in every state, for working on the UI.
 - `docs/ui-review.md`: the review, and what changed.
 - E2E: iPad projects in Safari and in Chrome (its `CriOS` user agent on WebKit) for `e2e/ipad.spec.ts`.
+- **The Windows worker installer makes a Dev Drive in the install folder** (w900, lothsahn: "Please modify the installer so that
+  it does this in the specified location when you request an install. The dev drive file would live there, and the dev drive
+  would grab a new file letter starting with V: and moving back towards A until it finds an available drive letter."). A new
+  install on Windows (`-NoDevDrive` opts out) makes `<root>\devdrive.vhdx`, a dynamically expanding ReFS Dev Drive mounted at
+  the first drive letter from V: down to A: that is not in use, a mapped network drive or reserved by Windows, and puts the
+  sandboxes and the Library seed on it, so each new sandbox's Library is a block clone of the seed. `ffsb-helper-mount` (SYSTEM,
+  also at every boot) mounts it again at the same letter, or the next free one with `daemon.json`, the pool's record, the junctions
+  and the worktrees repointed; the daemon's host guard remounts it if it goes. Running the installer again reuses the file and
+  formats nothing. An update makes no drive unless `-DevDrive`; `-Update -MoveToDevDrive` (and `ops_worker machine_update`
+  `move_to_dev_drive`) re-creates an existing install's sandboxes on it from the seed, saving each one's work first, and refuses
+  while an agent or an editor is in one. Tested on a real Windows runner (`.github/workflows/dev-drive.yml`) and with the disks
+  faked under PowerShell 7. docs/worker-install.md "The Dev Drive". Needs a portal deploy and, for LothDesktop, the move.
 
 ## [0.1.0] - 2026-09-24
 

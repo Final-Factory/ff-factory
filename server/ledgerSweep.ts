@@ -31,6 +31,7 @@ import {
   afterMergeReason,
   deployStep,
   partOfReason,
+  postDeployStep,
   cleanupSettings,
   followUpDecision,
   cutOffOf,
@@ -548,6 +549,10 @@ export class LedgerSweep {
     const step = reason && !partOf ? await this.appDeployStep(w, workers, merged) : undefined;
     const deployed = step ? await this.deployedText(step, merged) : undefined;
     if (deployed) {
+      // Its worker's own step after the deploy (w890: w889's "then I verify a live PR read and the health check") is not
+      // done by the deploy: it is resumed to do it, and the request closes on its report.
+      const after = postDeployStep(workers.map((s) => s.lastResult ?? ''));
+      if (after && this.d.orchestrators.resumeAfterDeploy(w.id, deployed, after)) return false;
       this.closeAsDone(w, { how: 'deploy', pr: last.number, sha: last.sha, mergedAt: last.at, text: `${prMergedText(last)}; deployed since: ${deployed}` }, acts);
       return true;
     }

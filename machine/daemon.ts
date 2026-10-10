@@ -19,6 +19,7 @@ import { writeFileDurable } from '../server/durable.ts';
 import { HOST_PROTOCOL, HostedSession, hostFolders, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
+import type { TrimPolicy } from '../server/cacheTrim.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
 import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
@@ -89,6 +90,8 @@ export interface DaemonConfig {
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
   sandboxIdleStopMinutes?: number;
+  /** Trim a sandbox's Library caches when its last agent leaves (machine/sandboxes.ts trim, w898): the limits, or false for never. Default on. */
+  sandboxCacheTrim?: Partial<TrimPolicy> | false;
   /**
    * The MCP-for-Unity server agents here get as "UnityMCP", each confined to its own editor (machine/unityMcp.ts).
    * Default: the UnityMCP entry the machine's own Claude Code has in ~/.claude.json.
@@ -342,6 +345,9 @@ export class Daemon {
         settings: cfg.sandboxes,
         idleStopMinutes: cfg.sandboxIdleStopMinutes,
         activity: (id) => this.sandboxActivity(id),
+        liveAgents: (id) => this.liveIn(id),
+        trim: cfg.sandboxCacheTrim,
+        log,
         startGate: () => this.guard?.blockReason('editor'),
         onChange: () => this.reportSandboxes(),
         onEvent: (e) => {
@@ -393,7 +399,7 @@ export class Daemon {
         const root = this.sandboxRoot();
         const settings = staleOutputSettings(this.cleanupSettings.staleOutput);
         // A sandbox's Builds/ is the stale-output rules' (attributed, or listed): the old 7-day age rule only when they are off.
-        const rules = cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [] }, DEFAULT_CLEANUP);
+        const rules = cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [] }, DEFAULT_CLEANUP);
         return cleanupPass({
           opts,
           guard,

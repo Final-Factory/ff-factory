@@ -650,7 +650,8 @@ LothDesktop and Beast, not just when BEAST is full").
     - **its daemon went away under it** (`heldSince`, w613): released **30 minutes** later (`HOLD_PLACE_MS`, a day
       before), unless a check-in within 30 minutes or a message resumes it first;
     - **Idle with nothing pending** (alive, no check-in, no job, nothing queued or unanswered; w650 waiting for a
-      deploy): stopped after 30 minutes without activity, with a line in its transcript, and marked `releaseDue`;
+      deploy, until w890: a worker that waits on a deploy or a person the ledger knows of now releases at once, below):
+      stopped after 30 minutes without activity, with a line in its transcript, and marked `releaseDue`;
       the idle reaper's stops (an hour idle, or its request over) are marked the same way. A message resumes it;
     - **it waits on CI** (w846, lothsahn on 2026-10-10: "When they're waiting for GithubCI with their unity editors
       off, they should free the slot"; at about 04:20 UTC BEAST had 0 of 5 sandboxes free, three of them held by w836,
@@ -668,6 +669,35 @@ LothDesktop and Beast, not just when BEAST is full").
       still free, else another free one **on the same machine**, switched to its branch, so red CI gets it a sandbox to
       fix in. Never another machine: its conversation lives there (the Claude Code session file), and placement rules
       are not touched;
+    - **it waits on a deploy, a person or another request** (w890, lothsahn on 2026-10-10, after w889 held m3's only
+      sandbox, so m3 showed BUSY, for hours after its PR #281 merged while it waited on Ben's go for the portal deploy and a
+      GitHub token permission: "Why is w889 holding a slot?  It's done with its work and it should free the slot.", and
+      "We should not wait for a worker waiting for a deploy.  Update FF Factory to free the slot immediately once work is
+      done--once the deploy has happened, the worker can get rescheduled by the dispatcher"): released **at once**, the way
+      the CI wait is, not after 30 minutes idle (that rule, "Idle with nothing pending", stays for a worker that waits on
+      nothing the ledger knows). The signal is the ledger's own live state (`Agents.waitOn`, from `workLive`), and it holds
+      only when **every** open request the worker is the latest worker on waits on one of: a **Blocked** request whose gates
+      are all a `deploy` (the portal or a machine's daemon), a `request` or a `pr` merging (set by the worker's `blocked_on`,
+      `deploys: ["portal"]` for a deploy, by the dispatcher's `decide_work block`, or by the ledger cleanup on a merged
+      request whose only step left is a deploy); or **Waiting on input**, a person (its `waiting_on_person`, "still open:
+      waiting on Ben to …" in its report, or a question). Not a time, a machine, a usage limit or a lock (they clear by
+      themselves or are about this machine), and not CI (its own, stricter rule above). Unlike CI, a running editor does not
+      keep it (nothing is about to be read or fixed in it, and the placement that takes the sandbox stops the editor first,
+      as for every release). Never released (`waitReleaseWhy`, `keptWhy`): uncommitted or untracked work its daemon cannot
+      save and push first, a branch with a commit its remote lacks, a Unity batch run of that sandbox in flight, another
+      agent working there, a message queued for it, a worker mid-turn, with a permission open, or with a background job or
+      unanswered message it needs (`keepLive`). Alive between turns it is stopped first (`releaseDue`), and the release pass
+      runs again 5 seconds later (`PlaceAgainDeps.soon`), so the sandbox frees within about a minute of the turn's end (the
+      first pass is at most a minute away, the second 5 seconds after it; was up to 30 minutes plus a minute). While it
+      waits it does not take its sandbox back for a near check-in. **Resuming**: a person's message, its check-in, or the
+      block clearing places it again like any released worker (its own sandbox if free, else another free one on the same
+      machine, switched to its branch). A `deploy` gate clearing (a different commit runs there: `blockerVerdict`) resumes
+      its latest worker within a minute with a note to do the check that comes after the deploy
+      (`Orchestrators.resumeGatedWorker`), with no dispatcher round trip. The ledger cleanup's deploy block (a merged
+      request whose only step left is a deploy) used to close the request on the deploy; when the worker's report puts a
+      check of its own after the deploy ("then I verify a live PR read and the health check", w889's), the cleanup now
+      resumes the worker for it instead (`postDeployStep`, `Orchestrators.resumeAfterDeploy`) and the request closes on its
+      report;
     - **several stopped workers in one sandbox**, each with its own release due, no longer keep it for each other
       ("agent … works there too"): they release it together, and when they resume each is placed back on the shared
       branch, the second joining the first.
