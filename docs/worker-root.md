@@ -142,6 +142,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 | `FFFactoryDaemon` scheduled task (Windows) | the daemon at logon, non-elevated, in the interactive session | deploy | the person | `server/machineDeployWin.ts:23,389-441` |
 | `com.fffactory.daemon` LaunchAgent, `~/Library/LaunchAgents/com.fffactory.daemon.plist` | the daemon in the GUI session | deploy | the person | `server/machineDeploy.ts:17,187-190,358` |
 | `ffsb-helper-mount`, `-trim`, `-compact`, `-detach`, `-reboot` tasks; `%ProgramData%\ffsb-helpers\` (`ffsb-helper.ps1`, `results\`) | the Dev Drive remount and maintenance (BEAST) | `scripts/install-privileged-helpers.ps1` (admin) | SYSTEM | `install-privileged-helpers.ps1:41-78`; `machine/hostGuard.ts` (w466) |
+| `<root>\devdrive.vhdx` → volume `<letter>:` (any Windows install, w900; ReFS Dev Drive, first free letter from V: down) and `<root>\devdrive.json`; the same `ffsb-helper-mount`, `-trim` and `-compact` tasks, registered with `-Flex` | the sandboxes and the seed | `scripts/worker/devdrive.ps1` (admin), `scripts/install-privileged-helpers.ps1 -Flex` | SYSTEM | `docs/worker-install.md` "The Dev Drive" |
 | `C:\ffsb-devdrive.vhdx` → volume `F:` (ReFS Dev Drive, 900 GB, 213 GB free; on the same NVMe as `C:`, measured) | BEAST's sandbox volume | `scripts/devdrive.ps1:8` (admin) | — | `scripts/devdrive.ps1` |
 | `ffsb-server`, `ffsb-server-nologon`, `ffsb-update` (BEAST) | the **portal**, not a worker: they leave with w510 and the VM | `scripts/install-autostart.ps1` | the person | `scripts/common.ps1:7` |
 | `ff-nightly-e2e-watchdog` (BEAST) | the nightly watchdog | `install_schedule.sh` over ssh | the person | `scripts/nightly/install_schedule.sh:27` |
@@ -188,6 +189,11 @@ current sandbox before it picks the folder names. A shorter `sb` instead of `san
   `machine/hostGuard.ts`), so it cannot live there. `F:\ffw\daemon`, `secrets` and `logs` are **directory junctions to
   `C:\ffw-anchor\…`**. The scheduled task names the `C:` path directly, so the daemon runs while `F:` is gone. The
   anchor is the one item outside the root on BEAST, and `root.json` lists it.
+- **A Dev Drive in the root (w900).** Any Windows install can have `<root>\devdrive.vhdx`, a VHDX mounted at the first free
+  letter from V: down (`docs/worker-install.md`, "The Dev Drive"). `<root>\sandboxes` and `<root>\seed` are then directory
+  junctions to `<letter>:\sandboxes` and `<letter>:\seed`, and `daemon.json` names the drive's paths. `daemon\`, `secrets\`,
+  `players\` and the rest stay on the root's own volume: the daemon must run while the drive is gone, and the firewall
+  rules name `players\`. `root.json` lists the drive (`devDrive`, and an `outside` entry for the three SYSTEM tasks).
 - **LothDesktop.** Everything on `D:` (the daemon folder, sandboxes and slots are all there today, from
   `list_machines`), so `D:\work\ffw` has no junctions.
 - **Macs.** One APFS container, so no junctions. `cp -c` clones the seed (`machine/sandboxes.ts`, the "Warm Library"

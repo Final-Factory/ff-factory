@@ -31,6 +31,21 @@
 .PARAMETER VoiceWhisper
   Whisper on this PC's GPU for the portal's mic (w615, docs/voice.md): a model name (large-v3-turbo) turns it on, off
   turns it off. Left out: a re-run keeps what the daemon has (a new install: off).
+.PARAMETER NoDevDrive
+  A new install makes a Dev Drive (w900, docs/worker-install.md "The Dev Drive"): a dynamically expanding VHDX in the root,
+  formatted as a ReFS Dev Drive and mounted at the first free letter from V: down to A:, holding the sandboxes and the
+  Library seed so that every new sandbox's Library is a block clone of the seed. It needs administrator rights (one prompt;
+  an administrator's ssh session needs none). -NoDevDrive makes none. A root already on ReFS needs none and makes none.
+.PARAMETER DevDrive
+  With -Update: make the Dev Drive if the install has none (an update never does on its own; one that has a drive keeps it).
+  The drive is made and kept ready; the sandboxes stay where they are until -MoveToDevDrive.
+.PARAMETER MoveToDevDrive
+  With -Update: also re-create the install's sandboxes on the Dev Drive from the Library seed, keeping their work (it is
+  committed on each branch and pushed first), and move the seed. Needs every sandbox free of workers and Unity editors.
+.PARAMETER DevDriveMaxGB
+  The VHDX's maximum size in GB (default: 90 % of the root's volume, 100 to 1024). It takes only what is written.
+.PARAMETER DevDriveSkip
+  Drive letters the Dev Drive never takes, e.g. U,T.
 #>
 param(
     [string]$Root = '',
@@ -53,7 +68,12 @@ param(
     [switch]$Update,
     [string]$DaemonRef = '',
     [string]$Owner = '',
-    [string]$VoiceWhisper = ''
+    [string]$VoiceWhisper = '',
+    [switch]$NoDevDrive,
+    [switch]$DevDrive,
+    [switch]$MoveToDevDrive,
+    [int]$DevDriveMaxGB = 0,
+    [string]$DevDriveSkip = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -155,6 +175,11 @@ if ($Update) {
     if ($DaemonRef) { $argv += @('--ref', $DaemonRef) }
     if ($Owner) { $argv += @('--owner', $Owner) }
     if ($VoiceWhisper) { $argv += @('--voice-whisper', $VoiceWhisper) }
+    if ($NoDevDrive) { $argv += '--no-dev-drive' }
+    if ($DevDrive) { $argv += '--dev-drive' }
+    if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }
+    if ($DevDriveMaxGB) { $argv += @('--dev-drive-max-gb', $DevDriveMaxGB) }
+    if ($DevDriveSkip) { $argv += @('--dev-drive-skip', $DevDriveSkip) }
     # A local checkout given with -Source is the daemon code too: no download at all.
     if ($Source -and -not $temp) { $argv += @('--source', $Source) }
     try {
@@ -176,6 +201,11 @@ if ($SshHost) { $argv += @('--ssh-host', $SshHost) }
 if ($NoSsh) { $argv += '--no-ssh' }
 if ($Owner) { $argv += @('--owner', $Owner) }
 if ($VoiceWhisper) { $argv += @('--voice-whisper', $VoiceWhisper) }
+if ($NoDevDrive) { $argv += '--no-dev-drive' }
+if ($DevDrive) { $argv += '--dev-drive' }
+if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }
+if ($DevDriveMaxGB) { $argv += @('--dev-drive-max-gb', $DevDriveMaxGB) }
+if ($DevDriveSkip) { $argv += @('--dev-drive-skip', $DevDriveSkip) }
 try {
     $credential | & $node.Path @argv
     $code = $LASTEXITCODE

@@ -286,9 +286,10 @@ export async function cleanupPass(o: {
    * The machine's worker install folder (root.json's root; w896, lothsahn: "in general we should only be clearing data in the
    * install folder for the worker"). Given, a pass removes only what is strictly inside it: whatever a rule picks outside
    * (system temp, caches, crash dumps, Unity Hub's editors, the game's data folder) is measured and listed with the reason,
-   * not removed. Absent (a machine without a root, the portal's own host): no fence.
+   * not removed. Absent (a machine without a root, the portal's own host): no fence. A list: the root and the folders that are
+   * part of the install though they lie elsewhere (daemon.json `extraRoots`: a Dev Drive's sandboxes and seed, w900).
    */
-  root?: string;
+  root?: string | string[];
 }): Promise<CleanupRun> {
   const outside: { path: string; why: string }[] = [];
   const fence = <T extends { path: string }>(items: T[]): T[] => {

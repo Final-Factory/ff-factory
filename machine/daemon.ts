@@ -47,6 +47,11 @@ import { attachmentLine } from '../shared/attachments.ts';
 import { machinePlatformOf, type AttachmentRef, type HostHealth, type HostStats, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
+  /**
+   * Folders that belong to the worker install though they are not inside its root (w900: the Dev Drive's `<letter>:\\sandboxes`
+   * and `<letter>:\\seed`, which the installer writes). The clean-up's fence to the install folder (w896) counts them as inside it.
+   */
+  extraRoots?: string[];
   /** Portal base URL, e.g. https://<host>.<tailnet>.ts.net */
   portalUrl: string;
   id: string;
@@ -420,8 +425,8 @@ export class Daemon {
               await realHostProcs().killTree(st.pid).catch(() => undefined);
             }
           },
-          // w896: with a worker root, only what is inside it is removed; the rest is measured and listed.
-          root: this.cfg.root,
+          // w896: with a worker root, only what is inside it is removed; the rest is measured and listed. The Dev Drive's folders (w900) are inside it.
+          root: this.cfg.root ? [this.cfg.root, ...(this.cfg.extraRoots ?? [])] : undefined,
           // FF Factory's own leftovers (w626): only while free space is below the soft threshold, or asked for.
           ...(low || opts.dryRun ? { own: this.ownLeftovers(guard) } : {}),
         });

@@ -1,0 +1,46 @@
+name: Worker Dev Drive end to end
+
+# w900: the worker install's Dev Drive (scripts/worker/devdrive.ps1, scripts/privileged/ffsb-helper.ps1 and devdrive-lib.ps1,
+# scripts/install-privileged-helpers.ps1) on a real Windows: a real VHDX is made, formatted ReFS, mounted at the first free
+# letter from V: down, re-run (idempotent), detached and brought back by the boot task at the same letter, then again with its
+# letter taken. GitHub's Windows runner is elevated and has the virtual disk service.
+# docs/worker-install.md, "The Dev Drive".
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/worker/devdrive.ps1'
+      - 'scripts/worker/devdrive.ts'
+      - 'scripts/worker/test/devdrive-e2e.ts'
+      - 'scripts/privileged/**'
+      - 'scripts/install-privileged-helpers.ps1'
+      - '.github/workflows/dev-drive.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/worker/devdrive.ps1'
+      - 'scripts/privileged/**'
+      - 'scripts/install-privileged-helpers.ps1'
+      - '.github/workflows/dev-drive.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: dev-drive-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dev-drive:
+    name: Dev Drive (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: The VHDX, its letter, a re-run, a reboot and a taken letter
+        run: node scripts/worker/test/devdrive-e2e.ts "${{ runner.temp }}\w900-devdrive"

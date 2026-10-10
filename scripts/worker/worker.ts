@@ -27,6 +27,7 @@ import { linuxControlScript, linuxReloadLines, parseUnitShow, systemdUnit, unitF
 import * as win from '../../server/machineDeployWin.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
+import { decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
 export const LAYOUT_VERSION = 1;
@@ -80,7 +81,7 @@ export function layoutOf(root: string): Layout {
 
 /** What the uninstall removes besides the root, recorded as the install makes it. */
 export interface OutsideItem {
-  kind: 'task' | 'launchagent' | 'systemd-unit' | 'firewall-group' | 'file' | 'authorized-key';
+  kind: 'task' | 'launchagent' | 'systemd-unit' | 'firewall-group' | 'file' | 'authorized-key' | 'dev-drive';
   name: string;
   /** authorized-key: the key's base64 (the lines the uninstall removes). */
   note?: string;
@@ -105,6 +106,8 @@ export interface Manifest {
   createdAt: string;
   updatedAt: string;
   outside: OutsideItem[];
+  /** Windows: the Dev Drive this install made in its root (w900, docs/worker-install.md "The Dev Drive"). */
+  devDrive?: DevDriveRecord;
 }
 
 export function readManifest(root: string): Manifest | undefined {
@@ -202,6 +205,19 @@ export interface InstallOptions {
    * turns it on (daemon.json `voice`), "off" turns it off; unset keeps what daemon.json has (off on a new install).
    */
   voiceWhisper?: string;
+  /**
+   * Windows, the Dev Drive (w900): "on" makes one in the root (a re-run reuses it), "off" makes none. Unset: a new install
+   * makes one, an update keeps the one it has and makes none (decideDevDrive).
+   */
+  devDrive?: 'on' | 'off';
+  /** The VHDX's maximum size in GB (default: defaultMaxGB of the root's volume). */
+  devDriveMaxGB?: number;
+  /** Letters the drive never takes, e.g. "U,T". */
+  devDriveSkip?: string;
+  /** An update that sets the drive up also moves the sandboxes and the seed onto it (needs no agent and no editor in them). */
+  moveToDevDrive?: boolean;
+  /** Set during install(): the drive's folders, which daemon.json then points at. */
+  devDriveDirs?: { sandboxes: string; seed: string; seedReady: boolean; blockClone: boolean };
 }
 
 /**
@@ -378,11 +394,26 @@ export interface Facts {
   loggedOn?: boolean;
   /** Linux: the user's systemd manager has a desktop session's DISPLAY or WAYLAND_DISPLAY (Unity editors need one). */
   display?: boolean;
+  /** Windows: the file system of the volume the root is on (NTFS, ReFS), and that volume's size in GB, for the Dev Drive's size. */
+  rootFileSystem?: string;
+  rootTotalGB?: number;
+  /** Only looked at for --move-to-dev-drive: the agents that are in a sandbox now (the portal's view), and the Unity editors running from the root's sandboxes. */
+  sandboxAgents?: string[];
+  sandboxEditors?: number;
 }
 
 /** Every reason the install cannot go ahead, from facts gathered without changing anything. Exported for tests. */
-export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string }): string[] {
+export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string; devDrive?: 'on' | 'off'; devDriveMaxGB?: number; moveToDevDrive?: boolean }): string[] {
   const p: string[] = [];
+  // The Dev Drive (w900): its flags must make sense, and a move starts only when nothing works in the sandboxes.
+  if (o.devDrive === 'on' && f.platform !== 'win32') p.push('--dev-drive: a Dev Drive is a Windows feature (this is not Windows)');
+  if (o.devDriveMaxGB !== undefined && (!Number.isInteger(o.devDriveMaxGB) || o.devDriveMaxGB < 50 || o.devDriveMaxGB > 64 * 1024)) p.push(`--dev-drive-max-gb must be a whole number from 50 (Windows' own minimum for a Dev Drive) to 65536 (got ${o.devDriveMaxGB})`);
+  if (o.moveToDevDrive) {
+    if (f.platform !== 'win32') p.push('--move-to-dev-drive: a Dev Drive is a Windows feature (this is not Windows)');
+    if (o.devDrive === 'off') p.push('--move-to-dev-drive and --no-dev-drive contradict each other');
+    if (f.sandboxAgents?.length) p.push(`--move-to-dev-drive needs every sandbox free of workers, and ${f.sandboxAgents.length} agent(s) are in one: ${f.sandboxAgents.join(', ')} (let them finish or stop them, then run it again)`);
+    if (f.sandboxEditors) p.push(`--move-to-dev-drive needs every sandbox's Unity editor stopped, and ${f.sandboxEditors} run(s) from ${o.root}\\sandboxes (stop them first: unity stop in each sandbox, or wait until they are idle-stopped)`);
+  }
   if (f.platform !== 'win32' && f.platform !== 'darwin' && f.platform !== 'linux') p.push(`this tool installs on Windows, macOS and Linux, not ${f.platform}`);
   if (f.platform === 'win32' && f.elevated && !o.owner) p.push('run it from a normal (not administrator) PowerShell: files an elevated shell makes belong to Administrators, and git then refuses the clone; the one step that needs admin rights (the firewall rules) asks for them itself');
   if (!nodeSupport(f.nodeVersion.replace(/^v/, '')).ok) p.push(`node ${MIN_NODE.join('.')} or newer is needed (this is ${f.nodeVersion})`);
@@ -476,6 +507,8 @@ async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?:
   }
   const id = credentialId(o.token);
   const portal = await whoami(o.portalUrl, o.token);
+  const vol = isWin ? await rootVolume(o.root) : {};
+  const mv = o.moveToDevDrive ? await sandboxActivity(o.root, portal) : {};
   return {
     platform: process.platform,
     elevated: elevated(),
@@ -492,36 +525,78 @@ async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?:
     serviceElsewhere: o.replacesService ? undefined : await serviceElsewhere(o.service, layoutOf(o.root).daemon),
     loggedOn: probe.loggedOn,
     ...(isLinux ? { display: await managerHasDisplay() } : {}),
+    ...vol,
+    ...mv,
     probe,
   };
+}
+
+/** Agents in a sandbox (the portal's view of this machine) and Unity editors running from the root's sandboxes, for a move onto the Dev Drive. */
+async function sandboxActivity(root: string, portal: Awaited<ReturnType<typeof whoami>>): Promise<{ sandboxAgents: string[]; sandboxEditors: number }> {
+  const agents = portal.ok ? portal.me.agents.filter((a) => a.sandbox).map((a) => `${a.title} (${a.id}, in ${a.sandbox})`) : [];
+  let editors = 0;
+  if (isWin) {
+    const dir = path.join(path.resolve(root), 'sandboxes');
+    const out = await ps('looking for Unity editors in the sandboxes', `$d = ${win.psq(dir)}
+$n = @(Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" | Where-Object { $c = [string]$_.CommandLine; $c.IndexOf($d, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $c.Replace('/', '\\').IndexOf($d, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count
+"editors=$n"
+`).catch(() => 'editors=0');
+    editors = Number(/^editors=(\d+)/m.exec(out)?.[1] ?? 0);
+  }
+  return { sandboxAgents: agents, sandboxEditors: editors };
+}
+
+/** Windows: the file system and size of the volume the root is on (the Dev Drive is not needed on ReFS, and sized from this). */
+async function rootVolume(root: string): Promise<{ rootFileSystem?: string; rootTotalGB?: number }> {
+  try {
+    const out = await ps('looking at the root\'s volume', `$q = ([IO.Path]::GetPathRoot(${win.psq(path.resolve(root))})).Substring(0, 1)
+$v = Get-Volume -DriveLetter $q -ErrorAction SilentlyContinue
+"fs=$($v.FileSystem)"
+"totalGB=$([math]::Floor($v.Size / 1GB))"
+`);
+    const fsys = /^fs=(.*)$/m.exec(out)?.[1]?.trim();
+    const gb = Number(/^totalGB=(\d+)/m.exec(out)?.[1]);
+    return { ...(fsys ? { rootFileSystem: fsys } : {}), ...(gb > 0 ? { rootTotalGB: gb } : {}) };
+  } catch {
+    return {};
+  }
 }
 
 // ---------------------------------------------------------------- install
 
 /** daemon.json of a worker root install: its folders in the root, the credential in a file, sandboxes only. Exported for tests. */
 export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: string | undefined): Record<string, unknown> {
+  // On the Dev Drive (w900) the daemon is given the drive's own paths, never the root's junctions: git and Unity record
+  // the canonical path (docs/worker-root.md 2.2), and a seed beside the sandboxes is what makes the copies block clones.
+  const dd = o.devDriveDirs;
   const sandboxes: SandboxPoolSettings = {
-    root: l.sandboxes,
+    root: dd ? dd.sandboxes : l.sandboxes,
     maxSandboxes: o.maxSandboxes,
     maxAgentsPerSandbox: o.maxAgentsPerSandbox,
     maxUnity: o.maxUnity,
     diskWarnGB: DISK_WARN_GB_DEFAULT,
     diskCriticalGB: DISK_CRITICAL_GB_DEFAULT,
-    ...(fs.existsSync(path.join(l.seed, 'Library')) ? { librarySeed: path.join(l.seed, 'Library') } : {}),
+    ...(dd ? (dd.seedReady ? { librarySeed: path.win32.join(dd.seed, 'Library') } : {}) : fs.existsSync(path.join(l.seed, 'Library')) ? { librarySeed: path.join(l.seed, 'Library') } : {}),
+    // Copy-Item block-clones only where the volume can (Dev Drive: Windows 11 24H2 and Server 2025, Microsoft Learn "Set up a Dev Drive");
+    // elsewhere it is a full copy that the pool's free-space check would count as 30 GB, so robocopy's honest accounting stays.
+    ...(dd?.blockClone ? { librarySeedCopy: 'clone' as const } : {}),
   };
   // A migration keeps the old daemon's settings (its host guard, protected paths, MCP server, idle stop); the root's
   // folders and the credential file replace its own, the token never goes into daemon.json, and max_agents is gone (w536).
   const { token: _t, appDir: _a, tempDir: _d, repoPath: _r, sandboxes: oldPool, unitySlotsDir: _u, maxEventsFile: _m, configFile: _c, maxSessions: _ms, ...carried } = (o.carry ?? {}) as Record<string, unknown>;
   if (oldPool && typeof oldPool === 'object') {
     const { root: _pr, librarySeed: oldSeed, ...poolRest } = oldPool as Record<string, unknown>;
-    Object.assign(sandboxes, { ...poolRest, root: sandboxes.root, ...(sandboxes.librarySeed ? { librarySeed: sandboxes.librarySeed } : {}) });
+    Object.assign(sandboxes, { ...poolRest, root: sandboxes.root, ...(sandboxes.librarySeed ? { librarySeed: sandboxes.librarySeed } : {}), ...(dd?.blockClone ? { librarySeedCopy: 'clone' as const } : {}) });
     // An update keeps the seed the daemon had (w613: BEAST's block-cloned Library) when the root holds none of its own.
-    if (o.update && !sandboxes.librarySeed && typeof oldSeed === 'string' && oldSeed) sandboxes.librarySeed = oldSeed;
+    if (o.update && !sandboxes.librarySeed && !dd && typeof oldSeed === 'string' && oldSeed) sandboxes.librarySeed = oldSeed;
   }
   const voice = voiceSetting(o.voiceWhisper, 'voice' in carried ? carried.voice : existingVoice(l));
   delete carried.voice;
   return {
     ...carried,
+    ...(dd && !carried.hostGuard ? { hostGuard: devDriveGuard(path.win32.parse(l.root).root, sandboxes) } : {}),
+    // The drive's folders are part of the install though they are not under the root: clean-up may delete in them (w896's fence).
+    ...(dd ? { extraRoots: [dd.sandboxes, dd.seed] } : {}),
     ...(voice ? { voice } : {}),
     portalUrl: o.portalUrl,
     id,
@@ -820,7 +895,120 @@ export async function giveTo(owner: string, paths: string[], recursive = true) {
 /** Everything in the root to `owner`, but the sandboxes' own trees: a sandbox moved in by a rename keeps its owner. */
 async function giveRoot(l: Layout, owner: string) {
   await giveTo(owner, [l.root, l.sandboxes], false);
-  await giveTo(owner, fs.readdirSync(l.root).filter((e) => e !== 'sandboxes').map((e) => path.join(l.root, e)));
+  // Not through the Dev Drive's junctions (w900: that is the sandboxes' and the seed's whole trees), nor the attached VHDX.
+  const skip = (e: string) => e === 'sandboxes' || e === 'devdrive.vhdx' || fs.lstatSync(path.join(l.root, e)).isSymbolicLink();
+  await giveTo(owner, fs.readdirSync(l.root).filter((e) => !skip(e)).map((e) => path.join(l.root, e)));
+}
+
+// ---------------------------------------------------------------- the Dev Drive (w900)
+
+const devDriveScript = () => path.join(SRC, 'scripts', 'worker', 'devdrive.ps1');
+const devDrivePsArgs = (a: string[]) => ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', devDriveScript(), ...a];
+export const devDriveFile = (root: string) => path.join(root, 'devdrive.json');
+
+/** What devdrive.ps1 says about the drive without changing it (no administrator needed): attached? which letter? */
+async function devDriveStatus(l: Layout): Promise<{ exists: boolean; attached: boolean; letter: string }> {
+  const r = await exec('powershell.exe', devDrivePsArgs(['-Action', 'status', '-Root', l.root]), { timeoutMs: 2 * 60_000 });
+  const out = parseDevDriveOutput(r.stdout);
+  return { exists: !!out?.exists, attached: !!out?.attached, letter: String(out?.letter ?? '') };
+}
+
+/** Run devdrive.ps1 -Action ensure: in this process when it is elevated, else in an elevated copy (one UAC prompt). */
+async function devDriveEnsure(l: Layout, args: string[]): Promise<DevDriveState> {
+  const psArgs = devDrivePsArgs(['-Action', 'ensure', ...args]);
+  let text: string;
+  if (elevated()) {
+    const r = await exec('powershell.exe', psArgs, { timeoutMs: 30 * 60_000 });
+    text = r.stdout;
+    if (r.code !== 0) throw new Error(`the Dev Drive could not be set up: ${(text.split('\n').find((x) => x.startsWith('FAILED:')) ?? r.stderr ?? text).trim().slice(-500)}`);
+  } else text = await elevatedSteps([{ kind: 'dev-drive', args: psArgs }]);
+  for (const line of text.split('\n')) if (line && !line.startsWith('FFW-DEVDRIVE')) say(`  ${line.trim()}`);
+  const out = parseDevDriveOutput(text);
+  if (out?.letter) return out as DevDriveState;
+  // The elevated copy's log may be cut short: the state file is what the script wrote last.
+  return JSON.parse(fs.readFileSync(devDriveFile(l.root), 'utf8')) as DevDriveState;
+}
+
+/** Whether a folder is a real one (not a junction) with something in it. */
+const realAndUsed = (dir: string) => {
+  try {
+    return !fs.lstatSync(dir).isSymbolicLink() && fs.readdirSync(dir).length > 0;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * The Dev Drive step of an install or update (w900): decide, make or reuse the drive, point the root's two junctions at it
+ * and set `o.devDriveDirs`, which daemon.json is written from. An existing install's sandboxes move only with
+ * --move-to-dev-drive; without it the drive is made and kept ready, and everything stays where it was.
+ */
+async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: { sid?: string; user?: string } }, m: Manifest): Promise<void> {
+  const dec = decideDevDrive({ platform: process.platform, update: !!o.update, flag: o.devDrive, hasOne: !!m.devDrive, rootFileSystem: f.rootFileSystem });
+  if (dec.action === 'none') return void say(`Dev Drive: none (${dec.why}).${m.devDrive ? ` The existing one (${m.devDrive.letter}:) is left as it is.` : ''}`);
+  say(`Dev Drive: ${dec.why}.`);
+  const had = m.devDrive;
+  let state: DevDriveState;
+  if (!elevated() && !process.stdin.isTTY && o.update) {
+    // Nobody can answer an administrator prompt here (an ssh session that is not elevated): only an existing, attached drive can be used.
+    const st = await devDriveStatus(l);
+    if (!st.exists) return void say('Dev Drive: not made: this session is not elevated and nobody can answer a prompt. Run the update from an administrator\'s ssh session, or the installer at the PC.');
+    if (!st.attached) {
+      say('Dev Drive: not attached; starting its boot-mount task (ffsb-helper-mount)...');
+      await exec('schtasks', ['/run', '/tn', 'ffsb-helper-mount'], { timeoutMs: 30_000 });
+      for (let i = 0; i < 30 && !(await devDriveStatus(l)).attached; i++) await new Promise((r) => setTimeout(r, 2000));
+    }
+    const now = await devDriveStatus(l);
+    if (!now.attached || !now.letter) throw new Error('the Dev Drive is not attached and this session cannot attach it (not elevated): run the update from an administrator\'s ssh session, or start the task by hand: schtasks /run /tn ffsb-helper-mount');
+    state = JSON.parse(fs.readFileSync(devDriveFile(l.root), 'utf8')) as DevDriveState;
+    state.letter = now.letter;
+  } else {
+    const maxGB = o.devDriveMaxGB ?? had?.maxGB ?? defaultMaxGB(f.rootTotalGB);
+    const args = ['-Root', l.root, '-MaxGB', String(maxGB)];
+    if (f.probe.user) args.push('-User', f.probe.user);
+    if (f.probe.sid) args.push('-UserSid', f.probe.sid);
+    if (had?.letter) args.push('-Letter', had.letter);
+    if (o.devDriveSkip) args.push('-Skip', o.devDriveSkip);
+    state = await devDriveEnsure(l, args);
+  }
+  say(`Dev Drive: ${state.created ? 'created' : 'reused'} ${state.vhdx} as ${state.letter}: (${state.fileSystem || 'ReFS'}${state.devDrive ? ', Dev Drive' : ', not a Dev Drive format'}, block clone ${state.blockClone ? 'yes' : 'not reported'}, up to ${state.maxGB} GB).`);
+  if (state.letterChangedFrom) say(`Dev Drive: its letter was ${state.letterChangedFrom}: and is taken, so it is ${state.letter}: now.`);
+  const dirs = devDriveDirs(state.letter);
+  const inUse0 = had?.inUse ?? false;
+
+  // Where the sandboxes are: already on the drive, or empty folders to point at it, or an install's own to move.
+  let use = inUse0 || !(realAndUsed(l.sandboxes) || realAndUsed(l.seed));
+  if (!use && o.moveToDevDrive) {
+    say('Moving the sandboxes and the seed onto the Dev Drive (the daemon is stopped for it)...');
+    const hold = await holdRedeploys(o.portalUrl, o.token);
+    if (!hold.ok) say(`(${hold.error}; carrying on: no agent is in a sandbox)`);
+    if (isWin) await ps('stopping the daemon', win.controlScript('stop', l.daemon, { task: o.service, only: true }));
+    const rep = await moveSandboxes(
+      { repo: l.repo, stateFile: path.join(l.daemon, 'sandboxes.json'), oldSandboxes: l.sandboxes, oldSeed: l.seed, newSandboxes: dirs.sandboxes, newSeed: dirs.seed },
+      realMoveDeps((cmd, args, opts) => exec(cmd, args, opts ?? {}), say),
+    );
+    say(`Moved ${rep.moved.length} sandbox(es) onto ${state.letter}:${rep.seedFrom ? `; the seed came from ${rep.seedFrom}` : ''}.`);
+    for (const dir of [l.sandboxes, l.seed]) {
+      // Whatever is left in an old folder is not the pool's: it is set aside, whole, never deleted.
+      if (realAndUsed(dir)) {
+        const aside = `${dir}.before-dev-drive`;
+        fs.renameSync(dir, aside);
+        say(`Set aside ${aside}: it held ${fs.readdirSync(aside).join(', ')}, which the pool does not know. Delete it when you have looked.`);
+      }
+    }
+    use = true;
+  }
+  m.devDrive = { vhdx: state.vhdx, letter: state.letter, maxGB: state.maxGB, inUse: use };
+  if (!m.outside.some((x) => x.kind === 'dev-drive')) noteOutside(m, { kind: 'dev-drive', name: state.vhdx, note: 'the Dev Drive: a VHDX in the root, mounted at a drive letter, and the SYSTEM tasks ffsb-helper-mount, -trim and -compact' });
+  writeManifest(l.root, m);
+  if (!use) {
+    return void say(`Dev Drive: ready as ${state.letter}:, but ${l.sandboxes} still holds this install's sandboxes, so they stay where they are and daemon.json keeps its paths. Move them with --move-to-dev-drive (-MoveToDevDrive) when no worker is in them.`);
+  }
+  const links = linkRootFolders(l.root, dirs);
+  for (const k of links) say(`Dev Drive: ${k.name}: ${k.action} (${k.detail}).`);
+  if (links.some((k) => k.action === 'blocked')) throw new Error(`the root's ${links.filter((k) => k.action === 'blocked').map((k) => k.detail).join('; ')}: it cannot become a junction to the Dev Drive`);
+  if (!state.blockClone) say(`Dev Drive: ${state.letter}: does not report block cloning (Microsoft: Dev Drive supports it from Windows 11 24H2 and Windows Server 2025), so each sandbox's Library is a full copy of the seed and the pool counts it so. The drive still keeps the sandboxes together and fast.`);
+  o.devDriveDirs = { ...dirs, seedReady: fs.existsSync(path.join(dirs.seed, 'Library')) && fs.readdirSync(path.join(dirs.seed, 'Library')).length > 0, blockClone: !!state.blockClone };
 }
 
 /** Run scripts/worker/firewall.ps1 elevated (one UAC prompt): the slot rules, the editors' rules, the slot config. */
@@ -877,7 +1065,7 @@ function firewallArgs(action: 'add' | 'remove', l: Layout, slots: number, editor
  * portal's key in C:\ProgramData\ssh\administrators_authorized_keys for an admin account (w568), which a non-elevated
  * admin cannot even read.
  */
-export type ElevatedStep = { kind: 'firewall'; args: string[] } | { kind: 'authorize-key'; file: string; line: string } | { kind: 'revoke-key'; file: string; blob: string };
+export type ElevatedStep = { kind: 'firewall'; args: string[] } | { kind: 'authorize-key'; file: string; line: string } | { kind: 'revoke-key'; file: string; blob: string } | { kind: 'dev-drive'; args: string[] };
 
 /** Run the steps in this process when it is elevated, else in an elevated copy of this script (one prompt). Returns its log. */
 async function elevatedSteps(steps: ElevatedStep[]): Promise<string> {
@@ -921,6 +1109,11 @@ export async function runElevatedSteps(steps: ElevatedStep[], log: string): Prom
         if (acl.code !== 0) throw new Error(`icacls ${s.file} exited ${acl.code}: ${(acl.stderr || acl.stdout).trim().slice(-300)}`);
         note(`The portal's ssh key: ${r.changed ? (r.existed ? 'updated in' : 'added to') : 'already in'} ${s.file} (Administrators and SYSTEM only).`);
         note(`key-existed=${r.existed}`);
+      } else if (s.kind === 'dev-drive') {
+        // devdrive.ps1 prints what it did and ends with FFW-DEVDRIVE {json}; its words go to the log, which the caller reads.
+        const r = await exec('powershell.exe', s.args, { timeoutMs: 30 * 60_000 });
+        note((r.stdout || '').trim());
+        if (r.code !== 0) throw new Error(`devdrive.ps1 exited ${r.code}: ${((r.stdout.split('\n').find((x) => x.startsWith('FAILED:')) ?? r.stderr) || r.stdout).trim().slice(-500)}`);
       } else {
         note(`The portal's ssh key: removed ${revokeIn(s.file, s.blob)} line(s) from ${s.file}.`);
       }
@@ -998,7 +1191,15 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   say(`OK: machine ${id}, node ${f.nodeVersion}, git ${f.git!.join('.')}, Claude Code ${f.claude ?? `${f.claudeShim} (an npm shim: agents use the Agent SDK's own Claude Code)`}, ${f.freeGB ?? '?'} GB free.`);
 
   // 1. The root and its manifest.
-  for (const d of [l.root, l.daemon, l.secrets, l.sandboxes, l.seed, l.players, l.nightly, l.scratch, l.tmp, l.logs]) fs.mkdirSync(d, { recursive: true });
+  // A junction to a Dev Drive that is detached right now dangles (mkdir would refuse it): setupDevDrive attaches the drive and looks after those two.
+  const isLink = (d: string) => {
+    try {
+      return fs.lstatSync(d).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  };
+  for (const d of [l.root, l.daemon, l.secrets, l.sandboxes, l.seed, l.players, l.nightly, l.scratch, l.tmp, l.logs]) if (!isLink(d)) fs.mkdirSync(d, { recursive: true });
   const now = new Date().toISOString();
   const prev = readManifest(l.root);
   const m: Manifest = {
@@ -1031,6 +1232,17 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   if (o.owner) await giveRoot(l, o.owner);
 
   if (phase === 'prepare') return true;
+
+  // The Dev Drive (w900), before the daemon's config is written: it decides where the sandboxes and the seed are.
+  try {
+    await setupDevDrive(o, l, f, m);
+  } catch (e) {
+    // A drive nobody asked for by name (the default of a new install) must not cost the install: carry on without it. One asked for
+    // (--dev-drive), or one this install already has, whose paths daemon.json holds, is an error.
+    if (o.devDrive === 'on' || m.devDrive) throw e;
+    o.devDriveDirs = undefined;
+    say(`Dev Drive: not made, and the install carries on without it (sandboxes stay on ${path.win32.parse(l.root).root}): ${(e as Error).message}\nRun the update with -DevDrive once that is fixed, or install with -NoDevDrive to stop this message.`);
+  }
 
   // The Unity slots mailbox the daemon will use, outside the root on purpose; the uninstall removes it.
   noteOutside(m, { kind: 'file', name: o.unitySlotsDir ?? path.join(os.homedir(), '.ff-factory', 'unity-slots'), note: 'the Unity slots mailbox every script finds (w469)' });
@@ -1143,6 +1355,12 @@ export interface UpdateFlags {
   ssh?: boolean;
   /** The GPU Whisper for the portal's mic (w615): a model name turns it on, "off" turns it off; unset carries daemon.json's. */
   voiceWhisper?: string;
+  /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
+  devDrive?: 'on' | 'off';
+  devDriveMaxGB?: number;
+  devDriveSkip?: string;
+  /** Also move the existing sandboxes and the seed onto the drive (needs every sandbox free of workers and editors). */
+  moveToDevDrive?: boolean;
 }
 
 /**
@@ -1174,6 +1392,10 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.absoluteWorktrees ? { absoluteWorktrees: true } : {}),
     ...(f.owner ? { owner: f.owner } : {}),
     ...(f.voiceWhisper !== undefined ? { voiceWhisper: f.voiceWhisper } : {}),
+    ...(f.devDrive ? { devDrive: f.devDrive } : {}),
+    ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
+    ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
+    ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
     carry: { ...config, sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     update: true,
   };
@@ -1488,11 +1710,12 @@ async function ancestors(): Promise<Set<number>> {
 }
 
 /** Stop every process started from the root (editors of its sandboxes, players in its slots, agents' shells), never Unity Hub. */
-async function stopRootProcesses(root: string): Promise<number> {
+async function stopRootProcesses(root: string, also: string[] = []): Promise<number> {
   if (isWin) {
     const out = await ps(
       'stopping what runs from the root',
       `$root = ${win.psq(root)}
+$also = @(${also.map((a) => win.psq(a)).join(', ')})
 $n = 0
 $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, ExecutablePath)
 # This uninstall itself (its command line names the root too): this script and every process above it.
@@ -1502,7 +1725,9 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
 foreach ($p in $all) {
   if ($mine.Contains([int]$p.ProcessId) -or [string]$p.Name -match '^Unity Hub\\.exe$') { continue }
   $c = [string]$p.CommandLine + ' ' + [string]$p.ExecutablePath
-  if ($c.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; $n++ }
+  $hit = $c.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
+  foreach ($a in $also) { if ($c.IndexOf($a, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true } }
+  if ($hit) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; $n++ }
 }
 "stopped=$n"
 `,
@@ -1540,6 +1765,23 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
   // 1. What would be lost: agents mid-turn (the portal knows), unpushed commits and uncommitted work (git knows).
   const w = token ? await whoami(m.portalUrl, token) : ({ ok: false, error: 'no credential in the root' } as const);
   const busy = w.ok ? w.me.agents.filter((a) => a.midTurn) : [];
+  // The sandboxes on a Dev Drive can only be read while it is attached (w900): attach it first, or refuse.
+  if (isWin && m.devDrive?.inUse) {
+    let st = await devDriveStatus(l);
+    if (!st.attached) {
+      say(`The Dev Drive (${m.devDrive.letter}:) is not attached; starting ffsb-helper-mount...`);
+      await exec('schtasks', ['/run', '/tn', 'ffsb-helper-mount'], { timeoutMs: 30_000 });
+      for (let i = 0; i < 30 && !st.attached; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        st = await devDriveStatus(l);
+      }
+    }
+    if (!st.attached && !o.force) {
+      say(`\nNot uninstalling: the Dev Drive ${m.devDrive.vhdx} is not attached, so its sandboxes cannot be checked for unpushed work. Attach it (schtasks /run /tn ffsb-helper-mount, or from an elevated PowerShell: Mount-DiskImage ${m.devDrive.vhdx}), or pass --force to discard them.`);
+      process.exitCode = 3;
+      return;
+    }
+  }
   const risks = await sandboxRisks(l.sandboxes);
   if (busy.length) {
     say(`\n${busy.length} agent(s) are mid-turn on ${m.machineId}:`);
@@ -1581,7 +1823,7 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
     await bash('unloading the LaunchAgent', `${macControlScript('uninstall', m.service)}i=0\nwhile launchctl print gui/$(id -u)/${m.service} >/dev/null 2>&1 && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done\n`, 2 * 60_000);
   }
   say(`Removed ${serviceNoun(m.service)}.`);
-  say(`Stopped ${await stopRootProcesses(l.root)} process(es) still running from the root.`);
+  say(`Stopped ${await stopRootProcesses(l.root, m.devDrive ? [`${m.devDrive.letter}:\\`] : [])} process(es) still running from the root${m.devDrive ? ` or the Dev Drive ${m.devDrive.letter}:` : ''}.`);
 
   // 4. Firewall rules, the portal's ssh key (w568: exactly its lines, unless they were there before) and the slot config.
   const steps: ElevatedStep[] = [];
@@ -1589,6 +1831,11 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
   for (const k of m.outside.filter((x) => x.kind === 'authorized-key' && !x.existed && x.note)) {
     if (isWin && /administrators_authorized_keys$/i.test(k.name)) steps.push({ kind: 'revoke-key', file: k.name, blob: k.note! });
     else say(`The portal's ssh key: removed ${revokeIn(k.name, k.note!)} line(s) from ${k.name}.`);
+  }
+  if (isWin && m.devDrive) {
+    // The root's two junctions first (a recursive delete must never meet them), then the drive: its tasks, the attachment and the VHDX.
+    for (const dir of [l.sandboxes, l.seed]) if (unlinkRootFolder(dir)) say(`Removed the junction ${dir}.`);
+    steps.push({ kind: 'dev-drive', args: devDrivePsArgs(['-Action', 'remove', '-Root', l.root]) });
   }
   if (steps.length) say(await elevatedSteps(steps));
   if (!isWin && slotConfigRoot(macSlotConfig())?.startsWith(l.root)) {
@@ -1648,6 +1895,7 @@ $id = $PID
 while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId -eq $id } | Select-Object -First 1).ParentProcessId }
 "procs=$(@($all | Where-Object { ([string]$_.CommandLine).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and -not $mine.Contains([int]$_.ProcessId) }).Count)"
 "runKeys=$(@(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -ErrorAction SilentlyContinue | ForEach-Object { $_.PSObject.Properties } | Where-Object { ([string]$_.Value).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count)"
+"helperTasks=$(@(Get-ScheduledTask -TaskName 'ffsb-helper-*' -ErrorAction SilentlyContinue | Where-Object { ([string]($_.Actions | Select-Object -First 1).Arguments).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count)"
 `,
     );
     const get = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(out)?.[1]?.trim() ?? '';
@@ -1667,6 +1915,8 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
       slotsPointerItem(l.root),
       { what: 'processes whose command line names the root', present: Number(get('procs')) > 0, detail: get('procs') },
       { what: 'HKCU Run entries naming the root', present: Number(get('runKeys')) > 0, detail: get('runKeys') },
+      { what: 'the Dev Drive helper tasks (ffsb-helper-*) naming the root', present: Number(get('helperTasks')) > 0, detail: get('helperTasks') },
+      { what: `the Dev Drive ${path.join(l.root, 'devdrive.vhdx')}`, present: fs.existsSync(path.join(l.root, 'devdrive.vhdx')), detail: m?.devDrive ? `${m.devDrive.letter}:` : undefined },
     );
   } else if (isLinux) {
     const file = unitFile(os.homedir(), service);
@@ -1796,12 +2046,16 @@ const USAGE = `node scripts/worker/worker.ts <install|update|uninstall|check> --
              GitHub credential, which an ssh session does not have)]
             [--unity-editor-root <dir>] [--unity-path <exe>]
             [--no-ssh] [--ssh-host <name the portal reaches it by>] [--ssh-user <user>] (the portal's ssh, w568)
+            [--no-dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] (Windows: a new install makes a Dev Drive in the root, w900)
   update    [--max-sandboxes N] [--max-agents-per-sandbox N] [--max-unity N] (only to change them)
             [--ref portal|main|<commit> (the daemon code; default: the commit the portal runs)] [--source <checkout>]
             [--owner <user> (Windows, elevated: default the user the daemon's task runs as)] [--no-firewall] [--no-ssh]
             (this machine's own install, in place: every setting, the credential and the PATH carried; no game-repo
              fetch; restarts the daemon and checks the portal sees it; docs/worker-install.md, "Updating")
             [--voice-whisper <model>|off] (the GPU Whisper for the portal's mic, w615; default: as daemon.json has it)
+            [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
+             install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
+             workers and editors. An update without these keeps the drive it has and makes none.)
             [--voice-whisper <model>|off] (Whisper on this machine's GPU for the portal's mic, w615; kept on a re-run)
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
@@ -1809,6 +2063,21 @@ const USAGE = `node scripts/worker/worker.ts <install|update|uninstall|check> --
             [--nightly <dir;dir>] [--dry-run] | --rollback | --cleanup [--legacy]
             (today's layout into the root; the credential comes from the old daemon.json)
 The OS wrappers (scripts/worker/install.ps1, install.sh) ask for these and pipe the credential.`;
+
+/** --dev-drive / --no-dev-drive, --dev-drive-max-gb N, --dev-drive-skip U,T and --move-to-dev-drive, from the command line (w900). Exported for tests. */
+export function devDriveFlags(opts: Record<string, string>, flags: Set<string>): Pick<InstallOptions, 'devDrive' | 'devDriveMaxGB' | 'devDriveSkip' | 'moveToDevDrive'> {
+  if (flags.has('dev-drive') && flags.has('no-dev-drive')) throw new Error('--dev-drive and --no-dev-drive contradict each other');
+  const gb = opts['dev-drive-max-gb'];
+  if (gb !== undefined && !/^\d+$/.test(gb)) throw new Error(`--dev-drive-max-gb is a whole number of GB (got "${gb}")`);
+  const skip = opts['dev-drive-skip'];
+  if (skip !== undefined && !/^[A-Za-z](?:[,;]?[A-Za-z])*$/.test(skip)) throw new Error(`--dev-drive-skip is drive letters, like U,T (got "${skip}")`);
+  return {
+    ...(flags.has('no-dev-drive') ? { devDrive: 'off' as const } : flags.has('dev-drive') || flags.has('move-to-dev-drive') ? { devDrive: 'on' as const } : {}),
+    ...(gb !== undefined ? { devDriveMaxGB: Number(gb) } : {}),
+    ...(skip ? { devDriveSkip: skip } : {}),
+    ...(flags.has('move-to-dev-drive') ? { moveToDevDrive: true } : {}),
+  };
+}
 
 export async function main(argv = process.argv.slice(2)) {
   // An ssh session's PATH may lack where git, git-lfs and node live (w629); this process's PATH only.
@@ -1839,6 +2108,7 @@ export async function main(argv = process.argv.slice(2)) {
       sshUser: opts['ssh-user'],
       ...(opts['seed-from'] ? { seedFrom: opts['seed-from'] } : {}),
       ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
+      ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'update') {
     if (!opts.root) throw new Error(USAGE);
@@ -1853,6 +2123,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(flags.has('no-firewall') ? { firewall: false } : {}),
       ...(flags.has('no-ssh') ? { ssh: false } : {}),
       ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
+      ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'elevated') {
     // The install's one administrator step (elevatedSteps): run by an elevated copy of this script.
@@ -1892,6 +2163,8 @@ export async function main(argv = process.argv.slice(2)) {
           ssh: !flags.has('no-ssh'),
           sshHost: opts['ssh-host'],
           sshUser: opts['ssh-user'],
+          // A migration moves what a machine already has into a root; a Dev Drive is a separate, later step (--dev-drive on an update).
+          devDrive: 'off',
         },
       });
   } else if (cmd === 'check') {

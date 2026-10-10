@@ -515,6 +515,12 @@ is the sandbox one: their worktree is theirs, the main clone and the daemon's
 folder are protected, killing Unity by hand is refused (other sandboxes' editors share the machine), and a raw
 `git switch` is refused while their editor runs.
 
+**On a Windows PC, a Dev Drive** (w900, [worker-install.md](worker-install.md#the-dev-drive-w900)): a new worker install keeps
+`sandbox_root` and the Library seed on a VHDX in its install folder, mounted at the first free letter from V: down and
+mounted again at every boot. The seed is then cloned, not copied, so a new sandbox costs seconds and little disk; the daemon's
+host guard remounts the drive if it goes. LothDesktop's `D:` is NTFS with other data on it, which is why it is a file and
+not a reformat; BEAST keeps its own `F:`.
+
 **Warm Library.** A new sandbox's `Library` is copied from the main clone's, or, when that is empty (a clone that never
 opened Unity), from a ready sandbox's, preferring one whose editor is stopped: robocopy on Windows, an APFS clone
 (`cp -c`) on a Mac. It needs `disk_warn_gb` + 30 GB free first, or `disk_warn_gb` + the Library's own size for a full
