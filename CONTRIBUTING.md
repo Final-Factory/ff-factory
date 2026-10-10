@@ -148,6 +148,8 @@ Then push the commit and the tag (the script prints the command).
 
 ## Guidelines
 
+- **Run `npm run prepush` before you push**: the typecheck, shellcheck, gitleaks and the identity rule below, locally
+  (`scripts/prepush.ts`). It skips, loudly, a check whose tool (shellcheck, gitleaks) is not installed.
 - Keep changes focused, with a test for new server behaviour (`server/*.test.ts`) and an E2E test for
   a new UI flow.
 - **Commit with your GitHub noreply address** (`<id>+<login>@users.noreply.github.com`, from GitHub
