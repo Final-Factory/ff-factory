@@ -9,9 +9,10 @@ import { FFBOX_LAN_LABEL, ffboxConversationHref, isFfboxConversationId } from '.
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
 import { CostChip, RequestSpendBlock, SpendTab, useSpendSummary } from './Spend';
-import { contextGlance, dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, useNow, workLabel, workTone, type Tone } from '../util';
+import { contextGlance, dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, permissionAnswerer, useNow, workLabel, workTone, type Tone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
+import { PermissionCard } from './Transcript';
 import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu } from './ui';
 import { TimersButton } from './Timers';
@@ -688,6 +689,17 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             <button className="link-btn small" onClick={() => navigate({ view: 'dispatcher', tab: w.mergedInto })}>
               Continues as {w.mergedInto}
             </button>
+          )}
+          {workers.flatMap((x) =>
+            x.pendingPermissions.map((p) => (
+              <div key={p.requestId} data-testid={`work-permission-${w.id}`}>
+                <p className="small tone-amber">
+                  {x.title} ({x.id}) waits for {permissionAnswerer(app, x) ? `${permissionAnswerer(app, x)}'s` : 'your'} OK
+                  {x.requestedBy && x.requestedBy.userId.toLowerCase() !== app.me?.userId.toLowerCase() ? `, for ${x.requestedBy.displayName}` : ''}:
+                </p>
+                {!permissionAnswerer(app, x) && <PermissionCard sessionId={x.id} requestId={p.requestId} toolName={p.toolName} input={p.input} reason={p.reason} pending />}
+              </div>
+            )),
           )}
           {workers.map((x) => (
             <button key={x.id} className="link-btn small" onClick={() => navigate(sessionRoute(x, app))}>

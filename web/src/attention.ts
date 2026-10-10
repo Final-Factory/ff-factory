@@ -4,7 +4,7 @@
 import type { AppState, SessionInfo } from '../../shared/types';
 import { summarizeToolInput, toolDisplayName } from './components/toolSummary';
 import { focusPermission } from './store';
-import { navigate, type Route } from './util';
+import { navigate, permissionAnswerer, type Route } from './util';
 
 export interface AttentionItem {
   key: string;
@@ -36,12 +36,15 @@ export function attentionItems(app: AppState): AttentionItem[] {
   for (const s of app.sessions) {
     // Someone else's orchestrator is theirs to answer; the dispatcher is the owner's.
     if (s.kind === 'orchestrator' && s.id !== app.orchestratorId && (s.orchestratorRole === 'personal' || app.me?.role !== 'owner')) continue;
+    // A member answers only their own workers' requests (w891); an owner answers any, and the line says whose it is.
+    if (permissionAnswerer(app, s)) continue;
+    const forOther = s.kind === 'worker' && s.requestedBy && s.requestedBy.userId.toLowerCase() !== app.me?.userId.toLowerCase() ? ` · for ${s.requestedBy.displayName}` : '';
     for (const p of s.pendingPermissions) {
       const what = summarizeToolInput(p.toolName, p.input);
       items.push({
         key: `p:${p.requestId}`,
         kind: 'permission',
-        title: s.id === app.orchestratorId ? 'Orchestrator' : s.kind === 'orchestrator' ? 'Dispatcher' : s.title,
+        title: s.id === app.orchestratorId ? 'Orchestrator' : s.kind === 'orchestrator' ? 'Dispatcher' : `${s.title}${forOther}`,
         detail: `Allow ${toolDisplayName(p.toolName).tool}${what ? `: ${what}` : '?'}`,
         at: p.createdAt,
         open: () => {

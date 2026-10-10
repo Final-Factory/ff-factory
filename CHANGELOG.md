@@ -10,6 +10,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Owners answer each other's workers' permission requests** (w891, lothsahn: "I should be able to approve Ben's shell command
+  requests and vice versa."). w876's Bash approval waited over 15 minutes and Lothsahn saw nothing: the server never refused him, but the push
+  notice for a worker on a machine always threw (`Notifier` read `toolName` of the signal's missing request, fixed), no page put
+  an Allow button where he looked, and only Ben's orchestrator was told. A worker's permission request is now answered by its
+  own people or any login with the owner role (`shared/permissionAccess.ts`, `Orchestrators.answerWorkerPermission`); a
+  member answers only the workers they work for (403 otherwise). The request's row on the Dispatcher page carries the Allow
+  and Deny card, the sidebar's "Needs you" names whose worker it is, the transcript card reads "Allowed by Lothsahn"
+  (`decidedBy` on the permission event), the request's log says who answered, and the worker's people hear it in one line
+  (`[from another owner] Lothsahn approved a Bash command for your worker …`). docs/orchestrators.md, "Owners across each
+  other's work". Needs a portal deploy.
 - **A verified portal deploy now updates every machine's daemon by itself** (w887, lothsahn: "Update FFFactory so that after
   updating the portal and validating, it automatically updated all the machines."). `fff-update verify` writes
   `data/update.verified.json` when the new release answers (a rollback writes none); the portal (`server/machineRollout.ts`) then

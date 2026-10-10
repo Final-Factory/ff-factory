@@ -13,8 +13,10 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   account. The display name is what people and prompts see ("Lothsahn").
 - Roles: `owner` (Ben, who runs the portal) and `member` (a teammate). The first login is the owner and
   later ones are members. A `users.json` written before roles existed reads every login as the owner.
-  **Roles are recorded, and enforced in one place so far:** an owner may close or reopen another person's request
-  when they ask for it in their own turn (w402; docs/orchestrators.md, "Owners close each other's requests"). The other per-role limits (no M5 for a member, no `add_machine`,
+  **Roles are recorded, and enforced in a few places so far:** an owner may close or reopen another person's request
+  when they ask for it in their own turn (w402; docs/orchestrators.md, "Owners close each other's requests"), message another
+  owner's workers and add notes to another owner's requests (w677), and answer any worker's permission requests; a member answers
+  only the workers they work for (w891; docs/orchestrators.md, "Owners across each other's work"). The other per-role limits (no M5 for a member, no `add_machine`,
   and so on) are phase 6 of the FFBox design, section 7.
 - Manage logins on the host:
 
