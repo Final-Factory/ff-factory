@@ -71,6 +71,9 @@ const takeLetter = (l: string) => spawnSync('net', ['use', `${l}:`, '\\\\127.0.0
 const releaseLetter = (l: string) => void spawnSync('net', ['use', `${l}:`, '/delete', '/y'], { encoding: 'utf8' });
 const letterOrder = [...'VUTSRQPONMLKJIHGFEDC', 'B', 'A'];
 const firstFree = (taken: string[]) => letterOrder.find((l) => !taken.includes(l));
+/** A clean shutdown's detach: the volume's cache is written out first (a hard detach with writes in flight loses them, as a power cut does). */
+const detach = () => ps(`Write-VolumeCache -DriveLetter ${currentLetter} -ErrorAction SilentlyContinue; Dismount-DiskImage -ImagePath '${vhdx}' | Out-Null`);
+let currentLetter = '';
 const attached = () => ps(`(Get-DiskImage -ImagePath '${vhdx}').Attached`).stdout.trim() === 'True';
 const helperResult = () => {
   try {
@@ -111,6 +114,7 @@ try {
   check(/refs/i.test(String(j1.fileSystem)), 'it is ReFS', `${j1.fileSystem}, Dev Drive format ${j1.devDrive}, block clone ${j1.blockClone}`);
   check(fs.statSync(vhdx).size < 2 * 1024 ** 3, 'the file is dynamic (small until written)', `${(fs.statSync(vhdx).size / 1024 ** 2).toFixed(0)} MB`);
   const letter = String(j1.letter);
+  currentLetter = letter;
   // What the install puts on the drive: a real worktree of the root's clone, and the root's two junctions.
   const gitenv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
   const g = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8', env: gitenv });
@@ -144,7 +148,7 @@ try {
   check(third.code === 0 && third.json?.created === false && third.json?.letter === letter, 'a third run with no user changes nothing either');
 
   // 3. A reboot: the attachment is lost. The boot task brings the drive back at the same letter.
-  ps(`Dismount-DiskImage -ImagePath '${vhdx}' | Out-Null`);
+  detach();
   check(!attached() && !fs.existsSync(`${letter}:\\`), 'detached (a reboot or a power cut)');
   const b1 = bootTask();
   check(b1.ok, 'the boot task reports success', b1.detail);
@@ -153,7 +157,7 @@ try {
   check(again.ok && /already there/.test(again.detail), 'the boot task run again changes nothing', again.detail);
 
   // 4. The letter is taken by the next boot: another letter, and everything is repointed.
-  ps(`Dismount-DiskImage -ImagePath '${vhdx}' | Out-Null`);
+  detach();
   const sub = takeLetter(letter);
   letterTaken = letter;
   const mapped = spawnSync('reg', ['query', `HKCU\\Network\\${letter}`], { encoding: 'utf8' }).status === 0;
@@ -162,6 +166,7 @@ try {
   const b2 = bootTask();
   const state = JSON.parse(fs.readFileSync(path.join(root, 'devdrive.json'), 'utf8').replace(/^\uFEFF/, ''));
   const moved = String(state.letter);
+  currentLetter = moved;
   check(b2.ok, 'the boot task still succeeds', b2.detail);
   check(moved !== letter && moved === firstFree(taken4), 'the drive took the next free letter', `${letter} -> ${moved}, expected ${firstFree(taken4)}`);
   check(fs.existsSync(`${moved}:\\sandboxes\\slot1\\marker.txt`), `${moved}: holds the data`);

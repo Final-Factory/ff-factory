@@ -68,6 +68,7 @@ try {
       }
       if (Drive) { Optimize-Volume -DriveLetter $Letter -ReTrim -ErrorAction SilentlyContinue }
       $how = ''
+      if (Drive) { Write-VolumeCache -DriveLetter $Letter -ErrorAction SilentlyContinue }
       Dismount-DiskImage -ImagePath $Vhdx | Out-Null
       try {
         if (Get-Command Optimize-VHD -ErrorAction SilentlyContinue) {
@@ -104,6 +105,7 @@ try {
       $users = Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" | Where-Object { $_.CommandLine -match "(?i)$($Letter):[\\/]" }
       if ($users) { Done $false "refused: $(@($users).Count) Unity editor(s) use $($Letter): (stop them first)" }
       if (-not (Get-DiskImage -ImagePath $Vhdx).Attached) { Done $true "already detached" }
+      if (Drive) { Write-VolumeCache -DriveLetter $Letter -ErrorAction SilentlyContinue }
       Dismount-DiskImage -ImagePath $Vhdx | Out-Null
       Done $true "detached $Vhdx ($($Letter): is gone until ffsb-helper-mount attaches it)"
     }
