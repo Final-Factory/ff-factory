@@ -35,8 +35,6 @@ jobs:
           P="$RUNNER_TEMP/probe"; mkdir -p "$P/procs"
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .github/w906-probe/trace.ps1 -Out "$(cygpath -w "$P/trace.txt")" -StopFile "$(cygpath -w "$P/stop")" &
           sleep 5
-          export FF_PROCLOG="$(cygpath -w "$P/procs")"
-          export NODE_OPTIONS="--import=file:///$(cygpath -m "$PWD")/.github/w906-probe/proclog.mjs"
           slow=(server/machineDeployWin.test.ts server/machines.test.ts server/orchestrators.test.ts)
           fails=0
           for i in 1 2 3; do
@@ -51,8 +49,9 @@ jobs:
             if [ -n "$f" ]; then
               pid=$(echo "$f" | cut -d- -f2)
               echo "::warning::iteration $i: empty coverage file $f (pid $pid)"
-              for r in "$P"/procs/$pid-*.json; do echo "$r: $(cat "$r")"; done
               grep -E "pid=$pid " "$P/trace.txt" || true
+              ppid=$(grep -E "START pid=$pid " "$P/trace.txt" | tail -1 | grep -oE "ppid=[0-9]+" | cut -d= -f2)
+              [ -n "$ppid" ] && grep -E "pid=$ppid " "$P/trace.txt" | head -3
             fi
             [ "$code" = 0 ] || fails=$((fails + 1))
           done
