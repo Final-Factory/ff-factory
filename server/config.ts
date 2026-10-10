@@ -243,6 +243,11 @@ export interface Config {
      */
     unattributed?: Partial<Record<'intake' | 'ffbox' | 'nightly', string>>;
     /**
+     * The repositories every GitHub token must reach (w904, docs/vault.md section 13.2), "owner/name"; default
+     * shared/githubRequirements.ts GITHUB_REQUIRED_REPOS. A token missing one gets a dashboard banner.
+     */
+    githubRepos?: string[];
+    /**
      * The Claude token pool's limits (w739, docs/vault.md section 4), one system-wide set that anyone can change with
      * set_app_config: sessionHoldPercent (80), onePerWeeklyPercent (95), retireWeeklyPercent (99), reservePerDayPercent
      * (5: the dispatcher's token keeps this per day left until its weekly reset) and reserveSessionPercent (20).
@@ -761,6 +766,8 @@ export function loadConfig(): Config {
   }
   if (cfg.vault !== undefined) {
     if (typeof cfg.vault !== 'object' || cfg.vault === null || Array.isArray(cfg.vault)) throw new Error('config vault is an object, e.g. { "keyFile": "/etc/fff/vault.key" }');
+    const repos: unknown = cfg.vault.githubRepos;
+    if (repos !== undefined && (!Array.isArray(repos) || !repos.length || repos.some((r) => typeof r !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(r)))) throw new Error('config vault.githubRepos is a list of "owner/name" repositories, e.g. ["Final-Factory/FinalFactory"]');
     const u: unknown = cfg.vault.unattributed;
     if (u !== undefined) {
       if (typeof u !== 'object' || u === null || Array.isArray(u)) throw new Error('config vault.unattributed is an object, e.g. { "intake": "lothsahn", "ffbox": "lothsahn", "nightly": "ben" }');

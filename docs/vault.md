@@ -681,35 +681,51 @@ the portal, neither a token change:
   fine-grained token. Edit the token in place on github.com; its value stays, so nothing goes into the VM.
 
 **One permission set per token.** A fine-grained token has one list of permissions for all the repositories it is given;
-"repo by repo" is which repositories to select. Each person's token:
+"repo by repo" is which repositories to select. **The requirements are lothsahn's** (2026-10-10, w904): "Give it these repo
+permissions: Actions (RW), Artifact metadata (RO), Commit statuses (RW), Contents (RW), Discussions (RW), Issues (RW),
+Metadata (Required), Pull requests (RW), Workflows (RW). And these organizational permissions: Self-hosted runners (RO). As
+we find more permissions we need, please add them to the requirements". In code they are one list,
+`shared/githubRequirements.ts`; `server/githubTokens.test.ts` fails when this table and that list disagree. The probe
+(13.3) checks every token against them, and a dashboard banner asks for the token to be updated when one is missing
+(13.6). **A worker that GitHub refuses (403, "Resource not accessible") for a permission or repository not listed here adds
+it to `shared/githubRequirements.ts` and this table in a pull request, and says so in its report** (the evidence-gate lesson
+"github-403-adds-a-requirement").
 
-| Setting | Value | Why (sourced from GitHub's permissions page unless said) |
+| Setting | Value | Why (sourced from GitHub's permissions page unless said) / how its read half is probed |
 |---|---|---|
-| Resource owner | **Final-Factory** | every repository below is the organization's |
+| Resource owner | **Final-Factory** | every required repository is the organization's |
 | Repository access | **All repositories**, or select the list below | |
-| Contents | **Read and write** | `git push`; merging a PR (`PUT …/pulls/{n}/merge` is listed under Contents, write); `GET …/commits` |
-| Pull requests | **Read and write** | create, edit, comment on and read PRs (`POST …/pulls`) |
-| Workflows | **Read and write** | pushing a commit that changes `.github/workflows/` (the Workflows section lists the ref and contents writes) |
-| Actions | **Read and write** | read runs, jobs and logs (read); re-run a failed job (`POST …/actions/runs/{id}/rerun`, write) |
-| Commit statuses | **Read-only** | the status part of a PR's checks (`GET …/commits/{ref}/status`) |
-| Issues | **Read and write** | PR conversation comments go through `…/issues/{n}/comments` (listed under Issues and Pull requests); issues themselves |
-| Metadata | Read-only (automatic) | |
-| Checks | not offered | see above: `gh pr checks` cannot work with any fine-grained token |
-| Expiration | the longest offered; write the date down | the vault page shows it from GitHub's `GitHub-Authentication-Token-Expiration` header and warns 14 days before |
+| Actions (repository) | **Read and write** | read runs, jobs and logs; re-run a failed job (`POST …/actions/runs/{id}/rerun`, write). Probe: `GET /repos/{repo}/actions/runs` |
+| Artifact metadata (repository) | **Read-only** | artifact storage and deployment records. Probe: `GET /orgs/Final-Factory/artifacts/{digest}/metadata/storage-records` with a made-up digest: 404 counts as allowed, 403 as refused *(measured with a token that may read: 404)* |
+| Commit statuses (repository) | **Read and write** | the status part of a PR's checks (`GET …/commits/{ref}/status`). Probe: that, on `HEAD` |
+| Contents (repository) | **Read and write** | `git push`; merging a PR (`PUT …/pulls/{n}/merge` is listed under Contents, write). Probe: `GET /repos/{repo}/commits` |
+| Discussions (repository) | **Read and write** | GitHub's REST has no Discussions endpoints (none on the permissions page). Probe: GraphQL `repository.discussions` |
+| Issues (repository) | **Read and write** | PR conversation comments go through `…/issues/{n}/comments`; issues themselves. Probe: `GET /repos/{repo}/issues` |
+| Metadata (repository) | **Read-only** | required by GitHub for any repository. Probe: `GET /repos/{repo}` (404: the repository is not selected) |
+| Pull requests (repository) | **Read and write** | create, edit, comment on and read PRs (`POST …/pulls`). Probe: `GET /repos/{repo}/pulls` |
+| Workflows (repository) | **Read and write** | pushing a commit that changes `.github/workflows/`. Write only: nothing to probe |
+| Self-hosted runners (organization) | **Read-only** | the organization's runners (BEAST's and the ffbox runners). Probe: `GET /orgs/Final-Factory/actions/runners` |
+| Checks | not offered | GitHub has no Checks permission for fine-grained tokens: `gh pr checks` cannot work with one |
+| Expiration | the longest offered; write the date down | the vault page shows it from GitHub's `GitHub-Authentication-Token-Expiration` header; the banner warns 14 days before |
 
-Repositories FF Factory touches *(measured: `gh repo list Final-Factory`, and the repositories named in this repo's code
-and the worker briefs)*:
+**Not checked:** the write half of every "Read and write" permission, and Workflows, which is write only. Reading them would
+mean writing, so the probe does not try, and the banner says which ones it could not check.
+
+The required repositories (config `vault.githubRepos`, default these nine, lothsahn's list) *(what FF Factory does in each:
+measured from `gh repo list Final-Factory` and the repositories named in this repo's code and the worker briefs)*:
 
 | Repository | What FF Factory does there | Needed |
 |---|---|---|
-| Final-Factory/FinalFactory (internal) | workers push branches, open and merge PRs into develop, read and re-run CI; the portal reads PR states and CI | yes |
-| Final-Factory/ff-factory (public) | workers' PRs to this portal, merged on green; the ledger sweep reads its PRs | yes |
-| Final-Factory/final-factory-agents (public) | skills and lessons (`publish-skills`) | yes |
-| Final-Factory/ffbox (private) | workers push fixes to ffbox master one at a time (w857's brief), read its code | yes |
-| Final-Factory/finalfactory-agent-kit (public) | the players' HowToPlay (`learnToPlay`) | yes |
-| Final-Factory/ff-marketing (private) | marketing skills' work | yes, if workers do marketing work |
-| Final-Factory/ff-orchestrator-memory (private) | the portal's own memory push (D7, unchanged) | not needed by a person's token |
-| Final-Factory/KNN, ff-factory-private, Facepunch.Steamworks, multiplayer-community-contributions, nevergames-website | none found in this repo's code or briefs | no ("All repositories" covers them anyway) |
+| Final-Factory/FinalFactory (internal) | workers push branches, open and merge PRs into develop, read and re-run CI; the portal reads PR states and CI | required |
+| Final-Factory/ff-factory (public) | workers' PRs to this portal, merged on green; the ledger sweep reads its PRs | required |
+| Final-Factory/final-factory-agents (public) | skills and lessons (`publish-skills`) | required |
+| Final-Factory/ffbox (private) | workers push fixes to ffbox master one at a time (w857's brief), read its code | required |
+| Final-Factory/finalfactory-agent-kit (public) | the players' HowToPlay (`learnToPlay`) | required |
+| Final-Factory/ff-marketing (private) | marketing skills' work | required |
+| Final-Factory/ff-orchestrator-memory (private) | the orchestrators' memory (the portal's D7 push) | required |
+| Final-Factory/KNN (internal) | the game's KNN package (lothsahn, w904) | required |
+| Final-Factory/Facepunch.Steamworks (public) | the game's Steamworks fork (lothsahn, w904) | required |
+| Final-Factory/ff-factory-private, multiplayer-community-contributions, nevergames-website | none found in this repo's code or briefs | no ("All repositories" covers them anyway) |
 | bryding/FinalFactoryModTemplate, Lothsahn/* | the mod template (game repo `CLAUDE.md`, "Modding"); personal repositories | **cannot**: a fine-grained token has one resource owner. With `GH_TOKEN` set, gh and git use only it, so work on these fails with the person token. Until the template moves to the organization, such work needs a run without the switch (its machine `githubFromVault` off) |
 
 ### 13.3 Selection, fallback, expiry
@@ -732,10 +748,16 @@ and the worker briefs)*:
 - **Expiry:** read from GitHub's `GitHub-Authentication-Token-Expiration` header at each probe *(sourced:
   composer/composer#11688 reads the same header for `composer diagnose`; not measured, no fine-grained token was available
   here)*. Past it, the token is not used; 14 days before, the line turns amber ("rotate it soon").
-- **Probe:** at start, whenever the vault changes (a new or rotated token), and every 6 hours: `GET /user` (the GitHub
-  account and id; it needs no permission) and, per repository of 13.2, its metadata, `commits`, `pulls`, `actions/runs` and
-  `commits/HEAD/status`. About 30 requests per token per probe, against GitHub's 5,000 an hour. Write permissions cannot
-  be read without writing, so they are not probed, and no API a token can call lists a fine-grained token's permissions.
+- **Probe** (w904): at start, whenever the vault changes (a new or rotated token, within 5 minutes), every 6 hours, and at
+  once on **Re-check now**. It reads `GET /user` (the GitHub account and id, and the expiry header; it needs no permission),
+  the organization's Self-hosted runners and Artifact metadata reads, and, per required repository (config
+  `vault.githubRepos`), each probe of 13.2's table. That is about 75 requests per token per probe, against GitHub's 5,000
+  an hour. Write halves are not probed (that would mean writing), and no API a token can call lists a fine-grained token's
+  permissions, so each read is a real request and its answer is the measurement. A read that gets no answer (a network
+  blip) is not counted against the token.
+- **The portal's own gh login (D7) is probed the same way** (w904), through `gh api -i` and `gh api graphql` as the portal's
+  user: gh reads its own credential, so the portal never handles the value. It is listed as "the portal's own gh login
+  (D7)", with its own banner for the owners.
 
 ### 13.4 Attribution: what changes when a person's token pushes
 
@@ -768,14 +790,27 @@ in chat, redacted from transcripts and logs by pattern and by value (`addSecretV
 use). A daemon from before w868 ignores `githubToken` and pushes on its own login; its workers get the token anyway (the
 spec is old). Keep each machine's own gh login: the fallback, and the daemon's own fetches (13.1).
 
-### 13.6 The vault page and system_status
+### 13.6 The banner, the vault page and system_status
 
-Each GitHub entry on Settings → Token vault has a line under it: the GitHub account it acts as, "not used: …" when refused,
-its expiry with the days left, the reads it lacks per repository ("FinalFactory: no actions"; "ffbox: not selected"), when it
-was probed, its last use ("given to a workers run on m3 for lothsahn", "CI on Final-Factory/FinalFactory#1372") and its last
-error. Amber when refused, near expiry or lacking a read. Below the list: where GitHub tokens from the vault are on. The same
-line per token is in `system_status`, after the vault's line. Last use and last error live in the portal's memory (empty after
-a restart until the next use); the probe runs at start.
+**The banner (w904).** lothsahn (2026-10-10): "Can you please build checks that if the necessary repos and permissions aren't
+present, a banner appears at the top asking for the github token to be updated?" When a token lacks anything of 13.2, or is
+refused (401), expired or within 14 days of its expiry, a banner "A GitHub token needs updating." is at the top of the
+dashboard for **the token's own person and every owner** (the portal login's for the owners). It names the token
+(`vault-<person>-github …abcd`, and its GitHub account), what it lacks ("Final-Factory/ff-marketing: not selected";
+"Actions: read refused on FinalFactory"; "Self-hosted runners (organization Final-Factory): read refused"), the fix (edit the
+token on github.com, Repository access and Permissions; its value stays, so nothing changes in the vault) and the
+permissions it could not check (the write halves). Its **Re-check now** button probes every token and the portal login at
+once (`POST /api/github/recheck`, anyone signed in, at most every 30 seconds); the banner clears by itself on the next
+probe that finds nothing missing. Closing it hides it until its text changes.
+
+**Also loud:** a `WARNING: GitHub token …` line per such token in `system_status`, and a `[host]` notice to the dispatcher
+plus the host notification, once when a token turns bad (or what it lacks changes) and once when it has everything again.
+
+**The vault page.** Each GitHub entry on Settings → Token vault has a line under it: the GitHub account it acts as, its
+expiry with the days left, what it lacks, when it was probed, its last use ("given to a workers run on m3 for lothsahn",
+"CI on Final-Factory/FinalFactory#1372") and its last error; amber when it lacks anything. Below the list: where GitHub
+tokens from the vault are on, the portal login's line, and **Re-check now**. Last use and last error live in the portal's
+memory (empty after a restart until the next use).
 
 ### 13.7 Switchover for lothsahn
 
@@ -853,10 +888,10 @@ sudo fff-vm ssh 'sudo fffctl vault list'             # "key: loaded"
   prints.
 - **GitHub:** github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new
   token:
-  - Resource owner: **Final-Factory**; Repository access: **All repositories** (or select FinalFactory, ff-factory,
-    final-factory-agents and the others workers push to);
-  - Permissions: the list in section 13.2 ([GitHub tokens per person](#13-github-tokens-per-person-w868): Contents, Pull requests,
-    Workflows, Actions and Issues: Read and write; Commit statuses: Read; Metadata: Read, automatic);
+  - Resource owner: **Final-Factory**; Repository access: **All repositories** (or select the nine of section 13.2);
+  - Permissions: the list in section 13.2 ([GitHub tokens per person](#13-github-tokens-per-person-w868)): repository
+    permissions Actions, Commit statuses, Contents, Discussions, Issues, Pull requests and Workflows: Read and write;
+    Artifact metadata: Read-only; Metadata: Read-only (required); organization permission Self-hosted runners: Read-only;
   - Expiration: up to a year; note the date. If the organization requires approval for fine-grained tokens, an owner
     approves it under the organization's Settings → Personal access tokens.
 - **Put them on the host** (`<id>` is your portal user id: `lothsahn`, `ben`). `bash -c`, not `sh -c`: on the host `sh` is

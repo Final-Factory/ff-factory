@@ -45,6 +45,7 @@ import { clock, firstFree, poolBanner, poolKind, poolLimits, warningsForUser } f
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
 import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.ts';
+import { GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
@@ -160,7 +161,7 @@ const credentialsDir = process.env.CREDENTIALS_DIRECTORY;
 delete process.env.CREDENTIALS_DIRECTORY;
 const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
 // The vault's GitHub tokens (w868, docs/vault.md section 13): the portal's gh reads per person, and each token's health.
-const github = new GithubTokens({ vault: () => vault, cfg, payer: () => identity.systemPayer().userId, log: (line) => console.warn(line) });
+const github = new GithubTokens({ vault: () => vault, cfg, repos: () => cfg.vault?.githubRepos ?? GITHUB_REQUIRED_REPOS, payer: () => identity.systemPayer().userId, log: (line) => console.warn(line), report: (title, body) => hostNotice(title, body) });
 setGithubTokens(github);
 github.start();
 // Transcripts written before redaction existed: no Claude OAuth or Discord token stays on disk (server/secrets.ts).
@@ -610,19 +611,21 @@ agents.blockerWatch = blockerWatch;
 const ciRead = new CiReadWatch({
   repo: () => repoSlug(cfg.repo.url),
   runner: () => ghRunner(undefined, 'the CI-read health check'),
-  report: (title, body) => {
-    console.warn(`ci read: ${title}: ${body}`);
-    notifier.host(title, body);
-    const orch = store.orchestratorId;
-    if (orch) {
-      try {
-        sessions.send(orch, `[host] ${title}. ${body}`, 'system');
-      } catch {
-        // the orchestrator is not there; the notification still went out
-      }
-    }
-  },
+  report: (title, body) => hostNotice(title, body),
 }).start();
+/** A loud notice (w889, w904): the server log, the host notification and a [host] message to the dispatcher. */
+function hostNotice(title: string, body: string) {
+  console.warn(`${title}: ${body}`);
+  notifier.host(title, body);
+  const orch = store.orchestratorId;
+  if (orch) {
+    try {
+      sessions.send(orch, `[host] ${title}. ${body}`, 'system');
+    } catch {
+      // the orchestrator is not there; the notification still went out
+    }
+  }
+}
 agents.daemonSha = (id) => machines.daemonVersions().find((d) => d.id === id.toLowerCase())?.sha;
 // The orchestrators' base clone, kept on origin's newest code (w467, server/baseRefresh.ts; config repo.refreshMinutes).
 startBaseRefresh(cfg);
@@ -822,6 +825,13 @@ const vaultChanged = () => {
   usage.poke();
   void github.tick();
 };
+// Probe every GitHub token and the portal's login now (w904, the banner's and the vault page's "Re-check now"): anyone
+// signed in, as the banner is shown to a token's own person; GitHub reads only, at most every 30 seconds, never a value.
+route('POST', '/api/github/recheck', async () => {
+  const ran = await github.recheck();
+  refreshTokenWarnings();
+  return { ran };
+});
 route('GET', '/api/vault', async (req) => {
   requireOwner(req);
   return vaultView();
@@ -1754,7 +1764,7 @@ setInterval(() => {
  */
 function hostForUser(h: HostStatus, user: string): HostStatus {
   if (!h.tokenWarnings) return h;
-  return { ...h, tokenWarnings: warningsForUser(h.tokenWarnings, user) };
+  return { ...h, tokenWarnings: warningsForUser(h.tokenWarnings, user, auth.userInfo(user)?.role === 'owner') };
 }
 function broadcast(e: ServerEvent) {
   if (e.type === 'host') {
@@ -2062,6 +2072,8 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
   // CI the portal cannot read (w889): for everyone, as a CI wait is anybody's.
   const ci = ciReadBanner(ciRead.health);
   if (ci) warnings.push({ id: 'ci-read', kind: 'ci-read', text: ci });
+  // A GitHub token that lacks a required repository or permission (w904): for its person and the owners.
+  for (const b of github.banners()) warnings.push({ id: b.id, kind: 'github-token', ...(b.person ? { person: b.person } : {}), owners: true, text: b.text });
   return { lines, warnings };
 }
 let tokenWarningsShown = '';

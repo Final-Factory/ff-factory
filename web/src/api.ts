@@ -108,6 +108,8 @@ export const api = {
   refreshUsage: () => request<{ started: boolean; machines: number }>('POST', '/api/usage/refresh'),
   // The token vault (docs/vault.md): the owner's only. A value goes in and never comes back; answers carry metadata only.
   vault: () => request<VaultView>('GET', '/api/vault'),
+  /** Probe every GitHub token and the portal's login again now (w904); ran false when the last one was under 30 s ago. */
+  githubRecheck: () => request<{ ran: boolean }>('POST', '/api/github/recheck'),
   vaultAdd: (e: Pick<VaultEntryMeta, 'name' | 'kind' | 'share' | 'roles' | 'machines'> & { env?: string; owner?: string; email?: string; value: string }) => request<VaultView>('POST', '/api/vault', e),
   vaultRotate: (name: string, value: string) => request<VaultView>('POST', `/api/vault/${encodeURIComponent(name)}/rotate`, { value }),
   vaultUpdate: (name: string, patch: Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'roles' | 'machines' | 'disabled' | 'email'>>) => request<VaultView>('PATCH', `/api/vault/${encodeURIComponent(name)}`, patch),
