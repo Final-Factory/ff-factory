@@ -1324,7 +1324,7 @@ test("w830: w811 as it happened: Lothsahn's \"close w811 as a duplicate once 131
   clock += 5 * 60_000;
   assert.equal((await watch.tick()).get(`${w.id}.c1`), `run: PR ${pr} merged as 3c1cdbfa256b`);
   assert.deepEqual([w.status, w.approval?.state, (w.approval?.by as Requester | undefined)?.userId, w.outcome, w.conditional], ['rejected', 'declined', 'lothsahn', 'duplicate of w814', undefined]);
-  assert.match(w.log.at(-1)!, new RegExp(`carried out Lothsahn's decision of 10-\\d\\d \\d\\d:\\d\\d UTC: "${words}" \\(${w.id}\\.c1: decline\\); condition met: PR ${pr} merged as 3c1cdbfa256b$`));
+  assert.match(w.log.at(-1)!, new RegExp(`carried out Lothsahn's decision of \\d\\d-\\d\\d \\d\\d:\\d\\d UTC: "${words}" \\(${w.id}\\.c1: decline\\); condition met: PR ${pr} merged as 3c1cdbfa256b$`));
   await until('Lothsahn is told', () => heard(loth.info.id, '[conditional decision] Carried out').some((e) => e.text.includes(`decline, Lothsahn's decision of`) && e.text.includes('Condition met: PR Final-Factory/FinalFactory#1314 merged as 3c1cdbfa256b')));
   assert.equal((await watch.tick()).size, 0, 'once');
 });
