@@ -69,16 +69,12 @@ jobs:
         run: npm run typecheck
       - name: Typecheck (web)
         run: npm --prefix web run typecheck
-      - name: gitleaks on the PATH, for the pre-push check's test (scripts/prepush.test.ts, w924)
+      - name: gitleaks and shellcheck on the PATH, for the pre-push check's test (scripts/prepush.test.ts, w924)
+        # Both are in the FFBox runner image (ffbox scripts/Dockerfile: GITLEAKS_VERSION, and shellcheck from the distribution);
+        # a container cannot download gitleaks from github.com.
         run: |
-          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
-          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$RUNNER_TEMP/$file" "$base/$file"
-          curl -sSfL -o "$RUNNER_TEMP/checksums.txt" "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
-          (cd "$RUNNER_TEMP" && grep " $file\$" checksums.txt | sha256sum -c -)
-          mkdir -p "$RUNNER_TEMP/bin" && tar -xzf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP/bin" gitleaks
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          command -v shellcheck || { echo "::error::shellcheck is missing on this runner; the pre-push test needs it"; exit 1; }
+          gitleaks version
+          command -v shellcheck || { echo "::error::shellcheck is missing from the runner image (ffbox scripts/Dockerfile installs it)"; exit 1; }
       - name: Unit tests with coverage
         timeout-minutes: 11
         shell: bash
