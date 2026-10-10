@@ -1,0 +1,31 @@
+name: ProbeE2E
+on:
+  push:
+    branches: [w858-probe-e2e]
+jobs:
+  e2e:
+    name: ${{ matrix.variant }} ${{ matrix.project }} #${{ matrix.rep }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [base, fix]
+        project: [desktop-chromium, mobile-safari]
+        rep: [1, 2]
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+      - run: npm ci --prefix web --no-audit --no-fund
+      - if: matrix.variant == 'fix'
+        run: git apply .github/e2e.patch
+      - run: npx playwright install --with-deps chromium webkit
+      - run: npm --prefix web run build
+      - name: Load the runner like a busy CI shard
+        run: for i in 1 2 3; do (while :; do :; done) & done
+      - run: npx playwright test e2e/banner.spec.ts e2e/vault.spec.ts --project=${{ matrix.project }} --repeat-each=30 --retries=0 --workers=3 --reporter=list

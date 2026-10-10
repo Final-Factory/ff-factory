@@ -1,0 +1,29 @@
+diff --git a/e2e/fixtures.ts b/e2e/fixtures.ts
+index ba59f5f..8fb1bed 100644
+--- a/e2e/fixtures.ts
++++ b/e2e/fixtures.ts
+@@ -194,6 +194,10 @@ export const test = base.extend<{ authed: Page }>({
+     await page.goto('/');
+     await expect(page.locator('.sidebar')).toBeAttached();
+     await use(page);
++    // A test may end while a page.route handler is still inside route.fetch (banner.spec.ts patches /api/state, which the
++    // page keeps polling): Playwright then fails the test with "route.fetch: Test ended" or "Response has been disposed".
++    // Taking the routes down waits for the handlers in flight and ignores what they throw.
++    await page.unrouteAll({ behavior: 'ignoreErrors' });
+   },
+ });
+ 
+diff --git a/e2e/vault.spec.ts b/e2e/vault.spec.ts
+index c644096..7095537 100644
+--- a/e2e/vault.spec.ts
++++ b/e2e/vault.spec.ts
+@@ -46,6 +46,9 @@ test('vault: add a secret in the settings sheet; it shows only its last four, ne
+   await expect(row).toContainText(`…${value.slice(-4)}`);
+   await expect(row).toContainText('FFE2E_TOKEN');
+   await expect(row).toContainText('any run; workers, standing on m3');
++  // The row shows as soon as the list comes back; the add form (a controlled input, whose value attribute holds the
++  // typed token) closes a tick later. page.content() read in between found the token (WebKit, 2026-10-09).
++  await expect(vault.getByLabel('value')).toHaveCount(0);
+   expect(await page.content()).not.toContain(value);
+   expect(await (await page.request.get('/api/vault')).text()).not.toContain(value);
+ 
