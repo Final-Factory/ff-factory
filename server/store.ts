@@ -326,6 +326,11 @@ export class Store {
   deleteTranscript(sessionId: string) {
     fs.rmSync(this.transcriptPath(sessionId), { force: true });
     fs.rmSync(`${this.transcriptPath(sessionId)}.gz`, { force: true });
+    this.deleteUploads(sessionId);
+  }
+
+  /** The images a session's transcript shows (they go with the transcript). */
+  deleteUploads(sessionId: string) {
     fs.rmSync(path.join(this.uploadDir, safeId(sessionId)), { recursive: true, force: true });
   }
 

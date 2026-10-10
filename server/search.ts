@@ -77,6 +77,8 @@ export function searchTranscripts(dir: string, sessions: Map<string, SessionInfo
   }
   for (const f of files) {
     const sessionId = f.replace(/\.jsonl(\.gz)?$/, '');
+    // Both files at once (a session resumed since the guard compressed it): the plain one is newer and holds the compressed one's events too.
+    if (f.endsWith('.gz') && files.includes(`${sessionId}.jsonl`)) continue;
     if (query.sessionIds && !query.sessionIds.has(sessionId)) continue;
     const file = path.join(dir, f);
     // A transcript last written before `since` has nothing newer.

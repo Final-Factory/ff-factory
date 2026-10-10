@@ -104,7 +104,9 @@ export interface Alloc {
   how: How;
 }
 
-const ABOUT = /\[about\s+((?:w\d+\b[^\]]*?)(?:,\s*w\d+\b[^\]]*?)*)\]/gi;
+const ABOUT = /\[about\s+([^\]]*)\]/gi;
+/** The ids at the start of each item of an [about] list: `w1 "title", w2 "title" (done)`. */
+const ABOUT_ID = /(?:^|,\s*)(w\d+)(?=\s+")/gi;
 const ID = /\bw\d{1,7}\b/gi;
 
 /** The request ids named by `[about wNNN "title", wMMM "title"]` lines in the messages that began a turn. */
@@ -112,11 +114,8 @@ export function aboutIds(texts: readonly string[]): string[] {
   const out = new Set<string>();
   for (const t of texts) {
     for (const m of t.matchAll(ABOUT)) {
-      // ids at the start of each item (a title may itself name another request)
-      for (const part of m[1].split(/",\s*(?=w\d+\b)|\)?,\s*(?=w\d+\s+")/)) {
-        const id = /^\s*(w\d+)\b/i.exec(part)?.[1];
-        if (id) out.add(id.toLowerCase());
-      }
+      // ids at the start of each item (a title may itself name another request); linear: no backtracking on an unclosed line
+      for (const im of m[1].matchAll(ABOUT_ID)) out.add(im[1].toLowerCase());
     }
   }
   return [...out];
@@ -196,7 +195,7 @@ export class SpendStore {
   private readonly file: SnapshotFile;
   private readonly ctx: SpendContext;
   /** The messages that began each session's current turn, newest last: in memory only; a restart falls back to the links. */
-  private readonly texts = new Map<string, string[]>();
+  private readonly texts = new Map<string, { uuid?: string; text: string }[]>();
   private readonly now: () => number;
 
   constructor(dataDir: string, ctx: SpendContext) {
@@ -244,10 +243,10 @@ export class SpendStore {
   observe(sessionId: string, e: TranscriptEvent) {
     if (e.kind === 'user') {
       const list = this.texts.get(sessionId) ?? [];
-      list.push(e.text.slice(0, 1500));
+      list.push({ uuid: e.uuid, text: e.text.slice(0, 1500) });
       this.texts.set(sessionId, list.slice(-12));
     } else if (e.kind === 'result') {
-      this.record(sessionId, e.t, e.usage, e.costUsd, e.durationMs, e.seq);
+      this.record(sessionId, e.t, e.usage, e.costUsd, e.durationMs, e.seq, e.answers);
     }
   }
 
@@ -285,7 +284,8 @@ export class SpendStore {
       const out: ModelTok = {};
       for (const [model, c] of Object.entries(cum)) {
         const p = prev[model] ?? zeroTok();
-        const reset = c.usd < p.usd * 0.5 || c.in < p.in * 0.5 || c.cr < p.cr * 0.5; // a /clear, or totals that began again
+        // totals that began again: the agent process says so (usage.restarted), else a drop to half or less (a /clear, an older daemon)
+        const reset = u?.restarted === true || c.usd < p.usd * 0.5 || c.in < p.in * 0.5 || c.cr < p.cr * 0.5;
         const d = reset ? c : { in: Math.max(0, c.in - p.in), out: Math.max(0, c.out - p.out), cr: Math.max(0, c.cr - p.cr), cw: Math.max(0, c.cw - p.cw), usd: Math.max(0, c.usd - p.usd) };
         if (d.in || d.out || d.cr || d.cw || d.usd) out[model] = d;
       }
@@ -299,13 +299,19 @@ export class SpendStore {
     return { models: usd > 0 ? { [fallbackModel]: { ...zeroTok(), usd } } : {}, estimated: true };
   }
 
-  private record(sessionId: string, at: string, u: TurnUsage | undefined, cost: number | undefined, durationMs: number, seq: number) {
+  private record(sessionId: string, at: string, u: TurnUsage | undefined, cost: number | undefined, durationMs: number, seq: number, answers?: string[]) {
     const info = this.ctx.session(sessionId);
     const s = this.sessionRec(sessionId, info, at);
     s.liveFrom ??= seq;
     const { models, estimated } = this.delta(s, sessionId, u, cost, info);
-    const texts = this.texts.get(sessionId) ?? [];
-    this.texts.delete(sessionId);
+    // The messages this result answers (its `answers` uuids): one that arrived mid-turn is the next turn's, not this one's.
+    const all = this.texts.get(sessionId) ?? [];
+    const mine = answers?.length ? all.filter((t) => t.uuid && answers.includes(t.uuid)) : [];
+    const used = mine.length ? mine : all;
+    const rest = mine.length ? all.filter((t) => !mine.includes(t)) : [];
+    if (rest.length) this.texts.set(sessionId, rest);
+    else this.texts.delete(sessionId);
+    const texts = used.map((t) => t.text);
     const total = sumTok(Object.values(models));
     const startMs = (Date.parse(at) || this.now()) - durationMs;
     const items = [...this.ctx.work()];

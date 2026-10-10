@@ -19,11 +19,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { promisify } from 'node:util';
 import type { SpendStore } from './spend.ts';
 import type { DataGuardConfig, Footprint } from '../shared/spend.ts';
 export type { DataGuardConfig, Footprint };
 import type { Store } from './store.ts';
 
+const gzipAsync = promisify(zlib.gzip);
+const gunzipAsync = promisify(zlib.gunzip);
+const yieldNow = () => new Promise<void>((r) => setImmediate(r));
 export const DATA_GUARD_DEFAULTS: DataGuardConfig = { retainDays: 7, gzipAtUsedPercent: 50, pruneAtUsedPercent: 75, alertAtUsedPercent: 90, gzipIdleHours: 24, everyMinutes: 60 };
 /** A prune stops this many points of disk below pruneAtUsedPercent, so it does not run again an hour later. */
 export const PRUNE_MARGIN = 5;
@@ -146,19 +150,20 @@ export interface GuardRun {
 }
 
 /** Compress one transcript: written beside it, checked by reading it back, then the plain file goes. Returns its bytes before and after. */
-export function gzipFile(file: string): { from: number; to: number } | undefined {
+export async function gzipFile(file: string): Promise<{ from: number; to: number } | undefined> {
   let raw: Buffer;
   try {
     raw = fs.readFileSync(file);
   } catch {
     return undefined;
   }
-  const gz = zlib.gzipSync(raw, { level: 9 });
+  // Off the main thread (the pool's), so the portal keeps answering while a big transcript is compressed.
+  const gz = await gzipAsync(raw, { level: 9 });
   const out = `${file}.gz`;
   const tmp = `${out}.tmp`;
   fs.writeFileSync(tmp, gz);
   // Only if nothing was appended meanwhile (a session resumed mid-pass) and the copy reads back whole.
-  if (fs.statSync(file).size !== raw.length || !zlib.gunzipSync(fs.readFileSync(tmp)).equals(raw)) {
+  if (fs.statSync(file).size !== raw.length || !(await gunzipAsync(fs.readFileSync(tmp))).equals(raw)) {
     fs.rmSync(tmp, { force: true });
     return undefined;
   }
@@ -168,7 +173,7 @@ export function gzipFile(file: string): { from: number; to: number } | undefined
 }
 
 /** One pass: measure, plan, compress, prune, record in the spend record which transcripts are which. */
-export function runDataGuard(o: { dir: string; spend: SpendStore; store: Pick<Store, 'sessions'> & { noteCompressed?: (sessionId: string) => void }; config: DataGuardConfig; now?: number; disk?: () => { usedBytes: number; totalBytes: number } | undefined }): GuardRun {
+export async function runDataGuard(o: { dir: string; spend: SpendStore; store: Pick<Store, 'sessions'> & { noteCompressed?: (sessionId: string) => void; deleteUploads?: (sessionId: string) => void }; config: DataGuardConfig; now?: number; disk?: () => { usedBytes: number; totalBytes: number } | undefined }): Promise<GuardRun> {
   const now = o.now ?? Date.now();
   const c = o.config;
   const run: GuardRun = { at: new Date(now).toISOString(), level: 'ok', gzipped: 0, gzippedFrom: 0, gzippedTo: 0, pruned: 0, prunedBytes: 0 };
@@ -190,6 +195,7 @@ export function runDataGuard(o: { dir: string; spend: SpendStore; store: Pick<St
     try {
       fs.rmSync(path.join(o.dir, f.id + '.jsonl'), { force: true });
       fs.rmSync(path.join(o.dir, f.id + '.jsonl.gz'), { force: true });
+      o.store.deleteUploads?.(f.id);
       run.pruned++;
       run.prunedBytes += f.bytes;
       o.spend.setTranscript(f.id, { state: 'pruned', prunedAt: run.at });
@@ -201,7 +207,8 @@ export function runDataGuard(o: { dir: string; spend: SpendStore; store: Pick<St
   run.level = plan.level;
   for (const id of plan.gzip) {
     try {
-      const r = gzipFile(path.join(o.dir, `${id}.jsonl`));
+      const r = await gzipFile(path.join(o.dir, `${id}.jsonl`));
+      await yieldNow();
       if (!r) continue;
       run.gzipped++;
       run.gzippedFrom += r.from;
@@ -217,6 +224,7 @@ export function runDataGuard(o: { dir: string; spend: SpendStore; store: Pick<St
     try {
       fs.rmSync(path.join(o.dir, `${id}.jsonl`), { force: true });
       fs.rmSync(path.join(o.dir, `${id}.jsonl.gz`), { force: true });
+      o.store.deleteUploads?.(id);
       run.pruned++;
       run.prunedBytes += f?.bytes ?? 0;
       o.spend.setTranscript(id, { state: 'pruned', prunedAt: run.at });
@@ -306,8 +314,31 @@ export function sampleGzipRatio(dir: string, maxFiles = 8, maxBytes = 64 * 1024 
 let ratioCache: { at: number; ratio: number | undefined } | undefined;
 /** sampleGzipRatio, remembered for six hours: it compresses a sample, which is not free. */
 export function gzipRatioCached(dir: string, now = Date.now()): number | undefined {
-  if (!ratioCache || now - ratioCache.at > 6 * 3_600_000) ratioCache = { at: now, ratio: sampleGzipRatio(dir, 6, 24 * 1024 * 1024) };
+  // Never compresses on the caller's turn: the first call starts a background sample and answers nothing yet.
+  if (!ratioCache || now - ratioCache.at > 6 * 3_600_000) {
+    ratioCache = { at: now, ratio: ratioCache?.ratio };
+    void sampleGzipRatioAsync(dir, 3, 8 * 1024 * 1024).then((r) => {
+      if (r !== undefined) ratioCache = { at: now, ratio: r };
+    });
+  }
   return ratioCache.ratio;
+}
+
+/** sampleGzipRatio without blocking: the pool compresses each file. */
+export async function sampleGzipRatioAsync(dir: string, maxFiles = 8, maxBytes = 64 * 1024 * 1024): Promise<number | undefined> {
+  const plain = listTranscripts(dir).filter((f) => !f.gz && f.bytes > 0).sort((a, b) => b.bytes - a.bytes);
+  let from = 0;
+  let to = 0;
+  for (const f of plain.filter((x) => x.bytes <= maxBytes).slice(0, maxFiles)) {
+    try {
+      const raw = fs.readFileSync(path.join(dir, `${f.id}.jsonl`));
+      from += raw.length;
+      to += (await gzipAsync(raw, { level: 6 })).length;
+    } catch {
+      // gone meanwhile
+    }
+  }
+  return from > 0 ? to / from : undefined;
 }
 
 /** The footprint as text for the spend_report tool. */

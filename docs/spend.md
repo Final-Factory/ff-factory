@@ -141,6 +141,11 @@ It cannot know a pre-existing session's cache split exactly, nor its context rea
 - Attribution rests on the ledger's `links` and the messages. A message that names two requests for a worker in one go splits the turn
   evenly. An orchestrator turn that names no request is overhead, not any request's.
 - The categories are by characters. Tool results are clipped to 6,000 characters in the transcript but counted whole by the meter (it sees them before the clip).
+- A turn is tied to the messages its result answers (`answers`), so a message that arrives mid-turn belongs to the next turn. A new agent
+  process whose totals started again (the SDK did not carry the saved ones) says so (`usage.restarted`), and its first turn counts in full.
+  A daemon too old to send usage, at its first result on a session that already had turns, records $0 for that turn (the backfill skips it too).
+- The guard compresses and the backfill reads on the pool and yield between files, but one big transcript parse is one blocking step (a few hundred ms).
+- `data/spend.json` is never pruned (1 to 2 KB a request and a session; rewritten whole at most every 10 s). Prune it by hand if it grows past a few tens of MB.
 - Prices (shared/spend.ts) weigh the shares and price the estimates; every dollar called measured is the SDK's.
 - The first reading below is beast's alone (its Claude Code transcripts; no other machine's, and not the portal's orchestrators).
 

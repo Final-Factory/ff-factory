@@ -136,6 +136,14 @@ test('ContextMeter: a context that shrinks is a compaction; reads after it are r
 // attribution
 // ---------------------------------------------------------------------------------------------------------------------
 
+test('aboutIds: an [about] line that is never closed does not hang the portal (linear, w859 review)', () => {
+  const ids = Array.from({ length: 40 }, (_, i) => `w${i + 1} "t${i}"`).join(', ');
+  const t0 = Date.now();
+  aboutIds([`[about ${ids}`]);
+  assert.ok(Date.now() - t0 < 200, 'an unclosed list');
+  assert.deepEqual(aboutIds([`[about ${ids}]\nx`]).length, 40);
+});
+
 test('aboutIds: the requests an [about] line names', () => {
   assert.deepEqual(aboutIds(['[about w12 "Fix the belt"]\nplease look']), ['w12']);
   assert.deepEqual(aboutIds(['[about w12 "Fix w99 belt", w13 "Other"]\nx']), ['w12', 'w13']);
@@ -287,6 +295,33 @@ test('the dispatcher\'s turn on a request is that request\'s; one that names non
   assert.equal(w.spend.request('w859')!.total.usd, 0.2);
   assert.ok(Math.abs(w.spend.request('_dispatcher')!.total.usd - 0.3) < 1e-9);
   assert.equal(w.spend.request('w859')!.sessions.d.role, 'dispatcher');
+});
+
+test('a message that arrives mid-turn belongs to the next turn, not the one that is ending (the result answers uuids)', () => {
+  const a = item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } });
+  const b = item('w2', { sessionIds: ['s1'], links: { s1: { at: iso(T0 + 20_000), how: 'sent' } } });
+  const w = world([a, b], [session('s1')]);
+  seq = 0;
+  const first: TranscriptEvent = { ...userEvent(T0 + 2000, 'work on it'), uuid: 'u1' } as TranscriptEvent;
+  const mid: TranscriptEvent = { ...userEvent(T0 + 30_000, '[about w2 "x"]\nlater'), uuid: 'u2' } as TranscriptEvent;
+  w.spend.observe('s1', first);
+  w.spend.observe('s1', mid); // arrives while turn 1 runs
+  const r1 = resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 1, cr: 1000 }) } }, 1);
+  (r1 as { answers?: string[] }).answers = ['u1'];
+  w.spend.observe('s1', r1);
+  assert.equal(w.spend.request('w2'), undefined, 'the mid-turn message did not move turn 1');
+  const r2 = resultEvent(T0 + 120_000, { cum: { m: tok({ usd: 3, cr: 3000 }) } }, 3);
+  (r2 as { answers?: string[] }).answers = ['u2'];
+  w.spend.observe('s1', r2);
+  assert.equal(w.spend.request('w2')!.total.usd, 2, 'turn 2 goes to the request its message names');
+});
+
+test('a new agent process whose totals started again counts its first turn in full, even when the total passes half of the old one', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1')]);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ in: 10, out: 100, cr: 1_000_000, cw: 50_000, usd: 10 }) } }, 10));
+  // the process restarted; the SDK did not carry the 10 dollars; this turn alone cost 6 (more than half of 10)
+  w.spend.observe('s1', resultEvent(T0 + 120_000, { restarted: true, cum: { m: tok({ in: 5, out: 80, cr: 700_000, cw: 40_000, usd: 6 }) } }, 6));
+  assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 16) < 1e-9);
 });
 
 test('a compaction between turns costs nothing extra to record: the next result totals carry it', () => {
@@ -452,24 +487,24 @@ test('dataGuardSettings: defaults, clamping and the order of the steps', () => {
   assert.ok(g.pruneAtUsedPercent >= g.gzipAtUsedPercent && g.alertAtUsedPercent >= g.pruneAtUsedPercent);
 });
 
-test('gzipFile: a transcript compressed and read back; a file that grew meanwhile is left alone', () => {
+test('gzipFile: a transcript compressed and read back; a file that grew meanwhile is left alone', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-test-'));
   const f = path.join(dir, 's.jsonl');
   const text = '{"seq":1,"kind":"system","text":"' + 'hello '.repeat(500) + '"}\n';
   fs.writeFileSync(f, text);
-  const r = gzipFile(f)!;
+  const r = (await gzipFile(f))!;
   assert.ok(r.to < r.from / 5);
   assert.ok(!fs.existsSync(f));
   assert.equal(zlib.gunzipSync(fs.readFileSync(`${f}.gz`)).toString('utf8'), text);
 });
 
-test('the store reads a compressed transcript, and writes to it again after unzipping it', () => {
+test('the store reads a compressed transcript, and writes to it again after unzipping it', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'store-gz-'));
   const store = new Store(dir);
   store.append('s1', { kind: 'system', text: 'one' });
   store.append('s1', { kind: 'result', ok: true, text: 'done', costUsd: 1, turns: 1, durationMs: 1 });
   const t = path.join(dir, 'transcripts', 's1.jsonl');
-  assert.ok(gzipFile(t));
+  assert.ok(await gzipFile(t));
   store.noteCompressed('s1'); // what the data guard does after it compresses one
   assert.ok(store.hasTranscript('s1'));
   assert.equal(store.readTranscript('s1').length, 2);
@@ -482,7 +517,7 @@ test('the store reads a compressed transcript, and writes to it again after unzi
   assert.ok(!store.hasTranscript('s1'));
 });
 
-test('runDataGuard: compresses, prunes past retention, keeps the cost record, leaves running sessions and protected ones', () => {
+test('runDataGuard: compresses, prunes past retention, keeps the cost record, leaves running sessions and protected ones', async () => {
   const items = [item('w1', { status: 'done', updatedAt: iso(T0 - 30 * 86_400_000), sessionIds: ['old'], links: { old: { at: iso(T0 - 31 * 86_400_000), how: 'sent' } } }), item('w2', { sessionIds: ['openS'], links: { openS: { at: iso(T0 - 40 * 86_400_000), how: 'sent' } } })];
   const sessions = [session('old', { status: 'stopped' }), session('openS', { status: 'stopped' }), session('busy', { status: 'running' })];
   const w = world(items, sessions);
@@ -496,7 +531,7 @@ test('runDataGuard: compresses, prunes past retention, keeps the cost record, le
   w.spend.observe('openS', resultEvent(T0 - 30 * 86_400_000, { cum: { m: tok({ usd: 1, cr: 100 }) } }, 1));
   w.spend.syncWork();
   const store = { sessions: new Map(sessions.map((s) => [s.id, s])) };
-  const run = runDataGuard({ dir: tdir, spend: w.spend, store, config: DATA_GUARD_DEFAULTS, now: T0, disk: () => ({ usedBytes: 80 * GB, totalBytes: 100 * GB }) });
+  const run = await runDataGuard({ dir: tdir, spend: w.spend, store, config: DATA_GUARD_DEFAULTS, now: T0, disk: () => ({ usedBytes: 80 * GB, totalBytes: 100 * GB }) });
   assert.equal(run.level, 'prune');
   assert.ok(!fs.existsSync(path.join(tdir, 'old.jsonl')) && !fs.existsSync(path.join(tdir, 'old.jsonl.gz')), 'past its retention');
   assert.ok(fs.existsSync(path.join(tdir, 'openS.jsonl.gz')), 'its request is open: compressed, kept');

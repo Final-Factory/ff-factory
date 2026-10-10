@@ -164,6 +164,9 @@ setTimeout(() => {
 }, 5000);
 const sessions = new SessionManager(cfg, store);
 sessions.keepTranscript = (id) => {
+  // A removed chat (an orchestrator's or the ops worker's) goes with its session; a worker's stays while its request's numbers are looked at.
+  const role = spend.session(id)?.role;
+  if (role === 'dispatcher' || role === 'personal' || role === 'ops') return false;
   const until = spend.protectedUntil(id, dataGuardSettings(cfg).retainDays);
   return until !== undefined && until > Date.now();
 };
@@ -337,11 +340,11 @@ notifier.orchestratorId = () => store.orchestratorId;
 // half a disk used, those past their retention (7 days after their request closed) deleted from three quarters, and a disk the
 // guard cannot get below 90% says so, once a day at most. The cost record in spend.json is never touched.
 let lastGuardAlert = 0;
-const guardData = () => {
+const guardData = async () => {
   if (isDryRun) return;
   try {
     spend.syncWork();
-    const run = runDataGuard({ dir: store.transcriptsDir, spend, store, config: dataGuardSettings(cfg) });
+    const run = await runDataGuard({ dir: store.transcriptsDir, spend, store, config: dataGuardSettings(cfg) });
     if (run.gzipped || run.pruned) console.log(`data guard: ${run.level} at ${run.usedPercent?.toFixed(0)}% used; compressed ${run.gzipped} transcript(s) (${(run.gzippedFrom / 1048576).toFixed(0)} MB to ${(run.gzippedTo / 1048576).toFixed(0)} MB), deleted ${run.pruned} past their retention (${(run.prunedBytes / 1048576).toFixed(0)} MB)`);
     if (run.error) console.warn(`data guard: ${run.error}`);
     if (run.alert && Date.now() - lastGuardAlert > 24 * 3_600_000) {
@@ -353,8 +356,8 @@ const guardData = () => {
     console.warn(`data guard failed: ${(e as Error).message}`);
   }
 };
-setTimeout(guardData, 3 * 60_000).unref();
-setInterval(guardData, dataGuardSettings(cfg).everyMinutes * 60_000).unref();
+setTimeout(() => void guardData(), 3 * 60_000).unref();
+setInterval(() => void guardData(), dataGuardSettings(cfg).everyMinutes * 60_000).unref();
 // Sessions that ran before the spend record existed are read from their transcripts once, a few at a time so the portal stays
 // responsive (w859, docs/spend.md "Backfill"): dollars as recorded, tokens estimated and labelled so.
 const backfillSpend = async () => {
@@ -373,7 +376,8 @@ const backfillSpend = async () => {
     } catch (e) {
       console.warn(`spend backfill: ${s.id}: ${(e as Error).message}`);
     }
-    if (sessionsDone % 10 === 0) await new Promise((r) => setTimeout(r, 25));
+    // One session per turn of the event loop (a big transcript is one blocking parse), a pause after every five.
+    await new Promise((r) => (sessionsDone % 5 === 0 ? setTimeout(r, 25) : setImmediate(r)));
   }
   if (sessionsDone) {
     spend.backfill = { at: new Date().toISOString(), sessions: (spend.backfill?.sessions ?? 0) + sessionsDone, turns: (spend.backfill?.turns ?? 0) + turns, usd: (spend.backfill?.usd ?? 0) + usd };

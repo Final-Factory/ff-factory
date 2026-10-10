@@ -579,6 +579,8 @@ export class AgentSession implements SessionHandle {
         return;
       case 'result': {
         const total = m.total_cost_usd ?? 0;
+        // A resumed process whose totals did not carry the earlier spend starts from zero (below the base): its cumulative usage is this turn in full (w859).
+        const restarted = this.firstResult && this.costBase > 0 && total < this.costBase;
         // A resumed session's first result may already carry the earlier spend; do not count it twice.
         if (this.firstResult && total >= this.costBase) this.costBase = 0;
         this.firstResult = false;
@@ -612,7 +614,7 @@ export class AgentSession implements SessionHandle {
           turns: m.num_turns,
           durationMs: m.duration_ms,
           answers: m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : undefined),
-          usage: this.turnUsage(m),
+          usage: { ...this.turnUsage(m), ...(restarted ? { restarted: true } : {}) },
         });
         this.lastTurnText = text;
         const spent = this.costBase + total;
@@ -639,6 +641,7 @@ export class AgentSession implements SessionHandle {
   private turnUsage(m: Extract<SDKMessage, { type: 'result' }>): TurnUsage {
     const cum: Cumulative = {};
     for (const [model, u] of Object.entries(m.modelUsage ?? {})) {
+      if (!u) continue;
       cum[model] = { in: u.inputTokens ?? 0, out: u.outputTokens ?? 0, cr: u.cacheReadInputTokens ?? 0, cw: u.cacheCreationInputTokens ?? 0, usd: u.costUSD ?? 0 };
     }
     const u = m.usage as { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null } | undefined;
