@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { POOL_DEFAULTS, bySoonestReset, checkPoolConfig, clock, heldReason, judge, metersOf, pickPool, poolBanner, poolKind, poolLimits, reserveOf, warningsForUser, type PoolToken } from './tokenPool.ts';
+import { POOL_DEFAULTS, bySoonestReset, checkPoolConfig, clock, heldReason, judge, metersOf, pickPool, poolBanner, poolKind, poolLimits, reserveOf, reserveReason, resetIn, warningsForUser, type PoolToken } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-09T12:00:00Z');
@@ -185,6 +185,42 @@ test("the dispatcher's reserve: 5% a day to the weekly reset and 20% of the 5-ho
   assert.equal(none.inReserve, true);
   // The per-day figure is the config's.
   assert.equal(reserveOf(u(41, 12, 5), { ...L, reservePerDay: 2 }, NOW).weekly, 10);
+});
+
+test("w828: reserveOf says WHICH limit put the token inside its buffer, and reserveReason names only that one", () => {
+  const u = (weekly: number, session: number, days = 5.2): PlanUsage => ({ available: true, asOf: '', models: [], weekly: { label: 'w', percent: weekly, resetsAt: iso(NOW + days * DAY) }, session: { label: 's', percent: session, resetsAt: iso(NOW + 10 * 60_000) } });
+  // Session only: the live case, weekly 51% (buffer 26%) and 5-hour 93% (buffer 20%).
+  const sessionOnly = reserveOf(u(51, 93), L, NOW);
+  assert.deepEqual([sessionOnly.inReserve, sessionOnly.sessionIn, sessionOnly.weeklyIn], [true, true, false]);
+  assert.equal(Math.round(sessionOnly.weekly), 26);
+  assert.equal(reserveReason(sessionOnly, u(51, 93), NOW), '5-hour 93% (buffer 20%), resets in 10 min');
+  // Weekly only.
+  const weeklyOnly = reserveOf(u(80, 12), L, NOW);
+  assert.deepEqual([weeklyOnly.inReserve, weeklyOnly.sessionIn, weeklyOnly.weeklyIn], [true, false, true]);
+  assert.equal(reserveReason(weeklyOnly, u(80, 12), NOW), `weekly 80% (buffer 26%), resets ${clock(iso(NOW + 5.2 * DAY))}`);
+  // Both.
+  const both = reserveOf(u(80, 93), L, NOW);
+  assert.deepEqual([both.sessionIn, both.weeklyIn], [true, true]);
+  assert.equal(reserveReason(both, u(80, 93), NOW), `5-hour 93% (buffer 20%), resets in 10 min; weekly 80% (buffer 26%), resets ${clock(iso(NOW + 5.2 * DAY))}`);
+  // Neither: not in the buffer, no reason.
+  const calm = reserveOf(u(51, 12), L, NOW);
+  assert.deepEqual([calm.inReserve, calm.sessionIn, calm.weeklyIn], [false, false, false]);
+  assert.equal(reserveReason(calm, u(51, 12), NOW), '');
+  // No reading: inside for want of a reading, neither limit blamed, no figure shown.
+  const none = reserveOf(undefined, L, NOW);
+  assert.deepEqual([none.inReserve, none.noReading, none.sessionIn, none.weeklyIn], [true, true, false, false]);
+  assert.equal(reserveReason(none, undefined, NOW), 'no reading yet (counted as inside the buffer)');
+});
+
+test('w828: resetIn reads a reset as minutes, hours, or a clock time, and owns up to an unknown one', () => {
+  const at = (ms: number) => iso(NOW + ms);
+  assert.equal(resetIn(at(10 * 60_000), NOW), 'in 10 min');
+  assert.equal(resetIn(at(30_000), NOW), 'any moment now');
+  assert.equal(resetIn(at(-5 * 60_000), NOW), 'any moment now', 'already past: the reading is old, the reset is due');
+  assert.equal(resetIn(at(3 * 3_600_000 + 5 * 60_000), NOW), 'in 3 h 5 min');
+  assert.equal(resetIn(at(2 * 3_600_000), NOW), 'in 2 h');
+  assert.equal(resetIn(at(3 * DAY), NOW), clock(at(3 * DAY)));
+  assert.equal(resetIn(undefined, NOW), 'at an unknown time');
 });
 
 test("w747: a token at 95% weekly is NOT over its cap: it works one job at a time until 99%, and says how much is left", () => {

@@ -1,4 +1,6 @@
 import type { Page } from '@playwright/test';
+import { reserveLines } from '../server/secrets.ts';
+import type { PlanUsage, TokenWarning } from '../shared/types.ts';
 import { ALPHA, appState, expect, go, isMobile, sandboxHash, test, uniq } from './fixtures.ts';
 
 const REASON = 'update (request_app_update)';
@@ -236,4 +238,62 @@ test('a closed watchdog-restart banner stays closed for that restart across relo
   const title = (await bar.locator('.gbar-text').getAttribute('title')) ?? '';
   expect(title).toContain(u2);
   expect(title).not.toContain(u1);
+});
+
+/**
+ * The banner text the server would send for a dispatcher token with these meters: the real reserveLines, fixture usage
+ * (a token ending …dAAA, as in w828's live reading), injected into /api/state and the live socket.
+ */
+function reserveBanner(usage: PlanUsage, others = 1): TokenWarning[] {
+  const token = 'sk-ant-oat01-e2e-fixture-token-dAAA';
+  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: token }, claudeAccounts: { dispatcher: 'token' } } as never;
+  return reserveLines(cfg, () => usage, () => others, Date.now()).flatMap((r) => (r.warning ? [{ id: `reserve:${r.cred.key}`, kind: 'reserve' as const, text: r.warning }] : []));
+}
+
+async function withTokenWarnings(page: Page, tokenWarnings: TokenWarning[]) {
+  await page.route('**/api/state', async (route) => {
+    const res = await route.fetch();
+    const state = await res.json();
+    state.host = { ...state.host, tokenWarnings };
+    await route.fulfill({ response: res, json: state });
+  });
+  await page.routeWebSocket(/\/ws/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((m) => server.send(m));
+    server.onMessage((m) => {
+      try {
+        const ev = JSON.parse(String(m));
+        if (ev.type === 'state') ev.state.host = { ...ev.state.host, tokenWarnings };
+        else if (ev.type === 'host') ev.host = { ...ev.host, tokenWarnings };
+        ws.send(JSON.stringify(ev));
+      } catch {
+        ws.send(m);
+      }
+    });
+  });
+  await page.reload();
+}
+
+test("the dispatcher's token buffer banner names the limit that tripped it: the 5-hour window, not the week (w828)", async ({ authed: page }, testInfo) => {
+  const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+  // The live reading: weekly 51% with a 26% buffer (5.2 days to the reset) is not inside it; the 5-hour window at 93% (buffer 20%) is.
+  const sessionOnly: PlanUsage = { available: true, asOf: at(0), models: [], weekly: { label: 'weekly', percent: 51, resetsAt: at(5.2 * 86_400_000) }, session: { label: '5-hour', percent: 93, resetsAt: at(10 * 60_000 + 30_000) } };
+  await withTokenWarnings(page, reserveBanner(sessionOnly));
+  const bar = page.locator('.gbar', { hasText: "The dispatcher's Claude token buffer is in use." });
+  await expect(bar).toBeVisible();
+  const text = bar.locator('.gbar-text');
+  await expect(text).toHaveAttribute('title', /is inside the buffer kept for the dispatcher: 5-hour 93% \(buffer 20%\), resets in 1[01] min$/);
+  await expect(text).not.toHaveAttribute('title', /weekly/);
+  await testInfo.attach('banner-5-hour-only', { body: await page.screenshot(), contentType: 'image/png' });
+
+});
+
+test("the dispatcher's token buffer banner names both limits when both are inside the buffer (w828)", async ({ authed: page }, testInfo) => {
+  const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+  const both: PlanUsage = { available: true, asOf: at(0), models: [], weekly: { label: 'weekly', percent: 80, resetsAt: at(5.2 * 86_400_000) }, session: { label: '5-hour', percent: 93, resetsAt: at(10 * 60_000 + 30_000) } };
+  await withTokenWarnings(page, reserveBanner(both));
+  const text = page.locator('.gbar', { hasText: "The dispatcher's Claude token buffer is in use." }).locator('.gbar-text');
+  await expect(text).toHaveAttribute('title', /: 5-hour 93% \(buffer 20%\), resets in 1[01] min; weekly 80% \(buffer 26%\), resets \w{3} \d\d:\d\dZ$/);
+  await text.click(); // the bar cuts a long line short; a tap unfolds it
+  await testInfo.attach('banner-both', { body: await page.screenshot(), contentType: 'image/png' });
 });

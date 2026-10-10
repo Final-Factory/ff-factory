@@ -6,7 +6,7 @@ import type { Requester, SessionInfo, SessionKind } from '../shared/types.ts';
 import { claudeEnvFor, userToken } from './identity.ts';
 import { PoolHeldError, vaultContext, type VaultContext, type VaultRole } from './vault.ts';
 import { HOST_LOGIN, credentialsFile, loginUnusable, readStoredLogin, tokenKey, usageEnv } from './usage.ts';
-import { clock, poolLimits, reserveOf, type PoolLimits, type Reserve } from './tokenPool.ts';
+import { poolLimits, reserveOf, reserveReason, type PoolLimits, type Reserve } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
 import { writeFileDurable } from './durable.ts';
 
@@ -442,8 +442,8 @@ export function reserveLines(
     return {
       cred,
       reserve: r,
-      line: `${name}: ${nums}${r.inReserve ? `; inside its reserve, kept for ${who}` : ''}${others ? `; ${others} other run${others === 1 ? '' : 's'} using it` : ''}`,
-      ...(others ? { warning: `${name} is the last token with room for ${others} run${others === 1 ? '' : 's'} and is inside the buffer kept for ${who}${w ? ` (weekly ${Math.round(w.percent)}%, reserve ${Math.round(r.weekly)}%, resets ${clock(w.resetsAt)})` : ''}` } : {}),
+      line: `${name}: ${nums}${r.inReserve ? `; inside its reserve (${reserveReason(r, u, now)}), kept for ${who}` : ''}${others ? `; ${others} other run${others === 1 ? '' : 's'} using it` : ''}`,
+      ...(others ? { warning: `${name} is the last token with room for ${others} run${others === 1 ? '' : 's'} and is inside the buffer kept for ${who}: ${reserveReason(r, u, now)}` } : {}),
     };
   });
 }

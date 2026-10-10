@@ -228,7 +228,10 @@ nothing checks it before the dispatcher starts. Nothing else is *refused* by it,
 else lands on these credentials except a person with no vault token yet (their orchestrator, the ops worker for them),
 who has no other account; `system_status` shows each reserve ("the dispatcher's token file …dAAA: weekly 41%, reserve
 25% (5 days to reset); 5-hour 12%, reserve 20%") and, while a meter is inside the buffer with such runs on the credential,
-the dashboard shows a warning. Until a credential's first reading arrives it counts as inside its reserve. One token is
+the dashboard shows a warning. Both the status line and the warning name only the limit or limits that put the token inside the
+buffer, each with its figure, its buffer and its reset ("5-hour 93% (buffer 20%), resets in 10 min"; both, when both are inside;
+`reserveReason` in `server/tokenPool.ts`): the week is never given as the reason while it is outside its buffer (w828). Until a
+credential's first reading arrives it counts as inside its reserve, and the text says "no reading yet". One token is
 one account: two tokens of one Claude account are not matched, so such a token would have its own meters and its own
 reserve.
 
