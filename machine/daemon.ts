@@ -392,7 +392,7 @@ export class Daemon {
           guard,
           mode: settings.mode,
           regular: () => planCleanup({ rules, guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
-          stale: () => planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, HOME), ctx: this.staleCtx, settings, guard }),
+          stale: () => planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(this.cfg.root), ctx: this.staleCtx, settings, guard }),
           // FF Factory's own leftovers (w626): only while free space is below the soft threshold, or asked for.
           ...(low || opts.dryRun ? { own: this.ownLeftovers(guard) } : {}),
         });

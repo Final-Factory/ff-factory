@@ -10,6 +10,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The deleted pre-install-folder places are no longer assumed anywhere** (w897, lothsahn, 2026-10-10: "Please remove references to
+  [the old clone, slot pool and nightly lab]. Those folders are all gone"). The stale-output pass's nightly lab default is `FF_NIGHTLY_ROOT`,
+  else the worker root's `nightly/` (`defaultNightlyRoots`), not a hard-coded place; the own-leftovers pass no longer looks for the
+  old slot pools; `docs/worker-root.md`, `worker-install.md`, `self-recovery.md` and `beast-machine.md` say the old places are gone
+  (the per-machine migration section now lists only the generic steps), and the test fixtures name no deleted folder. Earlier entries
+  below keep the old names: they record what happened then.
 - **A verified portal deploy now updates every machine's daemon by itself** (w887, lothsahn: "Update FFFactory so that after
   updating the portal and validating, it automatically updated all the machines."). `fff-update verify` writes
   `data/update.verified.json` when the new release answers (a rollback writes none); the portal (`server/machineRollout.ts`) then
