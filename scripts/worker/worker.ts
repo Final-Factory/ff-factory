@@ -1234,7 +1234,15 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   if (phase === 'prepare') return true;
 
   // The Dev Drive (w900), before the daemon's config is written: it decides where the sandboxes and the seed are.
-  await setupDevDrive(o, l, f, m);
+  try {
+    await setupDevDrive(o, l, f, m);
+  } catch (e) {
+    // A drive nobody asked for by name (the default of a new install) must not cost the install: carry on without it. One asked for
+    // (--dev-drive), or one this install already has, whose paths daemon.json holds, is an error.
+    if (o.devDrive === 'on' || m.devDrive) throw e;
+    o.devDriveDirs = undefined;
+    say(`Dev Drive: not made, and the install carries on without it (sandboxes stay on ${path.win32.parse(l.root).root}): ${(e as Error).message}\nRun the update with -DevDrive once that is fixed, or install with -NoDevDrive to stop this message.`);
+  }
 
   // The Unity slots mailbox the daemon will use, outside the root on purpose; the uninstall removes it.
   noteOutside(m, { kind: 'file', name: o.unitySlotsDir ?? path.join(os.homedir(), '.ff-factory', 'unity-slots'), note: 'the Unity slots mailbox every script finds (w469)' });
