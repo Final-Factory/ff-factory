@@ -134,7 +134,6 @@ test('reaction: an emoji shows on the message, reaches the orchestrator as a sho
   const asked = answerTo(page, `shall we ${tag}`);
   await expect(asked).toBeVisible();
   const orchestratorId = (await appState(page.request)).orchestratorId;
-  const before = (await transcript(page.request, orchestratorId)).length;
 
   await press(page, asked, 'React');
   await asked.getByRole('button', { name: 'React 👍' }).click();
@@ -142,14 +141,15 @@ test('reaction: an emoji shows on the message, reaches the orchestrator as a sho
   await expect(chip).toBeVisible();
 
   // The orchestrator answers it like a message; the harness line itself is not a row of the chat.
-  const reaction = page.locator('.orch .msg-assistant', { hasText: 'Echo: [reaction]' });
+  const reaction = page.locator('.orch .msg-assistant', { hasText: 'Echo: [reaction]' }).filter({ hasText: `Echo: shall we ${tag}` });
   await expect(reaction).toBeVisible();
   await expect(reaction).toContainText('reacted 👍 to a message in this chat');
   await expect(reaction).toContainText(`Echo: shall we ${tag}`);
   await expect(reaction).toContainText("It is a click, not tester's own words");
   await expect(page.locator('.orch .notice', { hasText: '[reaction]' })).toHaveCount(0);
   const events = await transcript(page.request, orchestratorId);
-  const sent = events.slice(before).find((e) => e.kind === 'user');
+  // Other tests share this chat: find our reaction line by the message it quotes.
+  const sent = events.find((e) => e.kind === 'user' && e.text.startsWith('[reaction]') && e.text.includes(`> Echo: shall we ${tag}`));
   expect(sent && sent.kind === 'user' ? [sent.from, sent.text.startsWith('[reaction] tester reacted 👍 to a message in this chat:\n#')] : []).toEqual(['system', true]);
 
   // It stays across a reload (the chat is the record), then one press takes it back; nothing more is sent to the orchestrator.
