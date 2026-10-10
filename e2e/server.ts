@@ -119,6 +119,11 @@ fs.writeFileSync(
       voice: { enabled: false, autoInstall: false, tts: false },
       // The machine "pc" never watches this host from outside (it would ping it and alert a phone).
       outsideWatch: { enabled: false },
+      // The disk-space guard's thresholds (80 GB warn, 40 critical) are for a developer's drive, and a runner with less free
+      // than that shows a "disk space is low" bar on every page: 56 GB in an FFBox runner container (w911), which made
+      // the page 70 px shorter in every screenshot and left a second bar after the first was dismissed. The tests are not
+      // about the disk, so the thresholds are low enough that no runner trips them.
+      hostGuard: { warnFreeGB: 5, criticalFreeGB: 2 },
       // A 20 MB cap: e2e/attachments.spec.ts sends a 9 MB file (two chunks) and is refused a 21 MB one.
       attachments: { maxMB: 20 },
       max: { eventsFile: path.join(base, 'max-events.jsonl'), ffboxConfigDir: path.join(base, 'ffbox'), discordApi: `http://127.0.0.1:${discordPort}/api/v10`, inbound: { pollMinutes: 60 } },
