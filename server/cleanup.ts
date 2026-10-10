@@ -161,8 +161,8 @@ export function neverDelete(p: string, g: CleanupGuard, opts: { claudeWorktrees?
   return undefined;
 }
 
-/** Whether `p` is strictly inside `root` (the root itself is not). */
-export const strictlyWithin = (p: string, root: string) => norm(p).startsWith(norm(root) + '/');
+/** Whether `p` is strictly inside `root` (the root itself is not); a list of roots: inside any of them. */
+export const strictlyWithin = (p: string, root: string | string[]) => [root].flat().some((r) => norm(p).startsWith(norm(r) + '/'));
 
 /** Why a pass only lists an item outside the worker install folder (w896). */
 export const OUTSIDE_ROOT_WHY = 'outside the worker install folder: clean-up deletes only inside it, so this is measured and listed, not removed';
@@ -172,12 +172,12 @@ export const OUTSIDE_ROOT_WHY = 'outside the worker install folder: clean-up del
  * the items strictly inside `root` stay, the rest come back with the reason they are only listed. A pass on a machine with a
  * worker root removes nothing else, whatever its rules pick.
  */
-export function fenceToRoot<T extends { path: string }>(items: T[], root: string): { inside: T[]; outside: { path: string; why: string }[] } {
+export function fenceToRoot<T extends { path: string }>(items: T[], root: string | string[]): { inside: T[]; outside: { path: string; why: string }[] } {
   const inside: T[] = [];
   const outside: { path: string; why: string }[] = [];
   for (const it of items) {
     if (strictlyWithin(it.path, root)) inside.push(it);
-    else outside.push({ path: it.path, why: `${OUTSIDE_ROOT_WHY} (${root})` });
+    else outside.push({ path: it.path, why: `${OUTSIDE_ROOT_WHY} (${[root].flat().join(', ')})` });
   }
   return { inside, outside };
 }

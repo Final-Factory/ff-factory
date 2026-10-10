@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, type MoveDeps, type PoolRec } from './worker/devdrive.ts';
 import { daemonJson, devDriveFlags, layoutOf, parseArgs, planUpdate, preflightProblems, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { saveWork } from '../server/saveWork.ts';
+import { fenceToRoot } from '../server/cleanup.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PWSH = process.env.FF_PWSH || 'pwsh';
@@ -233,6 +234,7 @@ test('daemon.json on the Dev Drive: the drive’s own paths, block-clone copies,
   assert.equal(cfg.sandboxes.librarySeed, 'V:\\seed\\Library');
   assert.equal(cfg.sandboxes.librarySeedCopy, 'clone');
   assert.equal(cfg.root, 'D:\\work\\ffw');
+  assert.deepEqual(cfg.extraRoots, ['V:\\sandboxes', 'V:\\seed'], "the clean-up's fence to the install folder counts the drive's folders as inside it");
   assert.deepEqual(cfg.hostGuard, { pollSeconds: 30, warnFreeGB: 20, criticalFreeGB: 10, hysteresisGB: 10, remountMinFreeGB: 30, hostDiskPaths: ['D:/'], reapBrowsersAfterHours: 0, reapEveryMinutes: 15 });
   // No seed yet: no librarySeed (the pool then copies a sandbox's Library once).
   assert.equal((daemonJson({ ...o, devDriveDirs: { ...devDriveDirs('V'), seedReady: false, blockClone: true } }, l, 'lothdesktop', undefined) as any).sandboxes.librarySeed, undefined);
@@ -251,6 +253,7 @@ test('daemon.json on the Dev Drive: the drive’s own paths, block-clone copies,
   assert.equal(plain.sandboxes.root, l.sandboxes);
   assert.equal(plain.sandboxes.librarySeedCopy, undefined);
   assert.equal(plain.hostGuard, undefined);
+  assert.equal(plain.extraRoots, undefined);
 });
 
 test('an update carries the Dev Drive flags, and says nothing about one when it was not asked', () => {
@@ -466,4 +469,15 @@ test('moving the sandboxes: work that cannot be kept stops everything before any
   assert.equal(fs.existsSync(path.join(w.sandboxes, 'slot1', 'notes.txt')), true, 'slot1 untouched');
   assert.equal(fs.existsSync(w.newSandboxes), false);
   fs.rmSync(w.base, { recursive: true, force: true });
+});
+
+test('clean-up’s fence to the install folder counts the Dev Drive’s sandboxes and seed as inside it, and nothing else on that drive', () => {
+  const roots = ['D:\\work\\ffw', 'V:\\sandboxes', 'V:\\seed'];
+  const f = fenceToRoot(
+    [{ path: 'V:/sandboxes/slot3/Library/BurstCache' }, { path: 'V:\\seed\\Library\\Bee' }, { path: 'D:/work/ffw/tmp/ffa-1' }, { path: 'V:/other/x' }, { path: 'V:/sandboxes' }, { path: 'D:/work/ffsb/old' }],
+    roots,
+  );
+  assert.deepEqual(f.inside.map((x) => x.path), ['V:/sandboxes/slot3/Library/BurstCache', 'V:\\seed\\Library\\Bee', 'D:/work/ffw/tmp/ffa-1']);
+  assert.deepEqual(f.outside.map((x) => x.path), ['V:/other/x', 'V:/sandboxes', 'D:/work/ffsb/old']);
+  assert.match(f.outside[0].why, /D:\\work\\ffw, V:\\sandboxes, V:\\seed/);
 });

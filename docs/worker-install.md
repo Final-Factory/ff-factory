@@ -275,6 +275,13 @@ generalises it, and BEAST keeps its own.
 | **The seed** | A new install has none: the first sandbox imports its Library cold, and the next ones copy it, as block clones because they share the drive (`librarySource` takes a ready sandbox's Library when there is no seed). A machine that has a seed puts it in `<letter>:\seed\Library`; the move below does that for an existing install. |
 | **The guard** | The installer adds a `hostGuard` to `daemon.json` (unless it has one): the daemon watches `<letter>:\sandboxes`, and when it is gone it starts `ffsb-helper-mount` and retries (at once, then 2, 5, 10 and 30 minutes; [self-recovery.md](self-recovery.md), "The sandbox drive"). Its thresholds are the pool's own (`disk_warn_gb` 20, `disk_critical_gb` 10, not BEAST's 80 and 40), it watches the **root's volume** too (`hostDiskPaths: ["D:/"]`: the drive's own "free space" is its maximum size, and a VHDX that cannot grow takes the drive away, BEAST 2026-09-24), and the browser reaper is off. |
 
+**Clean-up and the install folder (w896).** The daemon's clean-up deletes only inside the install folder. The drive's
+folders are not under the root, so the installer writes `extraRoots: ["<letter>:\\sandboxes", "<letter>:\\seed"]` into `daemon.json`
+and the pass counts them as inside it (`fenceToRoot`, `machine/daemon.ts`); the rest of the drive is outside. A letter change
+repoints them with everything else. What is **not** extended: a clean-up worker's shell guard (`server/rootFence.ts`) allows its
+own sandbox and the root, so it still cannot delete in another sandbox on the drive; the daemon's pass does that (the
+caps of w898 are the daemon's), and a worker reports what it would remove.
+
 **Elevation.** Making and mounting a VHDX needs administrator rights (sourced: Microsoft Learn, "Set up a Dev Drive on
 Windows 11": "Local administrator permissions"; BEAST's `devdrive.ps1` is "(admin)"). An **elevated session** (the ops
 worker's ssh to LothDesktop and BEAST is, [above](#updating)) does it in place; a normal PowerShell asks once with a

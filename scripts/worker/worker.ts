@@ -595,6 +595,8 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
   return {
     ...carried,
     ...(dd && !carried.hostGuard ? { hostGuard: devDriveGuard(path.win32.parse(l.root).root, sandboxes) } : {}),
+    // The drive's folders are part of the install though they are not under the root: clean-up may delete in them (w896's fence).
+    ...(dd ? { extraRoots: [dd.sandboxes, dd.seed] } : {}),
     ...(voice ? { voice } : {}),
     portalUrl: o.portalUrl,
     id,
@@ -1189,7 +1191,15 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   say(`OK: machine ${id}, node ${f.nodeVersion}, git ${f.git!.join('.')}, Claude Code ${f.claude ?? `${f.claudeShim} (an npm shim: agents use the Agent SDK's own Claude Code)`}, ${f.freeGB ?? '?'} GB free.`);
 
   // 1. The root and its manifest.
-  for (const d of [l.root, l.daemon, l.secrets, l.sandboxes, l.seed, l.players, l.nightly, l.scratch, l.tmp, l.logs]) fs.mkdirSync(d, { recursive: true });
+  // A junction to a Dev Drive that is detached right now dangles (mkdir would refuse it): setupDevDrive attaches the drive and looks after those two.
+  const isLink = (d: string) => {
+    try {
+      return fs.lstatSync(d).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  };
+  for (const d of [l.root, l.daemon, l.secrets, l.sandboxes, l.seed, l.players, l.nightly, l.scratch, l.tmp, l.logs]) if (!isLink(d)) fs.mkdirSync(d, { recursive: true });
   const now = new Date().toISOString();
   const prev = readManifest(l.root);
   const m: Manifest = {
