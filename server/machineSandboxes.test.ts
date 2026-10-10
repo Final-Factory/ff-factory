@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, midTurnRefusal, othersMidTurn, type SessionHandle, type SessionSink } from './sessions.ts';
 import { Agents } from './agents.ts';
+import { BlockerWatch } from './blockerWatch.ts';
 import { Identity } from './identity.ts';
 import { MachineManager, limitOptions, machineForPath, mergeSandboxes, parseSandboxRef, poolSettingsOf } from './machines.ts';
 import { daemonConfig } from './machineDeploy.ts';
@@ -21,12 +22,83 @@ import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { testRepos } from './testMachine.ts';
 import type { Config } from './config.ts';
-import type { ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
+import type { ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo, WorkItem } from '../shared/types.ts';
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
 process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
 
 const GB = 1024 ** 3;
+
+test('w890: the whole loop: a worker that ends its turn waiting on a deploy frees its sandbox within a minute, new work takes it, the deploy lands, the block clears and the worker resumes and is placed again, on its branch, in the other sandbox', async (t) => {
+  const { r, store, sessions, mm, agents, sbOf, path1, path2, gitNow, onDaemon } = await twoSandboxes(t);
+
+  // A worker on feature/w1 has its PR merged and its work pushed; its request is Blocked on the portal deploy, which only a
+  // person starts (it declared the wait itself, blocked_on deploys ["portal"]). It ends its turn: Idle, no check-in.
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w1 work', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  fs.writeFileSync(path.join(path1, 'work.txt'), 'w1');
+  r.git(path1, 'add', 'work.txt');
+  r.git(path1, 'commit', '-q', '-m', 'w1 work');
+  r.git(path1, 'push', '-q', '-u', 'origin', 'HEAD');
+  // No requesters: the notices to a person's orchestrator would start a real agent session in this harness.
+  const by = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const item: WorkItem = { id: 'w1', title: 'Fix the CI read', brief: 'Do it.', priority: 'normal', keys: [], requestedBy: by, requesters: [], humanAsked: true, status: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), sessionIds: [w.info.id], overlaps: [], asks: 0, log: [] };
+  store.putWork(item);
+  store.workSeq = Math.max(store.workSeq, 1);
+  let portal = 'aaa1111';
+  const o = agents.orchestrators;
+  (o as unknown as { d: { deploySha?: (id?: string) => string | undefined } }).d.deploySha = () => portal;
+  assert.match(o.workerBlocked(w.info.id, { deploys: ['portal'], what: 'the portal deploy of 65b1d27' }), /^Recorded: w1 is Blocked on a portal deploy\./);
+  assert.equal(item.blocked?.sha, 'aaa1111');
+  await gitNow('sb1');
+
+  // The first pass stops it (it holds nothing to do), the next, which the server runs 5 s later, frees the sandbox. (The
+  // timer is the server's: here the test asks for the pass itself, and checks that the first one asked for it.)
+  let soon = 0;
+  (agents.placeAgain as unknown as { d: { soon?: () => void } }).d.soon = () => void soon++;
+  assert.match(agents.placeAgain.tick().join('\n'), /stopped .*\(it waits on w1: a portal deploy\)/);
+  assert.equal(soon, 1, 'the next pass is asked for at once, not left a minute away');
+  await until('w stopped', () => !w.live && w.info.status === 'stopped');
+  await gitNow('sb1');
+  assert.match(agents.placeAgain.tick().join('\n'), /released pc\/sb1 of .* \(it waits on w1: a portal deploy\)/);
+  assert.equal(w.info.placeReleased?.branch, 'feature/w1');
+  assert.match(agents.describeAllSandboxes(), /pc\/sb1 FREE/);
+
+  // New work takes the sandbox (feature/w1 is left first, nothing lost).
+  const prep = await agents.prepareForNewWork('pc/sb1', undefined, 'W999');
+  assert.equal(prep.branch, 'sandbox/sb1-w999');
+  const n = agents.startWorker({ sandbox: 'pc/sb1', prompt: 'new work', from: 'orchestrator' });
+  await until('n live', () => n.live);
+  await gitNow('sb1');
+
+  // The deploy lands: a different commit runs. The blocker watch clears the gate and resumes the worker.
+  const watch = new BlockerWatch({ store, orchestrators: o, portalSha: () => portal });
+  assert.equal((await watch.tick()).has('w1'), false, 'the same commit still runs: it waits');
+  assert.equal(item.status, 'blocked');
+  portal = 'bbb2222';
+  assert.match((await watch.tick()).get('w1')!, /^clear: the portal runs bbb2222 now \(aaa1111 when it was blocked\)$/);
+  assert.equal(item.status, 'active');
+  const wake = agents.waker.pending(w.info.id)!;
+  assert.ok(wake && Date.parse(wake.at) - Date.now() <= 61_000, 'its check-in is within a minute');
+  assert.match(wake.note, /The deploy you waited for has happened: do the check that comes after it now/);
+
+  // The check-in fires (what the waker does when its time comes): the worker is placed again in sb2, on its branch.
+  agents.waker.cancel(w.info.id);
+  sessions.send(w.info.id, `[wake_me] Time is up. Your note: ${wake.note}`, 'system');
+  await until('w resumed in sb2', () => w.live && w.info.machineSandbox === 'sb2', 30_000);
+  assert.equal(r.git(path2, 'branch', '--show-current'), 'feature/w1');
+  assert.equal(r.git(path2, 'log', '-1', '--format=%s'), 'w1 work');
+  assert.equal(onDaemon(w.info.id)?.spec?.cwd, path2, 'its process runs in sb2');
+  assert.equal(w.info.placeReleased, undefined);
+  const said = store.readTranscript(w.info.id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text).at(-1) ?? '';
+  assert.match(said, /^\[moved\] While you were stopped your sandbox pc\/sb1 went to other work/);
+  assert.ok(said.includes('do the check that comes after it now'), said);
+  assert.ok(!sbOf('sb1')!.sessionIds.includes(w.info.id));
+  n.stop();
+  w.stop();
+  await until('both stopped', () => !n.live && !w.live);
+});
 
 const until = async (what: string, cond: () => boolean, ms = 60_000) => {
   const end = Date.now() + ms;
@@ -694,9 +766,8 @@ test('machine sandboxes: an editor start takes a Unity slot: batch builds starte
   assert.match(await p.unity('a', 'status'), /\nUnity on this machine: editors 3 of 2: 0 interactive, 2 batch, 1 granted not started yet; OVER LIMIT: nothing more starts until it drops/);
 });
 
-// ---------------------------------------------------------------- far check-ins release their sandbox (w640)
-
-test('w640: a worker stopped with a far check-in frees its sandbox; new work there starts on a fresh branch; the worker resumes in another sandbox on its branch, nothing lost', async (t) => {
+/** A portal with a machine `pc` (a real daemon and git) holding two ready sandboxes, sb1 on feature/w1 and sb2 (w640, w890). */
+async function twoSandboxes(t: { after: (fn: () => void | Promise<void>) => void }) {
   const r = repos();
   const cfg = {
     dataDir: path.join(r.root, 'data'),
@@ -752,6 +823,13 @@ test('w640: a worker stopped with a far check-in frees its sandbox; new work the
     sbOf(id)!.git = await readGitStatus(sbOf(id)!.path);
   };
   const onDaemon = (id: string) => (daemon as unknown as { entries: Map<string, { spec?: { cwd: string } }> }).entries.get(id);
+  return { r, store, sessions, mm, agents, sbOf, path1, path2, gitNow, onDaemon };
+}
+
+// ---------------------------------------------------------------- far check-ins release their sandbox (w640)
+
+test('w640: a worker stopped with a far check-in frees its sandbox; new work there starts on a fresh branch; the worker resumes in another sandbox on its branch, nothing lost', async (t) => {
+  const { r, store, sessions, mm, agents, sbOf, path1, path2, gitNow, onDaemon } = await twoSandboxes(t);
 
   // A worker on feature/w1 commits work no remote has, then sets a check-in two hours out and ends its turn.
   const w = mm.createSession('pc', { kind: 'worker', title: 'w1 work', permissionMode: 'default', sandbox: 'sb1' });

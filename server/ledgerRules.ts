@@ -244,6 +244,27 @@ export function deployStep(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' |
   return { portal: PORTAL_STEP.test(text) || !machines, machines };
 }
 
+/** A check, after "then" or "after the deploy", that the worker says it does itself once the deploy has happened. */
+const THEN_CHECK = /\bthen\b[^.;\n]{0,40}?\b(verify|verifies|check|checks|confirm|confirms|test|tests|watch|read|reads|show|shows|look|try|smoke)\b[^.\n]{0,140}/i;
+const AFTER_DEPLOY_CHECK = /\b(?:after|once|when)\b[^.;\n]{0,40}\b(?:deploy\w*|goes live|is live|lands)\b[^.;\n]{0,30}?[,:]?\s*(?:I|it|the worker|we)?\s*(?:will |'ll )?(?:verify|check|confirm|test|watch|read|show|look|try|smoke)\b[^.\n]{0,140}/i;
+
+/**
+ * The step a worker's report puts after a deploy that the worker does itself ("waiting for the go-ahead for the portal
+ * deploy ...; then I verify a live PR read and the health check", w889), or undefined. Only text after a mention of
+ * deploying counts. Such a request is not finished when the deploy lands: its worker is resumed to do it (w890), and the
+ * cleanup does not close the request on the deploy alone.
+ */
+export function postDeployStep(reports: readonly string[]): string | undefined {
+  for (const r of reports) {
+    const tail = r.slice(-700);
+    const at = tail.search(DEPLOY_SENTENCE);
+    if (at < 0) continue;
+    const m = THEN_CHECK.exec(tail.slice(at)) ?? AFTER_DEPLOY_CHECK.exec(tail);
+    if (m) return m[0].replace(/\s+/g, ' ').trim();
+  }
+  return undefined;
+}
+
 /** "merged as #9 (abc123def456) on 2026-10-03", from the PR that merged last. */
 export function prMergedText(p: WorkPr): string {
   return mergedText({ number: p.number, sha: p.sha, at: p.at });

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PlaceAgain, RELEASE_AFTER_MS, farWhy, keptWhy, movedNote, placeFor, releaseStep, releaseWhy, releasedOn, savedNote, type PlaceFacts } from './placeAgain.ts';
+import { PlaceAgain, RELEASE_AFTER_MS, farWhy, keptWhy, movedNote, placeFor, releaseStep, releaseWhy, releasedOn, savedNote, waitReleaseWhy, type PlaceFacts } from './placeAgain.ts';
 import { agentStateText, holdsItsPlace, holdsSandbox } from '../shared/agentState.ts';
 import { isLiveAgent } from '../shared/fleet.ts';
 import type { Machine, MachineSandbox, SessionInfo } from '../shared/types.ts';
@@ -453,3 +453,145 @@ test("w846: a worker waiting on CI with its editor stopped gives up its sandbox 
   assert.ok('sandbox' in p && p.sandbox.id === 'slot2', JSON.stringify(p));
   assert.equal(rel.placeReleased!.branch, 'feature/slot1', 'its branch is what it is placed on');
 });
+
+// ---------------------------------------------------------------- w890: a worker waiting on a deploy or a person gives up its sandbox at once
+
+// What Agents.waitOn says for each kind of wait (server/orchestrators.test.ts builds them from the ledger).
+const WAITS = {
+  deploy: 'it waits on w889: a portal deploy, after the merge',
+  person: 'it waits on w889: Ben to act',
+  request: 'it waits on w889: w633 finishing',
+  pr: 'it waits on w889: PR Final-Factory/ff-factory#281 merging',
+};
+
+for (const [kind, wait] of Object.entries(WAITS)) {
+  test(`w890: a worker that ends its turn waiting on ${kind} frees its sandbox at once, whatever its check-in; it is stopped first when alive, and stays released until it resumes`, () => {
+    const sb = sandbox('slot1');
+    const withWait = (f: PlaceFacts) => ({ ...f, waitOn: wait });
+    // Stopped: released now, not after 30 minutes, on its branch; a near poll of its own does not keep it.
+    const w = worker('w1');
+    assert.equal(releaseStep(w, sb, facts([w])), undefined, 'without the wait it holds nothing to release');
+    assert.deepEqual(releaseStep(w, sb, withWait(facts([w]))), { do: 'release', why: wait, branch: 'feature/slot1' });
+    const polling = worker('w1', { wakeAt: iso(NOW + 8 * MIN) });
+    assert.equal(releaseStep(polling, sb, withWait(facts([polling])))?.do, 'release');
+    // An editor left running does not keep it (nothing is about to be fixed in it; the next placement stops it, w656).
+    assert.equal(releaseStep(w, sandbox('slot1', { unity: { state: 'running' } }), withWait(facts([w])))?.do, 'release');
+    // Alive and Idle the minute its turn ended: stopped (due), the next pass releases it. No 30-minute idle wait.
+    const idle = worker('w1', { status: 'idle', lastActivityAt: iso(NOW - MIN) });
+    assert.equal(releaseStep(idle, sb, facts([idle], { liveIds: ['w1'] })), undefined, 'idle 1 min, no wait: kept');
+    assert.deepEqual(releaseStep(idle, sb, withWait(facts([idle], { liveIds: ['w1'] }))), { do: 'stop', why: wait, due: true });
+    const poll = worker('w1', { status: 'idle', wakeAt: iso(NOW + 8 * MIN), lastActivityAt: iso(NOW - MIN) });
+    assert.deepEqual(releaseStep(poll, sb, withWait(facts([poll], { liveIds: ['w1'] }))), { do: 'stop', why: wait, due: true });
+    // Released: it does not take its sandbox back for a near check-in while it waits; once the wait ends it does as before.
+    const rel = worker('w1', { wakeAt: iso(NOW + MIN), placeReleased: { at: iso(NOW - 20 * MIN), sandbox: 'slot1', branch: 'feature/slot1', why: wait } });
+    assert.equal(releaseStep(rel, sb, withWait(facts([rel]))), undefined);
+    assert.deepEqual(releaseStep(rel, sb, facts([rel])), { do: 'reclaim' });
+  });
+}
+
+test('w890: never released: unsaved work, commits no remote has, a batch run, a message waiting, a worker mid-turn or with work it needs, a permission open, or a wait that is a time or a machine', () => {
+  const wait = WAITS.deploy;
+  const withWait = (f: PlaceFacts) => ({ ...f, waitOn: wait });
+  const w = worker('w1');
+  const sb = sandbox('slot1');
+  // Unsaved work: its daemon commits and pushes it first (w656), or the sandbox stays held and says why.
+  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), { ...withWait(facts([w])), canSave: true }), { do: 'release', why: wait, branch: 'feature/slot1', save: true });
+  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, { untracked: 2 }), { ...withWait(facts([w])), canSave: true }), { do: 'release', why: wait, branch: 'feature/slot1', save: true });
+  assert.equal(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), withWait(facts([w]))), undefined, 'its daemon cannot save: held');
+  assert.equal(releaseStep(w, sandbox('slot1', {}, { dirty: 1 }), { ...withWait(facts([w])), canSave: true, saveRefused: () => '41491 untracked files' }), undefined, 'its last save failed: held');
+  assert.match(new PlaceAgain(deps([w], sandbox('slot1', {}, { dirty: 1 }), { waitOn: () => wait })).keptLine(w) ?? '', /^its sandbox stays held although it waits on w889: a portal deploy, after the merge: 1 uncommitted change\(s\) there/);
+  // Its PR merged or pushed: a commit its remote lacks keeps it (a branch with no upstream reads 0, as for CI).
+  assert.equal(releaseStep(w, sandbox('slot1', {}, { ahead: 1 }), withWait(facts([w]))), undefined);
+  assert.equal(waitReleaseWhy(sandbox('slot1', {}, { ahead: 3 }), wait), undefined);
+  assert.equal(waitReleaseWhy(sb, undefined), undefined);
+  // A git state older than its last work, or no git state, or the sandbox not ready.
+  assert.equal(releaseStep(w, sandbox('slot1', {}, { at: iso(NOW - 30 * MIN) }), withWait(facts([w]))), undefined);
+  assert.equal(releaseStep(w, sandbox('slot1', { git: undefined }), withWait(facts([w]))), undefined);
+  assert.equal(releaseStep(w, sandbox('slot1', { status: 'creating' }), withWait(facts([w]))), undefined);
+  // A Unity batch run of that sandbox in flight, or another agent working there.
+  assert.equal(releaseStep(w, sb, withWait(facts([w], { unityHolders: ['sandbox:slot1'] }))), undefined, 'batch run');
+  const other = worker('o1', { status: 'idle' });
+  assert.equal(releaseStep(w, sb, withWait(facts([w, other], { liveIds: ['o1'] }))), undefined, 'another agent works there');
+  // A message queued for it resumes it now.
+  assert.equal(releaseStep(worker('w1', { queuedSend: 'x' }), sb, withWait(facts([w]))), undefined);
+  // Mid-turn (running, starting, a permission open): not stopped, not released.
+  for (const status of ['running', 'starting', 'waiting_permission'] as const) {
+    const busy = worker('w1', { status });
+    assert.equal(releaseStep(busy, sb, withWait(facts([busy], { liveIds: ['w1'] }))), undefined, status);
+  }
+  const asking = worker('w1', { status: 'stopped', pendingPermissions: [{ id: 'p', toolName: 'Bash', input: {}, at: iso(NOW) } as never] });
+  assert.equal(releaseStep(asking, sb, withWait(facts([asking]))), undefined, 'a permission open');
+  // A live worker with a job or unanswered work it needs (keepLive), or with a job running (between turns): kept alive.
+  const idle = worker('w1', { status: 'idle', lastActivityAt: iso(NOW - MIN) });
+  assert.equal(releaseStep(idle, sb, { ...withWait(facts([idle], { liveIds: ['w1'] })), keepLive: 'it has unanswered messages or background tasks' }), undefined);
+  const job = worker('w1', { status: 'idle', backgroundTasks: 1, lastActivityAt: iso(NOW - MIN) });
+  assert.equal(releaseStep(job, sb, withWait(facts([job], { liveIds: ['w1'] }))), undefined, 'a running job is work in progress');
+  // No wait, no release: a time, a machine, a lock or a usage limit never reach waitOn (Agents.waitOn), so it holds as before.
+  assert.equal(releaseStep(idle, sb, facts([idle], { liveIds: ['w1'] })), undefined);
+  assert.equal(releaseStep(w, sb, facts([w])), undefined);
+});
+
+test('w890: the release pass schedules the next pass at once when it stops a worker to release its sandbox, so the sandbox frees within a minute of the turn end', () => {
+  const a = worker('a1', { status: 'idle', lastActivityAt: iso(NOW - MIN) });
+  const live = new Set(['a1']);
+  let soon = 0;
+  const freed: string[] = [];
+  const machine = { id: 'pc', sandboxes: [sandbox('slot1', { sessionIds: ['a1'] })] } as unknown as Machine;
+  const p = new PlaceAgain({
+    sessions: () => [a],
+    machine: () => machine,
+    isLive: (id) => live.has(id),
+    online: () => true,
+    unityHolders: () => [],
+    workOver: () => undefined,
+    waitOn: () => WAITS.deploy,
+    keepLive: () => undefined,
+    queued: () => false,
+    stopLive: (id) => {
+      live.delete(id);
+      a.status = 'stopped';
+    },
+    stopEditor: async () => undefined,
+    switchBranch: async () => ({ notes: [] }),
+    save: () => undefined,
+    saveMachine: () => undefined,
+    note: () => undefined,
+    drain: () => undefined,
+    freed: (what) => void freed.push(what),
+    soon: () => void soon++,
+    now: () => NOW,
+  });
+  assert.match(p.tick().join('\n'), /^stopped a1 \(it waits on w889: a portal deploy, after the merge\)/);
+  assert.equal(soon, 1);
+  assert.equal(a.releaseDue?.why, WAITS.deploy);
+  // The follow-up pass releases it; nothing more to schedule.
+  assert.match(p.tick().join('\n'), /released pc\/slot1 of a1/);
+  assert.equal(soon, 1);
+  assert.equal(a.placeReleased?.why, WAITS.deploy);
+  assert.deepEqual(freed, ['sandbox pc/slot1 released']);
+  // A wait that ended while it was released: a message places it again, as any released worker.
+  assert.equal(p.keptLine(a), undefined);
+});
+
+/** The dependencies of a PlaceAgain with one machine and the given workers' sandbox, for the tests that read keptLine. */
+function deps(sessions: SessionInfo[], sb: MachineSandbox, o: Partial<ConstructorParameters<typeof PlaceAgain>[0]> = {}): ConstructorParameters<typeof PlaceAgain>[0] {
+  return {
+    sessions: () => sessions,
+    machine: () => ({ id: 'pc', sandboxes: [sb] }) as unknown as Machine,
+    isLive: () => false,
+    online: () => true,
+    unityHolders: () => [],
+    workOver: () => undefined,
+    keepLive: () => undefined,
+    queued: () => false,
+    stopLive: () => undefined,
+    stopEditor: async () => undefined,
+    switchBranch: async () => ({ notes: [] }),
+    save: () => undefined,
+    saveMachine: () => undefined,
+    note: () => undefined,
+    drain: () => undefined,
+    now: () => NOW,
+    ...o,
+  };
+}
