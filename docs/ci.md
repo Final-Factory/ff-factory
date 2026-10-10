@@ -5,6 +5,14 @@ identities), `windows.yml` (the Windows-only tests, w910), `vm-scripts.yml` (she
 end to end), `worker-update.yml` (Windows and macOS installer runs) and `rerun-lost-runner.yml` (re-runs a job whose
 runner was lost, once).
 
+**What runs where** (w925, lothsahn: "3B"): a pull request runs the whole suite. A push to `main` runs only the secret
+scan and the identity check, each push in its own concurrency group so a later merge never cancels it, the way
+FinalFactory's `develop` works. Nothing reads `main`'s CI result: there is no branch protection or ruleset, the portal's
+`ci:` gate and CI-read health read pull-request heads (`server/blockerWatch.ts`, `server/ciReadHealth.ts`), and
+`fffctl update` builds `origin/main` without asking CI (`deploy/vm/guest/fff-update`). Still on `main`: the nightly VM
+run and the daily whole Windows suite (schedules). The whole suite on `main` by hand: `gh workflow run ci.yml --ref
+main` (likewise `vm-scripts.yml`, `windows.yml -f all=true`, `worker-update.yml`, `dev-drive.yml`).
+
 ## What failed, 2026-09-26..10-10 (w922, measured)
 
 373 failed or timed-out jobs (concurrency cancels left out): 37% real bugs, 36% flaky tests, 6% runner or mirror hangs,

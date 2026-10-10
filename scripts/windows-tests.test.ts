@@ -71,12 +71,12 @@ test('windows tests: a test skipped everywhere but Windows is listed, or it woul
   assert.deepEqual(missing, [], 'add them to .github/windows-tests.txt with what they cover and why');
 });
 
-test('windows tests: windows.yml runs when a listed test, a covered file or the list itself changes, on pull requests and on main alike', () => {
+test('windows tests: windows.yml runs when a pull request touches a listed test, a covered file or the list itself', () => {
   const pr = triggerPaths(yml, 'pull_request');
-  assert.deepEqual(triggerPaths(yml, 'push'), pr, 'the same paths for both');
+  assert.ok(!/^  push:/m.test(yml), 'no run on a push to main: its pull request ran it (w925)');
   const must = [...entries.flatMap((e) => [e.file, ...e.covers.map((c) => c.replace(/\*\*$/, 'any/file.ts'))]), '.github/windows-tests.txt', '.github/workflows/windows.yml', 'server/testPowershell.ts', 'scripts/a.ps1'];
   const uncovered = must.filter((f) => !pr.some((g) => globMatches(g, f)));
-  assert.deepEqual(uncovered, [], 'add them to both paths lists in .github/workflows/windows.yml');
+  assert.deepEqual(uncovered, [], 'add them to the paths list in .github/workflows/windows.yml');
   assert.match(yml, /grep -vE '\^\\s\*\(#\|\$\)' \.github\/windows-tests\.txt/, 'the job runs the listed files');
 });
 

@@ -18,7 +18,8 @@ the server.
 
 ## Tests
 
-CI runs everything below on every push and pull request to `main`
+CI runs everything below on every pull request to `main`; a push to `main` runs only the secret scan and the identity
+check (w925)
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ### Unit tests
