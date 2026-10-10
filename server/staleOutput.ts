@@ -118,6 +118,8 @@ export interface StalePlace {
 export interface StalePlan {
   items: CleanupItem[];
   listed: { path: string; why: string }[];
+  /** Processes still writing into a stopped session's folder (server/installLeftovers.ts, w899): ended before the items go. */
+  strays?: { pid: number; cmd: string; dir: string; why: string }[];
 }
 
 const DAY = 86_400_000;
@@ -274,6 +276,8 @@ export async function cleanupPass(o: {
   stale: () => Promise<StalePlan>;
   /** FF Factory's own leftovers (server/ownLeftovers.ts, w626): the caller passes them only while free space is low. */
   own?: { plan(): Promise<OwnLeftoverPlan>; run(plan: OwnLeftoverPlan): Promise<CleanupRun> };
+  /** Ends the plan's strays, before its items go (a deleted file's space comes back only when its writer ends); not in a dry run. */
+  endStrays?: (strays: NonNullable<StalePlan['strays']>) => Promise<void>;
 }): Promise<CleanupRun> {
   const regular = await o.regular();
   const plan = o.opts.stale && o.mode !== 'off' ? await o.stale() : { items: [], listed: [] };
@@ -285,6 +289,7 @@ export async function cleanupPass(o: {
   listed.sort((a, b) => b.bytes - a.bytes);
   if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await sizePlan([...regular, ...plan.items, ...own.items]), listed };
   const live = o.mode === 'on' ? plan.items : [];
+  if (o.mode === 'on' && plan.strays?.length && o.endStrays) await o.endStrays(plan.strays).catch(() => undefined);
   const r = await runCleanup([...regular, ...live], o.guard);
   if (o.own && own.items.length) {
     const r2 = await o.own.run(own).catch((e) => ({ removed: [], failed: [{ path: '(own leftovers)', why: (e as Error).message }], bytes: 0 }) as CleanupRun);

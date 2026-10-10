@@ -398,6 +398,38 @@ What clean-up cannot fix is reported, not removed: user data (OneDrive, Videos, 
 artifacts, and on BEAST the Dev Drive VHDX, which grows but never shrinks by itself (634 GB for 334 GB used
 on 2026-09-28): compact it by hand (section 3).
 
+### Install-folder leftovers (w899)
+
+On 2026-10-10 LothDesktop's D: fell from 104 GB to 60 GB free while the clean-up kept most of the cause as "not
+attributable": w876 (the disk clean-up that day) removed it by hand. The biggest item was one Claude task `.output`
+file of 99.6 GB, written for a day by a leftover `python -` whose heredoc was lost in an `eval`, so Python opened its
+interactive console and looped on `WinError 123`; deleting the file freed nothing until the process ended. Lothsahn
+(2026-10-10): "in general we should only be clearing data in the install folder for the worker". The rules in
+`server/installLeftovers.ts` (wired as the daemon's stale-output plan, merged with `planStaleOutput`'s in
+`machine/daemon.ts`) take these, only inside the worker root (`cfg.root`; a machine without one takes nothing), on the
+stale-output schedule (daily, and in every pass while free space is low, asked for, or a dry run):
+
+| What | Where | Goes when |
+|---|---|---|
+| per-commit builds | each sandbox's `.nightly-builds/cache/*` and `Builds/cache/*` | beyond the newest 2 (by last activity), once idle 6 h |
+| benchmark builds, captures | `Builds/bench*`; `.nightly-builds/clips`, `shots` | untouched 2 / 3 days |
+| the nightly lab | `<root>/nightly`: `builds/*` beyond the newest 2, `runs/*` but the newest, `rehearsals/*`, `logs/*` | idle 6 h / 3 days / 2 days / 3 days |
+| stale scratch | `<root>/scratch/*` | untouched 3 days and no open request (ledger context) named in it |
+| stopped sessions' temp | `<temp root>/ffa-<session>` | the session is not live (the guard's inUse), untouched 2 h; a clone inside with unpushed work is listed, kept (the app's own `ffbox-test-*` fixture repos do not hold it) |
+| runaway task output | `<ffa>/claude…/<project>/<session>/tasks/*.output` past 2 GB | a stopped session's: the file goes **and the processes naming that session's folder (and their children) are ended first**, `taskkill /T /F` or SIGKILL (`machine/hostWatch.ts` `killTree`), logged. A live session's is only **listed** |
+
+`StalePlan.strays` carries the processes; `cleanupPass` ends them just before the items go, never in a dry run, and the
+rest of the pass is unchanged (the guard, the rename, the log). The defaults are `INSTALL_LEFTOVER_DEFAULTS`
+(`keepBuilds`, `buildUntouchedHours`, `benchDays`, `captureDays`, `nightlyRunDays`, `rehearsalDays`,
+`sessionTempHours`, `scratchDays`, `outputCapGB`); the portal does not send them yet. Never looked into: `Library`,
+`Assets`, `ProjectSettings`, `Packages`, `Inbox`, `.git`, the sandbox folders themselves, the nightly lab's scripts and
+`state`, anything outside the root. A worktree with uncommitted work is never a candidate (only the named children above
+are). Tests: `server/installLeftovers.test.ts`, laid out from the recorded listing
+`server/fixtures/lothdesktop-2026-10-10.json` (what each rule takes and keeps, the strays named from the real
+command lines, a dry run and a real pass). The `python -` itself is guarded at the harness (the ff-agents lesson
+`python-dash-heredoc.md`: a Bash command must not feed `python -` through `eval`/a heredoc that can be lost), the daemon
+is the backstop that frees the space.
+
 ## 6. Crash-safe data files
 
 On 2026-09-30 BEAST hard-crashed (a WHEA hardware error) while the server was saving `data/state.json`. The save wrote a
