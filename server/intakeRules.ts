@@ -57,9 +57,33 @@ export interface IntakeSettings {
     desync: { enabled: boolean; maxPerDay: number };
   };
   release: { enabled: boolean; delayMinutes: number };
-  nightly: { enabled: boolean; autoApprove: { enabled: boolean; maxPerDay: number }; dailyCap: number; flakyNights: number; batchOver: number };
+  nightly: { enabled: boolean; autoApprove: { enabled: boolean; maxPerDay: number }; dailyCap: number; flakyNights: number; batchOver: number; run: NightlyRunSettings };
   reviewers: string[];
   lookbackDays: number;
+}
+
+/** The portal's nightly schedule (w864, config intake.nightly.run; docs/intake.md, "The nightly run"). */
+export interface NightlyRunSettings {
+  enabled: boolean;
+  /** HH:MM in tz: lothsahn, 2026-10-10: "schedule that nightly desync run to run at 3am eastern time on LothDesktop". */
+  time: string;
+  tz: string;
+  machine: string;
+  /** Who the run is for and who hears a missing or broken night (a user id); else the system payer. */
+  person?: string;
+  /** No report this long after the fire is the alarm. A night took 136 min on 2026-10-10 (build and battery). */
+  reportWithinHours: number;
+}
+
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function validZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const int = (v: unknown, def: number, min: number, max: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : def);
@@ -115,6 +139,14 @@ export function intakeSettings(cfg: Pick<Config, 'intake' | 'providers'>): Intak
       dailyCap: int(n.dailyCap, 10, 0, 100),
       flakyNights: int(n.flakyNights, 3, 1, 30),
       batchOver: int(n.batchOver, 4, 1, 50),
+      run: {
+        enabled: n.run?.enabled === true,
+        time: typeof n.run?.time === 'string' && HHMM.test(n.run.time) ? n.run.time : '03:00',
+        tz: typeof n.run?.tz === 'string' && validZone(n.run.tz) ? n.run.tz : 'America/New_York',
+        machine: typeof n.run?.machine === 'string' && /^[\w.-]{1,40}$/.test(n.run.machine) ? n.run.machine : 'lothdesktop',
+        ...(typeof n.run?.person === 'string' && /^[a-zA-Z0-9._-]{2,32}$/.test(n.run.person) ? { person: n.run.person } : {}),
+        reportWithinHours: int(n.run?.reportWithinHours, 5, 1, 20),
+      },
     },
     reviewers: list(cfg.intake?.reviewers, []),
     lookbackDays: int(cfg.intake?.lookbackDays, 14, 1, 90),
@@ -417,6 +449,7 @@ export function identityKeys(s: WorkSource): string[] {
   if (s.desyncGroup) keys.push(`desync-group:${s.desyncGroup}`);
   if (s.release) keys.push(`release:${s.release.version}`);
   for (const sc of s.nightly?.scenarios ?? []) keys.push(`nightly:${sc.toLowerCase()}`);
+  if (s.nightlyRun) keys.push(`nightly-run:${s.nightlyRun.date}`);
   return keys;
 }
 
@@ -743,6 +776,25 @@ export function workerRules(w: Pick<WorkItem, 'id' | 'source' | 'brief' | 'triag
       'DESIGN-QUESTION is only for an actual decision a person must make; never write "DESIGN-QUESTION: none" or a status after it. While the work is still going, end the turn with none of these lines.',
     ].join('\n');
   }
+  if (s.kind === 'nightly-run') {
+    const d = s.nightlyRun?.date ?? '<date>';
+    return [
+      head,
+      '',
+      `This is the night ${d}'s run of the nightly e2e lab (FinalFactory scripts/nightly, spec 075), filed by the portal's nightly schedule (docs/intake.md, "The nightly run"). It runs on ${s.nightlyRun?.machine ?? 'the machine named in the brief'}: Lothsahn chose that machine for this job. Your job is to run the night and see it delivered, not to fix what it finds: each regression becomes its own request through the nightly intake.`,
+      '',
+      "1. Stop your sandbox's Unity editor if it runs (mcp__machine__unity, stop): the night builds a player in batchmode and plays up to a dozen players.",
+      `2. From your sandbox (its branch is develop's): \`bash scripts/nightly/nightly_worker.sh start ${d} ${w.id}\`. The night runs detached for about two and a half hours (a build, then the battery), in the lab's own folder and clone (FF_NIGHTLY_ROOT), never in your sandbox. If it says the night is already running or done, start nothing: check it.`,
+      `3. At every check-in: \`bash scripts/nightly/nightly_worker.sh check ${d}\`, then wake_me in 25 minutes (never longer: the sandbox stays yours while it runs). It prints the night's status and step. A night that died or hung gets its NO VERDICT note posted, and FF Factory hears it as broken, from that command itself.`,
+      `4. When the status is done or no-verdict, read the report it names (reports/${d}.md under FF_NIGHTLY_ROOT): its TL;DR and its "FF Factory ledger" section, which says whether FF Factory heard of the night. NOT DELIVERED is the thing to report: why, in one line. A missing or refused key is the ops worker's to fix (the file ~/.config/ffnightly/ffactory.json on the lab); name the file, never print what is in it.`,
+      '- A night that died early in a way that looks transient (a reboot, a killed process) may be started once more with the same start command if it can still report before the time the brief names; say so. Otherwise do not rerun.',
+      "- Never post to Discord yourself (the lab posts its summary as Max), never file, approve or link the night's regressions by hand (the nightly intake does), and never print a credential or the contents of a file under ~/.config.",
+      '',
+      'End your final message with exactly this line, on a line of its own, once the night has ended and you have read its report:',
+      `- \`RESOLVED: nightly ${d} <passed|failed|broken>: <its TL;DR in one line>\``,
+      'While the night is still running, end the turn without it, after a wake_me.',
+    ].join('\n');
+  }
   if (s.kind === 'release') {
     return [head, '', POSTING_RULES, '', 'Post exactly one short follow-up in each thread listed in the brief, opening with the reporter\'s @-mention if the thread shows who they are, saying the fix is live in the version named. Do not reopen closed threads beyond what posting needs; post nowhere else.', '', 'End with `RESOLVED: announced <version> in <n> threads`.'].join('\n');
   }
@@ -782,7 +834,7 @@ export function sourceTag(w: Pick<WorkItem, 'source' | 'approval' | 'triage' | '
   const s = w.source;
   if (!s) return '';
   const where =
-    s.kind === 'discord-bug' ? `Discord ${s.channel ?? 'bug report'}` : s.kind === 'discord-request' ? `Discord request from ${s.reporter ?? '?'}` : s.kind === 'release' ? 'release follow-up' : s.kind === 'nightly' ? `nightly e2e ${s.nightly?.date ?? ''}`.trim() : s.kind === 'ffbox-dev' ? `FFBox dev request from ${s.reporter ?? '?'}` : `FFBox ${s.kind === 'ffbox-diagnosis' ? 'diagnosis' : s.kind === 'ffbox-branch' ? 'branch' : 'request'}`;
+    s.kind === 'discord-bug' ? `Discord ${s.channel ?? 'bug report'}` : s.kind === 'discord-request' ? `Discord request from ${s.reporter ?? '?'}` : s.kind === 'release' ? 'release follow-up' : s.kind === 'nightly' ? `nightly e2e ${s.nightly?.date ?? ''}`.trim() : s.kind === 'nightly-run' ? `nightly run ${s.nightlyRun?.date ?? ''}`.trim() : s.kind === 'ffbox-dev' ? `FFBox dev request from ${s.reporter ?? '?'}` : `FFBox ${s.kind === 'ffbox-diagnosis' ? 'diagnosis' : s.kind === 'ffbox-branch' ? 'branch' : 'request'}`;
   const triage = w.triage?.class === 'obvious-bug' ? ', obvious bug' : w.triage?.class === 'ffbox-desync' ? ', desync PR policy' : w.triage?.class === 'regression' ? `, ${w.triage.reason.replace(/^nightly e2e: /, '')}` : '';
   const d = withDecision ? decisionOf(w) : undefined;
   const approval = d ? `, ${d.text}` : '';

@@ -1446,9 +1446,11 @@ const server = http.createServer(async (req, res) => {
       // The nightly lab ran (and let go of its lab.lock): a lock blocker on it clears (w643).
       nightlyAt = Date.now();
       blockerWatch.kick();
+      // Every night is recorded, its regressions filed while the intake is on (w864); `recorded` says which night.
       const results = intake.onNightly(parsed.report);
-      if (!results) return send(res, 200, { enabled: false, note: 'the nightly intake is off (config intake.nightly.enabled)' });
-      return send(res, 200, { enabled: true, results });
+      const recorded = intake.nightLabel(parsed.report.date);
+      if (!results) return send(res, 200, { enabled: false, recorded, note: 'the nightly intake is off (config intake.nightly.enabled)' });
+      return send(res, 200, { enabled: true, recorded, results });
     }
     // Max's escalations from FFBox (docs/intake.md, "Escalations from Max"): a key minted --scope ffbox, nothing else.
     if (url.pathname === '/api/intake/ffbox' && req.method === 'POST') {

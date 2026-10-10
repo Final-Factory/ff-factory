@@ -13,6 +13,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 - **Test only: CONTRIBUTING's two flake rules from w858, and `scripts/clock-skew.mjs`** (`SKEW_DAYS=30 node --import
   ./scripts/clock-skew.mjs --test <file>` runs a test file a month ahead to find tests that only pass in the month they
   were written). No portal deploy.
+- **The portal fires the nightly e2e lab itself, and every night reports** (w864, lothsahn: "Create a portal timer that
+  happens and when it does it triggers a run on LothDesktop to do the desync run", "at 3am eastern time", "We
+  shouldn't assume silence means a successful (or failed) run."). `intake.nightly.run` files a `nightly-run` request
+  every night at 03:00 America/New_York for its person, approved, with constraints that place it on lothdesktop; its
+  worker starts the lab with FinalFactory's `scripts/nightly/nightly_worker.sh` and checks it. The lab now posts every
+  night, green ones too, with `status` passed, failed or broken; the portal records each night (`intake.json`
+  `nights`, the Intake tab), files a broken night as one request to find its cause instead of a regression per scenario,
+  and tells the person when a night is broken, or missing: no report within 5 hours of the fire, or its run request
+  closed without one. Replaces LothDesktop's Windows tasks `ff-nightly-e2e` and `ff-nightly-e2e-watchdog` (removed
+  2026-10-10). Needs a portal deploy, then `intake.nightly.run.enabled` (and `intake.nightly.enabled` for the
+  regressions) in config.json and a restart (docs/intake.md, "The nightly run").
 
 - **Test only: a test that would have failed from 2026-11-01** (w858, lothsahn: "look for flaky CI tests in FFFactory and
   fix them"). The w830 test in `intakeFlow.test.ts` matched the ledger line "decision of 10-DD hh:mm UTC" with the month

@@ -2859,7 +2859,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           id: z.string().optional().describe('A request id, e.g. "w12".'),
           status: z.enum(['open', 'all', 'needs_human', 'new', 'question', 'queued', 'blocked', 'active', 'stalled', 'merged', 'done', 'rejected', 'cancelled']).optional().describe('Default open. needs_human: the intake requests nobody works until a reviewer approves or answers them. stalled: requests the ledger cleanup found nothing working on, for their person to close or reopen.'),
           mine: z.boolean().optional().describe("Only your person's requests (a personal orchestrator)."),
-          source: z.enum(['people', 'intake', 'discord', 'ffbox', 'nightly']).optional().describe("people: filed by people's orchestrators; intake: from Discord, FFBox and the nightly e2e lab; discord, ffbox or nightly: one of them."),
+          source: z.enum(['people', 'intake', 'discord', 'ffbox', 'nightly']).optional().describe("people: filed by people's orchestrators; intake: from Discord, FFBox and the nightly e2e lab; discord, ffbox or nightly: one of them (nightly: the lab's regressions and each night's scheduled run)."),
           state: z
             .union([LIVE_STATE, z.array(LIVE_STATE).min(1).max(5)])
             .optional()
@@ -3309,7 +3309,7 @@ function sourceMatches(w: WorkItem, source?: 'people' | 'intake' | 'discord' | '
   if (source === 'people') return !k;
   if (source === 'intake') return !!k;
   if (source === 'discord') return k === 'discord-bug' || k === 'discord-request' || k === 'release';
-  if (source === 'nightly') return k === 'nightly';
+  if (source === 'nightly') return k === 'nightly' || k === 'nightly-run';
   return k === 'ffbox-branch' || k === 'ffbox-diagnosis' || k === 'ffbox-request' || k === 'ffbox-dev';
 }
 
