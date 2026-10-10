@@ -1,0 +1,15 @@
+name: ffghr artifact hand-off
+description: >
+  Zip an artifact and hand it, with this job's Actions runtime credential, to the host through the
+  ffgithubrunners drop box, so the SUPERVISOR performs the upload and the container never needs
+  blob storage. See docs/ci-egress-exfiltration-audit.md in the final-factory-agents repo.
+inputs:
+  name:
+    description: The artifact name, as it should appear on the run.
+    required: true
+  path:
+    description: Directory to archive.
+    required: true
+runs:
+  using: node20
+  main: index.js

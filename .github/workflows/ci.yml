@@ -26,23 +26,31 @@ env:
   # processes under it. Before, a hung run was cancelled at the job's timeout with its whole log lost (w906).
   TEST_FLAGS: --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout
 
+# WHERE THESE JOBS RUN (w911, lothsahn 2026-10-10). The Linux jobs run on the FFBox build server's runner containers
+# (label ffgithubrunners), not on GitHub-hosted runners: the hosted minutes were most of the organisation's Actions use.
+# A container there has Node 24, npm, gitleaks and the browsers' system libraries in its image, reaches only the npm
+# registry and Playwright's browser CDN from outside (never github.com or api.github.com), and gets this repository from
+# the host's mirror: `ffghr-workspace.sh use-mirror` before actions/checkout. Actions are pinned by commit SHA because the
+# image carries those archives and cannot download any other; there is no setup-node, no actions/cache and no sudo.
+# What stays on a hosted runner needs root, systemd or Windows/macOS: the ops-socket job below, windows.yml,
+# worker-update.yml, dev-drive.yml, rerun-lost-runner.yml and vm-scripts.yml's lint and end-to-end jobs.
+# The repository is public and the runners are shared with the private Final Factory repositories, so fork pull requests
+# need an owner's approval before any of this runs (Settings, Actions, General) and these jobs hold no secret.
+
 jobs:
   checks:
     # Linux only: every unit test runs here. The few that also need Windows run in windows.yml, only when a pull request
     # touches what they cover (.github/windows-tests.txt; w910, lothsahn 2026-10-10). Until w910 the whole suite ran
     # again on two Windows runners for every pull request.
-    name: Typecheck, unit tests, build (ubuntu-latest)
-    runs-on: ubuntu-latest
+    name: Typecheck, unit tests, build (Linux)
+    runs-on: ffgithubrunners
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            web/package-lock.json
+      - name: The host's mirror of this repository at this commit
+        run: /opt/ffghr/ffghr-workspace.sh use-mirror "${{ github.sha }}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Node, from the runner image
+        run: node --version && test "$(node -p 'process.versions.node.split(".")[0]')" = "${{ env.NODE_VERSION }}"
       - name: A git identity for the tests that commit
         # Global config, not GIT_AUTHOR_* variables: some tests set a commit's identity with -c on purpose.
         run: |
@@ -62,9 +70,6 @@ jobs:
           # npm run test:coverage, with TEST_FLAGS: node takes options only before the files. PowerShell 7 (pwsh, on
           # the runner) runs the scripts' tests that need no Windows (server/testPowershell.ts).
           node scripts/test-watchdog.ts --minutes 10 -- node --test $TEST_FLAGS --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' server/*.test.ts scripts/*.test.ts 2>&1 | tee coverage.txt
-      - name: The orchestration worker's socket under real systemd (w638)
-        # fff-ops.socket's settings, the real launcher and the portal's opsSpawner: a new process right after a stop runs.
-        run: sudo --preserve-env=PATH deploy/vm/test/fff-ops-socket.test.sh
       - name: Coverage summary
         if: always()
         shell: bash
@@ -81,10 +86,31 @@ jobs:
       - name: Build the web UI
         run: npm --prefix web run build
 
+  ops-socket:
+    name: The orchestration worker's socket under real systemd (w638)
+    # HOSTED ON PURPOSE: it needs root and a running systemd (fff-ops.socket's own settings, the real launcher and the
+    # portal's opsSpawner), and an FFBox runner container has neither. About two minutes a pull request.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci --no-audit --no-fund
+      # fff-ops.socket's settings, the real launcher and the portal's opsSpawner: a new process right after a stop runs.
+      - name: fff-ops.socket under real systemd
+        run: sudo --preserve-env=PATH deploy/vm/test/fff-ops-socket.test.sh
+
   e2e:
     name: Playwright (Chromium + WebKit, ${{ matrix.shard }}/3)
     # The same tests, split across three runners by file (playwright test --shard); each starts its own servers.
-    runs-on: ubuntu-latest
+    # Each shard downloads its own browsers from Playwright's CDN (the only host this job reaches besides the npm registry). The browsers' system libraries are in the
+    # runner image (scripts/Dockerfile in ffbox, PLAYWRIGHT_VERSION): a Playwright upgrade that needs a library the image
+    # lacks fails with "error while loading shared libraries" and wants that version bumped there.
+    runs-on: ffgithubrunners
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -95,49 +121,13 @@ jobs:
       # WebKit projects, so it takes fewer. Each file goes to one shard whatever the weights, so none is ever left out.
       PWTEST_SHARD_WEIGHTS: '5:5:3'
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            web/package-lock.json
+      - name: The host's mirror of this repository at this commit
+        run: /opt/ffghr/ffghr-workspace.sh use-mirror "${{ github.sha }}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: npm ci --no-audit --no-fund
       - run: npm ci --prefix web --no-audit --no-fund
-      - name: Playwright version
-        id: pw
-        run: |
-          echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-          echo "image=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
-      - name: Cache browsers
-        id: browsers
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
-      - name: Cache browser system packages
-        # The 181 packages Chromium and WebKit need took about 28 s to download from the Ubuntu mirror on every shard (w636).
-        # apt still resolves them against today's lists and fetches anything newer; this only saves the download.
-        uses: actions/cache@v6
-        with:
-          path: ~/apt-archives
-          key: playwright-apt-${{ steps.pw.outputs.image }}-${{ steps.pw.outputs.version }}
-          restore-keys: playwright-apt-
-      - name: apt keeps its downloads there
-        run: |
-          mkdir -p ~/apt-archives/partial
-          printf 'Dir::Cache::Archives "%s";\nAPT::Keep-Downloaded-Packages "true";\n' ~/apt-archives | sudo tee /etc/apt/apt.conf.d/99-ff-archives
-      - name: Install browsers
-        if: steps.browsers.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium webkit
-      - name: Install browser system libraries
-        if: steps.browsers.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium webkit
-      - name: The package cache readable for saving
-        run: |
-          sudo rm -f ~/apt-archives/lock && sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
-          echo "$(ls ~/apt-archives/*.deb 2>/dev/null | wc -l) packages, $(du -sh ~/apt-archives | cut -f1)"
+      - name: Install the browsers
+        run: npx playwright install chromium webkit
       - name: Build the web UI
         run: npm --prefix web run build
       - name: Snapshot mode
@@ -160,58 +150,56 @@ jobs:
         run: |
           node web/perf/bench.ts --check --live 0 --keys 60 --idle 5
           node web/perf/bench.ts --check --live 0 --keys 60 --idle 5 --route '#/sandbox/agent-mcp'
+      # The artifacts go to the host, which uploads them on this job's own credential: a runner container cannot reach
+      # the blob storage actions/upload-artifact writes to (.github/actions/ffghr-artifact-handoff).
+      - name: Gather the report and traces
+        if: failure()
+        run: |
+          mkdir -p pw-artifacts
+          cp -R playwright-report test-results pw-artifacts/ 2>/dev/null || true
       - name: Upload the report and traces
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: ./.github/actions/ffghr-artifact-handoff
         with:
           name: playwright-report-${{ matrix.shard }}
-          path: |
-            playwright-report/
-            test-results/
-          retention-days: 14
+          path: pw-artifacts
       - name: Upload rendered snapshots
         if: always() && steps.snap.outputs.update == 'true' && matrix.shard == 1
-        uses: actions/upload-artifact@v7
+        uses: ./.github/actions/ffghr-artifact-handoff
         with:
           name: linux-snapshots
-          path: e2e/__screenshots__/
-          retention-days: 14
+          path: e2e/__screenshots__
 
   secrets:
     name: Secret scan (gitleaks)
-    runs-on: ubuntu-latest
+    runs-on: ffgithubrunners
     timeout-minutes: 5
-    env:
-      GITLEAKS_VERSION: 8.30.1
     steps:
-      - uses: actions/checkout@v7
+      - name: The host's mirror of this repository at this commit
+        run: /opt/ffghr/ffghr-workspace.sh use-mirror "${{ github.sha }}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - name: Install gitleaks
-        run: |
-          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
-          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$RUNNER_TEMP/$file" "$base/$file"
-          curl -sSfL -o "$RUNNER_TEMP/checksums.txt" "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
-          (cd "$RUNNER_TEMP" && grep " $file\$" checksums.txt | sha256sum -c -)
-          tar -xzf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP" gitleaks
+      - name: gitleaks, from the runner image
+        # 8.30.1 is baked into the image (ffbox scripts/Dockerfile, GITLEAKS_VERSION, checksum-verified at build): a
+        # container cannot download it from github.com. A newer version here means bumping it there.
+        run: gitleaks version
       - name: Scan the history of this commit
         # HEAD only: other branches on the remote are not what is being merged.
-        run: $RUNNER_TEMP/gitleaks git . --log-opts=HEAD --redact --no-banner --verbose
+        run: gitleaks git . --log-opts=HEAD --redact --no-banner --verbose
       - name: Scan the working tree
-        run: $RUNNER_TEMP/gitleaks dir . --redact --no-banner
+        run: gitleaks dir . --redact --no-banner
 
   identity:
     name: Commit identities are noreply
-    runs-on: ubuntu-latest
+    runs-on: ffgithubrunners
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - name: The host's mirror of this repository at this commit
+        run: /opt/ffghr/ffghr-workspace.sh use-mirror "${{ github.sha }}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
       - name: Check the new commits
         shell: bash
         env:

@@ -43,24 +43,29 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   plan:
     name: Plan (which VM jobs this change needs)
-    runs-on: ubuntu-24.04
+    # ON FFBOX (w911): the pull request's files come from git, not from the API. A runner container cannot reach
+    # api.github.com, and the pull request's merge commit (what actions/checkout checks out) has the base as its first
+    # parent, so HEAD^1..HEAD is exactly the pull request's change. The lint and end-to-end jobs below stay hosted:
+    # they need root, systemd and KVM.
+    runs-on: ffgithubrunners
     timeout-minutes: 5
     outputs:
       lint: ${{ steps.plan.outputs.lint }}
       e2e: ${{ steps.plan.outputs.e2e }}
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
+      - name: The host's mirror of this repository at this commit
+        run: /opt/ffghr/ffghr-workspace.sh use-mirror "${{ github.sha }}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
       - id: plan
         env:
-          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
           SCOPE: ${{ inputs.scope }}
           # server/index.ts: a hunk (changed lines, context or its header) with one of these touches what the VM drives.
           VM_MARKERS: 'restartFlag|restart\.request|parseRestartRequest|[Dd]rainer|stopServer|plainStop|keepDaemonAgents|orchestrator-inbox|inbox|/api/health|appNow|SIGTERM|SIGINT|process\.exit|[Rr]esumeFile|update\.result|UPDATE_RESULT|ALIVE_FILE'
@@ -81,7 +86,7 @@ jobs:
               esac
               why="by hand: ${SCOPE:-full}" ;;
             pull_request)
-              files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename')
+              files=$(git diff --name-only HEAD^1 HEAD)
               echo "changed files:"; printf '  %s\n' $files
               lint=false e2e=false host=false
               for f in $files; do
@@ -90,9 +95,8 @@ jobs:
                   deploy/vm/*) lint=true e2e=true; why+=" $f;" ;;
                   server/restart.ts | package.json | package-lock.json | web/package.json | web/package-lock.json) e2e=true; why+=" $f;" ;;
                   server/index.ts)
-                    # No patch (a diff too large for the API): count it as touching the VM's paths.
-                    patch=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[] | select(.filename == "server/index.ts") | .patch // "NO-PATCH"')
-                    if [ "$patch" = NO-PATCH ] || grep -Eq "$VM_MARKERS" <<<"$patch"; then
+                    patch=$(git diff HEAD^1 HEAD -- server/index.ts)
+                    if grep -Eq "$VM_MARKERS" <<<"$patch"; then
                       e2e=true; why+=" server/index.ts (its restart, drain, inbox or health code);"
                     else
                       echo "server/index.ts: no hunk near the restart, drain, inbox or health code"
