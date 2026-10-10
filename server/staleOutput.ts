@@ -37,7 +37,7 @@ export interface StaleOutputSettings {
   tempHours: number;
   /** The nightly lab's builds/: the newest this many are kept whatever their age. */
   nightlyKeep: number;
-  /** The nightly lab's roots (FF_NIGHTLY_ROOT); default the lab's own (D:/work/ff-nightly, ~/nevergames/ff-nightly) when they exist. */
+  /** The nightly lab's roots; default FF_NIGHTLY_ROOT, else the worker root's nightly/ (defaultNightlyRoots). */
   nightlyRoots?: string[];
 }
 
@@ -69,9 +69,13 @@ export function staleOutputSettings(raw: unknown): StaleOutputSettings {
   };
 }
 
-/** The nightly lab's default roots on this platform (scripts/nightly/nightly.sh in the game repo). */
-export function defaultNightlyRoots(platform: string, home: string): string[] {
-  return platform === 'win32' ? ['D:/work/ff-nightly'] : platform === 'darwin' ? [path.join(home, 'nevergames', 'ff-nightly')] : [];
+/**
+ * The nightly lab's default roots: FF_NIGHTLY_ROOT, else the worker root's nightly/ (scripts/nightly/nightly_root.sh in
+ * the game repo). The old places outside the install folder are gone (2026-10-10), so a machine with neither has none.
+ */
+export function defaultNightlyRoots(workerRoot?: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  const root = env.FF_NIGHTLY_ROOT || (workerRoot ? path.join(workerRoot, 'nightly') : '');
+  return root ? [root] : [];
 }
 
 /**

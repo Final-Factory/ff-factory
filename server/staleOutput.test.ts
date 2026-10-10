@@ -179,7 +179,7 @@ test('stale output: the guard still wins (in use, protected, backups); a request
 
 test('stale output: the nightly lab keeps its newest builds and young runs; its checkout and reports are never touched', async (t) => {
   const root = tmp(t);
-  const lab = path.join(root, 'ff-nightly');
+  const lab = path.join(root, 'nightly');
   put(lab, `builds/${SHA_A}-win/player/x.exe`, 24 * 9);
   put(lab, `builds/${SHA_B}-win/player/x.exe`, 24 * 7);
   put(lab, `builds/${SHA_C}-win/player/x.exe`, 24 * 5);

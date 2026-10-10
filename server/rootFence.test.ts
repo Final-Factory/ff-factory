@@ -31,7 +31,7 @@ test('what w876 deleted on C: is refused, in PowerShell, Git Bash and cmd spelli
   no('rm -rf /c/ProgramData/PackageCache/x');
   no('Remove-Item $env:ProgramData\\PackageCache\\x -Recurse');
   no('rmdir /s /q %LOCALAPPDATA%\\Temp\\x');
-  no('rm -rf D:/work/FFFRepo');
+  no('rm -rf D:/work/mainrepo');
   no('rm -rf D:/work/ffw-old/x');
   no('rm -rf /d/work/ffw/../other');
   no('rm -rf D:\\work\\ffw\\..\\..\\Users');
@@ -109,8 +109,8 @@ test('the sandbox guard applies it when the spec carries a worker root, and not 
     };
     return r.hookSpecificOutput;
   };
-  const withRoot = sandboxGuard({ sandboxId: 'slot5', sandboxPath: 'D:/work/ffw/sandboxes/slot5', protectedPaths: ['D:/work/FFFRepo'], workerRoot: 'D:\\work\\ffw' });
-  const without = sandboxGuard({ sandboxId: 'slot5', sandboxPath: 'D:/work/ffw/sandboxes/slot5', protectedPaths: ['D:/work/FFFRepo'] });
+  const withRoot = sandboxGuard({ sandboxId: 'slot5', sandboxPath: 'D:/work/ffw/sandboxes/slot5', protectedPaths: ['D:/work/mainrepo'], workerRoot: 'D:\\work\\ffw' });
+  const without = sandboxGuard({ sandboxId: 'slot5', sandboxPath: 'D:/work/ffw/sandboxes/slot5', protectedPaths: ['D:/work/mainrepo'] });
   const cmd = 'Remove-Item -Recurse -Force C:\\Users\\loth\\AppData\\Local\\Temp\\old';
   const denied = await run(withRoot, cmd);
   assert.equal(denied?.permissionDecision, 'deny');

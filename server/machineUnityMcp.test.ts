@@ -38,25 +38,25 @@ test("machine unity mcp: the server is daemon.json's, else the machine's own Cla
   const write = (j: unknown) => fs.writeFileSync(file, '\uFEFF' + JSON.stringify(j));
   const stdio = (s: typeof UVX) => ({ UnityMCP: { type: 'stdio', ...s, env: {} } });
 
-  // LothDesktop as found (2026-09-29): three other clones registered, the main clone (D:\work\FFFRepo) not.
+  // LothDesktop as found (2026-09-29): three other clones registered, the main clone (D:\work\mainrepo) not.
   write({ mcpServers: {}, projects: { 'D:/work/FinalFactory': { mcpServers: stdio(UVX) }, 'D:/work/FinalFactoryMaster': { mcpServers: stdio(UVX) }, 'D:/work/FinalFactory2': { mcpServers: stdio(PRE) }, 'D:/work/other': {} } });
-  const most = resolveUnityMcpServer(undefined, 'D:\\work\\FFFRepo', file);
+  const most = resolveUnityMcpServer(undefined, 'D:\\work\\mainrepo', file);
   assert.deepEqual(most.server, UVX, 'the one most projects use');
   assert.match(most.source, /used by 2 project/);
 
   // The main clone's own entry wins, whatever the slashes and case.
-  write({ mcpServers: { UnityMCP: { ...UVX } }, projects: { 'd:/work/fffrepo': { mcpServers: stdio(PRE) } } });
-  assert.deepEqual(resolveUnityMcpServer(undefined, 'D:\\work\\FFFRepo\\', file).server, PRE);
+  write({ mcpServers: { UnityMCP: { ...UVX } }, projects: { 'd:/work/mainrepo': { mcpServers: stdio(PRE) } } });
+  assert.deepEqual(resolveUnityMcpServer(undefined, 'D:\\work\\mainrepo\\', file).server, PRE);
   // Then a user-wide one.
   write({ mcpServers: { UnityMCP: { ...PRE, env: { A: '1' } } }, projects: { 'D:/work/FinalFactory': { mcpServers: stdio(UVX) } } });
-  assert.deepEqual(resolveUnityMcpServer(undefined, 'D:\\work\\FFFRepo', file).server, { ...PRE, env: { A: '1' } });
+  assert.deepEqual(resolveUnityMcpServer(undefined, 'D:\\work\\mainrepo', file).server, { ...PRE, env: { A: '1' } });
   // daemon.json's before any of them.
-  assert.deepEqual(resolveUnityMcpServer({ command: 'uvx', args: ['x'] }, 'D:\\work\\FFFRepo', file).server, { command: 'uvx', args: ['x'] });
+  assert.deepEqual(resolveUnityMcpServer({ command: 'uvx', args: ['x'] }, 'D:\\work\\mainrepo', file).server, { command: 'uvx', args: ['x'] });
 
   // An http entry, none, or no file: no server (and it says why).
   write({ projects: { 'D:/work/FinalFactory': { mcpServers: { UnityMCP: { type: 'http', url: 'http://localhost:8080/mcp' } } } } });
-  assert.equal(resolveUnityMcpServer(undefined, 'D:\\work\\FFFRepo', file).server, undefined);
-  assert.match(resolveUnityMcpServer(undefined, 'D:\\work\\FFFRepo', path.join(dir, 'missing.json')).source, /no .*missing\.json/);
+  assert.equal(resolveUnityMcpServer(undefined, 'D:\\work\\mainrepo', file).server, undefined);
+  assert.match(resolveUnityMcpServer(undefined, 'D:\\work\\mainrepo', path.join(dir, 'missing.json')).source, /no .*missing\.json/);
 
   // Scoped: the place's own status folder, the entry's env kept.
   assert.deepEqual(scopedUnityMcp({ ...UVX, env: { A: '1' } }, 'D:\\ff', 'sb1').env, { A: '1', UNITY_MCP_STATUS_DIR: path.join('D:\\ff', 'unity-mcp', 'sb1') });
@@ -78,11 +78,11 @@ test("machine unity mcp: each place's folder holds only its own editor's status 
   const scopes = new McpScopes(home);
 
   // Both editors were already running when the daemon started: their status files count whatever their age.
-  status('aaaa', 'D:/work/FFFRepo', 6400, T - 3_600_000);
+  status('aaaa', 'D:/work/mainrepo', 6400, T - 3_600_000);
   status('bbbb', 'D:/work/ffsb/sb1', 6401, T - 3_600_000);
   status('cccc', 'D:/work/ffsb/sb2', 6402, T - 3_600_000);
   scopes.sync(app, [
-    { place: 'sb0', project: 'D:\\work\\FFFRepo', pid: 10 },
+    { place: 'sb0', project: 'D:\\work\\mainrepo', pid: 10 },
     { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 11 },
     { place: 'sb2', project: 'D:\\work\\ffsb\\sb2' },
   ], T);
@@ -94,17 +94,17 @@ test("machine unity mcp: each place's folder holds only its own editor's status 
 
   // sb1's editor crashed and a new one started (pid 12) after the last look: its crashed predecessor's file is not
   // mirrored until the new editor writes its own.
-  scopes.sync(app, [{ place: 'sb0', project: 'D:\\work\\FFFRepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }, { place: 'sb2', project: 'D:\\work\\ffsb\\sb2' }], T + 30_000);
+  scopes.sync(app, [{ place: 'sb0', project: 'D:\\work\\mainrepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }, { place: 'sb2', project: 'D:\\work\\ffsb\\sb2' }], T + 30_000);
   assert.deepEqual(files('sb1'), ['unity-mcp-port.json']);
   assert.equal(port('sb1'), 0);
   status('bbbb', 'D:/work/ffsb/sb1', 6403, T + 40_000);
-  scopes.sync(app, [{ place: 'sb0', project: 'D:\\work\\FFFRepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }, { place: 'sb2', project: 'D:\\work\\ffsb\\sb2' }], T + 45_000);
+  scopes.sync(app, [{ place: 'sb0', project: 'D:\\work\\mainrepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }, { place: 'sb2', project: 'D:\\work\\ffsb\\sb2' }], T + 45_000);
   assert.deepEqual(files('sb1'), ['unity-mcp-port.json', 'unity-mcp-status-bbbb.json']);
   assert.equal(port('sb1'), 6403);
   assert.deepEqual(files('sb0'), ['unity-mcp-port.json', 'unity-mcp-status-aaaa.json'], 'sb0 kept its own');
 
   // A deleted sandbox: its folder goes too.
-  scopes.sync(app, [{ place: 'sb0', project: 'D:\\work\\FFFRepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }], T + 60_000);
+  scopes.sync(app, [{ place: 'sb0', project: 'D:\\work\\mainrepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }], T + 60_000);
   assert.equal(fs.existsSync(mcpStatusDir(app, 'sb2')), false);
 });
 
@@ -165,7 +165,7 @@ test('machine unity mcp: the portal asks for it for sandbox agents on a machine;
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   });
   const sb: MachineSandbox = { id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', path: 'D:\\work\\ffsb\\sb1', createdAt: '2026-09-29T00:00:00Z', status: 'ready', purpose: 'unused', sessionIds: [], unity: { state: 'stopped' } };
-  const { machine } = machines.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: 'D:\\work\\FFFRepo', home: 'C:\\Users\\u', portalUrl: 'http://x', platform: 'win32', sandboxes: [sb] } as never);
+  const { machine } = machines.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: 'D:\\work\\mainrepo', home: 'C:\\Users\\u', portalUrl: 'http://x', platform: 'win32', sandboxes: [sb] } as never);
   const info = (over: Partial<SessionInfo>) => ({ id: 's1', kind: 'worker', title: 't', status: 'idle', permissionMode: 'default', createdAt: '', lastActivityAt: '', turns: 0, costUsd: 0, pendingPermissions: [], machineId: 'pc', ...over }) as SessionInfo;
   assert.throws(() => machines.hooks!.specFor(info({}), machine), /workers run in sandboxes only/);
   const inSb = machines.hooks!.specFor(info({ machineSandbox: 'sb1' }), machine);

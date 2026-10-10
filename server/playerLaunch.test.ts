@@ -22,7 +22,7 @@ test('a player started from a build, sandbox or temp folder is refused, with the
 
 test('a player in a slot, the slot launcher and commands that only touch a build are allowed', () => {
   for (const cmd of [
-    'F:/ff-players/slot3/player/finalfactory.exe -batchmode',
+    'F:/ffw/players/slot3/player/finalfactory.exe -batchmode',
     'C:\\ffw\\players\\slot0\\player\\finalfactory.exe -logFile x',
     'open -n ~/ffw/players/slot0/player/finalfactory.app --args -x',
     '/Users/b/ffw/players/slot1/player/finalfactory.app/Contents/MacOS/finalfactory -batchmode',
@@ -47,7 +47,7 @@ test("w576: a sandbox's players run from its own pair, slotK-0 and slotK-1, neve
   assert.match(why ?? '', /--peer 1/);
   // A pair path outside a slotK sandbox (a host sandbox, a main clone) and a lab pool's slotK stay as before.
   assert.equal(checkPlayerLaunch('D:/work/ffw/players/slot2-1/player/finalfactory.exe', 'agent-mcp'), undefined);
-  assert.equal(checkPlayerLaunch('F:/ff-players/slot7/player/finalfactory.exe', 'slot3'), undefined);
+  assert.equal(checkPlayerLaunch('F:/ffw/players/slot7/player/finalfactory.exe', 'slot3'), undefined);
   assert.match(checkPlayerLaunch('D:/work/ffw/sandboxes/slot3/Builds/w/finalfactory.exe', 'slot3') ?? '', /outside a player slot/);
 });
 

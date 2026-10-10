@@ -476,7 +476,7 @@ const hostHealth = new HostHealthMonitor({
         guard,
         mode: settings.mode,
         regular: () => planCleanup({ rules: cleanupRules(env, cfg.hostGuard.cleanup), guard, low, libraries }),
-        stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, cleanupEnv.home), ctx: staleContextOf(store.work.values()), settings, guard }),
+        stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(), ctx: staleContextOf(store.work.values()), settings, guard }),
       });
       return r;
     },
