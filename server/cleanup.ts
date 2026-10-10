@@ -36,6 +36,8 @@ export interface CleanupEnv {
   agentTemp?: string;
   /** Folders of sandboxes (the host's sandbox root): their Builds folders' old entries go, though sandboxes are kept. */
   sandboxRoots?: string[];
+  /** Folders of sandboxes whose Unity Library caches (BuildCache, BurstCache) are capped and aged out (w898). */
+  cacheRoots?: string[];
 }
 
 export function hostCleanupEnv(agentTemp?: string): CleanupEnv {
@@ -67,6 +69,10 @@ export interface CleanupRule {
   supersededOnly?: boolean;
   /** The folder is inside a kept path (a sandbox's Builds): that keep does not cover its entries. */
   insideKept?: boolean;
+  /** `dir` is a Unity project's Library: skipped while that project's Temp/UnityLockfile exists (an editor or batchmode build has it open). */
+  unityIdle?: boolean;
+  /** Only an entry larger than this many bytes (a cap, not an age). */
+  overBytes?: number;
 }
 
 /** What never goes: known paths (and whatever holds them), paths agents use now, and the home folder itself. */
@@ -186,6 +192,8 @@ export function fenceToRoot<T extends { path: string }>(items: T[], root: string
 
 const H = 1;
 const D = 24;
+/** The Library folders that grow without bound and are rebuilt on demand (Library/BuildCache, Library/BurstCache). */
+export const LIBRARY_CACHES = ['BuildCache', 'BurstCache'];
 
 /**
  * The built-in rules for a platform plus the policy's own (temp scratch, agent clones, age rules). Folders that
@@ -216,6 +224,16 @@ export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRul
   // Build outputs: a sandbox's Builds folder (sandboxes themselves are kept) and build archives in ff-worker.
   for (const r of env.sandboxRoots ?? []) {
     rules.push({ id: 'sandbox-builds', dir: j(r, '*', 'Builds'), olderThanHours: policy.buildsOlderThanDays * D, insideKept: true, repos: 'skip', what: 'a build in a sandbox untouched for days' });
+  }
+  // A sandbox's Unity Library caches (w898): content-addressed, rebuilt on demand, and 87 GB across lothdesktop's six sandboxes
+  // (BuildCache 6.2-12.7 GB, BurstCache 4.8-6.7 GB each; a fresh seed holds 0.7 and 2.5). Only while no editor or build has the
+  // project open. Three rules over one list of caches: unused for a while, over a cap, and all of them while space is low.
+  for (const r of env.cacheRoots ?? []) {
+    const dir = j(r, '*', 'Library');
+    const common = { dir, names: [...LIBRARY_CACHES], insideKept: true, unityIdle: true };
+    if (policy.libraryCacheIdleHours > 0) rules.push({ ...common, id: 'sandbox-lib-cache-idle', olderThanHours: policy.libraryCacheIdleHours, what: "a sandbox's Unity build cache nobody used" });
+    if (policy.libraryCacheCapGB > 0) rules.push({ ...common, id: 'sandbox-lib-cache-cap', olderThanHours: H, overBytes: policy.libraryCacheCapGB * 1024 ** 3, what: `a sandbox's Unity build cache grown past ${policy.libraryCacheCapGB} GB` });
+    rules.push({ ...common, id: 'sandbox-lib-cache-low', olderThanHours: H, when: 'low', what: "a sandbox's Unity build cache (rebuilt on demand)" });
   }
   rules.push({ id: 'worker-archives', dir: j(env.home, 'ff-worker'), names: ['*.tar', '*.tgz', '*.tar.gz', '*.zip', '*.bundle'], olderThanHours: policy.buildsOlderThanDays * D, what: 'a build or bundle archive' });
   // A GitHub Actions runner's job folders: checkouts and scratch it recreates for the next job.
@@ -446,6 +464,8 @@ export async function planCleanup(opts: {
     } catch {
       continue;
     }
+    // An editor or a batchmode build has the project open while Temp/UnityLockfile exists: its caches are not ours.
+    if (rule.unityIdle && fs.existsSync(path.join(path.dirname(rule.dir), 'Temp', 'UnityLockfile'))) continue;
     const match = rule.names?.map(glob);
     const except = rule.except?.map(glob);
     const old = rule.supersededOnly ? new Set(superseded(names)) : undefined;
@@ -462,6 +482,7 @@ export async function planCleanup(opts: {
       if (old && !old.has(n)) continue;
       if (neverDelete(p, guard)) continue;
       if (fs.existsSync(path.join(p, 'Editor', 'Unity.exe')) || fs.existsSync(path.join(p, 'Unity.app'))) continue;
+      if (rule.overBytes !== undefined && (await sizeOf(p)) <= rule.overBytes) continue;
       if (await touchedSince(p, cutoff)) continue;
       const repos = await reposIn(p);
       if (repos.length && rule.repos !== 'any') {

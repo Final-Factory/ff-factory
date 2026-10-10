@@ -75,10 +75,10 @@ export function MachineSandboxPanel({ app, machine: m, sandbox: sb, sessionId, o
         onToggleDetails={() => setDetails(!details)}
       />
       <AttentionStrip session={waiting} />
-      {(sb.status === 'creating' || sb.status === 'deleting') && (
+      {(sb.status === 'creating' || sb.status === 'deleting' || sb.status === 'cleanup') && (
         <div className="sb-progress">
           <div className="indeterminate" />
-          <span>{sb.statusDetail ?? (sb.status === 'creating' ? 'Creating…' : 'Deleting…')}</span>
+          <span>{sb.statusDetail ?? (sb.status === 'creating' ? 'Creating…' : sb.status === 'cleanup' ? 'Cleaning up…' : 'Deleting…')}</span>
         </div>
       )}
       {sb.status === 'error' && (

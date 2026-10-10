@@ -1210,6 +1210,8 @@ export class Agents {
     if (t.machineSandbox) {
       const sb = this.machines.requireSandbox(m.id, t.machineSandbox);
       if (sb.status === 'error' || sb.status === 'deleting') throw new Error(`sandbox ${m.id}/${sb.id} is ${sb.status}${sb.statusDetail ? `: ${sb.statusDetail}` : ''}`);
+      // Being trimmed after its last worker left (w898): not free, so placement never picks it; a named start is refused too.
+      if (sb.status === 'cleanup') throw new Error(`sandbox ${m.id}/${sb.id} is being cleaned up (${sb.statusDetail ?? 'trimming its Library caches'}) and is free again in a few minutes; use another free sandbox`);
     } else {
       // Refused before a record is made (w536): every worker runs in a sandbox, this host's own daemon's base clone included.
       throw new Error(this.machines.mainCloneRefusal(m, 'worker'));

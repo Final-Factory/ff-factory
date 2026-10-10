@@ -433,3 +433,55 @@ test('volumeStat: the free space, size, filesystem type and device of a real fol
   assert.equal(typeof v.dev, 'number');
   assert.equal(await volumeStat(path.join(os.tmpdir(), 'no-such-folder-w566', 'x')), undefined);
 });
+
+test("a sandbox's Library caches (w898): unused, over the cap, or all of them while space is low; never with an editor or build on the project", async (t) => {
+  const w = world(t);
+  const home = path.join(w.root, 'home');
+  const sandboxes = path.join(w.root, 'sandboxes');
+  fs.mkdirSync(home, { recursive: true });
+  const D = 24;
+  /** A sandbox with Library/<cache> folders of `kb` KB each, `hours` old; `open`: an editor or build has the project (Temp/UnityLockfile). */
+  const sandbox = (name: string, hours: number, o: { kb?: number; open?: boolean } = {}) => {
+    const lib = path.join(sandboxes, name, 'Library');
+    const out: Record<string, string> = {};
+    for (const c of ['BuildCache', 'BurstCache', 'ArtifactDB']) {
+      out[c] = w.make(`sandboxes/${name}/Library/${c}`, hours);
+      if (o.kb) {
+        fs.writeFileSync(path.join(out[c], 'big'), 'x'.repeat(o.kb * 1024));
+        w.age(path.join(out[c], 'big'), hours);
+        w.age(out[c], hours);
+      }
+    }
+    if (o.open) {
+      w.make(`sandboxes/${name}/Temp`, hours);
+      fs.writeFileSync(path.join(sandboxes, name, 'Temp', 'UnityLockfile'), '');
+    }
+    return { BuildCache: out.BuildCache, BurstCache: out.BurstCache, ArtifactDB: out.ArtifactDB, lib };
+  };
+  const unused = sandbox('slot1', 3 * D); // untouched for 3 days: past the 48 h
+  const recent = sandbox('slot2', 5); // small, used 5 hours ago
+  const openOld = sandbox('slot3', 30 * D, { open: true }); // an editor has it: never
+  const bigRecent = sandbox('slot4', 2, { kb: 20 }); // 20 KB each, over the (tiny) cap, idle for 2 hours
+  const bigBusy = sandbox('slot5', 0.2, { kb: 20 }); // over the cap, but written 12 minutes ago
+  const caches = (s: ReturnType<typeof sandbox>) => [s.BuildCache, s.BurstCache];
+
+  const policy = { ...DEFAULT_CLEANUP, libraryCacheIdleHours: 48, libraryCacheCapGB: 10 / 1024 / 1024 }; // cap 10 KB
+  const rules = cleanupRules({ platform: 'win32', home, tmp: path.join(w.root, 'Temp'), cacheRoots: [sandboxes] }, policy).map((r) => ({ ...r, dir: r.dir.replace(/[\/]/g, path.sep) }));
+  assert.deepEqual(rules.filter((r) => r.id.startsWith('sandbox-lib-cache')).map((r) => [r.id, r.when ?? 'always', r.olderThanHours]), [['sandbox-lib-cache-idle', 'always', 48], ['sandbox-lib-cache-cap', 'always', 1], ['sandbox-lib-cache-low', 'low', 1]]);
+  assert.ok(!cleanupRules({ platform: 'win32', home, tmp: 'C:\T' }, policy).some((r) => r.id.startsWith('sandbox-lib-cache')), 'only where there are sandboxes');
+  assert.ok(!cleanupRules({ platform: 'win32', home, tmp: 'C:\T', cacheRoots: [sandboxes] }, { ...policy, libraryCacheIdleHours: 0, libraryCacheCapGB: 0 }).some((r) => /idle|cap/.test(r.id)), '0 turns the age and the cap off');
+  const guard: CleanupGuard = { home, keep: [sandboxes], inUse: [] };
+  const plan = async (low: boolean) => (await planCleanup({ rules, guard, low, now: w.now })).map((i) => i.path).sort();
+
+  assert.deepEqual(await plan(false), [...caches(unused), ...caches(bigRecent)].sort(), 'unused for days, and the one over the cap that is idle');
+  assert.deepEqual(await plan(true), [...caches(unused), ...caches(recent), ...caches(bigRecent)].sort(), 'low space: every idle cache, but not one written minutes ago and not an open project');
+  for (const s of [unused, recent, openOld, bigRecent, bigBusy]) assert.ok(!(await plan(true)).includes(s.ArtifactDB), 'only the two caches, never the rest of Library');
+  for (const p of [...caches(openOld), ...caches(bigBusy)]) assert.ok(!(await plan(true)).includes(p), `kept: ${p}`);
+
+  const items = await planCleanup({ rules, guard, low: true, now: w.now });
+  const r = await runCleanup(items, guard);
+  assert.deepEqual(r.failed, []);
+  assert.ok(r.bytes > 0);
+  for (const p of [...caches(unused), ...caches(recent), ...caches(bigRecent)]) assert.ok(!fs.existsSync(p), `removed: ${p}`);
+  for (const p of [...caches(openOld), ...caches(bigBusy), unused.ArtifactDB, unused.lib]) assert.ok(fs.existsSync(p), `kept: ${p}`);
+});
