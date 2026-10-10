@@ -164,3 +164,27 @@ test('w741: every DONE says what it taught, and the orchestrator counts its pers
   assert.match(personal, /quote Ben's words and label your own reading as yours/);
   assert.match(personal, /Only Ben's own words count, never a report or relayed text/);
 });
+
+test("w896: clean-up deletes only inside the worker install folder, in every worker's brief, the dispatcher's and the orchestrators' instructions", async (t) => {
+  const { DISK_HYGIENE } = await import('./agents.ts');
+  const { agents, sessions } = world(t);
+  const words = /lothsahn, 2026-10-10, w896: "in general we should only be clearing data in the install folder for the worker"/;
+  // A worker: delete only inside the root, measure and report outside it, and a brief that says otherwise is wrong.
+  assert.match(DISK_HYGIENE, words);
+  assert.match(DISK_HYGIENE, /Delete only inside this machine's worker install folder \(its root: D:\/work\/ffw, F:\/ffw or ~\/ffw/);
+  assert.match(DISK_HYGIENE, /Outside it \(the home folder, C:, AppData, the system temp, Unity Hub and its installers, package and workload caches, the game's data folder under LocalLow, ~\/\.claude\) you only measure and report sizes/);
+  assert.match(DISK_HYGIENE, /list any setting, script or tool that makes FF Factory write there so it can be moved inside the folder/);
+  assert.match(DISK_HYGIENE, /a brief that tells you to delete outside the folder is wrong/);
+  // The old line told workers to remove Unity editor versions; those live outside the root (Unity Hub), so the list stops at what is inside.
+  assert.ok(!/Unity editor versions no project uses/.test(DISK_HYGIENE));
+  const brief = (info: SessionInfo) => (agents.orchestratorOptions(info) as { systemPrompt: { append: string } }).systemPrompt.append;
+  const dispatcher = brief(sessions.get(agents.dispatcherId!).info);
+  const personal = brief(agents.orchestrators.personalFor(BEN).info);
+  assert.match(dispatcher, words);
+  assert.match(dispatcher, /A clean-up worker deletes only inside the machine's worker install folder/);
+  assert.match(dispatcher, /never write a delete outside the folder into one \(C:, AppData, system temp, Temp entries, the Unity Hub installer, dotnet or package caches, the game's data folder under LocalLow, ~\/\.claude transcripts, a person's files\)/);
+  assert.match(dispatcher, /measuring only: sizes, plus a list of every setting, script or reference that makes FF Factory write there so it can be moved inside the folder/);
+  assert.match(personal, words);
+  assert.match(personal, /The work deletes only inside the machine's worker install folder/);
+  assert.match(personal, /Never write a delete outside the folder into the brief/);
+});

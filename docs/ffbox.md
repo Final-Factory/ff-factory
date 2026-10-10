@@ -96,7 +96,7 @@ per rolling 24 hours; operators are not capped.
   by hand), and
   opens a PR for any files the build regenerated. `ff-agents:ci-release` drives it. A requested
   release is done only when it is live on its branch and its patch notes are posted once, as Max,
-  in #dev-patch-notes (from a machine with the ffdiscord config, LothDesktop today).
+  in #dev-patch-notes (from any machine, with `post_as_max`: FFBox posts, [Posting as Max](#posting-as-max-w901)).
 
 ## Crash and desync intake
 
@@ -197,6 +197,41 @@ A thread FFBox has not read yet (opened in the last minute, or in a channel it d
 have a person with the `ffdiscord` config download it. A deploy note: the portal and each machine's daemon must run this
 version for the tool to exist (`launch: no tool "fetch_discord_thread_files" in this version; left out` on a daemon that does
 not), and FFBox must run ffbox master from 2026-10-09 (w787) or later; before that it answers `unsupported`.
+
+### Posting as Max, from any machine (w901)
+
+Lothsahn, 2026-10-10: "at some point, a worker on LothDesktop didn't have access to publish the notes. Please make
+sure that workers can request FFBox send a discord message and has what they need." Posting as Max used to need a
+machine with the ffdiscord config (the bot token), and only LothDesktop had it. FFBox holds the bot, so now a worker on
+any machine (beast, biscuit, m3, m5, LothDesktop) posts with the machine tool **`post_as_max`**:
+
+- `channel`: `dev_patch_notes` (a release's notes), `dev_chat` or `agent_testing` (a test channel). Nothing else, and
+  never `bug_reports` or `dev_bug_reports` (FFBox's own).
+- `text` (at most 2000 characters, Discord's limit for one message) **or** `file` (a file in the worker's working
+  folder or its temp folder, at most 16 KB; the daemon reads it, `skip_lines` leaves out its first lines: a
+  release-notes file is `file: "cicd/release-notes/<version>.md", skip_lines: 2`), `thread` (a thread of that
+  channel) and `key`.
+- `key` is the dedupe key: the same key in the same place posts **once**, and a repeat answers the first message's link
+  (`Already posted`). `dev_patch_notes` needs it: the release's version. Without a key the same text in the same place
+  posts once a day.
+- It answers the message link (`https://discord.com/channels/<guild>/<channel>/<message>`) for the report.
+
+The path: the worker's `post_as_max` → the portal (`Agents.postAsMaxFor`, `server/ffboxPost.ts`) → FFBox's
+**`post_message`** query over the connector → `ffwatch` runs every guard and posts through `ffdiscord post --silent`
+(the one FFBox query that writes; FFBox's README, "Posting as Max"). The bot token never leaves FFBox, and nothing on
+this side holds a Discord credential. The guards are FFBox's: the channel allowlist (`fff_feed.POST_CHANNELS`,
+narrowed by its config `fff.post.channels`), no mention of anyone or of everyone (an `@` before a word, `<@..>`,
+`<#..>`), a secret scan, the length limit, a dedupe key, at most 12 posts an hour, and a log (table `max_post` and a
+journal line, never the text). `server/ffboxPost.ts` checks the same rules first so a worker gets a sentence at once;
+FFBox answers `refused` with its own reason for anything that passes.
+
+Every post that was made (not a repeat) is also a Max event (`MaxManager.ingest`, [max.md](max.md)), so the Max page
+and `max_activity` show it with its channel, link, first line, the session that did it and the computer it ran on. A
+failed or timed-out call is not an event; FFBox's `max_post` and `ffbox_activity` `show: "logs"` (`ffwatch`) have it. A
+timeout (FFBox answers within 12 s) may still have posted: the worker asks again with the same key and gets the link.
+The answer is never kept as a "last known" one. Deploy: the portal and each machine's daemon must run this version for
+the tool to exist, and FFBox must run ffbox master with `post_message` (connector 2.9.0); before that it answers
+`unsupported`.
 
 ## Security model
 

@@ -12,8 +12,9 @@ import { CostChip, RequestSpendBlock, SpendTab, useSpendSummary } from './Spend'
 import { contextGlance, dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, useNow, workLabel, workTone, type Tone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
+import { PermissionCard } from './Transcript';
 import { accountOf } from './SystemMeters';
-import { Chip, Confirm, Dot, Icon, Menu } from './ui';
+import { Chip, Confirm, Dot, Icon, Menu, ToggleChip } from './ui';
 import { TimersButton } from './Timers';
 
 type Tab = 'requests' | 'intake' | 'spend' | 'conversation';
@@ -38,7 +39,7 @@ export function sourceLabel(s: WorkSource): string {
     case 'release':
       return 'Release follow-up';
     case 'nightly':
-      return `Nightly e2e${s.nightly?.date ? ` ${s.nightly.date}` : ''}`;
+      return `Nightly regression${s.nightly?.date ? ` ${s.nightly.date}` : ''}`;
     case 'nightly-run':
       return `Nightly run${s.nightlyRun?.date ? ` ${s.nightlyRun.date}` : ''}`;
   }
@@ -364,7 +365,7 @@ const onOff = (on: boolean) => (on ? 'on' : 'off');
 /**
  * The intake (docs/intake.md): what is switched on, today's numbers, the Discord and FFBox requests waiting for a
  * person's approval (Approve / Decline), those already in the ledger with their state and how the fix reaches players,
- * and what the intake saw lately. The settings are config.json's; this page only shows them.
+ * and what the intake saw lately. The settings are config.json's; this page shows them, and the two nightly chips are switches.
  */
 function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: IntakeSummary; work: WorkItem[]; now: number }) {
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -375,6 +376,8 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
   const auto = items.filter((w) => w.autoClosed).sort((a, b) => b.autoClosed!.at.localeCompare(a.autoClosed!.at));
   const rest = items.filter((w) => !pendingApproval(w) && !w.autoClosed);
   const anyOn = s.discord.enabled || s.ffbox.enabled || s.release.enabled || !!s.nightly?.enabled;
+  // The nightly chips are switches (w903): config.json's setting flips live; the server pushes the new summary to every page.
+  const flip = (which: 'enabled' | 'run', on: boolean) => void act(`nightly-${which}`, () => api.toggleNightly(which, on));
   const act = async (id: string, f: () => Promise<unknown>) => {
     setBusy(id);
     await attempt(f());
@@ -414,7 +417,15 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
         </div>
         {n && (
           <div className="intake-source">
-            <Chip tone={n.enabled ? 'green' : 'grey'}>Nightly e2e {onOff(n.enabled)}</Chip>
+            <ToggleChip
+              tone={n.enabled ? 'green' : 'grey'}
+              testId="nightly-regressions-toggle"
+              disabled={busy === 'nightly-enabled'}
+              onClick={() => flip('enabled', !n.enabled)}
+              title={`Click to turn ${n.enabled ? 'off' : 'on'}: whether the lab's new and flaky regressions are filed as intake requests (config intake.nightly.enabled). Every night is recorded either way.`}
+            >
+              File regressions based on Nightly run: {onOff(n.enabled)}
+            </ToggleChip>
             <span className="dim small">
               new regressions, and scenarios flaky {n.flakyNights} nights running, from the lab's report; more than {n.batchOver} in a night become one request; at most {n.dailyCap} a day; auto-approve {n.autoApprove.enabled ? `on, ${n.autoApprove.maxPerDay} a day` : 'off'}
               {n.last ? `; last report ${n.last.date} from ${n.last.lab} (develop ${n.last.sha.slice(0, 9)}): ${n.last.filed} filed, ${n.last.attached} added to open requests, ${n.last.skipped} skipped` : ''}
@@ -423,7 +434,15 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
         )}
         {n?.run && (
           <div className="intake-source" data-testid="nightly-run">
-            <Chip tone={n.run.enabled ? 'green' : 'grey'}>Nightly run {onOff(n.run.enabled)}</Chip>
+            <ToggleChip
+              tone={n.run.enabled ? 'green' : 'grey'}
+              testId="nightly-run-toggle"
+              disabled={busy === 'nightly-run'}
+              onClick={() => flip('run', !n.run!.enabled)}
+              title={`Click to turn ${n.run.enabled ? 'off' : 'on'}: whether the portal starts the nightly lab run on its schedule (config intake.nightly.run, enabled). The time, zone, machine and person stay as they are.`}
+            >
+              Nightly run {onOff(n.run.enabled)}
+            </ToggleChip>
             <span className="dim small">
               the portal starts the lab every night at {n.run.time} {n.run.tz} on {n.run.machine}
               {n.run.person ? ` for ${n.run.person}` : ''}; no report within {n.run.reportWithinHours} h is an alarm{n.run.next ? `; next ${fmtRelative(n.run.next, now)}` : ''}
@@ -688,6 +707,17 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             <button className="link-btn small" onClick={() => navigate({ view: 'dispatcher', tab: w.mergedInto })}>
               Continues as {w.mergedInto}
             </button>
+          )}
+          {workers.flatMap((x) =>
+            x.pendingPermissions.map((p) => (
+              <div key={p.requestId} data-testid={`work-permission-${w.id}`}>
+                <p className="small tone-amber">
+                  {x.title} ({x.id}) waits for an OK
+                  {x.requestedBy && x.requestedBy.userId.toLowerCase() !== app.me?.userId.toLowerCase() ? `, for ${x.requestedBy.displayName}` : ''}:
+                </p>
+                <PermissionCard sessionId={x.id} requestId={p.requestId} toolName={p.toolName} input={p.input} reason={p.reason} pending />
+              </div>
+            )),
           )}
           {workers.map((x) => (
             <button key={x.id} className="link-btn small" onClick={() => navigate(sessionRoute(x, app))}>

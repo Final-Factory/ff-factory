@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { repoIsPublic } from './publicGit.ts';
+import { checkOutsideRootDelete } from './rootFence.ts';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
@@ -30,6 +31,10 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *   - processes: no killing Unity, node, claude or PowerShell by hand, no shutdown/restart.
  *   - files: no writes to, or shell commands naming, a protected path (the live co-op checkout, this
  *     server's own directory).
+ *   - disk: on a machine with a worker install (opts.workerRoot), no rm / rmdir / del / rd / Remove-Item / find -delete that
+ *     names a path outside the install folder (server/rootFence.ts; w896, lothsahn: "in general we should only be clearing
+ *     data in the install folder for the worker"). Inside it, the worker's own temp and a save copy in the game's saves
+ *     folder stay allowed.
  *   - Unity MCP: refused until the session pins its own editor ("<id>@<hash>"), and never another.
  *   - public repos (config publicGitIdentity, default this app's own repo, and any other GitHub repo that
  *     GitHub reports as public, server/publicGit.ts): a push is refused when a commit it would publish has
@@ -52,6 +57,8 @@ export function sandboxGuard(opts: {
   editorRunning?: () => boolean;
   /** Public repos whose pushes must carry only public commit identities (checkShell's identity rule). */
   publicIdentity?: PublicIdentity;
+  /** The machine's worker install folder (root.json's root): deleting outside it is refused (checkOutsideRootDelete). Absent: not checked. */
+  workerRoot?: string;
 }): HookCallback {
   // Drive-letter paths are normalised textually so the guard behaves the same on any host OS.
   const norm = (p: string) => (/^[a-zA-Z]:[\\/]/.test(p) ? p : path.resolve(p)).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -88,7 +95,8 @@ export function sandboxGuard(opts: {
       const reason =
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
-        checkPlayerLaunch(cmd, opts.sandboxId);
+        checkPlayerLaunch(cmd, opts.sandboxId) ??
+        (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
       if (reason) return deny(reason);
       const flat = cmd.replace(/\\/g, '/').toLowerCase();
       for (const s of spellings) {

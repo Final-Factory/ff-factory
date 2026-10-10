@@ -358,7 +358,8 @@ export type TranscriptEvent =
   | { seq: number; t: string; kind: 'result'; ok: boolean; text: string; costUsd: number; turns: number; durationMs: number; answers?: string[]; usage?: TurnUsage }
   | { seq: number; t: string; kind: 'system'; text: string }
   | { seq: number; t: string; kind: 'error'; text: string }
-  | { seq: number; t: string; kind: 'permission'; requestId: string; toolName: string; input: unknown; decision?: 'allow' | 'deny' };
+  /** decidedBy: the person who answered it in the portal (w891). */
+  | { seq: number; t: string; kind: 'permission'; requestId: string; toolName: string; input: unknown; decision?: 'allow' | 'deny'; decidedBy?: Requester };
 
 /** One computer's load: the portal's host (SystemStats) or a machine (its daemon reports it, server/system.ts). */
 export interface HostStats {
@@ -1250,6 +1251,8 @@ export interface CleanupSummary {
   /** Temp folders on a volume apart from that disk, each as RAM (a tmpfs) or a disk volume of its own: shown, never counted. */
   temp?: { path: string; freeBytes?: number; totalBytes?: number; ram: boolean }[];
   softFreeGB: number;
+  /** The machine's worker install folder (w896): clean-up deletes only inside it. Absent: the machine has none. */
+  root?: string;
   /** Still below the soft threshold after the pass. */
   belowSoft?: boolean;
   /** The biggest entries it removed. */
@@ -2092,6 +2095,8 @@ export interface SendMessageRequest {
   attachments?: string[];
   /** A reply (w866): the transcript seq of the message in this orchestrator chat it answers; the server quotes it to the orchestrator. */
   replyTo?: number;
+  /** Names this send (w893): the page sends the same id again after an answer that never came, and the server takes the message once. */
+  clientId?: string;
 }
 
 /** An emoji reaction on a message of a person's orchestrator chat (w866), or taking it back with on: false. */

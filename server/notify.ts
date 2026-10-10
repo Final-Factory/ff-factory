@@ -80,9 +80,12 @@ export class Notifier {
     this.subs = (readJsonDurable<PushSub[]>(this.file, { check: checkArray, mode: 0o600 }) ?? []).map((s) => ({ ...s, prefs: { ...DEFAULT_PREFS, ...s.prefs } }));
     for (const s of store.sessions.values()) this.lastStatus.set(s.id, s.status);
 
-    sessions.events.on('permission', (s: SessionHandle, p: { toolName: string; input: unknown }) =>
-      this.fire({ kind: 'permission', title: `${this.name(s.info)} needs you`, body: `Wants to use ${p.toolName}`, url: this.route(s.info), tag: `perm-${s.info.id}` }, this.audience?.(s.info, 'permission')),
-    );
+    // A machine's daemon sends the signal without the request (machine/daemon.ts): it is the session's newest pending one.
+    // Before w891 this read p.toolName of undefined for every worker on a machine, so no push ever went out for them.
+    sessions.events.on('permission', (s: SessionHandle, arg?: { toolName: string; input: unknown }) => {
+      const p = arg ?? s.info.pendingPermissions.at(-1);
+      this.fire({ kind: 'permission', title: `${this.name(s.info)} needs you`, body: p ? `Wants to use ${p.toolName}` : 'Wants to use a tool', url: this.route(s.info), tag: `perm-${s.info.id}` }, this.audience?.(s.info, 'permission'));
+    });
     sessions.events.on('turnEnd', (s: SessionHandle, text: string, meta?: TurnEndMeta) => {
       if (s.info.kind === 'standing') return; // runs are reported below, and only when they go wrong
       // An automatic compaction (w535) is nobody's reply: no notification; a person's /compact still says it is done.

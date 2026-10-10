@@ -14,6 +14,7 @@ import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationV
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
+import { toggleNightly } from './appConfig.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
 import { BlockerWatch } from './blockerWatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
@@ -36,7 +37,7 @@ import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealt
 import { withDismissed } from '../shared/dismissals.ts';
 import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './unitWatchdog.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
-import { DispatcherChatRefused } from './orchestrators.ts';
+import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
@@ -475,7 +476,7 @@ const hostHealth = new HostHealthMonitor({
         guard,
         mode: settings.mode,
         regular: () => planCleanup({ rules: cleanupRules(env, cfg.hostGuard.cleanup), guard, low, libraries }),
-        stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, cleanupEnv.home), ctx: staleContextOf(store.work.values()), settings, guard }),
+        stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(), ctx: staleContextOf(store.work.values()), settings, guard }),
       });
       return r;
     },
@@ -787,6 +788,25 @@ route('POST', '/api/max/refresh', async () => max.refresh());
 // ---- the intake (docs/intake.md): Discord and FFBox requests in the ledger; a person approves or declines them
 route('GET', '/api/intake', async () => intake.summary());
 route('POST', '/api/intake/poll', async () => intake.checkNow());
+// The Intake tab's nightly chips (w903): anyone signed in flips intake.nightly.enabled or .run's enabled flag, as set_app_config
+// lets anyone (appConfig.ts SETTABLE_KEYS); the same checks, the same write, live at once.
+route('POST', '/api/intake/nightly/toggle', async (req) => {
+  const b = await readJson<{ which?: unknown; on?: unknown }>(req);
+  if (b.which !== 'enabled' && b.which !== 'run') throw new HttpError(400, '"which" is "enabled" or "run"');
+  if (typeof b.on !== 'boolean') throw new HttpError(400, '"on" is true or false');
+  const me = requesterOf(req);
+  let r;
+  try {
+    r = toggleNightly(configPath(), cfg, b.which, b.on, identity.list().map((u) => u.userId));
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
+  console.log(`app config: ${r.key} ${r.before} -> ${r.after}, set by ${me.displayName} (${me.userId}) from the Intake tab`);
+  providers.configChanged();
+  const summary = intake.summary();
+  broadcast({ type: 'intake', intake: summary });
+  return { key: r.key, before: r.before, after: r.after, intake: summary };
+});
 // The ledger cleanup now (an owner's): what it closed, resumed and stalled, in a line.
 route('POST', '/api/ledger/cleanup', async (req) => {
   if (identity.get(requesterOf(req).userId)?.role !== 'owner') throw new HttpError(403, 'only the owner runs the ledger cleanup');
@@ -932,11 +952,29 @@ route('GET', '/api/search', async (_r, _p, url) => {
   });
 });
 
+/**
+ * The sends the page named (`clientId`, w893) and the server took, so a send repeated after an answer that never came
+ * (the connection dropped after the message got through) is taken once. Kept ten minutes, per chat.
+ */
+const SENDS_KEPT_MS = 10 * 60_000;
+const takenSends = new Map<string, number>();
+
 route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
   // The page has no input here; a direct POST gets this error.
   agents.orchestrators.refuseHumanChat(sessions.get(id).info);
   // Images come base64 in the JSON (the UI shrinks them first), so this body may be large.
-  const { text, images, attachments: attachmentIds, replyTo } = await readJson<SendMessageRequest>(req, 40 * 1024 * 1024);
+  const { text, images, attachments: attachmentIds, replyTo, clientId } = await readJson<SendMessageRequest>(req, 40 * 1024 * 1024);
+  const sendKey = typeof clientId === 'string' && clientId && clientId.length <= 80 ? `${id}:${clientId}` : undefined;
+  if (sendKey) {
+    const now = Date.now();
+    for (const [k, at] of takenSends) if (now - at > SENDS_KEPT_MS) takenSends.delete(k);
+    if (takenSends.has(sendKey)) return { duplicate: true };
+  }
+  /** The send went through: a repeat of it is the same message. */
+  const taken = <T>(answer: T): T => {
+    if (sendKey) takenSends.set(sendKey, Date.now());
+    return answer;
+  };
   const imgs = checkImages(images);
   // Other files were uploaded first (POST /api/attachments): the message names them by id (docs/attachments.md).
   const files = attachments.resolve(attachmentIds);
@@ -945,14 +983,14 @@ route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
   if (s.info.kind === 'standing' && s.info.standingId) {
     if (imgs.length) throw new HttpError(400, 'standing agents take text only; describe the image or put it in their folder');
     if (files.length) throw new HttpError(400, 'standing agents take text only; attach the file in an orchestrator or worker chat');
-    return { note: agents.standing.runNow(s.info.standingId, 'message', need(text, 'text'), requesterOf(req)) };
+    return taken({ note: agents.standing.runNow(s.info.standingId, 'message', need(text, 'text'), requesterOf(req)) });
   }
   if (!imgs.length && !files.length) need(text, 'text');
   if (s.info.kind === 'ops') throw new HttpError(403, OPS_REFUSED);
   mayDrive(req, s.info);
   // `/compact [focus]` (w518) is no message: it compacts the conversation. Its wake_me check-in and budgets stay.
   const focus = s.info.kind === 'orchestrator' && !imgs.length && !files.length && replyTo === undefined ? compactCommand(String(text ?? '')) : undefined;
-  if (focus !== undefined) return { note: compactNow(id, focus, requesterOf(req)) };
+  if (focus !== undefined) return taken({ note: compactNow(id, focus, requesterOf(req)) });
   // A reply carries the message it answers, quoted by the server from the transcript (w866); refused before anything else changes.
   const words = agents.orchestrators.replyWords(id, String(text ?? '').trim(), replyTo);
   if (s.info.kind === 'orchestrator') {
@@ -963,7 +1001,7 @@ route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
   // The calls a gate refused in earlier turns ride along with the person's message (w830), marked as FF Factory's.
   const said = words + (s.info.kind === 'orchestrator' ? agents.orchestrators.heldOffer(id) : '');
   await agents.sendWithAttachments(id, said, 'human', { images: imgs, attachments: files, requestedBy: requesterOf(req) });
-  return {};
+  return taken({});
 });
 
 // An emoji reaction on a message of the person's own orchestrator chat (w866): a short answer the orchestrator reads with the
@@ -1179,8 +1217,19 @@ route('POST', '/api/sessions/([\\w-]+)/interrupt', async (req, [id]) => {
 route('POST', '/api/sessions/([\\w-]+)/permission', async (req, [id]) => {
   const b = await readJson<PermissionDecisionRequest>(req);
   const s = sessions.get(id);
+  const requestId = need(b.requestId, 'requestId');
+  // A worker's permission request (w891): its own people answer it, and so does any owner, whoever's worker it is (w677).
+  if (s.info.kind === 'worker') {
+    try {
+      agents.orchestrators.answerWorkerPermission(requesterOf(req), s, requestId, !!b.allow, b.message);
+    } catch (e) {
+      if (e instanceof PermissionAnswerRefused) throw new HttpError(e.status, e.message);
+      throw e;
+    }
+    return {};
+  }
   mayDrive(req, s.info);
-  if (!s.decide(need(b.requestId, 'requestId'), !!b.allow, b.message)) throw new HttpError(404, 'no such pending request');
+  if (!s.decide(requestId, !!b.allow, b.message)) throw new HttpError(404, 'no such pending request');
   return {};
 });
 

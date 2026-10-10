@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { OWNER_ONLY_KEYS, SETTABLE_KEYS, checkReviewers, normalizeSetting, setAppConfig } from './appConfig.ts';
+import { OWNER_ONLY_KEYS, SETTABLE_KEYS, checkReviewers, normalizeSetting, setAppConfig, toggleNightly } from './appConfig.ts';
 import { claudeFromVault } from './secrets.ts';
 import type { Config } from './config.ts';
 
@@ -235,4 +235,32 @@ test('set_app_config intake.nightly.run and .enabled (w864): checked, written, a
   assert.throws(() => normalizeSetting('intake.nightly.run', { key: 'ffsb_x' }, undefined, users), /unknown key/);
   assert.throws(() => normalizeSetting('intake.nightly.enabled', 'yes'), /true or false/);
   assert.equal(OWNER_ONLY_KEYS.has('intake.nightly.run'), false);
+});
+
+test('toggleNightly (w903): the Intake tab chips flip the flag through set_app_config\'s path and keep the rest of the run block', (t) => {
+  const { file, cfg } = setup(t);
+  const users = ['ben', 'lothsahn'];
+  const run = { enabled: true, time: '03:00', tz: 'America/New_York', machine: 'lothdesktop', person: 'lothsahn', reportWithinHours: 5 };
+  setAppConfig(file, cfg, 'intake.nightly.run', run, { users });
+  // The schedule off, then on again: only `enabled` moves, in the file and in the running config.
+  assert.deepEqual(toggleNightly(file, cfg, 'run', false, users), { key: 'intake.nightly.run', before: true, after: false });
+  assert.deepEqual(cfg.intake?.nightly?.run, { ...run, enabled: false });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\ufeff/, '')).intake.nightly.run, { ...run, enabled: false });
+  assert.deepEqual(toggleNightly(file, cfg, 'run', true, users), { key: 'intake.nightly.run', before: false, after: true });
+  assert.deepEqual(cfg.intake?.nightly?.run, run);
+  // Filing the regressions, which leaves the run block alone.
+  assert.deepEqual(toggleNightly(file, cfg, 'enabled', true, users), { key: 'intake.nightly.enabled', before: false, after: true });
+  assert.deepEqual(toggleNightly(file, cfg, 'enabled', false, users), { key: 'intake.nightly.enabled', before: true, after: false });
+  assert.deepEqual(cfg.intake?.nightly, { enabled: false, run });
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\ufeff/, '')).port, 8790, 'the rest of config.json kept');
+  // No block yet: the schedule is switched on with the defaults (03:00 America/New_York on lothdesktop).
+  const fresh = setup(t);
+  assert.deepEqual(toggleNightly(fresh.file, fresh.cfg, 'run', true, users), { key: 'intake.nightly.run', before: false, after: true });
+  assert.deepEqual(fresh.cfg.intake?.nightly?.run, { enabled: true });
+  // Same checks as set_app_config: a login that no longer exists refuses the toggle, and nothing is written.
+  const gone = fs.readFileSync(file, 'utf8');
+  assert.throws(() => toggleNightly(file, cfg, 'run', false, ['ben']), /is a login/);
+  assert.equal(fs.readFileSync(file, 'utf8'), gone);
+  assert.throws(() => toggleNightly(file, cfg, 'run', 'yes' as never, users), /true or false/);
+  assert.throws(() => toggleNightly(file, cfg, 'other' as never, true, users), /"enabled" or "run"/);
 });

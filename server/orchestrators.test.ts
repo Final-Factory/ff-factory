@@ -437,6 +437,60 @@ test("w677: an owner's note on another owner's request reaches the dispatcher an
   assert.equal(w().notes!.length, 1);
 });
 
+test("w891: an owner answers another owner's worker's permission request; the transcript, the log and its owner's orchestrator say who; a member answers as before", async (t) => {
+  const { store, sessions, agents, o, dispatcher, chat, call, heard } = await setupOnMachine(t, { people: OWNERS });
+  const ben = chat(BEN).info;
+  const loth = chat(LOTH).info;
+  await call(ben, 'request_work', { title: 'Disk clean-up', brief: 'Free the disk.' });
+  const id = /Started agent (\w+)/.exec((await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Clean up #perm', title: 'Disk clean-up', work_id: 'w1' })).text)![1];
+  const w = sessions.get(id);
+  await until('the Bash prompt', () => w.info.pendingPermissions.length === 1);
+  const first = w.info.pendingPermissions[0];
+  const permEvent = (requestId: string) => store.readTranscript(id).find((e) => e.kind === 'permission' && e.requestId === requestId) as Extract<TranscriptEvent, { kind: 'permission' }>;
+
+  // Lothsahn, an owner, answers Ben's worker.
+  o.answerWorkerPermission(LOTH, w, first.requestId, true);
+  await until('the worker went on', () => w.info.pendingPermissions.length === 0);
+  await until('the event says who and what', () => permEvent(first.requestId).decision === 'allow' && permEvent(first.requestId).decidedBy?.userId === 'lothsahn');
+  assert.deepEqual(permEvent(first.requestId).decidedBy, LOTH);
+  assert.match(store.work.get('w1')!.log.join('\n'), new RegExp(`Lothsahn approved a Bash command for ${id} \\(an owner, on another person's work\\): rm -rf build`));
+  await until('Ben is told', () => heard(ben.id, '[from another owner]').some((e) => e.text.startsWith(`[from another owner] Lothsahn approved a Bash command for your worker ${id} "w1: Disk clean-up" on w1: rm -rf build\n`)));
+  assert.equal(heard(loth.id, '[from another owner]').length, 0, 'the one who answered is not told about it');
+  assert.deepEqual(w.info.requestedBy, BEN, 'the worker stays Ben\'s');
+
+  // A second request: Ben, whose worker it is, denies it; nobody is told about their own answer, the log still says.
+  sessions.send(id, 'Again #perm');
+  await until('the second prompt', () => w.info.pendingPermissions.length === 1);
+  const second = w.info.pendingPermissions[0];
+  o.answerWorkerPermission(BEN, w, second.requestId, false, 'not that');
+  await until('the second event says who', () => permEvent(second.requestId).decision === 'deny' && permEvent(second.requestId).decidedBy?.userId === 'ben');
+  assert.match(store.work.get('w1')!.log.join('\n'), new RegExp(`Ben denied a Bash command for ${id}: rm -rf build`));
+  assert.doesNotMatch(store.work.get('w1')!.log.join('\n'), /Ben denied.*an owner/);
+  assert.equal(heard(ben.id, '[from another owner]').length, 1, 'Ben is not told about his own answer');
+
+  // An answer nobody asked for is a 404, whoever gives it.
+  assert.throws(() => o.answerWorkerPermission(BEN, w, 'no-such-request', true), (e: Error & { status?: number }) => e.status === 404);
+
+  // A member answers another person's worker exactly as before (w891 changes nothing for members); Ben still hears who.
+  sessions.send(id, 'Third #perm');
+  await until('the third prompt', () => w.info.pendingPermissions.length === 1);
+  const third = w.info.pendingPermissions[0];
+  o.answerWorkerPermission(CARA, w, third.requestId, true);
+  await until('the third event says who', () => permEvent(third.requestId).decision === 'allow' && permEvent(third.requestId).decidedBy?.userId === 'cara');
+  await until('Ben is told by Cara', () => heard(ben.id, '[from another person]').some((e) => e.text.startsWith(`[from another person] Cara approved a Bash command for your worker ${id} "w1: Disk clean-up" on w1: rm -rf build\n`)));
+
+  // A member answers their own worker's request, and an owner answers it too: the member hears who.
+  const hers = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Look #perm', title: 'Cara look', from: 'human', requestedBy: CARA });
+  await until("Cara's prompt", () => hers.info.pendingPermissions.length === 1);
+  o.answerWorkerPermission(CARA, hers, hers.info.pendingPermissions[0].requestId, true);
+  await until("Cara's worker went on", () => hers.info.pendingPermissions.length === 0);
+  assert.equal(heard(chat(CARA).info.id, '[from another owner]').length, 0);
+  sessions.send(hers.info.id, 'Again #perm');
+  await until("Cara's second prompt", () => hers.info.pendingPermissions.length === 1);
+  o.answerWorkerPermission(LOTH, hers, hers.info.pendingPermissions[0].requestId, false);
+  await until('Cara is told', () => heard(chat(CARA).info.id, '[from another owner]').some((e) => e.text.startsWith(`[from another owner] Lothsahn denied a Bash command for your worker ${hers.info.id} "Cara look": rm -rf build\n`)));
+});
+
 test("w677: owners close or reopen each other's requests as their own, in any turn; a member's still needs the owner's own words", async (t) => {
   const { store, chat, call, heard } = setup(t, { people: OWNERS });
   const ben = chat(BEN);

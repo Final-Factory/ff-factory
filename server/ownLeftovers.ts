@@ -7,7 +7,7 @@ import { hasLocalWork, neverDelete, norm, removeRenamed, touchedSince, within, t
  * FF Factory's own leftovers (w626, docs/self-recovery.md "FF Factory's own leftovers"): what its agents, scripts and
  * installs leave on a machine once nothing needs it, removed by the machine daemon's clean-up while free space is below
  * the soft threshold (and in every pass asked for), without asking anyone. On 2026-10-07 the m3 fell under its 50 GB
- * guard holding about 78 GB of these (old player slots in ~/nevergames/ff-players, an old agent worktree, Unity
+ * guard holding about 78 GB of these (old player slots outside the install folder, an old agent worktree, Unity
  * editors no project used), and a worker asked people for a go instead of removing them (w596).
  *
  * - **Player slots** (the game repo's scripts/nightly/player_slots.py): a slot folder with no live lease and nothing
@@ -108,9 +108,8 @@ export function leaseLive(lease: SlotLease, o: { host: string; now: number; maxA
 
 /**
  * Every player slot root this machine may have, current or left by an older layout: the worker root's players/
- * (FF_PLAYER_SLOT_ROOT of its agents), the slot config the setup script writes, and player_slots.py's default_root()
- * candidates (~/nevergames/ff-players on a Mac; D:\work\ff-players, <D..J>:\ff-players, C:\ff-players on Windows).
- * Only the ones that exist.
+ * (FF_PLAYER_SLOT_ROOT of its agents) and the slot config the setup script writes. The old default places outside the
+ * install folder are gone (2026-10-10) and are no longer looked for. Only the ones that exist.
  */
 export function playerSlotRoots(o: { platform: string; home: string; workerRoot?: string; env?: NodeJS.ProcessEnv; read?: (p: string) => string; exists?: (p: string) => boolean }): string[] {
   const env = o.env ?? {};
@@ -129,8 +128,6 @@ export function playerSlotRoots(o: { platform: string; home: string; workerRoot?
   } catch {
     // no config
   }
-  if (win) out.push('D:\\work\\ff-players', ...'DEFGHIJ'.split('').map((d) => `${d}:\\ff-players`), `${env.SystemDrive || 'C:'}\\ff-players`);
-  else out.push(J(o.home, 'nevergames', 'ff-players'));
   const seen = new Set<string>();
   return out.filter((p) => {
     const k = norm(p);

@@ -65,7 +65,7 @@ test('w416: with one busier, the other is picked, and placing on the busier one 
   assert.equal(preferLine([beast, loth]), `Next new game-repo work: lothdesktop (${p.why}).`);
   const hint = placementHint('beast', [beast, loth]);
   assert.match(hint ?? '', /^ Note: beast has \d+% room; the next new game-repo work goes to lothdesktop \(most room/);
-  assert.match(hint ?? '', /Unless this work needs beast \(FF Factory's own repo or its deploys, the review folder, ssh to the M5 from a computer that has its key, a brief that pins it, Max posting, which only LothDesktop has, or a worker going on in its own sandbox\), put it there\.$/);
+  assert.match(hint ?? '', /Unless this work needs beast \(FF Factory's own repo or its deploys, the review folder, ssh to the M5 from a computer that has its key, a brief that pins it, or a worker going on in its own sandbox\), put it there\.$/);
   assert.equal(placementHint('lothdesktop', [beast, loth]), undefined, 'placing on the next one says nothing');
   // And the other way round: LothDesktop busier, BEAST picked.
   assert.equal(pickComputer([idle('beast', 6), { ...loth, live: 4, freeSandboxes: 0, sandboxes: 5, memUsedBytes: 50 * GB }])!.pick.id, 'beast');

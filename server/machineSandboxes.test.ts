@@ -352,12 +352,12 @@ test('machine sandboxes: the idle-editor stop and a restarted daemon', async (t)
 // ---------------------------------------------------------------- pure parts
 
 test('machine sandboxes: only a direct child of the root named after it can be deleted, never the main clone', () => {
-  assert.equal(deletable('D:\\work\\ffsb\\sb1', 'sb1', 'D:\\work\\ffsb', 'D:\\work\\FFFRepo', 'win32'), true);
-  assert.equal(deletable('d:/work/FFSB/sb1/', 'sb1', 'D:\\work\\ffsb', 'D:\\work\\FFFRepo', 'win32'), true, 'case and slashes on Windows');
-  assert.equal(deletable('D:\\work\\ffsb\\sb1\\Library', 'sb1', 'D:\\work\\ffsb', 'D:\\work\\FFFRepo', 'win32'), false);
-  assert.equal(deletable('D:\\work\\ffsb\\sb2', 'sb1', 'D:\\work\\ffsb', 'D:\\work\\FFFRepo', 'win32'), false);
-  assert.equal(deletable('D:\\work\\FFFRepo', 'fffrepo', 'D:\\work', 'D:\\work\\FFFRepo', 'win32'), false, 'the main clone itself');
-  assert.equal(deletable('D:\\work\\FFFRepo\\sb', 'sb', 'D:\\work\\FFFRepo', 'D:\\work\\FFFRepo', 'win32'), false, 'inside the main clone');
+  assert.equal(deletable('D:\\work\\ffsb\\sb1', 'sb1', 'D:\\work\\ffsb', 'D:\\work\\mainrepo', 'win32'), true);
+  assert.equal(deletable('d:/work/FFSB/sb1/', 'sb1', 'D:\\work\\ffsb', 'D:\\work\\mainrepo', 'win32'), true, 'case and slashes on Windows');
+  assert.equal(deletable('D:\\work\\ffsb\\sb1\\Library', 'sb1', 'D:\\work\\ffsb', 'D:\\work\\mainrepo', 'win32'), false);
+  assert.equal(deletable('D:\\work\\ffsb\\sb2', 'sb1', 'D:\\work\\ffsb', 'D:\\work\\mainrepo', 'win32'), false);
+  assert.equal(deletable('D:\\work\\mainrepo', 'mainrepo', 'D:\\work', 'D:\\work\\mainrepo', 'win32'), false, 'the main clone itself');
+  assert.equal(deletable('D:\\work\\mainrepo\\sb', 'sb', 'D:\\work\\mainrepo', 'D:\\work\\mainrepo', 'win32'), false, 'inside the main clone');
   assert.equal(deletable('/Users/b/ffsb/sb1', 'sb1', '/Users/b/ffsb', '/Users/b/FinalFactory', 'darwin'), true);
   assert.equal(deletable('/Users/b/FFSB/sb1', 'sb1', '/Users/b/ffsb', '/Users/b/FinalFactory', 'darwin'), false, 'a Mac compares exactly');
 });
@@ -413,7 +413,7 @@ test('machine sandboxes: settings, limits, references and snapshots on the porta
   ]);
   assert.deepEqual(mergeSandboxes(prev, []), [], 'gone on the machine, gone here');
 
-  const m = { repoPath: 'D:\\work\\FFFRepo', home: 'C:\\Users\\l', platform: 'win32' as const, sandboxRoot: 'D:\\work\\ffsb' };
+  const m = { repoPath: 'D:\\work\\mainrepo', home: 'C:\\Users\\l', platform: 'win32' as const, sandboxRoot: 'D:\\work\\ffsb' };
   assert.equal(machineForPath('D:/work/ffsb/sb1/Assets/Screenshots/a.png', [m]), m, "a sandbox's screenshot belongs to its machine");
 
   const cfg = JSON.parse(daemonConfig({ portalUrl: 'https://p', id: 'x', token: 't', repoPath: '/r', sandboxes: poolSettingsOf({ sandboxRoot: '/s', maxSandboxes: 3 }) }));

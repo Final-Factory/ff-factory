@@ -38,7 +38,7 @@ const machine = (id: string, extra: Partial<Machine> = {}): Machine => ({
   purpose: 'unused',
   status: 'ready',
   online: true,
-  repoPath: 'D:/work/FFFRepo',
+  repoPath: 'D:/work/mainrepo',
   home: 'C:/Users/dev',
   portalUrl: 'https://portal.example',
   sessionIds: [],
