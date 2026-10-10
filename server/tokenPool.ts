@@ -261,8 +261,9 @@ export function poolBanner(tokens: readonly { name: string; last4: string; view:
  * The banners one person's page shows (w747): those about the whole system (no `person`) and those about their own pool
  * only. Ben never sees lothsahn's pool banner and lothsahn never sees Ben's. Undefined when none is left.
  */
-export function warningsForUser<T extends { person?: string }>(all: readonly T[] | undefined, user: string): T[] | undefined {
-  const mine = (all ?? []).filter((w) => !w.person || w.person.toLowerCase() === user.toLowerCase());
+export function warningsForUser<T extends { person?: string; owners?: boolean }>(all: readonly T[] | undefined, user: string, isOwner = false): T[] | undefined {
+  // `owners`: the owners see it too (w904: a GitHub token's banner is for its person and every owner).
+  const mine = (all ?? []).filter((w) => !w.person || w.person.toLowerCase() === user.toLowerCase() || (w.owners && isOwner));
   return mine.length ? mine : undefined;
 }
 
