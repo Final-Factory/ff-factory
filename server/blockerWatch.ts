@@ -19,6 +19,7 @@ import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
 import { blockerVerdict, CI_REF, gatesOf, type BlockerFacts } from '../shared/blockers.ts';
+import { conditionalVerdict } from '../shared/conditional.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
 
 const EVERY_MS = 60_000;
@@ -30,11 +31,11 @@ const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting',
 
 export type CiState = { done: boolean; text: string };
 /** A pull request's state (w754): open, merged, or closed without merging, and a line saying how. */
-export type PrState = { state: 'open' | 'merged' | 'closed'; text: string };
+export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?: string };
 
 export interface BlockerWatchDeps {
   store: Store;
-  orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom'>;
+  orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'>;
   /** The commit the portal runs. */
   portalSha?: () => string | undefined;
   /** The commit a machine's daemon runs. */
@@ -124,6 +125,19 @@ export class BlockerWatch {
         else continue;
         const was = bad ?? cleared[0];
         did.set(live.id, `${bad ? was.v.state : 'clear'}: ${(bad ? [bad] : cleared).map((x) => x.v.why).join('; ')}`);
+      }
+      // Conditional decisions (w830): a person's "close it once #1314 merges", carried out or dropped when the fact is met.
+      const decided = [...this.d.store.work.values()].filter((w) => w.conditional?.length);
+      for (const w of decided) for (const c of w.conditional!) if (c.when.kind !== 'request_done' && !pr.has(c.when.ref)) pr.set(c.when.ref, await this.prOf(c.when.ref));
+      const cfacts = { now: this.now(), work: (id: string) => this.d.store.work.get(id.toLowerCase()), pr: (ref: string) => pr.get(ref) };
+      for (const w of decided) {
+        for (const c of [...(this.d.store.work.get(w.id)?.conditional ?? [])]) {
+          const v = conditionalVerdict(c, cfacts);
+          if (v.state === 'wait') continue;
+          if (v.state === 'run') this.d.orchestrators.carryOutConditional(w.id, c.id, v.why);
+          else this.d.orchestrators.dropConditional(w.id, c.id, v.why);
+          did.set(c.id, `${v.state}: ${v.why}`);
+        }
       }
       const room = this.d.room?.();
       if (room?.length) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');
@@ -261,8 +275,8 @@ const clipLine = (s: string, n: number) => {
 };
 
 /** What a pull request says about itself (gh pr view): open, merged, or closed without merging (w754). */
-export function prState(pr: { state?: string }, ref: string): PrState {
-  if (pr.state === 'MERGED') return { state: 'merged', text: `${ref} merged` };
+export function prState(pr: { state?: string; mergeCommit?: { oid?: string } | null }, ref: string): PrState {
+  if (pr.state === 'MERGED') return { state: 'merged', text: `${ref} merged`, ...(pr.mergeCommit?.oid ? { sha: pr.mergeCommit.oid } : {}) };
   if (pr.state === 'CLOSED') return { state: 'closed', text: `${ref} was closed without merging` };
   return { state: 'open', text: `${ref} is still open` };
 }
@@ -271,9 +285,9 @@ export function prState(pr: { state?: string }, ref: string): PrState {
 export async function ghPr(ref: string, run: Runner = runProc): Promise<PrState> {
   const m = CI_REF.exec(ref);
   if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
-  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,mergeCommit'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
   if (r.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(r)}`);
-  return prState(JSON.parse(r.stdout) as { state?: string }, ref);
+  return prState(JSON.parse(r.stdout) as { state?: string; mergeCommit?: { oid?: string } | null }, ref);
 }
 
 type Runner = (cmd: string, args: string[], opts?: RunOptions) => Promise<RunResult>;

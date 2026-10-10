@@ -455,7 +455,7 @@ test("w677: owners close or reopen each other's requests as their own, in any tu
   assert.equal((await call(loth.info, 'update_work', { id: 'w1', reopen: true, note: 'The sort is back to oldest first.' })).isError, false);
   assert.equal(store.work.get('w1')!.status, 'new');
   // A member's request: an owner still needs their own words in this turn.
-  assert.match((await call(loth.info, 'update_work', { id: 'w2', close: 'done', note: 'looks done' })).text, /only Lothsahn, in their own words in this turn, closes or reopens Cara's request w2: ask them/);
+  assert.match((await call(loth.info, 'update_work', { id: 'w2', close: 'done', note: 'looks done' })).text, /only Lothsahn, in their own words in this turn, closes or reopens Cara's request w2, and this turn is not theirs .*Held: FF Factory offers this call back to you on Lothsahn's next message. If Lothsahn already decided it, do it on their next message; don't ask Lothsahn again./);
   assert.equal(store.work.get('w2')!.status, 'new');
   // A member closes nobody else's, in any turn.
   chat(CARA).lastFrom = 'human';

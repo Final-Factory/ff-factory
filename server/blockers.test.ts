@@ -260,7 +260,7 @@ test("w829: ghChecks reads the rollup; where GitHub refuses it, the PR state and
   await assert.rejects(ghChecks('#1328', ok.run), /"#1328" is not a pull request/);
   // The pr blocker's read throws the same way.
   await assert.rejects(ghPr(ref, down.run), /gh pr view Final-Factory\/FinalFactory#1328: HTTP 401: Bad credentials/);
-  assert.deepEqual(await ghPr(ref, fakeGh([{ match: /--json state$/, out: { state: 'MERGED' } }]).run), { state: 'merged', text: `${ref} merged` });
+  assert.deepEqual(await ghPr(ref, fakeGh([{ match: /--json state,mergeCommit$/, out: { state: 'MERGED' } }]).run), { state: 'merged', text: `${ref} merged` });
 });
 
 test('w829: CI that cannot be read clears its block after CI_UNREADABLE_MS so its worker looks itself; the clock restarts with a new block', () => {

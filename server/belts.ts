@@ -43,6 +43,8 @@ export const PERSONAL_TOOLS: ReadonlySet<string> = new Set([
   'request_work',
   'list_work',
   'update_work',
+  // its person's decisions that wait for a fact (w830; recording is update_work when)
+  'conditional_decisions',
   // another person's own orchestrator (scoped in the handler)
   'message_person',
   // its person's FFBox conversations (scoped in the handler: only the person's own linked requests)
@@ -55,7 +57,7 @@ export const PERSONAL_TOOLS: ReadonlySet<string> = new Set([
 export const OPS_TOOLS: ReadonlySet<string> = new Set(['list_machines', 'list_sandboxes', 'system_status', 'wake_me']);
 
 /** Tools that need a person's own orchestrator (its chat's budget, its person's requests, its person as the sender). */
-const PERSONAL_ONLY: ReadonlySet<string> = new Set(['request_work', 'update_work', 'message_person', 'reply_to_ffbox', 'ops_worker']);
+const PERSONAL_ONLY: ReadonlySet<string> = new Set(['request_work', 'update_work', 'conditional_decisions', 'message_person', 'reply_to_ffbox', 'ops_worker']);
 
 /** The dispatcher has no heartbeat of its own: each person's wakes their own orchestrator. */
 const NOT_DISPATCHER: ReadonlySet<string> = new Set([...PERSONAL_ONLY, 'set_heartbeat']);
