@@ -16,7 +16,7 @@ import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
 import { toggleNightly } from './appConfig.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
-import { BlockerWatch } from './blockerWatch.ts';
+import { BlockerWatch, ghPrHealth } from './blockerWatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
@@ -607,6 +607,8 @@ const blockerWatch = new BlockerWatch({
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
 agents.blockerWatch = blockerWatch;
+// A ci: wait is checked against its pull request when set (w907): a conflict or a push that did not land is refused.
+agents.prHealth = (ref) => ghPrHealth(ref, ghRunner(undefined, `the head of ${ref}`));
 // Whether the blocker watch can read CI at all (w889): measured at start and every half hour, said loudly when it cannot.
 const ciRead = new CiReadWatch({
   repo: () => repoSlug(cfg.repo.url),

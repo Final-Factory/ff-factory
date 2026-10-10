@@ -313,6 +313,12 @@ days; a deploy is a person's call, and a week without one is worth their look.
      worker that serves it alone (`Orchestrators.cancelCheckIns`, via `Agents.cancelWake`; the log says which) and the
      worker brief says not to set one. A worker can also cancel its own with `cancel_wake`. The block clears by itself and
      the dispatcher resumes the worker (`[ledger] … is unblocked … message_agent with work_id to its worker`).
+  6. **A `ci:` wait is checked, and a PR that cannot get CI wakes its worker** (w907): `blocked_on` takes `head` (the commit
+     just pushed) and refuses a `ci:` PR that conflicts or whose head is another commit; the blocker watch clears the gate at
+     once on a conflict with no check started, or no CI run for the head after 10 minutes, with "PR #N conflicts with <base>
+     (CI can't run): merge <base> in, resolve, push, and wait again" ([machines.md](machines.md#placing-work), "A PR that
+     cannot get CI"). Changelog notes are one file each in `changelog.d/` since the same day, so PRs stop conflicting on
+     CHANGELOG.md.
   5. **Waiting on a deploy frees the sandbox and wakes the worker** (w890, lothsahn: "We should not wait for a worker waiting
      for a deploy ... once the deploy has happened, the worker can get rescheduled by the dispatcher"). `blocked_on` also
      takes `deploys` (`"portal"`, or a machine id for its daemon update): a `deploy` gate, cleared when a different commit

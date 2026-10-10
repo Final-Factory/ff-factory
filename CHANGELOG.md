@@ -4,7 +4,8 @@ All notable changes to FF Factory are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Until 1.0 a minor bump may break things.
 
-Add your change under **[Unreleased]** in the same pull request. `npm run release -- minor` (or
+Add your change as a note file in `changelog.d/` in the same pull request (not here: see changelog.d/README.md). Notes
+already under **[Unreleased]** stay until the next release. `npm run release -- minor` (or
 `patch`, `major`, `X.Y.Z`) moves those notes under a new version, bumps `package.json` and
 `web/package.json`, commits and tags `vX.Y.Z`.
 

@@ -18,7 +18,7 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, gatesOf, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, gatesOf, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
@@ -34,7 +34,8 @@ const CI_EVERY_MS = 2 * 60_000;
 const READ_FAIL_LOG_MS = 30 * 60_000;
 const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
 
-export type CiState = { done: boolean; text: string };
+/** `none`: no check or workflow run exists for the pull request's head yet (w907: it may never get one). */
+export type CiState = { done: boolean; text: string; none?: boolean };
 /** A pull request's state (w754): open, merged, or closed without merging, and a line saying how. */
 export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?: string };
 
@@ -56,6 +57,8 @@ export interface BlockerWatchDeps {
    * waiting on it is for, w868; server/githubTokens.ts). Throws (or answers undefined) when they cannot be read.
    */
   ci?: (ref: string, person?: string) => Promise<CiState | undefined>;
+  /** A pull request's head and mergeability ("owner/repo#123", w907); default gh, as for ci. */
+  prHealth?: (ref: string, person?: string) => Promise<PrHealth | undefined>;
   /** A pull request's state ("owner/repo#123"); default gh, as for ci. */
   pr?: (ref: string, person?: string) => Promise<PrState | undefined>;
   /** Whose GitHub token a request's reads use (w868); undefined: the portal's own gh login. */
@@ -72,7 +75,11 @@ export class BlockerWatch {
   private readonly ciSeen = new Map<string, { at: number; state?: CiState }>();
   /** w829: pull requests whose checks could not be read: since when, why, and when that was last logged. */
   private readonly ciFailing = new Map<string, { since: number; why: string; logged: number }>();
+  private readonly healthSeen = new Map<string, { at: number; state?: PrHealth }>();
+  /** "<ref>@<head sha>" to when this portal first saw that head (w907: the clock of the no-CI-run rule). */
+  private readonly headFirstSeen = new Map<string, number>();
   private readonly prSeen = new Map<string, { at: number; state?: PrState }>();
+  private readonly healthFailing = new Map<string, { since: number; why: string; logged: number }>();
   private readonly prFailing = new Map<string, { since: number; why: string; logged: number }>();
   private readonly d: BlockerWatchDeps;
 
@@ -112,15 +119,18 @@ export class BlockerWatch {
       const blocked = [...this.d.store.work.values()].filter((w) => w.status === 'blocked' && w.blocked && w.blocked.by !== 'ledger cleanup');
       const ci = new Map<string, CiState | undefined>();
       const pr = new Map<string, PrState | undefined>();
+      const health = new Map<string, PrHealth | undefined>();
       for (const w of blocked) {
         for (const g of gatesOf(w)) {
           if (!g.ref) continue;
           // A pull request several requests wait on is read once, on the first one's person's token.
           if (g.kind === 'ci' && !ci.has(g.ref)) ci.set(g.ref, await this.ciOf(g.ref, this.d.githubPerson?.(w)));
           else if (g.kind === 'pr' && !pr.has(g.ref)) pr.set(g.ref, await this.prOf(g.ref, this.d.githubPerson?.(w)));
+          // w907: its head and mergeability, for a ci gate and for a pr gate its worker set itself.
+          if ((g.kind === 'ci' || (g.kind === 'pr' && g.by.startsWith('worker '))) && !health.has(g.ref)) health.set(g.ref, await this.healthOf(g.ref, this.d.githubPerson?.(w)));
         }
       }
-      const facts = this.facts(ci, pr);
+      const facts = this.facts(ci, pr, health);
       for (const w of blocked) {
         const live = this.d.store.work.get(w.id);
         if (!live || live.status !== 'blocked' || !live.blocked) continue;
@@ -164,7 +174,7 @@ export class BlockerWatch {
     return did;
   }
 
-  private facts(ci: ReadonlyMap<string, CiState | undefined>, pr: ReadonlyMap<string, PrState | undefined>): BlockerFacts {
+  private facts(ci: ReadonlyMap<string, CiState | undefined>, pr: ReadonlyMap<string, PrState | undefined>, health: ReadonlyMap<string, PrHealth | undefined>): BlockerFacts {
     const store = this.d.store;
     return {
       now: this.now(),
@@ -185,7 +195,34 @@ export class BlockerWatch {
         return f && { since: f.since, why: f.why };
       },
       pr: (ref) => pr.get(ref),
+      prHealth: (ref) => health.get(ref),
     };
+  }
+
+  /**
+   * A pull request's head and mergeability, read at most every CI_EVERY_MS (w907). A read that fails is logged as for CI
+   * and answers undefined (no conflict is assumed). The first time a head commit is seen starts its no-CI-run clock.
+   */
+  private async healthOf(ref: string, person?: string): Promise<PrHealth | undefined> {
+    const seen = this.healthSeen.get(ref);
+    const now = this.now();
+    if (seen && now - seen.at < CI_EVERY_MS) return seen.state;
+    let state: PrHealth | undefined;
+    let why = 'no answer';
+    try {
+      state = await (this.d.prHealth ? this.d.prHealth(ref, person) : ghPrHealth(ref, ghRunner(person, `the head of ${ref}`)));
+    } catch (e) {
+      why = clipLine((e as Error).message, 300);
+    }
+    if (state?.head) {
+      const key = `${ref}@${state.head}`;
+      if (!this.headFirstSeen.has(key)) this.headFirstSeen.set(key, now);
+      state = { ...state, headSeenAt: this.headFirstSeen.get(key) };
+      for (const [k, at] of this.headFirstSeen) if (now - at > 7 * 86_400_000) this.headFirstSeen.delete(k);
+    }
+    this.healthSeen.set(ref, { at: now, state });
+    this.noteRead(this.healthFailing, 'the head of', ref, now, state ? 'read' : undefined, why);
+    return state;
   }
 
   /** A pull request's state, read at most every CI_EVERY_MS (w754). A read that fails is logged as for CI (w829). */
@@ -254,7 +291,7 @@ export function checksState(pr: { state?: string; statusCheckRollup?: GhCheck[] 
   if (pr.state === 'MERGED' || pr.state === 'CLOSED') return { done: true, text: `${ref} is ${pr.state.toLowerCase()}` };
   const checks = pr.statusCheckRollup ?? [];
   const running = checks.filter((c) => (c.status ? c.status !== 'COMPLETED' : c.state === 'PENDING' || c.state === 'EXPECTED'));
-  if (!checks.length) return { done: false, text: `${ref} has no checks yet` };
+  if (!checks.length) return { done: false, text: `${ref} has no checks yet`, none: true };
   if (running.length) return { done: false, text: `${running.length} of ${checks.length} checks on ${ref} still running` };
   const failed = checks.filter((c) => ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes((c.conclusion ?? c.state ?? '').toUpperCase()));
   return { done: true, text: failed.length ? `CI on ${ref} finished: ${failed.length} of ${checks.length} checks failed (${failed.slice(0, 3).map((c) => c.name ?? c.context).join(', ')})` : `CI on ${ref} finished: all ${checks.length} checks passed or skipped` };
@@ -305,7 +342,7 @@ interface GhRun {
  */
 export function runsState(body: { workflow_runs?: GhRun[] }, ref: string): CiState {
   const runs = body.workflow_runs ?? [];
-  if (!runs.length) return { done: false, text: `${ref} has no workflow runs yet` };
+  if (!runs.length) return { done: false, text: `${ref} has no workflow runs yet`, none: true };
   const running = runs.filter((r) => (r.status ?? '').toLowerCase() !== 'completed');
   if (running.length) return { done: false, text: `${running.length} of ${runs.length} workflow runs on ${ref} still running (${running.slice(0, 3).map((r) => r.name).join(', ')})` };
   const failed = runs.filter((r) => ['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure'].includes((r.conclusion ?? '').toLowerCase()));
@@ -322,6 +359,29 @@ export function prState(pr: { state?: string; mergeCommit?: { oid?: string } | n
   if (pr.state === 'MERGED') return { state: 'merged', text: `${ref} merged`, ...(pr.mergeCommit?.oid ? { sha: pr.mergeCommit.oid } : {}) };
   if (pr.state === 'CLOSED') return { state: 'closed', text: `${ref} was closed without merging` };
   return { state: 'open', text: `${ref} is still open` };
+}
+
+/** What `gh pr view` says for a pull request's health (w907): its state, GitHub's mergeability, base branch and head commit. */
+export function prHealthOf(pr: { state?: string; mergeable?: string; baseRefName?: string; headRefOid?: string; headRefName?: string }): PrHealth {
+  const state = pr.state === 'MERGED' ? 'merged' : pr.state === 'CLOSED' ? 'closed' : 'open';
+  return {
+    state,
+    ...(pr.mergeable === 'CONFLICTING' ? { conflict: { base: pr.baseRefName || 'its base branch' } } : {}),
+    ...(pr.headRefOid ? { head: pr.headRefOid } : {}),
+    ...(pr.headRefName ? { headRef: pr.headRefName } : {}),
+  };
+}
+
+/**
+ * A pull request's health through gh (Pull requests: read only; no checks, no Actions). `mergeable` is UNKNOWN for a
+ * moment after a push while GitHub works it out: that reads as no conflict, and the next read decides.
+ */
+export async function ghPrHealth(ref: string, run: Runner = runProc): Promise<PrHealth> {
+  const m = CI_REF.exec(ref);
+  if (!m) throw new Error(`"${ref}" is not a pull request (owner/repo#123)`);
+  const r = await run('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state,mergeable,baseRefName,headRefOid,headRefName'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  if (r.code !== 0) throw new Error(`gh pr view ${ref}: ${ghSaid(r)}`);
+  return prHealthOf(JSON.parse(r.stdout) as Parameters<typeof prHealthOf>[0]);
 }
 
 /** A pull request's state through gh; throws, saying what gh said, when it cannot be read (w829). */
