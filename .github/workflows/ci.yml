@@ -12,8 +12,11 @@ on:
         type: boolean
         default: false
 
+# A push to main runs only the secret scan and the identity check (w925, lothsahn: "3B"): its pull request already ran the
+# whole suite, as FinalFactory's develop does. Each push to main is its own group, so a later merge never cancels them (68
+# of 310 main commits lost their run that way, w922). The whole suite on main by hand: gh workflow run ci.yml --ref main.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -21,6 +24,8 @@ permissions:
 
 env:
   NODE_VERSION: 24
+  # The secret scan's, and the pre-push check's test (w924) in the checks job.
+  GITLEAKS_VERSION: 8.30.1
   # Every unit-test run: a test that runs 5 min fails by name (none takes over 70 s; the few longer ones set their own
   # timeout), and scripts/test-watchdog.ts ends a run that outlives its deadline, naming the tests still running and the
   # processes under it. Before, a hung run was cancelled at the job's timeout with its whole log lost (w906).
@@ -39,6 +44,8 @@ env:
 
 jobs:
   checks:
+    # Not on a push to main (w925): see concurrency above.
+    if: github.event_name != 'push'
     # Linux only: every unit test runs here. The few that also need Windows run in windows.yml, only when a pull request
     # touches what they cover (.github/windows-tests.txt; w910, lothsahn 2026-10-10). Until w910 the whole suite ran
     # again on two Windows runners for every pull request.
@@ -62,6 +69,16 @@ jobs:
         run: npm run typecheck
       - name: Typecheck (web)
         run: npm --prefix web run typecheck
+      - name: gitleaks on the PATH, for the pre-push check's test (scripts/prepush.test.ts, w924)
+        run: |
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$file" "$base/$file"
+          curl -sSfL -o "$RUNNER_TEMP/checksums.txt" "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          (cd "$RUNNER_TEMP" && grep " $file\$" checksums.txt | sha256sum -c -)
+          mkdir -p "$RUNNER_TEMP/bin" && tar -xzf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          command -v shellcheck || { echo "::error::shellcheck is missing on this runner; the pre-push test needs it"; exit 1; }
       - name: Unit tests with coverage
         timeout-minutes: 11
         shell: bash
@@ -105,6 +122,8 @@ jobs:
         run: sudo --preserve-env=PATH deploy/vm/test/fff-ops-socket.test.sh
 
   e2e:
+    # Not on a push to main (w925): see concurrency above.
+    if: github.event_name != 'push'
     name: Playwright (Chromium + WebKit, ${{ matrix.shard }}/3)
     # The same tests, split across three runners by file (playwright test --shard); each starts its own servers.
     # The browsers are in the runner image, not downloaded: Chromium's build comes from storage.googleapis.com, which is every

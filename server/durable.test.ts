@@ -127,8 +127,22 @@ test('an older backup scheme counts too (config.json.prev), and a BOM is fine', 
   assert.deepEqual(readJsonDurable(f, { check: checkObject, extra: [`${f}.prev`] }), { port: 8787 });
 });
 
-test('background saves: a steady stream of changes cannot postpone the write', async (t) => {
+/** Every FileHandle.sync() (SnapshotFile's background fsync) waits `ms` first, for this test only: a loaded Windows runner. */
+async function slowFsync(t: { after: (fn: () => void) => void }, dir: string, ms: number) {
+  const h = await fs.promises.open(path.join(dir, 'probe'), 'w');
+  const proto = Object.getPrototypeOf(h) as { sync: () => Promise<void> };
+  await h.close();
+  const sync = proto.sync;
+  proto.sync = async function (this: unknown) {
+    await new Promise((r) => setTimeout(r, ms));
+    return sync.call(this);
+  };
+  t.after(() => (proto.sync = sync));
+}
+
+async function steadyStream(t: { after: (fn: () => void) => void }, fsyncMs = 0) {
   const dir = tmp(t);
+  if (fsyncMs) await slowFsync(t, dir, fsyncMs);
   const f = path.join(dir, 'state.json');
   let n = 0;
   const s = new SnapshotFile(f, () => JSON.stringify({ n }), { delayMs: 50, intervalMs: 200, label: 'test' });
@@ -150,7 +164,14 @@ test('background saves: a steady stream of changes cannot postpone the write', a
   assert.ok(seen > 5 && seen <= n, `a recent version (${seen} of ${n})`);
   await s.idle();
   assert.equal(read(f).n, n, 'and the last change once they stop');
-});
+}
+
+test('background saves: a steady stream of changes cannot postpone the write', (t) => steadyStream(t));
+
+// The Windows runners' failure (9 in 14 days, w926): each fsync took over half a second, and a test that read the file at a
+// fixed 700 ms found n 2 or 3 ("a recent version (2 of 100)"). Windows runs this file only once a day since w910, so the
+// slow fsync is made here, where every pull request runs it. The test before w636's fix failed 40 of 40 this way.
+test('background saves: a slow fsync (a loaded Windows runner) does not fail the steady stream either', (t) => steadyStream(t, 500));
 
 test('background saves: a synchronous flush is never overtaken by an older background write', async (t) => {
   const dir = tmp(t);

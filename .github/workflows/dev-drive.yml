@@ -5,6 +5,7 @@ name: Worker Dev Drive end to end
 # letter from V: down, re-run (idempotent), detached and brought back by the boot task at the same letter, then again with its
 # letter taken. GitHub's Windows runner is elevated and has the virtual disk service.
 # docs/worker-install.md, "The Dev Drive".
+# On pull requests and by hand only; never on a push to main, whose pull request ran it (w925).
 
 on:
   pull_request:
@@ -13,13 +14,6 @@ on:
       - 'scripts/worker/devdrive.ps1'
       - 'scripts/worker/devdrive.ts'
       - 'scripts/worker/test/devdrive-e2e.ts'
-      - 'scripts/privileged/**'
-      - 'scripts/install-privileged-helpers.ps1'
-      - '.github/workflows/dev-drive.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'scripts/worker/devdrive.ps1'
       - 'scripts/privileged/**'
       - 'scripts/install-privileged-helpers.ps1'
       - '.github/workflows/dev-drive.yml'

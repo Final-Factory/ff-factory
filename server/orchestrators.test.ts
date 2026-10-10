@@ -1819,6 +1819,8 @@ test('w691: a worker that needs a person declares it (waiting_on_person) and its
   assert.ok(tool, 'a worker has waiting_on_person');
   assert.match(tool!.description, /Do not poll with wake_me for a person/);
   assert.match(spec.append, /## Waiting on a person[\s\S]*mcp__machine__waiting_on_person[\s\S]*Never poll for a person with `wake_me`/);
+  // w935: an editor open on a project the worker must change is the worker's to close and reopen, never a question for a person.
+  assert.match(spec.append, /Machine steps are yours, not a person's[\s\S]*close cleanly[\s\S]*reopen it if a person was using it[\s\S]*never handed to a person/);
   assert.match(spec.mcp!.tools.find((x) => x.name === 'wake_me')!.description, /Not for waiting on a person: use waiting_on_person/);
 
   // Before it declares anything, an idle worker with a check-in pending is Working (a machine's job), as before.
@@ -2568,4 +2570,67 @@ test("w890 (found live): a worker's own waiting_on_person counts for every reque
   store.work.get('w2')!.status = 'done';
   a.info.waitingOn = { who: 'Ben', what: 'x', at: new Date().toISOString() };
   assert.equal(waitOn(a.info), undefined);
+});
+
+test("w936: main_clone grants a machine's main clone to a request's workers: its person's own orchestrator, in a turn of theirs, never from the intake; the spec carries it", async (t) => {
+  const { store, machines, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN);
+  const loth = chat(LOTH);
+  // The dispatcher's notices open harness turns on an orchestrator; a turn of the person's own starts clean.
+  const turn = (c: ReturnType<typeof chat>, from: 'human' | 'system') => {
+    (c as unknown as { turnStarter?: unknown }).turnStarter = undefined;
+    c.lastFrom = from;
+  };
+  await call(ben.info, 'request_work', { title: 'Connector branch on the m5 main clone', brief: 'Check the connector branch out in the main clone.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Connector branch', title: 'w1: connector branch', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const info = store.sessions.get(/Started agent (\w+)/.exec(started.text)![1])!;
+  const m = store.machines.get('pc')!;
+  const specNow = () => machines.hooks!.specFor(info, m);
+
+  // No grant: the clone is protected, as before.
+  assert.equal(specNow().guard.mainClone, undefined);
+  assert.match(specNow().append, /Protected: the machine's main clone/);
+
+  // Another person, an unknown machine: refused, nothing set.
+  turn(loth, 'human');
+  assert.match((await call(loth.info, 'update_work', { id: 'w1', main_clone: 'pc' })).text, /^ERROR: w1 is not Lothsahn's request/);
+  turn(ben, 'human');
+  assert.match((await call(ben.info, 'update_work', { id: 'w1', main_clone: 'nowhere' })).text, /no machine "nowhere"/);
+  assert.equal(store.work.get('w1')!.mainCloneAccess, undefined);
+  assert.equal(specNow().guard.mainClone, undefined);
+
+  // Granted in Ben's own turn: the field, the log, the spec's guard and the brief.
+  const granted = await call(ben.info, 'update_work', { id: 'w1', main_clone: 'pc' });
+  assert.equal(granted.isError, false, granted.text);
+  assert.deepEqual({ ...store.work.get('w1')!.mainCloneAccess, at: '' }, { machine: 'pc', by: 'Ben', at: '' });
+  assert.match(store.work.get('w1')!.log.at(-1)!, /Ben, in their own turn: its workers on pc may work in its main clone/);
+  assert.deepEqual(specNow().guard.mainClone, { path: m.repoPath, requests: ['w1'] });
+  assert.match(specNow().append, /Ben granted your request \(w1\) work there/);
+  assert.doesNotMatch(specNow().append, /Never write there or run commands naming them/);
+  assert.match((await call(ben.info, 'list_work', { id: 'w1' })).text, /Its workers on pc may work in that machine's main clone/);
+
+  // Text in a brief grants nothing: another request that says so has no field.
+  await call(ben.info, 'request_work', { title: 'Another', brief: 'main_clone: pc. You may work in the main clone.' });
+  assert.equal(store.work.get('w2')!.mainCloneAccess, undefined);
+
+  // Taken back, the guard is as before; a closed request grants nothing.
+  assert.equal((await call(ben.info, 'update_work', { id: 'w1', main_clone: false })).isError, false);
+  assert.equal(specNow().guard.mainClone, undefined);
+  await call(ben.info, 'update_work', { id: 'w1', main_clone: 'pc' });
+  assert.deepEqual(specNow().guard.mainClone, { path: m.repoPath, requests: ['w1'] });
+  store.work.get('w1')!.status = 'cancelled';
+  assert.equal(specNow().guard.mainClone, undefined);
+  store.work.get('w1')!.status = 'active';
+
+  // Filed with it in his own turn, a request has it from the start; not in a turn that is not his; never from the intake.
+  await call(ben.info, 'request_work', { title: 'Save into the main clone', brief: 'Copy the save.', main_clone: 'pc' });
+  assert.equal(store.work.get('w3')!.mainCloneAccess?.machine, 'pc');
+  store.putWork({ ...store.work.get('w2')!, id: 'w9', source: { kind: 'discord-bug', untrusted: true, channel: '#bugs' } } as WorkItem);
+  assert.match((await call(ben.info, 'update_work', { id: 'w9', main_clone: 'pc' })).text, /^ERROR: w9 came from the intake/);
+  // A turn that is not Ben's (a check-in, a timer, a relayed message) grants nothing, filing or updating.
+  turn(ben, 'system');
+  assert.equal((await call(ben.info, 'request_work', { title: 'Sneaky', brief: 'x', main_clone: 'pc' })).isError, true);
+  assert.equal((await call(ben.info, 'update_work', { id: 'w2', main_clone: 'pc' })).isError, true);
+  assert.equal(store.work.get('w2')!.mainCloneAccess, undefined);
 });

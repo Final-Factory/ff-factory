@@ -508,6 +508,52 @@ the character cap decides first when entries are long.
 Workers on a machine get the tool once both the portal and the machine's daemon have this version: an older daemon
 leaves a tool it does not know out (`buildOptions`).
 
+### Work in a machine's main clone (w936)
+
+A machine's main clone is a person's own project folder (Ben's `/Users/benryding/nevergames/FinalFactory` on the m5), and
+the guard keeps every worker out of it: no write, no shell command that names its path (`server/guard.ts`,
+`protectedPaths`). Ben's w934 asked for a branch checked out there, to open in his own editor, and the worker could not
+quit the editor open on it or run the checkout (w936, Ben: "I fucking built ff factory. It's my call"). A request that
+**explicitly asks** for work in a machine's main clone can now carry a grant.
+
+**The grant** is a field on the request, `mainCloneAccess {machine, by, at}`, never text in its brief: a brief can quote
+players or another agent, and a phrase anyone can type must not open a person's project folder. It is set by the request's
+own person's orchestrator, `request_work main_clone: "<machine id>"` when filing or `update_work {id, main_clone:
+"<machine id>"}` later (`Orchestrators.setMainCloneAccess`), and only
+
+- in a turn the person started with their own words (a check-in, a timer or a relayed message gets a held call, offered back
+  on their next message, as the approvals do), because it widens what a worker may touch, unlike the ledger-read grant;
+- on the person's own request, never on one from the intake, whose text is not a person's;
+- for a machine the portal knows. `main_clone: false` takes it back, in any turn (it narrows).
+
+The log says who set it and when, and `list_work {id}` and `read_work` show it. It counts while the granting request is open
+or stalled and the worker's current turn serves it (`servedBy`, as for every request link) on the granted machine
+(`Agents.mainCloneGrantOf`); the spec carries `guard.mainClone {path, requests}` with each message, so a running worker gets
+it, or loses it, with its next message. The dispatcher places the worker on the granted machine; the brief's paragraph
+(`mainCloneGrantBrief`) lists what is allowed.
+
+**What the guard allows** for a command that names the clone (`server/mainCloneGuard.ts`, tests in
+`server/mainCloneGuard.test.ts`), each simple command judged on its own, always as `git -C <clone> ...` (a `cd` into the
+clone is refused, so a later command cannot inherit the directory):
+
+| allowed | form |
+|---|---|
+| quit its editor | `python scripts/unity-bridge.py eval --project-path <clone> '<snippet>'` where the snippet is only `EditorSceneManager.SaveOpenScenes()`, `AssetDatabase.SaveAssets()` and `EditorApplication.Exit(0)` (or `delayCall += () => ...Exit(0)`), plus `return "text";`; `ping` and `status` too. Not an osascript quit: it would end every sandbox's editor on the machine |
+| back up uncommitted work | `git stash list`, `stash push` / `save` / `create` / `store` / `show` (list before and after), a backup branch (`git branch <new>`, `checkout -b`, `switch -c`), or a patch (`git diff --binary > <file outside the clone>`). No `stash pop`, `apply`, `drop` or `clear` |
+| bring a branch | `git fetch` (no `--prune`, `--force`), `git checkout <branch>` / `git switch <branch>` (no `-f`, `-B`, `-C`, `--`, `.`, `--merge`, `--discard-changes`; a name that is a path in the clone is refused for `checkout`, since git would restore the file), `git merge --ff-only`, `git pull --ff-only` |
+| look | read-only git: `status`, `diff`, `log`, `show`, `branch` (listing), `rev-parse`, `ls-files`, `remote -v`, `config --get`, ... (no `--output`) |
+| reopen Unity | `Unity -projectPath <clone> [-logFile <file outside the clone>]`, directly or through `open -n -a Unity --args ...`; no `-batchmode`, `-executeMethod`, `-quit` |
+| find its editor | `grep` / `pgrep` with the clone inside a `-projectPath` pattern |
+
+Everything else stays refused, with a refusal that lists the above and says to hand any other step to the orchestrator for
+the ops worker or ssh: deletes (`rm`, `Remove-Item`, `clean`), `reset`, `restore`, `rebase`, `commit`, `push`, `config`
+writes, redirects into the clone, command substitution next to it, Write and Edit of its files, and any other protected
+path (a path that only starts with the clone's, such as `FinalFactory-live`, is not the clone). Like the rest of
+`guard.ts` it is a seatbelt, not a boundary: the bridge snippet is checked as text.
+
+Needs the portal and the machine's daemon at this version: an older daemon ignores `guard.mainClone` and refuses every
+command that names the clone, as before.
+
 ## Pull requests
 
 Each request is linked to the pull requests its workers open (`WorkItem.prs`: repo, number, state, merge commit, and

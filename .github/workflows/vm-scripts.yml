@@ -13,15 +13,12 @@ name: Portal VM scripts
 #                 ubuntu-26.04 host, qcow2 on ubuntu-24.04) as well when it touches deploy/vm/host, deploy/vm/test or
 #                 this workflow. Lint (shellcheck, units, dry runs) when it touches deploy/vm or this workflow.
 #                 Nothing else: a PR that touches none of these never waits on a VM.
-#   push to main  all three, after a merge that touched any of those paths.
+#   push to main  nothing (w925): the pull request ran them; main runs only ci.yml's secret scan and identity check.
 #   nightly       all three, plus one at production timing: the fast mode's short health, verify and watch timers
 #                 (set only by the test) replaced by the shipped defaults. Also because it depends on outside sources
 #                 (the cloud image, NodeSource, GitHub CLI and Tailscale repositories).
 on:
   pull_request:
-    branches: [main]
-    paths: ['deploy/vm/**', '.github/workflows/vm-scripts.yml', 'server/restart.ts', 'server/index.ts', 'package.json', 'package-lock.json', 'web/package.json', 'web/package-lock.json']
-  push:
     branches: [main]
     paths: ['deploy/vm/**', '.github/workflows/vm-scripts.yml', 'server/restart.ts', 'server/index.ts', 'package.json', 'package-lock.json', 'web/package.json', 'web/package-lock.json']
   schedule:
@@ -77,7 +74,6 @@ jobs:
           lint=true e2e=true why=""
           case "$EVENT" in
             schedule) matrix="[$full,$prod]"; why="nightly: all three, and one at production timing" ;;
-            push) matrix="[$full]"; why="main after a merge: all three" ;;
             workflow_dispatch)
               case "${SCOPE:-full}" in
                 representative) matrix="[$rep]" ;;

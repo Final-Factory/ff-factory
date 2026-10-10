@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { repoIsPublic } from './publicGit.ts';
 import { checkOutsideRootDelete } from './rootFence.ts';
+import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
@@ -31,6 +32,10 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *   - processes: no killing Unity, node, claude or PowerShell by hand, no shutdown/restart.
  *   - files: no writes to, or shell commands naming, a protected path (the live co-op checkout, this
  *     server's own directory).
+ *   - the machine's main clone (a person's own project folder) is a protected path like the others, except for a worker whose
+ *     request was granted work there (opts.mainClone, WorkItem.mainCloneAccess, w936): its shell commands that name the
+ *     clone must be one of a short list (quit its editor through the bridge, back up with stash/branch/patch, git fetch,
+ *     checkout/switch, ff-only merge, reopen Unity), see server/mainCloneGuard.ts. Write and Edit stay refused.
  *   - disk: on a machine with a worker install (opts.workerRoot), no rm / rmdir / del / rd / Remove-Item / find -delete that
  *     names a path outside the install folder (server/rootFence.ts; w896, lothsahn: "in general we should only be clearing
  *     data in the install folder for the worker"). Inside it, the worker's own temp and a save copy in the game's saves
@@ -59,6 +64,12 @@ export function sandboxGuard(opts: {
   publicIdentity?: PublicIdentity;
   /** The machine's worker install folder (root.json's root): deleting outside it is refused (checkOutsideRootDelete). Absent: not checked. */
   workerRoot?: string;
+  /**
+   * w936: a machine's main clone this worker's request explicitly asked for work in (server/mainCloneGuard.ts). Shell
+   * commands naming it are then judged one by one against a short allowed list (quit its editor, back up, git fetch and
+   * checkout, reopen Unity) instead of refused whole; Write and Edit there, and every other protected path, stay refused.
+   */
+  mainClone?: MainCloneGrant;
 }): HookCallback {
   // Drive-letter paths are normalised textually so the guard behaves the same on any host OS.
   const norm = (p: string) => (/^[a-zA-Z]:[\\/]/.test(p) ? p : path.resolve(p)).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -66,15 +77,11 @@ export function sandboxGuard(opts: {
   const protectedPaths = opts.protectedPaths.map(norm).filter((p) => !own.startsWith(p + '/') && own !== p);
   const home = norm(os.homedir());
   // Every way a shell command might spell a protected path.
-  const spellings = protectedPaths.flatMap((p) => {
-    const out = [p];
-    if (/^[a-z]:\//.test(p)) out.push(`/${p[0]}${p.slice(2)}`); // Git Bash: C:/x -> /c/x
-    if (p.startsWith(home + '/')) {
-      const rest = p.slice(home.length); // "/games/mygame"
-      out.push(`~${rest}`, `$home${rest}`, `\${home}${rest}`, `%userprofile%${rest}`, `$env:userprofile${rest}`);
-    }
-    return out;
-  });
+  const spellings = protectedPaths.flatMap((p) => pathSpellings(p, home));
+  // w936: the granted main clone's spellings, matched as whole paths (`/repo` is not `/repo-live`).
+  const cloneGrant = opts.mainClone && !own.startsWith(normPath(opts.mainClone.path) + '/') ? opts.mainClone : undefined;
+  const cloneSpellings = cloneGrant ? pathSpellings(normPath(cloneGrant.path), home) : [];
+  const cloneNames = cloneGrant ? spellingsRegex(cloneSpellings) : undefined;
   const unityPrefix = `${opts.sandboxId.toLowerCase()}@`;
   let pinned = false;
 
@@ -98,7 +105,19 @@ export function sandboxGuard(opts: {
         checkPlayerLaunch(cmd, opts.sandboxId) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
       if (reason) return deny(reason);
-      const flat = cmd.replace(/\\/g, '/').toLowerCase();
+      let flat = flatten(cmd);
+      if (cloneGrant && cloneNames) {
+        // The granted clone: each command naming it must be an allowed form. What is left, with the clone's own name taken
+        // out, is still checked against every protected path (a path that merely starts with the clone's is not the clone).
+        cloneNames.lastIndex = 0;
+        if (cloneNames.test(flat)) {
+          const why = checkMainCloneShell(cmd, { ...cloneGrant, sandbox: opts.sandboxPath }, cloneSpellings);
+          if (why) return deny(why);
+          cloneNames.lastIndex = 0;
+          flat = flat.replace(cloneNames, ' ');
+        }
+        cloneNames.lastIndex = 0;
+      }
       for (const s of spellings) {
         if (flat.includes(s)) return deny(`${s} is a protected path (the live co-op checkout or this server). Work only inside ${opts.sandboxPath}.`);
       }
