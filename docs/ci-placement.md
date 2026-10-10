@@ -63,3 +63,11 @@ None of this moved. What each would need:
   disk. The nightly production-timing job needs the same machine for about 50 minutes.
 - **`ops-socket`** could join `vm-scripts.yml`'s `lint` on that machine.
 - **`rerun-lost-runner.yml`** is about hosted Windows runners GitHub loses; it goes when those do.
+
+## Notes for the next person
+
+- The artifact hand-off action is `index.cjs`, not `index.js`: this repository's `package.json` says `"type": "module"`, which
+  makes a `.js` file ESM and the action's `require` fail with "require is not defined in ES module scope".
+- The e2e server (`e2e/server.ts`) sets the host guard's disk thresholds low. A runner with less free space than the guard's 80 GB
+  warning (an FFBox container's workspace has 56 GB) otherwise shows a "disk space is low" bar on every page, which shifts every
+  screenshot 70 px and leaves a bar behind after a test dismisses its own.
