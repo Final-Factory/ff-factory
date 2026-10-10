@@ -89,6 +89,7 @@ function boot(sc: Scenario, o: { letter?: string; flex?: boolean; skip?: string[
   if (o.skip) args.push('-Skip', o.skip.join(','));
   const out = execFileSync(PWSH, args, { encoding: 'utf8', env: { ...process.env, DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: '1' } });
   fs.rmSync(work, { recursive: true, force: true });
+  if (process.env.DEVDRIVE_DEBUG || process.platform === 'win32') console.log('boot scenario', JSON.stringify(sc), '=>', out);
   return JSON.parse(out) as { log: string; calls: string[]; held: string; result: { ok: boolean; detail: string } | null; state: { letter: string } | null; daemon: any; pool: PoolRec[] | null };
 }
 
