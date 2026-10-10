@@ -299,16 +299,14 @@ export class SpendStore {
 
   // ---- recording
 
-  /** A transcript event was appended to a session: the user messages that begin a turn are kept, a result or compaction line is recorded. */
+  /** A transcript event was appended to a session: the user messages that begin a turn are kept, a result line is recorded. */
   observe(sessionId: string, e: TranscriptEvent) {
     if (e.kind === 'user') {
       const list = this.texts.get(sessionId) ?? [];
       list.push(e.text.slice(0, 1500));
       this.texts.set(sessionId, list.slice(-12));
     } else if (e.kind === 'result') {
-      this.record(sessionId, e.t, e.usage, e.costUsd, e.durationMs, true, e.seq);
-    } else if (e.kind === 'system' && e.usage?.compaction) {
-      this.record(sessionId, e.t, e.usage, undefined, 0, false, e.seq);
+      this.record(sessionId, e.t, e.usage, e.costUsd, e.durationMs, e.seq);
     }
   }
 
@@ -360,28 +358,27 @@ export class SpendStore {
     return { models: usd > 0 ? { [fallbackModel]: { ...zeroTok(), usd } } : {}, estimated: true };
   }
 
-  private record(sessionId: string, at: string, u: TurnUsage | undefined, cost: number | undefined, durationMs: number, isTurn: boolean, seq: number) {
+  private record(sessionId: string, at: string, u: TurnUsage | undefined, cost: number | undefined, durationMs: number, seq: number) {
     const info = this.ctx.session(sessionId);
     const s = this.sessionRec(sessionId, info, at);
     s.liveFrom ??= seq;
     const { models, estimated } = this.delta(s, sessionId, u, cost, info);
-    const texts = isTurn ? (this.texts.get(sessionId) ?? []) : [];
-    if (isTurn) this.texts.delete(sessionId);
+    const texts = this.texts.get(sessionId) ?? [];
+    this.texts.delete(sessionId);
     const total = sumTok(Object.values(models));
-    const startMs = (Date.parse(at) || this.now()) - (isTurn ? durationMs : 0);
+    const startMs = (Date.parse(at) || this.now()) - durationMs;
     const items = [...this.ctx.work()];
     const allocs = attribute(info, items, texts, startMs);
-    this.add({ s, at, models, total, estimated, meter: u?.meter, compaction: !isTurn, allocs, items, info });
+    this.add({ s, at, models, total, estimated, meter: u?.meter, allocs, items, info });
     this.changed();
   }
 
   /** Add one turn's spend to its session and, by weight, to its requests. Also the backfill's entry. */
-  add(a: { s: SessionSpend; at: string; models: ModelTok; total: Tok; estimated: boolean; meter?: MeterTurn; compaction: boolean; allocs: Alloc[]; items?: readonly WorkItem[]; info?: SessionInfo }) {
+  add(a: { s: SessionSpend; at: string; models: ModelTok; total: Tok; estimated: boolean; meter?: MeterTurn; allocs: Alloc[]; items?: readonly WorkItem[]; info?: SessionInfo }) {
     const { s, at, models, total, allocs } = a;
     s.lastAt = at > s.lastAt ? at : s.lastAt;
     if (at < s.firstAt) s.firstAt = at;
-    if (!a.compaction) s.turns++;
-    else s.compactions++;
+    s.turns++;
     s.total = addTok(s.total, total);
     s.models = addModels(s.models, models);
     if (a.estimated) s.estimated = addTok(s.estimated, total);
@@ -397,7 +394,7 @@ export class SpendStore {
       const r = this.requestRec(al.id, a.items, at);
       r.lastAt = at > r.lastAt ? at : r.lastAt;
       if (at < r.firstAt) r.firstAt = at;
-      if (!a.compaction) r.turns += f;
+      r.turns += f;
       r.total = addTok(r.total, scaleTok(total, f));
       r.models = addModels(r.models, models, f);
       if (a.estimated) r.estimated = addTok(r.estimated, scaleTok(total, f));
@@ -406,7 +403,7 @@ export class SpendStore {
       const rs = (r.sessions[s.id] ??= { role: s.role, total: zeroTok(), models: {}, turns: 0, how: {} });
       rs.total = addTok(rs.total, scaleTok(total, f));
       rs.models = addModels(rs.models, models, f);
-      if (!a.compaction) rs.turns += f;
+      rs.turns += f;
       rs.how[al.how] = (rs.how[al.how] ?? 0) + f;
       if (allocs.length > 1) rs.shared = (rs.shared ?? 0) + f;
       s.requests[al.id] = (s.requests[al.id] ?? 0) + total.usd * f;
@@ -506,7 +503,7 @@ export class SpendStore {
         const startMs = (Date.parse(e.t) || 0) - e.durationMs;
         const allocs = attribute(info, items, texts, startMs);
         if (d > 0) {
-          this.add({ s, at: e.t, models: { [model]: tok }, total: tok, estimated: true, compaction: false, allocs, items, info });
+          this.add({ s, at: e.t, models: { [model]: tok }, total: tok, estimated: true, allocs, items, info });
           for (const al of allocs) {
             const r = this.requests.get(al.id);
             if (r) r.sessions[sessionId].how.backfill = (r.sessions[sessionId].how.backfill ?? 0) + al.weight;

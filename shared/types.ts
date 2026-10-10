@@ -356,8 +356,7 @@ export type TranscriptEvent =
   | { seq: number; t: string; kind: 'tool_use'; toolUseId: string; name: string; input: unknown; parentToolUseId?: string | null }
   | { seq: number; t: string; kind: 'tool_result'; toolUseId: string; isError: boolean; text: string; images?: ImageRef[] }
   | { seq: number; t: string; kind: 'result'; ok: boolean; text: string; costUsd: number; turns: number; durationMs: number; answers?: string[]; usage?: TurnUsage }
-  /** usage: a compaction's own cost (w859), which is no turn: its text says so. */
-  | { seq: number; t: string; kind: 'system'; text: string; usage?: TurnUsage }
+  | { seq: number; t: string; kind: 'system'; text: string }
   | { seq: number; t: string; kind: 'error'; text: string }
   | { seq: number; t: string; kind: 'permission'; requestId: string; toolName: string; input: unknown; decision?: 'allow' | 'deny' };
 

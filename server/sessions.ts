@@ -587,8 +587,7 @@ export class AgentSession implements SessionHandle {
         if (answered.length && answered.every((u) => this.compactUuids.has(u))) {
           for (const u of answered) this.compactUuids.delete(u);
           if (m.subtype !== 'success' || m.is_error) this.compactFailed(m.subtype === 'success' ? m.result || 'an error result' : m.subtype);
-          // Its cost is the request's too (w859): recorded on a line of its own, since no result line is written for it.
-          this.store.append(id, { kind: 'system', text: `The compaction cost $${Math.max(0, this.costBase + total - this.info.costUsd).toFixed(2)}.`, usage: { ...this.turnUsage(m), compaction: true } });
+          // Its cost is in the SDK's cumulative totals, so the next turn's result carries it (w859): no line of its own.
           this.update({ costUsd: this.costBase + total });
           if (!this.stateEvents) {
             this.update({ status: this.pending.size ? 'waiting_permission' : 'idle', turnOpenSince: undefined });

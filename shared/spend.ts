@@ -70,8 +70,6 @@ export interface TurnUsage {
   /** result.usage: the main loop's tokens in this turn, no dollars, no subagents. A fallback for the first result of a session seen without a baseline. */
   main?: { in: number; out: number; cr: number; cw: number };
   meter?: MeterTurn;
-  /** The turn was a compaction's own (its cost counts; no reply came of it). */
-  compaction?: boolean;
 }
 
 /** The kinds of content a context holds, in the order they are shown. The list comes from what the tool results of a week of workers held. */

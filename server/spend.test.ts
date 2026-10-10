@@ -289,14 +289,12 @@ test('the dispatcher\'s turn on a request is that request\'s; one that names non
   assert.equal(w.spend.request('w859')!.sessions.d.role, 'dispatcher');
 });
 
-test('a compaction line carries its cost to the request', () => {
+test('a compaction between turns costs nothing extra to record: the next result totals carry it', () => {
   const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1')]);
   w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 1, cr: 1000 }) } }, 1));
-  w.spend.observe('s1', { seq: ++seq, t: iso(T0 + 90_000), kind: 'system', text: 'The compaction cost $0.40.', usage: { compaction: true, cum: { m: tok({ usd: 1.4, cr: 1400 }) } } });
-  const r = w.spend.request('w1')!;
-  assert.ok(Math.abs(r.total.usd - 1.4) < 1e-9);
-  assert.equal(r.turns, 1);
-  assert.equal(w.spend.session('s1')!.compactions, 1);
+  // (a /compact ran: 0.40 more in the totals, no result line of its own) then the next turn
+  w.spend.observe('s1', resultEvent(T0 + 200_000, { cum: { m: tok({ usd: 1.9, cr: 2400 }) } }, 1.9));
+  assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 1.9) < 1e-9);
 });
 
 test('the context reading adds up per request and shows in the report', () => {
