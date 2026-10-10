@@ -2386,9 +2386,9 @@ test('w890: Agents.waitOn names what a worker that ended its turn waits on: a de
   // A person: its declaration, also with a check-in as a fallback.
   const c = await startedFor(env, 'w3', { override_duplicate: 'another request' });
   assert.match(String(await c.h.waiting_on_person!({ who: 'Ben', what: 'give the go-ahead for the deploy' })), /^Recorded: your requests wait on Ben/);
-  assert.equal(waitOn(c.info), 'it waits on w3: Ben to act');
+  assert.equal(waitOn(c.info), 'it waits on Ben: give the go-ahead for the deploy');
   Object.assign(c.info, { wakeAt: new Date(Date.now() + 2 * 3_600_000).toISOString(), wakeNote: 'fallback' });
-  assert.equal(waitOn(c.info), 'it waits on w3: Ben to act');
+  assert.equal(waitOn(c.info), 'it waits on Ben: give the go-ahead for the deploy');
 
   // CI has its own, stricter rule (editor stopped): waitOn leaves it to ciWait.
   const d = await startedFor(env, 'w4', { override_duplicate: 'another request' });
@@ -2505,4 +2505,33 @@ test('w907: no CI run for a PR head after ten minutes clears the gate too, resum
   assert.match((await watch.tick()).get('w1')!, /^clear: no CI run exists for PR #283's head deadbee 11 min after it was pushed/);
   assert.equal(store.work.get('w1')!.status, 'active');
   agents.waker.cancel(a.id);
+});
+
+test("w890 (found live): a worker's own waiting_on_person counts for every request it is the latest worker on, also one it moved on from, so a worker on two requests that ends its turn waiting on a person frees its sandbox", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', status: 'active' }]);
+  const waitOn = (i: SessionInfo) => {
+    (agents as unknown as { waitLive?: unknown }).waitLive = undefined;
+    return agents.waitOn(i);
+  };
+  const a = await startedFor(env, 'w1');
+  // w890 at 19:34Z on the live portal: the worker was started for w1, then sent w2 (the ledger reads it as working on w2
+  // only), and ended its turn declaring that it waits on Lothsahn for w1. w1 read "its worker moved on", not Waiting, so
+  // "every request waits" failed and the sandbox was held.
+  const w2 = store.work.get('w2')!;
+  w2.sessionIds = [a.id];
+  w2.links = { [a.id]: { at: new Date(Date.now() + 60_000).toISOString(), how: 'sent' } };
+  assert.equal(waitOn(a.info), undefined, 'nothing declared: both requests are the worker\'s and none waits');
+  await a.h.waiting_on_person!({ who: 'Lothsahn', what: 'run the next portal deploy', request: 'w1' });
+  assert.equal(waitOn(a.info), 'it waits on Lothsahn: run the next portal deploy');
+  // Its next message ends the declaration, and with it the wait.
+  a.info.waitingOn = undefined;
+  assert.equal(waitOn(a.info), undefined);
+  // A declaration with no open request it is the latest worker on is the cleanup's to handle (workOver), not this.
+  store.work.get('w1')!.status = 'done';
+  store.work.get('w2')!.status = 'done';
+  a.info.waitingOn = { who: 'Ben', what: 'x', at: new Date().toISOString() };
+  assert.equal(waitOn(a.info), undefined);
 });
