@@ -48,8 +48,10 @@ export function globMatches(glob: string, file: string): boolean {
 /** A test that is skipped unless on Windows (the forms this repo uses). */
 export const WINDOWS_ONLY = /skip:\s*(?:process\.platform\s*!==\s*'win32'|!onWindows(?:Ci)?\b)|'Windows (?:CI )?only'/;
 
-const entries = parseList(fs.readFileSync(LIST, 'utf8'));
-const yml = fs.readFileSync(WORKFLOW, 'utf8');
+// LF: a Windows checkout has CRLF (git's autocrlf), and the parsers read lines.
+const readLf = (f: string) => fs.readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+const entries = parseList(readLf(LIST));
+const yml = readLf(WORKFLOW);
 
 test('windows tests: every listed file exists and says what it covers and why it needs Windows', () => {
   assert.ok(entries.length > 0);
@@ -65,7 +67,7 @@ test('windows tests: every listed file exists and says what it covers and why it
 test('windows tests: a test skipped everywhere but Windows is listed, or it would never run', () => {
   const listed = new Set(entries.map((e) => e.file));
   const files = ['server', 'scripts'].flatMap((d) => fs.readdirSync(path.join(ROOT, d)).filter((f) => f.endsWith('.test.ts')).map((f) => `${d}/${f}`));
-  const missing = files.filter((f) => f !== 'scripts/windows-tests.test.ts' && WINDOWS_ONLY.test(fs.readFileSync(path.join(ROOT, f), 'utf8')) && !listed.has(f));
+  const missing = files.filter((f) => f !== 'scripts/windows-tests.test.ts' && WINDOWS_ONLY.test(readLf(path.join(ROOT, f))) && !listed.has(f));
   assert.deepEqual(missing, [], 'add them to .github/windows-tests.txt with what they cover and why');
 });
 
