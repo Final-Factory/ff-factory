@@ -18,6 +18,10 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PWSH = process.env.FF_PWSH || 'pwsh';
 const hasPwsh = spawnSync(PWSH, ['-NoProfile', '-Command', '1'], { env: { ...process.env, DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: '1' } }).status === 0;
 const needPwsh = hasPwsh ? false : 'PowerShell 7 (pwsh) is not installed here';
+// The faked disks are for computers that have none. On a real Windows the same mount (attach, the letter, a taken letter, the repointing
+// of daemon.json, the pool's record, the junctions and a worktree) runs against a real VHDX in scripts/worker/test/devdrive-e2e.ts, where
+// the Storage cmdlets are the real ones and no stub can stand in for them reliably (the stubbed Set-Partition was bypassed on the runner).
+const needFake = process.platform === 'win32' ? 'covered by devdrive-e2e.ts on a real Windows' : needPwsh;
 const tmp = (name: string) => fs.mkdtempSync(path.join(os.tmpdir(), `w900-${name}-`));
 
 // ---------------------------------------------------------------- the letter
@@ -93,9 +97,9 @@ function boot(sc: Scenario, o: { letter?: string; flex?: boolean; skip?: string[
   return JSON.parse(out) as { log: string; calls: string[]; held: string; result: { ok: boolean; detail: string } | null; state: { letter: string } | null; daemon: any; pool: PoolRec[] | null };
 }
 
-test('boot mount: a detached drive is attached and gets its letter back; an attached one is left alone', { skip: needPwsh }, () => {
+test('boot mount: a detached drive is attached and gets its letter back; an attached one is left alone', { skip: needFake }, () => {
   const a = boot({ attached: false, autoLetter: '', state: { letter: 'V' } });
-  assert.deepEqual(a.calls, ['Mount-DiskImage', 'Set-Partition V'], a.log);
+  assert.deepEqual(a.calls, ['Mount-DiskImage', 'Set-Partition V']);
   assert.equal(a.result?.ok, true);
   assert.match(a.result!.detail, /attached .* as V:$/, 'no letter change to report');
   // Windows put it at some letter of its own on the way up (the lowest free one): it is moved to V:.
@@ -107,13 +111,13 @@ test('boot mount: a detached drive is attached and gets its letter back; an atta
   assert.match(b.result!.detail, /V: is already there/);
 });
 
-test('boot mount: the letter in the state file wins over the one the task was installed with', { skip: needPwsh }, () => {
+test('boot mount: the letter in the state file wins over the one the task was installed with', { skip: needFake }, () => {
   const r = boot({ attached: false, state: { letter: 'T' } }, { letter: 'V' });
   assert.deepEqual(r.calls, ['Mount-DiskImage', 'Set-Partition T']);
   assert.equal(boot({ attached: true, autoLetter: 'T', state: { letter: 'T' } }, { letter: 'V' }).calls.length, 0);
 });
 
-test('boot mount: the letter is taken, so the next free one is used and everything that stored the old one is repointed', { skip: needPwsh }, () => {
+test('boot mount: the letter is taken, so the next free one is used and everything that stored the old one is repointed', { skip: needFake }, () => {
   const files = {
     'daemon.json': { root: 'D:\\work\\ffw', sandboxes: { root: 'V:\\sandboxes', librarySeed: 'V:\\seed\\Library', librarySeedCopy: 'clone', maxSandboxes: 6 }, hostGuard: { hostDiskPaths: ['D:/'] } },
     'sandboxes.json': [
@@ -136,20 +140,20 @@ test('boot mount: the letter is taken, so the next free one is used and everythi
   assert.equal(r.pool?.[0].logPath, 'S:\\sandboxes\\slot1\\Logs\\editor.log');
 });
 
-test('boot mount: attached by Windows at a letter that is not the drive’s, it is moved to the right one when that is free, else to the next', { skip: needPwsh }, () => {
+test('boot mount: attached by Windows at a letter that is not the drive’s, it is moved to the right one when that is free, else to the next', { skip: needFake }, () => {
   assert.deepEqual(boot({ attached: true, autoLetter: 'E', state: { letter: 'V' } }).calls, ['Set-Partition V']);
   const r = boot({ attached: true, autoLetter: 'E', inUse: ['C', 'D', 'V'], state: { letter: 'V' } });
   assert.deepEqual(r.calls, ['Set-Partition U']);
 });
 
-test('boot mount: with no letter free from V: to A: it fails and says so, without touching anything', { skip: needPwsh }, () => {
+test('boot mount: with no letter free from V: to A: it fails and says so, without touching anything', { skip: needFake }, () => {
   const r = boot({ attached: false, inUse: ALL, state: { letter: 'V' }, files: { 'daemon.json': { sandboxes: { root: 'V:\\sandboxes' } } } });
   assert.equal(r.result?.ok, false);
   assert.match(r.result!.detail, /no free drive letter from V: down to A:/);
   assert.equal(r.daemon.sandboxes.root, 'V:\\sandboxes');
 });
 
-test('boot mount: BEAST’s drive (no -Flex) still takes exactly the letter it was installed with', { skip: needPwsh }, () => {
+test('boot mount: BEAST’s drive (no -Flex) still takes exactly the letter it was installed with', { skip: needFake }, () => {
   const r = boot({ attached: false, autoLetter: 'E', inUse: ['C', 'D'] }, { letter: 'F', flex: false });
   assert.deepEqual(r.calls, ['Mount-DiskImage', 'Set-Partition F']);
   assert.equal(r.result?.ok, true);
