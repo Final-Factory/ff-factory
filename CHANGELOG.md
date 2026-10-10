@@ -10,6 +10,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Test only: two Playwright flakes on main** (w858, lothsahn: "look for flaky CI tests in FFFactory and fix them").
+  The `authed` fixture now takes the page's routes down after each test (`unrouteAll` with `ignoreErrors`, which waits
+  for a handler still inside `route.fetch`): banner.spec.ts patches `/api/state`, which the page keeps polling, and a test
+  ending in the middle of one failed with "route.fetch: Test ended" or "Response has been disposed" (2 flaky runs of 378
+  since 2026-10-07, on main and a PR). The vault test waits for the add form to close before it reads `page.content()`:
+  the new row shows when the list comes back, the form a tick later, and its controlled password input still carried the
+  token in its `value` attribute (1 flaky run, WebKit). No portal deploy.
+
 - **Test only: the ledger test that began failing on main at 2026-10-10T08:00Z** (w858, lothsahn: "look for flaky CI
   tests in FFFactory and fix them"). `ledgerSweep.test.ts` dates its requests against a fixed NOW (2026-10-03T12:00Z) while
   the ledger's own rules read the wall clock, so 7 days later `updateProblem` refused to reopen a request "closed more
