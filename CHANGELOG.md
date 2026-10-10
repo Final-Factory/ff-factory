@@ -22,6 +22,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   scrolls the chat to it. `shared/replies.ts`, `Orchestrators.quoteOf` and `react`, `POST /api/sessions/<id>/react`;
   docs/orchestrators.md, "Replies and reactions". Needs a portal deploy.
 
+- **Per-person GitHub tokens from the vault** (w868, lothsahn: "I'd like the right token to get used based on whether a
+  request is Ben or lothsahn. Let's setup the framework for that similar to Claude tokens"). The vault's `vault-<person>-github`
+  entries are used where the new owner-only `machines.githubFromVault` is on (per machine; `"portal"` for the portal's own
+  reads): a worker's gh and git push, the daemon's `switch_branch` push and saved-work push for it, and the portal's PR and
+  CI reads for a blocked request all use the token of the person the work is for; request-less reads use the system payer's.
+  A person with no usable token keeps the login used before. Each token is probed (its GitHub account, expiry from
+  `GitHub-Authentication-Token-Expiration`, the reads it has per repository); a 401 stops it, a 403 is its last error, and
+  the vault page and `system_status` show all of it. **Behaviour change:** a GitHub entry is no longer handed to runs until
+  the setting is on. Also the diagnosis of the CI reads failing since 2026-10-10 07:45Z (the portal's D7 token lacks
+  "Actions: Read"; no fine-grained token can read check runs), the permissions each token needs, and the switchover
+  (docs/vault.md section 13). Needs a portal deploy; nothing switches until lothsahn sets it.
+
 - **Test only: CONTRIBUTING's two flake rules from w858, and `scripts/clock-skew.mjs`** (`SKEW_DAYS=30 node --import
   ./scripts/clock-skew.mjs --test <file>` runs a test file a month ahead to find tests that only pass in the month they
   were written). No portal deploy.

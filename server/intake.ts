@@ -34,6 +34,7 @@ export type EscalationAnswer =
   | { status: 'off' };
 import type { BoardCheckMessage, ProviderRequestMessage, ResultMessage, WorkReply } from './providerProtocol.ts';
 import { run } from './proc.ts';
+import { ghRunner } from './githubTokens.ts';
 import {
   bugBrief,
   bugSource,
@@ -1499,7 +1500,7 @@ export class IntakeManager {
     if (this.d.prInfo) return this.d.prInfo(n);
     const slug = await this.originSlug();
     if (!slug) return undefined;
-    const r = await run('gh', ['pr', 'view', String(n), '-R', slug, '--json', 'number,title,body,headRefName,state,mergedAt,mergeCommit'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+    const r = await ghRunner(undefined, 'intake')('gh', ['pr', 'view', String(n), '-R', slug, '--json', 'number,title,body,headRefName,state,mergedAt,mergeCommit'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
     if (r.code !== 0) return undefined;
     try {
       const p = JSON.parse(r.stdout) as { number: number; title: string; body?: string; headRefName: string; state: string; mergedAt?: string; mergeCommit?: { oid?: string } };
@@ -1514,7 +1515,7 @@ export class IntakeManager {
     if (this.d.mergedPrs) return this.d.mergedPrs();
     const slug = await this.originSlug();
     if (!slug) return undefined;
-    const r = await run('gh', ['pr', 'list', '-R', slug, '--state', 'merged', '--limit', String(MERGED_PRS), '--json', 'number,title,body,headRefName,baseRefName,mergedAt,mergeCommit'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+    const r = await ghRunner(undefined, 'intake')('gh', ['pr', 'list', '-R', slug, '--state', 'merged', '--limit', String(MERGED_PRS), '--json', 'number,title,body,headRefName,baseRefName,mergedAt,mergeCommit'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
     if (r.code !== 0) return undefined;
     try {
       const prs = JSON.parse(r.stdout) as { number: number; title: string; body?: string; headRefName: string; baseRefName: string; mergedAt?: string; mergeCommit?: { oid?: string } }[];

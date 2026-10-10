@@ -11,12 +11,13 @@ export interface SwitchResult {
   notes: string[];
 }
 
-async function git(dir: string, args: string[], timeoutMs = 120_000) {
-  return run('git', ['-C', dir, ...args], { timeoutMs, env: ENV });
+/** `net`: the environment of a push or fetch (w868: a person's GitHub token from the vault), over ENV. */
+async function git(dir: string, args: string[], timeoutMs = 120_000, net?: NodeJS.ProcessEnv) {
+  return run('git', ['-C', dir, ...args], { timeoutMs, env: net ? { ...ENV, ...net } : ENV });
 }
 
-async function must(dir: string, args: string[], what: string, timeoutMs?: number) {
-  const r = await git(dir, args, timeoutMs);
+async function must(dir: string, args: string[], what: string, timeoutMs?: number, net?: NodeJS.ProcessEnv) {
+  const r = await git(dir, args, timeoutMs, net);
   if (r.code !== 0) throw new Error(`${what} failed: ${(r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ')}`);
   return r.stdout;
 }
@@ -44,6 +45,8 @@ export async function switchBranch(opts: {
   createFrom?: string;
   lock?: <T>(fn: () => Promise<T>) => Promise<T>;
   nameOf?: (path: string) => string | undefined;
+  /** The push's and fetch's environment: the caller's person's GitHub token (w868); absent, the machine's own login. */
+  env?: NodeJS.ProcessEnv;
 }): Promise<SwitchResult> {
   const { dir, branch } = opts;
   const lock = opts.lock ?? (<T>(fn: () => Promise<T>) => fn());
@@ -63,12 +66,12 @@ export async function switchBranch(opts: {
     const unpushed = Number((await must(dir, ['rev-list', '--count', 'HEAD', '--not', '--remotes'], 'counting unpushed commits')).trim()) || 0;
     if (unpushed > 0) {
       if (SHARED.test(from)) throw new Error(`${from} has ${unpushed} commit(s) that are on no remote. Pushing ${from} is a decision for a person; push or move them yourself, then switch.`);
-      await must(dir, ['push', '-u', 'origin', `${from}:${from}`], `pushing ${from}`, 5 * 60_000);
+      await must(dir, ['push', '-u', 'origin', `${from}:${from}`], `pushing ${from}`, 5 * 60_000, opts.env);
       notes.push(`pushed ${unpushed} unpushed commit(s) of ${from} first`);
     }
   }
 
-  await lock(() => must(dir, ['fetch', '--prune', 'origin'], 'git fetch', 5 * 60_000));
+  await lock(() => must(dir, ['fetch', '--prune', 'origin'], 'git fetch', 5 * 60_000, opts.env));
   const has = async (ref: string) => (await git(dir, ['show-ref', '--verify', '--quiet', ref])).code === 0;
   let r;
   if (await has(`refs/heads/${branch}`)) {

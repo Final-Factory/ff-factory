@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultView } from '../../../shared/types';
+import type { GithubTokenHealth, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultView } from '../../../shared/types';
 import { ApiError, api } from '../api';
 import { toast, toastError } from '../store';
 
@@ -43,7 +43,7 @@ export function VaultSettings() {
       {view.entries.length ? (
         <ul className="vault-list">
           {view.entries.map((e) => (
-            <VaultRow key={e.id} e={e} people={view.people} onChange={act} />
+            <VaultRow key={e.id} e={e} people={view.people} github={view.github?.find((g) => g.fingerprint === e.fingerprint)} onChange={act} />
           ))}
         </ul>
       ) : (
@@ -54,6 +54,10 @@ export function VaultSettings() {
         Claude tokens from the vault on: {view.machines.filter((m) => m.claudeFromVault).map((m) => m.id).join(', ') || 'no machine yet'}{' '}
         <small>(set_app_config machines.claudeFromVault, per machine)</small>
       </p>
+      <p className="small dim" data-testid="vault-github-on">
+        GitHub tokens from the vault on: {[...(view.githubPortal ? ['the portal\'s own reads'] : []), ...view.machines.filter((m) => m.githubFromVault).map((m) => m.id)].join(', ') || 'nowhere yet: every caller uses its own gh login'}{' '}
+        <small>(set_app_config machines.githubFromVault, per machine; machine "portal" for the portal's reads; docs/vault.md section 13)</small>
+      </p>
       <MachineCredentials view={view} onChange={act} />
     </div>
   );
@@ -62,7 +66,7 @@ export function VaultSettings() {
 type Act = (p: Promise<VaultView>, done: string) => Promise<void>;
 const list = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
 
-function VaultRow({ e, people, onChange }: { e: VaultEntryMeta; people: VaultView['people']; onChange: Act }) {
+function VaultRow({ e, people, github, onChange }: { e: VaultEntryMeta; people: VaultView['people']; github?: GithubTokenHealth; onChange: Act }) {
   const [rotating, setRotating] = useState(false);
   const [value, setValue] = useState('');
   const [editing, setEditing] = useState(false);
@@ -91,6 +95,7 @@ function VaultRow({ e, people, onChange }: { e: VaultEntryMeta; people: VaultVie
         {e.share === 'owner' ? `${owner}'s own work only` : `any run${owner ? ` (${owner}'s)` : ''}`}; {e.roles.join(', ')} on {e.machines.join(', ')}
         {e.disabled ? '; disabled' : ''}; {e.rotatedAt ? `rotated ${e.rotatedAt.slice(0, 10)}` : `added ${e.createdAt.slice(0, 10)}`}
       </div>
+      {e.kind === 'github' && <GithubHealth h={github} name={e.name} />}
       {rotating && (
         <div className="field-row">
           <input className="input" type="password" autoComplete="off" placeholder="the new value" value={value} onChange={(x) => setValue(x.target.value)} />
@@ -229,6 +234,35 @@ function MachineCredentials({ view, onChange }: { view: VaultView; onChange: Act
           {sure === id ? `Really revoke ${id}?` : `${id} ✕`}
         </button>
       ))}
+    </div>
+  );
+}
+
+const minute = (iso: string) => `${iso.slice(0, 16).replace('T', ' ')}Z`;
+
+/**
+ * A GitHub token's health (w868, server/githubTokens.ts): the account it acts as, its expiry, the reads it lacks per
+ * repository (write permissions cannot be read without writing), its last use and its last error.
+ */
+function GithubHealth({ h, name }: { h?: GithubTokenHealth; name: string }) {
+  if (!h?.checkedAt) return <div className="small dim" data-testid={`vault-github-${name}`}>GitHub: not probed yet{h?.lastUse ? `; last used ${minute(h.lastUse.at)} (${h.lastUse.what})` : ''}</div>;
+  const days = h.expiresAt ? Math.floor((Date.parse(h.expiresAt) - Date.now()) / 86_400_000) : undefined;
+  const lacking = (h.repos ?? []).flatMap((r) => {
+    const short = r.repo.split('/')[1];
+    if (r.metadata !== 'read') return [`${short}: ${r.metadata === 'not-selected' ? 'not selected' : r.metadata}`];
+    const no = (['contents', 'pulls', 'actions', 'statuses'] as const).filter((k) => r[k] !== 'read');
+    return no.length ? [`${short}: no ${no.join(', ')}`] : [];
+  });
+  const warn = !!h.bad || (days !== undefined && days < 14) || lacking.length > 0;
+  return (
+    <div className={`small ${warn ? 'tone-amber' : 'dim'}`} data-testid={`vault-github-${name}`}>
+      GitHub {h.login ? `account ${h.login}` : 'account unknown'}
+      {h.bad ? `; not used: ${h.bad}` : ''}
+      {days === undefined ? '; no expiry given' : days < 0 ? `; expired ${h.expiresAt!.slice(0, 10)}` : `; expires ${h.expiresAt!.slice(0, 10)} (${days} days)`}
+      {h.repos ? (lacking.length ? `; reads lacking: ${lacking.join('; ')}` : `; reads ok on ${h.repos.length} repositories`) : ''}
+      ; probed {minute(h.checkedAt)}
+      {h.lastUse ? `; last used ${minute(h.lastUse.at)} (${h.lastUse.what})` : '; not used since the portal started'}
+      {h.lastError ? `; last error ${minute(h.lastError.at)}: ${h.lastError.what}` : ''}
     </div>
   );
 }

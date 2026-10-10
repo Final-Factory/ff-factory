@@ -292,6 +292,8 @@ export interface RunSecrets {
   claudeHold?: { why: string; next?: string };
   /** How many Claude tokens the run's person has (enabled, granted to the run): 0 is the transition, today's account. */
   poolSize?: number;
+  /** With `github`: the GitHub entry given as GH_TOKEN (w868), never its value. */
+  github?: VaultEntryMeta;
   env: Record<string, string>;
   /** Entries granted to the run that could not be opened (no key, a wrong key): named, never their values. */
   problems: string[];
@@ -539,6 +541,30 @@ export class Vault {
       .map(({ e, token }) => ({ token, label: `${e.name} …${e.last4}`, fingerprint: e.fingerprint, ...(e.email ? { email: e.email } : {}) }));
   }
 
+  /** Every enabled GitHub entry the key opens, with its value: the health probe's list (server/githubTokens.ts, w868). */
+  githubTokens(): { entry: VaultEntryMeta; token: string }[] {
+    this.reload();
+    const { key } = this.key();
+    if (!key) return [];
+    return this.data.entries
+      .filter((e) => e.kind === 'github' && !e.disabled)
+      .map((e) => ({ entry: this.meta(e), token: this.open(key, e) }))
+      .filter((x): x is { entry: VaultEntryMeta; token: string } => !!x.token);
+  }
+
+  /**
+   * The GitHub token the portal's own reads use for a person's work (w868): their own entry first, then one shared with
+   * anyone, by name; none known to be refused or expired. The portal is not a machine, so no role or machine grant applies:
+   * machines.githubFromVault's "portal" is the consent.
+   */
+  githubFor(person: string | undefined, usable: (fingerprint: string) => boolean = () => true): { entry: VaultEntryMeta; token: string } | undefined {
+    const run: VaultRun = { machineId: 'portal', role: 'orchestrator', userId: person };
+    const order = (e: VaultEntryMeta) => `${same(e.owner, person) ? 0 : 1}${e.name}`;
+    return this.githubTokens()
+      .filter((x) => eligible(x.entry, run) && usable(x.entry.fingerprint))
+      .sort((a, b) => order(a.entry).localeCompare(order(b.entry)))[0];
+  }
+
   /** The pick's view of one Claude entry: its meters, and the processes live on it other than `except`'s. */
   private poolToken(e: VaultEntry, usageOf: ((fp: string) => PlanUsage | undefined) | undefined, liveOn: ((fp: string, except?: string) => number) | undefined, except: string | undefined, now: number): PoolToken {
     const r = this.recent.get(e.fingerprint);
@@ -582,10 +608,11 @@ export class Vault {
    * What a run gets (docs/vault.md, section 3): with `claude`, one Claude token chosen by the pool rules (tokenPool.ts); and every other
    * entry granted to the run's role and machine, as environment. Nothing when the key is missing (the problems say so).
    */
-  forRun(run: VaultRun, o: { claude: boolean; usageOf?: (fingerprint: string) => PlanUsage | undefined; liveOn?: (fingerprint: string, exceptSession?: string) => number; limits?: PoolLimitsOf; now?: () => number }): RunSecrets {
+  forRun(run: VaultRun, o: { claude: boolean; github?: boolean; githubUsable?: (fingerprint: string) => boolean; usageOf?: (fingerprint: string) => PlanUsage | undefined; liveOn?: (fingerprint: string, exceptSession?: string) => number; limits?: PoolLimitsOf; now?: () => number }): RunSecrets {
     this.reload();
     const out: RunSecrets = { env: {}, problems: [] };
-    const granted = this.data.entries.filter((e) => eligible(e, run));
+    // GitHub entries only where machines.githubFromVault is on (w868), and none known to be refused or expired.
+    const granted = this.data.entries.filter((e) => eligible(e, run) && (e.kind !== 'github' || (!!o.github && (o.githubUsable?.(e.fingerprint) ?? true))));
     const wanted = granted.filter((e) => e.kind !== 'claude' || o.claude);
     if (!wanted.length) return out;
     const { key, status } = this.key();
@@ -605,6 +632,7 @@ export class Vault {
         continue;
       }
       out.env[name] = v;
+      if (e.kind === 'github') out.github = this.meta(e);
     }
     if (o.claude) {
       const sticky = run.sessionId ? this.lastPick.get(run.sessionId) : undefined;
@@ -659,6 +687,10 @@ export interface VaultContext {
   payer?: () => string | undefined;
   /** A run that wanted a vault Claude token and fell back, or an entry that would not open: for the log and system_status. */
   onProblem?: (line: string) => void;
+  /** Whether a GitHub token may be handed out (not refused by GitHub, not expired: server/githubTokens.ts, w868). */
+  githubUsable?: (fingerprint: string) => boolean;
+  /** A GitHub entry was given to a run: its last use on the vault page. */
+  onGithubUse?: (entry: VaultEntryMeta, what: string) => void;
 }
 let context: VaultContext | undefined;
 export const setVaultContext = (c: VaultContext | undefined) => {

@@ -20,6 +20,7 @@ import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
 import { blockerVerdict, CI_REF, gatesOf, type BlockerFacts } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
+import { ghRunner } from './githubTokens.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
 
 const EVERY_MS = 60_000;
@@ -50,10 +51,15 @@ export interface BlockerWatchDeps {
   usageClear?: (account: string) => boolean | undefined;
   /** When the nightly lab last posted its results (ms). */
   nightlyAt?: () => number | undefined;
-  /** A pull request's checks ("owner/repo#123"); default gh. Throws (or answers undefined) when they cannot be read. */
-  ci?: (ref: string) => Promise<CiState | undefined>;
-  /** A pull request's state ("owner/repo#123"); default gh. */
-  pr?: (ref: string) => Promise<PrState | undefined>;
+  /**
+   * A pull request's checks ("owner/repo#123"); default gh, on the GitHub token of `person` (the person the first request
+   * waiting on it is for, w868; server/githubTokens.ts). Throws (or answers undefined) when they cannot be read.
+   */
+  ci?: (ref: string, person?: string) => Promise<CiState | undefined>;
+  /** A pull request's state ("owner/repo#123"); default gh, as for ci. */
+  pr?: (ref: string, person?: string) => Promise<PrState | undefined>;
+  /** Whose GitHub token a request's reads use (w868); undefined: the portal's own gh login. */
+  githubPerson?: (w: WorkItem) => string | undefined;
   /** The computers with room for one more worker now. */
   room?: () => string[];
   now?: () => number;
@@ -109,8 +115,9 @@ export class BlockerWatch {
       for (const w of blocked) {
         for (const g of gatesOf(w)) {
           if (!g.ref) continue;
-          if (g.kind === 'ci') ci.set(g.ref, await this.ciOf(g.ref));
-          else if (g.kind === 'pr') pr.set(g.ref, await this.prOf(g.ref));
+          // A pull request several requests wait on is read once, on the first one's person's token.
+          if (g.kind === 'ci' && !ci.has(g.ref)) ci.set(g.ref, await this.ciOf(g.ref, this.d.githubPerson?.(w)));
+          else if (g.kind === 'pr' && !pr.has(g.ref)) pr.set(g.ref, await this.prOf(g.ref, this.d.githubPerson?.(w)));
         }
       }
       const facts = this.facts(ci, pr);
@@ -182,14 +189,14 @@ export class BlockerWatch {
   }
 
   /** A pull request's state, read at most every CI_EVERY_MS (w754). A read that fails is logged as for CI (w829). */
-  private async prOf(ref: string): Promise<PrState | undefined> {
+  private async prOf(ref: string, person?: string): Promise<PrState | undefined> {
     const seen = this.prSeen.get(ref);
     const now = this.now();
     if (seen && now - seen.at < CI_EVERY_MS) return seen.state;
     let state: PrState | undefined;
     let why = 'no answer';
     try {
-      state = await (this.d.pr ?? ghPr)(ref);
+      state = await (this.d.pr ? this.d.pr(ref, person) : ghPr(ref, ghRunner(person, `the state of ${ref}`)));
     } catch (e) {
       why = clipLine((e as Error).message, 300);
     }
@@ -217,14 +224,14 @@ export class BlockerWatch {
    * A pull request's checks, read at most every CI_EVERY_MS. A read that fails is remembered (ciUnreadable) and logged, the
    * first time and every 30 minutes after (w829: it failed in silence for hours), and so is its recovery.
    */
-  private async ciOf(ref: string): Promise<CiState | undefined> {
+  private async ciOf(ref: string, person?: string): Promise<CiState | undefined> {
     const seen = this.ciSeen.get(ref);
     const now = this.now();
     if (seen && now - seen.at < CI_EVERY_MS) return seen.state;
     let state: CiState | undefined;
     let why = 'no answer';
     try {
-      state = await (this.d.ci ?? ghChecks)(ref);
+      state = await (this.d.ci ? this.d.ci(ref, person) : ghChecks(ref, ghRunner(person, `CI on ${ref}`)));
     } catch (e) {
       why = clipLine((e as Error).message, 300);
     }
