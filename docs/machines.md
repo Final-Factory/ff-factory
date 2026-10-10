@@ -696,7 +696,10 @@ LothDesktop and Beast, not just when BEAST is full").
       are all a `deploy` (the portal or a machine's daemon), a `request` or a `pr` merging (set by the worker's `blocked_on`,
       `deploys: ["portal"]` for a deploy, by the dispatcher's `decide_work block`, or by the ledger cleanup on a merged
       request whose only step left is a deploy); or **Waiting on input**, a person (its `waiting_on_person`, "still open:
-      waiting on Ben to …" in its report, or a question). Not a time, a machine, a usage limit or a lock (they clear by
+      waiting on Ben to …" in its report, or a question). The worker's own `waiting_on_person` counts for **every** request it
+      is the latest worker on, at once (found live on w890, 2026-10-10 19:50Z: started for w1 and then sent w2, the ledger
+      read it as working on w2 only, w1 never read Waiting, "every request waits" failed, and biscuit/slot3 stayed held
+      with the worker Idle after it had declared it waited on lothsahn). Not a time, a machine, a usage limit or a lock (they clear by
       themselves or are about this machine), and not CI (its own, stricter rule above). Unlike CI, a running editor does not
       keep it (nothing is about to be read or fixed in it, and the placement that takes the sandbox stops the editor first,
       as for every release). Never released (`waitReleaseWhy`, `keptWhy`): uncommitted or untracked work its daemon cannot

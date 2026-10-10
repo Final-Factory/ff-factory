@@ -624,6 +624,10 @@ export class Agents {
     if (this.ciWait(i)) return undefined;
     const items = [...this.store.work.values()].filter((w) => w.sessionIds.at(-1) === i.id && WORK_OPEN.includes(w.status));
     if (!items.length) return undefined;
+    // The worker's own declaration (waiting_on_person, which its next message ends) covers every request it is the latest
+    // worker on (w890, found live: a worker started for w1 and then sent w2 is read as working on w2 only, so its
+    // declaration for w1 never made w1 Waiting, "every request waits" failed, and its sandbox stayed held).
+    if (i.waitingOn) return `it waits on ${i.waitingOn.who}: ${i.waitingOn.what}`;
     const now = Date.now();
     if (!this.waitLive || now - this.waitLive.at > 5000) this.waitLive = { at: now, live: this.workLive() };
     const parts: string[] = [];
