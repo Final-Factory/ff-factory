@@ -76,7 +76,7 @@ interface HeldCall {
   why: string;
 }
 /** update_work's input (Agents' tool). */
-type UpdateInput = { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; when?: ConditionInput; words?: string; expires_days?: number };
+type UpdateInput = { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; main_clone?: string | false; when?: ConditionInput; words?: string; expires_days?: number };
 
 /** Held calls kept per chat at most, and for how long. */
 const HELD_MAX = 10;
@@ -339,6 +339,11 @@ export interface WorkInput {
   subjects?: string[];
   /** A ledger task (w642): its workers may list and read every open and stalled request (read_work all). */
   ledger_read?: boolean;
+  /**
+   * w936: the machine whose main clone its workers may work in (quit the editor open there, back up, git fetch and
+   * checkout, reopen Unity). Only in a turn of its person's own, and only when the request explicitly asks for work there.
+   */
+  main_clone?: string;
 }
 
 /** An operator's ffdev turn FFBox handed over (server/devRequests.ts), its files already in the attachment store. */
@@ -855,6 +860,7 @@ export class Orchestrators {
     const brief = input.brief.trim();
     if (!title || !brief) throw new Error('give a title and a brief');
     const human = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    const cloneMachine = input.main_clone ? this.mainCloneMachine(owner, input.main_clone, human) : undefined;
     const repeat = repeatOf(this.store.work.values(), owner, title);
     if (repeat) {
       this.stamp(repeat, `filed again by ${owner.displayName}'s orchestrator${human ? ' in their own turn' : ''}: ${firstLine(brief)}`);
@@ -863,7 +869,7 @@ export class Orchestrators {
       if (confirmed) repeat.humanAsked = true;
       this.store.putWork(repeat);
       if (confirmed) this.gatherForDispatcher(owner, updateNotice(repeat, owner, 'asked for it again in their own words'));
-      return `Already filed as ${repeat.id} (${repeat.status}); the new text is in its log. To change what it asks for, use update_work with a note.`;
+      return `Already filed as ${repeat.id} (${repeat.status}); the new text is in its log. To change what it asks for, use update_work with a note${cloneMachine ? ` (and main_clone: "${cloneMachine}" for the main-clone grant)` : ''}.`;
     }
     this.spend(chat.info.id, owner);
     const now = this.now();
@@ -911,12 +917,13 @@ export class Orchestrators {
       ...(input.attachments?.length ? { attachments: input.attachments } : {}),
       ...(scope ? { scope } : {}),
       ...(input.ledger_read ? { ledgerRead: { by: owner.displayName, at: now.toISOString() } } : {}),
+      ...(cloneMachine ? { mainCloneAccess: { machine: cloneMachine, by: owner.displayName, at: now.toISOString() } } : {}),
       overlaps: [],
       asks: 0,
       log: [],
     };
     w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(id));
-    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}${w.ledgerRead ? '; its workers may read the ledger' : ''}`);
+    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}${w.ledgerRead ? '; its workers may read the ledger' : ''}${cloneMachine ? `; its workers may work in ${cloneMachine}'s main clone` : ''}`);
     this.store.putWork(w);
     this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     this.gatherForDispatcher(owner, requestNotice(w));
@@ -960,6 +967,11 @@ export class Orchestrators {
     if (input.ledger_read !== undefined) {
       readLine = this.setLedgerRead(owner, w, input.ledger_read);
       if (!input.note?.trim() && !input.priority && !input.close && !input.reopen && !input.subjects?.length && !input.approve && !input.decline) return readLine;
+    }
+    // MAIN-CLONE WORK (w936): grant or take back; with nothing else asked, that is the whole update.
+    if (input.main_clone !== undefined) {
+      const cloneLine = this.setMainCloneAccess(chat, owner, w, input.main_clone);
+      if (!input.note?.trim() && !input.priority && !input.close && !input.reopen && !input.subjects?.length && !input.approve && !input.decline) return cloneLine;
     }
     // SUBJECTS ADDED LATER (w502): the threads and reports a request turned out to be the work for, open or closed.
     // Add-only; with nothing else asked, that is the whole update.
@@ -1147,7 +1159,7 @@ export class Orchestrators {
   private recordConditional(chat: SessionHandle, owner: Requester, w: WorkItem, input: UpdateInput): string {
     const n = owner.displayName;
     if ((chat.turnFrom ?? chat.lastFrom) !== 'human') throw new GateRefused(`a decision that waits for a fact is recorded only in a turn ${n} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed message)`);
-    if (input.reopen || input.priority || input.subjects?.length || input.ledger_read !== undefined) throw new Error('when goes with one action (approve, decline or close) and its note, nothing else');
+    if (input.reopen || input.priority || input.subjects?.length || input.ledger_read !== undefined || input.main_clone !== undefined) throw new Error('when goes with one action (approve, decline or close) and its note, nothing else');
     const actions = [input.approve ? 'approve' : '', input.decline ? 'decline' : '', input.close ?? ''].filter(Boolean) as ConditionalDecision['action'][];
     if (actions.length !== 1) throw new Error('when needs exactly one action: approve, decline, or close (done or cancelled)');
     const action = actions[0];
@@ -1303,6 +1315,41 @@ export class Orchestrators {
     this.stamp(w, `${owner.displayName}: ${on ? 'its workers may read the ledger' : 'ledger reading taken back'}`);
     this.store.putWork(w);
     return `${w.id}: ${on ? 'its workers may now list and read every open and stalled request (read_work all)' : 'ledger reading taken back'}.`;
+  }
+
+  /** The machine id a main_clone names, or why it cannot be granted: only in a turn of the person's own (w936). */
+  private mainCloneMachine(owner: Requester, name: string, humanTurn: boolean): string {
+    if (!humanTurn) throw new GateRefused(`main_clone lets workers act in a machine's main clone, a person's own project folder: only ${owner.displayName}, in their own words, asks for that, and this turn is not theirs (a check-in, a timer or a relayed message)`);
+    const { machines } = this.d.places();
+    const m = machines.find((x) => same(x.id, name.trim()));
+    if (!m) throw new Error(`main_clone: no machine "${name}" (machines: ${machines.map((x) => x.id).join(', ') || 'none'})`);
+    return m.id;
+  }
+
+  /**
+   * Grant or take back work in a machine's main clone on a request (w936, docs/orchestrators.md "Work in a machine's main
+   * clone"): its workers there may then quit the editor open on the clone, back up, git fetch and checkout, and reopen
+   * Unity, and nothing else (server/mainCloneGuard.ts). Its own person's orchestrator only, in a turn of theirs, only for
+   * a request that explicitly asks for work in that clone, and never on one from the intake (its text is not a person's).
+   * Taking it back needs no turn: it narrows. A running worker's guard changes with its next message.
+   */
+  private setMainCloneAccess(chat: SessionHandle, owner: Requester, w: WorkItem, machine: string | false): string {
+    if (!isFor(w, owner.userId)) throw new Error(`${w.id} is not ${owner.displayName}'s request: only its own people grant its workers a machine's main clone`);
+    if (machine === false || machine === '') {
+      if (!w.mainCloneAccess) return `${w.id} grants no main-clone work.`;
+      const was = w.mainCloneAccess.machine;
+      w.mainCloneAccess = undefined;
+      this.stamp(w, `${owner.displayName}: main-clone work on ${was} taken back`);
+      this.store.putWork(w);
+      return `${w.id}: main-clone work on ${was} taken back (a running worker's guard changes with its next message).`;
+    }
+    if (w.source) throw new Error(`${w.id} came from the intake (${w.source.kind}): its text is not a person's own, so it never grants work in a main clone`);
+    const id = this.mainCloneMachine(owner, machine, (chat.turnFrom ?? chat.lastFrom) === 'human');
+    if (w.mainCloneAccess?.machine === id) return `${w.id} already grants work in ${id}'s main clone.`;
+    w.mainCloneAccess = { machine: id, by: owner.displayName, at: this.now().toISOString() };
+    this.stamp(w, `${owner.displayName}, in their own turn: its workers on ${id} may work in its main clone (quit the editor, back up, git fetch and checkout, reopen Unity)`);
+    this.store.putWork(w);
+    return `${w.id}: its workers on ${id} may now work in that machine's main clone: quit the editor open there, back up, git fetch and checkout, reopen Unity, and nothing else. A worker already running gets it with its next message.`;
   }
 
   /**

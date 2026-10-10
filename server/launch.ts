@@ -60,6 +60,11 @@ export interface LaunchSpec {
     publicIdentity?: { repos: string[]; name?: string; email?: string };
     /** The machine's worker install folder (w896): the guard refuses a delete outside it. An older daemon ignores it. */
     workerRoot?: string;
+    /**
+     * w936: the machine's main clone, when a request this worker serves was granted work there (mainCloneAccess): the guard
+     * then judges commands naming it one by one (server/mainCloneGuard.ts). An older daemon ignores it and refuses them all.
+     */
+    mainClone?: { path: string; requests: string[] };
   };
   env?: Record<string, string>;
   /**
@@ -228,6 +233,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       denyToolPrefixes: g.denyToolPrefixes,
       publicIdentity: g.publicIdentity,
       workerRoot: g.workerRoot,
+      mainClone: g.mainClone,
       editorRunning,
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),

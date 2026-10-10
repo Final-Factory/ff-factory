@@ -20,8 +20,9 @@ fresh log name when the old log is still locked. Restarting is fine with unsaved
 In a machine sandbox (BEAST's included), workers must use the tool, never kill Unity by hand: other sandboxes' editors
 and the live game run on the same machine (`server/guard.ts`). No agent works in a machine's main clone (w536), and
 the daemon runs no editor or watch for it, and its owner's own editor there is the owner's to use, not a wall for
-work: a request that must change the clone has its editor closed cleanly (scenes saved or backed up) and reopened by the
-worker or the ops worker, never by asking the person (w935, Ben: "You can close Unity."; ff-agents `editor-ops`, "An editor
+work: a request that explicitly asks for work in the clone carries a grant (orchestrators.md, "Work in a machine's main
+clone"), and its worker saves the scenes, quits the editor through the bridge, backs up, fetches and checks out, and
+reopens Unity, never asking the person (w935 and w936, Ben: "You can close Unity."; ff-agents `editor-ops`, "An editor
 open on a project you must change is yours to close").
 
 ## Hang and crash detection
