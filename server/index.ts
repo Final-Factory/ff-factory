@@ -413,7 +413,7 @@ agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));
 // The portal's host guard (docs/self-recovery.md): its data volume, RAM and the clean-up of this computer. No sandbox
 // drive: the portal holds no sandboxes (w510); a machine's drive is its daemon's guard's (machine/hostGuard.ts, w466).
-const cleanupEnv = { ...hostCleanupEnv(), sandboxRoots: [cfg.sandboxRoot] };
+const cleanupEnv = { ...hostCleanupEnv(), sandboxRoots: [cfg.sandboxRoot], cacheRoots: [cfg.sandboxRoot] };
 /**
  * What clean-up never touches here: the sandbox root (this host's own daemon's), the old standing agents' folders, the
  * base clone, this app and its data, and the temp folders of agents running now.

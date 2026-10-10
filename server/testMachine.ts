@@ -17,6 +17,7 @@ import { copyTree, removeTree, run, type RunResult } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { bus } from './store.ts';
 import type { GitStatus, Machine, MachineSandbox, SandboxPoolSettings } from '../shared/types.ts';
+import type { TrimPolicy } from './cacheTrim.ts';
 
 export const GB = 1024 ** 3;
 
@@ -163,6 +164,8 @@ export interface TestMachineOptions {
   maxUnity?: number;
   /** The daemon's agents (default: the real AgentSession, answered by whatever query the test installed). */
   makeSession?: SessionFactory;
+  /** The daemon's trim of a released sandbox's Library caches (default off in tests, so no sandbox is ever briefly 'cleanup'). */
+  cacheTrim?: Partial<TrimPolicy> | false;
   /** Free bytes on the sandbox volume (default 500 GB). */
   free?: () => number | undefined;
   /** Temp folder prefix, and the folder it is made in (default the system temp folder). */
@@ -280,7 +283,7 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
       // Never this computer's own Unity MCP entry from ~/.claude.json: a command nothing runs (the fake SDK starts no stdio server).
       const busBefore = new Set(bus.listeners('event'));
       daemon = new Daemon(
-        { portalUrl: url, id, token, agentHosts: false, repoPath: repos.main, appDir, tempDir: path.join(repos.root, 'tmp'), unitySlotsDir: path.join(repos.root, 'slots'), claude: 'no-such-claude', maxEventsFile: null, sandboxes: settings, sandboxIdleStopMinutes: 0, cleanup: NO_CLEANUP, unityMcpServer: { command: 'no-such-unity-mcp', args: [] } },
+        { portalUrl: url, id, token, agentHosts: false, repoPath: repos.main, appDir, tempDir: path.join(repos.root, 'tmp'), unitySlotsDir: path.join(repos.root, 'slots'), claude: 'no-such-claude', maxEventsFile: null, sandboxes: settings, sandboxIdleStopMinutes: 0, sandboxCacheTrim: o.cacheTrim ?? false, cleanup: NO_CLEANUP, unityMcpServer: { command: 'no-such-unity-mcp', args: [] } },
         o.makeSession,
         FAKE_PROBES,
         poolDeps,
