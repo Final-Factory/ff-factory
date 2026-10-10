@@ -1492,6 +1492,13 @@ export interface WorkItem {
    */
   ledgerRead?: { by: string; at: string };
   /**
+   * Its workers on `machine` may work in that machine's main clone: quit the editor open there, back up, git fetch and
+   * checkout, reopen Unity (w936, docs/orchestrators.md "Work in a machine's main clone"). Set by its person's orchestrator
+   * in a turn of theirs (request_work or update_work main_clone), never by its text; the guard reads it
+   * (server/mainCloneGuard.ts).
+   */
+  mainCloneAccess?: { machine: string; by: string; at: string };
+  /**
    * The question it waits on, from the dispatcher (decide_work ask) to its requester, until a note answers it (w278:
    * FFBox posts it in the requester's thread). A design question is `flag` instead.
    */

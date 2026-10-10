@@ -180,6 +180,7 @@ function facts(w: WorkItem): string[] {
     w.sessionIds.length ? `Workers: ${w.sessionIds.join(', ')}` : 'Workers: none yet',
     w.relatedIds?.length ? `Related: ${w.relatedIds.map((r) => cleanLine(r, 60)).join(', ')}` : '',
     w.ledgerRead ? `Grants ledger reading to its workers (set by ${w.ledgerRead.by} ${w.ledgerRead.at.slice(0, 16).replace('T', ' ')}).` : '',
+    w.mainCloneAccess ? `Grants its workers on ${cleanLine(w.mainCloneAccess.machine, 60)} work in that machine's main clone (set by ${w.mainCloneAccess.by} ${w.mainCloneAccess.at.slice(0, 16).replace('T', ' ')}).` : '',
     w.status === 'blocked' && w.blocked ? `Blocked on ${cleanLine(gatesName(gatesOf(w)), 200)}: ${cleanLine(gatesOf(w).map((g) => g.what).join('; '), 300)} (set by ${w.blocked.by} ${w.blocked.at.slice(0, 16).replace('T', ' ')}; it starts by itself when ${w.alsoBlocked?.length ? 'all of them clear' : 'that clears'}).` : '',
   ].filter(Boolean);
 }
