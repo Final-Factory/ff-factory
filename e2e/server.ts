@@ -196,6 +196,8 @@ process.env.CLAUDE_CONFIG_DIR = path.join(base, 'claude');
 // No GitHub login (w904): the portal probes its own gh login at start, and a developer's would show a token banner here.
 process.env.GH_CONFIG_DIR = path.join(base, 'gh');
 delete process.env.GH_TOKEN;
+// Not "elevated" even when the runner is root, as an FFBox runner container is (a root server shows an admin-rights bar on every page).
+process.env.FFSB_TEST_ELEVATED = '0';
 delete process.env.GITHUB_TOKEN;
 delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 // Nor a real Discord token: Max reads only the scratch ffbox config above.

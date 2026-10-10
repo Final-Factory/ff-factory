@@ -67,6 +67,9 @@ export function tokenIsElevated(t: TokenInfo): boolean {
 }
 
 export async function currentProcessElevated(): Promise<boolean> {
+  // A test seam, for the e2e server only (e2e/server.ts): a CI container runs as root, which is "elevated" here, and the
+  // warning bar that follows is on every page the Playwright tests look at (w911).
+  if (process.env.FFSB_TEST_ELEVATED === '0') return false;
   if (!isWindows) return typeof process.getuid === 'function' && process.getuid() === 0;
   const r = await run('whoami.exe', ['/groups', '/fo', 'csv'], { timeoutMs: 15_000 });
   if (r.code !== 0) return false; // unknown: do not block on it
