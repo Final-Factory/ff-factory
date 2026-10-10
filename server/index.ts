@@ -572,7 +572,14 @@ const intake = new IntakeManager({
   pushReportObsolete: (o) => providers.pushReportObsolete(o),
   // FFBox runs ffbox master, which takes maybe: no offer list gates it (docs/ffbox-connector-contract.md, "No negotiation").
   takesMaybe: () => true,
+  // The nightly run's key (w864): minted at each fire under one name, so the night before's dies; redacted from now on.
+  mintNightlyKey: () => {
+    const key = auth.createApiKey('nightly-run', undefined, 'nightly');
+    addSecretValues([key]);
+    return key;
+  },
 }).start();
+agents.nightlyKeyFor = (ids, portalUrl) => intake.nightlyRunEnv(ids, portalUrl);
 // The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): requests whose PRs merged close, quiet ones stall.
 const ledgerSweep = new LedgerSweep({
   cfg,

@@ -494,8 +494,19 @@ shouldn't assume silence means a successful (or failed) run." The Windows tasks 
   `FF_NIGHTLY_ROOT`, with the lab's player slots), checks it every 25 minutes with `nightly_worker.sh check <date>`
   (a night that died or hung gets its NO VERDICT note posted and is reported broken), reads the report, and ends with
   `RESOLVED: nightly <date> <passed|failed|broken>: <TL;DR>`. It posts nothing and files nothing by hand.
-- **Every night reports** (`POST /api/intake/nightly`, the nightly-scoped key in `~/.config/ffnightly/ffactory.json` on
-  the lab, written there by the ops worker): a green night too, with `status` passed, failed or broken, `counts`, a
+- **The night's key** (w864): at each fire the portal mints an API key `--scope nightly` under the one name
+  `nightly-run` (`Auth.createApiKey`), so it replaces, and so revokes, the night before's. It is kept in memory only (its
+  hash in the key store) and given to that night's worker alone, in its launch environment, as `FF_FACTORY_URL` (the
+  address its machine reaches the portal at, `Machine.portalUrl`) and `FF_FACTORY_NIGHTLY_KEY`
+  (`IntakeManager.nightlyRunEnv`, `agents.ts` `machineSandboxSpec`). The lab's `ffnightly.py deliver` reads those two
+  first. Like every `*_KEY` of a launch spec it is redacted from transcripts and logs (`secrets.ts` `SECRET_ENV`; the
+  portal registers it too), and it never appears in a brief, a file on the machine or the Intake tab. The worker is found
+  by its title (`w901: ...`) as well as by link, because its first process starts before the ledger links it. After a
+  portal restart a worker that already had the key gets none (the lab's running night keeps the valid one), and a night
+  whose worker never had it gets a fresh one. No person or ops worker handles the key, and no daemon update is needed:
+  the daemons already pass a launch spec's environment on. A key in `~/.config/ffnightly/ffactory.json` on a lab still
+  works for nights run by hand.
+- **Every night reports** (`POST /api/intake/nightly`): a green night too, with `status` passed, failed or broken, `counts`, a
   `cause` for a broken one and `request` (the run request). The night is recorded whether or not `intake.nightly.enabled`
   files regressions (`recordNight`), its run request gets a log line, and the answer says `recorded: "<date>, <request>"`.
   A lab from before w864 sends no status: its results decide (red when any is new or still failing).
@@ -655,10 +666,10 @@ snowflakes; an entry that is not one trusts nobody.
    `autoApprove` off for the first nights) and restart. After the next night, the Intake tab's Nightly line shows the
    last report and what it came to. Turn on `intake.nightly.autoApprove.enabled` once the requests look right. The
    nightly-regression-sentry standing agent now duplicates this: narrow its charter to what the intake does not do, or
-   pause it. **The nightly run** (w864): the ops worker mints the key on the portal host and writes it straight into
-   `%USERPROFILE%\.config\ffnightly\ffactory.json` on LothDesktop (`{"url": "<public Funnel URL>", "key": "<key>"}`),
-   never through chat; then set `intake.nightly.run: { "enabled": true, "person": "lothsahn" }` and restart. The next
-   03:00 New York time files the first run request.
+   pause it. **The nightly run** (w864): a person's orchestrator sets `set_app_config intake.nightly.run`
+   `{ "enabled": true, "time": "03:00", "tz": "America/New_York", "machine": "lothdesktop", "person": "lothsahn" }` and
+   `intake.nightly.enabled` `true` (both live, no restart, anyone may). The next 03:00 New York time files the first run
+   request; the portal mints and hands over its key itself.
 10. **Escalations from Max** (w94; after Lothsahn merges the ffbox side and the w54 prerequisites): mint FFBox's key on
    BEAST, `node server/apikey.ts ffbox --scope ffbox`, and hand it to Lothsahn out of band with the public URL. Set
    `intake.ffbox: { enabled: true, escalations: true }` (leave `autoApprove` off) and restart. The first escalation
