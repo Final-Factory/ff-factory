@@ -221,7 +221,8 @@ export class BlockerWatch {
       for (const [k, at] of this.headFirstSeen) if (now - at > 7 * 86_400_000) this.headFirstSeen.delete(k);
     }
     this.healthSeen.set(ref, { at: now, state });
-    this.noteRead(this.healthFailing, 'the head of', ref, now, state ? 'read' : undefined, why);
+    // A log line, not a warning: a failed head read only costs the conflict wake (the CI read itself is what warns, w829).
+    this.noteRead(this.healthFailing, 'the head of', ref, now, state ? 'read' : undefined, why, console.log);
     return state;
   }
 
@@ -246,13 +247,13 @@ export class BlockerWatch {
    * Remembers and logs a read of a pull request that failed: the first time, every 30 minutes after, and when it reads
    * again (w829: CI reads failed in silence for hours).
    */
-  private noteRead(failing: Map<string, { since: number; why: string; logged: number }>, what: string, ref: string, now: number, read: string | undefined, why: string) {
+  private noteRead(failing: Map<string, { since: number; why: string; logged: number }>, what: string, ref: string, now: number, read: string | undefined, why: string, warn: (line: string) => void = console.warn) {
     const was = failing.get(ref);
     if (read !== undefined) {
       if (was) console.log(`blocker watch: ${what} ${ref} reads again after ${Math.round((now - was.since) / 60_000)} min: ${read}`);
       failing.delete(ref);
     } else if (!was || now - was.logged >= READ_FAIL_LOG_MS) {
-      console.warn(`blocker watch: cannot read ${what} ${ref}${was ? ` (for ${Math.round((now - was.since) / 60_000)} min)` : ''}: ${why}`);
+      warn(`blocker watch: cannot read ${what} ${ref}${was ? ` (for ${Math.round((now - was.since) / 60_000)} min)` : ''}: ${why}`);
       failing.set(ref, { since: was?.since ?? now, why, logged: now });
     } else failing.set(ref, { ...was, why });
   }
