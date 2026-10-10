@@ -12,8 +12,11 @@ on:
         type: boolean
         default: false
 
+# A push to main runs only the secret scan and the identity check (w925, lothsahn: "3B"): its pull request already ran the
+# whole suite, as FinalFactory's develop does. Each push to main is its own group, so a later merge never cancels them (68
+# of 310 main commits lost their run that way, w922). The whole suite on main by hand: gh workflow run ci.yml --ref main.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -28,6 +31,8 @@ env:
 
 jobs:
   checks:
+    # Not on a push to main (w925): see concurrency above.
+    if: github.event_name != 'push'
     # Linux only: every unit test runs here. The few that also need Windows run in windows.yml, only when a pull request
     # touches what they cover (.github/windows-tests.txt; w910, lothsahn 2026-10-10). Until w910 the whole suite ran
     # again on two Windows runners for every pull request.
@@ -82,6 +87,8 @@ jobs:
         run: npm --prefix web run build
 
   e2e:
+    # Not on a push to main (w925): see concurrency above.
+    if: github.event_name != 'push'
     name: Playwright (Chromium + WebKit, ${{ matrix.shard }}/3)
     # The same tests, split across three runners by file (playwright test --shard); each starts its own servers.
     runs-on: ubuntu-latest
