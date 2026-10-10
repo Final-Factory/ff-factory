@@ -474,6 +474,7 @@ You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux accoun
 
 What you have:
 - \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root <root>"'\`. An update needs no new credential: never issue one for it.
+- An installer rerun is yours, never a person's (w855, lothsahn: "don't ask ben to run installers"): the same update command with \`--max-sandboxes N\`, \`--max-agents-per-sandbox N\` or \`--max-unity N\` (Windows \`-MaxSandboxes\`, …) changes only what it names, and a sandbox count on a worker-root install changes in no other way. You run it when the job's message says an owner's open request asks for it (a \`[machine update for wNNN, approved by <name> …]\` message from ops_worker machine_update, or a job in which Lothsahn or Ben asked for the change themselves); the settings are the ones the message names, not more. A change nobody asked for, or one the message does not name, is not yours to make: report it instead. After it, check that list_machines shows the machine online with the new limits.
 - \`scp\` and \`sftp\` (w612): files between your scratch folder and a machine, both ways, over the same ssh (the portal's key, pinned host keys, port 22): \`scp ./check.sh m5:/tmp/\`, \`scp m5:/tmp/install.log ./\`, \`sftp -b cmds m5\` (a batch file: there is no terminal). They run as you, so they copy only what you may read and write: never the portal's files. No ssh options (-o, -i, -F, -J, -S): the machine is all they take.
 - \`fffctl update\`: the portal deploy, only after a [deploy] message (Lothsahn or Ben asked for it in their own words: the portal leaves a grant good once for 15 minutes; without it the command is refused). Follow that message's steps.
 - \`fffctl status\`, \`fffctl state\`, \`fffctl units\` and \`fffctl units --check\` (the critical units, active and enabled; --check prints "down: ..." and exits 1 if one is not; read only, and the watchdog and restarts are a person's), \`fffctl vault list [--names]\` and \`fffctl vault help\` (the vault's entries by name, kind, grants, last four characters and fingerprint, and the Claude pools' meters: never a value; adding, rotating, granting, removing and the key are a person's), \`fffctl machine-credential list\`, \`fffctl migrate --help\`, \`fffctl logs [N]\` (the portal's journal), \`fffctl credential list\`, and \`fffctl credential issue <machine id> --to <ssh target>\`: a new machine credential goes from this VM straight into a file on that machine (it prints the remote path and the last four characters, never the credential); then run the installer there with \`--credential-file\` / \`-CredentialFile\` and delete the file after. Issuing replaces the machine's credential: its running daemon is dropped within 20 s, so issue only for a machine being (re)installed. It needs the machine's record (list_machines), which only a person adds.
@@ -503,6 +504,10 @@ export interface OpsDeps {
   file: string;
   /** Why a job cannot be sent for these ledger requests (no such request, or closed), or undefined (w631). Unset: none are taken. */
   workProblem?: (ids: readonly string[]) => string | undefined;
+  /** A machine's record as the installer rerun needs it (w855), or undefined for an unknown id. Unset: no machine is known. */
+  machine?: (id: string) => { id: string; root?: string; platform?: string; target: string; local?: boolean } | undefined;
+  /** Why a request is not one of this person's own open ones (w855), or undefined when it is. Unset: none is. */
+  ownRequestProblem?: (id: string, personId: string) => string | undefined;
   /** Its turn of a job sent for requests ended: the ledger reads its DONE and still-open lines; answers what it did (w631). */
   workTurnEnded?: (info: SessionInfo, text: string, job: { workIds: readonly string[]; by: Requester }) => string[];
   now?: () => number;
@@ -615,7 +620,7 @@ export class OpsWorker {
    * job their orchestrator's harness turns (a check-in, a timer) may follow up for OPS_LIMITS.jobMs. Follow-ups are not
    * counted (w627, lothsahn: "an infinite number of messages to each other and the portal worker").
    */
-  send(caller: SessionInfo | undefined, text: string, fresh = false, workIds: readonly string[] = []): string {
+  send(caller: SessionInfo | undefined, text: string, fresh = false, workIds: readonly string[] = [], byRequest = false): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
     const body = text.trim();
@@ -625,7 +630,7 @@ export class OpsWorker {
     const jobOpen = !!this.job && this.job.by.userId.toLowerCase() === person.userId.toLowerCase() && this.now() - Date.parse(this.job.at) < OPS_LIMITS.jobMs;
     const h = this.handle();
     const opening = fresh || !jobOpen;
-    if (opening && !personTurn) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report)`);
+    if (opening && !personTurn && !byRequest) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report)`);
     if (this.job && this.job.by.userId.toLowerCase() !== person.userId.toLowerCase() && isMidTurn(h.info)) {
       throw new Error(`the orchestration worker is busy with ${this.job.by.displayName}'s job (${this.job.what}); wait for its turn to end, or ask them`);
     }
@@ -652,6 +657,46 @@ export class OpsWorker {
     console.log(`ops-worker: message from ${person.userId}'s orchestrator${opening ? ' (a new job)' : ''}${ids.length ? ` for ${ids.join(', ')}` : ''}: ${redactSecrets(body).replace(/\s+/g, ' ').slice(0, 300)}`);
     this.d.sessions.send(OPS_ID, `${body}${ids.length ? opsWorkRule(ids) : ''}`, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
     return `Sent to the orchestration worker (${OPS_ID})${opening ? ` as a new job of ${person.displayName}'s` : ''}. Its turn's end comes back to you as an [ops worker] message; its transcript is on the dashboard (Orchestration worker) and in agent_transcript ${OPS_ID}.`;
+  }
+
+  /**
+   * A machine update or installer rerun (w855, lothsahn 2026-10-10: "don't ask ben to run installers ... When we say update
+   * the machines, do the update, including installers if necessary"). Opens a job in any turn of Lothsahn's or Ben's own
+   * orchestrator, a [dispatch] or a timer included, because the gate is the request instead of the turn: it must be one of
+   * the caller's person's own open requests (their words, recorded in the ledger; the same footing as the dispatcher's
+   * add_machine). The server writes the command itself from the machine's record: the update (docs/worker-install.md,
+   * "Updating") plus only the settings named here, as whole numbers. No free text of the caller's reaches the worker's shell.
+   */
+  machineInstall(
+    caller: SessionInfo | undefined,
+    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number },
+  ): string {
+    const person = opsAllowedOrchestrator(caller);
+    if (!person || !caller) throw new Error(OPS_REFUSED);
+    const id = o.workId.trim().toLowerCase();
+    if (!/^w\d+$/.test(id)) throw new Error(`work_id: a request id like "w847", not "${o.workId}"`);
+    const own = this.d.ownRequestProblem ? this.d.ownRequestProblem(id, person.userId) : 'this portal does not link ops jobs to requests';
+    if (own) throw new Error(`work_id: ${own} (a machine update runs for an open request of ${person.displayName}'s own, which is their approval of it)`);
+    const m = this.d.machine?.(o.machine.trim().toLowerCase());
+    if (!m) throw new Error(`machine: no machine "${o.machine}"`);
+    if (m.local) throw new Error(`machine: ${m.id} is the portal's own host, whose daemon the portal runs itself`);
+    if (!m.root) throw new Error(`machine: ${m.id} is not a worker root install (no root folder known): it is updated another way`);
+    const nums = { maxSandboxes: o.maxSandboxes, maxAgentsPerSandbox: o.maxAgentsPerSandbox, maxUnity: o.maxUnity };
+    for (const [k, v] of Object.entries(nums)) {
+      if (v !== undefined && (!Number.isInteger(v) || v < 1 || v > 16)) throw new Error(`${k}: a whole number from 1 to 16`);
+    }
+    const win = m.platform === 'win32';
+    if (!/^[\w@.\-]+$/.test(m.target) || !/^[\w:\\/. \-]+$/.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
+    const flags = win
+      ? [nums.maxSandboxes !== undefined && `-MaxSandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `-MaxAgentsPerSandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `-MaxUnity ${nums.maxUnity}`]
+      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`];
+    const extra = flags.filter(Boolean).join(' ');
+    const command = win
+      ? `ssh ${m.target} 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root ${m.root}${extra ? ` ${extra}` : ''}"'`
+      : `ssh ${m.target} 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root ${m.root}${extra ? ` ${extra}` : ''}'`;
+    const what = extra ? `with these settings changed: ${extra}` : 'with no setting changed';
+    const text = `[machine update for ${id}, approved by ${person.displayName} through that request] Update ${m.id}'s worker install ${what}. Run exactly this, once, and nothing else on the machine (docs/worker-install.md, "Updating"; it asks nothing, keeps every other setting, the machine's own credential and the PATH, restarts the daemon; never issue a credential for it):\n\n${command}\n\nThen check with list_machines that ${m.id} is online again${extra ? ' and shows the new limits' : ''}, and report what the update printed (the \`~ key: before -> after\` lines) and what the portal sees.`;
+    return this.send(caller, text, true, [id], true);
   }
 
   /**
