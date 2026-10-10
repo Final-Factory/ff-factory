@@ -10,6 +10,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The Intake tab's two nightly chips are switches** (w903, lothsahn: "Please modify FF Factory so I can toggle those settings on
+  the intake panel by clicking on them"). Click "Nightly run" to turn the portal's nightly schedule on or off
+  (`intake.nightly.run`, `enabled`; the time, zone, machine, person and report window stay), and the other chip, now named "File
+  regressions based on Nightly run" (it was "Nightly e2e", lothsahn's wording), to file or stop filing the lab's regressions
+  (`intake.nightly.enabled`). `POST /api/intake/nightly/toggle` goes through `set_app_config`'s checks and write
+  (`toggleNightly`, `server/appConfig.ts`), applies live with no restart and pushes the new summary to every page; any signed-in
+  person may click, as `set_app_config` allows for these keys. The portal's log gets an `app config: ... set by <person> from the
+  Intake tab` line. The chips have a pointer cursor, a hover outline and a tooltip saying what they toggle. Request titles ("Nightly
+  e2e <date>: ...") are unchanged. Tests: `server/appConfig.test.ts`, `e2e/intake.spec.ts`.
+
 - **The chat's message box empties when you send, every time** (w893, lothsahn: "Sometimes when I send you a message, the message doesn't clear
   and I have to manually clear it."). The box (and its saved draft) cleared only when the server answered, so a page that reloaded or
   closed with the message on its way wrote the sent text back as a draft. It now empties at once, and a text-only message goes with

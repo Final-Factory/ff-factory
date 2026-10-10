@@ -569,6 +569,25 @@ function getPath(obj: unknown, key: string): unknown {
   return key.split('.').reduce<unknown>((o, p) => (o && typeof o === 'object' ? (o as Record<string, unknown>)[p] : undefined), obj);
 }
 
+/**
+ * The Intake tab's click-to-toggle on the nightly chips (w903): flips `intake.nightly.enabled` (regressions filed) or the
+ * `enabled` flag of `intake.nightly.run` (the portal's nightly schedule) through setAppConfig, so it is checked, written
+ * to config.json and applied live exactly as set_app_config does. The run block's other keys (time, tz, machine, person,
+ * reportWithinHours) are kept as they are. Anyone may toggle them, as set_app_config allows (SETTABLE_KEYS comment).
+ */
+export function toggleNightly(file: string, cfg: Config, which: 'enabled' | 'run', on: boolean, users: readonly string[]): { key: SettableKey; before: boolean; after: boolean } {
+  if (typeof on !== 'boolean') throw new Error('on is true or false');
+  if (which === 'enabled') {
+    const r = setAppConfig(file, cfg, 'intake.nightly.enabled', on, { users });
+    return { key: 'intake.nightly.enabled', before: r.before === true, after: r.after === true };
+  }
+  if (which !== 'run') throw new Error('which is "enabled" or "run"');
+  const cur = cfg.intake?.nightly?.run;
+  const r = setAppConfig(file, cfg, 'intake.nightly.run', { ...cur, enabled: on }, { users });
+  const was = r.before as { enabled?: unknown } | undefined;
+  return { key: 'intake.nightly.run', before: was?.enabled === true, after: on };
+}
+
 /** A machine id as config machines.useHostClaudeEnv and machines.cleanup.* name it (server/machines.ts MACHINE_ID). */
 const MACHINE_KEY = /^[a-z0-9][a-z0-9-]{0,23}$/;
 

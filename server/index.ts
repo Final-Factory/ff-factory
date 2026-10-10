@@ -14,6 +14,7 @@ import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationV
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
+import { toggleNightly } from './appConfig.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
 import { BlockerWatch } from './blockerWatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
@@ -787,6 +788,25 @@ route('POST', '/api/max/refresh', async () => max.refresh());
 // ---- the intake (docs/intake.md): Discord and FFBox requests in the ledger; a person approves or declines them
 route('GET', '/api/intake', async () => intake.summary());
 route('POST', '/api/intake/poll', async () => intake.checkNow());
+// The Intake tab's nightly chips (w903): anyone signed in flips intake.nightly.enabled or .run's enabled flag, as set_app_config
+// lets anyone (appConfig.ts SETTABLE_KEYS); the same checks, the same write, live at once.
+route('POST', '/api/intake/nightly/toggle', async (req) => {
+  const b = await readJson<{ which?: unknown; on?: unknown }>(req);
+  if (b.which !== 'enabled' && b.which !== 'run') throw new HttpError(400, '"which" is "enabled" or "run"');
+  if (typeof b.on !== 'boolean') throw new HttpError(400, '"on" is true or false');
+  const me = requesterOf(req);
+  let r;
+  try {
+    r = toggleNightly(configPath(), cfg, b.which, b.on, identity.list().map((u) => u.userId));
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
+  console.log(`app config: ${r.key} ${r.before} -> ${r.after}, set by ${me.displayName} (${me.userId}) from the Intake tab`);
+  providers.configChanged();
+  const summary = intake.summary();
+  broadcast({ type: 'intake', intake: summary });
+  return { key: r.key, before: r.before, after: r.after, intake: summary };
+});
 // The ledger cleanup now (an owner's): what it closed, resumed and stalled, in a line.
 route('POST', '/api/ledger/cleanup', async (req) => {
   if (identity.get(requesterOf(req).userId)?.role !== 'owner') throw new HttpError(403, 'only the owner runs the ledger cleanup');

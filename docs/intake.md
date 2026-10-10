@@ -519,6 +519,11 @@ shouldn't assume silence means a successful (or failed) run." The Windows tasks 
   took 136 minutes on 2026-10-10), or the run request closing with no report for 15 minutes, makes the night `missing`:
   the person's orchestrator gets one `[nightly]` message and the run request a log line. A report that comes after that
   is recorded and told as late. A night the schedule could not file, or one the portal was down for, is missing at once.
+- **Switching it from the page** (w903). On the Intake tab the "Nightly run" chip turns the schedule on or off and the "File
+  regressions based on Nightly run" chip (`intake.nightly.enabled`) turns the filing of regressions on or off, with one click and
+  no restart: `POST /api/intake/nightly/toggle` `{ which: "run" | "enabled", on }` runs `toggleNightly` (`server/appConfig.ts`),
+  which calls `setAppConfig` as `set_app_config` does, so the checks and the write are the same and the rest of the run block is
+  kept. Anyone signed in may click, as for `set_app_config` (these keys are not in `OWNER_ONLY_KEYS`); the portal's log says who.
 - **Where to see it.** The Intake tab's Nightly run line (schedule, person, next fire) and the last 14 nights with their
   status, counts, cause and requests (`summary().nightly.nights`, kept in `intake.json`, 60 nights); `list_work` with
   `source: "nightly"` lists the run requests with the regressions.
