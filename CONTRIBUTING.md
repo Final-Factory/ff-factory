@@ -112,7 +112,9 @@ so a slow runner does not fail it.
 ## Versions and releases
 
 The version lives in `package.json` (web/package.json follows it) and uses semantic versioning. Add
-a line under **[Unreleased]** in [CHANGELOG.md](CHANGELOG.md) with your change. To release:
+a note for your change in its own file, `changelog.d/<request or topic>.md` (see [changelog.d/README.md](changelog.d/README.md);
+never edit [CHANGELOG.md](CHANGELOG.md) for it: two pull requests that both add to **[Unreleased]** conflict, and a conflicted
+pull request gets no CI). To release:
 
 ```bash
 npm run release -- minor --dry-run   # patch | minor | major | X.Y.Z: shows the notes

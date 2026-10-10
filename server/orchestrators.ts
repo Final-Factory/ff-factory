@@ -1615,7 +1615,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   private resumeGatedWorker(w: WorkItem, gates: readonly WorkBlocker[], cleared: string): string[] {
     const sid = [...w.sessionIds].reverse().find((x) => this.store.sessions.get(x));
     if (!sid || !gates.some((g) => g.kind === 'ci' || g.kind === 'deploy' || g.by === `worker ${sid}`)) return [];
-    const ci = gates.some((g) => g.kind === 'ci');
+    // Not the "read its checks" hint when CI could not start (w907: the PR conflicts, or its head never got a run): the worker pushes first.
+    const ci = gates.some((g) => g.kind === 'ci') && !/CI can't run|no CI run exists/.test(cleared);
     // A deploy (w890): its worker was released while it waited, and does its check after the deploy now.
     const deploy = gates.some((g) => g.kind === 'deploy');
     const note = `${w.id} is unblocked: ${cleared}.${ci ? ' Read its checks now (gh pr checks): merge on green, fix on red.' : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.`;
