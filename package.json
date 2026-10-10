@@ -12,7 +12,8 @@
     "test": "node --test server/*.test.ts scripts/*.test.ts",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-exclude=**/*.test.ts --test-coverage-exclude=e2e/** --test-coverage-exclude=node_modules/** server/*.test.ts scripts/*.test.ts",
     "test:e2e": "playwright test",
-    "release": "node scripts/release.ts"
+    "release": "node scripts/release.ts",
+    "prepush": "node scripts/prepush.ts"
   },
   "type": "module",
   "dependencies": {

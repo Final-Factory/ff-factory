@@ -4,7 +4,7 @@
 # Lint the portal VM's scripts (CI's "Portal VM scripts" workflow, and by hand): shellcheck and bash -n on every
 # shell script, systemd-analyze verify on every unit, and a parse of the measurement PowerShell script when pwsh is
 # there. Run from the repository root. --units needs root (it installs the scripts where the units point, on a
-# throwaway machine only).
+# throwaway machine only). --shellcheck-only stops after bash -n and shellcheck.
 set -o errexit -o nounset -o pipefail
 cd "$(dirname "$0")/../../.."
 units=0
@@ -23,6 +23,8 @@ echo "bash -n: ${#scripts[@]} files parse"
 shellcheck --version | sed -n 2p
 shellcheck -x -P SCRIPTDIR "${scripts[@]}"
 echo "shellcheck: clean"
+# The pre-push check (scripts/prepush.ts, w924) wants only the parse and shellcheck, not the tests below.
+[ "${1:-}" != --shellcheck-only ] || exit 0
 # Every executable script really is executable in git (the installers copy modes from the checkout).
 for f in deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm-rollback.sh deploy/vm/host/fff-vm deploy/vm/guest/install.sh \
   deploy/vm/guest/fffctl deploy/vm/guest/fff-update deploy/vm/guest/fff-health deploy/vm/guest/fff-backup deploy/vm/guest/fff-base-refresh \
