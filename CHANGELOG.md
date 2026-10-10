@@ -10,6 +10,8 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Test only: CONTRIBUTING's rule for e2e tests that share the orchestrator chat (w866), and the stray `node_modules` symlink leaves the repo.** A symlink to a Mac path had been committed at the root (c0df96e); merging main replaced a local `node_modules` folder with it. No portal deploy.
+
 - **Reply to a message and react with an emoji in your orchestrator chat** (w866, Ben: "we should be able to reply to a
   message and include it in the intput as context. also let us give emoji reactions to messages and used as
   responses"). Every message of your own chat (the orchestrator's answers, your own, and the relayed `[worker update]`,

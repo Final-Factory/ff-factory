@@ -75,6 +75,12 @@ fixed transcript for screenshots, `stuck` with a blocked Unity editor) and the l
 `e2e-password-123`. Each project (desktop Chromium, Pixel-sized Chrome, iPhone-sized WebKit) gets its
 own server on ports 8791-8793, so run nothing else there.
 
+Tests in one project share one server, so they share the owner's orchestrator chat (w866, which went red twice on CI
+for it). In a test that reads that chat: find your own lines by the unique tag or the text you quoted, never by position
+(`events.slice(before)`) or by a count of every user event; and press a hover-only button (`Reply`, `React`) with the
+hover and the click retried together (`press` in `e2e/replies.spec.ts`), because another test's answer scrolls the page
+and ends the hover. On a touch project the same button is shown by a tap on the message.
+
 Visual snapshots (`toHaveScreenshot`) are compared only on Linux, where CI renders them; the
 baselines are the `*-linux.png` files in `e2e/__screenshots__/`. When you change the UI on purpose,
 run the CI workflow by hand with **update snapshots** ticked (Actions → CI → Run workflow), download
