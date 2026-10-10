@@ -599,5 +599,20 @@ The ffbox repo can be changed through workers, like any repo: file it with `requ
   branch afterwards; the workflow never goes to master. A worker's `git push origin HEAD:master` into this repo can be
   refused by the game-repo master guard; pushing to the repo's URL (`git push https://github.com/Final-Factory/ffbox.git
   HEAD:refs/heads/master`) is not.
+  **A Windows machine with WSL runs them itself** (BEAST has Ubuntu, Python 3.12; w831): `wsl.exe -d Ubuntu -- bash -lc
+  'cd /mnt/<drive>/<clone> && python3 test/test_ffwatch.py'`. Three traps, each measured on BEAST on 2026-10-10:
+  - **Clone with LF endings** (`git -c core.autocrlf=false clone …`, or set `core.autocrlf false` and re-check out with
+    `git rm -rq --cached . && git reset -q --hard` before any edit). A CRLF checkout breaks the shell scripts the suites
+    call: `test_ffwatch.py` failed 57 checks on master that way, against 10 with LF.
+  - **Never `git add -A` right after switching `core.autocrlf`** in a CRLF checkout: every file then counts as changed, and
+    the commit rewrites all of them (207 files once). Re-check out first.
+  - **Not in a git worktree**: its `.git` file names the Windows path (`gitdir: F:/…`), which WSL's git cannot read, so the
+    git-based checks fail (57 again). Use a plain clone.
+
+  On master in WSL `test_ffwatch.py` fails 10 checks (no `ffdiscord.py` sibling, the CLI sender, pool hours) and
+  `test_fffconnector.py` none: a new failure is what counts.
+- **Seeing the box after a push** without its journal: `fetch_ffbox_report` with a made-up id (a worker's tool) answers
+  `not_found` from ffwatch itself while the box is up, and an offline or "ffwatch down" error while it is not; the deployed
+  commit is `ffbox_activity` `show: "status"` (an orchestrator's tool).
 - Agents' access to the box itself is limited to its config and secrets. The orchestrators never
   push.
