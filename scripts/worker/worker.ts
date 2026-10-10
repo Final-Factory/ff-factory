@@ -1643,7 +1643,7 @@ export const NIGHTLY_TASK = 'ff-nightly-e2e';
 
 /**
  * w577: the nightly lab's schedule names its root on its command line (FF_NIGHTLY_ROOT=... bash <root>/FinalFactory/...),
- * so a root move leaves it where it was: after w513, lothdesktop's task still ran the deleted D:\work\ff-nightly.
+ * so a root move leaves it where it was: after w513, lothdesktop's task still ran its old root, which had been deleted.
  * The line to say when the task's definition (schtasks /xml) does not name this root's nightly/, in either path form;
  * undefined when it does or there is no task. Exported for tests.
  */

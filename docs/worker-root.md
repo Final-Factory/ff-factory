@@ -87,16 +87,16 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 
 | Path | For | Created by | Scope | Size | Secret | Code |
 |---|---|---|---|---|---|---|
-| `C:\ffsb\_base` (BEAST), `D:\work\FFFRepo` (LothDesktop), `~/nevergames/FinalFactory` (Macs) | `repoPath`: the base the sandboxes are worktrees of, and main-clone agents' folder | the person | M | git objects 1.3 GB and LFS store 8.4 GB measured on `_base` (14 worktree entries registered in it) | no | `machine/daemon.ts:48`; probe `server/machineDeploy.ts:110,319`, `machineDeployWin.ts:281-284` |
+| `C:\ffsb\_base` (BEAST), `~/nevergames/FinalFactory` (Macs) | `repoPath`: the base the sandboxes are worktrees of, and main-clone agents' folder | the person | M | git objects 1.3 GB and LFS store 8.4 GB measured on `_base` (14 worktree entries registered in it) | no | `machine/daemon.ts:48`; probe `server/machineDeploy.ts:110,319`, `machineDeployWin.ts:281-284` |
 | `ff-local-backups/<time>/` beside the clone | the backup-before-discard rule for a person's uncommitted work | workers (guard-enforced) | M | not seen | no | `server/guard.ts:54-56,151,167-191`; `server/agents.ts:1523`; ff-agents `project-memory/memories/feedback-back-up-then-clear-bens-clone.md:21` |
 
 ### 1.5 Players, nightly lab and legacy labs
 
 | Path | For | Created by | Scope | BEAST size | Secret | Code |
 |---|---|---|---|---|---|---|
-| player slot pool: `F:\ff-players`, `D:\work\ff-players`, `~/nevergames/ff-players`; `<root>/slotK/player/`, `slot.json`, `leases/`, `pool.lock` | fixed exe paths for the firewall (w350) | `player_slots.py`, the firewall script | M | 13 GB | no | `scripts/nightly/player_slots.py:69-89,102-105`; `setup_player_slot_firewall.ps1:29-46` |
+| player slot pool: `<root>/players` of the worker install folder (`FF_PLAYER_SLOT_ROOT`; the pools the machines kept outside the install folder are gone, 2026-10-10): `<root>/slotK/player/`, `slot.json`, `leases/`, `pool.lock` | fixed exe paths for the firewall (w350) | `player_slots.py`, the firewall script | M | 13 GB | no | `scripts/nightly/player_slots.py` `default_root()` (`<FF_WORKER_ROOT>/players`, else refuses); `setup_player_slot_firewall.ps1:29-46` |
 | `%ProgramData%\FinalFactory\player-slots.json`, `~/.config/finalfactory/player-slots.json` | the recorded slot root and count | firewall script | M | tiny | no | `player_slots.py:54-58` |
-| nightly lab `FF_NIGHTLY_ROOT`: `D:\work\ff-nightly` (Windows), `~/nevergames/ff-nightly` (Mac): own clone, `builds/<sha>-*`, `runs/`, `logs/`, `reports/`, `tmp/` | the nightly e2e | nightly scripts | M | not on BEAST | no | `scripts/nightly/nightly.sh:17-18,23-34`; `install_schedule.sh:31,46-54`; `make_overlay.py:78`; ff-factory `server/staleOutput.ts:72-73` (hard-coded default) |
+| nightly lab `FF_NIGHTLY_ROOT`: `<root>/nightly` of the worker install folder (the labs outside it are gone, 2026-10-10): own clone, `builds/<sha>-*`, `runs/`, `logs/`, `reports/`, `tmp/` | the nightly e2e | nightly scripts | M | not on BEAST | no | `scripts/nightly/nightly.sh:17-18,23-34`; `install_schedule.sh:31,46-54`; `make_overlay.py:78`; ff-factory `server/staleOutput.ts` (roots from `FF_NIGHTLY_ROOT` and `nightlyRoots` only) |
 | `F:\ffsb\_nightly-e2e` (`reports/`, `beast_watchdog.sh`) | BEAST's report drop and watchdog | `install_schedule.sh` over ssh | M | 109 KB | no | `install_schedule.sh:25-27`; `nightly.sh:25` |
 | `F:/ffsb/nightly-e2e/Builds/nightly` | the M3 lab's remote Windows peer root | `lab.py` | M | absent now | no | `scripts/nightly/lab.m3.json:10` |
 | `C:\Users\rydin\ff-worker\` | the legacy Windows lab of the honest co-op runs (`ahttp.py`, builds by commit, logs) | agents by hand | M | 11 GB | no | ff-agents `honest-coop-play/SKILL.md:107,111`, `editor-ops/references/codex-fleet.md:81`; game repo `.claude/settings.json:77` |
@@ -209,7 +209,7 @@ current sandbox before it picks the folder names. A shorter `sb` instead of `san
 ### 2.3 The install's own clone (lothsahn, 2026-10-06)
 
 No agent runs in a person's clone. The install has `<root>/repo`, and every sandbox is a worktree of it. People's
-clones (`D:\work\FFFRepo`, the Macs' `~/nevergames/FinalFactory`, Ben's `C:\ffsb\_base`) are outside the install
+clones (the old LothDesktop main clone (gone, 2026-10-10), the Macs' `~/nevergames/FinalFactory`, Ben's `C:\ffsb\_base`) are outside the install
 entirely, so `ff-local-backups` is no longer needed.
 
 - **Bare, not mirror.** `git clone --bare`, then set `remote.origin.fetch = +refs/heads/*:refs/remotes/origin/*`. A
@@ -236,7 +236,7 @@ entirely, so `ff-local-backups` is no longer needed.
 - **The Library seed is still shared.** It is per machine and does not depend on the clone. Today `librarySource` takes
   the main clone's Library first (`machine/sandboxes.ts:117`). A bare clone has none, so the seed becomes the source
   (then a ready sandbox's, as today). BEAST's seed exists (65 GB, measured). LothDesktop's sandboxes were seeded from
-  `D:\work\FFFRepo\Library` (docs/machines.md "Warm Library"). Its installer copies that Library once, read-only, into
+  the old main clone's Library (docs/machines.md "Warm Library"; that clone is gone, 2026-10-10). Its installer copies that Library once, read-only, into
   `seed/Library`, or the first sandbox imports cold (many minutes, as the brief warns) and becomes the seed. The
   one-time script reimport after a copy stays (`machine/scriptReimport.ts`).
 - **Daemon code a person's clone no longer needs** (removed in w536, 2026-10-06; the line numbers below are from before; see 5.2):
@@ -271,7 +271,7 @@ the daemon's `process.env`). The editors the daemon starts inherit it too. So th
 | `GIT_SSH_COMMAND` | `ssh -F <root>/home/.ssh/config -i <root>/secrets/ssh/id_ed25519` | git over ssh | sourced: git docs |
 | `UPM_CACHE_ROOT` | `cache/upm` | Unity's global package cache | sourced: Unity manual, "Customize the global cache location" |
 | `npm_config_cache`, `PIP_CACHE_DIR` | `cache/npm`, `cache/pip` | tool caches | sourced: npm and pip docs |
-| `FF_PLAYER_SLOT_ROOT`, `FF_PLAYER_SLOT_COUNT` | `players/`, 8 | the slot pool; ends the drive-letter probing in `default_root()` (`player_slots.py:69-79`), which already left BEAST with rules for both `D:\work\ff-players` and `F:\ff-players` (measured) | measured: `player_slots.py:83-87` |
+| `FF_PLAYER_SLOT_ROOT`, `FF_PLAYER_SLOT_COUNT` | `players/`, 8 | the slot pool; ends the drive-letter probing in `default_root()` (`player_slots.py:69-79`), which had left BEAST with firewall rules for two pools (gone since; `default_root()` now returns `<FF_WORKER_ROOT>/players` or refuses) | measured: `player_slots.py:83-87` |
 | `FF_NIGHTLY_ROOT` | `nightly/` | the nightly lab | measured: `nightly.sh:17-18` |
 | `FFDISCORD_HOME` | `secrets/ffdiscord` | the Max bot config, where scripts honour it | measured: `nightly.sh:43`; whether the `ffdiscord` CLI itself does is unverified |
 | `FF_MAX_EVENTS`, `FF_UNITY_SLOTS` | `daemon/…` | already set by the daemon from `app_dir`. The Unity slots mailbox stays at its standard place in the home folder (not under the root), where scripts outside the daemon (the nightly harness, a build by hand) find it with no config (w469) | measured: `machine/daemon.ts:713,882`; `machine/unitySlots.ts` `slotsDir` |
@@ -466,7 +466,7 @@ its admin entry, which step 4 never removed. Everything copied was a copy.
 - Order: after the portal has left BEAST for the VM (w499 done; `convert_machine beast to: "ssh"`) and after w510's
   removal of the portal's host code, so only the daemon owns `F:\ffsb`.
 - Moves by rename on `F:`: the six sandboxes (`F:\ffsb\<name>` → `F:\ffw\sandboxes\<name>`), `_seed` → `seed`,
-  `_agents` → `agents` (standing agents move to a machine under D16), `_nightly-e2e` → `nightly`, `F:\ff-players` →
+  `_agents` → `agents` (standing agents move to a machine under D16), `_nightly-e2e` → `nightly`, the old pool beside `F:\ffsb` →
   `players` (new firewall rules for the new paths, the old group removed at cleanup).
 - Scratch: `_scratch` (141 GB), `F:\ffsb-scratch` (13 GB), `F:\tmp`, `_research`, `_w94` → `scratch/` by rename; the
   sizes say a clean-up pass is worth doing first (decision 10).
@@ -480,14 +480,14 @@ its admin entry, which step 4 never removed. Everything copied was a copy.
 
 **LothDesktop** (root `D:\work\ffw`; not seen by me: from `list_machines` and docs/machines.md):
 
-- Install with `--reference-if-able D:\work\FFFRepo` and its Library as the seed (both read-only).
+- Install with `--reference-if-able` the person's clone and its Library as the seed (both read-only). *(That clone is gone since 2026-10-10.)*
 - Rename `D:\work\ffsb\<name>` → `D:\work\ffw\sandboxes\<name>` (same volume, as listed), with the git re-home of step
-  4: today these are worktrees of `D:\work\FFFRepo`, so the re-home is what removes the person's clone from the
+  4: those were worktrees of the person's clone, so the re-home is what removed it from the
   install.
-- Move `D:\work\ff-players` → `players`, `D:\work\.ff-factory` → `daemon` (state) and `agents`, and `D:\work\ff-nightly`
+- Move the old slot pool → `players`, `D:\work\.ff-factory` → `daemon` (state) and `agents`, and the old nightly lab
   → `nightly` (by rename; the lab's own clone moves with it).
 - Copy into `secrets/`: the ffbox and ffdiscord configs.
-- After: `D:\work\FFFRepo` is lothsahn's alone. Its `worktrees/` entries for the moved sandboxes are pruned with his
+- After: the person's clone was lothsahn's alone; it and the old slot pool and nightly lab are gone (2026-10-10). Its `worktrees/` entries for the moved sandboxes were pruned with his
   OK.
 
 **The M3 and the M5** (root `/Users/Shared/ffw`; not seen: from `list_machines` and the skills):
@@ -496,8 +496,8 @@ its admin entry, which step 4 never removed. Everything copied was a copy.
 - The install gives them a pool for the first time: `repo/` with `--reference-if-able ~/nevergames/FinalFactory`, the
   seed by APFS clone (`cp -c`) of that clone's Library, `max_sandboxes` from their RAM.
 - Copy `~/.ff-factory` state and `~/.claude` (the machine login stays in the keychain, or the portal's token), and on
-  the M3 the nightly lab `~/nevergames/ff-nightly` → `nightly/` by rename (same volume).
-- `~/nevergames/ff-players` → `players/`.
+  the M3 the nightly lab (outside the install folder, gone since 2026-10-10) → `nightly/` by rename (same volume).
+- The old slot pool → `players/` (gone since 2026-10-10).
 - `~/nevergames/ff-audit-artifacts` stays the person's.
 - The M5's `~/.steamcmd-home` stays: last-resort releases are a person's job, not a worker's.
 - Disk space is unknown to me; the dry run reports it.
@@ -513,10 +513,10 @@ its admin entry, which step 4 never removed. Everything copied was a copy.
 | 5 | `unityMcpServer` written at install; `.claude.json` read from `CLAUDE_CONFIG_DIR` | `machine/unityMcp.ts:29-41` | S |
 | 6 | The token out of `daemon.json` into `secrets/`; `patchDaemonConfig` unchanged otherwise | `machine/daemon.ts:113,1229`, `server/machineDeploy.ts:416` | S |
 | 7 | Guards: protected paths and secrets from the root (`daemon/`, `secrets/`, `claude/`) instead of the `.ff-factory` spellings; the player-path rule (2.5) | `server/guard.ts`, `server/secretGuard.ts:167-177` | S-M |
-| 8 | Clean-up roots from the root, not `HOME` (`machine/daemon.ts:277,292,298`); nightly roots from `FF_NIGHTLY_ROOT`, not the hard-coded `D:/work/ff-nightly` (`server/staleOutput.ts:72-73`) | as listed | S |
+| 8 | Clean-up roots from the root, not `HOME` (`machine/daemon.ts:277,292,298`); nightly roots from `FF_NIGHTLY_ROOT`, not a hard-coded default (`server/staleOutput.ts`; the hard-coded places are gone, 2026-10-10) | as listed | S |
 | 9 | Installers and uninstallers, per OS | `scripts/install-worker.ps1`, `scripts/install-worker.sh` (new) | L |
 | 10 | The migration tool (dry run, copy or rename, git re-home, verify, rollback, cleanup) | `scripts/worker-migrate.ts` (new) | L |
-| 11 | Game repo: slot root and nightly root from env only; `lab.py` and `slot_path` refuse instead of falling back; BEAST paths in the nightly scripts | `scripts/nightly/*` (2.5, 5.1) | S |
+| 11 | Game repo: slot root and nightly root from env only; `lab.py` and `slot_path` refuse instead of falling back; BEAST paths in the nightly scripts | `scripts/nightly/*` (2.5, 5.1) | S. Done 2026-10-10 (w897) |
 | 12 | Skills: determinism-audit and the BEAST-sandbox recipe use the slot pool; paths that name `F:\ffsb` or `~/.ff-factory` take the root | ff-agents, through `/ff-agents:publish-skills` | S |
 | 13 | Optional: a game-side override of the data folder on Windows | game repo, decision 5 | M |
 

@@ -523,68 +523,40 @@ that belongs to something else. The firewall step of the migration replaces the 
 with the root's slots; after a rollback, `scripts/nightly/setup_player_slot_firewall.ps1 -Root <old slot root>`
 (in the game repo) puts the old ones back.
 
-## Per-machine commands (each needs lothsahn's go; in this order)
+## Per-machine commands (done; the old folders are gone, 2026-10-10)
+
+Every machine's migration into its worker install folder has run, and the places the machines used before (the old
+main clone, slot pool and nightly lab outside the install folder, on LothDesktop, the Macs and BEAST) are gone
+(lothsahn, 2026-10-10: "those folders are all gone"). What replaced each lives inside the install folder: `repo/` (the install's own bare clone), `players/` (the slot pool) and `nightly/`
+(the nightly lab), so on LothDesktop `D:\work\ffw\repo`, `D:\work\ffw\players` and `D:\work\ffw\nightly`. The game
+repo's scripts take the slot root and the nightly root from `FF_PLAYER_SLOT_ROOT`, `FF_NIGHTLY_ROOT` or
+`FF_WORKER_ROOT` (the daemon gives its agents all three) and refuse without them; they no longer guess a place.
+
+A machine that still has its old folders (a new one, or one restored from a backup) migrates with the same tool; the
+common steps are:
 
 Common to all: tell the people with workers there; stop each sandbox editor (`unity stop`); wait until no agent there is
 mid-turn; run the dry run, read it, then the same command without `-DryRun`. The firewall's UAC prompt appears on the
 PC's desktop: someone at the PC answers it. Watch a day (`list_machines`, a worker started in a moved sandbox, an
 editor start), then `-Cleanup`.
 
-**1. LothDesktop** (measured 2026-10-06 over ssh: git 2.50, node 22.17, NTFS `D:` with 81 GB free, six sandboxes in
-`D:\work\ffsb`, daemon folder `D:\work\.ff-factory`, clone `D:\work\FFFRepo`, slots `D:\work\ff-players`, nightly
-`D:\work\ff-nightly`; no Library seed). Everything is on `D:`, so every move is a rename.
-
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\ff-factory\scripts\worker\migrate.ps1 -Root D:\work\ffw -From D:\work\.ff-factory -OldSlots D:\work\ff-players -DryRun
+powershell -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\ff-factory\scripts\worker\migrate.ps1 -Root <install folder> -From <old daemon folder> -OldSlots <old slot root> -DryRun
 ```
-
-Leave `-Nightly` out unless the nightly lab's own scheduled task is re-pointed in the same sitting; otherwise it keeps
-running from `D:\work\ff-nightly`. After cleanup, `D:\work\FFFRepo` is lothsahn's alone.
-
-**The nightly lab does not follow the root by itself** (w577): its task `ff-nightly-e2e` names its root on its command
-line. After the migration (and after any install on a machine that has the task), re-point it from a game checkout,
-which makes the nightly checkout in the root and replaces the task:
-
-```bash
-FF_NIGHTLY_ROOT=/d/work/ffw/nightly bash scripts/nightly/install_schedule.sh
-schtasks //query //tn ff-nightly-e2e //xml | grep Arguments   # names /d/work/ffw/nightly
-```
-
-The install and the migration print a WARNING naming the task while it runs from anywhere else. LothDesktop was
-re-pointed this way on 2026-10-06 (w577), after its old `D:\work\ff-nightly` had been deleted.
-
-**2. The M3** (measured: git **2.46**, below 2.48; **49 GB** free; nightly lab `~/nevergames/ff-nightly` run by its own
-LaunchAgent; slots `~/nevergames/ff-players`; no sandboxes today). First `brew upgrade git`. With 49 GB, one sandbox at
-most.
 
 ```bash
 git clone --depth 1 https://github.com/Final-Factory/ff-factory.git /tmp/ff-factory
-bash /tmp/ff-factory/scripts/worker/migrate.sh --root ~/ffw --old-slots ~/nevergames/ff-players --max-sandboxes 1 --dry-run
+bash /tmp/ff-factory/scripts/worker/migrate.sh --root ~/ffw --old-slots <old slot root> --max-sandboxes <n> --dry-run
 ```
 
-The nightly lab moves only with `--nightly ~/nevergames/ff-nightly` and its LaunchAgent re-installed with
-`FF_NIGHTLY_ROOT=~/ffw/nightly` (`scripts/nightly/install_schedule.sh`).
-
-**3. The M5** (measured: git 2.50, 265 GB free; slots `~/nevergames/ff-players`; no sandboxes today):
-
-```bash
-bash /tmp/ff-factory/scripts/worker/migrate.sh --root ~/ffw --old-slots ~/nevergames/ff-players --max-sandboxes 3 --dry-run
-```
-
-`~/.steamcmd-home` stays: last-resort uploads are a person's job.
-
-**4. BEAST**, last. It also needs:
-- the portal gone from BEAST first (w499, w510), and BEAST turned into an ordinary machine (`convert_machine beast to: "ssh"`);
-- git upgraded from 2.45 (`winget upgrade --id Git.Git -e`), which is Ben's call: it is his PC.
-
-Measured on BEAST:
-- its slot config `%ProgramData%\FinalFactory\player-slots.json` points at `D:\work\ff-players`, on the 32 GB removable FAT32 stick labelled "BIOS". `player_slots.py`'s `default_root()` tries `D:\work` first, and that folder exists there;
-- its nightly root is `D:\work\ff-nightly` on the same stick;
-- `F:\ff-players` holds an older pool (13 GB).
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\ff-factory\scripts\worker\migrate.ps1 -Root F:\ffw -OldSlots D:\work\ff-players -DryRun
-```
+- The git on a Mac must be 2.48 or newer (`brew upgrade git`; the M3 had 2.46). BEAST's git was 2.45 when measured:
+  `winget upgrade --id Git.Git -e`, which is Ben's call since it is his PC.
+- `~/.steamcmd-home` stays: last-resort uploads are a person's job.
+- BEAST goes last: the portal gone from it first (w499, w510), and it turned into an ordinary machine
+  (`convert_machine beast to: "ssh"`). Its slot config must not point at a removable stick: `D:` there is a 32 GB
+  FAT32 stick labelled "BIOS" (`player_slots.py fixed-root` says so).
+- The nightly lab does not follow the root by itself on a machine that still has a scheduled task naming a root; since
+  w864 the portal fires the night, so there is no task to re-point (docs/intake.md, "Nightly e2e regressions").
 
 An open choice for BEAST: with the root on `F:` (the Dev Drive, so sandboxes, seed and slots keep block clones and hard
 links), the daemon's own code is on `F:` too. Since w466 the daemon is what remounts `F:` when Windows drops it, and
@@ -593,10 +565,9 @@ its supervisor could not restart it while `F:` is gone (worker-root.md 2.2). The
 `ffsb-helper-mount` SYSTEM task at boot as the fallback that brings `F:` back after a reboot. *(Guess: a drop without a
 reboot then needs a person; it happened once, 2026-09-24.)*
 
-Then `-Cleanup -Legacy` (`~/ff-worker` and the four old tasks; decision 10). `F:\ff-players` and `F:\ffsb\_scratch`
-(141 GB) are reviewed by hand first. `F:\ffsb\_review` is the portal's. `C:\ffsb\_base` is Ben's: cleanup only prunes
-its worktree entries for the moved sandboxes. The M3's nightly watchdog task (`ff-nightly-e2e-watchdog`,
-`F:\ffsb\_nightly-e2e`) stays as it is.
+Then `-Cleanup -Legacy` (`~/ff-worker` and the four old tasks; decision 10). `F:\ffsb\_scratch` (141 GB) is reviewed
+by hand first. `F:\ffsb\_review` is the portal's. `C:\ffsb\_base` is Ben's: cleanup only prunes its worktree entries
+for the moved sandboxes.
 
 ## Built players run only from the slots
 
