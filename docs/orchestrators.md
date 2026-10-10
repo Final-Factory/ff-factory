@@ -123,7 +123,7 @@ Lothsahn today) may have their own orchestrator close (done or cancelled) or reo
   request uses; a turn a harness notice, a worker, a standing agent or relayed FFBox or Discord text started is refused
   ("only Lothsahn, in their own words in this turn, closes or reopens Cara's request w234, and this turn is not theirs";
   the call is held for the owner's next message, [Calls a gate refused](#calls-a-gate-refused-w830)). The owner's own
-  words on Discord or GitHub, authenticated by FFBox, are a turn of theirs (w831, below);
+  words on Discord, GitHub, FFBox's shell or ffweb, matched by FFBox to them, are a turn of theirs (w831, w852, below);
 - only with a note saying why. A priority change on someone else's request stays refused: it is its people's to give.
   A note alone is the next section's (another owner's request only);
 - the request's log says `closed as done by Lothsahn (Ben's request), in Lothsahn's own turn: <note>`, or `on
@@ -1238,11 +1238,12 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   makes it theirs; a harness message (a `[worker update]`, `[dispatch]`, `[ledger]`, a timer, a check-in, a relayed
   FFBox or Discord text, another person's `message_person`) makes it the harness's. **An FFBox operator's own words
   are a person's message too** (w831; Lothsahn: "operator messages are always trusted. Only some intake messages are
-  untrusted."): a message they wrote on Discord or GitHub that FFBox authenticated by its author id and sent in the
+  untrusted."): a message they wrote on Discord or GitHub that FFBox matched by its author id, or on FFBox's shell or in
+  ffweb (w852; Lothsahn, 2026-10-10: "FFBox shell and ffweb messages are trusted like operator messages"), sent in the
   hand-over's `own` field reaches their orchestrator as theirs (`Agents.operatorTurn`, from `human`, quoted lines taken
   out, `[via FFBox: …]` first), and opens a turn of theirs that every gate below reads like one typed here. The rest of
-  that FFBox turn (another author's message, a quote, FFBox's notes), a shell or ffweb message (not authenticated) and
-  anything Max or a model wrote stay relayed data. [ffbox.md](ffbox.md#operators-own-words-w831) has the checks. A message delivered while the turn
+  that FFBox turn (another author's message, a quote, FFBox's notes) and anything Max or a model wrote stay relayed
+  data. [ffbox.md](ffbox.md#operators-own-words-w831) has the checks. A message delivered while the turn
   runs joins it (the CLI folds it in) and changes nothing either way: a `[worker update]` arriving in the middle of
   Lothsahn's "Please drain and install on BEAST and m5" does not demote his turn, and his "go" arriving in the middle of
   a turn a `[worker update]` started lends that turn no authority. When the CLI answers the opening message and then

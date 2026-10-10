@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, retiredConfigKeys, retiredKeysLine, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
+import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, pruneRetiredKeys, retiredConfigKeys, retiredKeysLine, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
 import { gitRemotes } from './guard.ts';
 import { appVersion, formatVersion, readSha, readVersion } from './version.ts';
 
@@ -83,6 +83,35 @@ test('loadConfig (w510): keys only the portal\'s own sandbox pool read still loa
   assert.match(retiredKeysLine(cfg.retiredKeys) ?? '', /^config\.json sets hostSandboxes, librarySeed, .*claudeAccounts\.standing, claudeAccounts\.workers, hostGuard\.compactWhenReclaimGB, which nothing reads any more: the portal runs no sandboxes, editors, workers or standing agents of its own \(w510\)/);
   assert.equal(retiredKeysLine([]), undefined);
   assert.deepEqual(retiredConfigKeys(withoutRetiredKeys(old)), [], 'withoutRetiredKeys leaves none');
+});
+
+test('pruneRetiredKeys (w852): the live config\'s two dead keys come out of the file, config.json.prev keeps it as it was, nothing else moves', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  // What system_status named on the live portal: "config.json sets claudeAccounts.workers, hostGuard.compactWhenReclaimGB".
+  const live = {
+    ...minimal(dir),
+    claudeAccounts: { orchestrator: 'login', workers: 'tokenfile' },
+    hostGuard: { warnFreeGB: 90, compactWhenReclaimGB: 60 },
+    ownerName: 'Ben',
+  };
+  const file = path.join(dir, 'config.json');
+  const text = JSON.stringify(live, null, 2) + '\n';
+  fs.writeFileSync(file, text);
+  assert.deepEqual(pruneRetiredKeys(file), ['claudeAccounts.workers', 'hostGuard.compactWhenReclaimGB']);
+  const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const { workers: _w, ...accounts } = live.claudeAccounts;
+  const { compactWhenReclaimGB: _c, ...guard } = live.hostGuard;
+  assert.deepEqual(after, { ...live, claudeAccounts: accounts, hostGuard: guard }, 'only the two keys went');
+  assert.deepEqual(Object.keys(after), Object.keys(live), 'the keys keep their order');
+  assert.equal(fs.readFileSync(`${file}.prev`, 'utf8'), text, 'config.json.prev is the file as it was');
+  // Loaded now, nothing is named any more: the system_status line is gone.
+  withConfig(t, after);
+  assert.deepEqual(loadConfig().retiredKeys, []);
+  // Nothing left to take out: nothing written.
+  fs.writeFileSync(`${file}.prev`, 'untouched');
+  assert.deepEqual(pruneRetiredKeys(file), []);
+  assert.equal(fs.readFileSync(`${file}.prev`, 'utf8'), 'untouched');
 });
 
 test('loadConfig: a standingRoot inside the app folder is refused', (t) => {

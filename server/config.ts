@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PermissionMode } from '../shared/types.ts';
-import { checkObject, dataRecoveries, readJsonDurable } from './durable.ts';
+import { checkObject, dataRecoveries, readJsonDurable, writeFileDurable } from './durable.ts';
 import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
 import { checkPoolConfig, type PoolConfig } from './tokenPool.ts';
 
@@ -542,7 +542,7 @@ export function retiredConfigKeys(raw: any): string[] {
   });
 }
 
-/** A copy of a raw config without the retired keys (what set_app_config and the VM migration write back). */
+/** A copy of a raw config without the retired keys (what pruneRetiredKeys and the VM migration write back). */
 export function withoutRetiredKeys(raw: any): any {
   const out = { ...raw };
   for (const k of RETIRED_CONFIG_KEYS) {
@@ -554,6 +554,23 @@ export function withoutRetiredKeys(raw: any): any {
     }
   }
   return out;
+}
+
+/**
+ * Take the retired keys out of the config file itself (w852; Lothsahn: "Yes, remove unused config keys"), as
+ * set_app_config writes it: the file as it was kept as config.json.prev first, the new one written through a temp file.
+ * Run once at start (server/index.ts), so the system_status line naming them goes with the next start. Only the keys in
+ * RETIRED_CONFIG_KEYS, which nothing reads; every other key and its value stays as it was. Returns the keys it took
+ * out ([] when there were none, and nothing is written).
+ */
+export function pruneRetiredKeys(file: string): string[] {
+  const text = fs.readFileSync(file, 'utf8');
+  const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+  const keys = retiredConfigKeys(raw);
+  if (!keys.length) return [];
+  writeFileDurable(`${file}.prev`, text, { generations: 0 });
+  writeFileDurable(file, JSON.stringify(withoutRetiredKeys(raw), null, 2) + '\n');
+  return keys;
 }
 
 /** The startup line for retired keys, or undefined. */

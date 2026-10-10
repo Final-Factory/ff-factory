@@ -10,6 +10,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **FFBox shell and ffweb operators' own words count as their turn too; the two dead config keys leave config.json**
+  (w852, lothsahn: "FFBox shell and ffweb messages are trusted like operator messages" and "Yes, remove unused config
+  keys"). `own` now also takes `via` `shell` and `web` (the opener's unix login or ffweb login; ffbox `aceb8e5` sends it),
+  trusted by that decision though neither login is authenticated; an `own` the portal cannot read is dropped instead of
+  refusing the frame. At start the server takes the retired keys out of config.json (`pruneRetiredKeys`, config.json.prev
+  keeps the file as it was; a dry run only names them): on the live portal `claudeAccounts.workers` and
+  `hostGuard.compactWhenReclaimGB`, so system_status stops naming them after the deploy.
+
 - **A worker waiting on CI frees its sandbox and is woken within minutes of its checks finishing** (w846, lothsahn: "When
   they're waiting for GithubCI with their unity editors off, they should free the slot", and "How long do workers wait on
   CI? Most of the CI runs are complete"). At about 04:20 UTC on 2026-10-10 BEAST had 0 of 5 sandboxes free, three held by

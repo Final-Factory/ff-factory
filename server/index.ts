@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { HOST_ROLES, loadConfig, machineCleanupSettings, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
+import { HOST_ROLES, configPath, loadConfig, machineCleanupSettings, pruneRetiredKeys, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { Store, bus } from './store.ts';
 import { SessionManager, compactCommand, snapshotOf } from './sessions.ts';
 import { TIMER_LIMITS } from './timers.ts';
@@ -67,7 +67,18 @@ const WEB = path.join(ROOT, 'web', 'dist');
 const appNow = () => ({ ...appVersion(), web: webBuild(WEB) });
 
 const cfg = loadConfig();
-// Keys the portal's own sandbox pool, editors and standing agents had (w510): named once, here and in system_status.
+// Keys the portal's own sandbox pool, editors and standing agents had (w510), which nothing reads: taken out of config.json
+// at start (w852, Lothsahn: "Yes, remove unused config keys"; config.json.prev keeps the file as it was). A dry run's
+// config is not its own to change, and one that cannot be written keeps them: named once, here and in system_status.
+if (cfg.retiredKeys?.length && !dryRun()) {
+  try {
+    const removed = pruneRetiredKeys(configPath());
+    if (removed.length) console.warn(`config: took ${removed.join(', ')} out of config.json, which nothing reads any more (w852; the file as it was is config.json.prev)`);
+    cfg.retiredKeys = cfg.retiredKeys.filter((k) => !removed.includes(k));
+  } catch (e) {
+    console.warn(`config: could not take the retired keys out of config.json: ${(e as Error).message}`);
+  }
+}
 const retiredKeys = retiredKeysLine(cfg.retiredKeys);
 if (retiredKeys) console.warn(`config: ${retiredKeys}`);
 fs.mkdirSync(cfg.dataDir, { recursive: true });
