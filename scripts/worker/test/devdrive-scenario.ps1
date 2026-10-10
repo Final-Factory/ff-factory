@@ -26,8 +26,8 @@ function global:Get-Disk { [CmdletBinding()] param([Parameter(ValueFromPipeline)
 function global:Set-Disk { [CmdletBinding()] param($Number, $IsOffline, $IsReadOnly) }
 function global:Get-Partition { [CmdletBinding()] param([int]$DiskNumber, [Parameter(ValueFromPipeline)]$In)
   process { if ($global:Attached) { [pscustomobject]@{ Type = 'Basic'; Size = 900GB; DriveLetter = $(if ($global:Held) { [char]$global:Held } else { [char]0 }); PartitionNumber = 2 } } } }
-function global:Set-Partition { [CmdletBinding()] param([Parameter(ValueFromPipeline)]$In, [string]$NewDriveLetter)
-  process { [void]$global:Calls.Add("Set-Partition $NewDriveLetter"); $global:Held = $NewDriveLetter.ToUpper(); $global:Gave = $NewDriveLetter.ToUpper() } }
+function global:Set-Partition { [CmdletBinding()] param([int]$DiskNumber, [int]$PartitionNumber, [string]$NewDriveLetter)
+  [void]$global:Calls.Add("Set-Partition $NewDriveLetter"); $global:Held = $NewDriveLetter.ToUpper(); $global:Gave = $NewDriveLetter.ToUpper() }
 function global:Test-Path { [CmdletBinding()] param([string]$Path, [string]$LiteralPath, $PathType)
   $p = if ($LiteralPath) { $LiteralPath } else { $Path }
   if ($p -match '^([A-Za-z]):\\$') { return ($global:Held -eq $Matches[1].ToUpper()) -or ($global:Sc.inUse -contains $Matches[1].ToUpper()) }

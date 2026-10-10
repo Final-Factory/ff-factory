@@ -175,7 +175,7 @@ function Mount-DevDrive {
           }
         }
       }
-      if ((ConvertTo-PartitionLetter $part.DriveLetter) -ne $Letter.ToUpper()) { $part | Set-Partition -NewDriveLetter $Letter -ErrorAction Stop; Log "gave disk $($disk.Number) partition $($part.PartitionNumber) the letter $($Letter):" }
+      if ((ConvertTo-PartitionLetter $part.DriveLetter) -ne $Letter.ToUpper()) { Set-Partition -DiskNumber $disk.Number -PartitionNumber $part.PartitionNumber -NewDriveLetter $Letter -ErrorAction Stop; Log "gave disk $($disk.Number) partition $($part.PartitionNumber) the letter $($Letter):" }
       $lettered = $true
     } catch {
       Log "partition/letter try $i failed: $($_.Exception.Message) [at: $(("$($_.InvocationInfo.Line)").Trim())]"
