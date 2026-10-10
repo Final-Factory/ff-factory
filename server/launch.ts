@@ -160,7 +160,7 @@ export const CATALOG = {
     state: z
       .union([LIVE_STATE, z.array(LIVE_STATE).min(1).max(WORK_LIVE_STATES.length)])
       .optional()
-      .describe('Only requests in these live states: working (mid-turn, or between turns with its own work going), waiting (on input: a person must act), queued (capacity only), blocked (on a thing: another request, a deploy, a machine, a usage limit, a lock, a time, CI), followup (merged, follow-up pending), stalled.'),
+      .describe('Only requests in these live states: working (mid-turn, or between turns with its own work going), waiting (on input: a person must act), queued (capacity only), blocked (on a thing: another request, a deploy, a machine, a usage limit, a lock, a time, CI), paused (its worker set it aside for another request), followup (merged, follow-up pending), stalled.'),
     person: z.string().max(64).optional().describe('Only the requests of this person (user id or display name).'),
     offset: z.number().int().min(0).optional().describe('Skip this many matching requests (the next page).'),
     limit: z.number().int().min(1).max(50).optional().describe('Requests per page, default 20, at most 50; a page also stops at 40,000 characters.'),

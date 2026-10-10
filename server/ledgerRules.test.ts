@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -271,4 +271,10 @@ test('w890: postDeployStep finds the check a worker puts after a deploy, and not
   // A check that is not about a deploy.
   assert.equal(postDeployStep(['Then I verify the build. The deploy is lothsahn\'s.']), undefined);
   assert.equal(postDeployStep([]), undefined);
+});
+
+test('w915: pausedIn reads a worker\'s set-aside lines, by request, as written; a sentence that only mentions one is not a line', () => {
+  const text = 'On w911 now.\n\n**w909**: paused: the runner group needs an admin\n- w910 - set aside until w911 lands\nIt says w912: paused somewhere in a sentence.\nw913: still open: the audit';
+  assert.deepEqual([...pausedIn(text)], [['w909', 'w909**: paused: the runner group needs an admin'], ['w910', 'w910 - set aside until w911 lands']]);
+  assert.equal(pausedIn('').size, 0);
 });
