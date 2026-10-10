@@ -378,6 +378,15 @@ export class Agents {
       machineOnline: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
       deploySha: (id) => (id ? this.daemonSha?.(id) : appVersion().sha),
       cancelWake: (id) => this.cancelWake(id),
+      pendingWake: (id) => this.waker.pending(id),
+      restoreWake: (id, note) => {
+        try {
+          this.waker.schedule(id, 1, note);
+          return true;
+        } catch {
+          return false;
+        }
+      },
     });
     // The orchestration worker (w597): its turns' ends go to the orchestrator of the person whose job it is.
     this.ops = new OpsWorker({

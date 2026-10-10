@@ -10,6 +10,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A request Blocked on CI clears when CI finishes, even where the portal cannot read the checks, and a worker's cancelled
+  check-in comes back** (w829, lothsahn: "Why was it stuck for so long if it was ready to merge?"). On 2026-10-10 w814 (PR #1338),
+  w818 (#1335) and w808 (#1328) stayed Blocked on CI for 2 to 3 hours after their checks finished, green or cancelled: the blocker
+  watch's `gh pr view --json statusCheckRollup` failed every time and a failed read counted as "still running", in silence. Likely
+  cause (sourced, not measured on the portal): the portal's fine-grained GitHub token (D7) has no Checks permission. Now: where the
+  rollup is refused, CI is read from the head commit's GitHub Actions runs (failed, timed-out and cancelled runs count as finished);
+  every failed read is logged with `gh`'s words (first, every 30 min, and on recovery), for `pr` gates too; CI unreadable for 15
+  minutes clears the block so the worker checks itself; and each check-in a block cancels is kept on the request
+  (`heldCheckIns`) and handed back to fire within a minute when the block clears, so the worker resumes itself. Needs a portal
+  deploy.
+
 - **An FFBox operator's own words count as their own turn; players' text stays untrusted** (w831, lothsahn: "operator
   messages are always trusted. Only some intake messages are untrusted."). Until now an operator's follow-up from Discord
   or GitHub reached their orchestrator as relayed data, so "approve w814" written in a Discord thread could approve nothing.

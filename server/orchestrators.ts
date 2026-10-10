@@ -134,6 +134,10 @@ export interface OrchestratorsDeps {
    * left behind would wake the worker to poll. Returns what it was ("08:06 UTC: <note>"), or undefined when none was pending.
    */
   cancelWake?: (sessionId: string) => string | undefined;
+  /** A worker's pending wake_me check-in, if any (w829: kept before a block cancels it). */
+  pendingWake?: (sessionId: string) => { at: string; note: string } | undefined;
+  /** Arm a worker's check-in to fire at once with `note` (w829: a cancelled one handed back); false when it cannot be. */
+  restoreWake?: (sessionId: string, note: string) => boolean;
   now?: () => Date;
   /** How long intake notices gather before they reach the dispatcher (tests shorten it). */
   intakeGatherMs?: number;
@@ -710,6 +714,8 @@ export class Orchestrators {
       w.blocked = undefined;
       w.alsoBlocked = undefined;
     }
+    // The check-ins a block held (w829) go with its gates: a start, a message or a close replaces them.
+    if (w.heldCheckIns && !w.blocked) w.heldCheckIns = undefined;
     if (w.status !== 'queued' && w.queuedFor) w.queuedFor = undefined;
   }
 
@@ -1279,8 +1285,9 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
 
   /**
    * A blocked request's workers need no check-ins (w754: w750's worker polled `gh pr view` every 20 minutes and the
-   * ledger called that Working): cancel the pending wake_me of each worker that serves this request alone. Returns the
-   * words for the request's log, or ''.
+   * ledger called that Working): cancel the pending wake_me of each worker that serves this request alone. Each one
+   * cancelled is kept on the request (w829, heldCheckIns) and handed back when the block ends (unblock), so a block that
+   * never clears by itself cannot leave the worker with nothing to wake it. Returns the words for the request's log, or ''.
    */
   private cancelCheckIns(w: WorkItem): string {
     if (!this.d.cancelWake) return '';
@@ -1290,10 +1297,27 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       if (!this.store.sessions.get(sid)) continue;
       const serves = servedBy(sid, items);
       if (serves.size !== 1 || !serves.has(w.id)) continue;
+      const pending = this.d.pendingWake?.(sid);
       const was = this.d.cancelWake(sid);
-      if (was) done.push(`${sid}'s check-in (${was})`);
+      if (!was) continue;
+      done.push(`${sid}'s check-in (${was})`);
+      if (pending) w.heldCheckIns = [...(w.heldCheckIns ?? []).filter((h) => h.session !== sid), { session: sid, at: pending.at, note: pending.note }];
     }
     return done.length ? `; cancelled ${done.join(', ')}` : '';
+  }
+
+  /**
+   * The check-ins a block cancelled (w829), handed back to their workers to fire at once: the worker resumes on its own,
+   * with no one having to pass the word on. Returns the workers whose check-in was handed back.
+   */
+  private handBackCheckIns(w: WorkItem, cleared: string): string[] {
+    const back: string[] = [];
+    for (const h of w.heldCheckIns ?? []) {
+      if (!this.store.sessions.get(h.session) || !w.sessionIds.includes(h.session)) continue;
+      const note = `${w.id} is unblocked: ${cleared}. This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`;
+      if (this.d.restoreWake?.(h.session, note)) back.push(h.session);
+    }
+    return back;
   }
 
   /** Whether a gate may still be open: judged here only where the facts are at hand; the rest waits for the blocker watch. */
@@ -3093,13 +3117,21 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const gates = gatesOf(w);
     const b = { what: gates.map((g) => g.what).join('; ') };
     const name = gatesName(gates, this.now().getTime());
-    w.status = 'new';
+    // w829: a worker whose check-in the block cancelled gets it back and resumes by itself; the request is its again.
+    const back = this.handBackCheckIns(w, `${name} cleared (${why})`);
+    w.status = back.length ? 'active' : 'new';
     w.blocked = undefined;
     w.alsoBlocked = undefined;
-    this.stamp(w, `unblocked: ${name} cleared (${why})`);
+    w.heldCheckIns = undefined;
+    // The hand-back goes first: a log line is clipped, and a CI reason can be long.
+    this.stamp(w, `unblocked${back.length ? ` (handed back ${back.map((sid) => `${sid}'s check-in`).join(', ')}, which resumes it now)` : ''}: ${name} cleared (${why})`);
     this.store.putWork(w);
+    console.log(`ledger: unblocked ${w.id}: ${name} cleared (${why})${back.length ? `; handed back the check-in of ${back.join(', ')}` : ''}`);
+    if (back.length) {
+      this.toPeople(w.requesters, dispatchNotice(w, `unblocked: it waited on ${name} (${b.what}), and ${why}; its worker ${back.join(', ')} carries on now`));
+      return;
+    }
     const worker = [...w.sessionIds].reverse().find((sid) => this.store.sessions.get(sid));
-    console.log(`ledger: unblocked ${w.id}: ${name} cleared (${why})`);
     this.toPeople(w.requesters, dispatchNotice(w, `unblocked: it waited on ${name} (${b.what}), and ${why}; the dispatcher starts it next`));
     this.toDispatcher(
       `[ledger] ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) is unblocked: it waited on ${name} (${b.what}), and ${why}. Start it now: start_agent with work_id "${w.id}"${worker ? `, or message_agent with work_id to its worker ${worker}` : ''}. If no computer that can take it has room, decide_work queue it; if it still waits on something, decide_work block it on that.`,

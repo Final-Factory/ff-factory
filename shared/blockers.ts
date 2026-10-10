@@ -27,6 +27,13 @@ export const BLOCKER_STUCK_MS: Record<WorkBlockerKind, number | undefined> = {
   pr: 7 * DAY,
 };
 
+/**
+ * How long a CI blocker may go without FF Factory being able to read the checks before it gives up and lets the worker
+ * look for itself (w829: the portal's fine-grained GitHub token could not read statusCheckRollup, every read failed in
+ * silence, and w814, w818 and w808 sat Blocked for hours after their CI finished). Three 5-minute reads.
+ */
+export const CI_UNREADABLE_MS = 15 * 60_000;
+
 /** "16:29 UTC" or "10-08 16:29 UTC". */
 const utc = (iso: string | undefined, now: number) => {
   if (!iso) return 'a time';
@@ -104,6 +111,8 @@ export interface BlockerFacts {
   nightlyAt?: number;
   /** A pull request's checks: done (none still running, or it merged or closed) and a line saying how. */
   ci?: (ref: string) => { done: boolean; text: string } | undefined;
+  /** w829: since when (ms) a pull request's checks could not be read, and why; undefined while they can be. */
+  ciUnreadable?: (ref: string) => { since: number; why: string } | undefined;
   /** A pull request's state (w754, the pr blocker): open, merged, or closed without merging; undefined when unknown. */
   pr?: (ref: string) => { state: 'open' | 'merged' | 'closed'; text: string } | undefined;
 }
@@ -178,6 +187,12 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts): BlockerVerdict 
     case 'ci': {
       const c = b.ref ? f.ci?.(b.ref) : undefined;
       if (c?.done) return { state: 'clear', why: c.text };
+      // w829: checks FF Factory cannot read do not hold the request in silence: after CI_UNREADABLE_MS its worker looks.
+      // The clock starts at the later of the first failed read and this block, so a request blocked again on the same
+      // unreadable CI waits its own CI_UNREADABLE_MS (no clear-and-block-again loop every minute).
+      const u = !c && b.ref ? f.ciUnreadable?.(b.ref) : undefined;
+      const unreadableFor = u ? f.now - Math.max(u.since, at) : 0;
+      if (u && unreadableFor >= CI_UNREADABLE_MS) return { state: 'clear', why: `FF Factory could not read CI on ${b.ref} for ${Math.round(unreadableFor / 60_000)} min (${u.why}), so its worker checks CI itself` };
       return late(c?.text ?? `CI on ${b.ref} is running`);
     }
     case 'pr': {
