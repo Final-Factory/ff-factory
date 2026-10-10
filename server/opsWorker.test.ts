@@ -584,6 +584,12 @@ test('a deploy: only in a person\'s own turn, a grant good once for 15 minutes, 
   again.start(0);
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(store.readTranscript(OPS_ID, 80).filter((e) => e.kind === 'user' && e.text.startsWith('[deploy] The portal has started again')).length, 1, 'reported once');
+  // w887: the worker is told it does not update the machines (FF Factory does, once the deploy verified), and the person
+  // who asked is remembered across restarts for the rollout's report.
+  assert.match(store.readTranscript(OPS_ID, 80).filter((e) => e.kind === 'user').map((e) => (e.kind === 'user' ? e.text : '')).join(' '), /Do not update the machines. daemons/);
+  assert.equal(again.deployRequester(Date.parse('2026-10-07T06:40:00Z'))?.userId, 'lothsahn', 'a deploy that verified within hours of the ask');
+  assert.equal(again.deployRequester(Date.parse('2026-10-07T05:00:00Z')), undefined, 'not before the ask');
+  assert.equal(again.deployRequester(Date.parse('2026-10-07T10:00:00Z')), undefined, 'not for a deploy hours later (by hand)');
   again.close();
 });
 

@@ -85,7 +85,11 @@ The route has two halves. The dispatcher makes the settings it can (`add_machine
 `max_sandbox_agents`) and sends the requester's orchestrator the step in a `decide_work` note, naming the exact action.
 The orchestrator then calls `ops_worker` with action **`machine_update`**: `machine`, exactly one `work_ids` entry (the
 person's own open request that asks for it), and `max_sandboxes`, `max_agents_per_sandbox` or `max_unity` for what
-changes. "Update the machines" is one such call per machine, with no setting named.
+changes. After a verified portal deploy none of this is needed for the daemon update itself: FF Factory does it, to every
+machine, by itself ([After a verified deploy](#after-a-verified-deploy-w887)). "Update the machines" at any other time is one
+such call per machine, with no setting named. An update never needs a drain or a wait (w605): it stops only the daemon, and
+the agents in their agent hosts, mid-turn ones included, run on and are adopted by the new daemon
+([worker-install.md](worker-install.md), "An update does not stop running work").
 
 **The gate** (`OpsWorker.machineInstall`, `server/opsWorker.ts`; tested in `server/opsWorker.test.ts`):
 
@@ -310,6 +314,9 @@ Lothsahn, 2026-10-07: "Yes, please modify the ops worker to update yourself." Af
    (already up to date) or the build failed, its `wake_me` brings it back to report from `fffctl status` and
    `fffctl logs`. The wake is kept in `data/wakes.json` across restarts.
 
+6. **The machines follow by themselves** once the deploy has verified (never after a rollback): [After a verified
+   deploy](#after-a-verified-deploy-w887). The worker does not update them, and its messages say so.
+
 CI checks the parts that need no Claude token, in a real guest, after the update step's own restart:
 - `fff-ops.socket` still listens, and the launcher still starts Claude Code;
 - `fffctl update` through the worker's wrapper is refused with no grant and with a grant that ran out;
@@ -319,6 +326,50 @@ CI checks the parts that need no Claude token, in a real guest, after the update
 `server/opsWorker.test.ts` checks that the server gives a grant only in the person's own turn, and that the report
 message is sent once after a restart. A real deploy by the worker, with its report, is the first such use after this
 merges.
+
+## After a verified deploy (w887)
+
+Lothsahn, 2026-10-10: "Update FFFactory so that after updating the portal and validating, it automatically updated all the
+machines." Then, asked "Isn't it possible to update a machine without disrupting running agents?": it is (w605), so there is
+no drain and no wait.
+
+**TL;DR:** once `fff-update` has verified a new portal release, the portal itself runs the worker installer's update on every
+online worker-root machine, one at a time, over its own ssh, and sends ONE report to the orchestrator of whoever asked for the
+deploy. A machine that is offline is updated when it comes back. No request, no ops job, no worker.
+
+- **The trigger is the verification, never the restart.** `fff-update verify` (`deploy/vm/guest/fff-update`, run by
+  `fff-health`) writes `data/update.verified.json` (`{sha, previous, at}`) only when the new release answers `/api/health`
+  with its commit. A rollback (`cmd_rollback`) removes `update.verifying.json` and writes nothing, so a rolled-back deploy
+  updates no machine. The portal (`MachineRollout`, `server/machineRollout.ts`) looks for the marker every 30 s, takes it once
+  (renaming it `update.verified.done.json`; a marker older than a day is only retired) and keeps the rollout in
+  `data/machine-rollout.json`, which survives a portal restart. Checked in `deploy/vm/test/ci-vm-e2e.sh` (the marker after the
+  update, none after the rollback) and in `server/machineRollout.test.ts`.
+- **Authority.** The person's deploy approval covers it (`ops_worker deploy`, or Lothsahn's own `sudo fffctl update`): the
+  rollout opens no request and no ops job, and the only command it can run is the installer's update form, written by the
+  server from the machine's record (`workerUpdateRemote`, the function `machine_update` uses) with **no setting named, so
+  every limit stays as it is**. Anything the installer says it changed (`~ key: before -> after`) is flagged in the report.
+  Off with config `machines.autoUpdateAfterDeploy: false`, and in a dry run.
+- **Running agents are not drained or waited for.** The update stops only the daemon; agents run on in their agent hosts and
+  the new daemon adopts them (w605). Before each machine the rollout counts its live agents; after it, the daemon's hello
+  says which it took back (`MachineManager.liveAtHello`). The report gives "N of M adopted" and names any that ended (the
+  portal resumes a mid-turn one; an idle one comes back on its next message).
+- **Which machines.** Worker-root machines (a record with a root folder), one at a time. The portal's own host is skipped (the
+  portal runs its daemon itself) and so is a machine deployed over ssh (the portal redeploys it once idle, as before). A daemon
+  already on the deployed commit is left alone.
+- **Offline or asleep** machines stay pending and are updated on the first pass (30 s) after their hello. The main report
+  waits up to 10 minutes after the verification for machines that are only reconnecting to the new portal; one still offline
+  then is listed as waiting, and a short follow-up message names it once it has been updated.
+- **A failure on one machine** is recorded and the rest carry on. The installer checks every prerequisite before it touches
+  anything and exits 2 with the old daemon running ("Not updating: ... the daemon was not touched"); a machine seen online
+  after a failed run is kept as it was. If a failed run leaves the machine offline or outdated, the rollout runs the
+  installer again with `--daemon-ref <the commit the daemon ran before>` (`-DaemonRef` on Windows) to put the old code back;
+  if that fails too, the report says the daemon is OFFLINE and needs a person, the one case that does.
+- **The report** is one `[machine updates]` message to the orchestrator of the person whose `ops_worker deploy` it was
+  (`OpsWorker.deployRequester`: the last deploy asked for within 3 hours before the verification), else to the dispatcher (a
+  deploy by hand). Per machine: updated, already current, skipped (with why), failed (with the installer's own lines and the
+  rollback outcome) or waiting; the commit before and after; "Limits unchanged"; the agents adopted and any that ended. The ops
+  worker is told in its `[deploy]` messages that it does not update the machines.
+- **Not replaced:** a change of setting (a sandbox count, an editor limit) is still `ops_worker machine_update`.
 
 ## In the portal
 
@@ -488,6 +539,7 @@ VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
   new machine only when the fingerprint and the tailnet agree, once, keeps it through `--check` and `--fix`, and refuses
   a wrong fingerprint, a host that does not answer, one already pinned in `machines.ssh` or `known_hosts2`, and bad
   arguments, with nothing written (w676).
+- `server/machineRollout.test.ts` (w887): a verified deploy updates every online worker-root machine with the installer's update form and no setting named; no marker (a rollback) updates nothing; an offline machine is deferred, reported as waiting and followed up when it comes back; one machine failing is isolated and an offline daemon is put back on its old commit; agents adopted across an update are counted and any that ended are named; one report to the deploy's requester (the dispatcher for a deploy by hand).
 - `server/machines.test.ts`: `add_machine worker_install` makes the record alone (no credential, no ssh deploy), refuses
   folders and an existing ssh machine, is left alone by the offline watch and a portal restart, and its first hello
   makes it ready (w676).

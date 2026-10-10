@@ -15,7 +15,8 @@
 #                            the prepared release (or build one now: an update cut off by a crash), record the result
 #                            for the server's restart summary, and start verifying it.
 #   fff-update verify        fff-health calls it: once the new code answers /api/health with its SHA the update is
-#                            done; past UPDATE_VERIFY_MIN minutes without that, roll back.
+#                            done (data/update.verified.json is written: the portal then updates every machine's
+#                            daemon, w887); past UPDATE_VERIFY_MIN minutes without that, roll back.
 #   fff-update rollback [WHY] back to the previous release, restart.
 #   fff-update prepare [REF] build REF (default origin/<branch>) and print the release folder.
 #   fff-update init [REF]    the first release (install.sh).
@@ -236,6 +237,9 @@ cmd_verify() {
   sha=$(jq -r .sha "$f"); deadline=$(jq -r .deadline "$f")
   got=$(health_json 2>/dev/null | jq -r '.sha // empty' 2>/dev/null || true)
   if [ -n "$got" ] && [ "${sha:0:${#got}}" = "$got" ]; then
+    # The portal reads this marker (server/machineRollout.ts, w887) and then updates every machine's daemon to this
+    # commit. Only here, never on a rollback: cmd_rollback removes update.verifying.json and writes no marker.
+    jq -n --arg sha "$sha" --arg prev "$(jq -r '.previous // empty' "$f")" --arg at "$(date -u +%FT%TZ)" '{sha: $sha, previous: $prev, at: $at}' | data_write update.verified.json
     rm -f "$f"
     log "update to ${sha:0:12} verified: the portal answers with it"
     return 0
@@ -266,5 +270,5 @@ case "${1:-}" in
   prepare) shift; prepare "${1:-}" ;;
   init) shift; cmd_init "${1:-}" ;;
   prune) prune ;;
-  *) sed -n '2,27p' "$0"; exit 2 ;;
+  *) sed -n '2,28p' "$0"; exit 2 ;;
 esac

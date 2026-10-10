@@ -191,8 +191,8 @@ redeploy of outdated daemons updates it.
 
 **Worker root installs** (w513, [worker-install.md](worker-install.md)): a machine installed on the computer itself with
 `scripts/worker/install.ps1` or `install.sh` keeps everything under one root, reports it in its hello (`layout`), and is
-never redeployed over ssh: when it is outdated, or has an update available, the portal says once to re-run its installer
-there.
+never redeployed over ssh: when it is outdated, the portal says once to re-run its installer there; one with an update available is
+updated by the portal's own rollout after a verified deploy ([ops-worker.md](ops-worker.md#after-a-verified-deploy-w887)).
 
 **Versions** (w605). A daemon is versioned by the protocol it speaks (`PROTOCOL_VERSION` in
 `server/machineProtocol.ts`), not by the commit it was installed from. Its hello reports the protocol, the oldest portal
@@ -204,7 +204,7 @@ tools it can serve.
   <commit>" and works exactly like a current one: it takes new agents, starts them, and resumes paused and cut-off ones
   (a restart's resume and `resumeCutOff`). Before w605 it counted as outdated, and after the update of 2026-10-07
   (portal 280ce85 to 9ea8476, every daemon on f3f19c0) the portal would not resume five paused agents until each
-  installer was re-run. A worker root install is told once to re-run its installer when convenient. A daemon the portal
+  installer was re-run. A worker root install is updated by FF Factory itself after a verified portal deploy ([ops-worker.md](ops-worker.md#after-a-verified-deploy-w887)), with no drain or wait: agents run on through it. Any that stays behind is told once, and `ops_worker machine_update` updates it. A daemon the portal
   deployed over ssh is redeployed by the portal once nothing runs there: no live process, no agent mid-turn by its
   record, none waiting to be resumed (checked on its hello and every 30 s, at most every 10 minutes per machine).
 - **Outdated** (`MachineManager.outdated`, `protocolProblem`): a protocol out of range. The portal drives daemons from

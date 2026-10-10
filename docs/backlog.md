@@ -19,7 +19,7 @@ dispatcher; BEAST cannot go back to host sandboxes, and that is accepted.
 
 After the BEAST daemon split is fully working: a portal update or restart no longer drains or stops daemon-hosted
 agents, on BEAST or on machines. The portal restarts, the daemons keep their agents running, and they reconnect and
-replay missed events. Only a daemon update itself would need a drain.
+replay missed events. A daemon update needs no drain either: since w605 it stops only the daemon, and the agents in their own agent hosts are adopted by the new one ([worker-install.md](worker-install.md), "An update does not stop running work").
 
 Behind config `machines.keepAgentsOnRestart`, on on BEAST since 2026-10-05 (w424; [beast-machine.md](beast-machine.md#backlog-step-2-on)):
 no drain and no stop for daemon agents, and a same-protocol daemon from another commit keeps taking agents until it is

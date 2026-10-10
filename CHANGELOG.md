@@ -10,6 +10,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A verified portal deploy now updates every machine's daemon by itself** (w887, lothsahn: "Update FFFactory so that after
+  updating the portal and validating, it automatically updated all the machines."). `fff-update verify` writes
+  `data/update.verified.json` when the new release answers (a rollback writes none); the portal (`server/machineRollout.ts`) then
+  runs the worker installer's update, the command `ops_worker machine_update` writes with no setting named, on each online
+  worker-root machine in turn over its ssh. Agents are not drained or waited for (an update stops only the daemon, w605): it
+  counts each machine's agents before and the new daemon's hello after, and names any that ended. An offline machine is updated
+  when it comes back; a failure on one is reported while the rest carry on, and a daemon left offline is put back on its old
+  commit. One `[machine updates]` report goes to the orchestrator of whoever asked for the deploy (the dispatcher for a deploy by
+  hand). Off with `machines.autoUpdateAfterDeploy: false`. The ops worker's and the orchestrators' instructions now say an
+  update needs no drain and that the deploy updates the machines. docs/ops-worker.md "After a verified deploy". Needs a portal
+  deploy; the first deploy after it is its first run on real machines.
 - **CI the portal cannot read is said loudly, and a green finish is seen without Actions access** (w889, Ben: "Yes fix
   it"). The portal's GitHub token (D7) cannot read check runs (no fine-grained token can) nor Actions runs ("Actions:
   Read" is missing), so every `ci:` wait sat the 15-minute fallback. `ghChecks` now falls back to the pull request's merge
