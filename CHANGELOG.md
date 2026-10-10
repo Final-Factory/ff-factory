@@ -10,6 +10,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Reply to a message and react with an emoji in your orchestrator chat** (w866, Ben: "we should be able to reply to a
+  message and include it in the intput as context. also let us give emoji reactions to messages and used as
+  responses"). Every message of your own chat (the orchestrator's answers, your own, and the relayed `[worker update]`,
+  `[dispatch]` and `[person message]` lines) has Reply and React: on hover, or after a tap on a touch screen. A reply shows
+  the message it answers above it (press it to go there) and reaches the orchestrator as your words, then the quoted
+  message under a mark that says it is not your words. A reaction shows as a chip on the message and reaches the
+  orchestrator as a short response with the message quoted: 👍 or ✅ is a yes, 👎 or ❌ a no, ❓ asks it to explain, 👀 is
+  seen. **A reaction is not your own turn:** it cannot approve, decline, delete, change a setting or deploy (a call it
+  tries is held and offered back with your next typed message); a reply, which you type, can. Sending a message now also
+  scrolls the chat to it. `shared/replies.ts`, `Orchestrators.quoteOf` and `react`, `POST /api/sessions/<id>/react`;
+  docs/orchestrators.md, "Replies and reactions". Needs a portal deploy.
+
 - **Test only: the ledger test that began failing on main at 2026-10-10T08:00Z** (w858, lothsahn: "look for flaky CI
   tests in FFFactory and fix them"). `ledgerSweep.test.ts` dates its requests against a fixed NOW (2026-10-03T12:00Z) while
   the ledger's own rules read the wall clock, so 7 days later `updateProblem` refused to reopen a request "closed more
