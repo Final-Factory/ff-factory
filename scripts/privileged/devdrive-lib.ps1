@@ -178,7 +178,7 @@ function Mount-DevDrive {
       if ((ConvertTo-PartitionLetter $part.DriveLetter) -ne $Letter.ToUpper()) { $part | Set-Partition -NewDriveLetter $Letter -ErrorAction Stop; Log "gave disk $($disk.Number) partition $($part.PartitionNumber) the letter $($Letter):" }
       $lettered = $true
     } catch {
-      Log "partition/letter try $i failed: $($_.Exception.Message)"
+      Log "partition/letter try $i failed: $($_.Exception.Message) [at: $(("$($_.InvocationInfo.Line)").Trim())]"
       # Nothing to retry: every letter is taken (a letter assigned by hand below would be somebody else's).
       if ($_.Exception -is [InvalidOperationException]) { throw }
       Start-Sleep -Seconds (5 * $i)

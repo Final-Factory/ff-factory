@@ -63,6 +63,7 @@ $out = [ordered]@{
   held   = $global:Held
   result = $(if (Test-Path -LiteralPath $res) { Get-Content -Raw -LiteralPath $res | ConvertFrom-Json } else { $null })
   thrown = $global:Thrown
+  cmds   = @('Set-Partition', 'Get-Partition', 'Get-Disk', 'Get-DiskImage', 'Mount-DiskImage' | ForEach-Object { "$_=$((Get-Command $_ | Select-Object -First 1).CommandType)" })
   log    = $(if (Test-Path -LiteralPath (Join-Path $Work 'results/mount.log')) { Get-Content -Raw -LiteralPath (Join-Path $Work 'results/mount.log') } else { '' })
   state  = $(if (Test-Path -LiteralPath $StateFile) { Get-Content -Raw -LiteralPath $StateFile | ConvertFrom-Json } else { $null })
   daemon = $(if (Test-Path -LiteralPath (Join-Path $Work 'daemon/daemon.json')) { Get-Content -Raw -LiteralPath (Join-Path $Work 'daemon/daemon.json') | ConvertFrom-Json } else { $null })
