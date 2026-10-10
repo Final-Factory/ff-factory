@@ -85,7 +85,9 @@ The route has two halves. The dispatcher makes the settings it can (`add_machine
 `max_sandbox_agents`) and sends the requester's orchestrator the step in a `decide_work` note, naming the exact action.
 The orchestrator then calls `ops_worker` with action **`machine_update`**: `machine`, exactly one `work_ids` entry (the
 person's own open request that asks for it), and `max_sandboxes`, `max_agents_per_sandbox` or `max_unity` for what
-changes. After a verified portal deploy none of this is needed for the daemon update itself: FF Factory does it, to every
+changes. On a Windows PC also `dev_drive` (make its Dev Drive if it has none), `move_to_dev_drive` (also re-create its
+sandboxes on it, which the installer refuses while an agent or an editor is in one) and `dev_drive_max_gb`
+([worker-install.md](worker-install.md#the-dev-drive-w900), w900); an update that names none of them makes no drive. After a verified portal deploy none of this is needed for the daemon update itself: FF Factory does it, to every
 machine, by itself ([After a verified deploy](#after-a-verified-deploy-w887)). "Update the machines" at any other time is one
 such call per machine, with no setting named. An update never needs a drain or a wait (w605): it stops only the daemon, and
 the agents in their agent hosts, mid-turn ones included, run on and are adopted by the new daemon

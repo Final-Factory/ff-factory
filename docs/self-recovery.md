@@ -26,6 +26,12 @@ arguments. There is no arbitrary command path.
 | `ffsb-helper-reboot` | a reboot in 2 minutes (`shutdown /a` cancels it). Refused unless automatic logon is set up, and at most once per 6 hours |
 | `ffsb-helper-pagefile` | only with `-PagefileGB N`: a fixed pagefile of N GB, from the next boot |
 
+**A worker install's Dev Drive (w900)** uses the same three tasks (`mount`, `trim`, `compact`; the others are not
+registered), made by `scripts/install-privileged-helpers.ps1 -Flex …` from the installer. `-Flex` makes the letter a
+preference: if another claim has taken it, the next free letter from V: down is used and what stored the old one is
+repointed ([worker-install.md](worker-install.md#the-dev-drive-w900)). The helper's attach code now lives in
+`scripts/privileged/devdrive-lib.ps1` (copied beside it), unchanged for BEAST, which has no `-Flex`.
+
 Each writes `%ProgramData%\ffsb-helpers\results\<action>.json` (`ok`, `at`, `detail`). The app
 starts one with `schtasks /run /tn ffsb-helper-<action>` and waits for that file
 (`server/privileged.ts`). Since w510 the only caller is BEAST's daemon's guard, and it starts `ffsb-helper-mount`

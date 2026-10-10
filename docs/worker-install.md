@@ -18,8 +18,10 @@ decisions of 2026-10-06 override it where they differ (listed at the end).
                         token), run-daemon.ps1, logs/, agents/ (standing agents), unity-mcp/, state files
   secrets/              machine-token: the machine's credential, owner-only (Windows ACL: the user and SYSTEM; macOS 0700)
   repo/                 the install's own bare clone of the game repo; every sandbox is a worktree of it
-  sandboxes/<name>/     the sandboxes
-  seed/Library/         the Library seed new sandboxes are warmed from
+  sandboxes/<name>/     the sandboxes (with a Dev Drive: a junction to <letter>:\sandboxes, see "The Dev Drive")
+  seed/Library/         the Library seed new sandboxes are warmed from (with a Dev Drive: a junction to <letter>:\seed)
+  devdrive.vhdx         Windows, only with a Dev Drive (w900): the drive's file, dynamically expanding; devdrive.json beside it
+                        says which letter it holds and how it was formatted
   players/slotK-0, -1/  each sandbox slotK's two player folders, K = 1..N, and slotnightly-0, -1 for the nightly lab
                         (scripts/nightly/player_slots.py, layout sandbox-pairs, w576): FF_PLAYER_SLOT_ROOT for agents
   nightly/              the nightly lab: FF_NIGHTLY_ROOT
@@ -51,6 +53,7 @@ MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\
 | Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile) and group "Final Factory Unity editors" (each Unity editor the Hub has) | none |
 | The slot config for scripts outside the daemon | `%ProgramData%\FinalFactory\player-slots.json` | `~/.config/finalfactory/player-slots.json` |
 | The Unity slots mailbox (`~/.ff-factory/unity-slots`, its standard place: no pointer is written, so the daemon, its agents and the nightly harness all use the same one, w469) | `%USERPROFILE%\.ff-factory\unity-slots` | `~/.ff-factory/unity-slots` |
+| The Dev Drive (w900) | the SYSTEM tasks `ffsb-helper-mount` (also at every boot), `-trim` and `-compact`, and their script in `%ProgramData%\ffsb-helpers`; the drive's file is inside the root | none |
 | The portal's record | removed through `POST /machine/unenroll` | the same |
 | The portal's ssh key (w568) | its line in `C:\ProgramData\ssh\administrators_authorized_keys` (a member of Administrators) or `%USERPROFILE%\.ssh\authorized_keys`; removed unless it was there before | its line in `~/.ssh/authorized_keys`; the same |
 
@@ -245,6 +248,129 @@ clean and places the agent again when it resumes (docs/machines.md, "Released sa
 sandbox held, and `list_sandboxes` says why. On LothDesktop at 08:29 UTC on 2026-10-07, the update stopped Ben's 77956901, which had no
 check-in, and slot2 showed FREE.
 
+
+### The Dev Drive (w900)
+
+**TL;DR:** A new Windows install makes a **Dev Drive** in its root: a dynamically expanding VHDX, `<root>\devdrive.vhdx`,
+formatted ReFS as a Dev Drive and mounted at **the first free drive letter from V: down to A:**. The sandboxes and the
+Library seed live on it, so every new sandbox's Library is a block clone of the seed (a few seconds and almost no disk)
+instead of a 40 to 99 GB copy. It is mounted again at every boot, before the daemon starts, by a SYSTEM task. Re-running
+the installer reuses it and never formats or recreates it. (lothsahn, 2026-10-10, w900: "Please modify the installer so
+that it does this in the specified location when you request an install. The dev drive file would live there, and the dev
+drive would grab a new file letter starting with V: and moving back towards A until it finds an available drive letter.")
+
+**Why** (w900; sizes from w892 and w628, measured): LothDesktop's `D:` is NTFS and holds other data, so it cannot be
+reformatted (lothsahn: "Is there a way to do this on NTFS because the drive has other data and I can't just reformat
+it"), and each of its six sandboxes carries a whole Unity Library (BurstCache alone is about 32 GB). BEAST has had the
+same thing since w466 as a hand-made VHDX (`scripts/devdrive.ps1`, `C:\ffsb-devdrive.vhdx` mounted as `F:`); this
+generalises it, and BEAST keeps its own.
+
+| | |
+|---|---|
+| **When** | A **new** install on Windows makes one unless `-NoDevDrive` (`--no-dev-drive`). An **update** makes none unless `-DevDrive`: the portal runs updates by itself after every verified deploy ([ops-worker.md](ops-worker.md#after-a-verified-deploy-w887)), and a drive made in the middle of work is not what an update is for. An install that has one keeps it on every update. A root already on a ReFS volume (BEAST's `F:`) needs none and gets none. |
+| **Flags** | `-NoDevDrive`; `-DevDrive` (update: make it if missing); `-MoveToDevDrive` (update: also move the existing sandboxes, below); `-DevDriveMaxGB N`; `-DevDriveSkip U,T` (letters it never takes). `worker.ts`: `--no-dev-drive`, `--dev-drive`, `--move-to-dev-drive`, `--dev-drive-max-gb N`, `--dev-drive-skip U,T`. `ops_worker machine_update` takes `dev_drive`, `move_to_dev_drive` and `dev_drive_max_gb` for a Windows PC. |
+| **The file** | `<root>\devdrive.vhdx`, made with `diskpart` (`create vdisk … type=expandable`: no Hyper-V tools needed), GPT, one partition, `Format-Volume -DevDrive -FileSystem ReFS`. The file starts at about 360 MB (measured on GitHub's Windows runner, 64 GB maximum) and grows as the drive fills. `devdrive.json` beside it records letter, maximum, file system, whether it is a Dev Drive format and whether the volume reports block cloning. |
+| **The letter** | `V:`, `U:`, `T:` … `C:`, then `B:`, then `A:`; `W:` to `Z:` are never tried (`Z:` is where a share is mapped first). Skipped: a letter **in use** (a volume, a `subst`, a CD drive), a **mapped network drive** (this session's, and every user's persistent mapping in the registry, read from their profiles' hives because the boot task runs as SYSTEM with nobody logged on), a letter **reserved** by Windows (`HKLM\SYSTEM\MountedDevices` remembers the letter of every volume it has seen, plugged in or not), and `-DevDriveSkip`. The install prints which letter it took and why each earlier one was passed over (`V: in use, U: mapped network drive, …`). The rule is one function, `Select-DriveLetter` in `scripts/privileged/devdrive-lib.ps1`, used by the installer and the boot task. |
+| **On it** | `<letter>:\sandboxes` and `<letter>:\seed`. `daemon.json` names these (`sandboxes.root`, `sandboxes.librarySeed`, `librarySeedCopy: "clone"`), never the root's junctions: git and Unity record the canonical path ([worker-root.md](worker-root.md) 2.2). `<root>\sandboxes` and `<root>\seed` become directory junctions to them, so tools that look under the root (the uninstall's risk check, `player_slots.py`'s `realpath` of `<root>/sandboxes`) still find the sandboxes. Built players stay in `<root>\players`: the firewall rules name those paths, and a build is hard-linked into a slot only on one volume, so on a Dev Drive root `player_slots.py` copies it (`_link_or_copy`, about 2 GB for a development player, measured in w628) instead. |
+| **The seed** | A new install has none: the first sandbox imports its Library cold, and the next ones copy it, as block clones because they share the drive (`librarySource` takes a ready sandbox's Library when there is no seed). A machine that has a seed puts it in `<letter>:\seed\Library`; the move below does that for an existing install. |
+| **The guard** | The installer adds a `hostGuard` to `daemon.json` (unless it has one): the daemon watches `<letter>:\sandboxes`, and when it is gone it starts `ffsb-helper-mount` and retries (at once, then 2, 5, 10 and 30 minutes; [self-recovery.md](self-recovery.md), "The sandbox drive"). Its thresholds are the pool's own (`disk_warn_gb` 20, `disk_critical_gb` 10, not BEAST's 80 and 40), it watches the **root's volume** too (`hostDiskPaths: ["D:/"]`: the drive's own "free space" is its maximum size, and a VHDX that cannot grow takes the drive away, BEAST 2026-09-24), and the browser reaper is off. |
+
+**Elevation.** Making and mounting a VHDX needs administrator rights (sourced: Microsoft Learn, "Set up a Dev Drive on
+Windows 11": "Local administrator permissions"; BEAST's `devdrive.ps1` is "(admin)"). An **elevated session** (the ops
+worker's ssh to LothDesktop and BEAST is, [above](#updating)) does it in place; a normal PowerShell asks once with a
+UAC prompt (the same elevated step as the firewall rules). A non-elevated, non-interactive update (an ssh session that is
+not an administrator's) cannot make or attach it: with a drive that exists it starts `ffsb-helper-mount` (the daemon's
+user may start that task, nothing more) and uses it; with none, it says so and goes on without.
+
+**The boot mount.** `scripts/install-privileged-helpers.ps1` (run by the installer, elevated) copies
+`ffsb-helper.ps1` and `devdrive-lib.ps1` to `%ProgramData%\ffsb-helpers` (writable by SYSTEM and Administrators only) and
+registers `ffsb-helper-mount` (SYSTEM, **at startup, 30 s after boot**, and on demand), `-trim` and `-compact`. The
+daemon's user gets read-and-run on those tasks, nothing more, and the arguments are fixed at registration. The 30 s is
+BEAST's: the storage provider refused the attach earlier in the boot on 2026-09-24, so every step retries three times
+and falls back to `diskpart`. The daemon starts at the user's **logon**, which comes after; if the drive is still
+missing then, the guard waits for it (below). The mount **keeps the letter** (`devdrive.json` says which). If another
+claim took it meanwhile, the helper uses the next free letter and **repoints** what holds the old one: `devdrive.json`,
+`daemon.json` (`sandboxes.root`, `sandboxes.librarySeed`), the pool's record `daemon\sandboxes.json`, the root's two
+junctions and each worktree's recorded path (`git worktree repair`), and writes what it did in `mount.json` and
+`mount.log`. Windows keeps the letter of a volume it has seen, so it does not give it to a different volume while
+this one is detached (measured on GitHub's Windows runner: `diskpart assign letter=V` for another disk was refused with
+"The specified drive letter is not free to be assigned"): what can really take it is a persistent network mapping, a
+`subst`, or a first mount on a different PC. An agent that was resumed after a letter change starts in a path with no
+conversation under it (Claude Code files them by path; the move below renames them, a letter change does not): that is
+the price of a rare event, *a guess* at how rare.
+
+**Idempotent.** `devdrive.ps1 -Action ensure` finds the file in the root: if it exists it is attached and kept, never
+recreated; it formats a disk only when the disk has **no partition** (an earlier run was cut off between creating and
+formatting, with nothing on it to lose); a partition that holds anything is never touched. The helper tasks are
+registered again (same names, `-Force`), the junctions are kept if they point at the right place and retargeted if they
+do not, and `daemon.json` is rewritten with the same paths. Tested on a real Windows (GitHub's runner,
+`.github/workflows/dev-drive.yml`, `scripts/worker/test/devdrive-e2e.ts`): three runs in a row give the same file
+(creation time), the same letter, and the data written to the drive in between is still there.
+
+**When the drive is missing at the daemon's start** (a reboot, a power cut, the attach failing): the host guard knows
+the state from its start. New agents and editors in sandboxes are refused with the reason; its first look reports "Sandbox
+drive not attached at startup" and starts `ffsb-helper-mount`; if that fails it tries again after 2, 5, 10 and 30
+minutes and reports and stops after six (`machine_daemon restart` makes it try again). When the drive is back it starts
+the editors that were up and tells the agents that were mid-turn to resume. That is BEAST's recovery path since w466,
+unchanged; this install gets the same `hostGuard` settings (above). The root's `daemon\` folder is on the root's own
+volume, so the daemon itself runs while the drive is gone.
+
+**Compaction and trim.** The VHDX grows to the most the drive has held and **does not shrink by itself**; deleting a
+sandbox frees space inside the drive, not on `D:`. Handing the free space back needs `Optimize-VHD`, which is in the
+Hyper-V PowerShell module; `diskpart`'s `compact vdisk` finds free space through NTFS and reclaimed nothing on BEAST's ReFS
+drive (245.6 GB before and after, measured 2026-09-24). The installer installs neither (adding a Windows feature is the
+owner's decision) and registers `ffsb-helper-trim` (`Optimize-Volume -ReTrim`) and `ffsb-helper-compact` for a person to
+start by hand: `compact` refuses while any `Unity.exe` has a project on the drive, retrims, detaches, runs `Optimize-VHD`
+(Full with the disk attached read-only, else Pretrimmed), attaches again, and reports ok only if it reclaimed 1 GB. Without
+the module it refuses before detaching anything and says how to get it. With block clones the drive holds one seed plus
+what each sandbox changed, so the high-water mark is the thing to watch (`devdrive.json` and the file's size).
+
+**Defender.** A Dev Drive is *trusted* when it is formatted, and Microsoft Defender then scans it in **performance mode**
+(asynchronous) instead of real-time protection: Microsoft's default for a trusted Dev Drive, and the reason for the
+format (sourced: Microsoft Learn, "Set up a Dev Drive on Windows 11", "What is Microsoft Defender performance mode?").
+The installer changes nothing in Defender (a security setting is the owner's) and writes `fsutil devdrv query <letter>:`
+into `mount.log`. The trust flag is stored in the registry of the PC that formatted the drive and survives a reboot; a VHDX
+copied to another PC is not trusted there.
+
+**Block cloning** needs Windows 11 24H2 or Windows Server 2025 (sourced: the same page, "Block Cloning Support"). The
+installer reads whether the volume reports it (`fsutil fsinfo volumeinfo`: measured true on GitHub's Windows Server
+runner, and the install says so for each PC). Without it, `daemon.json` keeps `robocopy` so the pool counts a full copy
+honestly, and the install says why.
+
+**The maximum size** defaults to **90 % of the root's volume, between 100 GB and 1 TB** (*a guess*, supported by two
+sourced numbers: Windows' own minimum is 50 GB, and BEAST's drive is 900 GB on about a terabyte); `-DevDriveMaxGB N`
+sets it. It is a ceiling: the file takes what is written. The guard watches the root's volume because that, not the
+ceiling, is what runs out.
+
+**Moving an existing install's sandboxes onto the drive** (`-Update -MoveToDevDrive`; LothDesktop's `D:\work\ffw`). It is
+the only thing that touches sandboxes, so it runs only on request, and only when nothing works in them:
+
+1. *Before anything changes* it refuses, naming them, if an agent is in a sandbox (the portal's view of the machine) or
+   a Unity editor runs from one, if a sandbox is on a detached HEAD, if a sandbox on `master`, `main` or `develop` has
+   uncommitted work (committing there is a person's decision), or if the untracked files are more than a save may carry
+   (`SAVE_LIMITS`). It changes nothing in that case.
+2. It stops the daemon (agents in their own hosts carry on, [above](#updating)) and **saves every sandbox's work**: the
+   uncommitted changes and untracked files are committed on the sandbox's own branch and pushed, as FF Factory's release
+   step does (`server/saveWork.ts`, w656). In an ssh session with no GitHub credential the push fails and says so; the
+   commit is in the root's clone, which the new worktree uses, so nothing is lost, and the daemon pushes it on the next
+   switch.
+3. The seed is **moved**, not copied: `<root>\seed\Library` if there is one, else the Library of the sandbox changed last,
+   with `robocopy /MOVE` (file by file, so `D:` frees as the drive fills and never holds both).
+4. One sandbox at a time: its old Library, worktree and folder are removed; a worktree of the same branch is made on the
+   drive and its Library **block-cloned from the seed**; the pool's record (`daemon\sandboxes.json`) and the sandbox's
+   Claude conversation folder (`~/.claude/projects/<path slug>`) follow it. Six full Libraries are never copied.
+5. The root's two folders become junctions; anything left in them that is not a pool sandbox is set aside whole as
+   `sandboxes.before-dev-drive` (never deleted); `daemon.json` is written with the drive's paths; the daemon starts.
+
+It is safe to run again after a stop: a sandbox already on the drive is skipped, one cut off between removal and creation
+is created. It runs in the background for an hour or more; `D:`'s free space before and after is what to report
+(`Get-PSDrive D`). Tested on a real git repository with two worktrees, unsaved work, an unpushed commit, a cut-off run, and
+a refused one (`scripts/devdrive.test.ts`); *not yet run on LothDesktop*.
+
+**Uninstall.** It attaches the drive first if it is not (the sandboxes' unpushed work is checked through the junction),
+stops what runs from the root or the drive, takes the junctions away, removes the three SYSTEM tasks (only those whose
+arguments name this root's VHDX), detaches the drive and deletes the file, then deletes the root. `check` lists the
+tasks and the file. Nothing is deleted outside the root's folder; the drive's contents go with its file.
 
 ### The portal's ssh (w568)
 
