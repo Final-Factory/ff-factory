@@ -63,15 +63,16 @@ import {
   type DiscordMessage,
   type IntakeSettings,
 } from './intakeRules.ts';
-import { brokenNightDraft, mentionsScenario, NIGHT_BROKEN, nightlyAgainLine, nightlyDraft, nightlyKey, nightlyRunDraft, nightlySkip, nightStatus, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
+import { brokenNightDraft, mentionsScenario, NIGHT_BROKEN, nightlyAgainLine, nightlyDraft, nightlyKey, nightlyReviewDraft, nightlyRunDraft, nightlySkip, nightStatus, parseNightlyJobs, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
+import { NIGHTLY_SENTRY, unattributedPerson } from './vault.ts';
 import { nextDaily } from './timers.ts';
-import type { NightlyRunSettings } from './intakeRules.ts';
+import type { NightlyReviewSettings, NightlyRunSettings } from './intakeRules.ts';
 import { isOpen } from './work.ts';
 import { linkedClosed, linkedDone, mergeCandidates, mergedBy, mergedText, parseLog, prNumberOf, type MergeRecord } from './mergedIntake.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 import { escalationCatchUp, escalationRef, fixLearnable, fixedByPr, followed, reportFixesOf, reportIdsOf, reportLines, reportObsoletesOf, reportSweep, type BoardWatch, type CatchUpLine, type ReportFix, type ReportObsolete, type ReportSweep } from './boardFollow.ts';
-import type { IntakeEntry, IntakeSummary, MaxEvent, NightlyNight, ProviderConversation, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
+import type { IntakeEntry, IntakeSummary, MaxEvent, NightlyNight, NightlyReview, ProviderConversation, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
 import { ffboxConversationHref } from '../shared/ffboxLinks.ts';
 
 const DISCORD_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request'];
@@ -174,6 +175,9 @@ interface Persisted {
   nights?: NightlyNight[];
   /** When the nightly schedule was first seen on: nights due before it are never fired late nor called missing. */
   nightlyRunSince?: number;
+  /** The nightly merge reviews, newest first (w905), and when that timer was first seen on. */
+  reviews?: NightlyReview[];
+  nightlyReviewSince?: number;
   /** Board answers FFBox follows, by ref (w480: kept across restarts, escalated threads' watches among them). */
   boards?: Record<string, BoardWatch>;
   /** When the resolver last looked for a followed request's fix (its PR, its release), by request. */
@@ -243,6 +247,8 @@ export class IntakeManager {
     if (s.release.enabled) every(RELEASE_EVERY_MS, () => void this.checkReleases(), 60_000);
     // The nightly e2e lab's run, fired by the portal every night, and its missing-night alarm (w864).
     every(NIGHTLY_RUN_EVERY_MS, () => this.checkNightlyRun(), 15_000);
+    // The nightly merge review (w905): the Nightly Regression Sentry's duties, fired as an ordinary job.
+    every(NIGHTLY_RUN_EVERY_MS, () => this.checkNightlyReview(), 20_000);
     // Requests whose branch or PR merged some other way close themselves (docs/intake.md, "Closed when it merged").
     every(MERGED_EVERY_MS, () => void this.checkMerged(), 90_000);
     // Board answers FFBox still follows are re-checked every minute; a change goes to it at once (docs/intake.md).
@@ -277,7 +283,7 @@ export class IntakeManager {
     try {
       const d = readJsonDurable<Partial<Persisted>>(this.file, { check: checkObject });
       if (!d) throw new Error('none yet');
-      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, nights: Array.isArray(d.nights) ? d.nights : undefined, nightlyRunSince: typeof d.nightlyRunSince === 'number' ? d.nightlyRunSince : undefined, escalations: d.escalations, maybes: d.maybes, boards: d.boards, fixTried: d.fixTried, catchUp: d.catchUp, reportFixes: d.reportFixes, reportSweep: d.reportSweep, reportObsoletes: d.reportObsoletes };
+      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, nights: Array.isArray(d.nights) ? d.nights : undefined, nightlyRunSince: typeof d.nightlyRunSince === 'number' ? d.nightlyRunSince : undefined, reviews: Array.isArray(d.reviews) ? d.reviews : undefined, nightlyReviewSince: typeof d.nightlyReviewSince === 'number' ? d.nightlyReviewSince : undefined, escalations: d.escalations, maybes: d.maybes, boards: d.boards, fixTried: d.fixTried, catchUp: d.catchUp, reportFixes: d.reportFixes, reportSweep: d.reportSweep, reportObsoletes: d.reportObsoletes };
     } catch {
       return { cursors: {}, recent: [], versions: {} };
     }
@@ -1417,6 +1423,132 @@ export class IntakeManager {
     return { FF_FACTORY_URL: portalUrl.replace(/\/+$/, ''), FF_FACTORY_NIGHTLY_KEY: this.runKey!.key };
   }
 
+  // ---------------------------------------------------------------- the nightly merge review (w905)
+
+  /**
+   * The nightly merge review's job timer (config intake.nightly.review; docs/intake.md, "The nightly merge review"): the
+   * Nightly Regression Sentry's duties as an ordinary job. Once a day, at its time in its zone, it files a review request
+   * the dispatcher places on its machine, and it tells the person when a review could not be filed, or ended or ran 20
+   * hours without reviewing (no REVIEWED-THROUGH).
+   */
+  checkNightlyReview(): void {
+    const r = this.settings.nightly.review;
+    if (!r.enabled) return;
+    const now = this.now();
+    if (this.data.nightlyReviewSince === undefined) {
+      this.data.nightlyReviewSince = now;
+      this.changed();
+    }
+    const fire = lastFire(r, now);
+    const date = nightOf(fire, r.tz);
+    if (fire >= this.data.nightlyReviewSince && !this.reviews().some((x) => x.date === date)) {
+      if (now - fire <= NIGHTLY_FIRE_LATE_MS) this.fireNightlyReview(r, date);
+      else {
+        const x: NightlyReview = { date, status: 'missing', cause: `not started: FF Factory was not running at ${r.time} ${r.tz} and came back more than ${NIGHTLY_FIRE_LATE_MS / 3_600_000} hours later` };
+        this.putReview(x);
+        this.reviewAlarm(x, `No nightly merge review today (${date}): ${x.cause}.`);
+      }
+    }
+    for (const x of this.reviews()) {
+      if (x.status !== 'running' || x.alarmAt) continue;
+      const w = x.workId ? this.d.store.work.get(x.workId) : undefined;
+      const closed = w && !isOpen(w) && now - Date.parse(w.updatedAt) > NIGHTLY_CLOSED_GRACE_MS;
+      const stale = x.firedAt && now - Date.parse(x.firedAt) > 20 * 3_600_000;
+      if (!closed && !stale && w) continue;
+      x.status = 'missing';
+      x.cause = !w ? 'its request is gone' : closed ? `its request ${w.id} ended (${w.status}) without a REVIEWED-THROUGH line` : `${w.id} has not reviewed anything 20 hours after the fire`;
+      this.reviewAlarm(x, `The nightly merge review of ${x.date}${x.workId ? ` (${x.workId})` : ''}: ${x.cause}. The merges since ${x.since ? x.since.slice(0, 9) : 'the last review'} have no regression check yet.`);
+    }
+  }
+
+  private fireNightlyReview(r: NightlyReviewSettings, date: string) {
+    const now = this.now();
+    const since = this.reviews().find((x) => x.reviewedThrough)?.reviewedThrough;
+    // The de-dupe against the lab's own regression filing: what it has open now goes into the brief.
+    const covered = [...this.d.store.work.values()].filter((w) => w.source?.kind === 'nightly' && isOpen(w) && !w.mergedInto).map((w) => ({ id: w.id, title: w.title }));
+    const draft = nightlyReviewDraft({ date, machine: r.machine, time: r.time, tz: r.tz, since, covered });
+    const person = this.d.identity.requester(r.person);
+    const res = this.d.orchestrators.fileIntake({
+      ...draft,
+      requestedBy: person ?? this.d.identity.systemPayer(),
+      person: !!person,
+      autoApprove: { enabled: false, maxPerDay: 0 },
+      kinds: ['nightly-review'],
+      lookbackDays: this.settings.lookbackDays,
+      // Switched on by a person: the timer is the approval, as the Sentry's own run was.
+      approved: true,
+    });
+    this.outcome('nightly-review', draft.title, undefined, res);
+    const x: NightlyReview = { date, status: 'running', firedAt: iso(now), ...(since ? { since } : {}), ...(res.item ? { workId: res.item.id } : {}) };
+    this.putReview(x);
+    if (!res.item) {
+      x.status = 'missing';
+      x.cause = `the timer could not file the review: ${res.skipped ?? 'no request was made'}`;
+      this.reviewAlarm(x, `No nightly merge review today (${date}): ${x.cause}.`);
+    }
+  }
+
+  /**
+   * A worker's final message (server/agents.ts onWorkerTurnEnd): when it serves a nightly merge review, its NIGHTLY-JOB
+   * blocks are filed as the Sentry's delegations were (Orchestrators.fileDelegation: its constraints and merge rules,
+   * auto-approved, the dispatcher places them, billed as the Sentry's were), with no standing-agent cap (lothsahn: "Don't
+   * worry about the cost limiting and such"), and its REVIEWED-THROUGH commit is where the next review starts. A block
+   * sent again is the same job (the delegation's title), never a second filing.
+   */
+  onNightlyWorkerTurn(workIds: readonly string[], text: string): void {
+    const x = this.reviews().find((r) => r.workId && workIds.includes(r.workId));
+    if (!x || !/NIGHTLY-JOB:|REVIEWED-THROUGH/.test(text)) return;
+    const { jobs, reviewedThrough } = parseNightlyJobs(text);
+    const owner = this.d.identity.requester(unattributedPerson(this.d.cfg, 'nightly')) ?? this.d.identity.systemPayer();
+    const filed: string[] = [];
+    jobs.forEach((j, i) => {
+      try {
+        const res = this.d.orchestrators.fileDelegation({
+          delegationId: `review-${x.date}-${i + 1}`,
+          agentId: NIGHTLY_SENTRY,
+          agentName: 'Nightly merge review',
+          title: j.title,
+          task: j.task,
+          owner,
+          ...(j.model ? { model: j.model } : {}),
+          ...(j.effort ? { effort: j.effort } : {}),
+          uncapped: true,
+        });
+        if (!res.repeat) filed.push(res.item.id);
+        x.jobs = [...new Set([...(x.jobs ?? []), res.item.id])];
+      } catch (e) {
+        if (x.workId) this.d.orchestrators.noteIntake(x.workId, `nightly review: job "${cleanLine(j.title, 80)}" not filed: ${cleanLine((e as Error).message, 160)}`);
+      }
+    });
+    if (reviewedThrough) {
+      x.reviewedThrough = reviewedThrough;
+      x.status = 'done';
+      x.cause = undefined;
+    }
+    if (x.workId && (filed.length || reviewedThrough)) {
+      this.d.orchestrators.noteIntake(x.workId, `nightly review: ${filed.length ? `filed ${filed.join(', ')}` : 'no new job filed'}${reviewedThrough ? `; reviewed through develop ${reviewedThrough.slice(0, 9)}` : ''}`);
+    }
+    for (const id of filed) this.record({ source: 'nightly-review', action: 'filed', title: this.d.store.work.get(id)?.title ?? id, workId: id, why: `the nightly merge review of ${x.date}` });
+    this.changed();
+  }
+
+  private reviews(): NightlyReview[] {
+    return (this.data.reviews ??= []);
+  }
+
+  private putReview(x: NightlyReview) {
+    this.data.reviews = [x, ...this.reviews().filter((r) => r !== x && r.date !== x.date)].sort((a, b) => b.date.localeCompare(a.date)).slice(0, NIGHTS_KEEP);
+    this.changed();
+  }
+
+  private reviewAlarm(x: NightlyReview, text: string) {
+    x.alarmAt = iso(this.now());
+    const r = this.settings.nightly.review;
+    this.d.orchestrators.toPeople([this.d.identity.requester(r.person) ?? this.d.identity.systemPayer()], `[nightly] ${text}`);
+    if (x.workId) this.d.orchestrators.noteIntake(x.workId, `nightly: ${text}`);
+    this.changed();
+  }
+
   /** What the lab's POST is answered with: the night as recorded, and its run request. */
   nightLabel(date: string): string | undefined {
     const n = this.nights().find((x) => x.date === date);
@@ -1692,6 +1824,8 @@ export class IntakeManager {
         run: { ...s.nightly.run, ...(s.nightly.run.enabled ? { next: iso(nextDaily(s.nightly.run.time, s.nightly.run.tz, now)) } : {}) },
         ...(this.data.nightly ? { last: this.data.nightly } : {}),
         nights: this.nights().slice(0, 14),
+        review: { ...s.nightly.review, ...(s.nightly.review.enabled ? { next: iso(nextDaily(s.nightly.review.time, s.nightly.review.tz, now)) } : {}) },
+        reviews: this.reviews().slice(0, 14),
       },
       reviewers: this.d.orchestrators.reviewers().map((r) => r.displayName),
       reviewerIds: this.d.orchestrators.reviewers().map((r) => r.userId),

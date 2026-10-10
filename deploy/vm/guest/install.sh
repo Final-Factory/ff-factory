@@ -269,6 +269,11 @@ for u in fff-portal.service fff-health.service fff-health.timer fff-update.path 
   c+=$(write_file "/etc/systemd/system/$u" 0644 <"$here/units/$u")
 done
 c+=$(render_unit "$here/units/fff-backup.timer.in" BACKUP_TIME | write_file /etc/systemd/system/fff-backup.timer 0644)
+# The server reads its own journal for portal_logs (w920): the systemd-journal group, for that service only. Not written
+# where the group is missing (a unit naming a missing group does not start).
+if getent group systemd-journal >/dev/null; then
+  c+=$(write_file /etc/systemd/system/fff-portal.service.d/20-journal.conf 0644 <"$here/units/fff-portal-journal.conf")
+fi
 # Tailscale's own unit gives up after 5 starts in 10 s; the portal is unreachable without it (w698).
 c+=$(write_file /etc/systemd/system/tailscaled.service.d/10-fff-restart.conf 0644 <"$here/units/tailscaled-restart.conf")
 [ -z "$c" ] || run_cmd systemctl daemon-reload
