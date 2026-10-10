@@ -10,6 +10,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Test only: a test that would have failed from 2026-11-01** (w858, lothsahn: "look for flaky CI tests in FFFactory and
+  fix them"). The w830 test in `intakeFlow.test.ts` matched the ledger line "decision of 10-DD hh:mm UTC" with the month
+  written in; it passes in October only. Found by running the suite with the clock moved forward 30 days. No portal deploy.
+
 - **Test only: two Playwright flakes on main** (w858, lothsahn: "look for flaky CI tests in FFFactory and fix them").
   The `authed` fixture now takes the page's routes down after each test (`unrouteAll` with `ignoreErrors`, which waits
   for a handler still inside `route.fetch`): banner.spec.ts patches `/api/state`, which the page keeps polling, and a test
