@@ -147,7 +147,7 @@ export function checkReviewers(value: unknown, users: readonly string[]): string
   return out;
 }
 
-const DEV_REQUEST_KEYS = ['enabled', 'perHour', 'maxFiles', 'maxRequestMB'];
+const DEV_REQUEST_KEYS = ['enabled', 'operatorTurns', 'perHour', 'maxFiles', 'maxRequestMB'];
 
 /** providers.ffbox.devRequests: the whole block, unknown keys refused (server/devRequests.ts devSettings fills the rest). */
 export function checkDevRequests(value: unknown): DevRequestsConfig {
@@ -158,6 +158,10 @@ export function checkDevRequests(value: unknown): DevRequestsConfig {
   if (r.enabled !== undefined) {
     if (typeof r.enabled !== 'boolean') throw new Error('providers.ffbox.devRequests.enabled is true or false');
     out.enabled = r.enabled;
+  }
+  if (r.operatorTurns !== undefined) {
+    if (typeof r.operatorTurns !== 'boolean') throw new Error('providers.ffbox.devRequests.operatorTurns is true or false');
+    out.operatorTurns = r.operatorTurns;
   }
   const whole = (k: 'perHour' | 'maxFiles' | 'maxRequestMB', lo: number, hi: number) => {
     if (r[k] === undefined) return;
