@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
-import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
+import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { HOST_PROTOCOL, HostedSession, hostFolders, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
@@ -1437,7 +1437,7 @@ export class Daemon {
           this.send({ type: 'switch_result', id: msg.id, ok: false, error: midTurnRefusal(busy, `sandbox ${msg.sandbox}`) });
           return;
         }
-        void this.pool.switch(msg.sandbox, msg.branch, msg.createFrom).then(
+        void this.pool.switch(msg.sandbox, msg.branch, msg.createFrom, githubNetEnv(msg.githubToken)).then(
           (r) => this.send({ type: 'switch_result', id: msg.id, ok: true, ...r }),
           (err) => this.send({ type: 'switch_result', id: msg.id, ok: false, error: (err as Error).message }),
         );
@@ -1450,7 +1450,7 @@ export class Daemon {
           this.send({ type: 'save_result', id: msg.id, ok: false, error: `agent ${up.join(', ')} runs in sandbox ${msg.sandbox}` });
           return;
         }
-        void this.pool.saveWork(msg.sandbox, msg.branch, msg.message).then(
+        void this.pool.saveWork(msg.sandbox, msg.branch, msg.message, githubNetEnv(msg.githubToken)).then(
           (r) => this.send({ type: 'save_result', id: msg.id, ok: true, ...r }),
           (err) => this.send({ type: 'save_result', id: msg.id, ok: false, error: (err as Error).message }),
         );
@@ -1609,6 +1609,17 @@ function readVersion() {
   } catch {
     return `protocol ${PROTOCOL_VERSION}`;
   }
+}
+
+/**
+ * A push's or fetch's environment for the GitHub token the portal sent with a switch or save (w868, docs/vault.md section
+ * 13): GH_TOKEN and the credential helper that reads it, as a run with a vault GitHub token gets (githubCredentialEnv).
+ * The token is learnt by redaction first. None: undefined, the machine's own login.
+ */
+export function githubNetEnv(token: string | undefined): NodeJS.ProcessEnv | undefined {
+  if (!token) return undefined;
+  addSecretValues([token]);
+  return { GH_TOKEN: token, ...githubCredentialEnv(process.env) };
 }
 
 // Run when started directly (not when imported by the tests).

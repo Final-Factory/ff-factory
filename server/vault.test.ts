@@ -129,7 +129,7 @@ test('vault: the key lives outside data/, readable by its owner only; a missing 
   const none = make(() => ({ why: 'no vault key: test' }));
   assert.equal(none.status().key, 'missing');
   assert.deepEqual(none.list().map((e) => e.name), ['a', 'gh'], 'listing needs no key');
-  const r = none.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true });
+  const r = none.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true, github: true });
   assert.equal(r.claude, undefined);
   assert.deepEqual(r.env, {});
   assert.match(r.problems[0], /cannot open a, gh: no vault key/);
@@ -201,13 +201,17 @@ test('vault: forRun gives the granted secrets as environment, and a Claude token
   v.add({ name: 'a', kind: 'claude', value: A, owner: 'ben', share: 'anyone' });
   v.add({ name: 'gh', kind: 'github', value: GH, share: 'anyone', roles: ['workers'] });
   v.add({ name: 'max', kind: 'env', env: 'FFDISCORD_APP_TOKEN', value: DISCORD, share: 'anyone', machines: ['lothdesktop'] });
-  const m3 = v.forRun({ machineId: 'm3', role: 'workers' }, { claude: false });
+  const m3 = v.forRun({ machineId: 'm3', role: 'workers' }, { claude: false, github: true });
   assert.deepEqual(m3.env, { GH_TOKEN: GH });
+  assert.equal(m3.github?.name, 'gh');
+  // GitHub entries only where machines.githubFromVault is on (w868), and none GitHub refused.
+  assert.deepEqual(v.forRun({ machineId: 'm3', role: 'workers' }, { claude: false }).env, {});
+  assert.deepEqual(v.forRun({ machineId: 'm3', role: 'workers' }, { claude: false, github: true, githubUsable: () => false }).env, {});
   assert.equal(m3.claude, undefined);
-  const loth = v.forRun({ machineId: 'lothdesktop', role: 'workers', userId: 'ben' }, { claude: true });
+  const loth = v.forRun({ machineId: 'lothdesktop', role: 'workers', userId: 'ben' }, { claude: true, github: true });
   assert.deepEqual(loth.env, { GH_TOKEN: GH, FFDISCORD_APP_TOKEN: DISCORD });
   assert.equal(loth.claude?.token, A);
-  assert.deepEqual(v.forRun({ machineId: 'm3', role: 'standing' }, { claude: false }).env, {}, 'gh is for workers only');
+  assert.deepEqual(v.forRun({ machineId: 'm3', role: 'standing' }, { claude: false, github: true }).env, {}, 'gh is for workers only');
   assert.deepEqual(v.claudeTokens().map((x) => x.label), [`a …${A.slice(-4)}`]);
 });
 
@@ -250,13 +254,19 @@ test('machineRunEnv: off by default; on, a vault token alone with the daemon cre
   // No context (the daemon, tests): exactly as before the vault.
   const before = machineRunEnv(cfg, m, { role: 'workers' }, undefined);
   assert.deepEqual(before, { env: { CLAUDE_CODE_OAUTH_TOKEN: C, CLAUDE_CONFIG_DIR: '/x' }, login: false, account: `host token …${C.slice(-4)}` });
-  // A context, but machines.claudeFromVault off: the machine's account, plus the granted GitHub token.
+  // A context, but machines.claudeFromVault and githubFromVault off: the machine's account and its own gh login.
   const off = machineRunEnv(cfg, m, { role: 'workers' }, ctx);
   assert.equal(off.env.CLAUDE_CODE_OAUTH_TOKEN, C);
-  assert.equal(off.env.GH_TOKEN, GH);
+  assert.equal(off.env.GH_TOKEN, undefined);
+  assert.equal(off.github, undefined);
   assert.equal(off.login, false);
+  // GitHub alone on (w868): the granted GitHub token, the Claude account unchanged.
+  const ghOnly = machineRunEnv({ ...cfg, machines: { githubFromVault: { m3: true } } }, m, { role: 'workers' }, ctx);
+  assert.equal(ghOnly.env.GH_TOKEN, GH);
+  assert.equal(ghOnly.env.CLAUDE_CODE_OAUTH_TOKEN, C);
+  assert.equal(ghOnly.github, `gh …${GH.slice(-4)}`);
   // On for m3: the vault token, the other credentials of claudeEnv dropped, login true (the daemon's own dropped too).
-  const on = { ...cfg, machines: { claudeFromVault: { m3: true } } };
+  const on = { ...cfg, machines: { claudeFromVault: { m3: true }, githubFromVault: { m3: true } } };
   assert.equal(claudeFromVault(on, m), true);
   assert.equal(claudeFromVault(on, { id: 'm5' }), false);
   const r = machineRunEnv(on, m, { role: 'workers', sessionId: 's1' }, ctx);
@@ -403,7 +413,7 @@ test('vault: after a new key, the entries sealed with the old one are named, and
   fs.chmodSync(other, 0o600);
   const v = make(() => ({ file: other }));
   assert.equal(v.status().key, 'wrong');
-  const r = v.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true });
+  const r = v.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true, github: true });
   assert.equal(r.claude, undefined);
   assert.deepEqual(r.env, {});
   assert.match(r.problems.join('\n'), /gh does not open with this key \(rotate it\)/);
@@ -423,8 +433,8 @@ test('vault: one value per variable, the run person own entry first, then by nam
   v.add({ name: 'shared-gh', kind: 'github', value: ghTok('s'), share: 'anyone' });
   v.add({ name: 'ben-gh', kind: 'github', value: ghTok('b'), owner: 'ben', share: 'owner' });
   v.add({ name: 'a-gh', kind: 'github', value: ghTok('a'), share: 'anyone' });
-  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: false }).env.GH_TOKEN, ghTok('b'), "ben's own");
-  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'loth' }, { claude: false }).env.GH_TOKEN, ghTok('a'), 'then by name');
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: false, github: true }).env.GH_TOKEN, ghTok('b'), "ben's own");
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'loth' }, { claude: false, github: true }).env.GH_TOKEN, ghTok('a'), 'then by name');
   // An entry named like another's id: grants are looked up by id, never by that name.
   const owned = v.add({ name: 'x', kind: 'claude', value: A, owner: 'loth', share: 'owner' });
   v.add({ name: owned.id, kind: 'claude', value: B, owner: 'ben', share: 'anyone', machines: ['m9'] });
@@ -472,7 +482,7 @@ test("machineRunEnv per person: each person's own Claude and GitHub tokens, neve
   v.add({ name: 'host-lothsahn-claude', kind: 'claude', value: B, owner: 'lothsahn', share: 'owner' });
   v.add({ name: 'host-lothsahn-github', kind: 'github', value: ghTok('l'), owner: 'lothsahn', share: 'owner' });
   const ctx: VaultContext = { vault: v, payer: () => 'ben' };
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: C }, userClaudeEnv: {}, machines: { claudeFromVault: true } };
+  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: C }, userClaudeEnv: {}, machines: { claudeFromVault: true, githubFromVault: true } };
   const m = { id: 'm3' };
   const loth = { userId: 'lothsahn', displayName: 'Lothsahn' };
   const r1 = machineRunEnv(cfg, m, { role: 'workers', requestedBy: loth }, ctx);

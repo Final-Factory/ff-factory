@@ -42,7 +42,8 @@ import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts'
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostAccountsInUse, reserveLines, hostRole, hostRoleOf, runsOnThisHost, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
 import { clock, firstFree, poolBanner, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
-import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
+import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
+import { GithubTokens, PORTAL_MACHINE, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
@@ -152,6 +153,10 @@ setInterval(() => guardMemory('backup'), 10 * 60_000).unref();
 const credentialsDir = process.env.CREDENTIALS_DIRECTORY;
 delete process.env.CREDENTIALS_DIRECTORY;
 const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
+// The vault's GitHub tokens (w868, docs/vault.md section 13): the portal's gh reads per person, and each token's health.
+const github = new GithubTokens({ vault: () => vault, cfg, payer: () => identity.systemPayer().userId, log: (line) => console.warn(line) });
+setGithubTokens(github);
+github.start();
 // Transcripts written before redaction existed: no Claude OAuth or Discord token stays on disk (server/secrets.ts).
 setTimeout(() => {
   const n = scrubTranscripts(path.join(cfg.dataDir, 'transcripts'));
@@ -524,6 +529,7 @@ const blockerWatch = new BlockerWatch({
   usageClear: (account) => accountClear(account),
   nightlyAt: () => nightlyAt,
   room: () => agents.roomNow(),
+  githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
 agents.blockerWatch = blockerWatch;
 agents.daemonSha = (id) => machines.daemonVersions().find((d) => d.id === id.toLowerCase())?.sha;
@@ -715,11 +721,16 @@ const vaultView = () => ({
   kinds: VAULT_KINDS,
   roles: VAULT_ROLES,
   people: identity.list().map((u) => ({ userId: u.userId, displayName: u.displayName })),
-  machines: machines.list().map((m) => ({ id: m.id, online: machines.isOnline(m.id), claudeFromVault: claudeFromVault(cfg, m) })),
+  machines: machines.list().map((m) => ({ id: m.id, online: machines.isOnline(m.id), claudeFromVault: claudeFromVault(cfg, m), githubFromVault: githubFromVault(cfg, m.id) })),
   enrolled: enrolledMachines(cfg.dataDir),
+  github: github.list(),
+  githubPortal: githubFromVault(cfg, PORTAL_MACHINE),
 });
 const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map((x) => x.trim()).filter(Boolean) : undefined);
-const vaultChanged = () => usage.poke();
+const vaultChanged = () => {
+  usage.poke();
+  void github.tick();
+};
 route('GET', '/api/vault', async (req) => {
   requireOwner(req);
   return vaultView();
@@ -1715,6 +1726,8 @@ setVaultContext({
   liveOn: (fp, except) => liveOnKey(`token:${fp}`, except),
   limits: () => poolLimits(cfg),
   payer: () => identity.systemPayer().userId,
+  githubUsable: github.usable,
+  onGithubUse: (e, what) => github.noteUse(e, what),
   onProblem: (line) => {
     if (vaultProblems.at(-1)?.line !== line) console.warn(`vault: ${line}`);
     vaultProblems.push({ at: new Date().toISOString(), line });
@@ -1844,7 +1857,7 @@ agents.extraStatusLines = () => {
 const vaultLines = () => {
   const line = vaultStatusLine(vault, machines.list().filter((m) => claudeFromVault(cfg, m)).map((m) => m.id));
   const recent = vaultProblems.filter((p) => Date.now() - Date.parse(p.at) < 24 * 3_600_000);
-  return [...(line ? [line] : []), ...(recent.length ? [`WARNING: the vault fell short ${recent.length} time(s) in 24 h; latest (${recent.at(-1)!.at}): ${recent.at(-1)!.line}`] : [])];
+  return [...(line ? [line] : []), ...github.statusLines(), ...(recent.length ? [`WARNING: the vault fell short ${recent.length} time(s) in 24 h; latest (${recent.at(-1)!.at}): ${recent.at(-1)!.line}`] : [])];
 };
 /**
  * Each person's Claude token pool as the rules read it now, and the dispatcher's (and host token's) reserve (w739,

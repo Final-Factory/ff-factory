@@ -265,7 +265,7 @@ export interface PlaceAgainDeps {
   /** Whether the machine's daemon saves uncommitted work (MachineManager.canSaveWork, w656). */
   canSave?: (machineId: string) => boolean;
   /** Commit and push a sandbox's uncommitted work on a branch, on its machine (MachineManager.saveWork, w656). */
-  saveWork?: (machineId: string, sandbox: string, branch: string, message: string) => Promise<SaveResult>;
+  saveWork?: (machineId: string, sandbox: string, branch: string, message: string, sessionId?: string) => Promise<SaveResult>;
   report?: (text: string) => void;
   now?: () => number;
 }
@@ -417,7 +417,7 @@ export class PlaceAgain {
   private async saveThenRelease(s: SessionInfo, m: Machine, sb: MachineSandbox, step: { why: string; branch: string }) {
     const key = `${m.id}/${sb.id}`;
     try {
-      const res = await this.d.saveWork!(m.id, sb.id, step.branch, `FF Factory: saved ${s.id}'s uncommitted work before releasing ${key} (w656)\n\nIts sandbox was released because ${step.why}. \`git reset HEAD~1\` gives the work back uncommitted.`);
+      const res = await this.d.saveWork!(m.id, sb.id, step.branch, `FF Factory: saved ${s.id}'s uncommitted work before releasing ${key} (w656)\n\nIts sandbox was released because ${step.why}. \`git reset HEAD~1\` gives the work back uncommitted.`, s.id);
       this.saveFailed.delete(key);
       const f = this.facts(m.id);
       const group = f.sessions.filter((o) => o.machineSandbox === sb.id && (o.id === s.id || releasable(o, f)));

@@ -23,6 +23,7 @@ import type { Orchestrators } from './orchestrators.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 import { run as runProc } from './proc.ts';
+import { ghRunner } from './githubTokens.ts';
 import { afterReopen, doneOf, isOpen, settleByHand } from './work.ts';
 import {
   STALL_AFTER_MS,
@@ -316,7 +317,7 @@ export class LedgerSweep {
     if (this.d.prs) return this.d.prs(repos, limit);
     const out: PrRecord[] = [];
     for (const repo of repos) {
-      const r = await runProc('gh', ['pr', 'list', '-R', repo, '--state', 'all', '--limit', String(limit), '--json', 'number,title,body,headRefName,baseRefName,state,createdAt,mergedAt,closedAt,mergeCommit,url'], { timeoutMs: limit > PRS_PER_REPO ? 180_000 : 45_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+      const r = await ghRunner(undefined, 'the ledger sweep')('gh', ['pr', 'list', '-R', repo, '--state', 'all', '--limit', String(limit), '--json', 'number,title,body,headRefName,baseRefName,state,createdAt,mergedAt,closedAt,mergeCommit,url'], { timeoutMs: limit > PRS_PER_REPO ? 180_000 : 45_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
       if (r.code !== 0) return undefined;
       try {
         out.push(...(JSON.parse(r.stdout) as GhPr[]).map((p) => fromGh(repo, p)));
@@ -329,7 +330,7 @@ export class LedgerSweep {
 
   private async view(repo: string, number: number): Promise<PrRecord | undefined> {
     if (this.d.viewPr) return this.d.viewPr(repo, number);
-    const r = await runProc('gh', ['pr', 'view', String(number), '-R', repo, '--json', 'number,title,body,headRefName,baseRefName,state,createdAt,mergedAt,closedAt,mergeCommit,url'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+    const r = await ghRunner(undefined, 'the ledger sweep')('gh', ['pr', 'view', String(number), '-R', repo, '--json', 'number,title,body,headRefName,baseRefName,state,createdAt,mergedAt,closedAt,mergeCommit,url'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
     if (r.code !== 0) return undefined;
     try {
       return fromGh(repo, JSON.parse(r.stdout) as GhPr);
@@ -653,7 +654,7 @@ export class LedgerSweep {
     if (g.code === 1) return false;
     const repo = await this.appSlug();
     if (!repo) return undefined;
-    const r = await runProc('gh', ['api', `repos/${repo}/compare/${sha}...${head}`, '--jq', '.status'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+    const r = await ghRunner(undefined, 'the ledger sweep')('gh', ['api', `repos/${repo}/compare/${sha}...${head}`, '--jq', '.status'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
     const status = r.code === 0 ? r.stdout.trim() : '';
     return status === 'ahead' || status === 'identical' ? true : status === 'behind' || status === 'diverged' ? false : undefined;
   }

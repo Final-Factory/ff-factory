@@ -26,7 +26,7 @@ Paths and code come from w511's map (`docs/worker-root.md`, ff-factory #135, mea
 | Secret | Who uses it | Where today | Decision |
 |---|---|---|---|
 | Claude subscription OAuth tokens (`sk-ant-oat01-…`, `claude setup-token`) | every worker and standing run | config `claudeEnv.CLAUDE_CODE_OAUTH_TOKEN` (the host token), `userClaudeEnv` (people's own), a machine's own `/login` (`~/.claude/.credentials.json` or the Keychain), BEAST's `~/.claude-worker-token` | **Moves**: kind `claude`, one chosen per run ([section 4](#4-which-claude-token-a-run-gets)) |
-| The workers' GitHub token (push, PRs, `gh`) | every worker | gh's login in each machine's keyring (BEAST: Windows Credential Manager, git's helper `gh auth git-credential`; measured in w511) | **Moves**: kind `github`, given as `GH_TOKEN`, plus a git credential helper that reads it (`githubCredentialEnv`). One fine-grained token per person (lothsahn, 2026-10-06; section 10) |
+| The workers' GitHub token (push, PRs, `gh`) | every worker | gh's login in each machine's keyring (BEAST: Windows Credential Manager, git's helper `gh auth git-credential`; measured in w511) | **Moves**: kind `github`, given as `GH_TOKEN`, plus a git credential helper that reads it (`githubCredentialEnv`). One fine-grained token per person (lothsahn, 2026-10-06; section 10), used where `machines.githubFromVault` is on ([section 13](#13-github-tokens-per-person-w868)) |
 | Max's Discord bot token (posting as Max) | runs that post as Max (LothDesktop's today) | `~/.config/ffbox/secrets.env` and `config.json` on LothDesktop | **Moves**: kind `env`, `FFDISCORD_APP_TOKEN`, granted to the posting machine only. *Measured:* `ffdiscord.py:9,236-238` (ff-discord plugin) reads `FFDISCORD_APP_TOKEN` from the environment before any file. `FFDISCORD_SERVER_ID` is not a secret and stays in the machine's config |
 | Any other API key a run needs later | as granted | — | kind `env`, any variable ending `_TOKEN`, `_KEY`, `_SECRET` or `_PASSWORD` |
 | The machine token (`ffm_<id>_…`) | the daemon, to reach the portal | `daemon.json` (w511 moves it to `secrets/machine-token`) | **Stays**: it is the enrollment credential, the one thing a machine must hold to be given anything |
@@ -37,7 +37,7 @@ Paths and code come from w511's map (`docs/worker-root.md`, ff-factory #135, mea
 | steamcmd's login cache (M5, `~/.steamcmd-home`) | last-resort manual uploads (`mp-beta-deploy`) | the M5 | **Stays**: a person's own login, used by a person (w511 5.1); releases go through ffbox CI |
 | FFBox's config and secrets (`~/.config/ffbox`, its connector token) | FFBox | FFBox's host, LothDesktop | **Stays, never shared**: the "nothing shared with FFBox" rule (D8) |
 | `AgentControl/session-*.json` bearer tokens | the game's agent automation | the game's data folder | **Stays**: the game makes one per session, for local use only |
-| The portal's own: its GitHub token (D7), Lothsahn's subscription token for the orchestrators (D4, `claudeTokenFile`), its Discord token copy, web-push keys, API keys | the portal | `/srv/fff/secrets`, `/srv/fff/home`, `data/` | **Stay as they are**: no worker uses them. The orchestrators could move onto vault tokens later ([section 9](#9-follow-ups)) |
+| The portal's own: its GitHub token (D7; since w868 its reads for a request use that request's person's vault token where `machines.githubFromVault` has `portal` on, section 13), Lothsahn's subscription token for the orchestrators (D4, `claudeTokenFile`), its Discord token copy, web-push keys, API keys | the portal | `/srv/fff/secrets`, `/srv/fff/home`, `data/` | **Stay as they are**: no worker uses them. The orchestrators could move onto vault tokens later ([section 9](#9-follow-ups)) |
 
 ## 2. The vault on the portal
 
@@ -100,7 +100,7 @@ orchestrators get no vault tool; `system_status` gets one summary line.
 | Kind | Value | Given to a run as |
 |---|---|---|
 | `claude` | one `sk-ant-oat01-…` token | `CLAUDE_CODE_OAUTH_TOKEN`, one per run, chosen by section 4 |
-| `github` | a GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`) | `GH_TOKEN`, and a git credential helper for `https://github.com` that reads it |
+| `github` | a GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`) | `GH_TOKEN`, and a git credential helper for `https://github.com` that reads it, on machines `machines.githubFromVault` names (section 13) |
 | `env` | any value of 8 to 4096 characters, no whitespace | the entry's variable, which must end `_TOKEN`, `_KEY`, `_SECRET` or `_PASSWORD` and may not start `CLAUDE_`, `ANTHROPIC_`, `GH_`, `GITHUB_` or `GIT_` |
 
 **Grants.** Each entry names the roles it serves (`workers`, `standing`), the machines (`*` or ids), an owner (a portal
@@ -142,8 +142,8 @@ in `server/standing.ts`) put it in the spec. So:
   otherwise) and one that answers `username=x-access-token`, `password=$GH_TOKEN` from the environment. *(Measured:
   `vault.test.ts` runs `git credential fill` with it on Windows and gets the token. Sourced: gitcredentials(7), "If
   `credential.helper` is configured to the empty string, this resets the helper list to empty".)*
-- **Only what that run may have.** A run gets one Claude token and the other entries granted to its role and machine.
-  Another machine's grants never reach it.
+- **Only what that run may have.** A run gets one Claude token and the other entries granted to its role and machine
+  (a GitHub entry only where `machines.githubFromVault` is on, section 13). Another machine's grants never reach it.
 
 **When the portal is down, nothing new starts.** That is how it already works: no portal, no `send`, no new process.
 Running agents keep the environment they started with and carry on. There is no cache on the machine to steal or to
@@ -302,8 +302,9 @@ Each step can be undone on its own. The commands are in [Cut-over](#cut-over).
 4. **Grant the other secrets** to that machine, then check that a worker there can `gh auth status` and push, and, on
    the posting machine, that `ffdiscord` posts.
 5. **Retire the machine's own logins** only after it has run on the vault for a while with no fallback warning:
-   `claude /logout`, `gh auth logout`, and LothDesktop's Discord token in `secrets.env`. Until then they are the
-   fallback.
+   `claude /logout` and LothDesktop's Discord token in `secrets.env`. Until then they are the fallback. **Keep the
+   machine's `gh` login** (w868): the daemon's own fetches (a new sandbox, the base refresh) and the pushes of a branch
+   handover still use it (section 13.3).
 
 **Rolling back:** `set_app_config machines.claudeFromVault false machine: "<id>"`, and take the machine out of the
 grants. Its next process runs on its own login or the host token again.
@@ -595,6 +596,208 @@ sudo fff-vm vault-sync                                 # records what has a file
 `fff-vm vault-pull` says the VM cannot list its entries, the sync removes nothing, and the nightly alerts; nothing is
 lost. No VM reboot; the next nightly runs the copy.
 
+## 13. GitHub tokens per person (w868)
+
+lothsahn (2026-10-10): "I would like you to enhance the portal vault to take GitHub fine grained access tokens as well. I'd
+like the right token to get used based on whether a request is Ben or lothsahn. Let's setup the framework for that similar to
+Claude tokens and I can get them installed for a switchover."
+
+- **Code:** `server/githubTokens.ts` (the switch `githubFromVault`, the portal's runner `ghRunner`, the daemon's token
+  `forMachine`, the probe and the health lines), `Vault.githubFor` / `Vault.githubTokens` and the `github` option of
+  `Vault.forRun` (`server/vault.ts`), the GitHub part of `machineRunEnv` (`server/secrets.ts`), `githubToken` on the
+  `switch` and `save_work` messages (`server/machineProtocol.ts`, `githubNetEnv` in `machine/daemon.ts`), the vault page
+  (`GithubHealth` in `web/src/components/Vault.tsx`). Tests: `server/githubTokens.test.ts`, the GitHub cases in
+  `server/vault.test.ts`.
+- **The tokens are the ones sections 10 to 12 already carry:** `people/<person>/github-token` on the FFBox host, synced to
+  the entry `vault-<person>-github` (`share: owner`, workers and standing agents on every machine). Nothing new to install
+  on a machine, no second store.
+- **Off until switched on.** One owner-only setting, `machines.githubFromVault`, the same shape as `claudeFromVault`: per
+  machine, `"*"` for the rest, and the machine id **`portal`** for the portal's own reads. Before w868 a GitHub entry went
+  to every run it was granted to whether or not anything was switched on; now it goes nowhere until this is on. *Measured
+  before the change:* this worker (w868, a lothsahn request on m3) had no `GH_TOKEN`, and `gh auth status` showed m3's own
+  login (`bryding`, a `gho_` OAuth token), so no lothsahn GitHub entry was being handed out on m3. A Ben entry, if one
+  exists, would stop being handed out at the deploy and Ben's runs would use the machine's login again, which on m3 is Ben's
+  account anyway (a guess for the other machines: the w511 map has BEAST's gh logged in as Ben too).
+
+### 13.1 Which credential each GitHub caller uses
+
+| Caller | Before (all measured or read in the code) | With `machines.githubFromVault` on |
+|---|---|---|
+| A worker's or standing agent's `gh` and `git push` | the machine's own gh login (on m3: `bryding`) | the request person's `vault-<person>-github` as `GH_TOKEN`, plus the credential helper (section 3) |
+| The daemon's push in `switch_branch`, and its push of a released worker's saved work (w656) | the machine's own login | that worker's person's token, sent with the `switch` / `save_work` message (`githubToken`); an older daemon ignores the field and uses its login |
+| The daemon's fetch for a new sandbox, the base refresh, a branch handover's push (`placeAgain`) | the machine's own login | unchanged: no request is behind them, and the handover pushes another worker's branch |
+| The portal's blocker watch: `ci:` and `pr:` gates (`gh pr view`, the Actions runs) | the portal's own gh login (D7) | on `portal`: the person of the first request waiting on that PR (its requester, or the configured person for unnamed work, section 10) |
+| The portal's ledger sweep, intake's merged-PR reads, a sandbox's PR look, FFBox's PR summary | D7 | on `portal`: the system payer's token (work no request is behind) |
+| The orchestrator-memory push and the public-repo check (`server/memoryGit.ts`, `server/publicGit.ts`) | D7 | unchanged: D7 is the one with write on `ff-orchestrator-memory`, and the public-repo check reads the portal's own account |
+
+### 13.2 The CI reads that failed since 2026-10-10 07:45Z, and the permissions each person's token needs
+
+**What failed** *(measured: the ledger's unblock lines, e.g. w857 at 08:15, 08:32 and 08:49 UTC)*: "FF Factory could not read
+CI on Final-Factory/FinalFactory#1371 for 15 min (its checks: GraphQL: Resource not accessible by personal access token
+(repository.pullRequest.statusCheckRollup.nodes.0…", and the Actions-runs fallback "gh: Resource not accessible by personal
+access token (HTTP 403)".
+
+**Which token:** the portal's own gh login in the VM, D7 (`fffctl gh-login`, [portal-on-ffbox-host.md](portal-on-ffbox-host.md)),
+a fine-grained token: every `ci:` read runs `server/blockerWatch.ts` `ghChecks` in the portal process with no `GH_TOKEN`
+(code; the token's value is not visible to a worker, only its effect).
+
+**What it lacks** *(sourced: GitHub, "Permissions required for fine-grained personal access tokens", read 2026-10-10)*:
+
+- **Checks:** no fine-grained token can have it. The page has no "Checks" section at all, so the check-run nodes of
+  `statusCheckRollup` are refused for every fine-grained token, D7's and the people's alike. This is permanent; `ghChecks`
+  reads Actions runs instead (w829).
+- **Actions: Read** on Final-Factory/FinalFactory: `GET /repos/{owner}/{repo}/actions/runs` is listed under "Actions"
+  (read), and that call is the one answering 403. D7 was made with "read access to the repos the portal queries", which
+  covers Pull requests and Metadata (its `gh pr view` of the state works) but evidently not Actions.
+- *Why from about 07:45Z (a guess):* w846 (merged 04:33Z) made `ci:` gates the way every worker waits for CI; the portal
+  deploy that carried it put many such gates on the watch from the morning on. The token itself was probably never able to
+  read Actions runs.
+
+**Fixing D7 now, without the switchover** (lothsahn, if he wants it before the person tokens): on github.com, the D7 token's
+account → Settings → Developer settings → Fine-grained tokens → the portal's token → Edit → Repository permissions →
+**Actions: Read-only** (and **Commit statuses: Read-only**) → Update. Editing keeps the same token value, so nothing in
+the VM changes. If the organization requires approval for fine-grained tokens, an owner approves the change first.
+Alternatively, the switchover below puts the portal's reads on the person tokens, which have Actions read.
+
+**One permission set per token.** A fine-grained token has one list of permissions for all the repositories it is given;
+"repo by repo" is which repositories to select. Each person's token:
+
+| Setting | Value | Why (sourced from GitHub's permissions page unless said) |
+|---|---|---|
+| Resource owner | **Final-Factory** | every repository below is the organization's |
+| Repository access | **All repositories**, or select the list below | |
+| Contents | **Read and write** | `git push`; merging a PR (`PUT …/pulls/{n}/merge` is listed under Contents, write); `GET …/commits` |
+| Pull requests | **Read and write** | create, edit, comment on and read PRs (`POST …/pulls`) |
+| Workflows | **Read and write** | pushing a commit that changes `.github/workflows/` (the Workflows section lists the ref and contents writes) |
+| Actions | **Read and write** | read runs, jobs and logs (read); re-run a failed job (`POST …/actions/runs/{id}/rerun`, write) |
+| Commit statuses | **Read-only** | the status part of a PR's checks (`GET …/commits/{ref}/status`) |
+| Issues | **Read and write** | PR conversation comments go through `…/issues/{n}/comments` (listed under Issues and Pull requests); issues themselves |
+| Metadata | Read-only (automatic) | |
+| Checks | not offered | see above: `gh pr checks` cannot work with any fine-grained token |
+| Expiration | the longest offered; write the date down | the vault page shows it from GitHub's `GitHub-Authentication-Token-Expiration` header and warns 14 days before |
+
+Repositories FF Factory touches *(measured: `gh repo list Final-Factory`, and the repositories named in this repo's code
+and the worker briefs)*:
+
+| Repository | What FF Factory does there | Needed |
+|---|---|---|
+| Final-Factory/FinalFactory (internal) | workers push branches, open and merge PRs into develop, read and re-run CI; the portal reads PR states and CI | yes |
+| Final-Factory/ff-factory (public) | workers' PRs to this portal, merged on green; the ledger sweep reads its PRs | yes |
+| Final-Factory/final-factory-agents (public) | skills and lessons (`publish-skills`) | yes |
+| Final-Factory/ffbox (private) | workers push fixes to ffbox master one at a time (w857's brief), read its code | yes |
+| Final-Factory/finalfactory-agent-kit (public) | the players' HowToPlay (`learnToPlay`) | yes |
+| Final-Factory/ff-marketing (private) | marketing skills' work | yes, if workers do marketing work |
+| Final-Factory/ff-orchestrator-memory (private) | the portal's own memory push (D7, unchanged) | not needed by a person's token |
+| Final-Factory/KNN, ff-factory-private, Facepunch.Steamworks, multiplayer-community-contributions, nevergames-website | none found in this repo's code or briefs | no ("All repositories" covers them anyway) |
+| bryding/FinalFactoryModTemplate, Lothsahn/* | the mod template (game repo `CLAUDE.md`, "Modding"); personal repositories | **cannot**: a fine-grained token has one resource owner. With `GH_TOKEN` set, gh and git use only it, so work on these fails with the person token. Until the template moves to the organization, such work needs a run without the switch (its machine `githubFromVault` off) |
+
+### 13.3 Selection, fallback, expiry
+
+- **Whose token:** the same person as the Claude token (section 10): a request's requester, the configured person for
+  intake, FFBox and nightly work nobody named (`vault.unattributed`), else the system payer. A worker's run, the daemon's
+  push for it and the portal's reads of its gates all name that person. Request-less portal reads use the system payer's.
+- **Which entry:** the person's own GitHub entry, then one shared with anyone (`share: anyone`, by name); never another
+  person's own (`share: owner`), as for every vault entry (`eligible`).
+- **None usable** (no entry, disabled, refused, expired): the caller keeps the credential it had before (the machine's
+  gh login, D7 for the portal), and `system_status` says so ("no usable vault GitHub token for a workers run on m3 for
+  sam; it uses the machine's own gh login", 24 hours). Not held, unlike a Claude pool: a GitHub token has no capacity to
+  wait for, and the fallback is what ran until now. *Decision (reasoned):* holding a person's work until a token is rotated
+  would stop every push for a typo; the alert is enough while the machine logins stay.
+- **401 (bad credentials, revoked, expired):** the portal's own call that got it is made again on D7 at once; the token is
+  marked "not used" and no run, push or read gets it until it is rotated (a new fingerprint) or the next probe passes.
+- **403 "Resource not accessible by personal access token":** a permission the token lacks. The portal's read is made
+  again on D7 and the token's last error names the call; the token stays in use (other calls may be allowed). A refused
+  `statusCheckRollup` is expected for every fine-grained token and is not recorded.
+- **Expiry:** read from GitHub's `GitHub-Authentication-Token-Expiration` header at each probe *(sourced:
+  composer/composer#11688 reads the same header for `composer diagnose`; not measured, no fine-grained token was available
+  here)*. Past it, the token is not used; 14 days before, the line turns amber ("rotate it soon").
+- **Probe:** at start, whenever the vault changes (a new or rotated token), and every 6 hours: `GET /user` (the GitHub
+  account and id; it needs no permission) and, per repository of 13.2, its metadata, `commits`, `pulls`, `actions/runs` and
+  `commits/HEAD/status`. About 30 requests per token per probe, against GitHub's 5,000 an hour. Write permissions cannot
+  be read without writing, so they are not probed, and no API a token can call lists a fine-grained token's permissions.
+
+### 13.4 Attribution: what changes when a person's token pushes
+
+- **Commit authorship does not change** *(sourced: git)*: the author and committer of a commit come from git's
+  `user.name`/`user.email` (the machine's, or the public identity for public repositories); the token only authenticates the
+  push.
+- **PRs and comments do:** a PR a worker opens, a comment, a review or a merge is by the token's account. Today all of it is
+  m3's or BEAST's login (measured on m3: `bryding`, for lothsahn's requests too); after the switch lothsahn's requests show
+  as Lothsahn (GitHub id 10092359), Ben's as Ben.
+- **Branch protection and required reviews:** nothing changes *(measured 2026-10-10, `gh api`)*. Final-Factory/FinalFactory
+  `develop` has only the ruleset "Protect master and develop from rewrites" (no deletion, no force push, no bypass actors) and
+  no required reviews or checks; `master` requires a PR with 0 approvals, linear history and resolved conversations;
+  ff-factory `main` is unprotected and has no rulesets. No rule depends on who authored the PR.
+- **FFBox reads comments by author, and lothsahn is its GitHub operator** *(sourced: Final-Factory/ffbox at 162c44c,
+  `scripts/ffwatch.py` `is_github_operator`, `take_review_trigger`, `take_feedback`; `config.md` "operators")*. A pull request
+  comment or review by GitHub id 10092359 is taken as lothsahn's own instruction: a `#codereview` / `!codereview` trigger starts
+  a review, and any comment on a PR FFBox opened (`ffbox/` branches) or is already in starts a feedback run, billed to his
+  subscription. With his token, a worker's comment on such a PR would do that. FFBox does not look at who authored a PR
+  (searched `scripts/` for pull-request author reads: none). So a worker with a person's token is told in its brief to post
+  no comment on FFBox's PRs unless the person asked for it. **This is the one real fork (13.7).**
+- **Merging FFBox's PRs** (w860, w862) is unchanged: FFBox sees the merge and posts its notice itself, whoever merged.
+- **`gh pr checks` stops working for workers on a person's token** (no Checks permission for fine-grained tokens): the brief
+  tells them to read CI with `gh run list --commit <head sha>` and `gh run view`.
+
+### 13.5 Machines
+
+Nothing to install. The token reaches a worker in its launch spec (`spec.env.GH_TOKEN`), and the daemon's pushes in the
+`switch` or `save_work` message, over the authenticated daemon link, as Claude tokens do (section 3): never on disk, never
+in chat, redacted from transcripts and logs by pattern and by value (`addSecretValues`, the daemon learns a pushed one before
+use). A daemon from before w868 ignores `githubToken` and pushes on its own login; its workers get the token anyway (the
+spec is old). Keep each machine's own gh login: the fallback, and the daemon's own fetches (13.1).
+
+### 13.6 The vault page and system_status
+
+Each GitHub entry on Settings → Token vault has a line under it: the GitHub account it acts as, "not used: …" when refused,
+its expiry with the days left, the reads it lacks per repository ("FinalFactory: no actions"; "ffbox: not selected"), when it
+was probed, its last use ("given to a workers run on m3 for lothsahn", "CI on Final-Factory/FinalFactory#1372") and its last
+error. Amber when refused, near expiry or lacking a read. Below the list: where GitHub tokens from the vault are on. The same
+line per token is in `system_status`, after the vault's line. Last use and last error live in the portal's memory (empty after
+a restart until the next use); the probe runs at start.
+
+### 13.7 Switchover for lothsahn
+
+Nothing switches until he does it, and each step is undone by the matching rollback line. Before step 4, the only change
+anyone sees is the new line on the vault page.
+
+1. **Decide the fork (FFBox comments, 13.4).** Recommended: switch as below; workers are told not to comment on FFBox PRs.
+   The other choice is to keep lothsahn's requests on the machine login for comments, which this framework does not split
+   (a token is all of gh). Ask if a guard (refuse `gh pr comment` on `ffbox/` PRs for his token) is wanted on top.
+2. **Make each token** (each person, on github.com, signed in as themselves): Settings → Developer settings → Personal
+   access tokens → Fine-grained tokens → Generate new token, with the settings of 13.2. If the organization asks for
+   approval, an owner approves it under Final-Factory → Settings → Personal access tokens → Pending requests.
+3. **Install them on the FFBox host** (as root; the value is typed at a hidden prompt, never on a command line or in chat):
+
+   ```bash
+   sudo install -d -m 0700 /etc/fff-vm/secrets/people/lothsahn /etc/fff-vm/secrets/people/ben
+   sudo bash -c 'umask 077; read -rs -p "lothsahn GitHub token: " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/lothsahn/github-token'; echo
+   sudo bash -c 'umask 077; read -rs -p "Ben GitHub token: " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/ben/github-token'; echo
+   sudo fff-vm vault-sync                     # "added vault-lothsahn-github", "added vault-ben-github"
+   ```
+
+   Ben types his own at the second prompt (a shared tmux session), or hands it over outside chat (Cut-over, step 2).
+   This needs the portal deployed with w868 (`sudo fff-vm ssh 'sudo fffctl update'`): on an older portal the entries would
+   go to every run at once (the pre-w868 behaviour).
+4. **Check before switching:** Settings → Token vault, or `system_status`: each `vault-<person>-github` line shows the
+   right GitHub account (lothsahn's has id 10092359), an expiry, and "reads ok on 7 repositories" (or names what is
+   missing: fix it in the token's settings; a new or rotated token is probed within 5 minutes, a permission changed on the
+   same token shows at its next probe, within 6 hours, or at once after a portal restart).
+5. **Switch the portal's reads first:** `set_app_config machines.githubFromVault true machine: "portal"`. Check: the next
+   `ci:` gate clears within about 4 minutes of its checks finishing, the log has no new `blocker watch: cannot read CI`,
+   and the token's line shows "last used … (CI on …)".
+6. **Switch one machine:** `set_app_config machines.githubFromVault true machine: "m3"`. Check with the next worker there
+   for lothsahn: its brief has "GitHub: your gh and git push act as the token vault-lothsahn-github …abcd", `gh auth
+   status` there shows Lothsahn, and its PR shows him as author. One for Ben's request shows Ben. Then m5, beast,
+   lothdesktop, biscuit (or `true` without `machine` for all).
+7. **Rotation later:** replace the host file, `sudo fff-vm vault-sync`; the new token is probed at once.
+
+### 13.8 Rollback
+
+`set_app_config machines.githubFromVault false machine: "<id>"` (or `"portal"`, or without `machine` for all): the next
+process start, push or read uses the login it had before. Nothing else to undo: the tokens can stay in the vault, given to
+nobody. To remove one for good: delete its host file, `sudo fff-vm vault-sync`, and revoke it on github.com.
+
 ## Decisions
 
 1. **Sharing across people:** no. Each person's own tokens for their own work (lothsahn, 2026-10-06; section 10).
@@ -604,6 +807,9 @@ lost. No VM reboot; the next nightly runs the copy.
    (lothsahn, 2026-10-06), in place of w511's single workers' token.
 4. **Entries made in the VM are copied to the host every night** (lothsahn, 2026-10-09, w749; section 12): root to root, a
    person's file is only created, the host file wins a conflict, the ops worker and the portal have no way to a value.
+5. **The right person's GitHub token for each request** (lothsahn, 2026-10-10, w868: "I'd like the right token to get used
+   based on whether a request is Ben or lothsahn"): workers, the daemon's pushes for them and the portal's reads, behind
+   `machines.githubFromVault`, off until he switches (section 13).
 
 ## Cut-over
 
@@ -628,9 +834,8 @@ sudo fff-vm ssh 'sudo fffctl vault list'             # "key: loaded"
   token:
   - Resource owner: **Final-Factory**; Repository access: **All repositories** (or select FinalFactory, ff-factory,
     final-factory-agents and the others workers push to);
-  - Permissions: **Contents: Read and write**, **Pull requests: Read and write**, **Workflows: Read and write** (to push
-    a change under `.github/workflows`), **Actions: Read** (to read CI runs; Read and write if workers re-run them),
-    Metadata: Read (automatic);
+  - Permissions: the list in section 13.2 ([GitHub tokens per person](#13-github-tokens-per-person-w868): Contents, Pull requests,
+    Workflows, Actions and Issues: Read and write; Commit statuses: Read; Metadata: Read, automatic);
   - Expiration: up to a year; note the date. If the organization requires approval for fine-grained tokens, an owner
     approves it under the organization's Settings → Personal access tokens.
 - **Put them on the host** (`<id>` is your portal user id: `lothsahn`, `ben`). `bash -c`, not `sh -c`: on the host `sh` is

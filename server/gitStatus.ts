@@ -1,4 +1,5 @@
 import { run } from './proc.ts';
+import { ghRunner } from './githubTokens.ts';
 import type { GitStatus } from '../shared/types.ts';
 
 const ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GH_PROMPT_DISABLED: '1' };
@@ -44,7 +45,7 @@ export async function openPr(where: { cwd?: string; repo?: string }, branch: str
   const key = `${repo}#${branch}`;
   const hit = prCache.get(key);
   if (hit && Date.now() - hit.at < 5 * 60_000) return hit.pr ?? undefined;
-  const r = await run('gh', ['pr', 'list', '-R', repo.replace(/\.git$/, ''), '--head', branch, '--state', 'open', '--json', 'number,url,title,isDraft', '--limit', '1'], { timeoutMs: 20_000, env: ENV });
+  const r = await ghRunner(undefined, 'a sandbox\'s pull request')('gh', ['pr', 'list', '-R', repo.replace(/\.git$/, ''), '--head', branch, '--state', 'open', '--json', 'number,url,title,isDraft', '--limit', '1'], { timeoutMs: 20_000, env: ENV });
   let pr: GitStatus['pr'] | null = null;
   if (r.code === 0) {
     try {
@@ -70,7 +71,7 @@ export interface PrView {
 }
 
 export async function prView(repo: string, number: number): Promise<PrView | undefined> {
-  const r = await run('gh', ['pr', 'view', String(number), '-R', repo.replace(/\.git$/, ''), '--json', 'number,url,title,body,isDraft,autoMergeRequest'], { timeoutMs: 20_000, env: ENV });
+  const r = await ghRunner(undefined, 'a pull request for FFBox')('gh', ['pr', 'view', String(number), '-R', repo.replace(/\.git$/, ''), '--json', 'number,url,title,body,isDraft,autoMergeRequest'], { timeoutMs: 20_000, env: ENV });
   if (r.code !== 0) return undefined;
   try {
     const p = JSON.parse(r.stdout) as { number: number; url: string; title: string; body?: string; isDraft: boolean; autoMergeRequest?: unknown };

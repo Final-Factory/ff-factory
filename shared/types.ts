@@ -2136,6 +2136,33 @@ export interface VaultStatus {
   entries: number;
 }
 
+/** What one probe read says a GitHub token may read (w868): read, denied (403), the repository not selected (404), or no answer. */
+export type GithubAccess = 'read' | 'denied' | 'not-selected' | 'error';
+
+/**
+ * A vault GitHub token's health (w868, server/githubTokens.ts), by fingerprint: whose it is, the GitHub account it acts as,
+ * its expiry, which reads it has per repository (write permissions cannot be read without writing), its last use and last
+ * error. Never its value.
+ */
+export interface GithubTokenHealth {
+  fingerprint: string;
+  name: string;
+  last4: string;
+  owner?: string;
+  disabled?: boolean;
+  /** GET /user: the account the token acts as. */
+  login?: string;
+  userId?: number;
+  /** The GitHub-Authentication-Token-Expiration header, as ISO; absent for a token without one. */
+  expiresAt?: string;
+  checkedAt?: string;
+  /** Why no run gets it now (GitHub answered 401); cleared by a probe that passes. */
+  bad?: string;
+  repos?: { repo: string; metadata: GithubAccess; contents?: GithubAccess; pulls?: GithubAccess; actions?: GithubAccess; statuses?: GithubAccess }[];
+  lastUse?: { at: string; what: string };
+  lastError?: { at: string; what: string };
+}
+
 /** What the owner's vault dialog shows (GET /api/vault). */
 export interface VaultView {
   status: VaultStatus;
@@ -2143,7 +2170,10 @@ export interface VaultView {
   kinds: VaultKind[];
   roles: VaultRole[];
   people: { userId: string; displayName: string }[];
-  machines: { id: string; online: boolean; claudeFromVault: boolean }[];
+  machines: { id: string; online: boolean; claudeFromVault: boolean; githubFromVault?: boolean }[];
   /** Machines that hold a credential now. */
   enrolled: string[];
+  /** The GitHub tokens' health (w868), and whether the portal's own reads use them (machines.githubFromVault "portal"). */
+  github?: GithubTokenHealth[];
+  githubPortal?: boolean;
 }

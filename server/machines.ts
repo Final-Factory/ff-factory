@@ -2045,7 +2045,7 @@ export class MachineManager {
   private readonly switchCalls = new Map<string, { resolve: (r: { from: string; to: string; notes: string[] }) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
   /** Switch the branch of a machine sandbox, on the machine (server/switchBranch.ts). callerSessionId: the agent asking, which its daemon does not count as busy. */
-  switchBranch(machineId: string, branch: string, createFrom?: string, sandbox?: string, callerSessionId?: string) {
+  switchBranch(machineId: string, branch: string, createFrom?: string, sandbox?: string, callerSessionId?: string, githubToken?: string) {
     if (!sandbox) return Promise.reject(new Error(MAIN_CLONE_NO_AGENTS));
     const sb = (this.requireSandboxDaemon(machineId), this.requireSandbox(machineId, sandbox).id);
     return new Promise<{ from: string; to: string; notes: string[] }>((resolve, reject) => {
@@ -2056,7 +2056,7 @@ export class MachineManager {
       }, 10 * 60_000);
       this.switchCalls.set(id, { resolve, reject, timer });
       try {
-        this.post(machineId, { type: 'switch', id, branch, createFrom, sandbox: sb, ...(callerSessionId ? { callerSessionId } : {}) });
+        this.post(machineId, { type: 'switch', id, branch, createFrom, sandbox: sb, ...(callerSessionId ? { callerSessionId } : {}), ...(githubToken ? { githubToken } : {}) });
       } catch (e) {
         clearTimeout(timer);
         this.switchCalls.delete(id);
@@ -2073,7 +2073,7 @@ export class MachineManager {
   }
 
   /** Commit and push a sandbox's uncommitted work on `branch`, on the machine (w656, server/saveWork.ts). */
-  saveWork(machineId: string, sandbox: string, branch: string, message: string): Promise<SaveResult> {
+  saveWork(machineId: string, sandbox: string, branch: string, message: string, githubToken?: string): Promise<SaveResult> {
     if (!this.canSaveWork(machineId)) return Promise.reject(new Error(`${machineId}'s daemon does not save uncommitted work yet (it needs a daemon update)`));
     return new Promise<SaveResult>((resolve, reject) => {
       const id = randomUUID();
@@ -2083,7 +2083,7 @@ export class MachineManager {
       }, 10 * 60_000);
       this.saveCalls.set(id, { resolve, reject, timer });
       try {
-        this.post(machineId, { type: 'save_work', id, sandbox, branch, message });
+        this.post(machineId, { type: 'save_work', id, sandbox, branch, message, ...(githubToken ? { githubToken } : {}) });
       } catch (e) {
         clearTimeout(timer);
         this.saveCalls.delete(id);
