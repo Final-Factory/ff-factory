@@ -1099,8 +1099,11 @@ export interface HostStatus {
 export interface TokenWarning {
   /** "pool:<person>" or "reserve:<credential>": a banner's identity, so a dismissed one returns when its text changes. */
   id: string;
-  /** exhausted: every token of the person is used up; held: every token is at a limit (new work waits); reserve: runs are inside the dispatcher's buffer. */
-  kind: 'exhausted' | 'held' | 'reserve';
+  /**
+   * exhausted: every token of the person is used up; held: every token is at a limit (new work waits); reserve: runs are
+   * inside the dispatcher's buffer; ci-read: the portal's GitHub token cannot read CI on pull requests (w889).
+   */
+  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read';
   /** The user id whose pool it is: only that person's pages show it (server/index.ts hostForUser). Absent: for everyone. */
   person?: string;
   text: string;

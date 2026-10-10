@@ -43,7 +43,8 @@ import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostAccountsInUse, reserveLines, hostRole, hostRoleOf, runsOnThisHost, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
 import { clock, firstFree, poolBanner, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
-import { GithubTokens, PORTAL_MACHINE, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
+import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
+import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
@@ -605,6 +606,23 @@ const blockerWatch = new BlockerWatch({
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
 agents.blockerWatch = blockerWatch;
+// Whether the blocker watch can read CI at all (w889): measured at start and every half hour, said loudly when it cannot.
+const ciRead = new CiReadWatch({
+  repo: () => repoSlug(cfg.repo.url),
+  runner: () => ghRunner(undefined, 'the CI-read health check'),
+  report: (title, body) => {
+    console.warn(`ci read: ${title}: ${body}`);
+    notifier.host(title, body);
+    const orch = store.orchestratorId;
+    if (orch) {
+      try {
+        sessions.send(orch, `[host] ${title}. ${body}`, 'system');
+      } catch {
+        // the orchestrator is not there; the notification still went out
+      }
+    }
+  },
+}).start();
 agents.daemonSha = (id) => machines.daemonVersions().find((d) => d.id === id.toLowerCase())?.sha;
 // The orchestrators' base clone, kept on origin's newest code (w467, server/baseRefresh.ts; config repo.refreshMinutes).
 startBaseRefresh(cfg);
@@ -1965,7 +1983,7 @@ agents.usagePollChanged = () => {
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
-  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ...tokenReport().lines, ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {
@@ -2012,6 +2030,9 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
     lines.push(r.line);
     if (r.warning) warnings.push({ id: `reserve:${r.cred.key}`, kind: 'reserve', text: r.warning });
   }
+  // CI the portal cannot read (w889): for everyone, as a CI wait is anybody's.
+  const ci = ciReadBanner(ciRead.health);
+  if (ci) warnings.push({ id: 'ci-read', kind: 'ci-read', text: ci });
   return { lines, warnings };
 }
 let tokenWarningsShown = '';
