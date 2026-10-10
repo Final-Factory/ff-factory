@@ -1251,6 +1251,8 @@ export interface CleanupSummary {
   /** Temp folders on a volume apart from that disk, each as RAM (a tmpfs) or a disk volume of its own: shown, never counted. */
   temp?: { path: string; freeBytes?: number; totalBytes?: number; ram: boolean }[];
   softFreeGB: number;
+  /** The machine's worker install folder (w896): clean-up deletes only inside it. Absent: the machine has none. */
+  root?: string;
   /** Still below the soft threshold after the pass. */
   belowSoft?: boolean;
   /** The biggest entries it removed. */
