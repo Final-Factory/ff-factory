@@ -237,7 +237,8 @@ test('thread: bad input is refused before anything is asked; FFBox not finding t
 
 test('no write path: the thread surface is two read-only queries and a worker tool that only fetches', () => {
   assert.ok(PROVIDER_QUERIES.includes('thread_files') && PROVIDER_QUERIES.includes('thread_file'));
-  assert.deepEqual(PROVIDER_QUERIES.filter((q) => /delete|purge|remove|move|write|rerun|re_run|upload|post|react/.test(q)), [], 'no query names a change');
+  // post_message (w901, server/ffboxPost.test.ts) is the one query that writes: it posts one guarded message as Max.
+  assert.deepEqual(PROVIDER_QUERIES.filter((q) => /delete|purge|remove|move|write|rerun|re_run|upload|post|react/.test(q)), ['post_message'], 'no query names a change but the one that posts as Max');
   assert.ok(FROM_CONNECTOR_TYPES.includes('report_chunk') && FROM_CONNECTOR_TYPES.includes('report_end'));
   assert.deepEqual(Object.keys(CATALOG.fetch_discord_thread_files).sort(), ['file', 'sha256', 'thread'], 'the worker tool takes a thread, a file name and a hash, nothing else');
   const src = fs.readFileSync(new URL('./ffboxThreadFiles.ts', import.meta.url), 'utf8');
