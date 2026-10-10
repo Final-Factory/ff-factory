@@ -132,7 +132,16 @@ jobs:
         if: steps.browsers.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium webkit
       - name: Install browser system libraries
+        id: deps
         if: steps.browsers.outputs.cache-hit == 'true'
+        # 21 s median and 52 s at most over 180 shards (w922, measured). The Ubuntu mirror sometimes hangs apt-get update
+        # instead, which held 7 shards to the job's 20-minute timeout in 14 days: give up after 3 minutes, try once more.
+        timeout-minutes: 3
+        continue-on-error: true
+        run: npx playwright install-deps chromium webkit
+      - name: Install browser system libraries (again, after a hung mirror)
+        if: steps.browsers.outputs.cache-hit == 'true' && steps.deps.outcome != 'success'
+        timeout-minutes: 5
         run: npx playwright install-deps chromium webkit
       - name: The package cache readable for saving
         run: |
