@@ -489,7 +489,7 @@ function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode })
       </div>
     );
   }
-  const asOf = `as of ${fmtClock(u.asOf)}${u.error ? ' (refresh failed)' : ''}`;
+  const asOf = `as of ${fmtClock(u.asOf)}${u.reading ? ` (${u.reading.kind} reading: ${u.reading.why})` : u.error ? ' (refresh failed)' : ''}`;
   if (!u.available) {
     return (
       <div className="meters plan-meters" title={u.why}>

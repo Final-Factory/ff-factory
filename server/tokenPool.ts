@@ -14,6 +14,8 @@
 //   - a person's own orchestrator, when every pool token is past its caps but none is used up, still runs on the one with
 //     the most room until it is used up: the caps keep workers from eating the person's own use, they do not lock them out.
 // A token with no numbers yet counts as 50% on both meters: it passes every rule and ranks after the ones with a score.
+// A reading kept from before (data/usage.json) stands in for a poll that failed or has not answered yet, aged by its reset
+// times and floored at 50% once older than STALE_READING_MS (server/usage.ts effectiveUsage, w1041).
 //
 // The dispatcher's reserve (reserveOf) is a different thing: the credential the dispatcher runs on keeps a buffer that
 // shrinks as its weekly window runs out, for the dispatcher alone.
@@ -170,7 +172,8 @@ export function scoreOf(t: PoolToken, now: number): { perDay?: number } {
 export function judge(t: PoolToken, limits: PoolLimits, now: number = Date.now()): PoolView {
   const m = metersOf(t.usage);
   const base = { session: m.session, weekly: m.weekly, known: m.known, sessionResetsAt: m.sessionResetsAt, weeklyResetsAt: m.weeklyResetsAt };
-  const numbers = `5-hour ${pc(m.session)}%, weekly ${pc(m.weekly)}%`;
+  // A reading this portal did not just take (the latest poll failed, or none has answered since it started) says so (w1041).
+  const numbers = `5-hour ${pc(m.session)}%, weekly ${pc(m.weekly)}%${t.usage?.reading ? ` [${t.usage.reading.kind} reading: ${t.usage.reading.why}]` : ''}`;
   const meters = m.known ? numbers : 'no numbers yet (counted as 50%)';
   if (m.weekly >= 100 || m.session >= 100) {
     const until = m.weekly >= 100 ? m.weeklyResetsAt : m.sessionResetsAt;
