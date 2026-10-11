@@ -470,7 +470,7 @@ acted on since it was filed.
 | FFBox-filed work naming no operator | `vault.unattributed.ffbox`, default `lothsahn` | the same |
 | FFBox work naming an operator (an ffdev dev request, an operator's escalation) | that operator's, mapped to the FF Factory login of the same name | the request is filed for them (`fileDevRequest` from `server/devRequests.ts`; an operator's escalation in `server/intake.ts`), so it is not unattributed |
 | A request filed from a nightly lab regression (source `nightly`) | `vault.unattributed.intake`, default `lothsahn` (w1031: the brief counts the lab's regressions as the intake's) | `unattributedKind` |
-| The nightly run and review jobs (sources `nightly-run`, `nightly-review`), the nightly regression sentry and the workers its delegations start | `vault.unattributed.nightly`, default `ben` | `unattributedKind` (or a delegation from `nightly-regression-sentry`); the sentry's own runs in `server/standing.ts` |
+| The nightly run and review jobs (sources `nightly-run`, `nightly-review`), the nightly regression sentry and the workers its delegations start | `vault.unattributed.nightly`, default `lothsahn` (w1031: "Yes, move the nightly jobs to me"; was `ben`) | `unattributedKind` (or a delegation from `nightly-regression-sentry`); the sentry's own runs in `server/standing.ts` |
 | Anything else no person asked for | the system payer's (config `systemPayer`) | `machineRunEnv` |
 
 **Take-over on action (w1031).** When a person acts on a request in FF Factory, `Orchestrators.takeOver` (`server/orchestrators.ts`)

@@ -7,4 +7,4 @@
   never count. Requests the intake files for nobody (Discord bug threads, FFBox reports and diagnoses, release follow-ups, and now the nightly
   lab's regressions) run for lothsahn. A person with a Claude pool never falls back to the host token or another person's: a pool the vault cannot
   open holds the run with the reason. A missing GitHub token raises a host notice. `spend_report` attributes each turn to the account its process
-  ran on. **Needs lothsahn's portal deploy** (docs/vault.md section 10).
+  ran on. The nightly run and review jobs and the Sentry's delegations move to lothsahn too (`vault.unattributed.nightly` defaults to `lothsahn`; lothsahn: "Yes, move the nightly jobs to me"). **Needs lothsahn's portal deploy**, and `vault.unattributed.nightly` removed from config.json if it is set to `ben` (docs/vault.md section 10).

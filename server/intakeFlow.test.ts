@@ -1699,7 +1699,7 @@ test('nightly merge review (w905): its worker\'s jobs are filed as the Sentry\'s
   const [a, b] = jobs;
   assert.equal(a.delegation?.agentId, 'nightly-regression-sentry', 'billed and attributed as the Sentry\'s were (vault.ts NIGHTLY_SENTRY)');
   assert.equal(a.delegation?.auto, true);
-  assert.equal(a.requestedBy.userId, 'ben', 'vault.unattributed.nightly: "Nightly sentry Ben"');
+  assert.equal(a.requestedBy.userId, 'lothsahn', 'vault.unattributed.nightly: "Yes, move the nightly jobs to me" (lothsahn, w1031)');
   assert.match(a.constraints ?? '', /Merge your own pull request into develop once its verification is done and CI is green/);
   assert.match(a.constraints ?? '', /Suggested worker: opus, high effort/);
   assert.match(b.constraints ?? '', /Suggested worker: sonnet, high effort/);

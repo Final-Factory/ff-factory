@@ -82,10 +82,12 @@ export type UnattributedKind = 'intake' | 'ffbox' | 'nightly';
  * lothsahn, 2026-10-06: "Intake should be my token. Nightly sentry Ben. Ffbox me unless it provides an operator... In that
  * case, use the token of the operator." (An FFBox request naming an operator is that person's own: not unattributed.)
  * w1031 (2026-10-11): "intake should use my Claude and GitHub tokens", and the brief lists the nightly lab's regressions
- * among the intake's requests: a request filed from a lab regression (source `nightly`) is the intake's, lothsahn's. The
- * Sentry's own runs, its delegations and the nightly run and review jobs stay on `nightly` (Ben's, as he said above).
+ * among the intake's requests: a request filed from a lab regression (source `nightly`) is the intake's, lothsahn's. Then
+ * lothsahn: "Yes, move the nightly jobs to me": the nightly run and review jobs, the Sentry's own runs and its delegations
+ * (`nightly`) default to lothsahn too. Config vault.unattributed.nightly still overrides it, and a config.json that still says
+ * "ben" keeps the old behaviour: the deploy needs that key removed or set to "lothsahn" (docs/vault.md section 10).
  */
-export const UNATTRIBUTED_DEFAULTS: Readonly<Record<UnattributedKind, string>> = { intake: 'lothsahn', ffbox: 'lothsahn', nightly: 'ben' };
+export const UNATTRIBUTED_DEFAULTS: Readonly<Record<UnattributedKind, string>> = { intake: 'lothsahn', ffbox: 'lothsahn', nightly: 'lothsahn' };
 /** The nightly regression sentry's standing agent id (server/schedule.ts AUTO_BY_DEFAULT). */
 export const NIGHTLY_SENTRY = 'nightly-regression-sentry';
 

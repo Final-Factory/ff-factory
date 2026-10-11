@@ -150,8 +150,10 @@ test('the intake default: requests nobody asked for by name run for lothsahn, wh
   const src = (kind: string) => ({ unattributed: true, source: { kind, untrusted: true } }) as never;
   // Discord bug threads, FFBox reports and diagnoses, release follow-ups, and the nightly lab's regressions
   for (const kind of ['discord-bug', 'ffbox-request', 'ffbox-diagnosis', 'ffbox-branch', 'release', 'nightly']) assert.equal(tokenPersonForWork(cfg, src(kind)), 'lothsahn', kind);
-  // The nightly run and review jobs and the Sentry's delegations stay on `nightly` (ben, lothsahn's 2026-10-06 words)
-  for (const kind of ['nightly-run', 'nightly-review']) assert.equal(tokenPersonForWork(cfg, src(kind)), 'ben', kind);
+  // The nightly run and review jobs and the Sentry's delegations: "Yes, move the nightly jobs to me" (lothsahn, w1031)
+  for (const kind of ['nightly-run', 'nightly-review']) assert.equal(tokenPersonForWork(cfg, src(kind)), 'lothsahn', kind);
+  assert.equal(tokenPersonForWork(cfg, { delegation: { id: 'd', agentId: 'nightly-regression-sentry', agentName: 'Sentry', auto: true } } as never), 'lothsahn', "the Sentry's delegations");
+  assert.equal(tokenPersonForWork({ vault: { unattributed: { nightly: 'ben' } } }, src('nightly-run')), 'ben', 'a config that still says ben keeps it');
   // config vault.unattributed still moves a kind
   assert.equal(tokenPersonForWork({ vault: { unattributed: { intake: 'ben' } } }, src('release')), 'ben');
   assert.equal(store.work.size, 1);
