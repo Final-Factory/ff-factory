@@ -53,7 +53,7 @@ import { serveStatic, webBuild } from './webStatic.ts';
 import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries, volumeStat } from './cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
-import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
+import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, survivesRestart, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
 import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, sessionSource, tokenKey, tokenLabel } from './usage.ts';
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
@@ -1878,7 +1878,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   // The supervisor has it now (or it was not an update): nothing left to retry after a crash.
   clearPendingRestart(cfg.dataDir);
   // Backlog step 2 (config machines.keepAgentsOnRestart, docs/beast-machine.md): the daemons' agents carry on.
-  sessions.stopAll((s) => !(keepDaemonAgents() && s.info.machineId));
+  sessions.stopAll((s) => !survivesRestart(s, keepDaemonAgents()));
   voice.unload('server stopping');
   providers.close();
   max.close();
@@ -2144,7 +2144,7 @@ const keepDaemonAgents = () => cfg.machines?.keepAgentsOnRestart === true;
 const drainer = new Drainer({
   dataDir: cfg.dataDir,
   // With keepAgentsOnRestart the daemons' agents are not asked to wrap up: the restart does not stop them.
-  snapshot: () => [...sessions.sessions.values()].filter((s) => !(keepDaemonAgents() && s.info.machineId)).map(snapshotOf),
+  snapshot: () => [...sessions.sessions.values()].filter((s) => !survivesRestart(s, keepDaemonAgents())).map(snapshotOf),
   tell: (id, text) => void sessions.send(id, text, 'system'),
   stop: (req, drained) => stopServer(req, drained),
   changed: () => broadcast({ type: 'host', host: { ...host, drain: drainer.status } }),

@@ -13,6 +13,7 @@ import {
   parseRestartRequest,
   readUpdateResult,
   restartSummary,
+  survivesRestart,
   versionLine,
   resumeMessage,
   systemdSupervised,
@@ -397,4 +398,32 @@ test('drain with relocate: a relocate that throws is written as the error, and t
   await settle(() => fs.existsSync(path.join(dir, 'drain.done')));
   const r = JSON.parse(fs.readFileSync(path.join(dir, RELOCATE_RESULT_FILE), 'utf8'));
   assert.deepEqual([r.ok, r.error, r.machines], [false, 'the machine manager is gone', []]);
+});
+
+test('w974: a soft restart (keepAgentsOnRestart): machine workers are neither drained nor stopped, only the portal\'s own agents restart; the deploy and fffctl restart ask the same way', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  // The sessions as the portal holds them: three busy workers on machines, the orchestrator and the ops worker (no machine).
+  const sessions = [
+    { id: 'w1', machineId: 'beast', status: 'running' },
+    { id: 'w2', machineId: 'm3', status: 'running' },
+    { id: 'w3', machineId: 'lothdesktop', status: 'running' },
+    { id: 'o', kind: 'orchestrator', status: 'running' },
+    { id: 'ops', kind: 'ops', status: 'running' },
+  ] as const;
+  const handle = (x: { id: string; machineId?: string }) => ({ info: { machineId: x.machineId } });
+  assert.deepEqual(sessions.filter((x) => survivesRestart(handle(x), true)).map((x) => x.id), ['w1', 'w2', 'w3'], 'with the setting on, exactly the machines\' agents survive');
+  assert.deepEqual(sessions.filter((x) => survivesRestart(handle(x), false)).map((x) => x.id), [], 'with it off, nothing survives');
+  // index.ts feeds the drainer the sessions that do not survive: no busy worker is left to wait for or to message.
+  const asked = JSON.stringify({ drain: 'auto', drainMinutes: 10, reason: 'restart (fffctl)', update: false, hold: false });
+  const fffctl = fs.readFileSync(new URL('../deploy/vm/guest/fffctl', import.meta.url), 'utf8');
+  assert.match(fffctl, /restart_request "\$drain" "\$mins" "restart \(fffctl\)" false/, 'fffctl restart asks for the same request as the update, minus the update');
+  assert.match(fffctl, /local drain=auto mins=10 wait=1/, 'fffctl restart drains by default as the update does (auto), never --no-drain by itself');
+  const req = parseRestartRequest(asked);
+  assert.ok(req !== 'now' && req.drain === 'auto' && !req.update);
+  const h = harness(sessions.filter((x) => !survivesRestart(handle(x), true)).map((x) => snap({ id: x.id, kind: 'kind' in x ? x.kind : 'worker', status: x.status })));
+  assert.match(h.d.request(req as RestartRequest), /restarting now/);
+  assert.deepEqual(h.told, [], 'no machine worker is asked to wrap up');
+  t.mock.timers.tick(5000);
+  assert.equal(h.stops.length, 1);
+  assert.deepEqual(h.stops[0].drained, [], 'and none is recorded as drained, so none is resumed by the portal');
 });

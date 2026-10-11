@@ -30,6 +30,8 @@ claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnecto
 - `ops_worker`, Lothsahn's and Ben's alone (refused for anyone else): the one orchestration worker in the portal VM, a
   shell for ssh to the machines, the portal's state and machine credentials, with no git, downloads or Unity
   ([ops-worker.md](ops-worker.md), w597). Its `deploy` updates the portal, only when the person asks in their own turn.
+  Its `restart` (w974) restarts the portal with no new code, softly like the deploy (the machines' workers keep running; for example so agents pick up a changed
+  Claude token), gated the same way, with its own grant.
   Its `machine_update` updates a machine's daemon and reruns its installer (a sandbox count, agent or editor limit, a
   reinstall) in any turn, for one of the person's own open requests (w855, lothsahn: "don't ask ben to run
   installers"). After a verified portal deploy FF Factory updates every worker-root machine's daemon by itself and sends the
@@ -710,7 +712,7 @@ done`); a still-open line becomes the request's latest word. A DONE counts from 
   of its workers. Now that worker becomes one of w556's workers (logged: "worker … said DONE for it from w604 … which
   names w556"), every check below applies, and both requests' people hear the close. The brief tells workers to add a
   DONE line for a request theirs takes over. Related ids alone close nothing: only the worker's explicit DONE does;
-- **the ops worker, for the requests its job was sent for** (`ops_worker` `send` or `deploy` with `work_ids`,
+- **the ops worker, for the requests its job was sent for** (`ops_worker` `send`, `deploy` or `restart` with `work_ids`,
   [ops-worker.md](ops-worker.md)): its report's DONE lines for those close them (`opsTurnEnded`); what the ledger did,
   closed or refused and why, follows its report to the person whose job it is.
 
@@ -1366,7 +1368,7 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   takes up one that waited behind it, the next turn is that message's. Before w607 any harness message among those
   not yet answered made the turn the harness's, and on 2026-10-07 (07:45-08:00 UTC) `ops_worker` refused Lothsahn's own
   request three times because a worker's report arrived mid-turn. Every gate reads this one value:
-  - `ops_worker` `send` opening a job and `deploy` ([ops-worker.md](ops-worker.md));
+  - `ops_worker` `send` opening a job, `deploy` and `restart` ([ops-worker.md](ops-worker.md));
   - `approve_delegation` (a personal orchestrator's);
   - `update_work` approve and decline of an intake request, and close and reopen of another person's request;
   - `humanAsked` on `request_work` and `update_work`, which the dispatcher's `USER_ASKED_TOOLS` above need

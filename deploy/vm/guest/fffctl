@@ -14,9 +14,10 @@
 #                                       the unit watchdog (fff-health runs it every 30 s): run now; pause it (until the next boot) for
 #                                       maintenance that stops a critical unit; resume; reset its back-off and give-up for a unit or all
 #   fffctl logs [-f]                    the portal's journal
-#   fffctl restart [--no-drain] [--drain-minutes N]
+#   fffctl restart [--no-drain] [--drain-minutes N] [--no-wait]
 #                                       drain busy agents, restart, resume them (restart.ps1's job); waits until the
-#                                       portal answers again, showing the drain
+#                                       portal answers again, showing the drain. --no-wait: only ask for it (the
+#                                       orchestration worker's form, w974: its own turn is one of the agents the drain waits for)
 #   fffctl update [--drain-minutes N] [--no-wait] [--timeout-minutes N]
 #                                       build origin/main beside the running portal, then drain and switch (what
 #                                       request_app_update does; restart.ps1 -Update's job). Waits, showing each stage,
@@ -242,15 +243,19 @@ cmd_status() {
 }
 
 cmd_restart() {
-  local drain=auto mins=10 before t0
+  local drain=auto mins=10 wait=1 before t0
   while [ $# -gt 0 ]; do
-    case "$1" in --no-drain) drain=false ;; --drain-minutes) mins=$2; shift ;; *) die "unknown option $1" ;; esac
+    case "$1" in --no-drain) drain=false ;; --drain-minutes) mins=$2; shift ;; --no-wait) wait=0 ;; *) die "unknown option $1" ;; esac
     shift
   done
   portal_active || { systemctl start fff-portal.service; wait_healthy 120 && echo "started"; return; }
   before=$(main_pid); t0=$(date +%s)
   restart_request "$drain" "$mins" "restart (fffctl)" false
   say "asked the portal to $([ "$drain" = false ] && echo 'stop now' || echo "drain (up to $mins min)") and restart"
+  if [ "$wait" = 0 ]; then
+    say "not waiting: the portal restarts, and resumes its own agents that were mid-turn; with machines.keepAgentsOnRestart (the VM default) the machines' workers are not drained or stopped (fffctl status, fffctl logs)"
+    return 0
+  fi
   wait_restart "$before" "$t0" $(((mins + 3) * 60)) || { say "the portal did not stop within $((mins + 3)) min"; die "fffctl status, fffctl logs"; }
   say "restarting (pid $(main_pid))"
   for _ in $(seq 120); do

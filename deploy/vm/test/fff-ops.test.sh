@@ -146,12 +146,14 @@ if [ "$(id -u)" -ne 0 ]; then
   printf '%s' "$out" | matches 'run through sudo' || fail "priv: runs without root: $out"
 fi
 # (vault and migrate have a case since w745, for their read-only forms only: the blocks below pin every other form)
-for sub in restart rollback configure backup claude-token gh-login prepare-shutdown; do
+for sub in rollback configure backup claude-token gh-login prepare-shutdown; do
   matches -E "^  $sub\)" $G/fff-ops-priv && fail "priv: has a $sub subcommand"
 done
-matches -F 'grant=$DATA/ops-deploy.grant' $G/fff-ops-priv || fail "priv: update does not need the portal's deploy grant"
+matches -F 'take_grant "$DATA/ops-deploy.grant" deploy' $G/fff-ops-priv || fail "priv: update does not need the portal's deploy grant"
 matches -F '"$FFFCTL" update --no-wait' $G/fff-ops-priv || fail "priv: update is not the plain fffctl update"
-echo "ok: fff-ops-priv has no restart, rollback, configure, backup or token subcommand, and update needs a grant"
+matches -F 'take_grant "$DATA/ops-restart.grant" restart' $G/fff-ops-priv || fail "priv: restart does not need the portal's restart grant"
+matches -F '"$FFFCTL" restart --no-wait' $G/fff-ops-priv || fail "priv: restart is not the plain fffctl restart --no-wait"
+echo "ok: fff-ops-priv has no rollback, configure, backup or token subcommand, and update and restart need their grants"
 
 # ---- fff-ops-priv machine-ssh and the credential's record check (w676), for real, as root (CI's lint runs as root):
 # a lib folder of fakes (lib.sh, fff-machine-ssh, fff-ops-ssh) and the portal's account taken as root.
@@ -161,7 +163,7 @@ if [ "$(id -u)" -ne 0 ]; then
 else
   plib=$tmp/plib
   mkdir -p "$plib" "$tmp/fffroot/data"
-  printf 'load_conf() { FFF_USER=root FFF_ROOT=%s DATA=%s/data; }\n' "$tmp/fffroot" "$tmp/fffroot" >"$plib/lib.sh"
+  printf 'load_conf() { FFF_USER=root FFF_ROOT=%s DATA=%s/data FFF_BRANCH=main CURRENT=%s/current; }\nrelease_sha() { echo abc1234; }\n' "$tmp/fffroot" "$tmp/fffroot" "$tmp/fffroot" >"$plib/lib.sh"
   printf '#!/bin/sh\nprintf "MSSH HOME=%%s:" "$HOME"; printf " [%%s]" "$@"; echo\n' >"$plib/fff-machine-ssh"
   printf '#!/bin/sh\necho Linux\n' >"$plib/fff-ops-ssh"
   chmod +x "$plib/fff-machine-ssh" "$plib/fff-ops-ssh"
@@ -236,5 +238,57 @@ else
     [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
     if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
   done
+  # restart (w974): only with the restart grant the portal leaves in a person's own turn, once; a deploy grant is not one, and
+  # a restart takes no option (no --no-drain, no other drain time).
+  rg=$tmp/fffroot/data/ops-restart.grant
+  mkdir -p "$tmp/fffroot/config"
+  cfg=$tmp/fffroot/config/config.json
+  echo '{"machines": {"keepAgentsOnRestart": true}}' >"$cfg"
+  dg=$tmp/fffroot/data/ops-deploy.grant
+  later=$(date -u -d '+10 min' +%FT%TZ)
+  rc=0; out=$(upriv restart) || rc=$?
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'no restart was asked for'; then fail "priv: restart without a grant (exit $rc): $out"; fi
+  printf '{"by":"lothsahn","expires":"2020-01-01T00:00:00Z"}\n' >"$rg"
+  rc=0; out=$(upriv restart) || rc=$?
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'ran out'; then fail "priv: restart with a grant that ran out (exit $rc): $out"; fi
+  [ ! -e "$rg" ] || fail "priv: an expired restart grant was kept"
+  printf '{"by":"","expires":"%s"}\n' "$later" >"$rg"
+  rc=0; out=$(upriv restart) || rc=$?
+  [ "$rc" -eq 2 ] || fail "priv: a restart grant with nobody in it was taken (exit $rc): $out"
+  printf '{"by":"lothsahn","expires":"%s"}\n' "$later" >"$dg"
+  rc=0; out=$(upriv restart) || rc=$?
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'no restart was asked for'; then fail "priv: a deploy grant started a restart (exit $rc): $out"; fi
+  [ -e "$dg" ] || fail "priv: a restart attempt used up the deploy grant"
+  rm -f "$dg"
+  printf '{"by":"lothsahn","expires":"%s"}\n' "$later" >"$rg"
+  rc=0; out=$(upriv update) || rc=$?
+  [ "$rc" -eq 2 ] || fail "priv: update with only a restart grant was not refused (exit $rc): $out"
+  if printf '%s' "$out" | matches FFFCTL; then fail "priv: a restart grant started a deploy: $out"; fi
+  [ -e "$rg" ] || fail "priv: an update attempt used up the restart grant"
+  for bad in 'restart --no-drain' 'restart --drain-minutes 0' 'restart --no-wait' 'restart now' 'restart --help' 'restart extra'; do
+    rc=0
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(upriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
+  done
+  [ -e "$rg" ] || fail "priv: a refused restart form used up the grant"
+  # Soft only: without machines.keepAgentsOnRestart the restart would drain and stop the machines' workers. Refused, grant kept.
+  for off in '{"machines": {"keepAgentsOnRestart": false}}' '{"machines": {}}' '{}' 'not json'; do
+    echo "$off" >"$cfg"
+    rc=0; out=$(upriv restart) || rc=$?
+    if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'keepAgentsOnRestart is not true'; then fail "priv: restart with config '$off' (exit $rc): $out"; fi
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: a restart that would stop workers reached fffctl ('$off'): $out"; fi
+    [ -e "$rg" ] || fail "priv: a refused hard restart used up the grant ('$off')"
+  done
+  echo '{"machines": {"keepAgentsOnRestart": true}}' >"$cfg"
+  rc=0; out=$(upriv restart) || rc=$?
+  [ "$rc" -eq 0 ] || fail "priv: restart with a fresh grant exited $rc: $out"
+  printf '%s' "$out" | matches -F 'restart asked for by lothsahn; the portal runs' || fail "priv: restart did not say who asked: $out"
+  printf '%s' "$out" | matches -F 'FFFCTL [restart] [--no-wait]' || fail "priv: restart is not fffctl restart --no-wait: $out"
+  [ ! -e "$rg" ] || fail "priv: the restart grant was not used up"
+  rc=0; out=$(upriv restart) || rc=$?
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'no restart was asked for'; then fail "priv: a restart grant worked twice (exit $rc): $out"; fi
+  echo "ok: fff-ops-priv restart needs the restart grant (not a deploy's), uses it up once, takes no option, and runs fffctl restart --no-wait"
   echo "ok: fff-ops-priv passes vault list [--names], vault help, machine-credential list and migrate --help to fffctl, and refuses every other vault, machine-credential and migrate form"
 fi

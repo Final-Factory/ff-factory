@@ -56,7 +56,9 @@ export const OPS_LIMITS = {
   jobMs: 12 * 3_600_000,
   /** A deploy grant (ops_worker deploy) is good for this long, once: fff-ops-priv refuses `fffctl update` without one. */
   deployGrantMs: 15 * 60_000,
-  /** After a deploy, the next portal start within this long tells the worker to report (the update's own restart). */
+  /** A restart grant (ops_worker restart, w974) is good for this long, once: fff-ops-priv refuses `fffctl restart` without one. */
+  restartGrantMs: 15 * 60_000,
+  /** After a deploy or a restart, the next portal start within this long tells the worker to report. */
   deployReportMs: 60 * 60_000,
   /** A verified portal deploy is attributed to a deploy asked for this long before it (build + drain + verify window). */
   deployAskedMs: 3 * 60 * 60_000,
@@ -64,6 +66,9 @@ export const OPS_LIMITS = {
 
 /** Where the portal leaves a deploy grant for fff-ops-priv (root reads it; fff-ops cannot reach the data folder). */
 export const OPS_GRANT = 'ops-deploy.grant';
+
+/** Where the portal leaves a restart grant (ops_worker restart, w974): its own file, so neither grant opens the other command. */
+export const OPS_RESTART_GRANT = 'ops-restart.grant';
 
 /** Why a caller may not use it (a refusal names who may). */
 export const OPS_REFUSED = `the orchestration worker takes messages only from Lothsahn's and Ben's own orchestrators (w597); not from the dispatcher, other people, standing agents, the intake, FFBox or /mcp`;
@@ -112,7 +117,7 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   migrate: { allowed: ['--help'], changes: ['--key', '--dry-run-copy', '--rollback-dry-run', '--cut-over'] },
   watchdog: { allowed: [], changes: ['run', 'pause', 'resume', 'reset'] },
   update: { allowed: [], changes: [''], grant: "only with the deploy grant of a person's own turn (ops_worker deploy)" },
-  restart: { allowed: [], changes: [''] },
+  restart: { allowed: [], changes: [''], grant: "only with the restart grant of a person's own turn (ops_worker restart)" },
   rollback: { allowed: [], changes: [''] },
   'prepare-shutdown': { allowed: [], changes: [''] },
   start: { allowed: [], changes: [''] },
@@ -222,7 +227,7 @@ export function checkOpsShell(cmd: string, read: ReadCtx, rules = opsSecretRules
       const why = copyProblem(name, words.slice(i + 1), read, rules);
       if (why) return why;
     }
-    if (name === 'fffctl' && words[i + 1] !== undefined && !OPS_FFFCTL.includes(words[i + 1])) return `fffctl ${words[i + 1]} is a person's (deploys, restarts, settings, the vault, migrations): you have fffctl ${OPS_FFFCTL.join(', ')}`;
+    if (name === 'fffctl' && words[i + 1] !== undefined && !OPS_FFFCTL.includes(words[i + 1])) return `fffctl ${words[i + 1]} is a person's (rollbacks, settings, the vault, migrations): you have fffctl ${OPS_FFFCTL.join(', ')}`;
     if (name === 'fffctl' && FFFCTL_FORM_WORD.includes(words[i + 1] ?? '')) {
       const forms = FFFCTL_FORMS[words[i + 1]];
       const form = words[i + 2];
@@ -478,6 +483,7 @@ What you have:
 - \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root <root>"'\`. An update needs no new credential: never issue one for it. An update never needs a drain or a wait (w605): it stops only the daemon, agents mid-turn run on in their own agent hosts and the new daemon adopts them, so run it at once. After a portal deploy you do not update the machines: FF Factory does that itself once the deploy has verified (w887).
 - An installer rerun is yours, never a person's (w855, lothsahn: "don't ask ben to run installers"): the same update command with \`--max-sandboxes N\`, \`--max-agents-per-sandbox N\` or \`--max-unity N\` (Windows \`-MaxSandboxes\`, …) changes only what it names, and a sandbox count on a worker-root install changes in no other way. You run it when the job's message says an owner's open request asks for it (a \`[machine update for wNNN, approved by <name> …]\` message from ops_worker machine_update, or a job in which Lothsahn or Ben asked for the change themselves); the settings are the ones the message names, not more. A change nobody asked for, or one the message does not name, is not yours to make: report it instead. After it, check that list_machines shows the machine online with the new limits.
 - \`scp\` and \`sftp\` (w612): files between your scratch folder and a machine, both ways, over the same ssh (the portal's key, pinned host keys, port 22): \`scp ./check.sh m5:/tmp/\`, \`scp m5:/tmp/install.log ./\`, \`sftp -b cmds m5\` (a batch file: there is no terminal). They run as you, so they copy only what you may read and write: never the portal's files. No ssh options (-o, -i, -F, -J, -S): the machine is all they take.
+- \`fffctl restart\` (w974): a plain, soft portal restart with no new code (only the portal process restarts; the machines' workers keep running), only after a [restart] message (Lothsahn or Ben asked for it in their own words: the portal leaves a grant good once for 15 minutes; without it the command is refused). It takes no option. Run it, end your turn at once, and report after the portal is back as that message says, with the before-and-after list of the live worker sessions. Follow that message's steps.
 - \`fffctl update\`: the portal deploy, only after a [deploy] message (Lothsahn or Ben asked for it in their own words: the portal leaves a grant good once for 15 minutes; without it the command is refused). Follow that message's steps.
 - \`fffctl status\`, \`fffctl state\`, \`fffctl units\` and \`fffctl units --check\` (the critical units, active and enabled; --check prints "down: ..." and exits 1 if one is not; read only, and the watchdog and restarts are a person's), \`fffctl vault list [--names]\` and \`fffctl vault help\` (the vault's entries by name, kind, grants, last four characters and fingerprint, and the Claude pools' meters: never a value; adding, rotating, granting, removing and the key are a person's), \`fffctl machine-credential list\`, \`fffctl migrate --help\`, \`fffctl logs [N]\` (the portal's journal), \`fffctl credential list\`, and \`fffctl credential issue <machine id> --to <ssh target>\`: a new machine credential goes from this VM straight into a file on that machine (it prints the remote path and the last four characters, never the credential); then run the installer there with \`--credential-file\` / \`-CredentialFile\` and delete the file after. Issuing replaces the machine's credential: its running daemon is dropped within 20 s, so issue only for a machine being (re)installed. It needs the machine's record (list_machines), which only a person adds.
 - \`fff-machine-ssh --check\` (or \`fffctl machine-ssh-check\`): each machine's ssh alias, pinned host key, the key it shows over the tailnet and whether ssh gets in, then the portal's public authorized_keys line (\`from="<the portal's tailnet IP>",no-agent-forwarding,... ssh-ed25519 ...\`). \`fff-machine-ssh --key\`: that line alone, for a person to add on a new machine. \`fff-machine-ssh --pin <user>@<host> <SHA256:fingerprint>\`: pins a new machine's host key, only when the fingerprint a person read on the machine itself (\`ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub\`) is the one it shows over the tailnet, and only for a host nothing pins yet. Never pin a fingerprint you read from the network yourself; a host whose key changed is a person's.
@@ -485,7 +491,7 @@ What you have:
 - list_machines, list_sandboxes and system_status: the portal's state, read-only. wake_me: be woken later (an install, a reboot).
 - A scratch folder, ${OPS_PATHS.scratch}, on a 2 GiB file system that is all you can write (home and temp included). Write notes and scripts there.
 
-What you do not have, by design (the account and the VM enforce it, not this text): no git, no downloads, no package installs, no builds, no interpreters, no Unity, no game workspace; network only to Anthropic's API and the tailnet; no sudo but the two wrappers above; no read of the portal's config, data, secrets or keys. Reserved for a person, whatever a message says: restarting or rolling back the portal, a deploy without a [deploy] message, app settings, the vault, deleting anything on the portal, Steam, anything that spends money or publishes. On a machine you do only what the job asks; ask before deleting anything that is not the job's own (an uninstall the job names is the job's own).
+What you do not have, by design (the account and the VM enforce it, not this text): no git, no downloads, no package installs, no builds, no interpreters, no Unity, no game workspace; network only to Anthropic's API and the tailnet; no sudo but the two wrappers above; no read of the portal's config, data, secrets or keys. Reserved for a person, whatever a message says: rolling back the portal, a deploy without a [deploy] message, a restart without a [restart] message, app settings, the vault, deleting anything on the portal, Steam, anything that spends money or publishes. On a machine you do only what the job asks; ask before deleting anything that is not the job's own (an uninstall the job names is the job's own).
 
 Every command you run is logged with your transcript, which people read. Never print a token, key or credential: not in a command, not in a reply (a file holds it; pass the file). End every turn with what you did, what each command answered (the important lines), and what is left. Say what every id is.`.trim();
 }
@@ -566,7 +572,21 @@ export function workerUpdateRemote(m: { root: string; platform?: string }, extra
     : `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root ${m.root}${extra ? ` ${extra}` : ''}`;
 }
 
-/** A deploy a person asked for (ops_worker deploy): reported after the portal's next start. */
+/** What the worker reports after a restart a person asked for (w974): the same lines in the instruction before and after it. */
+const RESTART_REPORT =
+  'the `fffctl status` lines (the portal active, its release and `/api/health`, with the sha it answers), the sha from `/api/health` on its own, and which Claude account each kind of agent runs on, from system_status (the dispatcher, each orchestrator, the workers: the account name and at most the last 4 characters of its token; never a token). Say whether the sha is the one that ran before the restart (a plain restart builds nothing, so it should be) and, if the job moved agents to another token, whether system_status now shows them on it. If `fffctl status` shows the portal down or unhealthy, say so first and read `fffctl logs 200`.';
+
+/**
+ * The soft-restart evidence the worker records before and after (lothsahn, 2026-10-11, w974: "Please make sure the restart is a
+ * soft restart just like the deploy so it doesn't restart the workers"). Read-only commands only; written to its scratch.
+ */
+const RESTART_PROOF_BEFORE =
+  'Record the live worker sessions first, in a file in your scratch folder: from list_sandboxes every agent that is live or mid-turn (session id, sandbox, status), for each one `agent_transcript <session id>` for the turns count in its first line, and on each machine that has one (list_machines; ssh) the agent processes with their PIDs and start times (Mac or Linux: `ps -eo pid,lstart,args | grep -i "[c]laude"`; Windows: `powershell -NoProfile -Command "Get-Process claude | Select-Object Id,StartTime | Format-Table -HideTableHeaders"`). Never print a token or an environment.';
+const RESTART_PROOF_AFTER =
+  'Evidence that the restart was soft, from the same commands as before the restart (your file): for each worker session recorded, say whether it is still live, whether its PID and start time are the same, whether its turns count went up or stayed and did not fall, whether one that was mid-turn is still on the same turn, and whether its transcript has no `[app restarted]` message. Report none that ended, restarted or lost its turn, or name each that did. The portal\'s own agents (the orchestrators, the dispatcher, you) do restart; they are not workers and are not on the list.';
+
+
+/** A deploy or a restart a person asked for (ops_worker deploy, restart): reported after the portal's next start. */
 interface OpsDeploy {
   by: Requester;
   at: string;
@@ -581,6 +601,8 @@ export class OpsWorker {
   private readonly now: () => number;
   private job?: OpsJob;
   private deploying?: OpsDeploy;
+  /** A restart a person asked for (ops_worker restart, w974): reported after the portal's next start, like a deploy. */
+  private restarting?: OpsDeploy;
   /** The last deploy a person asked for, kept after the restart that reports it: the machine rollout (w887) reports to this person. */
   private lastDeploy?: OpsDeploy;
   private timer?: NodeJS.Timeout;
@@ -592,6 +614,7 @@ export class OpsWorker {
       const saved = JSON.parse(fs.readFileSync(d.file, 'utf8'));
       this.job = saved.job;
       this.deploying = saved.deploy;
+      this.restarting = saved.restart;
       this.lastDeploy = saved.lastDeploy;
     } catch {
       this.job = undefined;
@@ -614,21 +637,33 @@ export class OpsWorker {
     this.timer = setInterval(() => this.tick(), 60_000);
     this.timer.unref?.();
     const dep = this.deploying;
-    if (!dep) return;
+    const res = this.restarting;
+    if (!dep && !res) return;
     this.deploying = undefined;
+    this.restarting = undefined;
     this.save();
-    if (this.now() - Date.parse(dep.at) > OPS_LIMITS.deployReportMs) return;
+    const workRule = () => (this.job?.workIds?.length ? opsWorkRule(this.job.workIds) : '');
+    const reports: { by: Requester; text: string }[] = [];
+    if (dep && this.now() - Date.parse(dep.at) <= OPS_LIMITS.deployReportMs) {
+      reports.push({
+        by: dep.by,
+        text: `[deploy] The portal has started again (${new Date(this.now()).toISOString()}), after the deploy ${dep.by.displayName} asked for at ${dep.at}: most likely the update's own restart. Run \`fffctl status\` and report to ${dep.by.displayName}: the commit before (what fffctl update printed), the commit running now, whether the update was verified or rolled back (\`fffctl logs 200\` says), and the status lines. Do not update the machines' daemons: when the portal is verified FF Factory does that itself and reports it.${workRule()}`,
+      });
+    }
+    if (res && this.now() - Date.parse(res.at) <= OPS_LIMITS.deployReportMs) {
+      reports.push({
+        by: res.by,
+        text: `[restart] The portal has started again (${new Date(this.now()).toISOString()}), after the restart ${res.by.displayName} asked for at ${res.at}. ${RESTART_PROOF_AFTER} Report to ${res.by.displayName}: ${RESTART_REPORT}${workRule()}`,
+      });
+    }
+    if (!reports.length) return;
     const t = setTimeout(() => {
-      try {
-        this.d.sessions.send(
-          OPS_ID,
-          `[deploy] The portal has started again (${new Date(this.now()).toISOString()}), after the deploy ${dep.by.displayName} asked for at ${dep.at}: most likely the update's own restart. Run \`fffctl status\` and report to ${dep.by.displayName}: the commit before (what fffctl update printed), the commit running now, whether the update was verified or rolled back (\`fffctl logs 200\` says), and the status lines. Do not update the machines' daemons: when the portal is verified FF Factory does that itself and reports it.${this.job?.workIds?.length ? opsWorkRule(this.job.workIds) : ''}`,
-          'system',
-          undefined,
-          { requestedBy: dep.by, ops: 'resume' },
-        );
-      } catch (e) {
-        console.warn('ops-worker: could not tell the worker the portal is back:', (e as Error).message);
+      for (const r of reports) {
+        try {
+          this.d.sessions.send(OPS_ID, r.text, 'system', undefined, { requestedBy: r.by, ops: 'resume' });
+        } catch (e) {
+          console.warn('ops-worker: could not tell the worker the portal is back:', (e as Error).message);
+        }
       }
     }, delayMs);
     t.unref?.();
@@ -652,7 +687,7 @@ export class OpsWorker {
 
   private save() {
     try {
-      fs.writeFileSync(this.d.file, JSON.stringify({ job: this.job, deploy: this.deploying, lastDeploy: this.lastDeploy }, null, 1), { mode: 0o600 });
+      fs.writeFileSync(this.d.file, JSON.stringify({ job: this.job, deploy: this.deploying, restart: this.restarting, lastDeploy: this.lastDeploy }, null, 1), { mode: 0o600 });
     } catch (e) {
       console.warn('ops-worker: could not save its job:', (e as Error).message);
     }
@@ -752,37 +787,49 @@ export class OpsWorker {
   }
 
   /**
-   * A portal deploy (lothsahn, 2026-10-07: "Yes, please modify the ops worker to update yourself."): only Lothsahn's or
-   * Ben's own orchestrator, and only in a turn its person started with a message of their own, never a check-in, a
-   * timer, a relayed report or a job's follow-up. Leaves a grant in the data folder, good once for
-   * OPS_LIMITS.deployGrantMs, which fff-ops-priv checks and removes before it runs `fffctl update`: without it the worker
-   * cannot deploy, whatever it is told. Then tells the worker to do it and report.
+   * The gate both portal-changing actions share (deploy, restart): only Lothsahn's or Ben's own orchestrator, and only in a
+   * turn its person started with a message of their own, never a check-in, a timer, a relayed report or a job's follow-up.
+   * Leaves the action's grant in the data folder, good once for `ms`, which fff-ops-priv checks and removes before it runs
+   * the command: without it the worker cannot run it, whatever it is told.
    */
-  deploy(caller: SessionInfo | undefined, note = '', workIds: readonly string[] = []): string {
+  private grantFor(caller: SessionInfo | undefined, o: { noun: 'deploy' | 'restart'; file: string; ms: number }, workIds: readonly string[]) {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
-    if (!this.d.personTurn(caller.id)) throw new Error(`a portal deploy needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report); ask them`);
+    if (!this.d.personTurn(caller.id)) throw new Error(`a portal ${o.noun} needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report); ask them`);
     const ids = this.workIdsOf(workIds);
     const at = new Date(this.now());
-    const previous = this.job;
     const h = this.handle();
-    if (previous && previous.by.userId.toLowerCase() !== person.userId.toLowerCase() && isMidTurn(h.info)) {
-      throw new Error(`the orchestration worker is busy with ${previous.by.displayName}'s job (${previous.what}); wait for its turn to end, or ask them`);
+    if (this.job && this.job.by.userId.toLowerCase() !== person.userId.toLowerCase() && isMidTurn(h.info)) {
+      throw new Error(`the orchestration worker is busy with ${this.job.by.displayName}'s job (${this.job.what}); wait for its turn to end, or ask them`);
     }
-    const grant = { by: person.userId, name: person.displayName, at: at.toISOString(), expires: new Date(at.getTime() + OPS_LIMITS.deployGrantMs).toISOString() };
-    fs.writeFileSync(path.join(path.dirname(this.d.file), OPS_GRANT), `${JSON.stringify(grant)}\n`, { mode: 0o600 });
-    this.deploying = { by: person, at: at.toISOString() };
-    this.lastDeploy = this.deploying;
-    this.job = { by: person, at: at.toISOString(), what: 'deploy the portal (fffctl update)', ...(ids.length ? { workIds: ids } : {}) };
+    const grant = { by: person.userId, name: person.displayName, at: at.toISOString(), expires: new Date(at.getTime() + o.ms).toISOString() };
+    fs.writeFileSync(path.join(path.dirname(this.d.file), o.file), `${JSON.stringify(grant)}\n`, { mode: 0o600 });
+    return { person, ids, at, grant, h };
+  }
+
+  /** Such an action is a new job too: a fresh conversation and process, on this person's token (the restart that follows resumes it). */
+  private openGrantedJob(g: ReturnType<OpsWorker['grantFor']>, what: string, label: string) {
+    this.job = { by: g.person, at: g.at.toISOString(), what, ...(g.ids.length ? { workIds: g.ids } : {}) };
     this.save();
-    // A deploy is a new job too: a fresh conversation and process, on this person's token (the restart that follows resumes it).
-    if (!isMidTurn(h.info)) {
-      if (h.live) h.stop(true);
-      delete h.info.sdkSessionId;
+    if (!isMidTurn(g.h.info)) {
+      if (g.h.live) g.h.stop(true);
+      delete g.h.info.sdkSessionId;
     }
-    this.d.store.append(OPS_ID, { kind: 'system', text: `A new job (a deploy) from ${person.displayName}'s orchestrator: a fresh conversation.` });
-    h.info.requestedBy = person;
-    this.d.store.putSession(h.info);
+    this.d.store.append(OPS_ID, { kind: 'system', text: `A new job (${label}) from ${g.person.displayName}'s orchestrator: a fresh conversation.` });
+    g.h.info.requestedBy = g.person;
+    this.d.store.putSession(g.h.info);
+  }
+
+  /**
+   * A portal deploy (lothsahn, 2026-10-07: "Yes, please modify the ops worker to update yourself."), through grantFor's gate
+   * and a deploy grant. Then tells the worker to do it and report.
+   */
+  deploy(caller: SessionInfo | undefined, note = '', workIds: readonly string[] = []): string {
+    const g = this.grantFor(caller, { noun: 'deploy', file: OPS_GRANT, ms: OPS_LIMITS.deployGrantMs }, workIds);
+    const { person, ids, grant } = g;
+    this.deploying = { by: person, at: g.at.toISOString() };
+    this.lastDeploy = this.deploying;
+    this.openGrantedJob(g, 'deploy the portal (fffctl update)', 'a deploy');
     console.log(`ops-worker: ${person.userId} asked for a portal deploy in a turn of their own; grant until ${grant.expires}`);
     const text = `[deploy] ${person.displayName} asked, in a turn of their own, for a portal deploy (fffctl update).${note.trim() ? ` Their words: ${note.trim()}` : ''}
 1. Run \`fffctl status\` and note the release and its commit.
@@ -792,6 +839,29 @@ Do not update the machines' daemons yourself: once the new portal is verified (n
 Report to ${person.displayName}: the commit before, the commit after, whether it was verified or rolled back, and \`fffctl status\`.${ids.length ? `${opsWorkRule(ids)} Only in the report after the restart, once the new portal is verified: never in the turn that starts the update.` : ''}`;
     this.d.sessions.send(OPS_ID, text, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
     return `Asked the orchestration worker (${OPS_ID}) to deploy the portal: it may run fffctl update once until ${grant.expires}. The portal will drain and restart; its report (commit before and after, fffctl status) comes back to you as an [ops worker] message after the restart.`;
+  }
+
+  /**
+   * A plain portal restart, no new code (w974, lothsahn 2026-10-11: "Please schedule a worker to update ff-factory so that the ops
+   * worker has a fffctl restart command to restart the portal and can use it"): the same gate as a deploy, with its own grant
+   * (OPS_RESTART_GRANT), which opens fffctl restart and nothing else. A soft restart like the deploy's: the portal
+   * process restarts on the release it runs, and the machines' workers keep running and are taken back by the new portal
+   * (machines.keepAgentsOnRestart, which fff-ops-priv requires). Then tells the worker to do it, to prove that, and to report.
+   */
+  restart(caller: SessionInfo | undefined, note = '', workIds: readonly string[] = []): string {
+    const g = this.grantFor(caller, { noun: 'restart', file: OPS_RESTART_GRANT, ms: OPS_LIMITS.restartGrantMs }, workIds);
+    const { person, ids, grant } = g;
+    this.restarting = { by: person, at: g.at.toISOString() };
+    this.openGrantedJob(g, 'restart the portal (fffctl restart)', 'a restart');
+    console.log(`ops-worker: ${person.userId} asked for a portal restart in a turn of their own; grant until ${grant.expires}`);
+    const text = `[restart] ${person.displayName} asked, in a turn of their own, for a plain portal restart (fffctl restart): no new code, no build. It is a soft restart, like the deploy's: only the portal process restarts. The workers on the machines keep running and the new portal takes them back; none is stopped, restarted or asked to wrap up.${note.trim() ? ` Their words: ${note.trim()}` : ''}
+1. Run \`fffctl status\` and note the release, its commit and the sha \`/api/health\` answers. ${RESTART_PROOF_BEFORE}
+2. Run \`fffctl restart\`, once, with no option. It is allowed until ${grant.expires} and only once, and it only asks for the restart: the portal restarts on the release it runs. If it is refused (for example "keepAgentsOnRestart is not true": the restart would stop the machines' workers), do not look for another way: report the refusal to ${person.displayName}.
+3. End your turn with what it printed and where your before-list is, right away. Your process ends with the old portal; when the new one starts, FF Factory messages you to report. If no message comes within 20 minutes, wake_me 20 before you end the turn covers it: then report from \`fffctl status\` and \`fffctl logs 200\`.
+Do not update the machines' daemons: a restart brings no new code. Do not run \`fffctl update\` or anything else the restart does not need.
+Report to ${person.displayName}: ${RESTART_REPORT} ${RESTART_PROOF_AFTER}${ids.length ? `${opsWorkRule(ids)} Only in the report after the restart, once the portal answers again: never in the turn that starts it.` : ''}`;
+    this.d.sessions.send(OPS_ID, text, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
+    return `Asked the orchestration worker (${OPS_ID}) to restart the portal: it may run fffctl restart once until ${grant.expires}. It is a soft restart like the deploy's (the machines' workers keep running; none is stopped or restarted). The worker's report (fffctl status, the /api/health sha, which Claude account each kind of agent is on, and its before-and-after list of the live worker sessions, PIDs and turn counts) comes back to you as an [ops worker] message after the restart.`;
   }
 
   /** Stop or interrupt it: Lothsahn's or Ben's own orchestrator, any turn (a stop is always safe). */
