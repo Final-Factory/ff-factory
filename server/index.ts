@@ -41,7 +41,7 @@ import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
-import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostAccountsInUse, reserveLines, hostRole, hostRoleOf, reservedCredentials, runsOnThisHost, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostAccountsInUse, reserveLines, hostRole, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, runsOnThisHost, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
 import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
@@ -1914,7 +1914,7 @@ usage.personTokens = () => [...personTokens(), ...fileTokenEntry(), ...vault.cla
 /** Recent reasons a run did not get what the vault should give it (a fallback, an entry that would not open), newest last. */
 const vaultProblems: { at: string; line: string }[] = [];
 /** Live sessions whose process started on this credential key, not counting `except` (the asking session's own). */
-const liveOnKey = (key: string, except?: string) => [...store.sessions.values()].filter((s) => s.id !== except && s.account === key && s.status !== 'stopped' && s.status !== 'error').length;
+const liveOnKey = (key: string, except?: string) => liveOnAccount(store.sessions.values(), key, except);
 /** Whether a vault Claude token is also the dispatcher's credential or the host token (w971), and for whom its reserve is kept. */
 function reservedFor(fingerprint: string): string | undefined {
   const c = reservedCredentials(cfg).find((x) => x.key === `token:${fingerprint}`);
@@ -1944,6 +1944,13 @@ function sourceOf(s: SessionInfo, token: string | undefined, toMachine: (id: str
   const login = () => hostAccount(cfg, role) === 'login';
   // A person's orchestrator (or the ops worker for them) on "vault" (w738) ran on the pool token it was handed last; a
   // session with no pick (or one before a restart) on the token file it falls back to.
+  // The dispatcher pinned to one vault token (claudeAccounts.dispatcher "vault:<name>", w996): a stopped session is counted
+  // on it too; a running one is on the account it started with (sessionSource).
+  const pinned = role === 'dispatcher' ? pinnedDispatcherEntry(cfg) : undefined;
+  if (pinned && (!s.status || s.status === 'stopped' || s.status === 'error')) {
+    const got = vault.claudeByName(pinned);
+    if (got) return `token:${got.entry.fingerprint}`;
+  }
   if (s.kind !== 'worker' && !s.machineId && hostAccount(cfg, role) === 'vault') {
     const running = !!s.account && !!s.status && s.status !== 'stopped' && s.status !== 'error';
     const fp = running ? undefined : vault.lastPickOf(s.id);

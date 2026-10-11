@@ -15,7 +15,7 @@ Every agent the portal starts runs on one of three kinds of Claude credential:
 | Agents | Config | Values | Default |
 |---|---|---|---|
 | The orchestrator (and the ops worker working for a person) | `claudeAccounts.orchestrator` | `"token"`, `"login"` (this host's), `"tokenfile"` or `"vault"` (each person's own pool, an owner's setting; w738) | `"token"` |
-| The dispatcher (w464) | `claudeAccounts.dispatcher` | same; once set it also overrides the system payer's own token in `userClaudeEnv` | unset: the system payer's own token if any, else `claudeAccounts.orchestrator`'s |
+| The dispatcher (w464) | `claudeAccounts.dispatcher` | same, and `"vault:<vault entry name>"` (one named vault Claude token, an owner's setting; w996); once set it also overrides the system payer's own token in `userClaudeEnv` | unset: the system payer's own token if any, else `claudeAccounts.orchestrator`'s |
 | Workers and standing agents on a machine (a Mac, a PC, BEAST, this host's own daemon) | `machines.useHostClaudeEnv` | `true` (host token) or `false` (the Mac's login); global, or per machine | `true` |
 
 The portal runs only the orchestrators and the dispatcher (w510, 2026-10-06), so those are the only agents whose
@@ -80,9 +80,16 @@ applies to the next session with no restart, and every other Claude credential r
 (`poolRunEnv`, `server/secrets.ts`). Which of their tokens, and what happens when they are over their caps or used up:
 [vault.md](vault.md) section 4. The orchestration worker works the same way, on the pool of the person whose orchestrator
 gave it the job, and starts a fresh conversation and process for every new job and every change of caller
-([ops-worker.md](ops-worker.md)). **The dispatcher never takes `"vault"`:** it keeps the shared token file (a dispatcher
+([ops-worker.md](ops-worker.md)). **The dispatcher never takes `"vault"`** (it has no person whose pool to use): it keeps the shared token file (a dispatcher
 that inherits `"vault"` from the orchestrator's setting is on the token file, else the host token), and that
-credential and the host token keep a reserve for their own roles. A person with no vault token yet falls back to the
+credential and the host token keep a reserve for their own roles. It may be set to **one named vault token** instead,
+`claudeAccounts.dispatcher "vault:<entry name>"` (w996; e.g. `"vault:vault-lothsahn-1"`, the names `fffctl vault list`
+shows; an owner's setting like `"vault"`, refused unless the vault holds an enabled Claude entry of that name that its key
+opens): the dispatcher's process then starts with that token alone as `CLAUDE_CODE_OAUTH_TOKEN` (every other Claude credential
+removed first, `pinnedDispatcherEnv`, `server/secrets.ts`), read at each process start, so it applies to the dispatcher's
+next start. The dispatcher's reserve moves with it and the dispatcher takes no pool slot there: [vault.md](vault.md),
+"The dispatcher on a vault token". When the vault cannot give that token later (entry removed or disabled, key gone) the
+dispatcher still starts, on the token file (else the host token), and `system_status` warns for 24 hours. A person with no vault token yet falls back to the
 token file, as before. `system_status` names the account per role ("each person's own vault pool (token file …dAAA for a
 person with no vault token)"), each person's pool with each token's `pool:<state>` label (`priority` on the one a new job gets), and the reserves. The pool limits are config
 `vault.pool.*`, one set for everyone, which any person's orchestrator may change: `sessionHoldPercent` 80,

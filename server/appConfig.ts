@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, TOKEN_FILE_ROLES, VAULT_ROLES_ACCOUNT, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole, type IntakeConfig } from './config.ts';
+import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, TOKEN_FILE_ROLES, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VAULT_PINNED_ROLES, VAULT_ROLES_ACCOUNT, VOICE_DEFAULTS, pinnedVaultEntry, type ClaudeAccount, type Config, type HostRole, type IntakeConfig } from './config.ts';
 import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret, readTokenFile } from './secrets.ts';
+import { vaultContext } from './vault.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
 import { writeFileDurable } from './durable.ts';
@@ -384,7 +385,16 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
         if (!VAULT_ROLES_ACCOUNT.includes(role)) throw new Error(`${key} cannot be "vault": only ${VAULT_ROLES_ACCOUNT.join(', ')} run on a person's own vault tokens (the dispatcher stays on the token file)`);
         return v;
       }
-      if (v !== 'login' && v !== 'token') throw new Error(`${key} is "login" (this host's stored claude.ai login) or "token" (config claudeEnv's)${TOKEN_FILE_ROLES.includes(role) ? ', or "tokenfile" (config claudeTokenFile\'s)' : ''}`);
+      const pinned = pinnedVaultEntry(typeof v === 'string' ? v : undefined);
+      if (pinned !== undefined) {
+        // w996: the dispatcher on one named vault token (it has no person whose pool to use); its reserve moves there.
+        if (!VAULT_PINNED_ROLES.includes(role)) throw new Error(`${key} cannot be "${v}": only ${VAULT_PINNED_ROLES.join(', ')} can run on one named vault token (the orchestrators use "vault": each person's own pool)`);
+        if (!VAULT_ENTRY_NAME.test(pinned)) throw new Error(`${key} is "${VAULT_PINNED_PREFIX}<vault entry name>", the name \`fffctl vault list\` shows (lower-case letters, digits, ".", "_", "-"), e.g. "vault:vault-lothsahn-1"`);
+        const context = vaultContext();
+        if (context && !context.vault.claudeByName(pinned)) throw new Error(`${key}: the vault has no enabled Claude token named "${pinned}" that its key opens (\`fffctl vault list\` shows the names)`);
+        return v;
+      }
+      if (v !== 'login' && v !== 'token') throw new Error(`${key} is "login" (this host's stored claude.ai login) or "token" (config claudeEnv's)${TOKEN_FILE_ROLES.includes(role) ? ', or "tokenfile" (config claudeTokenFile\'s)' : ''}${VAULT_PINNED_ROLES.includes(role) ? `, or "${VAULT_PINNED_PREFIX}<vault entry name>" (one named vault Claude token)` : ''}`);
       // Refuse a switch that would leave the role unable to start: the stored login must be there and alive.
       const problem = v === 'login' && cfg ? hostLoginProblem(cfg) : undefined;
       if (problem) throw new Error(`${key} cannot be "login": ${problem}`);

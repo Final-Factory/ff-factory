@@ -541,6 +541,19 @@ export class Vault {
       .map(({ e, token }) => ({ token, label: `${e.name} …${e.last4}`, fingerprint: e.fingerprint, ...(e.email ? { email: e.email } : {}) }));
   }
 
+  /**
+   * The enabled Claude entry called `name` and its token, when the key opens it: the one token the dispatcher is pinned to
+   * (claudeAccounts.dispatcher "vault:<name>", w996). No grant or owner is checked: the setting is the consent, and the
+   * dispatcher has no person whose pool it would be.
+   */
+  claudeByName(name: string): { entry: VaultEntryMeta; token: string } | undefined {
+    this.reload();
+    const e = this.data.entries.find((x) => x.name === name && x.kind === 'claude' && !x.disabled);
+    const { key } = this.key();
+    const token = e && key ? this.open(key, e) : undefined;
+    return e && token ? { entry: this.meta(e), token } : undefined;
+  }
+
   /** Every enabled GitHub entry the key opens, with its value: the health probe's list (server/githubTokens.ts, w868). */
   githubTokens(): { entry: VaultEntryMeta; token: string }[] {
     this.reload();
