@@ -595,3 +595,24 @@ function deps(sessions: SessionInfo[], sb: MachineSandbox, o: Partial<Constructo
     ...o,
   };
 }
+
+test("w890 (measured live): the stop's own transcript line does not make the git state stale, so a stopped worker's sandbox is released on the next pass, not after the daemon's next 2-minute git read", () => {
+  const wait = WAITS.deploy;
+  // Live, 2026-10-10: stopped 19:29:40Z, released 19:31:40Z. The stop wrote a line (lastActivityAt 19:29:41), the git state
+  // read at 19:29:00 was "older than the last activity", and the pass waited for the next read.
+  const worked = iso(NOW - 3 * MIN);
+  const stoppedAt = iso(NOW - 5_000);
+  const git = { at: iso(NOW - MIN) };
+  const w = worker('w1', { lastActivityAt: stoppedAt, releaseDue: { at: iso(NOW - 10_000), why: wait, workedAt: worked } });
+  assert.deepEqual(releaseStep(w, sandbox('slot1', {}, git), { ...facts([w]), waitOn: wait }), { do: 'release', why: wait, branch: 'feature/slot1' });
+  // Without the record (an older release due, or work after it) the old rule holds.
+  const plain = worker('w1', { lastActivityAt: stoppedAt, releaseDue: { at: iso(NOW - 10_000), why: wait } });
+  assert.equal(releaseStep(plain, sandbox('slot1', {}, git), { ...facts([plain]), waitOn: wait }), undefined);
+  // And git read before the work itself is still stale.
+  assert.equal(releaseStep(w, sandbox('slot1', {}, { at: iso(NOW - 4 * MIN) }), { ...facts([w]), waitOn: wait }), undefined);
+  // The pass records the last work when it stops a worker.
+  const a = worker('a1', { status: 'idle', lastActivityAt: worked });
+  const p = new PlaceAgain(deps([a], sandbox('slot1', { sessionIds: ['a1'] }), { isLive: () => true, waitOn: () => wait }));
+  p.tick();
+  assert.equal(a.releaseDue?.workedAt, worked);
+});

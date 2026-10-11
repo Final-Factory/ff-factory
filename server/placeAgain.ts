@@ -119,7 +119,9 @@ export function keptWhy(s: SessionInfo, sb: MachineSandbox, f: PlaceFacts): stri
   if (sb.status !== 'ready') return `the sandbox is ${sb.status}`;
   const g = sb.git;
   if (!g) return 'its git state is not known yet';
-  if (Date.parse(g.at ?? '') < Date.parse(s.lastActivityAt)) return 'its git state has not been read since the worker last worked';
+  // The stop that made its release due writes a line of its own (it moves lastActivityAt): the work is what counts (w890,
+  // measured live on 2026-10-10: stop 19:29:40Z, release 19:31:40Z, waiting for the daemon's next 2-minute git read).
+  if (Date.parse(g.at ?? '') < Date.parse(s.releaseDue?.workedAt ?? s.lastActivityAt)) return 'its git state has not been read since the worker last worked';
   if (g.branch === 'detached HEAD' || g.branch === '?') return 'it is not on a branch';
   if (f.unityHolders.includes(`sandbox:${sb.id}`)) return 'a Unity batch run of that sandbox is in flight';
   const other = f.sessions.find((o) => o.id !== s.id && o.machineSandbox === sb.id && occupies(o, f.live(o.id), f.now) && !releasable(o, f));
@@ -400,7 +402,7 @@ export class PlaceAgain {
       if (step.do === 'stop') {
         // Stopped while Idle: its sandbox stays its until the next pass releases it, its worktree clean (w656).
         if (step.due) {
-          s.releaseDue = { at: new Date(this.now()).toISOString(), why: step.why };
+          s.releaseDue = { at: new Date(this.now()).toISOString(), why: step.why, workedAt: s.lastActivityAt };
           this.d.save(s);
           stoppedDue = true;
         }

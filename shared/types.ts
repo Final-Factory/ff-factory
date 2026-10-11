@@ -260,7 +260,11 @@ export interface SessionInfo {
    * queued message), or its work over, and this is why. Its sandbox stays its (holdsSandbox) until the release pass
    * releases it (placeReleased) or it is messaged, so new work never starts on its branch or over its uncommitted files.
    */
-  releaseDue?: { at: string; why: string };
+  /**
+   * `workedAt`: its last activity when the release pass decided to stop it (w890): the stop's own transcript line moves
+   * `lastActivityAt`, and a git state read before that is not stale, since nothing was worked in between.
+   */
+  releaseDue?: { at: string; why: string; workedAt?: string };
   /**
    * Machine sandbox workers (w640, w656): stopped with its check-in far away (more than RELEASE_AFTER_MS), its requests
    * over, its w613 hold past, or stopped while idle (releaseDue), its worktree clean, so its sandbox no longer counts as its (holdsSandbox, shared/agentState.ts) and may take
