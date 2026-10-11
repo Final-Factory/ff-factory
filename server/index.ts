@@ -41,7 +41,7 @@ import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
-import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostAccountsInUse, reserveLines, hostRole, hostRoleOf, runsOnThisHost, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostAccountsInUse, reserveLines, hostRole, hostRoleOf, reservedCredentials, runsOnThisHost, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
 import { clock, firstFree, poolBanner, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
@@ -62,7 +62,7 @@ import { DRY_RUN_BANNER, DRY_RUN_WHY, defuseConfig, dryRun } from './dryRun.ts';
 import { portalPublicKey, tailnetAddress } from './machineSsh.ts';
 import { machineSshHttp } from './machineSshHttp.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
-import type { AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
+import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
 import { SpendStore, buildReport } from './spend.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
@@ -1915,11 +1915,17 @@ usage.personTokens = () => [...personTokens(), ...fileTokenEntry(), ...vault.cla
 const vaultProblems: { at: string; line: string }[] = [];
 /** Live sessions whose process started on this credential key, not counting `except` (the asking session's own). */
 const liveOnKey = (key: string, except?: string) => [...store.sessions.values()].filter((s) => s.id !== except && s.account === key && s.status !== 'stopped' && s.status !== 'error').length;
+/** Whether a vault Claude token is also the dispatcher's credential or the host token (w971), and for whom its reserve is kept. */
+function reservedFor(fingerprint: string): string | undefined {
+  const c = reservedCredentials(cfg).find((x) => x.key === `token:${fingerprint}`);
+  return c ? (c.role === 'dispatcher' ? 'the dispatcher' : 'its own roles') : undefined;
+}
 setVaultContext({
   vault,
   usageOf: (fp) => usage.entries.get(`token:${fp}`)?.usage,
   liveOn: (fp, except) => liveOnKey(`token:${fp}`, except),
   limits: () => poolLimits(cfg),
+  reservedFor,
   payer: () => identity.systemPayer().userId,
   githubUsable: github.usable,
   onGithubUse: (e, what) => github.noteUse(e, what),
@@ -1977,7 +1983,12 @@ function accountsNow() {
     const t = toMachine(m.id);
     return { id: m.id, usesToken: !!t && !!token && tokenKey(t) === tokenKey(token), onVault: claudeFromVault(cfg, m) };
   });
-  return buildAccounts(usage.entries, {
+  // A vault token's pool state and score, for the accounts page (w971).
+  const poolOf = new Map<string, NonNullable<AccountUsage['pool']>>();
+  for (const [person, list] of vault.pools({ usageOf: (fp) => usage.entries.get(`token:${fp}`)?.usage, liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor })) {
+    for (const t of list) poolOf.set(`token:${t.entry.fingerprint}`, { person, state: t.view.state, text: `${t.view.state}: ${t.view.scoreText}` });
+  }
+  const built = buildAccounts(usage.entries, {
     hostName: os.hostname(),
     token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
     hostLoginRoles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login'),
@@ -1995,6 +2006,10 @@ function accountsNow() {
       vault: used.vault || machineList.some((m) => m.onVault),
     },
     sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sourceOf(s, token, toMachine), live: s.status !== 'stopped' && s.status !== 'error' })),
+  });
+  return built.map((a) => {
+    const pool = a.sources.map((k) => poolOf.get(k)).find((x) => !!x);
+    return pool ? { ...a, pool } : a;
   });
 }
 // Which agents are on which account, and how many run now (the order), change with sessions and machines.
@@ -2061,13 +2076,15 @@ const vaultLines = () => {
 function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarning[] } {
   const usageOfKey = (key: string) => usage.entries.get(key)?.usage;
   const titlesOn = (key: string) => [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error').map((s) => s.title);
-  const pools = vault.pools({ usageOf: (fp) => usageOfKey(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), now: () => now });
+  const pools = vault.pools({ usageOf: (fp) => usageOfKey(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), now: () => now, reservedFor });
   const lines: string[] = [];
   const warnings: TokenWarning[] = [];
   for (const [person, list] of [...pools].sort((a, b) => a[0].localeCompare(b[0]))) {
+    // Best score first: the order the pool picks in (w971); no score last.
+    list.sort((a, b) => (b.view.score ?? -1) - (a.view.score ?? -1) || a.entry.name.localeCompare(b.entry.name));
     const each = list.map((t) => {
       const on = titlesOn(`token:${t.entry.fingerprint}`);
-      return `${t.entry.name} …${t.entry.last4} ${t.view.state} (${t.view.why}${t.view.weeklyResetsAt ? `; weekly resets ${clock(t.view.weeklyResetsAt)}` : ''}${on.length ? `; ${on.length} running: ${on.slice(0, 3).join(', ')}${on.length > 3 ? ', …' : ''}` : ''})`;
+      return `${t.entry.name} …${t.entry.last4} ${t.view.state} (${t.view.why}; ${t.view.scoreText}${t.view.weeklyResetsAt ? `; weekly resets ${clock(t.view.weeklyResetsAt)}` : ''}${on.length ? `; ${on.length} running: ${on.slice(0, 3).join(', ')}${on.length > 3 ? ', …' : ''}` : ''})`;
     });
     const views = list.map((t) => t.view);
     const kind = poolKind(views);
@@ -2082,7 +2099,7 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
           : kind === 'slot-taken'
             ? `no token is free for a new job right now (the ones that still work are busy with their one job): a new job starts when the running one finishes${next ? `, or when a limit lifts ${clock(next)}` : ''}`
             : 'workers and agents served';
-    lines.push(`Claude token pool, ${person} (${list.length} token${list.length === 1 ? '' : 's'}, soonest weekly reset first; caps ${poolLimits(cfg).sessionHold}% 5-hour / ${poolLimits(cfg).onePerWeekly}% one at a time / ${poolLimits(cfg).retireWeekly}% retired): ${each.join('; ')}. ${verdict}`);
+    lines.push(`Claude token pool, ${person} (${list.length} token${list.length === 1 ? '' : 's'}, highest score first: weekly % left per hour to the reset, scaled by the 5-hour room; caps ${poolLimits(cfg).sessionHold}% 5-hour / ${poolLimits(cfg).onePerWeekly}% one at a time / ${poolLimits(cfg).retireWeekly}% retired): ${each.join('; ')}. ${verdict}`);
     const banner = poolBanner(list.map((t) => ({ name: t.entry.name, last4: t.entry.last4, view: t.view })), 'your', vaultOrch);
     // For this person's own pages only (broadcast and appState filter on `person`): nobody else's top banner shows it.
     if (banner) warnings.push({ id: `pool:${person}`, kind: banner.kind, person, text: banner.text });

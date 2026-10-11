@@ -84,9 +84,17 @@ gave it the job, and starts a fresh conversation and process for every new job a
 that inherits `"vault"` from the orchestrator's setting is on the token file, else the host token), and that
 credential and the host token keep a reserve for their own roles. A person with no vault token yet falls back to the
 token file, as before. `system_status` names the account per role ("each person's own vault pool (token file …dAAA for a
-person with no vault token)"), each person's pool with each token's state, and the reserves. The pool limits are config
+person with no vault token)"), each person's pool with each token's state and score, and the reserves. The pool limits are config
 `vault.pool.*`, one set for everyone, which any person's orchestrator may change: `sessionHoldPercent` 80,
 `onePerWeeklyPercent` 95, `retireWeeklyPercent` 99, `reservePerDayPercent` 5, `reserveSessionPercent` 20.
+
+**Which token, and the dispatcher's reserve (w971).** A person's runs take the pool token with the highest score: weekly % left
+per hour until its weekly reset, scaled by the room left in the 5-hour window ([vault.md](vault.md) section 4, "The order").
+A pool token that is also the dispatcher's credential (the token file today) or the host token is not handed to any new run
+while it is inside that credential's reserve and another token of the person has room; with no other room, the person's
+orchestrator still uses it and workers wait. A run already on it keeps running and moves at its next start. The accounts list
+in the dashboard shows each vault token's pool state and score under its name ("pool: reserved: score 1.0%/day (3% weekly left
+over 3.0 days, x1.00 for the 5-hour room)"), and `system_status` lists each person's tokens best score first.
 
 The meters: a session on a pool token shows on that token's account (a live session by the account its process started
 on; a stopped orchestrator by the last token it was handed).

@@ -334,7 +334,7 @@ export function machineRunEnv(
   if (!ctx) return plain;
   const wantClaude = vaultOn && !own;
   const wantGithub = githubFromVault(cfg, refId(machine));
-  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, sessionId: run.sessionId }, { claude: wantClaude, github: wantGithub, githubUsable: ctx.githubUsable, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits });
+  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, sessionId: run.sessionId }, { claude: wantClaude, github: wantGithub, githubUsable: ctx.githubUsable, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
   for (const p of s.problems) ctx.onProblem?.(p);
   // GitHub (w868): the person's own token, else the machine's own gh login as before; never another person's.
   const github = s.github ? { github: `${s.github.name} …${s.github.last4}` } : {};
@@ -352,8 +352,8 @@ export function machineRunEnv(
 }
 
 /** "vault token ben-max …abcd" for a run's account line, safe to show. */
-function poolAccount(c: { entry: { name: string; last4: string }; how: 'normal' | 'over-cap' }, person: string | undefined): string {
-  return `vault token ${c.entry.name} …${c.entry.last4} (${person ? `${person}'s pool` : 'a pool'}${c.how === 'over-cap' ? ', over its caps: used up first' : ''}, docs/vault.md)`;
+function poolAccount(c: { entry: { name: string; last4: string }; how: 'normal' | 'over-cap' | 'in-reserve' }, person: string | undefined): string {
+  return `vault token ${c.entry.name} …${c.entry.last4} (${person ? `${person}'s pool` : 'a pool'}${c.how === 'over-cap' ? ', over its caps: used up first' : c.how === 'in-reserve' ? ", inside the dispatcher's reserve: no other token has room" : ''}, docs/vault.md)`;
 }
 
 /**
@@ -373,7 +373,7 @@ export function poolRunEnv(
 ): { env: Record<string, string | undefined>; account: string } {
   const plain = () => ({ env: fallback(), account: baseAccount(cfg, 'orchestrator') === 'tokenfile' ? 'token file' : 'host token' });
   if (hostAccount(cfg, 'orchestrator') !== 'vault' || !ctx || !run.personId) return plain();
-  const s = ctx.vault.forRun({ machineId: 'portal', role: run.role, userId: run.personId, sessionId: run.sessionId }, { claude: true, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits });
+  const s = ctx.vault.forRun({ machineId: 'portal', role: run.role, userId: run.personId, sessionId: run.sessionId }, { claude: true, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
   for (const p of s.problems) ctx.onProblem?.(p);
   if (s.claude) {
     const all = { ...process.env, ...cfg.claudeEnv };

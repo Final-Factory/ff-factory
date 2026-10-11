@@ -4,7 +4,7 @@ import path from 'node:path';
 import { checkObject, readJsonDurable } from './durable.ts';
 import { withFileLock, writeJsonOwned } from './machineTokens.ts';
 import type { PlanUsage, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultStatus, WorkItem } from '../shared/types.ts';
-import { POOL_DEFAULTS, pickPool, judge, type PoolLimits, type PoolToken, type PoolView } from './tokenPool.ts';
+import { POOL_DEFAULTS, pickPool, judge, reserveOf, type PoolLimits, type PoolToken, type PoolView } from './tokenPool.ts';
 
 /**
  * The token vault (docs/vault.md, w512): the secrets worker runs need, kept by the portal, encrypted value by value with a
@@ -284,7 +284,7 @@ export type UpdateInput = Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'role
 
 /** What a run gets from the vault: one Claude token (with its entry) and the other granted secrets, as environment. */
 export interface RunSecrets {
-  claude?: { entry: VaultEntryMeta; token: string; how: 'normal' | 'over-cap' };
+  claude?: { entry: VaultEntryMeta; token: string; how: 'normal' | 'over-cap' | 'in-reserve'; /** Its score in words (w971), no token. */ why?: string };
   /**
    * The run's person has Claude tokens in the vault and none may serve this run now (every one over its caps or used up):
    * the run is held (a worker, the ops worker) or stopped (an orchestrator), with this reason and when the first frees up.
@@ -566,7 +566,7 @@ export class Vault {
   }
 
   /** The pick's view of one Claude entry: its meters, and the processes live on it other than `except`'s. */
-  private poolToken(e: VaultEntry, usageOf: ((fp: string) => PlanUsage | undefined) | undefined, liveOn: ((fp: string, except?: string) => number) | undefined, except: string | undefined, now: number): PoolToken {
+  private poolToken(e: VaultEntry, usageOf: ((fp: string) => PlanUsage | undefined) | undefined, liveOn: ((fp: string, except?: string) => number) | undefined, except: string | undefined, now: number, reservedFor?: (fp: string) => string | undefined, limits: PoolLimits = POOL_DEFAULTS): PoolToken {
     const r = this.recent.get(e.fingerprint);
     let pending = 0;
     if (r) {
@@ -576,23 +576,26 @@ export class Vault {
       }
     }
     // A start in progress is not in the live counts yet; whichever is more, never both (the same process).
-    return { id: e.id, name: e.name, fingerprint: e.fingerprint, owner: e.owner, usage: usageOf?.(e.fingerprint), others: Math.max(liveOn?.(e.fingerprint, except) ?? 0, pending) };
+    const usage = usageOf?.(e.fingerprint);
+    // The dispatcher's credential or the host token (w971): its reserve is kept from everything but the dispatcher.
+    const reserveFor = reservedFor?.(e.fingerprint);
+    return { id: e.id, name: e.name, fingerprint: e.fingerprint, owner: e.owner, usage, others: Math.max(liveOn?.(e.fingerprint, except) ?? 0, pending), ...(reserveFor ? { reserve: reserveOf(usage, limits, now), reserveFor } : {}) };
   }
 
   /**
    * Every person's Claude pool as the rules read it now (system_status, `fffctl vault list`): each enabled token with its
    * state and how many processes run on it. The state is the worker's reading (the strictest).
    */
-  pools(o: { usageOf?: (fp: string) => PlanUsage | undefined; liveOn?: (fp: string, except?: string) => number; limits?: PoolLimitsOf; now?: () => number }): Map<string, { entry: VaultEntryMeta; view: PoolView; live: number }[]> {
+  pools(o: { usageOf?: (fp: string) => PlanUsage | undefined; liveOn?: (fp: string, except?: string) => number; limits?: PoolLimitsOf; now?: () => number; reservedFor?: (fp: string) => string | undefined }): Map<string, { entry: VaultEntryMeta; view: PoolView; live: number }[]> {
     this.reload();
     const limits = o.limits?.() ?? POOL_DEFAULTS;
     const now = o.now?.() ?? Date.now();
     const out = new Map<string, { entry: VaultEntryMeta; view: PoolView; live: number }[]>();
     for (const e of this.data.entries) {
       if (e.kind !== 'claude' || e.disabled || !e.owner) continue;
-      const t = this.poolToken(e, o.usageOf, o.liveOn, undefined, now);
+      const t = this.poolToken(e, o.usageOf, o.liveOn, undefined, now, o.reservedFor, limits);
       const list = out.get(e.owner.toLowerCase()) ?? [];
-      list.push({ entry: this.meta(e), view: judge(t, limits), live: t.others });
+      list.push({ entry: this.meta(e), view: judge(t, limits, now), live: t.others });
       out.set(e.owner.toLowerCase(), list);
     }
     return out;
@@ -608,7 +611,7 @@ export class Vault {
    * What a run gets (docs/vault.md, section 3): with `claude`, one Claude token chosen by the pool rules (tokenPool.ts); and every other
    * entry granted to the run's role and machine, as environment. Nothing when the key is missing (the problems say so).
    */
-  forRun(run: VaultRun, o: { claude: boolean; github?: boolean; githubUsable?: (fingerprint: string) => boolean; usageOf?: (fingerprint: string) => PlanUsage | undefined; liveOn?: (fingerprint: string, exceptSession?: string) => number; limits?: PoolLimitsOf; now?: () => number }): RunSecrets {
+  forRun(run: VaultRun, o: { claude: boolean; github?: boolean; githubUsable?: (fingerprint: string) => boolean; usageOf?: (fingerprint: string) => PlanUsage | undefined; liveOn?: (fingerprint: string, exceptSession?: string) => number; limits?: PoolLimitsOf; now?: () => number; reservedFor?: (fingerprint: string) => string | undefined }): RunSecrets {
     this.reload();
     const out: RunSecrets = { env: {}, problems: [] };
     // GitHub entries only where machines.githubFromVault is on (w868), and none known to be refused or expired.
@@ -642,9 +645,9 @@ export class Vault {
       out.poolSize = granted.filter((e) => e.kind === 'claude').length;
       // A token that does not open (sealed by another key) is skipped for the next best.
       for (;;) {
-        const tokens = granted.filter((e) => e.kind === 'claude' && !tried.has(e.id)).map((e) => this.poolToken(e, o.usageOf, o.liveOn, run.sessionId, now));
+        const tokens = granted.filter((e) => e.kind === 'claude' && !tried.has(e.id)).map((e) => this.poolToken(e, o.usageOf, o.liveOn, run.sessionId, now, o.reservedFor, limits));
         if (!tokens.length) break;
-        const pick = pickPool(tokens, { orchestrator: run.role === 'orchestrator', limits, sticky });
+        const pick = pickPool(tokens, { orchestrator: run.role === 'orchestrator', limits, sticky, now });
         if (!pick.token) {
           out.claudeHold = pick.held;
           break;
@@ -661,7 +664,7 @@ export class Vault {
             r.set(run.sessionId, now);
             this.recent.set(e.fingerprint, r);
           }
-          out.claude = { entry: this.meta(e), token: v, how: pick.how ?? 'normal' };
+          out.claude = { entry: this.meta(e), token: v, how: pick.how ?? 'normal', why: pick.views.get(e.id)?.scoreText };
           break;
         }
         tried.add(pick.token.id);
@@ -684,6 +687,10 @@ export interface VaultContext {
   liveOn?: (fingerprint: string, exceptSession?: string) => number;
   /** The system-wide pool limits in effect (config vault.pool), read at each pick. */
   limits?: PoolLimitsOf;
+  /** Whether a Claude entry (by fingerprint) is also the dispatcher's credential or the host token, and for whom its reserve is kept (w971). */
+  reservedFor?: (fingerprint: string) => string | undefined;
+  /** The clock the pool reads (tests); default the current time. */
+  now?: () => number;
   payer?: () => string | undefined;
   /** A run that wanted a vault Claude token and fell back, or an entry that would not open: for the log and system_status. */
   onProblem?: (line: string) => void;
