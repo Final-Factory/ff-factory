@@ -711,7 +711,7 @@ LothDesktop and Beast, not just when BEAST is full").
       agent working there, a message queued for it, a worker mid-turn, with a permission open, or with a background job or
       unanswered message it needs (`keepLive`). Alive between turns it is stopped first (`releaseDue`), and the release pass
       runs again 5 seconds later (`PlaceAgainDeps.soon`), so the sandbox frees within about a minute of the turn's end (the
-      first pass is at most a minute away, the second 5 seconds after it; was up to 30 minutes plus a minute). While it
+      first pass is at most a minute away, the second 5 seconds after it; was up to 30 minutes plus a minute). Measured live on the portal's log (2026-10-10), before `releaseDue.workedAt`: stop to release took 2 minutes on every worker (stopped 19:29:40Z, released 19:31:40Z for w890's worker; w913's, w914's and w873's alike), because the stop's own transcript line made the git state "older than the last activity" until the daemon's next 2-minute read; the stop now records the last work and judges the git state against it. While it
       waits it does not take its sandbox back for a near check-in. **Resuming**: a person's message, its check-in, or the
       block clearing places it again like any released worker (its own sandbox if free, else another free one on the same
       machine, switched to its branch). A `deploy` gate clearing (a different commit runs there: `blockerVerdict`) resumes
