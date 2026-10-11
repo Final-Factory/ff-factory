@@ -114,10 +114,17 @@ export interface PoolView {
   weeklyResetsAt?: string;
   /** When the state ends by itself (the window that holds it resets), ISO. */
   until?: string;
-  /** The token's score, weekly percent of headroom per day (scoreOf), and the sum in words. Absent without a weekly reset time. */
-  score?: number;
-  scoreText: string;
+  /** `one-at-a-time` only: a process is running on the token, so a new job waits (the state is the same with the slot free, w979). */
+  slotTaken?: boolean;
+  /** What the dashboard, system_status and `fffctl vault list` show beside the label (w979): the two meters for `ok` and `one-at-a-time`, else `why`. */
+  shown: string;
 }
+
+/** Whether a new job may start on a token in this view: `ok`, or `one-at-a-time` with its slot free. */
+export const usable = (v: PoolView): boolean => v.state === 'ok' || (v.state === 'one-at-a-time' && !v.slotTaken);
+
+/** The label under a pooled token (w979, lothsahn): `pool:ok`, `pool:one-at-a-time`, `pool:held` ..., then ` priority` for the one the picker would choose now. */
+export const poolLabel = (v: PoolView, priority = false): string => `pool:${v.state}${priority ? ' priority' : ''}`;
 
 /** The meters of a token, or the 50% default. */
 export function metersOf(u: PlanUsage | undefined): { session: number; weekly: number; known: boolean; sessionResetsAt?: string; weeklyResetsAt?: string } {
@@ -145,62 +152,62 @@ export const MIN_HOURS_TO_RESET = 1;
 /**
  * The token's score (w971): its weekly headroom per hour until the weekly window resets, (100 - weekly) / hours left, scaled by
  * the room left in the 5-hour window, (100 - 5-hour) / 100. A token with 73% left and 4 days to go scores 0.76 %/h (18 %/day);
- * one with 3% left and 3 days scores 0.04 %/h (1 %/day). Shown per day. `undefined` without a weekly reset time (a token with no
+ * one with 3% left and 3 days scores 0.04 %/h (1 %/day). Per day. `undefined` without a weekly reset time (a token with no
  * numbers yet), which ranks after every scored token. The hours left are never below MIN_HOURS_TO_RESET.
  */
-export function scoreOf(t: PoolToken, now: number): { perDay?: number; text: string } {
+export function scoreOf(t: PoolToken, now: number): { perDay?: number } {
   const m = metersOf(t.usage);
   const reset = ms(m.weeklyResetsAt);
-  if (!m.known || !Number.isFinite(reset)) return { text: 'no score yet (no weekly reset time known)' };
+  if (!m.known || !Number.isFinite(reset)) return {};
   const hours = Math.max(MIN_HOURS_TO_RESET, (reset - now) / 3_600_000);
   const left = Math.max(0, 100 - m.weekly);
   const sessionLeft = Math.max(0, 100 - m.session);
   const perDay = ((left / hours) * 24 * sessionLeft) / 100;
-  const days = hours / 24;
-  const span = days >= 1 ? `${days.toFixed(1)} days` : `${hours.toFixed(1)} h`;
-  return { perDay, text: `score ${perDay < 10 ? perDay.toFixed(1) : Math.round(perDay)}%/day (${pc(left)}% weekly left over ${span}, x${(sessionLeft / 100).toFixed(2)} for the 5-hour room)` };
+  return { perDay };
 }
 
 /** The state of a token under the limits, for a worker, a standing agent or the ops worker (the strictest reading). */
 export function judge(t: PoolToken, limits: PoolLimits, now: number = Date.now()): PoolView {
   const m = metersOf(t.usage);
-  const sc = scoreOf(t, now);
-  const base = { session: m.session, weekly: m.weekly, known: m.known, sessionResetsAt: m.sessionResetsAt, weeklyResetsAt: m.weeklyResetsAt, ...(sc.perDay !== undefined ? { score: sc.perDay } : {}), scoreText: sc.text };
+  const base = { session: m.session, weekly: m.weekly, known: m.known, sessionResetsAt: m.sessionResetsAt, weeklyResetsAt: m.weeklyResetsAt };
   const numbers = `5-hour ${pc(m.session)}%, weekly ${pc(m.weekly)}%`;
+  const meters = m.known ? numbers : 'no numbers yet (counted as 50%)';
   if (m.weekly >= 100 || m.session >= 100) {
     const until = m.weekly >= 100 ? m.weeklyResetsAt : m.sessionResetsAt;
-    return { ...base, state: 'exhausted', why: `${numbers}: used up until ${clock(until)}`, ...(until ? { until } : {}) };
+    const why = `${numbers}: used up until ${clock(until)}`;
+    return { ...base, state: 'exhausted', why, shown: why, ...(until ? { until } : {}) };
   }
-  if (m.weekly >= limits.retireWeekly) return { ...base, state: 'retired', why: `weekly ${pc(m.weekly)}% (>= ${limits.retireWeekly}): retired until ${clock(m.weeklyResetsAt)}`, ...(m.weeklyResetsAt ? { until: m.weeklyResetsAt } : {}) };
-  if (m.session >= limits.sessionHold) return { ...base, state: 'held', why: `5-hour ${pc(m.session)}% (>= ${limits.sessionHold}): held until ${clock(m.sessionResetsAt)}`, ...(m.sessionResetsAt ? { until: m.sessionResetsAt } : {}) };
+  if (m.weekly >= limits.retireWeekly) {
+    const why = `weekly ${pc(m.weekly)}% (>= ${limits.retireWeekly}): retired until ${clock(m.weeklyResetsAt)}`;
+    return { ...base, state: 'retired', why, shown: why, ...(m.weeklyResetsAt ? { until: m.weeklyResetsAt } : {}) };
+  }
+  if (m.session >= limits.sessionHold) {
+    const why = `5-hour ${pc(m.session)}% (>= ${limits.sessionHold}): held until ${clock(m.sessionResetsAt)}`;
+    return { ...base, state: 'held', why, shown: why, ...(m.sessionResetsAt ? { until: m.sessionResetsAt } : {}) };
+  }
   // Inside the reserve of the dispatcher's credential (w971): kept for that role while another token has room.
   if (t.reserve?.inReserve) {
-    return {
-      ...base,
-      state: 'reserved',
-      why: `${numbers}: inside the buffer kept for ${t.reserveFor ?? 'the dispatcher'} (${reserveReason(t.reserve, t.usage, now)}), so no new run while another token has room${t.reserve.until ? `; free ${clock(t.reserve.until)}` : ''}`,
-      ...(t.reserve.until ? { until: t.reserve.until } : {}),
-    };
+    const why = `${numbers}: inside the buffer kept for ${t.reserveFor ?? 'the dispatcher'} (${reserveReason(t.reserve, t.usage, now)}), so no new run while another token has room${t.reserve.until ? `; free ${clock(t.reserve.until)}` : ''}`;
+    return { ...base, state: 'reserved', why, shown: why, ...(t.reserve.until ? { until: t.reserve.until } : {}) };
   }
-  // From onePerWeekly up to retireWeekly a token still works, one job at a time (w747: it is not over its cap, and says so):
-  // how much is left before it stops, and whether its one slot is taken now.
-  const left = Math.max(0, Math.round((limits.retireWeekly - m.weekly) * 10) / 10);
-  const oneJob = m.weekly >= limits.onePerWeekly ? `one job at a time until ${limits.retireWeekly}%: ${left}% left before it stops` : '';
-  if (oneJob && t.others >= 1) {
-    return { ...base, state: 'one-at-a-time', why: `weekly ${pc(m.weekly)}%, ${oneJob}; the slot is taken now (${t.others} running)` };
+  // From onePerWeekly up to retireWeekly a token still works, one job at a time. Its state is `one-at-a-time` whether or not its
+  // slot is taken (w979, lothsahn: calling it ok was misleading); `slotTaken` says whether a new job can start on it.
+  if (m.weekly >= limits.onePerWeekly) {
+    const slotTaken = t.others >= 1;
+    return { ...base, state: 'one-at-a-time', slotTaken, why: `weekly ${pc(m.weekly)}%, one job at a time${slotTaken ? `; its slot is taken (${t.others} running)` : ''}`, shown: meters };
   }
-  return { ...base, state: 'ok', why: m.known ? `${numbers}${oneJob ? `; ${oneJob}; the slot is free` : ''}` : 'no numbers yet (counted as 50%)' };
+  return { ...base, state: 'ok', why: meters, shown: meters };
 }
 
 /**
- * What a pool can do for a new job, from its tokens' states: `serving` (some token is ok: under every limit, or in its
- * one-job-at-a-time zone with the slot free), `slot-taken` (none is ok, but a token that still works is busy with its one
+ * What a pool can do for a new job, from its tokens' states: `serving` (some token can take a job: `ok`, or in its
+ * one-job-at-a-time zone with the slot free), `slot-taken` (none can, but a token that still works is busy with its one
  * job: a new job starts when that finishes), `over` (every token is held, retired or used up: new work waits for a reset) and
  * `used-up` (every token is at 100). Only `over` and `used-up` are "over the caps" (the dashboard banner, w747).
  */
 export type PoolKind = 'serving' | 'slot-taken' | 'over' | 'used-up';
 export function poolKind(views: readonly PoolView[]): PoolKind {
-  if (!views.length || views.some((v) => v.state === 'ok')) return 'serving';
+  if (!views.length || views.some(usable)) return 'serving';
   if (views.every((v) => v.state === 'exhausted')) return 'used-up';
   if (views.some((v) => v.state === 'one-at-a-time')) return 'slot-taken';
   return 'over';
@@ -274,7 +281,7 @@ export function pickPool(tokens: readonly PoolToken[], o: { orchestrator: boolea
   const now = o.now ?? Date.now();
   const views = new Map(tokens.map((t) => [t.id, judge(t, o.limits, now)] as const));
   const state = (t: PoolToken) => views.get(t.id)!.state;
-  const ok = (t: PoolToken) => state(t) === 'ok';
+  const ok = (t: PoolToken) => usable(views.get(t.id)!);
   const order = byScore(now);
   const kept = o.sticky ? tokens.find((t) => t.id === o.sticky && ok(t)) : undefined;
   const best = kept ?? [...tokens].filter(ok).sort(order)[0];
@@ -282,7 +289,7 @@ export function pickPool(tokens: readonly PoolToken[], o: { orchestrator: boolea
   if (o.orchestrator) {
     // Nothing else has room: the reserve's token is used like any other that passes its caps (today's behaviour for the orchestrator).
     // Its own live-run count does not bind it, so judge it again as if it were not reserved.
-    const free = (t: PoolToken) => state(t) === 'reserved' && judge({ ...t, reserve: undefined }, o.limits, now).state === 'ok';
+    const free = (t: PoolToken) => state(t) === 'reserved' && usable(judge({ ...t, reserve: undefined }, o.limits, now));
     const keptReserved = o.sticky ? tokens.find((t) => t.id === o.sticky && free(t)) : undefined;
     const reserved = keptReserved ?? [...tokens].filter(free).sort(order)[0];
     if (reserved) return { token: reserved, how: 'in-reserve', views };

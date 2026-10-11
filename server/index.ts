@@ -42,7 +42,7 @@ import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostAccountsInUse, reserveLines, hostRole, hostRoleOf, reservedCredentials, runsOnThisHost, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
-import { clock, firstFree, poolBanner, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
+import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
 import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.ts';
@@ -1986,7 +1986,7 @@ function accountsNow() {
   // A vault token's pool state and score, for the accounts page (w971).
   const poolOf = new Map<string, NonNullable<AccountUsage['pool']>>();
   for (const [person, list] of vault.pools({ usageOf: (fp) => usage.entries.get(`token:${fp}`)?.usage, liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor })) {
-    for (const t of list) poolOf.set(`token:${t.entry.fingerprint}`, { person, state: t.view.state, text: `${t.view.state}: ${t.view.scoreText}` });
+    for (const t of list) poolOf.set(`token:${t.entry.fingerprint}`, { person, state: t.view.state, text: poolLabel(t.view, t.priority) });
   }
   const built = buildAccounts(usage.entries, {
     hostName: os.hostname(),
@@ -2080,11 +2080,9 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
   const lines: string[] = [];
   const warnings: TokenWarning[] = [];
   for (const [person, list] of [...pools].sort((a, b) => a[0].localeCompare(b[0]))) {
-    // Best score first: the order the pool picks in (w971); no score last.
-    list.sort((a, b) => (b.view.score ?? -1) - (a.view.score ?? -1) || a.entry.name.localeCompare(b.entry.name));
     const each = list.map((t) => {
       const on = titlesOn(`token:${t.entry.fingerprint}`);
-      return `${t.entry.name} …${t.entry.last4} ${t.view.state} (${t.view.why}; ${t.view.scoreText}${t.view.weeklyResetsAt ? `; weekly resets ${clock(t.view.weeklyResetsAt)}` : ''}${on.length ? `; ${on.length} running: ${on.slice(0, 3).join(', ')}${on.length > 3 ? ', …' : ''}` : ''})`;
+      return `${t.entry.name} …${t.entry.last4} ${poolLabel(t.view, t.priority)} (${t.view.shown}${t.view.weeklyResetsAt ? `; weekly resets ${clock(t.view.weeklyResetsAt)}` : ''}${on.length ? `; ${on.length} running: ${on.slice(0, 3).join(', ')}${on.length > 3 ? ', …' : ''}` : ''})`;
     });
     const views = list.map((t) => t.view);
     const kind = poolKind(views);
@@ -2099,7 +2097,7 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
           : kind === 'slot-taken'
             ? `no token is free for a new job right now (the ones that still work are busy with their one job): a new job starts when the running one finishes${next ? `, or when a limit lifts ${clock(next)}` : ''}`
             : 'workers and agents served';
-    lines.push(`Claude token pool, ${person} (${list.length} token${list.length === 1 ? '' : 's'}, highest score first: weekly % left per hour to the reset, scaled by the 5-hour room; caps ${poolLimits(cfg).sessionHold}% 5-hour / ${poolLimits(cfg).onePerWeekly}% one at a time / ${poolLimits(cfg).retireWeekly}% retired): ${each.join('; ')}. ${verdict}`);
+    lines.push(`Claude token pool, ${person} (${list.length} token${list.length === 1 ? '' : 's'}, the one a new job gets is marked priority; caps ${poolLimits(cfg).sessionHold}% 5-hour / ${poolLimits(cfg).onePerWeekly}% one at a time / ${poolLimits(cfg).retireWeekly}% retired): ${each.join('; ')}. ${verdict}`);
     const banner = poolBanner(list.map((t) => ({ name: t.entry.name, last4: t.entry.last4, view: t.view })), 'your', vaultOrch);
     // For this person's own pages only (broadcast and appState filter on `person`): nobody else's top banner shows it.
     if (banner) warnings.push({ id: `pool:${person}`, kind: banner.kind, person, text: banner.text });

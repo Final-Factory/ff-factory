@@ -465,8 +465,8 @@ function AccountsMeters({ app }: { app: AppState }) {
                 <span className="acct-agents">{live.length === 1 ? '1 agent' : `${live.length} agents`}</span>
                 {a.where.length > 0 && <div className="acct-where">{a.where.join(' · ')}</div>}
                 {a.pool && (
-                  <div className="acct-where" title={`${a.pool.person}'s Claude token pool: new work goes to the highest score first (weekly % left per hour to the reset, scaled by the 5-hour room)`} data-testid="account-pool">
-                    pool: {a.pool.text}
+                  <div className="acct-where" title={`${a.pool.person}'s Claude token pool: priority marks the token a new job gets now`} data-testid="account-pool">
+                    {a.pool.text}
                   </div>
                 )}
               </div>

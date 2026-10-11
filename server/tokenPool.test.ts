@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { POOL_DEFAULTS, MIN_HOURS_TO_RESET, bySoonestReset, byScore, scoreOf, checkPoolConfig, clock, heldReason, judge, metersOf, pickPool, poolBanner, poolKind, poolLimits, reserveOf, reserveReason, resetIn, warningsForUser, type PoolToken } from './tokenPool.ts';
+import { POOL_DEFAULTS, MIN_HOURS_TO_RESET, bySoonestReset, byScore, scoreOf, checkPoolConfig, clock, heldReason, judge, metersOf, poolLabel, usable, pickPool, poolBanner, poolKind, poolLimits, reserveOf, reserveReason, resetIn, warningsForUser, type PoolToken } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-09T12:00:00Z');
@@ -54,10 +54,12 @@ test('judge: ok, held at the 5-hour limit, one at a time at 95% weekly, retired 
   assert.equal(held.state, 'held');
   assert.match(held.why, /5-hour 80% \(>= 80\): held until \w{3} \d\d:\d\dZ/);
   assert.equal(held.until, iso(NOW + 2 * 3_600_000));
-  assert.equal(judge(tok('a', { weekly: 95, others: 0 }), L).state, 'ok', 'one at a time: the first process is fine');
+  assert.equal(judge(tok('a', { weekly: 95, others: 0 }), L).state, 'one-at-a-time', 'one at a time, slot free: still that state (w979)');
+  assert.equal(usable(judge(tok('a', { weekly: 95, others: 0 }), L)), true, 'but the first process is fine');
   const one = judge(tok('a', { weekly: 95, others: 1 }), L);
   assert.equal(one.state, 'one-at-a-time');
-  assert.equal(one.why, 'weekly 95%, one job at a time until 99%: 4% left before it stops; the slot is taken now (1 running)');
+  assert.equal(usable(one), false);
+  assert.equal(one.why, 'weekly 95%, one job at a time; its slot is taken (1 running)');
   assert.equal(judge(tok('a', { weekly: 99, weeklyDays: 2 }), L).state, 'retired');
   assert.equal(judge(tok('a', { weekly: 99 }), L).until, undefined);
   assert.equal(judge(tok('a', { weekly: 100, weeklyDays: 2 }), L).state, 'exhausted');
@@ -226,19 +228,34 @@ test('w828: resetIn reads a reset as minutes, hours, or a clock time, and owns u
   assert.equal(resetIn(undefined, NOW), 'at an unknown time');
 });
 
-test("w747: a token at 95% weekly is NOT over its cap: it works one job at a time until 99%, and says how much is left", () => {
-  const free = judge(tok('a', { weekly: 95, others: 0, session: 10 }), L);
-  assert.equal(free.state, 'ok', 'with its slot free it takes a job');
-  assert.equal(free.why, '5-hour 10%, weekly 95%; one job at a time until 99%: 4% left before it stops; the slot is free');
-  const taken = judge(tok('a', { weekly: 95, others: 1 }), L);
-  assert.equal(taken.state, 'one-at-a-time');
-  assert.match(taken.why, /4% left before it stops; the slot is taken now \(1 running\)/);
-  assert.equal(judge(tok('a', { weekly: 98.2, others: 2 }), L).why, 'weekly 98%, one job at a time until 99%: 0.8% left before it stops; the slot is taken now (2 running)');
-  assert.doesNotMatch(taken.why + free.why, /over|cap|wait until|reset/i, 'no "over cap" or "wait until reset" for a token that still works');
-  // Under the one-job limit nothing changes.
-  assert.equal(judge(tok('a', { weekly: 94, others: 3 }), L).why, '5-hour 10%, weekly 94%');
-  // The limits are the config's: the "until" is the retire limit.
-  assert.match(judge(tok('a', { weekly: 90, others: 1 }), { ...L, onePerWeekly: 90, retireWeekly: 96 }).why, /one job at a time until 96%: 6% left before it stops/);
+test("w979: the label is pool:ok below the one-at-a-time cap, pool:one-at-a-time in the band (slot free or taken), and the rarer states keep their names", () => {
+  const v = (o: Parameters<typeof tok>[1]) => judge(tok('a', o), L, NOW);
+  const ok = v({ weekly: 94, others: 3, session: 10 });
+  assert.equal(poolLabel(ok), 'pool:ok');
+  assert.equal(ok.shown, '5-hour 10%, weekly 94%', 'the two meters stay, nothing calculated');
+  // One at a time with its slot FREE: no longer called ok (lothsahn found that misleading).
+  const free = v({ weekly: 95, others: 0, session: 10 });
+  assert.equal(free.state, 'one-at-a-time');
+  assert.equal(free.slotTaken, false);
+  assert.equal(usable(free), true, 'a new job still takes the free slot');
+  assert.equal(poolLabel(free), 'pool:one-at-a-time');
+  assert.equal(free.shown, '5-hour 10%, weekly 95%');
+  // ... and with its slot TAKEN: the same label, and not usable.
+  const taken = v({ weekly: 98.2, others: 2 });
+  assert.equal(poolLabel(taken), 'pool:one-at-a-time');
+  assert.equal(taken.slotTaken, true);
+  assert.equal(usable(taken), false);
+  for (const view of [ok, free, taken]) assert.doesNotMatch(`${poolLabel(view)} ${view.shown}`, /score|%\/day|left over|before it stops|slot is|room/, 'no calculation, no slot wording');
+  // The rarer states: the same pool:<state> form.
+  assert.equal(poolLabel(v({ session: 85, sessionHours: 2 })), 'pool:held');
+  assert.equal(poolLabel(v({ weekly: 99.5, weeklyDays: 2 })), 'pool:retired');
+  assert.equal(poolLabel(v({ weekly: 100, weeklyDays: 2 })), 'pool:exhausted');
+  assert.equal(poolLabel(judge(withReserve(tok('r', { weekly: 97, weeklyDays: 4 })), L, NOW)), 'pool:reserved');
+  assert.equal(poolLabel(ok, true), 'pool:ok priority');
+  assert.equal(poolLabel(free, true), 'pool:one-at-a-time priority');
+  // Under the one-job limit nothing changes; the limits are the config's.
+  assert.equal(judge(tok('a', { weekly: 90, others: 1 }), { ...L, onePerWeekly: 90, retireWeekly: 96 }, NOW).state, 'one-at-a-time');
+  assert.equal(judge(tok('a', { weekly: 89, others: 1 }), { ...L, onePerWeekly: 90, retireWeekly: 96 }, NOW).state, 'ok');
 });
 
 test('w747: poolKind and poolBanner: the banner only when every token is held, retired or used up', () => {
@@ -279,7 +296,7 @@ test('w747: poolKind and poolBanner: the banner only when every token is held, r
 test('w747: the held reason of a busy one-job token says it is not over anything', () => {
   const t = tok('a', { weekly: 96, others: 1 });
   const r = heldReason([t], new Map([[t.id, judge(t, L)]]));
-  assert.equal(r.why, 'no token is free for a new job right now (a: weekly 96%, one job at a time until 99%: 3% left before it stops; the slot is taken now (1 running)): a new job starts when the running one finishes');
+  assert.equal(r.why, 'no token is free for a new job right now (a: weekly 96%, one job at a time; its slot is taken (1 running)): a new job starts when the running one finishes');
   assert.doesNotMatch(r.why, /every token is at a limit|over its caps|used up/);
   // with a held neighbour the reset is named as the other way out
   const h = tok('h', { session: 90, sessionHours: 2 });
@@ -309,7 +326,6 @@ test('w971: score = weekly % left per hour to the reset, x the 5-hour room: the 
   const s1 = scoreOf(ben1, NOW).perDay!;
   assert.ok(Math.abs(s2 - 1) < 0.01, `3% over 3 days is 1%/day, got ${s2}`);
   assert.ok(Math.abs(s1 - 18.25) < 0.01, `73% over 4 days is 18.25%/day, got ${s1}`);
-  assert.match(scoreOf(ben1, NOW).text, /^score 18%\/day \(73% weekly left over 4\.0 days, x1\.00 for the 5-hour room\)$/);
   // Whichever order the pool lists them in, ben-1 is picked, by a worker and by the orchestrator.
   for (const list of [[ben2, ben1], [ben1, ben2]]) for (const orchestrator of [false, true]) assert.equal(pickAt(list, { orchestrator, limits: L }).token?.name, 'vault-ben-1');
   assert.deepEqual([ben2, ben1].sort(byScore(NOW)).map((t) => t.name), ['vault-ben-1', 'vault-ben-2']);
@@ -341,12 +357,10 @@ test('w971: more headroom beats a sooner reset; the same headroom goes to the so
 test('w971: no reset time, no score: ranked after every scored token; a reset a few minutes off does not score as infinite', () => {
   assert.equal(scoreOf(tok('n', { none: true }), NOW).perDay, undefined);
   assert.equal(scoreOf(tok('n', { weekly: 50 }), NOW).perDay, undefined, 'meters but no weekly reset time');
-  assert.match(scoreOf(tok('n', { none: true }), NOW).text, /no score yet/);
   assert.equal(pickAt([tok('fresh', { none: true }), tok('known', { weekly: 90, weeklyDays: 5 })], { orchestrator: false, limits: L }).token?.name, 'known');
   // 3% left, 5 minutes to go: the hours are floored at MIN_HOURS_TO_RESET, so 3 / 1 h x 24 = 72%/day, not 864.
   const edge = tok('edge', { weekly: 97, weeklyDays: 5 / 1440, session: 0 });
   assert.ok(Math.abs(scoreOf(edge, NOW).perDay! - (3 / MIN_HOURS_TO_RESET) * 24) < 0.01);
-  assert.equal(judge(tok('x', { weekly: 20, weeklyDays: 4, session: 0 }), L, NOW).score, scoreOf(tok('x', { weekly: 20, weeklyDays: 4, session: 0 }), NOW).perDay);
 });
 
 // ---------------------------------------------------------------- w971: the dispatcher's reserve is enforced
@@ -403,7 +417,7 @@ test('w971: a token outside its buffer is an ordinary pool token; the buffer lif
   const at = (days: number) => withReserve(tok('t', { weekly: 97, weeklyDays: days, session: 0 }));
   assert.equal(judge(at(4), L, NOW).state, 'reserved');
   assert.equal(judge(at(2), L, NOW).state, 'reserved');
-  assert.equal(judge(at(0.5), L, NOW).state, 'ok');
+  assert.equal(judge(at(0.5), L, NOW).state, 'one-at-a-time', 'outside the buffer: an ordinary token (97% is in the one-at-a-time band)');
   // It says when: (100 - 97) / 5 = 0.6 days before the reset.
   assert.equal(judge(at(4), L, NOW).until, iso(NOW + 4 * DAY - 0.6 * DAY));
   // The 5-hour buffer: 85% used is inside the 20% buffer, so 'held' (at 80) comes first; at 79% it is outside; the token is ok.
@@ -416,7 +430,7 @@ test('w971: a token outside its buffer is an ordinary pool token; the buffer lif
   assert.equal(judge(noRead, L, NOW).state, 'reserved');
   assert.equal(pickAt([noRead], { orchestrator: true, limits: L }).token?.name, 'nr');
   // A token that is not the dispatcher's has no reserve at all.
-  assert.equal(judge(tok('plain', { weekly: 97, weeklyDays: 4 }), L, NOW).state, 'ok');
+  assert.equal(judge(tok('plain', { weekly: 97, weeklyDays: 4 }), L, NOW).state, 'one-at-a-time');
 });
 
 test('w971: poolKind and the banner read a reserved token as not free (workers cannot use it)', () => {
