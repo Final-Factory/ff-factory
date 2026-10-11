@@ -611,7 +611,8 @@ rgrant 2020-01-01T00:00:00Z
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl restart 2>&1' || true)
 printf '%s' "$out" | matches 'ran out' || fail "the worker's fffctl restart took a grant that ran out: $out"
 g 'test ! -e /srv/fff/data/ops-restart.grant' || fail "a restart grant that ran out was not removed"
-g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' | matches 'no deploy was asked for' || fail "a restart grant is a deploy grant"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
+printf '%s' "$out" | matches 'no deploy was asked for' || fail "a restart grant is a deploy grant: $out"
 rgrant "$(date -u -d '+10 min' +%FT%TZ)"
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
 printf '%s' "$out" | matches 'no deploy was asked for' || fail "a restart grant started a deploy: $out"
