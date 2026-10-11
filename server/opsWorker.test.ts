@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { OPS_GRANT, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner } from './opsWorker.ts';
+import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner } from './opsWorker.ts';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { isMidTurn, OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
@@ -69,6 +69,8 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     'fffctl machine-ssh-check',
     // allowed by the seatbelt: fff-ops-priv refuses it without the portal's deploy grant (ops_worker deploy)
     'fffctl update',
+    // w974: the same, for a plain restart (the root wrapper refuses it without the restart grant of ops_worker restart)
+    'fffctl restart',
     'ls -la /srv/fff-ops/scratch && cat notes.md',
     'set -e; ssh m5 uptime',
     'export LC_ALL=C',
@@ -96,7 +98,9 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     ['fffctl rollback', /a person's/],
     ['fffctl watchdog pause', /a person's/],
     ['sudo fffctl units --check', /no sudo/],
-    ['fffctl restart --drain-minutes 5', /a person's/],
+    ['fffctl prepare-shutdown', /a person's/],
+    ['fffctl start', /a person's/],
+    ['fffctl configure --claude-tokenfile', /a person's/],
     ['fffctl vault put --name x --kind claude --stdin', /a person's/],
     ['fffctl vault rotate x --file f', /a person's/],
     ['fffctl vault', /a person's/],
@@ -591,6 +595,92 @@ test('a deploy: only in a person\'s own turn, a grant good once for 15 minutes, 
   assert.equal(again.deployRequester(Date.parse('2026-10-07T05:00:00Z')), undefined, 'not before the ask');
   assert.equal(again.deployRequester(Date.parse('2026-10-07T10:00:00Z')), undefined, 'not for a deploy hours later (by hand)');
   again.close();
+});
+
+test('w974: a restart: only in a person\'s own turn, its own grant good once for 15 minutes, never a deploy\'s, and a report asked for after the restart', async () => {
+  setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-r-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  let personTurn = false;
+  let now = Date.parse('2026-10-11T06:00:00Z');
+  const deps = { sessions, store, options: () => ({}), tellOrchestrator: () => {}, personTurn: () => personTurn, file: path.join(dir, 'ops-worker.json'), now: () => now, workProblem: () => undefined };
+  const ops = new OpsWorker(deps);
+  const grant = path.join(dir, OPS_RESTART_GRANT);
+  const deployGrant = path.join(dir, OPS_GRANT);
+  const userTexts = () => store.readTranscript(OPS_ID, 100).flatMap((e) => (e.kind === 'user' ? [e.text] : []));
+  // Not the dispatcher, not another person's orchestrator, whatever the turn.
+  personTurn = true;
+  assert.throws(() => ops.restart(orch('d', undefined, 'dispatcher')), /only from Lothsahn's and Ben's/);
+  assert.throws(() => ops.restart(orch('co', { userId: 'carol', displayName: 'Carol' })), /only from Lothsahn's and Ben's/);
+  assert.ok(!fs.existsSync(grant));
+  // A harness turn (a check-in, a timer, a relayed report, a [dispatch]) of Lothsahn's own orchestrator: refused, even within an open job.
+  ops.send(orch('lo', LOTH), 'look at m5');
+  personTurn = false;
+  assert.throws(() => ops.restart(orch('lo', LOTH), 'restart now'), /a portal restart needs Lothsahn's own words in this turn/);
+  assert.ok(!fs.existsSync(grant), 'no grant in the harness\'s turn');
+  assert.ok(!fs.existsSync(deployGrant));
+  // The person's own turn: allowed, with a grant of its own.
+  personTurn = true;
+  assert.match(ops.restart(orch('lo', LOTH), 'Restart now', ['w973']), /may run fffctl restart once until 2026-10-11T06:15:00/);
+  const g = JSON.parse(fs.readFileSync(grant, 'utf8'));
+  assert.equal(g.by, 'lothsahn');
+  assert.equal(Date.parse(g.expires) - Date.parse(g.at), OPS_LIMITS.restartGrantMs);
+  assert.equal(OPS_LIMITS.restartGrantMs, 15 * 60_000);
+  assert.equal(fs.statSync(grant).mode & 0o777, 0o600);
+  assert.ok(!fs.existsSync(deployGrant), 'a restart is not a deploy: no deploy grant');
+  await new Promise((r) => setTimeout(r, 100));
+  const asked = userTexts().find((t) => t.startsWith('[restart] Lothsahn asked, in a turn of their own'));
+  assert.ok(asked, userTexts().join('\n---\n'));
+  assert.match(asked, /Their words: Restart now/);
+  assert.match(asked, /Run \`fffctl restart\`, once, with no option/);
+  assert.match(asked, /It kills no agent/);
+  assert.match(asked, /system_status/);
+  assert.match(asked, /at most the last 4 characters of its token; never a token/);
+  assert.match(asked, /This job is the step left on w973/);
+  assert.doesNotMatch(asked, /\[deploy\]/);
+  // The harness cannot ask again to open a second grant, and the one grant stays the one it was.
+  personTurn = false;
+  now += 60_000;
+  assert.throws(() => ops.restart(orch('lo', LOTH)), /needs Lothsahn's own words/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(grant, 'utf8')), g);
+  ops.close();
+  // The portal restarts: the worker is told to report, once, and not as a deploy (no machine rollout is owed, no commit changed).
+  sessions.get(OPS_ID).stop(false);
+  now += 5 * 60_000;
+  const after = new OpsWorker(deps);
+  after.start(0);
+  await new Promise((r) => setTimeout(r, 100));
+  const said = userTexts().filter((t) => t.startsWith('[restart] The portal has started again'));
+  assert.equal(said.length, 1);
+  assert.match(said[0], /Report to Lothsahn: the `fffctl status` lines[\s\S]*the sha from `\/api\/health`[\s\S]*which Claude account each kind of agent runs on/);
+  assert.equal(userTexts().filter((t) => t.startsWith('[deploy] The portal has started again')).length, 0);
+  assert.equal(after.deployRequester(Date.parse('2026-10-11T06:10:00Z')), undefined, 'a restart owes no machine rollout report');
+  after.close();
+  const again = new OpsWorker(deps);
+  again.start(0);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(userTexts().filter((t) => t.startsWith('[restart] The portal has started again')).length, 1, 'reported once');
+  again.close();
+  // A restart asked for hours ago is not reported on a later start.
+  personTurn = true;
+  const late = new OpsWorker(deps);
+  late.restart(orch('lo', LOTH));
+  late.close();
+  now += 3 * 3_600_000;
+  const stale = new OpsWorker(deps);
+  stale.start(0);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(userTexts().filter((t) => t.startsWith('[restart] The portal has started again')).length, 1, 'a stale restart is not reported');
+  stale.close();
+});
+
+test('w974: the guard lets fffctl restart through (the root wrapper holds the grant) and nothing else of the portal\'s own commands', () => {
+  assert.ok(OPS_FFFCTL.includes('restart'));
+  assert.equal(FFFCTL_FORMS.restart.grant?.includes('ops_worker restart'), true);
+  for (const bad of ['rollback', 'prepare-shutdown', 'start', 'configure', 'claude-token', 'backup', 'tailscale-join', 'gh-login']) assert.ok(!OPS_FFFCTL.includes(bad), bad);
+  assert.match(shell('sudo fffctl restart') ?? '', /no sudo/);
+  assert.match(shell('systemctl restart fff-portal') ?? '', /services are a person's/);
 });
 
 test('w855: machine_update opens a job in a harness turn, for the person\'s own open request, with a command the server wrote', async () => {

@@ -10,7 +10,9 @@ scripts\restart.ps1 -DrainMinutes 3
 ```
 
 `scripts\update.ps1` is `restart.ps1 -Update`. Without the user at the desktop, the orchestrator's
-`request_app_update` tool takes the same path (drain, update, restart, resume).
+`request_app_update` tool takes the same path (drain, update, restart, resume). On the portal VM it restarts only to
+switch to new code; a plain restart there is `fffctl restart`, which Lothsahn's and Ben's orchestrators can have the ops
+worker run (`ops_worker restart`, [ops-worker.md](ops-worker.md) "Restarts (w974)").
 
 ## What happens
 

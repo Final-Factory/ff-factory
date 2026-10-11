@@ -602,8 +602,33 @@ printf '%s' "$out" | matches 'no deploy was asked for' || fail "a deploy grant w
 wait_for 600 "the worker's update request finished (already up to date)" g "test ! -e /srv/fff/data/update.wanted && ! systemctl is-active --quiet fff-update.service && sudo journalctl -u fff-update.service --since @$since -o cat --no-pager | grep -E 'Deactivated successfully|Finished|Failed with result' >/dev/null"
 wait_for 300 "the portal answers after the worker's update request" health
 [ "$(sha_of)" = "$want" ] || fail "the portal does not run $want after the worker's update request"
+# Its restart (w974): the same gate with its own grant. Refused without one and with one that ran out; a fresh one is used
+# once, drains (nothing is busy here), restarts the portal on the same release and is gone.
+rgrant() { g "echo $(printf '{"by":"ci","name":"CI","at":"%s","expires":"%s"}' "$(date -u +%FT%TZ)" "$1" | base64 -w0) | base64 -d | sudo -u fff tee /srv/fff/data/ops-restart.grant >/dev/null"; }
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl restart 2>&1' || true)
+printf '%s' "$out" | matches 'no restart was asked for' || fail "the worker's fffctl restart ran without a grant: $out"
+rgrant 2020-01-01T00:00:00Z
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl restart 2>&1' || true)
+printf '%s' "$out" | matches 'ran out' || fail "the worker's fffctl restart took a grant that ran out: $out"
+g 'test ! -e /srv/fff/data/ops-restart.grant' || fail "a restart grant that ran out was not removed"
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' | matches 'no deploy was asked for' || fail "a restart grant is a deploy grant"
+rgrant "$(date -u -d '+10 min' +%FT%TZ)"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
+printf '%s' "$out" | matches 'no deploy was asked for' || fail "a restart grant started a deploy: $out"
+g 'test -e /srv/fff/data/ops-restart.grant' || fail "a deploy attempt used up the restart grant"
+pid=$(g 'systemctl show -p MainPID --value fff-portal.service')
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl restart 2>&1' || true)
+echo "$out"
+printf '%s' "$out" | matches "restart asked for by ci; the portal runs .* at commit $want" || fail "the worker's restart did not say what it runs: $out"
+g 'test ! -e /srv/fff/data/ops-restart.grant' || fail "the restart grant was not used up"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl restart 2>&1' || true)
+printf '%s' "$out" | matches 'no restart was asked for' || fail "a restart grant worked twice: $out"
+restarted() { [ "$(g 'systemctl show -p MainPID --value fff-portal.service')" != "$pid" ]; }
+wait_for 300 "the portal restarted after the worker's restart" restarted
+wait_for 300 "the portal answers after the worker's restart" health
+[ "$(sha_of)" = "$want" ] || fail "the portal does not run $want after the worker's restart"
 g 'rm -f /tmp/fff-ops-sock.js'
-echo "ok: the orchestration worker survives the portal's update, and deploys only with a fresh grant, once"
+echo "ok: the orchestration worker survives the portal's update, and deploys and restarts only with a fresh grant, once"
 
 step "a broken update is rolled back by itself"
 good=$want

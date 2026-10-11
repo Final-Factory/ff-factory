@@ -9,8 +9,9 @@ machine from nothing to online by itself, once a person has added its record and
 machine](#a-new-machine)). It has no git, no downloads, no package installs, no builds, no Unity and no game
 workspace: heavy work runs on the target machine over ssh. The VM enforces this, not only its prompt: a 2 GiB `noexec`
 scratch file system is all it can write, it can reach only Anthropic's API and the tailnet, and its only sudo rights
-are two wrappers. It can also deploy the portal (`fffctl update`), but only after Lothsahn or Ben asks for that in a turn
-of their own: the portal then leaves a one-use, 15-minute grant that the root wrapper checks.
+are two wrappers. It can also deploy the portal (`fffctl update`) and restart it with no new code (`fffctl restart`,
+w974), but only after Lothsahn or Ben asks for that in a turn of their own: the portal then leaves a one-use, 15-minute
+grant, one file for each of the two, that the root wrapper checks.
 
 Lothsahn asked for it on 2026-10-07: "Let's give you a real worker--not with unity, and not with a FinalFactory
 workspace, but with a claude so you can execute commands locally for orchestration." He settled three points: "You
@@ -216,8 +217,9 @@ process of the portal: it would get the portal's account and everything that acc
 | It may not | Enforced by |
 |---|---|
 | read the portal's config, data, secrets or keys | Unix permissions: `/srv/fff` is 0700 `fff`, and `/etc/fff/vault.key` is root's. The guard also refuses these paths with a reason, and refuses `/proc/*/environ` |
-| restart or roll back the portal; change settings; change the vault, tokens or migrations; backups or shutdown; pause, run or reset the watchdog | `fff-ops-priv` has none of those subcommands (it has `vault`, `machine-credential` and `migrate` only for their read-only forms, above), and sudoers allows nothing else as root. The guard refuses `fffctl restart` and the like with a reason |
+| roll back the portal; change settings; change the vault, tokens or migrations; backups or shutdown; pause, run or reset the watchdog | `fff-ops-priv` has none of those subcommands (it has `vault`, `machine-credential` and `migrate` only for their read-only forms, above), and sudoers allows nothing else as root. The guard refuses `fffctl rollback` and the like with a reason |
 | deploy the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own | `fff-ops-priv update` runs only with the grant the portal writes into its data folder on `ops_worker deploy`, which the server allows only in the person's own turn. `fff-ops` cannot write that folder (0700 `fff`), so it cannot make a grant. The grant is good for 15 minutes and is removed before the update runs, so it works once |
+| restart the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own (w974) | `fff-ops-priv restart` runs only with the grant the portal writes into its data folder (`ops-restart.grant`, its own file: a deploy grant does not open it, nor it a deploy) on `ops_worker restart`, which the server allows only in the person's own turn. Same rules as the deploy's grant: 15 minutes, once, removed before the restart is asked for, owned by `fff`. It takes no option (`--no-drain` and a drain time are refused), so the portal always drains its busy agents first |
 | copy the portal's secrets or keys off the VM | scp and sftp run as `fff-ops`, which cannot read `/srv/fff` (0700 `fff`) or `/etc/fff/vault.key` (root's): CI copies each of them and gets "Permission denied". `fff-ops-ssh` runs as `fff` but never sees a local path: it only carries the stream. The guard refuses those paths in an scp or sftp command (relative ones too) |
 | git, downloads, package installs, builds, interpreters | The network: the unit allows only loopback, the VM's resolvers, Anthropic's API (`160.79.104.0/23`, `2607:6bc0::/48`, [Anthropic's published inbound ranges](https://platform.claude.com/docs/en/api/ip-addresses)) and the tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). The disk: everything it can write is on a 2 GiB `noexec` file system. sudo: no `apt`. The guard refuses `git`, `curl`, `wget`, `rsync`, `apt`, `npm`, `pip`, `python`, `node` and the like, so the worker learns why at once. scp and sftp reach only what ssh reaches: the machines whose host keys are pinned, over the tailnet. They add no address to the allowlist and no nft rule: the copy is the same ssh process, as `fff`, inside the same unit |
 | print a credential | The launcher keeps the Claude credential out of its environment (fd 3). The guard refuses `env`, `printenv`, `export -p` and `/proc/*/environ`. Transcripts and the audit log redact Claude, GitHub, FFBox, machine, Tailscale, API and private keys (`redactSecrets`) |
@@ -323,11 +325,74 @@ CI checks the parts that need no Claude token, in a real guest, after the update
 - `fff-ops.socket` still listens, and the launcher still starts Claude Code;
 - `fffctl update` through the worker's wrapper is refused with no grant and with a grant that ran out;
 - a fresh grant works once and is gone;
+- the same for `fffctl restart` (w974): refused with no grant, with one that ran out and with a deploy grant; a fresh
+  restart grant really restarts the portal on the same commit, once;
 - the portal still runs the same commit afterwards.
 
 `server/opsWorker.test.ts` checks that the server gives a grant only in the person's own turn, and that the report
 message is sent once after a restart. A real deploy by the worker, with its report, is the first such use after this
 merges.
+
+## Restarts (w974)
+
+lothsahn, 2026-10-11, in his own words: "Please schedule a worker to update ff-factory so that the ops worker has a fffctl
+restart command to restart the portal and can use it". Under w973 ("move every running job off the nearly used-up
+pleasework32 tokens onto host token …9AAA") he had said "Restart now" so that the dispatcher and the orchestrators would start
+on the changed token. Nothing could: `request_app_update` restarts only when there is new code, and the worker's only
+command that changed the portal was `fffctl update`, behind a `[deploy]` message.
+
+A plain restart is `fffctl restart`: it drains the busy agents (each commits, pushes and ends its turn), restarts the
+portal service on the release it runs, resumes the interrupted workers, and builds nothing. It kills no agent. It has no
+rollback, because nothing new is switched to; `fff-health` still checks that the portal answers.
+
+It is gated exactly like a deploy, with a grant of its own:
+
+1. Lothsahn or Ben asks their orchestrator, in a turn of their own, to restart the portal. The orchestrator calls
+   `ops_worker restart` (`text`: their words; optional `work_ids`). `OpsWorker.restart` (`server/opsWorker.ts`) goes
+   through the same gate as `deploy` (`grantFor`): their own orchestrator, `personTurn`, and the busy check. A
+   check-in, a timer, a relayed report or a `[dispatch]` is refused: "a portal restart needs Lothsahn's own words in this
+   turn".
+2. The server writes `data/ops-restart.grant`, `{by, name, at, expires}`, 15 minutes (`OPS_LIMITS.restartGrantMs`), 0600
+   `fff`, saves the restart in `data/ops-worker.json` and sends the worker a `[restart]` message with the steps.
+3. The worker runs `fffctl status`, then `fffctl restart`, once, with no option, and ends its turn at once (its own
+   turn is one of the busy turns the drain waits for). `fff-ops-priv restart` (root) takes the grant (`take_grant`:
+   it must be the portal's and in time; it is removed first, whatever follows), prints who asked and the commit the
+   portal runs, and runs `fffctl restart --no-wait`. `--no-wait` is fffctl's: it only asks (writes `restart.request`)
+   instead of watching the restart through.
+4. The portal drains and restarts, and the worker's process ends with it. When the new portal starts (within the
+   hour), `OpsWorker.start` sends it `[restart] The portal has started again...`, once. It reports to the person:
+   - the `fffctl status` lines;
+   - the sha `/api/health` answers, and whether it is the one that ran before (a restart builds nothing, so it should
+     be);
+   - which Claude account each kind of agent runs on, from `system_status` (the dispatcher, each orchestrator, the
+     workers): the account and at most the last 4 characters of its token, never a token. After w973's token change,
+     this is how the person sees that the dispatcher and the orchestrators moved.
+   If no message comes within 20 minutes, its `wake_me 20` brings it back to report from `fffctl status` and `fffctl logs`.
+5. No machine rollout follows: a restart brings no new code (the rollout's trigger is a verified update,
+   [After a verified deploy](#after-a-verified-deploy-w887)), and a restart is not recorded as a deploy
+   (`deployRequester`).
+
+**The dispatcher's `request_app_update` is unchanged** (the optional part of w974): it stays the way to update to new code,
+and it changes nothing when the portal is already on the latest. A restart asked for in words is the owner's orchestrator's
+`ops_worker restart`, because that is the path that carries the person's own turn; the dispatcher's tools run in `[dispatch]`
+turns, which are the harness's, and giving it a second route to a restart would need the same gate again for no new reach.
+The tool descriptions of `request_app_update` and `set_app_config` (whose old text told an agent to restart with
+`request_app_update`) now point to `ops_worker restart`.
+
+Checked by:
+- `server/opsWorker.test.ts`, "w974": refused for the dispatcher and for another person's orchestrator, refused in the
+  harness's turn (no grant is written, and a second harness attempt leaves the first grant alone), allowed in the
+  person's own turn with a 15-minute 0600 grant of its own and no deploy grant, the worker's message, the report after
+  the portal restarts (once, not as a deploy, not after hours), and the guard lets `fffctl restart` through while
+  `rollback`, `start`, `prepare-shutdown`, `configure` and the rest stay refused.
+- `deploy/vm/test/fff-ops.test.sh` (CI, as root): `fff-ops-priv restart` refuses with no grant, with one that ran out, with a
+  grant naming nobody, and with a deploy grant (which the attempt leaves alone); a restart grant starts no deploy; a refused
+  form (`--no-drain`, `--drain-minutes N`, `--no-wait`, any word) leaves the grant; a fresh grant reaches `fffctl restart
+  --no-wait` once and is gone.
+- `deploy/vm/test/ci-vm-e2e.sh`, in a real guest: the same refusals through the worker's `ops-bin/fffctl`, then a restart
+  with a fresh grant that really restarts the portal (new main PID, same commit) and cannot be used twice.
+- Not tested in CI: a real Claude turn of the worker and the report it writes. The first real check is after the next
+  portal deploy: lothsahn's orchestrator asks him for the restart in his turn, and the worker's report is read.
 
 ## After a verified deploy (w887)
 
@@ -496,6 +561,8 @@ deploy (`fffctl update`, or `ops_worker deploy` on Lothsahn's or Ben's own word)
 release's scripts and its `ops-bin/fff-machine-ssh`, re-runs `fff-machine-ssh --fix` because the script changed, and
 restarts the portal on the new server code. The sudoers file and the units do not change, so no guest re-install.
 
+w974 (`fffctl restart` for the worker, `ops_worker restart`) needs only a portal deploy as well: it changes `fffctl`, `fff-ops-priv` and the server (the tool, the guard's table), not the sudoers file or the units. Until that deploy the worker's `fffctl restart` is refused ("is a person's") and `ops_worker` has no `restart` action.
+
 w743 (`fffctl units [--check]` for the worker) is the same kind: it changes `fff-ops-priv` and the server's shell guard (`OPS_FFFCTL` in `server/opsWorker.ts`), not the sudoers file (`fff-ops-priv` is still its one root file) or the units. A portal deploy carries it; the host's `install.sh --guest-only` adds nothing.
 
 ```bash
@@ -531,8 +598,8 @@ VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
 - `server/opsWorker.test.ts`: who reaches it, the belts, the shell seatbelt, writes and reads, redaction, the header,
   the spawner against a fake socket, a fresh job from every state the last process can be in (just after a turn,
   mid-turn, after the idle stop, after a failed start, a resume after a stop) through the real Agent SDK and a
-  stand-in for systemd's one-connection socket (w638), the one session with its job rule and lifetime, and a deploy
-  (only in the person's own turn, the grant, the report after the restart).
+  stand-in for systemd's one-connection socket (w638), the one session with its job rule and lifetime, a deploy
+  (only in the person's own turn, the grant, the report after the restart) and a plain restart (w974, [Restarts](#restarts-w974)).
 - `deploy/vm/test/fff-ops-socket.test.sh` (CI's unit-test job on Linux, w638): `fff-ops.socket`'s own settings under
   real systemd, the real launcher with a fake claude and the portal's `opsSpawner`: systemd drops a second connection
   while one is open, and a new process started right after a stop runs, the last one idle or mid-turn.

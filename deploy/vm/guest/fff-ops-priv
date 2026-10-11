@@ -40,7 +40,13 @@
 #                                      (ops_worker deploy): good for 15 minutes, once, removed here before anything runs.
 #                                      No options: no other ref, no drain setting.
 #
-# Everything else fffctl does (restart, rollback, configure, the vault, tokens, migrate, backups, shutdown) is a
+#   fffctl restart                     a plain portal restart (fffctl restart --no-wait: drain the busy agents, restart on the
+#                                      same release, resume them), only with the grant the portal leaves when Lothsahn or Ben
+#                                      asks for a restart in a turn of their own (ops_worker restart, w974): good for 15
+#                                      minutes, once, removed here before anything runs. No options: no --no-drain, no other
+#                                      drain time. No build, so no rollback: fff-health still checks the portal answers.
+#
+# Everything else fffctl does (rollback, configure, the vault, tokens, migrate, backups, shutdown) is a
 # person's and is not here. Every call is logged to the journal (tag fff-ops-priv); sudo logs it too.
 set -o errexit -o nounset -o pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -102,6 +108,19 @@ credential_issue() {
   echo "on $target: $(printf '%s' "$out" | tr -d '\r' | tail -n 1) (give it to the worker installer with --credential-file / -CredentialFile, then delete it there)"
 }
 
+# take_grant FILE WHAT ASKED_VIA: the one-use grant the portal leaves when Lothsahn or Ben asks for WHAT in a turn of their own
+# (ops_worker ASKED_VIA). Removed here before anything runs, whatever follows; sets GRANT_BY to who asked.
+take_grant() {
+  local grant=$1 what=$2 via=$3 owner expires
+  [ -f "$grant" ] || refuse "no $what was asked for: only Lothsahn or Ben ask for one, in a turn of their own, through their orchestrator's $via (good for 15 minutes, once)"
+  owner=$(stat -c %U "$grant")
+  GRANT_BY=$(jq -r '.by // ""' "$grant" 2>/dev/null || true)
+  expires=$(jq -r '.expires // ""' "$grant" 2>/dev/null || true)
+  rm -f "$grant"
+  [ "$owner" = "$FFF_USER" ] || refuse "the $what grant is not the portal's ($owner): refused"
+  if [ -z "$GRANT_BY" ] || [ "$(date -d "$expires" +%s 2>/dev/null || echo 0)" -le "$(date +%s)" ]; then refuse "the $what grant ran out (${expires:-no time}): ask your person to ask for the $what again"; fi
+}
+
 case "${1:-help}" in
   status) exec "$FFFCTL" status ;;
   state) exec "$FFFCTL" state ;;
@@ -159,21 +178,22 @@ case "${1:-help}" in
     ;;
   update)
     if [ $# -ne 1 ]; then refuse "update takes no options: it builds origin/$FFF_BRANCH"; fi
-    grant=$DATA/ops-deploy.grant
-    [ -f "$grant" ] || refuse "no deploy was asked for: only Lothsahn or Ben ask for one, in a turn of their own, through their orchestrator's ops_worker deploy (good for 15 minutes, once)"
-    owner=$(stat -c %U "$grant")
-    by=$(jq -r '.by // ""' "$grant" 2>/dev/null || true)
-    expires=$(jq -r '.expires // ""' "$grant" 2>/dev/null || true)
-    # Used once, whatever follows.
-    rm -f "$grant"
-    [ "$owner" = "$FFF_USER" ] || refuse "the deploy grant is not the portal's ($owner): refused"
-    if [ -z "$by" ] || [ "$(date -d "$expires" +%s 2>/dev/null || echo 0)" -le "$(date +%s)" ]; then refuse "the deploy grant ran out (${expires:-no time}): ask your person to ask for the deploy again"; fi
+    take_grant "$DATA/ops-deploy.grant" deploy "ops_worker deploy"
     before=$(release_sha "$(readlink -e "$CURRENT" 2>/dev/null || true)")
-    logger -t fff-ops-priv -- "deploy asked for by $by: fffctl update from ${before:-unknown}" 2>/dev/null || true
-    echo "deploy asked for by $by; the portal runs $(basename "$(readlink -e "$CURRENT" 2>/dev/null || echo none)") at commit ${before:-unknown}"
+    logger -t fff-ops-priv -- "deploy asked for by $GRANT_BY: fffctl update from ${before:-unknown}" 2>/dev/null || true
+    echo "deploy asked for by $GRANT_BY; the portal runs $(basename "$(readlink -e "$CURRENT" 2>/dev/null || echo none)") at commit ${before:-unknown}"
     "$FFFCTL" update --no-wait
     echo "asked for: the portal builds origin/$FFF_BRANCH beside the running release, drains, restarts on it, verifies it and rolls back by itself. Your process ends with the old portal; FF Factory messages you when the new one is up."
     ;;
+  restart)
+    if [ $# -ne 1 ]; then refuse "restart takes no options: it drains, restarts and resumes (no --no-drain, no other drain time)"; fi
+    take_grant "$DATA/ops-restart.grant" restart "ops_worker restart"
+    before=$(release_sha "$(readlink -e "$CURRENT" 2>/dev/null || true)")
+    logger -t fff-ops-priv -- "restart asked for by $GRANT_BY: fffctl restart at ${before:-unknown}" 2>/dev/null || true
+    echo "restart asked for by $GRANT_BY; the portal runs $(basename "$(readlink -e "$CURRENT" 2>/dev/null || echo none)") at commit ${before:-unknown}"
+    "$FFFCTL" restart --no-wait
+    echo "asked for: the portal asks its busy agents to commit, push and end their turn, restarts on the same release and resumes them. Your process ends with the old portal; FF Factory messages you when the new one is up."
+    ;;
   help | -h | --help) awk 'NR > 5 && /^#$/ {exit} NR > 5' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) refuse "fffctl $1 is a person's (restarts, rollbacks, settings, the vault, migrations). You have: status, state, units [--check], vault list [--names] / vault help, machine-credential list, migrate --help, logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, and update with a deploy grant" ;;
+  *) refuse "fffctl $1 is a person's (rollbacks, settings, the vault, migrations). You have: status, state, units [--check], vault list [--names] / vault help, machine-credential list, migrate --help, logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, update with a deploy grant, and restart with a restart grant" ;;
 esac
