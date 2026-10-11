@@ -2196,6 +2196,12 @@ export function machineDir(p: string | undefined, what: string): string | undefi
  * The folder options a deploy stores (add_machine): each given one checked and normalised (machineDir), "" back to the
  * default, an unset one kept from the previous deploy. Exported for tests.
  */
+/** Two folder paths as one place (either slash, case-insensitive on Windows paths, no trailing slash). */
+const samePoolPath = (a: string, b: string) => {
+  const k = (p: string) => (/^[A-Za-z]:|\\\\/.test(p) ? p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() : p.replace(/\/+$/, ''));
+  return k(a) === k(b);
+};
+
 /**
  * What a worker root install's hello says about its folders (w513), onto its record. A root the record does not know
  * yet (a new install, or a migration from today's layout into a root) is the daemon's to say: its daemon folder, clone,
@@ -2224,6 +2230,17 @@ export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, 
       ...(m.maxSandboxAgents === undefined && pool.maxAgents !== undefined ? { maxSandboxAgents: pool.maxAgents } : {}),
       ...(pool.librarySeed && (moved || !m.librarySeed) ? { librarySeed: pool.librarySeed } : {}),
     });
+  }
+  // Its sandbox folder is its installer's too (add_machine refuses to change it on a root install, setRootSettings), so a daemon that now
+  // reports another one has moved it: a Dev Drive (w900) puts the sandboxes on V:, and the record kept D:\\work\\ffw\\sandboxes, the
+  // junction, which the portal then sent back in every welcome as the pool's root (w1038). The seed and how it is copied follow it
+  // (the drive is where a block clone works); on a same-root hello with the same folder nothing changes, as before.
+  if (!moved && pool && pool.root && m.sandboxRoot && !samePoolPath(pool.root, m.sandboxRoot)) {
+    m.sandboxRoot = pool.root;
+    if (pool.librarySeed) m.librarySeed = pool.librarySeed;
+    else delete m.librarySeed;
+    if (pool.librarySeedCopy) m.librarySeedCopy = pool.librarySeedCopy;
+    else delete m.librarySeedCopy;
   }
   // Its sandbox count is its installer's, every time (w576): the installer also makes that many player-folder pairs
   // (players/slotK-0 and slotK-1) and their firewall rules, which the portal cannot.
