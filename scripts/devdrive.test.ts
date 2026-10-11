@@ -556,3 +556,19 @@ test('w1038: a Dev Drive record is rebuilt only from a drive that is really ther
   assert.equal('devDrive' in none, false);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('moving the sandboxes: a worktree the pool names by another spelling of its path (a short name, a junction, another case) is still the listed one, not a leftover (Windows runner, w1038)', async () => {
+  const w = oldInstall();
+  // The pool's record reaches the sandboxes through an alias of the folder (on Windows: RUNNER~1 for runneradmin, or a junction); git lists the real path.
+  const alias = path.join(w.base, 'alias');
+  fs.symlinkSync(w.sandboxes, alias, 'junction');
+  const recs = JSON.parse(fs.readFileSync(w.stateFile, 'utf8')) as PoolRec[];
+  for (const r of recs) r.path = path.join(alias, r.id);
+  fs.writeFileSync(w.stateFile, JSON.stringify(recs));
+  const said: string[] = [];
+  const rep = await moveSandboxes({ repo: w.repo, stateFile: w.stateFile, oldSandboxes: alias, oldSeed: w.oldSeed, newSandboxes: w.newSandboxes, newSeed: w.newSeed }, fakeDeps({}, said));
+  assert.ok(rep.moved[0].saved, "slot1's edit and new file were committed, not skipped as a folder git does not list");
+  assert.ok(!said.some((l) => /no longer lists|set aside/.test(l)), said.join('\n'));
+  assert.equal(fs.readFileSync(path.join(w.newSandboxes, 'slot1', 'notes.txt'), 'utf8'), 'new file\n');
+  fs.rmSync(w.base, { recursive: true, force: true });
+});
