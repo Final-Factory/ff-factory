@@ -16,6 +16,8 @@ const OLD = '1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 interface FakeMachine extends RolloutMachine {
   online: boolean;
   daemon: string;
+  /** Whether its daemon has said hello on this connection (default: yes once online). */
+  hello?: boolean;
   agents: { id: string; title: string }[];
   /** What a run of the installer does: its exit code and output, and what the machine looks like afterwards. */
   run: (remote: string) => { code: number; out?: string; after?: { online: boolean; daemon?: string }; adopt?: string[] };
@@ -44,7 +46,8 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
   const host: RolloutHost = {
     machines: () => machines,
     online: (id) => find(id).online,
-    daemon: (id) => (find(id).online ? find(id).daemon : undefined),
+    hello: (id) => find(id).online && find(id).hello !== false,
+    daemon: (id) => (find(id).online && find(id).hello !== false ? find(id).daemon || undefined : undefined),
     outdated: () => undefined,
     agents: (id) => find(id).agents,
     liveAtHello: (_id, since) => (helloAt >= since ? adopted : undefined),
@@ -158,6 +161,47 @@ test('a machine whose daemon already runs the deployed commit is not touched', a
   await w.make().tick();
   assert.deepEqual(w.calls.map((c) => c.target), ['ben@beast']);
   assert.match(w.told[0].text, /- m5: already on the deployed commit/);
+});
+
+test("w970: a machine connected but with no hello yet is waited for, not read as an unknown commit and skipped", async () => {
+  const w = world([mac('beast', { hello: false }), mac('m5')], { requester: LOTH });
+  const r = w.make();
+  w.verify();
+  await r.tick();
+  assert.deepEqual(w.calls.map((c) => c.target), ['ben@m5'], 'beast is not touched yet');
+  assert.equal(r.state.machines.beast.status, 'pending');
+  assert.match(r.state.machines.beast.note ?? '', /has not said hello yet/);
+  assert.equal(w.told.length, 0, 'the report waits for it');
+  // Its hello arrives (it runs the old commit): the next pass updates it.
+  w.find('beast').hello = true;
+  await r.tick();
+  assert.deepEqual(w.calls.map((c) => c.target), ['ben@m5', 'ben@beast']);
+  assert.equal(r.state.machines.beast.status, 'ok');
+  assert.equal(w.told.length, 1);
+  assert.match(w.told[0].text, /- beast: updated\./);
+  assert.doesNotMatch(w.told[0].text, /nothing to do/);
+});
+
+test('w970: a machine that never says hello is listed as waiting after the grace period, never as current', async () => {
+  const w = world([mac('beast', { hello: false })]);
+  const r = w.make();
+  w.verify();
+  await r.tick();
+  w.advance(11 * 60_000);
+  await r.tick();
+  assert.equal(w.calls.length, 0);
+  assert.equal(w.told.length, 1);
+  assert.match(w.told[0].text, /- beast: waiting: connected, but its daemon has not said hello yet/);
+  assert.doesNotMatch(w.told[0].text, /nothing to do/);
+});
+
+test('w970: a daemon whose hello carries no commit counts as outdated and is updated', async () => {
+  const w = world([mac('beast', { daemon: '' })]);
+  w.verify();
+  await w.make().tick();
+  assert.deepEqual(w.calls.map((c) => c.target), ['ben@beast']);
+  assert.match(w.told[0].text, /- beast: updated\./);
+  assert.doesNotMatch(w.told[0].text, /nothing to do/);
 });
 
 test("a machine that is not a worker root install, or the portal's own host, is skipped with the reason", async () => {

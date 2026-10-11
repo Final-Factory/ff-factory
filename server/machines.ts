@@ -727,6 +727,11 @@ export class MachineManager {
     return h && h.at >= since ? h.live : undefined;
   }
 
+  /** Whether a connected daemon has said hello on this connection (w970: a link is up some seconds before its hello). */
+  hasHello(id: string): boolean {
+    return this.isOnline(id) && this.hellos.has(id);
+  }
+
   /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
   daemonOf(id: string): string | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.daemon : undefined;

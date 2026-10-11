@@ -888,11 +888,23 @@ export class Daemon {
     while (this.outbox.length && this.ws?.readyState === WebSocket.OPEN) this.ws.send(this.outbox.shift()!);
   }
 
+  /** The OS and claude version probes of the last hello (w970): a reconnect within an hour reuses them. */
+  private helloProbes?: { at: number; osv: { code: number; stdout: string }; claude: { code: number; stdout: string } };
+
   private async hello() {
-    const [osv, claude] = await Promise.all([
-      process.platform === 'darwin' ? run('sw_vers', ['-productVersion'], { timeoutMs: 5000 }) : Promise.resolve({ code: -1, stdout: '', stderr: '' }),
-      run(this.cfg.claude ?? 'claude', ['--version'], { timeoutMs: 15000 }),
-    ]);
+    // w970: beast's hello came ~20 s after its link (the 15 s `claude --version` probe on a busy Windows machine), and the
+    // portal's rollout read the commit as unknown in that window. A reconnect says hello at once with the earlier probes.
+    let probed = this.helloProbes;
+    if (!probed || Date.now() - probed.at > HELLO_PROBE_TTL_MS) {
+      const [osv, claude] = await Promise.all([
+        process.platform === 'darwin' ? run('sw_vers', ['-productVersion'], { timeoutMs: 5000 }) : Promise.resolve({ code: -1, stdout: '', stderr: '' }),
+        run(this.cfg.claude ?? 'claude', ['--version'], { timeoutMs: 15000 }),
+      ]);
+      // A failed probe (claude missing or timed out) is tried again on the next hello.
+      this.helloProbes = claude.code === 0 ? { at: Date.now(), osv, claude } : undefined;
+      probed = { at: Date.now(), osv, claude };
+    }
+    const { osv, claude } = probed!;
     this.send({
       type: 'hello',
       protocol: PROTOCOL_VERSION,
@@ -1680,6 +1692,9 @@ export function keepAwakeCommand(platform: NodeJS.Platform, pid: number): string
   ].join('; ');
   return ['powershell.exe', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')];
 }
+
+/** How long a hello's OS and claude probes are reused by the next one. */
+const HELLO_PROBE_TTL_MS = 60 * 60_000;
 
 function readVersion() {
   try {

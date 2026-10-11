@@ -458,6 +458,7 @@ export class Agents {
       host: {
         machines: () => machines.list().map((m) => ({ id: m.id, root: m.root, platform: m.platform, target: m.ssh ? `${m.ssh.user}@${m.ssh.host}` : m.host, local: m.local })),
         online: (id) => machines.isOnline(id),
+        hello: (id) => machines.hasHello(id),
         daemon: (id) => machines.daemonOf(id),
         outdated: (id) => machines.outdated(id),
         agents: (id) => [...sessions.sessions.values()].filter((x) => x.info.machineId === id && x.live).map((x) => ({ id: x.info.id, title: x.info.title })),
