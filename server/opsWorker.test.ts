@@ -548,6 +548,32 @@ test('w631: a job sent for ledger requests: the ids are checked, the worker is t
   ops.close();
 });
 
+test('w1039: a click of the person\'s that covers a deploy opens it; one that covers nothing else does not, and a job needs the requests the click named', async () => {
+  setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-click-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  const asked: string[] = [];
+  let covers: (verb: string) => boolean = () => false;
+  const ops = new OpsWorker({
+    sessions, store, options: () => ({}), tellOrchestrator: () => {}, personTurn: () => false, file: path.join(dir, 'ops-worker.json'), now: () => Date.parse('2026-10-11T06:00:00Z'), workProblem: () => undefined,
+    reactionCovers: (_id, need) => {
+      asked.push(`${need.verb} ${(need.refs ?? []).join(',')}`);
+      return covers(need.verb);
+    },
+  });
+  assert.throws(() => ops.deploy(orch('lo', LOTH)), /needs Lothsahn's own words in this turn/);
+  covers = (v) => v === 'restart';
+  assert.throws(() => ops.deploy(orch('lo', LOTH)), /needs Lothsahn's own words in this turn/, 'a click on a restart is no deploy');
+  covers = (v) => v === 'deploy';
+  assert.match(ops.deploy(orch('lo', LOTH), 'ship it'), /may run fffctl update once/);
+  assert.throws(() => ops.send(orch('lo', LOTH), 'look at m5', true, ['w5']), /needs a turn Lothsahn started/, 'a job is not a deploy');
+  covers = (v) => v === 'job';
+  assert.match(ops.send(orch('lo', LOTH), 'look at m5', true, ['w5']), /Sent to the orchestration worker/);
+  assert.ok(asked.includes('job w5'), asked.join('; '));
+  ops.close();
+});
+
 test('a deploy: only in a person\'s own turn, a grant good once for 15 minutes, and a report asked for after the restart', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-d-'));
