@@ -358,6 +358,13 @@ deploy. A machine that is offline is updated when it comes back. No request, no 
 - **Which machines.** Worker-root machines (a record with a root folder), one at a time. The portal's own host is skipped (the
   portal runs its daemon itself) and so is a machine deployed over ssh (the portal redeploys it once idle, as before). A daemon
   already on the deployed commit is left alone.
+- **An unknown commit is outdated, never current** (w970). After a portal restart a daemon's link is up some seconds before
+  its hello, which carries `machine/VERSION`; beast's came about 20 s late (22:28:44 connected, hello 22:29:05), the rollout read the
+  commit as unknown and marked it "already on the deployed commit (unknown); nothing to do", and its daemon stayed on the old
+  commit. Now a machine connected without a hello (`MachineManager.hasHello`) stays pending ("connected, but its daemon has not
+  said hello yet") and is looked at again on the next 30 s pass; a hello with no commit counts as outdated and is updated.
+  (`daemonBehind` in `machines.ts` still leaves an unknown commit alone: that is only the "update available" nag.) The
+  daemon also reuses its OS and `claude --version` probes for an hour (`Daemon.hello`), so a reconnect says hello at once.
 - **Offline or asleep** machines stay pending and are updated on the first pass (30 s) after their hello. The main report
   waits up to 10 minutes after the verification for machines that are only reconnecting to the new portal; one still offline
   then is listed as waiting, and a short follow-up message names it once it has been updated.

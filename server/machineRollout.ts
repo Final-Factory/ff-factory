@@ -53,6 +53,8 @@ export interface RolloutMachine {
 export interface RolloutHost {
   machines(): RolloutMachine[];
   online(id: string): boolean;
+  /** Whether its connected daemon has said hello on this connection: until then its commit is not known, not unknown (w970). */
+  hello(id: string): boolean;
   /** The commit its connected daemon says it runs, or undefined. */
   daemon(id: string): string | undefined;
   /** Why its connected daemon is outdated (a protocol out of range), or undefined. */
@@ -226,6 +228,10 @@ export class MachineRollout {
         } else if (!this.d.host.online(m.id)) {
           o.note = 'offline';
           continue;
+        } else if (!this.d.host.hello(m.id)) {
+          // Connected, but its hello (which carries its commit) has not come yet: w970, beast was read as "unknown" and skipped.
+          o.note = 'connected, but its daemon has not said hello yet';
+          continue;
         } else if (!this.needsUpdate(m.id, sha)) {
           Object.assign(o, { status: 'current', before: this.d.host.daemon(m.id), after: this.d.host.daemon(m.id), at: new Date(this.now()).toISOString() });
         } else {
@@ -242,8 +248,10 @@ export class MachineRollout {
     }
   }
 
+  /** A commit that is not known counts as outdated (w970), unlike the nag in machines.ts that leaves it alone: the update fixes it. */
   private needsUpdate(id: string, sha: string): boolean {
-    return !!this.d.host.outdated(id) || !!daemonBehind({ daemon: this.d.host.daemon(id) }, sha);
+    const daemon = this.d.host.daemon(id);
+    return !!this.d.host.outdated(id) || !daemon || !!daemonBehind({ daemon }, sha);
   }
 
   private installCommand(m: RolloutMachine, daemonRef?: string): string {
