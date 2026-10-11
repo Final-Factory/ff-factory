@@ -55,6 +55,46 @@ export function defaultMaxGB(hostTotalGB: number | undefined): number {
   return Math.max(100, Math.min(1024, Math.floor(hostTotalGB * 0.9)));
 }
 
+/**
+ * The Dev Drive record install() writes into root.json (w1038). install() builds a new manifest on every run, and the first
+ * version (w900) left `devDrive` out of it: the first re-run after the move wrote root.json without it, the next update then saw
+ * "no drive", took none, and daemon.json's sandbox root and seed went back to the root's own folders (LothDesktop, 2026-10-11,
+ * after the 3bc7a07 deploy). So: the record the manifest had, else one rebuilt from what the drive left on disk (its
+ * devdrive.json, written by devdrive.ps1, with the VHDX beside it), which also heals a root.json already wiped. `inUse`: the
+ * root's sandboxes folder is a junction to the drive, so the sandboxes are on it. Exported for tests.
+ */
+export function carryDevDrive(prev: { devDrive?: DevDriveRecord } | undefined, root: string, io: { read(file: string): string | undefined; exists(p: string): boolean; isLink(p: string): boolean } = realDriveIo): DevDriveRecord | undefined {
+  if (prev?.devDrive) return prev.devDrive;
+  if (!io.exists(path.join(root, 'devdrive.vhdx'))) return undefined;
+  const text = io.read(path.join(root, 'devdrive.json'));
+  if (!text) return undefined;
+  try {
+    const st = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Partial<DevDriveState>;
+    if (typeof st.letter !== 'string' || !/^[A-Za-z]$/.test(st.letter)) return undefined;
+    return { vhdx: path.join(root, 'devdrive.vhdx'), letter: st.letter.toUpperCase(), maxGB: Number(st.maxGB) || 0, inUse: io.isLink(path.join(root, 'sandboxes')) };
+  } catch {
+    return undefined;
+  }
+}
+
+const realDriveIo = {
+  read: (f: string) => {
+    try {
+      return fs.readFileSync(f, 'utf8');
+    } catch {
+      return undefined;
+    }
+  },
+  exists: (p: string) => fs.existsSync(p),
+  isLink: (p: string) => {
+    try {
+      return fs.lstatSync(p).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  },
+};
+
 export type DevDriveDecision = { action: 'ensure'; why: string } | { action: 'none'; why: string };
 
 /**

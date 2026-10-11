@@ -9,8 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, type MoveDeps, type PoolRec } from './worker/devdrive.ts';
-import { daemonJson, devDriveFlags, layoutOf, parseArgs, planUpdate, preflightProblems, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, type MoveDeps, type PoolRec } from './worker/devdrive.ts';
+import { daemonJson, devDriveFlags, layoutOf, manifestFor, parseArgs, planUpdate, preflightProblems, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { saveWork } from '../server/saveWork.ts';
 import { fenceToRoot } from '../server/cleanup.ts';
 
@@ -504,4 +504,55 @@ test('moving the sandboxes: a folder git no longer lists (a removal cut off afte
   assert.ok(said.some((l) => /empty folder git no longer lists/.test(l)));
   assert.ok(!said.some((l) => /detached/.test(l)));
   fs.rmSync(w.base, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- an update of a Dev Drive machine (w1038)
+
+test('w1038: an update of a Dev Drive machine keeps its root and seed on the drive (the 3bc7a07 auto-update reset them to D:)', () => {
+  const root = tmp('upd');
+  const drive = tmp('upd-drive');
+  const l = layoutOf(root);
+  fs.writeFileSync(path.join(root, 'devdrive.vhdx'), '');
+  fs.writeFileSync(path.join(root, 'devdrive.json'), JSON.stringify({ vhdx: path.join(root, 'devdrive.vhdx'), letter: 'V', maxGB: 702 }));
+  fs.symlinkSync(drive, l.sandboxes, 'junction');
+  const opts = { portalUrl: 'https://portal.example', service: 'FFFactoryDaemon', maxSandboxes: 6, repoUrl: 'https://github.com/x/y.git' };
+  const record = { vhdx: path.join(root, 'devdrive.vhdx'), letter: 'V', maxGB: 702, inUse: true };
+  const updateOpts = (m: Manifest) => planUpdate(root, m, { portalUrl: opts.portalUrl, sandboxes: { root: 'V:\\sandboxes', librarySeed: 'V:\\seed\\Library', maxSandboxes: 6 } }, 'ffm_x', {});
+  // What the move wrote, then two later runs of install(): each builds a new manifest from the last. The record has to survive them.
+  let m = manifestFor({ ...MANIFEST, devDrive: record }, opts, 'lothdesktop', root, 't1', 'win32');
+  assert.deepEqual(m.devDrive, record, 'a re-run keeps the record (the bug: it was dropped here, so the next update saw no drive)');
+  m = manifestFor(m, opts, 'lothdesktop', root, 't2', 'win32');
+  assert.deepEqual(m.devDrive, record);
+  // The update with no flags decides to keep the drive, and daemon.json keeps the drive's root and seed.
+  const u = updateOpts(m);
+  const dec = decideDevDrive({ platform: 'win32', update: true, flag: u.devDrive, hasOne: !!m.devDrive, rootFileSystem: 'NTFS' });
+  assert.equal(dec.action, 'ensure');
+  const cfg = daemonJson({ ...u, devDriveDirs: { ...devDriveDirs(m.devDrive!.letter), seedReady: true, blockClone: true } }, l, 'lothdesktop', undefined) as any;
+  assert.equal(cfg.sandboxes.root, 'V:\\sandboxes');
+  assert.equal(cfg.sandboxes.librarySeed, 'V:\\seed\\Library');
+  assert.equal(cfg.sandboxes.maxSandboxes, 6);
+  // A root.json already wiped by the old code (LothDesktop's after the first re-run) is rebuilt from what the drive left on disk.
+  const healed = manifestFor({ ...MANIFEST }, opts, 'lothdesktop', root, 't3', 'win32');
+  assert.deepEqual(healed.devDrive, record);
+  assert.equal(decideDevDrive({ platform: 'win32', update: true, hasOne: !!healed.devDrive }).action, 'ensure');
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(drive, { recursive: true, force: true });
+});
+
+test('w1038: a Dev Drive record is rebuilt only from a drive that is really there, and a machine with none gets none', () => {
+  const root = tmp('carry');
+  assert.equal(carryDevDrive(undefined, root), undefined, 'no file: none');
+  fs.writeFileSync(path.join(root, 'devdrive.json'), JSON.stringify({ letter: 'V', maxGB: 100 }));
+  assert.equal(carryDevDrive(undefined, root), undefined, 'a state file without the VHDX is not a drive');
+  fs.writeFileSync(path.join(root, 'devdrive.vhdx'), '');
+  assert.deepEqual(carryDevDrive(undefined, root), { vhdx: path.join(root, 'devdrive.vhdx'), letter: 'V', maxGB: 100, inUse: false }, 'the drive is made but the sandboxes still on the root: not in use');
+  fs.writeFileSync(path.join(root, 'devdrive.json'), 'not json');
+  assert.equal(carryDevDrive(undefined, root), undefined);
+  fs.writeFileSync(path.join(root, 'devdrive.json'), JSON.stringify({ letter: 'VV' }));
+  assert.equal(carryDevDrive(undefined, root), undefined);
+  const rec = { vhdx: 'x', letter: 'U', maxGB: 1, inUse: true };
+  assert.equal(carryDevDrive({ devDrive: rec }, root), rec, 'the manifest’s own record wins');
+  const none = manifestFor(undefined, { portalUrl: 'p', service: 's', maxSandboxes: 1, repoUrl: 'u' }, 'm', tmp('none'), 't', 'linux');
+  assert.equal('devDrive' in none, false);
+  fs.rmSync(root, { recursive: true, force: true });
 });
