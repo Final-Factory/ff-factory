@@ -163,9 +163,21 @@ entries are unchanged. A worker or standing agent also needs the entry granted t
 `machines`); the ops worker takes the workers' grants on no machine; a person's orchestrator takes no grant (the
 account setting is its consent).
 
-**The order.** The token whose **weekly** window resets soonest first (it is the capacity that would otherwise be lost
-at the reset), the 5-hour reset as the tie-break, then the name. A token with no reset time yet goes last. The 5-hour
-window refills every five hours whatever is done, so ranking by it would save nothing; weekly is the default key.
+**The order (w971).** The token with the highest **score** first. The score is its weekly headroom per hour until its weekly
+window resets: `(100 - weekly %) / hours to the weekly reset`, scaled by the room left in its 5-hour window,
+`(100 - 5-hour %) / 100`. `system_status`, `fffctl vault list` and the accounts page show it per day. lothsahn, 2026-10-11:
+"let's prefer the token weighted by the reset, but not solely based on the reset. Basically like use the token with the largest
+remaining %/time left or something like that." Reading it as headroom per hour: a token with 3% left and 3 days to go scores
+1%/day, one with 73% left and 4 days scores 18%/day, so the second is picked; the old "soonest reset first" would have tried the
+nearly used-up one first (vault-ben-2 at 97% on 2026-10-11 04:32Z). Details *(guesses, no data behind them yet)*:
+- The hours to the reset are never counted below one (`MIN_HOURS_TO_RESET`), so a token minutes from its reset does not score as
+  infinite; a token about to reset with room left still scores high, which is right: that room is lost if unused.
+- The 5-hour room is a multiplier, so a token at 70% of its 5-hour window scores 0.3 of what a fresh one would. The caps stay
+  as they were (80% 5-hour: held; 95% weekly: one at a time; 99%: retired; 100: used up) and apply before the score.
+- **Ties** (scores equal to 9 digits): the soonest weekly reset, then the 5-hour reset, then the fewer live runs, then the name.
+- A token with no weekly reset time (no numbers yet) has no score and goes after every scored token.
+- The same order applies to workers, standing agents, a person's orchestrator and the ops worker; a session still keeps its token
+  while it passes (sticky), but not one inside the dispatcher's reserve (below).
 The meters are the ones `UsageTracker` polls (section 4a).
 
 **The limits** (one system-wide set, config `vault.pool.*`, percent 0 to 100, defaults below; **anyone** may change them
@@ -179,7 +191,7 @@ logged in the portal journal with who made it; they apply at the next process st
 | `vault.pool.retireWeeklyPercent` | 99 | its weekly meter: **retired**, handed to nobody until the weekly window resets |
 | (at 100) | | either meter: **used up**, handed to nobody until it resets (a rejection by the API counts as 100) |
 
-A token with no numbers yet counts as 50% on both meters, so it passes every rule and ranks last. "Live" counts the
+A token with no numbers yet counts as 50% on both meters, so it passes every rule and ranks last (no weekly reset time, so no score). "Live" counts the
 sessions whose process started on the token, not the asking session itself, and a pick made in the last 20 seconds before
 its process shows (two starts cannot both take the last slot).
 
@@ -192,7 +204,8 @@ used up):
 | Role | What happens |
 |---|---|
 | A worker, a standing agent, the ops worker for them | **Held** with the reason ("lothsahn's Claude token pool is held: every token is at a limit (a: 5-hour 90% (>= 80): held until Fri 14:00Z; b: …): the first frees up Fri 14:00Z"): a worker's first prompt queues and is tried again, a standing agent's run ends "Could not start: <reason>" and the next scheduled run tries again; no fallback to the host token, the machine's login, the dispatcher's token or anyone else's |
-| A person's own **orchestrator** (`claudeAccounts.orchestrator = "vault"`) | **Uses the pool up**: while some token is only past its caps (held, one-at-a-time, retired) but not used up, it runs on the one with the most room (the soonest reset on a tie), and the one-at-a-time rule does not bind it. Once every token is used up it **stops** with the reason and the next reset on the dashboard; there is no override and no fallback |
+| A person's own **orchestrator** (`claudeAccounts.orchestrator = "vault"`) | **Uses the pool up**: while some token is only past its caps (held, one-at-a-time, retired) but not used up, it runs on the one with the most room (the soonest reset on a tie), and the one-at-a-time rule does not bind it. A token inside the dispatcher's reserve (next section) is used before any of those, and only when no other token passes its caps. Once every token is used up it **stops** with the reason and the next reset on the dashboard; there is no override and no fallback |
+| A token **inside the dispatcher's reserve**, when no other token of the person has room (w971) | A worker, a standing agent or the ops worker is **held** like at any limit (the reason names the buffer and when it lifts); the person's orchestrator runs on it, as it did before |
 | The **dispatcher** | Never on a pool: it keeps the shared token file (or whatever `claudeAccounts.dispatcher` names) and is never held |
 
 **What a token at the one-at-a-time limit is (w747).** A token at 95% weekly is not over its cap: it still works, one
@@ -218,22 +231,41 @@ on m3 for sam; it runs on host token …abcd instead") for 24 hours. The same fa
 their tokens (no key, a wrong key): nothing the person can wait for. The moment a person has one token, only their pool
 is used.
 
-**The dispatcher's reserve.** The credential the dispatcher runs on (`claudeAccounts.dispatcher`, resolved from config
-at each look: the token file today, else the host token or this host's login) and the host token
+**The dispatcher's reserve (enforced since w971).** The credential the dispatcher runs on (`claudeAccounts.dispatcher`, resolved
+from config at each look: the token file today, else the host token or this host's login) and the host token
 (`claudeEnv.CLAUDE_CODE_OAUTH_TOKEN`, which biscuit's agents and any person without a pool run on) keep a buffer for
 their own roles: **5% of the weekly window for each day left until that window resets** (35% with seven days to go, 5%
 with one, 0 at the reset; `vault.pool.reservePerDayPercent`) and **20% of the 5-hour window**
 (`vault.pool.reserveSessionPercent`). The reserve is the dispatcher's: it may always run into it, up to 100%, and
-nothing checks it before the dispatcher starts. Nothing else is *refused* by it, because after the pool change nothing
-else lands on these credentials except a person with no vault token yet (their orchestrator, the ops worker for them),
-who has no other account; `system_status` shows each reserve ("the dispatcher's token file …dAAA: weekly 41%, reserve
-25% (5 days to reset); 5-hour 12%, reserve 20%") and, while a meter is inside the buffer with such runs on the credential,
-the dashboard shows a warning. Both the status line and the warning name only the limit or limits that put the token inside the
-buffer, each with its figure, its buffer and its reset ("5-hour 93% (buffer 20%), resets in 10 min"; both, when both are inside;
-`reserveReason` in `server/tokenPool.ts`): the week is never given as the reason while it is outside its buffer (w828). Until a
-credential's first reading arrives it counts as inside its reserve, and the text says "no reading yet". One token is
-one account: two tokens of one Claude account are not matched, so such a token would have its own meters and its own
-reserve.
+nothing checks it before the dispatcher starts.
+
+Until w971 nothing was refused by it, and vault-ben-2 (the token file's token, also in Ben's pool) sat at 97% weekly with
+both orchestrators, the ops worker and two workers on it, while vault-ben-1 had 73% left. Now **a vault token that is also the
+dispatcher's credential or the host token** (matched by the token's fingerprint, `reservedCredentials` in
+`server/secrets.ts` against the entry's `fingerprint`; `reservedFor` in `server/index.ts`), **while either meter is inside
+its buffer, is handed to no new run while another token of that person's pool has room** (state `reserved`: no worker, no
+standing agent, no ops worker, no orchestrator). "Has room" means passes every cap in section 4 (not held, not at its one slot,
+not retired, not used up). When none does:
+- a person's own **orchestrator** takes the reserved token as before (it uses the pool up; docs above), so nothing new
+  locks it out;
+- a **worker, a standing agent and the ops worker wait** (held), like at any other limit. *Why workers wait* (a judgment, with
+  the sources I have): the reserve exists so the dispatcher, which starts every worker, never runs dry (the section above and
+  w739); a worker that eats the last of it can stop the dispatcher for everyone, while a waiting worker costs a delay. The
+  same reasoning already holds workers at 95% and 99% so the person's own orchestrator keeps the pool's last part (this
+  section, "when the pool has no token that may serve the run"). The wait is bounded and visible: the held reason and
+  `system_status` name when the buffer lifts, which is when the week's buffer (5% a day) has shrunk below what is left, at
+  the latest at the weekly reset, or the 5-hour reset for the 5-hour buffer. Not measured on live traffic.
+- A token with no reading yet counts as inside its reserve (`noReading`), so it is the last choice until its first reading.
+
+Running processes are never touched. The pick is made at each process start, resumes included, so a worker or orchestrator already
+on the reserved token moves to another token at its next start or resume. `system_status` shows each reserve ("the
+dispatcher's token file …dAAA: weekly 41%, reserve 25% (5 days to reset); 5-hour 12%, reserve 20%") and, while a meter is inside
+the buffer with other runs on the credential, the dashboard shows a warning. Both the status line and the warning name only
+the limit or limits that put the token inside the buffer, each with its figure, its buffer and its reset ("5-hour 93%
+(buffer 20%), resets in 10 min"; both, when both are inside; `reserveReason` in `server/tokenPool.ts`): the week is never given
+as the reason while it is outside its buffer (w828). A person with no vault token of their own still lands on the credential
+(the transition below): they have no other account. One token is one account: two tokens of one Claude account are not matched,
+so such a token would have its own meters and its own reserve.
 
 **Order with the existing switches.** A person's own token in config `userClaudeEnv` still wins for their work on a
 machine, as before. Then the vault, on machines `machines.claudeFromVault` names (owner-only in `set_app_config`;
@@ -938,7 +970,7 @@ file holds another token now) is removed. The old names are never removed while 
 
 **3a. The pool works** (after the deploy and a `vault-sync`): `sudo fff-vm ssh 'sudo fffctl vault list'` ends with a "Claude
 token pools" section, one line per token: its last four characters, its state (`ok`, `held`, `one-at-a-time`, `retired`,
-`exhausted`), its 5-hour and weekly percent with their resets, and how many agents ran on it at the portal's last save.
+`exhausted`, `reserved`), its score, its 5-hour and weekly percent with their resets, and how many agents ran on it at the portal's last save.
 `system_status` has a "Claude token pool, <person>" line per person with the same, the agents running on each token, and
 a verdict, plus a line per reserved credential ("the dispatcher's token file …dAAA: weekly 41%, reserve 25% (5 days to
 reset)…"). A token whose line says "no numbers yet" has not been polled: wait for the next poll (2 to 15 minutes).

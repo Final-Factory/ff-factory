@@ -28,6 +28,7 @@ import { parseArgs } from 'node:util';
 import { loadConfig } from './config.ts';
 import { enrolledMachines, issueMachineToken, machineTokensFile, revokeMachineToken } from './machineTokens.ts';
 import type { PlanUsage } from '../shared/types.ts';
+import { reservedCredentials } from './secrets.ts';
 import { clock, poolLimits } from './tokenPool.ts';
 import { VAULT_FILE, Vault, fingerprintOf, keySource, newKeyText, type VaultEntryMeta, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 
@@ -135,7 +136,7 @@ function poolSection() {
     // no state file
   }
   const live = (fp: string) => sessions.filter((x) => x.account === `token:${fp}` && x.status !== 'stopped' && x.status !== 'error').length;
-  const pools = vault.pools({ usageOf: (fp) => usageFile.entries?.[`token:${fp}`]?.usage, liveOn: (fp) => live(fp), limits: () => poolLimits(cfg) });
+  const pools = vault.pools({ usageOf: (fp) => usageFile.entries?.[`token:${fp}`]?.usage, liveOn: (fp) => live(fp), limits: () => poolLimits(cfg), reservedFor: (fp) => (reservedCredentials(cfg).some((c) => c.key === `token:${fp}`) ? 'the dispatcher' : undefined) });
   // A Claude entry with no owner is in nobody's pool: the portal no longer hands out a shared Claude token (w739).
   const orphans = vault.list().filter((e) => e.kind === 'claude' && !e.disabled && !e.owner);
   if (orphans.length) console.log(`
@@ -143,13 +144,14 @@ not in any pool (a Claude token with no owner is used by nobody; grant it to a p
   if (!pools.size) return;
   const lim = poolLimits(cfg);
   console.log(`
-Claude token pools (5-hour >= ${lim.sessionHold}%: held; weekly >= ${lim.onePerWeekly}%: one at a time; >= ${lim.retireWeekly}%: retired; soonest weekly reset first):`);
+Claude token pools (5-hour >= ${lim.sessionHold}%: held; weekly >= ${lim.onePerWeekly}%: one at a time; >= ${lim.retireWeekly}%: retired; highest score first):`);
   for (const [person, list] of [...pools].sort((a, b) => a[0].localeCompare(b[0]))) {
     console.log(`  ${person}`);
-    for (const t of list.sort((a, b) => (a.view.weeklyResetsAt ?? '9').localeCompare(b.view.weeklyResetsAt ?? '9'))) {
+    for (const t of list.sort((a, b) => (b.view.score ?? -1) - (a.view.score ?? -1) || a.entry.name.localeCompare(b.entry.name))) {
       const v = t.view;
       console.log(`    ${t.entry.name.padEnd(24)} …${t.entry.last4}  ${v.state.padEnd(13)} 5-hour ${v.known ? Math.round(v.session) + '%' : '?'}${v.sessionResetsAt ? ` (resets ${clock(v.sessionResetsAt)})` : ''}, weekly ${v.known ? Math.round(v.weekly) + '%' : '?'}${v.weeklyResetsAt ? ` (resets ${clock(v.weeklyResetsAt)})` : ''}; ${t.live} agent${t.live === 1 ? '' : 's'} running${v.state === 'ok' && !v.why.includes('one job') ? '' : `
-${' '.repeat(8)}${v.why}`}`);
+${' '.repeat(8)}${v.why}`}
+${' '.repeat(8)}${v.scoreText}`);
     }
   }
 }

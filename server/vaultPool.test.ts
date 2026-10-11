@@ -89,19 +89,20 @@ test("pool: a person's runs use that person's own tokens only: no shared token, 
   assert.equal(v.claudeTokens().length, 4);
 });
 
-test('pool: the token whose weekly window resets first is used first; a held or retired one is skipped', (t) => {
+test('pool: the token with the most weekly headroom per hour to its reset is used first (w971); a held or retired one is skipped', (t) => {
   const { make } = setup(t);
   const v = poolVault(make);
   const m = {
     [fp(B1)]: usage(10, 30, { weeklyDays: 5, sessionHours: 3 }),
     [fp(B2)]: usage(10, 60, { weeklyDays: 2, sessionHours: 3 }),
   };
-  assert.equal(v.forRun(run('ben'), { claude: true, ...world(m) }).claude?.entry.name, 'ben-b', 'resets sooner');
+  assert.equal(v.forRun(run('ben'), { claude: true, ...world(m) }).claude?.entry.name, 'ben-b', '40% over 2 days beats 70% over 5');
   m[fp(B2)] = usage(85, 60, { weeklyDays: 2, sessionHours: 3 });
   assert.equal(v.forRun(run('ben'), { claude: true, ...world(m) }).claude?.entry.name, 'ben-a', 'ben-b is at 85% of its 5-hour window: held');
   m[fp(B2)] = usage(10, 99.4, { weeklyDays: 2 });
   assert.equal(v.forRun(run('ben'), { claude: true, ...world(m) }).claude?.entry.name, 'ben-a', 'ben-b retired until its week resets');
   // The limits are the config's (system-wide), read at each pick.
+  m[fp(B1)] = usage(10, 90, { weeklyDays: 5 }); // little headroom left, so ben-b still scores higher at 60% of its 5-hour window
   m[fp(B2)] = usage(60, 60, { weeklyDays: 2 });
   const strict = () => poolLimits({ vault: { pool: { sessionHoldPercent: 50 } } });
   assert.equal(v.forRun(run('ben'), { claude: true, ...world(m), limits: strict }).claude?.entry.name, 'ben-a', 'held at 50% with the changed limit');
@@ -195,7 +196,7 @@ test('pools(): every person pool as the rules read it, no token in it', (t) => {
 
 function ctxOf(v: Vault, meters: Record<string, PlanUsage | undefined> = {}, live: Record<string, number> = {}): VaultContext & { problems: string[] } {
   const problems: string[] = [];
-  return { vault: v, usageOf: (f) => meters[f], liveOn: (f) => live[f] ?? 0, payer: () => 'lothsahn', onProblem: (l) => problems.push(l), problems, limits: () => poolLimits(undefined) };
+  return { vault: v, usageOf: (f) => meters[f], liveOn: (f) => live[f] ?? 0, payer: () => 'lothsahn', onProblem: (l) => problems.push(l), problems, limits: () => poolLimits(undefined), now: () => NOW };
 }
 const cfgOf = (extra: Record<string, unknown> = {}) =>
   ({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST, ANTHROPIC_API_KEY: API_KEY, CLAUDE_CONFIG_DIR: '/x' }, userClaudeEnv: {}, machines: { claudeFromVault: true }, ...extra }) as never;
@@ -439,4 +440,57 @@ test('set_app_config: "vault" for the orchestrator only; the pool limits are any
   setAppConfig(file, cfg, 'vault.pool.sessionHoldPercent', null);
   assert.equal(poolLimits(cfg).sessionHold, 80);
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).vault.pool.sessionHoldPercent, undefined);
+});
+
+// ---------------------------------------------------------------- w971: the reserve is enforced, the score orders
+
+test("w971: the dispatcher's token in a person's pool, inside its reserve, goes to no worker, no ops worker and no orchestrator while another token has room", (t) => {
+  const { make, tokenFile } = setup(t);
+  const v = make();
+  // ben-a is the dispatcher's token file (also in Ben's pool); ben-b is another token. The 04:32Z picture: 97% vs 27% weekly, 4 days to go.
+  v.add({ name: 'ben-a', kind: 'claude', value: FILE, owner: 'ben', share: 'owner' });
+  v.add({ name: 'ben-b', kind: 'claude', value: B2, owner: 'ben', share: 'owner' });
+  const meters: Record<string, PlanUsage | undefined> = { [fp(FILE)]: usage(10, 97, { weeklyDays: 4, sessionHours: 3 }), [fp(B2)]: usage(10, 27, { weeklyDays: 4, sessionHours: 3 }) };
+  const cfg = cfgOf({ claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' }, claudeTokenFile: tokenFile });
+  const ctx = { ...ctxOf(v, meters), reservedFor: (f: string) => (f === fp(FILE) ? 'the dispatcher' : undefined) };
+  const fallback = () => ({});
+  const ben = { userId: 'ben', displayName: 'Ben' };
+  const token = (e: { CLAUDE_CODE_OAUTH_TOKEN?: string }) => e.CLAUDE_CODE_OAUTH_TOKEN;
+  assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w1' }, ctx).env), B2, 'a worker');
+  assert.equal(token(poolRunEnv(cfg, { role: 'ops', personId: 'ben', sessionId: 'ops1' }, fallback, ctx).env), B2, 'the ops worker');
+  assert.equal(token(poolRunEnv(cfg, { role: 'orchestrator', personId: 'ben', sessionId: 'orch1' }, fallback, ctx).env), B2, 'the orchestrator');
+  // Without the reserve known (the old code), the token with the sooner... both reset together, so it would have been by name: the point is the reserve decides.
+  const noReserve = { ...ctx, reservedFor: undefined };
+  assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w2' }, noReserve).env), B2, 'by score alone ben-b wins too');
+  // The other token fills up (5-hour window held): the worker and the ops worker wait, the orchestrator uses the reserve.
+  meters[fp(B2)] = usage(90, 27, { weeklyDays: 4, sessionHours: 2 });
+  assert.throws(
+    () => machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w3' }, ctx),
+    (e: unknown) => e instanceof PoolHeldError && /inside the buffer kept for the dispatcher/.test(e.message) && e.next === iso(NOW + 2 * 3_600_000) && !e.message.includes(FILE.slice(13, 40)),
+  );
+  assert.throws(() => poolRunEnv(cfg, { role: 'ops', personId: 'ben', sessionId: 'ops2' }, fallback, ctx), PoolHeldError);
+  const orch = poolRunEnv(cfg, { role: 'orchestrator', personId: 'ben', sessionId: 'orch2' }, fallback, ctx);
+  assert.equal(token(orch.env), FILE, 'nothing else has room: today\'s behaviour for the orchestrator');
+  assert.match(orch.account, /inside the dispatcher's reserve: no other token has room/);
+  // The week runs out: the buffer (5% a day) shrinks below what is left and the token is an ordinary one again (94% at 0.5 days: buffer 2.5%).
+  meters[fp(FILE)] = usage(10, 94, { weeklyDays: 0.5, sessionHours: 3 });
+  meters[fp(B2)] = usage(10, 90, { weeklyDays: 4, sessionHours: 3 }); // little headroom: the score now favours the ex-reserved token
+  assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w4' }, ctx).env), FILE);
+  // A session already running on it is never touched: only the next start asks the pool.
+});
+
+test('w971: the pool listing shows each token score and the reserve state (system_status, fffctl vault list)', (t) => {
+  const { make } = setup(t);
+  const v = make();
+  v.add({ name: 'ben-a', kind: 'claude', value: FILE, owner: 'ben', share: 'owner' });
+  v.add({ name: 'ben-b', kind: 'claude', value: B2, owner: 'ben', share: 'owner' });
+  const m = { [fp(FILE)]: usage(0, 97, { weeklyDays: 3 }), [fp(B2)]: usage(0, 27, { weeklyDays: 4 }) };
+  const pools = v.pools({ ...world(m), reservedFor: (f) => (f === fp(FILE) ? 'the dispatcher' : undefined) });
+  const [a, b] = ['ben-a', 'ben-b'].map((n) => pools.get('ben')!.find((x) => x.entry.name === n)!.view);
+  assert.equal(a.state, 'reserved');
+  assert.ok(Math.abs(a.score! - 1) < 0.01);
+  assert.match(a.scoreText, /^score 1\.0%\/day \(3% weekly left over 3\.0 days/);
+  assert.equal(b.state, 'ok');
+  assert.ok(Math.abs(b.score! - 18.25) < 0.01);
+  assert.match(b.scoreText, /^score 18%\/day \(73% weekly left over 4\.0 days/);
 });
