@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import { readToken, rootEnv, withRootDefaults } from '../machine/daemon.ts';
 import { macControlScript, macLabel, macReloadLines, plist } from '../server/machineDeploy.ts';
 import { installScript, taskName, taskXml, uninstallScript } from '../server/machineDeployWin.ts';
-import { adoptLayout, leaveRoot } from '../server/machines.ts';
+import { adoptLayout, leaveRoot, poolSettingsOf } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
@@ -157,9 +157,19 @@ test('worker portal record: a new root is the daemon\'s to say; a rollback gives
   assert.equal(m.maxSandboxes, 3, "its sandbox count is its installer's (w576: the installer also makes the player-folder pairs)");
   assert.equal(m.maxUnity, 2, 'a limit the record lacks comes from the daemon');
   assert.deepEqual(m.preRoot, { appDir: 'C:\\Users\\r\\.ff-factory', repoPath: 'C:\\ffsb\\_base', tempDir: undefined, sandboxRoot: 'F:\\ffsb', librarySeed: 'F:\\ffsb\\_seed\\Library' });
-  m.sandboxRoot = 'G:\\elsewhere';
-  assert.equal(adoptLayout(m, layout), false, 'the same root again: the record (add_machine) wins');
-  assert.equal(m.sandboxRoot, 'G:\\elsewhere');
+  assert.equal(adoptLayout(m, layout), false, 'the same root and the same pool folder again: nothing changes');
+  // The folder is the installer's (add_machine refuses to change it on a root install), so a daemon reporting another one has moved it:
+  // the Dev Drive move (w900) put LothDesktop's sandboxes on V:, and the record kept D:\\work\\ffw\\sandboxes, which the welcome then sent back
+  // as the pool's root (w1038). The seed and its copy mode follow, and the pool is sent again.
+  const lothdesktop = { id: 'lothdesktop', root: 'D:\\work\\ffw', appDir: 'D:\\work\\ffw\\daemon', repoPath: 'D:\\work\\ffw\\repo', sandboxRoot: 'D:\\work\\ffw\\sandboxes', librarySeed: 'D:\\work\\ffw\\seed\\Library', maxSandboxes: 6 } as Machine;
+  const onDrive = { root: 'D:\\work\\ffw', appDir: 'D:\\work\\ffw\\daemon', repoPath: 'D:\\work\\ffw\\repo', sandboxes: { root: 'V:\\sandboxes', librarySeed: 'V:\\seed\\Library', librarySeedCopy: 'clone' as const, maxSandboxes: 6, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 20, diskCriticalGB: 10 } };
+  assert.equal(adoptLayout(lothdesktop, onDrive), true, 'the pool folder changed: the welcome goes out again');
+  assert.equal(lothdesktop.sandboxRoot, 'V:\\sandboxes');
+  assert.equal(lothdesktop.librarySeed, 'V:\\seed\\Library');
+  assert.equal(lothdesktop.librarySeedCopy, 'clone');
+  assert.equal(poolSettingsOf(lothdesktop)?.root, 'V:\\sandboxes', 'and that is what the daemon is told');
+  assert.equal(poolSettingsOf(lothdesktop)?.librarySeedCopy, 'clone');
+  assert.equal(adoptLayout(lothdesktop, { ...onDrive, sandboxes: { ...onDrive.sandboxes, root: 'v:/sandboxes/' } }), false, 'the same place spelled another way is no change');
   m.sandboxRoot = 'F:\\ffw\\sandboxes';
   assert.equal(leaveRoot(m), true);
   assert.equal(m.root, undefined);

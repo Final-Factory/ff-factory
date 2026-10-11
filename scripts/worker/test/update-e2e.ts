@@ -110,8 +110,9 @@ const run = (args: string[], input?: string, env: NodeJS.ProcessEnv = {}) => {
 };
 
 try {
+  // No Dev Drive (w900, w1038): the new install would make one in the scratch root by default, and its sandbox root and seed would then be the drive's, not the tuned ones this test carries. The drive has its own end to end (devdrive-e2e.ts).
   // 1. The install, as a person runs it the first time.
-  const installArgs = [...node, path.join(SRC, 'scripts', 'worker', 'worker.ts'), 'install', '--root', root, '--portal-url', portalUrl, '--credential-stdin', '--max-sandboxes', '2', '--max-agents-per-sandbox', '1', '--max-unity', '1', '--service', service, '--repo-url', game, '--no-firewall', '--no-cleanup', '--no-ssh', '--unity-slots-dir', path.join(scratch, 'slots'), ...(elevated ? ['--owner', os.userInfo().username] : [])];
+  const installArgs = [...node, path.join(SRC, 'scripts', 'worker', 'worker.ts'), 'install', '--root', root, '--portal-url', portalUrl, '--credential-stdin', '--max-sandboxes', '2', '--max-agents-per-sandbox', '1', '--max-unity', '1', '--service', service, '--repo-url', game, '--no-firewall', '--no-cleanup', '--no-ssh', '--no-dev-drive', '--unity-slots-dir', path.join(scratch, 'slots'), ...(elevated ? ['--owner', os.userInfo().username] : [])];
   const inst = run(installArgs, credential + '\n');
   check(inst.code === 0, 'the test install', `exit ${inst.code}`);
   if (inst.code !== 0) throw new Error('the install failed; nothing to update');

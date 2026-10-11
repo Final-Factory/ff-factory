@@ -306,6 +306,21 @@ this one is detached (measured on GitHub's Windows runner: `diskpart assign lett
 conversation under it (Claude Code files them by path; the move below renames them, a letter change does not): that is
 the price of a rare event, *a guess* at how rare.
 
+**An update keeps the drive** (w1038). `root.json` carries `devDrive` (letter, size, `inUse`); every install or update builds a
+new manifest from the last (`manifestFor`), and the first version left that field out, so the first re-run after a move wiped it and
+the next update (the automatic one after a deploy) saw no drive, took none, and wrote `sandboxes.root` and `librarySeed` back to
+`<root>\\sandboxes` and `<root>\\seed` (LothDesktop, 2026-10-11, after the 3bc7a07 deploy; its report said "SETTINGS CHANGED although
+none was asked for"). Now the record is carried, and a `root.json` that lost it is rebuilt from `devdrive.json` and the VHDX beside
+it (`carryDevDrive`; `inUse` when `<root>\\sandboxes` is a junction), so the next update of such a machine puts the drive's paths
+back. A settings diff on an update that names no setting is the signal to look for.
+
+**The portal follows the daemon's pool folder** (w1038). A root install's sandbox folder is its installer's, and the daemon's hello
+carries its own `daemon.json` pool. `adoptLayout` (`server/machines.ts`) kept the record's folder for a root the portal already knew,
+so after the move the portal still said `D:\\work\\ffw\\sandboxes` (the junction) in `list_machines`, `list_sandboxes` and, worse, in every
+welcome, which the daemon applies over `daemon.json`: its pool root was the junction path and its seed copy mode was lost (`clone`
+is not on the record). Now a hello whose pool folder differs from the record's (same root) replaces the record's folder, seed and
+copy mode, and the portal sends the daemon its pool again.
+
 **Idempotent.** `devdrive.ps1 -Action ensure` finds the file in the root: if it exists it is attached and kept, never
 recreated; it formats a disk only when the disk has **no partition** (an earlier run was cut off between creating and
 formatting, with nothing on it to lose); a partition that holds anything is never touched. The helper tasks are
