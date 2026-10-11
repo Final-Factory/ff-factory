@@ -79,6 +79,8 @@ repo(path.join(base, 'base'), 'develop');
 const clips = path.join(sandboxRoot, '_review', 'w000-clips');
 fs.mkdirSync(clips, { recursive: true });
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.webm'));
+// The same bytes named .mp4: Playwright's Chromium has no H.264, so this one only proves the page asks for it as a video.
+fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.mp4'));
 
 // Max (docs/max.md): the token in a scratch ffbox config, a mock Discord, and what agents' ffdiscord calls wrote.
 const discordPort = port + 100;
