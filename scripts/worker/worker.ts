@@ -27,7 +27,7 @@ import { linuxControlScript, linuxReloadLines, parseUnitShow, systemdUnit, unitF
 import * as win from '../../server/machineDeployWin.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
-import { decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
+import { carryDevDrive, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
 export const LAYOUT_VERSION = 1;
@@ -1165,6 +1165,30 @@ async function registerPortalSsh(o: InstallOptions) {
   else say(`The portal's ssh: registered as ${r.host} (host key pinned), but its ssh does not get in yet: ${r.detail}`);
 }
 
+/**
+ * The root.json an install or update writes: what is new from the options, and what the root already had (its id, creation time,
+ * the list of things outside it, its Dev Drive: w1038). Exported for tests.
+ */
+export function manifestFor(prev: Manifest | undefined, o: Pick<InstallOptions, 'portalUrl' | 'service' | 'maxSandboxes' | 'repoUrl' | 'firewallSuffix'>, machineId: string, root: string, now: string, platform: NodeJS.Platform = process.platform): Manifest {
+  const drive = carryDevDrive(prev, root);
+  return {
+    installId: prev?.installId ?? crypto.randomUUID(),
+    layout: LAYOUT_VERSION,
+    machineId,
+    portalUrl: o.portalUrl,
+    platform: platform === 'win32' ? 'win32' : platform === 'linux' ? 'linux' : 'darwin',
+    service: o.service,
+    slots: o.maxSandboxes,
+    repoUrl: o.repoUrl,
+    ...(o.firewallSuffix ? { firewallSuffix: o.firewallSuffix } : {}),
+    createdAt: prev?.createdAt ?? now,
+    updatedAt: now,
+    outside: prev?.outside ?? [],
+    // The Dev Drive stays on the record: without it the next update takes no drive and resets daemon.json's root and seed.
+    ...(drive ? { devDrive: drive } : {}),
+  };
+}
+
 /** Ask a yes/no question on the terminal; `yes` answers it. */
 async function confirm(question: string, yes: boolean): Promise<boolean> {
   if (yes) return true;
@@ -1203,20 +1227,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   for (const d of [l.root, l.daemon, l.secrets, l.sandboxes, l.seed, l.players, l.nightly, l.scratch, l.tmp, l.logs]) if (!isLink(d)) fs.mkdirSync(d, { recursive: true });
   const now = new Date().toISOString();
   const prev = readManifest(l.root);
-  const m: Manifest = {
-    installId: prev?.installId ?? crypto.randomUUID(),
-    layout: LAYOUT_VERSION,
-    machineId: id,
-    portalUrl: o.portalUrl,
-    platform: isWin ? 'win32' : isLinux ? 'linux' : 'darwin',
-    service: o.service,
-    slots: o.maxSandboxes,
-    repoUrl: o.repoUrl,
-    ...(o.firewallSuffix ? { firewallSuffix: o.firewallSuffix } : {}),
-    createdAt: prev?.createdAt ?? now,
-    updatedAt: now,
-    outside: prev?.outside ?? [],
-  };
+  const m = manifestFor(prev, o, id, l.root, now);
   writeManifest(l.root, m);
   const pf = syncPlayerFolders(l.players, playerFolders(o.maxSandboxes));
   say(`Player folders: ${playerFolders(o.maxSandboxes).length} (slot1-0..slot${o.maxSandboxes}-1 and slotnightly-0, -1)${pf.made.length ? `, ${pf.made.length} made` : ''}${pf.removed.length ? `; removed ${pf.removed.join(', ')}` : ''}${pf.kept.length ? `; still in use: ${pf.kept.join(', ')}` : ''}.`);
