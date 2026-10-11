@@ -54,6 +54,7 @@ import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
+import { tokenPersonForWork } from './vault.ts';
 import type { AttachmentRef, ConditionalDecision, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -764,6 +765,34 @@ export class Orchestrators {
     if (w.status !== 'queued' && w.queuedFor) w.queuedFor = undefined;
   }
 
+  /**
+   * A person acted on a request in FF Factory (w1031): from now on its workers run on that person's Claude pool and GitHub
+   * token (WorkItem.runsFor, read by server/vault.ts tokenPersonForWork at each process start). Acting is answering its
+   * question, approving or declining it, adding a note, reopening it, changing its priority, or joining it from Discord or
+   * FFBox, through the web UI, their orchestrator's update_work or a relayed answer. Never a worker's report, a harness
+   * message or the dispatcher's own action: callers pass only a person's. A name that is no login here is ignored. The
+   * switch is logged when the account changes; the request shows it (describeItem, the dashboard). A worker mid-turn finishes
+   * on the account it started on; the next process start picks the new one.
+   */
+  takeOver(w: WorkItem, by: Requester, why: string): boolean {
+    const login = this.d.identity.get(by.userId);
+    if (!login) return false;
+    const was = tokenPersonForWork(this.d.cfg, w) ?? w.requestedBy.userId;
+    const at = this.now().toISOString();
+    w.runsFor = { userId: login.userId, displayName: login.displayName, at, why: clip(why, 200) };
+    if (same(was, login.userId)) return false;
+    this.stamp(w, `now runs for ${login.displayName}: ${why} (was ${was}; their Claude pool and GitHub token, from the next worker process start)`);
+    return true;
+  }
+
+  /** takeOver for a request by id, saved (a caller outside this class: FFBox's operator messages). */
+  actedOn(id: string, by: Requester, why: string): void {
+    const w = this.store.work.get(id.toLowerCase());
+    if (!w) return;
+    this.takeOver(w, by, why);
+    this.store.putWork(w);
+  }
+
   /** The branches checked out anywhere: the machines' main clones and their sandboxes. */
   private knownBranches(): string[] {
     const { machines } = this.d.places();
@@ -867,6 +896,7 @@ export class Orchestrators {
       // Filed again in the person's own turn: they asked for it themselves now, which the destructive tools need.
       const confirmed = human && !repeat.humanAsked;
       if (confirmed) repeat.humanAsked = true;
+      if (human) this.takeOver(repeat, owner, `${owner.displayName} filed it again`);
       this.store.putWork(repeat);
       if (confirmed) this.gatherForDispatcher(owner, updateNotice(repeat, owner, 'asked for it again in their own words'));
       return `Already filed as ${repeat.id} (${repeat.status}); the new text is in its log. To change what it asks for, use update_work with a note${cloneMachine ? ` (and main_clone: "${cloneMachine}" for the main-clone grant)` : ''}.`;
@@ -1011,6 +1041,12 @@ export class Orchestrators {
     // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn.
     w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
     const what: string[] = [];
+    // ACTING (w1031): their own words in this turn, never a harness message or a worker's report relayed to their chat.
+    if (w.humanAsked) {
+      const answers = !!note && (w.status === 'question' || !!w.question || !!w.flag);
+      const acted = input.reopen ? 'reopened it' : answers ? `answered ${w.flag ? 'the design question' : 'the question'} on it` : note ? 'added a note' : input.priority && input.priority !== w.priority ? `changed its priority to ${input.priority}` : undefined;
+      if (acted) this.takeOver(w, owner, `${owner.displayName} ${acted}`);
+    }
     if (input.reopen) {
       w.status = 'new';
       w.stalled = undefined;
@@ -1385,6 +1421,7 @@ export class Orchestrators {
       this.reopened(w);
       w.status = 'new';
       w.stalled = undefined;
+      if (own) this.takeOver(w, by, `${by.displayName} reopened it`);
     } else {
       settleByHand(w);
       w.status = input.close!;
@@ -1421,6 +1458,7 @@ export class Orchestrators {
     const own = (chat.turnFrom ?? chat.lastFrom) === 'human';
     w.notes = [...(w.notes ?? []), { at: this.now().toISOString(), by: by.displayName, text: note.slice(0, 2000) }].slice(-20);
     this.stamp(w, `note by ${by.displayName} (an owner, on ${whose} request)${own ? '' : ' (not in a turn of theirs)'}: ${note}`);
+    if (own) this.takeOver(w, by, `${by.displayName} added a note`);
     this.store.putWork(w);
     const sent = this.noteToWorkers(w, by, note);
     const to = sent.length ? ` Its worker${sent.length > 1 ? 's' : ''} ${sent.join(', ')} got it already.` : '';
@@ -2388,6 +2426,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const was = w.priority;
     w.priority = 'urgent';
     this.stamp(w, `${by.displayName} asked to start it now${was !== 'urgent' ? ` (priority ${was} → urgent)` : ''}`);
+    this.takeOver(w, by, `${by.displayName} pressed "Start now"`);
     this.store.putWork(w);
     this.gatherForDispatcher(w.requestedBy, updateNotice(w, by, `start it now: ${by.displayName} pressed "Start now" on the dashboard. Start it ahead of other queued work if any place fits (start_agent with its work_id); if nothing fits, keep it queued first in line and say why.`));
     return w;
@@ -2543,6 +2582,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     if (repeat) {
       if (f.source.pr && repeat.source && repeat.source.pr !== f.source.pr) repeat.source.pr = f.source.pr;
       this.stamp(repeat, `seen again by the intake: ${clip(f.title, 120)}`);
+      // A known person's own input joining it (a trusted request to Max, an FFBox operator) is their acting on it (w1031).
+      if (f.person) this.takeOver(repeat, f.requestedBy, `${f.requestedBy.displayName} joined it${f.source.channel ? ` from ${f.source.channel}` : ''}`);
       this.store.putWork(repeat);
       return { item: repeat, repeat: true };
     }
@@ -2658,6 +2699,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     this.requireReviewer(by);
     w.approval = { state: 'approved', by: asRequester(by), at: this.now().toISOString() };
     this.stamp(w, `approved by ${by.displayName}${w.triage?.class === 'needs-human' ? ` (triage at filing: ${clip(w.triage.reason, 160)})` : ''}`);
+    this.takeOver(w, by, `${by.displayName} approved it`);
     this.store.putWork(w);
     this.gatherForDispatcher(w.requestedBy, requestNotice(w), 'intake');
     return w;
@@ -2672,6 +2714,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     w.status = 'rejected';
     w.outcome = clip(note?.trim() || `declined by ${by.displayName}`, 300);
     this.stamp(w, `declined by ${by.displayName}${note?.trim() ? `: ${note.trim()}` : ''}${w.triage?.class === 'needs-human' ? ` (triage at filing: ${clip(w.triage.reason, 160)})` : ''}`);
+    this.takeOver(w, by, `${by.displayName} declined it`);
     this.store.putWork(w);
     return w;
   }
@@ -3016,6 +3059,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       }
       if (f.attachments.length) target.attachments = [...(target.attachments ?? []), ...f.attachments.filter((a) => !target.attachments?.some((b) => b.id === a.id))];
       if (!isFor(target, person.userId)) target.requesters = [...target.requesters, person];
+      this.takeOver(target, person, `${person.displayName} joined it from FFBox (dev request ${f.ref})`);
       target.ffboxDev = [...(target.ffboxDev ?? []), link('covered')].slice(-20);
       this.store.putWork(target);
       const busy = target.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
@@ -3366,6 +3410,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     w.question = undefined;
     w.humanAsked = false;
     this.stamp(w, `${person.displayName} answered on FFBox: ${what.join('; ')} (not in a turn of theirs)`);
+    this.takeOver(w, person, `${person.displayName} answered the question on FFBox`);
     this.store.putWork(w);
     this.gatherForDispatcher(person, updateNotice(w, person, `${what.join('; ')} (their answer in the FFBox thread: resume the work with it).`));
     return w;

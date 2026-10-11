@@ -448,7 +448,9 @@ test("whose tokens: nobody's work by where it came from (lothsahn's defaults), a
   assert.equal(unattributedKind({ unattributed: true, source: src('discord-bug') }), 'intake');
   assert.equal(unattributedKind({ unattributed: true, source: src('release') }), 'intake');
   assert.equal(unattributedKind({ unattributed: true, source: src('ffbox-request') }), 'ffbox');
-  assert.equal(unattributedKind({ unattributed: true, source: src('nightly') }), 'nightly');
+  assert.equal(unattributedKind({ unattributed: true, source: src('nightly') }), 'intake', 'w1031: a lab regression is the intake\'s: lothsahn\'s');
+  assert.equal(unattributedKind({ unattributed: true, source: src('nightly-run') }), 'nightly');
+  assert.equal(unattributedKind({ unattributed: true, source: src('nightly-review') }), 'nightly');
   assert.equal(unattributedKind({ delegation: { id: 'd', agentId: NIGHTLY_SENTRY, agentName: 'Nightly sentry', auto: true } }), 'nightly', "the sentry's delegations");
   assert.equal(unattributedKind({ source: src('ffbox-request') }), undefined, 'an FFBox request naming an operator is theirs');
   assert.equal(unattributedKind({}), undefined, "a person's own request");

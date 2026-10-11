@@ -435,6 +435,9 @@ export function fmtUsd(n: number): string {
 // What the portal stores and answers (server/spend.ts); here so the web can type its replies
 // ---------------------------------------------------------------------------------------------------------------------
 
+/** The account of a turn that ran before accounts were recorded, or of a backfilled one. */
+export const UNRECORDED_ACCOUNT = 'not recorded (before w1031)';
+
 export type SpendRole = 'worker' | 'dispatcher' | 'personal' | 'ops' | 'standing';
 
 /** How a turn was tied to a request: the `[about]` line, the request the worker was last sent, the ids a message named, or none. */
@@ -457,6 +460,8 @@ export interface SessionSpend {
   estimated: Tok;
   /** The SDK's cumulative totals at the last result, to take differences against. */
   cum?: ModelTok;
+  /** Spend by the Claude account each turn's process ran on (w1031): "vault token vault-lothsahn-1 …EAAA (…)", "host token …9AAA"; last four characters only. */
+  accounts?: Record<string, Tok>;
   lastCost?: number;
   /** usd by request (or bucket) id. */
   requests: Record<string, number>;
@@ -488,6 +493,8 @@ export interface RequestSpend {
   models: ModelTok;
   estimated: Tok;
   sessions: Record<string, { role: SpendRole; total: Tok; models: ModelTok; turns: number; how: Partial<Record<How, number>>; shared?: number }>;
+  /** Spend by the Claude account each turn's process ran on (w1031); turns before it was recorded are under UNRECORDED_ACCOUNT. */
+  accounts?: Record<string, Tok>;
   cats: Cats;
   calls: number;
   compactions: number;
@@ -510,6 +517,8 @@ export interface SpendReport {
   estimated: Tok;
   /** Share of the window's dollars by model. */
   models: ModelTok;
+  /** The window's dollars by the Claude account the turns ran on (w1031). */
+  accounts: { account: string; usd: number; tokens: Tok }[];
   top: { id: string; title: string; kind: string; status?: string; person?: string; usd: number; tokens: Tok; estimatedUsd: number; sessions: number; closed: boolean; cats: { cat: string; usd: number; pct: number }[] }[];
   kinds: { kind: string; usd: number; requests: number; avg: number }[];
   /** Where the context tokens went across the window's requests, by category (list-price shares applied to the measured dollars). */

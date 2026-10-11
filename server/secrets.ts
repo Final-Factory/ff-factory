@@ -368,10 +368,11 @@ export function machineRunEnv(
   ctx: VaultContext | undefined = vaultContext(),
 ): MachineRunEnv {
   const vaultOn = !!ctx && claudeFromVault(cfg, machine);
-  // Whose tokens (docs/vault.md, "Whose tokens"): work nobody asked for by name runs on the person config
-  // vault.unattributed names (run.tokenUser); anything else on its requester's, else the system payer's.
+  // Whose tokens (docs/vault.md, "Whose tokens"): the person who last acted on the request (w1031), else for work nobody
+  // asked for by name the person config vault.unattributed names (both are run.tokenUser); anything else its requester's,
+  // else the system payer's.
   const person = run.tokenUser ?? run.requestedBy?.userId ?? ctx?.payer?.();
-  const billed = vaultOn && run.tokenUser ? { userId: run.tokenUser, displayName: run.tokenUser } : run.requestedBy;
+  const billed = run.tokenUser ? { userId: run.tokenUser, displayName: run.tokenUser } : run.requestedBy;
   const base = claudeEnvFor(cfg, billed, hostClaudeEnvFor(cfg, machine));
   const plain = { env: base, login: machineUsesLogin(cfg, machine), account: accountSource(cfg, machine) };
   const own = userToken(cfg, billed?.userId);
@@ -383,14 +384,23 @@ export function machineRunEnv(
   // GitHub (w868): the person's own token, else the machine's own gh login as before; never another person's.
   const github = s.github ? { github: `${s.github.name} …${s.github.last4}` } : {};
   if (s.github) ctx.onGithubUse?.(s.github, `given to a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}`);
-  else if (wantGithub) ctx.onProblem?.(`no usable vault GitHub token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it uses the machine's own gh login`);
+  else if (wantGithub) {
+    ctx.onProblem?.(`no usable vault GitHub token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it uses the machine's own gh login`);
+    ctx.onGithubMissing?.(person, refId(machine), `a ${run.role} run`);
+  }
   if (s.claude) {
     return { env: { ...usageEnv(base), ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person), ...github };
   }
   // The person has Claude tokens and none may serve this run (every one over its caps or used up): the run waits for the
   // first to free up. No other person's token, no shared token, not the dispatcher's, not the host token (w739).
   if (wantClaude && s.claudeHold) throw new PoolHeldError(`${person ?? 'this run'}'s Claude token pool is held: ${s.claudeHold.why}`, s.claudeHold.next);
-  // No token of their own (or the vault cannot open them): today's account, as before the pool (docs/vault.md, "Cut-over").
+  // A person with a pool never runs on the host token, the machine's login or anyone else's (w1031, lothsahn: their work
+  // "NEVER falls back to the host token or to Ben's pool"): the vault could not give any of their tokens (no key, none opens),
+  // so the run waits for that to be fixed. Only a person with no Claude token in the vault at all keeps today's account.
+  if (wantClaude && (s.poolSize ?? 0) > 0) {
+    throw new PoolHeldError(`${person}'s Claude token pool cannot serve this run: ${s.problems.join('; ') || 'none of their tokens opens'}. It does not fall back to the host token or another person's tokens; fix the vault (docs/vault.md) and it starts`);
+  }
+  // No token of their own: today's account, as before the pool (docs/vault.md, "Cut-over").
   if (wantClaude) ctx.onProblem?.(`no vault Claude token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it runs on ${plain.account} instead`);
   return { ...plain, env: { ...base, ...s.env }, ...github };
 }

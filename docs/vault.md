@@ -454,7 +454,12 @@ lothsahn's decision (2026-10-06): "I would like the portal to hand out my Claude
 orchestrator and the same from Ben's." And for work nobody asked for by name: "Intake should be my token. Nightly sentry
 Ben. Ffbox me unless it provides an operator... In that case, use the token of the operator."
 
-**The rule.** A worker run gets the Claude token and the GitHub token of the person its work is for, and nobody else's:
+**The rule.** A worker run gets the Claude token and the GitHub token of the person its work is for, and nobody else's. w1031
+(lothsahn, 2026-10-11: "When a user on fffactory answers an intake question or otherwise updates a work item it should switch
+to them going forward. Use their Claude and GitHub tokens. Likewise intake should use my Claude and GitHub tokens. Discord inputs
+should follow ben if it's Ben's user requesting or mine if it's my user.") put one rule above the table: **the person who last
+acted on a request is the person its workers run for** (`WorkItem.runsFor`, below). The table is the answer for a request nobody has
+acted on since it was filed.
 
 | The run | Whose tokens | Where the code decides |
 |---|---|---|
@@ -464,8 +469,39 @@ Ben. Ffbox me unless it provides an operator... In that case, use the token of t
 | Intake work nobody named: Discord bug reports, FFBox reports and diagnoses, release follow-ups | config `vault.unattributed.intake`, default `lothsahn` | `WorkItem.unattributed` (set by `fileIntake` when no person asked), `unattributedKind`, `tokenPersonForWork` |
 | FFBox-filed work naming no operator | `vault.unattributed.ffbox`, default `lothsahn` | the same |
 | FFBox work naming an operator (an ffdev dev request, an operator's escalation) | that operator's, mapped to the FF Factory login of the same name | the request is filed for them (`fileDevRequest` from `server/devRequests.ts`; an operator's escalation in `server/intake.ts`), so it is not unattributed |
-| The nightly lab's reports, the nightly regression sentry and the workers its delegations start | `vault.unattributed.nightly`, default `ben` | `unattributedKind` (source `nightly`, or a delegation from `nightly-regression-sentry`); the sentry's own runs in `server/standing.ts` |
+| A request filed from a nightly lab regression (source `nightly`) | `vault.unattributed.intake`, default `lothsahn` (w1031: the brief counts the lab's regressions as the intake's) | `unattributedKind` |
+| The nightly run and review jobs (sources `nightly-run`, `nightly-review`), the nightly regression sentry and the workers its delegations start | `vault.unattributed.nightly`, default `ben` | `unattributedKind` (or a delegation from `nightly-regression-sentry`); the sentry's own runs in `server/standing.ts` |
 | Anything else no person asked for | the system payer's (config `systemPayer`) | `machineRunEnv` |
+
+**Take-over on action (w1031).** When a person acts on a request in FF Factory, `Orchestrators.takeOver` (`server/orchestrators.ts`)
+sets `WorkItem.runsFor` to them, and `tokenPersonForWork` (`server/vault.ts`) then returns them ahead of every row of the table.
+Acting is one of these, from a login that exists, through the web UI, the person's orchestrator or FFBox:
+
+| Action | Where it is caught |
+|---|---|
+| answers a question (a design question, the intake's or the dispatcher's) | `updateNow` (a note on a request with a question), `answerFromFfbox` |
+| approves or declines an intake request | `approveIntake`, `declineIntake` (the web routes, `update_work approve/decline`, a recorded conditional decision) |
+| adds a note | `updateNow`, `noteForOther` (another owner's request) |
+| reopens | `updateNow`, `closeForOther` |
+| changes its priority, or presses Start now | `updateNow`, `bumpWork` |
+| files it again, or joins it from Discord or FFBox (a known person's own input) | `fileNow` (repeat), `fileIntake` (repeat with a person), `fileDevRequest` (covered), `DevRequests.onMessage` |
+
+`update_work` counts only in a turn the person started with their own message (`turnFrom`/`lastFrom` is `human`). A worker's report,
+a harness message, a relayed Discord or FFBox text and the dispatcher's own decisions never count (`decide`, the ledger sweep,
+`fileDelegation` do not call `takeOver`). The switch is logged on the request ("now runs for Lothsahn: Lothsahn pressed "Start
+now" (was ben; …)"), shown on its row in the dashboard and in `list_work`, and applies to a worker's **next process start**:
+`machineSandboxSpec` reads `tokenUserOf` at every start, a process already running (mid-turn) keeps the account it started on.
+A worker serving two requests runs for whoever acted on either one most recently. `SessionInfo.ranAs` keeps the account each
+process started on, so `spend_report` attributes every turn to the account it ran on (`docs/spend.md`).
+
+**No fallback (w1031).** A person with at least one Claude token of their own in the vault never runs on the host token, the
+machine's login or another person's token: when none of theirs is eligible because the vault key is gone or none opens, the run
+waits with a `PoolHeldError` that says why (`machineRunEnv`); a pool at its caps was already held. A person with no Claude token in
+the vault at all keeps the transition fallback below. A run on a machine with `machines.claudeFromVault` off is outside all of this
+(that machine's agents use the host token or their login): turn it on for the machine to put its work under these rules.
+A GitHub token missing for the person (`machines.githubFromVault` on) gets a host notice, once per person, machine and day
+(`VaultContext.onGithubMissing`, `hostNotice`), besides the `system_status` line; the run still uses the machine's own gh login,
+so it pushes as that login, not as the person (decision 13.3: a push is not held for a token).
 
 The token person changes only which vault entries a run gets. Who a request is billed to in the ledger, who hears
 about it, and the usage attribution stay as they are.

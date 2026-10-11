@@ -311,6 +311,8 @@ export interface MachineHooks {
   specFor: (info: SessionInfo, m: Machine) => LaunchSpec;
   /** Answers for the MCP tools a session's spec lists. */
   handlersFor: (info: SessionInfo, m: Machine) => Partial<Record<CatalogTool, ToolHandler>>;
+  /** The Claude account the last spec built for a session names, in words safe to show (w1031): kept as SessionInfo.ranAs when a process starts. */
+  accountOf?: (sessionId: string) => string | undefined;
 }
 
 /**
@@ -1408,6 +1410,12 @@ export class MachineManager {
     // Redeployed while idle (an update was available): its daemon is about to stop, so a new process waits for the new one.
     if (!s.live && this.deploying.has(m.id)) throw new Error(`${m.id}'s daemon is being redeployed now. Try again in a few minutes.`);
     const spec = this.hooks.specFor(s.info, m);
+    // A live process keeps the account it started on; only a new process takes the one this spec names (w1031).
+    const ranAs = s.live ? undefined : this.hooks.accountOf?.(s.info.id);
+    if (ranAs && s.info.ranAs !== ranAs) {
+      s.info.ranAs = ranAs;
+      this.touch(s);
+    }
     const catalog = this.hellos.get(m.id)?.catalog;
     if (spec.mcp && catalog) spec.mcp = { ...spec.mcp, tools: spec.mcp.tools.filter((t) => catalog.includes(t.name)) };
     // Stored here first, so the daemon's transcript event can name them without sending them back.
