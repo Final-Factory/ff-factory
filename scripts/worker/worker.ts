@@ -982,7 +982,8 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
     say('Moving the sandboxes and the seed onto the Dev Drive (the daemon is stopped for it)...');
     const hold = await holdRedeploys(o.portalUrl, o.token);
     if (!hold.ok) say(`(${hold.error}; carrying on: no agent is in a sandbox)`);
-    if (isWin) await ps('stopping the daemon', win.controlScript('stop', l.daemon, { task: o.service, only: true }));
+    // Not a `stop` (which also ends the agent hosts, win.controlScript): an idle agent's host carries on, as in any update (w605).
+    if (isWin) await ps('stopping the daemon', win.stopScript(false, l.daemon, { task: o.service, only: true }));
     const rep = await moveSandboxes(
       { repo: l.repo, stateFile: path.join(l.daemon, 'sandboxes.json'), oldSandboxes: l.sandboxes, oldSeed: l.seed, newSandboxes: dirs.sandboxes, newSeed: dirs.seed },
       realMoveDeps((cmd, args, opts) => exec(cmd, args, opts ?? {}), say),
