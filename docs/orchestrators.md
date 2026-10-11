@@ -1223,7 +1223,7 @@ but the question it labelled ("brighten the lamps after w478?") was kept.
 | `[intake question]` | the reviewers' own orchestrators, when a worker on an intake request stops at a design decision |
 | push notifications and in-page notices | a person's own orchestrator's only to that person; a worker's finished turn to the people it works for; the dispatcher's turns to nobody, its questions and errors to the owner |
 
-`/mcp` `ask_orchestrator` and `orchestrator_transcript` talk to the key's person's own orchestrator.
+`/mcp` `ask_orchestrator`, `orchestrator_transcript`, `orchestrator_send` and `orchestrator_inbox` talk to the key's person's own orchestrator; a message from there is the person's own turn, tagged "via Claude Code or Desktop (key)" in their chat ([talk-to-your-orchestrator.md](talk-to-your-orchestrator.md), w1021).
 
 ## Agent states: Working, Needs you, Queued, Blocked, Idle, Stopped
 

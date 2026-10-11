@@ -30,7 +30,7 @@ export function localPath(url: string): string | undefined {
 const PATH_RE = /(?:[A-Za-z]:[\\/]|\/)(?:[^\s`'"()<>|*?,;]+[\\/])*[^\s`'"()<>|*?,;:\\/]+\.(?:png|jpe?g|gif|webp|svg|mp4|m4v|webm)\b/gi;
 
 // ![alt](url "title") and ![alt](<url with spaces>): the url only.
-const MD_IMAGE = /!\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/g;
+export const MD_IMAGE = /!\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/g;
 
 /** Bare absolute image and video paths in `text` (markdown images are shown where they are, not as these). */
 export function mentionedPaths(text: string): string[] {

@@ -1459,6 +1459,13 @@ select.input {
   padding: 0 6px;
 }
 
+/* Where a message came from when it was not typed on this page (Claude Code, Claude Desktop). */
+.msg-via {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  padding: 0 6px;
+}
+
 .msg-side-time {
   flex: none;
   padding-bottom: 6px;

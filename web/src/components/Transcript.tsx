@@ -1,7 +1,7 @@
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Machine, PendingPermission, SessionInfo, StandingAgent, TranscriptEvent } from '../../../shared/types';
 import { NOTICE_TAG, parseNotice, type Notice, type NoticeKind } from '../../../shared/notices';
-import { parseReaction, reactionsByMessage, splitReply } from '../../../shared/replies';
+import { parseReaction, reactionsByMessage, splitReply, splitVia } from '../../../shared/replies';
 import { HELD_MARK } from '../../../shared/conditional';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
@@ -340,7 +340,11 @@ function UserMessage({ ev, sessionId, owner }: { ev: UserEv; sessionId: string; 
   const chat = useContext(ChatActionsContext);
   const host = useActionsHost(!!chat?.interactive);
   // A reply carries the message it answers after their words (shared/replies.ts): the words are the bubble, the quote sits above it.
-  const { words, quote } = useMemo(() => splitReply(ev.text, HELD_MARK), [ev.text]);
+  // A message from Claude Code or Desktop starts with its client's label line (w1021): shown as a tag, not as text.
+  const { words, quote, via } = useMemo(() => {
+    const v = splitVia(ev.text);
+    return { ...splitReply(v.text, HELD_MARK), via: v.via };
+  }, [ev.text]);
   const q = quote && quoteLabel(quote.from, quote.excerpt, chat?.me?.displayName);
   const mine = !ev.requestedBy || ev.requestedBy.userId === chat?.me?.userId;
   return (
@@ -362,6 +366,11 @@ function UserMessage({ ev, sessionId, owner }: { ev: UserEv; sessionId: string; 
           <div className="bubble">
             <div className="bubble-text">{words}</div>
           </div>
+        )}
+        {via && (
+          <span className="msg-via" title="Sent from outside this page" data-testid="msg-via">
+            via {via}
+          </span>
         )}
         <Reactions seq={ev.seq} />
       </div>
