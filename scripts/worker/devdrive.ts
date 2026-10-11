@@ -266,10 +266,22 @@ export async function moveSandboxes(o: MoveOptions, d: MoveDeps): Promise<MoveRe
   // 1. Everything that could stop the move is looked at before anything changes.
   const branchOf = new Map<string, string>();
   const problems: string[] = [];
+  // Which folders are worktrees git still knows. A run cut off after git dropped a worktree but before its folder was gone (something
+  // held it) leaves a folder that is not one: empty, or with leftovers. It has no branch to read and no work git could keep, so it is not
+  // "a detached HEAD" (w900, found on lothdesktop): it is cleared away in step 4. If git cannot list them, a folder with a .git is live.
+  const listed = await d.git(['-C', o.repo, 'worktree', 'list', '--porcelain']);
+  const registered = listed.code === 0 ? new Set(listed.stdout.split('\n').filter((l) => l.startsWith('worktree ')).map((l) => norm(l.slice('worktree '.length).trim()))) : undefined;
+  const isLive = (dir: string) => (registered ? registered.has(norm(dir)) : fs.existsSync(path.join(dir, '.git')));
+  const stale = new Set<string>();
   for (const r of todo) {
     if (r.status === 'creating' || r.status === 'deleting') problems.push(`${r.id} is ${r.status}: wait for it to finish`);
     if (!fs.existsSync(r.path)) {
       branchOf.set(r.id, r.branch);
+      continue;
+    }
+    if (!isLive(r.path)) {
+      branchOf.set(r.id, r.branch);
+      stale.add(r.id);
       continue;
     }
     const b = await d.git(['-C', r.path, 'rev-parse', '--abbrev-ref', 'HEAD']);
@@ -294,7 +306,7 @@ export async function moveSandboxes(o: MoveOptions, d: MoveDeps): Promise<MoveRe
   // 2. Save every sandbox's work first, so a failure later cannot lose any.
   const saved = new Map<string, SaveResult>();
   for (const r of todo) {
-    if (!fs.existsSync(r.path)) continue;
+    if (!fs.existsSync(r.path) || stale.has(r.id)) continue;
     const branch = branchOf.get(r.id)!;
     const res = await d.save(r.path, branch, `FF Factory: saved ${r.id}'s uncommitted work before its sandbox moved to the Dev Drive (w900)\n\n\`git reset HEAD~1\` gives the work back uncommitted.`);
     if (res.sha) say(`Sandbox ${r.id}: ${res.notes.join('; ')}.`);
@@ -326,6 +338,18 @@ export async function moveSandboxes(o: MoveOptions, d: MoveDeps): Promise<MoveRe
   for (const r of todo) {
     const branch = branchOf.get(r.id)!;
     const to = path.join(o.newSandboxes, path.basename(r.path));
+    if (stale.has(r.id) && fs.existsSync(r.path)) {
+      if (hasFiles(r.path)) {
+        // Not a worktree git knows, yet not empty: never deleted, set aside whole.
+        let aside = `${r.path}.before-dev-drive`;
+        for (let i = 2; fs.existsSync(aside); i++) aside = `${r.path}.before-dev-drive-${i}`;
+        fs.renameSync(r.path, aside);
+        say(`Sandbox ${r.id}: ${r.path} is no worktree of git's (an earlier removal was cut off) but holds files; set aside as ${aside}.`);
+      } else {
+        fs.rmdirSync(r.path);
+        say(`Sandbox ${r.id}: ${r.path} is an empty folder git no longer lists (an earlier removal was cut off); removed it.`);
+      }
+    }
     if (fs.existsSync(r.path)) {
       say(`Sandbox ${r.id}: removing the old worktree ${r.path}...`);
       const lib = path.join(r.path, 'Library');
