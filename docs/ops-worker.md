@@ -219,7 +219,7 @@ process of the portal: it would get the portal's account and everything that acc
 | read the portal's config, data, secrets or keys | Unix permissions: `/srv/fff` is 0700 `fff`, and `/etc/fff/vault.key` is root's. The guard also refuses these paths with a reason, and refuses `/proc/*/environ` |
 | roll back the portal; change settings; change the vault, tokens or migrations; backups or shutdown; pause, run or reset the watchdog | `fff-ops-priv` has none of those subcommands (it has `vault`, `machine-credential` and `migrate` only for their read-only forms, above), and sudoers allows nothing else as root. The guard refuses `fffctl rollback` and the like with a reason |
 | deploy the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own | `fff-ops-priv update` runs only with the grant the portal writes into its data folder on `ops_worker deploy`, which the server allows only in the person's own turn. `fff-ops` cannot write that folder (0700 `fff`), so it cannot make a grant. The grant is good for 15 minutes and is removed before the update runs, so it works once |
-| restart the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own (w974) | `fff-ops-priv restart` runs only with the grant the portal writes into its data folder (`ops-restart.grant`, its own file: a deploy grant does not open it, nor it a deploy) on `ops_worker restart`, which the server allows only in the person's own turn. Same rules as the deploy's grant: 15 minutes, once, removed before the restart is asked for, owned by `fff`. It takes no option (`--no-drain` and a drain time are refused), so the portal always drains its busy agents first |
+| restart the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own (w974) | `fff-ops-priv restart` runs only with the grant the portal writes into its data folder (`ops-restart.grant`, its own file: a deploy grant does not open it, nor it a deploy) on `ops_worker restart`, which the server allows only in the person's own turn. Same rules as the deploy's grant: 15 minutes, once, removed before the restart is asked for, owned by `fff`. It takes no option (`--no-drain` and a drain time are refused) and is refused unless `machines.keepAgentsOnRestart` is on, so it is always the soft restart that leaves the machines' workers running |
 | copy the portal's secrets or keys off the VM | scp and sftp run as `fff-ops`, which cannot read `/srv/fff` (0700 `fff`) or `/etc/fff/vault.key` (root's): CI copies each of them and gets "Permission denied". `fff-ops-ssh` runs as `fff` but never sees a local path: it only carries the stream. The guard refuses those paths in an scp or sftp command (relative ones too) |
 | git, downloads, package installs, builds, interpreters | The network: the unit allows only loopback, the VM's resolvers, Anthropic's API (`160.79.104.0/23`, `2607:6bc0::/48`, [Anthropic's published inbound ranges](https://platform.claude.com/docs/en/api/ip-addresses)) and the tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). The disk: everything it can write is on a 2 GiB `noexec` file system. sudo: no `apt`. The guard refuses `git`, `curl`, `wget`, `rsync`, `apt`, `npm`, `pip`, `python`, `node` and the like, so the worker learns why at once. scp and sftp reach only what ssh reaches: the machines whose host keys are pinned, over the tailnet. They add no address to the allowlist and no nft rule: the copy is the same ssh process, as `fff`, inside the same unit |
 | print a credential | The launcher keeps the Claude credential out of its environment (fd 3). The guard refuses `env`, `printenv`, `export -p` and `/proc/*/environ`. Transcripts and the audit log redact Claude, GitHub, FFBox, machine, Tailscale, API and private keys (`redactSecrets`) |
@@ -341,9 +341,19 @@ pleasework32 tokens onto host token …9AAA") he had said "Restart now" so that 
 on the changed token. Nothing could: `request_app_update` restarts only when there is new code, and the worker's only
 command that changed the portal was `fffctl update`, behind a `[deploy]` message.
 
-A plain restart is `fffctl restart`: it drains the busy agents (each commits, pushes and ends its turn), restarts the
-portal service on the release it runs, resumes the interrupted workers, and builds nothing. It kills no agent. It has no
-rollback, because nothing new is switched to; `fff-health` still checks that the portal answers.
+A plain restart is `fffctl restart`. It is **soft, exactly like the deploy's restart** (lothsahn, 2026-10-11: "Please make
+sure the restart is a soft restart just like the deploy so it doesn't restart the workers"): only the portal process
+restarts. It builds nothing and has no rollback. Both ask the same way, with a `restart.request` (`drain: auto`), and the same
+code decides who is touched (`survivesRestart` in `server/restart.ts`, used by `server/index.ts` for the drain and for the
+stop): with `machines.keepAgentsOnRestart` on (the VM's default, `config.vm.example.json`), every agent a machine's daemon
+runs is neither asked to wrap up nor stopped. The daemon keeps its process, queues its events while the portal is down and
+the new portal takes it back ([restart.md](restart.md), "Agents on machines"). So a worker mid-turn on `beast`, `m3`, `m5` or
+`lothdesktop` goes on through the restart, with the same process and turn. What does restart is the portal's own: the
+orchestrators, the dispatcher, standing agents with no machine, and the ops worker; they resume afterwards.
+
+It cannot be a hard restart by accident: `fff-ops-priv restart` refuses (before it uses the grant) unless `config.json` has
+`machines.keepAgentsOnRestart: true`, because with it off the same request would drain and stop the machines' workers.
+Changing that setting is a person's; the worker reports the refusal.
 
 It is gated exactly like a deploy, with a grant of its own:
 
@@ -354,16 +364,21 @@ It is gated exactly like a deploy, with a grant of its own:
    turn".
 2. The server writes `data/ops-restart.grant`, `{by, name, at, expires}`, 15 minutes (`OPS_LIMITS.restartGrantMs`), 0600
    `fff`, saves the restart in `data/ops-worker.json` and sends the worker a `[restart]` message with the steps.
-3. The worker runs `fffctl status`, then `fffctl restart`, once, with no option, and ends its turn at once (its own
-   turn is one of the busy turns the drain waits for). `fff-ops-priv restart` (root) takes the grant (`take_grant`:
+3. The worker runs `fffctl status` and records the live worker sessions (below), then `fffctl restart`, once, with no
+   option, and ends its turn at once. `fff-ops-priv restart` (root) checks `keepAgentsOnRestart`, takes the grant (`take_grant`:
    it must be the portal's and in time; it is removed first, whatever follows), prints who asked and the commit the
    portal runs, and runs `fffctl restart --no-wait`. `--no-wait` is fffctl's: it only asks (writes `restart.request`)
    instead of watching the restart through.
-4. The portal drains and restarts, and the worker's process ends with it. When the new portal starts (within the
+4. The portal restarts, and the worker's process ends with it. When the new portal starts (within the
    hour), `OpsWorker.start` sends it `[restart] The portal has started again...`, once. It reports to the person:
    - the `fffctl status` lines;
    - the sha `/api/health` answers, and whether it is the one that ran before (a restart builds nothing, so it should
      be);
+   - the soft-restart evidence: before the restart it wrote down every live worker session (id, sandbox, status, the
+     turns count from `agent_transcript`, and on each machine the agent processes' PIDs and start times, over ssh); after it,
+     it repeats that and says for each whether it is still live, has the same PID and start time, has a turns count that
+     did not fall, is still on the same turn if it was mid-turn, and shows no `[app restarted]` message. Any that ended,
+     restarted or lost its turn is named; the portal's own agents are not on the list;
    - which Claude account each kind of agent runs on, from `system_status` (the dispatcher, each orchestrator, the
      workers): the account and at most the last 4 characters of its token, never a token. After w973's token change,
      this is how the person sees that the dispatcher and the orchestrators moved.
@@ -385,14 +400,22 @@ Checked by:
   person's own turn with a 15-minute 0600 grant of its own and no deploy grant, the worker's message, the report after
   the portal restarts (once, not as a deploy, not after hours), and the guard lets `fffctl restart` through while
   `rollback`, `start`, `prepare-shutdown`, `configure` and the rest stay refused.
-- `deploy/vm/test/fff-ops.test.sh` (CI, as root): `fff-ops-priv restart` refuses with no grant, with one that ran out, with a
+- `server/restart.test.ts`, "w974": with `keepAgentsOnRestart` on, `survivesRestart` is true for exactly the machines' agents,
+  `fffctl restart` asks for the same `drain: auto` request as the update minus the update, and a drainer fed what index.ts
+  feeds it (three busy machine workers, the orchestrator, the ops worker) messages nobody, records nothing as drained and
+  stops; with it off nothing survives.
+- `deploy/vm/test/fff-ops.test.sh` (CI, as root): `fff-ops-priv restart` refuses a config without
+  `machines.keepAgentsOnRestart: true` (false, missing, no `machines`, not JSON) without reaching `fffctl` or using the grant;
+  it refuses with no grant, with one that ran out, with a
   grant naming nobody, and with a deploy grant (which the attempt leaves alone); a restart grant starts no deploy; a refused
   form (`--no-drain`, `--drain-minutes N`, `--no-wait`, any word) leaves the grant; a fresh grant reaches `fffctl restart
   --no-wait` once and is gone.
 - `deploy/vm/test/ci-vm-e2e.sh`, in a real guest: the same refusals through the worker's `ops-bin/fffctl`, then a restart
   with a fresh grant that really restarts the portal (new main PID, same commit) and cannot be used twice.
-- Not tested in CI: a real Claude turn of the worker and the report it writes. The first real check is after the next
-  portal deploy: lothsahn's orchestrator asks him for the restart in his turn, and the worker's report is read.
+- Not tested in CI: a real Claude turn of the worker, live workers surviving a real restart, and the report it writes. The
+  first real check is after the next portal deploy: lothsahn's orchestrator asks him for the restart in his turn, and the
+  worker's before-and-after list is the evidence that no worker was touched (the 2026-10-05 measurement in
+  [restart.md](restart.md) is the precedent: the PIDs of all five agent processes unchanged, no gap in the transcripts).
 
 ## After a verified deploy (w887)
 

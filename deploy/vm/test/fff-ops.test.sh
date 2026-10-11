@@ -241,20 +241,23 @@ else
   # restart (w974): only with the restart grant the portal leaves in a person's own turn, once; a deploy grant is not one, and
   # a restart takes no option (no --no-drain, no other drain time).
   rg=$tmp/fffroot/data/ops-restart.grant
+  mkdir -p "$tmp/fffroot/config"
+  cfg=$tmp/fffroot/config/config.json
+  echo '{"machines": {"keepAgentsOnRestart": true}}' >"$cfg"
   dg=$tmp/fffroot/data/ops-deploy.grant
   later=$(date -u -d '+10 min' +%FT%TZ)
   rc=0; out=$(upriv restart) || rc=$?
-  [ "$rc" -eq 2 ] && printf '%s' "$out" | matches 'no restart was asked for' || fail "priv: restart without a grant (exit $rc): $out"
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'no restart was asked for'; then fail "priv: restart without a grant (exit $rc): $out"; fi
   printf '{"by":"lothsahn","expires":"2020-01-01T00:00:00Z"}\n' >"$rg"
   rc=0; out=$(upriv restart) || rc=$?
-  [ "$rc" -eq 2 ] && printf '%s' "$out" | matches 'ran out' || fail "priv: restart with a grant that ran out (exit $rc): $out"
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'ran out'; then fail "priv: restart with a grant that ran out (exit $rc): $out"; fi
   [ ! -e "$rg" ] || fail "priv: an expired restart grant was kept"
   printf '{"by":"","expires":"%s"}\n' "$later" >"$rg"
   rc=0; out=$(upriv restart) || rc=$?
   [ "$rc" -eq 2 ] || fail "priv: a restart grant with nobody in it was taken (exit $rc): $out"
   printf '{"by":"lothsahn","expires":"%s"}\n' "$later" >"$dg"
   rc=0; out=$(upriv restart) || rc=$?
-  [ "$rc" -eq 2 ] && printf '%s' "$out" | matches 'no restart was asked for' || fail "priv: a deploy grant started a restart (exit $rc): $out"
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'no restart was asked for'; then fail "priv: a deploy grant started a restart (exit $rc): $out"; fi
   [ -e "$dg" ] || fail "priv: a restart attempt used up the deploy grant"
   rm -f "$dg"
   printf '{"by":"lothsahn","expires":"%s"}\n' "$later" >"$rg"
@@ -270,13 +273,22 @@ else
     if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
   done
   [ -e "$rg" ] || fail "priv: a refused restart form used up the grant"
+  # Soft only: without machines.keepAgentsOnRestart the restart would drain and stop the machines' workers. Refused, grant kept.
+  for off in '{"machines": {"keepAgentsOnRestart": false}}' '{"machines": {}}' '{}' 'not json'; do
+    echo "$off" >"$cfg"
+    rc=0; out=$(upriv restart) || rc=$?
+    if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'keepAgentsOnRestart is not true'; then fail "priv: restart with config '$off' (exit $rc): $out"; fi
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: a restart that would stop workers reached fffctl ('$off'): $out"; fi
+    [ -e "$rg" ] || fail "priv: a refused hard restart used up the grant ('$off')"
+  done
+  echo '{"machines": {"keepAgentsOnRestart": true}}' >"$cfg"
   rc=0; out=$(upriv restart) || rc=$?
   [ "$rc" -eq 0 ] || fail "priv: restart with a fresh grant exited $rc: $out"
   printf '%s' "$out" | matches -F 'restart asked for by lothsahn; the portal runs' || fail "priv: restart did not say who asked: $out"
   printf '%s' "$out" | matches -F 'FFFCTL [restart] [--no-wait]' || fail "priv: restart is not fffctl restart --no-wait: $out"
   [ ! -e "$rg" ] || fail "priv: the restart grant was not used up"
   rc=0; out=$(upriv restart) || rc=$?
-  [ "$rc" -eq 2 ] && printf '%s' "$out" | matches 'no restart was asked for' || fail "priv: a restart grant worked twice (exit $rc): $out"
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'no restart was asked for'; then fail "priv: a restart grant worked twice (exit $rc): $out"; fi
   echo "ok: fff-ops-priv restart needs the restart grant (not a deploy's), uses it up once, takes no option, and runs fffctl restart --no-wait"
   echo "ok: fff-ops-priv passes vault list [--names], vault help, machine-credential list and migrate --help to fffctl, and refuses every other vault, machine-credential and migrate form"
 fi

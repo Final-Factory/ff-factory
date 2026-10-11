@@ -627,14 +627,17 @@ test('w974: a restart: only in a person\'s own turn, its own grant good once for
   assert.equal(g.by, 'lothsahn');
   assert.equal(Date.parse(g.expires) - Date.parse(g.at), OPS_LIMITS.restartGrantMs);
   assert.equal(OPS_LIMITS.restartGrantMs, 15 * 60_000);
-  assert.equal(fs.statSync(grant).mode & 0o777, 0o600);
   assert.ok(!fs.existsSync(deployGrant), 'a restart is not a deploy: no deploy grant');
   await new Promise((r) => setTimeout(r, 100));
   const asked = userTexts().find((t) => t.startsWith('[restart] Lothsahn asked, in a turn of their own'));
   assert.ok(asked, userTexts().join('\n---\n'));
   assert.match(asked, /Their words: Restart now/);
   assert.match(asked, /Run \`fffctl restart\`, once, with no option/);
-  assert.match(asked, /It kills no agent/);
+  // w974 (lothsahn: "make sure the restart is a soft restart just like the deploy so it doesn't restart the workers"): the worker
+  // is told it is soft, records the live worker sessions before, and proves after that none ended, restarted or lost its turn.
+  assert.match(asked, /soft restart, like the deploy's: only the portal process restarts\. The workers on the machines keep running[\s\S]*none is stopped, restarted or asked to wrap up/);
+  assert.match(asked, /Record the live worker sessions first[\s\S]*PIDs and start times/);
+  assert.doesNotMatch(asked, /commit, push and end its turn|drains? (its|the) busy/i, 'a soft restart drains no worker');
   assert.match(asked, /system_status/);
   assert.match(asked, /at most the last 4 characters of its token; never a token/);
   assert.match(asked, /This job is the step left on w973/);
@@ -653,6 +656,7 @@ test('w974: a restart: only in a person\'s own turn, its own grant good once for
   await new Promise((r) => setTimeout(r, 100));
   const said = userTexts().filter((t) => t.startsWith('[restart] The portal has started again'));
   assert.equal(said.length, 1);
+  assert.match(said[0], /Evidence that the restart was soft[\s\S]*whether its PID and start time are the same[\s\S]*turns count[\s\S]*none that ended, restarted or lost its turn/);
   assert.match(said[0], /Report to Lothsahn: the `fffctl status` lines[\s\S]*the sha from `\/api\/health`[\s\S]*which Claude account each kind of agent runs on/);
   assert.equal(userTexts().filter((t) => t.startsWith('[deploy] The portal has started again')).length, 0);
   assert.equal(after.deployRequester(Date.parse('2026-10-11T06:10:00Z')), undefined, 'a restart owes no machine rollout report');

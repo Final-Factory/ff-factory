@@ -30,7 +30,7 @@ claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnecto
 - `ops_worker`, Lothsahn's and Ben's alone (refused for anyone else): the one orchestration worker in the portal VM, a
   shell for ssh to the machines, the portal's state and machine credentials, with no git, downloads or Unity
   ([ops-worker.md](ops-worker.md), w597). Its `deploy` updates the portal, only when the person asks in their own turn.
-  Its `restart` (w974) restarts the portal with no new code (drain, restart, resume; for example so agents pick up a changed
+  Its `restart` (w974) restarts the portal with no new code, softly like the deploy (the machines' workers keep running; for example so agents pick up a changed
   Claude token), gated the same way, with its own grant.
   Its `machine_update` updates a machine's daemon and reruns its installer (a sandbox count, agent or editor limit, a
   reinstall) in any turn, for one of the person's own open requests (w855, lothsahn: "don't ask ben to run

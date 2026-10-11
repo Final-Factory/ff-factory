@@ -347,6 +347,18 @@ export function drainMessage(req: RestartRequest, deadline: Date): string {
   );
 }
 
+/**
+ * Whether a session is left alone by a portal restart (w974, lothsahn: "Please make sure the restart is a soft restart just
+ * like the deploy so it doesn't restart the workers"): with config machines.keepAgentsOnRestart on (the VM's default) an agent
+ * a machine's daemon runs is neither asked to wrap up by the drain nor stopped by the server's exit; its daemon keeps the
+ * process, and the new portal takes it back. Only the portal's own processes (the orchestrators, the dispatcher, the ops
+ * worker, standing agents with no machine) stop and resume. The deploy and `fffctl restart` ask the same way (a
+ * restart.request), so both are soft or neither is.
+ */
+export function survivesRestart(s: { info: { machineId?: string } }, keepAgentsOnRestart: boolean): boolean {
+  return keepAgentsOnRestart && !!s.info.machineId;
+}
+
 /** The workers a drain waits for: busy ones. The orchestrator and standing agents are not waited for. */
 export function busyWorkers(sessions: SessionSnapshot[]): SessionSnapshot[] {
   return sessions.filter((s) => s.kind === 'worker' && isBusy(s.status));

@@ -44,7 +44,9 @@
 #                                      same release, resume them), only with the grant the portal leaves when Lothsahn or Ben
 #                                      asks for a restart in a turn of their own (ops_worker restart, w974): good for 15
 #                                      minutes, once, removed here before anything runs. No options: no --no-drain, no other
-#                                      drain time. No build, so no rollback: fff-health still checks the portal answers.
+#                                      drain time. A soft restart like the deploy's: refused unless config.json has
+#                                      machines.keepAgentsOnRestart true (the machines' workers then keep running). No build,
+#                                      so no rollback: fff-health still checks the portal answers.
 #
 # Everything else fffctl does (rollback, configure, the vault, tokens, migrate, backups, shutdown) is a
 # person's and is not here. Every call is logged to the journal (tag fff-ops-priv); sudo logs it too.
@@ -187,6 +189,11 @@ case "${1:-help}" in
     ;;
   restart)
     if [ $# -ne 1 ]; then refuse "restart takes no options: it drains, restarts and resumes (no --no-drain, no other drain time)"; fi
+    # A soft restart only (lothsahn, w974: "so it doesn't restart the workers"): with machines.keepAgentsOnRestart on, the
+    # machines' agents are neither drained nor stopped. With it off the same request would drain and stop them: refused,
+    # before the grant is used.
+    jq -e '.machines.keepAgentsOnRestart == true' "$FFF_ROOT/config/config.json" >/dev/null 2>&1 ||
+      refuse "restart refused: config.json machines.keepAgentsOnRestart is not true, so the restart would drain and stop the machines' workers. Setting it is a person's; report this instead"
     take_grant "$DATA/ops-restart.grant" restart "ops_worker restart"
     before=$(release_sha "$(readlink -e "$CURRENT" 2>/dev/null || true)")
     logger -t fff-ops-priv -- "restart asked for by $GRANT_BY: fffctl restart at ${before:-unknown}" 2>/dev/null || true

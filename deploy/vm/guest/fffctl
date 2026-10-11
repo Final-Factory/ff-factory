@@ -253,7 +253,7 @@ cmd_restart() {
   restart_request "$drain" "$mins" "restart (fffctl)" false
   say "asked the portal to $([ "$drain" = false ] && echo 'stop now' || echo "drain (up to $mins min)") and restart"
   if [ "$wait" = 0 ]; then
-    say "not waiting: the portal drains its busy agents (they commit, push and end their turn), restarts and resumes them (fffctl status, fffctl logs)"
+    say "not waiting: the portal restarts, and resumes its own agents that were mid-turn; with machines.keepAgentsOnRestart (the VM default) the machines' workers are not drained or stopped (fffctl status, fffctl logs)"
     return 0
   fi
   wait_restart "$before" "$t0" $(((mins + 3) * 60)) || { say "the portal did not stop within $((mins + 3)) min"; die "fffctl status, fffctl logs"; }
