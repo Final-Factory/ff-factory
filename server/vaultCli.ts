@@ -28,7 +28,7 @@ import { parseArgs } from 'node:util';
 import { loadConfig } from './config.ts';
 import { enrolledMachines, issueMachineToken, machineTokensFile, revokeMachineToken } from './machineTokens.ts';
 import type { PlanUsage } from '../shared/types.ts';
-import { reservedCredentials } from './secrets.ts';
+import { liveOnAccount, reservedCredentials } from './secrets.ts';
 import { clock, poolLabel, poolLimits } from './tokenPool.ts';
 import { VAULT_FILE, Vault, fingerprintOf, keySource, newKeyText, type VaultEntryMeta, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 
@@ -129,14 +129,14 @@ function poolSection() {
   } catch {
     // the portal has not polled yet
   }
-  let sessions: { account?: string; status?: string }[] = [];
+  let sessions: { id?: string; account?: string; status?: string; kind?: string; orchestratorRole?: string }[] = [];
   try {
     sessions = (JSON.parse(fs.readFileSync(path.join(cfg.dataDir, 'state.json'), 'utf8')) as { sessions?: typeof sessions }).sessions ?? [];
   } catch {
     // no state file
   }
-  const live = (fp: string) => sessions.filter((x) => x.account === `token:${fp}` && x.status !== 'stopped' && x.status !== 'error').length;
-  const pools = vault.pools({ usageOf: (fp) => usageFile.entries?.[`token:${fp}`]?.usage, liveOn: (fp) => live(fp), limits: () => poolLimits(cfg), reservedFor: (fp) => (reservedCredentials(cfg).some((c) => c.key === `token:${fp}`) ? 'the dispatcher' : undefined) });
+  const live = (fp: string) => liveOnAccount(sessions, `token:${fp}`);
+  const pools = vault.pools({ usageOf: (fp) => usageFile.entries?.[`token:${fp}`]?.usage, liveOn: (fp) => live(fp), limits: () => poolLimits(cfg), reservedFor: (fp) => (reservedCredentials(cfg, { vault }).some((c) => c.key === `token:${fp}`) ? 'the dispatcher' : undefined) });
   // A Claude entry with no owner is in nobody's pool: the portal no longer hands out a shared Claude token (w739).
   const orphans = vault.list().filter((e) => e.kind === 'claude' && !e.disabled && !e.owner);
   if (orphans.length) console.log(`

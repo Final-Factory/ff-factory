@@ -206,7 +206,7 @@ used up):
 | A worker, a standing agent, the ops worker for them | **Held** with the reason ("lothsahn's Claude token pool is held: every token is at a limit (a: 5-hour 90% (>= 80): held until Fri 14:00Z; b: …): the first frees up Fri 14:00Z"): a worker's first prompt queues and is tried again, a standing agent's run ends "Could not start: <reason>" and the next scheduled run tries again; no fallback to the host token, the machine's login, the dispatcher's token or anyone else's |
 | A person's own **orchestrator** (`claudeAccounts.orchestrator = "vault"`) | **Uses the pool up**: while some token is only past its caps (held, one-at-a-time, retired) but not used up, it runs on the one with the most room (the soonest reset on a tie), and the one-at-a-time rule does not bind it. A token inside the dispatcher's reserve (next section) is used before any of those, and only when no other token passes its caps. Once every token is used up it **stops** with the reason and the next reset on the dashboard; there is no override and no fallback |
 | A token **inside the dispatcher's reserve**, when no other token of the person has room (w971) | A worker, a standing agent or the ops worker is **held** like at any limit (the reason names the buffer and when it lifts); the person's orchestrator runs on it, as it did before |
-| The **dispatcher** | Never on a pool: it keeps the shared token file (or whatever `claudeAccounts.dispatcher` names) and is never held |
+| The **dispatcher** | Never picked from a pool: it keeps the shared token file, or whatever `claudeAccounts.dispatcher` names (since w996 that may be one named vault token, "The dispatcher on a vault token" below), and is never held |
 
 **What a token at the one-at-a-time limit is (w747, relabelled w979).** A token at 95% weekly is not over its cap: it still
 works, one process at a time, until 99%. Under each pooled token the portal's accounts list, `system_status` ("Claude token
@@ -279,6 +279,34 @@ the limit or limits that put the token inside the buffer, each with its figure, 
 as the reason while it is outside its buffer (w828). A person with no vault token of their own still lands on the credential
 (the transition below): they have no other account. One token is one account: two tokens of one Claude account are not matched,
 so such a token would have its own meters and its own reserve.
+
+**The dispatcher on a vault token (w996).** `claudeAccounts.dispatcher` takes `"vault:<entry name>"`, e.g.
+`"vault:vault-lothsahn-1"` (lothsahn, 2026-10-11: "Please make Lothsahn's token the dispatcher token"). It is one named token,
+not "a person's pool": the dispatcher has no person, picking from a pool by score would put it on whichever token scores best
+that day rather than the token asked for, and the reserve needs one credential to sit on. An owner's setting like
+`claudeAccounts.orchestrator "vault"`; `set_app_config` refuses a name that is not an enabled Claude entry the key opens, and the
+config check refuses the value for the orchestrator. What it changes, each point *read* from the code:
+- **The process.** The dispatcher starts with that token alone (`pinnedDispatcherEnv`, from `orchestratorEnv` in
+  `server/agents.ts`), at each process start; a running dispatcher keeps its account until its process restarts. The entry
+  needs no role or machine grant, and does not have to be the dispatcher's person's: the setting is the consent.
+- **The reserve moves with it** (`reservedCredentials` in `server/secrets.ts`). The 5%-a-day weekly and 20% 5-hour buffer
+  (the numbers above, `vault.pool.reservePerDayPercent` / `reserveSessionPercent`) is kept on that token from the next look,
+  matched by its fingerprint like the token file's was. The token file and the old dispatcher token are not reserved for
+  the dispatcher any more (the host token keeps a reserve for its own roles, as before). So the same rule holds on the new token: no new worker, standing agent, ops worker or orchestrator while the
+  person's other tokens have room; when none does, the orchestrator takes it and workers **wait**. *Consequence worth knowing:*
+  on a pool of **one** token, the person's workers wait whenever that token is inside the buffer (e.g. weekly above 75% with five
+  days to the reset, above 95% with one), where it was the token file's pool that gave up that room before. With two or more
+  tokens workers move to the others. The dispatcher itself is never held: it may run into the buffer up to 100%.
+- **The dispatcher takes no pool slot** (`liveOnAccount`): its own live process is not counted toward the one-at-a-time slot
+  (95% to 99% weekly) of the token it is on, and not toward the "N running" the held reasons give. *Why* (a design call,
+  not measured): the reserve is already the rule that protects the dispatcher on that token; counting its always-on
+  process as well would hold the token's one slot for the whole last part of the week, so the person's workers could never
+  use it there, which is more than the reserve asks. The two rules only differ in the last day before the weekly reset, when the
+  buffer has shrunk below 5% and 95% or more is the one-at-a-time zone and no longer inside the buffer. The dispatcher is
+  still named under the token in `system_status` ("N running: …"). Workers and the person's orchestrator count as before.
+- **If the vault cannot give the token** (entry removed or disabled, key missing or wrong) the dispatcher is not stopped: it
+  runs on the token file, else the host token, the reserve sits there, and the vault warning in `system_status` names the
+  entry. Reset with `set_app_config claudeAccounts.dispatcher "tokenfile"` (or `"token"`, or `null` to unset).
 
 **Order with the existing switches.** A person's own token in config `userClaudeEnv` still wins for their work on a
 machine, as before. Then the vault, on machines `machines.claudeFromVault` names (owner-only in `set_app_config`;

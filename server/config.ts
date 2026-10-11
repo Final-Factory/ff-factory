@@ -15,8 +15,20 @@ import { checkPoolConfig, type PoolConfig } from './tokenPool.ts';
  * (w464, docs/portal-on-ffbox-host.md change 18) the OAuth token in config claudeTokenFile, read at each session start
  * and given to that process alone. "tokenfile" is for the orchestrator and the dispatcher only.
  */
-export type ClaudeAccount = 'login' | 'token' | 'tokenfile' | 'vault';
+export type ClaudeAccount = 'login' | 'token' | 'tokenfile' | 'vault' | `vault:${string}`;
 export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token', 'tokenfile', 'vault'];
+/**
+ * "vault:<entry name>" (w996): the role runs on that one vault Claude token, whoever's pool it is in (the dispatcher, which has
+ * no person to pool for; docs/vault.md, "The dispatcher on a vault token"). The reserve (section 4) then keeps its buffer on
+ * that token, not on the token file or the host token.
+ */
+export const VAULT_PINNED_PREFIX = 'vault:';
+/** The roles that may be pinned to one vault token. */
+export const VAULT_PINNED_ROLES: readonly string[] = ['dispatcher'];
+/** The vault entry a pinned account names ("vault:vault-lothsahn-1" -> "vault-lothsahn-1"), or undefined for any other account. */
+export const pinnedVaultEntry = (account: string | undefined): string | undefined => (typeof account === 'string' && account.startsWith(VAULT_PINNED_PREFIX) ? account.slice(VAULT_PINNED_PREFIX.length) : undefined);
+/** A vault entry's name as `Vault.add` takes it: lower-case letters, digits, ".", "_" and "-", up to 40 (server/vault.ts NAME). */
+export const VAULT_ENTRY_NAME = /^[a-z0-9][a-z0-9._-]{0,39}$/;
 /** The role that may run on a person's own vault pool (w738): the orchestrators, each on its own person's tokens. */
 export const VAULT_ROLES_ACCOUNT: readonly string[] = ['orchestrator'];
 /** The roles that may run on the token file (TOKEN_FILE). */
@@ -835,7 +847,13 @@ export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machine
     if (typeof a !== 'object' || a === null || Array.isArray(a)) throw new Error('config claudeAccounts is an object, e.g. { "orchestrator": "login" }');
     for (const [role, v] of Object.entries(a)) {
       if (!HOST_ROLES.includes(role as HostRole)) throw new Error(`config claudeAccounts.${role}: no such role (${HOST_ROLES.join(', ')})`);
-      if (!CLAUDE_ACCOUNTS.includes(v as ClaudeAccount)) throw new Error(`config claudeAccounts.${role} is "login" or "token" (or "tokenfile" for ${TOKEN_FILE_ROLES.join(', ')}, "vault" for ${VAULT_ROLES_ACCOUNT.join(', ')})`)
+      const pinned = pinnedVaultEntry(v as string);
+      if (pinned !== undefined) {
+        if (!VAULT_PINNED_ROLES.includes(role)) throw new Error(`config claudeAccounts.${role} cannot be "${v}": only ${VAULT_PINNED_ROLES.join(', ')} can run on one named vault token`);
+        if (!VAULT_ENTRY_NAME.test(pinned)) throw new Error(`config claudeAccounts.${role} is "vault:<entry name>", a vault entry's name as \`fffctl vault list\` shows it (lower-case letters, digits, ".", "_", "-"), e.g. "vault:vault-lothsahn-1"`);
+        continue;
+      }
+      if (!CLAUDE_ACCOUNTS.includes(v as ClaudeAccount)) throw new Error(`config claudeAccounts.${role} is "login" or "token" (or "tokenfile" for ${TOKEN_FILE_ROLES.join(', ')}, "vault" for ${VAULT_ROLES_ACCOUNT.join(', ')}, "vault:<entry name>" for ${VAULT_PINNED_ROLES.join(', ')})`);
       if (v === 'vault' && !VAULT_ROLES_ACCOUNT.includes(role)) throw new Error(`config claudeAccounts.${role} cannot be "vault": only ${VAULT_ROLES_ACCOUNT.join(', ')} run on a person's own vault tokens (the dispatcher stays on the token file)`);;
       if (v === 'tokenfile' && !TOKEN_FILE_ROLES.includes(role)) throw new Error(`config claudeAccounts.${role} cannot be "tokenfile": only ${TOKEN_FILE_ROLES.join(', ')} run on the token file`);
       if (v === 'tokenfile' && !(cfg as Partial<Pick<Config, 'claudeTokenFile'>>).claudeTokenFile) throw new Error(`config claudeAccounts.${role} is "tokenfile" but config claudeTokenFile names no file`);
