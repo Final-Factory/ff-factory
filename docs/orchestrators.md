@@ -1439,20 +1439,56 @@ person's own personal orchestrator takes them (a worker, a standing agent or the
   👍 or ✅ = yes, go ahead, got it; 👎 or ❌ = no, don't; ❓ = I don't follow, explain; 👀 = seen, I'll look; 🎉 or ❤️ = nice,
   nothing to do; anything else by its usual meaning in that context. A 👍 on its question about something it may do itself
   (start a worker, send a follow-up, relay an answer) is enough to go ahead.
-- **A reaction is not the person's turn, on purpose.** It is delivered as a harness message, so the turn it opens has
-  `turnFrom === 'system'` (`SessionHandle.turnFrom`): the gates that need the person's own turn refuse it, as they do a timer
-  (approve or decline an intake request, closing a non-owner's request, recording a conditional decision, a delegation
-  approval, memory writes, `set_app_config`, deploys and releases). It also does not start their budgets again
-  (`personWrote`). Why not count it, as w831 counts an FFBox operator's own authenticated message: (1) w831 admits *words*
-  FFBox matched to the person, and a click is not words; (2) it is cheap to do by accident, a tap on a phone, and an emoji's
-  meaning is open ("👍" on a message with three questions); (3) it can sit on a relayed line (a worker's report, a player's
-  text) that carries someone else's words, so the person's authority would reach whatever the orchestrator reads into that
-  text, the thing the gates exist to prevent. A call a gate refuses in a reaction's turn is **held** like a timer's (w830)
-  and offered back, under HELD_MARK, with the person's next typed message: a 👍 on "shall I approve w5?" gets "say it and I
-  will", and their one typed word then does it without being asked twice. To let a reaction pass one gate later, the place
-  is `Orchestrators.react` (send it as `human` for that emoji), and this paragraph.
+- **A reaction opens no turn of the person's, but a yes or a no on a proposal is their own answer (w1039).** A reaction is
+  delivered as a harness message, so the turn it opens has `turnFrom === 'system'` (`SessionHandle.turnFrom`) and the gates
+  that need the person's own turn refuse it, as they do a timer. It does not start their budgets again (`personWrote`).
+  Why it is not simply their turn, as w831 counts an FFBox operator's own authenticated message: (1) w831 admits *words*
+  FFBox matched to the person, and a click is not words; (2) it is cheap to do by accident, a tap on a phone, and an
+  emoji's meaning is open ("👍" on a message with three questions); (3) it can sit on a relayed line (a worker's report, a
+  player's text) that carries someone else's words, so the person's authority would reach whatever the orchestrator reads
+  into that text. One kind of click is the person's own words all the same (Ben, 2026-10-11, w1039: "please count my
+  thumbs up as my words", "yes change fff code"), and it answers all three: **👍 or ✅ on a message the orchestrator itself
+  wrote** is their yes, **👎 or ❌** their no, for **the action that message proposes and nothing else**.
+  - *Armed.* `Orchestrators.react` arms a click only when the emoji is 👍 ✅ 👎 ❌, the message is the orchestrator's own
+    (`kind: 'assistant'`; never a relayed `[worker update]`, `[dispatch]` or `[person message]` line, never a message of
+    the person's), it is at most 48 hours old (`PROPOSAL_MAX_AGE_MS`, a guess: the gates still check the request's
+    state), and the person clicking owns the chat. The `[reaction]` message then says so ("This is your own message and Ben
+    answered it with a yes. FF Factory counts that click as Ben's OWN WORDS ..."); any other click reads as before. Taking
+    the click back disarms it. A click stays armed for 2 hours (`GRANT_MS`, a guess: the orchestrator may be mid-turn),
+    and the turn stays the harness's (`turnFrom` is still `system`), so nothing but what the click covers opens.
+  - *Scope* (`shared/reactionGrant.ts`, `grantCovers`). At a gate, `Orchestrators.reactionTurn` asks whether the call is
+    what the message proposes: the message is an offer or a question (a `?` or "can", "shall", "want", "say if" ...), and
+    **one sentence of it** names every request the call is about (`w983`, not `w9830`) together with the action: approve,
+    decline, close (done: "close", "handled", "done"; cancelled: "cancel", "drop", "duplicate"; a bare "close" means done
+    unless the sentence says cancel), `main_clone`, deploy, restart, a delegation approval. For a decision for later
+    (`when`) the fact it waits for (`w1037`, `#1314`) must be somewhere in the message. A click does each thing **once**.
+    A 👎 or ❌ is no yes to anything: it covers only declining an intake request whose *approval* the message proposed
+    ("Shall I approve w5?" then 👎: `update_work decline`, the only other answer to it); on "decline w5?" it does nothing.
+    So "Once w1037 lands, I can close w983 as handled; say if you want that." and a 👍 let the orchestrator record
+    `update_work w983 close done when request_done w1037`, and nothing about w984, a cancel, or a reopen.
+  - *What it opens:* `update_work` approve and decline of an intake request, closing another person's request
+    (`closeForOther`), a decision for later (`when`), `main_clone` on an existing request, the ops worker's portal deploy
+    and restart and a new job for requests the message named (`OpsWorker` `reactionCovers`), and a standing agent's
+    delegation approval. **Held back, still typed words only:** memory writes (a click carries nothing to save),
+    `set_app_config`, deleting and the other admin tools (they take the request's `work_id`, not the turn), a reopen, a
+    cancel of a pending decision, and a new filing (`request_work`), each because a click names no content or target for
+    them to be scoped to. Ben's words exclude none of the others; deploys and restarts are in because the sentence names
+    them.
+  - *The record.* The decision keeps the click and the sentence it answered, written by FF Factory and never by the
+    orchestrator: `👍 on #22038: "...Once w1037 lands, I can close w983 as handled; say if you want that..."`. For a
+    decision for later, that is its `words` (any `words` the orchestrator passes with a click is ignored); an approve
+    or decline logs `Ben's own answer: <the record>`; a close logs `on Ben's own answer, <the record>`.
+  - *Where it counts.* Only the person's own portal chat (the reaction route, `POST /api/sessions/<id>/react`). Nothing
+    relays Discord reactions today (FFBox forwards typed text only: `server/devRequests.ts`, `operatorWords`, w831), so
+    a Discord emoji reaches no orchestrator and counts for nothing. If that is ever built it needs the w831 treatment
+    first: FFBox's authenticated operator identity for the person, and the same scope rule here.
+  - A call a gate refuses in a reaction's turn is **held** like a timer's (w830) and offered back, under HELD_MARK, with the
+    person's next typed message: a 👍 on "shall I approve w5?" while w5 is *not* the sentence's request gets "say it and I
+    will". The refusal names the click and says what it covers.
 - **Tests:** `server/replies.test.ts` (the orchestrator's input for a reply and a reaction, on its own answer, a relayed
-  worker update and the person's own message; the gates after each; the quote is data) and `e2e/replies.spec.ts` (desktop
+  worker update and the person's own message; the gates after each; the quote is data; w1039: a 👍 approving, a 👎
+  declining, a click on a message that proposed nothing, a decision for later and a close on a click, the text rules),
+  `server/opsWorker.test.ts` (a click and a deploy or a job) and `e2e/replies.spec.ts` (desktop
   and both phones: the buttons, the composer bar, the quote, the chips, over a reload, the API's refusals).
 
 ### Calls a gate refused (w830)

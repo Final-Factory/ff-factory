@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { HookCallback, Options, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import type { EffortLevel, Requester, SessionInfo } from '../shared/types.ts';
+import type { GateNeed } from '../shared/reactionGrant.ts';
 import { isMidTurn, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { Store } from './store.ts';
 import { readProblem, realReadFs, type ReadCtx, type SecretRules } from './secretGuard.ts';
@@ -508,6 +509,11 @@ export interface OpsDeps {
   tellOrchestrator: (person: Requester, text: string) => void;
   /** Whether the orchestrator's current turn is its person's own (not the harness's). */
   personTurn: (orchestratorId: string) => boolean;
+  /**
+   * w1039: whether a click of the person's (👍 ✅ on their orchestrator's proposal) is their own words for `need` now, and spends
+   * it. Optional: a portal without it takes only a typed turn.
+   */
+  reactionCovers?: (orchestratorId: string, need: GateNeed) => boolean;
   /** Where the job record is kept (data/ops-worker.json). */
   file: string;
   /** Why a job cannot be sent for these ledger requests (no such request, or closed), or undefined (w631). Unset: none are taken. */
@@ -720,7 +726,7 @@ export class OpsWorker {
     const jobOpen = !!this.job && this.job.by.userId.toLowerCase() === person.userId.toLowerCase() && this.now() - Date.parse(this.job.at) < OPS_LIMITS.jobMs;
     const h = this.handle();
     const opening = fresh || !jobOpen;
-    if (opening && !personTurn && !byRequest) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report)`);
+    if (opening && !personTurn && !byRequest && !this.d.reactionCovers?.(caller.id, { verb: 'job', refs: ids })) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report)`);
     if (this.job && this.job.by.userId.toLowerCase() !== person.userId.toLowerCase() && isMidTurn(h.info)) {
       throw new Error(`the orchestration worker is busy with ${this.job.by.displayName}'s job (${this.job.what}); wait for its turn to end, or ask them`);
     }
@@ -795,7 +801,7 @@ export class OpsWorker {
   private grantFor(caller: SessionInfo | undefined, o: { noun: 'deploy' | 'restart'; file: string; ms: number }, workIds: readonly string[]) {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
-    if (!this.d.personTurn(caller.id)) throw new Error(`a portal ${o.noun} needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report); ask them`);
+    if (!this.d.personTurn(caller.id) && !this.d.reactionCovers?.(caller.id, { verb: o.noun })) throw new Error(`a portal ${o.noun} needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report); ask them`);
     const ids = this.workIdsOf(workIds);
     const at = new Date(this.now());
     const h = this.handle();

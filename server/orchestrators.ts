@@ -48,7 +48,8 @@ import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, pausedIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
 import { asksAPerson, holdsOf, servedBy } from '../shared/workState.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
-import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionText, replyText, type Quoted } from '../shared/replies.ts';
+import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, type Quoted } from '../shared/replies.ts';
+import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
@@ -438,6 +439,8 @@ export class Orchestrators {
   private readonly filed = new Map<string, number>();
   /** w830: calls a gate refused, per chat, offered back on the person's next message (heldOffer). In memory only. */
   private readonly held = new Map<string, HeldCall[]>();
+  /** w1039: the person's 👍 ✅ 👎 ❌ on the orchestrator's own proposals, per chat, armed for GRANT_MS (reactionTurn). In memory only. */
+  private readonly grants = new Map<string, ReactionGrant[]>();
   /** Per personal orchestrator and worker ("orch:worker"): follow-ups since the person last wrote. */
   private readonly followUps = new Map<string, number>();
   /** Per sender and recipient ("from:to", user ids): messages since either of them last wrote to their orchestrator. */
@@ -1020,9 +1023,15 @@ export class Orchestrators {
     // A reviewer approves or declines an intake request from their own chat, in a turn of their own only: a harness
     // message (a relayed report, a worker's words) cannot approve anything.
     if (input.approve || input.decline) {
-      if ((chat.turnFrom ?? chat.lastFrom) !== 'human') throw new GateRefused(`only ${owner.displayName}, in their own words, approves or declines ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message). A decision of theirs that waits for a fact ("once #1314 merges") is recorded with update_work when, in their turn`);
       if (input.approve && input.decline) throw new Error('approve or decline, not both');
+      const turn = this.reactionTurn(chat, { verb: input.approve ? 'approve' : 'decline', refs: [w.id] });
+      if (!turn.own) throw new GateRefused(`only ${owner.displayName}, in their own words, approves or declines ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message)${turn.hint}. A decision of theirs that waits for a fact ("once #1314 merges") is recorded with update_work when, in their turn`);
       const done = input.approve ? this.approveIntake(w.id, owner) : this.declineIntake(w.id, owner, input.note);
+      if (turn.words) {
+        turn.use();
+        this.stamp(done, `${owner.displayName}'s own answer: ${turn.words}`);
+        this.store.putWork(done);
+      }
       return input.approve ? `${done.id} approved by ${owner.displayName}: the dispatcher decides it now.` : `${done.id} declined by ${owner.displayName}.`;
     }
     if (!isFor(w, owner.userId)) return this.closeForOther(chat, owner, w, input);
@@ -1129,10 +1138,12 @@ export class Orchestrators {
 
   /**
    * The orchestrator's person reacts to a message (`on`), or takes the reaction back. A reaction goes to the orchestrator as
-   * a harness message (`from: 'system'`): a click is not the person's own words, so the turn it opens is no turn of theirs,
-   * and nothing that needs their words passes on it (docs/orchestrators.md, "Replies and reactions"). It does not start
-   * the person's budgets again (personWrote), as their typing does. Taking one back is only recorded. Returns whether
-   * anything changed (a reaction already there, or not there, changes nothing).
+   * a harness message (`from: 'system'`), so the turn it opens is no turn of the person's. One kind is their own answer all
+   * the same (w1039, Ben: "please count my thumbs up as my words"): 👍 ✅ 👎 ❌ on the orchestrator's own recent message,
+   * clicked by the owner of that chat. It is armed (the orchestrator is told so), and the gates that need the person's own
+   * words take it for the action that message proposes, through reactionTurn. Taking one back disarms it. A reaction does
+   * not start the person's budgets again (personWrote), as their typing does. Returns whether anything changed (a
+   * reaction already there, or not there, changes nothing).
    */
   react(sessionId: string, seq: number, emoji: string, on: boolean, by: Requester): boolean {
     if (!isEmoji(emoji)) throw new Error('emoji: one emoji');
@@ -1140,9 +1151,62 @@ export class Orchestrators {
     const marks = reactionsByMessage(this.store.readTranscript(sessionId).filter((e): e is Extract<typeof e, { kind: 'user' | 'system' }> => e.kind === 'user' || e.kind === 'system'));
     const there = marks.get(seq)?.includes(emoji) ?? false;
     if (there === on) return false;
-    if (on) this.sessions.send(sessionId, reactionText(by.displayName, emoji, quoted), 'system', undefined, { requestedBy: by });
-    else this.store.append(sessionId, { kind: 'system', text: reactionRemovedText(emoji, seq) });
+    if (!on) {
+      this.grants.set(sessionId, (this.grants.get(sessionId) ?? []).filter((g) => !(g.seq === seq && g.emoji === emoji)));
+      this.store.append(sessionId, { kind: 'system', text: reactionRemovedText(emoji, seq) });
+      return true;
+    }
+    const grant = this.armReaction(sessionId, seq, emoji, by);
+    this.sessions.send(sessionId, reactionText(by.displayName, emoji, quoted, !!grant), 'system', undefined, { requestedBy: by });
     return true;
+  }
+
+  /**
+   * Arm a click as the person's own answer (w1039), or undefined when it is none: a yes or a no emoji, on a message the
+   * orchestrator itself wrote (a relayed line carries someone else's words, a person's own message needs no click), not
+   * older than PROPOSAL_MAX_AGE_MS, and clicked by the person whose chat it is. What it then covers is grantCovers's call
+   * at each gate.
+   */
+  private armReaction(sessionId: string, seq: number, emoji: string, by: Requester): ReactionGrant | undefined {
+    if (!isYes(emoji) && !isNo(emoji)) return undefined;
+    const info = this.sessions.get(sessionId).info;
+    const owner = this.ownerOf(info);
+    if (!owner || !same(owner.userId, by.userId)) return undefined;
+    const ev = this.store.readTranscript(sessionId).find((e) => e.seq === seq);
+    if (!ev || ev.kind !== 'assistant') return undefined;
+    const now = this.now().getTime();
+    if (now - Date.parse(ev.t) > PROPOSAL_MAX_AGE_MS) return undefined;
+    const g: ReactionGrant = { seq, emoji, yes: isYes(emoji), at: now, text: proposalText(ev.text, HELD_MARK, REPLY_MARK), used: [] };
+    const live = (this.grants.get(sessionId) ?? []).filter((x) => now - x.at < GRANT_MS && !(x.seq === seq && x.emoji === emoji));
+    this.grants.set(sessionId, [...live, g].slice(-10));
+    return g;
+  }
+
+  /**
+   * Whether this turn is the person's own for `need` (w1039): a turn they started with a message of theirs, or the harness's
+   * turn that a click of theirs on the orchestrator's proposal covers. `words` is the record to keep for a click: `👍 on
+   * #22038: "...close w983 as handled..."`; `use` marks it spent once the action went through, so one click does each
+   * thing once. A click that covers nothing here leaves `hint` for the refusal.
+   */
+  private reactionTurn(chat: SessionHandle, need: GateNeed): { own: boolean; words?: string; use: () => void; hint: string } {
+    if ((chat.turnFrom ?? chat.lastFrom) === 'human') return { own: true, use: () => {}, hint: '' };
+    const now = this.now().getTime();
+    const live = (this.grants.get(chat.info.id) ?? []).filter((g) => now - g.at < GRANT_MS);
+    for (const g of live) {
+      const sentence = grantCovers(g, need);
+      if (sentence) return { own: true, words: grantWords(g, sentence), use: () => void g.used.push(grantKey(need)), hint: '' };
+    }
+    const hint = live.length ? ` (${live.map((g) => `${g.emoji} on #${g.seq}`).join(', ')} covers only the action and the requests one sentence of that message proposes together; none of them proposes this)` : '';
+    return { own: false, hint, use: () => {} };
+  }
+
+  /** Whether a click of the person's covers `need` now, spending it: the ops worker's gates (server/opsWorker.ts) ask this. */
+  reactionCovers(chatId: string, need: GateNeed): boolean {
+    const chat = this.sessions.sessions.get(chatId);
+    if (!chat) return false;
+    const r = this.reactionTurn(chat, need);
+    if (r.words) r.use();
+    return !!r.words;
   }
 
   // ---------------------------------------------------------------- held calls and conditional decisions (w830)
@@ -1194,9 +1258,25 @@ export class Orchestrators {
    */
   private recordConditional(chat: SessionHandle, owner: Requester, w: WorkItem, input: UpdateInput): string {
     const n = owner.displayName;
-    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') throw new GateRefused(`a decision that waits for a fact is recorded only in a turn ${n} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed message)`);
-    if (input.reopen || input.priority || input.subjects?.length || input.ledger_read !== undefined || input.main_clone !== undefined) throw new Error('when goes with one action (approve, decline or close) and its note, nothing else');
     const actions = [input.approve ? 'approve' : '', input.decline ? 'decline' : '', input.close ?? ''].filter(Boolean) as ConditionalDecision['action'][];
+    let click: ReturnType<Orchestrators['reactionTurn']> | undefined;
+    let hint = '';
+    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') {
+      // w1039: a click on the proposal ("Once w1037 lands, I can close w983 as handled; say if you want that.") is their own words for it.
+      let waits: ConditionalDecision['when'] | undefined;
+      try {
+        waits = input.when ? parseCondition(input.when, w.id) : undefined;
+      } catch {
+        // a bad condition is reported below, in the person's turn or not
+      }
+      const a = actions[0];
+      const verb = a === 'approve' ? 'approve' : a === 'decline' ? 'decline' : a === 'done' ? 'close_done' : 'close_cancelled';
+      const turn = this.reactionTurn(chat, { verb, refs: [w.id], also: waits ? [waits.ref] : [] });
+      if (actions.length === 1 && waits && turn.words) click = turn;
+      else hint = turn.hint;
+      if (!click) throw new GateRefused(`a decision that waits for a fact is recorded only in a turn ${n} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed message)${hint}`);
+    }
+    if (input.reopen || input.priority || input.subjects?.length || input.ledger_read !== undefined || input.main_clone !== undefined) throw new Error('when goes with one action (approve, decline or close) and its note, nothing else');
     if (actions.length !== 1) throw new Error('when needs exactly one action: approve, decline, or close (done or cancelled)');
     const action = actions[0];
     const when = parseCondition(input.when!, w.id);
@@ -1214,9 +1294,10 @@ export class Orchestrators {
       const problem = updateProblem(w, { close: action }, this.now().getTime());
       if (problem) throw new Error(problem);
     }
-    const words = input.words?.trim();
+    // A click's words are FF Factory's record of it, never the orchestrator's: whatever `words` says is ignored.
+    const words = click?.words ?? input.words?.trim();
     if (!words) throw new Error(`words: ${n}'s own words for this decision, verbatim from their message ("close w811 as a duplicate once 1314 is merged")`);
-    if (!inPersonWords(words, this.personMessages(chat.info.id))) throw new Error(`words: "${clip(words, 120)}" is not in ${n}'s own recent messages here; quote them verbatim (at least a few words), never your summary`);
+    if (!click && !inPersonWords(words, this.personMessages(chat.info.id))) throw new Error(`words: "${clip(words, 120)}" is not in ${n}'s own recent messages here; quote them verbatim (at least a few words), never your summary`);
     const days = input.expires_days ?? CONDITIONAL_DAYS;
     if (!Number.isInteger(days) || days < 1 || days > CONDITIONAL_MAX_DAYS) throw new Error(`expires_days: 1 to ${CONDITIONAL_MAX_DAYS}`);
     // The same decision again replaces the one before (its words and note may have changed).
@@ -1226,7 +1307,8 @@ export class Orchestrators {
     const now = this.now();
     const d: ConditionalDecision = { id: `${w.id}.c${seq}`, by: asRequester(owner), at: now.toISOString(), words: clip(words, 500), action, ...(note ? { note: clip(note, 1000) } : {}), when, expires: new Date(now.getTime() + days * 86_400_000).toISOString() };
     w.conditional = [...others, d];
-    this.stamp(w, `${n}: conditional decision ${d.id} recorded in their own turn: ${actionName(action)} when ${conditionName(when)}: "${d.words}"`);
+    click?.use();
+    this.stamp(w, `${n}: conditional decision ${d.id} recorded ${click ? 'on their click' : 'in their own turn'}: ${actionName(action)} when ${conditionName(when)}: "${d.words}"`);
     this.store.putWork(w);
     return `Recorded ${conditionalLine(w, d)}. FF Factory checks it every few minutes and carries it out by itself once that is a fact, and tells you; it never does if that can no longer happen (you are told then). Don't ask ${n} again. conditional_decisions lists it, and cancels it if ${n} changes their mind.`;
   }
@@ -1354,8 +1436,8 @@ export class Orchestrators {
   }
 
   /** The machine id a main_clone names, or why it cannot be granted: only in a turn of the person's own (w936). */
-  private mainCloneMachine(owner: Requester, name: string, humanTurn: boolean): string {
-    if (!humanTurn) throw new GateRefused(`main_clone lets workers act in a machine's main clone, a person's own project folder: only ${owner.displayName}, in their own words, asks for that, and this turn is not theirs (a check-in, a timer or a relayed message)`);
+  private mainCloneMachine(owner: Requester, name: string, humanTurn: boolean, hint = ''): string {
+    if (!humanTurn) throw new GateRefused(`main_clone lets workers act in a machine's main clone, a person's own project folder: only ${owner.displayName}, in their own words, asks for that, and this turn is not theirs (a check-in, a timer or a relayed message)${hint}`);
     const { machines } = this.d.places();
     const m = machines.find((x) => same(x.id, name.trim()));
     if (!m) throw new Error(`main_clone: no machine "${name}" (machines: ${machines.map((x) => x.id).join(', ') || 'none'})`);
@@ -1380,10 +1462,12 @@ export class Orchestrators {
       return `${w.id}: main-clone work on ${was} taken back (a running worker's guard changes with its next message).`;
     }
     if (w.source) throw new Error(`${w.id} came from the intake (${w.source.kind}): its text is not a person's own, so it never grants work in a main clone`);
-    const id = this.mainCloneMachine(owner, machine, (chat.turnFrom ?? chat.lastFrom) === 'human');
+    const turn = this.reactionTurn(chat, { verb: 'main_clone', refs: [w.id], also: [machine] });
+    const id = this.mainCloneMachine(owner, machine, turn.own, turn.hint);
     if (w.mainCloneAccess?.machine === id) return `${w.id} already grants work in ${id}'s main clone.`;
     w.mainCloneAccess = { machine: id, by: owner.displayName, at: this.now().toISOString() };
-    this.stamp(w, `${owner.displayName}, in their own turn: its workers on ${id} may work in its main clone (quit the editor, back up, git fetch and checkout, reopen Unity)`);
+    turn.use();
+    this.stamp(w, `${owner.displayName}, ${turn.words ? `on their own answer, ${turn.words}` : 'in their own turn'}: its workers on ${id} may work in its main clone (quit the editor, back up, git fetch and checkout, reopen Unity)`);
     this.store.putWork(w);
     return `${w.id}: its workers on ${id} may now work in that machine's main clone: quit the editor open there, back up, git fetch and checkout, reopen Unity, and nothing else. A worker already running gets it with its next message.`;
   }
@@ -1407,9 +1491,11 @@ export class Orchestrators {
     // Between owners (w677, Lothsahn: "I don't want that guard between me and ben"): another owner's request closes or
     // reopens as one's own does, on the orchestrator's judgment in any turn (a timer, a [ledger cleanup] follow-up). A
     // member's request still needs the owner's own words in this turn.
-    const own = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    // w1039: a click of theirs on the orchestrator's proposal to close it is their own words for the close (not for a reopen).
+    const turn = this.reactionTurn(chat, input.close ? { verb: input.close === 'done' ? 'close_done' : 'close_cancelled', refs: [w.id] } : { verb: 'job' });
+    const own = turn.own;
     const betweenOwners = this.isOwnerRole(w.requestedBy.userId);
-    if (!own && !betweenOwners) throw new GateRefused(`only ${by.displayName}, in their own words in this turn, closes or reopens ${whose} request ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message)`);
+    if (!own && !betweenOwners) throw new GateRefused(`only ${by.displayName}, in their own words in this turn, closes or reopens ${whose} request ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message)${turn.hint}`);
     const note = input.note?.trim();
     if (!note) throw new Error(`say why in a note: ${names(w.requesters)} will be told who ${input.close ? 'closed' : 'reopened'} ${w.id} and why`);
     const problem = updateProblem(w, input, this.now().getTime());
@@ -1428,9 +1514,10 @@ export class Orchestrators {
       w.outcome = clip(note, 300);
     }
     // humanAsked stays as its own people left it: another owner's word does not make it theirs.
-    this.stamp(w, `${verb} by ${by.displayName} (${whose} request), ${own ? `in ${by.displayName}'s own turn` : `on ${by.displayName}'s orchestrator's judgment, not in a turn of theirs (owners, w677)`}: ${note}`);
+    turn.use();
+    this.stamp(w, `${verb} by ${by.displayName} (${whose} request), ${turn.words ? `on ${by.displayName}'s own answer, ${turn.words}` : own ? `in ${by.displayName}'s own turn` : `on ${by.displayName}'s orchestrator's judgment, not in a turn of theirs (owners, w677)`}: ${note}`);
     this.store.putWork(w);
-    const how = own ? `${by.displayName}, who asked for it in their own words` : `${by.displayName}'s orchestrator, on its own judgment (owners close each other's requests as their own, w677)`;
+    const how = turn.words ? `${by.displayName}, who answered the proposal with ${turn.words}` : own ? `${by.displayName}, who asked for it in their own words` : `${by.displayName}'s orchestrator, on its own judgment (owners close each other's requests as their own, w677)`;
     this.toPeople(w.requesters, dispatchNotice(w, `${verb} by ${how} (it is your request)`, note));
     if (input.close !== 'done') {
       const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
