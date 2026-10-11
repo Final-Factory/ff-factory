@@ -7,7 +7,7 @@ import { PoolHeldError, Vault, fingerprintOf, newKeyText, type KeySource, type V
 import { hostAccount, hostProcessEnv, machineRunEnv, poolRunEnv, reserveLines, reservedCredentials } from './secrets.ts';
 import { checkAccountConfig } from './config.ts';
 import { OWNER_ONLY_KEYS, normalizeSetting, setAppConfig } from './appConfig.ts';
-import { clock, poolLimits } from './tokenPool.ts';
+import { clock, poolLabel, poolLimits } from './tokenPool.ts';
 import { tokenKey } from './usage.ts';
 import type { PlanUsage } from '../shared/types.ts';
 import type { Config } from './config.ts';
@@ -121,7 +121,7 @@ test('pool: one process at a time at 95% weekly, counting processes starting now
   assert.equal(s2.claude?.entry.name, 'ben-b');
   const s3 = v.forRun(run('ben', 'workers', 's3'), { claude: true, ...world(m) });
   assert.equal(s3.claude, undefined);
-  assert.match(s3.claudeHold?.why ?? '', /^no token is free for a new job right now \(ben-a: weekly 96%, one job at a time until 99%: 3% left before it stops; the slot is taken now/);
+  assert.match(s3.claudeHold?.why ?? '', /^no token is free for a new job right now \(ben-a: weekly 96%, one job at a time; its slot is taken \(1 running\)/);
   // Live counts from the portal do the same once the processes show.
   const live = { [fp(B1)]: 1, [fp(B2)]: 1 };
   assert.equal(v.forRun(run('ben', 'workers', 's9'), { claude: true, ...world(m, live) }).claude, undefined);
@@ -479,18 +479,30 @@ test("w971: the dispatcher's token in a person's pool, inside its reserve, goes 
   // A session already running on it is never touched: only the next start asks the pool.
 });
 
-test('w971: the pool listing shows each token score and the reserve state (system_status, fffctl vault list)', (t) => {
+test('w979: the pool listing orders by the picker, labels each token, and marks priority on exactly one token per pool', (t) => {
   const { make } = setup(t);
   const v = make();
   v.add({ name: 'ben-a', kind: 'claude', value: FILE, owner: 'ben', share: 'owner' });
   v.add({ name: 'ben-b', kind: 'claude', value: B2, owner: 'ben', share: 'owner' });
-  const m = { [fp(FILE)]: usage(0, 97, { weeklyDays: 3 }), [fp(B2)]: usage(0, 27, { weeklyDays: 4 }) };
-  const pools = v.pools({ ...world(m), reservedFor: (f) => (f === fp(FILE) ? 'the dispatcher' : undefined) });
-  const [a, b] = ['ben-a', 'ben-b'].map((n) => pools.get('ben')!.find((x) => x.entry.name === n)!.view);
-  assert.equal(a.state, 'reserved');
-  assert.ok(Math.abs(a.score! - 1) < 0.01);
-  assert.match(a.scoreText, /^score 1\.0%\/day \(3% weekly left over 3\.0 days/);
-  assert.equal(b.state, 'ok');
-  assert.ok(Math.abs(b.score! - 18.25) < 0.01);
-  assert.match(b.scoreText, /^score 18%\/day \(73% weekly left over 4\.0 days/);
+  v.add({ name: 'ben-c', kind: 'claude', value: B1, owner: 'ben', share: 'owner' });
+  v.add({ name: 'loth-a', kind: 'claude', value: L1, owner: 'lothsahn', share: 'owner' });
+  const reservedFor = (f: string) => (f === fp(FILE) ? 'the dispatcher' : undefined);
+  const labels = (m: Record<string, PlanUsage | undefined>, live: Record<string, number> = {}) => {
+    const pools = v.pools({ ...world(m, live), reservedFor });
+    return { pools, ben: pools.get('ben')!.map((x) => `${x.entry.name} ${poolLabel(x.view, x.priority)}`), loth: pools.get('lothsahn')!.map((x) => `${x.entry.name} ${poolLabel(x.view, x.priority)}`) };
+  };
+  // The 04:32Z picture: ben-a (the dispatcher's) at 97% inside its reserve, ben-b at 27%, ben-c at 60%.
+  const m = { [fp(FILE)]: usage(0, 97, { weeklyDays: 3 }), [fp(B2)]: usage(0, 27, { weeklyDays: 4 }), [fp(B1)]: usage(0, 60, { weeklyDays: 4 }), [fp(L1)]: usage(0, 98, { weeklyDays: 1 }) };
+  const r = labels(m);
+  assert.deepEqual(r.ben, ['ben-b pool:ok priority', 'ben-c pool:ok', 'ben-a pool:reserved'], 'best first, priority on the one a new job gets');
+  assert.deepEqual(r.loth, ['loth-a pool:one-at-a-time priority'], "one at a time with the slot free: priority still goes to it, it takes the next job");
+  for (const [, list] of r.pools) assert.equal(list.filter((x) => x.priority).length, 1, 'exactly one per pool');
+  // Its slot taken: one-at-a-time, and no priority (nothing may serve a worker): none, not two.
+  const taken = labels(m, { [fp(L1)]: 1 });
+  assert.deepEqual(taken.loth, ['loth-a pool:one-at-a-time']);
+  assert.equal(taken.pools.get('lothsahn')!.filter((x) => x.priority).length, 0);
+  // The best token fills its 5-hour window: priority moves to the next.
+  const held = labels({ ...m, [fp(B2)]: usage(85, 27, { weeklyDays: 4, sessionHours: 2 }) });
+  assert.deepEqual(held.ben, ['ben-c pool:ok priority', 'ben-b pool:held', 'ben-a pool:reserved']);
+  assert.ok(!r.ben.concat(r.loth).join(' ').match(/score|%\/day|left over/));
 });

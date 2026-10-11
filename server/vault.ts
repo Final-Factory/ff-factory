@@ -4,7 +4,7 @@ import path from 'node:path';
 import { checkObject, readJsonDurable } from './durable.ts';
 import { withFileLock, writeJsonOwned } from './machineTokens.ts';
 import type { PlanUsage, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultStatus, WorkItem } from '../shared/types.ts';
-import { POOL_DEFAULTS, pickPool, judge, reserveOf, type PoolLimits, type PoolToken, type PoolView } from './tokenPool.ts';
+import { POOL_DEFAULTS, byScore, pickPool, judge, reserveOf, type PoolLimits, type PoolToken, type PoolView } from './tokenPool.ts';
 
 /**
  * The token vault (docs/vault.md, w512): the secrets worker runs need, kept by the portal, encrypted value by value with a
@@ -284,7 +284,7 @@ export type UpdateInput = Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'role
 
 /** What a run gets from the vault: one Claude token (with its entry) and the other granted secrets, as environment. */
 export interface RunSecrets {
-  claude?: { entry: VaultEntryMeta; token: string; how: 'normal' | 'over-cap' | 'in-reserve'; /** Its score in words (w971), no token. */ why?: string };
+  claude?: { entry: VaultEntryMeta; token: string; how: 'normal' | 'over-cap' | 'in-reserve'};
   /**
    * The run's person has Claude tokens in the vault and none may serve this run now (every one over its caps or used up):
    * the run is held (a worker, the ops worker) or stopped (an orchestrator), with this reason and when the first frees up.
@@ -586,17 +586,24 @@ export class Vault {
    * Every person's Claude pool as the rules read it now (system_status, `fffctl vault list`): each enabled token with its
    * state and how many processes run on it. The state is the worker's reading (the strictest).
    */
-  pools(o: { usageOf?: (fp: string) => PlanUsage | undefined; liveOn?: (fp: string, except?: string) => number; limits?: PoolLimitsOf; now?: () => number; reservedFor?: (fp: string) => string | undefined }): Map<string, { entry: VaultEntryMeta; view: PoolView; live: number }[]> {
+  pools(o: { usageOf?: (fp: string) => PlanUsage | undefined; liveOn?: (fp: string, except?: string) => number; limits?: PoolLimitsOf; now?: () => number; reservedFor?: (fp: string) => string | undefined }): Map<string, { entry: VaultEntryMeta; view: PoolView; live: number; priority: boolean }[]> {
     this.reload();
     const limits = o.limits?.() ?? POOL_DEFAULTS;
     const now = o.now?.() ?? Date.now();
-    const out = new Map<string, { entry: VaultEntryMeta; view: PoolView; live: number }[]>();
+    const tokens = new Map<string, { e: VaultEntry; t: PoolToken }[]>();
     for (const e of this.data.entries) {
       if (e.kind !== 'claude' || e.disabled || !e.owner) continue;
-      const t = this.poolToken(e, o.usageOf, o.liveOn, undefined, now, o.reservedFor, limits);
-      const list = out.get(e.owner.toLowerCase()) ?? [];
-      list.push({ entry: this.meta(e), view: judge(t, limits, now), live: t.others });
-      out.set(e.owner.toLowerCase(), list);
+      const list = tokens.get(e.owner.toLowerCase()) ?? [];
+      list.push({ e, t: this.poolToken(e, o.usageOf, o.liveOn, undefined, now, o.reservedFor, limits) });
+      tokens.set(e.owner.toLowerCase(), list);
+    }
+    const out = new Map<string, { entry: VaultEntryMeta; view: PoolView; live: number; priority: boolean }[]>();
+    for (const [person, list] of tokens) {
+      // `priority`: the token a new worker would get now (w979), at most one per pool; none when nothing may serve a worker.
+      const first = pickPool(list.map((x) => x.t), { orchestrator: false, limits, now }).token?.id;
+      // Listed in the order the picker uses: the best score first.
+      const order = byScore(now);
+      out.set(person, [...list].sort((a, b) => order(a.t, b.t)).map(({ e, t }) => ({ entry: this.meta(e), view: judge(t, limits, now), live: t.others, priority: t.id === first })));
     }
     return out;
   }
@@ -664,7 +671,7 @@ export class Vault {
             r.set(run.sessionId, now);
             this.recent.set(e.fingerprint, r);
           }
-          out.claude = { entry: this.meta(e), token: v, how: pick.how ?? 'normal', why: pick.views.get(e.id)?.scoreText };
+          out.claude = { entry: this.meta(e), token: v, how: pick.how ?? 'normal' };
           break;
         }
         tried.add(pick.token.id);

@@ -1362,7 +1362,7 @@ export interface AccountUsage {
   /** The portal's agents that run on it now, by session id. */
   sessionIds: string[];
   usage?: PlanUsage;
-  /** A vault Claude token in a person's pool (w971): its pool state and score, "ok: score 18%/day (73% weekly left over 4.0 days, ...)". No token. */
+  /** A vault Claude token in a person's pool (w971): its pool label (w979): "pool:ok priority", "pool:one-at-a-time", "pool:held" ..., priority on the one a new job gets. No token. */
   pool?: { person: string; state: string; text: string };
 }
 

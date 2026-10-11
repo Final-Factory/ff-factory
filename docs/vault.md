@@ -165,7 +165,7 @@ account setting is its consent).
 
 **The order (w971).** The token with the highest **score** first. The score is its weekly headroom per hour until its weekly
 window resets: `(100 - weekly %) / hours to the weekly reset`, scaled by the room left in its 5-hour window,
-`(100 - 5-hour %) / 100`. `system_status`, `fffctl vault list` and the accounts page show it per day. lothsahn, 2026-10-11:
+`(100 - 5-hour %) / 100`. The score only orders the pool; it is not shown anywhere (w979, below). lothsahn, 2026-10-11:
 "let's prefer the token weighted by the reset, but not solely based on the reset. Basically like use the token with the largest
 remaining %/time left or something like that." Reading it as headroom per hour: a token with 3% left and 3 days to go scores
 1%/day, one with 73% left and 4 days scores 18%/day, so the second is picked; the old "soonest reset first" would have tried the
@@ -208,12 +208,25 @@ used up):
 | A token **inside the dispatcher's reserve**, when no other token of the person has room (w971) | A worker, a standing agent or the ops worker is **held** like at any limit (the reason names the buffer and when it lifts); the person's orchestrator runs on it, as it did before |
 | The **dispatcher** | Never on a pool: it keeps the shared token file (or whatever `claudeAccounts.dispatcher` names) and is never held |
 
-**What a token at the one-at-a-time limit is (w747).** A token at 95% weekly is not over its cap: it still works, one
-process at a time, until 99%. Its line says so with the room left and whether the slot is free: `weekly 95%, one job at a
-time until 99%: 4% left before it stops; the slot is taken now (1 running)` (or `...; the slot is free`, and then it is
-`ok`: a new job takes it). The same words are in `system_status`, `fffctl vault list` and the queue's "held" reason. "At a
-limit" and "wait until the reset" are said only when every token is held or retired; "used up" only when every token is at
-100% or rejected.
+**What a token at the one-at-a-time limit is (w747, relabelled w979).** A token at 95% weekly is not over its cap: it still
+works, one process at a time, until 99%. Under each pooled token the portal's accounts list, `system_status` ("Claude token
+pool, <person>") and `fffctl vault list` show one label and the token's own meters, nothing calculated (lothsahn, 2026-10-11:
+"just say pool:ok (if it's not in one-at a time mode), pool:one-at-a-time (if it is in one at a time mode, even if nothing is
+using it), and the pool slot that is currently the one that will get picked for each pool should be marked "priority" on the same
+line ... Remove all the other calculations entirely"):
+- `pool:ok`: below the one-at-a-time limit (95%).
+- `pool:one-at-a-time`: from the one-at-a-time limit up to the retire limit, **whether its one slot is free or taken** (before
+  w979 a free slot read `ok`). A new job still starts on it when the slot is free, and waits when it is taken; the queue's "held"
+  reason says which ("... one job at a time; its slot is taken (1 running)").
+- `pool:held`, `pool:retired`, `pool:exhausted`, `pool:reserved`: the rarer states, in the same form, with their reason
+  after it as before (held until, retired until, used up until, the dispatcher's buffer).
+- ` priority` after the label on the one token per pool that the picker would hand a new worker now (`pickPool` without a sticky
+  session: the best score among the tokens a worker may use). At most one per pool; none when nothing may serve a worker.
+  Example: `vault-ben-1 …nQAA pool:ok priority`.
+- Kept: the 5-hour and weekly percent with their resets, the agents running on it. Gone: the %/day score, the 5-hour-room factor,
+  "N% weekly left over N days", "N% left before it stops", and the slot-free/taken sentence on the line.
+Tokens are listed in the picker's order. "At a limit" and "wait until the reset" are said only when every token is held or
+retired; "used up" only when every token is at 100% or rejected.
 
 **The banner at the top of the dashboard (w747).** A pool warning is shown only to the person whose pool it is (the server
 sends each connected page only its own: `warningsForUser`, `hostForUser`); the owners still see every pool in
@@ -969,8 +982,8 @@ the vault yet`, changes nothing, and the next sync after `fffctl update` renames
 file holds another token now) is removed. The old names are never removed while their file exists.
 
 **3a. The pool works** (after the deploy and a `vault-sync`): `sudo fff-vm ssh 'sudo fffctl vault list'` ends with a "Claude
-token pools" section, one line per token: its last four characters, its state (`ok`, `held`, `one-at-a-time`, `retired`,
-`exhausted`, `reserved`), its score, its 5-hour and weekly percent with their resets, and how many agents ran on it at the portal's last save.
+token pools" section, one line per token: its last four characters, its label (`pool:ok`, `pool:one-at-a-time`, `pool:held`, `pool:retired`,
+`pool:exhausted`, `pool:reserved`, with ` priority` on the one a new job gets), its 5-hour and weekly percent with their resets, and how many agents ran on it at the portal's last save.
 `system_status` has a "Claude token pool, <person>" line per person with the same, the agents running on each token, and
 a verdict, plus a line per reserved credential ("the dispatcher's token file …dAAA: weekly 41%, reserve 25% (5 days to
 reset)…"). A token whose line says "no numbers yet" has not been polled: wait for the next poll (2 to 15 minutes).

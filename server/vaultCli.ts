@@ -29,7 +29,7 @@ import { loadConfig } from './config.ts';
 import { enrolledMachines, issueMachineToken, machineTokensFile, revokeMachineToken } from './machineTokens.ts';
 import type { PlanUsage } from '../shared/types.ts';
 import { reservedCredentials } from './secrets.ts';
-import { clock, poolLimits } from './tokenPool.ts';
+import { clock, poolLabel, poolLimits } from './tokenPool.ts';
 import { VAULT_FILE, Vault, fingerprintOf, keySource, newKeyText, type VaultEntryMeta, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 
 const { values: o, positionals: args } = parseArgs({
@@ -144,14 +144,13 @@ not in any pool (a Claude token with no owner is used by nobody; grant it to a p
   if (!pools.size) return;
   const lim = poolLimits(cfg);
   console.log(`
-Claude token pools (5-hour >= ${lim.sessionHold}%: held; weekly >= ${lim.onePerWeekly}%: one at a time; >= ${lim.retireWeekly}%: retired; highest score first):`);
+Claude token pools (5-hour >= ${lim.sessionHold}%: held; weekly >= ${lim.onePerWeekly}%: one at a time; >= ${lim.retireWeekly}%: retired; the one a new job gets is marked priority):`);
   for (const [person, list] of [...pools].sort((a, b) => a[0].localeCompare(b[0]))) {
     console.log(`  ${person}`);
-    for (const t of list.sort((a, b) => (b.view.score ?? -1) - (a.view.score ?? -1) || a.entry.name.localeCompare(b.entry.name))) {
+    for (const t of list) {
       const v = t.view;
-      console.log(`    ${t.entry.name.padEnd(24)} …${t.entry.last4}  ${v.state.padEnd(13)} 5-hour ${v.known ? Math.round(v.session) + '%' : '?'}${v.sessionResetsAt ? ` (resets ${clock(v.sessionResetsAt)})` : ''}, weekly ${v.known ? Math.round(v.weekly) + '%' : '?'}${v.weeklyResetsAt ? ` (resets ${clock(v.weeklyResetsAt)})` : ''}; ${t.live} agent${t.live === 1 ? '' : 's'} running${v.state === 'ok' && !v.why.includes('one job') ? '' : `
-${' '.repeat(8)}${v.why}`}
-${' '.repeat(8)}${v.scoreText}`);
+      console.log(`    ${t.entry.name.padEnd(24)} …${t.entry.last4}  ${poolLabel(v, t.priority).padEnd(28)} 5-hour ${v.known ? Math.round(v.session) + '%' : '?'}${v.sessionResetsAt ? ` (resets ${clock(v.sessionResetsAt)})` : ''}, weekly ${v.known ? Math.round(v.weekly) + '%' : '?'}${v.weeklyResetsAt ? ` (resets ${clock(v.weeklyResetsAt)})` : ''}; ${t.live} agent${t.live === 1 ? '' : 's'} running${v.state === 'ok' || v.state === 'one-at-a-time' ? '' : `
+${' '.repeat(8)}${v.why}`}`);
     }
   }
 }
