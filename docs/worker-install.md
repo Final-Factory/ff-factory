@@ -356,7 +356,7 @@ the only thing that touches sandboxes, so it runs only on request, and only when
    a Unity editor runs from one, if a sandbox is on a detached HEAD, if a sandbox on `master`, `main` or `develop` has
    uncommitted work (committing there is a person's decision), or if the untracked files are more than a save may carry
    (`SAVE_LIMITS`). It changes nothing in that case.
-2. It stops the daemon (agents in their own hosts carry on, [above](#updating)) and **saves every sandbox's work**: the
+2. It stops the daemon (`Stop-FFDaemon` without `-Agents`: agents' hosts carry on, [above](#updating)) and **saves every sandbox's work**: the
    uncommitted changes and untracked files are committed on the sandbox's own branch and pushed, as FF Factory's release
    step does (`server/saveWork.ts`, w656). In an ssh session with no GitHub credential the push fails and says so; the
    commit is in the root's clone, which the new worktree uses, so nothing is lost, and the daemon pushes it on the next
@@ -376,6 +376,12 @@ worktree git lists: an empty one is removed, one with leftovers is renamed `<nam
 carries on. Before this fix (found on LothDesktop, w900) such a folder was read as "on a detached HEAD" and refused every resume. It runs in the background for an hour or more; `D:`'s free space before and after is what to report
 (`Get-PSDrive D`). Tested on a real git repository with two worktrees, unsaved work, an unpushed commit, a cut-off run, and
 a refused one (`scripts/devdrive.test.ts`); *not yet run on LothDesktop*.
+
+**Restarting a Windows daemon by hand.** Use `machine_daemon restart`, never `schtasks /end` and `/run`. The task's action is a
+headless console host that starts the supervisor (`run-daemon.ps1`), which starts node; ending the task ends the console host and
+can leave the supervisor and the daemon running, and the next `/run` then starts a second pair (two daemons answering the portal
+and the Unity slots mailbox, seen on LothDesktop after the w900 move). `Stop-FFDaemon` ends the whole tree by command line.
+The installer starts the daemon only with `Start-ScheduledTask` after it has stopped the old one that way.
 
 **Uninstall.** It attaches the drive first if it is not (the sandboxes' unpushed work is checked through the junction),
 stops what runs from the root or the drive, takes the junctions away, removes the three SYSTEM tasks (only those whose
