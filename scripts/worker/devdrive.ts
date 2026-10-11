@@ -310,8 +310,17 @@ export async function moveSandboxes(o: MoveOptions, d: MoveDeps): Promise<MoveRe
   // held it) leaves a folder that is not one: empty, or with leftovers. It has no branch to read and no work git could keep, so it is not
   // "a detached HEAD" (w900, found on lothdesktop): it is cleared away in step 4. If git cannot list them, a folder with a .git is live.
   const listed = await d.git(['-C', o.repo, 'worktree', 'list', '--porcelain']);
-  const registered = listed.code === 0 ? new Set(listed.stdout.split('\n').filter((l) => l.startsWith('worktree ')).map((l) => norm(l.slice('worktree '.length).trim()))) : undefined;
-  const isLive = (dir: string) => (registered ? registered.has(norm(dir)) : fs.existsSync(path.join(dir, '.git')));
+  // Compared by real path: git prints the long, resolved spelling (C:/Users/runneradmin/...), the pool's record may have another one
+  // (an 8.3 short name such as RUNNER~1, a junction, another case), and a worktree that only looks unlisted would be set aside as a leftover.
+  const real = (p: string) => {
+    try {
+      return norm(fs.realpathSync.native(p));
+    } catch {
+      return norm(p);
+    }
+  };
+  const registered = listed.code === 0 ? new Set(listed.stdout.split('\n').filter((l) => l.startsWith('worktree ')).map((l) => real(l.slice('worktree '.length).trim()))) : undefined;
+  const isLive = (dir: string) => (registered ? registered.has(real(dir)) : fs.existsSync(path.join(dir, '.git')));
   const stale = new Set<string>();
   for (const r of todo) {
     if (r.status === 'creating' || r.status === 'deleting') problems.push(`${r.id} is ${r.status}: wait for it to finish`);
