@@ -140,7 +140,7 @@ test('fffctl migrate (w508): Windows tar\'s -v read right, a file it stopped at 
   assert.throws(() => parseArgs(['--dry-run-copy', '--snapshot', 'live']), /--snapshot is auto, vss or copy/);
 });
 
-test('fffctl migrate: as the portal\'s account through setpriv, which execs, so a kill reaches the program itself', { skip: process.getuid?.() !== 0 || spawnSync('setpriv', ['--version']).status !== 0 ? 'needs root and setpriv' : undefined }, async () => {
+test('fffctl migrate: as the portal\'s account through setpriv, which execs, so a kill reaches the program itself', { skip: process.getuid?.() !== 0 || spawnSync('setpriv', ['--version']).status !== 0 ? 'needs root and setpriv' : spawnSync('setpriv', ['--reuid', 'nobody', '--regid', 'nogroup', '--init-groups', '--', 'true']).status !== 0 ? 'setpriv cannot switch user here (an FFBox runner container is root with CAP_SETUID dropped)' : undefined }, async () => {
   assert.deepEqual(asUserCommand(undefined, 'ssh', ['-n', 'beast']), ['ssh', ['-n', 'beast']]);
   assert.deepEqual(asUserCommand('nobody', 'ssh', ['-n', 'beast']), ['setpriv', ['--reuid', 'nobody', '--regid', execFileSync('id', ['-g', 'nobody'], { encoding: 'utf8' }).trim(), '--init-groups', '--', 'ssh', '-n', 'beast']]);
   // runuser stayed as a parent: the stall limit's SIGKILL ended it and left ssh running, holding the pipes (the hang).

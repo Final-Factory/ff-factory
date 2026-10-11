@@ -119,6 +119,11 @@ fs.writeFileSync(
       voice: { enabled: false, autoInstall: false, tts: false },
       // The machine "pc" never watches this host from outside (it would ping it and alert a phone).
       outsideWatch: { enabled: false },
+      // The disk-space guard's thresholds (80 GB warn, 40 critical) are for a developer's drive, and a runner with less free
+      // than that shows a "disk space is low" bar on every page: 56 GB in an FFBox runner container (w911), which made
+      // the page 70 px shorter in every screenshot and left a second bar after the first was dismissed. The tests are not
+      // about the disk, so the thresholds are low enough that no runner trips them.
+      hostGuard: { warnFreeGB: 5, criticalFreeGB: 2 },
       // A 20 MB cap: e2e/attachments.spec.ts sends a 9 MB file (two chunks) and is refused a 21 MB one.
       attachments: { maxMB: 20 },
       max: { eventsFile: path.join(base, 'max-events.jsonl'), ffboxConfigDir: path.join(base, 'ffbox'), discordApi: `http://127.0.0.1:${discordPort}/api/v10`, inbound: { pollMinutes: 60 } },
@@ -191,6 +196,8 @@ process.env.CLAUDE_CONFIG_DIR = path.join(base, 'claude');
 // No GitHub login (w904): the portal probes its own gh login at start, and a developer's would show a token banner here.
 process.env.GH_CONFIG_DIR = path.join(base, 'gh');
 delete process.env.GH_TOKEN;
+// Not "elevated" even when the runner is root, as an FFBox runner container is (a root server shows an admin-rights bar on every page).
+process.env.FFSB_TEST_ELEVATED = '0';
 delete process.env.GITHUB_TOKEN;
 delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 // Nor a real Discord token: Max reads only the scratch ffbox config above.

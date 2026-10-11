@@ -37,7 +37,11 @@ test('public repos: gh first, then the anonymous API, cached', () => {
   assert.equal(githubSlug('https://github.com/Final-Factory/ff-factory'), 'Final-Factory/ff-factory');
 });
 
-test('public repos: agents commit as the public identity in public clones, their own identity elsewhere', (t) => {
+// includeIf "hasconfig:remote.*.url:" is git 2.36. An FFBox runner container is Ubuntu 22.04 and has git 2.34.1 (w911).
+const gitVersion = /(\d+)\.(\d+)/.exec(execFileSync('git', ['--version'], { encoding: 'utf8' }));
+const gitTooOld = !gitVersion || Number(gitVersion[1]) < 2 || (Number(gitVersion[1]) === 2 && Number(gitVersion[2]) < 36);
+
+test('public repos: agents commit as the public identity in public clones, their own identity elsewhere', { skip: gitTooOld ? 'needs git 2.36 (includeIf hasconfig:remote.*.url)' : undefined }, (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pubgit-'));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
   const env = publicIdentityEnv({ name: 'Public Name', email: '1+pub@users.noreply.github.com' }, ['Org/public-kit'], path.join(tmp, 'id.gitconfig'), { GIT_CONFIG_COUNT: '1' });
