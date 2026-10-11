@@ -610,18 +610,18 @@ printf '%s' "$out" | matches 'no restart was asked for' || fail "the worker's ff
 rgrant 2020-01-01T00:00:00Z
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl restart 2>&1' || true)
 printf '%s' "$out" | matches 'ran out' || fail "the worker's fffctl restart took a grant that ran out: $out"
-g 'test ! -e /srv/fff/data/ops-restart.grant' || fail "a restart grant that ran out was not removed"
+g 'sudo test ! -e /srv/fff/data/ops-restart.grant' || fail "a restart grant that ran out was not removed"
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
 printf '%s' "$out" | matches 'no deploy was asked for' || fail "a restart grant is a deploy grant: $out"
 rgrant "$(date -u -d '+10 min' +%FT%TZ)"
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
 printf '%s' "$out" | matches 'no deploy was asked for' || fail "a restart grant started a deploy: $out"
-g 'test -e /srv/fff/data/ops-restart.grant' || fail "a deploy attempt used up the restart grant"
+g 'sudo test -e /srv/fff/data/ops-restart.grant' || fail "a deploy attempt used up the restart grant"
 pid=$(g 'systemctl show -p MainPID --value fff-portal.service')
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl restart 2>&1' || true)
 echo "$out"
 printf '%s' "$out" | matches "restart asked for by ci; the portal runs .* at commit $want" || fail "the worker's restart did not say what it runs: $out"
-g 'test ! -e /srv/fff/data/ops-restart.grant' || fail "the restart grant was not used up"
+g 'sudo test ! -e /srv/fff/data/ops-restart.grant' || fail "the restart grant was not used up"
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl restart 2>&1' || true)
 printf '%s' "$out" | matches 'no restart was asked for' || fail "a restart grant worked twice: $out"
 restarted() { [ "$(g 'systemctl show -p MainPID --value fff-portal.service')" != "$pid" ]; }
