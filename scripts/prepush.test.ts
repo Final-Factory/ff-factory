@@ -24,10 +24,11 @@ function repo(t: { after: (fn: () => void) => void }): { dir: string; git: (...a
   return { dir, git };
 }
 
-// In CI the tools are installed (ci.yml's checks job), so a missing one fails the test there instead of skipping it.
+// In ci.yml's checks job (Linux) the tools are installed, so a missing one fails the test there instead of skipping it.
+// Windows CI does not install them (windows.yml's daily whole-suite run, w910): skipped there.
 function need(t: { skip: (msg: string) => void }, tool: string, versionArg?: string): boolean {
   if (has(tool, versionArg)) return true;
-  assert.ok(!process.env.CI, `${tool} is missing on the CI runner`);
+  assert.ok(!(process.env.CI && process.platform === 'linux'), `${tool} is missing on the CI runner`);
   t.skip(`${tool} is not installed here`);
   return false;
 }
