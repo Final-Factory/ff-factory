@@ -486,3 +486,22 @@ test('clean-up’s fence to the install folder counts the Dev Drive’s sandboxe
   assert.deepEqual(f.outside.map((x) => x.path), ['V:/other/x', 'V:/sandboxes', 'D:/work/ffsb/old']);
   assert.match(f.outside[0].why, /D:\\work\\ffw, V:\\sandboxes, V:\\seed/);
 });
+
+test('moving the sandboxes: a folder git no longer lists (a removal cut off after git dropped the worktree) is cleared, not read as a detached HEAD (w900, lothdesktop)', async () => {
+  const w = oldInstall();
+  // slot1: git dropped the worktree but the folder stayed, empty. slot2: the same, with leftovers in it.
+  git(w.repo, 'worktree', 'remove', '--force', path.join(w.sandboxes, 'slot1'));
+  fs.mkdirSync(path.join(w.sandboxes, 'slot1'));
+  git(w.repo, 'worktree', 'remove', '--force', path.join(w.sandboxes, 'slot2'));
+  fs.mkdirSync(path.join(w.sandboxes, 'slot2', 'Temp'), { recursive: true });
+  fs.writeFileSync(path.join(w.sandboxes, 'slot2', 'Temp', 'held.dat'), 'x');
+  const said: string[] = [];
+  const rep = await moveSandboxes({ repo: w.repo, stateFile: w.stateFile, oldSandboxes: w.sandboxes, oldSeed: w.oldSeed, newSandboxes: w.newSandboxes, newSeed: w.newSeed }, fakeDeps({}, said));
+  assert.deepEqual(rep.moved.map((m) => m.id), ['slot1', 'slot2']);
+  for (const id of ['slot1', 'slot2']) assert.equal(git(path.join(w.newSandboxes, id), 'rev-parse', '--abbrev-ref', 'HEAD'), `sandbox/${id}-w1`, `${id} is a worktree on its branch`);
+  assert.equal(fs.existsSync(path.join(w.sandboxes, 'slot1')), false, 'the empty folder is gone');
+  assert.equal(fs.readFileSync(path.join(`${path.join(w.sandboxes, 'slot2')}.before-dev-drive`, 'Temp', 'held.dat'), 'utf8'), 'x', 'leftovers are set aside whole, never deleted');
+  assert.ok(said.some((l) => /empty folder git no longer lists/.test(l)));
+  assert.ok(!said.some((l) => /detached/.test(l)));
+  fs.rmSync(w.base, { recursive: true, force: true });
+});

@@ -370,7 +370,10 @@ the only thing that touches sandboxes, so it runs only on request, and only when
    `sandboxes.before-dev-drive` (never deleted); `daemon.json` is written with the drive's paths; the daemon starts.
 
 It is safe to run again after a stop: a sandbox already on the drive is skipped, one cut off between removal and creation
-is created. It runs in the background for an hour or more; `D:`'s free space before and after is what to report
+is created.
+A folder that is cut off mid-removal (git dropped the worktree but something held the folder, so it stayed) is no
+worktree git lists: an empty one is removed, one with leftovers is renamed `<name>.before-dev-drive` (never deleted), and the move
+carries on. Before this fix (found on LothDesktop, w900) such a folder was read as "on a detached HEAD" and refused every resume. It runs in the background for an hour or more; `D:`'s free space before and after is what to report
 (`Get-PSDrive D`). Tested on a real git repository with two worktrees, unsaved work, an unpushed commit, a cut-off run, and
 a refused one (`scripts/devdrive.test.ts`); *not yet run on LothDesktop*.
 
