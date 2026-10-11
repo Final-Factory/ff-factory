@@ -1918,7 +1918,7 @@ function reservedFor(fingerprint: string): string | undefined {
 const noGithubToken = new Set<string>();
 setVaultContext({
   vault,
-  usageOf: (fp) => usage.entries.get(`token:${fp}`)?.usage,
+  usageOf: (fp) => usage.usageOf(`token:${fp}`),
   liveOn: (fp, except) => liveOnKey(`token:${fp}`, except),
   limits: () => poolLimits(cfg),
   reservedFor,
@@ -1994,10 +1994,10 @@ function accountsNow() {
   });
   // A vault token's pool state and score, for the accounts page (w971).
   const poolOf = new Map<string, NonNullable<AccountUsage['pool']>>();
-  for (const [person, list] of vault.pools({ usageOf: (fp) => usage.entries.get(`token:${fp}`)?.usage, liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor })) {
+  for (const [person, list] of vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor })) {
     for (const t of list) poolOf.set(`token:${t.entry.fingerprint}`, { person, state: t.view.state, text: poolLabel(t.view, t.priority) });
   }
-  const built = buildAccounts(usage.entries, {
+  const built = buildAccounts(usage.effectiveEntries(), {
     hostName: os.hostname(),
     token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
     hostLoginRoles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login'),
@@ -2083,7 +2083,7 @@ const vaultLines = () => {
  * docs/vault.md section 4): system_status lines and the dashboard's warnings. Only names, last four characters and numbers.
  */
 function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarning[] } {
-  const usageOfKey = (key: string) => usage.entries.get(key)?.usage;
+  const usageOfKey = (key: string) => usage.usageOf(key);
   const titlesOn = (key: string) => [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error').map((s) => s.title);
   const pools = vault.pools({ usageOf: (fp) => usageOfKey(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), now: () => now, reservedFor });
   const lines: string[] = [];

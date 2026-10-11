@@ -337,6 +337,27 @@ token as `CLAUDE_CODE_OAUTH_TOKEN`, every other Claude credential removed first.
   an interval depends on the work on it and was **not measured** (no poll history existed to measure from): every poll
   logs the percentages (`usage: … Weekly 41%, Session 33%`), so a week of the journal gives the largest rise per interval.
   Between polls a pick can be a few percent stale; the caps leave 20% of the 5-hour window and 1% of the week for it.
+- **A reading outlives a restart and a failed poll (w1041).** `data/usage.json` already held each credential's last reading
+  and loaded it at startup, but a failed poll replaced a token's reading with "unknown" (no numbers), and an unknown reading
+  counts 50% on both windows, and "no reading" counts as inside the dispatcher's reserve (`reserveOf`). On 2026-10-11 at
+  20:30Z (14:30 local) the deploy restarted the portal; the first poll of vault-lothsahn-1 got **429 (Retry-After 60 min)** from
+  the endpoint and "fetch failed" from the headers call, the saved 8% / 28% was overwritten with unknown, and the pool showed
+  `reserved` until the 14:32 poll read the headers (*measured, portal journal 2026-10-11 14:29 to 14:33 local*). Now:
+  - a failed poll keeps that token's own last reading with the failure (`UsageEntry.usage.error`); only a 401 (token rejected)
+    drops it, because old numbers would hide that the token cannot run;
+  - every reading the scheduler and `system_status` use goes through `effectiveUsage` (`server/usage.ts`, via
+    `UsageTracker.usageOf`): a window whose reset time has passed counts as **0%** (the weekly one rolls forward by whole weeks),
+    and a reading this process has not read itself, or whose last poll failed, is labelled `[persisted reading: read 12 min
+    ago; ...]` in the pool lines, the reserve lines and the accounts list;
+  - **staleness bound: 6 hours** (`STALE_READING_MS`). Older than that, a window not yet reset counts as at least 50% (the same
+    assumption as a token never read); a high old reading stays high, because a window's counter only goes up before its reset.
+    Why six: longer than the endpoint's 60-minute Retry-After and several 15-minute polls, longer than one 5-hour window, and
+    short enough that the weekly counter cannot have moved far (vault-lothsahn-1 read 6% at 13:29 and 8% at 14:32 local,
+    +2 points in an hour, measured: about +12 in six hours at that pace). A guess for a heavier pace;
+  - the endpoint's refusals are persisted too (`holds` in `usage.json`: a 429's Retry-After and a 403's six hours, by token key),
+    so a restarted portal does not ask again inside them;
+  - a token on a kept reading is polled at the 2-minute near-poll pace until a poll answers.
+  The file holds the token's key (a hash prefix), its label (name and last four characters) and numbers; never a token.
 
 ## 5. Security review
 

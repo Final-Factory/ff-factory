@@ -641,9 +641,53 @@ export const NEAR_WEEKLY_PERCENT = 90;
 /** A new token (set_app_config) is polled this soon, and a manual refresh no sooner than this after the last poll. */
 const SOON_MS = 5_000;
 
+/**
+ * How old a reading may be and still be used as it was read (w1041). Past it, a window that has not reset counts as at
+ * least 50% (the same assumption as a token never read), because a window's counter only goes up until its reset: the old
+ * number is a floor, never a ceiling. Six hours: longer than the 60 minutes the usage endpoint's Retry-After asks for
+ * (measured 2026-10-11, 14:30 local: "next try in 60 min") and than several poll intervals (15 min), and longer than one
+ * 5-hour window, so a 5-hour reading never outlives its window by much. It is short enough that the weekly counter cannot
+ * have moved far: vault-lothsahn-1 read weekly 6% at 13:29 local and 8% at 14:32 the same day (+2% in an hour, measured
+ * in the portal journal), so six hours of the same pace is about +12 points, far from the 80/95/99 limits. A guess for a
+ * heavier pace; a window that resets in between is zero anyway.
+ */
+export const STALE_READING_MS = 6 * 3_600_000;
+const WEEK_MS = 7 * 86_400_000;
+
+/**
+ * A reading as the scheduler and system_status may use it at `now` (w1041). Unavailable readings come back as they are.
+ * A window whose reset time has passed counts as 0% (the weekly window rolls forward by whole weeks, the 5-hour one has no
+ * known next reset). With `held` (this portal has not read the credential successfully since it started, or its last poll
+ * failed) the result carries `reading`, and one older than STALE_READING_MS counts every window not yet reset as at least 50%.
+ */
+export function effectiveUsage(u: PlanUsage | undefined, now: number, held = false): PlanUsage | undefined {
+  if (!u?.available) return u;
+  const asOf = Date.parse(u.asOf);
+  const age = Number.isFinite(asOf) ? Math.max(0, now - asOf) : Infinity;
+  const stale = held && age > STALE_READING_MS;
+  const aged = (m: UsageMeter | undefined, weekly: boolean): UsageMeter | undefined => {
+    if (!m) return m;
+    const reset = m.resetsAt ? Date.parse(m.resetsAt) : NaN;
+    if (Number.isFinite(reset) && reset <= now) {
+      const next = weekly ? new Date(reset + Math.ceil((now - reset + 1) / WEEK_MS) * WEEK_MS).toISOString() : undefined;
+      const { resetsAt: _gone, ...rest } = m;
+      return { ...rest, percent: 0, ...(next ? { resetsAt: next } : {}) };
+    }
+    return stale && m.percent < 50 ? { ...m, percent: 50 } : m;
+  };
+  const out: PlanUsage = { ...u, weekly: aged(u.weekly, true), session: aged(u.session, false), models: u.models.map((m) => aged(m, true)!) };
+  if (!held) return out;
+  const mins = Math.round(age / 60_000);
+  const how = Number.isFinite(age) ? (mins < 1 ? 'under a minute' : mins < 90 ? `${mins} min` : age < 48 * 3_600_000 ? `${Math.round(age / 3_600_000)} h` : `${Math.round(age / 86_400_000)} days`) : 'an unknown time';
+  const why = `read ${how} ago${u.error ? `; the latest poll failed (${u.error.slice(0, 120)})` : '; not read since this portal started'}${stale ? `; older than ${STALE_READING_MS / 3_600_000} h, so a window not yet reset counts as at least 50%` : ''}`;
+  return { ...out, reading: { kind: stale ? 'stale' : 'persisted', asOf: u.asOf, ageMs: Number.isFinite(age) ? age : 0, why } };
+}
+
 /** What usage.json holds; a file from before per-account usage is one PlanUsage (this host's login). */
 interface UsageFile {
   entries: Record<string, UsageEntry>;
+  /** When the usage endpoint last refused a token, so a restart does not ask again at once (w1041): by token key (a hash prefix), epoch ms. */
+  holds?: Record<string, { noScopeAt?: number; retryAt?: number }>;
 }
 
 /** How the tracker reaches the network and its log; tests pass fakes. */
@@ -696,6 +740,8 @@ export class UsageTracker {
    */
   private readonly noScope = new Map<string, number>();
   private nearTimer?: NodeJS.Timeout;
+  /** Credentials read successfully by this process (w1041): every other reading is a persisted one until a poll answers. */
+  private readonly freshKeys = new Set<string>();
 
   constructor(cfg: Config, changed: () => void, deps: UsageDeps = {}) {
     this.cfg = cfg;
@@ -714,6 +760,14 @@ export class UsageTracker {
         // A token's numbers saved before it was asked directly were the stored login's: never show them.
         for (const [k, e] of Object.entries(f.entries)) if (e.kind !== 'token' || e.direct) this.entries.set(k, e);
       } else this.entries.set(HOST_LOGIN, { kind: 'login', usage: f });
+      // A refusal the last process was told about stands until it runs out (w1041).
+      const now = Date.now();
+      if ('entries' in f) {
+        for (const [k, h] of Object.entries(f.holds ?? {})) {
+          if (h.noScopeAt && now - h.noScopeAt < NO_SCOPE_RETRY_MS) this.noScope.set(k, h.noScopeAt);
+          if (h.retryAt && h.retryAt > now) this.retryAt.set(k, h.retryAt);
+        }
+      }
     } catch {
       // first run
     }
@@ -727,6 +781,20 @@ export class UsageTracker {
   /** This host's own claude.ai login's usage (the single meter before per-account usage). */
   get usage(): PlanUsage | undefined {
     return this.entries.get(HOST_LOGIN)?.usage;
+  }
+
+  /**
+   * A credential's usage as the scheduler and system_status use it (w1041, effectiveUsage): a reading this portal has not
+   * read itself since it started, or whose last poll failed, is the persisted one, aged and labelled as such.
+   */
+  usageOf(key: string, now: number = Date.now()): PlanUsage | undefined {
+    const u = this.entries.get(key)?.usage;
+    return effectiveUsage(u, now, !!u && (!this.freshKeys.has(key) || !!u.error));
+  }
+
+  /** The entries with their usage as usageOf gives it (for the accounts list). */
+  effectiveEntries(now: number = Date.now()): Map<string, UsageEntry> {
+    return new Map([...this.entries].map(([k, e]) => [k, e.usage ? { ...e, usage: this.usageOf(k, now) } : e] as const));
   }
 
   /** The tokens the last refresh polled, to notice a new one (set_app_config) before the next poll. */
@@ -769,7 +837,7 @@ export class UsageTracker {
   nearTokens(): { token: string; label: string }[] {
     return this.tokens().filter((x) => {
       const u = this.entries.get(tokenKey(x.token))?.usage;
-      return !u?.available || (u.session?.percent ?? 0) >= NEAR_SESSION_PERCENT || (u.weekly?.percent ?? 0) >= NEAR_WEEKLY_PERCENT;
+      return !u?.available || !!u.error || (u.session?.percent ?? 0) >= NEAR_SESSION_PERCENT || (u.weekly?.percent ?? 0) >= NEAR_WEEKLY_PERCENT;
     });
   }
 
@@ -865,6 +933,7 @@ export class UsageTracker {
   report(machineId: string, account: AccountIdentity, usage: PlanUsage) {
     const key = machineLogin(machineId);
     const prev = this.entries.get(key);
+    if (usage.available) this.freshKeys.add(key);
     // As for this host: a failed fetch keeps the last good numbers (stale by their asOf) and who it was.
     const failed = !usage.available && /^could not fetch/.test(usage.why ?? '');
     const kept = failed && prev?.usage?.available ? { ...prev.usage, error: usage.why?.slice(0, 200) } : usage;
@@ -950,6 +1019,7 @@ export class UsageTracker {
       }
     }
     if (!u.available) u.spendWeekUsd = weekSpend(this.ledger, localDay());
+    else this.freshKeys.add(HOST_LOGIN);
     this.entries.set(HOST_LOGIN, { kind: 'login', account, usage: u });
     said(u, account);
   }
@@ -1003,6 +1073,17 @@ export class UsageTracker {
       // Anything unexpected (a reply parseUsage cannot read): still a reason, never "not fetched yet".
       u = { available: false, asOf, models: [], why: `usage unknown: ${reason(e)}` };
     }
+    const prev = this.entries.get(key);
+    if (u.available) this.freshKeys.add(key);
+    else if (prev?.direct && prev.usage?.available && !/HTTP 401/.test(u.why ?? '')) {
+      // A failed poll keeps this token's own last good reading (w1041: the 2026-10-11 20:30Z restart lost it to a failed first
+      // poll and the pool was counted at 50%): shown as persisted with the failure, aged by effectiveUsage. Same key, same token.
+      // A token the API rejected (401: expired or revoked) is not kept: its old numbers would hide that it cannot run.
+      const kept = { ...prev.usage, error: (u.why ?? 'usage unknown').slice(0, 200) };
+      this.entries.set(key, { kind: 'token', label, usage: kept, direct: true });
+      this.log(`usage: ${label} (${key}, asked with that token itself, via ${via}): failed (${kept.error}), keeping its reading from ${prev.usage.asOf}`);
+      return;
+    }
     if (!u.available) u.spendWeekUsd = weekSpend(this.ledger, localDay());
     this.entries.set(key, { kind: 'token', label, usage: u, direct: true });
     this.log(`usage: ${label} (${key}, asked with that token itself, via ${via}): ${u.available ? 'ok' : 'failed'}, ${brief(u)}`);
@@ -1010,7 +1091,11 @@ export class UsageTracker {
 
   private save() {
     try {
-      writeJsonDurable(this.file, { entries: Object.fromEntries(this.entries) } satisfies UsageFile);
+      const holds: NonNullable<UsageFile['holds']> = {};
+      const now = Date.now();
+      for (const [k, at] of this.noScope) if (now - at < NO_SCOPE_RETRY_MS) holds[k] = { ...holds[k], noScopeAt: at };
+      for (const [k, at] of this.retryAt) if (at > now) holds[k] = { ...holds[k], retryAt: at };
+      writeJsonDurable(this.file, { entries: Object.fromEntries(this.entries), ...(Object.keys(holds).length ? { holds } : {}) } satisfies UsageFile);
     } catch {
       // not fatal
     }

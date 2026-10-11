@@ -515,7 +515,7 @@ export function reserveLines(
     return {
       cred,
       reserve: r,
-      line: `${name}: ${nums}${r.inReserve ? `; inside its reserve (${reserveReason(r, u, now)}), kept for ${who}` : ''}${others ? `; ${others} other run${others === 1 ? '' : 's'} using it` : ''}`,
+      line: `${name}: ${nums}${u?.reading ? ` [${u.reading.kind} reading: ${u.reading.why}]` : ''}${r.inReserve ? `; inside its reserve (${reserveReason(r, u, now)}), kept for ${who}` : ''}${others ? `; ${others} other run${others === 1 ? '' : 's'} using it` : ''}`,
       ...(others ? { warning: `${name} is the last token with room for ${others} run${others === 1 ? '' : 's'} and is inside the buffer kept for ${who}: ${reserveReason(r, u, now)}` } : {}),
     };
   });

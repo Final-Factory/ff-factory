@@ -1345,6 +1345,13 @@ export interface PlanUsage {
   source?: string;
   /** Only when unavailable: FF Factory's own agent spend over the last 7 days (spend, not the plan limit). */
   spendWeekUsd?: number;
+  /**
+   * Set on the reading the scheduler and system_status use (server/usage.ts effectiveUsage, w1041) when it is not one this
+   * portal just read: `persisted` (read earlier, kept in data/usage.json, the latest poll failed or has not answered yet),
+   * `stale` (the same, older than STALE_READING_MS: a window not yet reset counts as at least 50%). A window whose reset time
+   * passed counts as 0% either way. Never stored; computed when the numbers are read.
+   */
+  reading?: { kind: 'persisted' | 'stale'; asOf: string; ageMs: number; why: string };
 }
 
 /**
