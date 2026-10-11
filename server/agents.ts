@@ -45,6 +45,7 @@ import { SECRET_KEYS, accountSource, dispatcherOwnAccount, hostAccount, hostProc
 import { Identity, claudeEnvFor, forLine } from './identity.ts';
 import { crossOwnerLine, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { beltFor, type BeltRole } from './belts.ts';
+import { DEFAULT_WAIT_SECONDS, MAX_SEND_CHARS, MAX_TOOL_FILE_BYTES, MAX_WAIT_SECONDS, RemoteChat, type Progress, type RemoteCaller } from './remoteChat.ts';
 import { OPS_ID, OPS_LIMITS, OPS_PATHS, OPS_PEOPLE, OPS_REFUSED, OpsWorker, opsAllowedOrchestrator, opsBrief, opsGuard, opsSpawner } from './opsWorker.ts';
 import { memoryDirFor, memoryGuard, memoryRootOf } from './orchestratorMemory.ts';
 import { ownerDataReads, portalSecretRules, secretFilesOf, secretReadGuard, type SecretRules } from './secretGuard.ts';
@@ -74,11 +75,17 @@ import { collectResume, orchestratorWasBusy, readUpdateResult, restartSummary, r
 import { appVersion, formatVersion } from './version.ts';
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
+/** What the MCP SDK passes a tool handler besides its arguments: enough to send a progress notice to a client that asked for them. */
+export interface ToolExtra {
+  _meta?: { progressToken?: string | number };
+  sendNotification?: (n: { method: 'notifications/progress'; params: { progressToken: string | number; progress: number; message?: string } }) => Promise<void>;
+}
+
 export interface ToolSpec {
   name: string;
   description: string;
   schema: z.ZodRawShape;
-  handler: (args: Record<string, unknown>) => Promise<ToolResult>;
+  handler: (args: Record<string, unknown>, extra?: unknown) => Promise<ToolResult>;
 }
 
 /**
@@ -117,10 +124,10 @@ type ToolMaker = <S extends z.ZodRawShape>(name: string, description: string, sc
 const ok = (text: string) => ({ content: [{ type: 'text' as const, text }] });
 const fail = (e: unknown) => ({ content: [{ type: 'text' as const, text: `ERROR: ${(e as Error).message ?? e}` }], isError: true });
 const wrap =
-  <A,>(fn: (a: A) => Promise<string> | string) =>
-  async (a: A) => {
+  <A, X = undefined>(fn: (a: A, extra?: X) => Promise<string> | string) =>
+  async (a: A, extra?: X) => {
     try {
-      return ok(await fn(a));
+      return ok(await fn(a, extra));
     } catch (e) {
       return fail(e);
     }
@@ -3015,25 +3022,92 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     return `The orchestrator is still working after ${waitSeconds}s. Its reply will land in the web UI; call orchestrator_transcript later to read it.`;
   }
 
-  /** Tools only a remote client gets: talking to its person's own orchestrator. */
-  remoteToolSpecs(via: string, requestedBy?: Requester): ToolSpec[] {
+  /** The /mcp chat tools' state: where each key's inbox stands (server/remoteChat.ts). */
+  private remoteChat?: RemoteChat;
+
+  private remote(): RemoteChat {
+    return (this.remoteChat ??= new RemoteChat({
+      store: this.store,
+      sessions: this.sessions,
+      orchestrators: this.orchestrators,
+      waker: this.waker,
+      deliver: (id, text, o) => this.sendWithAttachments(id, text, 'human', { attachments: o.attachments, requestedBy: o.requestedBy }),
+      attachments: () => this.attachments,
+    }));
+  }
+
+  /**
+   * Tools only a remote client gets: talking to its person's own orchestrator. `ctx` says who is calling and over what
+   * (server/mcp.ts); without it only the older two tools are given (tests, callers that have no request).
+   */
+  remoteToolSpecs(via: string, requestedBy?: Requester, ctx?: RemoteCaller): ToolSpec[] {
     const mine = () => this.orchestrators.personalFor(requestedBy ?? this.identity.owner()).info.id;
-    return [
+    const refused = () => {
+      if (ctx?.refuse) throw new Error(`refused: ${ctx.refuse}`);
+    };
+    const progressOf = (raw?: unknown): Progress | undefined => {
+      const extra = raw as ToolExtra | undefined;
+      const token = extra?._meta?.progressToken;
+      if (token === undefined || !extra?.sendNotification) return undefined;
+      let n = 0;
+      return async (message) => {
+        try {
+          await extra.sendNotification!({ method: 'notifications/progress', params: { progressToken: token, progress: ++n, message } });
+        } catch {
+          // the client went away; the send goes on
+        }
+      };
+    };
+    const specs: ToolSpec[] = [
       {
         name: 'ask_orchestrator',
         description:
           "Send a plain-language request to your own FF Factory orchestrator on this host (your chat on the web UI's main page) and wait for its reply. " +
           'It answers status questions and files work with the dispatcher, which creates sandboxes, starts Unity and runs worker agents without duplicating work. Use this for anything open-ended ("spin up a sandbox for spec 093", "how is the shader work going?"); use the direct tools for precise actions.',
         schema: { message: z.string(), wait_seconds: z.number().int().min(5).max(600).optional().describe('How long to wait for the reply (default 180).') },
-        handler: wrap(async (a: Record<string, unknown>) => this.askOrchestrator(String(a.message), Number(a.wait_seconds ?? 180), via, requestedBy)) as ToolSpec['handler'],
+        handler: wrap(async (a: Record<string, unknown>) => {
+          refused();
+          return this.askOrchestrator(String(a.message), Number(a.wait_seconds ?? 180), via, requestedBy);
+        }) as ToolSpec['handler'],
       },
       {
         name: 'orchestrator_transcript',
         description: 'Read the recent condensed transcript of your own orchestrator conversation.',
         schema: { last: z.number().int().min(5).max(400).optional() },
-        handler: wrap(async (a: Record<string, unknown>) => this.condensed(this.store.readTranscript(mine(), Number(a.last ?? 40)))) as ToolSpec['handler'],
+        handler: wrap(async (a: Record<string, unknown>) => {
+          refused();
+          return this.condensed(this.store.readTranscript(mine(), Number(a.last ?? 40)));
+        }) as ToolSpec['handler'],
       },
     ];
+    if (!ctx) return specs;
+    const attachments = z.array(z.string()).max(MAX_ATTACHMENTS).optional().describe('Files for the orchestrator, by id ("att_k2m9x0q7p3a1"): from orchestrator_attach, or from the HTTP upload (PUT /mcp/upload).');
+    const chat: ToolSpec[] = [
+      {
+        name: 'orchestrator_send',
+        description:
+          "Talk to YOUR OWN FF Factory orchestrator, the same conversation, memory and history as your chat in the web app (which shows this exchange too, tagged as sent from here). It counts as your own message, exactly as if you typed it there: approvals, closes and grants you give in it are yours. " +
+          `Returns the orchestrator's reply (Markdown) when its turn ends. If the turn is still going after wait_seconds (default ${DEFAULT_WAIT_SECONDS}, at most ${MAX_WAIT_SECONDS}) you get what it said so far and a cursor; fetch the rest with orchestrator_inbox. ` +
+          "If the orchestrator is busy with another turn, your message is queued behind it, as a second web message would be. Tailnet only. To attach a file, call orchestrator_attach first (or upload it over HTTP) and pass the id.",
+        schema: { text: z.string().min(1).max(MAX_SEND_CHARS), attachments, wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional().describe(`How long to wait for the reply (default ${DEFAULT_WAIT_SECONDS}).`) },
+        handler: wrap(async (a: Record<string, unknown>, extra?: ToolExtra) => this.remote().send(ctx, { text: String(a.text ?? ''), attachments: a.attachments as string[] | undefined, waitSeconds: a.wait_seconds === undefined ? undefined : Number(a.wait_seconds) }, progressOf(extra))) as ToolSpec['handler'],
+      },
+      {
+        name: 'orchestrator_inbox',
+        description:
+          'What your own orchestrator said that you have not read yet: replies that came after a timeout, and what it sent on its own (dispatches, worker updates, heartbeats, questions, a permission waiting for you). ' +
+          'Without since it continues from where this API key last read; with since (the cursor an earlier call printed) from there. wait_seconds waits for something new, and for a running turn to end.',
+        schema: { since: z.number().int().min(0).optional().describe('A cursor (a transcript sequence number) an earlier orchestrator_send or orchestrator_inbox printed.'), wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional().describe('Wait up to this long for new messages (default 0: answer now).') },
+        handler: wrap(async (a: Record<string, unknown>, extra?: ToolExtra) => this.remote().inbox(ctx, { since: a.since === undefined ? undefined : Number(a.since), waitSeconds: a.wait_seconds === undefined ? undefined : Number(a.wait_seconds) }, progressOf(extra))) as ToolSpec['handler'],
+      },
+      {
+        name: 'orchestrator_attach',
+        description: `Store a small file (text, or base64 up to ${MAX_TOOL_FILE_BYTES / 1024 / 1024} MB) as an attachment and get its id for orchestrator_send. A larger file or a binary one on disk: PUT it to /mcp/upload?name=<file> with curl (docs/talk-to-your-orchestrator.md).`,
+        schema: { name: z.string().min(1).max(200), text: z.string().optional(), data_base64: z.string().optional() },
+        handler: wrap(async (a: Record<string, unknown>) => this.remote().attach(ctx, { name: String(a.name), text: a.text as string | undefined, dataBase64: a.data_base64 as string | undefined })) as ToolSpec['handler'],
+      },
+    ];
+    return [...specs, ...chat];
   }
 
   /** An orchestrator's tools: its role's belt (server/belts.ts), acting for its person or for the requests it serves. */

@@ -26,7 +26,7 @@ import { describeBusy } from './wake.ts';
 import { machineLoadLine, systemStats } from './system.ts';
 import { Auth } from './auth.ts';
 import { Identity, asRequester, userToken } from './identity.ts';
-import { handleMcp } from './mcp.ts';
+import { routeMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { keepMessageImages } from './inlineImages.ts';
@@ -1569,14 +1569,8 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = parseUrl(req.url);
     if (!url) return send(res, 400, { error: 'bad request' });
-    if (url.pathname === '/mcp') {
-      // Machine clients authenticate with an API key, not a browser session; no cookies, so no CSRF.
-      const who = auth.bearer(req);
-      if (!who.ok) return send(res, who.status, { error: who.status === 429 ? 'too many failures' : 'API key required' });
-      if (who.scope) return send(res, 403, { error: `this key is for ${who.scope} reports only` });
-      // A key bound to a login acts for that person; an unbound one (made before keys had users) for the owner.
-      const keyUser = auth.userInfo(who.user);
-      return await handleMcp(agents, who.name, keyUser ? asRequester(keyUser) : identity.owner(), req, res, req.method === 'POST' ? await readJson(req) : undefined);
+    if (url.pathname === '/mcp' || url.pathname === '/mcp/upload') {
+      return await routeMcp({ agents, auth, identity, attachments, send, readJson }, req, res, url);
     }
     if (url.pathname.startsWith('/api/') && req.method !== 'GET') {
       // CSRF: a cross-site form cannot send application/json, and SameSite=Strict keeps the cookie home. An attachment

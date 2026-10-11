@@ -135,3 +135,17 @@ export function reactionsByMessage(texts: Iterable<{ text: string }>): Map<numbe
   }
   return out;
 }
+
+// ---------------------------------------------------------------- messages from an MCP client (w1021)
+
+/**
+ * A message a person sent their own orchestrator from Claude Code or Claude Desktop starts with this line (server/remoteChat.ts):
+ * the orchestrator reads where it came from, and the page shows it as a small tag instead of a line of text.
+ */
+export const VIA_LINE = /^\[via ([^\]\n]{1,120})\]\n/;
+
+/** The client label of a message sent from outside the page, and the person's words without the label line. */
+export function splitVia(text: string): { via?: string; text: string } {
+  const m = VIA_LINE.exec(text);
+  return m ? { via: m[1], text: text.slice(m[0].length) } : { text };
+}

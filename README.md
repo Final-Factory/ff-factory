@@ -129,6 +129,9 @@ claude mcp add --transport http -s user ffsb https://<host>.<tailnet>.ts.net/mcp
 
 Then, in any Claude Code session: "spin up a sandbox for spec 093".
 
+To chat with your own orchestrator from Claude Code or Claude Desktop (the web app's conversation, tailnet only), bind the
+key to your login (`--user <login>`) and see [docs/talk-to-your-orchestrator.md](docs/talk-to-your-orchestrator.md).
+
 ### Running on this host
 
 `scripts/install-autostart.ps1` registers `ffsb-server` to run `scripts/start-server.ps1` at
