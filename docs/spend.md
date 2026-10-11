@@ -47,6 +47,15 @@ The turn's spend is the **difference** between `cum` and the last `cum` seen for
 
 Dollars are the SDK's `costUSD` (which, on the recent sessions checked, equals the calls' list prices to within 0–3%, below).
 
+## Which account a turn ran on (w1031)
+
+Every turn is also added to the Claude account its process ran on: `SessionInfo.ranAs`, set when a process starts (a worker's launch
+spec names it: "vault token vault-lothsahn-1 …EAAA (lothsahn's pool, docs/vault.md)", "host token …9AAA"; only the last four
+characters of a token ever appear). `spend.json` keeps it per request and per session (`accounts`), `spend_report` prints "By Claude
+account the turns ran on" and, for one request, "Per Claude account", so a request taken over by another person (docs/vault.md
+section 10) shows the turns before the switch on one account and after it on the other. A host session (an orchestrator, the
+dispatcher) shows its account key; a turn from before w1031, or a backfilled one, is "not recorded (before w1031)".
+
 ## Which request a turn belongs to
 
 `attribute` (server/spend.ts), at the moment a turn's result arrives, from the messages that began it and the ledger as it stood:

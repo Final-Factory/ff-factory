@@ -718,6 +718,11 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             </p>
           ) : null}
           {delivery && <p className="small dim">To players: {delivery}</p>}
+          {w.runsFor && (
+            <p className="small dim" data-testid={`runs-for-${w.id}`}>
+              Runs for {w.runsFor.displayName}: {w.runsFor.why} ({fmtRelative(w.runsFor.at, now)}). Its next worker starts on their Claude pool and GitHub token.
+            </p>
+          )}
           {w.ffbox && (
             <p className="small dim">
               On FFBox: {w.ffbox.state} ({w.ffbox.class}){w.ffbox.branch ? `, branch ${w.ffbox.branch}` : ''}

@@ -119,7 +119,7 @@ setInterval(() => writeAlive(cfg.dataDir), 30_000);
 
 const store = new Store(cfg.dataDir);
 // What each request costs (w859, docs/spend.md): fed by every transcript event, whether the session runs here or on a machine.
-const spend = new SpendStore(cfg.dataDir, { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: (id) => store.countResults(id) });
+const spend = new SpendStore(cfg.dataDir, { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: (id) => store.countResults(id), accountLabel: (i) => (i.account ? `account ${i.account}` : undefined) });
 store.onEvent = (sid, e) => spend.observe(sid, e);
 // The orchestrators' memory (Claude Code writes it, so it cannot be written crash-safe): a file a crash damaged gets its
 // newest good backup back, and a backup is taken every 10 minutes when something changed (server/orchestratorMemory.ts).
@@ -1914,6 +1914,8 @@ function reservedFor(fingerprint: string): string | undefined {
   const c = reservedCredentials(cfg).find((x) => x.key === `token:${fingerprint}`);
   return c ? (c.role === 'dispatcher' ? 'the dispatcher' : 'its own roles') : undefined;
 }
+/** One loud notice per person, machine and day for a run that found no usable vault GitHub token (w1031). */
+const noGithubToken = new Set<string>();
 setVaultContext({
   vault,
   usageOf: (fp) => usage.entries.get(`token:${fp}`)?.usage,
@@ -1923,6 +1925,12 @@ setVaultContext({
   payer: () => identity.systemPayer().userId,
   githubUsable: github.usable,
   onGithubUse: (e, what) => github.noteUse(e, what),
+  onGithubMissing: (person, machineId, what) => {
+    const key = `${person ?? '-'}@${machineId}@${new Date().toISOString().slice(0, 10)}`;
+    if (noGithubToken.has(key)) return;
+    noGithubToken.add(key);
+    hostNotice(`No GitHub token for ${person ?? 'a run with no person'}`, `${what} on ${machineId} found no usable vault GitHub token for ${person ?? 'its person'}, so it pushes and opens PRs as the machine's own gh login, not as ${person ?? 'them'} (w1031). Add or rotate vault-${person ?? '<person>'}-github (docs/vault.md section 13).`);
+  },
   onProblem: (line) => {
     if (vaultProblems.at(-1)?.line !== line) console.warn(`vault: ${line}`);
     vaultProblems.push({ at: new Date().toISOString(), line });

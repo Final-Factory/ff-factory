@@ -225,7 +225,7 @@ test('machineRunEnv: a worker waits (PoolHeldError) when its person pool is over
   assert.equal(unasked.env.CLAUDE_CODE_OAUTH_TOKEN, L1);
 });
 
-test("the transition: a person with no vault tokens keeps today's account, and so does one whose vault cannot be opened", (t) => {
+test("the transition: a person with no vault tokens keeps today's account; one with a pool whose vault cannot be opened waits (w1031)", (t) => {
   const { make } = setup(t);
   const v = poolVault(make);
   const ctx = ctxOf(v);
@@ -234,10 +234,13 @@ test("the transition: a person with no vault tokens keeps today's account, and s
   assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, HOST, "the host token, as before the pool");
   assert.equal(r.login, false);
   assert.match(ctx.problems.at(-1) ?? '', /no vault Claude token for a workers run on m3 for sam; it runs on host token/);
-  // Ben has tokens but the vault key is gone: not a hold (nothing the person can wait for), today's account with a warning.
+  // Ben has tokens but the vault key is gone: since w1031 a person with a pool never runs on the host token (lothsahn: their
+  // work "NEVER falls back to the host token or to Ben's pool"), so the run waits for the vault to be fixed, with the reason.
   const nokey = ctxOf(make(() => ({ why: 'no vault key: test' })));
-  const r2 = machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: { userId: 'ben', displayName: 'Ben' }, sessionId: 'w3' }, nokey);
-  assert.equal(r2.env.CLAUDE_CODE_OAUTH_TOKEN, HOST);
+  assert.throws(
+    () => machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: { userId: 'ben', displayName: 'Ben' }, sessionId: 'w3' }, nokey),
+    (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool cannot serve this run: the vault cannot open ben-a, ben-b: no vault key: test/.test(e.message) && !e.message.includes(HOST.slice(13, 40)),
+  );
   assert.match(nokey.problems.join('\n'), /the vault cannot open ben-a, ben-b: no vault key: test/);
 });
 

@@ -501,6 +501,7 @@ export class Agents {
       },
     });
     machines.hooks = {
+      accountOf: (id) => this.launchedAs.get(id),
       specFor: (info, m) => {
         if (info.kind === 'standing') return this.standing.spec(this.standing.require(info.standingId ?? ''));
         if (info.machineSandbox) return this.machineSandboxSpec(info, m, machines.requireSandbox(m.id, info.machineSandbox));
@@ -1532,10 +1533,15 @@ export class Agents {
     return runs.length ? (this.nightlyKeyFor(runs, m.portalUrl) ?? {}) : {};
   }
 
+  /** The account each session's latest launch spec names (machineSandboxSpec), for SessionInfo.ranAs and the spend by account. */
+  private readonly launchedAs = new Map<string, string>();
+
   private tokenUserOf(sessionId: string): string | undefined {
     const items = [...this.store.work.values()];
-    const served = [...servedBy(sessionId, items)].sort();
-    return served.map((id) => tokenPersonForWork(this.cfg, this.store.work.get(id))).find(Boolean);
+    const served = [...servedBy(sessionId, items)].sort().map((id) => this.store.work.get(id));
+    // The person who acted on any request it serves most recently wins (w1031); else the intake's default person, as before.
+    const acted = served.filter((w): w is WorkItem & { runsFor: NonNullable<WorkItem['runsFor']> } => !!w?.runsFor).sort((a, b) => b.runsFor.at.localeCompare(a.runsFor.at))[0];
+    return acted?.runsFor.userId ?? served.map((w) => tokenPersonForWork(this.cfg, w)).find(Boolean);
   }
 
   /**
@@ -1614,6 +1620,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   /** What a worker in a machine sandbox launches: its worktree and the sandbox guard. */
   private machineSandboxSpec(info: SessionInfo, m: Machine, sb: MachineSandbox): LaunchSpec {
     const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id, tokenUser: this.tokenUserOf(info.id) });
+    this.launchedAs.set(info.id, run.account);
     const clone = this.mainCloneGrantOf(info, m);
     return {
       cwd: sb.path,

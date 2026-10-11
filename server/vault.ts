@@ -81,8 +81,13 @@ export type UnattributedKind = 'intake' | 'ffbox' | 'nightly';
 /**
  * lothsahn, 2026-10-06: "Intake should be my token. Nightly sentry Ben. Ffbox me unless it provides an operator... In that
  * case, use the token of the operator." (An FFBox request naming an operator is that person's own: not unattributed.)
+ * w1031 (2026-10-11): "intake should use my Claude and GitHub tokens", and the brief lists the nightly lab's regressions
+ * among the intake's requests: a request filed from a lab regression (source `nightly`) is the intake's, lothsahn's. Then
+ * lothsahn: "Yes, move the nightly jobs to me": the nightly run and review jobs, the Sentry's own runs and its delegations
+ * (`nightly`) default to lothsahn too. Config vault.unattributed.nightly still overrides it, and a config.json that still says
+ * "ben" keeps the old behaviour: the deploy needs that key removed or set to "lothsahn" (docs/vault.md section 10).
  */
-export const UNATTRIBUTED_DEFAULTS: Readonly<Record<UnattributedKind, string>> = { intake: 'lothsahn', ffbox: 'lothsahn', nightly: 'ben' };
+export const UNATTRIBUTED_DEFAULTS: Readonly<Record<UnattributedKind, string>> = { intake: 'lothsahn', ffbox: 'lothsahn', nightly: 'lothsahn' };
 /** The nightly regression sentry's standing agent id (server/schedule.ts AUTO_BY_DEFAULT). */
 export const NIGHTLY_SENTRY = 'nightly-regression-sentry';
 
@@ -91,7 +96,7 @@ export function unattributedKind(w: Pick<WorkItem, 'source' | 'delegation' | 'un
   if (w.delegation?.agentId === NIGHTLY_SENTRY) return 'nightly';
   if (!w.unattributed || !w.source) return undefined;
   const k = w.source.kind;
-  return k === 'nightly' || k === 'nightly-run' || k === 'nightly-review' ? 'nightly' : k.startsWith('ffbox-') ? 'ffbox' : 'intake';
+  return k === 'nightly-run' || k === 'nightly-review' ? 'nightly' : k.startsWith('ffbox-') ? 'ffbox' : 'intake';
 }
 
 /** The user id whose vault tokens a kind of nobody's work runs on: config vault.unattributed, else the defaults. */
@@ -99,10 +104,12 @@ export const unattributedPerson = (cfg: { vault?: { unattributed?: Partial<Recor
   cfg.vault?.unattributed?.[kind] ?? UNATTRIBUTED_DEFAULTS[kind];
 
 /**
- * Whose tokens a worker serving `w` gets (w512): the configured person for work nobody asked for by name, else undefined
- * (the run's own person: its requester, which for a request is whoever filed it).
+ * Whose tokens a worker serving `w` gets (w512, w1031): the person who last acted on it in FF Factory (`runsFor`: they
+ * answered, approved, declined, noted, reopened or reprioritised it, or joined it), else the configured person for work
+ * nobody asked for by name, else undefined (the run's own person: its requester, which for a request is whoever filed it).
  */
-export function tokenPersonForWork(cfg: { vault?: { unattributed?: Partial<Record<UnattributedKind, string>> } }, w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed'> | undefined): string | undefined {
+export function tokenPersonForWork(cfg: { vault?: { unattributed?: Partial<Record<UnattributedKind, string>> } }, w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed' | 'runsFor'> | undefined): string | undefined {
+  if (w?.runsFor) return w.runsFor.userId;
   const kind = w ? unattributedKind(w) : undefined;
   return kind ? unattributedPerson(cfg, kind) : undefined;
 }
@@ -637,6 +644,7 @@ export class Vault {
     // GitHub entries only where machines.githubFromVault is on (w868), and none known to be refused or expired.
     const granted = this.data.entries.filter((e) => eligible(e, run) && (e.kind !== 'github' || (!!o.github && (o.githubUsable?.(e.fingerprint) ?? true))));
     const wanted = granted.filter((e) => e.kind !== 'claude' || o.claude);
+    if (o.claude) out.poolSize = granted.filter((e) => e.kind === 'claude').length;
     if (!wanted.length) return out;
     const { key, status } = this.key();
     if (!key) {
@@ -662,7 +670,6 @@ export class Vault {
       const limits = o.limits?.() ?? POOL_DEFAULTS;
       const now = o.now?.() ?? Date.now();
       const tried = new Set<string>();
-      out.poolSize = granted.filter((e) => e.kind === 'claude').length;
       // A token that does not open (sealed by another key) is skipped for the next best.
       for (;;) {
         const tokens = granted.filter((e) => e.kind === 'claude' && !tried.has(e.id)).map((e) => this.poolToken(e, o.usageOf, o.liveOn, run.sessionId, now, o.reservedFor, limits));
@@ -718,6 +725,11 @@ export interface VaultContext {
   githubUsable?: (fingerprint: string) => boolean;
   /** A GitHub entry was given to a run: its last use on the vault page. */
   onGithubUse?: (entry: VaultEntryMeta, what: string) => void;
+  /**
+   * A run on a machine that takes GitHub tokens from the vault found none usable for its person (w1031): loud, once per
+   * person and day (the host notice), because the run then pushes as whoever the machine's own gh login is.
+   */
+  onGithubMissing?: (person: string | undefined, machineId: string, what: string) => void;
 }
 let context: VaultContext | undefined;
 export const setVaultContext = (c: VaultContext | undefined) => {

@@ -758,6 +758,7 @@ export class DevRequests {
     const label = `[from FFBox via ${viaWord(link?.source ?? w.source?.channel ?? 'discord')}, ${m.operator.name}]`;
     const where = link?.url ?? w.source?.url ?? `FFBox conversation ${m.conversation}`;
     const text = cleanBlock(m.text, DEV_LIMITS.message) || '(no text)';
+    o.actedOn(w.id, person, `${person.displayName} wrote a follow-up on FFBox`);
     o.noteDev(w.id, `${m.operator.name} (${person.displayName}) wrote on FFBox, ${where}${own ? ' (their own words, a turn of theirs)' : ''}: ${cleanLine(m.text, 120)}`);
     const say = (id: string, t: string, by: Requester) => {
       try {

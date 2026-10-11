@@ -173,6 +173,12 @@ export interface SessionInfo {
    * follow the config (sessionSource).
    */
   account?: string;
+  /**
+   * The Claude account its current process was started on, in words safe to show and to keep with its spend (w1031):
+   * "vault token vault-lothsahn-1 …EAAA (lothsahn's pool, docs/vault.md)", "host token …9AAA". Set at each process start
+   * by the portal that built the launch; spend_report attributes a turn to the account its session ran on.
+   */
+  ranAs?: string;
   createdAt: string;
   lastActivityAt: string;
   /** A tool call of its own (not a subagent's) still running: the oldest one, since when (Store.noteActivity). */
@@ -1447,6 +1453,13 @@ export interface WorkItem {
    * its workers the tokens config vault.unattributed names for where it came from (docs/vault.md, "Whose tokens").
    */
   unattributed?: boolean;
+  /**
+   * Whose Claude pool and GitHub token its workers run on from now on (w1031): the person who last acted on it in FF Factory
+   * (answered its question, approved, declined, added a note, reopened, changed its priority, or joined it from Discord or
+   * FFBox). Wins over `unattributed` and `requestedBy` (server/vault.ts tokenPersonForWork). Absent: nobody has acted since
+   * it was filed, so the filer's (or the intake's default) apply. `why` is the log line's words; `at` the action's time.
+   */
+  runsFor?: { userId: string; displayName: string; at: string; why: string };
   /** Everyone it is for, the filer first, then the people whose requests were merged into it. They hear its news. */
   requesters: Requester[];
   /** Filed in a turn the person started (their own message), which the destructive tools require. */

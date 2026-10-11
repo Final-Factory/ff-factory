@@ -108,6 +108,9 @@ on; a stopped orchestrator by the last token it was handed).
 
 #### Machine runs
 
+Whose pool and GitHub token a request's workers get is decided by [vault.md](vault.md) section 10 (w1031): the person who last
+acted on the request, else the intake's default (lothsahn), else its requester.
+
 Machine runs (workers and standing agents on a machine) can take their Claude token from the portal's token vault
 instead: config `machines.claudeFromVault` (`true`, `false`, or per machine with `"*"`; default `false`; owner-only in
 `set_app_config`, with `machine: "<id>"` for one machine alone) names the machines. Each run then gets one vault token from its person's pool (docs/vault.md section 4), as `CLAUDE_CODE_OAUTH_TOKEN` alone (`LaunchSpec.login` drops the daemon's own credentials). A

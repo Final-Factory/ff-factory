@@ -444,18 +444,20 @@ test('vault: one value per variable, the run person own entry first, then by nam
 
 test("whose tokens: nobody's work by where it came from (lothsahn's defaults), an operator's own, configurable", () => {
   const src = (kind: string) => ({ kind, untrusted: true }) as never;
-  assert.deepEqual(UNATTRIBUTED_DEFAULTS, { intake: 'lothsahn', ffbox: 'lothsahn', nightly: 'ben' });
+  assert.deepEqual(UNATTRIBUTED_DEFAULTS, { intake: 'lothsahn', ffbox: 'lothsahn', nightly: 'lothsahn' });
   assert.equal(unattributedKind({ unattributed: true, source: src('discord-bug') }), 'intake');
   assert.equal(unattributedKind({ unattributed: true, source: src('release') }), 'intake');
   assert.equal(unattributedKind({ unattributed: true, source: src('ffbox-request') }), 'ffbox');
-  assert.equal(unattributedKind({ unattributed: true, source: src('nightly') }), 'nightly');
+  assert.equal(unattributedKind({ unattributed: true, source: src('nightly') }), 'intake', 'w1031: a lab regression is the intake\'s: lothsahn\'s');
+  assert.equal(unattributedKind({ unattributed: true, source: src('nightly-run') }), 'nightly');
+  assert.equal(unattributedKind({ unattributed: true, source: src('nightly-review') }), 'nightly');
   assert.equal(unattributedKind({ delegation: { id: 'd', agentId: NIGHTLY_SENTRY, agentName: 'Nightly sentry', auto: true } }), 'nightly', "the sentry's delegations");
   assert.equal(unattributedKind({ source: src('ffbox-request') }), undefined, 'an FFBox request naming an operator is theirs');
   assert.equal(unattributedKind({}), undefined, "a person's own request");
   assert.equal(tokenPersonForWork({}, { unattributed: true, source: src('ffbox-diagnosis') }), 'lothsahn');
   assert.equal(tokenPersonForWork({ vault: { unattributed: { ffbox: 'ben' } } }, { unattributed: true, source: src('ffbox-diagnosis') }), 'ben');
   assert.equal(tokenPersonForWork({}, undefined), undefined);
-  assert.equal(unattributedPerson({}, 'nightly'), 'ben');
+  assert.equal(unattributedPerson({}, 'nightly'), 'lothsahn', 'w1031: "Yes, move the nightly jobs to me"');
 });
 
 test('config: vault.unattributed names a portal user per kind of work', (t) => {

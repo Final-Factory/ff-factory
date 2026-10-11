@@ -556,7 +556,7 @@ Sentry, a standing agent (`nightly-regression-sentry`, cron 0 3 on LothDesktop, 
   delegation constraints (deliver by PR into develop, merge your own PR on green when it fixes a demonstrated bug or only
   adds tests or verdicts, a person for anything that spends, publishes or deploys, the suggested model), auto-approved,
   placed by the dispatcher on any machine, and billed as the Sentry's were (`agentId` `nightly-regression-sentry`, so
-  `vault.unattributed.nightly`: "Nightly sentry Ben"). The same title within two days is the same job, so a resent block
+  `vault.unattributed.nightly`, lothsahn since w1031: "Yes, move the nightly jobs to me"; it was ben). The same title within two days is the same job, so a resent block
   is not filed twice. No standing-agent cap applies (`uncapped`; lothsahn: "Don't worry about the cost limiting and such");
   at most 12 blocks are read from one message, a guard against a runaway message.
 - **Its alarm.** A review the timer could not file, one whose request ends without `REVIEWED-THROUGH` for 15 minutes, or

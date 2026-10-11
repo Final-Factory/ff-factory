@@ -19,7 +19,7 @@ import path from 'node:path';
 import { SnapshotFile, readJsonDurable, checkObject } from './durable.ts';
 import type { SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { WORK_OPEN } from '../shared/types.ts';
-import type { How, ReportOptions, RequestSpend, SessionSpend, SpendReport, SpendRole } from '../shared/spend.ts';
+import { UNRECORDED_ACCOUNT, type How, type ReportOptions, type RequestSpend, type SessionSpend, type SpendReport, type SpendRole } from '../shared/spend.ts';
 export type { How, ReportOptions, RequestSpend, SessionSpend, SpendReport, SpendRole };
 import { addCats, addModels, addTok, fmtTokens, fmtUsd, listUsd, priceOf, scaleTok, sumTok, zeroTok, CATEGORY_LABEL, CHARS_PER_TOKEN, OUTPUT_TOKENS_PER_CHAR, type Cats, type MeterTurn, type ModelTok, type Tok, type TurnUsage } from '../shared/spend.ts';
 
@@ -37,6 +37,8 @@ export interface SpendContext {
   session: (id: string) => SessionInfo | undefined;
   /** How many result lines the session's transcript holds (this one included): 1 = a new session whose totals started at zero. */
   priorResults: (sessionId: string) => number;
+  /** A label for a session's account when the process left none (ranAs): a host session's account key. */
+  accountLabel?: (info: SessionInfo) => string | undefined;
   now?: () => number;
 }
 
@@ -217,13 +219,14 @@ export class SpendStore {
         total: roundTok(r.total),
         estimated: roundTok(r.estimated),
         models: roundModels(r.models),
+        ...(r.accounts ? { accounts: roundModels(r.accounts) } : {}),
         cats: roundCats(r.cats),
         days: Object.fromEntries(Object.entries(r.days).map(([d, t]) => [d, roundTok(t)])),
         sessions: Object.fromEntries(Object.entries(r.sessions).map(([k, v]) => [k, { ...v, total: roundTok(v.total), models: roundModels(v.models) }])),
       };
     }
     const sessions: Record<string, SessionSpend> = {};
-    for (const [id, s] of this.sessions) sessions[id] = { ...s, total: roundTok(s.total), estimated: roundTok(s.estimated), models: roundModels(s.models), cats: roundCats(s.cats), requests: Object.fromEntries(Object.entries(s.requests).map(([k, v]) => [k, round(v)])) };
+    for (const [id, s] of this.sessions) sessions[id] = { ...s, total: roundTok(s.total), estimated: roundTok(s.estimated), models: roundModels(s.models), ...(s.accounts ? { accounts: roundModels(s.accounts) } : {}), cats: roundCats(s.cats), requests: Object.fromEntries(Object.entries(s.requests).map(([k, v]) => [k, round(v)])) };
     return { version: 1, requests, sessions, ...(this.backfill ? { backfill: this.backfill } : {}) };
   }
 
@@ -316,13 +319,20 @@ export class SpendStore {
     const startMs = (Date.parse(at) || this.now()) - durationMs;
     const items = [...this.ctx.work()];
     const allocs = attribute(info, items, texts, startMs);
-    this.add({ s, at, models, total, estimated, meter: u?.meter, allocs, items, info });
+    this.add({ s, at, models, total, estimated, meter: u?.meter, allocs, items, info, account: this.accountOf(info) });
     this.changed();
   }
 
-  /** Add one turn's spend to its session and, by weight, to its requests. Also the backfill's entry. */
-  add(a: { s: SessionSpend; at: string; models: ModelTok; total: Tok; estimated: boolean; meter?: MeterTurn; allocs: Alloc[]; items?: readonly WorkItem[]; info?: SessionInfo }) {
+  /** The account a live turn ran on: its process's (ranAs, set at each process start), else a host session's account label. */
+  private accountOf(info: SessionInfo | undefined): string {
+    return info?.ranAs ?? (info ? this.ctx.accountLabel?.(info) : undefined) ?? UNRECORDED_ACCOUNT;
+  }
+
+  /** Add one turn's spend to its session and, by weight, to its requests. Also the backfill's entry (no account). */
+  add(a: { s: SessionSpend; at: string; models: ModelTok; total: Tok; estimated: boolean; meter?: MeterTurn; allocs: Alloc[]; items?: readonly WorkItem[]; info?: SessionInfo; account?: string }) {
     const { s, at, models, total, allocs } = a;
+    const account = a.account ?? UNRECORDED_ACCOUNT;
+    s.accounts = addModels(s.accounts ?? {}, { [account]: total });
     s.lastAt = at > s.lastAt ? at : s.lastAt;
     if (at < s.firstAt) s.firstAt = at;
     s.turns++;
@@ -344,6 +354,7 @@ export class SpendStore {
       r.turns += f;
       r.total = addTok(r.total, scaleTok(total, f));
       r.models = addModels(r.models, models, f);
+      r.accounts = addModels(r.accounts ?? {}, { [account]: total }, f);
       if (a.estimated) r.estimated = addTok(r.estimated, scaleTok(total, f));
       const d = day(at);
       r.days[d] = addTok(r.days[d] ?? zeroTok(), scaleTok(total, f));
@@ -557,7 +568,12 @@ export function buildReport(spend: SpendStore, now: number, o: ReportOptions = {
   const total = sumTok(rows.map((x) => x.window));
   const estimated = sumTok(rows.map((x) => (x.r.total.usd > 0 ? scaleTok(x.r.estimated, x.window.usd / x.r.total.usd) : zeroTok())));
   let models: ModelTok = {};
-  for (const x of rows) if (x.r.total.usd > 0) models = addModels(models, x.r.models, x.window.usd / x.r.total.usd);
+  let byAccount: Record<string, Tok> = {};
+  for (const x of rows) {
+    if (x.r.total.usd <= 0) continue;
+    models = addModels(models, x.r.models, x.window.usd / x.r.total.usd);
+    byAccount = addModels(byAccount, x.r.accounts ?? { [UNRECORDED_ACCOUNT]: x.r.total }, x.window.usd / x.r.total.usd);
+  }
   const catShare = (r: RequestSpend, usd: number) => {
     const sum = Object.values(r.cats).reduce((a, c) => a + c.usd, 0);
     return sum > 0 ? Object.entries(r.cats).map(([cat, c]) => ({ cat, usd: (c.usd / sum) * usd, pct: c.usd / sum })) : [];
@@ -603,7 +619,8 @@ export function buildReport(spend: SpendStore, now: number, o: ReportOptions = {
   }
   const where = [...catUsd].map(([cat, usd]) => ({ cat, label: CATEGORY_LABEL[cat] ?? cat, usd, pct: measured > 0 ? usd / measured : 0 })).sort((a, b) => b.usd - a.usd);
   const buckets = rows.filter((x) => isBucket(x.r.id)).map((x) => ({ id: x.r.id, title: x.r.title, usd: x.window.usd })).sort((a, b) => b.usd - a.usd);
-  return { sinceDay, untilDay, total, estimated, models, top, kinds, where, buckets, measuredCats: measured, ...(reread ? { reread } : {}) };
+  const accounts = Object.entries(byAccount).map(([account, tokens]) => ({ account, usd: tokens.usd, tokens })).sort((a, b) => b.usd - a.usd);
+  return { sinceDay, untilDay, total, estimated, models, accounts, top, kinds, where, buckets, measuredCats: measured, ...(reread ? { reread } : {}) };
 }
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
@@ -617,6 +634,7 @@ export function renderReport(r: SpendReport): string {
   lines.push(`Spend ${r.sinceDay} to ${r.untilDay} (UTC days): ${tokLine(r.total)}.${r.estimated.usd > 0.005 ? ` Of that ${fmtUsd(r.estimated.usd)} is estimated (sessions that ran before the tracking, daemons that did not send usage, backfilled transcripts); the rest is Claude Code's own per-turn usage.` : ' All of it is Claude Code\'s own per-turn usage.'}`);
   const m = Object.entries(r.models).sort((a, b) => b[1].usd - a[1].usd);
   if (m.length) lines.push(`By model: ${m.map(([k, v]) => `${k} ${fmtUsd(v.usd)} (${pct(r.total.usd ? v.usd / r.total.usd : 0)}; in ${fmtTokens(v.in)}, out ${fmtTokens(v.out)}, read ${fmtTokens(v.cr)}, write ${fmtTokens(v.cw)})`).join('; ')}.`);
+  if (r.accounts.length) lines.push(`By Claude account the turns ran on (the account of the process that ran each turn, last four characters only): ${r.accounts.map((a) => `${a.account} ${fmtUsd(a.usd)} (${pct(r.total.usd ? a.usd / r.total.usd : 0)})`).join('; ')}.`);
   if (r.buckets.length) lines.push(`Not any request's: ${r.buckets.map((b) => `${b.title} ${fmtUsd(b.usd)}`).join('; ')}.`);
   lines.push('', `Top ${r.top.length} requests by cost:`);
   for (const [i, t] of r.top.entries()) {
@@ -651,6 +669,11 @@ export function renderRequest(spend: SpendStore, id: string, link: (sessionId: s
     lines.push('Per model:');
     for (const [k, v] of m) lines.push(`- ${k}: ${tokLine(v)}`);
   }
+  const accounts = Object.entries(r.accounts ?? {}).sort((a, b) => b[1].usd - a[1].usd);
+  if (accounts.length) {
+    lines.push('Per Claude account (the account of the process that ran each turn):');
+    for (const [k, v] of accounts) lines.push(`- ${k}: ${tokLine(v)}`);
+  }
   lines.push('Sessions (a session that served several requests shows only this request\'s share):');
   for (const { session: s, share } of spend.sessionsOf(id)) {
     const how = Object.entries(share.how).map(([h, n]) => `${h} ${Math.round(n)}`).join(', ');
@@ -675,6 +698,7 @@ export function renderSession(spend: SpendStore, id: string, link: (sessionId: s
   if (!s) return `No spend recorded for session ${id}.`;
   const lines = [`${s.id} ${s.role} "${s.title}"${s.machine ? ` on ${s.machine}` : ''}${s.person ? ` for ${s.person}` : ''}: ${tokLine(s.total)}, ${s.turns} turn(s), ${s.firstAt.slice(0, 16).replace('T', ' ')} to ${s.lastAt.slice(0, 16).replace('T', ' ')}.${s.estimated.usd > 0.005 ? ` ${fmtUsd(s.estimated.usd)} of it is estimated.` : ''} Transcript: ${s.transcript?.state === 'pruned' ? `pruned ${s.transcript.prunedAt?.slice(0, 10) ?? ''}` : s.transcript?.state === 'gz' ? 'compressed' : 'kept'}; ${link(s.id)}`];
   for (const [k, v] of Object.entries(s.models).sort((a, b) => b[1].usd - a[1].usd)) lines.push(`- ${k}: ${tokLine(v)}`);
+  for (const [k, v] of Object.entries(s.accounts ?? {}).sort((a, b) => b[1].usd - a[1].usd)) lines.push(`- on ${k}: ${tokLine(v)}`);
   const reqs = Object.entries(s.requests).sort((a, b) => b[1] - a[1]);
   if (reqs.length) lines.push(`Requests it served: ${reqs.map(([r, usd]) => `${r} ${fmtUsd(usd)}`).join(', ')}.`);
   const sum = Object.values(s.cats).reduce((a, c) => a + c.usd, 0);
