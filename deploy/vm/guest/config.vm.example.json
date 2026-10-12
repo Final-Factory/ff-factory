@@ -38,7 +38,7 @@
     "tts": false
   },
   "hostGuard": {
-    "warnFreeGB": 40,
+    "warnFreeGB": 20,
     "criticalFreeGB": 10,
     "remountMinFreeGB": 5,
     "devDriveVhdx": "",
