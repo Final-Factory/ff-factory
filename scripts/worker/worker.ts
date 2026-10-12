@@ -1119,6 +1119,8 @@ interface ReinstallCarry {
   oldDrive?: { sandboxes: string; seed: string };
   /** The old sandboxes' folders: their Claude conversations follow them to the same names in the new root. */
   sandboxes: string[];
+  /** The old drive's letter, which the new one takes (Windows keeps it reserved for the old volume, so it must be asked for). */
+  letter?: string;
 }
 
 /**
@@ -1139,8 +1141,9 @@ export function reinstallProblems(i: { root: string; windows: boolean; elevated:
   else if (i.agents.length) problems.push(`${i.agents.length} agent(s) run here: ${i.agents.map((a) => `${a.id}${a.sandbox ? ` in ${a.sandbox}` : ''}${a.midTurn ? ' (mid-turn)' : ''}`).join(', ')}; let them finish their turns`);
   if (i.processes.length) problems.push(`${i.processes.length} process(es) use the install or its drive (Unity, a player, a build, the nightly lab?): ${i.processes.slice(0, 6).join('; ')}`);
   for (const r of i.risks) problems.push(`sandbox ${r.sandbox} holds work that is not on origin (${r.unpushed.length} unpushed commit(s), ${r.dirty.length} uncommitted file(s)): commit it on its branch and push, then run this again`);
-  // The seed is copied to the host volume while the old drive goes: only with 10 GB to spare there.
-  return { problems, keepSeed: i.seedBytes > 0 && i.freeBytes > i.seedBytes + 10 * 1024 ** 3 };
+  // The seed (without its rebuilt caches) is copied to the host volume while the old drive goes, with 5 GB to spare there: by then
+  // nothing writes to that volume (no agent, no process, the daemon stopped), so the reserve is only for the copy's own slack.
+  return { problems, keepSeed: i.seedBytes > 0 && i.freeBytes > i.seedBytes + 5 * 1024 ** 3 };
 }
 
 async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<ReinstallCarry | undefined> {
@@ -1152,7 +1155,7 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
   const procs = isWin ? await processesUsing([l.root, ...(oldDrive ? [oldDrive.sandboxes, oldDrive.seed] : [])], daemonMarks) : [];
   const risks = await sandboxRisks(oldDrive?.sandboxes ?? l.sandboxes);
   const seedLib = oldDrive ? path.join(oldDrive.seed, 'Library') : path.join(l.seed, 'Library');
-  const seedBytes = fs.existsSync(seedLib) ? bytesUnder(seedLib) : 0;
+  const seedBytes = fs.existsSync(seedLib) ? bytesUnder(seedLib, SEED_REBUILT) : 0;
   const { problems, keepSeed } = reinstallProblems({ root: l.root, windows: isWin, elevated: elevated(), ...(old ? { manifest: old } : {}), ...(view ? { agents: view.agents } : {}), processes: procs, risks, seedBytes, freeBytes: await volumeFree(l.root) });
   if (problems.length) {
     say(`\nNot reinstalling: ${problems.length} problem(s); nothing was changed:`);
@@ -1170,7 +1173,7 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
   fs.mkdirSync(keep, { recursive: true });
   if (keepSeed) {
     say(`Copying the Library seed ${seedLib} -> ${path.join(keep, 'seed', 'Library')}...`);
-    await robocopy(seedLib, path.join(keep, 'seed', 'Library'), false);
+    await robocopy(seedLib, path.join(keep, 'seed', 'Library'), false, SEED_REBUILT);
   }
   for (const n of ['sandboxes', 'seed']) if (unlinkRootFolder(path.join(l.root, n))) say(`Removed the junction ${path.join(l.root, n)}.`);
   if (rec) {
@@ -1186,17 +1189,20 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
     if (fs.existsSync(p)) throw new Error(`could not delete ${p} (a process holds a file in it?); run the reinstall again once it is free`);
     say(`Deleted ${p}.`);
   }
-  return { keep, oldRoot: l.root, ...(oldDrive ? { oldDrive } : {}), sandboxes: pool };
+  return { keep, oldRoot: l.root, ...(oldDrive ? { oldDrive } : {}), sandboxes: pool, ...(rec?.letter ? { letter: rec.letter } : {}) };
 }
 
-/** robocopy a folder (`move`: file by file, the source freeing as the target fills). Windows; elsewhere a plain copy (tests). */
-async function robocopy(src: string, dst: string, move: boolean) {
+/** The caches in a Library that Unity rebuilds on demand (the daemon's clean-up trims them in sandboxes too): not carried in a seed. */
+const SEED_REBUILT = ['BurstCache', 'BuildCache'];
+
+/** robocopy a folder (`move`: file by file, the source freeing as the target fills; `skip`: folder names left out). Windows; elsewhere a plain copy (tests). */
+async function robocopy(src: string, dst: string, move: boolean, skip: string[] = []) {
   if (!isWin) {
     fs.cpSync(src, dst, { recursive: true, force: true });
     if (move) fs.rmSync(src, { recursive: true, force: true });
     return;
   }
-  const r = await exec('robocopy.exe', [src, dst, '/E', '/XJ', ...(move ? ['/MOVE'] : []), '/MT:8', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'], { timeoutMs: 6 * 60 * 60_000 });
+  const r = await exec('robocopy.exe', [src, dst, '/E', '/XJ', ...(skip.length ? ['/XD', ...skip] : []), ...(move ? ['/MOVE'] : []), '/MT:8', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'], { timeoutMs: 6 * 60 * 60_000 });
   if (r.code >= 8) throw new Error(`robocopy ${src} -> ${dst} failed (${r.code}): ${(r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ')}`);
 }
 
@@ -1454,7 +1460,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
         const host = l.root;
         fs.mkdirSync(host, { recursive: true });
         const maxGB = o.devDriveMaxGB ?? defaultMaxGB(f.rootTotalGB);
-        const st = await devDriveEnsure(host, ['-Root', host, '-MaxGB', String(maxGB), '-NoTasks', ...(f.probe.user ? ['-User', f.probe.user] : []), ...(f.probe.sid ? ['-UserSid', f.probe.sid] : []), ...(o.devDriveSkip ? ['-Skip', o.devDriveSkip] : [])]);
+        const st = await devDriveEnsure(host, ['-Root', host, '-MaxGB', String(maxGB), '-NoTasks', ...(carry?.letter ? ['-Letter', carry.letter] : []), ...(f.probe.user ? ['-User', f.probe.user] : []), ...(f.probe.sid ? ['-UserSid', f.probe.sid] : []), ...(o.devDriveSkip ? ['-Skip', o.devDriveSkip] : [])]);
         const root = driveRootOf(st.letter);
         fs.mkdirSync(root, { recursive: true });
         writeMoved(host, root);
@@ -1503,6 +1509,10 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   // 3. The game repo, bare, and the installer's own checkout.
   await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees, o.seedFrom, !o.update);
   if (carry && o.seedFrom) {
+    // Every local branch of the old clone as well (the seed brings origin's only): a branch whose newest commits never reached
+    // origin is kept.
+    const heads = await exec('git', ['-C', l.repo, 'fetch', '--no-tags', '--update-head-ok', o.seedFrom, '+refs/heads/*:refs/heads/*'], { timeoutMs: 30 * 60_000 });
+    if (heads.code !== 0) throw new Error(`could not carry the old clone's branches: ${(heads.stderr || heads.stdout).trim().split('\n').slice(-2).join(' ')}; ${o.seedFrom} is left as it was`);
     // The old clone's Git LFS objects too (a fetch from it copies none): the new sandboxes check out without downloading them again.
     const lfs = path.join(o.seedFrom, 'lfs', 'objects');
     if (fs.existsSync(lfs)) await robocopy(lfs, path.join(l.repo, 'lfs', 'objects'), true);

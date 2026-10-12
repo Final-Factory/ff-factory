@@ -173,8 +173,9 @@ test('the reinstall refuses, changing nothing, while an agent, a process or unpu
   assert.match(reinstallProblems({ ...base, elevated: false }).problems.join(), /elevated session/);
   assert.match(reinstallProblems({ ...base, agents: undefined }).problems.join(), /could not be asked/);
   assert.match(reinstallProblems({ ...base, manifest: { ...manifest, devDrive: { ...manifest.devDrive!, rootOnDrive: true } } as Manifest }).problems.join(), /on its Dev Drive already/);
-  // D: at 19.5 GB (2026-10-12 ~02:00Z): the 13.3 GB seed would leave less than 10 GB, so it is not kept and the first sandbox imports.
-  assert.equal(reinstallProblems({ ...base, freeBytes: 19.5 * GB }).keepSeed, false);
+  // D: at 19.5 GB (2026-10-12 ~02:00Z) holds the 13.3 GB seed with 5 GB to spare; at 17 GB it does not, and the first sandbox imports.
+  assert.equal(reinstallProblems({ ...base, freeBytes: 19.5 * GB }).keepSeed, true);
+  assert.equal(reinstallProblems({ ...base, freeBytes: 17 * GB }).keepSeed, false);
 });
 
 test('the reinstall’s check of the sandboxes: a commit no remote has, or an uncommitted file, is work that would be lost', async () => {
