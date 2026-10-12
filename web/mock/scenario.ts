@@ -145,7 +145,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
     orchestratorId: 'orch',
     dispatcherId: 'dispatcher',
     me: { userId: 'ben', displayName: 'Ben', role: 'owner' },
-    config: { defaultModel: 'opus', models: ['opus', 'sonnet', 'haiku', 'fable'], defaultBase: 'origin/develop', attachments: { maxBytes: 200 * 1024 * 1024, retentionDays: 30, maxPerMessage: 10 } },
+    config: { defaultModel: 'opus', models: ['opus', 'sonnet', 'haiku', 'fable'], defaultBase: 'origin/master', attachments: { maxBytes: 200 * 1024 * 1024, retentionDays: 30, maxPerMessage: 10 } },
     settings: { heartbeatMinutes: null, heartbeat: { ben: 15 } },
   };
 
@@ -188,7 +188,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
   const sb = (id: string, purpose: string, sessionIds: string[], unity: MachineSandbox['unity'], extra: Partial<MachineSandbox> = {}): MachineSandbox => ({
     id,
     branch: `sandbox/${id}`,
-    base: 'origin/develop',
+    base: 'origin/master',
     path: `${LOCAL_SANDBOX_ROOT}/${id}`,
     purpose,
     status: 'ready',

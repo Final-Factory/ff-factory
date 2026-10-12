@@ -83,7 +83,7 @@ export interface ReportFix {
 
 /**
  * Every report a finished request claims whose fix is merged and released (w502): one line per report, from the request
- * it continues as (a merge into another follows that one). `target` is the branch the fix landed on ("develop").
+ * it continues as (a merge into another follows that one). `target` is the branch the fix landed on ("master").
  * Requests that changed in the last `days` days only.
  */
 export function reportFixesOf(work: ReadonlyMap<string, WorkItem>, target: string, now: number, days = 30): ReportFix[] {

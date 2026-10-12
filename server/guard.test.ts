@@ -19,12 +19,13 @@ test('shell access to the protected checkout is denied in every spelling', async
   assert.equal(await decide(g, 'PowerShell', { command: 'dir c:/users/dev/games/mygame' }), 'deny');
 });
 
-test('pushes: own branch and develop allowed, master/main and force denied', async () => {
+test('pushes: own branch allowed, master/main, develop (retired, w1137) and force denied', async () => {
   const g = make();
   assert.equal(await decide(g, 'Bash', { command: 'git push -u origin sandbox/sb1' }), 'allow');
   assert.equal(await decide(g, 'Bash', { command: 'git push --force-with-lease origin sandbox/sb1' }), 'allow');
   assert.equal(await decide(g, 'Bash', { command: 'git push origin HEAD:master' }), 'deny');
   assert.equal(await decide(g, 'Bash', { command: 'git push origin main' }), 'deny');
+  assert.equal(await decide(g, 'Bash', { command: 'git push origin HEAD:develop' }), 'deny');
   assert.equal(await decide(g, 'Bash', { command: 'git push -f origin sandbox/sb1' }), 'deny');
   assert.equal(await decide(g, 'Bash', { command: 'git push --force origin sandbox/sb1' }), 'deny');
 });
@@ -55,8 +56,14 @@ test('review bypasses are closed (push variants, gh, process kills)', async () =
     'git push --mirror origin',
     'cd x && git push -f origin sb1',
     'gh api -X PATCH repos/o/r/git/refs/heads/master -F force=true',
-    'gh pr create --base master --title x --body y',
-    'gh pr create -B main --title x',
+    'git push origin HEAD:refs/heads/develop',
+    'git push origin develop',
+    'git push origin develop:develop',
+    'gh pr create --base develop --title x --body y',
+    'gh pr create --base=develop --title x',
+    'gh pr create -B develop --title x',
+    'gh pr edit 12 --base develop',
+    'gh pr edit 12 --base=develop',
     'Get-Process Unity | Stop-Process -Force',
     'taskkill //IM Unity.exe //F',
     'pkill -f node',
@@ -69,9 +76,13 @@ test('review bypasses are closed (push variants, gh, process kills)', async () =
     'git push -u origin sandbox/sb1',
     'git push origin HEAD',
     'git push --force-with-lease origin sandbox/sb1',
-    'gh pr create --base develop --title x --body y',
+    'gh pr create --base master --title x --body y',
+    'gh pr create --base=master --title x',
+    'gh pr create -B master --title x',
+    'gh pr edit 12 --base master',
+    'gh pr create --base main --title x',
+    'gh pr merge 12 --merge',
     'gh pr merge 12 --squash',
-    'git push origin HEAD:develop',
     'gh api repos/o/r/pulls',
     'git log --oneline -5',
   ];
@@ -90,8 +101,26 @@ test('master/main: blocked for the game repo only, and whenever the target is un
   const tools = 'C:/tmp/tools';
   const cases: [string, string, 'allow' | 'deny'][] = [
     [sb, 'git push origin HEAD:master', 'deny'],
-    [sb, 'gh pr create --base master --title x', 'deny'],
-    [sb, 'git push origin HEAD:develop', 'allow'],
+    // w1137: master takes a PR but no push; develop is retired for pushes and PRs alike.
+    [sb, 'gh pr create --base master --title x', 'allow'],
+    [sb, 'gh pr create --base=master --title x', 'allow'],
+    [sb, 'gh pr edit 7 --base master', 'allow'],
+    [sb, 'gh pr create --base main --title x', 'allow'], // the game repo has no main; not judged
+    [sb, 'git push origin HEAD:develop', 'deny'],
+    [sb, 'git push -u origin develop', 'deny'],
+    [sb, 'git push origin HEAD:refs/heads/develop', 'deny'],
+    [sb, 'git push origin sandbox/x:develop', 'deny'],
+    [sb, 'gh pr create --base develop --title x', 'deny'],
+    [sb, 'gh pr create --base=develop --title x', 'deny'],
+    [sb, 'gh pr create -b develop --title x', 'deny'],
+    [sb, 'gh pr edit 7 --base develop', 'deny'],
+    [sb, 'gh pr edit 7 --base=develop', 'deny'],
+    [sb, 'gh pr merge 7 --merge', 'allow'],
+    [sb, 'git push origin sandbox/x', 'allow'],
+    [tools, 'git push origin HEAD:develop', 'allow'], // another repo's develop is its own business
+    [tools, 'gh pr create --base develop --title x', 'allow'],
+    [sb, 'gh pr create -R Final-Factory/ff-factory --base develop --title x', 'allow'],
+    [sb, 'cd C:/tmp/tools && gh pr create --base develop --title x', 'allow'],
     [tools, 'git push origin HEAD:main', 'allow'],
     [tools, 'git push origin main', 'allow'],
     [tools, 'gh pr create --base main --title x', 'allow'],
@@ -106,8 +135,10 @@ test('master/main: blocked for the game repo only, and whenever the target is un
     [tools, 'git push upstream main', 'deny'],
     [tools, 'git push main', 'deny'],
     ['C:/elsewhere', 'git push origin main', 'deny'],
-    [tools, 'gh pr create -R example-org/example-game --base master', 'deny'],
-    [tools, 'GH_REPO=example-org/example-game gh pr create --base master', 'deny'],
+    [tools, 'gh pr create -R example-org/example-game --base master', 'allow'],
+    [tools, 'gh pr create -R example-org/example-game --base develop', 'deny'],
+    [tools, 'GH_REPO=example-org/example-game gh pr create --base develop', 'deny'],
+    [tools, 'GH_REPO=example-org/example-game gh pr create --base master', 'allow'],
     [sb, 'gh pr create --repo Final-Factory/ff-factory --base main', 'allow'],
     // Repository settings: other repos when the user asks; the game repo (or an unknown one) never; delete never.
     [tools, 'gh repo rename ff-factory-private -R Final-Factory/ff-factory --yes', 'allow'],
@@ -136,8 +167,13 @@ test('master/main: blocked for the game repo only, and whenever the target is un
   for (const [cwd, command, want] of cases) assert.equal(await decide(g, 'Bash', { command }, cwd), want, `${command} (in ${cwd})`);
   // w1112: a clone reached through a variable is an unknown repo, refused as the game's; the reason says so and names -R.
   const ctx = { cwd: sb, gameRepos: ['https://github.com/example-org/example-game.git'], remotes };
-  assert.match(checkShell('cd $TMPDIR/ff-factory && gh pr create --base main --title x', ctx) ?? '', /could not be determined.*gh pr create -R <owner>\/<repo>/);
-  assert.equal(checkShell('cd $TMPDIR/ff-factory && gh pr create -R Final-Factory/ff-factory --base main --title x', ctx), undefined);
+  assert.match(checkShell('cd $TMPDIR/ff-factory && gh pr create --base develop --title x', ctx) ?? '', /could not be determined.*develop is retired.*gh pr create -R <owner>\/<repo>/);
+  assert.equal(checkShell('cd $TMPDIR/ff-factory && gh pr create -R Final-Factory/ff-factory --base develop --title x', ctx), undefined);
+  assert.equal(checkShell('cd $TMPDIR/ff-factory && gh pr create --base master --title x', ctx), undefined);
+  // The refusals say what to do instead (w1137).
+  assert.match(checkShell('git push origin HEAD:master', ctx) ?? '', /master takes changes only through a pull request.*gh pr create --base master.*merge it when CI is green/);
+  assert.match(checkShell('git push origin HEAD:develop', ctx) ?? '', /develop is retired \(w1137, 2026-10-12\).*master is the one trunk.*open a PR into master/);
+  assert.match(checkShell('cd $NOPE/x && git push origin HEAD:develop', ctx) ?? '', /could not be determined.*pushing to develop is blocked.*develop is retired/);
 });
 
 test('w1132: master/main of Final-Factory/ffbox is pushed straight; the game repo and unknown targets are not', async () => {
@@ -272,7 +308,7 @@ test('public repos: a push whose commits carry a private email is refused', asyn
   }
   assert.deepEqual(seen.at(-1), ['https://github.com/Final-Factory/ff-factory.git', 'x']);
   // Other repos are not its business (the game repo's own rules still apply).
-  assert.equal(await decide(g, 'Bash', { command: 'git push game HEAD:develop' }, cwd), 'allow');
+  assert.equal(await decide(g, 'Bash', { command: 'git push game HEAD:feature' }, cwd), 'allow');
   // A repo GitHub reports as public counts too, configured or not.
   assert.equal(await decide(g, 'Bash', { command: 'git push kit HEAD:develop' }, cwd), 'deny');
   // The refusal says how to fix it.

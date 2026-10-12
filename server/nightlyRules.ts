@@ -40,7 +40,7 @@ export interface NightlyResult {
 
 export interface NightlyReport {
   v: number;
-  /** The night ("2026-09-30"), the lab's name and the develop commit it tested. */
+  /** The night ("2026-09-30"), the lab's name and the master commit it tested. */
   date: string;
   lab: string;
   sha: string;
@@ -219,7 +219,7 @@ function what(r: NightlyResult): string {
 /** The request's title for one scenario. */
 export function nightlyTitle(r: NightlyResult, sha: string): string {
   const where = r.release?.shipped === 'yes' ? ` (shipped in ${r.release.version})` : '';
-  const head = r.class === 'flaky' ? `${r.scenario} flaky ${r.flakyNights ?? '?'} nights running` : `${r.scenario} fails on develop ${short(sha)}`;
+  const head = r.class === 'flaky' ? `${r.scenario} flaky ${r.flakyNights ?? '?'} nights running` : `${r.scenario} fails on master ${short(sha)}`;
   return clip(`Nightly e2e: ${head}${where}`, 120);
 }
 
@@ -249,7 +249,7 @@ const TODO = [
 
 function header(rep: NightlyReport): string[] {
   return [
-    `The nightly e2e lab \`${rep.lab}\` ran the battery on ${rep.date} against develop \`${rep.sha}\`.`,
+    `The nightly e2e lab \`${rep.lab}\` ran the battery on ${rep.date} against master \`${rep.sha}\`.`,
     `- The commit tested is ${releaseLine(rep.release)}.`,
     ...(rep.report?.lab || rep.report?.beast
       ? [
@@ -267,7 +267,7 @@ export function nightlyDraft(rep: NightlyReport, results: readonly NightlyResult
   const batch = results.length > 1;
   const release = results.find((r) => r.release?.shipped === 'yes')?.release ?? results.find((r) => r.release?.shipped === 'maybe')?.release ?? rep.release;
   const title = batch
-    ? clip(`Nightly e2e ${rep.date}: ${results.length} regressions on develop ${short(rep.sha)}${results.some((r) => r.release?.shipped === 'yes') ? ' (some shipped)' : ''}`, 120)
+    ? clip(`Nightly e2e ${rep.date}: ${results.length} regressions on master ${short(rep.sha)}${results.some((r) => r.release?.shipped === 'yes') ? ' (some shipped)' : ''}`, 120)
     : nightlyTitle(results[0], rep.sha);
   const brief = [
     ...header(rep),
@@ -286,7 +286,7 @@ export function nightlyDraft(rep: NightlyReport, results: readonly NightlyResult
     priority: nightlyPriority(results),
     triage: {
       class: 'regression',
-      reason: `nightly e2e: ${batch ? `${results.length} scenarios` : what(results[0])} on develop ${short(rep.sha)}, ${release?.shipped === 'yes' ? `shipped in ${release.version}` : release?.shipped === 'maybe' ? `may have shipped in ${release.version}` : 'not released yet'}`,
+      reason: `nightly e2e: ${batch ? `${results.length} scenarios` : what(results[0])} on master ${short(rep.sha)}, ${release?.shipped === 'yes' ? `shipped in ${release.version}` : release?.shipped === 'maybe' ? `may have shipped in ${release.version}` : 'not released yet'}`,
     },
     source: {
       kind: 'nightly',
@@ -308,7 +308,7 @@ export function nightlyDraft(rep: NightlyReport, results: readonly NightlyResult
 
 /** The line a later night adds to the open request already on a scenario (once per night and scenario). */
 export function nightlyAgainLine(rep: NightlyReport, r: NightlyResult): string {
-  return `nightly ${rep.date}: ${r.scenario} ${r.class === 'flaky' ? `flaky again (${r.flakyNights ?? '?'} nights running)` : 'failed again'} on develop ${short(rep.sha)}${r.reason ? `: ${clip(r.reason, 160)}` : ''}; ${releaseLine(r.release)}`;
+  return `nightly ${rep.date}: ${r.scenario} ${r.class === 'flaky' ? `flaky again (${r.flakyNights ?? '?'} nights running)` : 'failed again'} on master ${short(rep.sha)}${r.reason ? `: ${clip(r.reason, 160)}` : ''}; ${releaseLine(r.release)}`;
 }
 
 /** How the night went: what the lab said, else (a lab from before w864) red when a scenario is new or still failing. */
@@ -321,7 +321,7 @@ export const NIGHT_BROKEN = 'night-broken';
 
 /** The one request for a broken night (w864): find the cause, the game or the lab, instead of N regressions. */
 export function brokenNightDraft(rep: NightlyReport, runId?: string): IntakeDraft & { priority: WorkPriority; triage: WorkTriage } {
-  const at = rep.sha ? ` on develop ${short(rep.sha)}` : '';
+  const at = rep.sha ? ` on master ${short(rep.sha)}` : '';
   return {
     title: clip(`Nightly e2e ${rep.date}: the night broke${at}: ${rep.cause ?? 'no reason given'}`, 120),
     brief: clip(
@@ -333,7 +333,7 @@ export function brokenNightDraft(rep: NightlyReport, runId?: string): IntakeDraf
         ...(runId ? [`- The run request: ${runId}.`] : []),
         `- The commit tested is ${releaseLine(rep.release)}.`,
         '',
-        'What to do: find whether the cause is in the game (a startup error, a failed build of develop: fix it like any regression, red before and green after) or in the lab (the machine, the scripts in scripts/nightly, a missing tool or file: fix the lab). Rerun a few scenarios on a player built from that commit to show which (python3 scripts/nightly/ffnightly.py run --scenario <id> --no-retry). Do not change any oracle or allowlist to make the night pass.',
+        'What to do: find whether the cause is in the game (a startup error, a failed build of master: fix it like any regression, red before and green after) or in the lab (the machine, the scripts in scripts/nightly, a missing tool or file: fix the lab). Rerun a few scenarios on a player built from that commit to show which (python3 scripts/nightly/ffnightly.py run --scenario <id> --no-retry). Do not change any oracle or allowlist to make the night pass.',
       ].join('\n'),
       7800,
     ),
@@ -372,8 +372,8 @@ export function nightlyReviewDraft(a: { date: string; machine: string; time: str
   return {
     title: `Nightly merge review ${a.date} on ${a.machine}`,
     brief: [
-      `Review the merges to develop for the night ${a.date}, as the Nightly Regression Sentry did, filed by the portal's job timer (${a.time} ${a.tz}): Duty A, regression checks on risky merges; Duty B, a guarding test for every merged fix. The intake rules below say how; the instructions are scripts/nightly/merge-review.md in the game repo.`,
-      a.since ? `- The last review got to develop \`${a.since}\`: review the merges after it.` : '- No earlier review is on record: review the merges of the last 24 hours.',
+      `Review the merges to master for the night ${a.date}, as the Nightly Regression Sentry did, filed by the portal's job timer (${a.time} ${a.tz}): Duty A, regression checks on risky merges; Duty B, a guarding test for every merged fix. The intake rules below say how; the instructions are scripts/nightly/merge-review.md in the game repo.`,
+      a.since ? `- The last review got to master \`${a.since}\`: review the merges after it.` : '- No earlier review is on record: review the merges of the last 24 hours.',
       '- You write the jobs; the portal files them as auto-approved requests for the dispatcher to place on any machine.',
       ...(a.covered?.length
         ? ['- Already in the ledger from the nightly lab (its own regression filing, intake.nightly.enabled): do not file a job for what these cover; name them instead.', ...a.covered.slice(0, 30).map((c) => `  - ${c.id}: ${clip(c.title, 140)}`)]

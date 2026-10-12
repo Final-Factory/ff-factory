@@ -105,7 +105,7 @@ test('auto-approve: defaults are Sonnet, high effort, 3 per run and per day; the
   assert.equal(normalizeAutoApprove({ maxPerRun: 9, maxPerDay: 2 }, undefined, ['opus', 'sonnet']).maxPerRun, 2, 'per run never above per day');
 });
 
-test('the person-only gate: money, publishing, settings, releases and master; not the words a regression brief uses', () => {
+test('the person-only gate: money, publishing, settings and releases; not the words a regression brief uses, and not master (w1137: the one trunk)', () => {
   for (const [text, why] of [
     ['Buy a second Steam key for the test account', 'spends money'],
     ['Raise the budget to $50 a day', 'spends money'],
@@ -117,7 +117,6 @@ test('the person-only gate: money, publishing, settings, releases and master; no
     ['Cut a release once this is fixed', 'releases'],
     ['Bump the version and run ci-release', 'releases'],
     ['Deploy the portal', 'releases'],
-    ['Merge the fix into master', 'touches master'],
   ] as const) {
     assert.match(personOnlyReason(text) ?? '(none)', new RegExp(why), text);
   }
@@ -125,6 +124,8 @@ test('the person-only gate: money, publishing, settings, releases and master; no
     'Verify suspected regressions from PRs #1105, #1024, #1065: run MP-belt-items-after-load-join on develop, bisect if it fails, fix with a test, PR into develop.',
     'The scenario failed on the nightly of 2026-10-06 (develop 98995630a, in release 0.50.0.47). No Discord posts. Hand the logs over with publish_attachment.',
     'Add a test guard for the belt deletion regression; master is untouched.',
+    'Merge the fix into master', // w1137: a PR into master is the normal flow, not a person-only step
+    'Fix the splitter and open a PR into master; merge it on green CI.',
   ]) {
     assert.equal(personOnlyReason(text), undefined, text);
   }

@@ -1516,10 +1516,10 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
   const w = store.work.get('w1')!;
   assert.deepEqual([w.title, w.brief, w.status, w.requestedBy, w.humanAsked], [title, task, 'new', BEN, false]);
   assert.deepEqual(w.delegation, { id: d.id, agentId: sentry.id, agentName: 'Nightly sentry', auto: true });
-  assert.match(w.constraints!, /never master or main/);
+  assert.match(w.constraints!, /never push to master directly/);
   // w694: the worker merges its own PR for an obvious bug or a tests-only change, and leaves a judgement call for a person.
-  assert.match(w.constraints!, /never push to develop directly and never force-push/);
-  assert.match(w.constraints!, /Merge your own pull request into develop once its verification is done and CI is green when it fixes a clear, demonstrated bug \(a failing-first test or a reproduction\) or only adds tests or verdicts/);
+  assert.match(w.constraints!, /never push to master directly and never force-push/);
+  assert.match(w.constraints!, /Merge your own pull request into master once its verification is done and CI is green when it fixes a clear, demonstrated bug \(a failing-first test or a reproduction\) or only adds tests or verdicts/);
   assert.match(w.constraints!, /changes design or behaviour beyond fixing the bug is a judgement call: leave it open for a person and say so in your report/);
   assert.doesNotMatch(w.constraints!, /do not merge it yourself|person's merge is the review/i);
   assert.match(w.constraints!, /spends money, publishes or posts outside, changes a live setting, releases or deploys needs a person/);
@@ -1570,7 +1570,7 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
   await until("the worker's brief went", () => !!first());
   const brief = first()!.text;
   assert.match(brief, /this is what the standing agent "Nightly sentry" asked, filed for Ben\):/);
-  assert.match(brief, /Merge your own pull request into develop once its verification is done and CI is green when it fixes a clear, demonstrated bug/);
+  assert.match(brief, /Merge your own pull request into master once its verification is done and CI is green when it fixes a clear, demonstrated bug/);
   assert.match(brief, /judgement call: leave it open for a person/);
   assert.doesNotMatch(brief, /do not merge it yourself|a person's merge is the review/);
   const mine = await st.handlers(sentry.id).my_delegations!({});
@@ -1937,12 +1937,12 @@ test('w691: a worker that needs a person declares it (waiting_on_person) and its
 test('w694: a delegated request lets its worker merge a clear bug fix or a tests-only PR, keeps a judgement call for a person, and keeps the person-only gates', () => {
   const c = delegationConstraints({ agentName: 'Nightly sentry', model: 'sonnet', effort: 'high' });
   // Merge: an obvious, demonstrated bug (failing-first test or reproduction), or only tests or verdicts, on green CI.
-  assert.match(c, /Merge your own pull request into develop once its verification is done and CI is green when it fixes a clear, demonstrated bug \(a failing-first test or a reproduction\) or only adds tests or verdicts/);
+  assert.match(c, /Merge your own pull request into master once its verification is done and CI is green when it fixes a clear, demonstrated bug \(a failing-first test or a reproduction\) or only adds tests or verdicts/);
   // Hold: a design or behaviour change beyond the bug is left open for a person, and the report says so.
   assert.match(c, /changes design or behaviour beyond fixing the bug is a judgement call: leave it open for a person and say so in your report/);
   // No blanket ban on merging, and the other limits stay.
   assert.doesNotMatch(c, /do not merge it yourself|person's merge is the review/i);
-  assert.match(c, /never master or main: never push to develop directly and never force-push/);
+  assert.match(c, /never push to master directly and never force-push/);
   assert.match(c, /spends money, publishes or posts outside, changes a live setting, releases or deploys needs a person in their own words/);
   assert.match(c, /Suggested worker: sonnet, high effort/);
 });

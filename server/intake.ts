@@ -1014,7 +1014,7 @@ export class IntakeManager {
     const s = this.settings;
     if (!s.ffbox.enabled) return 0;
     const now = this.now();
-    const target = this.d.cfg.defaultBase.replace(/^origin\//, '') || 'develop';
+    const target = this.d.cfg.defaultBase.replace(/^origin\//, '') || 'master';
     const known = { ...this.data.reportFixes };
     let changed = false;
     for (const f of reportFixesOf(this.d.store.work, target, now, REPORT_FIX_DAYS)) {
@@ -1264,7 +1264,7 @@ export class IntakeManager {
     const target = [...this.d.store.work.values()].find((w) => isOpen(w) && !w.mergedInto && w.keys.includes(key));
     let out: { scenario: string; action: 'filed' | 'attached' | 'skipped'; workId?: string; why?: string };
     if (target) {
-      const added = this.d.orchestrators.attachNightly(target.id, { key, line: `nightly ${rep.date}: the night broke again${rep.sha ? ` on develop ${rep.sha.slice(0, 9)}` : ''}: ${cleanLine(rep.cause, 200)}`, night: rep.date, scenario: NIGHT_BROKEN, urgent: rep.release?.shipped === 'yes' });
+      const added = this.d.orchestrators.attachNightly(target.id, { key, line: `nightly ${rep.date}: the night broke again${rep.sha ? ` on master ${rep.sha.slice(0, 9)}` : ''}: ${cleanLine(rep.cause, 200)}`, night: rep.date, scenario: NIGHT_BROKEN, urgent: rep.release?.shipped === 'yes' });
       out = { scenario: NIGHT_BROKEN, action: 'attached', workId: target.id, why: added ? `added to ${target.id}, open on a broken night` : `already on ${target.id} for ${rep.date}` };
     } else {
       const run = this.data.nights?.find((n) => n.date === rep.date)?.workId ?? rep.request;
@@ -1527,7 +1527,7 @@ export class IntakeManager {
       x.cause = undefined;
     }
     if (x.workId && (filed.length || reviewedThrough)) {
-      this.d.orchestrators.noteIntake(x.workId, `nightly review: ${filed.length ? `filed ${filed.join(', ')}` : 'no new job filed'}${reviewedThrough ? `; reviewed through develop ${reviewedThrough.slice(0, 9)}` : ''}`);
+      this.d.orchestrators.noteIntake(x.workId, `nightly review: ${filed.length ? `filed ${filed.join(', ')}` : 'no new job filed'}${reviewedThrough ? `; reviewed through master ${reviewedThrough.slice(0, 9)}` : ''}`);
     }
     for (const id of filed) this.record({ source: 'nightly-review', action: 'filed', title: this.d.store.work.get(id)?.title ?? id, workId: id, why: `the nightly merge review of ${x.date}` });
     this.changed();
@@ -1699,7 +1699,7 @@ export class IntakeManager {
     }
   }
 
-  /** The branches work merges into: the base branch and master beside it (a master release carries develop's fixes too). */
+  /** The branches work merges into: the base branch (master since w1137) and master beside it, for a config that still names another base. */
   private mergeTargets(): string[] {
     const base = this.d.cfg.defaultBase;
     const slash = base.indexOf('/');
@@ -1863,11 +1863,11 @@ function at(ms: number, tz: string): string {
   return `${nightOf(ms, tz)} ${hm(tz)} ${tz} (${hm('UTC')} UTC)`;
 }
 
-/** One line for a night: "the night 2026-10-11 passed: 130 of 136 passed, 2 flaky (lothdesktop, develop 7c43c32aa)". */
+/** One line for a night: "the night 2026-10-11 passed: 130 of 136 passed, 2 flaky (lothdesktop, master 7c43c32aa)". */
 export function nightLine(n: NightlyNight): string {
   const c = n.counts;
   const counts = c ? `: ${c.passed} of ${c.ran} passed${c.failed ? `, ${c.failed} failed` : ''}${c.flaky ? `, ${c.flaky} flaky` : ''}${c.env ? `, ${c.env} could not run` : ''}` : '';
   const why = n.status === 'broken' && n.cause ? `: ${cleanLine(n.cause, 300)}` : counts;
   const filed = n.work?.length ? `; its regressions are on ${n.work.join(', ')}` : '';
-  return `the night ${n.date} ${n.status === 'broken' ? 'broke' : n.status}${why} (${n.lab ?? 'the lab'}${n.sha ? `, develop ${n.sha.slice(0, 9)}` : ''})${filed}`;
+  return `the night ${n.date} ${n.status === 'broken' ? 'broke' : n.status}${why} (${n.lab ?? 'the lab'}${n.sha ? `, master ${n.sha.slice(0, 9)}` : ''})${filed}`;
 }

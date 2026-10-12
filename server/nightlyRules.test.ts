@@ -146,10 +146,10 @@ test('nightly draft: one scenario, with the commit, oracle, ledger entry, links,
     ),
   );
   const d = nightlyDraft(rep, rep.results);
-  assert.equal(d.title, 'Nightly e2e: MP-slow-client-catchup fails on develop aaaaaaaaa (shipped in 0.50.0.53)');
+  assert.equal(d.title, 'Nightly e2e: MP-slow-client-catchup fails on master aaaaaaaaa (shipped in 0.50.0.53)');
   assert.equal(d.priority, 'urgent');
   assert.equal(d.triage.class, 'regression');
-  assert.match(d.triage.reason, /new regression on develop aaaaaaaaa, shipped in 0\.50\.0\.53/);
+  assert.match(d.triage.reason, /new regression on master aaaaaaaaa, shipped in 0\.50\.0\.53/);
   for (const want of [
     'scripts/nightly/scenarios/MP-slow-client-catchup.json',
     SHA,
@@ -191,7 +191,7 @@ test('nightly draft: a batch names every scenario and keys each, so a later nigh
     ),
   );
   const d = nightlyDraft(rep, rep.results);
-  assert.equal(d.title, 'Nightly e2e 2026-09-30: 3 regressions on develop aaaaaaaaa');
+  assert.equal(d.title, 'Nightly e2e 2026-09-30: 3 regressions on master aaaaaaaaa');
   assert.deepEqual(identityKeys(d.source), ['nightly:a1-x', 'nightly:a2-y', 'nightly:a3-z']);
   for (const s of ['A1-x broke', 'A2-y broke', 'A3-z broke']) assert.ok(d.brief.includes(s));
   assert.equal(d.priority, 'high');
@@ -259,7 +259,7 @@ test('nightly merge review (w905): its jobs are read from the end of the worker\
 test('nightly merge review (w905): its worker reads merge-review.md, writes the jobs as blocks, and ends with REVIEWED-THROUGH', () => {
   const r = workerRules({ id: 'w950', brief: 'review', source: { kind: 'nightly-review', untrusted: false, nightlyReview: { date: '2026-10-11', machine: 'lothdesktop', since: 'a'.repeat(40) } } });
   assert.match(r, /scripts\/nightly\/merge-review\.md/);
-  assert.match(r, /git log --first-parent a{40}\.\.origin\/develop/);
+  assert.match(r, /git log --first-parent a{40}\.\.origin\/master/);
   assert.match(r, /NIGHTLY-JOB: <title/);
   assert.match(r, /REVIEWED-THROUGH: <the full sha/);
   assert.match(r, /Do not run the jobs yourself/);

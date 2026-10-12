@@ -12,7 +12,7 @@
     "url": "https://github.com/Final-Factory/FinalFactory.git",
     "basePath": "/srv/fff/base"
   },
-  "defaultBase": "origin/develop",
+  "defaultBase": "origin/master",
   "protectedPaths": [],
   "limits": {
     "minFreeRamGB": 0

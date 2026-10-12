@@ -8,7 +8,7 @@ the launcher, its test, server/opsWorker.ts or the lockfiles change, and weekly;
 
 **What runs where** (w925, lothsahn: "3B"): a pull request runs the whole suite. A push to `main` runs only the secret
 scan and the identity check, each push in its own concurrency group so a later merge never cancels it, the way
-FinalFactory's `develop` works. Nothing reads `main`'s CI result: there is no branch protection or ruleset, the portal's
+FinalFactory's `master` works (w1137: its one trunk; `develop` is retired). Nothing reads `main`'s CI result: there is no branch protection or ruleset, the portal's
 `ci:` gate and CI-read health read pull-request heads (`server/blockerWatch.ts`, `server/ciReadHealth.ts`), and
 `fffctl update` builds `origin/main` without asking CI (`deploy/vm/guest/fff-update`). Still on `main`: the nightly VM
 run and the daily whole Windows suite (schedules). The whole suite on `main` by hand: `gh workflow run ci.yml --ref

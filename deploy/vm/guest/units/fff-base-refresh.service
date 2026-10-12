@@ -1,5 +1,5 @@
 [Unit]
-Description=FF Factory portal: keep the orchestrators' base clone on origin/develop (fff-base-refresh)
+Description=FF Factory portal: keep the orchestrators' base clone on origin/master (fff-base-refresh)
 After=network-online.target
 
 [Service]

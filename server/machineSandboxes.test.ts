@@ -108,7 +108,7 @@ const until = async (what: string, cond: () => boolean, ms = 60_000) => {
   }
 };
 
-/** A bare origin and the machine's main clone of it (on develop), with a warm Library the clone never commits. */
+/** A bare origin and the machine's main clone of it (on master), with a warm Library the clone never commits. */
 const repos = () => testRepos();
 
 /** Real git, copy and delete; a stand-in editor (no Unity), and free space the test sets. */
@@ -189,7 +189,7 @@ test('machine sandboxes: a worktree of the main clone on its own branch, a warm 
   const r = repos();
   t.after(r.cleanup);
   const { p } = pool(r);
-  const created = await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: true, startUnity: false });
+  const created = await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: true, startUnity: false });
   assert.equal(created.status, 'creating');
   assert.equal(created.path, path.join(r.sbRoot, 'sb1'));
   await ready(p, 'sb1');
@@ -204,7 +204,7 @@ test('machine sandboxes: a worktree of the main clone on its own branch, a warm 
   assert.equal(r.git(r.main, 'status', '--porcelain'), '', 'the main clone is clean too');
   assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/sb1');
   assert.match(r.git(r.main, 'worktree', 'list'), /ffsb[\\/]sb1/);
-  assert.equal(r.git(r.main, 'branch', '--show-current'), 'develop', "the main clone's own checkout is untouched");
+  assert.equal(r.git(r.main, 'branch', '--show-current'), 'master', "the main clone's own checkout is untouched");
   assert.equal(p.list()[0].git?.branch, 'sandbox/sb1');
 
   // Persisted: a new daemon finds it.
@@ -223,24 +223,24 @@ test('machine sandboxes: a second one seeds its Library from a sandbox when the 
   const r = repos();
   t.after(r.cleanup);
   const { p } = pool(r);
-  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: true, startUnity: false });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: true, startUnity: false });
   await ready(p, 'sb1');
   fs.rmSync(path.join(r.main, 'Library'), { recursive: true, force: true });
-  await p.create({ id: 'sb2', branch: 'feature/x', base: 'origin/develop', seedLibrary: true, startUnity: false });
+  await p.create({ id: 'sb2', branch: 'feature/x', base: 'origin/master', seedLibrary: true, startUnity: false });
   await ready(p, 'sb2');
   assert.equal(fs.readFileSync(path.join(r.sbRoot, 'sb2', 'Library', 'Artifacts', 'warm.bin'), 'utf8'), 'imported', "sb1's Library");
   assert.ok(fs.existsSync(path.join(r.sbRoot, 'sb2', 'Assets', '__FFFactoryReimport')), 'armed after any Library copy');
   const exclude = fs.readFileSync(path.join(r.main, '.git', 'info', 'exclude'), 'utf8');
   assert.equal(exclude.split('\n').filter((l) => l === '/Assets/__FFFactoryReimport*').length, 1, 'the exclude line once');
 
-  await assert.rejects(p.create({ id: 'sb3', branch: 'sandbox/sb3', base: 'origin/develop', seedLibrary: false, startUnity: false }), /already 2 sandboxes on this machine \(max_sandboxes 2\)/);
+  await assert.rejects(p.create({ id: 'sb3', branch: 'sandbox/sb3', base: 'origin/master', seedLibrary: false, startUnity: false }), /already 2 sandboxes on this machine \(max_sandboxes 2\)/);
   await p.remove('sb2', true);
   assert.equal(r.git(r.main, 'branch', '--list', 'feature/x'), '', 'deleteBranch removes the branch');
-  await assert.rejects(p.create({ id: 'sb1', branch: 'sandbox/other', base: 'origin/develop', seedLibrary: false, startUnity: false }), /already exists/);
-  await assert.rejects(p.create({ id: 'sb3', branch: 'develop', base: 'origin/develop', seedLibrary: false, startUnity: false }), /never master, main or develop/);
-  await assert.rejects(p.create({ id: 'sb3', branch: 'bad..name', base: 'origin/develop', seedLibrary: false, startUnity: false }), /not a valid branch name/);
-  await assert.rejects(p.create({ id: 'finalfactory', branch: 'sandbox/ff', base: 'origin/develop', seedLibrary: false, startUnity: false }), /main clone's folder name/);
-  await assert.rejects(p.create({ id: 'Bad Name', branch: 'sandbox/x', base: 'origin/develop', seedLibrary: false, startUnity: false }), /not a usable sandbox name/);
+  await assert.rejects(p.create({ id: 'sb1', branch: 'sandbox/other', base: 'origin/master', seedLibrary: false, startUnity: false }), /already exists/);
+  await assert.rejects(p.create({ id: 'sb3', branch: 'master', base: 'origin/master', seedLibrary: false, startUnity: false }), /never master, main or develop/);
+  await assert.rejects(p.create({ id: 'sb3', branch: 'bad..name', base: 'origin/master', seedLibrary: false, startUnity: false }), /not a valid branch name/);
+  await assert.rejects(p.create({ id: 'finalfactory', branch: 'sandbox/ff', base: 'origin/master', seedLibrary: false, startUnity: false }), /main clone's folder name/);
+  await assert.rejects(p.create({ id: 'Bad Name', branch: 'sandbox/x', base: 'origin/master', seedLibrary: false, startUnity: false }), /not a usable sandbox name/);
 });
 
 test('machine sandboxes: editors are limited by max_unity; a switch waits for the editor to stop; the disk guard', async (t) => {
@@ -249,7 +249,7 @@ test('machine sandboxes: editors are limited by max_unity; a switch waits for th
   let free: number | undefined = 500 * GB;
   let busy = true;
   const { p, events, running } = pool(r, { free: () => free, settings: { maxUnity: 1 }, activity: () => ({ busy, lastActivityMs: Date.now() }) });
-  for (const id of ['a', 'b']) await p.create({ id, branch: `sandbox/${id}`, base: 'origin/develop', seedLibrary: false, startUnity: false });
+  for (const id of ['a', 'b']) await p.create({ id, branch: `sandbox/${id}`, base: 'origin/master', seedLibrary: false, startUnity: false });
   await ready(p, 'a');
   await ready(p, 'b');
   await p.unity('a', 'start');
@@ -270,7 +270,7 @@ test('machine sandboxes: editors are limited by max_unity; a switch waits for th
   await p.tick();
   assert.equal(p.diskState().level, 'warn');
   await assert.rejects(p.unity('b', 'start'), /disk space is warn/);
-  await assert.rejects(p.create({ id: 'c', branch: 'sandbox/c', base: 'origin/develop', seedLibrary: false, startUnity: false }), /disk space is warn|already 2 sandboxes/);
+  await assert.rejects(p.create({ id: 'c', branch: 'sandbox/c', base: 'origin/master', seedLibrary: false, startUnity: false }), /disk space is warn|already 2 sandboxes/);
   free = 52 * GB;
   await p.tick();
   assert.equal(p.diskState().level, 'warn', 'hysteresis: 5 GB above the threshold before it clears');
@@ -294,7 +294,7 @@ test('machine sandboxes: the default disk guard (w628) starts an editor at 25 GB
   let free: number | undefined = 25 * GB;
   const defaults = { diskWarnGB: DISK_WARN_GB_DEFAULT, diskCriticalGB: DISK_CRITICAL_GB_DEFAULT };
   const { p } = pool(r, { free: () => free, settings: defaults });
-  await p.create({ id: 'a', branch: 'sandbox/a', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await p.create({ id: 'a', branch: 'sandbox/a', base: 'origin/master', seedLibrary: false, startUnity: false });
   await ready(p, 'a');
   // The m3 of 2026-10-07: about 25 GB free, which the old 50 GB guard refused.
   await p.tick();
@@ -315,13 +315,13 @@ test('machine sandboxes: the default disk guard (w628) starts an editor at 25 GB
 
   // A full copy (robocopy onto NTFS) of a 100 GB Library at 110 GB free: refused, where the flat 30 GB allowance passed.
   const full = pool(r, { free: () => 110 * GB, copyBytes: 100 * GB, settings: defaults }).p;
-  await full.create({ id: 'b', branch: 'sandbox/b', base: 'origin/develop', seedLibrary: true, startUnity: false });
+  await full.create({ id: 'b', branch: 'sandbox/b', base: 'origin/master', seedLibrary: true, startUnity: false });
   await until('b refused', () => full.list().find((x) => x.id === 'b')?.status === 'error');
   assert.match(full.list().find((x) => x.id === 'b')!.statusDetail ?? '', /not enough disk for the Library copy \(~100 GB\): 110 GB free .* need 120 GB/);
   await full.remove('b').catch(() => undefined);
   // A block clone reports no size: the allowance stands.
   const cloned = pool(r, { free: () => 110 * GB, settings: defaults }).p;
-  await cloned.create({ id: 'c', branch: 'sandbox/c', base: 'origin/develop', seedLibrary: true, startUnity: false });
+  await cloned.create({ id: 'c', branch: 'sandbox/c', base: 'origin/master', seedLibrary: true, startUnity: false });
   await ready(cloned, 'c');
 });
 
@@ -340,7 +340,7 @@ test('machine sandboxes: the idle-editor stop and a restarted daemon', async (t)
   t.after(r.cleanup);
   let last = Date.now();
   const { p, running } = pool(r, { idle: 1, activity: () => ({ busy: false, lastActivityMs: last }) });
-  await p.create({ id: 'a', branch: 'sandbox/a', base: 'origin/develop', seedLibrary: false, startUnity: true });
+  await p.create({ id: 'a', branch: 'sandbox/a', base: 'origin/master', seedLibrary: false, startUnity: true });
   await ready(p, 'a');
   await until('editor started', () => running.size === 1);
   await p.tick();
@@ -477,7 +477,7 @@ const PROBES: Probes = {
 
 test('machine sandboxes: create, run agents (per-sandbox limit), drive the editor and delete, from the portal through a daemon', async (t) => {
   const r = repos();
-  const cfg = { dataDir: path.join(r.root, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' }, defaultBase: 'origin/develop' } as unknown as Config;
+  const cfg = { dataDir: path.join(r.root, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' }, defaultBase: 'origin/master' } as unknown as Config;
   fs.mkdirSync(cfg.dataDir, { recursive: true });
   const store = new Store(cfg.dataDir);
   const sessions = new SessionManager(cfg, store);
@@ -509,7 +509,7 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   await until('online with hello', () => mm.isOnline('pc') && !!store.machines.get('pc')?.info);
 
   const text = await mm.createSandbox('pc', { name: 'sb1', seedLibrary: true });
-  assert.match(text, /Creating sandbox sb1 on branch sandbox\/sb1 from origin\/develop/);
+  assert.match(text, /Creating sandbox sb1 on branch sandbox\/sb1 from origin\/master/);
   await until('ready on the portal', () => store.machines.get('pc')?.sandboxes?.find((s) => s.id === 'sb1')?.status === 'ready');
   const sb = mm.requireSandbox('pc', 'sb1');
   assert.equal(sb.purpose, 'sb1', 'its label is its name (w575)');
@@ -553,7 +553,7 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   hello.protocol = proto;
   const sw = await mm.switchBranch('pc', 'feature/z', undefined, 'sb1');
   assert.equal(sw.to, 'feature/z');
-  assert.equal(r.git(r.main, 'branch', '--show-current'), 'develop', 'the main clone stays where it was');
+  assert.equal(r.git(r.main, 'branch', '--show-current'), 'master', 'the main clone stays where it was');
 
   // Delete: refused while an agent there runs; then gone on both sides.
   await assert.rejects(mm.deleteSandbox('pc', 'sb1'), /2 agent\(s\) still run in sandbox sb1/);
@@ -589,7 +589,7 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
     sandboxRoot: path.join(r.root, 'host-sb'),
     standingRoot: path.join(r.root, '_agents'),
     repo: { url: 'x', basePath: path.join(r.root, 'base') },
-    defaultBase: 'origin/develop',
+    defaultBase: 'origin/master',
     models: ['opus'],
     defaultModel: 'opus',
     protectedPaths: [],
@@ -652,7 +652,7 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
   midTurn(a1, 'running');
   assert.match(await agents.switchBranch({ sandbox: 'pc/sb1', branch: 'feature/z', callerSessionId: a1.info.id }), /^pc\/sb1: sandbox\/sb1 → feature\/z/);
   // Creating a branch is the same call, with create_from.
-  assert.match(await agents.switchBranch({ sandbox: 'pc/sb1', branch: 'feature/new', createFrom: 'origin/develop', callerSessionId: a1.info.id }), /→ feature\/new/);
+  assert.match(await agents.switchBranch({ sandbox: 'pc/sb1', branch: 'feature/new', createFrom: 'origin/master', callerSessionId: a1.info.id }), /→ feature\/new/);
 
   // Another agent there that only waits (w426): its turn over, a wake_me pending and a background task still running.
   // Idle is not mid-turn, on the portal or on the daemon, so it does not hold the switch up, the orchestrator's included.
@@ -691,7 +691,7 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
 
 test('stale output on a machine: the portal sends the ledger facts, a dry run comes back in full and removes nothing, and the pass is logged on the portal', async (t) => {
   const r = repos();
-  const cfg = { dataDir: path.join(r.root, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' }, defaultBase: 'origin/develop' } as unknown as Config;
+  const cfg = { dataDir: path.join(r.root, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' }, defaultBase: 'origin/master' } as unknown as Config;
   fs.mkdirSync(cfg.dataDir, { recursive: true });
   const store = new Store(cfg.dataDir);
   const sessions = new SessionManager(cfg, store);
@@ -764,7 +764,7 @@ test('machine sandboxes: an editor start takes a Unity slot: batch builds starte
   let slots: UnitySlots | undefined;
   const { p } = pool(r, { settings: { maxUnity: 2 }, slots: () => slots! });
   slots = new UnitySlots({ dir, platform: 'win32', procs: async () => procs, alive: () => true, now: () => Date.now(), limit: () => 2, places: () => p.list().map((s) => ({ holder: `sandbox:${s.id}`, path: s.path, editorUp: p.editorUp(s.id) })), ramPct: () => undefined });
-  for (const id of ['a', 'b']) await p.create({ id, branch: `sandbox/${id}`, base: 'origin/develop', seedLibrary: false, startUnity: false });
+  for (const id of ['a', 'b']) await p.create({ id, branch: `sandbox/${id}`, base: 'origin/master', seedLibrary: false, startUnity: false });
   await ready(p, 'a');
   await ready(p, 'b');
   // Two command-line builds hold both slots (LothDesktop on 2026-10-05: its limit counted only the interactive editor).
@@ -786,7 +786,7 @@ async function twoSandboxes(t: { after: (fn: () => void | Promise<void>) => void
     sandboxRoot: path.join(r.root, 'host-sb'),
     standingRoot: path.join(r.root, '_agents'),
     repo: { url: 'x', basePath: path.join(r.root, 'base') },
-    defaultBase: 'origin/develop',
+    defaultBase: 'origin/master',
     models: ['opus'],
     defaultModel: 'opus',
     protectedPaths: [],
@@ -917,7 +917,7 @@ test("w898: the last agent leaving a sandbox sends it to 'cleanup', trims the ca
   t.after(r.cleanup);
   let live = 1;
   const { p, statuses } = pool(r, { liveAgents: () => live });
-  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
   await ready(p, 'sb1');
   const dir = path.join(r.sbRoot, 'sb1');
   const files = fillCaches(dir);
@@ -955,7 +955,7 @@ test("w913: the release sweep of build and capture output runs in the same 'clea
       return { files: 2, bytes: 3 * 1024 ** 3 };
     },
   });
-  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
   await ready(p, 'sb1');
   await p.tick();
   assert.deepEqual(seen, [], 'an agent lives there: no sweep');
@@ -978,7 +978,7 @@ test('w898: no trim while an agent is live, an editor is up, or a build has the 
   t.after(r.cleanup);
   let live = 1;
   const { p, running } = pool(r, { liveAgents: () => live });
-  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
   await ready(p, 'sb1');
   const dir = path.join(r.sbRoot, 'sb1');
   const files = fillCaches(dir);
@@ -1020,7 +1020,7 @@ test('w898: a trim that hangs, fails or ignores its abort times out and the sand
         ? Promise.reject(new Error('EBUSY: file locked'))
         : new Promise((resolve) => o?.signal?.addEventListener('abort', () => ((aborted = true), resolve({ stopped: 'timed out', files: 1, removedBytes: 5, keptBytes: 0 }))));
   const { p, events, statuses } = pool(r, { liveAgents: () => 0, trim: { timeoutMs: 80 }, trimmer });
-  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
   await ready(p, 'sb1');
   const t0 = Date.now();
   const hung = p.trim('sb1', 'test');
@@ -1044,7 +1044,7 @@ test('w898: a daemon restart in the middle of a trim leaves nothing stuck: the p
   const r = repos();
   t.after(r.cleanup);
   const { p } = pool(r, { liveAgents: () => 0, trim: { timeoutMs: 300 }, trimmer: () => new Promise(() => undefined) });
-  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
   await ready(p, 'sb1');
   const cut = p.trim('sb1');
   assert.equal(p.list()[0].status, 'cleanup');

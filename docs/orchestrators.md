@@ -805,8 +805,8 @@ stalled. Ben's requests are included. In this order, the first that fits applies
 
 1. **Merged.** The pull-request rule above for every request, and the intake's merged-branch rule for intake requests.
 2. **Delivered.** A request whose worker's final report (`lastResult`, at least an hour old) states plainly that the work
-   is done ("All done", "is delivered", "nothing more to do", "fully merged to develop, so I'm idle", "is fixed and merged into
-   develop", "nothing is open or pending") and says nothing is left, waiting or asked, with no open PR
+   is done ("All done", "is delivered", "nothing more to do", "fully merged to master, so I'm idle", "is fixed and merged into
+   master", "nothing is open or pending") and says nothing is left, waiting or asked, with no open PR
    and no step after the merge, closes as done with that report quoted. A release's report must also link the patch
    notes and say it is live. When the report is not clear, nothing closes. A stalled request is read the same way when its
    worker's report came after the stall (w631: a worker that went back to it and finished it left it stalled).
@@ -1038,7 +1038,7 @@ one rule, and it is the agent's own to enforce (`server/evidenceRules.test.ts` p
 
 A task a standing agent delegated follows the same rule with one narrowing (w694; the owner, 2026-10-08: "as long as they
 were obvious bugs merging is fine from sentry investigations"). Its request's constraints (`delegationConstraints` in
-`server/orchestrators.ts`) say it is delivered as a pull request into develop, never pushed to develop or master
+`server/orchestrators.ts`) say it is delivered as a pull request into master (the game repo's one trunk, w1137), never pushed to master
 directly and never force-pushed, and that its worker merges the PR itself once verified and CI is green when the PR fixes
 a clear, demonstrated bug (a failing-first test or a reproduction) or only adds tests or verdicts. A PR that changes
 design or behaviour beyond fixing the bug is a judgement call: the worker leaves it open for a person and says so in its

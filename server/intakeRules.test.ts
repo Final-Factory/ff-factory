@@ -341,7 +341,7 @@ test('desync PR policy (w358): which FFBox work it covers, its settings, its mar
   assert.equal(parseMarkers('- `PERF-ESCALATION: <one line>` (desync PRs only)').perfEscalation, undefined);
   assert.equal(parseMarkers('PERF-ESCALATION: none').perfEscalation, undefined);
   // The policy names every class and the threshold.
-  for (const re of [/Class 1/, /Class 2/, /Class 3/, /1% of develop's value/, /2-peer/, /PERF-ESCALATION/]) assert.match(DESYNC_PR_POLICY, re);
+  for (const re of [/Class 1/, /Class 2/, /Class 3/, /1% of master's value/, /2-peer/, /PERF-ESCALATION/]) assert.match(DESYNC_PR_POLICY, re);
   // set_app_config's intake.ffbox block takes it, checked like autoApprove.
   assert.deepEqual(checkFfboxIntake({ enabled: true, desync: { enabled: false, maxPerDay: 4 } }), { enabled: true, desync: { enabled: false, maxPerDay: 4 } });
   assert.throws(() => checkFfboxIntake({ desync: { cap: 1 } }), /intake\.ffbox\.desync: unknown key/);

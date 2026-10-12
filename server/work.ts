@@ -177,7 +177,7 @@ function jaccard(a: Set<string>, b: Set<string>): number {
   return common / (a.size + b.size - common);
 }
 
-/** Something a request may repeat: a work item, a worker, a delegation request, a commit on develop. */
+/** Something a request may repeat: a work item, a worker, a delegation request, a commit on master. */
 export interface PoolEntry {
   ref: string;
   kind: WorkOverlap['kind'];

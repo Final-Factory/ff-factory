@@ -289,7 +289,7 @@ receives none from FF Factory.
 ```json
 { "type": "submit", "id": "fff-7c1e", "requestedBy": { "userId": "lothsahn", "displayName": "Lothsahn" },
   "trigger": "person", "title": "Fix the belt splitter", "prompt": "…", "class": "fenced",
-  "untrustedInput": false, "base": "develop", "key": "issue#640" }
+  "untrustedInput": false, "base": "master", "key": "issue#640" }
 { "type": "diagnose", "id": "fff-7c1f", "requestedBy": { "userId": "ben", "displayName": "Ben" },
   "trigger": "automatic", "reportIds": ["20260927T090000Z-desync-3a9f01c2d4"], "key": "desync:0.50.0:minerBots+census" }
 { "type": "stop", "id": "fff-7c20", "requestedBy": { "userId": "ben", "displayName": "Ben" }, "conversation": "813" }
@@ -355,11 +355,11 @@ otherwise it sends `error` `not_enabled` and FFBox carries on as before. Schemas
 { "type": "board", "ref": "conv-812", "verdict": "in_flight",
   "matches": [{ "id": "w50", "status": "active", "title": "Lag when leading a fleet", "score": 1, "why": "same discord 1554582984567562253",
                 "updatedAt": "2026-09-29T10:00:00.000Z",
-                "watch": { "repo": "Final-Factory/FinalFactory", "branch": "sandbox/lag-lead", "pr": 812, "target": "develop" } }] }
+                "watch": { "repo": "Final-Factory/FinalFactory", "branch": "sandbox/lag-lead", "pr": 812, "target": "master" } }] }
 { "type": "board", "ref": "conv-812", "verdict": "done", "update": true,
   "matches": [{ "id": "w50", "status": "done", "title": "Lag when leading a fleet", "score": 1, "why": "same discord 1554582984567562253",
                 "updatedAt": "2026-09-30T08:00:00.000Z",
-                "version": null, "mergedIn": "develop@abc1234def5678", "branch": "sandbox/lag-lead" }] }
+                "version": null, "mergedIn": "master@abc1234def5678", "branch": "sandbox/lag-lead" }] }
 ```
 
 `request` (connector → FF Factory):
@@ -400,9 +400,9 @@ match's title into a container that runs player text. Protocol 2 adds, per match
 
 | field | on | what |
 |---|---|---|
-| `watch` | an open match, when FF Factory knows the branch; a done match, when it knows the PR that merged the fix (w480) | `{ "repo", "branch", "pr"?, "target" }`: on an open match, the branch the fix is being made on (the worker's PR head branch, with `pr` once a PR is open, else its sandbox branch such as `sandbox/lag-lead`), the repo (`Final-Factory/FinalFactory`, config `intake.ffbox.repo` or the game repo's URL) and the branch it lands on (`develop`); FFBox watches it for the merge, read-only. On a done match, the merged PR (its head branch and `pr`, always present), for the merge notice's "Fixed in PR #N"; FFBox follows no branch of a done match |
+| `watch` | an open match, when FF Factory knows the branch; a done match, when it knows the PR that merged the fix (w480) | `{ "repo", "branch", "pr"?, "target" }`: on an open match, the branch the fix is being made on (the worker's PR head branch, with `pr` once a PR is open, else its sandbox branch such as `sandbox/lag-lead`), the repo (`Final-Factory/FinalFactory`, config `intake.ffbox.repo` or the game repo's URL) and the branch it lands on (`master`); FFBox watches it for the merge, read-only. On a done match, the merged PR (its head branch and `pr`, always present), for the merge notice's "Fixed in PR #N"; FFBox follows no branch of a done match |
 | `version` | a done match | the first release (`FFVersion.cs` bump on the base branch) that contains the fix, e.g. `0.50.0.51`; `null` while it is merged but not yet released ("coming in the next beta build") |
-| `mergedIn` | a done match | `<target>@<sha>`, e.g. `develop@abc1234`, when the fix commit is known; else `null` |
+| `mergedIn` | a done match | `<target>@<sha>`, e.g. `master@abc1234`, when the fix commit is known; else `null` |
 | `branch` | a done match | the branch the work was on, when known |
 
 **Updates** (protocol 2): while the link is up, FF Factory re-checks every answer it gave `in_flight` (or `done` with
@@ -531,7 +531,7 @@ FF Factory → connector, only when the hello's `accepts` lists `report_fixed`:
 
 ```json
 { "type": "report_fixed", "reportId": "20261005T035612Z-crash-6102d405dc", "workId": "w414", "pr": 1064,
-  "version": "0.50.0.77", "mergedIn": "develop@ede697a08" }
+  "version": "0.50.0.77", "mergedIn": "master@ede697a08" }
 ```
 
 A player's crash or desync report a finished ledger request claims (its `report:<id>` key: its subjects, a report its

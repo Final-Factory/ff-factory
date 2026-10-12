@@ -36,7 +36,7 @@ RELEASES_KEEP_EXTRA=1
 
 # ---------------------------------------------------------------- the base clone orchestrators read
 BASE_REPO_URL=https://github.com/Final-Factory/FinalFactory.git
-BASE_BRANCH=develop
+BASE_BRANCH=master
 # Must match config.json's repo.basePath.
 BASE_PATH=/srv/fff/base
 
