@@ -175,12 +175,33 @@ test("w913: workers are told to leave their temp files, not to clean up; the one
   assert.match(DISK_HYGIENE, /The harness removes it: your temp folder a few minutes after your process ends \(your git clones six hours after, unless one holds work nothing else has\)/);
   assert.match(DISK_HYGIENE, /no clean-up step before DONE, no `player_slots\.py prune`/);
   assert.match(DISK_HYGIENE, /publish the proofs your report links .* before you end/);
-  assert.match(DISK_HYGIENE, /a delete whose every path is written out under \$TMPDIR is answered by the session itself with no approval, anything else .* still asks a person/);
+  assert.match(DISK_HYGIENE, /a delete whose every path is written out under \$TMPDIR is answered by the session itself with no approval, alone or inside a longer command; anything else .* still asks a person/);
   assert.match(DISK_HYGIENE, /name it with your temp folder's name in front/);
   // The old instructions are gone.
   assert.ok(!/Before you report a request done, clean up after yourself/.test(DISK_HYGIENE));
   assert.ok(!/delete the player builds, Captures/.test(DISK_HYGIENE));
   assert.ok(!/and you may remove them too, without asking/.test(DISK_HYGIENE));
+});
+
+test("w1097: every worker's brief says which shell step still waits for a person, and the routes that never do", async (t) => {
+  const { DISK_HYGIENE, SHELL_STEPS } = await import('./agents.ts');
+  // Why w1079 deleted its own temp: to reuse a test's output folder. The brief says to make a new one.
+  assert.match(DISK_HYGIENE, /never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, `\$TMPDIR\/<leg>-<timestamp>`/);
+  assert.match(DISK_HYGIENE, /lothsahn, 2026-10-12, w1097: "Can't we have the cleanup process when a worker is done do this for them so the worker doesn't have to worry about it\?"/);
+  assert.match(SHELL_STEPS, /Never delete in \$TMPDIR to reuse a folder: a new `\$TMPDIR\/<leg>-<timestamp>` per leg/);
+  assert.match(SHELL_STEPS, /^## Shell steps that never wait for a person\n/);
+  assert.match(SHELL_STEPS, /lothsahn, 2026-10-12, w1097: "Why did it do that, and how do we allow it to do what it just needed to do without a complex bash prompt\?"/);
+  assert.match(SHELL_STEPS, /except when Claude Code's own dangerous-rm check flags a delete in it/);
+  assert.match(SHELL_STEPS, /in a script file in \$TMPDIR, written with the Write tool, and run it: `bash "\$TMPDIR\/leg\.sh" 1920`/);
+  assert.match(SHELL_STEPS, /`python scripts\/game_data\.py` \(`snapshot`, `restore`, `run --name <leg> -- <command>`/);
+  assert.match(SHELL_STEPS, /writes only the game's two settings files and the saves you name/);
+  const { agents } = world(t);
+  const brief = (agents as unknown as { machineSandboxBrief: (m: unknown, sb: unknown) => string }).machineSandboxBrief(
+    { id: 'm5', repoPath: '/Users/dev/FinalFactory', platform: 'darwin', sandboxRoot: '/Users/dev/ffsb' },
+    { id: 'alpha', path: '/sb/alpha', branch: 'fix-x', purpose: 'a fix', unity: { state: 'stopped' } },
+  );
+  assert.ok(brief.includes(SHELL_STEPS) && brief.indexOf(DISK_HYGIENE) < brief.indexOf(SHELL_STEPS) && brief.indexOf(SHELL_STEPS) < brief.indexOf('## Reporting'));
+  assert.match(brief, /GameDataPaths\.Saves` = `<data root>\/UserData\/saves\/`/);
 });
 
 test("w896: clean-up deletes only inside the worker install folder, in every worker's brief, the dispatcher's and the orchestrators' instructions", async (t) => {

@@ -500,6 +500,84 @@ them; the rule lets a worker remove exactly the files named `<its temp folder's 
 --since 2026-10-03 --split <deploy date>` prints, per day, the prompts a person answered and the clean-up ones by kind
 (the session's own answer leaves no event, so a drop is real).
 
+### Routine test steps without a prompt (w1097)
+
+Lothsahn (2026-10-12): "I just got prompted to accept a bash prompt in w1079. Why did it do that, and how do we allow it to
+do what it just needed to do without a complex bash prompt?" Worker 35e02c31 (w1079, the resizable blueprint menu) sent one
+multi-line Bash command: `D="/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory"; rm -rf $TMPDIR/f1920
+$TMPDIR/f1280`, a shell function `run()` that restored a backed-up `settings.json` into the game's data folder in a `cp`
+retry loop and ran its test-leg script, then a grep of PanelPosition and PanelSize (the ledger keeps its first 120
+characters; the rest is from the request's brief).
+
+**Where prompts come from.** Workers run in `bypassPermissions` (`config.ts` `worker.permissionMode`). The guard
+(`server/guard.ts`) is a PreToolUse hook that only ever answers `deny` (`guard.ts:89`, the one `permissionDecision` it
+returns), never `ask`, so it cannot raise a prompt. The prompt is Claude Code's: in bypass mode the CLI still calls
+`canUseTool` for the checks its own table marks `bypassImmune` (Claude Code 2.1.284, the binary in
+`@anthropic-ai/claude-agent-sdk-win32-x64` 0.3.284: `dangerousRemoval`, `isolatePeerMachines`, `restrictedMode`,
+`outsideReadsBlocked`); for a worker's Bash command that is the dangerous-rm check. `canUseTool` lands in
+`Session.askPermission` (`server/sessions.ts`), which answers the w913 temp delete itself and asks a person for the rest.
+The SDK's warning "canUseTool will not be invoked: permissionMode 'bypassPermissions' auto-approves every tool call" (seen
+in the portal journal, 2026-10-12) is not the whole story.
+
+**Measured** (2026-10-12, lothdesktop: a Messages API stand-in on 127.0.0.1 that returns one Bash `tool_use` with the
+exact command, a real SDK `query()` in bypass mode with a `canUseTool` that records `decisionReason` and refuses; no
+model, no spend; the targets did not exist):
+
+| Command | Asks? | Claude Code's reason |
+|---|---|---|
+| the w1079 command rebuilt as described, `rm -rf $TMPDIR/f1920 $TMPDIR/f1280` in it | no | — |
+| a shell function, a `for`/`until` retry loop, several lines, `&&`, a pipe, a heredoc, `$(...)` | no | — |
+| `cp` into `.../LocalLow/Never Games/finalfactory/...` | no | — |
+| `bash "$TMPDIR/leg.sh" 1920`, `python scripts/game_data.py run ... -- ...` | no | — |
+| `rm -rf $TMPDIR/{f1920,f1280}`, `rm -f $TMPDIR/*.log`, w901's `rm -rf ... $TMPDIR/*.log ... /tmp/ffb-w901` | **yes** | `Dangerous rm operation on possibly-empty variable path: $TMPDIR/{f1920,f1280} in ...` |
+| `rm -rf /ffa-x`, `rm -rf "C:/ffa-x"` | **yes** | `Dangerous rm operation on critical path: ...` |
+
+So of the parts w1097 named (the `rm -rf`, the function, the write into LocalLow, the compound form) only an `rm` can raise
+it, and only in a form the check flags. The command as described does not ask on its own; the part the ledger cut off
+must hold a flagged `rm` (a glob or a brace list after `$TMPDIR`, or a critical path). The session did not answer it
+because the w913 rule (`tempOnlyDelete`) took only a command made of deletes alone, and this one also copied, looped and
+ran a script. The transcript event did not keep Claude Code's reason, so the exact `rm` cannot be read back; from w1097
+on it is kept (below).
+
+**Why the worker deleted at all** (lothsahn, 2026-10-12: "For w1097 why are workers deleting stuff in temp? Can't we have
+the cleanup process when a worker is done do this for them so the worker doesn't have to worry about it?"). To rerun a test
+leg into the same folder. w1079's tour script (`specs/w1079-blueprint-resize/run_tour.sh` in its PR, FinalFactory #1536)
+takes an output folder per screen size and writes the leg's stills there, and the PR says "the evidence was re-run until
+both legs agreed"; the deleted folders, `$TMPDIR/f1920` and `$TMPDIR/f1280`, are those two (sourced from the PR and the
+ledger's copy of the command; the transcript is on beast). The brief said "do not clean up after yourself", and a rerun's
+reset did not read as clean-up. The brief, the evidence-gate delete checklist (item 0) and its two lessons now say: never
+delete in your temp folder, mid-task included; every leg writes to a new `$TMPDIR/<leg>-<timestamp>`, and the daemon
+removes the whole folder when the session ends.
+
+**The end-of-session sweep runs (measured, lothdesktop, 2026-10-12).** Session b3327616 (this request's worker) was
+stopped at about 06:52 UTC; at 08:05 its folder `V:\ffw\tmp\ffa-b3327616` held only its four git clones (kept six hours) and
+what the resumed process made: the scratch from before (a 45 MB `cli.txt`, `probe/`, the probe scripts and their outputs)
+was gone. The portal's clean-up log for lothdesktop (`portal_logs` source `cleanup`) lists whole finished sessions'
+folders removed, e.g. `ffa-dd8193f8` 5.3 GB at 08:06:45 UTC and `ffa-476c7481` 3.8 GB at 04:59 UTC; neither is in
+`V:\ffw\tmp` now.
+
+**What changed**
+
+| What | Where |
+|---|---|
+| A delete inside a longer command is answered by the session when Claude Code's reason is its dangerous-rm check, the session runs in bypass mode, and every delete in the text is one `tempOnlyDelete` allows (every `rm`/`Remove-Item` word must be a statement it judged; no `TMPDIR`/`PATH` reassignment, link, `eval`, `xargs`, nested shell, `find -delete`, or function named `rm` in the command) | `tempDeletesWithin`, `server/tempDelete.ts`; `ownTempDelete`, `server/sessions.ts` |
+| `$TMPDIR/$S` (a variable after the folder) is no longer accepted: empty, it is the folder itself | `insideTmp`, `server/tempDelete.ts` |
+| The save-copy rule knows the game's `UserData/saves` (`GameDataPaths.Saves`, since 2026-10-11) | `SAVES_DIR`, `server/tempDelete.ts`; the saves line of the brief and `docs/attachments.md` |
+| Claude Code's reason is kept on the permission event and shown on the card | `reason` on `permission` events (`shared/types.ts`), `server/sessions.ts`, `web/src/components/Transcript.tsx` |
+| The prompt count groups every prompt by kind: Claude Code's reason when kept, the command's shape before | `promptKind`, `byKind`, `scripts/cleanup-approvals.ts` |
+| Every worker's brief: a new folder per run; multi-step logic in a script file in `$TMPDIR`; the game's settings and saves through `scripts/game_data.py` | `DISK_HYGIENE`, `SHELL_STEPS`, `server/agents.ts` |
+| `scripts/game_data.py` (game repo): `snapshot`, `restore`, `run -- <command>` (restores whatever the command did, keeps `after/`), `get <key> --after`, `put`; writes only `UserData/settings/settings.json`, `LocalSettings/settings.json` and the saves named; retries a file the game holds | game repo, `scripts/tests/test_game_data.py` |
+
+**Unchanged on purpose**: a delete outside the install folder is still refused by the guard (`rootFence.ts`); anything the
+session cannot judge still asks a person; writes into the game's data folder were never asked about in bypass mode, and
+nothing here widens them (the new tool writes only the settings files and the named saves).
+
+**Tests**: `server/tempDelete.test.ts` (w1079-shaped legs answered, 30 escapes refused, the `UserData/saves` copy),
+`server/agentSession.test.ts` (answered in bypass mode with the dangerous-rm reason; another reason, a delete outside, or
+default mode asks, and the card and transcript carry the reason), `scripts/cleanup-approvals.test.ts` (kinds),
+`server/evidenceRules.test.ts` (the brief). **Measuring**: `node scripts/cleanup-approvals.ts <dataDir> --since <7 days
+back> --split <deploy date>` ends with every prompt by kind, before and after.
+
 ### Where clean-up may delete (w896)
 
 **The rule** (lothsahn, 2026-10-10: "Why are you clearing C: on LothDesktop?  How much space are the unity caches using?  In

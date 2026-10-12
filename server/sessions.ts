@@ -11,7 +11,7 @@ import { accountKeyOf } from './usage.ts';
 import { senderOf, type SessionSnapshot, type Unanswered } from './restart.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun, dryRunStartRefusal } from './dryRun.ts';
-import { tempOnlyDelete } from './tempDelete.ts';
+import { DANGEROUS_REMOVAL, tempDeletesWithin, tempOnlyDelete } from './tempDelete.ts';
 import { ContextMeter, IMAGE_CHARS, type Cumulative, type TurnUsage } from '../shared/spend.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
@@ -433,7 +433,7 @@ export class AgentSession implements SessionHandle {
       allowDangerouslySkipPermissions: true,
       includePartialMessages: true,
       abortController: this.abort,
-      canUseTool: (toolName, input, { signal, blockedPath }) => this.askPermission(toolName, input, signal, blockedPath),
+      canUseTool: (toolName, input, { signal, blockedPath, decisionReason }) => this.askPermission(toolName, input, signal, blockedPath, decisionReason),
       ...(this.info.sdkSessionId ? { resume: this.info.sdkSessionId } : {}),
       // Opt in to session_state_changed: the authoritative "turn is over" signal. A `result` alone is
       // not — background subagents and tasks can re-invoke the session after it.
@@ -689,22 +689,32 @@ export class AgentSession implements SessionHandle {
    * A worker's clean-up of its own temp folder is answered here, not by a person (w913, lothsahn: "Random clean up commands
    * take a lot of approvals"): a plain rm / Remove-Item whose every path is inside `$TMPDIR` (or a save copy named with this
    * session's tag) is allowed. Anything else, or anything this cannot judge, is asked as before (server/tempDelete.ts).
+   *
+   * In bypass mode Claude Code still asks about a delete its dangerous-rm check flags, inside a longer command too (w1097: a
+   * test leg's function, retry loop, settings copy and `rm -rf` of its own output folders). When that check is the reason
+   * it gives, the delete is the whole question (the rest of the command runs unasked in bypass mode), so the session answers
+   * it when every delete in the command is one of those (tempDeletesWithin). In any other mode, or for any other reason, a
+   * person is asked.
    */
-  private ownTempDelete(toolName: string, input: Record<string, unknown>): boolean {
+  private ownTempDelete(toolName: string, input: Record<string, unknown>, why?: string): boolean {
     if ((toolName !== 'Bash' && toolName !== 'PowerShell') || typeof input.command !== 'string' || !this.tempDir) return false;
     if (!/^ffa-/i.test(path.basename(this.tempDir))) return false;
-    return tempOnlyDelete(input.command, { tmp: this.tempDir }).ok;
+    const ctx = { tmp: this.tempDir };
+    if (tempOnlyDelete(input.command, ctx).ok) return true;
+    return this.info.permissionMode === 'bypassPermissions' && !!why && DANGEROUS_REMOVAL.test(why) && tempDeletesWithin(input.command, ctx).ok;
   }
 
-  private askPermission(toolName: string, input: Record<string, unknown>, signal: AbortSignal, blockedPath?: string): Promise<PermissionResult> {
-    if (this.ownTempDelete(toolName, input)) return Promise.resolve({ behavior: 'allow', updatedInput: input });
+  private askPermission(toolName: string, input: Record<string, unknown>, signal: AbortSignal, blockedPath?: string, decisionReason?: string): Promise<PermissionResult> {
+    if (this.ownTempDelete(toolName, input, decisionReason)) return Promise.resolve({ behavior: 'allow', updatedInput: input });
     const requestId = randomUUID();
-    const ev = this.store.append(this.info.id, { kind: 'permission', requestId, toolName, input });
+    // Claude Code's own reason for asking (w1097): what a person sees on the card, and what the prompt count groups by.
+    const reason = decisionReason ? decisionReason.slice(0, 600) : blockedPath ? `touches ${blockedPath}` : undefined;
+    const ev = this.store.append(this.info.id, { kind: 'permission', requestId, toolName, input, ...(reason ? { reason } : {}) });
     const p: PendingPermission = {
       requestId,
       toolName,
       input,
-      reason: blockedPath ? `touches ${blockedPath}` : undefined,
+      reason,
       createdAt: new Date().toISOString(),
     };
     this.update({ status: 'waiting_permission', pendingPermissions: [...this.info.pendingPermissions, p] });
