@@ -324,12 +324,13 @@ So **a poll or a wait is a timer, never a background shell loop or a sleep loop 
   `lessons/a-person-wait-is-declared-not-polled.md`, section "A wait on a machine is a harness timer, never a background
   loop (w1106)", says the same.
 
-### Moving a poll onto a timer
+### An example
 
-The step after this change's deploy, for w1070: cancel the background task (the Bash tool's task id), then
-`set_timer {title: "w1070 LothDesktop idle check", schedule: {every_minutes: 120}, until: <3 days from now>, note: "Run
-w1070-idlecheck.ps1 on lothdesktop. On IDLE: run w1070-grow.ps1 under the same rules, verify, report, cancel_timer this.
-Otherwise report the one line it printed."}` within lothsahn's job for w1070.
+A poll like w1070's (grow LothDesktop's V: once it is idle; done on 2026-10-12 before this change shipped) is set once,
+within the job of the person who asked for it, for its request: `set_timer {title: "LothDesktop idle check", schedule:
+{every_minutes: 120}, until: <3 days from now>, work_ids: ["w1070"], note: "Run w1070-idlecheck.ps1 on lothdesktop. On
+IDLE: run w1070-grow.ps1 under the same rules, verify, report, end with DONE: w1070 and cancel_timer this. Otherwise
+report the one line it printed."}`.
 
 ## Audit
 
