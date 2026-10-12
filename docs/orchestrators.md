@@ -252,7 +252,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 | `usage` | the Claude account (its email or label) | its meters are under 90% | 8 days |
 | `lock` | its name ("lab.lock"); `holder`: the request holding it; `until`: when to look again | the holder closes or reports, the nightly lab posts its next results (its run let go of the lock), or `until` passes | 1 day |
 | `time` | none; `until` | `until` passes | never |
-| `ci` | the pull request, "owner/repo#123" | none of its checks is still running (it says which failed: a failed, timed-out or cancelled run is finished too), or it merged or closed (`gh pr view`, at most every 2 minutes, w846; where GitHub refuses the checks, its head commit's Actions runs, w829). Checks it cannot read for 15 minutes clear it too, and its worker looks itself | 6 hours |
+| `ci` | the pull request, "owner/repo#123" | none of its checks is still running (it says which failed: a failed, timed-out or cancelled run is finished too), or it merged or closed (`gh pr view`, at most every 2 minutes, w846; where GitHub refuses the checks, its head commit's Actions runs, w829). Checks it cannot read for 15 minutes clear it too, and its worker looks itself | 6 hours: it clears, and its worker looks at the hung run (w1094) |
 | `pr` (w754) | the pull request, "owner/repo#123" | it MERGED (`gh pr view`, at most every 2 minutes). Closed without merging: it asks its requester. For "wait for #1291 to merge"; `ci` also clears when the checks finish unmerged, and a request closes later than its PR merges | 7 days |
 
 The stuck times are judgments (`shared/blockers.ts` `BLOCKER_STUCK_MS`): a CI run takes minutes to an hour; a lock held
@@ -338,8 +338,8 @@ days; a deploy is a person's call, and a week without one is worth their look.
      request blocks on it (`blocked_on` with `prs: ["ci:owner/repo#123"]`, a `ci` gate: its checks finishing, green or
      red, not its merge) instead of polling with `wake_me`. With its editor stopped and its work pushed its sandbox
      takes other work meanwhile ([machines.md](machines.md#placing-work), "it waits on CI"), and when the checks finish
-     the worker is resumed within a minute: its own cancelled check-in handed back, or, for a CI gate or one it set
-     itself with none to hand back, a new one saying why (`resumeGatedWorker`), with no dispatcher round trip. Measured
+     the worker that set the gate is resumed within a minute with why and what to do (`resumeGatedWorker`; its own
+     cancelled check-in folded in), with no dispatcher round trip. See "How the portal learns that CI finished" below. Measured
      before (2026-10-10): PR #1354's editmode run finished at 04:17:08Z and its worker, polling every 10 minutes,
      merged at 04:24:34Z, 7.4 minutes later; a 30-minute poll can sit up to 30. After: the checks are read every 2
      minutes (was 5), so a worker resumes about 4 minutes after its checks finish at worst (computed from the code: 2
@@ -349,9 +349,44 @@ days; a deploy is a person's call, and a week without one is worth their look.
      (`WorkItem.heldCheckIns`: worker, when it was due, its note). When the gates clear, `Orchestrators.unblock` hands
      each back to fire within a minute, its note prefixed with `wNNN is unblocked: <why>. This is your own check-in, which
      the block cancelled; carry on from it`, and the request goes `active` with no dispatcher round trip; the log says
-     `unblocked (handed back <worker>'s check-in, which resumes it now): …`. A worker that is gone, or a check-in that
-     cannot be armed, falls back to the dispatcher. Any other end of the block (a start, a message, a stall, a close)
-     drops the held check-ins with the gates (`Orchestrators.stamp`).
+     `unblocked (handed back <worker>'s check-in, which resumes it now): …`. The gate's owner gets its check-in folded
+     into its resume instead (w1094). A worker that is gone, or a check-in that cannot be armed, falls back to the
+     dispatcher. A gate a worker set cancels that worker's check-in only, not those of the request's other workers
+     (w1094). Any other end of the block while the request stays open (a start, a message, a stall, a question) hands the
+     held check-ins back too (`Orchestrators.stamp`, w1094); a close drops them.
+- **How the portal learns that CI finished** (w1094). It polls; no GitHub event reaches it.
+  1. *Reading.* The blocker watch (`server/blockerWatch.ts`) looks every minute, and at once when a gate is set. It reads
+     each `ci` gate's pull request at most every 2 minutes (`CI_EVERY_MS`), on the GitHub token of the person the first
+     waiting request is for (w868). On the portal, `statusCheckRollup` is refused (a fine-grained token), so it reads the
+     head commit's Actions runs, in FinalFactory and ff-factory alike; the merge state is the last resort (w829, w889).
+     Done means no run is still queued or in progress, whatever the conclusion; a skipped or neutral check is finished.
+     What it read is kept on the gate (`WorkBlocker.read`), and the ledger shows it: `Blocked on CI on …; last read: 1 of 3
+     workflow runs … still running (Portal VM scripts) (2 min ago)`.
+  2. *Whom it wakes.* The worker that set the gate with `blocked_on` (`gateSetter`), not the request's newest worker. If
+     that worker is gone, the newest worker that exists is resumed and told that the merge is its own now (`gateOwner`).
+     While its CI runs, the setter is still "with" its request (`isWith`): the release pass frees its sandbox as a CI wait.
+     It no longer stops the setter as "its request is with another worker now".
+  3. *Where it resumes.* In its own sandbox if that is free. Otherwise in the next one to free on its machine, ahead of new
+     work (`placeFor`, the claims). Meanwhile the request shows Queued: `a message to … waits for a sandbox on its
+     machine`.
+  4. *The sweep.* Each resume is recorded on the request (`WorkItem.gateResumes`) until the worker's transcript shows the
+     message. A worker with nothing pending for it 5 minutes later (`RESUME_SWEEP_MS`; no check-in waiting to fire, no
+     message waiting for a sandbox, no turn running) is resumed again. Each retry logs `ledger: SWEEP: …` as a warning and
+     adds a line to the request's log. After 3 tries the dispatcher is told. A request still Blocked on CI that finished
+     more than 5 minutes ago is logged as `blocker watch: SWEEP: …` too. One request that throws no longer ends the
+     watch's look for the others, and the first look after a restart no longer crashes (the journal at 03:01Z showed
+     `Cannot access 'usage' before initialization`).
+  5. *Timing.* The worst case is about 4 minutes from the last check finishing to the resume: 2 to read, 1 for the
+     watch, 1 for the check-in (computed from the code). Measured on w1073 (game PR #1526): the run finished at 04:50:24Z
+     and the gate cleared at 04:52:21Z (portal journal, 2026-10-12).
+  6. *Webhooks.* **Recommendation (a judgment): keep polling, do not add a GitHub webhook now.** A `check_suite` or
+     `workflow_run` webhook would bring the resume down from about 3 minutes to seconds. But it needs a webhook secret,
+     and an endpoint open to GitHub on the portal's Funnel URL ([portal-on-ffbox-host.md](portal-on-ffbox-host.md)). It
+     needs one hook per repo (an org admin's act), and polling would still have to stay for a delivery GitHub drops or a
+     portal that was down. In the cases looked at, polling cleared on time (w1073: 2 min). What was lost came after the
+     poll: the wrong worker was resumed (w1049), or a stale gate showed only the worker's own words (w1078). Revisit if
+     the reads come near GitHub's rate limit (5,000 calls an hour; 10 gates cost at most 900) or a 3-minute resume
+     proves too slow.
 - **Any other decision ends the block** (`decide_work` reject, done, merge): the capacity note and the gates belong to an open
   request only (`Orchestrators.stamp`).
 - **Workers between turns are Working** (w643's decision). A worker waiting for CI or a long run on a check-in it set,

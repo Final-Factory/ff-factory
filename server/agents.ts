@@ -14,7 +14,7 @@ import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { HOLD_PLACE_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
-import { BLOCKER_KIND_HELP, conflictText, gatesName, gatesOf, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_KIND_HELP, conflictText, gateSetter, gatesName, gatesOf, isWith, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork } from './vault.ts';
 import { githubTokens } from './githubTokens.ts';
 import { READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
@@ -621,7 +621,8 @@ export class Agents {
   workOver(i: SessionInfo): string | undefined {
     const items = [...this.store.work.values()].filter((w) => w.sessionIds.includes(i.id) && w.status !== 'merged');
     if (items.length && items.every((w) => !WORK_OPEN.includes(w.status))) return `its request${items.length > 1 ? 's are' : ' is'} closed (${items.map((w) => `${w.id} ${w.status}`).join(', ')})`;
-    if (items.length && items.every((w) => w.sessionIds.at(-1) !== i.id)) return `its request${items.length > 1 ? 's are' : ' is'} with another worker now (${items.map((w) => `${w.id}: ${w.sessionIds.at(-1)}`).join(', ')})`;
+    // A worker that set a gate its request still waits on is with it (w1094, shared/blockers.ts isWith).
+    if (items.length && items.every((w) => !isWith(w, i.id))) return `its request${items.length > 1 ? 's are' : ' is'} with another worker now (${items.map((w) => `${w.id}: ${w.sessionIds.at(-1)}`).join(', ')})`;
     return undefined;
   }
 
@@ -632,9 +633,10 @@ export class Agents {
    * ciReleaseWhy), and it is resumed when the checks finish (Orchestrators.unblock).
    */
   ciWait(i: SessionInfo): string | undefined {
-    const items = [...this.store.work.values()].filter((w) => w.sessionIds.at(-1) === i.id && WORK_OPEN.includes(w.status));
+    const items = [...this.store.work.values()].filter((w) => isWith(w, i.id) && WORK_OPEN.includes(w.status));
     if (!items.length || !items.every((w) => w.status === 'blocked' && w.blocked)) return undefined;
-    const ci = items.flatMap((w) => gatesOf(w).filter((g) => g.kind === 'ci').map((g) => `${w.id}: CI on ${g.ref}`));
+    // Its own CI wait or the dispatcher's, never another worker's on the same request (w1094).
+    const ci = items.flatMap((w) => gatesOf(w).filter((g) => g.kind === 'ci' && (!gateSetter(g) || gateSetter(g) === i.id)).map((g) => `${w.id}: CI on ${g.ref}`));
     return ci.length ? `it waits on CI (${ci.join(', ')})` : undefined;
   }
 
@@ -650,7 +652,7 @@ export class Agents {
    */
   waitOn(i: SessionInfo): string | undefined {
     if (this.ciWait(i)) return undefined;
-    const items = [...this.store.work.values()].filter((w) => w.sessionIds.at(-1) === i.id && WORK_OPEN.includes(w.status));
+    const items = [...this.store.work.values()].filter((w) => isWith(w, i.id) && WORK_OPEN.includes(w.status));
     if (!items.length) return undefined;
     // The worker's own declaration (waiting_on_person, which its next message ends) covers every request it is the latest
     // worker on (w890, found live: a worker started for w1 and then sent w2 is read as working on w2 only, so its

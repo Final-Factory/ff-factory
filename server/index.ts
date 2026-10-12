@@ -619,6 +619,7 @@ const blockerWatch = new BlockerWatch({
   usageClear: (account) => accountClear(account),
   nightlyAt: () => nightlyAt,
   room: () => agents.roomNow(),
+  queued: (id) => sessions.queued().some((q) => q.id === id),
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
 agents.blockerWatch = blockerWatch;
