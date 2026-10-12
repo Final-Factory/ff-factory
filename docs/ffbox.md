@@ -491,7 +491,15 @@ own `watch` block decides (`ffbox_activity show config` shows it). In a public t
   repo names and ffbox branches too (`withoutRepo`, w352; Lothsahn: a link "exposes which github we use. I would like that
   to remain private."). The `pr` field still carries the URL, for FFBox to follow the PR; FFBox's sender takes any link
   out of a public post as well (ffbox `public_text`);
-- **the merge notice** ("Fixed in PR #N, coming in <version>…", no link) and the thread filed away after it.
+- **the merge notice** ("Fixed in PR #N, coming in <version>…", no link) and the thread filed away after it. A fix
+  the ledger already knows shipped (its `version` is a release that carries it) reads "Fixed in PR #N, in build X and
+  later." (w1143). **A request closed as already fixed** reaches its thread only when the ledger learns that fix:
+  `resolveFixes` (server/intake.ts) reads the PR from the close (`fixedByPr`: write `RESOLVED: already fixed by PR #N`;
+  text in parentheses is an aside) and the release from the version bumps, for escalated threads, report claimants and,
+  since w1143, FFBox dev-request threads; the done `dev_update` then carries `mergedIn`, `version` and `pr`. Without
+  them FFBox sends the result to the operator by DM and the thread hears nothing (w1088's thread, 2026-10-12). FFBox's
+  startup line `w1143: N thread(s) closed as already fixed ... with no fixed notice` lists the threads that missed one;
+  a back-fill is ffwatch `FIXED_ASKED`, each PR's release measured (its merge inside that release's bump commit).
 
 Nothing else, and no "Waiting on input from a developer." anywhere on Discord, public or private (w352; Lothsahn: "Let's
 stop max from saying 'Waiting on input from a developer.' in discord"): a request held in the intake (`held`, w299) or
