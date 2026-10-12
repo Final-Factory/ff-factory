@@ -389,7 +389,7 @@ const server = http.createServer(async (req, res) => {
     const sbx: MachineSandbox = {
       id,
       branch: data.branch ?? `sandbox/${id}`,
-      base: data.base ?? 'origin/develop',
+      base: data.base ?? 'origin/master',
       path: `${root}/${id}`,
       purpose: data.purpose ?? 'unused',
       status: 'creating',

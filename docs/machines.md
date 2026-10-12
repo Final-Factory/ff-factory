@@ -85,7 +85,7 @@ before redeploying by hand.
   backup-before-discard rule for the user's own clone (2026-09-25: copy local changes to `ff-local-backups/` beside
   the clone before setting any aside) went with main-clone workers (w536): no agent works there now, and the main
   clone is a protected path for sandbox workers. Existing `ff-local-backups` folders stay, and the clean-up never
-  deletes them. Force pushes and pushes to the game repo's master/main stay refused. The daemon's own folder
+  deletes them. Force pushes and direct pushes to the game repo's master/main (and to its retired develop) stay refused; master takes a PR. The daemon's own folder
   (`~/.ff-factory`, or the machine's `app_dir`; it holds the token) is protected.
 - **Claude account.** Every run on a machine, a Mac's included, gets a vault token from the run person's pool (highest score
   first, the weekly headroom per hour to its reset, within the pool's caps; not one inside the dispatcher's reserve while
@@ -488,7 +488,7 @@ sandbox agents in all), `max_unity: 2`.
   the daemon has recorded it; the fetch, `git worktree add --no-checkout`, checkout and Library copy go on in the
   background (`list_sandboxes` shows the step), and `start_agent` can be called at once: the prompt waits until
   the sandbox is ready. The branch defaults to `sandbox/<name>` (`ffbox-f/<name>` when the dispatcher passes the `work_id` of a request that came from FFBox, docs/ffbox.md "How work leaves"); an existing local or remote branch is checked out
-  (tracking origin); never master, main or develop.
+  (tracking origin); never master, main or develop (retired, w1137).
 - A sandbox's label is its name (slot1..N on a worker root) and never changes (w575): there is no `set_sandbox_label`,
   and `create_sandbox` takes no label.
 - `delete_sandbox {sandbox: "lothdesktop/sb1", user_asked}`
@@ -767,7 +767,7 @@ LothDesktop and Beast, not just when BEAST is full").
     transcript; its process would otherwise keep its memory and its folder.
   - **Why 30 minutes.** It has to be well above what moving a worker costs when it comes back to a sandbox that went to
     other work: an editor stop, at most 30 s (the `unity` tool's stop, sourced); a fetch, 2.0 s, and a switch of the
-    85 files (28 scripts) a typical worker branch differs from develop by, under a second (measured on the M3 in
+    85 files (28 scripts) a typical worker branch differs from its base by, under a second (measured on the M3 in
     slot1 on 2026-10-07, `git fetch --dry-run` timed and `git diff --name-only`); a warm editor start to a live MCP
     bridge, 78-83 s on the real 22 GiB workspace (sourced: project memory `unitymcp-works-headless-in-a-container`,
     2026-09-11/12); and a recompile of what differs, at most the 37.08 s a full compile of all 2,145 items took on the
@@ -796,7 +796,7 @@ LothDesktop and Beast, not just when BEAST is full").
     repository, and a commit on its branch goes wherever the worker is placed again. A push that fails still leaves the
     commit in the machine's repository, and the next switch away pushes it. The save is refused, and the sandbox stays
     held with the reason in `list_sandboxes` ("its uncommitted work could not be saved: …", tried again after 10
-    minutes), when the worktree is not on the worker's branch, the branch is develop, master or main, an agent there
+    minutes), when the worktree is not on the worker's branch, the branch is master, main or develop, an agent there
     has a process, or the untracked files pass `SAVE_LIMITS`: more than 500 files, one over 10 MB, or 50 MB in all.
     GitHub refuses a file over 100 MiB and warns from 50 MiB ("About large files on GitHub"), and a worker's new
     scripts and `.meta` files are a few kB each; on the M3 on 2026-10-07 slot1 held 41,491 untracked files, about
@@ -809,7 +809,7 @@ LothDesktop and Beast, not just when BEAST is full").
     the pass runs every minute), not at once, so new work never starts over its files or on its branch.
   - **New work in a released sandbox** starts on its own branch. When the sandbox is still on the released worker's
     branch, `start_agent` (and a start from the dashboard) first stops its editor if it runs and switches it to a
-    fresh branch, `sandbox/<slot>-<request id>` (`ffbox-f/…` for FFBox work) from origin/develop, so the new worker
+    fresh branch, `sandbox/<slot>-<request id>` (`ffbox-f/…` for FFBox work) from origin/master, so the new worker
     never commits on the other's branch. That switch pushes any commits of the old branch no remote has first
     (`switch_branch`'s rule), and it frees the branch for checkout elsewhere (git allows a branch in one worktree only).
     The tool's answer says it was handed over.

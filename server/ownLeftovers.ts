@@ -16,7 +16,7 @@ import { hasLocalWork, neverDelete, norm, removeRenamed, touchedSince, within, t
  * - **Agent worktrees**: a linked worktree of the machine's clone that is no sandbox, has nothing uncommitted,
  *   untracked or unpushed, and was not used for days. Git's own record is pruned after.
  * - **Unity editors**: an installed version that no sandbox's or the main clone's ProjectVersion.txt names (nor the
- *   clone's origin/develop or origin/master, nor a Unity project under the home folder opened within a month) and that
+ *   clone's origin/master, nor a Unity project under the home folder opened within a month) and that
  *   no process runs.
  * - **Finished agents' temp folders** are the regular clean-up's `agent-temp` rule (server/cleanup.ts).
  *
@@ -323,7 +323,7 @@ export const projectVersionOf = (text: string) => /m_EditorVersion:\s*(\S+)/.exe
 
 /**
  * The Unity versions this machine still needs: each project's ProjectSettings/ProjectVersion.txt (the sandboxes, the
- * main clone), each clone's HEAD, origin/develop and origin/master (a bare clone has no working copy; the next
+ * main clone), each clone's HEAD, origin/master (a bare clone has no working copy; the next
  * version is kept too), and every Unity project up to three folders under `recentRoots` opened within `recentDays`
  * (a person's own project).
  */
@@ -337,7 +337,7 @@ export async function unityVersionsInUse(o: { projects: string[]; clones: string
   for (const p of o.projects) add(await fs.promises.readFile(path.join(p, 'ProjectSettings', 'ProjectVersion.txt'), 'utf8').catch(() => undefined));
   for (const c of o.clones) {
     if (!fs.existsSync(c)) continue;
-    for (const ref of ['HEAD', 'origin/develop', 'origin/master']) add(await git(c, ['show', `${ref}:ProjectSettings/ProjectVersion.txt`], 15_000).catch(() => undefined));
+    for (const ref of ['HEAD', 'origin/master']) add(await git(c, ['show', `${ref}:ProjectSettings/ProjectVersion.txt`], 15_000).catch(() => undefined));
   }
   const now = o.now ?? Date.now();
   const recent = (o.recentDays ?? OWN_LEFTOVER_DEFAULTS.recentProjectDays) * DAY;

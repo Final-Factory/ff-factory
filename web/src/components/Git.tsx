@@ -109,7 +109,7 @@ export function SwitchBranchModal({ target, name, git, onClose }: { target: Bran
         </label>
         <label className="field">
           <span>Create it from, if it is new</span>
-          <input className="input mono" value={from} onChange={(e) => setFrom(e.target.value)} placeholder="origin/develop" />
+          <input className="input mono" value={from} onChange={(e) => setFrom(e.target.value)} placeholder="origin/master" />
         </label>
         <p className="dim small">
           Unpushed commits on the current branch are pushed first. An existing branch is checked out (and fast-forwarded if it only lags origin); one that

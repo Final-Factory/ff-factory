@@ -11,11 +11,11 @@ function repos() {
   const origin = path.join(root, 'origin.git');
   const work = path.join(root, 'work');
   const git = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe' }).toString().trim();
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'develop', origin]);
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'master', origin]);
   execFileSync('git', ['clone', '-q', origin, work], { stdio: 'pipe' });
-  git(work, 'switch', '-q', '-c', 'develop');
+  git(work, 'switch', '-q', '-c', 'master');
   git(work, 'commit', '-q', '--allow-empty', '-m', 'base');
-  git(work, 'push', '-q', '-u', 'origin', 'develop');
+  git(work, 'push', '-q', '-u', 'origin', 'master');
   git(work, 'switch', '-q', '-c', 'sandbox/a');
   return { root, origin, work, git, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
@@ -29,7 +29,7 @@ test('switch: refuses uncommitted changes and names them', async (t) => {
   assert.equal(r.git(r.work, 'branch', '--show-current'), 'sandbox/a', 'nothing switched');
 });
 
-test('switch: pushes stranded commits, then creates the new branch from origin/develop', async (t) => {
+test('switch: pushes stranded commits, then creates the new branch from origin/master', async (t) => {
   const r = repos();
   t.after(r.cleanup);
   r.git(r.work, 'commit', '-q', '--allow-empty', '-m', 'work in progress');
@@ -37,7 +37,7 @@ test('switch: pushes stranded commits, then creates the new branch from origin/d
   const res = await switchBranch({ dir: r.work, branch: '098-belts' });
   assert.equal(res.from, 'sandbox/a');
   assert.equal(res.to, '098-belts');
-  assert.match(res.notes.join('; '), /pushed 1 unpushed commit\(s\) of sandbox\/a first; created 098-belts from origin\/develop; 1 untracked file\(s\) came along/);
+  assert.match(res.notes.join('; '), /pushed 1 unpushed commit\(s\) of sandbox\/a first; created 098-belts from origin\/master; 1 untracked file\(s\) came along/);
   assert.equal(r.git(r.origin, 'log', '-1', '--format=%s', 'sandbox/a'), 'work in progress', 'the commit is safe on origin');
   assert.equal(r.git(r.work, 'log', '-1', '--format=%s'), 'base');
 });
@@ -47,7 +47,7 @@ test('switch: tracks a branch that only exists on origin; fast-forwards a local 
   t.after(r.cleanup);
   const other = path.join(r.root, 'other');
   execFileSync('git', ['clone', '-q', r.origin, other], { stdio: 'pipe' });
-  r.git(other, 'switch', '-q', '-c', 'feature/x', 'origin/develop');
+  r.git(other, 'switch', '-q', '-c', 'feature/x', 'origin/master');
   r.git(other, 'commit', '-q', '--allow-empty', '-m', 'remote work');
   r.git(other, 'push', '-q', '-u', 'origin', 'feature/x');
   let res = await switchBranch({ dir: r.work, branch: 'feature/x' });
@@ -62,13 +62,13 @@ test('switch: tracks a branch that only exists on origin; fast-forwards a local 
   assert.equal(r.git(r.work, 'log', '-1', '--format=%s'), 'more remote work');
 });
 
-test('switch: develop with unpushed commits is left for a person; a branch in another worktree is explained', async (t) => {
+test('switch: master with unpushed commits is left for a person; a branch in another worktree is explained', async (t) => {
   const r = repos();
   t.after(r.cleanup);
-  r.git(r.work, 'switch', '-q', 'develop');
+  r.git(r.work, 'switch', '-q', 'master');
   r.git(r.work, 'commit', '-q', '--allow-empty', '-m', 'local only');
-  await assert.rejects(switchBranch({ dir: r.work, branch: 'sandbox/a' }), /develop has 1 commit\(s\) that are on no remote/);
-  r.git(r.work, 'reset', '-q', '--hard', 'origin/develop');
+  await assert.rejects(switchBranch({ dir: r.work, branch: 'sandbox/a' }), /master has 1 commit\(s\) that are on no remote/);
+  r.git(r.work, 'reset', '-q', '--hard', 'origin/master');
   const wt = path.join(r.root, 'wt');
   r.git(r.work, 'worktree', 'add', '-q', wt, 'sandbox/a');
   await assert.rejects(switchBranch({ dir: r.work, branch: 'sandbox/a', nameOf: () => 'sandbox sb2' }), /Branch sandbox\/a is checked out in another worktree \(sandbox sb2\)/);

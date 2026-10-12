@@ -608,7 +608,7 @@ test('nightly: a new regression is filed once, urgent when it shipped; later nig
   const first = intake.onNightly(night('2026-09-30', NSHA('a'), [fail('MP-slow-client-catchup', { release: shipped }), fail('S4-rejoin-dwell', { class: 'flaky', flakyNights: 2 })]))!;
   assert.deepEqual(first.map((r) => [r.scenario, r.action]), [['S4-rejoin-dwell', 'skipped'], ['MP-slow-client-catchup', 'filed']], 'flaky 2 nights is under the 3 that file it');
   const [w] = work();
-  assert.deepEqual([w.title, w.priority, w.status, w.approval?.state, w.approval?.why, w.triage?.class, w.source?.kind, w.requestedBy.userId], ['Nightly e2e: MP-slow-client-catchup fails on develop aaaaaaaaa (shipped in 0.50.0.53)', 'urgent', 'new', 'pending', 'auto-approve is off', 'regression', 'nightly', 'ben']);
+  assert.deepEqual([w.title, w.priority, w.status, w.approval?.state, w.approval?.why, w.triage?.class, w.source?.kind, w.requestedBy.userId], ['Nightly e2e: MP-slow-client-catchup fails on master aaaaaaaaa (shipped in 0.50.0.53)', 'urgent', 'new', 'pending', 'auto-approve is off', 'regression', 'nightly', 'ben']);
   assert.deepEqual(attention, [`pending ${w.id}`], 'the reviewers hear it needs approval');
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(heard(dispatcher().info.id, '[work request]').length, 0);
@@ -666,7 +666,7 @@ test('nightly: many at once become one batched request; flaky N nights running i
   const out = intake.onNightly(night('2026-09-30', NSHA('a'), ['A1-x', 'A2-y', 'A3-z'].map((s) => fail(s))))!;
   assert.deepEqual(new Set(out.map((r) => r.workId)).size, 1);
   const [batch] = work();
-  assert.equal(batch.title, 'Nightly e2e 2026-09-30: 3 regressions on develop aaaaaaaaa');
+  assert.equal(batch.title, 'Nightly e2e 2026-09-30: 3 regressions on master aaaaaaaaa');
   assert.deepEqual([batch.approval?.state, batch.approval?.by, batch.priority], ['approved', 'auto', 'high']);
   await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request]').length === 1);
   // A later night: one of them again goes to the batch.
@@ -831,7 +831,7 @@ test('desync PR policy: FFBox desync diagnoses and their PRs arrive approved, wi
   const worker = [...store.sessions.values()].find((s) => s.kind === 'worker')!;
   await until('the worker got its brief', () => store.readTranscript(worker.id).some((e) => e.kind === 'user'));
   const brief = (store.readTranscript(worker.id).find((e) => e.kind === 'user') as Extract<TranscriptEvent, { kind: 'user' }>).text;
-  for (const re of [/FFBox desync PR policy/, /Classify first/, /Class 1, report generation only/, /Class 2, a desync fix/, /2-peer built-player check/, /Class 3, capture during play/, /less than 1% of develop's value/, /PERF-ESCALATION: <one line>/, /Review FFBox's branch `ffbox\/minerbots-1` \(PR #901\)/]) assert.match(brief, re);
+  for (const re of [/FFBox desync PR policy/, /Classify first/, /Class 1, report generation only/, /Class 2, a desync fix/, /2-peer built-player check/, /Class 3, capture during play/, /less than 1% of master's value/, /PERF-ESCALATION: <one line>/, /Review FFBox's branch `ffbox\/minerbots-1` \(PR #901\)/]) assert.match(brief, re);
 
   // Switched off, a desync PR takes the usual triage again.
   cfg.intake = { ffbox: { enabled: true, desync: { enabled: false } } };
@@ -1515,7 +1515,7 @@ test('nightly run: every report is recorded on its night and its run request, a 
   assert.equal(intake.nightLabel('2026-10-11'), `2026-10-11, ${run.id}`);
   const [n] = intake.summary().nightly!.nights!;
   assert.deepEqual([n.status, n.counts?.passed, n.sha], ['passed', 134, NSHA('c')]);
-  assert.match(run.log.at(-1)!, /nightly: the night 2026-10-11 passed: 134 of 136 passed, 2 flaky \(lothdesktop, develop ccccccccc\)/);
+  assert.match(run.log.at(-1)!, /nightly: the night 2026-10-11 passed: 134 of 136 passed, 2 flaky \(lothdesktop, master ccccccccc\)/);
   clock.now = NY_0300_EDT + 9 * 3_600_000;
   intake.checkNightlyRun();
   assert.equal(heard(o.personalFor(LOTH).info.id, '[nightly]').length, 0, 'a delivered night raises no alarm');
@@ -1560,7 +1560,7 @@ test('nightly run: a broken night is one request to find its cause, not one per 
   assert.deepEqual(out.map((r) => [r.scenario, r.action]), [['night-broken', 'filed']]);
   const filed = work().filter((w) => w.source?.kind === 'nightly');
   assert.equal(filed.length, 1);
-  assert.match(filed[0].title, /^Nightly e2e 2026-10-09: the night broke on develop ddddddddd: 130 of 136/);
+  assert.match(filed[0].title, /^Nightly e2e 2026-10-09: the night broke on master ddddddddd: 130 of 136/);
   assert.match(filed[0].brief, /find whether the cause is in the game .* or in the lab/);
   assert.match(heard(o.personalFor(LOTH).info.id, '[nightly]')[0].text, /the night 2026-10-09 broke: 130 of 136 scenarios/);
   // The next broken night joins it.
@@ -1672,7 +1672,7 @@ const REVIEW_REPORT = [
 test('nightly merge review (w905): fires once at 06:00 New York time, for its person, on its machine, approved, listing the lab\'s open regressions', async (t) => {
   const { intake, clock, work, store, heard, dispatcher } = reviewClock(t);
   const now = new Date().toISOString();
-  store.putWork({ id: 'w50', title: 'Nightly e2e: SP-loot-panels-take-all fails on develop aaaaaaaaa', brief: 'x', priority: 'high', keys: ['nightly:sp-loot-panels-take-all'], requestedBy: BEN, requesters: [BEN], humanAsked: false, status: 'new', createdAt: now, updatedAt: now, sessionIds: [], overlaps: [], asks: 0, log: [], source: { kind: 'nightly', untrusted: false } });
+  store.putWork({ id: 'w50', title: 'Nightly e2e: SP-loot-panels-take-all fails on master aaaaaaaaa', brief: 'x', priority: 'high', keys: ['nightly:sp-loot-panels-take-all'], requestedBy: BEN, requesters: [BEN], humanAsked: false, status: 'new', createdAt: now, updatedAt: now, sessionIds: [], overlaps: [], asks: 0, log: [], source: { kind: 'nightly', untrusted: false } });
   clock.now = NY_0600_EDT - 60_000;
   intake.checkNightlyReview();
   clock.now = NY_0600_EDT + 60_000;
@@ -1707,7 +1707,7 @@ test('nightly merge review (w905): its worker\'s jobs are filed as the Sentry\'s
   assert.equal(a.delegation?.agentId, 'nightly-regression-sentry', 'billed and attributed as the Sentry\'s were (vault.ts NIGHTLY_SENTRY)');
   assert.equal(a.delegation?.auto, true);
   assert.equal(a.requestedBy.userId, 'lothsahn', 'vault.unattributed.nightly: "Yes, move the nightly jobs to me" (lothsahn, w1031)');
-  assert.match(a.constraints ?? '', /Merge your own pull request into develop once its verification is done and CI is green/);
+  assert.match(a.constraints ?? '', /Merge your own pull request into master once its verification is done and CI is green/);
   assert.match(a.constraints ?? '', /Suggested worker: opus, high effort/);
   assert.match(b.constraints ?? '', /Suggested worker: sonnet, high effort/);
   assert.match(a.brief, /^You are an Opus verifier for the nightly regression sentry/);
@@ -1717,13 +1717,13 @@ test('nightly merge review (w905): its worker\'s jobs are filed as the Sentry\'s
   assert.equal(work().filter((w) => w.delegation).length, 2);
   const [x] = intake.summary().nightly!.reviews!;
   assert.deepEqual([x.status, x.reviewedThrough, x.jobs], ['done', 'e'.repeat(40), [a.id, b.id]]);
-  assert.match(store.work.get(review.id)!.log.find((l) => l.includes('nightly review: filed'))!, new RegExp(`filed ${a.id}, ${b.id}; reviewed through develop eeeeeeeee`));
+  assert.match(store.work.get(review.id)!.log.find((l) => l.includes('nightly review: filed'))!, new RegExp(`filed ${a.id}, ${b.id}; reviewed through master eeeeeeeee`));
   // The next day's review starts after that commit.
   clock.now = NY_0600_EDT + 86_400_000 + 60_000;
   intake.checkNightlyReview();
   const next = work().find((w) => w.source?.kind === 'nightly-review' && w.id !== review.id)!;
   assert.equal(next.source?.nightlyReview?.since, 'e'.repeat(40));
-  assert.match(next.brief, /The last review got to develop `eeeeeeee/);
+  assert.match(next.brief, /The last review got to master `eeeeeeee/);
 });
 
 test('nightly merge review (w905): a review that ends without reviewing tells its person', (t) => {

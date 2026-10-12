@@ -70,7 +70,7 @@ Every standing agent gets Read, Glob, Grep, Skill, and Write/Edit **only inside 
 loads user settings (so the ff-agents / ff-discord plugin skills are available) but no MCP servers
 except its own. Permission mode is `bypassPermissions`, bounded by two `PreToolUse` hooks:
 
-1. `sandboxGuard`, the same one workers get: no push to the game repo's master/main, no force push,
+1. `sandboxGuard`, the same one workers get: no direct push to the game repo's master/main (or its retired develop), no force push,
    no remote branch deletion, no killing processes, no protected paths (the live checkout, this
    server's code and data).
 2. `standingGuard`: Write/Edit only in its own folder; shell commands must be on an allowlist
@@ -95,7 +95,7 @@ A standing agent asks for real work with `request_delegation(title, task)`. Sinc
 ordinary request in the work ledger ([orchestrators.md](orchestrators.md#requests-and-the-ledger)): it is filed for the
 agent's **owner** (`owner`, set to the person who created the agent; agents from before have none and use the system
 payer, config `systemPayer`, else the owner), with the task verbatim as its brief and a fixed constraints line
-(written by the agent; a PR into develop, never master or main, never pushed or force-pushed to develop, which its worker
+(written by the agent; a PR into master, the one trunk, never pushed or force-pushed to master directly, which its worker
 merges itself once verified and CI is green when it fixes a clear, demonstrated bug or only adds tests or verdicts, and
 leaves open for a person when it is a judgement call (w694); anything that spends money, publishes,
 changes a live setting, releases or deploys needs a person). The dispatcher gets it as a normal `[work request]`, with the agent and who
@@ -116,8 +116,8 @@ How a request is approved:
   timer of the intake ([intake.md](intake.md), "The nightly merge review"), which files its jobs through the same
   delegation path under the same agent id.
 - **The person-only gate** (`personOnlyReason`, server/schedule.ts): a request whose title or task asks to spend
-  money, publish or post outside, change a setting (app config, a Steam branch, secrets' homes), release or deploy,
-  or merge into master waits for a person whatever the rules say. It matches the request's words, so it errs towards
+  money, publish or post outside, change a setting (app config, a Steam branch, secrets' homes), release or deploy
+  waits for a person whatever the rules say. It matches the request's words, so it errs towards
   a click.
 - **A person**: the Approve button on the agent's page ("Approve: queue it") files it at once; it never needs a free
   slot. "Approve and start now", and "Start now" on an approved one, make its request urgent and tell the dispatcher

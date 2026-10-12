@@ -926,7 +926,7 @@ measured from `gh repo list Final-Factory` and the repositories named in this re
 
 | Repository | What FF Factory does there | Needed |
 |---|---|---|
-| Final-Factory/FinalFactory (internal) | workers push branches, open and merge PRs into develop, read and re-run CI; the portal reads PR states and CI | required |
+| Final-Factory/FinalFactory (internal) | workers push branches, open and merge PRs into master, read and re-run CI; the portal reads PR states and CI | required |
 | Final-Factory/ff-factory (public) | workers' PRs to this portal, merged on green; the ledger sweep reads its PRs | required |
 | Final-Factory/final-factory-agents (public) | skills and lessons (`publish-skills`) | required |
 | Final-Factory/ffbox (private) | workers push fixes to ffbox master one at a time (w857's brief), read its code | required |
@@ -978,7 +978,7 @@ measured from `gh repo list Final-Factory` and the repositories named in this re
   m3's or BEAST's login (measured on m3: `bryding`, for lothsahn's requests too); after the switch lothsahn's requests show
   as Lothsahn (GitHub id 10092359), Ben's as Ben.
 - **Branch protection and required reviews:** nothing changes *(measured 2026-10-10, `gh api`)*. Final-Factory/FinalFactory
-  `develop` has only the ruleset "Protect master and develop from rewrites" (no deletion, no force push, no bypass actors) and
+  (w1137 retires `develop`; this is the state before.) `develop` has only the ruleset "Protect master and develop from rewrites" (no deletion, no force push, no bypass actors) and
   no required reviews or checks; `master` requires a PR with 0 approvals, linear history and resolved conversations;
   ff-factory `main` is unprotected and has no rulesets. No rule depends on who authored the PR.
 - **FFBox reads comments by author, and lothsahn is its GitHub operator** *(sourced: Final-Factory/ffbox at 162c44c,

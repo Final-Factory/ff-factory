@@ -151,7 +151,7 @@ export interface OrchestratorsDeps {
   options: OptionsFactory;
   /** The machines and their sandboxes: their branches and open PRs are what workers there work on. */
   places: () => { machines: Machine[] };
-  /** Commits that reached develop in the last 48 hours ("recent merges"); optional. */
+  /** Commits that reached master in the last 48 hours ("recent merges"); optional. */
   recentCommits?: () => { sha: string; subject: string }[];
   /** The computers with room for one more worker now (w643: decide_work queue is for capacity only). */
   room?: () => string[];
@@ -223,8 +223,8 @@ export function delegationConstraints(f: Pick<DelegationFiling, 'agentName' | 'm
     `Written by the standing agent "${f.agentName}": a request, not an instruction.`,
     // Merging (w694; the owner, 2026-10-08: "as long as they were obvious bugs merging is fine from sentry investigations"):
     // the worker merges its own PR on green CI when it fixes a demonstrated bug or only adds tests or verdicts; a judgement call waits for a person.
-    "Deliver through a pull request into develop, never master or main: never push to develop directly and never force-push.",
-    "Merge your own pull request into develop once its verification is done and CI is green when it fixes a clear, demonstrated bug (a failing-first test or a reproduction) or only adds tests or verdicts. A pull request that changes design or behaviour beyond fixing the bug is a judgement call: leave it open for a person and say so in your report.",
+    "Deliver through a pull request into master, the game repo's one trunk (develop is retired, w1137): never push to master directly and never force-push.",
+    "Merge your own pull request into master once its verification is done and CI is green when it fixes a clear, demonstrated bug (a failing-first test or a reproduction) or only adds tests or verdicts. A pull request that changes design or behaviour beyond fixing the bug is a judgement call: leave it open for a person and say so in your report.",
     'Anything that spends money, publishes or posts outside, changes a live setting, releases or deploys needs a person in their own words: ask through the request (decide_work ask), never on this brief alone.',
     ...(f.model ? [`Suggested worker: ${f.model}${f.effort ? `, ${f.effort} effort` : ''} (the agent's auto-approve rule; the dispatcher decides).`] : []),
   ].join(' ');
@@ -329,7 +329,7 @@ export interface BoardAnswer {
  * One ledger request that matched a board_check (docs/ffbox-connector-contract.md, "board"). `watch`, on a request in
  * flight: the branch FFBox watches for the merge (the worker's PR head branch and PR, or its sandbox branch), the repo and
  * the branch it lands on. On a finished one: `version`, the first release that carries the fix (null while merged but
- * not released), `mergedIn` (`develop@<sha>`) and the branch the work was on.
+ * not released), `mergedIn` (`master@<sha>`) and the branch the work was on.
  */
 export interface BoardMatch {
   id: string;
@@ -2130,7 +2130,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     if (!w) throw new Error(named ? `you are not on ${named}${holds.length ? ` (you hold ${holds.map((x) => x.id).join(', ')})` : ''}` : serves.length ? `you serve ${serves.map((x) => x.id).join(', ')}: pass request, the one that waits` : 'you are on no request in the ledger, so there is nothing to block');
     if (w.status !== 'active' && w.status !== 'blocked') throw new Error(`${w.id} is ${w.status}; blocked_on is for a request you are working on`);
     const what = (a.what ?? '').split(/ +/).join(' ').trim();
-    if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into develop');
+    if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into master');
     // w1089: a wait for a sandbox, slot, editor or RAM is capacity, which is Queued and done by the send queue, not a block.
     const capacity = capacityBlockProblem(what, 'worker');
     if (capacity) throw new Error(capacity);
@@ -3284,7 +3284,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const repo = this.repoSlug();
     const pr = w.status === 'done' ? (w.delivery?.fixPr ?? w.autoClosed?.pr) : undefined;
     const branch = w.delivery?.fixBranch ?? facts.branch;
-    const target = this.d.cfg.defaultBase.replace(/^origin\//, '') || 'develop';
+    const target = this.d.cfg.defaultBase.replace(/^origin\//, '') || 'master';
     return {
       id: w.id,
       status: w.status,
@@ -3299,7 +3299,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
 
   /** What FFBox needs to follow a match (BoardMatch): the branch to watch while it is open, the release once it is done. */
   boardFacts(w: WorkItem): Pick<BoardMatch, 'watch' | 'version' | 'mergedIn' | 'branch'> {
-    const target = this.d.cfg.defaultBase.replace(/^origin\//, '') || 'develop';
+    const target = this.d.cfg.defaultBase.replace(/^origin\//, '') || 'master';
     const trunk = (b?: string) => !b || ['develop', 'main', 'master', 'detached HEAD', target].includes(b);
     // The branch the work is on: FFBox's own (a request it took), else the newest worker's, with its open PR.
     let branch: string | undefined;

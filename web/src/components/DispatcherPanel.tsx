@@ -396,7 +396,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
             </ToggleChip>
             <span className="dim small">
               new regressions, and scenarios flaky {n.flakyNights} nights running, from the lab's report; more than {n.batchOver} in a night become one request; at most {n.dailyCap} a day; auto-approve {n.autoApprove.enabled ? `on, ${n.autoApprove.maxPerDay} a day` : 'off'}
-              {n.last ? `; last report ${n.last.date} from ${n.last.lab} (develop ${n.last.sha.slice(0, 9)}): ${n.last.filed} filed, ${n.last.attached} added to open requests, ${n.last.skipped} skipped` : ''}
+              {n.last ? `; last report ${n.last.date} from ${n.last.lab} (master ${n.last.sha.slice(0, 9)}): ${n.last.filed} filed, ${n.last.attached} added to open requests, ${n.last.skipped} skipped` : ''}
             </span>
           </div>
         )}
@@ -444,7 +444,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
                 <span className="dim">
                   {x.counts ? `${x.counts.passed} of ${x.counts.ran} passed${x.counts.failed ? `, ${x.counts.failed} failed` : ''}${x.counts.flaky ? `, ${x.counts.flaky} flaky` : ''}` : ''}
                   {x.cause ? ` ${x.cause}` : ''}
-                  {x.sha ? ` (develop ${x.sha.slice(0, 9)})` : ''}
+                  {x.sha ? ` (master ${x.sha.slice(0, 9)})` : ''}
                   {x.workId ? ` run ${x.workId}` : ''}
                   {x.work?.length ? `; filed on ${x.work.join(', ')}` : ''}
                 </span>
@@ -534,7 +534,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
 function deliveryLine(w: WorkItem): string {
   const d = w.delivery;
   if (!d) return '';
-  return [d.fixCommit && `fix ${d.fixCommit.slice(0, 10)}`, d.landedAt && 'on develop', d.repliedAt && 'replied in Discord', d.closedAt && 'thread closed', d.releasedIn && `live in ${d.releasedIn}`, d.announcedBy && `follow-up ${d.announcedBy}`].filter(Boolean).join(' · ');
+  return [d.fixCommit && `fix ${d.fixCommit.slice(0, 10)}`, d.landedAt && 'on master', d.repliedAt && 'replied in Discord', d.closedAt && 'thread closed', d.releasedIn && `live in ${d.releasedIn}`, d.announcedBy && `follow-up ${d.announcedBy}`].filter(Boolean).join(' · ');
 }
 
 function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: WorkItem; live?: WorkLive; open: boolean; onToggle: () => void; now: number }) {

@@ -83,6 +83,7 @@ test('the evidence rule: the worker settles its own guesses; a person is asked f
   assert.match(MERGE_RULES, /Never stop at an open PR waiting for the user/);
   assert.match(MERGE_RULES, /Hold one only for exceptional risk or a concrete timing reason, and say in your report which it is and when it will merge/);
   assert.match(MERGE_RULES, /Verification still comes first/);
+  assert.match(MERGE_RULES, /master takes changes only through your pull request.*never a direct push/);
   assert.match(REPORT_LABELS, /Label each number and recommendation as measured, sourced or a guess/);
   assert.match(REPORT_LABELS, /what you saw yourself rather than what a title, a measurement table or a tool verdict implies/);
   assert.match(REPORT_LABELS, /an orchestrator relays only the start of a long report/);
@@ -101,6 +102,14 @@ test("every worker's brief carries it: a sandbox on a machine (w510: the portal 
     assert.ok(brief.indexOf(EVIDENCE_RULES) < brief.indexOf('## Reporting'), `${name}: the rule comes before Reporting`);
     assert.equal(brief.split('## Evidence before you act').length, 2, `${name}: once`);
     assert.ok(brief.includes(MERGE_RULES), `${name}: merge your own pull request`);
+    // w1137: master is the game repo's one trunk, reached by a PR the worker merges; develop is retired.
+    assert.match(brief, /`master` is the game repo's one trunk \(develop is retired, w1137\)/, `${name}: master is the trunk`);
+    assert.match(brief, /git fetch origin && git merge origin\/master/, `${name}: merge origin/master, never rebase a pushed branch`);
+    assert.match(brief, /gh pr create --base master.*gh pr merge <n> --merge/, `${name}: open a PR into master, merge it`);
+    assert.match(brief, /gh pr edit <n> --base master/, `${name}: retarget a develop-based PR`);
+    assert.match(brief, /FeatureToggles\.cs/, `${name}: unfinished work goes behind a feature toggle`);
+    assert.match(brief, /Never push to or open PRs into develop/, `${name}: develop is off-limits`);
+    assert.ok(!/origin\/develop|HEAD:develop|rebase origin/.test(brief), `${name}: no develop flow left`);
   }
 });
 

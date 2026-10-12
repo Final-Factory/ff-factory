@@ -239,7 +239,7 @@ export const AUTO_BY_DEFAULT: readonly string[] = ['nightly-regression-sentry'];
 /**
  * What only a person may approve, whatever an agent's auto-approve rules say (w527; the evidence gate's list in
  * docs/orchestrators.md): spending money, publishing or posting outside, changing a live setting, releasing or
- * deploying, and anything on master. Matched on the request's own words, so it errs towards asking: a request that
+ * deploying (w1137: not "anything on master" any more: master is the one trunk, and a PR into it is the normal flow). Matched on the request's own words, so it errs towards asking: a request that
  * only mentions one of these waits for a click, which is the safe side. Returns what it found, or undefined.
  */
 const PERSON_ONLY: readonly [RegExp, string][] = [
@@ -247,7 +247,6 @@ const PERSON_ONLY: readonly [RegExp, string][] = [
   [/\b(?:publish(?:es|ing)?|republish|announce|patch notes|post (?:it |this |them |a \w+ )?(?:to|in|on) (?:discord|steam|reddit|twitter|x|bluesky|the forum)|tweet)\b/i, 'publishes or posts outside'],
   [/\b(?:set_app_config|request_app_update|app (?:config|settings)|change (?:the )?(?:portal|app|steam|github|discord|server|live) (?:config|settings?)|steam branch|set ?live|default branch|branch protection|api key|token vault)\b/i, 'changes a setting'],
   [/\b(?:ci-release|cut (?:a |the )?release|(?:make|do|start|ship|trigger) (?:a |the )?(?:new )?release|bump (?:the )?version|deploy(?:s|ing|ment)?|upload (?:a |the )?build|steam ?upload|mp-beta-deploy)\b/i, 'releases or deploys'],
-  [/\b(?:merge|push|land|pr|pull request)\b[^.\n]{0,40}?\b(?:in)?to\s+(?:master|main)\b/i, 'touches master'],
 ];
 
 export function personOnlyReason(text: string): string | undefined {

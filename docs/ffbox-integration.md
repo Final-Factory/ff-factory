@@ -155,11 +155,10 @@ this subsection and in section 6 are in that repo.
     per pair (README.md, `ffmode2`).
   - A class can boot a headless editor over MCP (`unity_mcp.enabled`, off by default).
 - **CI and releases** run on the same box, through ephemeral org runners labelled
-  `ffgithubrunners` (`runners/README.md`). A push to `develop` or `master` that bumps the version
-  builds, checks and uploads both apps to Steam. A `develop` release's main app is set live on
-  `development` and a `master` release's on `pre-release` (`scripts/release_lane.py` `SETLIVE`;
-  the game repo's `scripts/release-status.py` checks it). Ben or Lothsahn move the default
-  (public) branch by hand.
+  `ffgithubrunners` (`runners/README.md`). A version bump merged into `master` (the game repo's one trunk; `develop` is
+  retired, w1137) builds, checks and uploads both apps to Steam and sets the main app live on
+  `development` (`scripts/release_lane.py` `SETLIVE`; the game repo's `scripts/release-status.py`
+  checks it). Nothing sets `pre-release` or the default (public) branch: Ben or Lothsahn move those by hand.
 - **`ffintake`**: section 6.
 
 ### Where they differ, and why it matters here
@@ -169,7 +168,7 @@ this subsection and in section 6 are in that repo.
 | Who runs the model process | the portal's host, or a Mac daemon, as the logged-in user | only inside a throwaway container; never on the host |
 | What decides an agent's tools, env and prompt | the portal (`LaunchSpec`) | FFBox's fixed code, per class |
 | Session shape | long-lived and interactive; message it mid-turn, interrupt, approve tools | one prompt per container turn; follow-ups are new turns |
-| How work leaves | workers push, including to `develop` | the host pushes an `ffbox/*` branch and opens a PR; nothing merges |
+| How work leaves | workers open PRs into `master` and merge them | the host pushes an `ffbox/*` branch and opens a PR; nothing merges |
 | Isolation | a guard hook (a seatbelt) | container, network fence, no credentials inside |
 | Unity | real editors on a GPU, screenshots, play | batchmode, software GL, Linux player pairs |
 | Who connects to whom | Macs dial out to the portal; the portal ssh-deploys them | nothing dials in, except `ffintake`, which takes uploads from anyone |
@@ -291,7 +290,7 @@ It can:
 
 - read, change and commit code, published as a PR;
 - run the EditMode suite;
-- reproduce play-mode behaviour with software GL, on `develop`-based workspaces;
+- reproduce play-mode behaviour with software GL, on `master`-based workspaces;
 - run two-peer determinism pairs;
 - do reviews, specs and docs;
 - diagnose desync and crash reports;
@@ -301,7 +300,7 @@ It cannot:
 
 - judge anything by pixels or timing: shaders, VFX, UI screenshots, performance;
 - run the three-machine rig, Steam builds on real machines, Mac work or the live co-op game;
-- push straight to `develop`. FFBox work lands as a PR, and someone reviews and merges it.
+- push straight to `master`. FFBox work lands as a PR, and someone reviews and merges it.
 
 ## 3. Security boundaries
 
@@ -451,7 +450,7 @@ A list in FF Factory's state, beside sandboxes and standing agents:
   on GLM-5.3 Flash, claims only simple items.
 - **Loth's agents outside FF Factory** reach the board through `/mcp` with a user-bound key
   (section 7). Doing so needs no conversation with Ben.
-- **Overlapping PRs are flagged.** A background job reads the open PRs against `develop` and flags
+- **Overlapping PRs are flagged.** A background job reads the open PRs against `master` and flags
   items whose PRs touch the same files. Both sessions get a message, so a clash surfaces before
   review, not after merge.
 - Spec numbers keep their git-based claim in `specs/STATUS.md` in the game repo, and the board
@@ -506,7 +505,7 @@ exactly one investigation, routed to FFBox's fenced class and claimed on the boa
   across sessions yet. That is the gap below.
 - **Diagnosis.** `ffwatch diagnose <report> --by <login>` opens one conversation per report, keyed
   `intake:<report id>`, with the group's partner reports attached. It runs in `ffdiagnose` on
-  `develop`. The brief (`scripts/intake/desync.md`) has the agent reproduce the desync with
+  `master`. The brief (`scripts/intake/desync.md`) has the agent reproduce the desync with
   `ffmode2`, fix it and verify it. The verdict is `NEEDS-INFO` when the report is not enough, in
   which case the PR only makes the next report collect more. It is `ESCALATE` when a fix needs
   three peers, in which case it writes a handoff. `/intake` then tracks the PR through
@@ -616,7 +615,7 @@ Each layer bounds the next:
 | rate | at most 3 new automatic investigations an hour and 20 a day (Ben, 2026-09-27) |
 | money | automatic investigations carry the system payer (config `systemPayer`, Ben) as `requestedBy`, so FFBox bills Ben's second Claude account, whose token Ben gives Lothsahn directly (section 7); plus FFBox's `max_budget_usd` per turn and its subscription holds |
 | **storm breaker** | more than 5 new signatures in an hour, or one version's reports at more than 5 times its daily average: automatic starts stop, both people get one notice, and the queue waits ranked by distinct senders, then newest build. Starts resume when the rate falls back, or when a person says so |
-| ordering | the newest `develop` build first; builds older than a known fix last |
+| ordering | the newest `master` build first; builds older than a known fix last |
 
 A desync storm from one bug in one build becomes one item and one investigation. Fifty different
 forks in an hour trips the breaker after five, and both people get one notice.

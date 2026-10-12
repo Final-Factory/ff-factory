@@ -11,7 +11,7 @@
     "basePath": "C:/ffsb/_base",
     "referenceRepo": "C:/path/to/your/existing/clone"
   },
-  "defaultBase": "origin/develop",
+  "defaultBase": "origin/master",
   "unity": {
     "mcpServer": {
       "command": "uvx",

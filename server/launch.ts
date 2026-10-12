@@ -103,7 +103,7 @@ export const CATALOG = {
     prs: z.array(z.string().max(200)).max(6).optional().describe('Pull requests that must MERGE first: "owner/repo#123" or the github.com link.'),
     head: z.string().max(64).optional().describe('With a ci: pull request (w907): the commit you just pushed (git rev-parse HEAD). FF Factory refuses the wait when the pull request\'s head is another commit (your push did not land) or the pull request conflicts with its base (CI cannot run).'),
     deploys: z.array(z.string().max(40)).max(2).optional().describe('Deploys that must happen first (w890): "portal" for a portal deploy, or a machine id for that machine\'s daemon update. It clears when a different commit runs there; you are resumed then, in any free sandbox, for the check that comes after it.'),
-    what: z.string().min(1).max(200).describe('What you wait for, in a line ("w727 PR #1291 and w752 fix merged into develop").'),
+    what: z.string().min(1).max(200).describe('What you wait for, in a line ("w727 PR #1291 and w752 fix merged into master").'),
     request: z.string().max(16).optional().describe('The request ("w750") that waits, when you serve several; default: the one you are on.'),
   },
   /** docs/orchestrators.md, "Waiting, Queued, Blocked" (w691): the worker says only a person can move it on. */
@@ -118,7 +118,7 @@ export const CATALOG = {
   },
   switch_branch: {
     branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),
-    create_from: z.string().optional().describe('Base for a branch that exists neither here nor on origin. Default origin/develop.'),
+    create_from: z.string().optional().describe('Base for a branch that exists neither here nor on origin. Default origin/master.'),
   },
   /** docs/review.md. On a machine the daemon sends the files itself: the portal gives the plan, the daemon uploads. */
   publish_review: {

@@ -296,7 +296,7 @@ export function devFacts(
   return out;
 }
 
-/** An update in a few words, for the dev_requests view: "open, watching fix/x PR #12", "done, develop@abc1234, 0.50.0.70". */
+/** An update in a few words, for the dev_requests view: "open, watching fix/x PR #12", "done, master@abc1234, 0.50.0.70". */
 const updateWords = (u: DevUpdate) =>
   u.status === 'open'
     ? `open${u.watch ? `, watching ${u.watch.branch}${u.watch.pr ? ` PR #${u.watch.pr}` : ''}` : ''}`

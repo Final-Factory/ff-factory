@@ -435,7 +435,7 @@ The guest install masks `tmp.mount`, systemd's documented way back to the disk; 
 | `fff-health.timer` (30 s) | the unit watchdog (2.4a): restarts any critical unit that is failed or stopped; then `/api/health` from inside, 4 failures in a row after a 2-minute start grace restart the portal; verifies a fresh update (3) | the restart half of `supervise.ps1`, plus a hung-server check BEAST does not have |
 | `fff-update.path` → `.service` | starts the updater when `data/update.wanted` appears | `supervise.ps1`'s update step |
 | `fff-backup.timer` (11:15 UTC) | the encrypted backup (2.2) | none (new) |
-| `fff-base-refresh.timer` (15 min) | fetches the base clone and moves its detached HEAD to `origin/develop` when nothing there is modified | change 11, on the VM's side |
+| `fff-base-refresh.timer` (15 min) | fetches the base clone and moves its detached HEAD to `origin/master` when nothing there is modified | change 11, on the VM's side |
 | `fff-guest-firewall.service` | the `inet fff_guest` table (1.4, rule 5) | |
 
 ### 2.4a Every critical unit starts at boot, and a failed one is restarted (w698)

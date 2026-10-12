@@ -33,7 +33,7 @@ export async function until(what: string, cond: () => boolean, ms = 60_000, step
 export interface TestRepos {
   root: string;
   origin: string;
-  /** The machine's main clone, on develop, with a warm Library it never commits. */
+  /** The machine's main clone, on master, with a warm Library it never commits. */
   main: string;
   /** Where its sandboxes go. */
   sbRoot: string;
@@ -50,21 +50,21 @@ function repoTemplate(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-template-'));
   const origin = path.join(root, 'origin.git');
   const main = path.join(root, 'FinalFactory');
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'develop', origin], { windowsHide: true });
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'master', origin], { windowsHide: true });
   execFileSync('git', ['clone', '-q', origin, main], { stdio: 'pipe', windowsHide: true });
-  gitIn(main, 'switch', '-q', '-c', 'develop');
+  gitIn(main, 'switch', '-q', '-c', 'master');
   fs.writeFileSync(path.join(main, '.gitignore'), 'Library/\nLogs/\nTemp/\n');
   fs.writeFileSync(path.join(main, 'README.md'), 'game\n');
   gitIn(main, 'add', '.gitignore', 'README.md');
   gitIn(main, 'commit', '-q', '-m', 'base');
-  gitIn(main, 'push', '-q', '-u', 'origin', 'develop');
+  gitIn(main, 'push', '-q', '-u', 'origin', 'master');
   fs.mkdirSync(path.join(main, 'Library', 'Artifacts'), { recursive: true });
   fs.writeFileSync(path.join(main, 'Library', 'Artifacts', 'warm.bin'), 'imported');
   process.on('exit', () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
   return (template = root);
 }
 
-/** A bare origin and the machine's main clone of it (on develop), with a warm Library the clone never commits. */
+/** A bare origin and the machine's main clone of it (on master), with a warm Library the clone never commits. */
 export function testRepos(prefix = 'ff-msb-', parent = os.tmpdir()): TestRepos {
   fs.mkdirSync(parent, { recursive: true });
   const from = repoTemplate();
@@ -154,7 +154,7 @@ const NO_CLEANUP = { everyMinutes: 0, softFreeGB: 0 };
 export interface TestMachineOptions {
   /** Machine id (default "pc"). */
   id?: string;
-  /** Sandboxes made before the daemon starts (ready, from origin/develop, on sandbox/<name> unless given), with their labels. */
+  /** Sandboxes made before the daemon starts (ready, from origin/master, on sandbox/<name> unless given), with their labels. */
   sandboxes?: (string | { name: string; branch?: string })[];
   /** The portal's address when it already serves /machine (the e2e server); else the machine gets a stand-in portal of its own. */
   portalUrl?: string;
@@ -213,7 +213,7 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
   const wanted = (o.sandboxes ?? []).map((s): { name: string; branch?: string } => (typeof s === 'string' ? { name: s } : s));
   // The daemon's own pool code makes them, into the state file the daemon reads when it starts.
   const pool = new SandboxPool({ repoPath: repos.main, stateFile: path.join(appDir, 'sandboxes.json'), settings, activity: () => ({ busy: false, lastActivityMs: 0 }), onChange: () => undefined, onEvent: () => undefined, idleStopMinutes: 0 }, poolDeps);
-  for (const s of wanted) await pool.create({ id: s.name, branch: s.branch ?? `sandbox/${s.name}`, base: 'origin/develop', seedLibrary: false, startUnity: false });
+  for (const s of wanted) await pool.create({ id: s.name, branch: s.branch ?? `sandbox/${s.name}`, base: 'origin/master', seedLibrary: false, startUnity: false });
   await until('the test machine sandboxes', () => {
     const bad = pool.list().find((s) => s.status === 'error');
     if (bad) throw new Error(`test sandbox ${bad.id} failed: ${bad.statusDetail}`);

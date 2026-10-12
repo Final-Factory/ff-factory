@@ -35,7 +35,7 @@ threads by default, and the ledger check both ways (provider protocol 2) is buil
 | a `request` FFBox's connector files (review, escalation, an operator's dev work) | "FFBox …: <title>" | the operator, else the system payer | the same |
 | a finished FFBox diagnosis of a player's desync or crash report (`POST /api/intake/ffbox`, `source: "intake"`) | "FFBox diagnosis (root cause …): <title>", or joined to the request it exactly matches | the system payer | the [desync PR policy](#ffbox-desync-prs) for a desync with a PR or a found cause, else the w299 triage ([below](#intake-diagnoses-from-ffbox)) |
 | a release (a `bundleVersion` bump on the base branch) that carries landed fixes with threads | "Tell reporters their fixes are live in 0.50.0.X" | the system payer | follow-up |
-| the nightly e2e lab's report: a new regression, a scenario still failing, or one flaky `flakyNights` nights running | "Nightly e2e: <scenario> fails on develop <sha>" | the system payer | regression |
+| the nightly e2e lab's report: a new regression, a scenario still failing, or one flaky `flakyNights` nights running | "Nightly e2e: <scenario> fails on master <sha>" | the system payer | regression |
 
 Code: `server/intake.ts` (`IntakeManager`: the polls and hooks), `server/intakeRules.ts` (the rules, pure),
 `Orchestrators.fileIntake` in `server/orchestrators.ts` (filing, duplicates, approval).
@@ -65,7 +65,7 @@ been fixed' comments, and the FFBox harness is designed to see merged PRs and re
 - **The ledger check links the thread to the work** (w55, protocol 2, below). When FFBox's check for a thread finds
   a ledger request in flight, FFBox starts no turn and sets the request's branch and PR (`watch`) on its conversation,
   so its merge watcher announces that PR's merge on the thread; a request already done gets FFBox's merged notice with
-  the release version. A worker that lands on develop without a PR is covered by the answer FF Factory pushes when the
+  the release version. A worker whose fix lands on master is covered by the answer FF Factory pushes when the
   request turns done.
 
 **This differs from Ben's w39 framing** (the intake as the one route for #bug-reports, with FF Factory's human-approval
@@ -164,11 +164,11 @@ sure you remember how to do this." It holds until he changes it; config can swit
   the class and the reason in its first report and the PR:
   1. **Report generation only** (runs only while a desync report is written or uploaded, no effect on play): the tests
      that show it is safe, then merge.
-  2. **A desync fix in the game code**: a test that fails on develop and passes with the fix, and a 2-peer built-player
-     check that reproduces the fork (red on develop, green with the fix), then merge.
+  2. **A desync fix in the game code**: a test that fails on master and passes with the fix, and a 2-peer built-player
+     check that reproduces the fork (red on master, green with the fix), then merge.
   3. **Capture during play** (the simulation hash or fingerprint, the census, per-heartbeat or per-frame capture,
      anything that costs time while playing): tick time (heartbeat main-thread mean and p95) and frame time (heartbeat
-     frame wall median) on the biggest save, develop against the branch, interleaved runs, at least 3 of each, the method
+     frame wall median) on the biggest save, master against the branch, interleaved runs, at least 3 of each, the method
      stated. Under 1% on each number and resolved above the noise: validate as 1 or 2, record the numbers, merge.
      Otherwise the PR stays open and the worker ends with `PERF-ESCALATION: PR #<n>: <change>; tick a -> b ms (+x%),
      frame c -> d ms (+y%) on <save>`.
@@ -218,7 +218,7 @@ request whose linked pull requests merged.
   so a report cannot make itself look like work in flight.
 - A bug report that strongly repeats an **open** bug report is merged into it, and its thread is added to that one's
   `alsoThreads`, so the fix's reply and the release follow-up reach both reporters. A worker already on it is told.
-- A strong overlap with finished work is listed on the request; the worker checks origin/develop first and ends with
+- A strong overlap with finished work is listed on the request; the worker checks origin/master first and ends with
   `RESOLVED: already fixed` when it is.
 
 ## Injection resistance
@@ -437,7 +437,7 @@ ledger request, or a line on the request already fixing it.
   on `/mcp`, so a leaked lab key can file nightly requests and nothing else. The lab keeps the URL and key in a local file
   (`~/.config/ffnightly/ffactory.json`), never in git. A failed post never fails the night: the report says it was not
   filed, and the #dev-chat post still goes out.
-- **The report** (`server/nightlyRules.ts` `parseNightlyReport`, version 1): the night, the lab, the develop commit,
+- **The report** (`server/nightlyRules.ts` `parseNightlyReport`, version 1): the night, the lab, the master commit,
   the release that contains it, where the report file is, and one result per failing or flaky scenario with its class
   (`new`, `still`, `flaky`), the oracle's step and reason, the last green and first red nights, the GitHub compare link,
   the regression-ledger entries that name the scenario, the evidence folder, desync reports, a repro line and whether the
@@ -453,7 +453,7 @@ ledger request, or a line on the request already fixing it.
      broke again), so it is filed afresh with the done one listed as an overlap.
   More to file in one night than `intake.nightly.batchOver` (default 4) become **one request for the night**, keyed by
   every scenario: many at once usually share a cause (a broken build, the lab).
-- **The request.** Title `Nightly e2e: <scenario> fails on develop <sha9>` (`… (shipped in 0.50.0.53)` when it did);
+- **The request.** Title `Nightly e2e: <scenario> fails on master <sha9>` (`… (shipped in 0.50.0.53)` when it did);
   priority **urgent when the failing code is in a release, high otherwise**; triage `regression`; billed to the system
   payer. The brief carries the commit tested, the scenario and its file, the oracle's verdict, the last green and first
   red nights and the compare link, the release line, the regression-ledger entries, the evidence folder on the lab, the
@@ -461,8 +461,7 @@ ledger request, or a line on the request already fixing it.
   "determinism-critical: start its worker on Opus". The worker rules (`workerRules`) repeat the method, forbid hiding a
   regression (a loosened oracle, an allowlist line, a quarantine: Ben's call), require the scenario red before and green
   after, and end with the usual markers.
-- **Shipped or not** comes from the lab, which has the clone: a release is a commit on `origin/develop` or
-  `origin/master` that changes `bundleVersion` (ff-agents `ci-release`: the version bump is the release). `yes` when a
+- **Shipped or not** comes from the lab, which has the clone: a release is a commit on `origin/master` that changes `bundleVersion` (ff-agents `ci-release`: the version bump is the release). `yes` when a
   release contains the first failing night's commit, `maybe` when a release lies between the last green and the first
   red night (bisect to tell; high, not urgent), `no` otherwise, with the newest release named. The night's report.md says
   the same for the commit it tested.
@@ -501,12 +500,12 @@ shouldn't assume silence means a successful (or failed) run." The Windows tasks 
 ightly?"): the game repo decides (`nightly_root.sh ff_nightly_mode`: `FF_NIGHTLY_MODE`, else `lab.win.json`
   `runIn`). `lab` is the old way: the lab root `FF_NIGHTLY_ROOT` (`<install>/nightly`) with its own clone, Library,
   `builds/` and the `slotnightly-0/1` player folders. `sandbox` is a regular job: the worker's own sandbox, fast-forwarded
-  on its throwaway branch to origin/develop (nothing pushed; `start` refuses a branch with commits of its own, tracked
+  on its throwaway branch to origin/master (nothing pushed; `start` refuses a branch with commits of its own, tracked
   changes or an open editor), built from its own tree and Library into `Builds/cache` through the machine's Unity slot
   queue, played from its own `slotK-0/1`; only the state, logs, runs, reports and lab fixtures go to
   `<install>/nightly-history/`, which the clean-up passes trim like the lab (`installLeftovers.ts`, `staleOutput.ts`
   `defaultNightlyRoots`). The cost of a per-sandbox build cache: a rerun of a night in another sandbox builds again, and a
-  sandbox whose Library is far from develop takes longer to build than the lab's always-warm one.
+  sandbox whose Library is far from master takes longer to build than the lab's always-warm one.
 - **Room and waits** (w1099): `start` prints the machine's RAM in use and Unity slots and how long after the fire it starts
   (the portal gives the worker `FF_NIGHTLY_FIRED_AT`, `IntakeManager.nightlyRunEnv`); the build waits in the Unity slot
   queue (which also waits while RAM is high) and the battery waits up to 30 minutes for RAM below 85%; `check` prints
@@ -565,7 +564,7 @@ Sentry, a standing agent (`nightly-regression-sentry`, cron 0 3 on LothDesktop, 
   writes the day's regression checks). It reads the night's report from where
   `nightly_worker.sh where <date>` says, in either mode.
 - **The worker** follows the game repo's `scripts/nightly/merge-review.md` (the Sentry's charter, its two duties, the
-  brief templates and the risk ranking, carried over) and reviews the merges to develop after the last review's
+  brief templates and the risk ranking, carried over) and reviews the merges to master after the last review's
   `REVIEWED-THROUGH` commit (kept in `intake.json` `reviews`, given in the next brief; the Sentry kept it in its folder's
   notes). Its brief lists the nightly lab's open regression requests, the de-dupe against the lab's own filing
   (`intake.nightly.enabled`). It runs nothing and opens no PR: it ends its final message with one `NIGHTLY-JOB:` block per
@@ -573,7 +572,7 @@ Sentry, a standing agent (`nightly-regression-sentry`, cron 0 3 on LothDesktop, 
   `RESOLVED: nightly review <date>: ...`.
 - **The jobs** (`onNightlyWorkerTurn`, from `server/agents.ts` `onWorkerTurnEnd` for a worker serving the review, by link
   or title) are filed exactly as the Sentry's delegations were (`Orchestrators.fileDelegation`): the brief verbatim, the
-  delegation constraints (deliver by PR into develop, merge your own PR on green when it fixes a demonstrated bug or only
+  delegation constraints (deliver by PR into master, merge your own PR on green when it fixes a demonstrated bug or only
   adds tests or verdicts, a person for anything that spends, publishes or deploys, the suggested model), auto-approved,
   placed by the dispatcher on any machine, and billed as the Sentry's were (`agentId` `nightly-regression-sentry`, so
   `vault.unattributed.nightly`, lothsahn since w1031: "Yes, move the nightly jobs to me"; it was ben). The same title within two days is the same job, so a resent block
@@ -603,8 +602,8 @@ FFBox's `fff.board_check` switch; submitting work (phase 3) is not built there y
   contents claim nothing: w312, a fetch request, held "done" for the ten reports its brief listed. Every start drops
   such report keys from people's requests (thread keys of old requests stay: most were a fix's own thread) (`Orchestrators.detachBorrowedSubjects`; backup `data/ledger-detach-<time>.json`,
   a log line on each request). A match in flight carries
-  `watch` (the worker's PR head branch and PR, or its sandbox branch, the repo and `develop`); a done one `version`
-  (the release that carries it, or null while merged but not released) and `mergedIn` (`develop@<sha>`). FF Factory
+  `watch` (the worker's PR head branch and PR, or its sandbox branch, the repo and `master`); a done one `version`
+  (the release that carries it, or null while merged but not released) and `mergedIn` (`master@<sha>`). FF Factory
   re-checks those answers each minute and pushes the ones that change. FFBox's own conversation never matches itself,
   except an escalated thread's watch, which follows its request by id ("Escalations from Max", w480). A done match also
   names the PR that merged its fix as `watch` (w480).

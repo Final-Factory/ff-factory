@@ -18,14 +18,16 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  * Rules:
  *   - git, every repo: no force pushes (--force-with-lease is allowed), no remote branch deletion,
  *     no --mirror/--all, no `gh` calls that rewrite refs/branches.
- *   - git, the game repo only (config repo.url / repo.basePath): no pushes to master/main and no PRs
- *     into master/main. The target is read from the push's remote (`git remote -v` in the command's
+ *   - git, the game repo only (config repo.url / repo.basePath): master is its one trunk (w1137, 2026-10-12; develop is
+ *     retired) and takes changes only through a pull request: no pushes to master/main, no pushes to develop and no PRs
+ *     into develop. A PR into master (`gh pr create --base master`, then `gh pr merge`) is the normal flow; the game
+ *     repo has no main, so a PR's `--base main` is not judged. The target is read from the push's remote (`git remote -v` in the command's
  *     directory, following `cd` and `git -C`, through the variables the worker's shell has: $TMPDIR, $HOME, ~) or
  *     gh's -R/--repo/GH_REPO; when it cannot be determined, it counts as the game repo, and the refusal says why
  *     and what it saw. Other repos' master/main are fair game: Final-Factory/ffbox is pushed straight to master by
- *     design (docs/ffbox.md; w1132), the repo read from the remote's URL, never from a folder's name. Pushing and merging into
- *     develop is the normal, encouraged flow. (GitHub itself also refuses force pushes and deletion
- *     of master and develop: ruleset "Protect master and develop from rewrites".)
+ *     design (docs/ffbox.md; w1132), the repo read from the remote's URL, never from a folder's name. Pushing your own branch and
+ *     merging your PR into master is the normal, encouraged flow. (GitHub itself also refuses force pushes, deletion
+ *     and direct pushes to master: branch protection requires a PR and green CI.)
  *   - repository settings: `gh repo delete` never. `gh repo rename|create|edit|archive|unarchive` and
  *     writes to `.../private-vulnerability-reporting` only for repos other than the game repo (so an
  *     agent can publish or retire the app's own repos when the user asks); the target comes from
@@ -55,7 +57,7 @@ export function sandboxGuard(opts: {
   sandboxId: string;
   sandboxPath: string;
   protectedPaths: string[];
-  /** URLs or paths that name the game repo, whose master/main is off-limits. Empty: every repo counts. */
+  /** URLs or paths that name the game repo, whose master/main takes no direct push and whose develop is retired. Empty: every repo counts. */
   gameRepos?: string[];
   remotes?: RemoteResolver;
   /** The environment of the worker's shell: `cd $TMPDIR/ffbox` and `git -C ~/x` are followed through it (w1132). Absent: variables are not followed. */
@@ -159,6 +161,10 @@ export function sandboxGuard(opts: {
 }
 
 const PROTECTED_BRANCH = /^(?:refs\/heads\/)?(?:master|main)$/i;
+/** w1137: the game repo's develop branch is retired; master is the one trunk. */
+const RETIRED_BRANCH = /^(?:refs\/heads\/)?develop$/i;
+const DEVELOP_RETIRED = 'develop is retired (w1137, 2026-10-12): master is the one trunk; push your own branch and open a PR into master (`gh pr create --base master`), then merge it when CI is green.';
+const MASTER_BY_PR = 'master takes changes only through a pull request: push your own branch, open a PR into master (`gh pr create --base master`), and merge it when CI is green.';
 
 /** A built Final Factory player (or server) binary: finalfactory.exe, a finalfactory .app bundle or the binary inside one, a Linux build's finalfactory.x86_64. */
 const PLAYER_BINARY = /(?:^|[\\/])finalfactory(?:\.exe|\.x86_64|\.app(?:[\\/]contents[\\/]macos[\\/]finalfactory)?)$/i;
@@ -471,12 +477,14 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
         if (w.startsWith('+')) return 'Force pushes (+refspec) are blocked in sandboxes.';
         if (!w.startsWith('-')) {
           const dst = w.includes(':') ? w.slice(w.indexOf(':') + 1) : w;
-          if (PROTECTED_BRANCH.test(dst)) {
+          const retired = RETIRED_BRANCH.test(dst);
+          if (PROTECTED_BRANCH.test(dst) || retired) {
             const target = pushTarget(ctx, remote, pushDir, pushLost);
             if (target.game) {
+              const fix = retired ? DEVELOP_RETIRED : MASTER_BY_PR;
               return target.known
-                ? `Pushing to the Final Factory game repo's master/main is blocked: ${target.saw}. Push your own branch and integrate into develop. ${PUSH_AIM}`
-                : `This push's target repo could not be determined (${target.saw}), so it counts as the Final Factory game repo's, whose master/main is blocked. Push your own branch and integrate into develop. ${PUSH_AIM}`;
+                ? `Pushing to the Final Factory game repo's ${retired ? 'develop' : 'master/main'} is blocked: ${target.saw}. ${fix} ${PUSH_AIM}`
+                : `This push's target repo could not be determined (${target.saw}), so it counts as the Final Factory game repo's, where pushing to ${retired ? 'develop' : 'master/main'} is blocked. ${fix} ${PUSH_AIM}`;
             }
           }
         }
@@ -501,10 +509,11 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
         if (sub === 'repo create' && !arg) return 'gh repo create without a repository name is blocked: name the repo (owner/name) so it is clearly not the game repo.';
         if (ghIsGameRepo(ctx, repoFlag ?? arg, dir)) return `gh ${sub} on the Final Factory game repo (or a repo that could not be determined) is the user's call, not an agent's.`;
       }
-      // PRs and merges into develop are the normal flow; anything aimed at master is the user's release call.
-      if ((sub === 'pr create' || sub === 'pr edit') && lower.some((w, i) => w === '--base=master' || w === '--base=main' || ((w === '--base' || w === '-b') && /^(master|main)$/.test(lower[i + 1] ?? '')))) {
-        // Unknown counts as the game repo; say so, and how to name the repo (w1112: `cd $TMPDIR/ff-factory && gh pr create --base main` was refused as the game's).
-        if (ghIsGameRepo(ctx, repoFlag, dir)) return "PRs into the Final Factory game repo's master/main are the user's release call (or this PR's repo could not be determined: a `cd` to a path with a variable is not followed). Target develop; for another repo, name it: `gh pr create -R <owner>/<repo> ...`.";
+      // w1137: a PR into the game repo's master is the normal flow (it has no main, so --base main is not judged);
+      // develop is retired, so a PR into it is refused.
+      if ((sub === 'pr create' || sub === 'pr edit') && lower.some((w, i) => w === '--base=develop' || w === '--base=refs/heads/develop' || ((w === '--base' || w === '-b') && RETIRED_BRANCH.test(lower[i + 1] ?? '')))) {
+        // Unknown counts as the game repo; say so, and how to name the repo (w1112: a clone reached through a variable was refused as the game's).
+        if (ghIsGameRepo(ctx, repoFlag, dir)) return `PRs into the Final Factory game repo's develop are blocked (or this PR's repo could not be determined: a cd to a path with a variable is not followed). ${DEVELOP_RETIRED} For another repo, name it: gh pr create -R <owner>/<repo> ...`;
       }
       if (lower[1] === 'api') {
         const method = lower.find((w, i) => (lower[i - 1] === '-x' || lower[i - 1] === '--method') && !!w)?.toUpperCase();

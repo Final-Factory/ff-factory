@@ -69,7 +69,7 @@ export interface Sandbox {
   name: string;
   /** Git branch checked out in this sandbox's worktree. */
   branch: string;
-  /** What the branch was created from (e.g. "origin/develop"). */
+  /** What the branch was created from (e.g. "origin/master"). */
   base: string;
   /** Absolute worktree path on the host. */
   path: string;
@@ -1856,13 +1856,13 @@ export interface WorkSource {
   alsoThreads?: { threadId: string; url?: string; reporter?: string }[];
   /** A release follow-up: the version and the requests it announces. */
   release?: { version: string; workIds: string[] };
-  /** A nightly e2e regression: the scenarios, the develop commit tested and the release that carries it. */
+  /** A nightly e2e regression: the scenarios, the master commit tested and the release that carries it. */
   nightly?: WorkNightly;
   /** The night's run of the nightly e2e lab (w864): the night (its date where the schedule fired) and the machine it runs on. */
   nightlyRun?: { date: string; machine: string };
   /**
    * The night's merge review (w905, the Nightly Regression Sentry folded into the job timers): the night, its machine, and
-   * the develop commit the last review got to (it reviews the merges after it).
+   * the master commit the last review got to (it reviews the merges after it).
    */
   nightlyReview?: { date: string; machine: string; since?: string };
 }
@@ -1874,7 +1874,7 @@ export interface NightlyReview {
   status: 'running' | 'done' | 'missing';
   firedAt?: string;
   workId?: string;
-  /** The develop commit the review started after (the last review's REVIEWED-THROUGH), and the one it got to. */
+  /** The master commit the review started after (the last review's REVIEWED-THROUGH), and the one it got to. */
   since?: string;
   reviewedThrough?: string;
   /** The verifier and test-writer requests it filed (Duty A and B). */
@@ -1927,7 +1927,7 @@ export interface WorkReportFile {
 export interface WorkNightly {
   /** The scenario ids ("MP-slow-client-catchup"); more than one for a night's batched request. */
   scenarios: string[];
-  /** The night that filed it ("2026-09-30"), the lab and the develop commit it tested. */
+  /** The night that filed it ("2026-09-30"), the lab and the master commit it tested. */
   date: string;
   lab: string;
   sha: string;

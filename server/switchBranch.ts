@@ -7,7 +7,7 @@ const SHARED = /^(master|main|develop)$/;
 export interface SwitchResult {
   from: string;
   to: string;
-  /** What happened, for the caller to show: "pushed 2 commits of x", "created y from origin/develop". */
+  /** What happened, for the caller to show: "pushed 2 commits of x", "created y from origin/master". */
   notes: string[];
 }
 
@@ -33,10 +33,10 @@ export function explainCheckoutError(stderr: string, branch: string, nameOf: (pa
 /**
  * Switch a working tree to `branch` safely (docs: the switch_branch tool):
  *   - refuse on uncommitted changes to tracked files (untracked files ride along, as git does);
- *   - push the current branch first if it has commits no remote has (never develop/master/main:
+ *   - push the current branch first if it has commits no remote has (never master/main/develop:
  *     those are refused, somebody decides that by hand);
  *   - fetch, then switch to the local branch (fast-forwarding it if it only lags its upstream), or
- *     track origin/<branch>, or create it from `createFrom` (default origin/develop).
+ *     track origin/<branch>, or create it from `createFrom` (default origin/master).
  * `lock` wraps the fetch (sandbox worktrees share the base clone's refs).
  */
 export async function switchBranch(opts: {
@@ -85,7 +85,7 @@ export async function switchBranch(opts: {
     r = await git(dir, ['switch', '-c', branch, '--track', `origin/${branch}`]);
     if (r.code === 0) notes.push(`checked out ${branch} from origin`);
   } else {
-    const base = opts.createFrom?.trim() || 'origin/develop';
+    const base = opts.createFrom?.trim() || 'origin/master';
     if ((await git(dir, ['rev-parse', '--verify', '--quiet', `${base}^{commit}`])).code !== 0) throw new Error(`${branch} does not exist here or on origin, and ${base} (to create it from) is not a known commit`);
     r = await git(dir, ['switch', '-c', branch, '--no-track', base]);
     if (r.code === 0) notes.push(`created ${branch} from ${base}`);

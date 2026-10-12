@@ -71,8 +71,8 @@ per rolling 24 hours; operators are not capped.
 - **Branches and PRs.** A run commits in its container. The host re-checks the harvest (protected
   branch names, size and file-count caps, ancestry, author identity, no `.github/`), pushes
   `ffbox/<name>-<run id>` to FinalFactory with its own credential, and opens a PR once the run
-  compiled and its tests passed. One branch per conversation. The base is master or develop by
-  the game version the report names, else the class's default. Nothing merges: a person does.
+  compiled and its tests passed. One branch per conversation. The base is master (w1137: develop is retired)
+  or, for an older game version the report names, that version's branch, else the class's default. Nothing merges: a person does.
   Merged `ffbox/*` branches are deleted daily.
 - **Branch names: `ffbox/*` is FFBox's, `ffbox-f/*` is FF Factory's** (w273). FFBox's containers push
   `ffbox/<name>-<run id>`. Work FF Factory does for a request that came from FFBox goes on
@@ -83,17 +83,16 @@ per rolling 24 hours; operators are not capped.
   the intake rules the harness adds to the worker's brief (`workerRules`, `server/intakeRules.ts`) say to push and
   open the PR from an `ffbox-f/<topic>` branch, and to `git branch -m` a `sandbox/<name>` sandbox before the first
   push (a branch continuing an open PR keeps its name); and the dispatcher's prompt says so. A review of an FFBox
-  branch (`ffbox-branch`, or a diagnosis or request that carries `ffbox/<name>`) is integrated into develop and
+  branch (`ffbox-branch`, or a diagnosis or request that carries `ffbox/<name>`) is merged into master and
   names no new branch. Only `ffbox/*` conversations become "Review and merge" requests here (`ffboxReviewFrom`),
   so an `ffbox-f/*` PR is never filed back as one.
 - **Discord replies** are composed by the host from the run's structured result, never sent by the
   container, which has no Discord access at all.
-- **Releases.** A commit on develop or master whose `FFVersion.cs` differs from its first parent's
-  is a release (game repo `.github/workflows/main.yml`, `scripts/trigger-ci-release.sh`). The host
+- **Releases.** A commit on master whose `FFVersion.cs` differs from its first parent's
+  is a release (a version bump merged into master; w1137) (game repo `.github/workflows/main.yml`, `scripts/trigger-ci-release.sh`). The host
   decides whether to grant it (`scripts/release_lane.py`), checks the players, uploads both apps to
-  Steam once the run's tests pass, sets the main app live (develop: `development`; master:
-  `pre-release`; `scripts/release_lane.py` `SETLIVE`; Ben or Lothsahn move the default branch
-  by hand), and
+  Steam once the run's tests pass, sets the main app live on `development` (`scripts/release_lane.py` `SETLIVE`; nothing sets
+  `pre-release` or the default branch: Ben or Lothsahn move those by hand), and
   opens a PR for any files the build regenerated. `ff-agents:ci-release` drives it. A requested
   release is done only when it is live on its branch and its patch notes are posted once, as Max,
   in #dev-patch-notes (from any machine, with `post_as_max`: FFBox posts, [Posting as Max](#posting-as-max-w901)).
@@ -128,7 +127,7 @@ answer ("diagnosed in FFBox conversation N").
 **Its desync PRs follow Lothsahn's standing policy** (2026-10-04, w358; docs/intake.md, "FFBox desync PRs"). FF
 Factory approves a desync diagnosis or its `ffbox/*` PR at once into a review-and-merge request, and its worker
 classifies the change first: report generation only (test it is safe, merge); a desync fix in the game code (a test
-that fails first and a 2-peer built-player check, red on develop and green with the fix, then merge); or capture
+that fails first and a 2-peer built-player check, red on master and green with the fix, then merge); or capture
 during play, the hash, the census, per-heartbeat or per-frame capture (tick and frame time on the biggest save before
 and after: under 1% merges with the numbers recorded, above stays open and goes back to the intake for a developer,
 `PERF-ESCALATION`). The daily caps and the duplicate checks still apply.

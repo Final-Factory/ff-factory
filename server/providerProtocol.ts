@@ -368,7 +368,7 @@ export const SubmitSchema = z
     prompt: z.string().min(1).max(48_000),
     /** fenced by default. FFBox may still pick a stricter class; nothing here can force the open one. */
     class: z.enum(['fenced', 'open']).default('fenced'),
-    /** Branch to base new work on (default develop), or to continue. */
+    /** Branch to base new work on (default master), or to continue. */
     base: gitRef.optional(),
     branch: gitRef.optional(),
     /** A conversation this portal started earlier: this is its next turn. */

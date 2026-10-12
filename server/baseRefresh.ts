@@ -7,7 +7,7 @@ import { withBaseRepoLock } from './sandboxes.ts';
  * Keep the base clone the orchestrators read on origin's newest code (w467, change 11 of docs/portal-on-ffbox-host.md).
  * Until now it was fetched only by list_branches and sandbox creation, and its working tree, which the orchestrators
  * read, never moved. Every `repo.refreshMinutes` (default 15, 0 off): fetch, then a detached checkout of
- * config.defaultBase (origin/develop), under the same lock as every other git call on that clone. A clone with
+ * config.defaultBase (origin/master), under the same lock as every other git call on that clone. A clone with
  * modified tracked files keeps its HEAD (someone is using it). The portal VM's fff-base-refresh.timer does the same
  * from outside; run one of the two (repo.refreshMinutes 0 there, or disable that timer).
  */

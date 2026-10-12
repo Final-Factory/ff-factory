@@ -129,7 +129,7 @@ export interface IntakeConfig {
     run?: { enabled?: boolean; time?: string; tz?: string; machine?: string; person?: string; reportWithinHours?: number };
     /**
      * The nightly merge review (w905; docs/intake.md, "The nightly merge review"): the Nightly Regression Sentry as a
-     * job timer. Every day at `time` in `tz` it files a request for `person` to review the merges to develop on `machine`;
+     * job timer. Every day at `time` in `tz` it files a request for `person` to review the merges to master on `machine`;
      * the worker's verifier and test-writer jobs are filed as the Sentry's were. Default off, 06:00 America/New_York,
      * lothdesktop.
      */
@@ -526,7 +526,7 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
   trustProxy: true,
   host: '0.0.0.0',
   dataDir: './data',
-  defaultBase: 'origin/develop',
+  defaultBase: 'origin/master',
   protectedPaths: [],
   limits: { minFreeRamGB: 10 },
   hostDiskPaths: [],
