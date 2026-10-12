@@ -676,8 +676,8 @@ export const DEFAULT_CLEANUP: CleanupPolicy = {
 };
 
 /**
- * The soft threshold the portal's host uses: softFreeGB, or warnFreeGB when unset (w1101, lothsahn: "The portal should be
- * considered to be low below 40GB free, not 120GB"). It was warnFreeGB + 40, for BEAST's sandbox drive; the portal's
+ * The soft threshold the portal's host uses: softFreeGB, or warnFreeGB when unset (w1101: the portal is low at its warn
+ * level, lothsahn: "not 120GB"). It was warnFreeGB + 40, for BEAST's sandbox drive; the portal's
  * dedicated VM keeps no sandboxes, so its clean-up works hard only once it is low.
  */
 export const hostSoftFreeGB = (g: Pick<HostGuardConfig, 'warnFreeGB' | 'cleanup'>) => g.cleanup.softFreeGB || g.warnFreeGB;
@@ -724,13 +724,13 @@ export interface HostGuardConfig {
 }
 
 /**
- * The portal's own host guard (hostGuard.*; the machines' daemons have their own thresholds). Low below 40 GB and critical
- * below 10 GB (w1101, lothsahn 2026-10-12: "The portal should be considered to be low below 40GB free, not 120GB" and
- * "Critical level for the portal should be 10GB"): the portal's dedicated VM has a 115 GB disk and keeps no sandboxes.
+ * The portal's own host guard (hostGuard.*; the machines' daemons have their own thresholds). Low below 20 GB and critical
+ * below 10 GB (w1101, lothsahn 2026-10-12: "Critical level for the portal should be 10GB", then "Let's just set the warning
+ * to 20GB both in code and in config."): the portal's dedicated VM has a 115 GB disk and keeps no sandboxes.
  */
 export const HOST_GUARD_DEFAULTS: HostGuardConfig = {
   pollSeconds: 30,
-  warnFreeGB: 40,
+  warnFreeGB: 20,
   criticalFreeGB: 10,
   hysteresisGB: 10,
   remountMinFreeGB: 30,

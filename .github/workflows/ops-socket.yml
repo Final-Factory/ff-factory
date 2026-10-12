@@ -1,0 +1,59 @@
+name: Ops socket
+
+# The orchestration worker's socket under real systemd (w638, deploy/vm/test/fff-ops-socket.test.sh). It was a job in
+# ci.yml that ran on every pull request and every push to main (66 runs in two days, w1102); it now runs only when a
+# file it exercises changes, and once a week to catch a change in the runner image's systemd.
+#
+# HOSTED ON PURPOSE: it needs root and a running systemd, and an FFBox runner container has neither.
+#
+# What the test loads, and so what a change must touch to need it:
+#   deploy/vm/guest/units/fff-ops.socket   its [Socket] settings are copied into a test unit (Accept, MaxConnections)
+#   deploy/vm/guest/fff-ops-launch         the real launcher, started by that unit
+#   deploy/vm/test/fff-ops-socket.*        the test and its driver
+#   server/opsWorker.ts                    opsSpawner and opsHeader, the portal's side of the socket
+#   package.json, package-lock.json        the SDK version the launcher compares, and the node_modules the driver runs on
+#   this file
+# NOT listed: the other server files opsWorker.ts imports (sessions, secretGuard, store and the rest). They are not what
+# the test checks; a change that breaks their loading fails ci.yml's unit tests.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/vm/guest/units/fff-ops.socket'
+      - 'deploy/vm/guest/fff-ops-launch'
+      - 'deploy/vm/test/fff-ops-socket.*'
+      - 'server/opsWorker.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/ops-socket.yml'
+  schedule:
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ops-socket-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 24
+
+jobs:
+  ops-socket:
+    name: The orchestration worker's socket under real systemd (w638)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci --no-audit --no-fund
+      # fff-ops.socket's settings, the real launcher and the portal's opsSpawner: a new process right after a stop runs.
+      - name: fff-ops.socket under real systemd
+        run: sudo --preserve-env=PATH deploy/vm/test/fff-ops-socket.test.sh

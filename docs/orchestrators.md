@@ -561,6 +561,7 @@ too. `read_work` (w642) says the same, and a blocked request's facts name its bl
 state with its count above the list: any number can be on at once, and the list shows the requests in any of them;
 "All" or "Clear" turns them off. Each list's choice is kept in the browser (localStorage) across reloads (Lothsahn: "I'd
 like to be able to select multiple types"). Each row's state and reason follow its workers live.
+A Working row names the machine its working workers run on, after its id and before its people (w1104, lothsahn: "show which machine working runs are running on after the work item number and before the user"): `WorkLive.machines`, each machine once, the machine part of "<machine>/<slot>"; no other state shows one. An FFBox dev request reads "<operator> (FFBox)" in the row (w1105), and its detail names the operator once (no "reported by", no "for" when it is the same person) with a short "untrusted" marking (`shared/workLabels.ts`).
 
 ### Workers read the ledger
 

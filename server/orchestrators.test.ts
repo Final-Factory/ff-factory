@@ -1483,7 +1483,7 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
   t.mock.timers.tick(30_000);
   t.mock.timers.reset();
   const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').map((e) => e.text).join('\n');
-  assert.match(ping, /\[ledger\] Capacity may have freed \(worker x "Other work" stopped, 0 min ago\)\. Room now: game work: pc; agent-slot work: pc\. Queued for capacity and fitting it: w1 "Verify suspected/);
+  assert.match(ping, /\[ledger\] Capacity may have freed \(worker x "Other work" stopped, 0 min ago\)\. Room now: game work: pc; agent-slot work: pc\. Queued for capacity and fitting it, by priority, then oldest: w1 "Verify suspected/);
 
   // It starts it in a machine's sandbox: the request is active, and the agent sees how it is doing.
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: task, title: 'Regression check', work_id: 'w1' });
@@ -2907,6 +2907,47 @@ test("w1089: start_agent refuses a request's worker into a sandbox another reque
   assert.match(full.text, /sandbox pc\/alpha is full: .*2 agents mid-turn there \(max_agents_per_sandbox 2\), so a worker started there would only wait in the send queue/);
   assert.equal(store.work.get('w3')!.status, 'new');
   assert.equal([...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').length, 2);
+});
+
+test('w1099: the capacity ping and the queued-with-room flag list queued requests by priority, then oldest', async (t) => {
+  const { store, agents, o, dispatcher, chat, call, heard } = setup(t);
+  agentsRoom(agents, []);
+  await call(chat(BEN).info, 'request_work', { title: 'Old normal', brief: 'First.' });
+  await call(chat(BEN).info, 'request_work', { title: 'Newer normal', brief: 'Second.' });
+  await call(chat(BEN).info, 'request_work', { title: 'Nightly e2e run', brief: 'Third.', priority: 'high' });
+  await call(chat(LOTH).info, 'request_work', { title: 'Someday', brief: 'Fourth.', priority: 'low' });
+  const at = ['2026-10-12T01:00:00.000Z', '2026-10-12T02:00:00.000Z', '2026-10-12T03:00:00.000Z', '2026-10-12T00:00:00.000Z'];
+  ['w1', 'w2', 'w3', 'w4'].forEach((id, i) => {
+    const w = store.work.get(id)!;
+    w.createdAt = at[i];
+    store.putWork(w);
+  });
+  for (const id of ['w2', 'w4', 'w1', 'w3']) {
+    const r = await call(dispatcher().info, 'decide_work', { id, action: 'queue', note: 'every place is busy' });
+    assert.equal(r.isError, false, r.text);
+  }
+  // w1089: the ping is sent when a computer has room at the moment it fires; here one does (and nobody has started the requests).
+  agentsRoom(agents, ['lothdesktop']);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  o.capacityMayHaveFreed('worker x stopped');
+  t.mock.timers.tick(30_000);
+  t.mock.timers.reset();
+  const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
+  const order = ['w3', 'w1', 'w2', 'w4'].map((id) => ping.indexOf(`${id} "`));
+  assert.ok(order.every((x, i) => x >= 0 && (i === 0 || x > order[i - 1])), `high first, then the normal ones oldest first, then low: ${ping}`);
+  assert.match(ping, /Queued for capacity and fitting it, by priority, then oldest: w3 "Nightly e2e run"/);
+  // The flag for requests left queued while a computer has room, in the same order.
+  agentsRoom(agents, ['lothdesktop']);
+  const later = Date.now() + 11 * 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(later);
+  assert.deepEqual(o.flagQueuedWithRoom(['lothdesktop']), ['w3', 'w1', 'w2', 'w4']);
+  // Released workers waiting for a sandbox resume in the same order (placeAgain claims, Agents.resumeOrder); one with no
+  // open request last.
+  ['w1', 'w2', 'w3', 'w4'].forEach((id, i) => {
+    store.work.get(id)!.sessionIds = [`s${i + 1}`];
+  });
+  const ids = ['s5', 's2', 's4', 's1', 's3'].map((id) => ({ id }) as SessionInfo).sort((a, b) => agents.resumeOrder(a, b)).map((x) => x.id);
+  assert.deepEqual(ids, ['s3', 's1', 's2', 's4', 's5']);
 });
 
 // ---------------------------------------------------------------- w1094: a gate's clearing reaches the worker that set it

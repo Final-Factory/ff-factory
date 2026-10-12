@@ -4083,6 +4083,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       flagged.push({ w, on });
     }
     if (!flagged.length) return [];
+    flagged.sort((a, b) => ledgerOrder(a.w, b.w)); // by priority, then oldest (w1099)
     console.warn(`ledger: queued while a computer has room: ${flagged.map((f) => `${f.w.id} (${f.on.join(', ')})`).join('; ')}`);
     this.toDispatcher(
       `[ledger] WRONG STATE: queued for capacity while a computer that could take it has room: ${flagged.map((f) => `${f.w.id} "${clip(f.w.title, 80)}" (${names(f.w.requesters)}, ${f.w.priority}; ${needsOf(f.w) === 'agent' ? 'an agent slot (it needs no editor)' : 'room'} on ${f.on.join(', ')})`).join('; ')}. Queued means no free place. Start each now (start_agent with its work_id), or decide_work block it on what it really waits for (another request, a deploy, a machine, a lock, a time, CI), or queue it again with needs naming the only computers that can take it.`,
@@ -4119,7 +4120,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
         this.capacityTimer.unref?.();
         return;
       }
-      const queued = [...this.store.work.values()].filter((w) => w.status === 'queued');
+      // By priority, then oldest (ledgerOrder): the order the dispatcher should start them in (w1099: a high nightly run first).
+      const queued = [...this.store.work.values()].filter((w) => w.status === 'queued').sort(ledgerOrder);
       const events = this.capacityEvents;
       this.capacityEvents = [];
       if (!queued.length) return;
@@ -4136,7 +4138,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${w.queuedFor?.needs?.length ? `; needs ${w.queuedFor.needs.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''})`;
       const room = [facts.game.length ? `game work: ${facts.game.join(', ')}` : '', facts.agent.length ? `agent-slot work: ${facts.agent.join(', ')}` : '', facts.held.length ? heldText(facts.held) : ''].filter(Boolean).join('; ');
       const rest = queued.filter((w) => !usable.includes(w));
-      this.toDispatcher(`[ledger] Capacity may have freed (${events.map(old).join('; ')}). Room now: ${room}. Queued for capacity and fitting it: ${usable.map(line).join('; ')}.${rest.length ? ` Queued with no room for them now: ${rest.map((w) => w.id).join(', ')}.` : ''} Start what fits now (start_agent into a FREE sandbox: list_sandboxes marks them, and check the sandbox is still free); leave queued only what no computer with room can take, and block what waits on something else.`);
+      this.toDispatcher(`[ledger] Capacity may have freed (${events.map(old).join('; ')}). Room now: ${room}. Queued for capacity and fitting it, by priority, then oldest: ${usable.map(line).join('; ')}.${rest.length ? ` Queued with no room for them now: ${rest.map((w) => w.id).join(', ')}.` : ''} Start what fits now (start_agent into a FREE sandbox: list_sandboxes marks them, and check the sandbox is still free); leave queued only what no computer with room can take, and block what waits on something else.`);
     };
     this.capacityTimer = setTimeout(fire, CAPACITY.quietMs);
     this.capacityTimer.unref?.();

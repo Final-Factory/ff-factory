@@ -41,7 +41,21 @@ export interface WorkLive {
    * what it really waits for). Names the computers.
    */
   roomOn?: string[];
+  /** Working (w1104): the machines its working workers run on, each once, in the workers' order ("lothdesktop", "beast"); absent when none is known. */
+  machines?: string[];
 }
+
+/**
+ * The machine ids the given workers run on (w1104), each once: a machine sandbox worker's `machineId` is the machine part of
+ * "<machine>/<slot>". A worker on no machine (the portal's own host) names none.
+ */
+export function machinesOf(workers: readonly Pick<SessionInfo, 'machineId'>[]): string[] {
+  return [...new Set(workers.map((s) => s.machineId?.split('/')[0].trim()).filter((m): m is string => !!m))];
+}
+const withMachines = (l: WorkLive, workers: readonly Pick<SessionInfo, 'machineId'>[]): WorkLive => {
+  const machines = machinesOf(workers);
+  return machines.length ? { ...l, machines } : l;
+};
 
 export interface WorkLiveFacts {
   session: (id: string) => SessionInfo | undefined;
@@ -225,7 +239,7 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   const busy = mine.filter((s) => BUSY.has(s.status) && !s.hostFailure);
   if (busy.length) {
     const tool = busy.find((s) => s.activeTool)?.activeTool;
-    return { state: 'working', why: `${busy.map((s) => s.id).join(', ')} ${busy[0].status === 'starting' ? 'starting' : 'mid-turn'}${tool ? `, in ${tool.name} since ${ago(tool.since, f.now)}` : ''}${sharedWith(busy)}` };
+    return withMachines({ state: 'working', why: `${busy.map((s) => s.id).join(', ')} ${busy[0].status === 'starting' ? 'starting' : 'mid-turn'}${tool ? `, in ${tool.name} since ${ago(tool.since, f.now)}` : ''}${sharedWith(busy)}` }, busy);
   }
   if (w.ffbox && (w.ffbox.state === 'sent' || w.ffbox.state === 'accepted')) return { state: 'working', why: `on FFBox${w.ffbox.conversation ? ` (conversation ${w.ffbox.conversation})` : ''}` };
 
@@ -269,7 +283,7 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   const gates = gatesOf(w);
   if (w.status === 'blocked' && gates.length && !(coming && coming.a.kind === 'job')) return blockedLive(gates, f.now);
 
-  if (coming) return { state: 'working', why: `${coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}`}${sharedWith([coming.s])}` };
+  if (coming) return withMachines({ state: 'working', why: `${coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}`}${sharedWith([coming.s])}` }, [coming.s]);
 
   const decide = serving.find((s) => asksAPerson(s.lastResult));
   if (decide) return { state: 'waiting', why: `${decide.id} stopped asking for a decision`, waitsOn: names(w.requesters) };

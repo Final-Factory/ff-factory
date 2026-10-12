@@ -71,11 +71,14 @@ export function staleOutputSettings(raw: unknown): StaleOutputSettings {
 
 /**
  * The nightly lab's default roots: FF_NIGHTLY_ROOT, else the worker root's nightly/ (scripts/nightly/nightly_root.sh in
- * the game repo). The old places outside the install folder are gone (2026-10-10), so a machine with neither has none.
+ * the game repo), and the worker root's nightly-history/ (w1099). The old places outside the install folder are gone (2026-10-10), so a machine with neither has none.
  */
 export function defaultNightlyRoots(workerRoot?: string, env: NodeJS.ProcessEnv = process.env): string[] {
   const root = env.FF_NIGHTLY_ROOT || (workerRoot ? path.join(workerRoot, 'nightly') : '');
-  return root ? [root] : [];
+  // w1099: a sandbox night's history (scripts/nightly/nightly_root.sh ff_nightly_history) sits beside it.
+  const base = workerRoot || env.FF_WORKER_ROOT;
+  const history = base ? path.join(base, 'nightly-history') : '';
+  return [...new Set([root, history].filter((x) => x))];
 }
 
 /**

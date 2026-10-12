@@ -11,7 +11,8 @@ import { mentions } from './ownLeftovers.ts';
  *
  * - per-commit player builds beyond the newest few, in each sandbox's `.nightly-builds/cache` and `Builds/cache`, old
  *   `Builds/bench*` folders and capture output (`.nightly-builds/clips`, `shots`);
- * - the nightly lab's (`<install>/nightly`) builds beyond the newest few, runs, rehearsals and logs past their age;
+ * - the nightly lab's (`<install>/nightly`, and `<install>/nightly-history` since w1099) builds beyond the newest few, runs,
+ *   rehearsals and logs past their age;
  * - folders of sessions that stopped: `<install>/tmp/ffa-<session>` (also those holding fixture repos) and stale `scratch/`;
  * - a Claude task `.output` file past a cap (a runaway writer reached 99.6 GB; the space came back only when its
  *   process ended): the file goes and, when its session has stopped, so does the process still writing it.
@@ -240,14 +241,16 @@ export async function planInstallLeftovers(o: {
     return plan;
   }
 
-  // ---- the nightly lab inside the install folder
-  const nightly = path.join(root, 'nightly');
-  await keepNewest(path.join(nightly, 'builds'), nightly, 'nightly-build', 'a nightly player build');
-  const runs = await newestFirst(path.join(nightly, 'runs'));
-  for (const e of runs.slice(1)) await take(path.join(nightly, 'runs', e.name), nightly, 'nightly-run', `a nightly run (not the newest) untouched for ${s.nightlyRunDays} days`, s.nightlyRunDays * DAY);
-  for (const e of await children(path.join(nightly, 'rehearsals'))) await take(path.join(nightly, 'rehearsals', e.name), nightly, 'nightly-rehearsal', `a nightly rehearsal untouched for ${s.rehearsalDays} days`, s.rehearsalDays * DAY);
-  for (const e of await children(path.join(nightly, 'logs'))) {
-    if (e.isFile()) await take(path.join(nightly, 'logs', e.name), nightly, 'nightly-log', `a nightly log untouched for ${s.nightlyRunDays} days`, s.nightlyRunDays * DAY);
+  // ---- the nightly lab inside the install folder, and since w1099 the history a sandbox night keeps (nightly-history:
+  // state, logs, runs, reports, fixtures; no builds). Its state, reports and fixtures (a player's save) are never looked at.
+  for (const nightly of [path.join(root, 'nightly'), path.join(root, 'nightly-history')]) {
+    await keepNewest(path.join(nightly, 'builds'), nightly, 'nightly-build', 'a nightly player build');
+    const runs = await newestFirst(path.join(nightly, 'runs'));
+    for (const e of runs.slice(1)) await take(path.join(nightly, 'runs', e.name), nightly, 'nightly-run', `a nightly run (not the newest) untouched for ${s.nightlyRunDays} days`, s.nightlyRunDays * DAY);
+    for (const e of await children(path.join(nightly, 'rehearsals'))) await take(path.join(nightly, 'rehearsals', e.name), nightly, 'nightly-rehearsal', `a nightly rehearsal untouched for ${s.rehearsalDays} days`, s.rehearsalDays * DAY);
+    for (const e of await children(path.join(nightly, 'logs'))) {
+      if (e.isFile()) await take(path.join(nightly, 'logs', e.name), nightly, 'nightly-log', `a nightly log untouched for ${s.nightlyRunDays} days`, s.nightlyRunDays * DAY);
+    }
   }
 
   // ---- stale scratch: named after an open request it stays; the rest goes by age

@@ -361,3 +361,28 @@ test('w915: held does not borrow the other request\'s question for a person', ()
   assert.equal(all.get('w911')?.state, 'waiting');
   assert.equal(all.get('w909')?.state, 'stalled', 'the question is about the request the turn was on');
 });
+
+test('workState: a Working request names the machines its working workers run on, each once (w1104)', () => {
+  const w = item('w1', { sessionIds: ['a', 'b', 'c', 'd'] });
+  const at = (machineId: string, machineSandbox: string) => ({ machineId, machineSandbox });
+  assert.deepEqual(one(w, [session('a', { status: 'running', ...at('lothdesktop', 'slot1') })])?.machines, ['lothdesktop']);
+  assert.deepEqual(
+    one(w, [session('a', { status: 'running', ...at('lothdesktop', 'slot1') }), session('b', { status: 'running', ...at('beast', 'agent-a') }), session('c', { status: 'starting', ...at('lothdesktop', 'slot2') })])?.machines,
+    ['lothdesktop', 'beast'],
+    'two workers on one machine show it once; several machines each once, in the workers’ order',
+  );
+  assert.deepEqual(one(w, [session('a', { status: 'running', machineId: 'm3/slot2' })])?.machines, ['m3'], 'the machine part of "<machine>/<slot>"');
+  assert.deepEqual(one(w, [session('a', { status: 'idle', ...at('beast', 'agent-a') }), session('b', { status: 'running', ...at('m3', 'slot1') })])?.machines, ['m3'], 'only the workers that make it Working');
+  assert.equal(one(w, [session('a', { status: 'running', sandboxId: 'alpha' })])?.machines, undefined, 'a worker on no machine names none');
+  assert.equal(one(item('w2', { ffbox: { requestId: 'r', state: 'accepted', class: 'fenced', sentAt: ago(1) } }))?.machines, undefined, 'FFBox runs it: no machine of ours');
+  const between = one(w, [session('a', { status: 'idle', wakeAt: new Date(NOW + 20 * 60_000).toISOString(), wakeNote: 'CI', ...at('beast', 'agent-a') })]);
+  assert.equal(between?.state, 'working', 'a check-in keeps it Working between turns');
+  assert.deepEqual(between?.machines, ['beast']);
+});
+
+test('workState: only a Working request names machines; waiting, queued and blocked ones do not (w1104)', () => {
+  const w = item('w1', { sessionIds: ['a'], status: 'question', question: { text: 'Which save?', at: ago(1) } });
+  const l = one(w, [session('a', { status: 'idle', machineId: 'beast', machineSandbox: 'agent-a' })]);
+  assert.equal(l?.state, 'waiting');
+  assert.equal(l?.machines, undefined);
+});

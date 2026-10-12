@@ -273,6 +273,11 @@ export interface PlaceAgainDeps {
   ciWait?: (s: SessionInfo) => string | undefined;
   /** Why it waits on a deploy, a person, another request or a pull request merging, nothing else (Agents.waitOn, w890), or undefined. */
   waitOn?: (s: SessionInfo) => string | undefined;
+  /**
+   * Which of two released workers waiting for a sandbox resumes first (w1099): by their requests' priority, then the oldest
+   * request (Agents.resumeOrder). Unset, or a tie: session id order.
+   */
+  order?: (a: SessionInfo, b: SessionInfo) => number;
   /** Run the release pass again soon (a worker was just stopped to release its sandbox: w890 frees it within a minute of its turn's end). */
   soon?: () => void;
   /** Why a live idle worker must keep its process, its check-in aside (Agents.keepIdle without the wake), or undefined. */
@@ -339,7 +344,8 @@ export class PlaceAgain {
 
   /**
    * Sandboxes of a machine spoken for by released workers waiting to resume: those being placed, then for each worker
-   * whose message waits (in id order), the sandbox it would get. Not free for new work (Agents.free).
+   * whose message waits (by its requests' priority, then the oldest request, w1099; then id), the sandbox it would get.
+   * Not free for new work (Agents.free).
    */
   claims(machineId: string): Map<string, string> {
     const m = this.d.machine(machineId);
@@ -347,7 +353,7 @@ export class PlaceAgain {
     if (!m) return out;
     for (const [id, p] of this.placing) if (p.machine === machineId) out.set(p.sandbox, id);
     const f = this.facts(machineId);
-    const waiting = f.sessions.filter((s) => s.placeReleased && !f.live(s.id) && !this.placing.has(s.id) && this.d.queued(s.id)).sort((a, b) => a.id.localeCompare(b.id));
+    const waiting = f.sessions.filter((s) => s.placeReleased && !f.live(s.id) && !this.placing.has(s.id) && this.d.queued(s.id)).sort((a, b) => (this.d.order?.(a, b) ?? 0) || a.id.localeCompare(b.id));
     for (const s of waiting) {
       const p = placeFor(s, m, f, out, this.failedIn(s.id));
       if ('sandbox' in p) out.set(p.sandbox.id, s.id);
