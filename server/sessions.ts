@@ -64,7 +64,12 @@ export interface QueuedSend {
   on?: 'capacity' | 'machine';
   /** The last error a delivery attempt threw (w496): it stays queued and is tried again, up to QUEUE_HOLD_MS. */
   lastError?: string;
+  /** It waits for its worker's process to restart on another person's Claude tokens (w1076, SessionManager.accountMove). */
+  account?: boolean;
 }
+
+/** How long a worker stopped to restart on another account may take to go before it is told to stop again (w1076). */
+const MOVE_RESTOP_MS = 60_000;
 
 /**
  * How long a queued message that cannot be delivered yet (its machine's daemon outdated or offline, the host guard) is
@@ -829,6 +834,13 @@ export class SessionManager {
   placeFull?: (s: SessionHandle) => string | undefined;
   /** Why this idle session must not be stopped to make room (a pending wake_me, a dirty sandbox, …), or undefined. Set by Agents. */
   keepIdle?: (s: SessionHandle) => string | undefined;
+  /**
+   * Why a worker's live process must restart on another person's Claude tokens before its next turn (w1076: every turn on
+   * a request runs on its person's tokens), or undefined. Set by Agents. Its messages wait meanwhile (moveFor).
+   */
+  accountMove?: (s: SessionHandle) => string | undefined;
+  /** Workers this manager stopped to restart them on another account, and when (moveFor). */
+  private readonly moving = new Map<string, number>();
 
   constructor(cfg: Config, store: Store) {
     this.cfg = cfg;
@@ -933,6 +945,27 @@ export class SessionManager {
     return h;
   }
 
+  /**
+   * Why a message to this worker must wait for its process to restart on another person's Claude tokens (w1076), or
+   * undefined. Idle, its process is stopped now, and the message then starts the next one on the right account, in the
+   * same conversation. Mid-turn, that turn ends on the account it started on and the stop comes at its end (drain runs
+   * on every turn end), so the message is never a turn of the old account's.
+   */
+  private moveFor(s: SessionHandle): string | undefined {
+    const why = this.accountMove?.(s);
+    if (!why) {
+      this.moving.delete(s.info.id);
+      return undefined;
+    }
+    const since = this.moving.get(s.info.id);
+    if (!isMidTurn(s.info) && (since === undefined || Date.now() - since > MOVE_RESTOP_MS)) {
+      this.moving.set(s.info.id, Date.now());
+      this.store.append(s.info.id, { kind: 'system', text: `Its process stops and starts again on another Claude account: ${why}.` });
+      s.stop(false);
+    }
+    return why;
+  }
+
   /** Why a message to this session must wait for a free running slot, or undefined (it may go now). */
   private fullFor(s: SessionHandle): string | undefined {
     if (s.info.kind === 'orchestrator' || s.info.kind === 'ops' || isMidTurn(s.info)) return undefined;
@@ -965,7 +998,7 @@ export class SessionManager {
   private enqueue(q: QueuedSend) {
     this.queue.push(q);
     this.saveQueue();
-    this.store.append(q.id, { kind: 'system', text: q.on === 'machine' ? `A message is waiting for its machine (${q.why}); it is delivered as soon as it can go.` : `A message is waiting for a free agent slot (${q.why}); it is delivered as soon as one frees.` });
+    this.store.append(q.id, { kind: 'system', text: q.on === 'machine' ? `A message is waiting for its machine (${q.why}); it is delivered as soon as it can go.` : q.account ? `A message is waiting for this worker's process to restart (${q.why}); it is delivered as soon as the new process can start.` : `A message is waiting for a free agent slot (${q.why}); it is delivered as soon as one frees.` });
     console.log(`sessions: queued a message for ${q.id}: ${q.why}`);
     return q.uuid;
   }
@@ -990,7 +1023,7 @@ export class SessionManager {
         drop();
         continue;
       }
-      if (this.fullFor(s)) {
+      if (this.moveFor(s) || this.fullFor(s)) {
         held.add(q.id);
         continue;
       }
@@ -1031,8 +1064,11 @@ export class SessionManager {
     // The orchestration worker (w597, server/opsWorker.ts) hears only Lothsahn's and Ben's own orchestrators (through
     // OpsWorker.send), its own wake_me and a restart's resume: no other sender, a harness notice included, reaches it.
     if (s.info.kind === 'ops' && !opts.ops) throw new Error(OPS_SEND_REFUSED);
-    const queue = (why: string, on: 'capacity' | 'machine') =>
-      this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), at: new Date().toISOString(), why, on });
+    const queue = (why: string, on: 'capacity' | 'machine', account = false) =>
+      this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), at: new Date().toISOString(), why, on, ...(account ? { account } : {}) });
+    // ANOTHER PERSON'S ACCOUNT (w1076): its process restarts on its requests' person's tokens first; the message waits.
+    const move = this.moveFor(s);
+    if (move) return queue(move, 'capacity', true);
     // ALL RUNNING SLOTS BUSY (w384): the message waits and goes when a turn ends, instead of being refused. So does any
     // later message to a session that already has one waiting, so its messages keep their order.
     const full = this.fullFor(s);

@@ -313,6 +313,8 @@ export interface MachineHooks {
   handlersFor: (info: SessionInfo, m: Machine) => Partial<Record<CatalogTool, ToolHandler>>;
   /** The Claude account the last spec built for a session names, in words safe to show (w1031): kept as SessionInfo.ranAs when a process starts. */
   accountOf?: (sessionId: string) => string | undefined;
+  /** Whose own Claude tokens that spec gives (w1076), absent for the machine's account: kept as SessionInfo.ranFor. */
+  personOf?: (sessionId: string) => string | undefined;
 }
 
 /**
@@ -1416,6 +1418,12 @@ export class MachineManager {
       s.info.ranAs = ranAs;
       this.touch(s);
     }
+    const ranFor = s.live ? s.info.ranFor : this.hooks.personOf?.(s.info.id);
+    if (ranFor !== s.info.ranFor) {
+      if (ranFor) s.info.ranFor = ranFor;
+      else delete s.info.ranFor;
+      this.touch(s);
+    }
     const catalog = this.hellos.get(m.id)?.catalog;
     if (spec.mcp && catalog) spec.mcp = { ...spec.mcp, tools: spec.mcp.tools.filter((t) => catalog.includes(t.name)) };
     // Stored here first, so the daemon's transcript event can name them without sending them back.
@@ -1674,7 +1682,9 @@ export class MachineManager {
         if (!s || s.info.machineId !== id) return;
         // The portal owns identity, naming and where it works (a worker placed again in another sandbox, w640: the
         // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, releaseDue: _rd, savedWork: _sw, ...run } = msg.info;
+        // The account its process started on (ranAs, ranFor) is the portal's too: the daemon keeps the copy of the session's
+        // first start, which would put a restart on another person's tokens back on the first account (w1076).
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host

@@ -510,10 +510,34 @@ Acting is one of these, from a login that exists, through the web UI, the person
 `update_work` counts only in a turn the person started with their own message (`turnFrom`/`lastFrom` is `human`). A worker's report,
 a harness message, a relayed Discord or FFBox text and the dispatcher's own decisions never count (`decide`, the ledger sweep,
 `fileDelegation` do not call `takeOver`). The switch is logged on the request ("now runs for Lothsahn: Lothsahn pressed "Start
-now" (was ben; …)"), shown on its row in the dashboard and in `list_work`, and applies to a worker's **next process start**:
-`machineSandboxSpec` reads `tokenUserOf` at every start, a process already running (mid-turn) keeps the account it started on.
-A worker serving two requests runs for whoever acted on either one most recently. `SessionInfo.ranAs` keeps the account each
-process started on, so `spend_report` attributes every turn to the account it ran on (`docs/spend.md`).
+now" (was ben; …)"), shown on its row in the dashboard and in `list_work`, and applies from the worker's **next turn**
+(w1076, below). `SessionInfo.ranAs` keeps the account each process started on, so `spend_report` attributes every turn to the
+account it ran on (`docs/spend.md`).
+
+**One person's tokens per turn (w1076).** lothsahn: "Why was that running on Ben's account? I messaged that on discord. It
+should have run on my account" (his w1072 was sent into Ben's worker a33e1437 and ran on Ben's pool until Ben's session limit).
+Every turn a worker spends on a request runs on that request's person's tokens (`personForWork`: `tokenPersonForWork`, else its
+requester). Of the options weighed, a session's process does not switch account per message: a Claude Code process takes its
+token at start, a message that arrives mid-turn joins the turn in flight, prompt caches do not carry across accounts, and a
+session with two people's requests would bill each for re-reading the other's context on every turn. Instead:
+
+- **One person per session.** A request never goes into a session that has another person's open request in hand
+  (`Orchestrators.accountClash`): `message_agent` starts a new session in the same sandbox, `decide_work link` is refused
+  (docs/orchestrators.md, "One person per session").
+- **The session's person is its requests' person**, read at every process start (`machineSandboxSpec` → `tokenUserOf` →
+  `Orchestrators.sessionPersonOf`, `sessionPerson` in `server/vault.ts`), not whoever started the session; a new worker's first
+  process uses the request it was started for (`startWorker`'s `workId`), since it starts before the ledger links it. Two
+  people in one session anyway (a take-over of one of several requests, or a join from before w1076): the person it last ran
+  for keeps it, so it never flips, and the other request moves out on its next `message_agent`.
+- **A live process follows its person at a turn boundary.** `SessionInfo.ranFor` is whose own tokens (a pool token or their
+  `userClaudeEnv` token) its process started on (`MachineRunEnv.person`). When its requests now name another person (a
+  take-over), the next message waits (`SessionManager.accountMove`, `moveFor`): an idle process is stopped and the message
+  starts a new process on the new person's tokens in the same conversation; a process mid-turn finishes that turn first.
+  Not while it runs a background task (a build the restart would kill): that process carries on until it ends. The daemon's
+  session reports never overwrite `ranAs` or `ranFor` (it keeps the copy of the first start).
+- **A limit is its own account's.** The ledger cleanup does not hold a request on another person's usage limit: a worker that
+  stopped on a limit while holding another person's request gets that request moved (the dispatcher is told), and a worker
+  whose next process runs on another person's tokens than the account at its limit is resumed at once.
 
 **No fallback (w1031).** A person with at least one Claude token of their own in the vault never runs on the host token, the
 machine's login or another person's token: when none of theirs is eligible because the vault key is gone or none opens, the run

@@ -819,6 +819,21 @@ fresh session*, and an update to a request always goes to the session already on
   sandbox's branch and git state now, which session used the sandbox last and the requests it keeps, and the requests this
   one names with their status and PRs, to be read with `read_work` (`start_agent` adds the same). Then the intake rules and the
   `Request:` line.
+- **One person per session** (w1076, lothsahn: "Why was that running on Ben's account? I messaged that on discord. It
+  should have run on my account"). On 2026-10-12 the dispatcher sent lothsahn's w1072 into worker a33e1437, which was on
+  Ben's w1056: w1072 ran on Ben's Claude pool and stopped at 02:00Z on Ben's session limit, and the dispatcher's
+  `session: "new"` at 02:03 was ignored because w1072 was already on that worker. Now a request never shares a session with
+  another person's: `Orchestrators.accountClash` says when the worker has an open request of another person in hand
+  (persons from `personForWork`, server/vault.ts). Then `message_agent` with its `work_id` starts a NEW session in the same
+  sandbox whatever the relation or the dispatcher's `session: "same"` says, and the reply and log say why; a request
+  already on that worker (sent there before w1076, or a take-over) is taken off it (`Orchestrators.moveOff`) and moves to
+  the new session the same way; `session: "new"` with a reason moves a request the worker is already on too;
+  `decide_work link` is refused; an owner's cross-owner note skips that worker. A session's process runs on the person of
+  the requests it has in hand (`Orchestrators.sessionPersonOf`), not on whoever started the session. The usage-limit case
+  is in the ledger cleanup: a worker that stopped on one person's limit while it holds another person's request does not
+  hold that request: the dispatcher is told to move it (`Orchestrators.limitElsewhere`), and a request whose person changed
+  by a take-over is resumed at once, on its new person's tokens. How the account itself follows: docs/vault.md, "One
+  person's tokens per turn".
 
 **Stalled** is a status of its own (`WorkItem.stalled`: kind, reason, when): out of the open lists, behind the "N stalled"
 filter on the Requests tab and `list_work status stalled`, kept like an open request. The cleanup never closes one: its

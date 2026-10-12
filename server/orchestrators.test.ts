@@ -14,6 +14,7 @@ import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { requestAsFiled } from './work.ts';
 import { BlockerWatch } from './blockerWatch.ts';
+import { personForWork, sessionPerson } from './vault.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
@@ -2073,6 +2074,136 @@ test('w740: decide_work link is the same-work mark: refused for an unrelated req
   assert.equal(sent.isError, false, sent.text);
   assert.doesNotMatch(sent.text, /NEW session/);
   await until('w3 reached the same session', () => store.readTranscript(id).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('The request as filed (w3')));
+});
+
+// ---------------------------------------------------------------- w1076: a request runs on its own person's tokens
+
+/** Each person has a Claude token of their own (config userClaudeEnv), so a process records whose it started on (ranFor). */
+async function setupTwoAccounts(t: Parameters<typeof setupOnMachine>[0]) {
+  const env = await setupOnMachine(t, { people: [{ ...BEN, role: 'owner' }, { ...LOTH, role: 'owner' }] });
+  (env.cfg as { userClaudeEnv?: Record<string, Record<string, string>> }).userClaudeEnv = {
+    ben: { CLAUDE_CODE_OAUTH_TOKEN: `sk-ant-oat01-${'b'.repeat(40)}` },
+    lothsahn: { CLAUDE_CODE_OAUTH_TOKEN: `sk-ant-oat01-${'l'.repeat(40)}` },
+  };
+  /** A request as the ledger holds it, filed for `who` (the filing tools cap a message's filings). */
+  const file = (id: string, who: Requester, over: Partial<WorkItem> = {}) => {
+    const w = { id, title: `Job ${id}`, brief: `Do ${id}.`, priority: 'normal', keys: [], requestedBy: who, requesters: [who], humanAsked: true, status: 'new', createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [], ...over } as WorkItem;
+    env.store.putWork(w);
+    env.store.workSeq = Math.max(env.store.workSeq, Number(id.slice(1)));
+    return w;
+  };
+  /** Ben's worker on Ben's w1 in pc/alpha, idle, its process on Ben's token. */
+  const bensWorker = async () => {
+    file('w1', BEN, { title: 'Rocket Adapters burn cargo' });
+    const started = await env.call(env.dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Show the burn', title: 'Adapters', work_id: 'w1' });
+    const id = /Started agent (\w+)/.exec(started.text)![1];
+    await until('idle on Ben\'s token', () => env.sessions.get(id).info.status === 'idle' && env.sessions.get(id).info.ranFor === 'ben');
+    return id;
+  };
+  return { ...env, file, bensWorker };
+}
+
+test("w1076: lothsahn's request sent to Ben's worker starts a NEW session on lothsahn's tokens, whatever the relation or 'same' says; link is refused", async (t) => {
+  const { store, sessions, o, dispatcher, call, file, bensWorker } = await setupTwoAccounts(t);
+  const a = await bensWorker();
+  // w2 names w1 (the server reads it as related) and the dispatcher even says 'same': w1072's 01:36 join.
+  file('w2', LOTH, { title: 'Ice lost after starting a ship', relatedIds: ['w1'] });
+  const link = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'link', note: 'Same work.', session_ids: [a], title: 'Ice' });
+  assert.equal(link.isError, true);
+  assert.match(link.text, /w2 runs on Lothsahn's Claude tokens, and worker \w+ is on w1 "Rocket Adapters burn cargo" \(Ben's\), so its process runs on Ben's\. A request runs on its own person's tokens \(w1076\)/);
+  assert.deepEqual(store.work.get('w2')!.sessionIds, []);
+
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: a, text: 'Take w2.', work_id: 'w2', title: 'Ice', session: 'same', session_reason: 'the adapters burn ice: the same code' });
+  assert.equal(sent.isError, false, sent.text);
+  const b = /Started a NEW session (\w+)/.exec(sent.text)?.[1];
+  assert.ok(b && b !== a, sent.text);
+  assert.match(sent.text, /a request runs on its own person's tokens \(w1076\), so the dispatcher's "same" is overruled \(the server read it as related: it names w1/);
+  assert.deepEqual(store.work.get('w2')!.sessionIds, [b]);
+  assert.deepEqual(store.work.get('w1')!.sessionIds, [a]);
+  assert.match(store.work.get('w2')!.log.join('\n'), /session choice: a NEW session instead of worker \w+'s; w2 runs on Lothsahn's Claude tokens/);
+  assert.ok(!store.readTranscript(a).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('Take w2.')), "nothing of w2 went into Ben's conversation");
+  // The new session: the same sandbox, its process on lothsahn's token from its first turn; Ben's stays on Ben's.
+  assert.equal(sessions.get(b).info.machineSandbox, 'alpha');
+  await until("the new session's process on lothsahn's token", () => sessions.get(b).info.ranFor === 'lothsahn');
+  assert.equal(sessions.get(a).info.ranFor, 'ben');
+  assert.equal(o.sessionPersonOf(a), 'ben');
+  assert.equal(o.sessionPersonOf(b), 'lothsahn');
+
+  // Ben's own related request still goes to Ben's worker (w740 unchanged for one person).
+  await until('idle', () => sessions.get(a).info.status === 'idle');
+  file('w3', BEN, { title: 'Adapter tooltip', relatedIds: ['w1'] });
+  const same = await call(dispatcher().info, 'message_agent', { session_id: a, text: 'Take w3.', work_id: 'w3', title: 'Tooltip' });
+  assert.match(same.text, /Same session \(related: it names w1/, same.text);
+});
+
+test('w1076: a request already in another person\'s session moves out on its next message_agent; session "new" is honoured for a request the worker is on', async (t) => {
+  const { store, sessions, o, dispatcher, call, file, bensWorker } = await setupTwoAccounts(t);
+  const a = await bensWorker();
+  // The state w1072 was left in: lothsahn's w2 sent into Ben's worker before w1076 (and sent last, so it is what it serves).
+  file('w2', LOTH, { title: 'Ice lost after starting a ship', status: 'active', sessionIds: [a], links: { [a]: { at: new Date(Date.now() + 1000).toISOString(), how: 'sent' } } });
+  // Its next process stays on Ben's tokens (the person it ran for keeps a mixed session), never Ben's w1 on lothsahn's.
+  assert.equal(o.sessionPersonOf(a), 'ben');
+  assert.equal(o.accountClash(store.work.get('w1')!, a), undefined, "Ben's request stays in Ben's session");
+  assert.match(o.accountClash(store.work.get('w2')!, a)!, /w2 runs on Lothsahn's Claude tokens/);
+
+  // The dispatcher restarts w2 with the same session id and no session choice: it moves to a new session (02:03 went to a33e1437).
+  const moved = await call(dispatcher().info, 'message_agent', { session_id: a, text: 'Restart w2 on lothsahn\'s account.', work_id: 'w2' });
+  assert.equal(moved.isError, false, moved.text);
+  const b = /Started a NEW session (\w+)/.exec(moved.text)?.[1];
+  assert.ok(b && b !== a, moved.text);
+  assert.match(moved.text, new RegExp(`w2 is taken off ${a}`));
+  assert.deepEqual(store.work.get('w2')!.sessionIds, [b], 'the old worker no longer has it');
+  assert.equal(store.work.get('w2')!.links?.[a], undefined);
+  assert.match(store.work.get('w2')!.log.join('\n'), new RegExp(`taken off worker ${a}: it moves to a new session in the same sandbox: w2 runs on Lothsahn's Claude tokens`));
+  assert.deepEqual(o.handsOf(a).map((w) => w.id), ['w1']);
+  await until("lothsahn's token", () => sessions.get(b).info.ranFor === 'lothsahn');
+  assert.ok(!store.readTranscript(a).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('Restart w2')));
+
+  // session "new" on a request the worker is on, one person: it needs a reason, and then moves it.
+  await until('idle', () => sessions.get(b).info.status === 'idle');
+  const noWhy = await call(dispatcher().info, 'message_agent', { session_id: b, text: 'Go on.', work_id: 'w2', session: 'new' });
+  assert.equal(noWhy.isError, true);
+  assert.match(noWhy.text, /session "new" moves w2 off \w+, which is on it already: say why in session_reason/);
+  const fresh = await call(dispatcher().info, 'message_agent', { session_id: b, text: 'Go on in a clean session.', work_id: 'w2', session: 'new', session_reason: 'its session stopped on a usage limit' });
+  assert.equal(fresh.isError, false, fresh.text);
+  const c = /Started a NEW session (\w+)/.exec(fresh.text)![1];
+  assert.match(fresh.text, /the dispatcher chose a new session: its session stopped on a usage limit/);
+  assert.deepEqual(store.work.get('w2')!.sessionIds, [c]);
+  assert.equal(sessions.get(c).info.title, 'w2: Ice lost after starting a ship', 'titled from the request when no title is given');
+});
+
+test("w1076: a request taken over by another person restarts its worker's process on their tokens at the next turn, in the same conversation", async (t) => {
+  const { store, sessions, o, dispatcher, call, bensWorker } = await setupTwoAccounts(t);
+  const a = await bensWorker();
+  const turnsBefore = sessions.get(a).info.turns;
+  // lothsahn acts on Ben's w1 (w1031): it runs for him from now on.
+  o.takeOver(store.work.get('w1')!, LOTH, 'Lothsahn added a note');
+  assert.equal(o.sessionPersonOf(a), 'lothsahn');
+  const r = await call(dispatcher().info, 'message_agent', { session_id: a, text: 'Lothsahn added a note: check the ice too.', work_id: 'w1' });
+  assert.equal(r.isError, false, r.text);
+  assert.doesNotMatch(r.text, /NEW session/, 'one person in the session: no new session, the account switches');
+  await until("the turn ran on lothsahn's token", () => sessions.get(a).info.ranFor === 'lothsahn' && sessions.get(a).info.status === 'idle' && store.readTranscript(a).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('check the ice too')), 10_000);
+  const events = store.readTranscript(a);
+  const stop = events.find((e) => e.kind === 'system' && /Its process stops and starts again on another Claude account: its process runs on ben's Claude tokens and its requests are lothsahn's now/.test((e as { text: string }).text));
+  const note = events.find((e) => e.kind === 'user' && (e as { text: string }).text.includes('check the ice too'));
+  assert.ok(stop && note && note.seq > stop.seq, "the note is a turn of the new process, never of the one on Ben's token");
+  assert.equal(events.filter((e) => e.kind === 'system' && /Its process stops and starts again/.test((e as { text: string }).text)).length, 1, 'one restart: the daemon\'s copy does not put it back on ben');
+  assert.ok(sessions.get(a).info.turns > turnsBefore, 'the same session went on');
+  assert.equal(store.sessions.get(a)!.queuedSend, undefined, 'nothing left waiting');
+});
+
+test('w1076: sessionPerson: the person of the requests in hand, never the session\'s starter; a mixed session keeps the person it ran for', () => {
+  const cfg = {} as Config;
+  const w = (id: string, who: Requester, over: Partial<WorkItem> = {}) => ({ id, requestedBy: who, requesters: [who], ...over }) as WorkItem;
+  assert.equal(sessionPerson(cfg, [w('w2', LOTH)], [w('w2', LOTH)]), 'lothsahn');
+  assert.equal(sessionPerson(cfg, [], []), undefined);
+  const both = [w('w1', BEN), w('w2', LOTH)];
+  assert.equal(sessionPerson(cfg, both, [both[1]], 'ben'), 'ben');
+  assert.equal(sessionPerson(cfg, both, [both[1]], 'lothsahn'), 'lothsahn');
+  assert.equal(sessionPerson(cfg, both, [both[1]]), 'lothsahn', 'never ran: the request it serves');
+  const taken = w('w1', BEN, { runsFor: { userId: 'lothsahn', displayName: 'Lothsahn', at: T0, why: 'noted' } });
+  assert.equal(sessionPerson(cfg, [taken], [taken], 'ben'), 'lothsahn', 'one person: theirs, whoever it ran for');
+  assert.equal(personForWork(cfg, w('w9', BEN, { unattributed: true, source: { kind: 'discord-bug' } as WorkItem['source'] })), 'lothsahn', "the intake's default");
 });
 
 // ---------------------------------------------------------------- w754: gates outlive a hold, several gates, no polling

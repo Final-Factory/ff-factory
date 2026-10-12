@@ -351,6 +351,8 @@ export interface MachineRunEnv {
   account: string;
   /** The vault GitHub entry given as GH_TOKEN (w868), "vault-ben-github …abcd"; absent: the machine's own gh login. */
   github?: string;
+  /** Whose own Claude tokens it got (w1076: their pool token or config userClaudeEnv); absent: the machine's account. */
+  person?: string;
 }
 
 /**
@@ -376,7 +378,8 @@ export function machineRunEnv(
   const base = claudeEnvFor(cfg, billed, hostClaudeEnvFor(cfg, machine));
   const plain = { env: base, login: machineUsesLogin(cfg, machine), account: accountSource(cfg, machine) };
   const own = userToken(cfg, billed?.userId);
-  if (!ctx) return plain;
+  const ownPerson = own && billed ? { person: billed.userId } : {};
+  if (!ctx) return { ...plain, ...ownPerson };
   const wantClaude = vaultOn && !own;
   const wantGithub = githubFromVault(cfg, refId(machine));
   const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, sessionId: run.sessionId }, { claude: wantClaude, github: wantGithub, githubUsable: ctx.githubUsable, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
@@ -389,7 +392,7 @@ export function machineRunEnv(
     ctx.onGithubMissing?.(person, refId(machine), `a ${run.role} run`);
   }
   if (s.claude) {
-    return { env: { ...usageEnv(base), ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person), ...github };
+    return { env: { ...usageEnv(base), ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person), ...github, ...(person ? { person } : {}) };
   }
   // The person has Claude tokens and none may serve this run (every one over its caps or used up): the run waits for the
   // first to free up. No other person's token, no shared token, not the dispatcher's, not the host token (w739).
@@ -402,7 +405,7 @@ export function machineRunEnv(
   }
   // No token of their own: today's account, as before the pool (docs/vault.md, "Cut-over").
   if (wantClaude) ctx.onProblem?.(`no vault Claude token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it runs on ${plain.account} instead`);
-  return { ...plain, env: { ...base, ...s.env }, ...github };
+  return { ...plain, env: { ...base, ...s.env }, ...github, ...ownPerson };
 }
 
 /** "vault token ben-max …abcd" for a run's account line, safe to show. */

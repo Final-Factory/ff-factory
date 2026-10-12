@@ -1318,3 +1318,48 @@ test('w731: an idle reopened request is not closed on its worker’s old "delive
   // `now` of the sweep is fixed in the past, so this report is also "too recent": the quiet period rules, not the reopen.
   assert.notEqual(get('w1').status, 'stalled');
 });
+
+test("w1076: a usage limit on another person's account never holds a request: the dispatcher moves it; the account's own request still waits for its reset", async (t) => {
+  const { request, worker, world, sweep, get, store, o, agents } = setup(t);
+  (o as unknown as { d: { gatherMs: number } }).d.gatherMs = 20;
+  const LIMIT = "You've hit your session limit · resets 9:40pm (America/Denver)";
+  // The w1072 shape: Ben's w1 and lothsahn's w2 in Ben's worker s1 (sent there before w1076), which stopped on Ben's limit.
+  request('w1', { sessionIds: ['s1'], updatedAt: ago(8), links: { s1: { at: ago(9), how: 'sent' } } });
+  request('w2', { requestedBy: LOTH, requesters: [LOTH], sessionIds: ['s1'], updatedAt: ago(8), links: { s1: { at: ago(8.5), how: 'sent' } } });
+  worker('s1', { lastActivityAt: ago(8), lastResult: LIMIT, ranFor: 'ben' });
+  world.clear = false;
+  await sweep.run();
+  // lothsahn's request: not stalled on Ben's limit and not resumed in Ben's session; the dispatcher is told to move it.
+  assert.equal(get('w2').status, 'active');
+  assert.deepEqual(world.resumed, [], "nothing is resumed in Ben's session");
+  assert.match(get('w2').log.join('\n'), /w2 runs on Lothsahn's Claude tokens, and worker s1 is on w1 "Fix w1" \(Ben's\), so its process runs on Ben's, so w2 does not wait for that limit/);
+  const told = () => store.readTranscript(agents.dispatcherId).filter((e) => e.kind === 'user' && (e as { text: string }).text.includes('must not wait for that limit'));
+  await until('the dispatcher is told', () => told().length === 1);
+  assert.match((told()[0] as { text: string }).text, /message_agent with session_id "s1" and work_id "w2" starts one in its sandbox on Lothsahn's tokens/);
+  // Ben's own request in his own session waits for his limit, as before.
+  assert.equal(get('w1').status, 'stalled');
+  assert.match(get('w1').stalled!.reason, /limit has not reset yet/);
+  // Not told twice: the next pass stalls it, saying the dispatcher was told.
+  await sweep.run();
+  assert.equal(get('w2').status, 'stalled');
+  assert.match(get('w2').stalled!.reason, /the dispatcher was told to give w2 a session of its own \(w1076\)/);
+  assert.equal(told().length, 1);
+});
+
+test('w1076: a request taken over by another person is resumed at once when its worker stopped on the old account\'s limit', async (t) => {
+  const { request, worker, world, sweep, get } = setup(t);
+  const LIMIT = "You've hit your session limit · resets 9:40pm (America/Denver)";
+  // Ben's request in Ben's worker, at Ben's limit; lothsahn acted on it (w1031), so its next process runs on his tokens.
+  request('w1', { sessionIds: ['s1'], updatedAt: ago(8), runsFor: { userId: 'lothsahn', displayName: 'Lothsahn', at: ago(8), why: 'Lothsahn added a note' } });
+  worker('s1', { lastActivityAt: ago(8), lastResult: LIMIT, ranFor: 'ben' });
+  world.clear = false;
+  await sweep.run();
+  assert.deepEqual(world.resumed.map((r) => r.id), ['s1'], "resumed without waiting for Ben's limit");
+  assert.equal(get('w1').status, 'active');
+  // The same person's own limit still waits (the existing rule).
+  request('w2', { sessionIds: ['s2'], updatedAt: ago(8) });
+  worker('s2', { lastActivityAt: ago(8), lastResult: LIMIT, ranFor: 'ben' });
+  await sweep.run();
+  assert.equal(get('w2').status, 'stalled');
+  assert.match(get('w2').stalled!.reason, /limit has not reset yet/);
+});
