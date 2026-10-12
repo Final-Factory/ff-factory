@@ -72,8 +72,9 @@ before `loadConfig`; not in a dry run, whose config is another portal's). It is 
   (`redactSecrets`' patterns, or a URL with a password) is not moved; it is warned about ("config: WARNING config.json <key>
   looks like a credential (not shown)") and keeps config.json closed to agents until a person moves it.
 
-The secrets folder is `FFSB_SECRETS_DIR` if set; else in the VM `/srv/fff/secrets` (a `secrets` folder beside config's folder);
-else `<app>/secrets` (`secretsDirOf`).
+The secrets folder is `FFSB_SECRETS_DIR` if set; else `<app>/secrets` when config.json is in the app folder; else in the VM
+`/srv/fff/secrets` (beside a folder named `config`); else a `secrets` folder inside config.json's own folder, so a portal on a
+config in a temp folder never shares one (`secretsDirOf`). The read guard closes each of them.
 
 **The retired token file.** `/srv/fff/secrets/claude-oauth-token` (what `fffctl claude-token` wrote for the `"tokenfile"`
 account) is deleted by the portal, with no copy, once this release's deploy has verified (`data/update.verified*.json` names

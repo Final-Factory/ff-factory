@@ -56,6 +56,8 @@ test('the start splits config.json once: retired Claude keys out, the FFBox hash
   const p = portal(t, OLD);
   const original = fs.readFileSync(p.config, 'utf8');
   assert.equal(secretsDirOf(p.config), p.secrets, "the VM's layout: secrets beside config's folder");
+  assert.equal(secretsDirOf('/tmp/ffsb-x/config.json', '/srv/app'), '/tmp/ffsb-x/secrets', 'a config in any other folder keeps its secrets inside it, never in a shared /tmp/secrets');
+  assert.equal(secretsDirOf('/srv/app/config.json', '/srv/app'), '/srv/app/secrets');
   const m = migrateConfig(p.config, p.secrets, new Date('2026-10-12T04:00:00Z'));
   const said = m.changes.join('; ');
   for (const k of ['claudeEnv', 'userClaudeEnv', 'claudeTokenFile', 'machines.useHostClaudeEnv', 'machines.claudeFromVault', 'claudeAccounts.orchestrator', 'providers.ffbox.tokenSha256']) assert.match(said, new RegExp(k.replace('.', '\\.')), k);

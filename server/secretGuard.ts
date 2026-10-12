@@ -281,7 +281,8 @@ export function portalSecretRules(o: {
       `${P.join(o.appRoot, 'config.json')}*`,
       o.dataDir,
       P.join(o.appRoot, 'secrets'),
-      ...(same(cfgDir, o.appRoot) ? [] : [P.join(P.dirname(cfgDir), 'secrets')]),
+      // The secrets folder (w1078, server/configMigration.ts secretsDirOf): beside a folder named config, else inside config's.
+      ...(same(cfgDir, o.appRoot) ? [] : [P.join(P.dirname(cfgDir), 'secrets'), P.join(cfgDir, 'secrets')]),
       // The secrets folder when it is set elsewhere (w1078, server/configMigration.ts secretsDirOf).
       ...(env.FFSB_SECRETS_DIR ? [env.FFSB_SECRETS_DIR] : []),
       ...files.map((f) => (P.basename(P.dirname(f)).toLowerCase() === 'secrets' ? P.dirname(f) : f)),

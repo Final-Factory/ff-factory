@@ -54,6 +54,8 @@ test('the secrets folder, where the FFBox connector hash is, stays closed to eve
     assert.match(read(r, '/srv/fff/secrets', 'search') ?? '', /FF Factory's own|would read/);
   }
   assert.ok(secretFilesOf({ providers: { ffbox: { tokenSha256File: '/elsewhere/hash' } } }).includes('/elsewhere/hash'), 'a hash file named anywhere is closed too');
+  const tmpRules = portalSecretRules({ configFile: '/tmp/ffsb-x/config.json', appRoot: '/srv/fff/app/current', dataDir: '/tmp/ffsb-x/data', platform: 'linux' });
+  assert.match(readProblem('/tmp/ffsb-x/secrets/ffbox-connector-token.sha256', 'file', tmpRules, LINUX) ?? '', /FF Factory's own/, "a config folder's own secrets folder is closed");
   const moved = portalSecretRules({ configFile: CONFIG, appRoot: '/srv/fff/app/current', dataDir: '/srv/fff/data', env: { FFSB_SECRETS_DIR: '/var/lib/fff-secrets' }, platform: 'linux' });
   assert.match(readProblem('/var/lib/fff-secrets/ffbox-connector-token.sha256', 'file', moved, LINUX) ?? '', /FF Factory's own/, 'a secrets folder set elsewhere (FFSB_SECRETS_DIR) is closed too');
 });

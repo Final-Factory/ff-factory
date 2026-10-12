@@ -17,14 +17,16 @@ export const OLD_TOKEN_FILE = 'claude-oauth-token';
 const HASH = /^[0-9a-f]{64}$/;
 
 /**
- * The portal's secrets folder: FFSB_SECRETS_DIR, else the one the read guard already closes (server/secretGuard.ts
- * portalSecretRules): `<app>/secrets` when config.json sits in the app folder, else `secrets` beside config.json's folder
- * (the VM: /srv/fff/config/config.json -> /srv/fff/secrets).
+ * The portal's secrets folder, one the read guard closes (server/secretGuard.ts portalSecretRules): FFSB_SECRETS_DIR; else
+ * `<app>/secrets` when config.json sits in the app folder; else, in the VM's layout (a folder named config),
+ * `secrets` beside it (/srv/fff/config/config.json -> /srv/fff/secrets); else `secrets` inside config.json's own folder,
+ * so a portal started on a config in a temp folder never shares one with another (/tmp/secrets).
  */
 export function secretsDirOf(configFile: string, appRoot = ROOT, env: NodeJS.ProcessEnv = process.env): string {
   if (env.FFSB_SECRETS_DIR) return path.resolve(env.FFSB_SECRETS_DIR);
   const dir = path.dirname(path.resolve(configFile));
-  return path.resolve(dir) === path.resolve(appRoot) ? path.join(appRoot, 'secrets') : path.join(path.dirname(dir), 'secrets');
+  if (dir === path.resolve(appRoot)) return path.join(appRoot, 'secrets');
+  return path.basename(dir) === 'config' ? path.join(path.dirname(dir), 'secrets') : path.join(dir, 'secrets');
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
