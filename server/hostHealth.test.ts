@@ -178,13 +178,14 @@ test('disk critical: busy agents asked to checkpoint once, idle editors stopped,
 });
 
 test('continuous clean-up: a regular pass each hour, sooner below the soft threshold, a notice only when it cannot get above', async () => {
-  const { world, log, cleaned, m } = harness();
+  // A soft threshold set above the warn level (the default is the warn level, w1101), so there is a band to clean in.
+  const { world, log, cleaned, m } = harness({ cfg: { hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: '', cleanup: { everyMinutes: 60, softFreeGB: 120 } } } as never });
   await m.tick();
   await settle();
   assert.deepEqual(cleaned, ['regular'], 'the first look runs a pass');
   assert.equal(m.status.lastCleanup?.trigger, 'hourly');
   assert.equal(m.status.lastCleanup?.freedBytes, 3 * GB);
-  assert.equal(m.status.lastCleanup?.softFreeGB, 120, 'default soft threshold: warnFreeGB + 40');
+  assert.equal(m.status.lastCleanup?.softFreeGB, 120, 'the soft threshold set');
   assert.ok(!log.some((l) => l.startsWith('report Clean-up')), 'a pass that is fine says nothing');
   world.now += 30 * 60_000;
   await m.tick();
