@@ -7,7 +7,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { HOST_ROLES, configPath, loadConfig, machineCleanupSettings, pruneRetiredKeys, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus } from './store.ts';
-import { SessionManager, compactCommand, snapshotOf } from './sessions.ts';
+import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessions.ts';
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
 import { MachineManager, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
@@ -135,6 +135,8 @@ const store = new Store(cfg.dataDir);
 // What each request costs (w859, docs/spend.md): fed by every transcript event, whether the session runs here or on a machine.
 const spend = new SpendStore(cfg.dataDir, { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: (id) => store.countResults(id), accountLabel: (i) => (i.account ? `account ${i.account}` : undefined) });
 store.onEvent = (sid, e) => spend.observe(sid, e);
+// Sessions from before w1161 learn the CLI's own total at their last result, so their next resume is not counted twice.
+if (seedSdkCost(store.sessions.values(), (id) => spend.session(id)?.lastCost)) store.save();
 // The orchestrators' memory (Claude Code writes it, so it cannot be written crash-safe): a file a crash damaged gets its
 // newest good backup back, and a backup is taken every 10 minutes when something changed (server/orchestratorMemory.ts).
 const memoryRoot = memoryRootOf(cfg);

@@ -39,6 +39,12 @@ The turn's spend is the **difference** between `cum` and the last `cum` seen for
 - a session's first result, when its transcript holds no earlier result: `cum` is the turn (exact);
 - the SDK says a resumed session continues from its saved totals, so the first result after a resume already holds the earlier
   turns: the difference against the stored totals is still the turn;
+  totals that grew on every count since the last result are always this case, even when the result says `restarted` (w1161);
+- `restarted` (server/sessions.ts `firstResultBase`): a process's first total below the CLI's own total at the session's last
+  result (`SessionInfo.sdkCostUsd`), so the CLI began again from zero. Before w1161 the portal compared with its own figure
+  (`costUsd`), which runs ahead of the CLI's total once a process starts from zero; from then on every resume was flagged, and
+  each portal restart counted the CLI's whole running total again: the dispatcher's and orchestrators' first turn after a restart
+  read $165 to $215 (portal journal, auto-compact lines, 2026-10-11..12), 59 dispatcher turns billed to w605 at $1,836;
 - totals that start again (a `/clear`; half of the old figure or less): counted in full;
 - a session that ran before this existed, at its first result after the deploy: its totals hold all its history, so this turn is
   `usage.main` priced at list prices, marked estimated; from the next turn on it is exact;
