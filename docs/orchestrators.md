@@ -50,19 +50,62 @@ do not chat with it; the owner can open its page and write to it. It runs for th
 Ben). It hears work requests, updates to them, capacity news and the host's notices, and answers people only through
 the ledger.
 
-Both briefs describe the same world (`worldBrief` in `server/agents.ts`). Its FFBox paragraph is Lothsahn's text,
-verbatim (`FFBOX_BRIEF`): what FFBox is, that it owns #bug-reports and dev_bug_reports, and that the ffbox repo can be
-changed through workers, who push straight to its master one change at a time because a push goes live on the box within
-about five minutes. The longer version is [ffbox.md](ffbox.md). After it, the paragraph names `ffbox_activity`'s views,
-the live ones too (`config`, `board_log`, `status`, `conversation` with `id`) and the "Last known, from <time>"
+Both briefs describe the same world (`worldBrief` in `server/agents.ts`). Its FFBox line keeps FFBox's hard rules (it
+owns #bug-reports and dev_bug_reports, nobody announces a merged fix, no agent changes a Steam branch) and says when to
+read `read_rules ffbox`, which returns Lothsahn's text verbatim (`FFBOX_BRIEF`): what FFBox is, and that the ffbox repo can
+be changed through workers, who push straight to its master one change at a time because a push goes live on the box
+within about five minutes. The longer version is [ffbox.md](ffbox.md). After it, the topic names `ffbox_activity`'s
+views, the live ones too (`config`, `board_log`, `status`, `conversation` with `id`) and the "Last known, from <time>"
 fallback, and says that a copy of the tool's schema earlier in a resumed chat may list fewer views and is out of date.
-`ffbox_activity` stays read-only.
+`ffbox_activity` stays read-only. (Until w1158 the paragraph was in every call of every coordinator; its line on posting
+patch notes now says post_as_max, w901, as the release rule always did.)
 
 Both are sessions of kind `orchestrator`, so neither takes an agent slot, and both keep the orchestrator's limits: no
-shell, no web tools, `Read`/`Glob`/`Grep` on the base clone, and `Write`/`Edit` only in their own memory folder
-([Memory](#memory)). Their briefs share one description of the world
+shell, no web tools, `Read`/`Glob`/`Grep` on the base clone, `ToolSearch` for their deferred tools
+([What a coordinator's context costs](#what-a-coordinators-context-costs-w1158)), and `Write`/`Edit` only in their own
+memory folder ([Memory](#memory)). Their briefs share one description of the world
 (`worldBrief` in `server/agents.ts`); the dispatcher's is the old shared orchestrator's, edited for a chat nobody
 writes to.
+
+## What a coordinator's context costs (w1158)
+
+lothsahn, w1158: "1) Do it" (shrink the coordinators' context). In `spend_report` for 2026-10-10..12 the dispatcher and
+the personal orchestrators were about $5.8k of the top-20 requests' $6.9k, and its estimate put their base context
+(system prompt, tool definitions, reminders) at 52-63% of their spend. Every call carries that base context, and a call
+that has to write it to the prompt cache pays the write price on all of it. So it is kept small:
+
+- **Deferred tools.** A coordinator has `ToolSearch` (Claude Code's own), so only its everyday tools are sent in full in
+  every call: `ALWAYS_LOADED` in `server/belts.ts` (the dispatcher's `list_work`, `list_sandboxes`, `list_machines`,
+  `system_status`, `start_agent`, `message_agent`, `decide_work`, `create_sandbox`, `list_branches`, `set_agent_title`,
+  `wake_me`, `read_rules`; a person's `list_work`, `request_work`, `update_work`, `message_agent`, `list_sandboxes`,
+  `list_machines`, `system_status`, `agent_transcript`, `message_person`, `wake_me`, `read_rules`), marked
+  `_meta["anthropic/alwaysLoad"]` (the SDK's `tool(..., { alwaysLoad: true })`). Every other tool is listed by name and
+  `ToolSearch` (`select:<name>`) loads its description and schema when the coordinator needs it; its description is
+  where its long rules live (`ops_worker`'s jobs, deploys, restarts and machine updates; `set_app_config`'s every key).
+  Without `ToolSearch` in `tools`, Claude Code sends every MCP tool in full: that was the state before w1158.
+- **`read_rules <topic>`.** Rules most turns do not need are a topic of `Agents.rulesText`: `ffbox` (Lothsahn's FFBox
+  text, `ffbox_activity`'s views, and for a person's orchestrator the `[via FFBox: …]` and `[from FFBox …]` messages),
+  `intake` (the dispatcher's: sharing a worker, Lothsahn's desync PR policy, `ffbox-f/` branches, `send_to_ffbox`),
+  `release` (the dispatcher's: done means landed and the notes posted), `machines` (main clones w936, installers w855,
+  daemon updates w605/w887, low disk w626/w896) and `reactions` (a person's: replies and reactions, w866, w1039). The
+  brief keeps one line per topic: the gist that must hold without reading it, the w-numbers, and when to read it. The
+  topic's text binds like the brief.
+- **No duplication.** A rule lives in one place: the brief, or the description of the tool it is about.
+
+Measured on the API with each coordinator's own options and no conversation (Opus, the first call's input tokens,
+`scripts/coordinatorContext.ts` builds them; Claude Code's preset and its file tools are about 5,500 of each):
+
+| Coordinator | Before w1158 | After |
+|---|---|---|
+| Dispatcher | 48,176 | 23,277 |
+| Lothsahn's orchestrator | 37,903 | 22,751 |
+| Ben's orchestrator | 37,546 | 22,448 |
+| A member's | 36,150 | 20,971 |
+
+`node scripts/coordinatorContext.ts [--dump DIR]` prints each kind's brief and tool sizes (characters; the API counted
+about 2.9 characters a token for this text). `server/coordinatorContext.test.ts` fails when a brief passes 26,000
+characters or the always-loaded tools 22,500, when a topic is not named in the brief that reads it, and when a moved rule
+loses its words or w-number: move a rarely needed rule into a topic, or defer a tool, rather than raise the budget.
 
 ## Requests and the ledger
 

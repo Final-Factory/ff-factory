@@ -403,8 +403,9 @@ test("w677: a non-owner still follows up only on their own workers; an owner not
   assert.equal((await call(ben, 'message_agent', { session_id: hers.info.id, text: 'hi' })).text, `ERROR: ${hers.info.id} "Cara look" is Cara's work: follow up only on Ben's own workers and other owners' workers; for anything else, request_work`);
   assert.equal(heard(ben.id, '[from another owner]').length, 0);
   const desc = (info: SessionInfo) => agents.orchestratorBelt(info).find((x) => x.name === 'message_agent')!.description;
-  assert.match(desc(ben), /As an owner, Ben may also follow up on another owner's workers \(w677\), attachments included/);
-  assert.doesNotMatch(desc(cara), /another owner's workers/);
+  // The tool names the w677 permission; the brief (below) carries the rule in full (w1158: said once, not twice).
+  assert.match(desc(ben), /own workers, or another owner's \(w677\), as your brief's follow-up rule says/);
+  assert.doesNotMatch(desc(cara), /another owner's/);
   const brief = (p: Requester) => (agents as unknown as { personalBrief(r: Requester): string }).personalBrief(p);
   assert.match(brief(BEN), /As an owner, Ben may follow up the same way on another owner's workers too \(w677\)/);
   assert.doesNotMatch(brief(CARA), /another owner's workers too/);
@@ -1468,7 +1469,7 @@ test("w650: Lothsahn's and Ben's orchestrators read data/'s reports and ledger, 
       assert.equal(await run(info, tool, input), 'deny', `${who.userId}: ${tool} ${input.file_path}`);
     }
     const o = agents.orchestratorOptions(info) as { tools: string[]; systemPrompt: { append: string } };
-    assert.deepEqual(o.tools, ['Read', 'Glob', 'Grep', 'Write', 'Edit'], 'no shell: no Bash path to data/');
+    assert.deepEqual(o.tools, ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ToolSearch'], 'no shell: no Bash path to data/');
     assert.ok(o.systemPrompt.append.includes("## The portal's data folder"), 'the brief says what it may read');
   }
   for (const info of [dispatcher().info, chat(CARA).info]) {
