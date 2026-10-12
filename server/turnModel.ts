@@ -17,7 +17,10 @@ export const ROUTINE_AFTER_MINUTES_DEFAULT = 60;
 
 /**
  * Harness messages that still get the coordinator's own model: the dispatcher's placement and dispatch decisions, and a
- * person's click (a 👍 on a question of its own counts as the person's words, w1039).
+ * person's click (a 👍 on a question of its own counts as the person's words, w1039). The decisions by evidence (w1158's
+ * replay, docs/orchestrators.md "Which model answers a turn"): on 10 of 11 kinds of decision Sonnet decided as Opus did,
+ * but with a gate open and Ben's note "Unblock this one, go ahead." it started the gated work with override_gate in 3 runs
+ * of 3, the mistake of w754; Opus asked Ben in 3 of 3.
  */
 export const OWN_MODEL_TAGS: Readonly<Record<'dispatcher' | 'personal', readonly string[]>> = {
   dispatcher: ['work request', 'work update', 'ledger'],
