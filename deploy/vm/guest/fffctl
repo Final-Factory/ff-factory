@@ -582,6 +582,7 @@ cmd_configure() {
 # password. jq, for cmd_config.
 CONFIG_SECRETLIKE='def secretlike: type == "string" and (test("sk-ant-|ffpv1_|ffm_[A-Za-z0-9.-]+_[A-Za-z0-9_-]{32}|gh[pousr]_[A-Za-z0-9_]{30}|github_pat_|tskey-|AGE-SECRET-KEY-|PRIVATE KEY") or test("^[a-z][a-z0-9+.-]*://[^/@:]+:[^/@]+@"; "i"));'
 # The key paths in a config file that hold a secret or a key w1078 retired for holding one: names only.
+# shellcheck disable=SC2016 # jq's $p, not the shell's
 CONFIG_SECRET_PATHS="$CONFIG_SECRETLIKE"'[(["claudeEnv"], ["userClaudeEnv"], ["claudeTokenFile"], ["providers", "ffbox", "tokenSha256"]) as $p | select(getpath($p) != null) | $p | join(".")] + [paths(secretlike) | map(tostring) | join(".")] | unique | .[]'
 
 # config.json to read (w1078; the orchestration worker's too, through fff-ops-priv): every setting and no secret. What
