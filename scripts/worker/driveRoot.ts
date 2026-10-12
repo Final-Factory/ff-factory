@@ -1,7 +1,7 @@
 // The whole worker root on its Dev Drive (w1070, docs/worker-install.md "The Dev Drive"). lothsahn: "If using a dev drive,
 // the entire folder structure should be under V: Then we won't need the folder symlinks or anything". A Windows install with a
 // Dev Drive puts its root at <letter>:\ffw; the folder the person gave (the host folder, D:\work\ffw on LothDesktop) keeps only
-// what has to be there before the drive is attached (HOST_FILES). w900 had put only the sandboxes and the Library seed on the
+// what has to be there before the drive is attached or while it is gone (HOST_FILES). w900 had put only the sandboxes and the Library seed on the
 // drive, behind two junctions in a root on D:. An install of that kind is made again with `install --reinstall` (worker.ts
 // reinstallOnDrive): lothsahn, "Instead of doing a move, can we just do a fresh reinstall on LothDesktop instead?"
 import fs from 'node:fs';
@@ -13,16 +13,17 @@ export const DRIVE_ROOT_DIR = 'ffw';
 /**
  * What stays in the host folder, and why each must:
  * - devdrive.vhdx: the drive itself (a file cannot hold the volume it is the file of);
- * - devdrive.json: its letter, read by the boot mount (ffsb-helper-mount, SYSTEM, 30 s after boot) and by start-daemon.ps1
- *   before the drive is attached;
- * - start-daemon.ps1 (and its log): the daemon task's action. The task starts at logon, which can come before the boot mount
- *   has attached the drive, and a task whose action is on a missing drive does not start at all; this waits for the drive
- *   and then runs <root>\daemon\run-daemon.ps1;
+ * - devdrive.json: its letter, read by the boot mount (ffsb-helper-mount, SYSTEM, 30 s after boot) before the drive is attached;
+ * - daemon\ (its code, daemon.json, logs, run-daemon.ps1, the agent hosts' records, the pool's record) and secrets\ (the machine
+ *   credential): the daemon is what remounts the drive (its host guard runs ffsb-helper-mount), so it runs from here, where a
+ *   dropped drive cannot take it, its agent hosts or its logs away, and the FFFactoryDaemon task, which starts at logon, maybe
+ *   before the boot mount, finds its action. BEAST's C:\ffw-anchor, for the same reason (docs/worker-root.md 2.2). daemon.json
+ *   names these paths itself: no junctions;
  * - moved.json: where the root is, for an update or a person given the folder the install went into;
  * - .reinstall: only while `install --reinstall` runs, what it carries from the old install to the new root.
  * The helper scripts the boot mount runs are not here: they live in %ProgramData%\ffsb-helpers (install-privileged-helpers.ps1).
  */
-export const HOST_FILES = ['devdrive.vhdx', 'devdrive.json', 'start-daemon.ps1', 'start-daemon.log', 'moved.json', '.reinstall'];
+export const HOST_FILES = ['devdrive.vhdx', 'devdrive.json', 'daemon', 'secrets', 'moved.json', '.reinstall'];
 
 /** One of the host folder's own entries. */
 export const isHostFile = (name: string) => HOST_FILES.includes(name.toLowerCase());

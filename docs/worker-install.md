@@ -416,13 +416,15 @@ instead of the D: space for disk. And then cap the vdisk file at 275GB".
 | File | Why it cannot be on the drive |
 |---|---|
 | `devdrive.vhdx` | the drive itself: a file cannot hold the volume it is the file of |
-| `devdrive.json` | its letter, read by the boot mount (`ffsb-helper-mount`, SYSTEM, 30 s after boot) and by `start-daemon.ps1` before the drive is attached |
-| `start-daemon.ps1` (and `start-daemon.log`) | the `FFFactoryDaemon` task's action. The task starts at logon, which can come before the boot mount; a task whose action is on a missing drive does not start. It reads the letter from `devdrive.json`, starts `ffsb-helper-mount` after 20 s, runs `<letter>:\ffw\daemon\run-daemon.ps1` as its child once it is there, and gives up after 10 minutes (Task Scheduler retries a minute later) (`server/machineDeployWin.ts` `startDaemonScript`) |
+| `devdrive.json` | its letter, read by the boot mount (`ffsb-helper-mount`, SYSTEM, 30 s after boot) before the drive is attached |
+| `daemon\` and `secrets\` | the daemon (its code, `daemon.json`, logs, `run-daemon.ps1`, the agent hosts' and the pool's records) and the machine credential. The daemon is what remounts the drive (its host guard runs `ffsb-helper-mount`), so it must not run from it: a dropped `V:` would take the daemon, its agent hosts and its logs with it, and nothing would remount it until the next logon. The `FFFactoryDaemon` task names `D:\work\ffw\daemon\run-daemon.ps1` directly, so it also starts at a logon that comes before the boot mount. BEAST keeps the same three in `C:\ffw-anchor` for the same reason ([worker-root.md](worker-root.md) 2.2); here `daemon.json` names them, with no junctions (`worker.ts` `layoutOf(root, anchor)`) |
 | `moved.json` | where the root is: `worker.ts update --root D:\work\ffw` and `install.ps1 -Update -Root D:\work\ffw` follow it |
 
 The helper scripts the boot mount runs stay in `%ProgramData%\ffsb-helpers`. A changed letter is followed: the boot mount
-repoints `daemon.json`, the pool's record and the worktrees on the drive (`devdrive-lib.ps1` `Update-LetterDependents`), and
-`start-daemon.ps1` reads the letter each time.
+repoints `daemon.json`, the pool's record and the worktrees on the drive (`devdrive-lib.ps1` `Update-LetterDependents`).
+**If V: drops while the machine runs**, the daemon on D: sees it (its host guard), stops the turns in sandboxes, remounts it
+through `ffsb-helper-mount` (at once, then 2, 5, 10 and 30 minutes) and restarts the editors and resumes the agents, as on
+BEAST ([self-recovery.md](self-recovery.md)).
 
 **A new install** (`install.ps1`, `worker.ts install`) makes the drive first, in the folder given, and installs the root on it
 (`install` step 0). **An existing w900 install** (sandboxes and seed on the drive behind junctions, the rest on D:) is made
@@ -431,12 +433,14 @@ doing a move, can we just do a fresh reinstall on LothDesktop instead?"):
 
 1. It refuses, changing nothing, while the portal names an agent on the machine, a process uses the root or the drive (an
    editor, a build, a player, the nightly lab), or a sandbox holds a commit no remote has or an uncommitted file
-   (`sandboxRisks`; commit each on its branch and push first). It needs an elevated session (an administrator's ssh).
+   (`sandboxRisks`; commit each on its branch and push first). It needs an elevated session (an administrator's ssh). The new
+   drive asks for the old one's letter by name: Windows keeps it reserved for the old volume.
 2. It stops the daemon, copies the Library seed off the old drive into `<host>\.reinstall` when it fits with 10 GB to spare
    (else the first new sandbox imports its Library, an hour or more), deletes the old drive and its tasks, puts the clone,
    `nightly`, `tmp` and `scratch` aside in `<host>\.reinstall`, and deletes everything else of the old install.
 3. It installs as new with every setting and the credential of the old install (paths in the carried `daemon.json` settings
-   rebased onto the new root): a new drive (`-DevDriveMaxGB`), the root on it, the clone seeded from the old one (its Git LFS
+   rebased onto the new root): a new drive (`-DevDriveMaxGB`), the root on it with the daemon and the credential in the host
+   folder, the clone seeded from the old one (its Git LFS
    objects too), `nightly`, `tmp`, `scratch` and the seed moved in file by file, the nightly lab's task repointed, the sandboxes'
    Claude conversations renamed to the same sandbox names in the new root.
 

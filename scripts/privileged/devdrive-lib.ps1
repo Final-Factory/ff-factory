@@ -268,7 +268,9 @@ function Update-LetterDependents([string]$From, [string]$To) {
   }
   if ($DaemonConfig) { try { $n = Update-JsonFileLetter $DaemonConfig $From $To; $done += "daemon.json ($n paths)" } catch { $done += "daemon.json FAILED: $($_.Exception.Message)" } }
   if ($WorkerRoot) {
-    try { $n = Update-JsonFileLetter (Join-Path $WorkerRoot 'daemon\sandboxes.json') $From $To; $done += "sandboxes.json ($n paths)" } catch { $done += "sandboxes.json FAILED: $($_.Exception.Message)" }
+    # The pool's record sits beside daemon.json (in the host folder for a root on the drive, w1070).
+    $poolFile = if ($DaemonConfig) { Join-Path (Split-Path -Parent $DaemonConfig) 'sandboxes.json' } else { Join-Path $WorkerRoot 'daemon\sandboxes.json' }
+    try { $n = Update-JsonFileLetter $poolFile $From $To; $done += "sandboxes.json ($n paths)" } catch { $done += "sandboxes.json FAILED: $($_.Exception.Message)" }
     foreach ($name in 'sandboxes', 'seed') {
       try {
         # Only a junction (a root whose sandboxes are on the drive); a real folder is the install's own and is left alone.

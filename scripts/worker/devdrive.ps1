@@ -10,7 +10,8 @@
 #                    <Root>\devdrive.vhdx.
 #
 # -Root is the folder that holds the VHDX (the host folder). -WorkerRoot is the worker root, when it is somewhere else: on
-# the drive itself (w1070, <letter>:\ffw); its daemon\daemon.json and sandboxes follow a letter change.
+# the drive itself (w1070, <letter>:\ffw), whose sandboxes follow a letter change; -DaemonConfig is then the daemon's
+# daemon.json, which stays in the host folder with the daemon (it remounts the drive, so it does not run from it).
 #
 # The last line it prints is `FFW-DEVDRIVE {json}` for the caller. Exit code 0 on success, 1 on a failure it names.
 param(
@@ -27,7 +28,9 @@ param(
   # Letters never to use, e.g. 'U,T'.
   [string]$Skip = '',
   [switch]$NoTasks,
-  [string]$WorkerRoot = ''
+  [string]$WorkerRoot = '',
+  # The daemon's daemon.json when it is not in the worker root: a root on the drive keeps the daemon in the host folder (w1070).
+  [string]$DaemonConfig = ''
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\privileged\devdrive-lib.ps1')
@@ -39,7 +42,7 @@ $WorkerRoot = if ($WorkerRoot) { [IO.Path]::GetFullPath($WorkerRoot).TrimEnd('\'
 $ResultDir = Join-Path $env:ProgramData 'ffsb-helpers\results'
 $Flex = $true
 $LetterChangedFrom = ''
-$DaemonConfig = Join-Path $WorkerRoot 'daemon\daemon.json'
+if (-not $DaemonConfig) { $DaemonConfig = Join-Path $WorkerRoot 'daemon\daemon.json' }
 New-Item -ItemType Directory -Force $ResultDir | Out-Null
 
 function Say([string]$line) { Write-Output $line; Log $line }
