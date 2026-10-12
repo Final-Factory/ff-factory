@@ -224,6 +224,12 @@ export function githubCredentialEnv(prior: Record<string, string | undefined>): 
 export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env, editorRunning?: () => boolean): Options {
   const baseEnv = spec.login ? usageEnv(processEnv) : processEnv;
   const g = spec.guard;
+  // Git fails fast instead of waiting on a credential prompt nobody will answer.
+  const agentEnv = (() => {
+    const env: Record<string, string | undefined> = { MCP_TIMEOUT: '120000', ...baseEnv, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env };
+    // A vault GitHub token (GH_TOKEN): gh reads it itself; git gets a helper that reads it (githubCredentialEnv).
+    return spec.env?.GH_TOKEN ? { ...env, ...githubCredentialEnv(env) } : env;
+  })();
   const hooks = [
     sandboxGuard({
       sandboxId: g.id,
@@ -235,6 +241,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       workerRoot: g.workerRoot,
       mainClone: g.mainClone,
       editorRunning,
+      // The shell's own variables, so `cd $TMPDIR/ffbox && git push origin HEAD:master` is read where it goes (w1132).
+      env: agentEnv,
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];
@@ -270,12 +278,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     mcpServers,
     ...(spec.maxBudgetUsd !== undefined ? { maxBudgetUsd: spec.maxBudgetUsd } : {}),
     hooks: { PreToolUse: [{ hooks }] },
-    // Git fails fast instead of waiting on a credential prompt nobody will answer.
-    env: (() => {
-      const env: Record<string, string | undefined> = { MCP_TIMEOUT: '120000', ...baseEnv, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env };
-      // A vault GitHub token (GH_TOKEN): gh reads it itself; git gets a helper that reads it (githubCredentialEnv).
-      return spec.env?.GH_TOKEN ? { ...env, ...githubCredentialEnv(env) } : env;
-    })(),
+    env: agentEnv,
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
   };
 }

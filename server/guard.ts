@@ -20,8 +20,10 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     no --mirror/--all, no `gh` calls that rewrite refs/branches.
  *   - git, the game repo only (config repo.url / repo.basePath): no pushes to master/main and no PRs
  *     into master/main. The target is read from the push's remote (`git remote -v` in the command's
- *     directory, following `cd` and `git -C`) or gh's -R/--repo/GH_REPO; when it cannot be determined,
- *     it counts as the game repo. Other repos' master/main are fair game. Pushing and merging into
+ *     directory, following `cd` and `git -C`, through the variables the worker's shell has: $TMPDIR, $HOME, ~) or
+ *     gh's -R/--repo/GH_REPO; when it cannot be determined, it counts as the game repo, and the refusal says why
+ *     and what it saw. Other repos' master/main are fair game: Final-Factory/ffbox is pushed straight to master by
+ *     design (docs/ffbox.md; w1132), the repo read from the remote's URL, never from a folder's name. Pushing and merging into
  *     develop is the normal, encouraged flow. (GitHub itself also refuses force pushes and deletion
  *     of master and develop: ruleset "Protect master and develop from rewrites".)
  *   - repository settings: `gh repo delete` never. `gh repo rename|create|edit|archive|unarchive` and
@@ -56,6 +58,8 @@ export function sandboxGuard(opts: {
   /** URLs or paths that name the game repo, whose master/main is off-limits. Empty: every repo counts. */
   gameRepos?: string[];
   remotes?: RemoteResolver;
+  /** The environment of the worker's shell: `cd $TMPDIR/ffbox` and `git -C ~/x` are followed through it (w1132). Absent: variables are not followed. */
+  env?: Record<string, string | undefined>;
   /** Tool name prefixes to refuse, e.g. "mcp__ffsb__" (the portal's own MCP, which would let an agent launch agents). */
   denyToolPrefixes?: string[];
   /** Whether the sandbox's Unity editor is up right now: raw branch switches are refused then (checkEditorSwitch). */
@@ -100,7 +104,7 @@ export function sandboxGuard(opts: {
     if (tool === 'Bash' || tool === 'PowerShell') {
       const cmd = String(args.command ?? '');
       const reason =
-        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity }) ??
+        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity, env: opts.env }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
@@ -280,6 +284,8 @@ export interface ShellContext {
   gameRepos: string[];
   remotes: RemoteResolver;
   publicIdentity?: PublicIdentity;
+  /** The worker shell's environment, for `cd $TMPDIR/x`. */
+  env?: Record<string, string | undefined>;
 }
 
 /** Repos whose history is public, and the identity commits to them should carry (config publicGitIdentity). */
@@ -325,21 +331,60 @@ function checkPublicIdentity(ctx: ShellContext | undefined, remote: string, srcs
   return `This push publishes commits with the email(s) ${bad.join(', ')} to ${target}, whose history is public. Commit as the public identity instead: in this clone run git config user.name "${name}" and git config user.email "${email}", then rewrite your unpushed commits with git rebase -r @{u} --exec "git commit --amend --no-edit --reset-author" and push again.`;
 }
 
+type ShellEnv = Record<string, string | undefined>;
+
+/**
+ * `p` with the variables the worker's shell has filled in ($VAR, ${VAR}, $env:VAR, %VAR%, a leading ~), or undefined when one is
+ * unset or the text runs a command ($(...), backticks). Names match without regard to case (Windows). Exported for tests.
+ */
+export function expandVars(p: string, env: ShellEnv | undefined): string | undefined {
+  if (!/[$~%`]/.test(p)) return p;
+  if (!env || /`|\$\(/.test(p)) return undefined;
+  const get = (name: string) => env[Object.keys(env).find((k) => k.toLowerCase() === name.toLowerCase()) ?? ''] || undefined;
+  let bad = false;
+  const val = (name: string) => get(name) ?? ((bad = true), '');
+  let q = p.replace(/^~(?=[\\/]|$)/, () => get('HOME') ?? get('USERPROFILE') ?? ((bad = true), ''));
+  q = q.replace(/\$\{(\w+)\}|\$env:(\w+)|\$(\w+)|%(\w+)%/gi, (_m, a, b, c, d) => val(a ?? b ?? c ?? d));
+  return bad || /[$`]|^~/.test(q) ? undefined : q;
+}
+
 /** Where a `cd` / `git -C` argument lands, or undefined when that cannot be known from the text. */
-function resolveDir(base: string | undefined, p: string | undefined): string | undefined {
-  if (!p || p.startsWith('-') || /[$~%`]/.test(p)) return undefined;
-  const q = /^\/[a-zA-Z]\//.test(p) ? `${p[1]}:${p.slice(2)}` : p; // Git Bash /c/x -> c:/x
+function resolveDir(base: string | undefined, p: string | undefined, env?: ShellEnv): string | undefined {
+  if (!p || p.startsWith('-')) return undefined;
+  const e = expandVars(p, env);
+  if (e === undefined) return undefined;
+  const q = /^\/[a-zA-Z]\//.test(e) ? `${e[1]}:${e.slice(2)}` : e; // Git Bash /c/x -> c:/x
   if (/^[a-zA-Z]:[\\/]/.test(q) || q.startsWith('/')) return q;
   return base ? path.join(base, q) : undefined;
 }
 
-/** Whether a push to `target` (a remote name in `dir`, or a URL) goes to the game repo. Unknown counts as yes. */
-function pushIsGameRepo(ctx: ShellContext | undefined, target: string | undefined, dir: string | undefined): boolean {
-  if (!ctx?.gameRepos.length || !target) return true;
+/** A URL without its credentials, for a message ("https://user:token@host/x" -> "https://host/x"). */
+const plainUrl = (u: string) => u.replace(/^([a-z+]+:\/\/)[^@/]*@/i, '$1');
+
+/**
+ * Where a push to `remote` (a remote name in `dir`, or a URL) goes, for the master/main rule: whether it is the game repo, and what
+ * the guard saw. Unknown counts as the game repo (`known: false`), and `saw` then says why it could not tell. `lost` is the text of a
+ * `cd` / `git -C` target that could not be followed.
+ */
+function pushTarget(ctx: ShellContext | undefined, remote: string | undefined, dir: string | undefined, lost?: string): { game: boolean; known: boolean; saw: string } {
+  const unknown = (saw: string) => ({ game: true, known: false, saw });
+  if (!ctx?.gameRepos.length) return unknown('no game repo is configured here, so every master/main push counts as the game repo\'s');
+  if (!remote) return unknown('the push names no remote before the branch (write `git push <remote> <branch>`)');
   const game = new Set(ctx.gameRepos.map(repoKey));
-  const url = (dir ? ctx.remotes(dir)?.get(target) : undefined) ?? (/[/:\\]/.test(target) ? target : undefined);
-  return url === undefined || game.has(repoKey(url));
+  if (/[/:\\]/.test(remote)) {
+    const key = repoKey(plainUrl(remote));
+    return { game: game.has(key), known: true, saw: `it pushes to ${key}` };
+  }
+  if (!dir) return unknown(`remote ${remote} could not be read: the directory it runs in could not be followed${lost ? ` (\`${lost}\` has a variable the shell does not have, or runs a command)` : ' (no directory is known for it)'}`);
+  const remotes = ctx.remotes(dir);
+  if (!remotes) return unknown(`remote ${remote} could not be read: ${dir} is not a git repo`);
+  const url = remotes.get(remote);
+  if (!url) return unknown(`remote ${remote} could not be read: ${dir} has remotes ${[...remotes].map(([n, u]) => `${n}=${plainUrl(u)}`).join(', ') || '(none)'}`);
+  const key = repoKey(plainUrl(url));
+  return { game: game.has(key), known: true, saw: `remote ${remote} of ${dir} is ${key}` };
 }
+
+const PUSH_AIM = 'The shell returns to your sandbox after every command: to push another repo (Final-Factory/ffbox master is pushed straight, docs/ffbox.md), name its clone in the same command, `cd <clone> && git push origin HEAD:master` (a path, or one under $TMPDIR), or push to its URL.';
 
 /** Whether a gh command run in `dir` (or aimed at `repo` by -R/GH_REPO) is about the game repo. Unknown counts as yes. */
 function ghIsGameRepo(ctx: ShellContext | undefined, repo: string | undefined, dir: string | undefined): boolean {
@@ -373,20 +418,42 @@ function ghRepoArgument(raw: string[]): string | undefined {
  */
 export function checkShell(cmd: string, ctx?: ShellContext): string | undefined {
   let dir = ctx?.cwd;
+  // The text of the last `cd` / `git -C` target that could not be followed, for the refusal's reason.
+  let lost: string | undefined;
+  // The worker's shell variables, plus the plain `NAME=value` assignments seen earlier in this command.
+  const env: ShellEnv = { ...ctx?.env };
+  const move = (base: string | undefined, p: string | undefined) => {
+    const d = resolveDir(base, p, env);
+    lost = d === undefined ? p : undefined;
+    return d;
+  };
   // Judge each simple command separately: `cd x && git push -f` must not hide behind the `cd`.
   for (const seg of cmd.split(/&&|\|\||[;|\n]/)) {
     const words = seg.trim().split(/\s+/).filter(Boolean);
     const raw = words.map((w) => w.replace(/^["']|["']$/g, ''));
     const lower = raw.map((w) => w.toLowerCase());
-    if (['cd', 'pushd', 'chdir', 'set-location', 'sl'].includes(lower[0] ?? '')) dir = resolveDir(dir, raw[1]);
+    if (['cd', 'pushd', 'chdir', 'set-location', 'sl'].includes(lower[0] ?? '')) dir = move(dir, raw[1]);
+    const assign = words.length === 1 ? /^(?:export\s+)?(\w+)=(.*)$/.exec(words[0]) : null;
+    if (assign) {
+      const v = expandVars(assign[2].replace(/^["']|["']$/g, ''), env);
+      if (v === undefined) delete env[assign[1]];
+      else env[assign[1]] = v;
+    }
 
     const pushAt = lower.findIndex((w, i) => w === 'push' && lower.slice(0, i).some((x) => x === 'git' || x.endsWith('/git') || x.endsWith('git.exe')));
     if (pushAt >= 0) {
       // The repo this push goes to: `git -C <dir>` or the tracked cwd, and the remote when a refspec follows it.
       let pushDir = dir;
+      let pushLost = dir === undefined ? lost : undefined;
       for (let i = 0; i < pushAt; i++) {
-        if (raw[i] === '-C') pushDir = resolveDir(pushDir, raw[i + 1]);
-        if (lower[i].startsWith('--git-dir') || lower[i].startsWith('--work-tree')) pushDir = undefined;
+        if (raw[i] === '-C') {
+          pushDir = move(pushDir, raw[i + 1]);
+          pushLost = lost;
+        }
+        if (lower[i].startsWith('--git-dir') || lower[i].startsWith('--work-tree')) {
+          pushDir = undefined;
+          pushLost = raw[i];
+        }
       }
       const positionals = raw.slice(pushAt + 1).filter((w) => !w.startsWith('-'));
       const remote = positionals.length >= 2 ? positionals[0] : undefined;
@@ -404,8 +471,13 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
         if (w.startsWith('+')) return 'Force pushes (+refspec) are blocked in sandboxes.';
         if (!w.startsWith('-')) {
           const dst = w.includes(':') ? w.slice(w.indexOf(':') + 1) : w;
-          if (PROTECTED_BRANCH.test(dst) && pushIsGameRepo(ctx, remote, pushDir)) {
-            return "Pushing to the Final Factory game repo's master/main is blocked (or this push's target repo could not be determined). Push your own branch and integrate into develop.";
+          if (PROTECTED_BRANCH.test(dst)) {
+            const target = pushTarget(ctx, remote, pushDir, pushLost);
+            if (target.game) {
+              return target.known
+                ? `Pushing to the Final Factory game repo's master/main is blocked: ${target.saw}. Push your own branch and integrate into develop. ${PUSH_AIM}`
+                : `This push's target repo could not be determined (${target.saw}), so it counts as the Final Factory game repo's, whose master/main is blocked. Push your own branch and integrate into develop. ${PUSH_AIM}`;
+            }
           }
         }
       }

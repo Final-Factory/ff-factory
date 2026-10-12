@@ -140,6 +140,103 @@ test('master/main: blocked for the game repo only, and whenever the target is un
   assert.equal(checkShell('cd $TMPDIR/ff-factory && gh pr create -R Final-Factory/ff-factory --base main --title x', ctx), undefined);
 });
 
+test('w1132: master/main of Final-Factory/ffbox is pushed straight; the game repo and unknown targets are not', async () => {
+  const game = 'https://github.com/Final-Factory/FinalFactory.git';
+  const byDir: Record<string, Record<string, string>> = {
+    'c:/ffsb/sb1': { origin: 'git@github.com:Final-Factory/FinalFactory.git' },
+    'c:/tmp/ffbox-https': { origin: 'https://github.com/Final-Factory/ffbox.git' },
+    'c:/tmp/ffbox-ssh': { origin: 'git@github.com:Final-Factory/ffbox.git', upstream: 'ssh://git@github.com/Final-Factory/ffbox' },
+    'c:/tmp/ffbox-token': { origin: 'https://x-access-token:abc@github.com/final-factory/FFBox' },
+    'c:/tmp/fork': { origin: 'https://github.com/Final-Factory/FinalFactory' },
+    'c:/tmp/not-a-clone': {},
+  };
+  const remotes = (dir: string) => {
+    const r = byDir[dir.replace(/\\/g, '/').toLowerCase()];
+    return r ? new Map(Object.entries(r)) : undefined;
+  };
+  const sb = 'C:/ffsb/sb1';
+  const env = { TMPDIR: 'C:\\tmp', HOME: 'C:\\tmp\\home' };
+  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: sb, protectedPaths: [], gameRepos: [game, 'F:/ffw/repo'], remotes, env });
+  const cases: [string, string, 'allow' | 'deny'][] = [
+    // ffbox master/main, every remote spelling and every refspec form
+    ['C:/tmp/ffbox-https', 'git push origin HEAD:master', 'allow'],
+    ['C:/tmp/ffbox-https', 'git push origin master', 'allow'],
+    ['C:/tmp/ffbox-https', 'git push origin HEAD:refs/heads/master', 'allow'],
+    ['C:/tmp/ffbox-https', 'git push origin HEAD:main', 'allow'],
+    ['C:/tmp/ffbox-https', 'git push -u origin master', 'allow'],
+    ['C:/tmp/ffbox-ssh', 'git push origin HEAD:master', 'allow'],
+    ['C:/tmp/ffbox-ssh', 'git push upstream master', 'allow'],
+    ['C:/tmp/ffbox-token', 'git push origin HEAD:master', 'allow'],
+    [sb, 'git push https://github.com/Final-Factory/ffbox.git HEAD:master', 'allow'],
+    [sb, 'git push git@github.com:Final-Factory/ffbox.git HEAD:refs/heads/master', 'allow'],
+    // reached from the sandbox: a path, -C, or a variable the worker's shell has
+    [sb, 'cd C:/tmp/ffbox-https && git push origin HEAD:master', 'allow'],
+    [sb, 'git -C C:/tmp/ffbox-ssh push origin master', 'allow'],
+    [sb, 'cd $TMPDIR/ffbox-https && git push origin HEAD:master', 'allow'],
+    [sb, 'cd "$TMPDIR/ffbox-https" && git push origin HEAD:master', 'allow'],
+    [sb, 'cd ${TMPDIR}/ffbox-ssh && git push origin master', 'allow'],
+    [sb, 'git -C "$TMPDIR/ffbox-https" push origin HEAD:master', 'allow'],
+    [sb, 'Set-Location $env:TMPDIR/ffbox-https; git push origin HEAD:master', 'allow'],
+    [sb, 'cd %TMPDIR%/ffbox-https && git push origin HEAD:master', 'allow'],
+    [sb, 'D=$TMPDIR/ffbox-https; cd $D && git push origin HEAD:master', 'allow'],
+    // the game repo, every spelling, from anywhere
+    [sb, 'git push origin HEAD:master', 'deny'],
+    [sb, 'git push origin master', 'deny'],
+    [sb, 'git push origin HEAD:main', 'deny'],
+    ['C:/tmp/fork', 'git push origin HEAD:main', 'deny'],
+    [sb, 'git push https://github.com/Final-Factory/FinalFactory HEAD:master', 'deny'],
+    [sb, 'git push git@github.com:Final-Factory/FinalFactory.git master', 'deny'],
+    [sb, 'cd $TMPDIR/ffbox-https && git push https://github.com/Final-Factory/FinalFactory.git HEAD:master', 'deny'],
+    // force pushes and deletions are refused for ffbox too
+    ['C:/tmp/ffbox-https', 'git push --force origin HEAD:master', 'deny'],
+    ['C:/tmp/ffbox-https', 'git push -f origin master', 'deny'],
+    ['C:/tmp/ffbox-https', 'git push origin +HEAD:master', 'deny'],
+    ['C:/tmp/ffbox-https', 'git push origin --delete master', 'deny'],
+    [sb, 'cd $TMPDIR/ffbox-https && git push --force origin HEAD:master', 'deny'],
+    ['C:/tmp/ffbox-https', 'git push --force-with-lease origin HEAD:master', 'allow'],
+    // a target that cannot be determined stays the game repo's
+    [sb, 'cd $NOPE/ffbox-https && git push origin HEAD:master', 'deny'],
+    [sb, 'cd $(mktemp -d) && git push origin HEAD:master', 'deny'],
+    ['C:/tmp/not-a-clone', 'git push origin HEAD:master', 'deny'],
+    ['C:/tmp/ffbox-https', 'git push nosuch master', 'deny'],
+    ['C:/tmp/ffbox-https', 'git push master', 'deny'],
+  ];
+  for (const [cwd, command, want] of cases) assert.equal(await decide(g, 'Bash', { command }, cwd), want, `${command} (in ${cwd})`);
+});
+
+test('w1132: a refused master push says which repo it saw, or why it could not tell', () => {
+  const remotes = (dir: string) => {
+    const d = dir.replace(/\\/g, '/').toLowerCase();
+    if (d === 'c:/ffsb/sb1') return new Map([['origin', 'git@github.com:Final-Factory/FinalFactory.git']]);
+    if (d === 'c:/tmp/ffbox') return new Map([['origin', 'https://github.com/Final-Factory/ffbox.git']]);
+    return undefined;
+  };
+  const ctx = { cwd: 'C:/ffsb/sb1', gameRepos: ['https://github.com/Final-Factory/FinalFactory.git'], remotes, env: { TMPDIR: 'C:/tmp' } };
+  // The shell goes back to the sandbox after every command: the refusal names the repo it read there and how to aim at another.
+  const game = checkShell('git push origin HEAD:master', ctx) ?? '';
+  assert.match(game, /github\.com\/final-factory\/finalfactory/);
+  assert.match(game, /remote origin/);
+  assert.match(game, /C:\/ffsb\/sb1/);
+  assert.match(game, /cd <clone> && git push/);
+  // A variable the shell does not have: says which path, and that the push counts as the game repo's.
+  const unset = checkShell('cd $NOPE/ffbox && git push origin HEAD:master', ctx) ?? '';
+  assert.match(unset, /could not be determined/);
+  assert.match(unset, /\$NOPE\/ffbox/);
+  // A remote name the clone does not have: lists the ones it has.
+  const noRemote = checkShell('cd C:/tmp/ffbox && git push ffbox master', ctx) ?? '';
+  assert.match(noRemote, /could not be determined/);
+  assert.match(noRemote, /remote ffbox/);
+  assert.match(noRemote, /origin=https:\/\/github\.com\/Final-Factory\/ffbox\.git/);
+  // A directory that is no git repo.
+  assert.match(checkShell('cd C:/tmp/other && git push origin master', ctx) ?? '', /C:\/tmp\/other is not a git repo/);
+  // No remote before the branch.
+  assert.match(checkShell('git push master', ctx) ?? '', /names no remote/);
+  // Without a configured game repo nothing can be told apart.
+  assert.match(checkShell('git push origin master', { cwd: 'C:/tmp/ffbox', gameRepos: [], remotes }) ?? '', /no game repo is configured/);
+  // And the answer for ffbox, from the same directory the refusal named, is none.
+  assert.equal(checkShell('cd $TMPDIR/ffbox && git push origin HEAD:master', ctx), undefined);
+});
+
 test('branch switches: refused in the sandbox while its editor runs, fine otherwise', async () => {
   const sb = 'C:/ffsb/sb1';
   const denied = ['git switch other', 'git switch -c new origin/develop', 'git checkout other', 'git checkout -b new', 'git -C C:/ffsb/sb1 switch x', 'cd /c/ffsb/sb1 && git checkout x'];
