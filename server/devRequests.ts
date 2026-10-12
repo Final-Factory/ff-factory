@@ -270,7 +270,7 @@ export function prSummary(v: Pick<PrView, 'title' | 'body' | 'url' | 'autoMerge'
 export function devFacts(
   w: WorkItem,
   facts: { watch?: DevUpdate['watch']; version?: string | null; mergedIn?: string | null; branch?: string },
-  extra: { summary?: string; prUrl?: string } = {},
+  extra: { summary?: string; prUrl?: string; fixPr?: { number: number; url: string } } = {},
 ): Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> {
   // QUESTIONS AND RESULTS ARE FOR A DEVELOPER (w351): FFBox posts them only in a private channel, and from a public
   // thread DMs them to the operator who filed the request, so they keep their internal detail (ids, files, PRs).
@@ -293,6 +293,9 @@ export function devFacts(
   const out: Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> = { status: 'done', version: facts.version ?? null, mergedIn: facts.mergedIn ?? null, ...(facts.branch ? { branch: facts.branch } : {}) };
   const result = cleanLine(w.outcome ?? '', 300);
   if (!out.mergedIn && result) out.result = result;
+  // THE FIX'S PR (w1143): a request closed as already fixed by an earlier PR has that PR's merge as its own, so FFBox's
+  // notice says which fix ("Fixed in PR #1075, in build 78 and later.") and files the thread away.
+  if (out.mergedIn && extra.fixPr) out.pr = extra.fixPr;
   return out;
 }
 
@@ -887,7 +890,8 @@ export class DevRequests {
     const board = o.boardFacts(target);
     const pr = board.watch?.pr && o.prOf(target);
     const known = pr ? this.prs.get(`${pr.repo}#${pr.number}`) : undefined;
-    const facts = devFacts(target, board, known?.summary ? { summary: known.summary, prUrl: known.url } : {});
+    const fixPr = o.fixPrOf(target);
+    const facts = devFacts(target, board, { ...(known?.summary ? { summary: known.summary, prUrl: known.url } : {}), ...(fixPr ? { fixPr } : {}) });
     const digest = JSON.stringify(facts);
     let changed = false;
     for (const conversation of conversations) {

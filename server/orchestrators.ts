@@ -3784,6 +3784,13 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   }
 
   /** The PR summary's facts, with the repo it is in (w278); undefined until the request has a PR. */
+  /** The PR a finished request's fix merged in (delivery.fixPr), as FFBox's dev_update carries it (w1143). */
+  fixPrOf(w: WorkItem): { number: number; url: string } | undefined {
+    const repo = this.repoSlug();
+    const n = w.status === 'done' && w.delivery?.fixCommit ? w.delivery.fixPr : undefined;
+    return repo && n ? { number: n, url: `https://github.com/${repo}/pull/${n}` } : undefined;
+  }
+
   prOf(w: WorkItem): { repo: string; number: number } | undefined {
     const repo = this.repoSlug();
     const pr = this.boardFacts(w).watch?.pr;
