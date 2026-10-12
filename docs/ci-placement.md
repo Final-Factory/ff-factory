@@ -11,7 +11,7 @@ Windows, macOS, root, systemd or KVM stays hosted.
 | `ci.yml` `secrets` (gitleaks), `identity` (noreply emails) | FFBox | Linux, git |
 | `vm-scripts.yml` `plan` | FFBox | reads `git diff`; no API |
 | `rerun-lost-runner.yml` `rerun` (w1102) | FFBox | needs the API, which the host makes for it (below) |
-| `ci.yml` `ops-socket` (w638) | hosted `ubuntu-latest` | `sudo` and a running systemd |
+| `ops-socket.yml` (w638; was a job in `ci.yml`) | hosted `ubuntu-latest`, only when its files change | `sudo` and a running systemd |
 | `vm-scripts.yml` `lint`, `e2e` | hosted | root, systemd, libvirt, KVM (the end-to-end jobs nest a VM) |
 | `windows.yml`, `dev-drive.yml`, `worker-update.yml` (Windows) | hosted `windows-latest` | Windows |
 | `worker-update.yml` (macOS) | hosted `macos-latest` | macOS |
@@ -67,7 +67,7 @@ None of this moved. What each would need:
   runner container on FFBox has none of them. They need a privileged runner on the FFBox host itself (not a container), or
   a dedicated machine with `/dev/kvm`, registered as a runner with a label of its own, and a way to give each run an empty
   disk. The nightly production-timing job needs the same machine for about 50 minutes.
-- **`ops-socket`** could join `vm-scripts.yml`'s `lint` on that machine.
+- **`ops-socket.yml`** could join `vm-scripts.yml`'s `lint` on that machine.
 - **`rerun-lost-runner.yml`** re-runs the hosted Windows jobs GitHub loses; it goes when those do.
 
 ## Notes for the next person

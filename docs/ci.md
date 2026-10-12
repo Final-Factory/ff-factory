@@ -2,8 +2,9 @@
 
 The workflows are `.github/workflows/`: `ci.yml` (typecheck, unit tests, web build, Playwright, gitleaks, commit
 identities), `windows.yml` (the Windows-only tests, w910), `vm-scripts.yml` (shellcheck and dry runs, then the nested-VM
-end to end), `worker-update.yml` (Windows and macOS installer runs) and `rerun-lost-runner.yml` (re-runs a job whose
-runner was lost, once).
+end to end), `worker-update.yml` (Windows and macOS installer runs), `rerun-lost-runner.yml` (re-runs a job whose
+runner was lost, once) and `ops-socket.yml` (the ops worker's socket under real systemd, only when deploy/vm/guest/units/fff-ops.socket,
+the launcher, its test, server/opsWorker.ts or the lockfiles change, and weekly; w1102).
 
 **What runs where** (w925, lothsahn: "3B"): a pull request runs the whole suite. A push to `main` runs only the secret
 scan and the identity check, each push in its own concurrency group so a later merge never cancels it, the way
