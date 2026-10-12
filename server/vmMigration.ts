@@ -2,8 +2,7 @@
 // run" and "Cut-over"): what scripts/fff-migrate.ts does to the copy of BEAST's config.json and data/, as pure
 // functions over parsed JSON, so each rewrite is tested on its own. Nothing here reads, writes or runs anything.
 
-import { nextPerMachine } from './appConfig.ts';
-import { retiredConfigKeys, withDefaults, withoutRetiredKeys } from './config.ts';
+import { currentAccounts, retiredConfigKeys, withDefaults, withoutRetiredKeys } from './config.ts';
 import { convertMachineRecord, localDaemonExtras } from './machines.ts';
 import type { Machine, SessionInfo, StandingAgent } from '../shared/types.ts';
 
@@ -45,10 +44,8 @@ export interface ConfigRewrite {
 /**
  * BEAST's config.json as the VM's portal runs it (design 7.3 step 5): BEAST's settings, people, tokens, intake, FFBox and
  * machine settings, with this computer's paths and server settings from the VM's own config.json (`vm`, which the guest
- * install and `fffctl configure` wrote), voice off, `publicUrl`, the
- * orchestrators and the dispatcher on the token file when the VM has one (design 5.2), keepAgentsOnRestart, and
- * machines.useHostClaudeEnv set for BEAST so its workers keep the account they have today (design 5.3). The keys the
- * portal's own sandbox pool had (w510, config RETIRED_CONFIG_KEYS) are left out.
+ * install and `fffctl configure` wrote), voice off, `publicUrl`, and keepAgentsOnRestart. The keys nothing reads any
+ * more (config RETIRED_CONFIG_KEYS: w510's sandbox pool, w1078's Claude accounts other than the vault) are left out.
  */
 export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; beastId: string }): ConfigRewrite {
   const notes: string[] = [];
@@ -66,28 +63,16 @@ export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; bea
   // The portal holds no sandboxes or editors (w510): of the limits only minFreeRamGB is left, the VM's own.
   if (isObj(vm.limits)) out.limits = pick(vm.limits, ['minFreeRamGB']);
   if (!out.ownerName && vm.ownerName) out.ownerName = vm.ownerName;
-  // The subscription token the guest stored (fffctl claude-token, design 5.2).
-  if (typeof vm.claudeTokenFile === 'string' && vm.claudeTokenFile) {
-    out.claudeTokenFile = vm.claudeTokenFile;
-    out.claudeAccounts = { ...(isObj(beast.claudeAccounts) ? beast.claudeAccounts : {}), orchestrator: 'tokenfile', dispatcher: 'tokenfile' };
-    notes.push('the orchestrators and the dispatcher run on the stored subscription token (claudeAccounts "tokenfile")');
-  } else notes.push('the VM has no claudeTokenFile: the orchestrators and the dispatcher keep BEAST\'s accounts (run sudo fffctl claude-token --file FILE first: it sets both)');
-  // BEAST's workers keep their account: as the portal's own host it followed claudeAccounts.workers (read here from
-  // BEAST's file, a key the portal ignores since w755); as a machine it follows machines.useHostClaudeEnv, whose default is true (design 5.3).
+  // Every Claude process runs on a vault token (w1078): BEAST's accounts that were not the vault's are left behind.
+  if (isObj(out.claudeAccounts)) out.claudeAccounts = { ...currentAccounts(out.claudeAccounts), orchestrator: 'vault' };
   const machines: Json = { ...(isObj(beast.machines) ? beast.machines : {}), keepAgentsOnRestart: true };
-  const u = machines.useHostClaudeEnv;
-  if (!(isObj(u) && typeof u[o.beastId] === 'boolean')) {
-    const keep = !isObj(beast.claudeAccounts) || beast.claudeAccounts.workers !== 'login';
-    machines.useHostClaudeEnv = nextPerMachine(u, o.beastId, keep);
-    notes.push(`machines.useHostClaudeEnv for ${o.beastId}: ${keep} (its workers ${keep ? 'run on this portal\'s token, as they do now' : 'keep its own stored login, as they do now'})`);
-  }
   out.machines = machines;
   // Paths only BEAST had: Max's FFBox config folder and events file, an orchestrator memory folder, voice tools.
   dropWindowsPaths(out, 'max', notes);
   dropWindowsPaths(out, 'orchestrator', notes);
   // Keys nothing reads any more (w510: the portal's own sandbox pool, editors and standing agents) are left behind.
   const retired = retiredConfigKeys(out);
-  if (retired.length) notes.push(`left out, as nothing reads them any more (w510): ${retired.join(', ')}`);
+  if (retired.length) notes.push(`left out, as nothing reads them any more (w510, w1078): ${retired.join(', ')}`);
   const config = withoutRetiredKeys(out);
   return { config, notes, windowsPaths: windowsPathsIn(config) };
 }

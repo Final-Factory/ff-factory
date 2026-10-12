@@ -769,5 +769,5 @@ export function vaultStatusLine(v: Vault | undefined, claudeMachines: string[]):
   if (!s.entries && s.key === 'missing' && !claudeMachines.length) return undefined;
   const list = v.list();
   const kinds = VAULT_KINDS.map((k) => [k, list.filter((e) => e.kind === k).length] as const).filter(([, n]) => n);
-  return `Token vault (docs/vault.md): ${s.entries} entr${s.entries === 1 ? 'y' : 'ies'}${kinds.length ? ` (${kinds.map(([k, n]) => `${n} ${k}`).join(', ')})` : ''}; key ${s.key}${s.why ? ` (${s.why})` : ''}; Claude tokens from it on ${claudeMachines.length ? claudeMachines.join(', ') : 'no machine yet (machines.claudeFromVault)'}`;
+  return `Token vault (docs/vault.md): ${s.entries} entr${s.entries === 1 ? 'y' : 'ies'}${kinds.length ? ` (${kinds.map(([k, n]) => `${n} ${k}`).join(', ')})` : ''}; key ${s.key}${s.why ? ` (${s.why})` : ''}; every Claude process runs on its tokens (w1078): this portal's and ${claudeMachines.length ? `the machines' (${claudeMachines.join(', ')})` : 'no machine yet'}`;
 }

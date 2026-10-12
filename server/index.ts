@@ -5,6 +5,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { HOST_ROLES, configPath, loadConfig, machineCleanupSettings, pruneRetiredKeys, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
+import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus } from './store.ts';
 import { SessionManager, compactCommand, snapshotOf } from './sessions.ts';
 import { TIMER_LIMITS } from './timers.ts';
@@ -25,7 +26,7 @@ import { Notifier } from './notify.ts';
 import { describeBusy } from './wake.ts';
 import { machineLoadLine, systemStats } from './system.ts';
 import { Auth } from './auth.ts';
-import { Identity, asRequester, userToken } from './identity.ts';
+import { Identity, asRequester } from './identity.ts';
 import { routeMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
@@ -41,7 +42,7 @@ import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
-import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostAccountsInUse, reserveLines, hostRole, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, runsOnThisHost, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, addSecretValues, reserveLines, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, scrubTranscripts, shownRoles } from './secrets.ts';
 import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
@@ -54,11 +55,11 @@ import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostClea
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, survivesRestart, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
-import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, sessionSource, tokenKey, tokenLabel } from './usage.ts';
+import { UsageTracker, accountLines, buildAccounts, sessionSource } from './usage.ts';
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { startBaseRefresh } from './baseRefresh.ts';
-import { DRY_RUN_BANNER, DRY_RUN_WHY, defuseConfig, dryRun } from './dryRun.ts';
+import { DRY_RUN_BANNER, DRY_RUN_WHY, dryRun } from './dryRun.ts';
 import { portalPublicKey, tailnetAddress } from './machineSsh.ts';
 import { machineSshHttp } from './machineSshHttp.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
@@ -72,6 +73,20 @@ const WEB = path.join(ROOT, 'web', 'dist');
 /** The server's version plus the web UI build it serves now (server/webStatic.ts): an open page reloads when that changes. */
 const appNow = () => ({ ...appVersion(), web: webBuild(WEB) });
 
+// w1078: config.json holds no secret, so the owners' orchestrators, the dispatcher and the ops worker may read it. Before it
+// is read: the retired Claude account keys out (every Claude process runs on a vault token), FFBox's connector hash into the
+// secrets folder, config.json as it was kept there, and its saved versions scrubbed. Once: a changed config is left as it is.
+// Not a dry run's: its config is another portal's.
+if (!dryRun()) {
+  try {
+    const m = migrateConfig(configPath(), secretsDirOf(configPath()));
+    if (m.changes.length) console.warn(`config: took ${m.changes.join(', ')} out of config.json (w1078: every Claude process runs on a vault token; FFBox's connector hash is in the secrets folder); the file as it was is ${m.backup}`);
+    if (m.scrubbed.length) console.warn(`config: took the secrets out of config.json's saved versions (w1078): ${m.scrubbed.join(', ')}`);
+    for (const w of m.warnings) console.warn(`config: WARNING config.json ${w} looks like a credential (not shown): agents cannot read config.json until it is moved out (w1078)`);
+  } catch (e) {
+    console.error(`config: could not take the secrets out of config.json (w1078): ${(e as Error).message}. It stays closed to every agent until this works.`);
+  }
+}
 const cfg = loadConfig();
 // Keys the portal's own sandbox pool, editors and standing agents had (w510), which nothing reads: taken out of config.json
 // at start (w852, Lothsahn: "Yes, remove unused config keys"; config.json.prev keeps the file as it was). A dry run's
@@ -90,10 +105,7 @@ if (retiredKeys) console.warn(`config: ${retiredKeys}`);
 fs.mkdirSync(cfg.dataDir, { recursive: true });
 // The dry run (server/dryRun.ts, change 17): this portal runs on a copy of another's data and acts on nothing outside.
 const isDryRun = dryRun();
-if (isDryRun) {
-  const ignored = defuseConfig(cfg);
-  console.warn(`\n!!!!!!!! DRY RUN (FFSB_DRY_RUN=1). ${DRY_RUN_BANNER}${ignored.length ? ` Ignored: config ${ignored.join(' and ')}.` : ''}\n`);
-}
+if (isDryRun) console.warn(`\n!!!!!!!! DRY RUN (FFSB_DRY_RUN=1). ${DRY_RUN_BANNER}\n`);
 
 // First of all, before anything is started: never run elevated (server/elevation.ts). Everything this
 // server starts inherits its token: the orchestrators' shells would have admin rights.
@@ -839,7 +851,7 @@ const vaultView = () => ({
   kinds: VAULT_KINDS,
   roles: VAULT_ROLES,
   people: identity.list().map((u) => ({ userId: u.userId, displayName: u.displayName })),
-  machines: machines.list().map((m) => ({ id: m.id, online: machines.isOnline(m.id), claudeFromVault: claudeFromVault(cfg, m), githubFromVault: githubFromVault(cfg, m.id) })),
+  machines: machines.list().map((m) => ({ id: m.id, online: machines.isOnline(m.id), claudeFromVault: true, githubFromVault: githubFromVault(cfg, m.id) })),
   enrolled: enrolledMachines(cfg.dataDir),
   github: github.list(),
   githubPortal: githubFromVault(cfg, PORTAL_MACHINE),
@@ -1890,21 +1902,8 @@ const usage = new UsageTracker(cfg, () => {
   if (usage.usage) broadcast({ type: 'usage', usage: usage.usage });
   broadcast({ type: 'accounts', accounts: accountsNow() });
 });
-/** People's own Claude tokens (config userClaudeEnv, docs/identity.md), labelled with their names. */
-function personTokens() {
-  return identity
-    .list()
-    .map((u) => ({ u, token: userToken(cfg, u.userId) }))
-    .filter((x): x is { u: (typeof x)['u']; token: string } => !!x.token)
-    .map(({ u, token }) => ({ token, displayName: u.displayName, label: `${u.displayName}'s token …${token.slice(-4)}` }));
-}
-/** The token file's token (config claudeTokenFile, w464) while a role runs on it: polled by the meters like the others. */
-function fileTokenEntry(): { token: string; label: string }[] {
-  const t = tokenFileToken(cfg);
-  return t ? [{ token: t, label: `token file …${t.slice(-4)}` }] : [];
-}
-// The vault's Claude tokens (docs/vault.md) are polled like the others: section 4 picks a run's token by these numbers.
-usage.personTokens = () => [...personTokens(), ...fileTokenEntry(), ...vault.claudeTokens()];
+// The vault's Claude tokens (docs/vault.md) are the ones polled: every Claude process runs on one (w1078).
+usage.personTokens = () => vault.claudeTokens();
 /** Recent reasons a run did not get what the vault should give it (a fallback, an entry that would not open), newest last. */
 const vaultProblems: { at: string; line: string }[] = [];
 /** Live sessions whose process started on this credential key, not counting `except` (the asking session's own). */
@@ -1916,6 +1915,25 @@ function reservedFor(fingerprint: string): string | undefined {
 }
 /** One loud notice per person, machine and day for a run that found no usable vault GitHub token (w1031). */
 const noGithubToken = new Set<string>();
+// The retired token file (w1078), deleted once this release has verified and the dispatcher runs on a vault token: checked
+// every minute until then, and told once. Not in a dry run (its files are another portal's).
+if (!isDryRun) {
+  let said = '';
+  const retire = setInterval(() => {
+    const vaultKeys = new Set(vault.claudeTokens().map((v) => `token:${v.fingerprint}`));
+    const pinned = pinnedDispatcherEntry(cfg);
+    const dispatcherOnVault = (pinned === undefined || !!vault.claudeByName(pinned)) && [...store.sessions.values()].some((s) => s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher' && !!s.account && vaultKeys.has(s.account));
+    try {
+      const r = retireOldTokenFile({ configFile: configPath(), secretsDir: secretsDirOf(configPath()), dataDir: cfg.dataDir, sha: appVersion().sha, dispatcherOnVault });
+      if (r.deleted) console.warn(`config: deleted the retired Claude token file ${r.deleted} (w1078): the deploy verified and the dispatcher runs on a vault token`);
+      if (!r.waiting) clearInterval(retire);
+      else if (r.waiting !== said) console.log(`config: the retired Claude token file waits to be deleted: ${(said = r.waiting)} (w1078)`);
+    } catch (e) {
+      console.warn(`config: could not delete the retired Claude token file (w1078): ${(e as Error).message}`);
+    }
+  }, 60_000);
+  retire.unref?.();
+}
 setVaultContext({
   vault,
   usageOf: (fp) => usage.usageOf(`token:${fp}`),
@@ -1938,41 +1956,25 @@ setVaultContext({
   },
 });
 /**
- * The account a session ran on, for the meters. The dispatcher with an account of its own (claudeAccounts.dispatcher,
- * w464) runs on it, never on its person's own token, so its stopped session is counted there too.
+ * The account a session ran on, for the meters: the vault token its process started on (w1078: every one is on a vault
+ * token). A stopped one of this host's: the dispatcher's pinned token (w996), else the pool token it was handed last (w738).
  */
-function sourceOf(s: SessionInfo, token: string | undefined, toMachine: (id: string) => string | undefined) {
-  const role = hostRoleOf(cfg, s);
-  const login = () => hostAccount(cfg, role) === 'login';
-  // A person's orchestrator (or the ops worker for them) on "vault" (w738) ran on the pool token it was handed last; a
-  // session with no pick (or one before a restart) on the token file it falls back to.
-  // The dispatcher pinned to one vault token (claudeAccounts.dispatcher "vault:<name>", w996): a stopped session is counted
-  // on it too; a running one is on the account it started with (sessionSource).
-  const pinned = role === 'dispatcher' ? pinnedDispatcherEntry(cfg) : undefined;
-  if (pinned && (!s.status || s.status === 'stopped' || s.status === 'error')) {
+function sourceOf(s: SessionInfo): string {
+  const stopped = !s.status || s.status === 'stopped' || s.status === 'error';
+  const pinned = hostRoleOf(cfg, s) === 'dispatcher' ? pinnedDispatcherEntry(cfg) : undefined;
+  if (pinned && stopped) {
     const got = vault.claudeByName(pinned);
     if (got) return `token:${got.entry.fingerprint}`;
   }
-  if (s.kind !== 'worker' && !s.machineId && hostAccount(cfg, role) === 'vault') {
-    const running = !!s.account && !!s.status && s.status !== 'stopped' && s.status !== 'error';
-    const fp = running ? undefined : vault.lastPickOf(s.id);
+  if (stopped && s.kind !== 'worker' && !s.machineId) {
+    const fp = vault.lastPickOf(s.id);
     if (fp) return `token:${fp}`;
   }
-  // A role on the token file (w464) ran on it, whoever the session was for.
-  if (s.kind !== 'worker' && !s.machineId && (hostAccount(cfg, role) === 'tokenfile' || (hostAccount(cfg, role) === 'vault' && cfg.claudeTokenFile))) {
-    const t = tokenFileToken(cfg);
-    if (t) return sessionSource({ ...s, requestedBy: undefined }, t, toMachine, () => undefined, () => false);
-  }
-  if (role === 'dispatcher') return sessionSource({ ...s, requestedBy: undefined }, token, toMachine, () => undefined, login);
-  return sessionSource(s, token, toMachine, (id) => userToken(cfg, id), (kind: SessionKind) => runsOnThisHost(kind) && hostAccount(cfg, hostRole(kind)) === 'login');
-}
-function accountSourceOf(s: SessionInfo) {
-  const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, store.machines.get(id) ?? id));
-  return sourceOf(s, hostToken(cfg), toMachine);
+  return sessionSource(s);
 }
 /** Whether the Claude account a session ran on has room again (no meter at 90% or more), or undefined when unknown (the ledger cleanup, before it resumes a worker a limit cut off). */
 function limitsClearFor(s: SessionInfo): boolean | undefined {
-  const source = accountSourceOf(s);
+  const source = sourceOf(s);
   const u = accountsNow().find((a) => a.sources.includes(source))?.usage;
   if (!u?.available) return undefined;
   return [u.weekly, u.session, ...u.models].filter((m): m is NonNullable<typeof m> => !!m).every((m) => m.percent < 90);
@@ -1985,13 +1987,8 @@ function accountClear(name: string): boolean | undefined {
   return [u.weekly, u.session, ...u.models].filter((m): m is NonNullable<typeof m> => !!m).every((m) => m.percent < 90);
 }
 function accountsNow() {
-  const token = hostToken(cfg);
-  const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, store.machines.get(id) ?? id));
-  const used = hostAccountsInUse(cfg);
-  const machineList = machines.list().map((m) => {
-    const t = toMachine(m.id);
-    return { id: m.id, usesToken: !!t && !!token && tokenKey(t) === tokenKey(token), onVault: claudeFromVault(cfg, m) };
-  });
+  // Every machine's runs are on vault tokens (w1078): no Mac login, no host token.
+  const machineList = machines.list().map((m) => ({ id: m.id, usesToken: false, onVault: true }));
   // A vault token's pool state and score, for the accounts page (w971).
   const poolOf = new Map<string, NonNullable<AccountUsage['pool']>>();
   for (const [person, list] of vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor })) {
@@ -1999,22 +1996,11 @@ function accountsNow() {
   }
   const built = buildAccounts(usage.effectiveEntries(), {
     hostName: os.hostname(),
-    token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
-    hostLoginRoles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login'),
     roles: shownRoles(cfg),
-    ...(() => {
-      const t = tokenFileToken(cfg);
-      return t ? { tokenFile: { key: tokenKey(t), label: `token file …${t.slice(-4)}`, roles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'tokenfile') } } : {};
-    })(),
-    people: personTokens().map((p) => ({ key: tokenKey(p.token), label: p.label, displayName: p.displayName })),
     vault: vault.claudeTokens().map((v) => ({ key: `token:${v.fingerprint}`, label: v.label, ...(v.email ? { email: v.email } : {}) })),
     machines: machineList,
-    inUse: {
-      hostLogin: used.login || !token,
-      hostToken: used.token || machineList.some((m) => m.usesToken),
-      vault: used.vault || machineList.some((m) => m.onVault),
-    },
-    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sourceOf(s, token, toMachine), live: s.status !== 'stopped' && s.status !== 'error' })),
+    inUse: { hostLogin: false, hostToken: false, vault: true },
+    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sourceOf(s), live: s.status !== 'stopped' && s.status !== 'error' })),
   });
   return built.map((a) => {
     const pool = a.sources.map((k) => poolOf.get(k)).find((x) => !!x);
@@ -2030,7 +2016,7 @@ bus.on('event', (e: ServerEvent) => {
   accountTimer ??= setTimeout(() => {
     accountTimer = undefined;
     const live = (s: { status: string }) => (s.status === 'stopped' || s.status === 'error' ? '' : '+');
-    const shape = `${[...store.sessions.values()].map((s) => s.id + live(s) + (s.account ?? '')).join()}|${machines.list().map((m) => m.id).join()}|${hostToken(cfg)?.slice(-4) ?? ''}|${JSON.stringify([cfg.claudeAccounts, cfg.machines?.useHostClaudeEnv, cfg.machines?.claudeFromVault])}`;
+    const shape = `${[...store.sessions.values()].map((s) => s.id + live(s) + (s.account ?? '')).join()}|${machines.list().map((m) => m.id).join()}|${JSON.stringify(cfg.claudeAccounts)}`;
     if (shape === accountShape) return;
     accountShape = shape;
     broadcast({ type: 'accounts', accounts: accountsNow() });
@@ -2041,24 +2027,11 @@ for (const s of sessions.sessions.values()) usage.recordCost(s.info.id, s.info.c
 sessions.events.on('result', (s: { info: { id: string; costUsd: number } }) => usage.recordCost(s.info.id, s.info.costUsd));
 // The SDK's rate_limit_event (the API's rate-limit headers on the session's own requests) raises its token's meter between polls (w739).
 sessions.events.on('rateLimit', (s: { info: { account?: string } }, info: { rateLimitType?: string; utilization?: number; resetsAt?: number }) => usage.noteRateLimit(s.info.account, info));
-/** Whose account each orchestrator runs on (docs/orchestrators.md), for system_status: a person without a token of their own is on the owner's. */
-function orchestratorAccountsLine() {
-  const people = identity.list();
-  const own = people.filter((u) => userToken(cfg, u.userId)).map((u) => u.displayName);
-  const none = people.filter((u) => !userToken(cfg, u.userId)).map((u) => u.displayName);
-  const payer = identity.systemPayer();
-  return (
-    `Orchestrators: each person's own runs on their own token${own.length ? ` (${own.join(', ')})` : ''}` +
-    `${none.length ? `; ${none.join(', ')} ${none.length === 1 ? 'has' : 'have'} none here, so theirs runs on the orchestrator's account above` : ''}` +
-    `; the dispatcher runs for the system payer, ${payer.displayName}, on ${userToken(cfg, payer.userId) ? 'their own token' : "the orchestrator's account above"}.`
-  );
-}
 agents.usageLines = () => {
   // Numbers under one interval old are used as they are; older, a poll starts (docs/accounts.md, "How often").
   usage.ensureFresh();
   return [
-    ...accountSetupLines(cfg, os.hostname(), hostToken(cfg), machines.list(), personTokens().map((p) => p.displayName)),
-    orchestratorAccountsLine(),
+    ...accountSetupLines(cfg, identity.systemPayer().userId),
     ...accountLines(accountsNow(), store.sessions, new Date()),
   ];
 };
@@ -2074,7 +2047,7 @@ agents.extraStatusLines = () => {
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {
-  const line = vaultStatusLine(vault, machines.list().filter((m) => claudeFromVault(cfg, m)).map((m) => m.id));
+  const line = vaultStatusLine(vault, machines.list().map((m) => m.id));
   const recent = vaultProblems.filter((p) => Date.now() - Date.parse(p.at) < 24 * 3_600_000);
   return [...(line ? [line] : []), ...github.statusLines(), ...(recent.length ? [`WARNING: the vault fell short ${recent.length} time(s) in 24 h; latest (${recent.at(-1)!.at}): ${recent.at(-1)!.line}`] : [])];
 };
@@ -2096,7 +2069,8 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
     const views = list.map((t) => t.view);
     const kind = poolKind(views);
     const next = firstFree(views);
-    const vaultOrch = hostAccount(cfg, 'orchestrator') === 'vault';
+    // Every person's orchestrator runs on their pool (w1078).
+    const vaultOrch = true;
     // The same words as the queue's reason and the banner (w747): "over its caps" only when every token is held, retired or used up.
     const verdict =
       kind === 'used-up'
@@ -2111,7 +2085,7 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
     // For this person's own pages only (broadcast and appState filter on `person`): nobody else's top banner shows it.
     if (banner) warnings.push({ id: `pool:${person}`, kind: banner.kind, person, text: banner.text });
   }
-  const others = (key: string, role: 'dispatcher' | 'host-token') =>
+  const others = (key: string, role: 'dispatcher') =>
     role === 'dispatcher' ? [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error' && !(s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher')).length : 0;
   for (const r of reserveLines(cfg, usageOfKey, others, now)) {
     lines.push(r.line);
