@@ -74,8 +74,8 @@ Every `hostGuard.pollSeconds` (30) it measures the volumes above (the sandbox ro
 sandbox root exists.
 
 **Disk levels**, with `hysteresisGB` (10) before a level clears. The portal's own host, its dedicated VM, is low below
-`hostGuard.warnFreeGB` (40) and critical below `hostGuard.criticalFreeGB` (10) (w1101, lothsahn: "The portal should be
-considered to be low below 40GB free, not 120GB" and "Critical level for the portal should be 10GB"; settable with
+`hostGuard.warnFreeGB` (20) and critical below `hostGuard.criticalFreeGB` (10) (w1101, lothsahn: "Let's just set the
+warning to 20GB both in code and in config." and "Critical level for the portal should be 10GB"; settable with
 set_app_config, critical below warn). A machine's daemon has its own levels (`disk_warn_gb`, `disk_critical_gb` in its
 daemon.json):
 
@@ -247,7 +247,7 @@ Now the host guard and every machine daemon clean up by themselves (`server/clea
 - **A pass every hour** (`everyMinutes`, 60).
 - **A pass every 15 minutes while free space is below the soft threshold** (`softFreeGB`), which also runs
   the rules that empty whole caches. On the portal's dedicated VM the soft threshold defaults to its warn level,
-  **40 GB** (`hostSoftFreeGB`, w1101; it was warn + 40 = 120 GB for BEAST's sandbox drive, when the portal ran there and
+  **20 GB** (`hostSoftFreeGB`, w1101; it was warn + 40 = 120 GB for BEAST's sandbox drive, when the portal ran there and
   kept sandboxes); on the machines it is **80 GB**. The volumes
   measured are the disk's: the home folder's, (host) the data folder's and `hostDiskPaths`, (machine) the clone's
   and the sandboxes'; the fullest one counts. A RAM-backed filesystem (tmpfs, ramfs) never counts, and the temp
