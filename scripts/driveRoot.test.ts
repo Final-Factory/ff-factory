@@ -11,7 +11,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { HOST_FILES, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './worker/driveRoot.ts';
 import { carryDevDrive, devDriveGuard, hostDirOf } from './worker/devdrive.ts';
-import { anchorOf, daemonJson, layoutOf, planUpdate, reinstallProblems, sandboxRisks, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { anchorOf, daemonJson, layoutOf, planUpdate, reinstallProblems, sandboxRisks, setAside, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { taskXml } from '../server/machineDeployWin.ts';
 import { roomLevel, blockReason } from '../server/hostHealth.ts';
 import { MachineGuard } from '../machine/hostGuard.ts';
@@ -229,4 +229,24 @@ test('moved.json in the folder the install went into names the root on the drive
   writeMoved(host, 'V:\\ffw');
   assert.equal(readMoved(host), 'V:\\ffw');
   fs.rmSync(host, { recursive: true, force: true });
+});
+
+test('the reinstall sets the carried folders aside before it deletes anything, and puts them all back when one is held', () => {
+  // LothDesktop's first run (2026-10-12): find.exe and head.exe from an agent's push pipeline held a file in tmp, and the rename
+  // failed after the old drive was already gone. Now the renames come first, and a refusal leaves the old install as it was.
+  const root = tmp('aside');
+  for (const n of ['repo', 'nightly', 'tmp', 'scratch', 'daemon']) fs.mkdirSync(path.join(root, n));
+  const keep = path.join(root, '.reinstall');
+  const held = (from: string, to: string) => {
+    if (path.basename(from) === 'tmp') throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+    fs.renameSync(from, to);
+  };
+  assert.throws(() => setAside(root, keep, ['repo', 'nightly', 'tmp', 'scratch'], held), /could not set .*tmp aside \(EPERM\).*Nothing was deleted/);
+  assert.deepEqual(fs.readdirSync(root).filter((n) => n !== '.reinstall').sort(), ['daemon', 'nightly', 'repo', 'scratch', 'tmp'], 'repo and nightly went back');
+  assert.deepEqual(fs.readdirSync(keep), []);
+  setAside(root, keep, ['repo', 'nightly', 'tmp', 'scratch']);
+  assert.deepEqual(fs.readdirSync(keep).sort(), ['nightly', 'repo', 'scratch', 'tmp']);
+  assert.deepEqual(fs.readdirSync(root).sort(), ['.reinstall', 'daemon']);
+  setAside(root, keep, ['repo', 'nightly', 'tmp', 'scratch']);
+  fs.rmSync(root, { recursive: true, force: true });
 });

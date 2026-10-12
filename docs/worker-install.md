@@ -440,13 +440,17 @@ the players, slots, everything else should go to V:"; "I meant keep the existing
    editor, a build, a player, the nightly lab), or a sandbox holds a commit no remote has or an uncommitted file
    (`sandboxRisks`; commit each on its branch and push first). It needs an elevated session (an administrator's ssh). The new
    drive asks for the old one's letter by name: Windows keeps it reserved for the old volume.
-2. It stops the daemon, copies the Library seed off the old drive into `<host>\.reinstall` when it fits with 10 GB to spare
-   (else the first new sandbox imports its Library, an hour or more), deletes the old drive and its tasks, puts the clone,
-   `nightly`, `tmp` and `scratch` aside in `<host>\.reinstall`, and deletes everything else of the old install.
+2. It stops the daemon and first puts the clone, `nightly`, `tmp` and `scratch` aside in `<host>\.reinstall` (renames: a
+   folder that will not move, because a process holds a file in it, stops it with all of them put back and nothing deleted;
+   LothDesktop's first run on 2026-10-12 failed there after the old drive was gone, on find.exe and head.exe left by an
+   agent's pipeline in `tmp`). Then it copies the Library seed (without BurstCache and BuildCache) off the old drive when it
+   fits with 5 GB to spare (else the first new sandbox imports its Library, an hour or more), deletes the old drive and its
+   tasks, and deletes everything else of the old install.
 3. It installs as new with every setting and the credential of the old install (paths in the carried `daemon.json` settings
    rebased onto the new root): a new drive (`-DevDriveMaxGB`), the root on it with the daemon and the credential in the host
    folder, the clone seeded from the old one (its Git LFS
-   objects too), `nightly`, `tmp`, `scratch` and the seed moved in file by file, the nightly lab's task repointed, the sandboxes'
+   objects too), `nightly`, `tmp`, `scratch` and the seed moved in file by file, a nightly lab task repointed if the machine
+   still has one (the nightly run is portal-fired since w864, with `FF_NIGHTLY_ROOT` from the daemon's root), the sandboxes'
    Claude conversations renamed to the same sandbox names in the new root.
 
 Lost by a reinstall: the sandboxes' worktrees (made again from their pushed branches when work is placed there), their

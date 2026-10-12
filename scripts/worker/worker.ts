@@ -1183,7 +1183,10 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
   await ps('stopping the daemon', win.stopScript(true, l.daemon, { task: o.service, only: true })).catch((e) => say(`(stopping it: ${(e as Error).message})`));
   const pool = (readJsonFile<{ path: string }[]>(path.join(l.daemon, 'sandboxes.json')) ?? []).map((r) => r.path).filter((p): p is string => typeof p === 'string');
   const keep = path.join(l.root, '.reinstall');
-  fs.mkdirSync(keep, { recursive: true });
+  // What is carried goes aside first, before anything is deleted: a folder that will not move (a process holds a file in it;
+  // LothDesktop's first run, 2026-10-12: find.exe and head.exe left by an agent's pipeline held tmp after the old drive was
+  // gone) stops the reinstall with everything put back.
+  setAside(l.root, keep, REINSTALL_KEEPS);
   if (keepSeed) {
     say(`Copying the Library seed ${seedLib} -> ${path.join(keep, 'seed', 'Library')}...`);
     await robocopy(seedLib, path.join(keep, 'seed', 'Library'), false, SEED_REBUILT);
@@ -1193,7 +1196,6 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
     say(`Deleting the old drive ${rec.vhdx} and its tasks...`);
     await devDriveEnsure(l.root, ['-Root', l.root], 'remove');
   }
-  for (const n of REINSTALL_KEEPS) if (fs.existsSync(path.join(l.root, n))) fs.renameSync(path.join(l.root, n), path.join(keep, n));
   for (const n of fs.readdirSync(l.root)) {
     // Everything of the old install goes, its daemon folder and credential included (the token is in hand): only what it carries stays.
     if (n === '.reinstall') continue;
@@ -1204,6 +1206,27 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
     say(`Deleted ${p}.`);
   }
   return { keep, oldRoot: l.root, ...(oldDrive ? { oldDrive } : {}), sandboxes: pool, ...(rec?.letter ? { letter: rec.letter } : {}) };
+}
+
+/**
+ * Rename `names` of `root` into `keep` (one volume: instant). If one cannot be (a process holds a file in it), the ones moved
+ * already go back and it throws, naming the folder: nothing is left half done. One already in `keep` (a run after a stop) is
+ * kept there. Exported for tests.
+ */
+export function setAside(root: string, keep: string, names: string[], rename: (from: string, to: string) => void = fs.renameSync) {
+  fs.mkdirSync(keep, { recursive: true });
+  const done: string[] = [];
+  for (const n of names) {
+    const from = path.join(root, n);
+    if (!fs.existsSync(from) || fs.existsSync(path.join(keep, n))) continue;
+    try {
+      rename(from, path.join(keep, n));
+      done.push(n);
+    } catch (e) {
+      for (const d of done.reverse()) rename(path.join(keep, d), path.join(root, d));
+      throw new Error(`could not set ${from} aside (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}): a process holds a file in it (an editor, a build, a leftover shell's find or head: Resource Monitor's "Associated Handles" names it). Nothing was deleted; end it and run the reinstall again`);
+    }
+  }
 }
 
 /** The caches in a Library that Unity rebuilds on demand (the daemon's clean-up trims them in sandboxes too): not carried in a seed. */
