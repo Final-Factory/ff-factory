@@ -1587,6 +1587,12 @@ export interface WorkItem {
    */
   heldCheckIns?: HeldCheckIn[];
   /**
+   * w1094: the workers its gates' clearing resumed, until each is seen to take the message (it shows in its transcript).
+   * The blocker watch's sweep resumes again, loudly, one that has nothing pending for it 5 minutes later (no check-in
+   * waiting to fire, no message waiting for a sandbox), and tells the dispatcher after a few tries.
+   */
+  gateResumes?: GateResume[];
+  /**
    * w830: decisions a person gave on this request that wait for a fact ("close w811 as a duplicate once #1314 merges"),
    * recorded in their own turn with their words; the blocker watch carries each out, or drops it, when its condition is met.
    */
@@ -1664,6 +1670,19 @@ export interface WorkPr {
 export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci' | 'pr';
 export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci', 'pr'];
 
+/** A worker a gate's clearing resumed (w1094, WorkItem.gateResumes). */
+export interface GateResume {
+  session: string;
+  /** When it was resumed (ISO), and the start of the message it was sent, which its transcript shows once delivered. */
+  at: string;
+  mark: string;
+  /** The message in full, to send again. */
+  note: string;
+  /** Its transcript's last sequence number when it was resumed: the message comes after it. */
+  seq: number;
+  tries: number;
+}
+
 export interface WorkBlocker {
   kind: WorkBlockerKind;
   /**
@@ -1685,6 +1704,11 @@ export interface WorkBlocker {
   by: string;
   /** deploy: the commit the portal (or the machine's daemon) ran when it was set; a different one is the deploy. */
   sha?: string;
+  /**
+   * ci: what the blocker watch last read of its checks, and when (w1094: w1078 read "Blocked on CI" for 20 minutes while
+   * its nested-VM workflow still ran, and the people saw only the worker's own words, so it looked stale).
+   */
+  read?: { at: string; text: string };
 }
 
 /**

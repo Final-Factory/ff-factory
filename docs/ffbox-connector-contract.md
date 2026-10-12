@@ -64,7 +64,9 @@ parse something FF Factory sent, it closes with `4400` and its own reason the sa
 
 - The token looks like `ffpv1_` followed by 43 base64url characters (`^ffpv1_[A-Za-z0-9_-]{43}$`).
   Ben mints it on the FF Factory host with `node server/providerToken.ts`, which prints it once. FF
-  Factory keeps only its SHA-256, in `config.json` as `providers.ffbox.tokenSha256`. The token
+  Factory keeps only its SHA-256, in a file of its secrets folder that config `providers.ffbox.tokenSha256File` names (in the
+  VM `/srv/fff/secrets/ffbox-connector-token.sha256`, `0600`; w1078: config.json holds no hash, and before w1078 it held it as
+  `providers.ffbox.tokenSha256`). The portal reads the file at each connection, so a new token needs no restart. The token
   reaches FFBox out of band and goes into FFBox's secrets file. Keep it out of argv, logs and
   containers, like every other FFBox secret.
 - It is sent on the upgrade request as `Authorization: Bearer <token>`.

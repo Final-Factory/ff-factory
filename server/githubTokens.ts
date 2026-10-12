@@ -2,7 +2,7 @@
 // a request is Ben or lothsahn." The tokens are the vault's `github` entries (vault-<person>-github, synced from the FFBox
 // host's people/<person>/github-token); this module decides where they are used and keeps their health:
 //
-// - the switch: config machines.githubFromVault, per machine like claudeFromVault, with the machine id "portal" for the
+// - the switch: config machines.githubFromVault, per machine (true, false or { "*": …, "<id>": … }), with the machine id "portal" for the
 //   portal's own gh reads (PR states, CI checks). Off by default: until it is on, every caller uses the credential it had;
 // - the portal's gh calls run with GH_TOKEN of the person the work is for (ghRunner), falling back to the portal's own
 //   gh login when the person has no usable token or GitHub refuses theirs;

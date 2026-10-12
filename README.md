@@ -57,10 +57,11 @@ Workers default to `bypassPermissions` (autonomous, bounded by the guard). Switc
 ## Setup (Windows host)
 
 Needs Node ≥ 23.6 (runs the TypeScript directly), git with LFS, the Unity editor version the
-project pins, the final-factory-agents plugins registered, and Claude credentials. An interactive
-`claude` login works but its refresh can lapse on an always-on box; prefer `claude setup-token`
-(a long-lived token) and put it in `config.json` as
-`"claudeEnv": { "CLAUDE_CODE_OAUTH_TOKEN": "…" }`.
+project pins, the final-factory-agents plugins registered, and Claude tokens in the portal's vault. Every
+Claude process the portal starts runs on a vault token and nothing else (w1078): make one with `claude setup-token`
+(a long-lived token) and add it with `fffctl vault add-claude <person>` in the portal VM
+([docs/accounts.md](docs/accounts.md), [docs/vault.md](docs/vault.md)). Config `claudeEnv` and the interactive `claude`
+login are no longer used.
 
 ```powershell
 git clone https://github.com/Final-Factory/ff-factory.git C:\ff-sandboxes
@@ -91,7 +92,7 @@ JSON-only writes (CSRF) and a same-origin check on the WebSocket.
 
 Several people can share one portal, each with their own orchestrator chat. Every message records who wrote
 it, and the workers, standing runs and approvals it causes are recorded as requested by that person. A person
-can have their own Claude token (`userClaudeEnv`), which the agents they ask for run on. The first login
+can have their own Claude tokens in the vault (their pool), which the agents they ask for run on. The first login
 is the owner. Roles are recorded but not enforced yet. See [docs/identity.md](docs/identity.md).
 
 For access from anywhere, bind to loopback (`"host": "127.0.0.1"`) and publish it with
@@ -165,18 +166,14 @@ process for it (the Agent SDK's experimental usage request; no model call) at st
 config `usagePollMinutes` (default 15); **Refresh usage** under the meters asks at once. Each account says
 "as of" when. The orchestrator's `system_status` tool reports the same numbers.
 
-They cover every Claude account in use, each with its own meters: the agents' token
-(`claudeEnv.CLAUDE_CODE_OAUTH_TOKEN`, shown as "host token …abcd"), this host's own claude.ai login,
-and each machine's own login (its daemon polls it the same way and reports it). Which agents run on
-which is set per role and per machine ([docs/accounts.md](docs/accounts.md)): config `claudeAccounts`
-puts the orchestrators or the dispatcher on this host's login instead of the token, and
-`machines.useHostClaudeEnv` puts a Mac's agents on that Mac's login. The token vault
-([docs/vault.md](docs/vault.md)) holds Claude tokens and the workers' other secrets on the portal and hands each
-machine run what it may have, picking the Claude token from the person's own pool by plan meters. A login is shown by
-its email and one login signed in on several computers is one account; a token by its last 4
-characters, never its value. Each account lists where it is used and which agents run on it, and an
-agent's details name its account when there is more than one. The collapsed footer shows the
-account nearest its weekly limit and how many more there are.
+They cover the vault's Claude tokens, each with its own meters (w1078: no host token, host login or machine login is polled any
+more, because no agent runs on them). Which agents run on which is [docs/accounts.md](docs/accounts.md): a person's
+orchestrator and the agents they ask for run on a token of their own pool, the dispatcher on the token config
+`claudeAccounts.dispatcher` pins or the system payer's pool. The token vault ([docs/vault.md](docs/vault.md)) holds Claude
+tokens and the workers' other secrets on the portal and hands each run what it may have, picking the Claude token from the
+person's own pool by plan meters. A token is shown by its vault entry's name and its last 4 characters, never its value.
+Each account lists where it is used and which agents run on it, and an agent's details name its account when there is more than
+one. The collapsed footer shows the account nearest its weekly limit and how many more there are.
 
 The footer also shows every computer's load: this host, and each machine as its daemon reports it
 every 15 s (CPU, RAM, GPU, disk). Alone, the host keeps its numbers (CPU, RAM, VRAM); with machines,
@@ -186,31 +183,18 @@ and compressed memory, from `vm_stat`; plain "total minus free" counts the file 
 turns amber or red with macOS memory pressure. Its GPU shares that RAM, so its bar is how busy the
 GPU is (`ioreg`), not VRAM.
 
-Credentials for the usage meter. Each account is asked with its own credential, and the numbers
-are kept per credential. The agents' token is sent straight to `GET /api/oauth/usage` as the only
-credential of that request. It does not go through the CLI: given a `CLAUDE_CODE_OAUTH_TOKEN`, the
-CLI still answers with the claude.ai login stored on the machine (measured 2026-09-27: a made-up
-token got that login's exact numbers). If the token's request fails (rejected, rate-limited, no
-network), its meter says "usage unknown" with the reason; it never shows older or other numbers.
+Credentials for the usage meter. Each vault token is asked with its own credential, and the numbers are kept per
+credential. The token is sent straight to `GET /api/oauth/usage` as the only credential of that request. It does not go
+through the CLI: given a `CLAUDE_CODE_OAUTH_TOKEN`, the CLI still answers with the claude.ai login stored on the machine
+(measured 2026-09-27: a made-up token got that login's exact numbers). If the token's request fails (rejected,
+rate-limited, no network), its meter says "usage unknown" with the reason; it never shows older or other numbers.
 The endpoint rate-limits a token for long stretches when many agents run on it (HTTP 429 with a
 `Retry-After` of about an hour). Until that passes, the token's weekly and 5-hour numbers come from
 the rate-limit headers of one Haiku request with one output token, made with the same token; the meter
 says "from rate-limit headers", and per-model limits are missing then. Each poll logs one line per credential (which one, by
 its last 4 characters and hash prefix, and whether it answered), never the credential itself.
-This host's own login is polled without the agents' token
-(and without any API key variable). The CLI then uses the interactive claude.ai login stored on this
-machine, `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR/.credentials.json`; the Keychain on
-macOS). A normal `/login` carries `user:inference user:profile user:sessions:claude_code
-user:mcp_servers user:file_upload`. Each fetch starts a new CLI process, so it reads the file afresh
-and picks up refreshes made by any other `claude` run. When the access token has expired, the CLI
-refreshes it with the refresh token and writes it back, as any `claude` run would. The app itself
-reads only the scopes and expiry times from the file. It never reads, logs or sends the token
-values. The agents keep their own token.
-
-If that login is missing, lacks `user:profile`, or has expired (refresh token included), the
-sidebar shows "unavailable" with the reason, plus FF Factory's own agent spend over 7 days,
-labelled as spend. The fix is always the same: on this machine, run `claude` in a terminal and type
-`/login` with the claude.ai account.
+Until w1078 this host's own stored claude.ai login was polled too, through the CLI with no token in its environment; nothing runs
+on it now, so it is not polled.
 
 ### Sandbox Dev Drive (optional)
 
@@ -255,10 +239,13 @@ under a machine daemon (`machine/daemon.ts`), on the same computer as the portal
 
 **Retired config keys** (`RETIRED_CONFIG_KEYS`, `server/config.ts`): `hostSandboxes`, `librarySeed`, `librarySeedGB`,
 `librarySeedCopy`, `limits.maxUnity`, `limits.maxSessions`, `limits.maxIdleAgents`, `limits.maxSandboxes`,
-`limits.minFreeGB`, `unity.editorPath`, `unity.extraArgs`, `unity.watchdog`, `unity.hang`, `unity.autoRestart` and
-`claudeAccounts.standing`. A config that still sets one loads: the key is named once at startup (console) and in
+`limits.minFreeGB`, `unity.editorPath`, `unity.extraArgs`, `unity.watchdog`, `unity.hang`, `unity.autoRestart`,
+`claudeAccounts.standing` and, since w1078, `claudeEnv`, `userClaudeEnv`, `claudeTokenFile`, `machines.useHostClaudeEnv` and
+`machines.claudeFromVault` (every Claude process runs on a vault token; the portal's start takes them out of config.json and
+keeps the file as it was in the secrets folder, [docs/accounts.md](docs/accounts.md)). A config that still sets one loads: the key is named once at startup (console) and in
 `system_status`, and ignored. `set_app_config` no longer takes `limits.maxUnity`, `limits.maxSandboxes`,
-`limits.maxSessions` or `claudeAccounts.standing`. Still read: `sandboxRoot`, `standingRoot`, `unity.idleStopMinutes`
+`limits.maxSessions`, `claudeAccounts.standing`, `claudeEnv.*`, `userClaudeEnv.*`, `claudeAccounts.orchestrator`, `claudeTokenFile`,
+`machines.useHostClaudeEnv` or `machines.claudeFromVault`. Still read: `sandboxRoot`, `standingRoot`, `unity.idleStopMinutes`
 and `unity.mcpServer` (handed to this host's own daemon), `limits.minFreeRamGB`, `hostGuard.*` and `hostDiskPaths`.
 `add_machine local` takes no limits or Library seed from the config: pass `max_sandboxes`, `max_unity`,
 `library_seed` and the rest to `add_machine`.
@@ -292,13 +279,15 @@ FF Factory gives AI agents a shell on your machine. Treat access to it like SSH 
   `server/standingGuard.ts`) blocks the known-destructive git operations and paths listed under
   `protectedPaths`, and pins Unity MCP calls to the agent's own editor. It is a seatbelt against
   mistakes, not a sandbox against an agent that is trying (see Known gaps).
-- **Secrets on disk:** `config.json` (it may hold a Claude token in `claudeEnv`) and `data/` (users,
+- **Secrets on disk:** `config.json` holds none since w1078 (Claude tokens are the vault's, FFBox's connector hash is a file in
+  the secrets folder; `fffctl config --check` in the VM says so), and `data/` (users,
   sessions, API keys, VAPID keys, machine tokens, transcripts) are gitignored and stay on the host.
   Transcripts contain whatever the agents saw.
 - **Remote machines** connect out to the portal with a per-machine token and run agents as the user
   logged in there.
 - **FFBox's connector** connects out to `/provider` with its own token (`ffpv1_…`, minted by
-  `node server/providerToken.ts`; only its SHA-256 is kept, and transcripts redact it). It can only
+  `node server/providerToken.ts`; only its SHA-256 is kept, in a file of the secrets folder that config
+  `providers.ffbox.tokenSha256File` names, and transcripts redact it). It can only
   report data, which is shown as text and never acted on; it is not an `/mcp` key and cannot run
   anything here. `providers.ffbox.enabled` (default false) turns it off at once.
 - **Standing agents** can be pointed at untrusted text (issues, Discord). They are read-only by

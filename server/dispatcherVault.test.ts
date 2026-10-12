@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PoolHeldError, Vault, fingerprintOf, newKeyText, setVaultContext, type VaultContext } from './vault.ts';
-import { accountSetupLines, hostAccount, hostAccountsInUse, hostProcessEnv, liveOnAccount, machineRunEnv, pinnedDispatcherEntry, pinnedDispatcherEnv, reserveLines, reservedCredentials } from './secrets.ts';
+import { accountSetupLines, hostAccount, liveOnAccount, machineRunEnv, pinnedDispatcherEntry, pinnedDispatcherEnv, reserveLines, reservedCredentials } from './secrets.ts';
 import { checkAccountConfig } from './config.ts';
 import { normalizeSetting } from './appConfig.ts';
 import { poolLimits } from './tokenPool.ts';
@@ -19,8 +19,6 @@ const iso = (ms: number) => new Date(ms).toISOString();
 const claudeTok = (c: string) => `sk-ant-oat01-${c.repeat(48)}`;
 const L1 = claudeTok('a'); // vault-lothsahn-1, ...aaaa: the dispatcher's
 const L2 = claudeTok('b'); // vault-lothsahn-2
-const FILE = claudeTok('f'); // the token file
-const HOST = claudeTok('g'); // config claudeEnv: the host token
 const API_KEY = ['sk-ant-api03-', 'z'.repeat(40)].join('');
 const fp = (v: string) => fingerprintOf(v);
 
@@ -38,17 +36,14 @@ function setup(t: { after: (fn: () => void) => void }, pool: 'two' | 'one' = 'tw
   const keyFile = path.join(dir, 'vault.key');
   fs.writeFileSync(keyFile, newKeyText(), { mode: 0o600 });
   fs.chmodSync(keyFile, 0o600);
-  const tokenFile = path.join(dir, 'claude-oauth-token');
-  fs.writeFileSync(tokenFile, `${FILE}\n`, { mode: 0o600 });
   const vault = new Vault({ file: path.join(dir, 'vault.json'), key: () => ({ file: keyFile }) });
   vault.add({ name: 'vault-lothsahn-1', kind: 'claude', value: L1, owner: 'lothsahn', share: 'owner' });
   if (pool === 'two') vault.add({ name: 'vault-lothsahn-2', kind: 'claude', value: L2, owner: 'lothsahn', share: 'owner' });
-  return { vault, tokenFile, dir };
+  return { vault, dir };
 }
 
 const PINNED = { orchestrator: 'vault', dispatcher: 'vault:vault-lothsahn-1' } as const;
-const cfgOf = (tokenFile: string, extra: Record<string, unknown> = {}) =>
-  ({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST, ANTHROPIC_API_KEY: API_KEY, CLAUDE_CONFIG_DIR: '/x' }, userClaudeEnv: {}, machines: { claudeFromVault: true }, claudeTokenFile: tokenFile, claudeAccounts: PINNED, ...extra }) as never;
+const cfgOf = (extra: Record<string, unknown> = {}) => ({ claudeAccounts: PINNED, ...extra }) as never;
 
 /** The vault context the portal builds (server/index.ts): the reserve comes from config, the live counts from liveOnAccount. */
 function ctxOf(vault: Vault, cfg: never, meters: Record<string, PlanUsage | undefined>, sessions: Parameters<typeof liveOnAccount>[0] = []): VaultContext & { problems: string[] } {
@@ -79,15 +74,16 @@ test('config: the dispatcher alone takes "vault:<entry name>"; the orchestrator,
   for (const bad of ['vault:', 'vault:Upper', 'vault: x', 'vault:a/b', `vault:${'x'.repeat(41)}`]) {
     assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: bad } } as never), /vault entry's name|"vault:<entry name>"/, bad);
   }
-  assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'vault' } } as never), /claudeAccounts\.dispatcher cannot be "vault"/, 'the plain pool value is still the orchestrators\'');
-  assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'keychain' } } as never), /"vault:<entry name>" for dispatcher/);
+  checkAccountConfig({ claudeAccounts: { dispatcher: 'vault' } } as never);
+  assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'keychain' } } as never), /claudeAccounts\.dispatcher is "vault" .* or "vault:<entry name>"/);
+  assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'tokenfile' } } as never), /every Claude process runs on a vault token \(w1078\)/, 'retired (w1078)');
 });
 
 test('set_app_config: "vault:<entry name>" is accepted for the dispatcher when the vault holds that Claude token, refused otherwise', (t) => {
   assert.equal(normalizeSetting('claudeAccounts.dispatcher', ' vault:vault-lothsahn-1 '), 'vault:vault-lothsahn-1', 'no vault in this process (tests): the name shape is checked');
-  assert.throws(() => normalizeSetting('claudeAccounts.orchestrator', 'vault:vault-lothsahn-1'), /only dispatcher can run on one named vault token/);
+  assert.equal(normalizeSetting('claudeAccounts.dispatcher', 'vault'), undefined, '"vault" is the system payer\'s pool: stored as no key (w1078)');
   assert.throws(() => normalizeSetting('claudeAccounts.dispatcher', 'vault:Not A Name'), /vault entry name/);
-  assert.throws(() => normalizeSetting('claudeAccounts.dispatcher', 'sideways'), /or "vault:<vault entry name>" \(one named vault Claude token\)/);
+  assert.throws(() => normalizeSetting('claudeAccounts.dispatcher', 'sideways'), /is "vault:<vault entry name>".* or "vault" \(the system payer's pool\)/);
   const { vault } = setup(t);
   vault.add({ name: 'github-x', kind: 'github', value: 'ghp_' + 'x'.repeat(36), owner: 'lothsahn', share: 'owner' });
   vault.add({ name: 'off', kind: 'claude', value: claudeTok('c'), owner: 'lothsahn', share: 'owner' });
@@ -100,71 +96,73 @@ test('set_app_config: "vault:<entry name>" is accepted for the dispatcher when t
   }
 });
 
-test('the dispatcher on a vault token: hostAccount says so, the orchestrators keep "vault", and the fallback is the token file', (t) => {
-  const { tokenFile } = setup(t);
-  const cfg = cfgOf(tokenFile);
+test('the dispatcher on a vault token: hostAccount says so, the orchestrators keep "vault", and unpinned it is the system payer\'s pool', () => {
+  const cfg = cfgOf();
   assert.equal(hostAccount(cfg, 'dispatcher'), 'vault:vault-lothsahn-1');
   assert.equal(hostAccount(cfg, 'orchestrator'), 'vault');
   assert.equal(pinnedDispatcherEntry(cfg), 'vault-lothsahn-1');
-  assert.equal(pinnedDispatcherEntry(cfgOf(tokenFile, { claudeAccounts: { dispatcher: 'tokenfile' } })), undefined);
-  assert.equal(pinnedDispatcherEntry(cfgOf(tokenFile, { claudeAccounts: { orchestrator: 'vault' } })), undefined, 'inheriting "vault" is not a pin');
-  assert.equal(hostProcessEnv(cfg, 'dispatcher', { PATH: '/bin' }).CLAUDE_CODE_OAUTH_TOKEN, FILE, 'the base account, used when the vault cannot give the token');
-  const noFile = cfgOf(tokenFile, { claudeTokenFile: undefined });
-  assert.equal(hostProcessEnv(noFile, 'dispatcher', { PATH: '/bin' }).CLAUDE_CODE_OAUTH_TOKEN, HOST);
-  assert.equal(hostAccountsInUse(cfg).vault, true, 'the accounts list keeps the vault tokens');
+  assert.equal(pinnedDispatcherEntry(cfgOf({ claudeAccounts: { dispatcher: 'vault' } })), undefined, '"vault" is not a pin');
+  assert.equal(pinnedDispatcherEntry(cfgOf({ claudeAccounts: { orchestrator: 'vault' } })), undefined, 'inheriting "vault" is not a pin');
+  assert.equal(pinnedDispatcherEntry(cfgOf({ claudeAccounts: undefined })), undefined);
 });
 
-test('pinnedDispatcherEnv: exactly the named token, every other Claude credential gone; a missing or disabled one falls back with a warning', (t) => {
-  const { vault, tokenFile } = setup(t);
-  const cfg = cfgOf(tokenFile);
+test('pinnedDispatcherEnv: exactly the named token, every other Claude credential gone; a missing or disabled one stops the dispatcher with the reason', (t) => {
+  const { vault } = setup(t);
+  const cfg = cfgOf();
   const ctx = ctxOf(vault, cfg, {});
-  const fallback = () => hostProcessEnv(cfg, 'dispatcher', { PATH: '/bin' });
-  const r = pinnedDispatcherEnv(cfg, fallback, ctx)!;
+  const was = { key: process.env.ANTHROPIC_API_KEY, oauth: process.env.CLAUDE_CODE_OAUTH_TOKEN };
+  process.env.ANTHROPIC_API_KEY = API_KEY;
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = claudeTok('h');
+  t.after(() => {
+    for (const [k, v] of [['ANTHROPIC_API_KEY', was.key], ['CLAUDE_CODE_OAUTH_TOKEN', was.oauth]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+  const r = pinnedDispatcherEnv(cfg, ctx)!;
   assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, L1);
   assert.equal(r.env.ANTHROPIC_API_KEY, undefined, 'an API key would outrank the token');
-  assert.equal(r.env.CLAUDE_CONFIG_DIR, '/x', 'settings that are not credentials stay');
   assert.match(r.account, /^vault token vault-lothsahn-1 …aaaa \(the dispatcher's/);
   assert.equal(r.account.includes(L1.slice(13, 40)), false, 'the account line carries no token');
   assert.equal(ctx.problems.length, 0);
-  // Not pinned: nothing to do here.
-  assert.equal(pinnedDispatcherEnv(cfgOf(tokenFile, { claudeAccounts: { dispatcher: 'tokenfile' } }), fallback, ctx), undefined);
-  // The entry is disabled: the dispatcher still starts, on the token file, and the problem is reported (not a stop).
+  // Not pinned: nothing to do here (the system payer's pool, Agents.orchestratorEnv).
+  assert.equal(pinnedDispatcherEnv(cfgOf({ claudeAccounts: { dispatcher: 'vault' } }), ctx), undefined);
+  // The entry is disabled: the dispatcher does not start, on any other credential, and the problem is reported.
   vault.update('vault-lothsahn-1', { disabled: true });
-  const down = pinnedDispatcherEnv(cfg, fallback, ctx)!;
-  assert.equal(down.env.CLAUDE_CODE_OAUTH_TOKEN, FILE);
-  assert.equal(down.account, 'token file');
-  assert.match(ctx.problems.at(-1) ?? '', /the dispatcher is pinned to vault token vault-lothsahn-1 .* runs on the token file instead/);
+  assert.throws(() => pinnedDispatcherEnv(cfg, ctx), (e: unknown) => e instanceof PoolHeldError && /the dispatcher is pinned to vault token vault-lothsahn-1 .* so it does not start/.test(e.message));
+  assert.match(ctx.problems.at(-1) ?? '', /the dispatcher is pinned to vault token vault-lothsahn-1 /);
   // No vault in this process at all: the same.
-  assert.equal(pinnedDispatcherEnv(cfg, fallback, undefined)!.env.CLAUDE_CODE_OAUTH_TOKEN, FILE);
+  assert.throws(() => pinnedDispatcherEnv(cfg, undefined), (e: unknown) => e instanceof PoolHeldError && /token vault is not loaded/.test(e.message));
 });
 
-test("the reserve moves with the dispatcher: the named vault token is the dispatcher's, the host token keeps a reserve for its own roles", (t) => {
-  const { vault, tokenFile } = setup(t);
-  const cfg = cfgOf(tokenFile);
+test("the reserve moves with the dispatcher: the named vault token is the dispatcher's, and nothing else is reserved", (t) => {
+  const { vault } = setup(t);
+  const cfg = cfgOf();
   const got = reservedCredentials(cfg, { vault });
-  assert.deepEqual(got.map((c) => [c.role, c.key]), [['dispatcher', tokenKey(L1)], ['host-token', tokenKey(HOST)]]);
+  assert.deepEqual(got.map((c) => [c.role, c.key]), [['dispatcher', tokenKey(L1)]]);
   assert.equal(tokenKey(L1), `token:${fp(L1)}`, 'the vault entry matches the meters by this fingerprint');
   assert.equal(got[0].what, "the dispatcher's vault token vault-lothsahn-1 …aaaa");
-  // The token file is no longer reserved: it is nobody's dispatcher credential.
-  assert.ok(!got.some((c) => c.key === tokenKey(FILE)));
   // The meters: the usual rule on the new token (5 days left = 25% weekly, 20% of the 5-hour window).
-  const meters: Record<string, PlanUsage | undefined> = { [tokenKey(L1)]: usage(12, 41, { weeklyDays: 5 }), [tokenKey(HOST)]: usage(5, 10, { weeklyDays: 5 }) };
+  const meters: Record<string, PlanUsage | undefined> = { [tokenKey(L1)]: usage(12, 41, { weeklyDays: 5 }) };
   const lines = reserveLines(cfg, (k) => meters[k], () => 0, NOW, { vault });
+  assert.equal(lines.length, 1);
   assert.equal(lines[0].line, "dispatcher's vault token vault-lothsahn-1 …aaaa: weekly 41%, reserve 25% (5 days to reset); 5-hour 12%, reserve 20%");
   // system_status names it.
   setVaultContext({ vault });
   t.after(() => setVaultContext(undefined));
-  assert.match(accountSetupLines(cfg, 'portal', HOST, [])[0], /the dispatcher here: vault token vault-lothsahn-1 …aaaa \(pinned/);
-  // The vault cannot give it: the dispatcher runs on the token file, so that is where the reserve is.
+  assert.match(accountSetupLines(cfg, 'ben')[0], /the dispatcher on vault token vault-lothsahn-1 …aaaa \(pinned/);
+  // Unpinned, the dispatcher is on the system payer's pool, whose own limits hold it like anyone's: no reserve.
+  assert.deepEqual(reservedCredentials(cfgOf({ claudeAccounts: {} }), { vault }), []);
+  assert.match(accountSetupLines(cfgOf({ claudeAccounts: {} }), 'ben')[0], /the dispatcher on the system payer's pool \(ben; claudeAccounts\.dispatcher pins none\)/);
+  // The vault cannot give it: the dispatcher does not start, so there is no reserve to keep.
   vault.update('vault-lothsahn-1', { disabled: true });
-  assert.deepEqual(reservedCredentials(cfg, { vault }).map((c) => [c.role, c.key]), [['dispatcher', tokenKey(FILE)], ['host-token', tokenKey(HOST)]]);
-  assert.deepEqual(reservedCredentials(cfgOf(tokenFile, { claudeTokenFile: undefined }), { vault }).map((c) => [c.role, c.key]), [['dispatcher', tokenKey(HOST)]], 'no token file: the host token');
-  assert.match(accountSetupLines(cfg, 'portal', HOST, [])[0], /pinned, but the vault has no usable Claude entry of that name: it runs on the token file instead/);
+  assert.deepEqual(reservedCredentials(cfg, { vault }), []);
+  assert.match(accountSetupLines(cfg, 'ben')[0], /pinned, but the vault has no usable Claude entry of that name: the dispatcher does not start until it is fixed/);
 });
 
 test("lothsahn's workers stay off the dispatcher's token inside its buffer while another token has room; with none they wait", (t) => {
-  const { vault, tokenFile } = setup(t);
-  const cfg = cfgOf(tokenFile);
+  const { vault } = setup(t);
+  const cfg = cfgOf();
   // vault-lothsahn-1 (the dispatcher's) at 83% weekly with 5 days to go: inside the 25% buffer. vault-lothsahn-2 at 30%.
   const meters: Record<string, PlanUsage | undefined> = { [fp(L1)]: usage(10, 83, { weeklyDays: 5, sessionHours: 3 }), [fp(L2)]: usage(10, 30, { weeklyDays: 5, sessionHours: 3 }) };
   const ctx = ctxOf(vault, cfg, meters);
@@ -178,16 +176,16 @@ test("lothsahn's workers stay off the dispatcher's token inside its buffer while
   // Outside the buffer (60% weekly, 25% buffer): an ordinary token again.
   meters[fp(L1)] = usage(10, 60, { weeklyDays: 5, sessionHours: 3 });
   assert.equal(worker(cfg, ctx, 'w3').env.CLAUDE_CODE_OAUTH_TOKEN, L1);
-  // Before the move the same token was not reserved at all (the dispatcher was on the token file).
-  const before = cfgOf(tokenFile, { claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' } });
+  // Before the move (the dispatcher on the system payer's pool, unpinned) the same token was not reserved at all.
+  const before = cfgOf({ claudeAccounts: { orchestrator: 'vault' } });
   meters[fp(L1)] = usage(10, 83, { weeklyDays: 5, sessionHours: 3 });
   meters[fp(L2)] = usage(90, 30, { weeklyDays: 5, sessionHours: 2 });
   assert.equal(worker(before, ctxOf(vault, before, meters), 'w4').env.CLAUDE_CODE_OAUTH_TOKEN, L1);
 });
 
 test("a pool of one token: the dispatcher's token inside its buffer holds the person's workers (said plainly)", (t) => {
-  const { vault, tokenFile } = setup(t, 'one');
-  const cfg = cfgOf(tokenFile);
+  const { vault } = setup(t, 'one');
+  const cfg = cfgOf();
   const meters: Record<string, PlanUsage | undefined> = { [fp(L1)]: usage(10, 80, { weeklyDays: 5, sessionHours: 3 }) };
   assert.throws(() => worker(cfg, ctxOf(vault, cfg, meters), 'w1'), (e: unknown) => e instanceof PoolHeldError && /inside the buffer kept for the dispatcher/.test(e.message));
   meters[fp(L1)] = usage(10, 70, { weeklyDays: 5, sessionHours: 3 });
@@ -208,8 +206,8 @@ test('the dispatcher takes no pool slot: liveOnAccount skips it, so the one-at-a
   assert.equal(liveOnAccount([sessions[0]], key), 0);
 
   // The last day of the week (12 hours left): the buffer is 2.5%, so 96% weekly is the one-at-a-time zone, not the buffer.
-  const { vault, tokenFile } = setup(t, 'one');
-  const cfg = cfgOf(tokenFile);
+  const { vault } = setup(t, 'one');
+  const cfg = cfgOf();
   const meters: Record<string, PlanUsage | undefined> = { [fp(L1)]: usage(10, 96, { weeklyDays: 0.5, sessionHours: 3 }) };
   const withDispatcher = ctxOf(vault, cfg, meters, [sessions[0]]);
   assert.equal(worker(cfg, withDispatcher, 'w1').env.CLAUDE_CODE_OAUTH_TOKEN, L1, 'the dispatcher is on the token and a worker still gets the one slot');

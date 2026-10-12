@@ -7,7 +7,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, MAX_GATES, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, RESUME_SWEEP_MS, gatesName, gatesOf, MAX_GATES, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
 import type { OptionsFactory, SessionHandle, SessionManager } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -59,7 +59,7 @@ import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
-import type { AttachmentRef, ConditionalDecision, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, ConditionalDecision, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -203,6 +203,8 @@ export interface DelegationFiling {
 
 /** How long a request may sit queued while a computer has room before it is flagged (w643; a judgment: two dispatcher turns). */
 export const ROOM_GRACE_MS = 10 * 60_000;
+/** How many times the sweep resumes a worker again before it tells the dispatcher (w1094). */
+const RESUME_TRIES = 3;
 
 /** A finished request still covers the same agent asking again with the same title this long (w527; a guess, tunable). */
 export const DELEGATION_LOOKBACK_MS = 2 * 86_400_000;
@@ -775,8 +777,17 @@ export class Orchestrators {
       w.blocked = undefined;
       w.alsoBlocked = undefined;
     }
-    // The check-ins a block held (w829) go with its gates: a start, a message or a close replaces them.
-    if (w.heldCheckIns && !w.blocked) w.heldCheckIns = undefined;
+    // The check-ins a block held (w829) go with its gates. A request still open (a start, a stall, a question, a queue)
+    // hands them back so no worker is left with nothing to wake it (w1094); a close drops them.
+    if (w.heldCheckIns && !w.blocked) {
+      const held = w.heldCheckIns;
+      w.heldCheckIns = undefined;
+      if (isOpen(w) || w.status === 'stalled') {
+        for (const h of held) {
+          if (this.store.sessions.get(h.session) && w.sessionIds.includes(h.session)) this.wakeNow(h.session, `${w.id}'s block ended (${clip(line, 200)}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`);
+        }
+      }
+    }
     if (w.status !== 'queued' && w.queuedFor) w.queuedFor = undefined;
   }
 
@@ -1844,13 +1855,15 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * A blocked request's workers need no check-ins (w754: w750's worker polled `gh pr view` every 20 minutes and the
    * ledger called that Working): cancel the pending wake_me of each worker that serves this request alone. Each one
    * cancelled is kept on the request (w829, heldCheckIns) and handed back when the block ends (unblock), so a block that
-   * never clears by itself cannot leave the worker with nothing to wake it. Returns the words for the request's log, or ''.
+   * never clears by itself cannot leave the worker with nothing to wake it. A gate a worker set itself (blocked_on) cancels
+   * that worker's check-in only (w1094: w1049's other worker, 39772f0c, waited on Ben with a check-in of its own, and
+   * 0b5f813d's CI wait took it). Returns the words for the request's log, or ''.
    */
-  private cancelCheckIns(w: WorkItem): string {
+  private cancelCheckIns(w: WorkItem, setter?: string): string {
     if (!this.d.cancelWake) return '';
     const items = [...this.store.work.values()];
     const done: string[] = [];
-    for (const sid of w.sessionIds) {
+    for (const sid of setter ? [setter] : w.sessionIds) {
       if (!this.store.sessions.get(sid)) continue;
       const serves = servedBy(sid, items);
       if (serves.size !== 1 || !serves.has(w.id)) continue;
@@ -1865,33 +1878,144 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
 
   /**
    * The check-ins a block cancelled (w829), handed back to their workers to fire at once: the worker resumes on its own,
-   * with no one having to pass the word on. Returns the workers whose check-in was handed back.
+   * with no one having to pass the word on. `lead` says how its block ended ("w12 is unblocked: …"). The gate's owner
+   * (`except`) is resumed by resumeGatedWorker instead, its check-in folded in. Returns the workers whose check-in was
+   * handed back.
    */
-  private handBackCheckIns(w: WorkItem, cleared: string): string[] {
+  private handBackCheckIns(w: WorkItem, lead: string, except?: string): string[] {
     const back: string[] = [];
     for (const h of w.heldCheckIns ?? []) {
-      if (!this.store.sessions.get(h.session) || !w.sessionIds.includes(h.session)) continue;
-      const note = `${w.id} is unblocked: ${cleared}. This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`;
-      if (this.d.restoreWake?.(h.session, note)) back.push(h.session);
+      if (h.session === except || !this.store.sessions.get(h.session) || !w.sessionIds.includes(h.session)) continue;
+      const note = `${lead}. This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`;
+      if (!this.wakeNow(h.session, note)) continue;
+      this.noteResume(w, h.session, note);
+      back.push(h.session);
     }
     return back;
   }
 
   /**
-   * A request unblocked with no check-in to hand back (w846): when a gate was CI, a deploy (w890: the worker released its
-   * sandbox while it waited, and its check after the deploy is its next step) or one its worker set itself (blocked_on),
-   * that worker is resumed within a minute with why, instead of waiting for the dispatcher to pass the word on. Its
-   * latest worker only, and only one that still exists. Returns it, or [].
+   * Resume a worker within a minute with `note` (Agents' restoreWake: its check-in, due now). A check-in it still has
+   * pending is folded into the note rather than replaced (w1094: one pending wake per worker, so a resume overwrote it).
+   */
+  private wakeNow(sid: string, note: string): boolean {
+    const pending = this.d.pendingWake?.(sid);
+    const folded = pending && !note.includes(pending.note) ? `${note}\n\nYour own check-in (due ${pending.at.slice(11, 16)} UTC) is folded into this message; its note was: ${pending.note}` : note;
+    return !!this.d.restoreWake?.(sid, folded);
+  }
+
+  /**
+   * Whom a request's gates clearing resumes (w1094), or undefined (the dispatcher starts it): the worker that set a gate
+   * (blocked_on), when it still exists; else, for a CI or deploy gate or one a worker set, its newest worker that exists,
+   * with `gone` naming the setter it stands in for. w1049 (PR #1507): the CI's end resumed the newest worker, 39772f0c,
+   * not 0b5f813d that set the gate, and nobody merged the PR.
+   */
+  private gateOwner(w: WorkItem, gates: readonly WorkBlocker[]): { sid: string; gone?: string } | undefined {
+    const exists = (sid: string) => !!this.store.sessions.get(sid) && w.sessionIds.includes(sid);
+    const setters = [...new Set(gates.map(gateSetter).filter((x): x is string => !!x))];
+    const setter = setters.find(exists);
+    if (setter) return { sid: setter };
+    if (!setters.length && !gates.some((g) => g.kind === 'ci' || g.kind === 'deploy')) return undefined;
+    const sid = [...w.sessionIds].reverse().find(exists);
+    return sid ? { sid, ...(setters.length ? { gone: setters[0] } : {}) } : undefined;
+  }
+
+  /**
+   * A request unblocked (w846): when a gate was CI, a deploy (w890: the worker released its sandbox while it waited, and
+   * its check after the deploy is its next step) or one a worker set itself (blocked_on), the gate's owner (gateOwner) is
+   * resumed within a minute with why, instead of waiting for the dispatcher to pass the word on. A check-in the block
+   * held for it is folded in. One standing in for a setter that is gone is told the work is its now. The resume is
+   * recorded (gateResumes) for the sweep. Returns it, or [].
    */
   private resumeGatedWorker(w: WorkItem, gates: readonly WorkBlocker[], cleared: string): string[] {
-    const sid = [...w.sessionIds].reverse().find((x) => this.store.sessions.get(x));
-    if (!sid || !gates.some((g) => g.kind === 'ci' || g.kind === 'deploy' || g.by === `worker ${sid}`)) return [];
+    const owner = this.gateOwner(w, gates);
+    if (!owner) return [];
+    const sid = owner.sid;
+    const ciGates = gates.filter((g) => g.kind === 'ci');
     // Not the "read its checks" hint when CI could not start (w907: the PR conflicts, or its head never got a run): the worker pushes first.
-    const ci = gates.some((g) => g.kind === 'ci') && !/CI can't run|no CI run exists/.test(cleared);
+    const ci = ciGates.length > 0 && !/CI can't run|no CI run exists/.test(cleared);
     // A deploy (w890): its worker was released while it waited, and does its check after the deploy now.
     const deploy = gates.some((g) => g.kind === 'deploy');
-    const note = `${w.id} is unblocked: ${cleared}.${ci ? ' Read its checks now (gh pr checks): merge on green, fix on red.' : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.`;
-    return this.d.restoreWake?.(sid, note) ? [sid] : [];
+    const prs = ciGates.map((g) => g.ref).filter(Boolean).join(', ');
+    const yours = owner.gone
+      ? ` Worker ${owner.gone} set this gate and is gone, so ${ciGates.length ? `the merge of ${prs} is yours now: you own it (merge on green, fix on red)` : 'what it waited for is yours to carry on now'}.`
+      : '';
+    const held = w.heldCheckIns?.find((h) => h.session === sid);
+    const note = `${w.id} is unblocked: ${cleared}.${yours}${ci ? ` Read its checks now (gh pr checks${prs ? ` ${prs}` : ''}): merge on green, fix on red.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
+    if (!this.wakeNow(sid, note)) return [];
+    this.noteResume(w, sid, note);
+    return [sid];
+  }
+
+  /** Records a gate's resume of `sid` for the sweep (w1094, sweepResumes). */
+  private noteResume(w: WorkItem, sid: string, note: string) {
+    const r: GateResume = { session: sid, at: this.now().toISOString(), mark: note.slice(0, 120), note, seq: this.store.lastSeq(sid), tries: 1 };
+    w.gateResumes = [...(w.gateResumes ?? []).filter((x) => x.session !== sid), r];
+  }
+
+  /**
+   * The sweep (w1094): a worker a gate's clearing resumed that, 5 minutes later, has neither taken the message (its
+   * transcript does not show it) nor anything pending that will bring it (a check-in waiting to fire, a message waiting
+   * for a sandbox, a turn running) was lost: it is resumed again, said loudly (the server log, the request's log), and
+   * after RESUME_TRIES the dispatcher is told. Returns what it did, by request id.
+   */
+  sweepResumes(queued: (sid: string) => boolean): Map<string, string> {
+    const did = new Map<string, string>();
+    const now = this.now().getTime();
+    for (const w of this.store.work.values()) {
+      if (!w.gateResumes?.length) continue;
+      if (!isOpen(w)) {
+        w.gateResumes = undefined;
+        this.store.putWork(w);
+        continue;
+      }
+      const left: GateResume[] = [];
+      for (const r of w.gateResumes) {
+        const s = this.store.sessions.get(r.session);
+        if (!s) continue;
+        const delivered = this.store.readTranscript(r.session, 400).some((e) => e.seq > r.seq && e.kind === 'user' && e.text.includes(r.mark));
+        if (delivered) continue;
+        if (now - Date.parse(r.at) < RESUME_SWEEP_MS || this.d.pendingWake?.(r.session) || queued(r.session) || s.status === 'running' || s.status === 'starting') {
+          left.push(r);
+          continue;
+        }
+        if (r.tries >= RESUME_TRIES) {
+          console.warn(`ledger: SWEEP: ${w.id}: worker ${r.session} still has not taken its resume after ${r.tries} tries; the dispatcher is told`);
+          this.stamp(w, `sweep: worker ${r.session} did not take its resume after ${r.tries} tries (${clip(r.mark, 100)}); the dispatcher is told`);
+          this.toDispatcher(`[ledger] ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}): its gate cleared and its worker ${r.session} was resumed ${r.tries} times, but the message never reached it: "${clip(r.note, 300)}". Message it yourself (message_agent with work_id "${w.id}"), or start another worker on it.`, w.requestedBy);
+          did.set(w.id, `gave up on ${r.session}`);
+          continue;
+        }
+        const again = this.d.restoreWake?.(r.session, r.note);
+        console.warn(`ledger: SWEEP: ${w.id}: worker ${r.session} was resumed ${Math.round((now - Date.parse(r.at)) / 60_000)} min ago when its gate cleared and has not taken it, with nothing pending for it: ${again ? 'resumed again' : 'could not resume it again'} (try ${r.tries + 1})`);
+        this.stamp(w, `sweep: worker ${r.session} had not taken its resume ${Math.round((now - Date.parse(r.at)) / 60_000)} min after its gate cleared; ${again ? 'resumed it again' : 'could not resume it again'}`);
+        left.push({ ...r, at: this.now().toISOString(), seq: this.store.lastSeq(r.session), tries: r.tries + 1 });
+        did.set(w.id, `resumed ${r.session} again`);
+      }
+      const changed = left.length !== w.gateResumes.length || left.some((r, i) => r !== w.gateResumes![i]);
+      if (!changed) continue;
+      w.gateResumes = left.length ? left : undefined;
+      this.store.putWork(w);
+    }
+    return did;
+  }
+
+  /**
+   * What the blocker watch read of a pull request's checks (w1094): kept on each open CI gate that names it, so the ledger
+   * says why it is still Blocked ("1 of 3 workflow runs still running (Portal VM scripts)"). Saved when the words change.
+   */
+  noteCiRead(ref: string, text: string) {
+    const at = this.now().toISOString();
+    for (const w of this.store.work.values()) {
+      if (w.status !== 'blocked') continue;
+      let changed = false;
+      for (const g of gatesOf(w)) {
+        if (g.kind !== 'ci' || g.ref !== ref) continue;
+        changed ||= g.read?.text !== text;
+        g.read = { at, text };
+      }
+      if (changed) this.store.putWork(w);
+    }
   }
 
   /**
@@ -1907,7 +2031,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const sid = [...w.sessionIds].reverse().find((x) => this.store.sessions.get(x));
     if (!sid) return false;
     const note = `${w.id}: the deploy you waited for has happened (${why}). Your report put a step after it: "${clip(step, 200)}". Do it now, then report.`;
-    if (!this.d.restoreWake?.(sid, note)) return false;
+    if (!this.wakeNow(sid, note)) return false;
+    this.noteResume(w, sid, note);
     const was = w.blocked ? ` (it was blocked on ${gatesName(gatesOf(w), this.now().getTime())})` : '';
     w.status = 'active';
     w.blocked = undefined;
@@ -1945,10 +2070,15 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    */
   workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; prs?: string[]; deploys?: string[]; what: string }): string {
     const items = [...this.store.work.values()];
-    const serves = [...servedBy(sessionId, items)].map((id) => this.store.work.get(id)).filter((x): x is WorkItem => !!x);
+    const byId = (id: string) => this.store.work.get(id);
+    const serves = [...servedBy(sessionId, items)].map(byId).filter((x): x is WorkItem => !!x);
+    // Any open request it holds or set aside, not only the one it was sent last (w1094: sent w1095, 7d8eebb0 could no
+    // longer register its wait for w1078's PR). Without request, the one it serves now, as before.
+    const h = holdsOf(sessionId, items);
+    const holds = [...new Set([...h.held, ...h.paused.keys()])].sort().map(byId).filter((x): x is WorkItem => !!x);
     const named = a.request?.trim().toLowerCase();
-    const w = named ? serves.find((x) => x.id === named) : serves.length === 1 ? serves[0] : undefined;
-    if (!w) throw new Error(named ? `you are not on ${named}` : serves.length ? `you serve ${serves.map((x) => x.id).join(', ')}: pass request, the one that waits` : 'you are on no request in the ledger, so there is nothing to block');
+    const w = named ? holds.find((x) => x.id === named) : serves.length === 1 ? serves[0] : undefined;
+    if (!w) throw new Error(named ? `you are not on ${named}${holds.length ? ` (you hold ${holds.map((x) => x.id).join(', ')})` : ''}` : serves.length ? `you serve ${serves.map((x) => x.id).join(', ')}: pass request, the one that waits` : 'you are on no request in the ledger, so there is nothing to block');
     if (w.status !== 'active' && w.status !== 'blocked') throw new Error(`${w.id} is ${w.status}; blocked_on is for a request you are working on`);
     const what = (a.what ?? '').split(/ +/).join(' ').trim();
     if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into develop');
@@ -1984,7 +2114,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     w.alsoBlocked = gates.length > 1 ? gates.slice(1) : undefined;
     w.stalled = undefined;
     w.status = 'blocked';
-    const cancelled = this.cancelCheckIns(w);
+    w.gateResumes = undefined;
+    const cancelled = this.cancelCheckIns(w, sessionId);
     const name = gatesName(gates, now.getTime());
     this.stamp(w, `worker ${sessionId}: blocked on ${name} (${gates[0].what}); it ends its turn and is resumed when that clears${cancelled}`);
     this.store.putWork(w);
@@ -3813,22 +3944,21 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const gates = gatesOf(w);
     const b = { what: gates.map((g) => g.what).join('; ') };
     const name = gatesName(gates, this.now().getTime());
-    // w829: a worker whose check-in the block cancelled gets it back and resumes by itself; the request is its again.
-    let back = this.handBackCheckIns(w, `${name} cleared (${why})`);
-    // w846: with none to hand back, the worker of a CI gate or of a gate it set itself is resumed the same way, within a minute.
-    let resumed = false;
-    if (!back.length) {
-      back = this.resumeGatedWorker(w, gates, `${name} cleared (${why})`);
-      resumed = back.length > 0;
-    }
+    // w846, w1094: the gate's owner (the worker that set it, or the newest standing in for it) is resumed within a minute,
+    // its own check-in folded in. w829: every other worker whose check-in the block cancelled gets it back.
+    const resumedIds = this.resumeGatedWorker(w, gates, `${name} cleared (${why})`);
+    const handed = this.handBackCheckIns(w, `${w.id} is unblocked: ${name} cleared (${why})`, resumedIds[0]);
+    const back = [...resumedIds, ...handed];
+    const resumed = resumedIds.length > 0;
     w.status = back.length ? 'active' : 'new';
     w.blocked = undefined;
     w.alsoBlocked = undefined;
     w.heldCheckIns = undefined;
     // The hand-back goes first: a log line is clipped, and a CI reason can be long.
-    this.stamp(w, `unblocked${back.length ? (resumed ? ` (its worker ${back.join(', ')} resumes within a minute)` : ` (handed back ${back.map((sid) => `${sid}'s check-in`).join(', ')}, which resumes it now)`) : ''}: ${name} cleared (${why})`);
+    const how = [resumed ? `its worker ${resumedIds.join(', ')} resumes within a minute` : '', handed.length ? `handed back ${handed.map((sid) => `${sid}'s check-in`).join(', ')}, which resumes it now` : ''].filter(Boolean).join('; ');
+    this.stamp(w, `unblocked${how ? ` (${how})` : ''}: ${name} cleared (${why})`);
     this.store.putWork(w);
-    console.log(`ledger: unblocked ${w.id}: ${name} cleared (${why})${back.length ? `; handed back the check-in of ${back.join(', ')}` : ''}`);
+    console.log(`ledger: unblocked ${w.id}: ${name} cleared (${why})${resumed ? `; resumed its worker ${resumedIds.join(', ')}` : ''}${handed.length ? `; handed back the check-in of ${handed.join(', ')}` : ''}`);
     if (back.length) {
       this.toPeople(w.requesters, dispatchNotice(w, `unblocked: it waited on ${name} (${b.what}), and ${why}; its worker ${back.join(', ')} carries on now`));
       return;

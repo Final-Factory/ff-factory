@@ -212,17 +212,18 @@ test('meters: a server from before per-account usage still shows the host and it
   await expect(foot.locator('.acct-head')).toHaveCount(0);
 });
 
-test('meters: the server lists its accounts, with each agent on the one it runs on', async ({ page }) => {
+test('meters: the server lists its accounts: the vault tokens, never a login or a host token (w1078)', async ({ page }) => {
   await signIn(page);
   const s = await appState(page.request);
   expect(Object.keys(s.machineStats ?? {})).toEqual(['pc']);
-  // The test server has no token and no stored login: its own login, not fetched or unavailable, and its machine's.
-  expect(s.accounts?.map((a) => [a.kind, a.sources]).sort()).toEqual([
-    ['login', ['host:login']],
-    ['login', ['login:pc']],
-  ]);
-  expect(s.accounts!.find((a) => a.sources.includes('host:login'))!.sessionIds).toEqual(expect.arrayContaining([s.orchestratorId]));
-  expect(s.accounts!.flatMap((a) => a.sessionIds)).toContain('gallery1');
+  // Every Claude process runs on a vault token (w1078): the test server's vault holds one fake token per login (e2e/server.ts),
+  // and neither this host's login nor the machine's own is an account any more.
+  expect(s.accounts?.length).toBe(3);
+  for (const a of s.accounts!) {
+    expect(a.kind).toBe('token');
+    expect(a.label).toMatch(/^vault-[a-z0-9._-]+-1 …/);
+  }
+  expect(s.accounts!.flatMap((a) => a.sources).filter((k) => k.startsWith('login:') || k === 'host:login')).toEqual([]);
   expect(JSON.stringify(s.accounts)).not.toMatch(/sk-ant/);
 });
 

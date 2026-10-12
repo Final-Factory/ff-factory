@@ -37,8 +37,8 @@ guest_setup() {
   local bundle=$1 st repo_arg="" url ip out
   log "11/12 the guest: waiting for the VM (first boot: cloud-init upgrades, installs and may reboot once; minutes)"
   if [ "$DRY_RUN" = 1 ]; then
-    log "DRY-RUN would copy deploy/vm/guest into the VM, run its install.sh, then: claude-token, tailscale-join, gh-login,"
-    log "DRY-RUN   base-clone, configure (ownerName, publicUrl, token-file accounts), backup-config and a first backup"
+    log "DRY-RUN would copy deploy/vm/guest into the VM, run its install.sh, then: tailscale-join, gh-login,"
+    log "DRY-RUN   base-clone, configure (ownerName, publicUrl), backup-config and a first backup"
     return 0
   fi
   for _ in $(seq 240); do gssh 'cloud-init status --wait >/dev/null 2>&1; [ -f /var/lib/cloud/instance/boot-finished ]' >/dev/null 2>&1 && break; sleep 5; done
@@ -56,15 +56,7 @@ guest_setup() {
   jq -e .installed <<<"$st" >/dev/null || die "the guest install finished but fffctl state says the portal is not installed"
 
   log "12/12 the guest's settings"
-  # 1. The subscription token (D4).
-  if jq -e .claudeToken <<<"$st" >/dev/null; then log "claude token: stored in the VM"
-  elif [ -s "$SECRETS/claude-token" ]; then
-    push_secret claude-token
-    if out=$(gssh 'sudo fffctl claude-token --file /run/fff-install/claude-token'); then log "claude token: ${out%%. Delete*}"
-    else todo "the Claude subscription token: fffctl claude-token failed ($out)"; fi
-    drop_secret claude-token
-  else todo "the Claude subscription token: run this installer again in a terminal (it asks), or sudo fffctl claude-token in the VM"; fi
-
+  # 1. The Claude tokens are the vault's (w1078: every Claude process runs on one; the people's files sync in, vault.sh).
   # 2. Tailscale: join and Funnel. The key is one-use: once the node has joined, the stored copy is deleted.
   if jq -e .tailscale.joined <<<"$st" >/dev/null; then log "tailscale: joined ($(jq -r .tailscale.ip <<<"$st"))"
   elif [ "${GUEST_TAILSCALE:-join}" = skip ]; then todo "Tailscale: skipped (GUEST_TAILSCALE=skip in $CONF). Remove that line and run this again with a fresh auth key"
@@ -99,15 +91,14 @@ guest_setup() {
     gssh 'sudo fffctl base-clone' || todo "the base clone failed (above): sudo fffctl base-clone in the VM"
   fi
 
-  # 5. config.json: ownerName, publicUrl (the Funnel URL), the orchestrators and the dispatcher on the token file.
+  # 5. config.json: ownerName and publicUrl (the Funnel URL).
   local args=""
   [ "$(jq -r '.config.ownerName // ""' <<<"$st")" = "$PORTAL_OWNER_NAME" ] || args+=" --owner-name $(printf %q "$PORTAL_OWNER_NAME")"
   [ -z "$url" ] || [ "$(jq -r '.config.publicUrl // ""' <<<"$st")" = "$url" ] || args+=" --public-url $(printf %q "$url")"
-  if jq -e .claudeToken <<<"$st" >/dev/null && ! jq -e .config.tokenfile <<<"$st" >/dev/null; then args+=" --claude-tokenfile"; fi
   if [ -n "$args" ]; then
     # shellcheck disable=SC2086
     gssh "sudo fffctl configure$args" || todo "config.json: fffctl configure failed (above)"
-  else log "config.json: ownerName, publicUrl and the accounts already set"; fi
+  else log "config.json: ownerName and publicUrl already set"; fi
 
   # 6. Backups (D17).
   if [ -n "${GUEST_BACKUP_SSH_TARGET:-}" ]; then

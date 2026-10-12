@@ -1,6 +1,6 @@
 // Providers: places that run work with their own rules, reached through a connector they run
 // (docs/ffbox-integration.md). FFBox is the only one. Its connector dials out to /provider with a token
-// whose SHA-256 is in config (providers.ffbox.tokenSha256), and reports: its container classes and free
+// whose SHA-256 is in the secrets folder (config providers.ffbox.tokenSha256File, w1078), and reports: its container classes and free
 // slots (capacity), its conversations, and the reports ffintake files (intake). Phase 1 is read-only:
 // nothing here can send FFBox work. Wire format: server/providerProtocol.ts; for the connector's author:
 // docs/ffbox-connector-contract.md.
@@ -48,6 +48,7 @@ import { devRequestsHealth } from '../shared/devRequestsHealth.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 import { emptyDevState, type DevLink, type DevRequests, type DevState } from './devRequests.ts';
+import { ffboxTokenHash } from './configMigration.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -488,7 +489,7 @@ export class ProviderManager {
       id: this.id,
       name: this.name,
       enabled: this.enabled,
-      tokenSet: !!this.settings.tokenSha256,
+      tokenSet: !!ffboxTokenHash(this.cfg),
       online: this.online,
       connectedSince: this.link?.hello ? new Date(this.link.since).toISOString() : undefined,
       lastSeen: this.data.lastSeen,
@@ -593,7 +594,8 @@ export class ProviderManager {
   /** The connector token in an Authorization header matches the configured hash (constant time). */
   authenticate(header: string | undefined): boolean {
     const m = /^Bearer\s+(\S+)$/.exec(header ?? '');
-    const want = this.settings.tokenSha256;
+    // Read from its file at each connection (w1078): a new token applies without a restart.
+    const want = ffboxTokenHash(this.cfg);
     if (!m || !want || !PROVIDER_TOKEN.test(m[1]) || !/^[0-9a-f]{64}$/.test(want)) return false;
     return timingSafeEqual(Buffer.from(want, 'hex'), Buffer.from(tokenSha256(m[1]), 'hex'));
   }

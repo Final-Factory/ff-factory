@@ -14,6 +14,10 @@ import { grantCovers, grantWords, mentions, sentencesOf, type ReactionGrant } fr
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types.ts';
+import { useFakeVault } from './testVault.ts';
+
+// Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
+useFakeVault();
 
 /** w866: replying to a message and reacting to it in a person's orchestrator chat (shared/replies.ts, Orchestrators.quoteOf/react). */
 

@@ -4,8 +4,8 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NIGHTLY_SENTRY, UNATTRIBUTED_DEFAULTS, Vault, tokenPersonForWork, unattributedKind, unattributedPerson, eligible, type KeySource, envNameProblem, fingerprintOf, keySource, newKeyText, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
-import { SECRET_ENV, addSecretValues, claudeFromVault, machineRunEnv, redactSecrets, registerSecretValues } from './secrets.ts';
+import { NIGHTLY_SENTRY, PoolHeldError, UNATTRIBUTED_DEFAULTS, Vault, tokenPersonForWork, unattributedKind, unattributedPerson, eligible, type KeySource, envNameProblem, fingerprintOf, keySource, newKeyText, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
+import { SECRET_ENV, addSecretValues, machineRunEnv, redactSecrets, registerSecretValues } from './secrets.ts';
 import { GITHUB_HELPER, githubCredentialEnv } from './launch.ts';
 import { buildAccounts, tokenKey } from './usage.ts';
 import { checkAccountConfig, loadConfig } from './config.ts';
@@ -241,57 +241,49 @@ test('eligible: role, machine and share', () => {
   assert.equal(eligible(gh({ disabled: true }), run), false);
 });
 
-test('machineRunEnv: off by default; on, a vault token alone with the daemon credentials dropped; a person own token still wins', (t) => {
+test('machineRunEnv (w1078): a vault token alone with the daemon credentials dropped; GitHub where the machine takes it; no eligible token and the run does not start', (t) => {
   const { make } = setup(t);
   const v = make();
   v.add({ name: 'shared', kind: 'claude', value: A, owner: 'ben', share: 'anyone' });
   v.add({ name: 'gh', kind: 'github', value: GH, share: 'anyone' });
   const problems: string[] = [];
   const ctx: VaultContext = { vault: v, payer: () => 'ben', onProblem: (l) => problems.push(l) };
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: C, CLAUDE_CONFIG_DIR: '/x' }, userClaudeEnv: {}, machines: {} };
+  const cfg = { machines: {} };
   const m = { id: 'm3' };
 
-  // No context (the daemon, tests): exactly as before the vault.
-  const before = machineRunEnv(cfg, m, { role: 'workers' }, undefined);
-  assert.deepEqual(before, { env: { CLAUDE_CODE_OAUTH_TOKEN: C, CLAUDE_CONFIG_DIR: '/x' }, login: false, account: `host token …${C.slice(-4)}` });
-  // A context, but machines.claudeFromVault and githubFromVault off: the machine's account and its own gh login.
+  // No context: nothing to run on, and no other account to fall back to.
+  assert.throws(() => machineRunEnv(cfg, m, { role: 'workers' }, undefined), (e: unknown) => e instanceof PoolHeldError && /token vault is not loaded/.test(e.message));
+  // GitHub off (machines.githubFromVault): the Claude token alone, and the machine keeps its own gh login.
   const off = machineRunEnv(cfg, m, { role: 'workers' }, ctx);
-  assert.equal(off.env.CLAUDE_CODE_OAUTH_TOKEN, C);
+  assert.equal(off.env.CLAUDE_CODE_OAUTH_TOKEN, A);
   assert.equal(off.env.GH_TOKEN, undefined);
   assert.equal(off.github, undefined);
-  assert.equal(off.login, false);
-  // GitHub alone on (w868): the granted GitHub token, the Claude account unchanged.
-  const ghOnly = machineRunEnv({ ...cfg, machines: { githubFromVault: { m3: true } } }, m, { role: 'workers' }, ctx);
-  assert.equal(ghOnly.env.GH_TOKEN, GH);
-  assert.equal(ghOnly.env.CLAUDE_CODE_OAUTH_TOKEN, C);
-  assert.equal(ghOnly.github, `gh …${GH.slice(-4)}`);
-  // On for m3: the vault token, the other credentials of claudeEnv dropped, login true (the daemon's own dropped too).
-  const on = { ...cfg, machines: { claudeFromVault: { m3: true }, githubFromVault: { m3: true } } };
-  assert.equal(claudeFromVault(on, m), true);
-  assert.equal(claudeFromVault(on, { id: 'm5' }), false);
+  assert.equal(off.login, true, "the daemon's own credentials are dropped too");
+  assert.match(off.account, /^vault token shared …/);
+  // GitHub on for m3 (w868): the granted GitHub token as well.
+  const on = { machines: { githubFromVault: { m3: true } } };
   const r = machineRunEnv(on, m, { role: 'workers', sessionId: 's1' }, ctx);
   assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, A);
-  assert.equal(r.env.CLAUDE_CONFIG_DIR, '/x', 'non-credential settings stay');
   assert.equal(r.env.GH_TOKEN, GH);
-  assert.equal(r.login, true);
-  assert.match(r.account, /^vault token shared …/);
-  // A person's own token (config userClaudeEnv) wins for their work, as before.
-  const own = { ...on, userClaudeEnv: { loth: { CLAUDE_CODE_OAUTH_TOKEN: B } } };
-  const lr = machineRunEnv(own, m, { role: 'workers', requestedBy: { userId: 'loth', displayName: 'Lothsahn' } }, ctx);
+  assert.equal(r.github, `gh …${GH.slice(-4)}`);
+  assert.equal(machineRunEnv(on, { id: 'm5' }, { role: 'workers' }, ctx).env.GH_TOKEN, undefined, 'a machine nobody named keeps its own');
+  // A person's own token wins for their work.
+  v.add({ name: 'loth-claude', kind: 'claude', value: B, owner: 'loth', share: 'owner' });
+  const lr = machineRunEnv(on, m, { role: 'workers', requestedBy: { userId: 'loth', displayName: 'Lothsahn' } }, ctx);
   assert.equal(lr.env.CLAUDE_CODE_OAUTH_TOKEN, B);
   assert.equal(lr.env.GH_TOKEN, GH);
-  // Nothing eligible: back to the machine's account, and the fallback is reported.
+  // Nothing eligible: the run does not start, and the reason is reported.
   v.update('shared', { machines: ['m5'] });
-  const fb = machineRunEnv(on, m, { role: 'workers' }, ctx);
-  assert.equal(fb.env.CLAUDE_CODE_OAUTH_TOKEN, C);
-  assert.match(problems.at(-1) ?? '', /no vault Claude token for a workers run on m3 for ben; it runs on host token/);
+  assert.throws(() => machineRunEnv(on, m, { role: 'workers' }, ctx), (e: unknown) => e instanceof PoolHeldError && /ben has no Claude token in the vault, so a workers run on m3 cannot start/.test(e.message));
+  assert.match(problems.at(-1) ?? '', /ben has no Claude token in the vault/);
   assert.ok(!problems.join('\n').includes(A.slice(13, 30)), 'problems never hold a value');
 });
 
-test('config: machines.claudeFromVault is checked like useHostClaudeEnv', () => {
-  checkAccountConfig({ machines: { claudeFromVault: { m3: true, '*': false } } });
-  assert.throws(() => checkAccountConfig({ machines: { claudeFromVault: 'yes' as never } }), /machines\.claudeFromVault is true, false/);
-  assert.throws(() => checkAccountConfig({ machines: { claudeFromVault: { m3: 'on' as never } } }), /claudeFromVault\.m3 is true or false/);
+test('config: machines.githubFromVault is true, false or per machine; a retired machines.claudeFromVault is not checked (w1078)', () => {
+  checkAccountConfig({ machines: { githubFromVault: { m3: true, '*': false } } });
+  assert.throws(() => checkAccountConfig({ machines: { githubFromVault: 'yes' as never } }), /machines\.githubFromVault is true, false/);
+  assert.throws(() => checkAccountConfig({ machines: { githubFromVault: { m3: 'on' as never } } }), /githubFromVault\.m3 is true or false/);
+  checkAccountConfig({ machines: { claudeFromVault: 'yes' } } as never);
 });
 
 test('redaction: GitHub tokens by pattern, and every vault value by value', () => {
@@ -346,7 +338,7 @@ test('vaultStatusLine: counts and the key, never a value', (t) => {
   v.add({ name: 'a', kind: 'claude', value: A, owner: 'ben', share: 'anyone' });
   v.add({ name: 'gh', kind: 'github', value: GH, share: 'anyone' });
   const line = vaultStatusLine(v, ['m3']) ?? '';
-  assert.match(line, /2 entries \(1 claude, 1 github\); key loaded; Claude tokens from it on m3/);
+  assert.match(line, /2 entries \(1 claude, 1 github\); key loaded; every Claude process runs on its tokens \(w1078\): this portal's and the machines' \(m3\)/);
   assert.ok(!line.includes(A.slice(13, 30)) && !line.includes(GH.slice(4, 20)));
 });
 
@@ -484,7 +476,7 @@ test("machineRunEnv per person: each person's own Claude and GitHub tokens, neve
   v.add({ name: 'host-lothsahn-claude', kind: 'claude', value: B, owner: 'lothsahn', share: 'owner' });
   v.add({ name: 'host-lothsahn-github', kind: 'github', value: ghTok('l'), owner: 'lothsahn', share: 'owner' });
   const ctx: VaultContext = { vault: v, payer: () => 'ben' };
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: C }, userClaudeEnv: {}, machines: { claudeFromVault: true, githubFromVault: true } };
+  const cfg = { machines: { githubFromVault: true } };
   const m = { id: 'm3' };
   const loth = { userId: 'lothsahn', displayName: 'Lothsahn' };
   const r1 = machineRunEnv(cfg, m, { role: 'workers', requestedBy: loth }, ctx);
@@ -495,9 +487,8 @@ test("machineRunEnv per person: each person's own Claude and GitHub tokens, neve
   assert.deepEqual([r3.env.CLAUDE_CODE_OAUTH_TOKEN, r3.env.GH_TOKEN], [A, ghTok('b')], "no requester: the system payer's");
   const r4 = machineRunEnv(cfg, m, { role: 'workers', requestedBy: { userId: 'ben', displayName: 'Ben' }, tokenUser: 'lothsahn' }, ctx);
   assert.deepEqual([r4.env.CLAUDE_CODE_OAUTH_TOKEN, r4.env.GH_TOKEN], [B, ghTok('l')], "intake work billed to Ben runs on lothsahn's tokens");
-  // Someone with no token of their own gets nobody else's: the machine's own account, as before the vault.
-  const r5 = machineRunEnv(cfg, m, { role: 'workers', requestedBy: { userId: 'mate', displayName: 'Mate' } }, ctx);
-  assert.deepEqual([r5.env.CLAUDE_CODE_OAUTH_TOKEN, r5.env.GH_TOKEN], [C, undefined]);
+  // Someone with no token of their own gets nobody else's: the run does not start (w1078: there is no machine account).
+  assert.throws(() => machineRunEnv(cfg, m, { role: 'workers', requestedBy: { userId: 'mate', displayName: 'Mate' } }, ctx), (e: unknown) => e instanceof PoolHeldError && /mate has no Claude token in the vault/.test(e.message));
 });
 
 test('vault rename (w748): the same entry under a new name keeps its id, value, grants and pick; a taken or bad name is refused', (t) => {

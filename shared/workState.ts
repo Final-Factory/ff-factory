@@ -198,7 +198,10 @@ const ago = (iso: string | undefined, now: number) => {
 function blockedLive(gates: readonly NonNullable<WorkItem['blocked']>[], now: number): WorkLive {
   const first = gates[0];
   const more = gates.length > 1 ? `; also ${gates.slice(1).map((g) => g.what).join('; ')}` : '';
-  return { state: 'blocked', why: `${first.what}${more} (since ${ago(first.at, now)}, set by ${first.by})`, waitsOn: gates.map((g) => gatesName([g], now)) };
+  // w1094: what the blocker watch last read of a CI gate's checks, so a gate that is still open says why.
+  const read = gates.find((g) => g.kind === 'ci' && g.read)?.read;
+  const ci = read ? `; last read: ${read.text} (${ago(read.at, now)})` : '';
+  return { state: 'blocked', why: `${first.what}${more} (since ${ago(first.at, now)}, set by ${first.by})${ci}`, waitsOn: gates.map((g) => gatesName([g], now)) };
 }
 
 /** The live state of one request, or undefined once it is closed. */
@@ -274,7 +277,8 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   // A message to one of its workers waits in the send queue: for a free slot (Queued) or for its machine (Blocked).
   const held = serving.map((s) => ({ s, why: f.queuedSend?.(s.id) ?? s.queuedSend, on: s.queuedOn })).find((x) => x.why);
   if (held?.on === 'machine') return { state: 'blocked', why: `a message to ${held.s.id} waits for its machine (${held.why})`, waitsOn: [held.s.machineId ?? 'its machine'] };
-  if (held) return { state: 'queued', why: `a message to ${held.s.id} waits for a free agent slot (${held.why})` };
+  // w1094: a worker resumed after its sandbox went to other work waits for a sandbox on its machine: Queued, named so.
+  if (held) return { state: 'queued', why: `a message to ${held.s.id} waits for a ${/^(no sandbox on|being placed again|its branch )/.test(held.why ?? '') ? 'sandbox on its machine' : 'free agent slot'} (${held.why})` };
 
   // Blocked on a thing (w643): the blocker it records.
   if (w.status === 'blocked' && gates.length) return blockedLive(gates, f.now);
