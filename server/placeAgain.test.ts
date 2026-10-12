@@ -690,3 +690,61 @@ test('w1089: no capacity ping for a sandbox that is taken again: an agent starte
   assert.equal(b.placeReleased, undefined, 'a live agent there keeps the sandbox held (keptWhy), as before');
   assert.deepEqual(freed2, []);
 });
+
+// ---------------------------------------------------------------- w1135: work that is not the game's resumes on an agent seat
+
+test('w1135: a released worker on work that is not the game\'s (b3327616, ff-factory work) resumes at once on an agent seat beside another agent, claims no game sandbox and switches nothing; it waits only when every sandbox is full', () => {
+  const b = worker('b33', { machineSandbox: 'slot5', placeReleased: { at: iso(NOW), sandbox: 'slot5', branch: 'sandbox/slot1-w1063', why: 'it waits on lothsahn: deploy the portal' } });
+  const g = worker('g1', { placeReleased: { at: iso(NOW), sandbox: 'slot9', branch: 'feature/g1', why: 'far' } });
+  // Every sandbox has one agent working in it (lothdesktop at 15:36Z: 6 of 6 sandboxes in use, 3 of 10 agents mid-turn).
+  const a5 = worker('a5', { machineSandbox: 'slot5', status: 'running' });
+  const a6 = worker('a6', { machineSandbox: 'slot6', status: 'running' });
+  const machine = { id: 'pc', sandboxes: [sandbox('slot5', { sessionIds: ['a5'] }, { branch: 'sandbox/slot5-w1134' }), sandbox('slot6', { sessionIds: ['a6'] })] } as unknown as Machine;
+  const switched: string[] = [];
+  const stopped: string[] = [];
+  const notes: string[] = [];
+  const d: ConstructorParameters<typeof PlaceAgain>[0] = {
+    sessions: () => [b, g, a5, a6],
+    machine: () => machine,
+    isLive: (id) => id === 'a5' || id === 'a6',
+    online: () => true,
+    unityHolders: () => [],
+    workOver: () => undefined,
+    keepLive: () => undefined,
+    queued: (id) => id === 'b33' || id === 'g1',
+    stopLive: () => undefined,
+    stopEditor: async (_m, sb) => void stopped.push(sb),
+    switchBranch: async (_m, branch, sb) => (switched.push(`${sb}:${branch}`), { notes: [] }),
+    save: () => undefined,
+    saveMachine: () => undefined,
+    note: (_id, text) => void notes.push(text),
+    drain: () => undefined,
+    now: () => NOW,
+  };
+  // Before (every worker is game work): it waits for a game sandbox, and counts as waiting for one.
+  const before = new PlaceAgain(d);
+  assert.match(before.answer({ ...b }) ?? '', /no sandbox on pc is free/);
+  assert.deepEqual(before.waiting('pc'), ['b33', 'g1']);
+  const p = new PlaceAgain({ ...d, agentOnly: (s) => s.id === 'b33', seats: () => 2 });
+  assert.deepEqual(p.waiting('pc'), ['g1'], 'it waits for no sandbox; the game worker still does');
+  assert.equal(p.answer(b), undefined, 'the bug: it waited for a free sandbox while seats were free');
+  assert.equal(b.placeReleased, undefined);
+  assert.equal(b.machineSandbox, 'slot5', 'its own sandbox has a seat: beside a5');
+  assert.deepEqual([switched, stopped], [[], []], "nothing is switched or stopped: a5's game tree stays a5's");
+  assert.equal(b.movedFrom?.shared, true);
+  assert.match(notes.at(-1) ?? '', /on an agent seat in pc\/slot5, beside the agent there/);
+  const said = movedNote({ id: 'pc' }, b.movedFrom!, { id: 'slot5', path: 'D:\\ffsb\\slot5' });
+  assert.match(said, /needs only an agent seat, not a free sandbox \(w1098\)\. You resume in it again, beside the agent that works there now\./);
+  assert.match(said, /do not edit, commit, stash, switch branches or start Unity there/);
+  assert.match(said, /your game branch `sandbox\/slot1-w1063` is untouched/);
+  // Its own sandbox full (2 agents): the one with a seat. Every sandbox full: it waits for a seat.
+  const c = worker('c', { machineSandbox: 'slot5', placeReleased: { at: iso(NOW), sandbox: 'slot5', branch: 'b/c', why: 'far' } });
+  const a5b = worker('a5b', { machineSandbox: 'slot5', status: 'running' });
+  const q = new PlaceAgain({ ...d, sessions: () => [c, a5, a5b, a6], isLive: (id) => id !== 'c', agentOnly: () => true, seats: () => 2 });
+  assert.equal(q.answer(c), undefined);
+  assert.equal(c.machineSandbox, 'slot6');
+  const e = worker('e', { machineSandbox: 'slot5', placeReleased: { at: iso(NOW), sandbox: 'slot5', branch: 'b/e', why: 'far' } });
+  const a6b = worker('a6b', { machineSandbox: 'slot6', status: 'running' });
+  const full = new PlaceAgain({ ...d, sessions: () => [e, a5, a5b, a6, a6b], isLive: (id) => id !== 'e', agentOnly: () => true, seats: () => 2 });
+  assert.match(full.answer(e) ?? '', /no agent seat is free on pc/);
+});

@@ -290,7 +290,8 @@ export interface SessionInfo {
    */
   savedWork?: { sha: string; files: number; pushed: boolean; branch: string; at: string };
   /** Placed again in another sandbox than the one it stopped in (w640): its next message says where, then this goes. */
-  movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string };
+  /** `shared` (w1135): work that is not the game's, resumed on an agent seat beside another agent; its game tree is that agent's. */
+  movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string; shared?: true };
 }
 
 /**

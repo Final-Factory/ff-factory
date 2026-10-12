@@ -1296,3 +1296,28 @@ test("w1097: the daemon hears which stopped workers a request still waits for, a
   await until('the daemon is told', () => held().length === 0);
   assert.deepEqual(guard().resumable, []);
 });
+
+test('w1135: a message queued while its machine was offline goes as soon as the daemon is back (its hello), not at the next half-minute pass; the queue says what holds it now', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const delay = RESUME_DELAY_MS.value;
+  RESUME_DELAY_MS.value = 50;
+  t.after(() => void (RESUME_DELAY_MS.value = delay));
+  // No half-minute pass in this test: only the reconnect may deliver it.
+  clearInterval((sessions as unknown as { drainTimer: NodeJS.Timeout }).drainTimer);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  sessions.send(s.info.id, 'one');
+  await until('idle', () => s.info.status === 'idle');
+  d.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  // As on 2026-10-12 15:34Z (lothdesktop's daemon updating): the resume waits for its machine.
+  sessions.send(s.info.id, 'resume: carry on', 'system', undefined, { hold: true });
+  assert.equal(sessions.queued().length, 1);
+  assert.match(sessions.queued()[0].why, /machine mx is offline/);
+  assert.equal(sessions.queued()[0].on, 'machine');
+  daemon();
+  await until('delivered after the reconnect', () => store.readTranscript(s.info.id).some((e) => e.kind === 'user' && e.text === 'resume: carry on'), 10_000);
+  assert.equal(sessions.queued().length, 0);
+});

@@ -55,6 +55,7 @@ import { SpendStore, buildReport, costLine, renderReport, renderRequest, renderS
 import { dataGuardSettings, footprint, gzipRatioCached, renderFootprint } from './dataGuard.ts';
 import { REACTION_MEANINGS, REPLY_MARK } from '../shared/replies.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
+import { needsOf } from '../shared/capacity.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -402,6 +403,15 @@ export class Agents {
       order: (a, b) => this.resumeOrder(a, b),
       ciWait: (info) => this.ciWait(info),
       waitOn: (info) => this.waitOn(info),
+      // w1135: a worker whose open requests are all not the game's (w1098) resumes on an agent seat, not a game sandbox.
+      agentOnly: (info) => {
+        const open = this.workIdsOf(info).map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
+        return open.length > 0 && open.every((w) => needsOf(w) === 'agent');
+      },
+      seats: (id) => {
+        const m = store.machines.get(id);
+        return (m && poolSettingsOf(m)?.maxAgentsPerSandbox) || 2;
+      },
       soon: () => void setTimeout(() => this.placeAgain.tick(), 5000).unref?.(),
       // Uncommitted changes keep no process when its daemon saves them before the release (w656).
       keepLive: (id) => {

@@ -423,3 +423,22 @@ test('w859: a turn result line carries the SDK cumulative usage per model and th
   assert.ok((a?.meter?.calls ?? 0) >= 1);
   assert.ok(a?.meter?.cats.base, 'what the context held is shared out (here all base: the fake sends no tool output)');
 });
+
+test('w1135: a queued message says what holds it now: "offline" goes once the machine is back and something else holds it', async (t) => {
+  const { sessions, worker, store } = setup(t);
+  const c = worker();
+  c.info.machineId = 'm1';
+  let hold: string | undefined = 'm1 is offline: it is placed again once its daemon is back';
+  sessions.placeFull = () => hold;
+  sessions.send(c.info.id, 'carry on');
+  assert.match(sessions.queued()[0].why, /m1 is offline/);
+  assert.equal(sessions.queued()[0].on, 'machine');
+  // dd8193f8 on 2026-10-12: back online and being placed again, its line still said "lothdesktop is offline".
+  hold = 'no agent seat is free on m1';
+  sessions.drain();
+  assert.equal(sessions.queued()[0].why, 'no agent seat is free on m1', 'the bug: the reason it was queued with stayed');
+  assert.equal(sessions.queued()[0].on, 'capacity');
+  hold = undefined;
+  sessions.drain();
+  await until(() => store.readTranscript(c.info.id).some((e) => e.kind === 'user' && (e as { text: string }).text === 'carry on'), 'delivered');
+});
