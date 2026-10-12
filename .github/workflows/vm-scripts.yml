@@ -11,7 +11,9 @@ name: Portal VM scripts
 #                 restart, hold; server/index.ts where it reads restart.request, the orchestrator inbox, /api/health or
 #                 stops; see VM_MARKERS), or the packages the guest builds. The two other jobs (a zvol on an
 #                 ubuntu-26.04 host, qcow2 on ubuntu-24.04) as well when it touches deploy/vm/host, deploy/vm/test or
-#                 this workflow. Lint (shellcheck, units, dry runs) when it touches deploy/vm or this workflow.
+#                 this workflow. Lint (shellcheck, units, dry runs) when it touches deploy/vm or this workflow. Not for
+#                 RUNBOOK.md, the old tailnet policy, measure/results/ or the path-fixtures README; deploy/vm/measure/
+#                 (a PowerShell script) is lint only.
 #                 Nothing else: a PR that touches none of these never waits on a VM.
 #   push to main  nothing (w925): the pull request ran them; main runs only ci.yml's secret scan and identity check.
 #   nightly       all three, plus one at production timing: the fast mode's short health, verify and watch timers
@@ -87,6 +89,11 @@ jobs:
               lint=false e2e=false host=false
               for f in $files; do
                 case "$f" in
+                  # Words and old measurements, named one by one so a new .md that a script reads still runs (w1102): no
+                  # script under deploy/vm opens these (grep for each name finds only docs and comments).
+                  deploy/vm/RUNBOOK.md | deploy/vm/tailnet-policy-*.hujson | deploy/vm/measure/results/* | deploy/vm/test/path-fixtures/README.md) echo "ignored: $f" ;;
+                  # Only lint.sh parses it (pwsh); no VM runs it.
+                  deploy/vm/measure/*) lint=true; why+=" $f (lint only);" ;;
                   deploy/vm/host/* | deploy/vm/test/* | .github/workflows/vm-scripts.yml) lint=true e2e=true host=true; why+=" $f (all three);" ;;
                   deploy/vm/*) lint=true e2e=true; why+=" $f;" ;;
                   server/restart.ts | package.json | package-lock.json | web/package.json | web/package-lock.json) e2e=true; why+=" $f;" ;;

@@ -166,6 +166,10 @@ test('place again (w640): waiting resumes claim the free sandboxes before new wo
   });
   assert.equal(p.claimedBy('pc', 'slot2'), 'a1');
   assert.deepEqual(p.waiting('pc'), ['b2'], 'b2 waits for the next one to free');
+  // w1099: with an order (Agents.resumeOrder: its request's priority, then age), b2 on a high request goes first.
+  const byPriority = new PlaceAgain({ ...(p as unknown as { d: ConstructorParameters<typeof PlaceAgain>[0] }).d, order: (x, y) => (x.id === 'b2' ? -1 : y.id === 'b2' ? 1 : 0) });
+  assert.equal(byPriority.claimedBy('pc', 'slot2'), 'b2');
+  assert.deepEqual(byPriority.waiting('pc'), ['a1']);
   // The worker learns where it is now from its next message.
   const note = movedNote({ id: 'pc' }, { sandbox: 'slot1', path: 'D:\\ffsb\\slot1', at: iso(NOW), why: 'its check-in is 9.0 h away', branch: 'feature/a1' }, { id: 'slot2', path: 'D:\\ffsb\\slot2' });
   assert.match(note, /^\[moved\] While you were stopped your sandbox pc\/slot1 went to other work/);

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { normalizeSetting } from './appConfig.ts';
 import { CleanupRunner, runCleanup, staleAtFile, type CleanupGuard, type CleanupRun, type PassOptions } from './cleanup.ts';
-import { STALE_OUTPUT_DEFAULTS, cleanupPass, planStaleOutput, requestIdsIn, staleContextOf, staleOutputSettings, type StaleContext, type StalePlace } from './staleOutput.ts';
+import { STALE_OUTPUT_DEFAULTS, cleanupPass, defaultNightlyRoots, planStaleOutput, requestIdsIn, staleContextOf, staleOutputSettings, type StaleContext, type StalePlace } from './staleOutput.ts';
 
 /**
  * The stale build and run output rules (w459, server/staleOutput.ts): what goes, what stays, and what is listed for a
@@ -321,4 +321,11 @@ test('stale output: set_app_config takes its block for this host and for every m
   assert.throws(() => normalizeSetting('machines.cleanup.staleOutput', { libraries: true }, cfg), /unknown key "libraries"/);
   assert.throws(() => normalizeSetting('machines.cleanup.staleOutput', 'on', cfg), /is an object such as/);
   assert.equal(normalizeSetting('machines.cleanup.staleOutput', null, cfg), undefined, 'null: back to the defaults');
+});
+
+test('w1099: the nightly roots are the lab and, beside it, a sandbox night\'s nightly-history', () => {
+  const r = path.join('V:', 'ffw');
+  assert.deepEqual(defaultNightlyRoots(r, {}), [path.join(r, 'nightly'), path.join(r, 'nightly-history')]);
+  assert.deepEqual(defaultNightlyRoots(r, { FF_NIGHTLY_ROOT: path.join(r, 'lab') }), [path.join(r, 'lab'), path.join(r, 'nightly-history')]);
+  assert.deepEqual(defaultNightlyRoots(undefined, {}), [], 'no worker root: none (the old places outside it are gone)');
 });
