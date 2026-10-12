@@ -17,6 +17,7 @@ import { PermissionCard } from './Transcript';
 import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu, ToggleChip } from './ui';
 import { TimersButton } from './Timers';
+import { useKeepScroll } from '../scrollKeep';
 
 type Tab = 'requests' | 'intake' | 'spend' | 'conversation';
 
@@ -254,6 +255,7 @@ function StateFilter({ live, picked, onChange, testId }: { live: ReadonlyMap<str
 const pickedLabel = (picked: ReadonlySet<WorkLiveState>) => WORK_LIVE_STATES.filter((s) => picked.has(s)).map((s) => WORK_LIVE_LABEL[s].toLowerCase()).join(' or ');
 
 function Requests({ app, work, open, stalled, closed, focus, now }: { app: AppState; work: WorkItem[]; open: WorkItem[]; stalled: WorkItem[]; closed: WorkItem[]; focus?: string; now: number }) {
+  const keep = useKeepScroll('dispatcher:requests');
   const live = useWorkLive(app, work, now);
   const [picked, setPicked] = usePickedStates('requests');
   const only = picked.size > 0;
@@ -284,7 +286,7 @@ function Requests({ app, work, open, stalled, closed, focus, now }: { app: AppSt
   // States picked: every open and stalled request in one of them, whatever its stored status.
   const shown = only ? [...open, ...stalled].filter((w) => picked.has(live.get(w.id)?.state as WorkLiveState)) : [];
   return (
-    <div className="sa-scroll">
+    <div className="sa-scroll" ref={keep}>
       {live.size > 0 && <StateFilter live={live} picked={picked} onChange={setPicked} testId="ledger-states" />}
       {only ? (
         shown.length ? <div className="run-list" data-testid="ledger-picked">{shown.map(row)}</div> : <p className="dim small ledger-none">None {pickedLabel(picked)} now.</p>
@@ -345,6 +347,7 @@ const onOff = (on: boolean) => (on ? 'on' : 'off');
  * and what the intake saw lately. The settings are config.json's; this page shows them, and the two nightly chips are switches.
  */
 function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: IntakeSummary; work: WorkItem[]; now: number }) {
+  const keep = useKeepScroll('dispatcher:intake');
   const [expanded, setExpanded] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const items = work.filter((w) => w.source);
@@ -370,7 +373,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
   const f = s.ffbox;
   const n = s.nightly;
   return (
-    <div className="sa-scroll intake-tab" data-testid="intake-tab">
+    <div className="sa-scroll intake-tab" data-testid="intake-tab" ref={keep}>
       <section className="intake-settings" data-testid="intake-settings">
         <div className="intake-source">
           <Chip tone={d.enabled ? 'green' : 'grey'}>Discord {onOff(d.enabled)}</Chip>
