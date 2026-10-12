@@ -18,6 +18,8 @@ export type { MachineGuardSettings };
 export interface MachineGuardEffects {
   exists(p: string): boolean;
   statfs(p: string): Promise<{ free: number; total: number } | undefined>;
+  /** A file's size in bytes (the VHDX's, w1070), undefined when it cannot be read. */
+  fileBytes?(p: string): number | undefined;
   mem(): { free: number; total: number };
   runHelper(action: HelperAction): Promise<HelperResult>;
   reap?(maxAgeHours: number): Promise<string[]>;
@@ -53,7 +55,8 @@ export function machineGuardConfig(s: MachineGuardSettings, sandboxRoot: string)
     criticalFreeGB: s.criticalFreeGB,
     hysteresisGB: s.hysteresisGB,
     remountMinFreeGB: s.remountMinFreeGB,
-    devDriveVhdx: '',
+    devDriveVhdx: s.devDriveVhdx ?? '',
+    ...(s.devDriveMaxGB ? { devDriveMaxGB: s.devDriveMaxGB } : {}),
     reapBrowsersAfterHours: s.reapBrowsersAfterHours,
     reapEveryMinutes: s.reapEveryMinutes,
     cleanup: { ...DEFAULT_CLEANUP, everyMinutes: 0, softFreeGB: 0 },
@@ -74,6 +77,7 @@ export class MachineGuard {
     this.monitor = new HostHealthMonitor({
       cfg: machineGuardConfig(settings, sandboxRoot),
       statfs: (p) => fx.statfs(p),
+      ...(fx.fileBytes ? { fileBytes: (p: string) => fx.fileBytes!(p) } : {}),
       exists: (p) => fx.exists(p),
       mem: () => fx.mem(),
       sandboxes: () => ports.sandboxes(),
@@ -129,6 +133,13 @@ export async function realGuardEffects(): Promise<MachineGuardEffects> {
       try {
         const s = await fs.promises.statfs(p);
         return { free: s.bavail * s.bsize, total: s.blocks * s.bsize };
+      } catch {
+        return undefined;
+      }
+    },
+    fileBytes: (p) => {
+      try {
+        return fs.statSync(p).size;
       } catch {
         return undefined;
       }

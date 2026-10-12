@@ -9,6 +9,9 @@
 #   -Action remove   the uninstall's half: take the tasks, the attachment and the VHDX away. Refuses unless the VHDX is
 #                    <Root>\devdrive.vhdx.
 #
+# -Root is the folder that holds the VHDX (the host folder). -WorkerRoot is the worker root, when it is somewhere else: on
+# the drive itself (w1070, <letter>:\ffw); its daemon\daemon.json and sandboxes follow a letter change.
+#
 # The last line it prints is `FFW-DEVDRIVE {json}` for the caller. Exit code 0 on success, 1 on a failure it names.
 param(
   [Parameter(Mandatory)][ValidateSet('ensure', 'status', 'remove')][string]$Action,
@@ -23,7 +26,8 @@ param(
   [string]$UserSid = '',
   # Letters never to use, e.g. 'U,T'.
   [string]$Skip = '',
-  [switch]$NoTasks
+  [switch]$NoTasks,
+  [string]$WorkerRoot = ''
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\privileged\devdrive-lib.ps1')
@@ -31,10 +35,11 @@ $ErrorActionPreference = 'Stop'
 $Root = [IO.Path]::GetFullPath($Root).TrimEnd('\')
 $Vhdx = Join-Path $Root 'devdrive.vhdx'
 $StateFile = Join-Path $Root 'devdrive.json'
+$WorkerRoot = if ($WorkerRoot) { [IO.Path]::GetFullPath($WorkerRoot).TrimEnd('\') } else { $Root }
 $ResultDir = Join-Path $env:ProgramData 'ffsb-helpers\results'
 $Flex = $true
 $LetterChangedFrom = ''
-$DaemonConfig = Join-Path $Root 'daemon\daemon.json'
+$DaemonConfig = Join-Path $WorkerRoot 'daemon\daemon.json'
 New-Item -ItemType Directory -Force $ResultDir | Out-Null
 
 function Say([string]$line) { Write-Output $line; Log $line }
@@ -94,7 +99,7 @@ function Initialize-DevDriveDisk($disk, [string]$l) {
 function Register-Tasks([string]$l) {
   if ($NoTasks) { return }
   $helpers = Join-Path $PSScriptRoot '..\install-privileged-helpers.ps1'
-  $a = @{ Vhdx = $Vhdx; Letter = $l; Flex = $true; StateFile = $StateFile; DaemonConfig = $DaemonConfig; WorkerRoot = $Root; Actions = @('mount', 'trim', 'compact') }
+  $a = @{ Vhdx = $Vhdx; Letter = $l; Flex = $true; StateFile = $StateFile; DaemonConfig = $DaemonConfig; WorkerRoot = $WorkerRoot; Actions = @('mount', 'trim', 'compact') }
   if ($User) { $a.User = $User }
   if ($Skip) { $a.Skip = $Skip }
   & $helpers @a | ForEach-Object { Say "helpers: $_" }
@@ -153,7 +158,6 @@ try {
           if ($MaxGB -lt 50 -and $st) { $MaxGB = [int]$st.maxGB }
           Initialize-DevDriveDisk $disk $Letter
         } elseif ((Get-OwnLetter) -ne $Letter.ToUpper()) {
-          $WorkerRoot = $Root
           Mount-DevDrive
           if ($LetterChangedFrom) { Say "the letter changed from ${LetterChangedFrom}: to ${Letter}: (taken): $(Update-LetterDependents $LetterChangedFrom $Letter)" }
         }

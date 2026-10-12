@@ -26,6 +26,23 @@ export function diskLevel(freeGB: number | undefined, prev: DiskLevel, g: Pick<H
   return 'ok';
 }
 
+/**
+ * The level of the volume that holds a Dev Drive's VHDX, when the guard knows the file and its maximum (w1070): what matters
+ * there is whether the file can still grow to its maximum (a dynamic VHDX that cannot grow takes the drive away, BEAST
+ * 2026-09-24), not a fixed number of GB, since the work's own space is the drive's. Warn while the free space is less than the
+ * growth left (no new editors or agents); critical when it is also under criticalFreeGB. Hysteresis as diskLevel's.
+ */
+export function roomLevel(freeGB: number | undefined, growthGB: number, prev: DiskLevel, g: Pick<HostGuardConfig, 'criticalFreeGB' | 'hysteresisGB'>): DiskLevel {
+  if (freeGB === undefined) return prev;
+  const room = freeGB - growthGB;
+  const short = room < 0 || (prev !== 'ok' && room < g.hysteresisGB);
+  if (short && (freeGB < g.criticalFreeGB || (prev === 'critical' && freeGB < g.criticalFreeGB + g.hysteresisGB))) return 'critical';
+  return short ? 'warn' : 'ok';
+}
+
+const diskWords = (d: { path: string; freeBytes?: number; growthBytes?: number }) =>
+  `${d.path} ${d.freeBytes === undefined ? '?' : (d.freeBytes / GB).toFixed(0)} GB free${d.growthBytes !== undefined ? ` (the Dev Drive's file can still grow ${(d.growthBytes / GB).toFixed(0)} GB there)` : ''}`;
+
 export const worstLevel = (levels: DiskLevel[]): DiskLevel => (levels.includes('critical') ? 'critical' : levels.includes('warn') ? 'warn' : 'ok');
 
 /** Why a new editor or a new agent process is refused right now, or undefined. */
@@ -36,7 +53,7 @@ export function blockReason(
 ): string | undefined {
   if (h.sandboxRoot !== 'ok') return `the sandbox drive is offline (${h.sandboxRoot}${h.detail ? `: ${h.detail}` : ''}); the app is reattaching it and resumes the work afterwards`;
   if (h.level !== 'ok') {
-    const low = h.disks.filter((d) => d.level !== 'ok').map((d) => `${d.path} ${d.freeBytes === undefined ? '?' : (d.freeBytes / GB).toFixed(0)} GB free`);
+    const low = h.disks.filter((d) => d.level !== 'ok').map(diskWords);
     return `disk space is ${h.level === 'critical' ? 'critically ' : ''}low (${low.join(', ')}); new ${kind === 'editor' ? 'editors' : 'agent processes'} wait until space is freed`;
   }
   if (kind === 'editor' && mem.minFreeRamGB > 0 && mem.freeGB < mem.minFreeRamGB) {
@@ -60,6 +77,8 @@ export const volumeOf = (p: string) => {
 export interface HostDeps {
   cfg: Config;
   statfs(p: string): Promise<VolumeStat | undefined>;
+  /** A file's size in bytes: the Dev Drive's VHDX, for roomLevel (w1070). */
+  fileBytes?(p: string): number | undefined;
   exists(p: string): boolean;
   mem(): { free: number; total: number };
   sandboxes(): Sandbox[];
@@ -202,11 +221,17 @@ export class HostHealthMonitor {
     // The portal holds no sandboxes (w510): its data volume (state, transcripts, attachments) is what fills up there.
     const paths = [...new Map([this.ownsDrive() ? cfg.sandboxRoot : cfg.dataDir, ...cfg.hostDiskPaths].map((p) => [volumeOf(p), p])).values()];
     const disks: HostHealth['disks'] = [];
+    const vhdx = this.g().devDriveVhdx;
+    const maxGB = this.g().devDriveMaxGB ?? 0;
+    const size = vhdx && maxGB > 0 ? this.d.fileBytes?.(vhdx) : undefined;
     for (const p of paths) {
       const st = this.d.exists(p) ? await this.d.statfs(p) : undefined;
-      const level = diskLevel(st ? st.free / GB : undefined, this.levels.get(p) ?? 'ok', this.g());
+      const hostOfVhdx = size !== undefined && volumeOf(p) === volumeOf(vhdx) && cfg.hostDiskPaths.some((h) => volumeOf(h) === volumeOf(p));
+      const growth = hostOfVhdx ? Math.max(0, maxGB * GB - size!) : undefined;
+      const prev = this.levels.get(p) ?? 'ok';
+      const level = growth !== undefined ? roomLevel(st ? st.free / GB : undefined, growth / GB, prev, this.g()) : diskLevel(st ? st.free / GB : undefined, prev, this.g());
       this.levels.set(p, level);
-      disks.push({ path: p, freeBytes: st?.free, totalBytes: st?.total, level });
+      disks.push({ path: p, freeBytes: st?.free, totalBytes: st?.total, level, ...(growth !== undefined ? { growthBytes: growth } : {}) });
     }
     const m = this.d.mem();
     this.health = {
@@ -337,7 +362,7 @@ export class HostHealthMonitor {
     const lvl = this.health.level;
     const prev = this.criticalSince ? 'critical' : undefined;
     if (lvl !== 'ok' && this.lastReported !== lvl) {
-      const low = this.health.disks.filter((x) => x.level !== 'ok').map((x) => `${x.path}: ${((x.freeBytes ?? 0) / GB).toFixed(0)} GB free`).join(', ');
+      const low = this.health.disks.filter((x) => x.level !== 'ok').map(diskWords).join(', ');
       this.d.report(
         lvl === 'critical' ? 'Disk space critical' : 'Disk space low',
         `${low}. ${lvl === 'critical' ? `Below ${this.g().criticalFreeGB} GB: agents are asked to checkpoint, idle editors stop, known-safe junk is removed.` : `Below ${this.g().warnFreeGB} GB: no new editors or agent processes until space is freed.`}`,

@@ -8,7 +8,8 @@
 # state file, the daemon's config and pool state, the root's two junctions, and the worktrees' recorded paths.
 #   -StateFile     <root>\devdrive.json: { letter, ... }; its letter wins over -Letter (the drive may have moved before)
 #   -DaemonConfig  <root>\daemon\daemon.json (sandboxes.root and sandboxes.librarySeed are rewritten)
-#   -WorkerRoot    <root>: its sandboxes\ and seed\ junctions, its repo\ (git worktree repair), daemon\sandboxes.json
+#   -WorkerRoot    <root>: its sandboxes\ and seed\ junctions, its repo\ (git worktree repair), daemon\sandboxes.json.
+#                  A root on the drive itself (w1070, V:\ffw) moves with the letter, and so does -DaemonConfig.
 #   -Skip          letters never to use
 param(
   [Parameter(Mandatory)][ValidateSet('mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile')][string]$Action,
@@ -41,6 +42,11 @@ try {
         $pref = $Letter
         if ($StateFile -and (Test-Path -LiteralPath $StateFile)) {
           try { $l = (Get-Content -Raw -LiteralPath $StateFile | ConvertFrom-Json).letter; if ("$l" -match '^[A-Za-z]$') { $pref = "$l" } } catch { Log "could not read $StateFile : $($_.Exception.Message)" }
+        }
+        # A worker root on the drive (w1070): the task names its daemon.json and root at the letter it was registered with.
+        if ($pref.ToUpper() -ne $Letter.ToUpper()) {
+          if ($DaemonConfig) { $script:DaemonConfig = Convert-PathLetter $DaemonConfig $Letter $pref }
+          if ($WorkerRoot) { $script:WorkerRoot = Convert-PathLetter $WorkerRoot $Letter $pref }
         }
         $script:Letter = $pref.ToUpper()
         if ((Get-OwnLetter) -eq $script:Letter) { Done $true "$($Letter): is already there" }
