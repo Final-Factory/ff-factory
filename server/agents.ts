@@ -3621,7 +3621,8 @@ ${this.worldBrief(false)}
   }
 
   /**
-   * What an orchestrator may not read (w467, server/secretGuard.ts): config.json, the secrets folder and token files,
+   * What an orchestrator may not read (w467, server/secretGuard.ts): config.json (Lothsahn's and Ben's own and the dispatcher
+   * may while it holds no secret, w1078), the secrets folder and token files,
    * data/ (its own memory folder and the attachment store excepted), ~/.ssh and Claude's and gh's credentials.
    * Lothsahn's and Ben's own (w650) also read data/'s reports, logs, state and history (ownerDataReads) and list its names.
    */

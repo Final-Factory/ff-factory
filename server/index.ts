@@ -1908,7 +1908,7 @@ usage.personTokens = () => vault.claudeTokens();
 const vaultProblems: { at: string; line: string }[] = [];
 /** Live sessions whose process started on this credential key, not counting `except` (the asking session's own). */
 const liveOnKey = (key: string, except?: string) => liveOnAccount(store.sessions.values(), key, except);
-/** Whether a vault Claude token is also the dispatcher's credential or the host token (w971), and for whom its reserve is kept. */
+/** Whether a vault Claude token is the dispatcher's pinned one (w971, w996), and for whom its reserve is kept. */
 function reservedFor(fingerprint: string): string | undefined {
   const c = reservedCredentials(cfg).find((x) => x.key === `token:${fingerprint}`);
   return c ? (c.role === 'dispatcher' ? 'the dispatcher' : 'its own roles') : undefined;
@@ -2052,7 +2052,7 @@ const vaultLines = () => {
   return [...(line ? [line] : []), ...github.statusLines(), ...(recent.length ? [`WARNING: the vault fell short ${recent.length} time(s) in 24 h; latest (${recent.at(-1)!.at}): ${recent.at(-1)!.line}`] : [])];
 };
 /**
- * Each person's Claude token pool as the rules read it now, and the dispatcher's (and host token's) reserve (w739,
+ * Each person's Claude token pool as the rules read it now, and the dispatcher's reserve on its pinned token (w739,
  * docs/vault.md section 4): system_status lines and the dashboard's warnings. Only names, last four characters and numbers.
  */
 function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarning[] } {

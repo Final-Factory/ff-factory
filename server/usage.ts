@@ -314,9 +314,9 @@ export interface AccountContext {
   hostLoginRoles?: HostRole[];
   /** The roles to name apart (secrets.ts shownRoles): the dispatcher only when it has an account of its own. Default: all but the dispatcher. */
   roles?: HostRole[];
-  /** The token file (config claudeTokenFile, w464): its token's key and label, and the roles that run on it. */
+  /** Before w1078: the token file's key and label, and the roles on it. Nothing sets it now. */
   tokenFile?: { key: string; label: string; roles: HostRole[] };
-  /** People's own tokens (config userClaudeEnv): key, label ("Lothsahn's token …abcd") and whose. */
+  /** Before w1078: people's own tokens (config userClaudeEnv). Nothing sets it now. */
   people?: { key: string; label: string; displayName: string }[];
   /** The token vault's Claude tokens (docs/vault.md, w512): key, label ("ben-max …abcd") and the account email a person recorded for it, if any (w785). Their grants are not shown (w748). */
   vault?: { key: string; label: string; email?: string }[];
