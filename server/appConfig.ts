@@ -93,6 +93,10 @@ export const SETTABLE_KEYS = [
   'orchestrator.filingsPerMessage',
   'orchestrator.followUpsPerMessage',
   'orchestrator.messagesPerPerson',
+  // The coordinators' routine turns (w1158, server/turnModel.ts): their model ("off" keeps every turn on orchestrator.model)
+  // and how long after a turn on orchestrator.model they stay on it.
+  'orchestrator.routineModel',
+  'orchestrator.routineAfterMinutes',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
@@ -417,6 +421,16 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (!Number.isFinite(n) || (n !== 0 && (n < AUTO_COMPACT_LIMITS.minTurnUsd || n > AUTO_COMPACT_LIMITS.maxTurnUsd))) throw new Error(`orchestrator.compactAtTurnUsd is 0 (off) or a cost in USD from ${AUTO_COMPACT_LIMITS.minTurnUsd} to ${AUTO_COMPACT_LIMITS.maxTurnUsd}`);
       return n;
     }
+    case 'orchestrator.routineModel': {
+      const m = String(value).trim();
+      if (!/^(off|opus|sonnet|haiku|claude-[a-z0-9.-]{3,40})$/.test(m)) throw new Error('orchestrator.routineModel is a model ("claude-sonnet-5-5", "sonnet") or "off" (every coordinator turn on orchestrator.model)');
+      return m;
+    }
+    case 'orchestrator.routineAfterMinutes': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 0 || n > 1440) throw new Error('orchestrator.routineAfterMinutes is a whole number of minutes from 0 to 1440');
+      return n;
+    }
     case 'orchestrator.filingsPerMessage':
     case 'orchestrator.followUpsPerMessage':
     case 'orchestrator.messagesPerPerson': {
@@ -707,6 +721,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'orchestrator.filingsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, filingsPerMessage: v as number | undefined };
   else if (key === 'orchestrator.followUpsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, followUpsPerMessage: v as number | undefined };
   else if (key === 'orchestrator.messagesPerPerson') cfg.orchestrator = { ...cfg.orchestrator, messagesPerPerson: v as number | undefined };
+  else if (key === 'orchestrator.routineModel') cfg.orchestrator = { ...cfg.orchestrator, routineModel: v as string | undefined };
+  else if (key === 'orchestrator.routineAfterMinutes') cfg.orchestrator = { ...cfg.orchestrator, routineAfterMinutes: v as number | undefined };
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;
   else if (key === 'hostGuard.cleanup.softFreeGB') cfg.hostGuard.cleanup.softFreeGB = (v as number | undefined) ?? DEFAULT_CLEANUP.softFreeGB;
