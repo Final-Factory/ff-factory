@@ -867,6 +867,12 @@ export class SessionManager {
    */
   accountMove?: (s: SessionHandle) => string | undefined;
   /**
+   * Why a worker's live process must restart on the FF Factory code its machine runs now before its next turn (w1166: an
+   * agent host keeps the guard and system prompt it started with across daemon updates), or undefined. Set by Agents.
+   * Its messages wait meanwhile, as for an account move (moveFor).
+   */
+  codeMove?: (s: SessionHandle) => string | undefined;
+  /**
    * Why a resume of `sessionId` for request `work` must not go now, or undefined (w1128): its request was blocked again or
    * closed while the resume waited. Set by Agents (Orchestrators.staleResume, which keeps it for the new gates).
    */
@@ -984,7 +990,9 @@ export class SessionManager {
    * on every turn end), so the message is never a turn of the old account's.
    */
   private moveFor(s: SessionHandle): string | undefined {
-    const why = this.accountMove?.(s);
+    const account = this.accountMove?.(s);
+    // w1166: or on the FF Factory code its machine runs now, so its next turn has the current guard and system prompt.
+    const why = account ?? this.codeMove?.(s);
     if (!why) {
       this.moving.delete(s.info.id);
       return undefined;
@@ -992,7 +1000,7 @@ export class SessionManager {
     const since = this.moving.get(s.info.id);
     if (!isMidTurn(s.info) && (since === undefined || Date.now() - since > MOVE_RESTOP_MS)) {
       this.moving.set(s.info.id, Date.now());
-      this.store.append(s.info.id, { kind: 'system', text: `Its process stops and starts again on another Claude account: ${why}.` });
+      this.store.append(s.info.id, { kind: 'system', text: `Its process stops and starts again ${account ? 'on another Claude account' : "on its machine's FF Factory code"}: ${why}.` });
       s.stop(false);
     }
     return why;

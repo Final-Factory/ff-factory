@@ -28,7 +28,7 @@ import { MachineRollout } from './machineRollout.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
-import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, parseSandboxRef, poolSettingsOf } from './machines.ts';
+import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, parseSandboxRef, poolSettingsOf, sameCommit } from './machines.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG } from './launch.ts';
 import { AutoCompactor } from './autoCompact.ts';
@@ -382,6 +382,7 @@ export class Agents {
     sessions.keepIdle = (s) => this.keepIdle(s);
     // One person's tokens per turn (w1076): a live worker whose requests changed person restarts on theirs first.
     sessions.accountMove = (s) => this.accountMove(s);
+    sessions.codeMove = (s) => this.codeMove(s);
     // w1128: a gate's resume that waited while its request was blocked again is kept for the new gates, not delivered.
     sessions.staleResume = (work, sid, note) => this.orchestrators?.staleResume(work, sid, note);
     // What each agent waits on between turns (w475): its wake_me and a queued message, on its session for the page.
@@ -1610,6 +1611,23 @@ export class Agents {
 
   /** The request a worker was started for (startWorker's workId), for its first process, which starts before the link. */
   private readonly startingFor = new Map<string, string>();
+
+  /**
+   * Why a message to a worker must wait for its process to restart on the FF Factory code its machine runs now (w1166,
+   * sessions.codeMove). An agent host keeps the code it started with (machine/agentHost.ts: the guard hooks, the system
+   * prompt of its launch spec) across daemon updates, which adopt it: on 2026-10-12 workers started before ba015be (#359,
+   * develop retired) were adopted by the update at 21:30-21:37 UTC and opened game PRs #1579-#1582 into develop until
+   * 22:43, one merged there. Between turns only (a message sent mid-turn reaches the running process), and not while a
+   * background task runs (a build the restart would kill), as accountMove. A process from before ranOn was recorded counts
+   * as other code.
+   */
+  private codeMove(s: SessionHandle): string | undefined {
+    const i = s.info;
+    if (i.kind !== 'worker' || !i.machineId || !s.live || i.backgroundTasks || isMidTurn(i)) return undefined;
+    const now = this.machines.daemonCommit(i.machineId);
+    if (!now || (i.ranOn && sameCommit(i.ranOn, now))) return undefined;
+    return `its process started on FF Factory ${i.ranOn ? i.ranOn.slice(0, 7) : 'from before w1166'} and ${i.machineId} runs ${now.slice(0, 7)} now, so it restarts on the new code (its guard and system prompt) before this turn (w1166)`;
+  }
 
   /**
    * Why a message to a worker must wait for its process to restart on another Claude account (w1076, sessions.accountMove):
