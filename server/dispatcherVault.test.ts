@@ -60,7 +60,7 @@ function ctxOf(vault: Vault, cfg: never, meters: Record<string, PlanUsage | unde
     payer: () => 'lothsahn',
     onProblem: (l) => problems.push(l),
     problems,
-    limits: () => poolLimits(undefined),
+    limits: () => poolLimits(cfg),
     now: () => NOW,
   };
 }
@@ -206,9 +206,13 @@ test('the dispatcher takes no pool slot: liveOnAccount skips it, so the one-at-a
   assert.equal(liveOnAccount([sessions[0]], key), 0);
 
   // The last day of the week (12 hours left): the buffer is 2.5%, so 96% weekly is the one-at-a-time zone, not the buffer.
+  // w1109: 96% is past the dispatcher's stop line (95), which holds every worker off its token; with the line set above it
+  // (98 here) the token is an ordinary one-at-a-time token, and the dispatcher still takes no slot there.
   const { vault } = setup(t, 'one');
-  const cfg = cfgOf();
   const meters: Record<string, PlanUsage | undefined> = { [fp(L1)]: usage(10, 96, { weeklyDays: 0.5, sessionHours: 3 }) };
+  const atLine = cfgOf();
+  assert.throws(() => worker(atLine, ctxOf(vault, atLine, meters, [sessions[0]]), 'w1'), (e: unknown) => e instanceof PoolHeldError && /weekly 96% \(stop line 95%\)/.test(e.message), 'w1109: at the stop line no worker starts on it');
+  const cfg = cfgOf({ vault: { pool: { dispatcherStopPercent: 98 } } });
   const withDispatcher = ctxOf(vault, cfg, meters, [sessions[0]]);
   assert.equal(worker(cfg, withDispatcher, 'w1').env.CLAUDE_CODE_OAUTH_TOKEN, L1, 'the dispatcher is on the token and a worker still gets the one slot');
   // A worker already running on it does take the slot.

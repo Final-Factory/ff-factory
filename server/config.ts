@@ -257,7 +257,8 @@ export interface Config {
     /**
      * The Claude token pool's limits (w739, docs/vault.md section 4), one system-wide set that anyone can change with
      * set_app_config: sessionHoldPercent (80), onePerWeeklyPercent (95), retireWeeklyPercent (99), reservePerDayPercent
-     * (5: the dispatcher's token keeps this per day left until its weekly reset) and reserveSessionPercent (20).
+     * (5: the dispatcher's token keeps this per day left until its weekly reset), reserveSessionPercent (20) and
+     * dispatcherStopPercent (95: either meter of the dispatcher's token at or above it stops its workers, w1109).
      */
     pool?: PoolConfig;
   };

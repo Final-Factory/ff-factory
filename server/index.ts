@@ -42,6 +42,7 @@ import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
+import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
 import { accountSetupLines, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, scrubTranscripts, shownRoles } from './secrets.ts';
 import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
@@ -616,7 +617,9 @@ const blockerWatch = new BlockerWatch({
   portalSha: () => appVersion().sha,
   daemonSha: (id) => agents.daemonSha?.(id),
   online: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
-  usageClear: (account) => accountClear(account),
+  // A usage gate naming a vault token (w1109: the dispatcher token's stop) clears when that token's owner's pool can serve a
+  // worker again, on that token or another; any other account when its meters are clear.
+  usageClear: (account) => ownerPoolServes(account) ?? accountClear(account),
   nightlyAt: () => nightlyAt,
   room: () => agents.roomNow(),
   roomFacts: () => agents.roomFacts(),
@@ -1984,6 +1987,17 @@ function limitsClearFor(s: SessionInfo): boolean | undefined {
   if (!u?.available) return undefined;
   return [u.weekly, u.session, ...u.models].filter((m): m is NonNullable<typeof m> => !!m).every((m) => m.percent < 90);
 }
+/**
+ * Whether the pool of the vault token called `label` ("vault-lothsahn-1 …EAAA", the name a usage gate gives it) can serve a new
+ * worker now (w1109: some token of its owner's pool is the one pickPool would hand a worker), or undefined when no vault
+ * token has that label.
+ */
+function ownerPoolServes(label: string): boolean | undefined {
+  const n = label.trim().toLowerCase();
+  const pools = vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor });
+  for (const list of pools.values()) if (list.some((t) => `${t.entry.name} …${t.entry.last4}`.toLowerCase() === n)) return list.some((t) => t.priority);
+  return undefined;
+}
 /** Whether the Claude account named by its email, label or id has room again (w643: a usage blocker), or undefined when unknown. */
 function accountClear(name: string): boolean | undefined {
   const n = name.trim().toLowerCase();
@@ -2048,7 +2062,7 @@ agents.usagePollChanged = () => {
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
-  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {
@@ -2115,6 +2129,32 @@ function refreshTokenWarnings() {
 }
 setInterval(refreshTokenWarnings, 20_000).unref();
 setTimeout(refreshTokenWarnings, 8_000).unref();
+/** The dispatcher's pinned vault token, for its stop line (w1109): its meters' key, its name and whose pool it is in. */
+function dispatcherToken(): { key: string; name: string; owner?: string } | undefined {
+  const pinned = pinnedDispatcherEntry(cfg);
+  const got = pinned !== undefined ? vault.claudeByName(pinned) : undefined;
+  return got ? { key: `token:${got.entry.fingerprint}`, name: `${got.entry.name} …${got.entry.last4}`, ...(got.entry.owner ? { owner: got.entry.owner } : {}) } : undefined;
+}
+// At the stop line (vault.pool.dispatcherStopPercent, 95) of the dispatcher's token, its workers are asked to save their work
+// and stop, once per crossing (w1109, server/dispatcherStop.ts). Every 30 seconds: the meters move with each poll (2 minutes
+// near a limit) and each running session's rate-limit event. Not in a dry run (its sessions are another portal's).
+const tokenStop = new DispatcherStop({
+  token: dispatcherToken,
+  usageOf: (key) => usage.usageOf(key),
+  limits: () => poolLimits(cfg),
+  sessions: () => store.sessions.values(),
+  requestsOf: (sid) => agents.orchestrators.itemsOf(sid).map((w) => w.id),
+  tell: (sid, text) => void sessions.send(sid, text, 'system'),
+  interrupt: (sid) => sessions.get(sid).interrupt(),
+  block: (sid, gate) => agents.orchestrators.tokenStopBlocked(sid, gate),
+  log: (line) => console.log(line),
+  file: path.join(cfg.dataDir, 'dispatcher-stop.json'),
+});
+agents.tokenStopped = (account) => {
+  const t = dispatcherToken();
+  return t && t.key === account && stopMeters(usage.usageOf(t.key), poolLimits(cfg)).length ? t.name : undefined;
+};
+if (!isDryRun) setInterval(() => tokenStop.tick(), 30_000).unref();
 const outsideWatchLines = () => {
   const w = watcher();
   const c = watchConfig();

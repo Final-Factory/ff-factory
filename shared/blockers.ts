@@ -133,7 +133,7 @@ export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
   request: 'another request (ref: its id, e.g. "w633"): clears when it closes as done, or with on "report" at its next report',
   deploy: "a deploy (ref: a machine id for that machine's daemon update; none for the portal): clears when a different commit runs there",
   machine: 'a machine offline or asleep (ref: its id): clears when it is online',
-  usage: "a Claude account's usage limit (ref: the account's email or label): clears when its meters are clear",
+  usage: "a Claude account's usage limit (ref: the account's email or label): clears when its meters are clear; for a vault token (\"vault-lothsahn-1 …EAAA\"), when its person's pool can serve a worker again (w1109)",
   lock: 'a shared lock such as the nightly lab.lock (ref: its name; holder: the request holding it, if one does; until: when to look again): clears when the holder closes or reports, the nightly lab next reports, or at until',
   time: 'a time (until: ISO): clears when it passes',
   ci: 'CI or checks on a pull request (ref: "owner/repo#123"): clears when no check is still running, or the PR merged or closed',

@@ -21,7 +21,9 @@
 // times and floored at 50% once older than STALE_READING_MS (server/usage.ts effectiveUsage, w1041).
 //
 // The dispatcher's reserve (reserveOf) is a different thing: the credential the dispatcher runs on keeps a buffer that
-// shrinks as its weekly window runs out, for the dispatcher alone.
+// shrinks as its weekly window runs out, for the dispatcher alone. At `dispatcherStop` (95) on either of its meters the
+// token is inside that reserve whatever the buffer says (w1109): no new worker starts on it, and the workers already on it
+// are asked to stop (server/dispatcherStop.ts).
 
 import type { PlanUsage } from '../shared/types.ts';
 
@@ -37,9 +39,11 @@ export interface PoolLimits {
   reservePerDay: number;
   /** ... and this many percent of the 5-hour window. */
   reserveSession: number;
+  /** Either meter of the dispatcher's token at or above: its workers are asked to stop, and no new one starts on it (w1109). */
+  dispatcherStop: number;
 }
 
-export const POOL_DEFAULTS: Readonly<PoolLimits> = { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20 };
+export const POOL_DEFAULTS: Readonly<PoolLimits> = { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20, dispatcherStop: 95 };
 
 /** Config vault.pool: the same, with the unit in the name. Anything unset is the default. */
 export interface PoolConfig {
@@ -48,9 +52,10 @@ export interface PoolConfig {
   retireWeeklyPercent?: number;
   reservePerDayPercent?: number;
   reserveSessionPercent?: number;
+  dispatcherStopPercent?: number;
 }
 
-export const POOL_CONFIG_KEYS = ['sessionHoldPercent', 'onePerWeeklyPercent', 'retireWeeklyPercent', 'reservePerDayPercent', 'reserveSessionPercent'] as const;
+export const POOL_CONFIG_KEYS = ['sessionHoldPercent', 'onePerWeeklyPercent', 'retireWeeklyPercent', 'reservePerDayPercent', 'reserveSessionPercent', 'dispatcherStopPercent'] as const;
 
 const pct = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100 ? v : d);
 
@@ -63,6 +68,7 @@ export function poolLimits(cfg: { vault?: { pool?: PoolConfig } } | undefined): 
     retireWeekly: pct(p?.retireWeeklyPercent, POOL_DEFAULTS.retireWeekly),
     reservePerDay: pct(p?.reservePerDayPercent, POOL_DEFAULTS.reservePerDay),
     reserveSession: pct(p?.reserveSessionPercent, POOL_DEFAULTS.reserveSession),
+    dispatcherStop: pct(p?.dispatcherStopPercent, POOL_DEFAULTS.dispatcherStop),
   };
   // A hand-edited config.json that breaks the order is read as the retire limit for both (checkPoolConfig refuses it at load).
   if (out.onePerWeekly > out.retireWeekly) out.onePerWeekly = out.retireWeekly;
@@ -377,6 +383,11 @@ export interface Reserve {
   weeklyIn: boolean;
   /** The 5-hour meter has reached its buffer. */
   sessionIn: boolean;
+  /** The 5-hour or the weekly meter is at or above the dispatcher's stop line (`stopLine`, w1109): inside the reserve too. */
+  stopSession: boolean;
+  stopWeekly: boolean;
+  /** The stop line in effect (limits.dispatcherStop), percent. */
+  stopLine: number;
   /** When the buffer shrinks below what the meters have used (the week's buffer falls 5% a day; the 5-hour window resets), ISO: the later of the windows that hold it. Absent without a reading or reset time. */
   until?: string;
 }
@@ -396,14 +407,21 @@ export function reserveOf(u: PlanUsage | undefined, limits: PoolLimits, now: num
   const noReading = !m.known;
   const weeklyIn = !noReading && m.weekly >= 100 - weekly;
   const sessionIn = !noReading && m.session >= 100 - session;
-  const inReserve = noReading || weeklyIn || sessionIn;
+  // The stop line (w1109): a meter there is inside the reserve whatever the buffer is (the week's buffer is under 5% on its last day).
+  const stopLine = limits.dispatcherStop;
+  const stopSession = !noReading && m.session >= stopLine;
+  const stopWeekly = !noReading && m.weekly >= stopLine;
+  const inReserve = noReading || weeklyIn || sessionIn || stopSession || stopWeekly;
   // The week's buffer is perDay x days left, so a weekly meter at w is outside it from (100 - w) / perDay days before the reset on;
   // the 5-hour buffer lasts until that window resets.
   const lifts: number[] = [];
   if (weeklyIn && Number.isFinite(reset)) lifts.push(limits.reservePerDay > 0 && m.weekly < 100 ? reset - ((100 - m.weekly) / limits.reservePerDay) * 86_400_000 : reset);
   if (sessionIn && ms(m.sessionResetsAt) !== Infinity) lifts.push(ms(m.sessionResetsAt));
+  // A meter at the stop line lifts only when its own window resets.
+  if (stopWeekly && Number.isFinite(reset)) lifts.push(reset);
+  if (stopSession && ms(m.sessionResetsAt) !== Infinity) lifts.push(ms(m.sessionResetsAt));
   const until = !noReading && lifts.length ? new Date(Math.max(...lifts)).toISOString() : undefined;
-  return { weekly, session, daysLeft, noReading, inReserve, weeklyIn, sessionIn, ...(until ? { until } : {}) };
+  return { weekly, session, daysLeft, noReading, inReserve, weeklyIn, sessionIn, stopSession, stopWeekly, stopLine, ...(until ? { until } : {}) };
 }
 
 /** "in 10 min", "in 3 h 5 min", "in 2 days" for a reset time; the clock time when it is over 2 days off; "its reset time is unknown" without one. */
@@ -427,8 +445,12 @@ export function reserveReason(r: Reserve, u: PlanUsage | undefined, now: number)
   const m = metersOf(u);
   const one = (name: string, read: number | undefined, buffer: number, resetsAt: string | undefined) =>
     `${name} ${typeof read === 'number' ? `${pc(read)}%` : 'no reading (counted as 50%)'} (buffer ${Math.round(buffer)}%), resets ${resetIn(resetsAt, now)}`;
+  // At the stop line (w1109) a meter is named with it rather than with the buffer: "weekly 96% (stop line 95%), resets in 9 h".
+  const stop = (name: string, read: number | undefined, resetsAt: string | undefined) => `${name} ${typeof read === 'number' ? `${pc(read)}%` : 'no reading'} (stop line ${r.stopLine}%), resets ${resetIn(resetsAt, now)}`;
   const parts: string[] = [];
-  if (r.sessionIn) parts.push(one('5-hour', u?.session?.percent, r.session, m.sessionResetsAt));
-  if (r.weeklyIn) parts.push(one('weekly', u?.weekly?.percent, r.weekly, m.weeklyResetsAt));
+  if (r.stopSession) parts.push(stop('5-hour', u?.session?.percent, m.sessionResetsAt));
+  else if (r.sessionIn) parts.push(one('5-hour', u?.session?.percent, r.session, m.sessionResetsAt));
+  if (r.stopWeekly) parts.push(stop('weekly', u?.weekly?.percent, m.weeklyResetsAt));
+  else if (r.weeklyIn) parts.push(one('weekly', u?.weekly?.percent, r.weekly, m.weeklyResetsAt));
   return parts.join('; ');
 }

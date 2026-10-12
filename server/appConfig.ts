@@ -57,6 +57,8 @@ export const SETTABLE_KEYS = [
   'vault.pool.retireWeeklyPercent',
   'vault.pool.reservePerDayPercent',
   'vault.pool.reserveSessionPercent',
+  // The dispatcher token's stop line (w1109): its workers are asked to save and stop, and no new one starts on it.
+  'vault.pool.dispatcherStopPercent',
   // Who automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to.
   'systemPayer',
   // Files people attach to messages (docs/attachments.md): the largest one, and how long one nobody sends on is kept.
@@ -390,7 +392,8 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     case 'vault.pool.onePerWeeklyPercent':
     case 'vault.pool.retireWeeklyPercent':
     case 'vault.pool.reservePerDayPercent':
-    case 'vault.pool.reserveSessionPercent': {
+    case 'vault.pool.reserveSessionPercent':
+    case 'vault.pool.dispatcherStopPercent': {
       // The token pool's limits (w739): a percent, 0-100 (a number or its text); one at a time may not be above retired.
       const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
       if (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > 100) throw new Error(`${key} is a percent from 0 to 100`);
