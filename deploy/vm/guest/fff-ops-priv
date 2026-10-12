@@ -7,6 +7,9 @@
 #   fffctl state                       what is set up, as JSON (fffctl state)
 #   fffctl config [--check]            config.json to read (w1078): every setting, no secret (fffctl config), or the check
 #                                      that it and its saved versions hold none, by key names and last four characters
+#   fffctl approvals [--since DATE] [--split DATE]
+#                                      the permission prompts a person answered, as counts only (w1097): per day and by kind,
+#                                      before and after DATE (YYYY-MM-DD). Read only, run as the portal's account; no other word
 #   fffctl units [--check]             the critical units: active, enabled, the watchdog's verdict and its last restarts (fffctl
 #                                      units). --check prints "down: ..." and exits 1 if one is not (w743); read only, and no
 #                                      other word: `fffctl watchdog` (run, pause, resume, reset) and the restarts stay a person's
@@ -135,6 +138,21 @@ case "${1:-help}" in
       --check) [ $# -eq 2 ] || refuse "config --check takes nothing more"; exec "$FFFCTL" config --check ;;
       *) refuse "config | config --check (changing a setting is set_app_config's, through the dispatcher or an owner's orchestrator)" ;;
     esac
+    ;;
+  approvals)
+    # Read only (w1097): counts of the prompts people answered. Only --since and --split, each once, each with a date.
+    shift
+    seen=""
+    for ((k = 1; k <= $#; k += 2)); do
+      flag=${!k}
+      n=$((k + 1))
+      val=${!n:-}
+      case "$flag" in --since | --split) ;; *) refuse "approvals [--since YYYY-MM-DD] [--split YYYY-MM-DD] (counts only)" ;; esac
+      case " $seen " in *" $flag "*) refuse "approvals: $flag twice" ;; esac
+      seen="$seen $flag"
+      [[ $val =~ ^20[0-9]{2}-[01][0-9]-[0-3][0-9]$ ]] || refuse "approvals $flag takes a date, YYYY-MM-DD"
+    done
+    exec "$FFFCTL" approvals "$@"
     ;;
   units)
     # Read only (cmd_units): the table, or the check's exit status. Exactly these two forms; a unit's change is a person's.
