@@ -1,0 +1,32 @@
+name: w1167 probe (throwaway)
+# What an FFBox runner container can do, measured for w1167. This file is never merged.
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/w1167-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ffgithubrunners
+    timeout-minutes: 5
+    steps:
+      - name: Probe
+        shell: bash
+        run: |
+          set +e
+          echo "== id"; id; echo "uid=$(id -u)"
+          echo "== os"; . /etc/os-release; echo "$PRETTY_NAME"; uname -r
+          echo "== caps"; grep -E 'Cap(Inh|Prm|Eff|Bnd|Amb)' /proc/self/status
+          echo "== pid1"; cat /proc/1/comm
+          echo "== systemd"; ls -d /run/systemd/system 2>&1; command -v systemctl systemd-analyze journalctl
+          echo "== kvm"; ls -l /dev/kvm 2>&1; grep -Ec 'vmx|svm' /proc/cpuinfo
+          echo "== cgroup"; cat /proc/self/cgroup; mount | grep cgroup; touch /sys/fs/cgroup/w1167 2>&1 && echo cgroup-writable
+          echo "== userns"; unshare -U -r true 2>&1 && echo unshare-userns-ok
+          echo "== mount"; unshare -m true 2>&1 && echo unshare-mount-ok
+          echo "== tools"; for t in sudo shellcheck nft python3 jq node npm pwsh zfs zpool qemu-system-x86_64 virsh apt-get dpkg useradd install systemd-analyze; do printf '%-20s %s\n' "$t" "$(command -v $t || echo MISSING)"; done
+          shellcheck --version | sed -n 2p
+          echo "== apt reach"; timeout 20 apt-get update -q 2>&1 | tail -3
+          echo "== net"; for u in https://cloud-images.ubuntu.com/ https://deb.nodesource.com/ https://pkgs.tailscale.com/ https://cli.github.com/; do printf '%s ' "$u"; timeout 10 curl -sS -o /dev/null -w '%{http_code}\n' "$u" 2>&1; done
+          echo "== disk"; df -h / "$GITHUB_WORKSPACE" 2>&1
+          echo "== mem"; nproc; free -g
