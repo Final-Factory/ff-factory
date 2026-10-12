@@ -13,9 +13,11 @@ import { mentions } from './ownLeftovers.ts';
  * cleaned up by hand or not at all and the daemon's own pass (server/installLeftovers.ts) waits for a stopped session's
  * folder to be untouched for two hours and runs once a day.
  *
- * "A worker is done" is the end of its process: a request closed, a wait for CI or a person, a stop or the idle reaper (the
- * same moment the sandbox trims its Library caches, machine/sandboxes.ts). The session itself stays and can be resumed in the
- * same folder, so the sweep has two steps after the process is gone:
+ * "A worker is done" is the end of its process with no request left waiting for it (w1097): its requests closed, or handed
+ * to another worker (server/resumable.ts; the portal tells the daemon, ToDaemon `resumable`). Until w1097 the end of the
+ * process alone counted, so a wait for CI or a person, a stop or a pause emptied the folder of a worker that came back to it
+ * (2026-10-12: dcf976fc on w1086 lost its "before" clips and a player build during LothDesktop's V: grow). Once done, the
+ * sweep has two steps:
  *
  * 1. after `graceMin` (default 10): everything in the folder goes except git clones (a resumed worker usually wants its clone
  *    back: CI came back red, a review comment) and what a running process still names;
@@ -134,6 +136,8 @@ export async function planSessionSweep(o: {
 export interface SweepSession {
   id: string;
   live: boolean;
+  /** Stopped, but a request still waits for it (server/resumable.ts, w1097): its folder stays, as a live one's does. */
+  resumable?: boolean;
 }
 
 export interface SweeperDeps {
@@ -188,7 +192,8 @@ export class SessionSweeper {
     const known = new Set<string>();
     for (const x of this.d.sessions()) {
       known.add(x.id);
-      if (x.live) this.tracks.delete(x.id); // it came back (or never left): the clock starts at its next end
+      // It came back (or never left), or it will: the clock starts when it is gone AND no request waits for it (w1097).
+      if (x.live || x.resumable) this.tracks.delete(x.id);
       else if (!this.tracks.has(x.id)) this.tracks.set(x.id, { since: now, done: 0 });
     }
     for (const id of [...this.tracks.keys()]) if (!known.has(id)) this.tracks.delete(id);

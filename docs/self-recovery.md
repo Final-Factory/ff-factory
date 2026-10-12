@@ -467,8 +467,8 @@ folders, 21 GB, the biggest 8.8, 5.3 and 3.5 GB (builds, logs, clones of closed 
 
 | What | Where | When | Why then |
 |---|---|---|---|
-| everything in the worker's temp folder but git clones | `<install>/tmp/ffa-<session>` | `graceMin` (10 min) after the session's process ended: a request closed, a wait for CI or a person, a stop, the idle reaper (`SessionSweeper`, `server/sessionSweep.ts`, a look every 30 s) | the process ending is "a worker is done"; the grace lets a worker that is resumed at once keep its files |
-| the git clones there | same | `cloneKeepHours` (6 h) after it ended, unless a clone holds work no remote has (uncommitted, or commits on no remote: listed, kept) | a wait for CI is minutes to hours and a red check needs the clone again |
+| everything in the worker's temp folder but git clones | `<install>/tmp/ffa-<session>` | `graceMin` (10 min) after the session's process ended AND no request waits for it (closed, or with another worker; since w1097, below: a wait for CI or a person, a stop or a pause keeps it) (`SessionSweeper`, `server/sessionSweep.ts`, a look every 30 s) | then the worker is done; the grace lets a worker that is resumed at once keep its files |
+| the git clones there | same | `cloneKeepHours` (6 h) after it was done, unless a clone holds work no remote has (uncommitted, or commits on no remote: listed, kept) | a wait for CI is minutes to hours and a red check needs the clone again |
 | the sandbox's own build and capture output | `<sandbox>/.nightly-builds/cache/*` and `Builds/cache/*` beyond the newest 1, `Builds/bench*`, `.nightly-builds/clips`, `shots` | when the sandbox is released, in the same `cleanup` state as the Library trim (w898; `releaseSweep` in `machine/sandboxes.ts`, limits `RELEASE_SETTINGS` in `server/installLeftovers.ts`: nothing changed in it for 15 min) | the last worker is gone and its editor down; a detached build still writing keeps its folder |
 | old per-commit builds, nightly runs and rehearsals, stale scratch, runaway task output | as w899 above | the daily pass and below the soft threshold | the backstop for sessions the daemon never saw end |
 | player slots nobody holds, pushed agent worktrees | as w626 above | below the soft threshold | unchanged |
@@ -555,6 +555,29 @@ what the resumed process made: the scratch from before (a 45 MB `cli.txt`, `prob
 was gone. The portal's clean-up log for lothdesktop (`portal_logs` source `cleanup`) lists whole finished sessions'
 folders removed, e.g. `ffa-dd8193f8` 5.3 GB at 08:06:45 UTC and `ffa-476c7481` 3.8 GB at 04:59 UTC; neither is in
 `V:\ffw\tmp` now.
+
+**But it also ran on a pause, which it must not (fixed).** b3327616 was not done at 06:52: it was stopped for LothDesktop's
+V: grow with w1097 still open, and lost its scratch anyway. So did dcf976fc (w1086, belt corners, lothdesktop/slot4): its
+"before" clips and a player build in progress, which it had to record and build again (its report, relayed by lothsahn's
+orchestrator). Nothing for either is in the portal's clean-up log (`portal_logs` source `cleanup`, lothdesktop, from
+2026-10-12T00:00Z): the remover was the session sweep, which logs only to the daemon's own log. The code says why:
+`SessionSweeper.tick` (`server/sessionSweep.ts`) started its 10-minute clock at the end of the process, so a wait for CI or a
+person, a stop or a pause emptied the folder of a worker that came back to it; the daily pass's `stopped-session-temp` rule
+(`server/installLeftovers.ts`, untouched for 2 h) and the `agent-temp` rule (`server/cleanup.ts`, 2 h) did the same to a
+longer wait, a Unity CI run included. "Keep everything in temp and let the harness remove it" only holds if temp survives a
+pause, so:
+
+- The portal works out which of a machine's sessions a request still waits for (`resumableSessions`, `server/resumable.ts`:
+  a worker on an open or stalled request that is still with it, AgentManager.workOver's rule turned round) and tells the
+  daemon in the `welcome` and in a `resumable` message whenever the set changes (each 20 s heartbeat compares,
+  `MachineManager.pushResumable`). No protocol bump: an older daemon ignores both and sweeps as before; an older portal
+  sends neither.
+- The daemon keeps those folders in its clean-up guard (`CleanupGuard.resumable`, `neverDelete`: "a stopped session's
+  folder that its open request will resume"), which the daily pass's two rules go through, and the sweeper treats such a
+  session like a live one: its 10 minutes start when its request closes or moves to another worker.
+- Tests: `server/resumable.test.ts` (the rule; the guard; a session stopped for three hours on a waiting request keeps its
+  folder, which goes 10 minutes after the request closes; the daily pass leaves it), `server/machines.test.ts` (a real
+  daemon is told in its welcome, and told again when the request closes), `server/machineProtocol.test.ts` (the decision).
 
 **What changed**
 

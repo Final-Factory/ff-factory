@@ -104,7 +104,13 @@ export type ToDaemon =
    * `maxSessions` (its name kept so an older daemon still reads it, w536): the machine's agent cap, which the daemon
    * applies to agents outside sandboxes (standing agents) with its sandboxes' mid-turn agents counted in.
    */
-  | { type: 'welcome'; machineId: string; maxSessions: number; sessions: { id: string; lastSeq: number }[]; sandboxes?: SandboxPoolSettings | null }
+  | { type: 'welcome'; machineId: string; maxSessions: number; sessions: { id: string; lastSeq: number }[]; sandboxes?: SandboxPoolSettings | null; resumable?: string[] }
+  /**
+   * The sessions here whose temp folder must survive while they are stopped: a request they are on still waits for them
+   * (server/resumable.ts, w1097). Sent in the welcome and again whenever the set changes; the daemon's sweep and clean-up
+   * passes leave those folders (machine/daemon.ts cleanupGuard). An older daemon ignores it and sweeps as before.
+   */
+  | { type: 'resumable'; sessionIds: string[] }
   /**
    * Start the session's process if needed (from `spec`) and send it a message. `attachments` (protocol 7): files the
    * daemon fetches into `<spec.cwd>/Inbox/` first; the message then names where each is, or why it is not.
