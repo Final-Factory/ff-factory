@@ -9,6 +9,7 @@ import { MachineManager, STANDING_CAP_NO_POOL, agentCap } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
+import { OPS_ID } from './opsWorker.ts';
 import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
@@ -1098,6 +1099,78 @@ test('w362: a timer\'s turn carries no one\'s authority: a person-only tool refu
   assert.equal(r.isError, true, 'refused on a timer turn');
   assert.match(r.text, /own words/);
   assert.ok(store.machines.get('pc')!.sandboxes!.some((x) => x.id === 'alpha'), 'nothing deleted');
+});
+
+test("w1106: the ops worker's repeating timer survives a portal restart: the fire due meanwhile is delivered once, as the job it was set in, and the next on schedule", async (t) => {
+  const { dir, cfg, store, sessions, agents, chat, call, closers } = setup(t);
+  const loth = chat(LOTH);
+  const filed = await call(loth.info, 'request_work', { title: 'Grow LothDesktop V: once it is idle', brief: 'lothsahn: "Let\'s schedule it for when LothDesktop is idle."' });
+  const wid = /Filed (w\d+)/.exec(filed.text)![1];
+  // Lothsahn's own turn gives the ops worker the job, for that request.
+  sessions.send(loth.info.id, 'Poll LothDesktop for idle every 2 hours #slow', 'human', undefined, { requestedBy: LOTH });
+  const job = await call(loth.info, 'ops_worker', { action: 'send', text: 'Poll LothDesktop for idle every 2 hours.', fresh: true, work_ids: [wid] });
+  assert.equal(job.isError, false, job.text);
+  await until('the ops worker\'s turn', () => sessions.get(OPS_ID).info.status === 'idle');
+  // The worker sets the timer with its own belt, as its model would.
+  const opsBelt = beltFor('ops', agents.toolSpecs('orchestrator', agents.dispatcherActor, { role: 'ops', sessionId: OPS_ID }));
+  for (const name of ['set_timer', 'list_timers', 'update_timer', 'cancel_timer', 'wake_me']) assert.ok(opsBelt.some((x) => x.name === name), `the ops worker has ${name}`);
+  const set = await opsBelt.find((x) => x.name === 'set_timer')!.handler({ title: 'w1070 LothDesktop idle check', note: 'Run w1070-idlecheck.ps1 on lothdesktop; on IDLE run w1070-grow.ps1, verify, report and cancel_timer this.', schedule: { every_minutes: 120 }, until: new Date(Date.now() + 3 * 24 * 3600_000).toISOString() });
+  const setText = set.content.map((c) => c.text).join('\n');
+  assert.ok(!set.isError, setText);
+  assert.match(setText, new RegExp(`every 2 h, next at .*, until .*; each fire comes back as Lothsahn's job for ${wid}\\.`));
+  const id = /Timer (t-[0-9a-f]{8})/.exec(setText)![1];
+  assert.match(await call(loth.info, 'ops_worker', { action: 'status' }).then((r) => r.text), new RegExp(`Its timers \\(w1106\\): .*\\n.*${id} "w1070 LothDesktop idle check" \\[active\\] every 2 h`));
+  const fires = () => store.readTranscript(OPS_ID, 500).filter((e) => e.kind === 'user' && e.from === 'system' && e.text.startsWith(`[timer ${id} `)) as { text: string; requestedBy?: Requester }[];
+  // Ben's job runs in between: the timer stays the job it was set in.
+  const ben = chat(BEN);
+  sessions.send(ben.info.id, 'check m5 #slow', 'human', undefined, { requestedBy: BEN });
+  assert.equal((await call(ben.info, 'ops_worker', { action: 'send', text: 'ssh m5 uptime', fresh: true })).isError, false);
+  await until('Ben\'s job ran', () => sessions.get(OPS_ID).info.status === 'idle' && store.readTranscript(OPS_ID, 500).some((e) => e.kind === 'user' && e.text.startsWith('ssh m5 uptime')));
+
+  assert.equal(fires().length, 0, 'nothing fired before the restart');
+  // The portal goes down, 2 h 10 min pass (a fire came due at 2 h), and it starts again on the same data folder.
+  agents.timers.stop();
+  agents.ops.close();
+  agents.orchestrators.close();
+  sessions.stopAll();
+  await new Promise((r) => setTimeout(r, 60));
+  store.flush();
+  const later = Date.now() + 130 * 60_000;
+  const store2 = new Store(dir);
+  const sessions2 = new SessionManager(cfg, store2);
+  const agents2 = new Agents(cfg, store2, sessions2, new MachineManager(cfg, store2, sessions2), new Identity(cfg, () => PEOPLE));
+  closers.push(async () => {
+    agents2.timers.stop();
+    agents2.ops.close();
+    agents2.orchestrators.close();
+    sessions2.stopAll();
+    await new Promise((r) => setTimeout(r, 60));
+    store2.flush();
+  });
+  agents2.timers.now = () => later;
+  agents2.boot();
+  const fires2 = () => store2.readTranscript(OPS_ID, 500).filter((e) => e.kind === 'user' && e.from === 'system' && e.text.startsWith(`[timer ${id} `)) as { text: string; requestedBy?: Requester }[];
+  await until('the fire due during the restart', () => fires2().length === 1);
+  const fire = fires2()[0];
+  assert.match(fire.text, new RegExp(`^\\[timer ${id} "w1070 LothDesktop idle check"\\] Run w1070-idlecheck\\.ps1 on lothdesktop`));
+  assert.match(fire.text, new RegExp(`in Lothsahn's job for ${wid}: it carries that job's authority`));
+  assert.match(fire.text, new RegExp(`\\[ledger\\] This job is the step left on ${wid}\\.`));
+  assert.match(agents2.ops.status(), /job of Lothsahn since/, "the fire opened Lothsahn's job again (Ben's came in between)");
+  await until('its turn ends', () => sessions2.get(OPS_ID).info.status === 'idle');
+  // Never twice: the ticks after it deliver nothing more until the next fire is due.
+  agents2.timers.tick();
+  agents2.timers.turnEnded(OPS_ID);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(fires2().length, 1, 'delivered once');
+  const view = agents2.timers.list(OPS_ID)[0];
+  assert.equal(view.fires, 1);
+  assert.equal(view.state, 'active');
+  // The next on schedule, on its own grid: 4 h after it was set, 2 h after the one the restart delayed.
+  assert.ok(Math.abs(Date.parse(view.nextFireAt!) - (later + 110 * 60_000)) < 60_000, view.nextFireAt);
+  agents2.timers.now = () => Date.parse(view.nextFireAt!);
+  agents2.timers.tick();
+  await until('the next fire', () => fires2().length === 2);
+  assert.doesNotMatch(fires2()[1].text, /missed while FF Factory was down/);
 });
 
 // ---------------------------------------------------------------- w384: idle workers

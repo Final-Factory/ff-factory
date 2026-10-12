@@ -110,7 +110,8 @@ the agents in their agent hosts, mid-turn ones included, run on and are adopted 
 
 Its `ssh`, `scp`, `sftp`, `fffctl` and `fff-machine-ssh` are wrappers on its PATH (`/usr/local/lib/fff/ops-bin`).
 `fffctl machine-ssh-check` still works: it is `fff-machine-ssh --check`. It also has `list_machines`,
-`list_sandboxes` and `system_status` (read only) and its own `wake_me`.
+`list_sandboxes` and `system_status` (read only), its own `wake_me`, and its own timers (`set_timer`, `list_timers`,
+`update_timer`, `cancel_timer`; [Polls and waits](#polls-and-waits-timers-w1106)). `ops_worker status` lists its timers.
 
 ## A new machine
 
@@ -266,13 +267,68 @@ Fixed in `OPS_LIMITS` (`server/opsWorker.ts`), like the worker itself:
 | account | **the Claude token pool of the person whose orchestrator gave it the job** (a vault token and nothing else since w1078; before, the VM's subscription token file, or with `claudeAccounts.orchestrator "vault"` (w738) that pool), picked at the start of every job by the pool rules in docs/vault.md section 4: the caps hold it ("held" with the reason and the next reset, like that person's other workers), and it never falls to the dispatcher's token. A caller with no vault token does not get a worker: it does not start and says why ("<person> has no Claude token in the vault … add one with sudo fffctl vault add-claude <person>"). A new job from the other person's orchestrator starts a fresh process on that person's token. | sourced: the worker works only for the two people's orchestrators. The account must be a token: the VM's claude.ai login belongs to `fff`, which `fff-ops` cannot read, so the launcher refuses with "no Claude credential" |
 | spend cap | $25 per process (the SDK's `maxBudgetUsd`, which the CLI enforces) | a guess: a runaway guard. On a vault (subscription) token, the cost is plan usage, and the dollar figure is the SDK's estimate |
 | idle stop | 1 hour, then the process stops and the conversation stays | sourced: the same hour idle workers get (`IDLE_REAP_MS`), the prompt cache's lifetime |
-| turn limit | 2 hours, then FF Factory interrupts the turn | a guess: an install with its waits fits, and longer waits use `wake_me` |
+| turn limit | 2 hours, then FF Factory interrupts the turn | a guess: an install with its waits fits, and longer waits use `wake_me` or a timer |
 | process limit | 8 hours (`RuntimeMaxSec`), enforced by systemd | a guess: a backstop if the portal's checks fail |
 | a job | 12 hours of follow-ups from the orchestrator's harness turns after a person's own turn opened it, as many as the job needs | a guess: one evening's reinstall. Follow-ups were never counted, and w627 (lothsahn, 2026-10-07: "an infinite number of messages to each other and the portal worker") keeps it so |
 | memory | 1536 MB (`MemoryMax`) | measured basis: an idle claude process used 100-300 MB resident and 450-650 MB committed (BEAST, 2026-10-04, orchestrators.md). The VM has 4 GiB |
 
 The session record stays for good, with its conversation. `fresh: true` starts a new conversation: the transcript
 goes on, with a line marking the new job and whose it is. Every new job does this (w738), not only `fresh: true`; a follow-up within the job keeps the conversation and the process, and with them the token it started on.
+
+## Polls and waits: timers (w1106)
+
+lothsahn, 2026-10-12: "Please make sure polls are done via the timer framework and don't get interrupted by portal
+updates." For w1070 (grow LothDesktop's V: once LothDesktop is idle) the worker ran its idle poll as a background Bash
+loop (`w1070-wait.sh`, every 18 min). The loop lived in the worker's Claude process, and that process ends at every portal
+deploy and restart (it is the portal's socket connection) and after its 1-hour idle stop. The first deploy (05:33Z)
+killed it after one check, and nothing noticed until lothsahn asked.
+
+So **a poll or a wait is a timer, never a background shell loop or a sleep loop that outlives the turn**:
+
+- **Tools.** The worker has the orchestrators' timer tools ([orchestrators.md, "Timers"](orchestrators.md#timers)):
+  `set_timer {title, note, schedule, until?, max_fires?, …, work_ids?}`, `list_timers`, `update_timer`, `cancel_timer`.
+  The same `server/timers.ts`, the same `data/timers.json`, owner `ops-worker`; the same caps (20 active, every 5 minutes
+  at least, 96 messages a day).
+- **They survive.** The timers are the portal's, not the worker's process's. A deploy, a restart or the idle stop
+  ends the process and leaves the timer. A fire that came due while the portal was down is delivered once at its next
+  start, with the missed count, and the next one is set from then: none lost, none doubled. A fire while the worker is
+  mid-turn waits for that turn to end; several are coalesced.
+- **Authority: the job it was set in.** A timer can be set only within a job, and keeps that job's person and requests
+  (`work_ids`: all of the job's by default, or some of them). Each fire comes back as `[timer <id> "<title>"] <note>`, as
+  that person's job: within their open job it is a follow-up (its requests are added to the job); otherwise it opens
+  their job again with a fresh conversation and process on their token, as every new job does (w738). The ledger rule for
+  its requests is added, so the worker can run the check and, when the condition is met, the action that person already
+  approved for that request, and its `DONE:` lines close it. It carries nothing more: deploys and restarts still need a
+  person's own turn (the grants), and a request that has closed since is named in the message, not carried. The turn's
+  end goes to that person's orchestrator, as a job's always does. Fires of two people's timers never share a message.
+- **The note stands alone**, since a fire may open a fresh conversation: the exact command, the condition, the action on
+  it and what to report. When the condition is met and the action done, or the request closes, the worker cancels it.
+- **The guard** (`pollProblem` in `server/opsWorker.ts`) refuses a Bash command sent to the background (the tool's
+  `run_in_background`, a trailing `&`, `nohup`, `setsid`, `disown`) that loops or sleeps (`while`, `until`, `for`,
+  `sleep`, `Start-Sleep`, `timeout /t`, `watch`), itself or in a `.sh`, `.bash` or `.ps1` script of its scratch folder that
+  it runs, with the reason and the way (set_timer). A backgrounded installer passes, and so does a loop in the foreground
+  within one turn.
+
+### Workers (checked for w1106)
+
+- **`wake_me` survives** a portal restart and a daemon update: pending wakes are kept in `data/wakes.json` and re-armed
+  at the portal's start (`Waker.restore`, `server/wake.ts`; called in `Agents.boot`), and one that came due while the
+  portal was down fires at once, saying how late. A daemon update does not touch them (they are the portal's).
+- **`blocked_on` survives** too: the gate is the request's own (`WorkItem.blocked`, status `blocked`, written to the
+  ledger by `Orchestrators.workerBlocked`), and `BlockerWatch.start()` checks again at every portal start.
+- **A background shell loop does not.** A worker's Claude process keeps running across a portal restart and a daemon
+  update (w605, `keepAgentsOnRestart`), but the reaper stops an idle worker after an hour (`IDLE_REAP_MS`,
+  `server/agents.ts`), and a sandbox released for other work ends it too. A loop that finishes or finds its condition
+  after the turn has ended does not wake anyone. Workers are told so in their brief ("Plain `sleep` in the shell and the
+  Monitor tool do NOT bring you back once your turn ends"), and the evidence-gate lesson
+  `lessons/a-wait-is-a-harness-timer.md` (ff-agents) says the same.
+
+### Moving a poll onto a timer
+
+The step after this change's deploy, for w1070: cancel the background task (the Bash tool's task id), then
+`set_timer {title: "w1070 LothDesktop idle check", schedule: {every_minutes: 120}, until: <3 days from now>, note: "Run
+w1070-idlecheck.ps1 on lothdesktop. On IDLE: run w1070-grow.ps1 under the same rules, verify, report, cancel_timer this.
+Otherwise report the one line it printed."}` within lothsahn's job for w1070.
 
 ## Audit
 
@@ -624,7 +680,13 @@ VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
   the spawner against a fake socket, a fresh job from every state the last process can be in (just after a turn,
   mid-turn, after the idle stop, after a failed start, a resume after a stop) through the real Agent SDK and a
   stand-in for systemd's one-connection socket (w638), the one session with its job rule and lifetime, a deploy
-  (only in the person's own turn, the grant, the report after the restart) and a plain restart (w974, [Restarts](#restarts-w974)).
+  (only in the person's own turn, the grant, the report after the restart) and a plain restart (w974, [Restarts](#restarts-w974)),
+  and its timers (w1106): a timer set in a job carries that job's person and requests, a fire reopens the job (a fresh
+  conversation when it had ended), the guard refuses background polls.
+- `server/orchestrators.test.ts`, "w1106": a repeating ops-worker timer set through its own belt, the portal restarted on
+  the same data folder (a new Store, SessionManager and Agents) with a fire due meanwhile: the next fire is delivered once,
+  as lothsahn's job for its request, and the one after it on schedule.
+- `server/timers.test.ts`: fires of two people's timers go in two messages, each with its own authority.
 - `deploy/vm/test/fff-ops-socket.test.sh` (CI's unit-test job on Linux, w638): `fff-ops.socket`'s own settings under
   real systemd, the real launcher with a fake claude and the portal's `opsSpawner`: systemd drops a second connection
   while one is open, and a new process started right after a stop runs, the last one idle or mid-turn.

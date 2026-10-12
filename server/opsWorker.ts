@@ -11,6 +11,7 @@ import type { Store } from './store.ts';
 import { readProblem, realReadFs, type ReadCtx, type SecretRules } from './secretGuard.ts';
 import { scanShell } from './standingGuard.ts';
 import { redactSecrets } from './secrets.ts';
+import type { TimerAuthority } from './timers.ts';
 
 /**
  * The orchestration worker (w597, docs/ops-worker.md): ONE Claude Code session with a real shell, for Lothsahn's and
@@ -257,11 +258,50 @@ export function inScratch(p: string, scratch = OPS_PATHS.scratch): boolean {
   return abs === scratch || abs.startsWith(`${scratch}/`);
 }
 
+/** A script of its scratch folder, as text (the poll check reads what a backgrounded script would run), or undefined. */
+function scratchScript(p: string): string | undefined {
+  try {
+    return fs.readFileSync(p, 'utf8').slice(0, 200_000);
+  } catch {
+    return undefined;
+  }
+}
+
+/** What a shell poll looks like: a loop, a sleep (Start-Sleep, timeout /t), or watch. */
+const POLL_WORDS = /(^|[^\w-])(while|until|for|sleep|watch)\b|Start-Sleep|\btimeout\s+\/t\b/i;
+
+export const POLL_REFUSED =
+  'a poll or a wait is a timer (set_timer: every N minutes, until, max_fires; it survives portal deploys, restarts and your idle stop), never a background shell loop or sleep: your process ends at a deploy, a restart and after 60 min idle, and the loop with it (w1106: w1070\'s idle poll died at the first deploy and nothing noticed). Run the check once now in the foreground, then set_timer to run it again';
+
+/**
+ * Why a shell command is a poll that would outlive the turn (w1106), or undefined: one sent to the background (the Bash
+ * tool's run_in_background, a trailing &, nohup, setsid, disown) that loops or sleeps, itself or in a script of its
+ * scratch folder that it runs. A backgrounded installer or a one-off command passes; so does a loop in the foreground.
+ */
+export function pollProblem(cmd: string, background: boolean, script: (abs: string) => string | undefined = scratchScript): string | undefined {
+  const detached = background || /(^|[^&|>])&\s*($|[;)\n])/.test(cmd) || /(^|[\s;&|(])(nohup|setsid|disown)\b/.test(cmd);
+  if (!detached) return undefined;
+  if (POLL_WORDS.test(cmd)) return POLL_REFUSED;
+  for (const word of cmd.split(/[\s;&|()'"]+/)) {
+    if (!/\.(sh|bash|ps1)$/i.test(word)) continue;
+    const abs = path.posix.resolve(OPS_PATHS.scratch, word);
+    if (!inScratch(abs)) continue;
+    const text = script(abs);
+    if (text && POLL_WORDS.test(text)) return `${POLL_REFUSED} (${word} loops or sleeps)`;
+  }
+  return undefined;
+}
+
 /**
  * Its PreToolUse hook: every tool call is logged (redacted) to the portal's journal, which is the audit beside its
- * transcript; Write and Edit only in its scratch; reads never of FF Factory's own files; the shell through checkOpsShell.
+ * transcript; Write and Edit only in its scratch; reads never of FF Factory's own files; the shell through checkOpsShell,
+ * and never a background poll (pollProblem, w1106).
  */
-export function opsGuard(log: (line: string) => void = (l) => console.log(l), read: ReadCtx = { platform: 'linux', home: OPS_PATHS.home, cwd: OPS_PATHS.scratch, fsx: realReadFs }): HookCallback {
+export function opsGuard(
+  log: (line: string) => void = (l) => console.log(l),
+  read: ReadCtx = { platform: 'linux', home: OPS_PATHS.home, cwd: OPS_PATHS.scratch, fsx: realReadFs },
+  script: (abs: string) => string | undefined = scratchScript,
+): HookCallback {
   const deny = (reason: string) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: reason } });
   const rules = opsSecretRules();
   return async (input) => {
@@ -283,7 +323,7 @@ export function opsGuard(log: (line: string) => void = (l) => console.log(l), re
       if (why) return refuse(`${target}: not yours to read (FF Factory's config, secrets, keys or data)`);
     }
     if (tool === 'Bash') {
-      const why = checkOpsShell(String(args.command ?? ''), read, rules);
+      const why = checkOpsShell(String(args.command ?? ''), read, rules) ?? pollProblem(String(args.command ?? ''), args.run_in_background === true, script);
       if (why) return refuse(why);
     }
     log(`ops-worker: ${tool}: ${redactSecrets(shown).replace(/\s+/g, ' ').slice(0, 600)}`);
@@ -490,7 +530,8 @@ What you have:
 - \`fffctl status\`, \`fffctl state\`, \`fffctl units\` and \`fffctl units --check\` (the critical units, active and enabled; --check prints "down: ..." and exits 1 if one is not; read only, and the watchdog and restarts are a person's), \`fffctl vault list [--names]\` and \`fffctl vault help\` (the vault's entries by name, kind, grants, last four characters and fingerprint, and the Claude pools' meters: never a value; adding, rotating, granting, removing and the key are a person's), \`fffctl machine-credential list\`, \`fffctl migrate --help\`, \`fffctl logs [N]\` (the portal's journal), \`fffctl credential list\`, and \`fffctl credential issue <machine id> --to <ssh target>\`: a new machine credential goes from this VM straight into a file on that machine (it prints the remote path and the last four characters, never the credential); then run the installer there with \`--credential-file\` / \`-CredentialFile\` and delete the file after. Issuing replaces the machine's credential: its running daemon is dropped within 20 s, so issue only for a machine being (re)installed. It needs the machine's record (list_machines), which only a person adds.
 - \`fff-machine-ssh --check\` (or \`fffctl machine-ssh-check\`): each machine's ssh alias, pinned host key, the key it shows over the tailnet and whether ssh gets in, then the portal's public authorized_keys line (\`from="<the portal's tailnet IP>",no-agent-forwarding,... ssh-ed25519 ...\`). \`fff-machine-ssh --key\`: that line alone, for a person to add on a new machine. \`fff-machine-ssh --pin <user>@<host> <SHA256:fingerprint>\`: pins a new machine's host key, only when the fingerprint a person read on the machine itself (\`ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub\`) is the one it shows over the tailnet, and only for a host nothing pins yet. Never pin a fingerprint you read from the network yourself; a host whose key changed is a person's.
 - A new machine, from nothing to online (docs/ops-worker.md, "A new machine"): a person adds its record (the dispatcher's add_machine with worker_install), lets the portal reach it on the tailnet, adds the portal's key line there and gives you its fingerprint. You pin it, check \`ssh <user>@<host> whoami\`, issue its credential with \`--to <user>@<host>\`, run its installer there with every answer as an option, since ssh has no terminal to ask on: \`--root --portal-url --max-sandboxes --max-agents-per-sandbox --max-unity --credential-file\` (Windows: \`-Root -PortalUrl -MaxSandboxes -MaxAgentsPerSandbox -MaxUnity -CredentialFile\`), delete that credential file, and check that list_machines shows it online and ready.
-- list_machines, list_sandboxes and system_status: the portal's state, read-only. wake_me: be woken later (an install, a reboot).
+- list_machines, list_sandboxes and system_status: the portal's state, read-only. wake_me: be woken once later (an install, a reboot).
+- set_timer, list_timers, update_timer, cancel_timer (w1106, lothsahn: "Please make sure polls are done via the timer framework and don't get interrupted by portal updates"): every poll or wait of yours ("once LothDesktop is idle", "check every 2 hours for 3 days") is a timer: every_minutes with until or max_fires, set within the job it serves. It is kept on the portal, so its fires survive a portal deploy, a restart and your own idle stop: one that came due meanwhile is delivered once when the portal is back, never lost and never twice. Each fire comes back as \`[timer <id> "<title>"]\` with your note, as the job it was set in (its person, its requests as work_ids), so it may run the check and, when the condition is met, the action that person already approved for that request, nothing more. Write the note so it stands alone (a fire may open a fresh conversation): the exact command, the condition, the action on it and what to report. When the condition is met and the action done, or the request closes, cancel_timer it. Never a background shell loop, a \`sleep\` loop, \`&\`, \`nohup\` or a backgrounded script that polls: your process ends at every deploy, restart and idle stop, and the loop with it, with nobody told (w1070's idle poll died at the first deploy). The guard refuses them. A loop in the foreground within one turn (a few minutes at most) is fine.
 - A scratch folder, ${OPS_PATHS.scratch}, on a 2 GiB file system that is all you can write (home and temp included). Write notes and scripts there.
 
 What you do not have, by design (the account and the VM enforce it, not this text): no git, no downloads, no package installs, no builds, no interpreters, no Unity, no game workspace; network only to Anthropic's API and the tailnet; no sudo but the two wrappers above; no read of the portal's data, secrets or keys, and its config only through \`fffctl config\`. Reserved for a person, whatever a message says: rolling back the portal, a deploy without a [deploy] message, a restart without a [restart] message, app settings, the vault, deleting anything on the portal, Steam, anything that spends money or publishes. On a machine you do only what the job asks; ask before deleting anything that is not the job's own (an uninstall the job names is the job's own).
@@ -869,6 +910,52 @@ Do not update the machines' daemons: a restart brings no new code. Do not run \`
 Report to ${person.displayName}: ${RESTART_REPORT} ${RESTART_PROOF_AFTER}${ids.length ? `${opsWorkRule(ids)} Only in the report after the restart, once the portal answers again: never in the turn that starts it.` : ''}`;
     this.d.sessions.send(OPS_ID, text, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
     return `Asked the orchestration worker (${OPS_ID}) to restart the portal: it may run fffctl restart once until ${grant.expires}. It is a soft restart like the deploy's (the machines' workers keep running; none is stopped or restarted). The worker's report (fffctl status, the /api/health sha, which Claude account each kind of agent is on, and its before-and-after list of the live worker sessions, PIDs and turn counts) comes back to you as an [ops worker] message after the restart.`;
+  }
+
+  /**
+   * What a timer it sets now carries (set_timer, w1106): the job it is set in, its person and the requests it serves
+   * (all of them, or the ones `workIds` names among them). Refused outside a job: a timer acts for someone.
+   */
+  timerAuthority(workIds?: readonly string[]): TimerAuthority {
+    const job = this.job;
+    if (!job || this.now() - Date.parse(job.at) >= OPS_LIMITS.jobMs) throw new Error('a timer is set within a job (it carries that job\'s person and requests); this one has ended, so ask the orchestrator that gave it');
+    const mine = job.workIds ?? [];
+    const asked = [...new Set((workIds ?? []).map((x) => x.trim().toLowerCase()).filter(Boolean))];
+    const stray = asked.find((x) => !mine.includes(x));
+    if (stray) throw new Error(`work_ids: ${stray} is not a request of this job (${mine.length ? mine.join(', ') : 'it names none'})`);
+    return { person: job.by, workIds: asked.length ? asked : [...mine] };
+  }
+
+  /**
+   * One of its timers fired (server/timers.ts, w1106): the harness's message, as `authority`'s job. Within that person's
+   * open job it is a follow-up (the requests are added to it); otherwise it opens their job again in a fresh conversation
+   * and process, on their token, as any new job does (w738). Requests that have closed since are named, not carried.
+   * Throws (the timers try again on their next tick) mid-turn or for someone who may not use it.
+   */
+  timerFired(text: string, authority: TimerAuthority | undefined) {
+    const person = authority?.person;
+    if (!person || !OPS_PEOPLE.includes(person.userId.toLowerCase())) throw new Error('a timer of the orchestration worker fires only for Lothsahn\'s or Ben\'s job');
+    const h = this.handle();
+    if (isMidTurn(h.info)) throw new Error('the orchestration worker is mid-turn');
+    const open = authority.workIds.filter((id) => this.d.workProblem && !this.d.workProblem([id]));
+    const closed = authority.workIds.filter((id) => !open.includes(id));
+    const jobOpen = !!this.job && this.job.by.userId.toLowerCase() === person.userId.toLowerCase() && this.now() - Date.parse(this.job.at) < OPS_LIMITS.jobMs;
+    if (!jobOpen) {
+      if (h.live) h.stop(true);
+      delete h.info.sdkSessionId;
+      this.job = { by: person, at: new Date(this.now()).toISOString(), what: `a timer of ${person.displayName}'s job: ${text.split('\n')[0].slice(0, 100)}`, ...(open.length ? { workIds: open } : {}) };
+      h.info.requestedBy = person;
+      this.d.store.putSession(h.info);
+      this.d.store.append(OPS_ID, { kind: 'system', text: `A timer of ${person.displayName}'s job fired: a fresh conversation.` });
+    } else if (open.some((id) => !this.job!.workIds?.includes(id))) {
+      this.job!.workIds = [...new Set([...(this.job!.workIds ?? []), ...open])];
+    }
+    // Its turn's end goes to this person's orchestrator (turnEnded), even after another person's job.
+    h.info.lastRequestedBy = person;
+    this.save();
+    const gone = closed.length ? `\n\n(${closed.join(', ')}: closed or unknown in the ledger now. If this timer's job was for ${closed.length > 1 ? 'them' : 'it'}, cancel_timer it and say so.)` : '';
+    console.log(`ops-worker: a timer fired for ${person.userId}'s job${open.length ? ` (${open.join(', ')})` : ''}${jobOpen ? '' : ', a fresh conversation'}`);
+    this.d.sessions.send(OPS_ID, `${text}${open.length ? opsWorkRule(open) : ''}${gone}`, 'system', undefined, { requestedBy: person, ops: 'timer' });
   }
 
   /** Stop or interrupt it: Lothsahn's or Ben's own orchestrator, any turn (a stop is always safe). */

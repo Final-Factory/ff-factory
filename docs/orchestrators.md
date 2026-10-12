@@ -1181,6 +1181,8 @@ A timer is a standing job (`server/timers.ts`):
   Timers button in your chat's header, and the dispatcher's for owners (`GET /api/timers/<orchestrator id>`, `POST
   /api/timers/<orchestrator id>/<timer id> {action: pause|resume|cancel}`, guarded like writing to that chat). It lists
   each timer's schedule, next and last fire, state and note, and the day's messages against the budget.
+- **The orchestration worker has them too** (w1106): its polls and waits are timers, never background shell loops, and
+  each carries the job it was set in (the person and the requests). See [docs/ops-worker.md](ops-worker.md#polls-and-waits-timers-w1106).
 
 ## Compacting a conversation
 
