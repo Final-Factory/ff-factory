@@ -1699,7 +1699,12 @@ export class MachineManager {
         // After the daemon's own session reports (sent right after its hello), so a resume starts from its state.
         // Only for this connection: if it drops first, the next hello tries again.
         const link = this.links.get(id);
-        setTimeout(() => this.links.get(id) === link && this.resumeCutOff(id, live), RESUME_DELAY_MS.value).unref();
+        setTimeout(() => {
+          if (this.links.get(id) !== link) return;
+          this.resumeCutOff(id, live);
+          // w1135: messages queued while it was offline are placed and delivered now, not at the next half-minute pass.
+          this.sessions.drain();
+        }, RESUME_DELAY_MS.value).unref();
         return;
       }
       case 'session': {

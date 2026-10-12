@@ -249,6 +249,21 @@ export function placeFor(s: SessionInfo, m: Pick<Machine, 'id' | 'sandboxes'>, f
   return { wait: `no sandbox on ${m.id} is free (its own, ${r.sandbox}, took other work after it was released: ${r.why}); the next one to free there is its, ahead of new work` };
 }
 
+/**
+ * Where a released worker whose work is not the game's resumes on machine `m` (w1135, the w1098 rule: FF Factory, FFBox or
+ * another repo's work runs in its own clone and needs an agent seat, not a game sandbox): its own sandbox while it has a
+ * seat (fewer than `max` agents there), else the sandbox with the most seats free; nothing is switched or stopped there.
+ * b3327616 (w1097, ff-factory work) waited for a free lothdesktop sandbox on 2026-10-12 while 7 of its 10 seats were free.
+ */
+export function seatFor(s: SessionInfo, m: Pick<Machine, 'id' | 'sandboxes'>, f: PlaceFacts, max: number): { sandbox: MachineSandbox } | { wait: string } {
+  const sbs = (m.sandboxes ?? []).filter((sb) => sb.status === 'ready' && !sb.lingering?.some((l) => l.sessionId !== s.id));
+  const agents = (sb: MachineSandbox) => f.sessions.filter((o) => o.id !== s.id && o.machineSandbox === sb.id && occupies(o, f.live(o.id), f.now)).length;
+  const own = sbs.find((x) => x.id === s.placeReleased!.sandbox);
+  if (own && agents(own) < max) return { sandbox: own };
+  const other = sbs.filter((x) => agents(x) < max).sort((a, b) => agents(a) - agents(b) || a.id.localeCompare(b.id))[0];
+  return other ? { sandbox: other } : { wait: `no agent seat is free on ${m.id} (every sandbox has ${max} agents); its work needs only a seat (w1098), and it takes the first that frees` };
+}
+
 /** The line that tells a worker its uncommitted work was committed for it before its sandbox was released (w656). */
 export function savedNote(w: NonNullable<SessionInfo['savedWork']>): string {
   return `[saved] While you were stopped, FF Factory committed your uncommitted work (${w.files} file(s), new ones included) on your branch \`${w.branch}\` as ${w.sha}, ${w.pushed ? 'and pushed it' : 'not pushed yet (the next switch away pushes it)'}, so your sandbox could take other work. \`git reset HEAD~1\` gives it back uncommitted if that commit is still on top; or keep it and go on.`;
@@ -257,6 +272,11 @@ export function savedNote(w: NonNullable<SessionInfo['savedWork']>): string {
 /** The line that tells a moved worker where it is now, put before the message that resumes it. */
 export function movedNote(m: Pick<Machine, 'id'>, from: NonNullable<SessionInfo['movedFrom']>, to: Pick<MachineSandbox, 'id' | 'path'>): string {
   const branch = from.branch;
+  // w1135: work that is not the game's resumes on an agent seat, beside whoever works in that sandbox now.
+  if (from.shared) {
+    const where = from.sandbox === to.id ? `You resume in it again, beside the agent that works there now` : `You resume in sandbox ${m.id}/${to.id} (\`${to.path}\`), beside the agent that works there`;
+    return `[moved] While you were stopped your sandbox ${m.id}/${from.sandbox} went to other work (it was released because ${from.why}). Your work is not the game's, so it needs only an agent seat, not a free sandbox (w1098). ${where}. Its game tree is that agent's, on its own branch: do not edit, commit, stash, switch branches or start Unity there. Work in your own clone in your temp folder, as before; your game branch \`${branch}\` is untouched. Then carry on.`;
+  }
   return `[moved] While you were stopped your sandbox ${m.id}/${from.sandbox} went to other work (it was released because ${from.why}). You work in sandbox ${m.id}/${to.id} now: \`${to.path}\`, on your branch \`${branch}\`, checked out here with all its commits. Work only in this folder from now on; \`${from.path}\` is another worker's. Your Unity editor is this sandbox's (\`${to.id}@<hash>\`): read mcpforunity://instances and set_active_instance again before any Unity call; its first start here recompiles what differs. Then carry on.`;
 }
 
@@ -278,6 +298,13 @@ export interface PlaceAgainDeps {
    * request (Agents.resumeOrder). Unset, or a tie: session id order.
    */
   order?: (a: SessionInfo, b: SessionInfo) => number;
+  /**
+   * Whether a worker's open requests are all work that is not the game's (w1098 `needs: 'agent'`: FF Factory, FFBox, another
+   * repo's), so it resumes on an agent seat (seatFor), not a game sandbox (w1135). Unset: every worker is game work.
+   */
+  agentOnly?: (s: SessionInfo) => boolean;
+  /** How many agents a sandbox of the machine takes (its pool's max_agents_per_sandbox; default 2). */
+  seats?: (machineId: string) => number;
   /** Run the release pass again soon (a worker was just stopped to release its sandbox: w890 frees it within a minute of its turn's end). */
   soon?: () => void;
   /** Why a live idle worker must keep its process, its check-in aside (Agents.keepIdle without the wake), or undefined. */
@@ -353,7 +380,8 @@ export class PlaceAgain {
     if (!m) return out;
     for (const [id, p] of this.placing) if (p.machine === machineId) out.set(p.sandbox, id);
     const f = this.facts(machineId);
-    const waiting = f.sessions.filter((s) => s.placeReleased && !f.live(s.id) && !this.placing.has(s.id) && this.d.queued(s.id)).sort((a, b) => (this.d.order?.(a, b) ?? 0) || a.id.localeCompare(b.id));
+    // A worker on work that is not the game's takes an agent seat, never a game sandbox (w1135): it claims none.
+    const waiting = f.sessions.filter((s) => s.placeReleased && !f.live(s.id) && !this.placing.has(s.id) && this.d.queued(s.id) && !this.d.agentOnly?.(s)).sort((a, b) => (this.d.order?.(a, b) ?? 0) || a.id.localeCompare(b.id));
     for (const s of waiting) {
       const p = placeFor(s, m, f, out, this.failedIn(s.id));
       if ('sandbox' in p) out.set(p.sandbox.id, s.id);
@@ -376,7 +404,7 @@ export class PlaceAgain {
   /** Released workers of a machine whose resume waits for a sandbox there (none is free for them). */
   waiting(machineId: string): string[] {
     const claimed = new Set(this.claims(machineId).values());
-    return this.facts(machineId).sessions.filter((s) => s.placeReleased && !this.d.isLive(s.id) && this.d.queued(s.id) && !claimed.has(s.id)).map((s) => s.id);
+    return this.facts(machineId).sessions.filter((s) => s.placeReleased && !this.d.isLive(s.id) && this.d.queued(s.id) && !claimed.has(s.id) && !this.d.agentOnly?.(s)).map((s) => s.id);
   }
 
   /**
@@ -504,6 +532,7 @@ export class PlaceAgain {
     const m = this.d.machine(info.machineId);
     if (!m) return undefined;
     if (!this.d.online(m.id)) return `${m.id} is offline: it is placed again once its daemon is back`;
+    if (this.d.agentOnly?.(info)) return this.seat(info, m);
     const f = this.facts(m.id);
     const taken = this.claims(m.id);
     const p = placeFor(info, m, f, taken, this.failedIn(info.id));
@@ -516,6 +545,36 @@ export class PlaceAgain {
     }
     void this.move(info, m, sb);
     return `being placed again in ${m.id}/${sb.id}${sb.git?.branch !== r.branch ? ` (switching it to its branch ${r.branch})` : ''}`;
+  }
+
+  /**
+   * A released worker on work that is not the game's resumes now on an agent seat (w1135, seatFor): its record moves to the
+   * sandbox (its own, or the one with the most seats free), with no branch switch and no editor stopped, and its first
+   * message says it works beside that sandbox's agent, in its own clone. Undefined: it may go now; else why it waits.
+   */
+  private seat(info: SessionInfo, m: Machine): string | undefined {
+    const r = info.placeReleased!;
+    const p = seatFor(info, m, this.facts(m.id), this.d.seats?.(m.id) ?? 2);
+    if ('wait' in p) return p.wait;
+    const sb = p.sandbox;
+    const from = info.machineSandbox!;
+    const back = from === sb.id && sb.git?.branch === r.branch;
+    if (!back) {
+      const old = m.sandboxes?.find((x) => x.id === from);
+      info.movedFrom = { sandbox: from, path: old?.path ?? from, at: new Date(this.now()).toISOString(), why: r.why, branch: r.branch, shared: true };
+    }
+    if (from !== sb.id) {
+      info.machineSandbox = sb.id;
+      for (const x of m.sandboxes ?? []) x.sessionIds = x.id === sb.id ? [...x.sessionIds.filter((i) => i !== info.id), info.id] : x.sessionIds.filter((i) => i !== info.id);
+      this.d.saveMachine(m);
+    }
+    delete info.placeReleased;
+    this.d.save(info);
+    const where = back ? `back in its own sandbox ${m.id}/${sb.id}` : `on an agent seat in ${m.id}/${sb.id}, beside the agent there (its work is not the game's, w1098)`;
+    this.d.note(info.id, `Placed again ${where}; its game branch ${r.branch} is untouched.`);
+    this.d.report?.(`[machines] ${info.id} "${info.title}" resumes ${where}: it had released its sandbox (${r.why}).`);
+    console.log(`place again: ${info.id} placed ${where}`);
+    return undefined;
   }
 
   /** Put a released worker in `sb` on its branch: stop the editor there, switch, then move its record and deliver. */

@@ -822,6 +822,17 @@ LothDesktop and Beast, not just when BEAST is full").
     its conversation is in that machine's Claude Code folder and its branch in that machine's repository. A placement
     that fails (a switch refused) is reported in the worker's transcript and the next free sandbox is tried; that one
     is tried again after 10 minutes.
+  - **Work that is not the game's resumes on an agent seat** (w1135, lothsahn: "Shouldn't be queued now"). A worker whose
+    open requests all need only an agent slot (w1098: FF Factory, FFBox, another repo's work, in its own clone) takes a
+    seat at once: its own sandbox while it has fewer than `max_agents_per_sandbox` agents, else the sandbox with the most
+    seats free, beside whoever works there (`placeAgain.ts` `seatFor`). Nothing is switched or stopped there, it claims no
+    game sandbox and is not counted among the released workers waiting for one, and its first message tells it the game
+    tree is the other agent's. It waits only when every sandbox on its machine is full. On 2026-10-12 b3327616 (w1097,
+    ff-factory work) waited behind "no sandbox on lothdesktop is free" while 7 of its 10 seats were free.
+  - **A message waiting for its machine goes when the daemon is back** (w1135): the send queue is delivered right after
+    the daemon's hello (with the resume of agents cut off, `RESUME_DELAY_MS`), not only at its half-minute pass, and a
+    queued message's reason is what holds it now, so a line that said "lothdesktop is offline" says what it waits for
+    once the machine is back.
   - **Its editor, its players** (decision 2). Releasing leaves the sandbox's editor as it is: it belongs to the sandbox,
     and the idle stop (2 hours without agent activity) still applies. New work there, or a worker placed in a sandbox,
     stops that sandbox's editor before the switch: a switch under a running editor makes Unity stop on "The open

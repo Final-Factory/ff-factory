@@ -1068,7 +1068,15 @@ export class SessionManager {
         this.notDelivered(q.id, stale);
         continue;
       }
-      if (this.moveFor(s) || this.fullFor(s)) {
+      const hold = this.moveFor(s) || this.fullFor(s);
+      if (hold) {
+        // w1135: what holds it NOW, not what held it when it was queued ("lothdesktop is offline" stayed on dd8193f8's line
+        // after the daemon was back and it had been placed again): the session's line and the reply read this.
+        if (q.why !== hold) {
+          q.why = hold;
+          q.on = OFFLINE.test(hold) ? 'machine' : 'capacity';
+          this.saveQueue();
+        }
         held.add(q.id);
         continue;
       }
