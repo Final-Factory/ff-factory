@@ -40,6 +40,9 @@ test('[dispatch], [work request], [work update], [ledger]: the ledger’s notice
   assert.equal(two.summary, 'Ben asks: “A” (and 1 more)');
   const ledger = parseNotice('[ledger] Capacity may have freed (worker ab12 "T" finished a turn). Queued: w15 "A" (Ben, high); w17 "B" (Lothsahn, normal). Start what fits now, or leave it queued.');
   assert.deepEqual([ledger.kind, ledger.summary], ['ledger', 'Capacity may have freed; 2 queued']);
+  // The ping as the server writes it since w1099 (by priority, then oldest).
+  const sorted = parseNotice('[ledger] Capacity may have freed (x). Queued for capacity, by priority, then oldest: w3 "Nightly" (Lothsahn, high); w1 "A" (Ben, normal); w2 "B" (Ben, normal). Start what fits now; leave queued only what no computer with room can take, and block what waits on something else.');
+  assert.equal(sorted.summary, 'Capacity may have freed; 3 queued');
 });
 
 test('[worker update] on a machine', () => {

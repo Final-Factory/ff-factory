@@ -485,21 +485,38 @@ shouldn't assume silence means a successful (or failed) run." The Windows tasks 
 - **The schedule** (`IntakeManager.checkNightlyRun`, every minute; `intake.nightly.run`). At `time` in `tz` (default
   03:00 America/New_York, so daylight saving moves with it: `nextDaily` in `server/timers.ts`) it files one request per
   night, `Nightly e2e run <date> on <machine>`, source `nightly-run` (key `nightly-run:<date>`), for `person` (else the
-  system payer), approved by the schedule itself, with `constraints` that name the machine. The dispatcher places it like
-  any request, in a sandbox of that machine: LothDesktop is Lothsahn's chosen exception to his rule for this job. No
+  system payer), approved by the schedule itself, with `constraints` that name the machine, at **high priority** (w1099,
+  lothsahn, 2026-10-12: "Please also change the job so it runs at high priority. That will help it get queued. Don't ask
+  the dispatcher to keep LothDesktop underutilized"). The dispatcher places it like any request, in a sandbox of that
+  machine, ahead of normal requests; nothing is held free for it. LothDesktop is Lothsahn's chosen exception to his rule for this job. No
   intake cap applies to it. A night is fired once; a fire the portal was down for still starts up to 3 hours late, and
   a night due before the schedule was first switched on is never fired late.
 - **The worker** (`workerRules`, `nightly-run`) stops its sandbox's editor, starts the night with FinalFactory's
-  `scripts/nightly/nightly_worker.sh start <date> <request>` (detached, in the lab's own root and clone,
-  `FF_NIGHTLY_ROOT`, with the lab's player slots), checks it every 25 minutes with `nightly_worker.sh check <date>`
-  (a night that died or hung gets its NO VERDICT note posted and is reported broken), reads the report, and ends with
+  `scripts/nightly/nightly_worker.sh start <date> <request>` (detached), checks it every 25 minutes with
+  `nightly_worker.sh check <date>` (a night that died or hung gets its NO VERDICT note posted and is reported broken),
+  reads the report the check names, says how long the night waited, and ends with
   `RESOLVED: nightly <date> <passed|failed|broken>: <TL;DR>`. It posts nothing and files nothing by hand.
+- **Where the night runs** (w1099, lothsahn, 2026-10-12: "Can we have it use a slot like a regular job and get rid of
+  ffw
+ightly?"): the game repo decides (`nightly_root.sh ff_nightly_mode`: `FF_NIGHTLY_MODE`, else `lab.win.json`
+  `runIn`). `lab` is the old way: the lab root `FF_NIGHTLY_ROOT` (`<install>/nightly`) with its own clone, Library,
+  `builds/` and the `slotnightly-0/1` player folders. `sandbox` is a regular job: the worker's own sandbox, fast-forwarded
+  on its throwaway branch to origin/develop (nothing pushed; `start` refuses a branch with commits of its own, tracked
+  changes or an open editor), built from its own tree and Library into `Builds/cache` through the machine's Unity slot
+  queue, played from its own `slotK-0/1`; only the state, logs, runs, reports and lab fixtures go to
+  `<install>/nightly-history/`, which the clean-up passes trim like the lab (`installLeftovers.ts`, `staleOutput.ts`
+  `defaultNightlyRoots`). The cost of a per-sandbox build cache: a rerun of a night in another sandbox builds again, and a
+  sandbox whose Library is far from develop takes longer to build than the lab's always-warm one.
+- **Room and waits** (w1099): `start` prints the machine's RAM in use and Unity slots and how long after the fire it starts
+  (the portal gives the worker `FF_NIGHTLY_FIRED_AT`, `IntakeManager.nightlyRunEnv`); the build waits in the Unity slot
+  queue (which also waits while RAM is high) and the battery waits up to 30 minutes for RAM below 85%; `check` prints
+  every wait, for the worker's report.
 - **The night's key** (w864): at each fire the portal mints an API key `--scope nightly` under the one name
   `nightly-run` (`Auth.createApiKey`), so it replaces, and so revokes, the night before's. It is kept in memory only (its
   hash in the key store) and given to that night's worker alone, in its launch environment, as `FF_FACTORY_URL` (the
   address its machine reaches the portal at, `Machine.portalUrl`) and `FF_FACTORY_NIGHTLY_KEY`
   (`IntakeManager.nightlyRunEnv`, `agents.ts` `machineSandboxSpec`). The lab's `ffnightly.py deliver` reads those two
-  first. Like every `*_KEY` of a launch spec it is redacted from transcripts and logs (`secrets.ts` `SECRET_ENV`; the
+  first. The night inherits them from the worker's start command in either mode (w1099). Like every `*_KEY` of a launch spec it is redacted from transcripts and logs (`secrets.ts` `SECRET_ENV`; the
   portal registers it too), and it never appears in a brief, a file on the machine or the Intake tab. The worker is found
   by its title (`w901: ...`) as well as by link, because its first process starts before the ledger links it. After a
   portal restart a worker that already had the key gets none (the lab's running night keeps the valid one), and a night
@@ -543,7 +560,10 @@ Sentry, a standing agent (`nightly-regression-sentry`, cron 0 3 on LothDesktop, 
   after the 03:00 lab has usually reported; the Sentry ran at 09:00Z) it files `Nightly merge review <date> on <machine>`,
   source `nightly-review` (key `nightly-review:<date>`), for `person`, approved by the timer, with constraints that place
   it on the machine (default lothdesktop), like the nightly run: fired once a day, up to 3 hours late after an outage,
-  never for a day due before it was switched on.
+  never for a day due before it was switched on. High priority like the run (w1099: lothsahn asked it for the run; the
+  brief asked for the same here unless there was a reason not to, and none was found: it is one request a day that
+  writes the day's regression checks). It reads the night's report from where
+  `nightly_worker.sh where <date>` says, in either mode.
 - **The worker** follows the game repo's `scripts/nightly/merge-review.md` (the Sentry's charter, its two duties, the
   brief templates and the risk ranking, carried over) and reviews the merges to develop after the last review's
   `REVIEWED-THROUGH` commit (kept in `intake.json` `reviews`, given in the next brief; the Sentry kept it in its folder's

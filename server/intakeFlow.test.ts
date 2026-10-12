@@ -1597,6 +1597,9 @@ test('nightly run (w864): the night\'s key is minted at the fire and reaches onl
   const spec = machines.hooks!.specFor(w.info, m);
   assert.equal(spec.env?.FF_FACTORY_NIGHTLY_KEY, `ffsb_night1_${'x'.repeat(30)}`);
   assert.equal(spec.env?.FF_FACTORY_URL, m.portalUrl.replace(/\/+$/, ''));
+  // w1099: when the night was fired, for the worker's "how long it waited", and the request is high priority.
+  assert.equal(spec.env?.FF_NIGHTLY_FIRED_AT, new Date(NY_0300_EDT + 60_000).toISOString());
+  assert.equal(run.priority, 'high', 'lothsahn (w1099): "Please also change the job so it runs at high priority"');
   assert.doesNotMatch(run.brief, /ffsb_/, 'never in the brief');
   assert.doesNotMatch(JSON.stringify(intake.summary()), /ffsb_night/, 'never in what the Intake tab or intake.json show');
   // Any other worker gets nothing.

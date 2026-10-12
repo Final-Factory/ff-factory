@@ -432,10 +432,15 @@ export function pruneIds(items: Iterable<WorkItem>, keepClosed = KEEP_CLOSED, no
 /** Open items first (question, new, queued, blocked, active; by priority, then oldest), then closed ones, newest first. */
 export function ledgerOrder(a: WorkItem, b: WorkItem): number {
   const rank: Record<WorkStatus, number> = { question: 0, new: 1, queued: 2, blocked: 2.5, active: 3, stalled: 4, done: 5, merged: 5, rejected: 5, cancelled: 5 };
-  const prio: Record<WorkPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
   if (rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status];
-  if (isOpen(a)) return prio[a.priority] - prio[b.priority] || a.createdAt.localeCompare(b.createdAt);
+  if (isOpen(a)) return priorityThenAge(a, b);
   return b.updatedAt.localeCompare(a.updatedAt);
+}
+
+/** Urgent, high, normal, low; within one priority the oldest request first (w1099: the order work goes in). */
+export function priorityThenAge(a: Pick<WorkItem, 'priority' | 'createdAt'>, b: Pick<WorkItem, 'priority' | 'createdAt'>): number {
+  const prio: Record<WorkPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+  return prio[a.priority] - prio[b.priority] || a.createdAt.localeCompare(b.createdAt);
 }
 
 /**

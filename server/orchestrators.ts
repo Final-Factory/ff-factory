@@ -3893,6 +3893,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       flagged.push({ w, on });
     }
     if (!flagged.length) return [];
+    flagged.sort((a, b) => ledgerOrder(a.w, b.w)); // by priority, then oldest (w1099)
     console.warn(`ledger: queued while a computer has room: ${flagged.map((f) => `${f.w.id} (${f.on.join(', ')})`).join('; ')}`);
     this.toDispatcher(
       `[ledger] WRONG STATE: queued for capacity while a computer that could take it has room: ${flagged.map((f) => `${f.w.id} "${clip(f.w.title, 80)}" (${names(f.w.requesters)}, ${f.w.priority}; room on ${f.on.join(', ')})`).join('; ')}. Queued means no free place. Start each now (start_agent with its work_id), or decide_work block it on what it really waits for (another request, a deploy, a machine, a lock, a time, CI), or queue it again with needs naming the only computers that can take it.`,
@@ -3919,10 +3920,11 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
         this.capacityTimer.unref?.();
         return;
       }
-      const queued = [...this.store.work.values()].filter((w) => w.status === 'queued');
+      // By priority, then oldest (ledgerOrder): the order the dispatcher should start them in (w1099: a high nightly run first).
+      const queued = [...this.store.work.values()].filter((w) => w.status === 'queued').sort(ledgerOrder);
       if (!queued.length) return;
       this.capacityWakes.push(now);
-      this.toDispatcher(`[ledger] Capacity may have freed (${what}). Queued for capacity: ${queued.map((w) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${w.queuedFor?.needs?.length ? `; needs ${w.queuedFor.needs.join(' or ')}` : ''})`).join('; ')}. Start what fits now; leave queued only what no computer with room can take, and block what waits on something else.`);
+      this.toDispatcher(`[ledger] Capacity may have freed (${what}). Queued for capacity, by priority, then oldest: ${queued.map((w) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${w.queuedFor?.needs?.length ? `; needs ${w.queuedFor.needs.join(' or ')}` : ''})`).join('; ')}. Start what fits now; leave queued only what no computer with room can take, and block what waits on something else.`);
     };
     this.capacityTimer = setTimeout(fire, CAPACITY.quietMs);
     this.capacityTimer.unref?.();

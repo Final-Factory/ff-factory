@@ -166,7 +166,8 @@ export function parseNotice(text: string): Notice {
   if (tag === 'ledger') {
     const waiting = /Requests waiting for you: ([\s\S]*?)\. list_work shows/.exec(rest)?.[1];
     if (waiting) return { kind: 'ledger', summary: `${waiting.split('; ').length} request(s) still waiting`, attention: false, body: rest.trim() };
-    const queued = /Queued: ([\s\S]*?)\. Start what fits/.exec(rest)?.[1];
+    // "Queued for capacity, by priority, then oldest:" since w1099 ("Queued for capacity:" before, "Queued:" earlier still).
+    const queued = /Queued(?: for capacity)?(?:, by priority, then oldest)?: ([\s\S]*?)\. Start what fits/.exec(rest)?.[1];
     const n = queued ? queued.split('; ').length : 0;
     return { kind: 'ledger', summary: `Capacity may have freed${n ? `; ${n} queued` : ''}`, attention: false, body: rest.trim() };
   }

@@ -163,3 +163,27 @@ test('a dry run measures what would go and ends nothing; a real pass ends the st
   assert.ok(fs.existsSync(path.join(root, 'sandboxes', 'slot2', 'Library', 'big.bin')));
   assert.ok(fs.existsSync(path.join(root, 'nightly', 'state', 'x.json')));
 });
+
+test("w1099: a sandbox night's nightly-history loses old runs and logs as the lab did, never its state, reports or fixtures", async (t) => {
+  const root = materialize(t);
+  const h = path.join(root, 'nightly-history');
+  const put = (rel: string, ageH: number) => {
+    const f = path.join(h, ...rel.split('/'));
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, 'x');
+    const at = (NOW - ageH * HOUR) / 1000;
+    for (let p = f; p.length > h.length; p = path.dirname(p)) fs.utimesSync(p, at, at);
+  };
+  put('runs/2026-10-01/run.json', 10 * 24);
+  put('runs/2026-10-02/run.json', 9 * 24);
+  put('logs/nightly-2026-10-01.log', 10 * 24);
+  put('state/2026-10-01.json', 10 * 24);
+  put('reports/2026-10-01.md', 10 * 24);
+  put('fixtures/w797-reteoteigam.zip', 10 * 24);
+  const p = await plan(root);
+  const taken = new Set(p.items.map((i) => rel(root, i.path)));
+  assert.ok(taken.has('nightly-history/runs/2026-10-01'), 'an old run goes');
+  assert.ok(!taken.has('nightly-history/runs/2026-10-02'), 'the newest run stays, however old');
+  assert.ok(taken.has('nightly-history/logs/nightly-2026-10-01.log'));
+  for (const x of taken) assert.ok(!/^nightly-history\/(state|reports|fixtures)/.test(x), x);
+});

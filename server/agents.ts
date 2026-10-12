@@ -54,7 +54,7 @@ import { conditionalLine, HELD_MARK } from '../shared/conditional.ts';
 import { SpendStore, buildReport, costLine, renderReport, renderRequest, renderSession } from './spend.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, renderFootprint } from './dataGuard.ts';
 import { REACTION_MEANINGS, REPLY_MARK } from '../shared/replies.ts';
-import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, requestAsFiled, requestLineRule, startProblem } from './work.ts';
+import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -375,6 +375,7 @@ export class Agents {
         return u ? [...u.granted, ...u.waiting].map((x) => x.holder) : [];
       },
       workOver: (info) => this.workOver(info),
+      order: (a, b) => this.resumeOrder(a, b),
       ciWait: (info) => this.ciWait(info),
       waitOn: (info) => this.waitOn(info),
       soon: () => void setTimeout(() => this.placeAgain.tick(), 5000).unref?.(),
@@ -615,6 +616,17 @@ export class Agents {
   private queuedLine(id: string): string {
     const q = this.sessions.queued().filter((x) => x.id === id);
     return q.length ? ` Queued, not refused: ${q[0].why}; it is delivered as soon as it can go, before any later message to it (nothing to resend).` : '';
+  }
+
+  /**
+   * Which of two released workers resumes first when a sandbox frees (w1099, lothsahn: "change the job so it runs at high
+   * priority. That will help it get queued"): the one whose open request comes first by priority, then age; one with none last.
+   */
+  resumeOrder(a: SessionInfo, b: SessionInfo): number {
+    const first = (i: SessionInfo) => [...this.store.work.values()].filter((w) => w.sessionIds.at(-1) === i.id && WORK_OPEN.includes(w.status)).sort(priorityThenAge)[0];
+    const x = first(a);
+    const y = first(b);
+    return x && y ? priorityThenAge(x, y) : x ? -1 : y ? 1 : 0;
   }
 
   /** Why a worker's work is over, or undefined: its requests are closed, or handed to another worker (w384, w640). */
