@@ -40,6 +40,12 @@ test('fixedByPr: the one PR a close names as the fix, in the words workers use',
   assert.equal(fixedByPr(undefined), undefined);
 });
 
+test('fixedByPr (w1143): a PR in parentheses is an aside, so follow-ups beside the fix do not hide it', () => {
+  assert.equal(fixedByPr('already fixed by PR #1075 (w432, DTLS→WebSocket relay fallback, shipped in 0.50.0.78; follow-ups PR #1095 and PR #1229)'), 1075);
+  assert.equal(fixedByPr('fixed by #1076 and #1080 (Build 78)'), undefined, 'two PRs outside the aside: still not one fix');
+  assert.equal(fixedByPr('already fixed (see PR #1075)'), undefined, 'a fix only named in an aside is not named');
+});
+
 test('fixLearnable: a finished request whose PR or release can still be learnt', () => {
   assert.equal(fixLearnable(item('w1', { outcome: 'already fixed by #1076' })), true);
   assert.equal(fixLearnable(item('w1', { autoClosed: { at: '', how: 'pr', pr: 9, sha: 'a'.repeat(40), text: '' } })), true);

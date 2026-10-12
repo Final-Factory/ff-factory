@@ -12,7 +12,7 @@ import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { ProviderManager } from './providers.ts';
-import { DevRequests, devSettings, operatorWords, prSummary, publicText, withoutRepo } from './devRequests.ts';
+import { DevRequests, devFacts, devSettings, operatorWords, prSummary, publicText, withoutRepo } from './devRequests.ts';
 import type { PrView } from './gitStatus.ts';
 import { AttachmentStore, sha256File } from './attachments.ts';
 import { mintProviderToken, tokenSha256 } from './providerProtocol.ts';
@@ -695,6 +695,20 @@ test('reply_to_ffbox sends a dev_reply for the person\'s own conversation, and s
   const off = await call(loth.info, 'reply_to_ffbox', { request: wid, text: 'Hello?' });
   assert.equal(off.isError, true);
   assert.match(off.text, /FFBox's connector is offline; nothing was sent/);
+});
+
+test('devFacts (w1143): a request closed as already fixed by an earlier PR names that PR beside its merge and release', () => {
+  const w = { status: 'done', outcome: 'already fixed by PR #1075 (w432)' } as WorkItem;
+  const fixPr = { number: 1075, url: 'https://github.com/Final-Factory/FinalFactory/pull/1075' };
+  assert.deepEqual(devFacts(w, { version: '0.50.0.78', mergedIn: `develop@${'a'.repeat(40)}` }, { fixPr }), {
+    status: 'done',
+    version: '0.50.0.78',
+    mergedIn: `develop@${'a'.repeat(40)}`,
+    pr: fixPr,
+  });
+  const none = devFacts(w, { version: null, mergedIn: null }, { fixPr });
+  assert.equal(none.pr, undefined, 'no merge known: no PR, the result line instead');
+  assert.equal(none.result, 'already fixed by PR #1075 (w432)');
 });
 
 /** The next dev_update that `ok` accepts, skipping the others (intermediate states a test does not look at). */

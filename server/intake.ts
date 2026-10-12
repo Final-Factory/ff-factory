@@ -109,6 +109,12 @@ const FIX_HOLD_MS = 15 * 60_000;
 const CATCH_UP_DAYS = 14;
 /** Reports a finished request fixed (w502): told to FFBox for requests that changed this many days back. */
 const REPORT_FIX_DAYS = 30;
+/**
+ * FFBox dev-request threads (w1143) have their finished request's fix learnt too, so a close as "already fixed by PR #N"
+ * reaches the thread as FFBox's notice. Only for requests that changed since this moment: the threads closed before it
+ * are back-filled one by one through FFBox, after a person's yes (w1096's rule on bulk closes).
+ */
+const DEV_FIX_FROM = Date.parse('2026-10-12T04:00:00Z');
 /** Reports a declined request leaves (w853): told to FFBox for requests declined this many days back. */
 const REPORT_OBSOLETE_DAYS = 30;
 const VERSION_FILE = 'ProjectSettings/ProjectSettings.asset';
@@ -920,6 +926,8 @@ export class IntakeManager {
     }
     // And every finished request that claims player reports (w502): FFBox is told they are fixed once the fix ships.
     for (const w of this.reportClaimants(now)) if (due(w)) targets.set(w.id, w);
+    // And every finished request an FFBox dev-request thread is linked to (w1143): its done update then names the fix.
+    for (const w of this.devClaimants(now)) if (due(w)) targets.set(w.id, w);
     if (!targets.size) return [];
     this.resolving = true;
     const changed: string[] = [];
@@ -981,6 +989,7 @@ export class IntakeManager {
       // Forget the looks at requests nobody follows any more.
       const followedIds = new Set([...this.boards.values()].map((b) => (b.follow ? followed(b.follow, this.d.store.work)?.id : undefined)).filter(Boolean));
       for (const w of this.reportClaimants(now)) followedIds.add(w.id);
+      for (const w of this.devClaimants(now)) followedIds.add(w.id);
       this.data.fixTried = Object.fromEntries(Object.entries(this.data.fixTried ?? {}).filter(([id]) => followedIds.has(id)));
     } catch (e) {
       this.data.error = `fix look: ${cleanLine((e as Error).message, 200)}`;
@@ -992,6 +1001,14 @@ export class IntakeManager {
   }
 
   // ---------------------------------------------------------------- players' reports a request fixed (w502)
+
+  /** The finished requests FFBox dev-request threads are linked to, changed since DEV_FIX_FROM and in REPORT_FIX_DAYS. */
+  private devClaimants(now = this.now()): WorkItem[] {
+    return (this.d.orchestrators.devLinkedWork?.() ?? []).filter((w) => {
+      const at = Date.parse(w.updatedAt);
+      return w.status === 'done' && at >= DEV_FIX_FROM && now - at <= REPORT_FIX_DAYS * 86_400_000;
+    });
+  }
 
   /** The finished requests (as they continue, through a merge) that claim player reports and changed recently. */
   private reportClaimants(now = this.now()): WorkItem[] {

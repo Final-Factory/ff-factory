@@ -1114,6 +1114,37 @@ test('w480: closed "already fixed by #1076": the PR is looked up, its release fo
   assert.deepEqual([pushed.at(-1)![0], pushed.at(-1)![1].matches[0].watch], ['conv-413', undefined]);
 });
 
+test('w1143: an FFBox dev request closed "already fixed by PR #N" learns that fix and its release; older ones wait', async (t) => {
+  const { intake, o, dir, store } = setup(t, { ffbox: { enabled: true, repo: REPO } });
+  const repo = path.join(dir, 'base');
+  fs.mkdirSync(path.join(repo, 'ProjectSettings'), { recursive: true });
+  const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@users.noreply.github.com', ...a], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_COMMITTER_DATE: new Date(Date.now() - 3 * 3_600_000).toISOString() } }).trim();
+  const version = (v: string) => fs.writeFileSync(path.join(repo, 'ProjectSettings', 'ProjectSettings.asset'), `PlayerSettings:\n  bundleVersion: ${v}\n`);
+  git('init', '-q', '-b', 'develop');
+  version('0.50.0.77');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'v77');
+  fs.writeFileSync(path.join(repo, 'relay.txt'), 'websocket fallback');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'A hosted room falls back to WebSocket (#1075)');
+  const fix = git('rev-parse', 'HEAD');
+  version('0.50.0.78');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'v78');
+  depsOf(intake).prInfo = async (n) => (n === 1075 ? { sha: fix, at: new Date().toISOString(), number: 1075, head: 'w432-relay', text: 'Relay fallback' } : undefined);
+  depsOf(intake).mergedPrs = async () => [];
+  const link = (conversation: string) => ({ ref: `dev-${conversation}-1`, conversation, source: 'discord', operator: 'lothsahn', person: LOTH, at: new Date().toISOString(), outcome: 'filed' as const });
+  const put = (id: string, conversation: string, updatedAt: string) =>
+    store.putWork({ id, title: 'Hosted room drops to the menu', brief: 'Assess it.', priority: 'normal', keys: [], requestedBy: LOTH, requesters: [LOTH], humanAsked: true, status: 'done', outcome: 'already fixed by PR #1075 (w432, shipped in 0.50.0.78; follow-ups PR #1095 and PR #1229)', createdAt: updatedAt, updatedAt, sessionIds: [], overlaps: [], asks: 0, log: [], ffboxDev: [link(conversation)] } as WorkItem);
+  put('w1088', '717', new Date().toISOString());
+  put('w1000', '600', '2026-10-11T12:00:00Z');
+  assert.deepEqual(await intake.resolveFixes(), ['w1088'], 'only the request closed since the change; the older one waits for a person');
+  const w = o.requireWork('w1088');
+  assert.deepEqual([w.delivery?.fixCommit, w.delivery?.fixPr, w.delivery?.releasedIn], [fix, 1075, '0.50.0.78']);
+  assert.deepEqual(o.fixPrOf(w), { number: 1075, url: `https://github.com/${REPO}/pull/1075` });
+  assert.equal(o.requireWork('w1000').delivery, undefined);
+});
+
 test('w480: the one-time catch-up follows escalated requests closed done in the last 14 days, once', async (t) => {
   const { intake, o, cfg } = setup(t, { ffbox: { enabled: true, escalations: true, repo: REPO } });
   const recent = o.requireWork((intake.onEscalation(ESCALATION) as { workId: string }).workId);

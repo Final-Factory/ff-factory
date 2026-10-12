@@ -23,10 +23,13 @@ export const escalationRef = (conversation: string) => `conv-${conversation}`;
 
 /**
  * The pull request a close names as the fix: "already fixed by #1076", "fixed in PR #1076 (Build 78)", "#1076 already
- * fixed this". Undefined when it names none, or mentions any other PR beside it.
+ * fixed this". Undefined when it names none, or mentions any other PR beside it. Text in parentheses is an aside and
+ * is left out first (w1143: w1088 closed "already fixed by PR #1075 (w432, ...; follow-ups PR #1095 and PR #1229)",
+ * and its thread never heard which fix).
  */
 export function fixedByPr(text: string | undefined): number | undefined {
   if (!text) return undefined;
+  text = text.replace(/\([^()]*\)/g, ' ');
   const found = new Set<number>();
   for (const re of [/\bfixed\s+(?:by|in|with|via)\s+(?:(?:PR|pull request)\s*)?#(\d{1,7})\b/gi, /(?:\b(?:PR|pull request)\s*)?#(\d{1,7})\s+(?:already\s+)?fix(?:ed|es)\b/gi]) {
     for (const m of text.matchAll(re)) found.add(Number(m[1]));
