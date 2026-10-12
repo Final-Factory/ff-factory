@@ -18,7 +18,7 @@ The rest of this page describes the Macs; [Windows machines](#windows-machines) 
 |---|---|
 | Reachable | `ssh <host alias>` from the portal host with an existing key, no password prompt |
 | Game clone | a clone of the game repo (the one in config `repo.url`) under the home folder, found by its `origin` URL, or pass its path to `add_machine` |
-| Claude Code | installed and logged in for the user (the keychain login works: the daemon runs in the GUI session) |
+| Claude Code | installed for the user. Portal-run agents run on a vault token (w1078), so a login is not needed for them; the user's own sessions keep theirs |
 | node | 22.6 or newer (versions without native TypeScript support run with `--experimental-strip-types`); the newest node on the PATH the user's own zsh sets up, or in common install locations, is used |
 | Portal URL | a public URL for the portal, e.g. the Tailscale Funnel URL `https://<host>.<tailnet>.ts.net` (config `publicUrl`, or given to `add_machine`) |
 | Sleep | set to never, or agents stop when the Mac sleeps (the daemon holds `caffeinate -i` only while agents run) |
@@ -87,24 +87,19 @@ before redeploying by hand.
   clone is a protected path for sandbox workers. Existing `ff-local-backups` folders stay, and the clean-up never
   deletes them. Force pushes and pushes to the game repo's master/main stay refused. The daemon's own folder
   (`~/.ff-factory`, or the machine's `app_dir`; it holds the token) is protected.
-- **Claude account.** With the token vault on for a machine (config `machines.claudeFromVault`), its runs get a vault
-  token from the run person's pool (highest score first, the weekly headroom per hour to its reset, within the pool's caps; not one inside the dispatcher's reserve while another has room), and the other secrets granted to that machine, in the same launch spec
-  ([vault.md](vault.md)). Otherwise: portal-run agents on a Mac (workers and standing agents) use this host's
-  `claudeEnv`, so with `CLAUDE_CODE_OAUTH_TOKEN` set (`set_app_config`, write-only) they run on the same
-  Claude account as the agents here, not on the Mac's own login. The portal puts it in the launch spec,
-  sent over the authenticated daemon connection with each start; the daemon passes it to that agent's
-  Agent SDK process only (it overrides the Mac's keychain login for that process). It is never written
-  to disk on the Mac, the daemon log redacts tokens, and transcripts are redacted (server/secrets.ts).
-  The user's own interactive Claude Code sessions on the Mac are unaffected: they keep the Mac's login.
-  `list_machines` and a sandbox worker's brief show the source: "host token …abcd" or "Mac login". Config
-  `machines.useHostClaudeEnv` (default `true`) turns it off everywhere (`false`) or per machine
-  (`{ "m3": false }`, with `"*"` for the machines not named); `set_app_config machines.useHostClaudeEnv`
-  sets it, with `machine: "<id>"` for one machine. A Mac on its own login gets no token, and the daemon
-  drops any credential in its own environment for that agent (`LaunchSpec.login`). An agent already
-  running keeps its account until its process restarts; after an update the daemons are redeployed
-  anyway. An agent working for someone with their own token (config `userClaudeEnv`,
-  [identity.md](identity.md)) runs on that token instead, on any Mac. Every account switch, including the
-  orchestrator's and the dispatcher's: [accounts.md](accounts.md).
+- **Claude account.** Every run on a machine, a Mac's included, gets a vault token from the run person's pool (highest score
+  first, the weekly headroom per hour to its reset, within the pool's caps; not one inside the dispatcher's reserve while
+  another has room), and the other secrets granted to that machine, in the same launch spec ([vault.md](vault.md)). Since
+  w1078 there is nothing else: no host token in config, no Mac login, and `machines.useHostClaudeEnv`, `machines.claudeFromVault` and
+  `userClaudeEnv` are retired and taken out of config.json at the portal's start ([accounts.md](accounts.md)). The portal puts
+  the token in the launch spec, sent over the authenticated daemon connection with each start; the daemon passes it to that
+  agent's Agent SDK process only (it overrides the Mac's keychain login for that process), and drops any credential in its
+  own environment for that agent (`LaunchSpec.login`, always set). It is never written to disk on the Mac, the daemon log
+  redacts tokens, and transcripts are redacted (server/secrets.ts). The user's own interactive Claude Code sessions on the Mac
+  are unaffected: they keep the Mac's login, but no portal-run agent uses it. `list_machines` and a sandbox worker's brief say
+  "a vault token from the pool of the person the work is for", and the brief names the token ("vault token vault-ben-1
+  …abcd"). A person with no usable token waits (a held pool) or the run does not start and says why. An agent already
+  running keeps its token until its process restarts; after an update the daemons are redeployed anyway.
 - **Limits.** **Workers run in sandboxes only** (w536, Lothsahn on 2026-10-06: "Can't we get rid of this code so the
   settings doesn't matter?"): `start_agent` with a machine alone is refused, naming its sandboxes, the Capacity block
   lists sandbox computers only, and the daemon refuses any agent whose folder is the main clone (`mainCloneRefusal` in
@@ -190,7 +185,7 @@ memory pressure, the GPU from `ioreg`), and every config `usagePollMinutes` (def
 usage of the Mac's own Claude login (`usage`, the same promptless usage request the portal makes, with
 no token in its environment). The portal keeps the load in memory only (not in state.json) and drops
 it when the machine goes offline; the sidebar footer and `system_status` show every machine. The usage
-becomes one of the accounts in the usage meters, merged by email with the same login elsewhere. A
+is not listed in the usage meters since w1078 (no portal-run agent runs on that login; [accounts.md](accounts.md)), though the daemon still reports it. A
 daemon from before protocol 4 sends neither; the machine shows "no numbers yet" until the usual
 redeploy of outdated daemons updates it.
 

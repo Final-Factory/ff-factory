@@ -134,14 +134,16 @@ export function stripConfig(raw: Record<string, unknown>): Stripped {
     }
     out.machines = m;
   }
-  if (isObj(out.claudeAccounts)) {
-    const a = currentAccounts(out.claudeAccounts) as Record<string, unknown>;
-    const dropped = Object.keys(out.claudeAccounts).filter((k) => !(k in a));
-    // The orchestrators keep "vault" written out, so a rollback to a release before w1078 runs them on their pools too.
+  {
+    // The orchestrators get "vault" written out, so a rollback to a release from before w1078 runs them on their pools too.
+    // The dispatcher keeps only a pin: "vault" (the payer's pool) is no key, as set_app_config stores it, and those releases
+    // refused it.
+    const was = isObj(out.claudeAccounts) ? out.claudeAccounts : {};
+    const a = currentAccounts(was) as Record<string, unknown>;
     const next: Record<string, unknown> = { ...a, orchestrator: 'vault' };
-    if (next.dispatcher !== undefined && next.dispatcher !== 'vault' && pinnedVaultEntry(next.dispatcher as string) === undefined) delete next.dispatcher;
-    for (const k of dropped) changes.push(`claudeAccounts.${k} ("${String(out.claudeAccounts[k])}")`);
-    if (out.claudeAccounts.orchestrator !== 'vault' && !dropped.includes('orchestrator')) changes.push(`claudeAccounts.orchestrator ("${String(out.claudeAccounts.orchestrator)}" -> "vault")`);
+    if (next.dispatcher !== undefined && pinnedVaultEntry(next.dispatcher as string) === undefined) delete next.dispatcher;
+    for (const k of Object.keys(was)) if (!(k in next) || (k === 'orchestrator' && was[k] !== 'vault')) changes.push(`claudeAccounts.${k} ("${String(was[k])}"${k in next ? ' -> "vault"' : ''})`);
+    if (!isObj(out.claudeAccounts)) changes.push('claudeAccounts.orchestrator ("vault", written out)');
     if (JSON.stringify(next) !== JSON.stringify(out.claudeAccounts)) out.claudeAccounts = next;
   }
   let hash: string | undefined;

@@ -98,7 +98,7 @@ test("config.json's saved versions keep no secret: rewritten, or moved into the 
   fs.writeFileSync(`${p.config}.2`, text.slice(0, text.length / 2), { mode: 0o600 }); // torn by a crash, with a token in it
   fs.writeFileSync(`${p.config}.3`, JSON.stringify({ ownerName: 'Ben' }));
   const m = migrateConfig(p.config, p.secrets);
-  assert.deepEqual(m.scrubbed.sort(), ['config.json.1', 'config.json.2 (moved to the secrets folder)', 'config.json.prev']);
+  assert.deepEqual(m.scrubbed.sort(), ['config.json.1', 'config.json.2 (moved to the secrets folder)', 'config.json.3', 'config.json.prev']);
   for (const n of ['.prev', '.1']) assert.deepEqual(inlineSecrets(JSON.parse(fs.readFileSync(`${p.config}${n}`, 'utf8'))), [], n);
   assert.ok(!fs.existsSync(`${p.config}.2`), 'the torn version left the config folder');
   assert.ok(fs.existsSync(path.join(p.secrets, 'config.json.2.before-w1078')));
@@ -113,10 +113,20 @@ test('a config that still holds a secret is not readable, and its key path is na
   raw.publicGitIdentity = { name: 'X', email: 'x@example.test', repos: [`https://x-access-token:${'ghp_'}${'f'.repeat(36)}@github.com/a/b.git`] };
   fs.writeFileSync(p.config, JSON.stringify(raw));
   const m = migrateConfig(p.config, p.secrets);
-  assert.deepEqual(m.changes, [], 'not moved: they are a person\'s to fix');
+  assert.deepEqual(m.changes, ['claudeAccounts.orchestrator ("vault", written out)'], 'the credentials are not moved: they are a person\'s to fix');
   assert.deepEqual(m.warnings, ['repo.url', 'publicGitIdentity.repos.0']);
   assert.deepEqual(readableConfigFiles(p.config), []);
   assert.deepEqual(inlineSecrets({ claudeTokenFile: '/x', providers: { ffbox: { tokenSha256: HASH } } }), ['claudeTokenFile', 'providers.ffbox.tokenSha256']);
+});
+
+test('the accounts a release before w1078 also reads: the orchestrators "vault" written out, the dispatcher only a pin (w1078)', (t) => {
+  const p = portal(t, { claudeAccounts: { dispatcher: 'vault' } });
+  migrateConfig(p.config, p.secrets);
+  assert.deepEqual(JSON.parse(fs.readFileSync(p.config, 'utf8')).claudeAccounts, { orchestrator: 'vault' }, 'a dispatcher "vault" is the payer\'s pool: no key (older releases refused it)');
+  const q = portal(t, { claudeAccounts: { orchestrator: 'login', dispatcher: 'tokenfile' } });
+  const m = migrateConfig(q.config, q.secrets);
+  assert.deepEqual(JSON.parse(fs.readFileSync(q.config, 'utf8')).claudeAccounts, { orchestrator: 'vault' });
+  assert.deepEqual(m.changes, ['claudeAccounts.orchestrator ("login" -> "vault")', 'claudeAccounts.dispatcher ("tokenfile")']);
 });
 
 test('config loading: the split config loads and the connector hash comes from its file; an unsplit one (a dry run) loads too, its retired keys ignored (w1078)', (t) => {
