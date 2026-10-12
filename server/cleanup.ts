@@ -80,6 +80,11 @@ export interface CleanupGuard {
   keep: string[];
   inUse: string[];
   home: string;
+  /**
+   * Temp folders of stopped sessions that a request still waits for (server/resumable.ts, w1097): kept like a live one's,
+   * since the worker comes back to them (a wait for CI, a person, a pause).
+   */
+  resumable?: string[];
 }
 
 export interface CleanupItem {
@@ -158,6 +163,7 @@ export function neverDelete(p: string, g: CleanupGuard, opts: { claudeWorktrees?
   if ((win ? SYSTEM_TOP_WIN : SYSTEM_TOP_POSIX).has(parts[win ? 1 : 0])) return 'a system folder';
   for (const k of g.keep) if (k && (within(p, k) || within(k, p))) return `kept (${k})`;
   for (const k of g.inUse) if (k && (within(p, k) || within(k, p))) return `in use by a running agent (${k})`;
+  for (const k of g.resumable ?? []) if (k && (within(p, k) || within(k, p))) return `a stopped session's folder that its open request will resume (${k})`;
   if (within(p, `${g.home}/torque`)) return 'torque';
   const seg = protectedSegment(parts, opts.claudeWorktrees);
   if (seg) return seg;

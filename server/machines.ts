@@ -18,6 +18,7 @@ import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
 import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
+import { resumableSessions } from './resumable.ts';
 import { movedNote, savedNote } from './placeAgain.ts';
 import { safeImage } from './images.ts';
 import { hostStartFailed } from '../shared/agentState.ts';
@@ -1522,7 +1523,30 @@ export class MachineManager {
   private welcomeOf(m: Machine, sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }))) {
     // A worker root install (w513) whose record has no pool of its own yet keeps daemon.json's until its hello says it.
     const pool = m.sandboxRoot || !m.root ? poolSettingsOf(m) : undefined;
-    return { type: 'welcome' as const, machineId: m.id, maxSessions: agentCap(m), sessions, sandboxes: pool };
+    const resumable = this.resumableOf(m);
+    this.sentResumable.set(m.id, resumable.join(','));
+    return { type: 'welcome' as const, machineId: m.id, maxSessions: agentCap(m), sessions, sandboxes: pool, resumable };
+  }
+
+  /** What each daemon was last told of its resumable sessions (joined ids), so a change is sent once. */
+  private readonly sentResumable = new Map<string, string>();
+
+  /** A machine's sessions that a request still waits for: their temp folders survive a stop (server/resumable.ts, w1097). */
+  private resumableOf(m: Machine): string[] {
+    return resumableSessions(m.sessionIds.filter((sid) => this.store.sessions.has(sid)), this.store.work.values());
+  }
+
+  /** Tell every connected daemon whose resumable set changed (a request closed, a worker linked; each heartbeat). */
+  private pushResumable() {
+    for (const [id, link] of this.links) {
+      const m = this.store.machines.get(id);
+      if (!m) continue;
+      const ids = this.resumableOf(m);
+      const key = ids.join(',');
+      if (this.sentResumable.get(id) === key) continue;
+      this.sentResumable.set(id, key);
+      link.ws.send(JSON.stringify({ type: 'resumable', sessionIds: ids } satisfies ToDaemon));
+    }
   }
 
   /** Wire a connected daemon (exported for tests: any WebSocket works). */
@@ -1624,6 +1648,7 @@ export class MachineManager {
         this.detach(id);
       } else link.ws.ping();
     }
+    this.pushResumable();
   }
 
   private handle(sessionId: string) {

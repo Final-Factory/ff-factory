@@ -17,7 +17,7 @@ import { HOST_LOGIN } from './usage.ts';
 import { Daemon, RECONNECT_MS, type Probes } from '../machine/daemon.ts';
 import { agentPath, macReloadLines, nodeSupport, plist } from './machineDeploy.ts';
 import type { Config } from './config.ts';
-import type { HostStats, ImageInput, MachineSandbox, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import type { HostStats, ImageInput, MachineSandbox, PermissionMode, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
 process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
@@ -1275,4 +1275,24 @@ test('w496: a queued message that cannot be delivered for a day is given up, wit
   assert.match((store.readTranscript('gone1').at(-1) as { text: string }).text, /could not be delivered within 24 hours and was given up: mx's daemon is outdated\. It began: BRIEF/);
   store.flush();
   fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("w1097: the daemon hears which stopped workers a request still waits for, and their temp folders stay out of its guard's reach", async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  const w = { id: 'w9001', title: 'belt corners', status: 'blocked', sessionIds: [s.info.id], requesters: [], requestedBy: { userId: 'l', displayName: 'L' }, createdAt: '', updatedAt: '', log: [] } as unknown as WorkItem;
+  store.putWork(w);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  const held = () => [...(d as unknown as { resumable: Set<string> }).resumable];
+  await until('the welcome names it', () => held().includes(s.info.id));
+  const guard = () => (d as unknown as { cleanupGuard: () => { resumable?: string[] } }).cleanupGuard();
+  assert.ok(guard().resumable!.some((p) => p.endsWith(`ffa-${s.info.id}`)), JSON.stringify(guard()));
+  // Its request closes: the next heartbeat tells the daemon, and the folder is the sweep's again.
+  w.status = 'done';
+  store.putWork(w);
+  (mm as unknown as { heartbeat: () => void }).heartbeat();
+  await until('the daemon is told', () => held().length === 0);
+  assert.deepEqual(guard().resumable, []);
 });
