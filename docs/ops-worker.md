@@ -320,8 +320,9 @@ So **a poll or a wait is a timer, never a background shell loop or a sleep loop 
   update (w605, `keepAgentsOnRestart`), but the reaper stops an idle worker after an hour (`IDLE_REAP_MS`,
   `server/agents.ts`), and a sandbox released for other work ends it too. A loop that finishes or finds its condition
   after the turn has ended does not wake anyone. Workers are told so in their brief ("Plain `sleep` in the shell and the
-  Monitor tool do NOT bring you back once your turn ends"), and the evidence-gate lesson
-  `lessons/a-wait-is-a-harness-timer.md` (ff-agents) says the same.
+  Monitor tool do NOT bring you back once your turn ends"), and the ff-agents evidence-gate lesson
+  `lessons/a-person-wait-is-declared-not-polled.md`, section "A wait on a machine is a harness timer, never a background
+  loop (w1106)", says the same.
 
 ### Moving a poll onto a timer
 
