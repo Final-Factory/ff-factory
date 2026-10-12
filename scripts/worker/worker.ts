@@ -235,6 +235,12 @@ export interface InstallOptions {
   /** A root on its Dev Drive: the host folder that holds the daemon's folder and the credential (layoutOf, w1070). */
   anchor?: string;
   /**
+   * A new root on a Dev Drive: the folder that will hold the VHDX, the daemon and the credential (lothsahn, w1070: "The daemon
+   * and support files from the installer should go in d:\ffw. But all the players, slots, everything else should go to V:").
+   * Default: the root given. A reinstall passes it (--anchor) to leave the old root's folder behind.
+   */
+  driveHome?: string;
+  /**
    * Set during install(): the drive's folders, which daemon.json then points at. `onRoot`: the whole root is on the drive
    * (w1070) and `host` the folder that holds the VHDX; `vhdx` and `maxGB` give the host guard the file's room to grow.
    */
@@ -1136,8 +1142,9 @@ interface ReinstallCarry {
  * aside in <root>\.reinstall, and deletes everything else of the old install. Everything it deletes is inside the root.
  */
 /** What stops a reinstall (nothing changes then), and whether the Library seed fits beside the new drive meanwhile. Exported for tests. */
-export function reinstallProblems(i: { root: string; windows: boolean; elevated: boolean; manifest?: Manifest; agents?: { id: string; sandbox?: string; midTurn?: boolean }[]; processes: string[]; risks: SandboxRisk[]; seedBytes: number; freeBytes: number }): { problems: string[]; keepSeed: boolean } {
+export function reinstallProblems(i: { root: string; windows: boolean; elevated: boolean; manifest?: Manifest; agents?: { id: string; sandbox?: string; midTurn?: boolean }[]; processes: string[]; risks: SandboxRisk[]; seedBytes: number; freeBytes: number; home?: { path: string; entries: string[] } }): { problems: string[]; keepSeed: boolean } {
   const problems: string[] = [];
+  if (i.home && i.home.entries.length) problems.push(`${i.home.path}, where the drive, the daemon and the credential go, already holds ${i.home.entries.slice(0, 5).join(', ')}: give an empty or new folder`);
   if (!i.windows) problems.push('--reinstall is for a Windows install with a Dev Drive');
   if (!i.elevated) problems.push("--reinstall needs an elevated session (an administrator's ssh session): it deletes a VHDX and its SYSTEM tasks");
   if (!i.manifest) problems.push(`${i.root} holds no install to make again (no root.json)`);
@@ -1161,7 +1168,8 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
   const risks = await sandboxRisks(oldDrive?.sandboxes ?? l.sandboxes);
   const seedLib = oldDrive ? path.join(oldDrive.seed, 'Library') : path.join(l.seed, 'Library');
   const seedBytes = fs.existsSync(seedLib) ? bytesUnder(seedLib, SEED_REBUILT) : 0;
-  const { problems, keepSeed } = reinstallProblems({ root: l.root, windows: isWin, elevated: elevated(), ...(old ? { manifest: old } : {}), ...(view ? { agents: view.agents } : {}), processes: procs, risks, seedBytes, freeBytes: await volumeFree(l.root) });
+  const home = o.driveHome && path.resolve(o.driveHome) !== path.resolve(l.root) ? { path: path.resolve(o.driveHome), entries: fs.existsSync(o.driveHome) ? fs.readdirSync(o.driveHome) : [] } : undefined;
+  const { problems, keepSeed } = reinstallProblems({ root: l.root, windows: isWin, elevated: elevated(), ...(old ? { manifest: old } : {}), ...(view ? { agents: view.agents } : {}), processes: procs, risks, seedBytes, freeBytes: await volumeFree(l.root), ...(home ? { home } : {}) });
   if (problems.length) {
     say(`\nNot reinstalling: ${problems.length} problem(s); nothing was changed:`);
     for (const p of problems) say(`- ${p}`);
@@ -1460,11 +1468,12 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   //    folder structure should be under V:"): the folder given becomes the host folder, which keeps the VHDX and what starts
   //    before the drive is attached (driveRoot.ts HOST_FILES), and the root is <letter>:\ffw.
   let fresh: DevDriveRecord | undefined;
-  if (isWin && !o.update && !readManifest(l.root) && !readMoved(l.root)) {
+  const home = path.resolve(o.driveHome ?? l.root);
+  if (isWin && !o.update && !readManifest(l.root) && !readMoved(l.root) && !readManifest(home) && !readMoved(home)) {
     const dec = decideDevDrive({ platform: process.platform, update: false, flag: o.devDrive, hasOne: false, rootFileSystem: f.rootFileSystem });
     if (dec.action === 'ensure') {
       try {
-        const host = l.root;
+        const host = home;
         fs.mkdirSync(host, { recursive: true });
         const maxGB = o.devDriveMaxGB ?? defaultMaxGB(f.rootTotalGB);
         const st = await devDriveEnsure(host, ['-Root', host, '-MaxGB', String(maxGB), '-NoTasks', ...(carry?.letter ? ['-Letter', carry.letter] : []), ...(f.probe.user ? ['-User', f.probe.user] : []), ...(f.probe.sid ? ['-UserSid', f.probe.sid] : []), ...(o.devDriveSkip ? ['-Skip', o.devDriveSkip] : [])]);
@@ -1529,6 +1538,15 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
       fs.rmdirSync(carry.keep);
     } catch {
       say(`(${carry.keep} still holds ${fs.existsSync(carry.keep) ? fs.readdirSync(carry.keep).join(', ') : 'nothing'}: left there)`);
+    }
+    // The old root's folder, when the new install's home is elsewhere (D:\ffw for D:\work\ffw): empty now, so it goes.
+    if (path.resolve(carry.oldRoot) !== path.resolve(o.anchor ?? '')) {
+      try {
+        fs.rmdirSync(carry.oldRoot);
+        say(`Removed the old root's folder ${carry.oldRoot} (empty).`);
+      } catch {
+        if (fs.existsSync(carry.oldRoot)) say(`(${carry.oldRoot} still holds ${fs.readdirSync(carry.oldRoot).join(', ')}: left there)`);
+      }
     }
   }
   await syncSource(l, from);
@@ -1644,6 +1662,8 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
 
 /** What `worker.ts update` takes on its command line; every setting it does not name comes from the install there. */
 export interface UpdateFlags {
+  /** reinstall (w1070): the folder for the new drive, the daemon and the credential (default: the old root's). */
+  anchor?: string;
   maxSandboxes?: number;
   maxAgentsPerSandbox?: number;
   maxUnity?: number;
@@ -1889,7 +1909,7 @@ export async function reinstall(root: string, f: UpdateFlags): Promise<boolean> 
     say(`Elevated session: what the reinstall makes goes to ${owner}, the user the ${m.service} task runs as.`);
   }
   const { moveToDevDrive: _m, update: _u, ...o } = planUpdate(l.root, m, config, token, { ...f, ...(owner ? { owner } : {}) });
-  return install({ ...o, reinstall: true, devDrive: 'on' });
+  return install({ ...o, reinstall: true, devDrive: 'on', ...(f.anchor ? { driveHome: path.resolve(f.anchor) } : {}) });
 }
 
 export async function update(root: string, f: UpdateFlags): Promise<boolean> {
@@ -2402,7 +2422,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
             [--voice-whisper <model>|off] (Whisper on this machine's GPU for the portal's mic, w615; kept on a re-run)
-  reinstall [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--owner <user>] [--max-sandboxes N] [--max-agents-per-sandbox N] [--max-unity N]
+  reinstall [--anchor <folder for the drive, the daemon and the credential, e.g. D:\\ffw; default the root given>]
+            [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--owner <user>] [--max-sandboxes N] [--max-agents-per-sandbox N] [--max-unity N]
             (Windows, w1070: this machine's install made again with its whole root on a new Dev Drive, <letter>:\\ffw; the root
              given keeps only the VHDX and the daemon's start. Every setting and the credential carried. Refuses while an agent
              or a process uses it, or a sandbox holds work not on origin. Keeps the clone (as the new one's seed), the nightly
@@ -2479,6 +2500,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (!opts.root) throw new Error(USAGE);
     const opt = (k: string) => (opts[k] === undefined ? undefined : Number(opts[k]));
     const ok = await reinstall(opts.root, {
+      ...(opts.anchor ? { anchor: opts.anchor } : {}),
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
       maxUnity: opt('max-unity'),

@@ -188,6 +188,9 @@ test('the reinstall refuses, changing nothing, while an agent, a process or unpu
   assert.match(r.problems[1], /Unity\.exe/);
   assert.match(r.problems[2], /sandbox slot3 holds work that is not on origin \(1 unpushed commit/);
   assert.match(reinstallProblems({ ...base, elevated: false }).problems.join(), /elevated session/);
+  // lothsahn: "The daemon and support files from the installer should go in d:\ffw": that folder must be new or empty.
+  assert.deepEqual(reinstallProblems({ ...base, home: { path: 'D:\\ffw', entries: [] } }).problems, []);
+  assert.match(reinstallProblems({ ...base, home: { path: 'D:\\ffw', entries: ['notes.txt'] } }).problems.join(), /D:\\ffw, where the drive, the daemon and the credential go, already holds notes\.txt/);
   assert.match(reinstallProblems({ ...base, agents: undefined }).problems.join(), /could not be asked/);
   assert.match(reinstallProblems({ ...base, manifest: { ...manifest, devDrive: { ...manifest.devDrive!, rootOnDrive: true } } as Manifest }).problems.join(), /on its Dev Drive already/);
   // D: at 19.5 GB (2026-10-12 ~02:00Z) holds the 13.3 GB seed with 5 GB to spare; at 17 GB it does not, and the first sandbox imports.

@@ -431,6 +431,11 @@ BEAST ([self-recovery.md](self-recovery.md)).
 again with **`install.ps1 -Reinstall -Root D:\work\ffw [-DevDriveMaxGB 275]`** (`worker.ts reinstall`; lothsahn: "Instead of
 doing a move, can we just do a fresh reinstall on LothDesktop instead?"):
 
+The old root's folder stays as the anchor: it keeps the new drive's VHDX, `devdrive.json`, the daemon and the credential, and
+everything else goes to the drive (lothsahn: "The daemon and support files from the installer should go in d:\ffw. But all
+the players, slots, everything else should go to V:"; "I meant keep the existing folder. Keep it at d:\work\ffw").
+`-Anchor <folder>` puts those in another, new or empty folder instead, and the old root's folder is then removed.
+
 1. It refuses, changing nothing, while the portal names an agent on the machine, a process uses the root or the drive (an
    editor, a build, a player, the nightly lab), or a sandbox holds a commit no remote has or an uncommitted file
    (`sandboxRisks`; commit each on its branch and push first). It needs an elevated session (an administrator's ssh). The new
