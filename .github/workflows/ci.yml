@@ -37,7 +37,7 @@ env:
 # reaches only the npm registry from outside (never github.com or api.github.com), and gets this repository from
 # the host's mirror: `ffghr-workspace.sh use-mirror` before actions/checkout. Actions are pinned by commit SHA because the
 # image carries those archives and cannot download any other; there is no setup-node, no actions/cache and no sudo.
-# What stays on a hosted runner needs root, systemd or Windows/macOS: the ops-socket job below, windows.yml,
+# What stays on a hosted runner needs root, systemd or Windows/macOS: ops-socket.yml (only when its own files change), windows.yml,
 # worker-update.yml, dev-drive.yml and vm-scripts.yml's lint and end-to-end jobs. rerun-lost-runner.yml runs on FFBox
 # too (w1102): the host makes its API calls for it.
 # The repository is public and the runners are shared with the private Final Factory repositories, so fork pull requests
@@ -99,24 +99,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Build the web UI
         run: npm --prefix web run build
-
-  ops-socket:
-    name: The orchestration worker's socket under real systemd (w638)
-    # HOSTED ON PURPOSE: it needs root and a running systemd (fff-ops.socket's own settings, the real launcher and the
-    # portal's opsSpawner), and an FFBox runner container has neither. About two minutes a pull request.
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: package-lock.json
-      - run: npm ci --no-audit --no-fund
-      # fff-ops.socket's settings, the real launcher and the portal's opsSpawner: a new process right after a stop runs.
-      - name: fff-ops.socket under real systemd
-        run: sudo --preserve-env=PATH deploy/vm/test/fff-ops-socket.test.sh
 
   e2e:
     # Not on a push to main (w925): see concurrency above.

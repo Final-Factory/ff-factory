@@ -234,3 +234,26 @@ test('the nightly chips on the Intake tab are switches: a click flips the settin
   const off = (await appState(page.request)).intake?.nightly;
   expect([off?.enabled, off?.run?.enabled, off?.run?.time]).toEqual([false, false, '03:00']);
 });
+
+test('the Intake tab keeps its scroll position across the Conversation tab and another page (w1100)', async ({ authed: page }) => {
+  await go(page, '#/dispatcher/intake');
+  const tab = page.getByTestId('intake-tab');
+  await expect(tab).toBeVisible();
+  // Long enough to scroll: a rule in the page's head survives the tab being drawn again.
+  await page.addStyleTag({ content: `[data-testid='intake-tab']::after { content: ''; display: block; flex: none; height: 3000px; }` });
+  await tab.evaluate((el) => el.scrollTo({ top: 700 }));
+  await expect.poll(() => tab.evaluate((el) => Math.round(el.scrollTop))).toBeGreaterThan(690);
+  await page.waitForTimeout(300);
+  const at = await tab.evaluate((el) => Math.round(el.scrollTop));
+
+  const panel = page.locator('.dispatcher-panel');
+  await panel.getByRole('tab', { name: 'Conversation' }).click();
+  await expect(tab).toHaveCount(0);
+  await panel.getByRole('tab', { name: 'Intake' }).click();
+  await expect.poll(() => tab.evaluate((el) => Math.round(el.scrollTop))).toBe(at);
+
+  await go(page, '#/overview');
+  await expect(tab).toHaveCount(0);
+  await go(page, '#/dispatcher/intake');
+  await expect.poll(() => tab.evaluate((el) => Math.round(el.scrollTop))).toBe(at);
+});

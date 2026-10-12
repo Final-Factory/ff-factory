@@ -356,9 +356,11 @@ export function nightlyRunDraft(a: { date: string; machine: string; time: string
       `Run the nightly e2e lab for the night ${a.date} on ${a.machine}, filed by the portal's nightly schedule (${a.time} ${a.tz}). The intake rules below say how: start it with scripts/nightly/nightly_worker.sh, check it at every check-in, and end with its outcome once it has delivered.`,
       `- Its report must reach FF Factory by ${a.dueBy}; with none by then, the portal raises the missing-night alarm.`,
       '- The lab posts its own summary in #dev-chat as Max and files its regressions through the nightly intake: nothing to post or file by hand.',
-      '- For the dispatcher: the worker mostly waits and reads a report (a check every 25 minutes for about two and a half hours), so start it on Sonnet at medium effort.',
+      '- For the dispatcher: the worker mostly waits and reads a report (a check every 25 minutes for about two and a half hours), so start it on Sonnet at medium effort. It is high priority (lothsahn, 2026-10-12, w1099: "Please also change the job so it runs at high priority. That will help it get queued"): start it in the next free sandbox of its machine ahead of normal requests, like any high one; no sandbox, Unity slot or room is held free for it.',
     ].join('\n'),
-    priority: 'normal',
+    // lothsahn, 2026-10-12 (w1099): "Please also change the job so it runs at high priority. That will help it get queued.
+    // Don't ask the dispatcher to keep LothDesktop underutilized": high, so it goes ahead of normal work; nothing reserved.
+    priority: 'high',
     triage: { class: 'follow-up', reason: `the nightly e2e run of ${a.date}, filed by the portal's schedule` },
     constraints: `Run it on ${a.machine}, in one of its sandboxes, and nowhere else: Lothsahn chose ${a.machine} for the nightly run ("Create a portal timer that happens and when it does it triggers a run on LothDesktop to do the desync run", 2026-10-10), the one exception to his rule that work avoids it.`,
     source: { kind: 'nightly-run', untrusted: false, channel: 'nightly e2e', nightlyRun: { date: a.date, machine: a.machine } },
@@ -376,9 +378,11 @@ export function nightlyReviewDraft(a: { date: string; machine: string; time: str
       ...(a.covered?.length
         ? ['- Already in the ledger from the nightly lab (its own regression filing, intake.nightly.enabled): do not file a job for what these cover; name them instead.', ...a.covered.slice(0, 30).map((c) => `  - ${c.id}: ${clip(c.title, 140)}`)]
         : ['- No nightly lab regression request is open now.']),
-      '- For the dispatcher: this is judgment work (ranking regression risk and writing briefs), so start it on Opus at high effort.',
+      '- For the dispatcher: this is judgment work (ranking regression risk and writing briefs), so start it on Opus at high effort. It is high priority, as the nightly run is (w1099): ahead of normal requests, with nothing held free for it.',
     ].join('\n'),
-    priority: 'normal',
+    // w1099: high like the nightly run (lothsahn: "Please also change the job so it runs at high priority"), so the day's merges
+    // get their regression checks the same morning; like the run, it reserves nothing.
+    priority: 'high',
     triage: { class: 'follow-up', reason: `the nightly merge review of ${a.date}, filed by the portal's job timer` },
     constraints: `Run it on ${a.machine}, in one of its sandboxes: Lothsahn asked for the Sentry's job to run on ${a.machine} as an ordinary job ("We had a thing where we wanted this to be a standard job sent to a worker on LothDesktop like any other", 2026-10-10). The jobs it files go through normal placement.`,
     source: { kind: 'nightly-review', untrusted: false, channel: 'nightly e2e', nightlyReview: { date: a.date, machine: a.machine, ...(a.since ? { since: a.since } : {}) } },

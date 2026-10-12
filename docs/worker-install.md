@@ -24,7 +24,9 @@ decisions of 2026-10-06 override it where they differ (listed at the end).
   seed/Library/         the Library seed new sandboxes are warmed from
   players/slotK-0, -1/  each sandbox slotK's two player folders, K = 1..N, and slotnightly-0, -1 for the nightly lab
                         (scripts/nightly/player_slots.py, layout sandbox-pairs, w576): FF_PLAYER_SLOT_ROOT for agents
-  nightly/              the nightly lab: FF_NIGHTLY_ROOT
+  nightly/              the nightly lab: FF_NIGHTLY_ROOT (mode lab; goes once a sandbox night is verified, w1099)
+  nightly-history/      since w1099 (mode sandbox): a sandbox night's state, logs, runs, reports and lab fixtures; no
+                        clone, Library or builds (the night builds in its sandbox)
   scratch/              long-lived scratch; scratch/legacy/ holds what a migration archived
   tmp/                  agents' TMP, TEMP and TMPDIR (one ffa-<session> folder each)
   voice/                only with --voice-whisper (w615): the GPU Whisper for the portal's mic, uv's Python, its venv,
