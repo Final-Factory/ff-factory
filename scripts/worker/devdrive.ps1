@@ -172,6 +172,10 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "icacls ${Letter}:\ failed ($LASTEXITCODE)" }
         Say "gave $UserSid full control of ${Letter}:\"
       }
+      # The maximum the VHDX really has, not the one asked for or recorded: a drive grown by hand (Resize-VHD or diskpart
+      # expand, LothDesktop 275 -> 300 GiB on 2026-10-12, w1070) keeps its old number otherwise, and the host guard then
+      # misjudges how much the file can still grow on its volume.
+      try { $real = [int][math]::Round((Get-DiskImage -ImagePath $Vhdx -ErrorAction Stop).Size / 1GB); if ($real -ge 50) { if ($real -ne $MaxGB) { Say "the VHDX's maximum is $real GB (recorded: $MaxGB GB)" }; $MaxGB = $real } } catch { }
       $state = Write-State $Letter $MaxGB $created
       $state['letterChangedFrom'] = $LetterChangedFrom
       Register-Tasks $Letter
