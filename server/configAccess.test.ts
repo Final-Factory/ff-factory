@@ -109,3 +109,12 @@ test('the ops worker reads config.json through fffctl config and its check, and 
   assert.match(checkOpsShell('fffctl claude-token --file /tmp/x', ctx) ?? '', /a person's/, 'gone, and never the worker\'s');
   assert.match(opsBrief('Ben'), /fffctl config/);
 });
+
+test('w1097: the ops worker counts the prompts people answered through fffctl approvals, and still reads no transcript', () => {
+  const ctx: ReadCtx = { platform: 'linux', home: OPS_PATHS.home, cwd: OPS_PATHS.scratch, fsx: { realpath: () => undefined } };
+  assert.equal(checkOpsShell('fffctl approvals', ctx), undefined);
+  assert.equal(checkOpsShell('fffctl approvals --since 2026-10-05 --split 2026-10-13', ctx), undefined);
+  assert.match(checkOpsShell('cat /srv/fff/data/transcripts/a1b2c3d4.jsonl', ctx) ?? '', /not yours to read/);
+  assert.match(checkOpsShell('node /srv/fff/app/current/scripts/cleanup-approvals.ts /srv/fff/data', ctx) ?? '', /no interpreters in the VM/, 'why fffctl approvals exists');
+  assert.match(opsBrief('Lothsahn'), /fffctl approvals --since YYYY-MM-DD --split YYYY-MM-DD\` \(w1097\): the permission prompts a person answered, as counts only/);
+});

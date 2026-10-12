@@ -220,6 +220,19 @@ else
   rc=0; out=$(upriv units '') || rc=$?
   [ "$rc" -eq 2 ] || fail "priv: units with an empty word was not refused (exit $rc): $out"
   echo "ok: fff-ops-priv units and units --check reach fffctl (and its exit status comes back); every other word, the watchdog included, is refused"
+  # approvals (w1097): the prompt counts, read only. Only --since and --split, each once, each with a date, reach fffctl.
+  [ "$(upriv approvals)" = "FFFCTL [approvals]" ] || fail "priv: approvals: $(upriv approvals)"
+  [ "$(upriv approvals --since 2026-10-05 --split 2026-10-13)" = "FFFCTL [approvals] [--since] [2026-10-05] [--split] [2026-10-13]" ] || fail "priv: approvals --since --split: $(upriv approvals --since 2026-10-05 --split 2026-10-13)"
+  [ "$(upriv approvals --split 2026-10-13)" = "FFFCTL [approvals] [--split] [2026-10-13]" ] || fail "priv: approvals --split: $(upriv approvals --split 2026-10-13)"
+  for bad in 'approvals --since' 'approvals --since 2026-10-5' 'approvals --since 2026-10-05;id' 'approvals --split x' 'approvals --since 2026-10-05 --since 2026-10-06' \
+    'approvals --data /srv/fff/data' 'approvals /srv/fff/data' 'approvals --since 2026-10-05 extra' 'approvals -- --since 2026-10-05'; do
+    rc=0
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(upriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
+  done
+  echo "ok: fff-ops-priv approvals reaches fffctl with --since and --split dates only; every other word is refused"
   # The other read-only forms (w745): the vault's list, list --names and help, machine-credential list, migrate --help. Every
   # other form of those commands changes the vault, a credential or the migration, or copies the key: refused, never run.
   [ "$(upriv vault list)" = "FFFCTL [vault] [list]" ] || fail "priv: vault list: $(upriv vault list)"

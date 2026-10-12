@@ -4,6 +4,9 @@
  * deploy that carries w913: `node scripts/cleanup-approvals.ts <dataDir> [--since 2026-10-03] [--split 2026-10-11]`.
  * A prompt is a `permission` event with a `decision` and `decidedBy` (a person answered it, server/sessions.ts decide); the
  * delete a session answers itself (server/tempDelete.ts) leaves no such event, so the "after" count falls to what still asks.
+ * On the portal VM it is `fffctl approvals [--since D] [--split D]` (w1097), which the orchestration worker may run: the
+ * portal's account runs it from the current release, and it prints counts and kinds only, never a command, a path or a reason's
+ * own words beyond plain ones (reasonWords).
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -41,7 +44,7 @@ export function promptKind(toolName: string | undefined, input: { command?: unkn
     if (/^Dangerous \S+ operation on critical path/i.test(reason)) return 'Claude Code: dangerous rm of a critical path';
     if (/^Dangerous \S+ operation/i.test(reason)) return 'Claude Code: dangerous rm, other';
     if (/^touches /.test(reason)) return 'Claude Code: a path outside the allowed folders';
-    return `Claude Code: ${reason.replace(/\s+/g, ' ').replace(/[`'"].*$/, '').slice(0, 70).trim()}`;
+    return `Claude Code: ${reasonWords(reason)}`;
   }
   if (toolName !== 'Bash' && toolName !== 'PowerShell') return `tool: ${toolName?.replace(/^(mcp__[^_]+(?:_[^_]+)*?)__.*$/, '$1') ?? 'unknown'}`;
   const cmd = typeof input?.command === 'string' ? input.command : '';
@@ -52,6 +55,20 @@ export function promptKind(toolName: string | undefined, input: { command?: unkn
   if (/\n|\(\)\s*\{/.test(cmd)) return `${toolName}: multi-step, no delete`;
   return `${toolName}: other`;
 }
+
+/**
+ * The words of a reason Claude Code gave, as a kind: what comes before a colon, a quote or a parenthesis, and only plain
+ * words, so no path, command or variable from the transcript is printed (`fffctl approvals` shows counts only, w1097).
+ */
+export function reasonWords(reason: string): string {
+  const head = reason.split(/[:`'"(]/)[0];
+  const all = head.trim().split(/\s+/);
+  const stop = all.findIndex((w) => !/^[A-Za-z][A-Za-z-]*[,.;]?$/.test(w));
+  const words = stop < 0 ? all : all.slice(0, stop);
+  return words.join(' ').slice(0, 70).replace(/[,.;]$/, '').trim() || 'another reason';
+}
+
+const DAY = /^\d{4}-\d\d-\d\d$/;
 
 export interface DayCount {
   day: string;
@@ -97,11 +114,16 @@ function main() {
   const args = process.argv.slice(2);
   const dataDir = args.find((a) => !a.startsWith('--') && !/^\d{4}-\d\d-\d\d$/.test(a));
   const opt = (name: string) => args.find((_a, i) => args[i - 1] === name);
-  if (!dataDir) {
-    console.error('usage: node scripts/cleanup-approvals.ts <dataDir> [--since YYYY-MM-DD] [--split YYYY-MM-DD]');
+  const bad = ['--since', '--split'].find((o) => args.includes(o) && !DAY.test(opt(o) ?? ''));
+  if (!dataDir || bad) {
+    console.error(`${bad ? `${bad} takes a date, YYYY-MM-DD. ` : ''}usage: node scripts/cleanup-approvals.ts <dataDir> [--since YYYY-MM-DD] [--split YYYY-MM-DD]`);
     process.exit(2);
   }
   const dir = path.join(dataDir, 'transcripts');
+  if (!fs.existsSync(dir)) {
+    console.error(`no ${dir}: is ${dataDir} the portal's data folder?`);
+    process.exit(2);
+  }
   const days = new Map<string, DayCount>();
   for (const f of fs.readdirSync(dir)) {
     if (f.endsWith('.jsonl')) countApprovals(fs.readFileSync(path.join(dir, f), 'utf8').split('\n'), opt('--since') ?? '', days);
