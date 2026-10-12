@@ -9,6 +9,10 @@ import { StandingAgents, type SessionLike, type SessionPort } from './standing.t
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { Machine, SessionInfo } from '../shared/types.ts';
+import { useFakeVault } from './testVault.ts';
+
+// Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
+useFakeVault();
 
 const at = (s: string) => new Date(s); // local time: no "Z"
 

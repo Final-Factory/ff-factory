@@ -14,7 +14,8 @@ import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { requestAsFiled } from './work.ts';
 import { BlockerWatch } from './blockerWatch.ts';
-import { personForWork, sessionPerson } from './vault.ts';
+import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
+import { fakeToken, useFakeVault } from './testVault.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
@@ -54,6 +55,8 @@ async function until(what: string, cond: () => boolean, ms = 5000) {
 }
 
 function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { legacy?: boolean; notify?: boolean; people?: UserInfo[]; hostAlpha?: boolean; gatherMs?: number } = {}) {
+  useFakeVault();
+  t.after(() => setVaultContext(undefined));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-orch-'));
   const cfg = {
     dataDir: dir,
@@ -1302,17 +1305,16 @@ test('w536: every worker runs in a sandbox: start_agent with a machine alone is 
   assert.equal(machines.placeFull(next), undefined, 'an idle agent takes no slot');
 });
 
-test('w464 change 6: claudeAccounts.dispatcher runs the dispatcher on that account, not the system payer\'s own token; people\'s orchestrators keep theirs', (t) => {
+test("w464 change 6, w1078: claudeAccounts.dispatcher pins the dispatcher to one vault token, else it runs on the system payer's pool; people's orchestrators keep their own", (t) => {
   const { cfg, agents, dispatcher, chat } = setup(t);
-  const HOST = 'sk-ant-oat01-host-token-9AAA';
-  const BENS = 'sk-ant-oat01-bens-own-token-BBBB';
-  cfg.claudeEnv = { CLAUDE_CODE_OAUTH_TOKEN: HOST };
-  cfg.userClaudeEnv = { ben: { CLAUDE_CODE_OAUTH_TOKEN: BENS } };
+  useFakeVault({ vault: { claudeByName: (name: string) => (name === 'vault-pin-1' ? { entry: { name, last4: 'pppp' }, token: fakeToken('pinned') } : undefined) } as never });
   const tokenOf = (info: SessionInfo) => (agents.orchestratorOptions(info) as { env: Record<string, string | undefined> }).env.CLAUDE_CODE_OAUTH_TOKEN;
-  assert.equal(tokenOf(dispatcher().info), BENS, 'unset: the system payer (Ben, the owner) and his own token, as before');
-  cfg.claudeAccounts = { dispatcher: 'token' };
-  assert.equal(tokenOf(dispatcher().info), HOST, "set: the host token, whoever the system payer is");
-  assert.equal(tokenOf(chat(BEN).info), BENS, "Ben's own orchestrator still runs on his token");
+  assert.equal(tokenOf(dispatcher().info), fakeToken('ben'), "unset: the system payer's (Ben, the owner) pool");
+  cfg.claudeAccounts = { dispatcher: 'vault:vault-pin-1' };
+  assert.equal(tokenOf(dispatcher().info), fakeToken('pinned'), 'pinned: that one vault token, whoever the system payer is');
+  assert.equal(tokenOf(chat(BEN).info), fakeToken('ben'), "Ben's own orchestrator still runs on his pool");
+  cfg.claudeAccounts = { dispatcher: 'vault:gone' };
+  assert.throws(() => tokenOf(dispatcher().info), /pinned to vault token gone/, 'a pin the vault cannot give: the dispatcher does not start, on no other credential');
 });
 
 // ---------------------------------------------------------------- w467: no secrets for orchestrators

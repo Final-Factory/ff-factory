@@ -8,8 +8,9 @@ starts anything. The record of every request and what became of it is the work l
 ## The two kinds
 
 **A person's own orchestrator** (`orchestratorRole: 'personal'`, its `requestedBy` is its person) talks only with that
-person. It runs on their own Claude token when config `userClaudeEnv` has one, otherwise on the account
-`claudeAccounts.orchestrator` picks (the owner's), and `system_status` says which. It gets none of that account's
+person. It runs on a token of their own vault pool and nothing else (w1078; before, on their `userClaudeEnv` token or the account
+`claudeAccounts.orchestrator` picked), and `system_status` says which; with no usable token it does not start and says why
+([accounts.md](accounts.md)). It gets none of that account's
 claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnectors`, [accounts.md](accounts.md),
 "claude.ai connectors"), and neither does the dispatcher. Its tools, as listed in
 `server/belts.ts` `PERSONAL_TOOLS`:
@@ -27,6 +28,8 @@ claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnecto
   owner's orchestrator may also message another owner's workers ([Owners across each other's work](#owners-across-each-others-work));
 - the ledger: `request_work`, `list_work`, `update_work`;
 - `message_person`, to another person's own orchestrator ([People to people](#people-to-people)).
+- `set_app_config` (w1078), Lothsahn's and Ben's alone, only in a turn their person started with a message of their own
+  ([What Lothsahn's and Ben's orchestrators read in config.json](#what-lothsahns-and-bens-orchestrators-read-in-configjson-w1078));
 - `ops_worker`, Lothsahn's and Ben's alone (refused for anyone else): the one orchestration worker in the portal VM, a
   shell for ssh to the machines, the portal's state and machine credentials, with no git, downloads or Unity
   ([ops-worker.md](ops-worker.md), w597). Its `deploy` updates the portal, only when the person asks in their own turn.
@@ -1017,13 +1020,16 @@ a Discord thread) could otherwise read a token and pass it on in a tool call. A 
 `server/secretGuard.ts`; for standing agents inside `standingGuard`) refuses `Read`, `NotebookRead`, `LS`, `Grep` and
 `Glob` calls, and a standing agent's shell words, that reach:
 
-- `config.json` and its saved versions (`config.json.prev`, `.1`…), where `FFSB_CONFIG` puts it and beside the app;
+- `config.json` and its saved versions (`config.json.prev`, `.1`…), where `FFSB_CONFIG` puts it and beside the app, except
+  for Lothsahn's and Ben's own orchestrators and the dispatcher while the file holds no secret (w1078, below); in the VM the
+  rest of `/srv/fff/config` stays closed to all of them;
 - `data/`, apart from an orchestrator's **own** memory folder and `data/attachments` (the files people attached, which
   orchestrators are handed and read), and for Lothsahn's and Ben's own orchestrators the parts of `data/` listed below
   (w650); for the dispatcher and other people's orchestrators, other orchestrators' memory, transcripts, the ledger and
   state stay closed;
 - the secrets folder (`<app>/secrets`, and the portal VM's `/srv/fff/secrets` beside its config folder) and the files
-  config `claudeTokenFile` and `anthropicApiKeyFile` name (their whole folder when it is called `secrets`);
+  config `anthropicApiKeyFile`, `vault.keyFile` and `providers.ffbox.tokenSha256File` name (their whole folder when it is called `secrets`); the
+  FFBox connector hash and the backup of config.json (`config.json.before-w1078-<time>`) are in it, closed to every agent;
 - FFBox's ffdiscord config and secrets (`FFBOX_CONFIG_DIR`, `FFBOX_SECRETS`);
 - the home secrets of the computer the agent runs on: `~/.ssh`, `~/.claude` and `~/.claude.json` (Claude's
   credentials), `CLAUDE_CONFIG_DIR`, `~/.config/gh` and `%APPDATA%\GitHub CLI` (gh's token), `~/.git-credentials`. A
@@ -1087,6 +1093,26 @@ backups (`orchestrator-memory.backup/`) and its git folder.
 - **No write path.** Orchestrators have no shell (`tools: Read, Glob, Grep, Write, Edit`, `orchestratorOptions`), and
   `memoryGuard` refuses `Write` and `Edit` outside the orchestrator's own memory folder and every other write tool.
   Tests: `server/secretGuard.test.ts` (w650), `server/orchestrators.test.ts` (w650, end to end).
+
+### What Lothsahn's and Ben's orchestrators read in config.json (w1078)
+
+config.json holds no secret since w1078: the Claude tokens are the vault's, and FFBox's connector hash is a file in the secrets
+folder ([accounts.md](accounts.md), "What w1078 did to config.json"). lothsahn first asked: "Can we move these two to a separate
+secrets file and let you read and write the rest?" So the guard now allows, for **Lothsahn's and Ben's own orchestrators and the
+dispatcher** (`mayReadConfig`, `server/agents.ts`), Read and Grep of config.json and its saved versions (`.prev`, `.1` to `.3`)
+that exist and hold no secret (`readableConfigFiles`, `inlineSecrets`, `server/configMigration.ts`). The list is computed at each
+session start, so a file that gains a secret is closed from the next one. Their brief says so (`configBrief`). Other people's
+orchestrators and standing agents are still refused, and the VM's secrets folder stays closed to everyone.
+
+**Nobody Writes or Edits config.json.** A change goes through `set_app_config`: it validates the value, applies it live and
+keeps the old file as `config.json.prev`. A malformed hand edit would stop the portal at its next start; Edit would skip the
+validation and the live apply, could change the keys `set_app_config` deliberately excludes (paths, permissions, models,
+`protectedPaths`) and could put a secret back. `set_app_config` is in Lothsahn's and Ben's own orchestrators' tools, **only in a
+turn their person started with a message of their own**, never because relayed text or a harness message (a check-in, a timer, a
+report) asks: otherwise it answers "a setting changes only in a turn <person> started with a message of their own (this turn is
+the harness's …); ask them". An owner-only key (`OWNER_ONLY_KEYS`) still needs the caller to be an owner (`ownerOnlyProblem`). The dispatcher keeps its existing
+guard (`USER_ASKED_TOOLS`, `server/belts.ts`: a person's own turn in its chat, or a `work_id` they filed). The orchestration
+worker reads it with `fffctl config` ([ops-worker.md](ops-worker.md)).
 
 ## Timers
 
@@ -1384,6 +1410,7 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   not yet answered made the turn the harness's, and on 2026-10-07 (07:45-08:00 UTC) `ops_worker` refused Lothsahn's own
   request three times because a worker's report arrived mid-turn. Every gate reads this one value:
   - `ops_worker` `send` opening a job, `deploy` and `restart` ([ops-worker.md](ops-worker.md));
+  - `set_app_config` in Lothsahn's and Ben's own orchestrators (w1078, `personalSettingProblem`, `server/agents.ts`);
   - `approve_delegation` (a personal orchestrator's);
   - `update_work` approve and decline of an intake request, and close and reopen of another person's request;
   - `humanAsked` on `request_work` and `update_work`, which the dispatcher's `USER_ASKED_TOOLS` above need

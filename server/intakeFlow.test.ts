@@ -25,6 +25,10 @@ import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { BlockerWatch } from './blockerWatch.ts';
 import { HELD_MARK } from '../shared/conditional.ts';
 import { startTestMachine } from './testMachine.ts';
+import { useFakeVault } from './testVault.ts';
+
+// Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
+useFakeVault();
 
 /**
  * The intake end to end (docs/intake.md; shared/intake.ts's FFBox signatures are server/intake.test.ts) on a real Agents with the scripted fake SDK and a fake Discord: what a poll

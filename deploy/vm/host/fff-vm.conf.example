@@ -103,8 +103,9 @@ NTFY_URL_FILE=/etc/fff-vm/ntfy-url
 
 # ---------------------------------------------------------------- the portal inside (install.sh sets it up, w498)
 # The answers install.sh asks for are stored here by it; the secrets are files in /etc/fff-vm/secrets (0600, root's):
-# claude-token (Lothsahn's, from "claude setup-token"), tailscale-authkey (Ben's one-use key; deleted once used),
-# gh-token (the portal's GitHub token, D7). The backups' age public keys are in /etc/fff-vm/backup-recipients.txt.
+# tailscale-authkey (Ben's one-use key; deleted once used), gh-token (the portal's GitHub token, D7), and the people's
+# Claude and GitHub tokens for the vault under people/<user id>/ (docs/vault.md; w1078: no claude-token answer any more).
+# The backups' age public keys are in /etc/fff-vm/backup-recipients.txt.
 # config.json's ownerName.
 PORTAL_OWNER_NAME=
 # join (the default: needs a fresh auth key until the node has joined) or skip (CI).

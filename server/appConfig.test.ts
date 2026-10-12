@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, checkReviewers, normalizeSetting, setAppConfig, toggleNightly } from './appConfig.ts';
-import { claudeFromVault } from './secrets.ts';
+import { githubFromVault } from './githubTokens.ts';
+import { FFBOX_HASH_FILE, ffboxTokenHash } from './configMigration.ts';
+import { tokenSha256 } from './providerProtocol.ts';
 import type { Config } from './config.ts';
 
 const setup = (t: { after: (fn: () => void) => void }) => {
@@ -191,34 +193,96 @@ test('set_app_config: placement.prefer and placement.avoid (w428), live, cleared
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement, { prefer: ['beast', 'lothdesktop'] });
 });
 
-test('set_app_config: machines.claudeFromVault switches one machine alone, true and false still set them all (w737)', (t) => {
+test('set_app_config: machines.githubFromVault switches one machine alone, true and false still set them all (w737, w1078: it was claudeFromVault, now the GitHub one)', (t) => {
   const { file, cfg } = setup(t);
-  const on = (id: string) => claudeFromVault(cfg, { id });
-  const saved = () => JSON.parse(fs.readFileSync(file, 'utf8')).machines?.claudeFromVault;
+  const on = (id: string) => githubFromVault(cfg, id);
+  const saved = () => JSON.parse(fs.readFileSync(file, 'utf8')).machines?.githubFromVault;
   // One machine: the others (BEAST, m3, m5, biscuit) stay off, and a machine nobody named is off.
-  assert.deepEqual(setAppConfig(file, cfg, 'machines.claudeFromVault', true, { machine: 'lothdesktop' }), { before: undefined, after: { lothdesktop: true } });
+  assert.deepEqual(setAppConfig(file, cfg, 'machines.githubFromVault', true, { machine: 'lothdesktop' }), { before: undefined, after: { lothdesktop: true } });
   assert.deepEqual(saved(), { lothdesktop: true });
   assert.deepEqual([on('lothdesktop'), on('beast'), on('m3'), on('m5'), on('biscuit')], [true, false, false, false, false]);
   // A second machine joins; the first stays.
-  setAppConfig(file, cfg, 'machines.claudeFromVault', true, { machine: 'm3' });
+  setAppConfig(file, cfg, 'machines.githubFromVault', true, { machine: 'm3' });
   assert.deepEqual(saved(), { lothdesktop: true, m3: true });
   // Taking one out leaves the other.
-  setAppConfig(file, cfg, 'machines.claudeFromVault', false, { machine: 'm3' });
+  setAppConfig(file, cfg, 'machines.githubFromVault', false, { machine: 'm3' });
   assert.deepEqual([on('lothdesktop'), on('m3')], [true, false]);
   // Without a machine the value is every machine not named (the "*" entry): the named one keeps its own.
-  setAppConfig(file, cfg, 'machines.claudeFromVault', false);
+  setAppConfig(file, cfg, 'machines.githubFromVault', false);
   assert.deepEqual(saved(), { lothdesktop: true, m3: false, '*': false });
   assert.deepEqual([on('lothdesktop'), on('m5')], [true, false]);
   // Starting from the plain global value, as before w737.
   const fresh = setup(t);
-  setAppConfig(fresh.file, fresh.cfg, 'machines.claudeFromVault', true);
-  assert.equal(JSON.parse(fs.readFileSync(fresh.file, 'utf8')).machines.claudeFromVault, true);
-  assert.equal(claudeFromVault(fresh.cfg, { id: 'm5' }), true);
-  setAppConfig(fresh.file, fresh.cfg, 'machines.claudeFromVault', false, { machine: 'beast' });
-  assert.deepEqual(JSON.parse(fs.readFileSync(fresh.file, 'utf8')).machines.claudeFromVault, { '*': true, beast: false });
+  setAppConfig(fresh.file, fresh.cfg, 'machines.githubFromVault', true);
+  assert.equal(JSON.parse(fs.readFileSync(fresh.file, 'utf8')).machines.githubFromVault, true);
+  assert.equal(githubFromVault(fresh.cfg, 'm5'), true);
+  setAppConfig(fresh.file, fresh.cfg, 'machines.githubFromVault', false, { machine: 'beast' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(fresh.file, 'utf8')).machines.githubFromVault, { '*': true, beast: false });
   // A value that is not true or false, and a machine id that is not one, are refused.
-  assert.throws(() => setAppConfig(file, cfg, 'machines.claudeFromVault', 'maybe', { machine: 'm5' }), /machines\.claudeFromVault is true/);
-  assert.throws(() => setAppConfig(file, cfg, 'machines.claudeFromVault', true, { machine: 'loth desktop' }), /machine id/);
+  assert.throws(() => setAppConfig(file, cfg, 'machines.githubFromVault', 'maybe', { machine: 'm5' }), /machines\.githubFromVault is true/);
+  assert.throws(() => setAppConfig(file, cfg, 'machines.githubFromVault', true, { machine: 'loth desktop' }), /machine id/);
+});
+
+test('set_app_config (w1078): the Claude credential keys are gone, refused whatever the value, and the file is left alone', (t) => {
+  const { file, cfg } = setup(t);
+  const before = fs.readFileSync(file, 'utf8');
+  for (const key of ['claudeEnv.CLAUDE_CODE_OAUTH_TOKEN', 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN', 'claudeAccounts.orchestrator', 'claudeTokenFile', 'machines.useHostClaudeEnv', 'machines.claudeFromVault']) {
+    assert.ok(!(SETTABLE_KEYS as readonly string[]).includes(key), key);
+    assert.throws(() => setAppConfig(file, cfg, key as never, 'vault'), /cannot be changed by an agent/, key);
+  }
+  assert.ok(OWNER_ONLY_KEYS.has('claudeAccounts.dispatcher'));
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'the file is left alone');
+});
+
+test('set_app_config (w1078): providers.ffbox.token keeps only its hash, in a file of the secrets folder; config.json names the file and never holds the hash', (t) => {
+  const { file, cfg } = setup(t);
+  const secrets = path.join(path.dirname(file), 'secrets');
+  const was = process.env.FFSB_SECRETS_DIR;
+  process.env.FFSB_SECRETS_DIR = secrets;
+  t.after(() => (was === undefined ? delete process.env.FFSB_SECRETS_DIR : (process.env.FFSB_SECRETS_DIR = was)));
+  const token = `ffpv1_${'B'.repeat(39)}Q7q7`;
+  const hash = tokenSha256(token);
+  const hashFile = path.join(secrets, FFBOX_HASH_FILE);
+  const r = setAppConfig(file, cfg, 'providers.ffbox.token', token);
+  assert.deepEqual(r, { before: 'not set', after: `set (…${hash.slice(-4)})` });
+  assert.equal(fs.readFileSync(hashFile, 'utf8').trim(), hash, 'the hash is in the secrets folder');
+  assert.equal(fs.statSync(hashFile).mode & 0o777, 0o600, 'its owner only');
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+  assert.equal(saved.providers.ffbox.tokenSha256File, hashFile, 'config.json names the file');
+  assert.equal(saved.providers.ffbox.tokenSha256, undefined);
+  assert.ok(!fs.readFileSync(file, 'utf8').includes(hash) && !fs.readFileSync(file, 'utf8').includes(token), 'config.json holds neither');
+  assert.equal(cfg.providers?.ffbox?.tokenSha256File, hashFile, 'live');
+  assert.equal(cfg.providers?.ffbox?.tokenSha256, undefined);
+  assert.equal(ffboxTokenHash(cfg), hash, 'the connector reads it from the file');
+  // A new token replaces the file only: config.json already names it.
+  const text = fs.readFileSync(file, 'utf8');
+  const next = `ffpv1_${'C'.repeat(39)}Z9z9`;
+  assert.deepEqual(setAppConfig(file, cfg, 'providers.ffbox.token', next), { before: `set (…${hash.slice(-4)})`, after: `set (…${tokenSha256(next).slice(-4)})` });
+  assert.equal(fs.readFileSync(file, 'utf8'), text, 'config.json is not rewritten');
+  assert.equal(ffboxTokenHash(cfg), tokenSha256(next));
+  // null removes the file and the key.
+  assert.deepEqual(setAppConfig(file, cfg, 'providers.ffbox.token', null), { before: `set (…${tokenSha256(next).slice(-4)})`, after: 'not set' });
+  assert.ok(!fs.existsSync(hashFile));
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).providers.ffbox.tokenSha256File, undefined);
+  assert.equal(ffboxTokenHash(cfg), undefined);
+});
+
+test('set_app_config (w1078): an old inline providers.ffbox.tokenSha256 is read until the first write, which moves it into the file', (t) => {
+  const { file, cfg } = setup(t);
+  const secrets = path.join(path.dirname(file), 'secrets');
+  const was = process.env.FFSB_SECRETS_DIR;
+  process.env.FFSB_SECRETS_DIR = secrets;
+  t.after(() => (was === undefined ? delete process.env.FFSB_SECRETS_DIR : (process.env.FFSB_SECRETS_DIR = was)));
+  const old = tokenSha256(`ffpv1_${'D'.repeat(43)}`);
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+  fs.writeFileSync(file, JSON.stringify({ ...raw, providers: { ffbox: { enabled: true, tokenSha256: old } } }));
+  cfg.providers = { ffbox: { enabled: true, tokenSha256: old } };
+  assert.equal(ffboxTokenHash(cfg), old);
+  const fresh = `ffpv1_${'E'.repeat(43)}`;
+  assert.equal(setAppConfig(file, cfg, 'providers.ffbox.token', fresh).before, `set (…${old.slice(-4)})`);
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual(saved.providers.ffbox, { enabled: true, tokenSha256File: path.join(secrets, FFBOX_HASH_FILE) }, 'the inline hash is gone from config.json');
+  assert.equal(ffboxTokenHash(cfg), tokenSha256(fresh));
 });
 
 test('set_app_config intake.nightly.run and .enabled (w864): checked, written, applied live; anyone may set them', (t) => {

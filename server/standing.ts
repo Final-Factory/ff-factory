@@ -821,11 +821,10 @@ export class StandingAgents {
       // The daemon's token and secrets (w467); the machine's home secrets are added there, by standingGuard.
       secrets: { deny: [`${dir}/daemon.json*`, `${dir}/secrets`], allow: [] } as SecretRules,
       gameRepos: [this.cfg.repo.url],
-      // The host's Claude account (config machines.useHostClaudeEnv), for this agent only; the run's person's own
-      // when they have one (config userClaudeEnv, docs/identity.md).
+      // A vault token from the run person's pool, for this agent only (w1078: nothing else).
       ...(() => {
-        // The vault's token and secrets for this run (docs/vault.md), else the machine's account as before. The nightly
-        // regression sentry runs on the tokens config vault.unattributed.nightly names ("Whose tokens").
+        // The vault's token and secrets for this run (docs/vault.md). The nightly regression sentry runs on the tokens config
+        // vault.unattributed.nightly names ("Whose tokens").
         const tokenUser = a.id === NIGHTLY_SENTRY ? unattributedPerson(this.cfg, 'nightly') : undefined;
         const run = machineRunEnv(this.cfg, m ?? a.machineId, { role: 'standing', requestedBy: this.currentRequester(a), sessionId: a.sessionId, tokenUser });
         return { env: run.env, login: run.login };

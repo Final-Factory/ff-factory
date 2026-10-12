@@ -6,10 +6,11 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 /**
  * What orchestrators and standing agents may not read (w467, change 7 of docs/portal-on-ffbox-host.md): FF Factory's
  * own secrets and data. An orchestrator reads the repo and its own memory; a standing agent its folder, the repo and
- * GitHub. Neither has a reason to open config.json (the agents' Claude token, FFBox's connector token), a token or
- * API-key file, ~/.ssh (the keys machine deploys use), Claude's credentials folder, gh's token, or data/ (sessions,
- * transcripts, the ledger, other people's memory). A prompt injection relayed into one could otherwise read them and
- * pass them on in a tool call. This is a seatbelt like the other guards: the tools' own permission rules still apply.
+ * GitHub. Neither has a reason to open a token or API-key file, the secrets folder (FFBox's connector hash, w1078),
+ * ~/.ssh (the keys machine deploys use), Claude's credentials folder, gh's token, or data/ (sessions, transcripts, the
+ * ledger, other people's memory). config.json is closed too, except to Lothsahn's and Ben's own orchestrators and the
+ * dispatcher while it holds no secret (w1078). A prompt injection relayed into one could otherwise read them and pass them
+ * on in a tool call. This is a seatbelt like the other guards: the tools' own permission rules still apply.
  *
  * Paths follow the agent's platform (`platform`): Windows paths compare without case, `/c/x` (Git Bash) is `c:/x`,
  * UNC and device paths are refused; POSIX paths compare as they are. "~" is the agent's home.
@@ -241,18 +242,23 @@ export function homeSecrets(env: NodeJS.ProcessEnv = process.env, platform: Node
   ];
 }
 
-/** Secret files config may name (part A of the portal VM, w464: claudeTokenFile; change 18: anthropicApiKeyFile; w512: vault.keyFile). */
+/**
+ * Secret files config may name (change 18: anthropicApiKeyFile; w512: vault.keyFile; w1078: providers.ffbox.tokenSha256File,
+ * and claudeTokenFile from a config before w1078).
+ */
 export const secretFilesOf = (cfg: object): (string | undefined)[] => {
-  const c = cfg as { claudeTokenFile?: unknown; anthropicApiKeyFile?: unknown; vault?: { keyFile?: unknown } };
-  return [c.claudeTokenFile, c.anthropicApiKeyFile, c.vault?.keyFile].map((v) => (typeof v === 'string' ? v : undefined));
+  const c = cfg as { claudeTokenFile?: unknown; anthropicApiKeyFile?: unknown; vault?: { keyFile?: unknown }; providers?: { ffbox?: { tokenSha256File?: unknown } } };
+  return [c.claudeTokenFile, c.anthropicApiKeyFile, c.vault?.keyFile, c.providers?.ffbox?.tokenSha256File].map((v) => (typeof v === 'string' ? v : undefined));
 };
 
 /**
  * The portal's secrets and data, as rules for agents that run on its own computer (orchestrators, and standing agents
- * of this host): config.json and its saved versions, data/, the secrets folder (the VM's /srv/fff/secrets, or one beside
- * the app), token and API-key files (config claudeTokenFile, anthropicApiKeyFile), FFBox's ffdiscord config and secrets
- * (FFBOX_CONFIG_DIR, FFBOX_SECRETS), and the home secrets (homeSecrets). `allow`: what such an agent may still read in
- * there. Each rule in both its Windows and its POSIX spelling, so the platform the agent runs on decides.
+ * of this host): config.json and its saved versions (and, when it has a folder of its own as in the VM, that whole folder),
+ * data/, the secrets folder (the VM's /srv/fff/secrets, or one beside the app), the secret files config names
+ * (secretFilesOf), FFBox's ffdiscord config and secrets (FFBOX_CONFIG_DIR, FFBOX_SECRETS), and the home secrets
+ * (homeSecrets). `allow`: what such an agent may still read in there (w1078: config.json while it holds no secret, for
+ * Lothsahn's and Ben's own orchestrators and the dispatcher). Each rule in both its Windows and its POSIX spelling, so the
+ * platform the agent runs on decides.
  */
 export function portalSecretRules(o: {
   configFile: string;
@@ -275,7 +281,10 @@ export function portalSecretRules(o: {
       `${P.join(o.appRoot, 'config.json')}*`,
       o.dataDir,
       P.join(o.appRoot, 'secrets'),
-      ...(same(cfgDir, o.appRoot) ? [] : [P.join(P.dirname(cfgDir), 'secrets')]),
+      // The secrets folder (w1078, server/configMigration.ts secretsDirOf): beside a folder named config, else inside config's.
+      ...(same(cfgDir, o.appRoot) ? [] : [P.join(P.dirname(cfgDir), 'secrets'), P.join(cfgDir, 'secrets')]),
+      // The secrets folder when it is set elsewhere (w1078, server/configMigration.ts secretsDirOf).
+      ...(env.FFSB_SECRETS_DIR ? [env.FFSB_SECRETS_DIR] : []),
       ...files.map((f) => (P.basename(P.dirname(f)).toLowerCase() === 'secrets' ? P.dirname(f) : f)),
       ...(env.FFBOX_SECRETS ? [env.FFBOX_SECRETS] : []),
       ...(env.FFBOX_CONFIG_DIR ? [env.FFBOX_CONFIG_DIR] : []),
