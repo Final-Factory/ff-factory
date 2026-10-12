@@ -103,6 +103,13 @@ test('w643: Queued is capacity only: queued for capacity, or a message held for 
   assert.equal(own?.state, 'queued');
 });
 
+test('w1094: w1073 as it happened: CI cleared, its worker resumed, its sandbox gone to other work: Queued for a sandbox on its machine, not Blocked', () => {
+  const why = 'no sandbox on lothdesktop is free (its own, slot1, took other work after it was released: it waits on CI (w1073: CI on Final-Factory/FinalFactory#1526)); the next one to free there is its, ahead of new work';
+  const w = item('w1073', { sessionIds: ['ec839c3a'] });
+  const l = workLive(w, { items: [w], session: () => session('ec839c3a', { status: 'stopped', queuedSend: why, placeReleased: { sandbox: 'slot1', branch: 'sandbox/w1073-map-hint', at: ago(0.3), why: 'it waits on CI' } }), now: NOW });
+  assert.deepEqual([l?.state, l?.why], ['queued', `a message to ec839c3a waits for a sandbox on its machine (${why})`]);
+});
+
 test('w643: a machine with room: nothing is wrongly Queued; a request queued anyway is flagged with the computers that have room', () => {
   const w = item('w634', { status: 'queued', queuedFor: { at: ago(1) } });
   const full = workLive(w, { items: [w], session: () => undefined, room: [], now: NOW });

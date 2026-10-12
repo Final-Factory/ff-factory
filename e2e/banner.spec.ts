@@ -246,8 +246,10 @@ test('a closed watchdog-restart banner stays closed for that restart across relo
  */
 function reserveBanner(usage: PlanUsage, others = 1): TokenWarning[] {
   const token = 'sk-ant-oat01-e2e-fixture-token-dAAA';
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: token }, claudeAccounts: { dispatcher: 'token' } } as never;
-  return reserveLines(cfg, () => usage, () => others, Date.now()).flatMap((r) => (r.warning ? [{ id: `reserve:${r.cred.key}`, kind: 'reserve' as const, text: r.warning }] : []));
+  // The dispatcher pinned to a vault token (w996; w1078: the only reserve there is): a fake vault that gives it.
+  const cfg = { claudeAccounts: { dispatcher: 'vault:vault-e2e-1' } } as never;
+  const vault = { claudeByName: () => ({ entry: { name: 'vault-e2e-1', last4: 'dAAA' }, token }) };
+  return reserveLines(cfg, () => usage, () => others, Date.now(), { vault } as never).flatMap((r) => (r.warning ? [{ id: `reserve:${r.cred.key}`, kind: 'reserve' as const, text: r.warning }] : []));
 }
 
 async function withTokenWarnings(page: Page, tokenWarnings: TokenWarning[]) {

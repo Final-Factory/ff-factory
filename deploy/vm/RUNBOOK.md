@@ -1,7 +1,7 @@
 # Installing the portal VM on the FFBox host: the runbook
 
 One command on the FFBox host (Ubuntu 24.04), run by Lothsahn as root, installs the host side and then the portal
-inside the VM, and sets the portal up: Tailscale and Funnel, the subscription token, GitHub and the base clone,
+inside the VM, and sets the portal up: Tailscale and Funnel, GitHub and the base clone,
 config.json and the backups. It asks for everything it needs first, before it changes anything, and stores the answers
 in `/etc/fff-vm`, so running it again (or rebuilding the VM) asks nothing it already knows. The design and the reasons
 are in [docs/portal-on-ffbox-host.md](../../docs/portal-on-ffbox-host.md). Every step is idempotent: a run that stops
@@ -68,7 +68,6 @@ What to have at hand (the installer asks for each, and stores it):
 | your ssh public key for the VM's admin account | your `~/.ssh/id_ed25519.pub` | `/etc/fff-vm/admin_authorized_keys` |
 | the alerts' ntfy URL | FF Factory's outside-watch topic | `/etc/fff-vm/ntfy-url` (0600) |
 | the portal's owner name (config `ownerName`) | | `fff-vm.conf` |
-| your Claude subscription token: `claude setup-token` on any machine with Claude Code, the `sk-ant-oat01-...` it prints | | `/etc/fff-vm/secrets/claude-token` |
 | Ben's Tailscale auth key (`tskey-auth-...`) | | `/etc/fff-vm/secrets/tailscale-authkey`, deleted once the node has joined |
 | the portal's GitHub token (D7, `github_pat_...`); skipping it needs an explicit yes | | `/etc/fff-vm/secrets/gh-token` |
 | the backups: the sftp target (`fff-backup@beast`) and the age public keys; both may be left empty | | `fff-vm.conf`, `/etc/fff-vm/backup-recipients.txt` |
@@ -151,8 +150,9 @@ portal keeps running for everyone. The design is section 7.2 of
 
 **Before:**
 
-- The VM is installed (section 2). The subscription token is stored and the base clone is there; `fffctl status`
-  shows both.
+- The VM is installed (section 2). The base clone is there (`fffctl status`), and each person's Claude tokens are in the vault (`sudo fffctl vault list`):
+  since w1078 the installer no longer asks for a Claude subscription token; every Claude process runs on a vault token, added
+  with `sudo fffctl vault add-claude <person>` or the host's `people/<id>/claude-tokens` files (`fff-vm vault-sync`).
 - The portal's key is authorized on BEAST. Print the line with:
 
   ```bash
@@ -206,14 +206,15 @@ It prints and keeps in `/srv/fff/migrate/report-dry-run-*.txt`:
 
 - the copy's size and time;
 - every rewrite it made: BEAST from the portal's own host to a machine over ssh; every machine's portal URL; the paths;
-  the portal-only mode; the orchestrators and the dispatcher on the subscription token; `machines.useHostClaudeEnv` for
-  BEAST, so its workers keep their account;
+  the portal-only mode; the orchestrators on `claudeAccounts.orchestrator "vault"` (until w1078: the orchestrators and the
+  dispatcher on the subscription token, and `machines.useHostClaudeEnv` for BEAST); BEAST's retired Claude account keys left out;
 - then four checks, each **PASS** or **FAIL**:
   - it starts as a dry run (`/api/health` says `dryRun`);
   - no data was restored on load;
   - the session, work-item, machine and transcript counts equal BEAST's;
-  - the dispatcher's conversation resumes here on the token file (one short message, through `claude --resume
-    --fork-session`, so the copied conversation itself is not changed).
+  - the dispatcher's conversation resumes here (one short message, through `claude --resume --fork-session`, so the copied
+    conversation itself is not changed). Until w1078 it ran on the token file; w1078 retired that file, so the check
+    (`resumeCheck`, `scripts/fff-migrate.ts`) now reports that it cannot run when the VM's config names none.
 
 While it is in place:
 
@@ -413,5 +414,5 @@ what the install added. `/etc/fff-vm`, the answers and secrets included, is kept
 | Private network | 10.213.41.0/24 (host .1, VM .10) | Unlikely to collide with a home LAN or Docker's ranges; the installer refuses if it does |
 | Guest resolvers | 1.1.1.1, 9.9.9.9 | The VM uses no DNS service on the host (design 1.3) |
 | Funnel on the first join | on | Logins exist only once `node server/user.ts` runs in the VM, so an empty portal behind Funnel cannot be signed in to |
-| The orchestrators and the dispatcher | on the subscription token (`claudeAccounts` `tokenfile`) | D4, design 5.2; workers stay as they are |
+| The orchestrators and the dispatcher | on vault tokens (w1078; until then the subscription token, `claudeAccounts` `tokenfile`) | D4 and design 5.2 are superseded: every Claude process runs on a vault token, no secret in config.json |
 | A copy of the secrets on the host | `/etc/fff-vm/secrets`, root-only | So a rebuilt VM needs no one to find them again. Root on this host can read the VM's memory and disk anyway (D2), so this moves no boundary |

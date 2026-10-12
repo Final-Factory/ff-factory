@@ -313,7 +313,7 @@ It cannot:
 2. **FFBox initiates.** FF Factory has no ssh, no inbound port and no deploy path into FFBox.
 3. **No secret crosses.** FF Factory never sends a Claude token to FFBox, unlike the Macs, and
    FFBox never sends one back. The one shared secret is the connector token. FFBox keeps it; FF
-   Factory keeps only its SHA-256, as for machine tokens. Prompt text passes `redactSecrets`
+   Factory keeps only its SHA-256, as for machine tokens, in a file of its secrets folder (config `providers.ffbox.tokenSha256File`; never in config.json, w1078). Prompt text passes `redactSecrets`
    (`server/secrets.ts:41`) on the way out, and results pass it on the way in.
 4. **Least privilege, both ways.** FF Factory may submit, follow up on and stop the conversations
    it opened, ask for a diagnosis of a filed report, and read summaries. It may not touch pools,
@@ -645,9 +645,9 @@ Built 2026-09-27 ([identity.md](identity.md)):
 
   The orchestrator acts for the author of the latest person's message, or names another person with
   `for_user`. Agent cards and details show who an agent works for.
-- **Local billing.** A worker runs on its person's own Claude token when config `userClaudeEnv` has
-  one, and on the owner's otherwise. This is how the agents Lothsahn asks for on Ben's machines (BEAST
-  sandboxes and the M3) run on Lothsahn's account.
+- **Local billing.** A worker runs on a token of its person's own vault pool, and on nobody else's (w1078; until then on
+  config `userClaudeEnv`'s token when it had one, and on the owner's otherwise). This is how the agents Lothsahn asks for on
+  Ben's machines (BEAST sandboxes and the M3) run on Lothsahn's account ([accounts.md](accounts.md)).
 - Roles are not enforced yet, and an API key is still a full tool belt (`server/mcp.ts`).
 
 ### Proposal
@@ -686,11 +686,10 @@ Built 2026-09-27 ([identity.md](identity.md)):
   `accepted.billedTo` says whose account was charged. Tokens never cross the connector (rule 3).
   The schema and the MUST rules are in the contract, "Work messages".
 - **Billing on Ben's machines** (the same idea, locally; [identity.md](identity.md), "Local billing"):
-  - Work Lothsahn asks for on BEAST sandboxes or the M3 runs on Lothsahn's own Claude token when FF
-    Factory has one. It is config `userClaudeEnv.lothsahn`, write-only and redacted like `claudeEnv`,
-    and chosen per worker by `requestedBy`.
-  - Without one, work runs on the owner's account.
-  - The shared orchestrator always runs on the owner's.
+  - Work Lothsahn asks for on BEAST sandboxes or the M3 runs on a token of Lothsahn's own vault pool, chosen per worker by
+    `requestedBy`. (Until w1078 it was config `userClaudeEnv.lothsahn`.)
+  - Without a token in the vault the work does not start and says why; since w1078 it never runs on the owner's account.
+  - The dispatcher runs on the vault token it is pinned to, else on the system payer's pool.
 - **FFBox trusts FF Factory's login.** That is a real delegation of trust. Anyone who takes over FF
   Factory can submit as either person. The limits are section 3, plus per-source caps FFBox can set
   for `fff`: allowed classes per person, and turns and spend per day.

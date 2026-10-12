@@ -36,6 +36,8 @@ import path from 'node:path';
 import type { SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { RED_PNG, fakeQuery } from './fakeAgent.ts';
 import { E2E_PROVIDER_TOKEN } from './mockConnector.ts';
+import { FFBOX_HASH_FILE } from '../server/configMigration.ts';
+import { fakeToken } from '../server/testVault.ts';
 import { CH, SEEDED_CURSORS, snowflake, startMockDiscord, writeFfboxConfig, writeMaxEvents } from './mockDiscord.ts';
 
 export const USER = 'tester';
@@ -64,6 +66,12 @@ const sandboxRoot = path.join(base, 'sandboxes');
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(sandboxRoot, { recursive: true });
 fs.writeFileSync(path.join(base, 'vault.key'), randomBytes(32).toString('base64'), { mode: 0o600 });
+// The secrets folder (w1078): FFBox's connector hash lives here, not in config.json, and the portal reads this one.
+const secretsDir = path.join(base, 'secrets');
+fs.mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
+process.env.FFSB_SECRETS_DIR = secretsDir;
+const providerHashFile = path.join(secretsDir, FFBOX_HASH_FILE);
+if (withProvider) fs.writeFileSync(providerHashFile, createHash('sha256').update(E2E_PROVIDER_TOKEN).digest('hex') + '\n', { mode: 0o600 });
 
 // A tiny git repo stands in for the game repo: the base clone and each sandbox folder.
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore', windowsHide: true });
@@ -108,7 +116,8 @@ fs.writeFileSync(
       dataDir,
       sandboxRoot,
       // The token vault (docs/vault.md, e2e/vault.spec.ts): its key outside data/, readable by its owner only.
-      vault: { keyFile: path.join(base, 'vault.key') },
+      // Work nobody asked for by name (intake, FFBox, the nightly run) runs on the tester's tokens: the vault holds nobody else's here.
+      vault: { keyFile: path.join(base, 'vault.key'), unattributed: { intake: USER, ffbox: USER, nightly: USER } },
       repo: { url: path.join(base, 'base'), basePath: path.join(base, 'base') },
       defaultBase: 'develop',
       models: ['opus', 'sonnet'],
@@ -133,7 +142,7 @@ fs.writeFileSync(
       // The provider projects also take FFBox's ledger check and its fix branches (docs/intake.md; e2e/provider.spec.ts).
       ...(withProvider
         ? {
-            providers: { ffbox: { enabled: true, tokenSha256: createHash('sha256').update(E2E_PROVIDER_TOKEN).digest('hex') } },
+            providers: { ffbox: { enabled: true, tokenSha256File: providerHashFile } },
             intake: { ffbox: { enabled: true, boardCheck: true, escalations: true, repo: 'Final-Factory/FinalFactory' } },
           }
         : {}),
@@ -205,6 +214,12 @@ delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 // Nor a real Discord token: Max reads only the scratch ffbox config above.
 for (const k of ['DISCORD_TOKEN', 'FFDISCORD_APP_TOKEN', 'FFDISCORD_SERVER_ID', 'FFBOX_SECRETS', 'FFBOX_CONFIG_DIR']) delete process.env[k];
 fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
+
+// Every Claude process runs on a vault token (w1078): one fake Claude token for each login, so the orchestrators, the
+// dispatcher and the machine's workers start. The portal's vault reads this file and key at its start.
+const { Vault, VAULT_FILE } = await import('../server/vault.ts');
+const vault = new Vault({ file: path.join(dataDir, VAULT_FILE), key: () => ({ file: path.join(base, 'vault.key') }) });
+for (const login of [USER, MATE, COMPACTOR]) vault.add({ name: `vault-${login}-1`, kind: 'claude', value: fakeToken(login), owner: login, share: 'owner' });
 
 const { Auth } = await import('../server/auth.ts');
 const auth = new Auth(dataDir, { trustProxy: false });

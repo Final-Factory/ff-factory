@@ -73,12 +73,16 @@ Every `hostGuard.pollSeconds` (30) it measures the volumes above (the sandbox ro
 `hostDiskPaths`, where you put `"C:/"` when the Dev Drive's VHDX lives on C:), free RAM, and, on a daemon, whether the
 sandbox root exists.
 
-**Disk levels**, with `hysteresisGB` (10) before a level clears:
+**Disk levels**, with `hysteresisGB` (10) before a level clears. The portal's own host, its dedicated VM, is low below
+`hostGuard.warnFreeGB` (40) and critical below `hostGuard.criticalFreeGB` (10) (w1101, lothsahn: "The portal should be
+considered to be low below 40GB free, not 120GB" and "Critical level for the portal should be 10GB"; settable with
+set_app_config, critical below warn). A machine's daemon has its own levels (`disk_warn_gb`, `disk_critical_gb` in its
+daemon.json):
 
 | Level | When (any watched volume) | What happens |
 |---|---|---|
-| warn | below `warnFreeGB` (80) | a `[host]` message to the orchestrator and a push (kind "Host health"); on a machine's daemon, new sandbox agents and editors there are also refused with the reason |
-| critical | below `criticalFreeGB` (40) | also: a clean-up pass with every rule runs (at most every 10 minutes); the daemon's guard also stops sandbox editors nobody is working in |
+| warn | below the warn level | a `[host]` message to the orchestrator and a push (kind "Host health"); on a machine's daemon, new sandbox agents and editors there are also refused with the reason |
+| critical | below the critical level | also: a clean-up pass with every rule runs (at most every 10 minutes); the daemon's guard also stops sandbox editors nobody is working in |
 
 **The sandbox drive** (a machine daemon's guard; the portal's has none). When the sandbox root disappears:
 1. The guard remembers the editors that were up and the agents mid-turn in sandboxes (from its
@@ -242,8 +246,9 @@ Now the host guard and every machine daemon clean up by themselves (`server/clea
 
 - **A pass every hour** (`everyMinutes`, 60).
 - **A pass every 15 minutes while free space is below the soft threshold** (`softFreeGB`), which also runs
-  the rules that empty whole caches. On BEAST the soft threshold defaults to `warnFreeGB` + 40 = **120 GB**,
-  so clean-up works hard well before the hard block at 80 GB; on the machines it is **80 GB**. The volumes
+  the rules that empty whole caches. On the portal's dedicated VM the soft threshold defaults to its warn level,
+  **40 GB** (`hostSoftFreeGB`, w1101; it was warn + 40 = 120 GB for BEAST's sandbox drive, when the portal ran there and
+  kept sandboxes); on the machines it is **80 GB**. The volumes
   measured are the disk's: the home folder's, (host) the data folder's and `hostDiskPaths`, (machine) the clone's
   and the sandboxes'; the fullest one counts. A RAM-backed filesystem (tmpfs, ramfs) never counts, and the temp
   folder is shown apart (`temp` in the summary: RAM, or a disk volume of its own) unless it is on that disk (w566:
@@ -319,7 +324,8 @@ Unity Libraries, as a `[host]` message or `[machine <id>]` message to the orches
 per episode and at most once a day while it lasts. Passes that are fine say nothing.
 
 **Settings** (`set_app_config`, applied at once): `hostGuard.cleanup.everyMinutes` (0 = only below the
-soft threshold, else 15-1440), `hostGuard.cleanup.softFreeGB` (above `warnFreeGB`), and for the machines
+soft threshold, else 15-1440), `hostGuard.cleanup.softFreeGB` (above `criticalFreeGB`; default `warnFreeGB`),
+`hostGuard.warnFreeGB` and `hostGuard.criticalFreeGB` (the portal's own levels, critical below warn; w1101), and for the machines
 `machines.cleanup.everyMinutes` / `machines.cleanup.softFreeGB`, optionally with `machine` for one
 machine (`{ "*": 80, "m3": 40 }` in config.json). The ages are in `hostGuard.cleanup` in config.json
 (`tempAnyOlderThanDays`, `sessionTempHours`, `claudeTempDays`, `runnerWorkDays`, `buildsOlderThanDays`,

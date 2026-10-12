@@ -116,21 +116,23 @@ if [ -e /var/lib/fff-vm/manifest ] || [ -e /usr/local/sbin/fff-vm ] || nft list 
 fi
 echo "ok: the dry run changed nothing"
 
-step "a missing token stops the install before it changes anything"
+step "a missing answer stops the install before it changes anything"
+# The owner's name is the required answer left out here (w1078: the Claude subscription token it was is gone).
+sed -i '/^PORTAL_OWNER_NAME=/d' /etc/fff-vm/fff-vm.conf
 conf_before=$(sha256sum /etc/fff-vm/fff-vm.conf)
 rc=0
-deploy/vm/host/install.sh --yes >/tmp/no-token.log 2>&1 || rc=$?
-cat /tmp/no-token.log
-[ "$rc" = 2 ] || fail "a run without the Claude token exited $rc, not 2"
-matches 'secrets/claude-token' /tmp/no-token.log || fail "the refusal does not name the missing Claude token"
+deploy/vm/host/install.sh --yes >/tmp/no-answer.log 2>&1 || rc=$?
+cat /tmp/no-answer.log
+[ "$rc" = 2 ] || fail "a run without the owner's name exited $rc, not 2"
+matches 'PORTAL_OWNER_NAME' /tmp/no-answer.log || fail "the refusal does not name the missing owner name"
 if [ -e /var/lib/fff-vm/manifest ] || [ -e /usr/local/sbin/fff-vm ] || nft list table inet fff_vm >/dev/null 2>&1 ||
   dpkg -l libvirt-daemon-system 2>/dev/null | grep '^ii' >/dev/null || [ "$(sha256sum /etc/fff-vm/fff-vm.conf)" != "$conf_before" ]; then
   fail "the refused run changed something"
 fi
 echo "ok: refused before any change, naming what is missing"
-# The stored answers a person's first run leaves (answers.sh): root's, 0600 in a 0700 folder.
+echo 'PORTAL_OWNER_NAME=CI' >>/etc/fff-vm/fff-vm.conf
+# The stored answers a person's first run leaves (answers.sh): root's, 0700.
 install -d -m 0700 /etc/fff-vm/secrets
-printf 'sk-ant-oat01-ci-dummy-0123456789abcdef-WXYZ\n' | install -m 0600 /dev/stdin /etc/fff-vm/secrets/claude-token
 
 step "host install"
 deploy/vm/host/install.sh --host-only --wait
@@ -193,13 +195,12 @@ git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 t0=$(date +%s)
 deploy/vm/host/install.sh --guest-only --yes --guest-repo-bundle /tmp/ff.bundle 2>&1 | tee /tmp/guest-install.log
 echo "MEASURE guest install (packages, npm ci, web build, start, settings) in a $(g nproc)-vCPU VM: $(($(date +%s) - t0)) s"
-if matches -e 'ci-dummy' -e '0123456789abcdef' /tmp/guest-install.log; then fail "the install printed the Claude token"; fi
-[ "$(g 'sudo stat -c "%a %U" /srv/fff/secrets/claude-oauth-token')" = "600 fff" ] || fail "the stored token is not 0600 fff"
-g 'test ! -e /run/fff-install/claude-token' || fail "the token's hand-over file was left in the guest"
-g 'sudo jq -e ".ownerName == \"CI\" and .claudeAccounts.orchestrator == \"tokenfile\" and .claudeAccounts.dispatcher == \"tokenfile\" and .claudeTokenFile == \"/srv/fff/secrets/claude-oauth-token\"" /srv/fff/config/config.json' >/dev/null ||
-  fail "config.json was not set: $(g 'sudo jq -c "{ownerName, claudeAccounts, claudeTokenFile}" /srv/fff/config/config.json')"
+# Every Claude process runs on a vault token (w1078): no token file, and config.json names no Claude credential.
+g 'sudo test ! -e /srv/fff/secrets/claude-oauth-token' || fail "the install made the retired Claude token file"
+g 'sudo jq -e ".ownerName == \"CI\" and .claudeTokenFile == null and .claudeEnv == null" /srv/fff/config/config.json' >/dev/null ||
+  fail "config.json was not set: $(g 'sudo jq -c "{ownerName, claudeAccounts}" /srv/fff/config/config.json')"
 matches 'Tailscale: skipped' /tmp/guest-install.log || fail "the end of the install does not list the skipped Tailscale join"
-echo "ok: the guest is set up from the host, the token stored and never printed, config.json set"
+echo "ok: the guest is set up from the host, config.json set and holding no Claude credential"
 # The machines' ssh (w537): the guest install wrote the portal account's aliases and pinned host keys (machines.ssh).
 # No machine answers here: each is pinned anyway, and nothing is accepted on first use.
 out=$(g 'sudo -H -u fff /usr/local/lib/fff/fff-machine-ssh --check' 2>&1 || true)
@@ -238,12 +239,14 @@ deploy/vm/host/install.sh --guest-only --yes --guest-repo-bundle /tmp/ff.bundle 
 echo "ok: the guest install ran twice"
 g 'sudo fffctl base-clone' && g 'sudo systemctl start fff-base-refresh.service && sudo journalctl -u fff-base-refresh -n 3 --no-pager'
 g 'sudo nft list table inet fff_guest' >/dev/null || fail "the guest's firewall table"
-# The subscription token's store (decision D4), with a dummy token: 0600, fff's, and never printed whole.
-out=$(g 'printf "sk-ant-oat01-ci-dummy-WXYZ\n" >/tmp/k && sudo fffctl claude-token --file /tmp/k; rm -f /tmp/k')
+# config.json to read (w1078): every setting, no secret; the check names what holds one, by key only.
+out=$(g 'sudo fffctl config')
+printf '%s' "$out" | jq -e '.ownerName == "CI"' >/dev/null || fail "fffctl config does not show the settings: $out"
+out=$(g 'sudo fffctl config --check') || fail "fffctl config --check says config.json holds a secret: $out"
 echo "$out"
-if printf '%s' "$out" | matches 'ci-dummy'; then fail "fffctl claude-token printed the token"; fi
-[ "$(g 'sudo stat -c "%a %U" /srv/fff/secrets/claude-oauth-token')" = "600 fff" ] || fail "the token file is not 0600 fff"
-echo "ok: the token is stored 0600, owned by fff, shown only as its last four characters"
+printf '%s' "$out" | matches '^config.json: no secret' || fail "fffctl config --check does not check config.json: $out"
+if g 'sudo fffctl claude-token --file /dev/null' >/dev/null 2>&1; then fail "fffctl claude-token still exists (w1078 removed it)"; fi
+echo "ok: fffctl config shows the settings, and config.json holds no secret"
 # The token vault (w512, docs/vault.md): the key is root's alone and reaches the portal as a systemd credential; a value
 # added with fffctl is never printed, sealed on disk, and the vault file stays the portal user's.
 [ "$(g 'sudo stat -c "%a %U" /etc/fff/vault.key')" = "600 root" ] || fail "the vault key is not 0600 root"
@@ -367,6 +370,8 @@ done
 # sudo: fff-ops-priv as root and fff-ops-ssh as fff, nothing else.
 g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl status' | matches '^portal: active' || fail "the worker's fffctl status does not work"
 g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl logs 5' >/dev/null || fail "the worker's fffctl logs does not work"
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl config' | jq -e '.ownerName == "CI"' >/dev/null || fail "the worker's fffctl config does not show config.json (w1078)"
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl config --check' >/dev/null || fail "the worker's fffctl config --check does not work (w1078)"
 # The read-only forms of the vault and the rest (w745): the worker's fffctl lists the entries (name, last four characters,
 # fingerprint), never a value, and changes nothing.
 g 'printf "ci-ops-secret-ZYXW\n" >/tmp/v && sudo fffctl vault add --name ci-ops-env --kind env --env CI_OPS_TOKEN --share anyone --file /tmp/v; rm -f /tmp/v' >/dev/null

@@ -6,7 +6,7 @@
 #   /etc/fff-vm/admin_authorized_keys   the admin's ssh public key(s)
 #   /etc/fff-vm/ntfy-url                the alerts' ntfy URL (0600)
 #   /etc/fff-vm/backup-recipients.txt   the backups' age public keys
-#   /etc/fff-vm/secrets/                claude-token, tailscale-authkey, gh-token: 0600 in a 0700 folder, root's;
+#   /etc/fff-vm/secrets/                tailscale-authkey, gh-token: 0600 in a 0700 folder, root's;
 #                                       people/<user id>/{claude,github}-token and vault.key: the token vault (vault.sh)
 # A secret is read without echo, never put on a command line, in a log or in the cloud-init seed, and goes into the VM
 # only over ssh's stdin (guest.sh). Root on this host can read the VM anyway (design D2): this copy changes no boundary.
@@ -31,7 +31,6 @@ v_sshkey() {
   [[ "$1" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)\ [A-Za-z0-9+/=]+ ]] || { echo "not an OpenSSH public key (ssh-ed25519 AAAA...)"; return 1; }
   ssh-keygen -l -f - <<<"$1" >/dev/null 2>&1 || { echo "ssh-keygen cannot read it as a public key"; return 1; }
 }
-v_claude() { [[ "$1" =~ ^sk-ant-oat01-[A-Za-z0-9_-]{20,}$ ]] || { echo "not a 'claude setup-token' token (sk-ant-oat01-...)"; return 1; }; }
 v_tskey() { [[ "$1" =~ ^tskey-auth-[A-Za-z0-9_-]{10,}$ ]] || { echo "not a Tailscale auth key (tskey-auth-...)"; return 1; }; }
 v_ghtoken() { [[ "$1" =~ ^(github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{30,})$ ]] || { echo "not a GitHub token (github_pat_... or ghp_...)"; return 1; }; }
 v_owner() { [[ "$1" =~ ^[A-Za-z][A-Za-z0-9\ ._-]{0,39}$ ]] || { echo "a name of 1-40 letters, digits, spaces, . _ -"; return 1; }; }
@@ -188,13 +187,6 @@ answers_guest() {
       ask PORTAL_OWNER_NAME v_owner "The portal's owner name (config ownerName: the person it works for)"
       conf_set PORTAL_OWNER_NAME "$PORTAL_OWNER_NAME"
     else missing "PORTAL_OWNER_NAME in $CONF: config.json's ownerName"; fi
-  fi
-  # 1. Lothsahn's subscription token for the orchestrators and the dispatcher (D4).
-  if ! has .claudeToken && ! secret_ok claude-token v_claude; then
-    if interactive; then
-      printf '\nLothsahn'"'"'s Claude subscription token: run "claude setup-token" on any machine with Claude Code and copy the sk-ant-oat01-... it prints.\n' >/dev/tty
-      ask_secret claude-token v_claude "Claude subscription token"
-    else missing "$SECRETS/claude-token: the token from 'claude setup-token' (sk-ant-oat01-...), one line, chmod 600"; fi
   fi
   # 2. Tailscale: Ben's one-use, pre-approved, tag:fff-portal auth key. Used once, at the join, then deleted here.
   if [ "${GUEST_TAILSCALE:-join}" != skip ] && ! has .tailscale.joined && ! ts_key_fresh; then

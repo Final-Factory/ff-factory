@@ -215,6 +215,24 @@ cmd_activate() {
   fi
 }
 
+# restore_inline_hash DIR: a release from before w1078 reads FFBox's connector hash from config.json only, so it is put
+# back there from its file in the secrets folder (the start of a newer release moves it out again). Nothing else needs
+# undoing: config keeps claudeAccounts.orchestrator "vault", which those releases read too.
+restore_inline_hash() {
+  local cfg=$FFF_ROOT/config/config.json f h tmp
+  [ -f "$1/server/configMigration.ts" ] && return 0
+  f=$(jq -r '.providers.ffbox.tokenSha256File // ""' "$cfg" 2>/dev/null) || return 0
+  [ -n "$f" ] && [ -s "$f" ] || return 0
+  h=$(tr -d '[:space:]' <"$f")
+  [[ $h =~ ^[0-9a-f]{64}$ ]] || { warn "$f does not hold one SHA-256: FFBox's connector hash not put back into config.json"; return 0; }
+  tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
+  if ! jq --arg h "$h" '.providers.ffbox.tokenSha256 = $h' "$cfg" >"$tmp"; then rm -f "$tmp"; warn "could not put FFBox's connector hash back into config.json"; return 0; fi
+  chown --reference="$cfg" "$tmp"
+  chmod --reference="$cfg" "$tmp"
+  mv -f "$tmp" "$cfg"
+  log "FFBox's connector hash put back into config.json for $(basename "$1"), a release from before w1078"
+}
+
 cmd_rollback() {
   local why=${1:-asked for by hand} cur prev cur_sha prev_sha
   cur=$(current_dir); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || true)
@@ -222,6 +240,7 @@ cmd_rollback() {
   cur_sha=$(release_sha "$cur"); prev_sha=$(release_sha "$prev")
   ln -sfn "$prev" "$CURRENT.new" && mv -Tf "$CURRENT.new" "$CURRENT"
   ln -sfn "$cur" "$PREVIOUS.new" && mv -Tf "$PREVIOUS.new" "$PREVIOUS"
+  restore_inline_hash "$prev"
   refresh_scripts "$prev"
   rm -f "$DATA/update.verifying.json"
   jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$cur_sha" --arg a "$prev_sha" --arg e "rolled back: $why" \

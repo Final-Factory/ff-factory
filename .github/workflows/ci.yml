@@ -38,7 +38,8 @@ env:
 # the host's mirror: `ffghr-workspace.sh use-mirror` before actions/checkout. Actions are pinned by commit SHA because the
 # image carries those archives and cannot download any other; there is no setup-node, no actions/cache and no sudo.
 # What stays on a hosted runner needs root, systemd or Windows/macOS: the ops-socket job below, windows.yml,
-# worker-update.yml, dev-drive.yml, rerun-lost-runner.yml and vm-scripts.yml's lint and end-to-end jobs.
+# worker-update.yml, dev-drive.yml and vm-scripts.yml's lint and end-to-end jobs. rerun-lost-runner.yml runs on FFBox
+# too (w1102): the host makes its API calls for it.
 # The repository is public and the runners are shared with the private Final Factory repositories, so fork pull requests
 # need an owner's approval before any of this runs (Settings, Actions, General) and these jobs hold no secret.
 

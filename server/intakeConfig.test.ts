@@ -20,6 +20,10 @@ import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { useFakeVault } from './testVault.ts';
+
+// Every Claude process runs on a vault token (w1078): these tests start orchestrators.
+useFakeVault();
 
 /**
  * set_app_config intake.ffbox (w224) and intake.reviewers (w270), end to end on a real Agents, ProviderManager and IntakeManager: an owner's setting

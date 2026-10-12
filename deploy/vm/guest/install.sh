@@ -202,7 +202,7 @@ if [ -x "$FFF_ROOT/home/.local/bin/claude" ]; then
 elif [ "$DRY_RUN" = 1 ]; then
   log "DRY-RUN would run the native installer (curl -fsSL https://claude.ai/install.sh | bash) as $FFF_USER"
 else
-  as_fff bash -c 'cd ~ && curl -fsSL https://claude.ai/install.sh | bash' || warn "the Claude Code CLI did not install; fffctl claude-login needs it (rerun install.sh)"
+  as_fff bash -c 'cd ~ && curl -fsSL https://claude.ai/install.sh | bash' || warn "the Claude Code CLI did not install (rerun install.sh)"
 fi
 
 log "8/10 config.json"
@@ -307,11 +307,11 @@ fi
 [ "$TODO" = 1 ] && cat >&2 <<EOF
 
 Installed. Still to do, by a person (docs/portal-on-ffbox-host.md, "Installing"):
-  1. sudo fffctl claude-token --file /root/claude.token          Lothsahn's subscription token (D4, 'claude setup-token')
+  1. sudo fffctl vault add-claude PERSON                          each person's Claude tokens: every Claude process runs on one (w1078)
   2. sudo fffctl tailscale-join --authkey-file /root/ts.key       tagged node, Funnel to the portal
   3. sudo fffctl gh-login --token-file /root/gh.token             the portal's GitHub token (D7)
   4. sudo fffctl base-clone                                       the game repo for orchestrators' reads
-  5. $FFF_ROOT/config/config.json: ownerName, claudeAccounts; then sudo fffctl restart (publicUrl: set from Tailscale)
+  5. sudo fffctl configure --owner-name NAME                      config.json's ownerName (publicUrl: set from Tailscale)
   6. backups: age public keys in $BACKUP_RECIPIENTS_FILE, BACKUP_SSH_TARGET in $FFF_CONF,
      and authorize $BACKUP_SSH_KEY.pub there; then sudo fffctl backup
   The portal's ssh key for machine deploys: $FFF_ROOT/home/.ssh/id_ed25519.pub (authorize with from=, docs 4.3).

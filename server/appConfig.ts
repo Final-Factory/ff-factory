@@ -1,13 +1,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, TOKEN_FILE_ROLES, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VAULT_PINNED_ROLES, VAULT_ROLES_ACCOUNT, VOICE_DEFAULTS, pinnedVaultEntry, type ClaudeAccount, type Config, type HostRole, type IntakeConfig } from './config.ts';
-import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret, readTokenFile } from './secrets.ts';
+import { DEFAULT_CLEANUP, HOST_GUARD_DEFAULTS, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VOICE_DEFAULTS, pinnedVaultEntry, type ClaudeAccount, type Config, type IntakeConfig } from './config.ts';
+import { SECRET_KEYS, maskSecret } from './secrets.ts';
+import { FFBOX_HASH_FILE, ffboxTokenHash, secretsDirOf, writeFfboxTokenHash } from './configMigration.ts';
 import { vaultContext } from './vault.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
 import { writeFileDurable } from './durable.ts';
-import { refuseInDryRun } from './dryRun.ts';
 import { placeId } from './placement.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
@@ -28,6 +28,9 @@ export const SETTABLE_KEYS = [
   'publicGitIdentity.email',
   // The host guard's housekeeping (docs/self-recovery.md), so it can be tuned without anyone at the desk.
   'hostGuard.devDriveVhdx',
+  // The portal's own disk levels (w1101): low (warn) and critical, in GB free; critical below warn. The machines' are their own.
+  'hostGuard.warnFreeGB',
+  'hostGuard.criticalFreeGB',
   'hostGuard.cleanup.ageRules',
   // The continuous clean-up's pace and soft threshold, on this host and on the machines (optional `machine`).
   'hostGuard.cleanup.everyMinutes',
@@ -41,20 +44,9 @@ export const SETTABLE_KEYS = [
   'usagePollMinutes',
   // The address machines and the outside watchdog reach this portal at (the Tailscale Funnel URL).
   'publicUrl',
-  // The Claude account the agents run on (claude setup-token): write-only, never shown (server/secrets.ts).
-  'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN',
-  // A person's own Claude account, for agents working for them (docs/identity.md): write-only, needs `user`.
-  'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN',
-  // Which account this host's agents run on, per role: "token" (claudeEnv's) or "login" (this host's stored
-  // claude.ai login), and whether a Mac's agents take the host token (optional `machine`). docs/accounts.md.
-  'claudeAccounts.orchestrator',
-  // The dispatcher's own (w464); unset, it follows the orchestrator's (and the system payer's own token).
+  // The one vault token the dispatcher runs on (w996), "vault:<entry name>"; unset, the system payer's pool. The owner's only.
+  // Every other Claude process runs on its person's pool: nothing else to set (w1078).
   'claudeAccounts.dispatcher',
-  // The file holding the token the "tokenfile" roles run on (w464): a path, checked by reading it; its content is never shown.
-  'claudeTokenFile',
-  'machines.useHostClaudeEnv',
-  // Whether a machine's runs take their Claude token from the token vault (docs/vault.md, w512; optional `machine`). The owner's only.
-  'machines.claudeFromVault',
   // Whether a machine's runs (and, for the machine id "portal", the portal's own gh reads) use the run person's vault GitHub
   // token (docs/vault.md section 13, w868; optional `machine`). The owner's only.
   'machines.githubFromVault',
@@ -71,7 +63,7 @@ export const SETTABLE_KEYS = [
   'attachments.maxMB',
   'attachments.retentionDays',
   // FFBox's connector (docs/ffbox-integration.md): whether it may connect (default off), and its token,
-  // write-only: only its SHA-256 is stored, as providers.ffbox.tokenSha256.
+  // write-only: only its SHA-256 is stored, in a file of the secrets folder that providers.ffbox.tokenSha256File names (w1078).
   'providers.ffbox.enabled',
   'providers.ffbox.token',
   // FFBox dev requests (docs/ffbox.md, "Dev requests"): the switch and caps. The owner's only (OWNER_ONLY_KEYS). Which
@@ -104,7 +96,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'machines.claudeFromVault', 'machines.githubFromVault']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync'];
@@ -364,62 +356,20 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (typeof value !== 'string' || !/^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(value.trim())) throw new Error('publicGitIdentity.email is an email address, e.g. 12345+you@users.noreply.github.com');
       return value.trim();
     }
-    case 'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN':
-    case 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN': {
-      // Never echo the value, not even in the error.
-      if (typeof value !== 'string' || !OAUTH_TOKEN.test(value.trim())) throw new Error(`${key} must be a Claude OAuth token (sk-ant-oat01-…, from \`claude setup-token\`); the value given is not one (not shown)`);
-      return value.trim();
-    }
-    case 'claudeAccounts.orchestrator':
     case 'claudeAccounts.dispatcher': {
+      // The dispatcher on one named vault token (w996), or "vault": the system payer's pool, stored as no key (w1078).
       const v = typeof value === 'string' ? value.trim() : value;
-      const role = key.slice('claudeAccounts.'.length);
-      if (v === 'tokenfile') {
-        // w464, change 18: only once the file reads as a token (never shown).
-        if (!TOKEN_FILE_ROLES.includes(role)) throw new Error(`${key} cannot be "tokenfile": only ${TOKEN_FILE_ROLES.join(', ')} run on the token file`);
-        if (cfg) readTokenFile(cfg);
-        return v;
-      }
-      if (v === 'vault') {
-        // w738: each person's orchestrator on that person's own vault Claude token; the dispatcher stays on the token file.
-        if (!VAULT_ROLES_ACCOUNT.includes(role)) throw new Error(`${key} cannot be "vault": only ${VAULT_ROLES_ACCOUNT.join(', ')} run on a person's own vault tokens (the dispatcher stays on the token file)`);
-        return v;
-      }
+      if (v === 'vault') return undefined;
       const pinned = pinnedVaultEntry(typeof v === 'string' ? v : undefined);
-      if (pinned !== undefined) {
-        // w996: the dispatcher on one named vault token (it has no person whose pool to use); its reserve moves there.
-        if (!VAULT_PINNED_ROLES.includes(role)) throw new Error(`${key} cannot be "${v}": only ${VAULT_PINNED_ROLES.join(', ')} can run on one named vault token (the orchestrators use "vault": each person's own pool)`);
-        if (!VAULT_ENTRY_NAME.test(pinned)) throw new Error(`${key} is "${VAULT_PINNED_PREFIX}<vault entry name>", the name \`fffctl vault list\` shows (lower-case letters, digits, ".", "_", "-"), e.g. "vault:vault-lothsahn-1"`);
-        const context = vaultContext();
-        if (context && !context.vault.claudeByName(pinned)) throw new Error(`${key}: the vault has no enabled Claude token named "${pinned}" that its key opens (\`fffctl vault list\` shows the names)`);
-        return v;
-      }
-      if (v !== 'login' && v !== 'token') throw new Error(`${key} is "login" (this host's stored claude.ai login) or "token" (config claudeEnv's)${TOKEN_FILE_ROLES.includes(role) ? ', or "tokenfile" (config claudeTokenFile\'s)' : ''}${VAULT_PINNED_ROLES.includes(role) ? `, or "${VAULT_PINNED_PREFIX}<vault entry name>" (one named vault Claude token)` : ''}`);
-      // Refuse a switch that would leave the role unable to start: the stored login must be there and alive.
-      const problem = v === 'login' && cfg ? hostLoginProblem(cfg) : undefined;
-      if (problem) throw new Error(`${key} cannot be "login": ${problem}`);
-      return v;
-    }
-    case 'machines.useHostClaudeEnv': {
-      if (value === true || value === 'true') return true;
-      if (value === false || value === 'false') return false;
-      throw new Error('machines.useHostClaudeEnv is true (the host token) or false (the Mac\'s own login)');
-    }
-    case 'machines.claudeFromVault': {
-      if (value === true || value === 'true') return true;
-      if (value === false || value === 'false') return false;
-      throw new Error("machines.claudeFromVault is true (a vault token per run, docs/vault.md) or false (the host token or the machine's own login, as before)");
+      if (pinned === undefined || !VAULT_ENTRY_NAME.test(pinned)) throw new Error(`${key} is "${VAULT_PINNED_PREFIX}<vault entry name>", the name \`fffctl vault list\` shows (lower-case letters, digits, ".", "_", "-"), e.g. "vault:vault-lothsahn-1", or "vault" (the system payer's pool); every Claude process runs on a vault token (w1078)`);
+      const context = vaultContext();
+      if (context && !context.vault.claudeByName(pinned)) throw new Error(`${key}: the vault has no enabled Claude token named "${pinned}" that its key opens (\`fffctl vault list\` shows the names)`);
+      return v as ClaudeAccount;
     }
     case 'machines.githubFromVault': {
       if (value === true || value === 'true') return true;
       if (value === false || value === 'false') return false;
       throw new Error('machines.githubFromVault is true (the run person\'s vault GitHub token, docs/vault.md section 13; machine "portal" for the portal\'s own reads) or false (the gh login it had, as before)');
-    }
-    case 'claudeTokenFile': {
-      // A path, checked by reading it as a token (w464); the content is never echoed, the path is.
-      if (typeof value !== 'string' || !value.trim() || !path.isAbsolute(value.trim())) throw new Error('claudeTokenFile is the absolute path of a file holding one Claude OAuth token');
-      readTokenFile({ claudeTokenFile: value.trim() });
-      return value.trim();
     }
     case 'systemPayer': {
       if (typeof value !== 'string' || !USER_ID.test(value.trim())) throw new Error('systemPayer is a user id (a login name, e.g. "ben")');
@@ -491,9 +441,19 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return checkStaleOutput(key, value);
     case 'hostGuard.cleanup.softFreeGB':
     case 'machines.cleanup.softFreeGB': {
+      // The portal's at or below its warn level is fine (w1101: its default is warnFreeGB); above its critical level.
       const n = Number(value);
-      const floor = key === 'hostGuard.cleanup.softFreeGB' && cfg ? cfg.hostGuard.warnFreeGB + 1 : 10;
-      if (!Number.isInteger(n) || n < floor || n > 2000) throw new Error(`${key} is a whole number of GB from ${floor} to 2000${floor > 10 ? ' (above hostGuard.warnFreeGB, where new work is refused)' : ''}`);
+      const floor = key === 'hostGuard.cleanup.softFreeGB' && cfg ? Math.max(cfg.hostGuard.criticalFreeGB + 1, 5) : 10;
+      if (!Number.isInteger(n) || n < floor || n > 2000) throw new Error(`${key} is a whole number of GB from ${floor} to 2000${key === 'hostGuard.cleanup.softFreeGB' && cfg ? ' (above hostGuard.criticalFreeGB)' : ''}`);
+      return n;
+    }
+    case 'hostGuard.warnFreeGB':
+    case 'hostGuard.criticalFreeGB': {
+      // Critical stays below warn (w1101): the other one is the running config's.
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 2000) throw new Error(`${key} is a whole number of GB from 1 to 2000`);
+      if (cfg && key === 'hostGuard.warnFreeGB' && n <= cfg.hostGuard.criticalFreeGB) throw new Error(`${key} (${n}) must be above hostGuard.criticalFreeGB (${cfg.hostGuard.criticalFreeGB}): lower that first`);
+      if (cfg && key === 'hostGuard.criticalFreeGB' && n >= cfg.hostGuard.warnFreeGB) throw new Error(`${key} (${n}) must be below hostGuard.warnFreeGB (${cfg.hostGuard.warnFreeGB}): raise that first`);
       return n;
     }
     case 'providers.ffbox.enabled': {
@@ -573,7 +533,32 @@ function checkStaleOutput(key: string, value: unknown): Partial<StaleOutputSetti
   return out as Partial<StaleOutputSettings>;
 }
 
-const STORED_AS: Partial<Record<SettableKey, string>> = { 'providers.ffbox.token': 'providers.ffbox.tokenSha256' };
+
+/**
+ * providers.ffbox.token (w1078): its hash into the file in the secrets folder (FFBOX_HASH_FILE, 0600) that config
+ * providers.ffbox.tokenSha256File names, never into config.json; undefined removes the file and the key. config.json is
+ * written only when the key changes (the first time), and an old inline hash is taken out with it. The connector reads the
+ * file at its next connection (server/configMigration.ts ffboxTokenHash).
+ */
+function setFfboxToken(file: string, cfg: Config, raw: Record<string, unknown>, text: string, hash: string | undefined): { before: unknown; after: unknown } {
+  const hashFile = cfg.providers?.ffbox?.tokenSha256File ?? path.join(secretsDirOf(file), FFBOX_HASH_FILE);
+  const before = ffboxTokenHash(cfg);
+  writeFfboxTokenHash(hashFile, hash, file);
+  const named = getPath(raw, 'providers.ffbox.tokenSha256File');
+  const want = hash === undefined ? undefined : hashFile;
+  if (named !== want || getPath(raw, 'providers.ffbox.tokenSha256') !== undefined) {
+    setPath(raw, 'providers.ffbox.tokenSha256File', want);
+    setPath(raw, 'providers.ffbox.tokenSha256', undefined);
+    writeFileDurable(file + '.prev', text, { generations: 0 });
+    writeFileDurable(file, JSON.stringify(raw, null, 2) + '\n');
+  }
+  const ffbox = { ...cfg.providers?.ffbox };
+  delete ffbox.tokenSha256;
+  if (want === undefined) delete ffbox.tokenSha256File;
+  else ffbox.tokenSha256File = want;
+  cfg.providers = { ...cfg.providers, ffbox };
+  return { before: maskSecret(before), after: maskSecret(hash) };
+}
 
 /** Set (or with `undefined`, remove) a dotted key in a plain object. */
 function setPath(obj: Record<string, unknown>, key: string, value: unknown) {
@@ -616,11 +601,11 @@ export function toggleNightly(file: string, cfg: Config, which: 'enabled' | 'run
   return { key: 'intake.nightly.run', before: was?.enabled === true, after: on };
 }
 
-/** A machine id as config machines.useHostClaudeEnv and machines.cleanup.* name it (server/machines.ts MACHINE_ID). */
+/** A machine id as config machines.githubFromVault and machines.cleanup.* name it (server/machines.ts MACHINE_ID). */
 const MACHINE_KEY = /^[a-z0-9][a-z0-9-]{0,23}$/;
 
 /**
- * A per-machine setting (machines.useHostClaudeEnv, machines.cleanup.*) after setting it to `v` (undefined:
+ * A per-machine setting (machines.githubFromVault, machines.cleanup.*) after setting it to `v` (undefined:
  * removing it) for `machine`, or for every machine not named when `machine` is absent. Per-machine entries
  * survive a change of the rest, which is "*" once there are any: { "*": false, "m5": true }. Collapses back to a
  * plain value (or nothing) when it can.
@@ -638,30 +623,22 @@ export function nextPerMachine<T extends boolean | number>(cur: unknown, machine
 
 /**
  * Change one allowlisted key in the config file (kept as config.json.prev first; written through a temp
- * file) and in the running config. Returns the value before and after. `opts.user`: whose entry, for the
- * per-person keys (userClaudeEnv.*, stored as userClaudeEnv.<user>.*). `opts.machine`: for
- * machines.useHostClaudeEnv, the one machine to set (absent: every machine not named).
+ * file) and in the running config. Returns the value before and after. `opts.machine`: for the per-machine keys
+ * (machines.githubFromVault, machines.cleanup.*), the one machine to set (absent: every machine not named).
+ * providers.ffbox.token is never written to config.json (w1078): its hash goes to the file in the secrets folder that
+ * providers.ffbox.tokenSha256File names (named there the first time).
  */
-export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { user?: string; machine?: string; users?: readonly string[] } = {}): { before: unknown; after: unknown } {
+export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { machine?: string; users?: readonly string[] } = {}): { before: unknown; after: unknown } {
   if (!SETTABLE_KEYS.includes(key)) throw new Error(`${key} cannot be changed by an agent; allowed: ${SETTABLE_KEYS.join(', ')}`);
-  // A dry run ignores both (server/dryRun.ts); one set here would arm what it keeps off.
-  if (key.startsWith('claudeEnv.') || key.startsWith('userClaudeEnv.')) refuseInDryRun(key);
-  const perUser = key.startsWith('userClaudeEnv.');
-  // The user id becomes a key path segment: no dots (edit config.json by hand for such a login).
-  if (perUser && !(opts.user && USER_ID.test(opts.user) && !opts.user.includes('.'))) throw new Error(`${key} needs user: the user id (login name, without dots) whose account it is`);
-  const perMachine = key === 'machines.useHostClaudeEnv' || key === 'machines.claudeFromVault' || key === 'machines.githubFromVault' || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
-  if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.useHostClaudeEnv, machines.claudeFromVault, machines.githubFromVault and machines.cleanup.*, and is a machine id such as "m5"`);
+  const perMachine = key === 'machines.githubFromVault' || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
+  if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.githubFromVault and machines.cleanup.*, and is a machine id such as "m5"`);
   const v = normalizeSetting(key, value, cfg, opts.users);
-  if (key === 'claudeTokenFile' && v === undefined) {
-    const on = Object.entries(cfg.claudeAccounts ?? {}).filter(([, x]) => x === 'tokenfile').map(([r]) => r);
-    if (on.length) throw new Error(`claudeTokenFile cannot be cleared while claudeAccounts.${on.join(', claudeAccounts.')} ${on.length > 1 ? 'are' : 'is'} "tokenfile"`);
-  }
   const text = fs.readFileSync(file, 'utf8');
   const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
-  const stored = perUser ? `userClaudeEnv.${opts.user}.${key.slice('userClaudeEnv.'.length)}` : (STORED_AS[key] ?? key);
-  const before = getPath(raw, stored);
+  if (key === 'providers.ffbox.token') return setFfboxToken(file, cfg, raw, text, v as string | undefined);
+  const before = getPath(raw, key);
   const next = perMachine ? nextPerMachine(before, opts.machine, v as boolean | number | undefined) : v;
-  setPath(raw, stored, next);
+  setPath(raw, key, next);
   writeFileDurable(file + '.prev', text, { generations: 0 });
   writeFileDurable(file, JSON.stringify(raw, null, 2) + '\n');
   // Live: the running server reads these through the shared config object.
@@ -670,7 +647,6 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'voice.ttsVoice') cfg.voice.ttsVoice = (v as string | undefined) ?? VOICE_DEFAULTS.ttsVoice;
   else if (key === 'hostGuard.devDriveVhdx') cfg.hostGuard.devDriveVhdx = (v as string | undefined) ?? '';
   else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
-  else if (key === 'claudeTokenFile') cfg.claudeTokenFile = v as string | undefined;
   else if (key === 'attachments.maxMB' || key === 'attachments.retentionDays') {
     const field = key === 'attachments.maxMB' ? 'maxMB' : 'retentionDays';
     const a = { ...cfg.attachments };
@@ -678,28 +654,12 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else a[field] = v as number;
     cfg.attachments = a;
   }
-  else if (key === 'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN') {
-    const env = { ...cfg.claudeEnv };
-    if (v === undefined) delete env.CLAUDE_CODE_OAUTH_TOKEN;
-    else env.CLAUDE_CODE_OAUTH_TOKEN = v as string;
-    cfg.claudeEnv = env;
-  } else if (key === 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN') {
-    const all = { ...cfg.userClaudeEnv };
-    const env = { ...all[opts.user!] };
-    if (v === undefined) delete env.CLAUDE_CODE_OAUTH_TOKEN;
-    else env.CLAUDE_CODE_OAUTH_TOKEN = v as string;
-    if (Object.keys(env).length) all[opts.user!] = env;
-    else delete all[opts.user!];
-    cfg.userClaudeEnv = all;
-  } else if (key === 'claudeAccounts.orchestrator' || key === 'claudeAccounts.dispatcher') {
+  else if (key === 'claudeAccounts.dispatcher') {
     const accounts = { ...cfg.claudeAccounts };
-    const role = key.slice('claudeAccounts.'.length) as HostRole;
-    if (v === undefined) delete accounts[role];
-    else accounts[role] = v as ClaudeAccount;
+    if (v === undefined) delete accounts.dispatcher;
+    else accounts.dispatcher = v as ClaudeAccount;
     cfg.claudeAccounts = accounts;
-  } else if (key === 'machines.useHostClaudeEnv') cfg.machines = { ...cfg.machines, useHostClaudeEnv: next as boolean | Record<string, boolean> | undefined };
-  else if (key === 'machines.claudeFromVault') cfg.machines = { ...cfg.machines, claudeFromVault: next as boolean | Record<string, boolean> | undefined };
-  else if (key === 'machines.githubFromVault') cfg.machines = { ...cfg.machines, githubFromVault: next as boolean | Record<string, boolean> | undefined };
+  } else if (key === 'machines.githubFromVault') cfg.machines = { ...cfg.machines, githubFromVault: next as boolean | Record<string, boolean> | undefined };
   else if (key.startsWith('vault.pool.')) {
     // Live: the pool picks read the limits at each process start (poolLimits).
     const pool = { ...cfg.vault?.pool } as Record<string, number | undefined>;
@@ -709,11 +669,10 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     cfg.vault = { ...cfg.vault, pool: pool as NonNullable<Config['vault']>['pool'] };
   }
   else if (key === 'systemPayer') cfg.systemPayer = v as string | undefined;
-  else if (key === 'providers.ffbox.enabled' || key === 'providers.ffbox.token' || key === 'providers.ffbox.devRequests') {
+  else if (key === 'providers.ffbox.enabled' || key === 'providers.ffbox.devRequests') {
     const ffbox = { ...cfg.providers?.ffbox };
     if (key === 'providers.ffbox.enabled') ffbox.enabled = v as boolean | undefined;
-    else if (key === 'providers.ffbox.devRequests') ffbox.devRequests = v as DevRequestsConfig | undefined;
-    else ffbox.tokenSha256 = v as string | undefined;
+    else ffbox.devRequests = v as DevRequestsConfig | undefined;
     cfg.providers = { ...cfg.providers, ffbox };
   }
   else if (key === 'intake.ffbox') cfg.intake = { ...cfg.intake, ffbox: v as IntakeConfig['ffbox'] };
@@ -746,6 +705,9 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;
   else if (key === 'hostGuard.cleanup.softFreeGB') cfg.hostGuard.cleanup.softFreeGB = (v as number | undefined) ?? DEFAULT_CLEANUP.softFreeGB;
+  // Live: the host guard reads its levels at every look (server/hostHealth.ts).
+  else if (key === 'hostGuard.warnFreeGB') cfg.hostGuard.warnFreeGB = (v as number | undefined) ?? HOST_GUARD_DEFAULTS.warnFreeGB;
+  else if (key === 'hostGuard.criticalFreeGB') cfg.hostGuard.criticalFreeGB = (v as number | undefined) ?? HOST_GUARD_DEFAULTS.criticalFreeGB;
   else if (key === 'machines.cleanup.everyMinutes' || key === 'machines.cleanup.softFreeGB') {
     const field = key === 'machines.cleanup.everyMinutes' ? 'everyMinutes' : 'softFreeGB';
     cfg.machines = { ...cfg.machines, cleanup: { ...cfg.machines?.cleanup, [field]: next as number | Record<string, number> | undefined } };

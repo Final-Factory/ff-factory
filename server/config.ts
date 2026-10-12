@@ -11,12 +11,15 @@ import { checkPoolConfig, type PoolConfig } from './tokenPool.ts';
 
 
 /**
- * Which Claude account this host's agents of a role run on: config claudeEnv's token, this host's stored login, or
- * (w464, docs/portal-on-ffbox-host.md change 18) the OAuth token in config claudeTokenFile, read at each session start
- * and given to that process alone. "tokenfile" is for the orchestrator and the dispatcher only.
+ * Which vault token this host's agents of a role run on (w1078: every Claude process runs on a vault token, nothing else):
+ * "vault", a person's own pool (the orchestrators; the dispatcher on the system payer's), or (w996) "vault:<entry name>",
+ * one named vault token (the dispatcher). The host token, the token file and this host's login are gone (lothsahn,
+ * 2026-10-12: "everything runs off the vault").
  */
-export type ClaudeAccount = 'login' | 'token' | 'tokenfile' | 'vault' | `vault:${string}`;
-export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token', 'tokenfile', 'vault'];
+export type ClaudeAccount = 'vault' | `vault:${string}`;
+export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['vault'];
+/** What claudeAccounts said before w1078, now ignored: the startup takes them out (server/configMigration.ts). */
+export const RETIRED_ACCOUNTS: readonly string[] = ['token', 'login', 'tokenfile'];
 /**
  * "vault:<entry name>" (w996): the role runs on that one vault Claude token, whoever's pool it is in (the dispatcher, which has
  * no person to pool for; docs/vault.md, "The dispatcher on a vault token"). The reserve (section 4) then keeps its buffer on
@@ -29,14 +32,15 @@ export const VAULT_PINNED_ROLES: readonly string[] = ['dispatcher'];
 export const pinnedVaultEntry = (account: string | undefined): string | undefined => (typeof account === 'string' && account.startsWith(VAULT_PINNED_PREFIX) ? account.slice(VAULT_PINNED_PREFIX.length) : undefined);
 /** A vault entry's name as `Vault.add` takes it: lower-case letters, digits, ".", "_" and "-", up to 40 (server/vault.ts NAME). */
 export const VAULT_ENTRY_NAME = /^[a-z0-9][a-z0-9._-]{0,39}$/;
-/** The role that may run on a person's own vault pool (w738): the orchestrators, each on its own person's tokens. */
-export const VAULT_ROLES_ACCOUNT: readonly string[] = ['orchestrator'];
-/** The roles that may run on the token file (TOKEN_FILE). */
-export const TOKEN_FILE_ROLES: readonly string[] = ['orchestrator', 'dispatcher'];
+/**
+ * The roles that run on a person's own vault pool ("vault", w738): the orchestrators, each on its own person's tokens, and
+ * the dispatcher when it is pinned to no token (then the system payer's pool, w1078).
+ */
+export const VAULT_ROLES_ACCOUNT: readonly string[] = ['orchestrator', 'dispatcher'];
 /**
  * The roles config claudeAccounts sets an account for: the only agents the portal runs itself (w510), every worker and
- * standing agent being a machine's (machines.useHostClaudeEnv). `dispatcher` (w464, docs/portal-on-ffbox-host.md change
- * 6): when set, the dispatcher runs on it, and not on the system payer's own token; unset, it follows `orchestrator`.
+ * standing agent being a machine's (each on the pool of the person its work is for, docs/vault.md). `dispatcher` (w996):
+ * "vault:<entry name>" pins it to one vault token; unset, it runs on the system payer's pool.
  */
 export type HostRole = 'orchestrator' | 'dispatcher';
 export const HOST_ROLES: readonly HostRole[] = ['orchestrator', 'dispatcher'];
@@ -183,24 +187,15 @@ export interface Config {
    */
   outsideWatch?: { enabled?: boolean; machine?: string; healthUrl?: string; host?: string; ntfyServer?: string };
   /**
-   * Machines (docs/machines.md, docs/accounts.md). `useHostClaudeEnv` (default true): portal-run agents on a Mac
-   * get this host's `claudeEnv` (so CLAUDE_CODE_OAUTH_TOKEN: the same Claude account as the agents here) instead
-   * of the Mac's own login. `false` turns it off everywhere; an object sets it per machine, "*" for the rest:
-   * { "m3": false, "m5": false } or { "*": false, "m5": true }.
+   * Machines (docs/machines.md, docs/accounts.md). Every machine's runs take their Claude token from the vault, from the
+   * pool of the person the work is for (docs/vault.md section 4; w1078: useHostClaudeEnv and claudeFromVault are gone).
    */
   machines?: {
-    useHostClaudeEnv?: boolean | Record<string, boolean>;
-    /**
-     * The token vault (docs/vault.md, w512; default false): a machine's runs take their Claude token from the vault,
-     * taken per run from the run person's pool (docs/vault.md section 4), instead of the host token or the machine's own login. Same shape as
-     * useHostClaudeEnv: true, false, or per machine with "*" for the rest. A person's own token still wins for their work.
-     */
-    claudeFromVault?: boolean | Record<string, boolean>;
     /**
      * Per-person GitHub tokens (docs/vault.md section 13, w868; default false): a machine's runs get their person's vault
      * GitHub entry as GH_TOKEN (and the daemon's pushes for them use it); the machine id "portal" is the portal's own gh
-     * reads for a request. Off: GitHub entries are given to nobody and every caller keeps its own gh login. Same shape as
-     * claudeFromVault.
+     * reads for a request. Off: GitHub entries are given to nobody and every caller keeps its own gh login. true, false,
+     * or per machine with "*" for the rest: { "*": true, "beast": false }.
      */
     githubFromVault?: boolean | Record<string, boolean>;
     /**
@@ -227,11 +222,10 @@ export interface Config {
     autoUpdateAfterDeploy?: boolean;
   };
   /**
-   * Which Claude account THIS host's agents run on, per role (docs/accounts.md): "token" (the default) is
-   * claudeEnv's CLAUDE_CODE_OAUTH_TOKEN; "login" starts the process with no credential in its environment, so
-   * Claude Code uses the claude.ai login stored on this host (the one the usage meters show as "<host> login").
-   * Only the orchestrator and the dispatcher run here (w510); workers and standing agents are on machines and follow
-   * machines.useHostClaudeEnv, and a person's own token (userClaudeEnv) wins for work they asked for.
+   * Which vault token THIS host's agents run on, per role (docs/accounts.md): the orchestrators on their person's pool
+   * ("vault", the only value), the dispatcher on one named token ("vault:<entry name>") or, unset, the system payer's pool.
+   * Only the orchestrators and the dispatcher run here (w510); workers and standing agents run on machines, on the pool of
+   * the person their work is for. Nothing falls back to another credential (w1078).
    */
   claudeAccounts?: Partial<Record<HostRole, ClaudeAccount>>;
   /**
@@ -242,12 +236,6 @@ export interface Config {
    * ENABLE_CLAUDEAI_MCP_SERVERS=false for any other process. docs/accounts.md, "claude.ai connectors".
    */
   claudeAiConnectors?: Partial<Record<ConnectorRole, boolean>>;
-  /**
-   * The file holding the long-lived Claude OAuth token (sk-ant-oat01-…, from `claude setup-token`) the roles set to
-   * "tokenfile" run on (w464): read at each session start into that process's CLAUDE_CODE_OAUTH_TOKEN, with every other
-   * Claude credential removed. Never in claudeEnv, never sent to a machine, never shown (only its last four characters).
-   */
-  claudeTokenFile?: string;
   /**
    * The token vault (docs/vault.md, w512): `keyFile`, the file holding its key (32 bytes, base64), outside the data folder.
    * In the VM the systemd credential fff-vault-key wins (deploy/vm/guest/units/fff-portal.service). The vault itself is
@@ -275,12 +263,16 @@ export interface Config {
   };
   /**
    * Providers (docs/ffbox-integration.md): FFBox, whose connector dials out to /provider. `enabled` (default
-   * false) lets it connect; `tokenSha256` is the SHA-256 of its connector token (ffpv1_…), set with
-   * `node server/providerToken.ts` or set_app_config providers.ffbox.token; the token itself is never kept.
+   * false) lets it connect; `tokenSha256File` is the file in the secrets folder holding the SHA-256 of its connector token
+   * (ffpv1_…), set with `node server/providerToken.ts` or set_app_config providers.ffbox.token; the token itself is never
+   * kept, and the hash is never in config.json (w1078, lothsahn: "migrate providers.ffbox { enabled, tokenSha256 } to a file
+   * in the secrets folder and have the config reference the filename").
    */
   providers?: {
     ffbox?: {
       enabled?: boolean;
+      tokenSha256File?: string;
+      /** Before w1078 the hash itself; the start moves it into tokenSha256File (server/configMigration.ts). Read only until then. */
       tokenSha256?: string;
       /**
        * Let the dispatcher hand ledger requests to FFBox (send_to_ffbox; docs/intake.md, "Ledger → FFBox"). Default
@@ -323,8 +315,8 @@ export interface Config {
    */
   dataGuard?: { retainDays?: number; gzipAtUsedPercent?: number; pruneAtUsedPercent?: number; alertAtUsedPercent?: number; gzipIdleHours?: number; everyMinutes?: number };
   /**
-   * The portal holds no sandboxes of its own (w510): this is the folder this host's own machine daemon keeps its
-   * sandboxes in (add_machine local takes it as its sandbox_root; BEAST's F:\ffsb), and the default parent of
+   * The portal holds no sandboxes of its own (w510): this is the folder a machine daemon on the portal's own host would keep
+   * its sandboxes in (add_machine local takes it as its sandbox_root; the portal's dedicated VM has none), and the default parent of
    * `review.root` and `standingRoot`. Optional (default <dataDir>/sandboxes).
    */
   sandboxRoot: string;
@@ -352,8 +344,8 @@ export interface Config {
   /** Base ref for new sandbox branches. */
   defaultBase: string;
   /**
-   * Extra volumes the host guard watches besides the data volume, e.g. "C:/" (on BEAST, also handed to its own daemon's
-   * guard, which watches its sandbox drive's host volume with it).
+   * Extra volumes the host guard watches besides the data volume, e.g. "C:/" (also handed to a daemon on the portal's own host,
+   * which watches its sandbox drive's host volume with it; the portal's dedicated VM runs none).
    */
   hostDiskPaths: string[];
   /** The disk guard and the sandbox drive's self-recovery (server/hostHealth.ts, docs/self-recovery.md). */
@@ -437,18 +429,6 @@ export interface Config {
     permissionMode: PermissionMode;
     effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   };
-  /**
-   * Extra environment for every Claude session, e.g. { "CLAUDE_CODE_OAUTH_TOKEN": "<from claude setup-token>" }
-   * so an always-on host does not depend on an interactive login that can expire.
-   */
-  claudeEnv?: Record<string, string>;
-  /**
-   * Per-person Claude env, by user id (docs/identity.md, "Local billing"): an agent working for that person
-   * (SessionInfo.requestedBy) runs with it laid over claudeEnv, e.g.
-   * { "lothsahn": { "CLAUDE_CODE_OAUTH_TOKEN": "<Lothsahn's claude setup-token>" } }. A person without an entry
-   * runs on claudeEnv, the owner's account. Write-only through set_app_config; redacted from transcripts.
-   */
-  userClaudeEnv?: Record<string, Record<string, string>>;
   /**
    * The user id automatic work is attributed and billed to: scheduled standing-agent runs and, once FFBox takes
    * work, intake-triggered diagnoses (docs/identity.md). Default: the owner (the first login with role owner).
@@ -582,6 +562,14 @@ export const RETIRED_CONFIG_KEYS: readonly string[] = [
   'claudeAccounts.workers',
   // Ignored since 2026-09-24 (compacting the sandbox drive is manual only, host_recovery "compact"); nothing read it.
   'hostGuard.compactWhenReclaimGB',
+  // Every Claude process runs on a vault token (w1078, lothsahn: "Delete claudeTokenFile and its associated config. Also
+  // delete claudeEnv, get rid of the fallback mode, everything runs off the vault"). The start takes them out first, its
+  // backup in the secrets folder (server/configMigration.ts).
+  'claudeEnv',
+  'userClaudeEnv',
+  'claudeTokenFile',
+  'machines.useHostClaudeEnv',
+  'machines.claudeFromVault',
 ];
 
 /** The retired keys (RETIRED_CONFIG_KEYS) a raw config file sets. */
@@ -625,13 +613,13 @@ export function pruneRetiredKeys(file: string): string[] {
 
 /** The startup line for retired keys, or undefined. */
 export function retiredKeysLine(keys: string[] | undefined): string | undefined {
-  return keys?.length ? `config.json sets ${keys.join(', ')}, which nothing reads any more: the portal runs no sandboxes, editors, workers or standing agents of its own (w510). Ignored; remove them (config.example.json shows what is left).` : undefined;
+  return keys?.length ? `config.json sets ${keys.join(', ')}, which nothing reads any more (w510: the portal runs no sandboxes, editors, workers or standing agents of its own; w1078: every Claude process runs on a vault token). Ignored; remove them (config.example.json shows what is left).` : undefined;
 }
 
 export interface CleanupPolicy {
   /** A clean-up pass this often (minutes; 0: only when free space is below softFreeGB). */
   everyMinutes: number;
-  /** Below this much free space: a pass every 15 minutes, including the rules that empty whole caches. 0: warnFreeGB + 40. */
+  /** Below this much free space: a pass every 15 minutes, including the rules that empty whole caches. 0: warnFreeGB (w1101). */
   softFreeGB: number;
   /** Folder name patterns in the temp folder that are scratch, removed when older than tempOlderThanHours. */
   tempPatterns: string[];
@@ -686,8 +674,12 @@ export const DEFAULT_CLEANUP: CleanupPolicy = {
   ageRules: [],
 };
 
-/** The soft threshold the host uses: softFreeGB, or warnFreeGB + 40 when unset. */
-export const hostSoftFreeGB = (g: Pick<HostGuardConfig, 'warnFreeGB' | 'cleanup'>) => g.cleanup.softFreeGB || g.warnFreeGB + 40;
+/**
+ * The soft threshold the portal's host uses: softFreeGB, or warnFreeGB when unset (w1101, lothsahn: "The portal should be
+ * considered to be low below 40GB free, not 120GB"). It was warnFreeGB + 40, for BEAST's sandbox drive; the portal's
+ * dedicated VM keeps no sandboxes, so its clean-up works hard only once it is low.
+ */
+export const hostSoftFreeGB = (g: Pick<HostGuardConfig, 'warnFreeGB' | 'cleanup'>) => g.cleanup.softFreeGB || g.warnFreeGB;
 
 /** A machine's clean-up when config machines.cleanup says nothing about it. */
 export const MACHINE_CLEANUP_DEFAULTS = { everyMinutes: 60, softFreeGB: 80 };
@@ -708,9 +700,9 @@ export function machineCleanupSettings(cfg: Pick<Config, 'machines'>, id: string
 export interface HostGuardConfig {
   /** How often the guard looks (seconds). 0 turns the whole guard off. */
   pollSeconds: number;
-  /** Below this much free space on any watched volume: notify, and refuse new editors and agent processes. */
+  /** Below this much free space on any watched volume: the portal is low; notify (and a daemon on this host refuses new editors and agents). */
   warnFreeGB: number;
-  /** Below this: also ask busy agents to checkpoint and end their turn, stop idle editors, and clean up. */
+  /** Below this: also a clean-up pass with every rule (and a daemon on this host stops idle editors). Below warnFreeGB. */
   criticalFreeGB: number;
   /** A level clears only this far above its threshold, so it does not flap. */
   hysteresisGB: number;
@@ -730,10 +722,15 @@ export interface HostGuardConfig {
   cleanup: CleanupPolicy;
 }
 
-const HOST_GUARD_DEFAULTS: HostGuardConfig = {
+/**
+ * The portal's own host guard (hostGuard.*; the machines' daemons have their own thresholds). Low below 40 GB and critical
+ * below 10 GB (w1101, lothsahn 2026-10-12: "The portal should be considered to be low below 40GB free, not 120GB" and
+ * "Critical level for the portal should be 10GB"): the portal's dedicated VM has a 115 GB disk and keeps no sandboxes.
+ */
+export const HOST_GUARD_DEFAULTS: HostGuardConfig = {
   pollSeconds: 30,
-  warnFreeGB: 80,
-  criticalFreeGB: 40,
+  warnFreeGB: 40,
+  criticalFreeGB: 10,
   hysteresisGB: 10,
   remountMinFreeGB: 30,
   devDriveVhdx: '',
@@ -755,6 +752,8 @@ export function configPath(): string {
  */
 export function withDefaults(raw: any): Config {
   const kept = withoutRetiredKeys(raw);
+  const accounts = currentAccounts(kept.claudeAccounts);
+  if (accounts !== kept.claudeAccounts) kept.claudeAccounts = accounts;
   return {
     ...DEFAULTS,
     ...kept,
@@ -790,9 +789,10 @@ export function loadConfig(): Config {
     if (!rel.startsWith('..') && !path.isAbsolute(rel)) throw new Error(`standingRoot (${cfg.standingRoot}) must not be inside ${guarded}`);
   }
   cfg.repo.basePath = path.resolve(cfg.repo.basePath);
-  if (cfg.claudeTokenFile !== undefined) {
-    if (typeof cfg.claudeTokenFile !== 'string' || !cfg.claudeTokenFile.trim()) throw new Error('config claudeTokenFile is the path of a file');
-    cfg.claudeTokenFile = path.resolve(cfg.claudeTokenFile);
+  const hashFile: unknown = cfg.providers?.ffbox?.tokenSha256File;
+  if (hashFile !== undefined) {
+    if (typeof hashFile !== 'string' || !path.isAbsolute(hashFile.trim())) throw new Error('config providers.ffbox.tokenSha256File is the absolute path of the file holding the connector token\'s SHA-256 (in the secrets folder)');
+    cfg.providers!.ffbox!.tokenSha256File = path.resolve(hashFile.trim());
   }
   if (cfg.vault !== undefined) {
     if (typeof cfg.vault !== 'object' || cfg.vault === null || Array.isArray(cfg.vault)) throw new Error('config vault is an object, e.g. { "keyFile": "/etc/fff/vault.key" }');
@@ -841,15 +841,26 @@ export function windowsPathsOffWindows(cfg: Pick<Config, 'sandboxRoot' | 'dataDi
 }
 
 /**
- * Throws when config claudeAccounts or machines.useHostClaudeEnv is malformed: a typo there would otherwise
- * quietly run agents on another account than the one meant.
+ * config claudeAccounts without the accounts retired in w1078 ("token", "login", "tokenfile"): the role then runs on its
+ * vault default. The same object when there is nothing to drop.
  */
-export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machines'> & Partial<Pick<Config, 'claudeTokenFile' | 'vault'>>) {
+export function currentAccounts<T>(a: T): T {
+  if (typeof a !== 'object' || a === null || Array.isArray(a)) return a;
+  const entries = Object.entries(a as Record<string, unknown>);
+  if (!entries.some(([, v]) => typeof v === 'string' && RETIRED_ACCOUNTS.includes(v))) return a;
+  return Object.fromEntries(entries.filter(([, v]) => !(typeof v === 'string' && RETIRED_ACCOUNTS.includes(v)))) as T;
+}
+
+/**
+ * Throws when config claudeAccounts, machines.githubFromVault or vault.pool is malformed: a typo there would otherwise
+ * quietly run agents on another token than the one meant.
+ */
+export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machines'> & Partial<Pick<Config, 'vault'>>) {
   const poolProblem = checkPoolConfig(cfg.vault?.pool);
   if (poolProblem) throw new Error(poolProblem);
   const a: unknown = cfg.claudeAccounts;
   if (a !== undefined) {
-    if (typeof a !== 'object' || a === null || Array.isArray(a)) throw new Error('config claudeAccounts is an object, e.g. { "orchestrator": "login" }');
+    if (typeof a !== 'object' || a === null || Array.isArray(a)) throw new Error('config claudeAccounts is an object, e.g. { "orchestrator": "vault", "dispatcher": "vault:vault-lothsahn-1" }');
     for (const [role, v] of Object.entries(a)) {
       if (!HOST_ROLES.includes(role as HostRole)) throw new Error(`config claudeAccounts.${role}: no such role (${HOST_ROLES.join(', ')})`);
       const pinned = pinnedVaultEntry(v as string);
@@ -858,19 +869,14 @@ export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machine
         if (!VAULT_ENTRY_NAME.test(pinned)) throw new Error(`config claudeAccounts.${role} is "vault:<entry name>", a vault entry's name as \`fffctl vault list\` shows it (lower-case letters, digits, ".", "_", "-"), e.g. "vault:vault-lothsahn-1"`);
         continue;
       }
-      if (!CLAUDE_ACCOUNTS.includes(v as ClaudeAccount)) throw new Error(`config claudeAccounts.${role} is "login" or "token" (or "tokenfile" for ${TOKEN_FILE_ROLES.join(', ')}, "vault" for ${VAULT_ROLES_ACCOUNT.join(', ')}, "vault:<entry name>" for ${VAULT_PINNED_ROLES.join(', ')})`);
-      if (v === 'vault' && !VAULT_ROLES_ACCOUNT.includes(role)) throw new Error(`config claudeAccounts.${role} cannot be "vault": only ${VAULT_ROLES_ACCOUNT.join(', ')} run on a person's own vault tokens (the dispatcher stays on the token file)`);;
-      if (v === 'tokenfile' && !TOKEN_FILE_ROLES.includes(role)) throw new Error(`config claudeAccounts.${role} cannot be "tokenfile": only ${TOKEN_FILE_ROLES.join(', ')} run on the token file`);
-      if (v === 'tokenfile' && !(cfg as Partial<Pick<Config, 'claudeTokenFile'>>).claudeTokenFile) throw new Error(`config claudeAccounts.${role} is "tokenfile" but config claudeTokenFile names no file`);
+      if (v !== 'vault') throw new Error(`config claudeAccounts.${role} is "vault" (a person's own vault pool)${VAULT_PINNED_ROLES.includes(role) ? ' or "vault:<entry name>" (one named vault token)' : ''}: every Claude process runs on a vault token (w1078)`);
     }
   }
-  for (const key of ['useHostClaudeEnv', 'claudeFromVault', 'githubFromVault'] as const) {
-    const u: unknown = cfg.machines?.[key];
-    if (u === undefined || typeof u === 'boolean') continue;
-    if (typeof u !== 'object' || u === null || Array.isArray(u)) throw new Error(`config machines.${key} is true, false or { "<machine id>" | "*": true | false }`);
-    for (const [id, v] of Object.entries(u)) {
-      if (typeof v !== 'boolean') throw new Error(`config machines.${key}.${id} is true or false`);
-    }
+  const u: unknown = cfg.machines?.githubFromVault;
+  if (u === undefined || typeof u === 'boolean') return;
+  if (typeof u !== 'object' || u === null || Array.isArray(u)) throw new Error('config machines.githubFromVault is true, false or { "<machine id>" | "*": true | false }');
+  for (const [id, v] of Object.entries(u)) {
+    if (typeof v !== 'boolean') throw new Error(`config machines.githubFromVault.${id} is true or false`);
   }
 }
 

@@ -5,7 +5,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import net from 'node:net';
 import crypto from 'node:crypto';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { DEFAULTS, Migration, type Options, type System } from './fff-migrate.ts';
@@ -16,6 +15,7 @@ import { SessionManager } from '../server/sessions.ts';
 import { MachineManager } from '../server/machines.ts';
 import type { Probes } from '../machine/daemon.ts';
 import type { Config } from '../server/config.ts';
+import { reservePort } from '../server/testPorts.ts';
 
 // ---------------------------------------------------------------- the synthetic BEAST and VM
 
@@ -29,13 +29,6 @@ export const skip = !PWSH ? 'needs Linux with pwsh (the fake BEAST runs its Powe
 export const HAS_ZSTD = spawnSync('zstd', ['--version'], { stdio: 'ignore' }).status === 0;
 export const lanIp = () => Object.values(os.networkInterfaces()).flat().find((i) => i && i.family === 'IPv4' && !i.internal)?.address;
 
-async function freePort(): Promise<number> {
-  const s = net.createServer();
-  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
-  const port = (s.address() as net.AddressInfo).port;
-  await new Promise<void>((r) => s.close(() => r()));
-  return port;
-}
 
 const gitInit = (dir: string) => {
   fs.mkdirSync(dir, { recursive: true });
@@ -186,7 +179,8 @@ export interface World {
 export async function world(t: { after: (fn: () => unknown) => void }): Promise<World> {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'fff-migrate-'));
   const ip = lanIp()!;
-  const [vmPort, beastPort] = [await freePort(), await freePort()];
+  // Known before the portals start and kept across their restarts, so reserved, not "listen on 0 and close" (w1095).
+  const [vmPort, beastPort] = [await reservePort(), await reservePort()];
   const publicUrl = `http://${ip}:${vmPort}`;
 
   // ---- BEAST: its app folder (config.json, data, scripts), its base clone, its Claude folder
@@ -273,8 +267,6 @@ for ($i = 0; $i -lt 120; $i++) { try { $null = Invoke-WebRequest -UseBasicParsin
     hostGuard: { ...template.hostGuard, pollSeconds: 0 },
     unity: { editorPath: path.join(base, 'no-unity'), watchdog: { stallMinutes: 0, runningPollSeconds: 0, autoDismiss: false } },
     orchestrator: { ...template.orchestrator, notifyOnWorkerEvents: false },
-    claudeTokenFile: path.join(vm, 'secrets', 'claude-oauth-token'),
-    claudeAccounts: { orchestrator: 'tokenfile', dispatcher: 'tokenfile' },
   };
   const vmCfgFile = path.join(vm, 'config', 'config.json');
   fs.writeFileSync(vmCfgFile, JSON.stringify(vmCfg, null, 2) + '\n');

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { STALE_READING_MS, UsageFetchError, UsageTracker, buildAccounts, effectiveUsage, tokenKey, tokenLabel, type UsageDeps } from './usage.ts';
+import { STALE_READING_MS, UsageFetchError, UsageTracker, buildAccounts, effectiveUsage, tokenKey, type UsageDeps } from './usage.ts';
 import { POOL_DEFAULTS, judge, reserveOf, type PoolToken } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
 
@@ -62,17 +62,17 @@ test('effectiveUsage: a persisted reading is labelled with its age; older than t
   assert.deepEqual([high.weekly?.percent, high.session?.percent], [97, 0], 'the weekly stays 97 until its reset; the 5-hour window reset long ago');
 });
 
+/** How the meters label a vault token (a vault entry's name and the last four characters, w1078). */
+const tokenLabel = (token: string) => `vault-ben-1 …${token.slice(-4)}`;
+
 function trackerIn(dir: string, deps: UsageDeps) {
-  fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'login-secret', refreshToken: 'r', scopes: ['user:inference', 'user:profile'] } }));
-  const cfg = { dataDir: dir, claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never;
+  const cfg = { dataDir: dir } as never;
   const logs: string[] = [];
   const t = new UsageTracker(cfg, () => undefined, {
-    fetchLogin: async () => {
-      throw new Error('no login here');
-    },
     log: (l) => logs.push(l),
     ...deps,
   });
+  t.personTokens = () => [{ token: TOKEN, label: tokenLabel(TOKEN) }];
   return { t, logs };
 }
 const body = (weekly: number, session: number) => ({
@@ -97,9 +97,9 @@ test('a reading is persisted, loaded at startup, and kept through a restart whos
   await first.t.refresh();
   assert.equal(first.t.usageOf(key)?.reading, undefined, 'read by this process just now: no label');
   const file = fs.readFileSync(path.join(dir, 'usage.json'), 'utf8');
-  assert.ok(!file.includes(TOKEN) && !file.includes('xxxxxxxx') && !file.includes('login-secret'), 'a token is never written: the file has the hash key and the label (last four) only');
+  assert.ok(!file.includes(TOKEN) && !file.includes('xxxxxxxx'), 'a token is never written: the file has the hash key and the label (last four) only');
   assert.match(file, new RegExp(`"${key}"`));
-  assert.match(file, /host token …EAAA/);
+  assert.match(file, /vault-ben-1 …EAAA/);
   const saved = JSON.parse(file).entries[key];
   assert.deepEqual([saved.usage.weekly.percent, saved.usage.session.percent, typeof saved.usage.asOf, typeof saved.usage.weekly.resetsAt], [8, 28, 'string', 'string']);
 
@@ -121,7 +121,7 @@ test('a reading is persisted, loaded at startup, and kept through a restart whos
   const after = second.t.usageOf(key)!;
   assert.deepEqual([after.available, after.weekly?.percent, after.session?.percent, after.reading?.kind], [true, 8, 28, 'persisted']);
   assert.match(after.reading!.why, /^read under a minute ago; the latest poll failed \(usage unknown: the usage endpoint rate-limits this token/);
-  assert.match(second.logs.find((l) => /host token/.test(l))!, /failed \(.*\), keeping its reading from /);
+  assert.match(second.logs.find((l) => /vault-ben-1/.test(l))!, /failed \(.*\), keeping its reading from /);
   assert.equal(second.t.nearTokens().length, 1, 'a token on a kept reading is asked again at the near-poll pace');
 
   // The kept reading is what the pool uses: not "no numbers", not the 50% assumption
