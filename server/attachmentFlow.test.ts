@@ -173,7 +173,7 @@ test("a person's files reach their orchestrator as stored files, go with request
   const e = await upload('old.zip', Buffer.from('old save'));
   assert.equal((await call(loth, 'request_work', { title: 'An old save', brief: 'Look at it.', attachments: [e.id] })).isError, false);
   (files as unknown as { records: Map<string, unknown> }).records.delete(e.id);
-  const late = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Look at the old save.', title: 'Old save', work_id: 'w2' });
+  const late = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Look at the old save.', title: 'Old save', work_id: 'w2', extra_agent: true });
   assert.equal(late.isError, false, late.text);
   assert.ok(late.text.includes(`Not sent, deleted by retention (ask the person to attach them again): ${e.id} "old.zip".`), late.text);
 

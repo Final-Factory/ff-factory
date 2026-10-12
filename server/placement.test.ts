@@ -65,7 +65,7 @@ test('w416: with one busier, the other is picked, and placing on the busier one 
   assert.equal(preferLine([beast, loth]), `Next new game-repo work: lothdesktop (${p.why}).`);
   const hint = placementHint('beast', [beast, loth]);
   assert.match(hint ?? '', /^ Note: beast has \d+% room; the next new game-repo work goes to lothdesktop \(most room/);
-  assert.match(hint ?? '', /Unless this work needs beast \(FF Factory's own repo or its deploys, the review folder, ssh to the M5 from a computer that has its key, a brief that pins it, or a worker going on in its own sandbox\), put it there\.$/);
+  assert.match(hint ?? '', /Unless this work needs beast \(the review folder, ssh to the M5 from a computer that has its key, a brief that pins it, or a worker going on in its own sandbox\), put it there\.$/);
   assert.equal(placementHint('lothdesktop', [beast, loth]), undefined, 'placing on the next one says nothing');
   // And the other way round: LothDesktop busier, BEAST picked.
   assert.equal(pickComputer([idle('beast', 6), { ...loth, live: 4, freeSandboxes: 0, sandboxes: 5, memUsedBytes: 50 * GB }])!.pick.id, 'beast');
@@ -76,8 +76,8 @@ test('w416: BEAST full (the 05:22 numbers): busy, LothDesktop is next, and the c
   assert.equal(roomOf(BEAST), 0);
   const lines = capacityLines([BEAST, LOTH]);
   assert.match(lines[0], /^## Capacity/);
-  assert.equal(lines[1], '- beast: BUSY (7 live agents of 6; RAM 86% used; no free sandbox (5 of 5 made, all in use)): 7 live agents of 6 (5 mid-turn); 0 of 5 sandboxes free; RAM 86% used; editors 2 of 3');
-  assert.match(lines[2], /^- lothdesktop: ROOM \d+%: 2 live agents of 5 \(1 mid-turn\); 2 of 5 sandboxes free \(2 more can be made\); RAM 47% used; editors 1 of 2$/);
+  assert.equal(lines[1], '- beast: BUSY (7 live agents of 6; RAM 86% used; no free sandbox (5 of 5 made, all in use)): 7 live agents of 6 (5 mid-turn); 0 of 5 sandboxes free; RAM 86% used; editors 2 of 3; agent slot: free (5 of 6 mid-turn)');
+  assert.match(lines[2], /^- lothdesktop: ROOM \d+%: 2 live agents of 5 \(1 mid-turn\); 2 of 5 sandboxes free \(2 more can be made\); RAM 47% used; editors 1 of 2; agent slot: free \(1 of 5 mid-turn\)$/);
   assert.equal(lines[3], 'Next new game-repo work: lothdesktop (the only one with room; beast is busy).');
   assert.match(placementHint('beast', [BEAST, LOTH]) ?? '', /^ Note: beast is busy \(7 live agents of 6; RAM 86% used; no free sandbox .*\); the next new game-repo work goes to lothdesktop/);
 });
@@ -97,7 +97,7 @@ test('w416: no note on the next one, none when nothing has room, and one compute
   assert.equal(placementHint('beast', [BEAST, lothOff]), undefined, 'nothing has room: nowhere better to point');
   assert.equal(preferLine([BEAST, lothOff]), 'No computer has room for new work now.');
   assert.equal(preferLine([LOTH]), undefined);
-  assert.equal(capacityLines([LOTH]).length, 2);
+  assert.equal(capacityLines([LOTH]).length, 3, 'its header, its line and the non-game line');
   assert.deepEqual(capacityLines([]), []);
 });
 
@@ -132,7 +132,7 @@ test('w428: the capacity block tags each computer, and placing on an avoided BEA
   assert.match(lines[1], /^- beast \[avoided: BEAST unstable, 2026-10-05\]: ROOM \d+%: 0 live agents of 6/);
   assert.match(lines[2], /^- lothdesktop \[preferred #1\]: ROOM \d+%/);
   assert.match(lines[3], /^Next new game-repo work: lothdesktop \(first with room in placement\.prefer/);
-  assert.equal(lines.length, 4);
+  assert.equal(lines.length, 5, "header, two computers, the next game line and the non-game line");
   assert.match(placementHint('beast', cs, undefined, PREFS) ?? '', /^ Note: beast is avoided \(BEAST unstable, 2026-10-05\); the next new game-repo work goes to lothdesktop \(first with room in placement\.prefer/);
   assert.equal(placementHint('lothdesktop', cs, undefined, PREFS), undefined);
 });
@@ -160,6 +160,6 @@ test('w615: a machine whose GPU Whisper is loaded says how much VRAM it holds; u
   assert.deepEqual(voiceVram({ state: 'ready' }), {});
   assert.deepEqual(voiceVram(undefined), {});
   const lines = capacityLines([{ ...BEAST, voiceVramMiB: 1161 }, LOTH]);
-  assert.match(lines[1], /; editors 2 of 3; Whisper holds ~1\.1 GB VRAM \(unloaded for the editors when VRAM runs short\)$/);
+  assert.match(lines[1], /; editors 2 of 3; Whisper holds ~1\.1 GB VRAM \(unloaded for the editors when VRAM runs short\); agent slot: free \(5 of 6 mid-turn\)$/);
   assert.doesNotMatch(lines[2], /Whisper/);
 });

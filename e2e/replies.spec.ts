@@ -111,7 +111,7 @@ test('reply: your own message and a relayed worker update can be replied to too'
   await call(me.orchestratorId, 'request_work', { title: `Skip button ${tag}`, brief: 'Add a skip button.' });
   let w: WorkItem | undefined;
   await expect.poll(async () => (w = (await appState(page.request)).work?.find((x) => x.title === `Skip button ${tag}`)) !== undefined).toBe(true);
-  await call(me.dispatcherId!, 'start_agent', { sandbox: ALPHA, prompt: `add a skip button ${tag}`, title: `Skip ${tag}`, work_id: w!.id });
+  await call(me.dispatcherId!, 'start_agent', { sandbox: ALPHA, prompt: `add a skip button ${tag}`, title: `Skip ${tag}`, work_id: w!.id, extra_agent: true });
   const notice = page.locator('.orch .notice', { hasText: `Skip ${tag}` });
   await expect(notice).toBeVisible();
 

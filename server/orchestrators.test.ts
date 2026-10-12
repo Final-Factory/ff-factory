@@ -1448,7 +1448,7 @@ test("w650: Lothsahn's and Ben's orchestrators read data/'s reports and ledger, 
 
 test('w496: a worker started for a request gets the request as filed, its notes and the PR line in its first message, at once or queued at the cap', async (t) => {
   shortSlowTurns(t);
-  const { store, sessions, dispatcher, chat, call } = await setupOnMachine(t, {}, { maxAgentsPerSandbox: 1 });
+  const { store, sessions, agents, dispatcher, chat, call } = await setupOnMachine(t, {}, { maxAgentsPerSandbox: 1 });
   const ben = chat(BEN);
   ben.lastFrom = 'human';
   await call(ben.info, 'request_work', { title: 'Ghosts fly over the station', brief: 'Remote players float 2 m above the deck after a resync. Reproduce with the attached save.', constraints: 'No save-layout change.', related_ids: ['w445'] });
@@ -1476,9 +1476,13 @@ test('w496: a worker started for a request gets the request as filed, its notes 
   await until('a idle', () => sessions.get(a).info.status === 'idle');
   sessions.send(a, '#slow keep busy', 'orchestrator');
   await until('a mid-turn', () => sessions.get(a).info.status === 'running');
-  const queued = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Find the lag lead.', title: 'Lag lead', work_id: 'w2', override_duplicate: 'another request' });
-  assert.match(queued.text, /Queued, not refused: 1 agents mid-turn in sandbox pc\/alpha \(max_agents_per_sandbox 1\)/);
-  const b = /Started agent (\w+)/.exec(queued.text)![1];
+  // w1089: the dispatcher's start_agent no longer queues a worker behind a full sandbox: it is refused, saying what is there.
+  const refused = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Find the lag lead.', title: 'Lag lead', work_id: 'w2', override_duplicate: 'another request', extra_agent: true });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /sandbox pc\/alpha is full: .*"w1: Ghosts" \(Working\); 1 agents mid-turn there \(max_agents_per_sandbox 1\), so a worker started there would only wait in the send queue/);
+  // The send queue still holds a brief at the cap for the ways that reach it (a start from /mcp, a session resumed): the brief goes first.
+  const b = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Find the lag lead.\n\nThe request as filed (w2): The client leads the host by 3 heartbeats.', title: 'Lag lead', from: 'orchestrator' }).info.id;
+  assert.match((agents as unknown as { queuedLine(id: string): string }).queuedLine(b), /Queued, not refused: 1 agents mid-turn in sandbox pc\/alpha \(max_agents_per_sandbox 1\)/);
   assert.equal(first(b), undefined, 'nothing delivered yet');
   sessions.send(b, 'Start your brief now.', 'orchestrator');
   await until('the brief went', () => !!first(b), 20_000);
@@ -1542,10 +1546,17 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
 
   // A worker somewhere stops: after the quiet spell the dispatcher is woken with the queue, w1 in it.
   t.mock.timers.enable({ apis: ['setTimeout'] });
+  // w1089: decided when it fires, from the room then. No computer has room: nothing worth a ping, so none (a stale "released" is never sent).
+  o.capacityMayHaveFreed('sandbox pc/alpha released');
+  t.mock.timers.tick(30_000);
+  assert.equal(heard(dispatcher().info.id, '[ledger] Capacity may have freed').length, 0, 'no room now: no ping');
+  // A computer has room at the time it fires: the ping says how old the event is and where there is room now.
+  agents.roomNow = () => ['pc'];
   o.capacityMayHaveFreed('worker x "Other work" stopped');
   t.mock.timers.tick(30_000);
   t.mock.timers.reset();
-  assert.ok(heard(dispatcher().info.id, '[ledger] Capacity may have freed').some((e) => e.text.includes('w1 "Verify suspected')));
+  const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').map((e) => e.text).join('\n');
+  assert.match(ping, /\[ledger\] Capacity may have freed \(worker x "Other work" stopped, 0 min ago\)\. Room now: game work: pc; agent-slot work: pc\. Queued for capacity and fitting it, by priority, then oldest: w1 "Verify suspected/);
 
   // It starts it in a machine's sandbox: the request is active, and the agent sees how it is doing.
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: task, title: 'Regression check', work_id: 'w1' });
@@ -2117,7 +2128,7 @@ test('w740: start_agent into the same sandbox for another request is a second se
   await call(ben, 'request_work', { title: 'First job', brief: 'One.' });
   await call(ben, 'request_work', { title: 'Second job', brief: 'Two.', related_ids: ['w1'] });
   const one = /Started agent (\w+)/.exec((await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'One', title: 'First', work_id: 'w1' })).text)![1];
-  const r2 = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Two', title: 'Second', work_id: 'w2', override_duplicate: 'w2 is the regression test for w1, not a repeat of it' });
+  const r2 = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Two', title: 'Second', work_id: 'w2', override_duplicate: 'w2 is the regression test for w1, not a repeat of it', extra_agent: true });
   assert.equal(r2.isError, false, r2.text);
   const two = /Started agent (\w+)/.exec(r2.text)![1];
   assert.notEqual(one, two);
@@ -2284,10 +2295,10 @@ test('w1076: sessionPerson: the person of the requests in hand, never the sessio
 // ---------------------------------------------------------------- w754: gates outlive a hold, several gates, no polling
 
 /** Requests as the ledger holds them, filed directly (filing through request_work is capped per message). */
-function putRequests(store: Store, rows: { id: string; status?: WorkItem['status']; by?: Requester }[]) {
-  for (const r of rows) {
-    const by = r.by ?? LOTH;
-    store.putWork({ id: r.id, title: `Request ${r.id}`, brief: 'Do it.', priority: 'normal', keys: [], requestedBy: by, requesters: [by], humanAsked: true, status: r.status ?? 'new', createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [] });
+function putRequests(store: Store, rows: (Partial<WorkItem> & { id: string; by?: Requester })[]) {
+  for (const { by: given, ...r } of rows) {
+    const by = given ?? LOTH;
+    store.putWork({ title: `Request ${r.id}`, brief: 'Do it.', priority: 'normal', keys: [], requestedBy: by, requesters: [by], humanAsked: true, createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [], ...r, status: r.status ?? 'new' });
   }
   store.workSeq = Math.max(store.workSeq, ...rows.map((r) => Number(r.id.slice(1))));
 }
@@ -2335,7 +2346,7 @@ test('w754: w750 as it happened: block on A, a hold, the hold lifted with A stil
 
   // A person's own word lets the dispatcher start a gated request: a different request, so w3 stays gated for the rest.
   assert.equal((await decide('w4', { action: 'block', blocker: { kind: 'request', ref: 'w2', what: 'w2 first' } })).isError, false);
-  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do w4', title: 'w4: do it', work_id: 'w4', override_gate: 'lothsahn: start w4 now, w2 does not matter for it' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do w4', title: 'w4: do it', work_id: 'w4', override_gate: 'lothsahn: start w4 now, w2 does not matter for it', extra_agent: true });
   assert.equal(started.isError, false, started.text);
   assert.equal(store.work.get('w4')!.status, 'active');
   assert.equal(store.work.get('w4')!.blocked, undefined, 'the start dropped its gates');
@@ -2355,7 +2366,7 @@ test('w754: w750 as it happened: block on A, a hold, the hold lifted with A stil
   assert.deepEqual([store.work.get('w3')!.status, store.work.get('w3')!.blocked], ['new', undefined]);
   await until('the dispatcher is told to start it', () => heard(dispatcher().info.id, '[ledger] w3').some((e) => /is unblocked: it waited on w2 finishing/.test(e.text)));
   // Now it starts without an override.
-  const ok = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Release it', title: 'w3: release', work_id: 'w3', override_duplicate: 'not a repeat of w4' });
+  const ok = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Release it', title: 'w3: release', work_id: 'w3', override_duplicate: 'not a repeat of w4', extra_agent: true });
   assert.equal(ok.isError, false, ok.text);
 });
 
@@ -2448,7 +2459,7 @@ test('w846: a worker blocks on its own PR\'s CI (blocked_on prs "ci:…"); while
     ['w1', 'Final-Factory/FinalFactory#1354', { done: true, text: 'CI on Final-Factory/FinalFactory#1354 finished: 1 of 9 checks failed (Test in editmode)' }],
     ['w2', 'Final-Factory/FinalFactory#1356', { done: true, text: 'CI on Final-Factory/FinalFactory#1356 finished: all 9 checks passed or skipped' }],
   ] as const) {
-    const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: `${wid}: fix`, work_id: wid, ...(wid === 'w2' ? { override_duplicate: 'another request' } : {}) });
+    const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: `${wid}: fix`, work_id: wid, ...(wid === 'w2' ? { override_duplicate: 'another request', extra_agent: true } : {}) });
     assert.equal(started.isError, false, started.text);
     const id = /Started agent (\w+)/.exec(started.text)![1];
     const info = store.sessions.get(id)!;
@@ -2586,7 +2597,7 @@ test('w754: a worker whose request waits only on a PR and another request calls 
 /** A worker started for request `wid` in pc/alpha, past its first turn. */
 async function startedFor(env: Awaited<ReturnType<typeof setupOnMachine>>, wid: string, extra: Record<string, unknown> = {}) {
   const { store, machines, dispatcher, call } = env;
-  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: `${wid}: fix`, work_id: wid, ...extra });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: `${wid}: fix`, work_id: wid, extra_agent: true, ...extra });
   assert.equal(started.isError, false, started.text);
   const id = /Started agent (\w+)/.exec(started.text)![1];
   const info = store.sessions.get(id)!;
@@ -2842,6 +2853,135 @@ test("w936: main_clone grants a machine's main clone to a request's workers: its
   assert.equal(store.work.get('w2')!.mainCloneAccess, undefined);
 });
 
+/** Room for each kind of work, as the dispatcher's tools and the page see it (Agents.roomFacts, w1089, w1098). */
+function agentsRoomFacts(agents: Agents, r: { game?: string[]; agent?: string[]; held?: { id: string; why: string; for: ('game' | 'agent')[] }[] }) {
+  const f = { game: r.game ?? [], agent: r.agent ?? [], held: r.held ?? [] };
+  agents.roomNow = () => f.game;
+  agents.roomFacts = () => f;
+}
+
+test('w1089: waiting for a free sandbox is capacity: decide_work block is refused for it (a guessed time most of all) and says to queue; a real time block still works; queue takes it', async (t) => {
+  const { store, agents, dispatcher, chat, call } = setup(t);
+  agentsRoomFacts(agents, {});
+  await call(chat(BEN).info, 'request_work', { title: 'Copy the station name', brief: 'Add (Copy).' });
+  const at = new Date(Date.now() + 15 * 60_000).toISOString();
+  // The 04:20 UTC mistake: blocked on a made-up time for "a free sandbox: all in use except the m5's (Ben testing)".
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'all full', blocker: { kind: 'time', until: at, what: "a free sandbox: all in use except the m5's (Ben testing)" } });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /is a wait for capacity .*Queued, never Blocked on a time or a thing: use decide_work queue/);
+  assert.equal(store.work.get('w1')!.status, 'new', 'nothing was recorded');
+  // The same words on a lock or a machine are refused the same way.
+  for (const blocker of [{ kind: 'lock', ref: 'lab.lock', what: 'no free editor' }, { kind: 'machine', ref: 'pc', what: 'waiting for a free slot' }]) {
+    assert.match((await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'x', blocker })).text, /decide_work queue/);
+  }
+  // A time that is a time still blocks.
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'after the nightly', blocker: { kind: 'time', until: at, what: 'after the nightly run' } })).isError, false);
+  // Queued is what the capacity wait gets: back to new, then queued with the held computer named in the note.
+  store.work.get('w1')!.status = 'new';
+  store.work.get('w1')!.blocked = undefined;
+  agentsRoomFacts(agents, { held: [{ id: 'm5', why: "Ben's testing", for: ['game', 'agent'] }] });
+  const queued = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'every sandbox is in use' });
+  assert.equal(queued.isError, false, queued.text);
+  assert.match(store.work.get('w1')!.log.join('\n'), /dispatcher: queued for capacity; m5 has room but is held \(Ben's testing\)/);
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Queued \(queued for capacity: no computer that could take it has room; m5 has room but is held \(Ben's testing\)\)/);
+});
+
+test('w1089: a worker whose sandbox was given away does not block on capacity: blocked_on refuses it and says the queue places it', async (t) => {
+  const { store, machines, agents, dispatcher, call } = await setupOnMachine(t);
+  agentsRoomFacts(agents, { agent: ['pc'] });
+  putRequests(store, [{ id: 'w2' }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w2: do it', work_id: 'w2' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  await assert.rejects(async () => h.blocked_on!({ requests: ['w1'], what: 'waiting for a free sandbox: mine was given away' }), /is a wait for capacity .* That is Queued, not Blocked, and FF Factory queues it by itself/);
+  assert.equal(store.work.get('w2')!.status, 'active', 'nothing was recorded');
+});
+
+test('w1089: a request already Blocked on a capacity wait (w1084 to w1088) becomes Queued by itself, keeping its place and notes; a block on a thing, or the cleanup\'s, stays', async (t) => {
+  const { store, o, agents } = setup(t);
+  agentsRoomFacts(agents, {});
+  const gate = (what: string, by = 'dispatcher', kind: 'time' | 'request' = 'time') => ({ kind, at: T0, by, what, ...(kind === 'time' ? { until: '2026-10-12T04:35:00Z' } : { ref: 'w1' }) });
+  putRequests(store, [
+    { id: 'w1', status: 'active' },
+    { id: 'w2', status: 'blocked', blocked: gate('a free sandbox: all in use except the m5\'s (Ben testing)'), priority: 'high', notes: [{ at: T0, by: 'Lothsahn', text: 'keep my notes' }] },
+    { id: 'w3', status: 'blocked', blocked: gate("w1's fix", 'dispatcher', 'request') },
+    { id: 'w4', status: 'blocked', blocked: gate('after the nightly run') },
+    { id: 'w5', status: 'blocked', blocked: gate('no free sandbox', 'ledger cleanup') },
+    { id: 'w6', status: 'blocked', blocked: gate('waiting for a free slot'), alsoBlocked: [gate("w1's fix", 'dispatcher', 'request')] },
+  ]);
+  assert.deepEqual(o.requeueCapacityBlocks(), ['w2']);
+  const w2 = store.work.get('w2')!;
+  assert.deepEqual([w2.status, w2.blocked, w2.alsoBlocked, w2.queuedFor, w2.priority, w2.notes?.[0].text], ['queued', undefined, undefined, { at: T0 }, 'high', 'keep my notes']);
+  assert.match(w2.log.join('\n'), /ledger: was blocked on .* \(a free sandbox: all in use except the m5's \(Ben testing\)\), set by dispatcher; that is a wait for capacity, so it is Queued/);
+  assert.deepEqual(['w3', 'w4', 'w5', 'w6'].map((id) => store.work.get(id)!.status), ['blocked', 'blocked', 'blocked', 'blocked'], 'a thing it also waits on, a real time and the cleanup\'s gate stay');
+  assert.deepEqual(o.requeueCapacityBlocks(), [], 'once');
+  // The blocker watch does it every minute.
+  Object.assign(store.work.get('w4')!, { blocked: gate('no free editor') });
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  assert.match((await watch.tick()).get('w4') ?? '', /^requeued: a block that waited only for capacity/);
+  assert.equal(store.work.get('w4')!.status, 'queued');
+});
+
+test('w1098: a request on a repo that is not the game\'s needs an agent slot only: decide_work queue is refused while one has a slot, the WRONG flag counts agent slots, and the live state says so', async (t) => {
+  const { store, agents, o, dispatcher, chat, call, heard } = setup(t);
+  // Game room is none (RAM, no sandbox), LothDesktop has an agent slot, the m5 is held for Ben.
+  agentsRoomFacts(agents, { agent: ['lothdesktop'], held: [{ id: 'm5', why: "Ben's testing", for: ['game', 'agent'] }] });
+  await call(chat(BEN).info, 'request_work', { title: 'Queued waits show as Queued', brief: 'Change the dispatcher.', repo: 'Final-Factory/ff-factory' });
+  await call(chat(BEN).info, 'request_work', { title: 'Fix the belt splitter desync', brief: 'In Final-Factory/FinalFactory, spec 098.', repo: 'Final-Factory/FinalFactory' });
+  await call(chat(BEN).info, 'request_work', { title: 'Another FFBox change', brief: 'Only ffbox.' });
+  const needs = (id: string) => store.work.get(id)!.needs;
+  assert.deepEqual([needs('w1'), needs('w2'), needs('w3')], ['agent', 'game', 'agent'], 'the repo decides, once, at filing; w3 was guessed from its words');
+  assert.match(store.work.get('w1')!.log.join('\n'), /filed by Ben; needs an agent slot only \(no editor, no game sandbox\) \(repo Final-Factory\/ff-factory, not the game's\)/);
+  assert.match(store.work.get('w3')!.log.join('\n'), /needs an agent slot only .*guessed from its title and brief/);
+  // The non-game request cannot be queued while LothDesktop has an agent slot; the game one can (no game room).
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'everything is full' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /queue is for capacity only, and lothdesktop has an agent slot \(it needs no editor and no game sandbox, w1098\) for w1 now: start it there/);
+  const game = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'game work: no sandbox, RAM high' });
+  assert.equal(game.isError, false, game.text);
+  assert.match(store.work.get('w2')!.log.join('\n'), /queued for capacity; m5 has room but is held \(Ben's testing\)/);
+  // Queued while an allowed computer has an agent slot is flagged like game work, after the grace.
+  const w3 = store.work.get('w3')!;
+  w3.status = 'queued';
+  w3.queuedFor = { at: T0 };
+  (o as unknown as { now: () => Date }).now = () => new Date(Date.parse(T0) + 11 * 60_000);
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w3' })).text, /Queued \[WRONG: lothdesktop has room\] \(queued for capacity, but lothdesktop has an agent slot/);
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), ['w3'], 'the game request is not flagged: no game room');
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[ledger] WRONG STATE').length > 0);
+  assert.match(store.work.get('w3')!.log.join('\n'), /flagged: queued for capacity while lothdesktop has an agent slot \(lothdesktop: .* at this time\)|flagged: queued for capacity while lothdesktop has an agent slot \(lothdesktop: room at this time\)/);
+});
+
+test("w1089: start_agent refuses a request's worker into a sandbox another request's agent occupies; extra_agent puts it beside on purpose, never past max_agents_per_sandbox", async (t) => {
+  shortSlowTurns(t);
+  const { store, sessions, agents, dispatcher, call } = await setupOnMachine(t, {}, { maxAgentsPerSandbox: 2 });
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }, { id: 'w4' }]);
+  const start = (wid: string, extra: Record<string, unknown> = {}) => call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: `#slow ${wid}`, title: `${wid}: job`, work_id: wid, ...extra });
+  const first = await start('w1');
+  assert.equal(first.isError, false, first.text);
+  const a = /Started agent (\w+)/.exec(first.text)![1];
+  await until('a is mid-turn', () => sessions.get(a).info.status === 'running');
+  // 2026-10-12 ~05:50 UTC: a request's worker was started in slot5 where two agents were Working, and only queued there.
+  const refused = await start('w2');
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /sandbox pc\/alpha is not free: \w+ "w1: job" \(Working\)\. A request's worker goes into a FREE sandbox .*pass extra_agent: true/);
+  assert.equal(store.work.get('w2')!.status, 'new', 'nothing was started or linked');
+  assert.equal([...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').length, 1, 'no second worker was made');
+  // On purpose: a second agent beside it (one seat is left).
+  const second = await start('w2', { extra_agent: true });
+  assert.equal(second.isError, false, second.text);
+  const b = /Started agent (\w+)/.exec(second.text)![1];
+  await until('b is mid-turn', () => sessions.get(b).info.status === 'running');
+  // Never a third: the sandbox is full (2 mid-turn of 2), and a worker started there could only wait in the send queue.
+  const full = await start('w3', { extra_agent: true });
+  assert.equal(full.isError, true);
+  assert.match(full.text, /sandbox pc\/alpha is full: .*2 agents mid-turn there \(max_agents_per_sandbox 2\), so a worker started there would only wait in the send queue/);
+  assert.equal(store.work.get('w3')!.status, 'new');
+  assert.equal([...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').length, 2);
+});
+
 test('w1099: the capacity ping and the queued-with-room flag list queued requests by priority, then oldest', async (t) => {
   const { store, agents, o, dispatcher, chat, call, heard } = setup(t);
   agentsRoom(agents, []);
@@ -2859,6 +2999,8 @@ test('w1099: the capacity ping and the queued-with-room flag list queued request
     const r = await call(dispatcher().info, 'decide_work', { id, action: 'queue', note: 'every place is busy' });
     assert.equal(r.isError, false, r.text);
   }
+  // w1089: the ping is sent when a computer has room at the moment it fires; here one does (and nobody has started the requests).
+  agentsRoom(agents, ['lothdesktop']);
   t.mock.timers.enable({ apis: ['setTimeout'] });
   o.capacityMayHaveFreed('worker x stopped');
   t.mock.timers.tick(30_000);
@@ -2866,7 +3008,7 @@ test('w1099: the capacity ping and the queued-with-room flag list queued request
   const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
   const order = ['w3', 'w1', 'w2', 'w4'].map((id) => ping.indexOf(`${id} "`));
   assert.ok(order.every((x, i) => x >= 0 && (i === 0 || x > order[i - 1])), `high first, then the normal ones oldest first, then low: ${ping}`);
-  assert.match(ping, /Queued for capacity, by priority, then oldest: w3 "Nightly e2e run"/);
+  assert.match(ping, /Queued for capacity and fitting it, by priority, then oldest: w3 "Nightly e2e run"/);
   // The flag for requests left queued while a computer has room, in the same order.
   agentsRoom(agents, ['lothdesktop']);
   const later = Date.now() + 11 * 60_000;

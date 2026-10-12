@@ -361,6 +361,13 @@ export class PlaceAgain {
     return out;
   }
 
+  /** Whether any agent occupies the sandbox "<machine>/<sandbox>" now (a process, mid-turn, a permission open, its place held). */
+  private occupiedNow(key: string): boolean {
+    const [machine, sandbox] = key.split('/');
+    const f = this.facts(machine);
+    return f.sessions.some((o) => o.machineSandbox === sandbox && occupies(o, f.live(o.id), f.now));
+  }
+
   /** The released worker a sandbox is spoken for by, or undefined. */
   claimedBy(machineId: string, sandbox: string): string | undefined {
     return this.claims(machineId).get(sandbox);
@@ -442,7 +449,9 @@ export class PlaceAgain {
     // A worker stopped to release its sandbox is released by the next pass: do not leave that a minute away (w890).
     if (stoppedDue) this.d.soon?.();
     // Queued work may take them now: the dispatcher hears it (w656, Orchestrators.capacityMayHaveFreed).
-    if (freed.size) this.d.freed?.(`sandbox${freed.size > 1 ? 's' : ''} ${[...freed].join(', ')} released`);
+    // Only a sandbox nobody occupies now is capacity (w1089: slot5 was announced released while two agents were Working in it).
+    const free = [...freed].filter((key) => !this.occupiedNow(key));
+    if (free.length) this.d.freed?.(`sandbox${free.length > 1 ? 'es' : ''} ${free.join(', ')} released`);
     return did;
   }
 
@@ -470,7 +479,8 @@ export class PlaceAgain {
         this.d.note(o.id, `Its uncommitted work in ${key} was saved (${res.notes.join('; ')}) and the sandbox is released for other work while it waits: ${why}. When it resumes it is placed again on its branch ${step.branch}, back here if this sandbox is still free.`);
       }
       console.log(`place again: saved and released ${key} of ${group.map((o) => o.id).join(', ')} (${res.notes.join('; ')})`);
-      this.d.freed?.(`sandbox ${key} released`);
+      // The save took a moment: an agent may have been started or resumed in the sandbox meanwhile (w1089).
+      if (!this.occupiedNow(key)) this.d.freed?.(`sandbox ${key} released`);
     } catch (e) {
       const why = (e as Error).message;
       const was = this.saveFailed.get(key);

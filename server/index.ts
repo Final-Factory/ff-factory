@@ -619,6 +619,7 @@ const blockerWatch = new BlockerWatch({
   usageClear: (account) => accountClear(account),
   nightlyAt: () => nightlyAt,
   room: () => agents.roomNow(),
+  roomFacts: () => agents.roomFacts(),
   queued: (id) => sessions.queued().some((q) => q.id === id),
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
@@ -723,6 +724,7 @@ function appState(user: string | undefined): AppState {
     me,
     work: agents.orchestrators.forPage(),
     room: agents.roomNow(),
+    ...agents.roomExtras(),
     intake: intake.summary(),
     ledger: ledgerSweep.state(),
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings },

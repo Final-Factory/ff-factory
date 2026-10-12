@@ -341,3 +341,16 @@ test('intake.nightly.review (w905): settable by anyone, checked like the run\'s,
   assert.equal(OWNER_ONLY_KEYS.has('intake.nightly.review'), false);
   assert.ok(SETTABLE_KEYS.includes('intake.nightly.review'));
 });
+
+test('set_app_config: placement.hold (w1089) keeps a computer off for everything, with who holds it and why; null releases it and leaves the rest', (t) => {
+  const { file, cfg } = setup(t);
+  setAppConfig(file, cfg, 'placement.avoid', { beast: 'BEAST unstable' });
+  assert.deepEqual(setAppConfig(file, cfg, 'placement.hold', { M5: "Ben's testing, 2026-10-12" }).after, { m5: "Ben's testing, 2026-10-12" });
+  assert.deepEqual(cfg.placement, { avoid: { beast: 'BEAST unstable' }, hold: { m5: "Ben's testing, 2026-10-12" } });
+  assert.throws(() => setAppConfig(file, cfg, 'placement.hold', { m5: '' }), /placement\.hold\.m5: say who holds it and why/);
+  assert.throws(() => setAppConfig(file, cfg, 'placement.hold', ['m5']), /placement\.hold is an object/);
+  assert.throws(() => setAppConfig(file, cfg, 'placement.hold', { 'this host': 'x' }), /no place for work/);
+  setAppConfig(file, cfg, 'placement.hold', null);
+  assert.deepEqual(cfg.placement, { avoid: { beast: 'BEAST unstable' } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement, { avoid: { beast: 'BEAST unstable' } });
+});

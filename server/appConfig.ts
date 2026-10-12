@@ -81,6 +81,8 @@ export const SETTABLE_KEYS = [
   // Where new game-repo work goes first, and which computers it stays off (w428, docs/machines.md "Placing work").
   'placement.prefer',
   'placement.avoid',
+  // Computers that take no new work at all, with who holds them and why (w1089): the m5 held for Ben's testing.
+  'placement.hold',
   // When the orchestrators compact their conversations by themselves (w535, server/autoCompact.ts): the context in
   // tokens, and a turn's cost in USD. 0 turns either trigger off.
   'orchestrator.compactAtTokens',
@@ -490,16 +492,18 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (ids.length > 12) throw new Error('placement.prefer names at most 12 computers');
       return ids.length ? ids : undefined;
     }
-    case 'placement.avoid': {
-      if (typeof value !== 'object' || Array.isArray(value)) throw new Error('placement.avoid is an object: computer id to why, e.g. { "beast": "BEAST unstable, 2026-10-05" }');
+    case 'placement.avoid':
+    case 'placement.hold': {
+      const name = key;
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(name === 'placement.hold' ? 'placement.hold is an object: computer id to who holds it and why, e.g. { "m5": "Ben testing, 2026-10-12" }' : 'placement.avoid is an object: computer id to why, e.g. { "beast": "BEAST unstable, 2026-10-05" }');
       const out: Record<string, string> = {};
       for (const [k, why] of Object.entries(value as Record<string, unknown>)) {
         const id = placeId(k);
-        if (!MACHINE_KEY.test(id) || id === 'host') throw new Error(`placement.avoid: "${k.slice(0, 40)}" is not a machine id${NO_HOST}`);
-        if (typeof why !== 'string' || !oneLine(why) || oneLine(why).length > 200) throw new Error(`placement.avoid.${id}: say why in one line of at most 200 characters`);
+        if (!MACHINE_KEY.test(id) || id === 'host') throw new Error(`${name}: "${k.slice(0, 40)}" is not a machine id${NO_HOST}`);
+        if (typeof why !== 'string' || !oneLine(why) || oneLine(why).length > 200) throw new Error(`${name}.${id}: say ${name === 'placement.hold' ? 'who holds it and why' : 'why'} in one line of at most 200 characters`);
         out[id] = oneLine(why);
       }
-      if (Object.keys(out).length > 12) throw new Error('placement.avoid names at most 12 computers');
+      if (Object.keys(out).length > 12) throw new Error(`${name} names at most 12 computers`);
       return Object.keys(out).length ? out : undefined;
     }
     case 'voice.ttsVoice': {
@@ -685,13 +689,11 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else nightly.review = v as NonNullable<IntakeConfig['nightly']>['review'];
     cfg.intake = { ...cfg.intake, nightly };
   }
-  else if (key === 'placement.prefer' || key === 'placement.avoid') {
+  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold') {
     const p = { ...cfg.placement };
-    if (key === 'placement.prefer') {
-      if (v === undefined) delete p.prefer;
-      else p.prefer = v as string[];
-    } else if (v === undefined) delete p.avoid;
-    else p.avoid = v as Record<string, string>;
+    const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : 'hold';
+    if (v === undefined) delete p[field];
+    else (p as Record<string, unknown>)[field] = v;
     cfg.placement = p;
   }
   else if (key === 'hostGuard.cleanup.staleOutput') cfg.hostGuard.cleanup.staleOutput = v as Partial<StaleOutputSettings> | undefined;

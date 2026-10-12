@@ -1599,6 +1599,17 @@ export interface WorkItem {
   conditional?: ConditionalDecision[];
   /** The computers the dispatcher said can take it when it queued it for capacity (decide_work queue `needs`, w643). */
   queuedFor?: { at: string; needs?: string[] };
+  /**
+   * The repository the work is in, "owner/name" (w1098; request_work `repo`). Placement reads `needs`, which is derived
+   * from it when the request is filed, never guessed later from the brief.
+   */
+  repo?: string;
+  /**
+   * What the work needs of a computer (w1098, lothsahn: "FFBox and FF Factory updates don't need unity editors"): `game`,
+   * a game sandbox with an editor's worth of RAM (the game repo, or unknown: the safe default), or `agent`, only an
+   * agent slot (FF Factory, FFBox, the ff-agents plugin, any non-Unity repo). Absent on requests filed before it: game.
+   */
+  needs?: 'game' | 'agent';
   /** The cleanup's last "Is it done?" to a worker about this merged request (w419): at most one a day. */
   followUp?: { at: string; sessionId: string };
   /** Workers the cleanup already resumed once after they were cut off, by session id: never a second time. */
@@ -2100,6 +2111,10 @@ export interface AppState {
   work?: WorkItem[];
   /** The computers with room for one more worker now (w643: a Queued request while one has room is flagged). */
   room?: string[];
+  /** The computers with an agent slot for work that needs no editor (w1098); the same RoomNow as `room` (server/placement.ts). */
+  agentRoom?: string[];
+  /** Computers with room that a placement hold keeps work off, with who and why (w1089); a Queued request says so. */
+  heldRoom?: { id: string; why: string; for: ('game' | 'agent')[] }[];
   /** Discord and FFBox intake into the ledger (docs/intake.md); absent from a server older than this field. */
   intake?: IntakeSummary;
   /** The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): its switches and its last run. */

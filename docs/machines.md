@@ -608,6 +608,9 @@ LothDesktop and Beast, not just when BEAST is full").
   (`pickComputer`): the computer with the most room; when the best two are within `EVEN_MARGIN` (10 points), the one
   with fewer live agents, then the one that did not take the last (FF Factory remembers the computer it last placed new
   work on, in memory). Two idle computers so take turns, and one with more agents gets the next less often.
+  Every line also ends with its **agent slot** for work that needs no editor ("agent slot: free (5 of 10 mid-turn)" or
+  "agent slot: none (…)", below), and the block's last line names where the next piece of **non-game** work goes. A computer
+  held with `placement.hold` reads `ROOM n% but HELD (<who and why>): no new work goes there` and is never the next.
 - **The note**: `create_sandbox`, and `start_agent` into a FREE sandbox (new work), end with a note when they place
   work on a computer other than the next one, naming it, why, and its load. It never refuses or moves anything. A
   `start_agent` into a sandbox whose label holds its work (a worker going on where it was) gets none, and does not count
@@ -630,10 +633,44 @@ LothDesktop and Beast, not just when BEAST is full").
   once BEAST is fixed). The Capacity block tags each computer `[preferred #n]` or `[avoided: <why>]`, and its last line says why the next
   one was picked ("first with room in placement.prefer (lothdesktop > m5 > m3)", "only avoided computers have room").
   The dispatcher's prompt shows the setting in force.
+- **A hold** (w1089, lothsahn, 2026-10-12, after five of his requests were blocked on "a free sandbox: all in use except
+  the m5's (Ben testing)"): `placement.hold`, set with `set_app_config` and kept across restarts, names computers that take
+  **no** new work at all, game or not, even when every other computer is busy, each with who holds it and why:
+  `"hold": { "m5": "Ben testing, 2026-10-12" }`. `null` releases it. It differs from `placement.avoid`, which only puts a
+  computer last. A held computer with room is shown as such (`ROOM n% but HELD`), is never picked, is not "room" for
+  `decide_work queue` or the Queued WRONG flag, and a Queued request's reason names it ("m5 has room but is held (Ben testing,
+  2026-10-12)"). Before this the m5's hold lived in the dispatcher's memory only, so it could not be named in a reason.
+- **Work that needs no Unity editor is placed by agent slot alone** (w1098, lothsahn, 2026-10-12: "Yes, please tell the
+  dispatcher that.  Please update the rules to also indicate that--FFBox and FF Factory updates don't need unity editors").
+  Which repositories: Final-Factory/ff-factory, Final-Factory/ffbox, the ff-agents plugin (Final-Factory/final-factory-agents)
+  and any other repo that is not Unity. What does **not** block such a request: no Unity editor, no free game sandbox, and
+  the editor and RAM-for-Unity limits (the 85% `RAM_BUSY_PCT` line is the game's, an editor's 8-12 GB). What still applies: the
+  computer's agent cap (the agents mid-turn, what start_agent's queue counts: `machines.ts` `capFull`), a seat in some
+  sandbox (`max_agents_per_sandbox` less the agents mid-turn there, or room to make a sandbox; a second agent in a busy
+  sandbox is fine when the dispatcher says so (`start_agent` `extra_agent: true`; w1089): it works in its own clone in its temp folder, not in the sandbox's game tree), the person's own Claude
+  pool (a held pool queues the worker's first prompt, docs/vault.md), `placement.hold` (a held computer gets nothing) and
+  `placement.avoid` (last). The test is `hasAgentRoom` / `agentBusyReasons` (`server/placement.ts`), side by side with the
+  game test `hasRoom`; `roomNow` returns both, and `pickComputer(…, 'agent')` picks the computer (the most agent room,
+  `placement.prefer` first, as for game work).
+  - **Where it is said.** Each Capacity line ends with "agent slot: free (n of m mid-turn)" or "agent slot: none (reason)", and
+    the block's last line reads "Next non-game work (needs only an agent slot, no editor, no free game sandbox): <computer> (why)",
+    in `list_sandboxes` and `system_status`, beside the game line. The dispatcher's prompt carries the rule, with
+    lothsahn's words.
+  - **How a request is told apart.** `request_work` takes `repo` ("owner/name") and `needs` (`game` or `agent`).
+    `WorkItem.needs` is decided **once, when it is filed**, and logged: `needs` as given; else from `repo` (the game's own
+    repository is `game`, any other `agent`); else a guess from the title and the first 400 characters of the brief
+    (`resolveNeeds`, `shared/capacity.ts`): a non-game repository named (ff-factory, ffbox, ff-agents, …) and no game word
+    (Unity, a scene, a shader, a spec, the game repo) is `agent`, anything else `game`, the stricter. Placement never
+    guesses again. A request filed before this has no `needs` and counts as `game`. The log line says which way it went and
+    why, so a wrong guess is visible when the request is started.
+  - **Wrong when it waits.** A non-game request queued while an allowed computer has an agent slot is flagged WRONG exactly
+    like game work (`Orchestrators.flagQueuedWithRoom`, same test via `roomNow`); `decide_work queue` is refused for it
+    ("lothdesktop has an agent slot (it needs no editor and no game sandbox, w1098)"). A game request is not refused for
+    want of an editor-free slot.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
-  computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: FF
-  Factory's own repo or its deploys, `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it. A worker going on in its own sandbox stays
+  computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it
+  (FF Factory's own repo and its deploys are no longer such a pin: that work goes by agent slot, above). A worker going on in its own sandbox stays
   there, and running workers are never moved.
 - **Released sandboxes** (w640, Lothsahn on 2026-10-07: "Can we not reserve slots for workers that resume a long time
   from now?"; `server/placeAgain.ts`). That afternoon LothDesktop's slot1 counted as taken with no live agent, only two

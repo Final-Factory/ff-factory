@@ -47,6 +47,9 @@ import { autoApproveProblem, cleanBlock, cleanLine, identityKeys, parseMarkers, 
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, pausedIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
 import { asksAPerson, holdsOf, servedBy } from '../shared/workState.ts';
+import { capacityBlockProblem, capacityWaitIn, needsOf, resolveNeeds } from '../shared/capacity.ts';
+import { heldText, roomIds, type RoomNow } from './placement.ts';
+import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
 import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
@@ -152,6 +155,11 @@ export interface OrchestratorsDeps {
   recentCommits?: () => { sha: string; subject: string }[];
   /** The computers with room for one more worker now (w643: decide_work queue is for capacity only). */
   room?: () => string[];
+  /**
+   * Room for each kind of work, and the computers with room that a hold keeps off (w1089, w1098): the same RoomNow the
+   * Capacity block and the page read (server/placement.ts roomNow). Without it, `room` is the game room and nothing is held.
+   */
+  roomFacts?: () => RoomNow;
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
   /** The commit the portal runs (no id), or a machine's daemon (w643: a deploy blocker clears when it changes). */
@@ -348,6 +356,10 @@ export interface WorkInput {
    * checkout, reopen Unity). Only in a turn of its person's own, and only when the request explicitly asks for work there.
    */
   main_clone?: string;
+  /** w1098: the repository the work is in, "owner/name"; a repo that is not the game's needs an agent slot only. */
+  repo?: string;
+  /** w1098: what it needs of a computer when `repo` does not say: `game` (a game sandbox with an editor) or `agent` (only an agent slot). */
+  needs?: 'game' | 'agent';
 }
 
 /** An operator's ffdev turn FFBox handed over (server/devRequests.ts), its files already in the attachment store. */
@@ -1012,6 +1024,8 @@ export class Orchestrators {
       }, branches).filter((k) => !SUBJECT_KEY.test(k)),
     ]);
     const id = `w${++this.store.workSeq}`;
+    // What it needs of a computer is decided once, here (w1098), never guessed again when it is placed.
+    const placed = resolveNeeds({ needs: input.needs, repo: input.repo, title, brief }, repoSlug(this.d.cfg.repo.url));
     // The threads it is the work for are its scope: a dev request from one of them joins it (docs/ffbox.md, "Dev requests").
     const scope = scopeOf(input.scope, [...keys].filter((k) => k.startsWith('discord:')).map((k) => k.slice('discord:'.length)));
     const w: WorkItem = {
@@ -1032,6 +1046,8 @@ export class Orchestrators {
       sessionIds: [],
       ...(input.attachments?.length ? { attachments: input.attachments } : {}),
       ...(scope ? { scope } : {}),
+      needs: placed.needs,
+      ...(input.repo?.trim() ? { repo: clip(input.repo.trim(), 120) } : {}),
       ...(input.ledger_read ? { ledgerRead: { by: owner.displayName, at: now.toISOString() } } : {}),
       ...(cloneMachine ? { mainCloneAccess: { machine: cloneMachine, by: owner.displayName, at: now.toISOString() } } : {}),
       overlaps: [],
@@ -1039,7 +1055,7 @@ export class Orchestrators {
       log: [],
     };
     w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(id));
-    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}${w.ledgerRead ? '; its workers may read the ledger' : ''}${cloneMachine ? `; its workers may work in ${cloneMachine}'s main clone` : ''}`);
+    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}; needs ${placed.needs === 'agent' ? 'an agent slot only (no editor, no game sandbox)' : 'a game sandbox'} (${placed.how})${w.ledgerRead ? '; its workers may read the ledger' : ''}${cloneMachine ? `; its workers may work in ${cloneMachine}'s main clone` : ''}`);
     this.store.putWork(w);
     this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     this.gatherForDispatcher(owner, requestNotice(w));
@@ -1721,14 +1737,17 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       if (gated) throw new Error(`${gated} It waits for those, not for capacity: leave it blocked.`);
       // Queued is capacity only (w643): with a computer that could take it free, it is started or blocked, not queued.
       const needs = [...new Set((input.needs ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean))];
-      const room = (this.d.room?.() ?? []).filter((id) => !needs.length || needs.includes(id.toLowerCase()));
+      const kind = needsOf(w);
+      const facts = this.roomNow();
+      const room = roomIds(facts, kind).filter((id) => !needs.length || needs.includes(id.toLowerCase()));
       if (room.length) {
         throw new Error(
-          `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} room for ${w.id} now: start it there (start_agent with work_id "${w.id}"), or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
+          `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: start it there (start_agent with work_id "${w.id}"), or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
         );
       }
+      const held = heldText(facts.held.filter((h) => !needs.length || needs.includes(h.id)), kind);
       w.queuedFor = { at: this.now().toISOString(), ...(needs.length ? { needs } : {}) };
-      what = `queued for capacity${needs.length ? ` on ${needs.join(' or ')}` : ''}`;
+      what = `queued for capacity${needs.length ? ` on ${needs.join(' or ')}` : ''}${held ? `; ${held}` : ''}`;
     } else if (input.action === 'block') {
       const now = this.now();
       const kept = gatesOf(w);
@@ -2063,6 +2082,9 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     if (w.status !== 'active' && w.status !== 'blocked') throw new Error(`${w.id} is ${w.status}; blocked_on is for a request you are working on`);
     const what = (a.what ?? '').split(/ +/).join(' ').trim();
     if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into develop');
+    // w1089: a wait for a sandbox, slot, editor or RAM is capacity, which is Queued and done by the send queue, not a block.
+    const capacity = capacityBlockProblem(what, 'worker');
+    if (capacity) throw new Error(capacity);
     const now = this.now();
     const asked: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[] = [];
     for (const id of a.requests ?? []) asked.push({ kind: 'request', ref: id.trim(), what: `${id.trim().toLowerCase()} finishing` });
@@ -3999,6 +4021,41 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     this.toPeople([w.requestedBy], dispatchNotice(w, 'a question', text));
   }
 
+  /**
+   * Blocked requests whose every gate is really a wait for capacity become Queued (w1089; w1084 to w1088 had been blocked
+   * "until 04:35 UTC: a free sandbox"). Their place in the queue (the order is priority, then age) and their notes are kept:
+   * only the status and the gate change, and the request's log says what was done. Run by the blocker watch each minute, so a
+   * block recorded before the dispatcher's guard (blockerProblem), or by an older dispatcher, ends here. A gate the ledger
+   * cleanup set itself, or one that names a thing as well, stays. Returns the ids requeued.
+   */
+  requeueCapacityBlocks(): string[] {
+    const out: string[] = [];
+    for (const w of this.store.work.values()) {
+      if (w.status !== 'blocked') continue;
+      const gates = gatesOf(w);
+      if (!gates.length || gates.some((g) => g.by === 'ledger cleanup' || !capacityWaitIn(g.what))) continue;
+      const first = gates[0];
+      const what = gates.map((g) => g.what).join('; ');
+      w.status = 'queued';
+      w.blocked = undefined;
+      w.alsoBlocked = undefined;
+      w.queuedFor = { at: first.at };
+      this.stamp(w, `ledger: was blocked on ${gatesName(gates, this.now().getTime())} (${clip(what, 160)}), set by ${first.by}; that is a wait for capacity, so it is Queued, and the queue places it on the first place that frees`);
+      this.store.putWork(w);
+      out.push(w.id);
+    }
+    if (out.length) console.log(`ledger: ${out.join(', ')} waited for capacity as a block: now Queued`);
+    return out;
+  }
+
+  /**
+   * The room every capacity check reads (w1089): Capacity's ROOM/BUSY, decide_work queue's refusal, the Queued WRONG flag
+   * and the page all come from this one answer (server/placement.ts roomNow), so they cannot disagree.
+   */
+  roomNow(): RoomNow {
+    return this.d.roomFacts?.() ?? { game: this.d.room?.() ?? [], agent: [], held: [] };
+  }
+
   /** When each request was last flagged Queued while a computer had room (at most once an hour each). */
   private readonly roomFlags = new Map<string, number>();
 
@@ -4007,18 +4064,21 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * is a bug, flagged loudly: logged on it and in the server log, and the dispatcher is told to start it or block it.
    * Returns the ids flagged.
    */
-  flagQueuedWithRoom(room: readonly string[]): string[] {
+  flagQueuedWithRoom(room: readonly string[] | RoomNow): string[] {
+    // The room the page and decide_work queue read (this.roomNow()); a bare list is the game room, nothing held.
+    const facts: RoomNow = Array.isArray(room) ? { game: [...room], agent: [], held: [] } : (room as RoomNow);
     const now = this.now().getTime();
     const flagged: { w: WorkItem; on: string[] }[] = [];
+    const nums = (ids: readonly string[]) => ids.map((id) => `${id}: ${facts.detail?.[id] ?? 'room'}`).join('; ');
     for (const w of this.store.work.values()) {
       if (w.status !== 'queued') continue;
       const since = Date.parse(w.queuedFor?.at ?? w.updatedAt) || now;
       if (now - since < ROOM_GRACE_MS || now - (this.roomFlags.get(w.id) ?? 0) < 3_600_000) continue;
       const needs = w.queuedFor?.needs?.map((n) => n.toLowerCase());
-      const on = room.filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
+      const on = roomIds(facts, needsOf(w)).filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
       if (!on.length) continue;
       this.roomFlags.set(w.id, now);
-      this.stamp(w, `flagged: queued for capacity while ${on.join(', ')} ${on.length > 1 ? 'have' : 'has'} room`);
+      this.stamp(w, `flagged: queued for capacity while ${on.join(', ')} ${on.length > 1 ? 'have' : 'has'} ${needsOf(w) === 'agent' ? 'an agent slot' : 'room'} (${nums(on)} at this time)`);
       this.store.putWork(w);
       flagged.push({ w, on });
     }
@@ -4026,19 +4086,29 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     flagged.sort((a, b) => ledgerOrder(a.w, b.w)); // by priority, then oldest (w1099)
     console.warn(`ledger: queued while a computer has room: ${flagged.map((f) => `${f.w.id} (${f.on.join(', ')})`).join('; ')}`);
     this.toDispatcher(
-      `[ledger] WRONG STATE: queued for capacity while a computer that could take it has room: ${flagged.map((f) => `${f.w.id} "${clip(f.w.title, 80)}" (${names(f.w.requesters)}, ${f.w.priority}; room on ${f.on.join(', ')})`).join('; ')}. Queued means no free place. Start each now (start_agent with its work_id), or decide_work block it on what it really waits for (another request, a deploy, a machine, a lock, a time, CI), or queue it again with needs naming the only computers that can take it.`,
+      `[ledger] WRONG STATE: queued for capacity while a computer that could take it has room: ${flagged.map((f) => `${f.w.id} "${clip(f.w.title, 80)}" (${names(f.w.requesters)}, ${f.w.priority}; ${needsOf(f.w) === 'agent' ? 'an agent slot (it needs no editor)' : 'room'} on ${f.on.join(', ')})`).join('; ')}. Queued means no free place. Start each now (start_agent with its work_id), or decide_work block it on what it really waits for (another request, a deploy, a machine, a lock, a time, CI), or queue it again with needs naming the only computers that can take it.`,
     );
     return flagged.map((f) => f.w.id);
   }
 
   // ---------------------------------------------------------------- capacity
 
+  /** What woke the capacity ping that is waiting for its quiet spell (w1089): each event and when it happened, newest last. */
+  private capacityEvents: { what: string; at: number }[] = [];
+
   /**
-   * A worker finished a turn or ended: when requests are queued, the dispatcher is told (after a quiet spell, at
-   * least a few minutes apart, a few an hour) so queued work can start without anyone asking.
+   * A worker finished a turn or ended, or a sandbox was released: when requests are queued, the dispatcher is told (after a
+   * quiet spell, at least a few minutes apart, a few an hour) so queued work can start without anyone asking.
+   *
+   * w1089 (2026-10-12 ~05:50 UTC: "Capacity may have freed (sandbox lothdesktop/slot5 released)" reached the dispatcher while
+   * two agents were Working in slot5; start_agent then queued a third there): the ping waits for its quiet spell, and for the
+   * 2-minute gap after the last, so it can arrive long after its event, with the sandbox taken again. It is now decided when it
+   * fires, from the room at that moment (`roomNow`): no queued request that a computer with room could take, no ping; and the
+   * ping says how old each event is and where there is room now, so a stale "released" is never read as current.
    */
   capacityMayHaveFreed(what: string) {
     if (![...this.store.work.values()].some((w) => w.status === 'queued')) return;
+    this.capacityEvents = [...this.capacityEvents, { what, at: this.now().getTime() }].slice(-5);
     clearTimeout(this.capacityTimer);
     const fire = () => {
       const now = this.now().getTime();
@@ -4052,9 +4122,23 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       }
       // By priority, then oldest (ledgerOrder): the order the dispatcher should start them in (w1099: a high nightly run first).
       const queued = [...this.store.work.values()].filter((w) => w.status === 'queued').sort(ledgerOrder);
+      const events = this.capacityEvents;
+      this.capacityEvents = [];
       if (!queued.length) return;
+      // The room now, not the room when the event happened: only a queued request that a computer with room could take is worth a ping.
+      const facts = this.roomNow();
+      const fits = (w: WorkItem) => roomIds(facts, needsOf(w)).some((id) => !w.queuedFor?.needs?.length || w.queuedFor.needs.some((n) => n.toLowerCase() === id.toLowerCase()));
+      const usable = queued.filter(fits);
+      if (!usable.length) {
+        console.log(`ledger: no capacity ping: ${events.map((e) => e.what).join('; ')}, but no computer with room can take ${queued.map((w) => w.id).join(', ')} now`);
+        return;
+      }
       this.capacityWakes.push(now);
-      this.toDispatcher(`[ledger] Capacity may have freed (${what}). Queued for capacity, by priority, then oldest: ${queued.map((w) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${w.queuedFor?.needs?.length ? `; needs ${w.queuedFor.needs.join(' or ')}` : ''})`).join('; ')}. Start what fits now; leave queued only what no computer with room can take, and block what waits on something else.`);
+      const old = (e: { what: string; at: number }) => `${e.what}, ${Math.max(0, Math.round((now - e.at) / 60_000))} min ago`;
+      const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${w.queuedFor?.needs?.length ? `; needs ${w.queuedFor.needs.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''})`;
+      const room = [facts.game.length ? `game work: ${facts.game.join(', ')}` : '', facts.agent.length ? `agent-slot work: ${facts.agent.join(', ')}` : '', facts.held.length ? heldText(facts.held) : ''].filter(Boolean).join('; ');
+      const rest = queued.filter((w) => !usable.includes(w));
+      this.toDispatcher(`[ledger] Capacity may have freed (${events.map(old).join('; ')}). Room now: ${room}. Queued for capacity and fitting it, by priority, then oldest: ${usable.map(line).join('; ')}.${rest.length ? ` Queued with no room for them now: ${rest.map((w) => w.id).join(', ')}.` : ''} Start what fits now (start_agent into a FREE sandbox: list_sandboxes marks them, and check the sandbox is still free); leave queued only what no computer with room can take, and block what waits on something else.`);
     };
     this.capacityTimer = setTimeout(fire, CAPACITY.quietMs);
     this.capacityTimer.unref?.();

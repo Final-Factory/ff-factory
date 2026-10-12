@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { AppState, IntakeSummary, WorkItem } from '../../../shared/types';
 import { decisionOf } from '../../../shared/decision';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
-import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../../../shared/workState';
+import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, type WorkLive, type WorkLiveState } from '../../../shared/workState';
 import { gatesName, gatesOf } from '../../../shared/blockers';
 import { namesReporter, namesRequesters, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { FFBOX_LAN_LABEL, ffboxConversationHref, isFfboxConversationId } from '../../../shared/ffboxLinks';
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
 import { CostChip, RequestSpendBlock, SpendTab, useSpendSummary } from './Spend';
-import { contextGlance, dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, useNow, workLabel, workTone, type Tone } from '../util';
+import { contextGlance, dispatcherGlance, useWorkLive, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, useNow, workLabel, workTone, type Tone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
 import { PermissionCard } from './Transcript';
@@ -84,7 +84,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   const focus = tab && /^w\d+$/.test(tab) ? tab : undefined;
   const setTab = (t: Tab) => navigate({ view: 'dispatcher', tab: t === 'requests' ? undefined : t }, true);
   const owner = app.me?.role === 'owner';
-  const glance = dispatcherGlance(session, open, app.me?.userId);
+  const glance = dispatcherGlance(session, open, useWorkLive(app, work, now), app.me?.userId);
   const account = session ? accountOf(app, session.id) : undefined;
   // Its context and last compaction (w535).
   const ctx = session ? contextGlance(session, now) : undefined;
@@ -197,18 +197,6 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
 
 /** A live state's tone: working blue, waiting on input amber, queued grey, blocked violet, merged with a follow-up green, stalled red. */
 const LIVE_TONE: Record<WorkLiveState, Tone> = { working: 'blue', waiting: 'amber', queued: 'grey', blocked: 'violet', paused: 'grey', followup: 'green', stalled: 'red' };
-
-/**
- * What each open or stalled request is doing now (shared/workState.ts, w418), from the page's own sessions: it follows
- * them live. A message held in the send queue shows from the session's own copy (queuedSend), and a Queued request
- * while a computer has room is flagged from the server's `room` (w643).
- */
-export function useWorkLive(app: AppState, work: readonly WorkItem[], now: number): Map<string, WorkLive> {
-  return useMemo(() => {
-    const byId = new Map(app.sessions.map((s) => [s.id, s]));
-    return workLiveAll(work, { session: (id) => byId.get(id), ...(app.room ? { room: app.room } : {}), now });
-  }, [app.sessions, app.room, work, now]);
-}
 
 /** The live states picked on one list, kept in this browser across reloads (w418, Lothsahn: "select multiple types"). */
 function usePickedStates(key: string): [ReadonlySet<WorkLiveState>, (next: ReadonlySet<WorkLiveState>) => void] {

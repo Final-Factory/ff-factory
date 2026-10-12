@@ -16,6 +16,7 @@
 import type { SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
+import { needsOf } from './capacity.ts';
 
 export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'paused' | 'followup' | 'stalled';
 export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'waiting', 'queued', 'blocked', 'paused', 'followup', 'stalled'];
@@ -65,8 +66,12 @@ export interface WorkLiveFacts {
    * session's own copy (SessionInfo.queuedSend, queuedOn), which the page has too.
    */
   queuedSend?: (sessionId: string) => string | undefined;
-  /** The computers with room for one more worker now (Agents.places, hasRoom); undefined when unknown. */
+  /** The computers with room for one more game worker now (server/placement.ts roomNow); undefined when unknown. */
   room?: readonly string[];
+  /** The computers with an agent slot for work that needs no editor and no game sandbox (w1098); undefined when unknown. */
+  agentRoom?: readonly string[];
+  /** Computers with room that a placement hold keeps work off (w1089), with who and why: a Queued request says so. */
+  heldRoom?: readonly { id: string; why: string; for: readonly ('game' | 'agent')[] }[];
   now: number;
 }
 
@@ -298,10 +303,16 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   // Queued: capacity only. With a computer that could take it free, that is wrong, and says so (w643).
   if (w.status === 'queued') {
     const needs = w.queuedFor?.needs?.map((n) => n.toLowerCase());
-    const room = (f.room ?? []).filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
+    // The same room test as Capacity's ROOM/BUSY and decide_work queue (w1089), by what the request needs (w1098).
+    const kind = needsOf(w);
+    const known = kind === 'game' ? f.room : f.agentRoom;
+    const room = (known ?? []).filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
     const what = `for capacity${needs?.length ? ` on ${needs.join(' or ')}` : ''}`;
-    if (room.length) return { state: 'queued', why: `queued ${what}, but ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} room: the dispatcher should start it, or block it on what it waits for`, roomOn: room };
-    return { state: 'queued', why: `queued ${what}${f.room ? ': no computer that could take it has room' : ''}` };
+    const slot = kind === 'agent' ? 'an agent slot' : 'room';
+    if (room.length) return { state: 'queued', why: `queued ${what}, but ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${slot}: the dispatcher should start it, or block it on what it waits for`, roomOn: room };
+    const held = (f.heldRoom ?? []).filter((h) => h.for.includes(kind) && (!needs?.length || needs.includes(h.id.toLowerCase())));
+    const heldWhy = held.length ? `; ${held.map((h) => `${h.id} has ${slot} but is held (${h.why})`).join('; ')}` : '';
+    return { state: 'queued', why: `queued ${what}${known ? ': no computer that could take it has ' + slot : ''}${heldWhy}` };
   }
 
   // Paused (w915): its worker wrote `<id>: paused: …`, set it aside for the request it is on first. Not Stalled: someone
@@ -358,4 +369,18 @@ export function liveCounts(states: Iterable<WorkLive>): Record<WorkLiveState, nu
   const n = Object.fromEntries(WORK_LIVE_STATES.map((s) => [s, 0])) as Record<WorkLiveState, number>;
   for (const l of states) n[l.state]++;
   return n;
+}
+
+/**
+ * The ledger at a glance (w1089, lothsahn: "the dispatcher queued show 8 on the right side pane, but the left side pane says
+ * 34 active 6 queued"): the counts of every live state, in the order a person scans them, zeros left out, as
+ * [count, label] pairs. The sidebar row and the Dispatcher page both call this on the one workLiveAll map, so their counts
+ * cannot differ: before, the row counted each request's stored status, so a request whose worker's message waits for a free
+ * agent slot (stored active) counted active there and Queued on the page.
+ */
+export const GLANCE_ORDER: readonly WorkLiveState[] = ['waiting', 'working', 'queued', 'blocked', 'stalled', 'followup', 'paused'];
+const GLANCE_WORD: Record<WorkLiveState, string> = { waiting: 'waiting', working: 'working', queued: 'queued', blocked: 'blocked', stalled: 'stalled', followup: 'to follow up', paused: 'paused' };
+export function ledgerGlance(states: Iterable<WorkLive>): [number, string][] {
+  const n = liveCounts(states);
+  return GLANCE_ORDER.filter((s) => n[s]).map((s) => [n[s], GLANCE_WORD[s]] as [number, string]);
 }
