@@ -97,23 +97,23 @@ login. It applies to scheduled standing runs now, and to intake-triggered FFBox 
 This covers work Lothsahn asks for that runs on Ben's machines: BEAST sandboxes and the M3. Lothsahn has no
 access to the M5.
 
-- Config `userClaudeEnv` holds a Claude env per user id, for example
-  `{ "lothsahn": { "CLAUDE_CODE_OAUTH_TOKEN": "<his claude setup-token>" } }`. Set it with
-  `set_app_config userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN` with `user: "lothsahn"`. The value is write-only:
-  it reads back only as `set (…abcd)`, and it is redacted from transcripts like `claudeEnv`
-  (`server/secrets.ts`).
-- An agent's Claude env is `claudeEnvFor(requestedBy)`: the person's entry laid over the owner's, which is,
-  on this host, the token or this host's login as config `claudeAccounts` picks per role, and, on a Mac,
-  the token or the Mac's login as `machines.useHostClaudeEnv` picks ([accounts.md](accounts.md)). A person
-  without an entry runs on the owner's account (`server/identity.ts`). This applies to sandbox workers
-  (`workerOptions`), Mac workers (`machineWorkerSpec`) and standing runs on either (`standing.ts`, `place`).
-- The env is fixed when an agent's process starts. A worker keeps the account of the person who started it.
-  A message from someone else is recorded, but it does not move the worker to another account.
-- A person's own orchestrator runs on their entry when they have one, otherwise on the owner's orchestrator account
-  (the host token, or this host's login with `claudeAccounts.orchestrator: "login"`); `system_status` names who is on
-  the owner's. The dispatcher runs for the system payer, on their entry if they have one.
-- The usage meters list each person's token as its own account ("Lothsahn's token …abcd", "agents working
-  for Lothsahn"). It is polled like the host token, with that token alone (`server/usage.ts`).
+- A person's own token is a vault entry (`sudo fffctl vault add-claude <person>`, or a file on the FFBox host synced by
+  `fff-vm vault-sync`: [vault.md](vault.md) sections 4 and 11). Their **pool** is all their Claude entries. Config
+  `userClaudeEnv` held one env per user id until w1078 (`set_app_config userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN` with
+  `user: "lothsahn"`); it is retired, ignored if present, and taken out of config.json at the portal's start
+  ([accounts.md](accounts.md)). `set_app_config` no longer takes it, and `claudeEnvFor` is gone.
+- An agent working for a person (`requestedBy`) runs on a token of that person's pool and nobody else's, on this host and on
+  every machine: workers (`workerOptions`, `machineWorkerSpec`) and standing runs (`standing.ts`, `place`) through
+  `machineRunEnv`, a person's orchestrator through `poolRunEnv` ([accounts.md](accounts.md)). Which person a request's workers
+  use (the one who last acted, `vault.unattributed` for work nobody asked for, else the requester, else the payer):
+  [vault.md](vault.md) section 10. A person with no usable token does not run: it waits when the pool is held, and is told
+  why when they have none ("add one with `sudo fffctl vault add-claude <person>`"). There is no owner's account to fall back
+  to, since w1078.
+- The token is picked when an agent's process starts, and a live process follows its person at a turn boundary
+  ([vault.md](vault.md) section 10).
+- The dispatcher runs for the system payer: on the vault token `claudeAccounts.dispatcher` pins, else on the payer's pool.
+- The usage meters list each vault token as its own account, named by its vault entry ("vault-lothsahn-1 …abcd"), with
+  "agents working for Lothsahn" under it. The poll sends each token alone (`server/usage.ts`).
 
 ## FFBox
 

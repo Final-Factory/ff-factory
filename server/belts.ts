@@ -53,6 +53,8 @@ export const PERSONAL_TOOLS: ReadonlySet<string> = new Set([
   'reply_to_ffbox',
   // the orchestration worker in the portal VM (w597): Lothsahn's and Ben's own orchestrators only (checked in the handler)
   'ops_worker',
+  // the portal's settings (w1078): Lothsahn's and Ben's own orchestrators only, in a turn their person started (checked in the handler)
+  'set_app_config',
 ]);
 
 /** The orchestration worker's own belt (w597, docs/ops-worker.md): the portal's state, read-only, and its own check-ins. */

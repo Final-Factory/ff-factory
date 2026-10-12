@@ -50,7 +50,7 @@ Dollars are the SDK's `costUSD` (which, on the recent sessions checked, equals t
 ## Which account a turn ran on (w1031)
 
 Every turn is also added to the Claude account its process ran on: `SessionInfo.ranAs`, set when a process starts (a worker's launch
-spec names it: "vault token vault-lothsahn-1 …EAAA (lothsahn's pool, docs/vault.md)", "host token …9AAA"; only the last four
+spec names it: "vault token vault-lothsahn-1 …EAAA (lothsahn's pool, docs/vault.md)"; before w1078 also "host token …9AAA"; only the last four
 characters of a token ever appear). `spend.json` keeps it per request and per session (`accounts`), `spend_report` prints "By Claude
 account the turns ran on" and, for one request, "Per Claude account", so a request taken over by another person (docs/vault.md
 section 10) shows the turns before the switch on one account and after it on the other. A host session (an orchestrator, the

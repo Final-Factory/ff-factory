@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PoolHeldError, Vault, fingerprintOf, newKeyText, type KeySource, type VaultContext } from './vault.ts';
-import { hostAccount, hostProcessEnv, machineRunEnv, poolRunEnv, reserveLines, reservedCredentials } from './secrets.ts';
+import { hostAccount, machineRunEnv, pinnedDispatcherEnv, poolRunEnv, reserveLines, reservedCredentials } from './secrets.ts';
 import { checkAccountConfig } from './config.ts';
 import { OWNER_ONLY_KEYS, normalizeSetting, setAppConfig } from './appConfig.ts';
 import { clock, poolLabel, poolLimits } from './tokenPool.ts';
@@ -20,9 +20,7 @@ const B1 = claudeTok('b');
 const B2 = claudeTok('c');
 const L1 = claudeTok('d');
 const SHARED = claudeTok('e');
-const FILE = claudeTok('f'); // the token file: the dispatcher's
-const HOST = claudeTok('g'); // config claudeEnv: the host token
-const API_KEY = ['sk-ant-api03-', 'z'.repeat(40)].join('');
+const DISP = claudeTok('f'); // the vault token the dispatcher is pinned to (w996)
 
 const usage = (session: number, weekly: number, o: { weeklyDays?: number; sessionHours?: number } = {}): PlanUsage => ({
   available: true,
@@ -40,10 +38,8 @@ function setup(t: { after: (fn: () => void) => void }) {
   const keyFile = path.join(dir, 'vault.key');
   fs.writeFileSync(keyFile, newKeyText(), { mode: 0o600 });
   fs.chmodSync(keyFile, 0o600);
-  const tokenFile = path.join(dir, 'claude-oauth-token');
-  fs.writeFileSync(tokenFile, `${FILE}\n`, { mode: 0o600 });
   const make = (key: () => KeySource = () => ({ file: keyFile })) => new Vault({ file: path.join(data, 'vault.json'), key });
-  return { dir, data, keyFile, tokenFile, make };
+  return { dir, data, keyFile, make };
 }
 
 /** A vault with ben's two tokens, lothsahn's one, and a Claude entry nobody owns. */
@@ -198,8 +194,14 @@ function ctxOf(v: Vault, meters: Record<string, PlanUsage | undefined> = {}, liv
   const problems: string[] = [];
   return { vault: v, usageOf: (f) => meters[f], liveOn: (f) => live[f] ?? 0, payer: () => 'lothsahn', onProblem: (l) => problems.push(l), problems, limits: () => poolLimits(undefined), now: () => NOW };
 }
-const cfgOf = (extra: Record<string, unknown> = {}) =>
-  ({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST, ANTHROPIC_API_KEY: API_KEY, CLAUDE_CONFIG_DIR: '/x' }, userClaudeEnv: {}, machines: { claudeFromVault: true }, ...extra }) as never;
+const cfgOf = (extra: Record<string, unknown> = {}) => ({ machines: {}, ...extra }) as never;
+
+/** A vault where the dispatcher is pinned to its own token "disp" (config claudeAccounts.dispatcher, w996): the only reserve there is (w1078). */
+function pinned(make: ReturnType<typeof setup>['make']) {
+  const vault = make();
+  vault.add({ name: 'disp', kind: 'claude', value: DISP, owner: 'lothsahn', share: 'owner' });
+  return { vault, cfg: { claudeAccounts: { orchestrator: 'vault', dispatcher: 'vault:disp' } } as never };
+}
 
 test('machineRunEnv: a worker waits (PoolHeldError) when its person pool is over its caps, and falls back to no one', (t) => {
   const { make } = setup(t);
@@ -211,8 +213,8 @@ test('machineRunEnv: a worker waits (PoolHeldError) when its person pool is over
     () => machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w1' }, ctx),
     (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is held: every token is at a limit \(.*\): the first frees up Fri 14:00Z$/.test(e.message) && e.next === iso(NOW + 2 * 3_600_000) && !e.message.includes(B1.slice(13, 40)),
   );
-  // Never the host token, the machine's login, nor another person's token (the dispatcher's token file is not a worker's at all).
-  assert.equal(ctx.problems.length, 0, 'held is not a fallback: nothing reported as one');
+  // Never another credential, nor another person's token.
+  assert.equal(ctx.problems.length, 0, 'held is not a problem: nothing reported');
   // Ben's pool frees up: he gets his token, alone, with the daemon's other credentials dropped.
   m[fp(B1)] = usage(30, 40, { weeklyDays: 3 });
   const ok = machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w1' }, ctx);
@@ -225,148 +227,137 @@ test('machineRunEnv: a worker waits (PoolHeldError) when its person pool is over
   assert.equal(unasked.env.CLAUDE_CODE_OAUTH_TOKEN, L1);
 });
 
-test("the transition: a person with no vault tokens keeps today's account; one with a pool whose vault cannot be opened waits (w1031)", (t) => {
+test("w1078: a person with no vault tokens gets no run on any other credential; one with a pool whose vault cannot be opened waits (w1031)", (t) => {
   const { make } = setup(t);
   const v = poolVault(make);
   const ctx = ctxOf(v);
   const sam = { userId: 'sam', displayName: 'Sam' };
-  const r = machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: sam, sessionId: 'w1' }, ctx);
-  assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, HOST, "the host token, as before the pool");
-  assert.equal(r.login, false);
-  assert.match(ctx.problems.at(-1) ?? '', /no vault Claude token for a workers run on m3 for sam; it runs on host token/);
-  // Ben has tokens but the vault key is gone: since w1031 a person with a pool never runs on the host token (lothsahn: their
-  // work "NEVER falls back to the host token or to Ben's pool"), so the run waits for the vault to be fixed, with the reason.
+  assert.throws(
+    () => machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: sam, sessionId: 'w1' }, ctx),
+    (e: unknown) => e instanceof PoolHeldError && /sam has no Claude token in the vault, so a workers run on m3 cannot start/.test(e.message),
+  );
+  assert.match(ctx.problems.at(-1) ?? '', /sam has no Claude token in the vault/);
+  // Ben has tokens but the vault key is gone: the run waits for the vault to be fixed, with the reason (lothsahn, w1031: their
+  // work "NEVER falls back to the host token or to Ben's pool"; w1078: there is no host token).
   const nokey = ctxOf(make(() => ({ why: 'no vault key: test' })));
   assert.throws(
     () => machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: { userId: 'ben', displayName: 'Ben' }, sessionId: 'w3' }, nokey),
-    (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool cannot serve this run: the vault cannot open ben-a, ben-b: no vault key: test/.test(e.message) && !e.message.includes(HOST.slice(13, 40)),
+    (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool cannot serve a workers run on m3: the vault cannot open ben-a, ben-b: no vault key: test/.test(e.message),
   );
   assert.match(nokey.problems.join('\n'), /the vault cannot open ben-a, ben-b: no vault key: test/);
 });
 
-test('poolRunEnv: on "vault" the orchestrator and the ops worker run on that person token alone; every other Claude credential is gone', (t) => {
-  const { make, tokenFile } = setup(t);
+test('poolRunEnv: the orchestrator and the ops worker run on that person token alone; every other Claude credential is gone', (t) => {
+  const { make } = setup(t);
   const v = poolVault(make);
   const ctx = ctxOf(v, { [fp(B1)]: usage(10, 50, { weeklyDays: 4 }), [fp(B2)]: usage(10, 50, { weeklyDays: 2 }) });
-  const cfg = cfgOf({ claudeAccounts: { orchestrator: 'vault' }, claudeTokenFile: tokenFile });
-  const fallback = () => hostProcessEnv(cfg, 'orchestrator', { PATH: '/bin', ANTHROPIC_API_KEY: API_KEY, CLAUDE_CODE_OAUTH_TOKEN: 'server-own' });
+  const was = { key: process.env.ANTHROPIC_API_KEY, oauth: process.env.CLAUDE_CODE_OAUTH_TOKEN };
+  process.env.ANTHROPIC_API_KEY = ['sk-ant-api03-', 'z'.repeat(40)].join('');
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = 'server-own';
+  t.after(() => {
+    for (const [k, x] of [['ANTHROPIC_API_KEY', was.key], ['CLAUDE_CODE_OAUTH_TOKEN', was.oauth]] as const) {
+      if (x === undefined) delete process.env[k];
+      else process.env[k] = x;
+    }
+  });
   for (const role of ['orchestrator', 'ops'] as const) {
-    const r = poolRunEnv(cfg, { role, personId: 'ben', sessionId: `s-${role}` }, fallback, ctx);
+    const r = poolRunEnv({ role, personId: 'ben', sessionId: `s-${role}` }, ctx);
     assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, B2, `${role}: ben's token that resets first`);
     assert.equal(r.env.ANTHROPIC_API_KEY, undefined, 'an API key would outrank the token: gone');
-    assert.equal(r.env.CLAUDE_CONFIG_DIR, '/x', 'settings that are not credentials stay');
     assert.match(r.account, /^vault token ben-b …cccc \(ben's pool/);
     assert.ok(!JSON.stringify(r.account).includes(B2.slice(13, 40)));
   }
-  assert.equal(poolRunEnv(cfg, { role: 'orchestrator', personId: 'lothsahn' }, fallback, ctx).env.CLAUDE_CODE_OAUTH_TOKEN, L1, "each person's orchestrator on their own");
+  assert.equal(poolRunEnv({ role: 'orchestrator', personId: 'lothsahn' }, ctx).env.CLAUDE_CODE_OAUTH_TOKEN, L1, "each person's orchestrator on their own");
   // A new token in the vault applies to the next session start, no restart: ben-c resets sooner than anything.
   v.add({ name: 'ben-c', kind: 'claude', value: claudeTok('h'), owner: 'ben', share: 'owner' });
   const meters = { [fp(claudeTok('h'))]: usage(10, 50, { weeklyDays: 1 }), [fp(B1)]: usage(10, 50, { weeklyDays: 4 }), [fp(B2)]: usage(10, 50, { weeklyDays: 2 }) };
   const ctx2 = ctxOf(v, meters);
-  assert.equal(poolRunEnv(cfg, { role: 'orchestrator', personId: 'ben' }, fallback, ctx2).env.CLAUDE_CODE_OAUTH_TOKEN, claudeTok('h'));
+  assert.equal(poolRunEnv({ role: 'orchestrator', personId: 'ben' }, ctx2).env.CLAUDE_CODE_OAUTH_TOKEN, claudeTok('h'));
 });
 
-test('poolRunEnv: no pool token yet (the transition) is the token file; not on "vault" it is the fallback whatever the vault holds', (t) => {
-  const { make, tokenFile } = setup(t);
+test('poolRunEnv (w1078): no pool token, no person, or tokens the vault cannot open stop the start with the reason, on no other credential', (t) => {
+  const { make } = setup(t);
   const v = poolVault(make);
   const ctx = ctxOf(v);
-  const cfg = cfgOf({ claudeAccounts: { orchestrator: 'vault' }, claudeTokenFile: tokenFile });
-  const fallback = () => hostProcessEnv(cfg, 'orchestrator', { PATH: '/bin' });
-  const r = poolRunEnv(cfg, { role: 'orchestrator', personId: 'sam' }, fallback, ctx);
-  assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, FILE, 'the token file, as today');
-  assert.equal(r.env.ANTHROPIC_API_KEY, undefined);
-  assert.equal(r.account, 'token file');
-  assert.equal(poolRunEnv(cfg, { role: 'ops', personId: undefined }, fallback, ctx).env.CLAUDE_CODE_OAUTH_TOKEN, FILE, 'the ops worker with no caller');
-  // Another account setting: the pool is not used.
-  const tokenAccount = cfgOf({ claudeAccounts: { orchestrator: 'token' } });
-  assert.equal(poolRunEnv(tokenAccount, { role: 'orchestrator', personId: 'ben' }, () => ({ CLAUDE_CODE_OAUTH_TOKEN: HOST }), ctx).env.CLAUDE_CODE_OAUTH_TOKEN, HOST);
-  // The vault cannot open ben's tokens: the fallback, with the problem named (never a value).
+  assert.throws(() => poolRunEnv({ role: 'orchestrator', personId: 'sam' }, ctx), (e: unknown) => e instanceof PoolHeldError && /sam has no Claude token in the vault, so an orchestrator cannot start/.test(e.message));
+  assert.throws(() => poolRunEnv({ role: 'ops', personId: undefined }, ctx), (e: unknown) => e instanceof PoolHeldError && /the orchestration worker is for nobody/.test(e.message), 'the ops worker with no caller');
+  // The vault cannot open ben's tokens: the problem is named (never a value).
   const nokey = ctxOf(make(() => ({ why: 'no vault key: test' })));
-  const r2 = poolRunEnv(cfg, { role: 'orchestrator', personId: 'ben' }, fallback, nokey);
-  assert.equal(r2.env.CLAUDE_CODE_OAUTH_TOKEN, FILE);
+  assert.throws(() => poolRunEnv({ role: 'orchestrator', personId: 'ben' }, nokey), (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool cannot serve an orchestrator: .*no vault key: test/.test(e.message));
   assert.match(nokey.problems.join('\n'), /no vault key: test/);
 });
 
 test("poolRunEnv: the orchestrator stops when its pool is used up and the error shows the reset, never a token; the ops worker is held when capped", (t) => {
-  const { make, tokenFile } = setup(t);
+  const { make } = setup(t);
   const v = poolVault(make);
-  const cfg = cfgOf({ claudeAccounts: { orchestrator: 'vault' }, claudeTokenFile: tokenFile });
-  const fallback = () => hostProcessEnv(cfg, 'orchestrator', {});
   const used = ctxOf(v, { [fp(B1)]: usage(100, 40, { sessionHours: 2 }), [fp(B2)]: usage(10, 100, { weeklyDays: 3 }) });
   assert.throws(
-    () => poolRunEnv(cfg, { role: 'orchestrator', personId: 'ben' }, fallback, used),
-    (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is used up: every token is used up \(.*\): the first frees up Fri 14:00Z$/.test(e.message) && !e.message.includes(B1.slice(13, 40)) && !e.message.includes(FILE.slice(13, 40)),
+    () => poolRunEnv({ role: 'orchestrator', personId: 'ben' }, used),
+    (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is used up: every token is used up \(.*\): the first frees up Fri 14:00Z$/.test(e.message) && !e.message.includes(B1.slice(13, 40)) && !e.message.includes(DISP.slice(13, 40)),
   );
   const capped = ctxOf(v, { [fp(B1)]: usage(90, 40, { sessionHours: 2 }), [fp(B2)]: usage(85, 30, { weeklyDays: 3, sessionHours: 4 }) });
-  assert.throws(() => poolRunEnv(cfg, { role: 'ops', personId: 'ben' }, fallback, capped), (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is held/.test(e.message));
+  assert.throws(() => poolRunEnv({ role: 'ops', personId: 'ben' }, capped), (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is held/.test(e.message));
   // The orchestrator on the same pool still runs: over its cap, on the token with the most room.
-  assert.equal(poolRunEnv(cfg, { role: 'orchestrator', personId: 'ben' }, fallback, capped).env.CLAUDE_CODE_OAUTH_TOKEN, B2);
-  // Neither falls to the dispatcher's token file: the stop is the stop.
+  assert.equal(poolRunEnv({ role: 'orchestrator', personId: 'ben' }, capped).env.CLAUDE_CODE_OAUTH_TOKEN, B2);
+  // Neither falls to another credential: the stop is the stop.
 });
 
 // ---------------------------------------------------------------- the dispatcher and its reserve
 
-test('hostAccount: "vault" is the orchestrators only; the dispatcher that inherits it stays on the token file (else the host token)', () => {
-  const cfg = { claudeAccounts: { orchestrator: 'vault' }, claudeTokenFile: '/srv/fff/secrets/t', claudeEnv: {} } as never;
+test('hostAccount: "vault" for the orchestrators; the dispatcher that is not pinned runs on the system payer\'s pool, also "vault"', () => {
+  const cfg = { claudeAccounts: { orchestrator: 'vault' } } as never;
   assert.equal(hostAccount(cfg, 'orchestrator'), 'vault');
-  assert.equal(hostAccount(cfg, 'dispatcher'), 'tokenfile');
-  assert.equal(hostAccount({ claudeAccounts: { orchestrator: 'vault' }, claudeEnv: {} } as never, 'dispatcher'), 'token');
-  assert.equal(hostAccount({ claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' }, claudeTokenFile: '/x', claudeEnv: {} } as never, 'dispatcher'), 'tokenfile');
+  assert.equal(hostAccount(cfg, 'dispatcher'), 'vault');
+  assert.equal(hostAccount({} as never, 'dispatcher'), 'vault');
+  assert.equal(hostAccount({ claudeAccounts: { orchestrator: 'vault', dispatcher: 'vault:disp' } } as never, 'dispatcher'), 'vault:disp');
 });
 
-test('the reserve follows the dispatcher account and covers the host token; one credential is the dispatcher', (t) => {
-  const { tokenFile } = setup(t);
-  const base = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST }, claudeTokenFile: tokenFile } as const;
-  // The token file is the dispatcher's, the host token is reserved for its own roles.
-  const a = reservedCredentials({ ...base, claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' } } as never);
-  assert.deepEqual(a.map((c) => [c.role, c.key]), [['dispatcher', tokenKey(FILE)], ['host-token', tokenKey(HOST)]]);
-  assert.match(a[0].what, /^the dispatcher's token file …ffff$/);
-  assert.match(a[1].what, /^the host token …gggg$/);
-  // Switch the dispatcher's account to the host token: the reserve moves and the two are one credential, the dispatcher's.
-  const b = reservedCredentials({ ...base, claudeAccounts: { dispatcher: 'token' } } as never);
-  assert.deepEqual(b.map((c) => [c.role, c.key]), [['dispatcher', tokenKey(HOST)]]);
-  assert.match(b[0].what, /^the dispatcher's host token …gggg$/);
-  // The dispatcher on this host's login.
-  const c = reservedCredentials({ ...base, claudeAccounts: { dispatcher: 'login' } } as never);
-  assert.deepEqual(c.map((x) => [x.role, x.key]), [['dispatcher', 'host:login'], ['host-token', tokenKey(HOST)]]);
-  // No token file readable: no reserve on it (nothing to name).
-  assert.deepEqual(reservedCredentials({ claudeEnv: {}, claudeAccounts: { dispatcher: 'tokenfile' }, claudeTokenFile: '/nonexistent/x' } as never), []);
+test('the reserve is the dispatcher\'s pinned vault token alone: unpinned there is none, and a pin the vault cannot give has none', (t) => {
+  const { make } = setup(t);
+  const { vault, cfg } = pinned(make);
+  const a = reservedCredentials(cfg, { vault });
+  assert.deepEqual(a.map((c) => [c.role, c.key]), [['dispatcher', tokenKey(DISP)]]);
+  assert.match(a[0].what, /^the dispatcher's vault token disp …ffff$/);
+  assert.deepEqual(reservedCredentials({ claudeAccounts: { orchestrator: 'vault' } } as never, { vault }), [], 'unpinned: the system payer\'s pool, held by its own limits like anyone\'s');
+  vault.update('disp', { disabled: true });
+  assert.deepEqual(reservedCredentials(cfg, { vault }), [], 'no usable token to name');
+  assert.deepEqual(reservedCredentials(cfg, undefined), [], 'no vault at all');
 });
 
 test("reserveLines: the dispatcher's token shows its reserve; runs inside it raise the warning; none without readings or users", (t) => {
-  const { tokenFile } = setup(t);
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST }, claudeTokenFile: tokenFile, claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' } } as never;
-  const file = tokenKey(FILE);
-  const meters: Record<string, PlanUsage | undefined> = { [file]: usage(12, 41, { weeklyDays: 5 }), [tokenKey(HOST)]: usage(5, 10, { weeklyDays: 5 }) };
+  const { make } = setup(t);
+  const { vault, cfg } = pinned(make);
+  const key = tokenKey(DISP);
+  const meters: Record<string, PlanUsage | undefined> = { [key]: usage(12, 41, { weeklyDays: 5 }) };
   const none = (_: string) => 0;
-  const calm = reserveLines(cfg, (k) => meters[k], none, NOW);
-  assert.equal(calm[0].line, "dispatcher's token file …ffff: weekly 41%, reserve 25% (5 days to reset); 5-hour 12%, reserve 20%");
+  const calm = reserveLines(cfg, (k) => meters[k], none, NOW, { vault });
+  assert.equal(calm.length, 1);
+  assert.equal(calm[0].line, "dispatcher's vault token disp …ffff: weekly 41%, reserve 25% (5 days to reset); 5-hour 12%, reserve 20%");
   assert.equal(calm[0].warning, undefined);
-  assert.match(calm[1].line, /^host token …gggg: weekly 10%, reserve 25% \(5 days to reset\)/);
   // Inside the buffer with another person's orchestrator on it (a person with no vault token yet): a warning, not a refusal.
-  meters[file] = usage(12, 83, { weeklyDays: 5 });
-  const busy = reserveLines(cfg, (k) => meters[k], (k, role) => (k === file && role === 'dispatcher' ? 2 : 0), NOW);
-  assert.equal(busy[0].line, `dispatcher's token file …ffff: weekly 83%, reserve 25% (5 days to reset); 5-hour 12%, reserve 20%; inside its reserve (weekly 83% (buffer 25%), resets ${clock(iso(NOW + 5 * DAY))}), kept for the dispatcher; 2 other runs using it`);
-  assert.equal(busy[0].warning, `dispatcher's token file …ffff is the last token with room for 2 runs and is inside the buffer kept for the dispatcher: weekly 83% (buffer 25%), resets ${clock(iso(NOW + 5 * DAY))}`);
+  meters[key] = usage(12, 83, { weeklyDays: 5 });
+  const busy = reserveLines(cfg, (k) => meters[k], (k, role) => (k === key && role === 'dispatcher' ? 2 : 0), NOW, { vault });
+  assert.equal(busy[0].line, `dispatcher's vault token disp …ffff: weekly 83%, reserve 25% (5 days to reset); 5-hour 12%, reserve 20%; inside its reserve (weekly 83% (buffer 25%), resets ${clock(iso(NOW + 5 * DAY))}), kept for the dispatcher; 2 other runs using it`);
+  assert.equal(busy[0].warning, `dispatcher's vault token disp …ffff is the last token with room for 2 runs and is inside the buffer kept for the dispatcher: weekly 83% (buffer 25%), resets ${clock(iso(NOW + 5 * DAY))}`);
   // Inside the buffer and nobody else on it: the dispatcher alone uses it, as intended: no warning.
-  const alone = reserveLines(cfg, (k) => meters[k], none, NOW);
+  const alone = reserveLines(cfg, (k) => meters[k], none, NOW, { vault });
   assert.match(alone[0].line, /inside its reserve \(weekly 83% .*\), kept for the dispatcher$/);
   assert.equal(alone[0].warning, undefined);
   // No reading yet: counted as inside its reserve.
-  const unread = reserveLines(cfg, () => undefined, none, NOW);
+  const unread = reserveLines(cfg, () => undefined, none, NOW, { vault });
   assert.match(unread[0].line, /no reading yet \(counted as inside its reserve\)/);
   // 5 days to the reset gives 25; the figure per day is the system-wide config.
-  const slow = reserveLines({ ...(cfg as object), vault: { pool: { reservePerDayPercent: 2 } } } as never, (k) => meters[k], none, NOW);
+  const slow = reserveLines({ ...(cfg as object), vault: { pool: { reservePerDayPercent: 2 } } } as never, (k) => meters[k], none, NOW, { vault });
   assert.match(slow[0].line, /reserve 10% \(5 days to reset\)/);
-  assert.ok(![calm, busy, alone, unread].some((x) => x.some((l) => l.line.includes(FILE.slice(13, 40)))), 'a line shows the last four characters only');
+  assert.ok(![calm, busy, alone, unread].some((x) => x.some((l) => l.line.includes(DISP.slice(13, 40)))), 'a line shows the last four characters only');
 });
 
 test("w828: the warning names the limit that put the token inside its buffer: 5-hour only, weekly only, both, no reading", (t) => {
-  const { tokenFile } = setup(t);
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST }, claudeTokenFile: tokenFile, claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' } } as never;
-  const two = (k: string, role: string) => (k === tokenKey(FILE) && role === 'dispatcher' ? 2 : 0);
-  const warn = (u: PlanUsage | undefined) => reserveLines(cfg, (k) => (k === tokenKey(FILE) ? u : undefined), two, NOW)[0];
-  const tail = /^dispatcher's token file …ffff is the last token with room for 2 runs and is inside the buffer kept for the dispatcher: /;
+  const { make } = setup(t);
+  const { vault, cfg } = pinned(make);
+  const two = (k: string, role: string) => (k === tokenKey(DISP) && role === 'dispatcher' ? 2 : 0);
+  const warn = (u: PlanUsage | undefined) => reserveLines(cfg, (k) => (k === tokenKey(DISP) ? u : undefined), two, NOW, { vault })[0];
+  const tail = /^dispatcher's vault token disp …ffff is the last token with room for 2 runs and is inside the buffer kept for the dispatcher: /;
   // The live case: weekly 51% (buffer 26%, not inside it) and 5-hour 93% (buffer 20%, inside it). The week is not blamed.
   const sessionOnly = warn(usage(93, 51, { weeklyDays: 5.2, sessionHours: 1 / 6 }));
   assert.match(sessionOnly.warning ?? '', tail);
@@ -388,24 +379,24 @@ test("w828: the warning names the limit that put the token inside its buffer: 5-
   assert.match(warn(usage(93, 10)).warning ?? '', /5-hour 93% \(buffer 20%\), resets at an unknown time$/);
 });
 
-test("the dispatcher is never held by its own reserve: its environment is the token file whatever the meters say", (t) => {
-  const { tokenFile } = setup(t);
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST }, claudeTokenFile: tokenFile, claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' } } as never;
-  // hostProcessEnv consults no meter: at 99.9% weekly and 100% of the 5-hour window the dispatcher still starts on it.
-  const env = hostProcessEnv(cfg, 'dispatcher', { PATH: '/bin' });
-  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, FILE);
+test("the dispatcher is never held by its own reserve: its environment is its pinned token whatever the meters say", (t) => {
+  const { make } = setup(t);
+  const { vault, cfg } = pinned(make);
+  // pinnedDispatcherEnv consults no meter: at 99.9% weekly and 100% of the 5-hour window the dispatcher still starts on it.
+  const env = pinnedDispatcherEnv(cfg, { vault, usageOf: () => usage(100, 99.9, { weeklyDays: 0.1 }) })!.env;
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, DISP);
   // And the reserve is a line and a warning, never an exception: reserveLines returns even at 100%.
-  const full = reserveLines(cfg, () => usage(100, 99.9, { weeklyDays: 0.1 }), () => 0, NOW);
-  assert.equal(full.length, 2);
+  const full = reserveLines(cfg, () => usage(100, 99.9, { weeklyDays: 0.1 }), () => 0, NOW, { vault });
+  assert.equal(full.length, 1);
   assert.match(full[0].line, /inside its reserve \(.*\), kept for the dispatcher/);
 });
 
 // ---------------------------------------------------------------- config
 
-test('config: "vault" is the orchestrator account; the dispatcher and workers refuse it; vault.pool is checked at load', () => {
-  checkAccountConfig({ claudeAccounts: { orchestrator: 'vault' } } as never);
-  checkAccountConfig({ claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' }, claudeTokenFile: '/x' } as never);
-  assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'vault' } } as never), /claudeAccounts\.dispatcher cannot be "vault"/);
+test('config: "vault" is the account of the orchestrators and the unpinned dispatcher; workers have none; vault.pool is checked at load', () => {
+  checkAccountConfig({ claudeAccounts: { orchestrator: 'vault', dispatcher: 'vault' } } as never);
+  checkAccountConfig({ claudeAccounts: { orchestrator: 'vault', dispatcher: 'vault:disp' } } as never);
+  assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'tokenfile' } } as never), /every Claude process runs on a vault token \(w1078\)/, 'retired (w1078)');
   assert.throws(() => checkAccountConfig({ claudeAccounts: { workers: 'vault' } } as never), /claudeAccounts\.workers: no such role/, 'retired (w755): not a role any more');
   checkAccountConfig({ vault: { pool: { sessionHoldPercent: 70, reservePerDayPercent: 0 } } } as never);
   assert.throws(() => checkAccountConfig({ vault: { pool: { sessionHoldPercent: 101 } } } as never), /percent from 0 to 100/);
@@ -413,9 +404,9 @@ test('config: "vault" is the orchestrator account; the dispatcher and workers re
   assert.throws(() => checkAccountConfig({ vault: { pool: { retireWeeklyPercent: 90, onePerWeeklyPercent: 95 } } } as never), /above retireWeeklyPercent/);
 });
 
-test('set_app_config: "vault" for the orchestrator only; the pool limits are anyone\'s, checked, applied live and cleared by null', (t) => {
-  assert.equal(normalizeSetting('claudeAccounts.orchestrator', 'vault'), 'vault');
-  assert.throws(() => normalizeSetting('claudeAccounts.dispatcher', 'vault'), /cannot be "vault"/);
+test('set_app_config: the pool limits are anyone\'s, checked, applied live and cleared by null', (t) => {
+  assert.equal(normalizeSetting('claudeAccounts.dispatcher', 'vault'), undefined, 'the account setting is the owner\'s only (w1078)');
+  assert.equal(OWNER_ONLY_KEYS.has('claudeAccounts.dispatcher'), true);
   // Not owner-only keys: the pool limits are one system-wide set that any person's orchestrator may change.
   for (const k of ['vault.pool.sessionHoldPercent', 'vault.pool.onePerWeeklyPercent', 'vault.pool.retireWeeklyPercent', 'vault.pool.reservePerDayPercent', 'vault.pool.reserveSessionPercent'] as const) {
     assert.equal(OWNER_ONLY_KEYS.has(k), false, k);
@@ -448,20 +439,19 @@ test('set_app_config: "vault" for the orchestrator only; the pool limits are any
 // ---------------------------------------------------------------- w971: the reserve is enforced, the score orders
 
 test("w971: the dispatcher's token in a person's pool, inside its reserve, goes to no worker, no ops worker and no orchestrator while another token has room", (t) => {
-  const { make, tokenFile } = setup(t);
+  const { make } = setup(t);
   const v = make();
-  // ben-a is the dispatcher's token file (also in Ben's pool); ben-b is another token. The 04:32Z picture: 97% vs 27% weekly, 4 days to go.
-  v.add({ name: 'ben-a', kind: 'claude', value: FILE, owner: 'ben', share: 'owner' });
+  // ben-a is the dispatcher's pinned token (also in Ben's pool); ben-b is another token. The 04:32Z picture: 97% vs 27% weekly, 4 days to go.
+  v.add({ name: 'ben-a', kind: 'claude', value: DISP, owner: 'ben', share: 'owner' });
   v.add({ name: 'ben-b', kind: 'claude', value: B2, owner: 'ben', share: 'owner' });
-  const meters: Record<string, PlanUsage | undefined> = { [fp(FILE)]: usage(10, 97, { weeklyDays: 4, sessionHours: 3 }), [fp(B2)]: usage(10, 27, { weeklyDays: 4, sessionHours: 3 }) };
-  const cfg = cfgOf({ claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' }, claudeTokenFile: tokenFile });
-  const ctx = { ...ctxOf(v, meters), reservedFor: (f: string) => (f === fp(FILE) ? 'the dispatcher' : undefined) };
-  const fallback = () => ({});
+  const meters: Record<string, PlanUsage | undefined> = { [fp(DISP)]: usage(10, 97, { weeklyDays: 4, sessionHours: 3 }), [fp(B2)]: usage(10, 27, { weeklyDays: 4, sessionHours: 3 }) };
+  const cfg = cfgOf({ claudeAccounts: { orchestrator: 'vault', dispatcher: 'vault:ben-a' } });
+  const ctx = { ...ctxOf(v, meters), reservedFor: (f: string) => (f === fp(DISP) ? 'the dispatcher' : undefined) };
   const ben = { userId: 'ben', displayName: 'Ben' };
   const token = (e: { CLAUDE_CODE_OAUTH_TOKEN?: string }) => e.CLAUDE_CODE_OAUTH_TOKEN;
   assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w1' }, ctx).env), B2, 'a worker');
-  assert.equal(token(poolRunEnv(cfg, { role: 'ops', personId: 'ben', sessionId: 'ops1' }, fallback, ctx).env), B2, 'the ops worker');
-  assert.equal(token(poolRunEnv(cfg, { role: 'orchestrator', personId: 'ben', sessionId: 'orch1' }, fallback, ctx).env), B2, 'the orchestrator');
+  assert.equal(token(poolRunEnv({ role: 'ops', personId: 'ben', sessionId: 'ops1' }, ctx).env), B2, 'the ops worker');
+  assert.equal(token(poolRunEnv({ role: 'orchestrator', personId: 'ben', sessionId: 'orch1' }, ctx).env), B2, 'the orchestrator');
   // Without the reserve known (the old code), the token with the sooner... both reset together, so it would have been by name: the point is the reserve decides.
   const noReserve = { ...ctx, reservedFor: undefined };
   assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w2' }, noReserve).env), B2, 'by score alone ben-b wins too');
@@ -469,33 +459,33 @@ test("w971: the dispatcher's token in a person's pool, inside its reserve, goes 
   meters[fp(B2)] = usage(90, 27, { weeklyDays: 4, sessionHours: 2 });
   assert.throws(
     () => machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w3' }, ctx),
-    (e: unknown) => e instanceof PoolHeldError && /inside the buffer kept for the dispatcher/.test(e.message) && e.next === iso(NOW + 2 * 3_600_000) && !e.message.includes(FILE.slice(13, 40)),
+    (e: unknown) => e instanceof PoolHeldError && /inside the buffer kept for the dispatcher/.test(e.message) && e.next === iso(NOW + 2 * 3_600_000) && !e.message.includes(DISP.slice(13, 40)),
   );
-  assert.throws(() => poolRunEnv(cfg, { role: 'ops', personId: 'ben', sessionId: 'ops2' }, fallback, ctx), PoolHeldError);
-  const orch = poolRunEnv(cfg, { role: 'orchestrator', personId: 'ben', sessionId: 'orch2' }, fallback, ctx);
-  assert.equal(token(orch.env), FILE, 'nothing else has room: today\'s behaviour for the orchestrator');
+  assert.throws(() => poolRunEnv({ role: 'ops', personId: 'ben', sessionId: 'ops2' }, ctx), PoolHeldError);
+  const orch = poolRunEnv({ role: 'orchestrator', personId: 'ben', sessionId: 'orch2' }, ctx);
+  assert.equal(token(orch.env), DISP, 'nothing else has room: today\'s behaviour for the orchestrator');
   assert.match(orch.account, /inside the dispatcher's reserve: no other token has room/);
   // The week runs out: the buffer (5% a day) shrinks below what is left and the token is an ordinary one again (94% at 0.5 days: buffer 2.5%).
-  meters[fp(FILE)] = usage(10, 94, { weeklyDays: 0.5, sessionHours: 3 });
+  meters[fp(DISP)] = usage(10, 94, { weeklyDays: 0.5, sessionHours: 3 });
   meters[fp(B2)] = usage(10, 90, { weeklyDays: 4, sessionHours: 3 }); // little headroom: the score now favours the ex-reserved token
-  assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w4' }, ctx).env), FILE);
+  assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w4' }, ctx).env), DISP);
   // A session already running on it is never touched: only the next start asks the pool.
 });
 
 test('w979: the pool listing orders by the picker, labels each token, and marks priority on exactly one token per pool', (t) => {
   const { make } = setup(t);
   const v = make();
-  v.add({ name: 'ben-a', kind: 'claude', value: FILE, owner: 'ben', share: 'owner' });
+  v.add({ name: 'ben-a', kind: 'claude', value: DISP, owner: 'ben', share: 'owner' });
   v.add({ name: 'ben-b', kind: 'claude', value: B2, owner: 'ben', share: 'owner' });
   v.add({ name: 'ben-c', kind: 'claude', value: B1, owner: 'ben', share: 'owner' });
   v.add({ name: 'loth-a', kind: 'claude', value: L1, owner: 'lothsahn', share: 'owner' });
-  const reservedFor = (f: string) => (f === fp(FILE) ? 'the dispatcher' : undefined);
+  const reservedFor = (f: string) => (f === fp(DISP) ? 'the dispatcher' : undefined);
   const labels = (m: Record<string, PlanUsage | undefined>, live: Record<string, number> = {}) => {
     const pools = v.pools({ ...world(m, live), reservedFor });
     return { pools, ben: pools.get('ben')!.map((x) => `${x.entry.name} ${poolLabel(x.view, x.priority)}`), loth: pools.get('lothsahn')!.map((x) => `${x.entry.name} ${poolLabel(x.view, x.priority)}`) };
   };
   // The 04:32Z picture: ben-a (the dispatcher's) at 97% inside its reserve, ben-b at 27%, ben-c at 60%.
-  const m = { [fp(FILE)]: usage(0, 97, { weeklyDays: 3 }), [fp(B2)]: usage(0, 27, { weeklyDays: 4 }), [fp(B1)]: usage(0, 60, { weeklyDays: 4 }), [fp(L1)]: usage(0, 98, { weeklyDays: 1 }) };
+  const m = { [fp(DISP)]: usage(0, 97, { weeklyDays: 3 }), [fp(B2)]: usage(0, 27, { weeklyDays: 4 }), [fp(B1)]: usage(0, 60, { weeklyDays: 4 }), [fp(L1)]: usage(0, 98, { weeklyDays: 1 }) };
   const r = labels(m);
   assert.deepEqual(r.ben, ['ben-b pool:ok priority', 'ben-c pool:ok', 'ben-a pool:reserved'], 'best first, priority on the one a new job gets');
   assert.deepEqual(r.loth, ['loth-a pool:one-at-a-time priority'], "one at a time with the slot free: priority still goes to it, it takes the next job");

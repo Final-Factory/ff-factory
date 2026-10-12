@@ -109,7 +109,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 |---|---|---|---|---|---|---|
 | `~/.claude/` (`projects/` = transcripts and memory, `plugins/`, `settings.json`) | Claude Code's config and history; `CLAUDE_CONFIG_DIR` is **unset** for BEAST workers today (measured) | Claude Code, `registerAgents.sh` | M | 3.8 GB (`projects` 3.7 GB, `plugins` 124 MB, 63 cached ff-agents versions) | **yes** (`.credentials.json` on Windows) | `server/usage.ts:195`; `server/secretGuard.ts:167-177` |
 | `~/.claude.json` (+ `.backup`, `.tmp.*`) | per-project MCP servers (the daemon reads the UnityMCP entry from it) | Claude Code | M | small | no (but guarded) | `machine/unityMcp.ts:29-32` |
-| `~/.claude-worker-token` (BEAST) | a token file (config `claudeTokenFile`) | a person | M | tiny | **yes** | `server/config.ts:195`, `server/appConfig.ts:312-315` |
+| `~/.claude-worker-token` (BEAST) | a token file (config `claudeTokenFile` until w1078, which retired the key and the "tokenfile" account; nothing reads the file now) | a person | M | tiny | **yes** | `server/config.ts:195`, `server/appConfig.ts:312-315` (as measured before w1078) |
 | `~/final-factory-agents/` | the marketplace clone `registerAgents.sh` installs from | a person | M | 3.8 MB | no | CLAUDE.md of the game repo |
 | `~/.local/bin/` (`claude.exe`, the `unity` CLI shim) | Claude Code's native binary; the editor-ops fallback | installers | M | 236 MB | no | `server/machineDeployWin.ts:269,354`; ff-agents `editor-ops/references/recovery.md:193` |
 | `~/.gitconfig` | user git config; on BEAST its GitHub credential helper is `gh auth git-credential` (measured) | a person | M | tiny | no | — |
@@ -374,8 +374,8 @@ each step idempotent:
    record the rule group in `outside`.
 6. Claude: with `CLAUDE_CONFIG_DIR=<root>/claude`, run `registerAgents.sh` (the plugins), and write `unityMcpServer`
    into `daemon.json`, so the daemon no longer reads a person's `~/.claude.json` (`machine/unityMcp.ts:32`). No login is
-   needed when the machine's workers run on the portal's token (`machines.useHostClaudeEnv`, default true,
-   docs/machines.md "Claude account"). A machine on its own login runs `claude` once with the variable set.
+   needed: the machine's workers run on a vault token the portal sends in each launch spec (w1078; before, on the host token
+   with `machines.useHostClaudeEnv`, or on the machine's own login, docs/machines.md "Claude account").
 7. Secrets in (below). Then `daemon.json` without the token, the env block, and the service (the existing deploy code,
    pointed at the root). Record the task or plist in `outside`.
 
@@ -498,7 +498,7 @@ its admin entry, which step 4 never removed. Everything copied was a copy.
 - Today they run agents in the person's clone (`~/nevergames/FinalFactory`), with no sandboxes.
 - The install gives them a pool for the first time: `repo/` with `--reference-if-able ~/nevergames/FinalFactory`, the
   seed by APFS clone (`cp -c`) of that clone's Library, `max_sandboxes` from their RAM.
-- Copy `~/.ff-factory` state and `~/.claude` (the machine login stays in the keychain, or the portal's token), and on
+- Copy `~/.ff-factory` state and `~/.claude` (the machine login stays in the keychain; portal-run agents use a vault token and do not read it), and on
   the M3 the nightly lab (outside the install folder, gone since 2026-10-10) → `nightly/` by rename (same volume).
 - The old slot pool → `players/` (gone since 2026-10-10).
 - `~/nevergames/ff-audit-artifacts` stays the person's.

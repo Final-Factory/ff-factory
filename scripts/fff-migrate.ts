@@ -1229,14 +1229,16 @@ export class Migration {
   }
 
   /** Change 10's check (design 7.2 check 3): a copied orchestrator conversation resumes here, on the token file. */
-  async resumeCheck(moves: HistoryMove[], installed: string[]): Promise<{ ok: boolean; line: string; extra?: string }> {
+  async resumeCheck(moves: HistoryMove[], installed: string[]): Promise<{ ok: boolean | 'skip'; line: string; extra?: string }> {
     const vm = readJson(this.vmConfigFile());
     const state = readJson(path.join(this.o.root, 'data', 'state.json'));
     const dispatcher = String(state.orchestratorId ?? '');
     const pickOne = moves.find((m) => m.sessionId === dispatcher && installed.some((f) => f.endsWith(`${m.sdkSessionId}.jsonl`))) ?? moves.find((m) => m.kind === 'orchestrator' && installed.some((f) => f.endsWith(`${m.sdkSessionId}.jsonl`)));
     if (!pickOne) return { ok: false, line: 'no copied orchestrator conversation to resume' };
     const tokenFile = String(vm.claudeTokenFile ?? '');
-    if (!tokenFile || !fs.existsSync(tokenFile)) return { ok: false, line: `no token file (${tokenFile || 'claudeTokenFile is not set'}): fffctl claude-token first` };
+    // The token file it resumed on was retired after the BEAST cut-over (w1078: every Claude process runs on a vault token):
+    // without one the check is skipped and said so, never passed.
+    if (!tokenFile || !fs.existsSync(tokenFile)) return { ok: 'skip', line: `no token file to resume on (${tokenFile || 'claudeTokenFile is not set'}; w1078 retired it): resume a copied conversation by hand in the dry run (docs/portal-on-ffbox-host.md 7.2)` };
     const cwd = String((vm.repo as Json | undefined)?.basePath ?? '');
     if (!cwd || !fs.existsSync(cwd)) return { ok: false, line: `no base clone at ${cwd || '(repo.basePath)'}: fffctl base-clone first` };
     const token = fs.readFileSync(tokenFile, 'utf8').trim();
@@ -1308,7 +1310,7 @@ export class Migration {
     const t0 = Date.now();
     await this.sys.startPortal();
     const health = await this.waitHealthy(true);
-    const checks: [string, boolean, string][] = [];
+    const checks: [string, boolean | 'skip', string][] = [];
     checks.push(['starts as a dry run', !!health, health ? `/api/health: ok, dryRun, version ${String(health.version ?? '?')}` : `no healthy dry-run answer on port ${this.o.port} within ${this.o.healthSeconds} s`]);
     await sleep(health ? 8000 : 0);
     const logs = await this.sys.logsSince(t0);
@@ -1325,7 +1327,7 @@ export class Migration {
     }
     this.say('');
     this.say('Dry run checks:');
-    for (const [name, ok, detail] of checks) this.say(`  ${ok ? 'PASS' : 'FAIL'}  ${name}: ${detail}`);
+    for (const [name, ok, detail] of checks) this.say(`  ${ok === 'skip' ? 'SKIP' : ok ? 'PASS' : 'FAIL'}  ${name}: ${detail}`);
     this.say('');
     this.say(`The copy took ${secs(pulled.ms)}. This VM's portal now runs BEAST's copy as a DRY RUN (FFSB_DRY_RUN=1): it acts on nothing outside itself, and ${marker.funnel === 'funnel' ? 'the Funnel is off (tailnet only)' : 'it was not on the Funnel'}${marker.backups ? '; its backups are paused' : ''}.`);
     this.say('By hand next (docs/portal-on-ffbox-host.md 7.2, checks 2 and 4-13): sign in over the tailnet, open transcripts, download an attachment; then');

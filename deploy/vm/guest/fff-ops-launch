@@ -57,7 +57,7 @@ elif [ -n "$apikey" ]; then
   envs+=(CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR=3)
   exec 3< <(printf '%s' "$apikey")
 else
-  answer_err "the portal sent no Claude credential: the orchestrators' account must be a token (config claudeAccounts.orchestrator \"token\" or \"tokenfile\"), not this VM's login"
+  answer_err "the portal sent no Claude credential: the orchestration worker runs on a token from its person's vault pool (docs/vault.md), never on this VM's login"
 fi
 token=""
 apikey=""

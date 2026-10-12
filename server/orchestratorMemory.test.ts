@@ -13,6 +13,10 @@ import { memoryDirFor, memoryGuard, memoryKey, memoryWriteProblem, secretIn, typ
 import { connectorEnv, type Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
+import { useFakeVault } from './testVault.ts';
+
+// Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
+useFakeVault();
 
 /**
  * Orchestrators' own memory (docs/orchestrators.md, "Memory"): a folder each, MEMORY.md loaded by the CLI

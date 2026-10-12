@@ -16,6 +16,10 @@ import type { Config } from './config.ts';
 import type { DeliveredAttachment, Requester, SessionInfo, TranscriptEvent, UserInfo } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine } from './testMachine.ts';
+import { useFakeVault } from './testVault.ts';
+
+// Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
+useFakeVault();
 
 /**
  * Attachments through the orchestrators (docs/attachments.md), on a real Agents with the scripted fake SDK: a person's

@@ -13,6 +13,7 @@ import { updaterHealth, UPDATER_STALE_INTERVALS } from '../shared/updaterHealth.
 import type { ProviderUpdater } from '../shared/types.ts';
 import { CLOSE, LIMITS, PROVIDER_PROTOCOL, PROVIDER_TOKEN, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
 import { normalizeSetting, setAppConfig } from './appConfig.ts';
+import { FFBOX_HASH_FILE, ffboxTokenHash } from './configMigration.ts';
 import { redactSecrets } from './secrets.ts';
 import { MockConnector, SAMPLE_CLASSES, SAMPLE_CONVERSATION_ANSWER, SAMPLE_CONVERSATIONS, SAMPLE_INTAKE } from '../e2e/mockConnector.ts';
 import type { Config } from './config.ts';
@@ -68,18 +69,23 @@ test('set_app_config: providers.ffbox.token is kept only as its hash, never echo
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'config.json');
   fs.writeFileSync(file, JSON.stringify({ port: 8790 }, null, 2));
+  const was = process.env.FFSB_SECRETS_DIR;
+  process.env.FFSB_SECRETS_DIR = path.join(dir, 'secrets');
+  t.after(() => (was === undefined ? delete process.env.FFSB_SECRETS_DIR : (process.env.FFSB_SECRETS_DIR = was)));
+  const hashFile = path.join(dir, 'secrets', FFBOX_HASH_FILE);
   const cfg = {} as Config;
   const token = mintProviderToken();
   const r = setAppConfig(file, cfg, 'providers.ffbox.token', token);
   assert.equal(r.before, 'not set');
   assert.match(String(r.after), /^set \(…[0-9a-f]{4}\)$/);
   const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.deepEqual(saved.providers, { ffbox: { tokenSha256: tokenSha256(token) } });
-  assert.ok(!fs.readFileSync(file, 'utf8').includes(token), 'the token itself is never written');
-  assert.equal(cfg.providers?.ffbox?.tokenSha256, tokenSha256(token));
+  assert.deepEqual(saved.providers, { ffbox: { tokenSha256File: hashFile } }, 'w1078: config.json names the file in the secrets folder');
+  assert.ok(!fs.readFileSync(file, 'utf8').includes(token) && !fs.readFileSync(file, 'utf8').includes(tokenSha256(token)), 'neither the token nor its hash is in config.json');
+  assert.equal(fs.readFileSync(hashFile, 'utf8').trim(), tokenSha256(token));
+  assert.equal(ffboxTokenHash(cfg), tokenSha256(token));
   setAppConfig(file, cfg, 'providers.ffbox.enabled', 'true');
   assert.equal(cfg.providers?.ffbox?.enabled, true);
-  assert.equal(cfg.providers?.ffbox?.tokenSha256, tokenSha256(token), 'enabling keeps the token');
+  assert.equal(ffboxTokenHash(cfg), tokenSha256(token), 'enabling keeps the token');
   setAppConfig(file, cfg, 'providers.ffbox.enabled', false);
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).providers.ffbox.enabled, false);
   assert.throws(() => normalizeSetting('providers.ffbox.enabled', 'yes'), /true or false/);
@@ -88,7 +94,8 @@ test('set_app_config: providers.ffbox.token is kept only as its hash, never echo
     (e: Error) => /connector token/.test(e.message) && !e.message.includes('short-secret-value'),
   );
   setAppConfig(file, cfg, 'providers.ffbox.token', null);
-  assert.equal(cfg.providers?.ffbox?.tokenSha256, undefined);
+  assert.equal(ffboxTokenHash(cfg), undefined);
+  assert.equal(fs.existsSync(hashFile), false, 'the file goes with it');
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).providers.ffbox, { enabled: false });
 });
 

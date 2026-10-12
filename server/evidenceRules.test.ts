@@ -11,6 +11,10 @@ import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
+import { useFakeVault } from './testVault.ts';
+
+// Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
+useFakeVault();
 
 /**
  * The evidence rule in the briefs (docs/orchestrators.md, "Evidence and labels"; w208). In October 2026 an ad campaign
@@ -40,7 +44,6 @@ function world(t: { after: (fn: () => void | Promise<void>) => void }) {
     worker: { permissionMode: 'bypassPermissions', effort: 'low' },
     unity: {},
     machines: {},
-    claudeEnv: {},
   } as unknown as Config;
   const store = new Store(dir);
   const sessions = new SessionManager(cfg, store);
