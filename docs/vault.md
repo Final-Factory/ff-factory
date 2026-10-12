@@ -190,6 +190,7 @@ logged in the portal journal with who made it; they apply at the next process st
 | `vault.pool.sessionHoldPercent` | 80 | its **5-hour** meter: no new process on it until that window resets |
 | `vault.pool.onePerWeeklyPercent` | 95 | its **weekly** meter: **one** live process at a time |
 | `vault.pool.retireWeeklyPercent` | 99 | its weekly meter: **retired**, handed to nobody until the weekly window resets |
+| `vault.pool.dispatcherStopPercent` | 95 | the **dispatcher's pinned token** only, either meter: its workers are asked to save and stop, and no new worker starts on it until that window resets ("The stop line" below, w1109) |
 | (at 100) | | either meter: **used up**, handed to nobody until it resets (a rejection by the API counts as 100) |
 
 A token with no numbers yet counts as 50% on both meters, so it passes every rule and ranks last (no weekly reset time, so no score). "Live" counts the
@@ -283,6 +284,52 @@ the limit or limits that put the token inside the buffer, each with its figure, 
 (buffer 20%), resets in 10 min"; both, when both are inside; `reserveReason` in `server/tokenPool.ts`): the week is never given
 as the reason while it is outside its buffer (w828). One token is one account: two tokens of one Claude account are not matched,
 so such a token would have its own meters and its own reserve.
+
+**The stop line (w1109).** lothsahn, 2026-10-12: "at 95%+ session or weekly usage the dispatcher asks all workers using the
+dispatcher key to stop, save their work and push". When either meter of the dispatcher's pinned token reaches
+`vault.pool.dispatcherStopPercent` (95; anyone may change it with `set_app_config`, like the other limits), the portal
+(`DispatcherStop`, `server/dispatcherStop.ts`, every 30 seconds from `server/index.ts`) does this, each point *read* from the code
+and covered by `server/dispatcherStop.test.ts`:
+- **Who is asked.** Every worker (`kind` worker) whose process runs on that token (`SessionInfo.account`) and is mid-turn
+  (running, starting, or waiting for a permission). Not the dispatcher, not the orchestrators (they use the pool up, above), not
+  the ops worker (the harness takes no message to it but its own orchestrators', w597, and w1112 runs it past the caps), not
+  standing agents (one short scheduled run each), not other tokens' workers. An idle worker is not asked: it has nothing running,
+  and its next message restarts its process on another token first (below).
+- **Once per crossing.** A crossing starts when a meter reaches the line and ends when both are below it again (the window's reset)
+  or the dispatcher is pinned to another token. Each worker is asked once in it, however many readings follow; a worker that
+  starts a turn on the token later in the same crossing (one with a background task keeps its process) is asked once too. The
+  crossing and who was asked are kept in `data/dispatcher-stop.json`, so a portal restart does not ask them again.
+- **The message** (`[token stop] ...`, `stopMessage`) goes the normal way (`SessionManager.send`, from the harness), so a worker
+  mid-turn reads it at its next step: do not start anything long; commit the work in progress on its own branch and push it, and if
+  the push is refused (a guard, a hook, a protected branch) keep the commit local and say so, never discard or stash; end the turn
+  with a report and a `wNNN: still open: stopped at the dispatcher token's stop line; resumes on a token with room` line; set no
+  wake_me.
+- **Interrupted after 15 minutes** (`INTERRUPT_AFTER_MS`) if it is still mid-turn. *Why 15* (a judgment, not measured): a worker
+  reads a message sent mid-turn only after the tool call it is in, and a foreground shell command may run 10 minutes (Claude
+  Code's Bash timeout, 600000 ms at most); committing, the repos' prepush checks, pushing and the report take a few minutes more;
+  the restart drain gives the same wrap-up 10 minutes (`drainMinutes`, `server/restart.ts`). An interrupt loses nothing: the work
+  stays in the worker's sandbox, committed or not, and the sandbox stays its own. At 95% the token has 5% left, so the wait costs
+  at most a few points of the dispatcher's margin.
+- **Then its requests are Blocked** on that token's limit (`Orchestrators.tokenStopBlocked`): a `usage` gate naming the token
+  ("vault-lothsahn-1 …EAAA's usage limit"), set as the worker's own, once its turn has ended (asked and finished, or
+  interrupted). Blocked, not Queued: a usage limit is a thing, not capacity (docs/orchestrators.md, "Waiting, Queued, Blocked";
+  w1089 keeps Queued for a free place only). The gate clears when the token's owner's pool can serve a worker again
+  (`ownerPoolServes` in `server/index.ts`: some token of that pool is the one `pickPool` would hand a new worker), which is at
+  once when another of the person's tokens has room, else at the reset that frees one. The blocker watch then resumes that worker
+  (`resumeGatedWorker`), and since its idle process still runs on the stopped token, `Agents.accountMove` stops it first and the
+  message starts a new process in the same conversation on a token with room. A usage gate naming any vault token clears this
+  way (the pool's answer); a usage gate naming another account (an email) still clears when its meters are under 90%.
+- **No new job on the token from the same reading.** A meter at the stop line counts as **inside the dispatcher's reserve**
+  (`reserveOf`: `stopWeekly`, `stopSession`), so the token is `pool:reserved`: no worker or standing agent is handed it (they
+  move to another token of the person's, or are held when none has room), and the person's own orchestrator still takes it when
+  nothing else has room, as with the reserve (the ops worker follows its own rule, w1112). The reason names the line ("weekly 96% (stop line 95%), resets in
+  12 h"), and it lifts at that window's reset. *What this changes in the caps:* the 5-hour meter was already covered (80% holds the
+  token for every worker); the weekly meter was covered by the reserve buffer except on the last day before the weekly reset, when
+  the buffer (5% a day) falls under 5% and 95-99% weekly was the `one-at-a-time` band with its slot free (the dispatcher takes no
+  slot), so a worker could still start there. The stop line closes that gap. Without a pinned token there is no stop line: the
+  dispatcher is then on its payer's pool, whose own caps hold it like anyone's.
+- `system_status` shows a crossing in progress ("Dispatcher token stop (w1109): ... N worker(s) asked to save and stop, still
+  working: ..."), and the server log has a `token stop:` line for each ask, interrupt and block.
 
 **The dispatcher on a vault token (w996).** `claudeAccounts.dispatcher` takes `"vault:<entry name>"`, e.g.
 `"vault:vault-lothsahn-1"` (lothsahn, 2026-10-11: "Please make Lothsahn's token the dispatcher token"). It is one named token,

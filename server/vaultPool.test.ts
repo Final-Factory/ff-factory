@@ -378,7 +378,8 @@ test("w828: the warning names the limit that put the token inside its buffer: 5-
   assert.doesNotMatch(weeklyOnly.warning ?? '', /5-hour/);
   // Both inside: both named, the 5-hour first.
   const both = warn(usage(93, 97, { weeklyDays: 1, sessionHours: 1.5 }));
-  assert.equal((both.warning ?? '').replace(tail, ''), '5-hour 93% (buffer 20%), resets in 1 h 30 min; weekly 97% (buffer 5%), resets in 24 h');
+  // Weekly 97% is past the stop line (95%, w1109), which is named instead of the buffer.
+  assert.equal((both.warning ?? '').replace(tail, ''), '5-hour 93% (buffer 20%), resets in 1 h 30 min; weekly 97% (stop line 95%), resets in 24 h');
   // No reading: said plainly, with no figure invented.
   const unread = warn(undefined);
   assert.equal((unread.warning ?? '').replace(tail, ''), 'no reading yet (counted as inside the buffer)');
@@ -416,7 +417,7 @@ test('set_app_config: the pool limits are anyone\'s, checked, applied live and c
   assert.equal(normalizeSetting('claudeAccounts.dispatcher', 'vault'), undefined, 'the account setting is the owner\'s only (w1078)');
   assert.equal(OWNER_ONLY_KEYS.has('claudeAccounts.dispatcher'), true);
   // Not owner-only keys: the pool limits are one system-wide set that any person's orchestrator may change.
-  for (const k of ['vault.pool.sessionHoldPercent', 'vault.pool.onePerWeeklyPercent', 'vault.pool.retireWeeklyPercent', 'vault.pool.reservePerDayPercent', 'vault.pool.reserveSessionPercent'] as const) {
+  for (const k of ['vault.pool.sessionHoldPercent', 'vault.pool.onePerWeeklyPercent', 'vault.pool.retireWeeklyPercent', 'vault.pool.reservePerDayPercent', 'vault.pool.reserveSessionPercent', 'vault.pool.dispatcherStopPercent'] as const) {
     assert.equal(OWNER_ONLY_KEYS.has(k), false, k);
   }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pool-cfg-'));

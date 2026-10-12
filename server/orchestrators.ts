@@ -2123,6 +2123,36 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     return `Recorded: ${w.id} is Blocked on ${name}. ${cancelled ? 'Your pending check-in is cancelled. ' : ''}End your turn now with your report (a line "${w.id}: still open: blocked on ${name}"). Do NOT set a wake_me to poll for it: when it clears, FF Factory resumes you with a message. Anything people add meanwhile is kept for you.`;
   }
 
+  /**
+   * The dispatcher's token reached its stop line and this worker, which ran on it, was asked to stop (w1109,
+   * server/dispatcherStop.ts) and has ended its turn: each active request it serves is Blocked on that token's limit (a usage
+   * gate: a usage limit is a thing, not capacity, docs/orchestrators.md "Waiting, Queued, Blocked"). The gate is the worker's
+   * own, so it is resumed when the gate clears (resumeGatedWorker); its process then starts again on a token with room
+   * (Agents.accountMove). Returns the requests blocked.
+   */
+  tokenStopBlocked(sessionId: string, a: { ref: string; what: string }): string[] {
+    const items = [...this.store.work.values()];
+    const now = this.now();
+    const done: string[] = [];
+    for (const id of holdsOf(sessionId, items).held) {
+      const w = this.store.work.get(id);
+      if (!w || w.status !== 'active') continue;
+      const gate = this.makeGate({ kind: 'usage', ref: a.ref, what: a.what }, now.toISOString(), `worker ${sessionId}`);
+      w.blocked = gate;
+      w.alsoBlocked = undefined;
+      w.stalled = undefined;
+      w.status = 'blocked';
+      w.gateResumes = undefined;
+      const cancelled = this.cancelCheckIns(w, sessionId);
+      const name = gatesName([gate], now.getTime());
+      this.stamp(w, `worker ${sessionId} stopped at the dispatcher's token's stop line: blocked on ${name} (${gate.what}); it is resumed on a token with room, or after the reset${cancelled}`);
+      this.store.putWork(w);
+      this.toPeople(w.requesters, dispatchNotice(w, `blocked on ${name} (${gate.what}); its worker ${sessionId} saved its work and stopped, and is resumed when a token has room`));
+      done.push(w.id);
+    }
+    return done;
+  }
+
   /** A worker was started, messaged or approved for a request: link it, mark the request active, tell its requesters. */
   linkWorker(workId: string, s: Pick<SessionInfo, 'id' | 'title'>, what: string, opts: { reply?: boolean; overrideGate?: string } = {}) {
     const w = this.requireWork(workId);

@@ -31,7 +31,7 @@ const L = POOL_DEFAULTS;
 const pickAt = (tokens: PoolToken[], o: { orchestrator: boolean; ops?: boolean; limits: typeof L; sticky?: string }) => pickPool(tokens, { ...o, now: NOW });
 
 test('pool limits: defaults 80 / 95 / 99 and 5% a day + 20%, config overrides, bad values refused', () => {
-  assert.deepEqual(poolLimits(undefined), { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20 });
+  assert.deepEqual(poolLimits(undefined), { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20, dispatcherStop: 95 });
   assert.equal(poolLimits({ vault: { pool: { sessionHoldPercent: 70, reservePerDayPercent: 8 } } }).sessionHold, 70);
   assert.equal(poolLimits({ vault: { pool: { sessionHoldPercent: 70, reservePerDayPercent: 8 } } }).reservePerDay, 8);
   assert.equal(poolLimits({ vault: { pool: { sessionHoldPercent: 700 } } }).sessionHold, 80, 'a value out of range is the default');
@@ -382,7 +382,8 @@ test("w971: a pool token inside the dispatcher's reserve goes to no worker, no o
   const ben1 = tok('vault-ben-1', { weekly: 27, weeklyDays: 4, session: 5 });
   const v = judge(ben2, L, NOW);
   assert.equal(v.state, 'reserved');
-  assert.match(v.why, /inside the buffer kept for the dispatcher \(weekly 97% \(buffer 20%\), resets /);
+  // 97% is past the stop line too (w1109), which the reason names rather than the buffer.
+  assert.match(v.why, /inside the buffer kept for the dispatcher \(weekly 97% \(stop line 95%\), resets /);
   for (const [orchestrator, ops] of [[false, false], [true, false], [false, true]]) {
     for (const list of [[ben2, ben1], [ben1, ben2]]) {
       const p = pickAt(list, { orchestrator, ops, limits: L });
@@ -439,9 +440,13 @@ test('w971: a token outside its buffer is an ordinary pool token; the buffer lif
   const at = (days: number) => withReserve(tok('t', { weekly: 97, weeklyDays: days, session: 0 }));
   assert.equal(judge(at(4), L, NOW).state, 'reserved');
   assert.equal(judge(at(2), L, NOW).state, 'reserved');
-  assert.equal(judge(at(0.5), L, NOW).state, 'one-at-a-time', 'outside the buffer: an ordinary token (97% is in the one-at-a-time band)');
-  // It says when: (100 - 97) / 5 = 0.6 days before the reset.
-  assert.equal(judge(at(4), L, NOW).until, iso(NOW + 4 * DAY - 0.6 * DAY));
+  // w1109: outside the buffer, but 97% is past the dispatcher's stop line (95%), so still no worker; below the line it is ordinary.
+  assert.equal(judge(at(0.5), L, NOW).state, 'reserved', 'past the stop line');
+  assert.equal(judge(withReserve(tok('t', { weekly: 94, weeklyDays: 0.5, session: 0 })), L, NOW).state, 'ok', 'outside the buffer and below the stop line: an ordinary token');
+  // It says when. 97% is past the stop line (w1109), which holds until the weekly reset; at 90% the buffer alone holds it,
+  // and lifts (100 - 90) / 5 = 2 days before the reset.
+  assert.equal(judge(at(4), L, NOW).until, iso(NOW + 4 * DAY));
+  assert.equal(judge(withReserve(tok('t', { weekly: 90, weeklyDays: 4, session: 0 })), L, NOW).until, iso(NOW + 4 * DAY - 2 * DAY));
   // The 5-hour buffer: 85% used is inside the 20% buffer, so 'held' (at 80) comes first; at 79% it is outside; the token is ok.
   assert.equal(judge(withReserve(tok('t', { weekly: 10, weeklyDays: 4, session: 79 })), L, NOW).state, 'ok');
   // The host token's reserve is kept the same way and says for whom.
