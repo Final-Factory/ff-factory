@@ -1166,7 +1166,7 @@ test("w1106: the ops worker's repeating timer survives a portal restart: the fir
   assert.equal(view.fires, 1);
   assert.equal(view.state, 'active');
   // The next on schedule, on its own grid: 4 h after it was set, 2 h after the one the restart delayed.
-  assert.ok(Math.abs(Date.parse(view.nextFireAt!) - (later + 110 * 60_000)) < 60_000, view.nextFireAt);
+  assert.ok(Math.abs(Date.parse(view.nextFireAt!) - (later + 110 * 60_000)) < 60_000, String(view.nextFireAt));
   agents2.timers.now = () => Date.parse(view.nextFireAt!);
   agents2.timers.tick();
   await until('the next fire', () => fires2().length === 2);
