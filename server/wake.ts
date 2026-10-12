@@ -11,6 +11,8 @@ const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permissio
 interface WakeRecord {
   at: number;
   note: string;
+  /** The request whose gates' clearing this wake resumes (w1128): it is not delivered once that request is blocked again. */
+  resumeOf?: string;
 }
 
 /** Tries to deliver a wake whose session could not be started (the agent limit, the host guard): once a minute. */
@@ -42,12 +44,12 @@ export class Waker {
   }
 
   /** Message `sessionId` with `note` after `minutes` (one pending wake per session: a new one replaces it). */
-  schedule(sessionId: string, minutes: number, note: string): string {
+  schedule(sessionId: string, minutes: number, note: string, resumeOf?: string): string {
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > 24 * 60) throw new Error('minutes must be between 1 and 1440');
     refuseInDryRun('wake_me');
     this.sessions.get(sessionId);
     const at = this.now() + minutes * 60_000;
-    this.arm(sessionId, { at, note: note.trim().slice(0, 2000) });
+    this.arm(sessionId, { at, note: note.trim().slice(0, 2000), ...(resumeOf ? { resumeOf } : {}) });
     this.save();
     return `I will message you at ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${minutes} min) with your note. End your turn now; that message resumes you.`;
   }
@@ -88,7 +90,7 @@ export class Waker {
     let n = 0;
     for (const [id, w] of Object.entries(saved)) {
       if (!this.sessions.sessions.has(id) || !Number.isFinite(w?.at) || this.timers.has(id)) continue;
-      this.arm(id, { at: w.at, note: String(w.note ?? '') });
+      this.arm(id, { at: w.at, note: String(w.note ?? ''), ...(typeof w.resumeOf === 'string' ? { resumeOf: w.resumeOf } : {}) });
       n++;
     }
     this.save();
@@ -107,7 +109,7 @@ export class Waker {
     this.onChange?.();
     if (!this.file) return;
     const out: Record<string, WakeRecord> = {};
-    for (const [id, t] of this.timers) out[id] = { at: t.at, note: t.note };
+    for (const [id, t] of this.timers) out[id] = { at: t.at, note: t.note, ...(t.resumeOf ? { resumeOf: t.resumeOf } : {}) };
     try {
       writeJsonDurable(this.file, out, { indent: 2 });
     } catch (e) {
@@ -123,10 +125,10 @@ export class Waker {
     const late = Math.round((this.now() - t.at) / 60_000);
     const when = late >= 2 ? ` (${late} min late: FF Factory was restarting)` : '';
     try {
-      this.sessions.send(sessionId, `[wake_me] Time is up${when}. Your note: ${t.note || '(none)'}`, 'system', undefined, { ops: 'wake' });
+      this.sessions.send(sessionId, `[wake_me] Time is up${when}. Your note: ${t.note || '(none)'}`, 'system', undefined, { ops: 'wake', ...(t.resumeOf ? { resumeOf: { work: t.resumeOf, note: t.note } } : {}) });
     } catch (e) {
       // At the agent limit, the host guard says wait, or its machine is offline: try again in a minute, a few times.
-      if (tries < RETRIES) return this.arm(sessionId, { at: t.at, note: t.note }, tries + 1, 60_000);
+      if (tries < RETRIES) return this.arm(sessionId, { at: t.at, note: t.note, ...(t.resumeOf ? { resumeOf: t.resumeOf } : {}) }, tries + 1, 60_000);
       this.store.append(sessionId, { kind: 'system', text: `wake_me could not wake this session: ${(e as Error).message}` });
     }
     this.save();

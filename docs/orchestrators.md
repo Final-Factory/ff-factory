@@ -317,7 +317,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 | `request` | the request it waits on ("w633"); `on`: `done` (default) or `report` | that request closes as done; with `on: report`, also when a worker on it finishes a turn with a report. Merges are followed. Declined or cancelled: it asks its requester (Waiting on input). Stalled: it stalls too | never by time: it follows that request, which the cleanup stalls by itself when nothing works on it |
 | `deploy` | none for the portal; a machine id for that machine's daemon update | a different commit runs there than when it was blocked (`version.ts` `appVersion`, the daemon's) | 7 days |
 | `machine` | the machine | it is online | 3 days |
-| `usage` | the Claude account (its email or label) | its meters are under 90% | 8 days |
+| `usage` | the vault token ("vault-lothsahn-1" or "vault-lothsahn-1 …EAAA") or the person whose Claude pool it is ("lothsahn", "lothsahn's pool"); another account by its email or label. Kept as the token's label; a ref nothing answers to is refused (w1126). `until`: the hold's end, filled in from the pool's first reset | that pool can serve a worker again (looked at each minute and on each usage reading), or `until` passes, whichever comes first; the request's worker is resumed then (w1126); another account when its meters are under 90% | 8 days |
 | `lock` | its name ("lab.lock"); `holder`: the request holding it; `until`: when to look again | the holder closes or reports, the nightly lab posts its next results (its run let go of the lock), or `until` passes | 1 day |
 | `time` | none; `until` | `until` passes | never |
 | `ci` | the pull request, "owner/repo#123" | none of its checks is still running (it says which failed: a failed, timed-out or cancelled run is finished too), or it merged or closed (`gh pr view`, at most every 2 minutes, w846; where GitHub refuses the checks, its head commit's Actions runs, w829). Checks it cannot read for 15 minutes clear it too, and its worker looks itself | 6 hours: it clears, and its worker looks at the hung run (w1094) |
@@ -332,6 +332,31 @@ days; a deploy is a person's call, and a week without one is worth their look.
   cancelled gets it back (below, "No poll is left behind") and the request is its again (`active`); otherwise the request
   goes back to the dispatcher (`new`), which gets `[ledger] w634 "…" is unblocked: it waited on w633 finishing (…), and
   w633 closed as done. Start it now: …`. Its people hear why either way. No person nudges it.
+- **A Claude pool hold ends by itself, and every request on it resumes** (w1126, w1129, lothsahn: "When tokens run out on an
+  account, please set a timer to resume blocked workers when tokens come back", then "Make the portal harness do this
+  automatically"). On 2026-10-12 the dispatcher blocked w1116, w1117, w1118 and w1124 at 12:35Z on ref `vault-lothsahn-1`,
+  held at 89% until 12:50Z. The pool read 2% from 12:51Z, and at 14:30Z they were still Blocked: the gate matched only an
+  account's exact label (`vault-lothsahn-1 …EAAA`), so it answered "unknown" and would have waited out its 8-day limit.
+  Before that, while the pool was held, every message to lothsahn's workers (CI resumes, wake-ups, `message_agent`) was
+  refused: a launch spec picks a pool token for every message (`machines.ts` `dispatchSend` → `specFor` →
+  `machineRunEnv`), and `PoolHeldError` was queued only for a worker's first prompt, so the sweep said "the message never
+  reached it" three times each and handed them to the dispatcher. Now:
+  - a usage ref is matched by the token's label, its bare name, its person or "<person>'s pool" (`server/usageGate.ts`
+    `poolForRef`), kept as the label, with `until` the pool's first reset (`firstFree`); one nothing answers to is refused;
+  - the gate clears when the pool can serve a worker or at `until`, whichever comes first; the watch looks on every usage
+    reading too, not only each minute;
+  - its clearing resumes the request's newest worker, as CI's and a deploy's do (`gateOwner`); with no worker, the dispatcher
+    starts the request;
+  - a message to a worker whose pool is held waits in the send queue (`on: 'pool'`, shown Blocked), tried every 30 seconds
+    and on each usage reading, kept up to 8 days (`POOL_HOLD_MS`), never refused; the sweep counts it as on its way;
+  - a standing agent's run waits for its pool (tried each minute) instead of ending "Could not start".
+  A queued message still keeps its worker's sandbox (`placeAgain.ts` `releaseWhy`): releasing it would place and release
+  the worker again every pass while the pool is held.
+- **A resume that comes after its request is blocked again does not go** (w1128). w1083's CI resume of a50a8ee1, queued for a
+  sandbox at 06:48Z, went at 06:50Z, though the dispatcher had blocked the request on w1070 and w1110 at 06:49Z; w1082's
+  (c37a6ec0) waited from 06:13Z and went at 07:33Z the same way. A gate's resume carries its request (`resumeOf`, through
+  the wake and the send queue); when it is due and the request is Blocked again, `Orchestrators.staleResume` keeps it on the
+  request (`heldCheckIns`, `resume: true`) and the new gates' clearing hands it back. A closed request drops it.
 - **CI it cannot read does not hold a request in silence** (w829). On 2026-10-10 w814, w818 and w808 sat Blocked on CI for
   2 to 3 hours after their checks had finished (#1338 green at 00:26Z, #1335 at 00:06Z, #1328's editmode run cancelled at
   23:38Z): every `gh pr view --json statusCheckRollup` failed, and the watch took a failed read for "still running" and

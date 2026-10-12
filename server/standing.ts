@@ -1,4 +1,5 @@
 import { machineRunEnv } from './secrets.ts';
+import { poolHeld } from './sessions.ts';
 import { NIGHTLY_SENTRY, unattributedPerson } from './vault.ts';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -100,6 +101,8 @@ export interface StandingDeps {
 
 const TOOL_GROUPS: StandingToolGroup[] = ['shell_read', 'github_comment', 'delegate'];
 const MAX_RUNS = 50;
+/** How often a run its person's Claude pool held is tried again (w1126): each minute, so it starts within one of the pool freeing. */
+const POOL_RETRY_MS = 60_000;
 const MAX_DELEGATIONS = 200;
 /**
  * Delegation requests people already handled by hand, with the ledger request they were handled under (w527): the
@@ -394,7 +397,7 @@ export class StandingAgents {
     }
     if (a.pending) {
       // The new occurrence replaces the one still waiting for a slot.
-      this.recordSkip(a, a.pending.trigger, a.pending.dueAt, 'no free agent slot before the next run came due');
+      this.recordSkip(a, a.pending.trigger, a.pending.dueAt, a.pending.poolWait ? `its person's Claude pool was still held when the next run came due (${a.pending.poolWait.why})` : 'no free agent slot before the next run came due');
       text = [a.pending.text, text].filter(Boolean).join('\n\n') || undefined;
       // A person's message riding along keeps the run theirs.
       if (a.pending.text && a.pending.requestedBy) requestedBy = a.pending.requestedBy;
@@ -422,6 +425,8 @@ export class StandingAgents {
       this.store.putStanding(a);
       return `Skipped: ${STANDING_NEEDS_MACHINE}.`;
     }
+    // w1126: a run its person's Claude pool held waits for the pool, looked at again once a minute (and it starts then).
+    if (p.poolWait && this.now().getTime() < Date.parse(p.poolWait.retryAt)) return `Waiting for its person's Claude pool: ${p.poolWait.why}.`;
     const m = this.deps.machines?.get(a.machineId);
     const online = !!m && !!this.deps.machines?.isOnline(m.id);
     const verdict = admit({
@@ -448,10 +453,10 @@ export class StandingAgents {
       this.store.putStanding(a);
       return `Skipped: ${verdict.reason}.`;
     }
-    return this.startRun(a, p.trigger, p.dueAt, verdict.capUsd, p.text, p.requestedBy);
+    return this.startRun(a, p.trigger, p.dueAt, verdict.capUsd, p.text, p.requestedBy, p);
   }
 
-  private startRun(a: StandingAgent, trigger: StandingRunTrigger, dueAt: string, capUsd: number, text?: string, requestedBy?: Requester): string {
+  private startRun(a: StandingAgent, trigger: StandingRunTrigger, dueAt: string, capUsd: number, text?: string, requestedBy?: Requester, pending?: NonNullable<StandingAgent['pending']>): string {
     const now = this.now();
     if (!this.hasSession(a.sessionId)) a.sessionId = this.newSession(a).info.id;
     const s = this.sessions.get(a.sessionId);
@@ -469,6 +474,19 @@ export class StandingAgents {
       this.sessions.send(a.sessionId, this.runMessage(a, run, capUsd, text), 'system', undefined, { requestedBy });
       return `Started a run of ${a.name} (budget $${capUsd.toFixed(2)}).`;
     } catch (e) {
+      // w1126: its person's Claude pool is held (every token over its caps until a reset): the run waits for the pool,
+      // looked at again each minute, instead of ending as an error and being lost until its next slot.
+      if (pending && poolHeld(e)) {
+        this.active.delete(a.id);
+        a.runs = a.runs.filter((r) => r.id !== run.id);
+        const why = (e as Error).message;
+        const next = (e as { next?: string }).next;
+        a.pending = { ...pending, poolWait: { why, ...(next ? { next } : {}), retryAt: new Date(now.getTime() + POOL_RETRY_MS).toISOString() } };
+        a.state = 'waiting';
+        a.stateDetail = `blocked: waits for its person's Claude pool (${why})`;
+        this.store.putStanding(a);
+        return `Waiting for its person's Claude pool: ${why}. It starts by itself once a token has room.`;
+      }
       this.finish(a, 'error', `Could not start: ${(e as Error).message}`);
       return `Could not start: ${(e as Error).message}`;
     }

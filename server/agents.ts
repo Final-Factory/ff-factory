@@ -330,6 +330,11 @@ export class Agents {
    * credential key) is that token and a meter of it is at or above vault.pool.dispatcherStopPercent; wired by index.ts.
    */
   tokenStopped?: (account: string) => string | undefined;
+  /**
+   * The Claude pool a usage gate's ref names (w1126, server/usageGate.ts poolForRef over the vault's pools, else an account):
+   * the label the ledger keeps and when its hold lifts; undefined when nothing answers to it. Wired by index.ts.
+   */
+  usageRef?: (ref: string) => { ref: string; until?: string } | undefined;
   /** One load line per machine (wired by index.ts). */
   machineStatusLines?: () => string[];
   /** The host guard (server/hostHealth.ts); wired by index.ts. */
@@ -376,6 +381,8 @@ export class Agents {
     sessions.keepIdle = (s) => this.keepIdle(s);
     // One person's tokens per turn (w1076): a live worker whose requests changed person restarts on theirs first.
     sessions.accountMove = (s) => this.accountMove(s);
+    // w1128: a gate's resume that waited while its request was blocked again is kept for the new gates, not delivered.
+    sessions.staleResume = (work, sid, note) => this.orchestrators?.staleResume(work, sid, note);
     // What each agent waits on between turns (w475): its wake_me and a queued message, on its session for the page.
     this.waker.onChange = () => this.syncWaiting();
     sessions.onQueueChange = () => this.syncWaiting();
@@ -447,14 +454,15 @@ export class Agents {
       deploySha: (id) => (id ? this.daemonSha?.(id) : appVersion().sha),
       cancelWake: (id) => this.cancelWake(id),
       pendingWake: (id) => this.waker.pending(id),
-      restoreWake: (id, note) => {
+      restoreWake: (id, note, resumeOf) => {
         try {
-          this.waker.schedule(id, 1, note);
+          this.waker.schedule(id, 1, note, resumeOf);
           return true;
         } catch {
           return false;
         }
       },
+      usageRef: (ref) => this.usageRef?.(ref),
     });
     // The orchestration worker (w597): its turns' ends go to the orchestrator of the person whose job it is.
     this.ops = new OpsWorker({
@@ -598,7 +606,7 @@ export class Agents {
       const wakeNote = wake?.note ? wake.note.replace(/\s+/g, ' ').trim().slice(0, 120) : undefined;
       const q = queued.find((x) => x.id === s.id);
       const queuedSend = q?.why;
-      const queuedOn = q?.on === 'machine' ? q.on : undefined;
+      const queuedOn = q?.on === 'machine' || q?.on === 'pool' ? q.on : undefined;
       if (s.wakeAt === wakeAt && s.wakeNote === wakeNote && s.queuedSend === queuedSend && s.queuedOn === queuedOn) continue;
       if (wakeAt) s.wakeAt = wakeAt;
       else delete s.wakeAt;

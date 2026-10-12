@@ -628,6 +628,8 @@ const blockerWatch = new BlockerWatch({
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
 agents.blockerWatch = blockerWatch;
+// A usage gate keeps the pool's own name for its ref and the hold's end (w1126: "vault-lothsahn-1" never matched and never cleared).
+agents.usageRef = (ref) => usageRefOf(ref);
 // A ci: wait is checked against its pull request when set (w907): a conflict or a push that did not land is refused.
 agents.prHealth = (ref) => ghPrHealth(ref, ghRunner(undefined, `the head of ${ref}`));
 // Whether the blocker watch can read CI at all (w889): measured at start and every half hour, said loudly when it cannot.
@@ -1910,6 +1912,9 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
 const usage = new UsageTracker(cfg, () => {
   if (usage.usage) broadcast({ type: 'usage', usage: usage.usage });
   broadcast({ type: 'accounts', accounts: accountsNow() });
+  // w1126, w1129: each reading may free a held pool: its usage gates are looked at, and its waiting messages tried, at once.
+  blockerWatch.kick();
+  sessions.drain();
 });
 // The vault's Claude tokens (docs/vault.md) are the ones polled: every Claude process runs on one (w1078).
 usage.personTokens = () => vault.claudeTokens();
@@ -2000,6 +2005,16 @@ function ownerPoolServes(label: string): boolean | undefined {
 function gatePools(): [string, GatePoolToken[]][] {
   const pools = vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor });
   return [...pools].map(([person, list]) => [person, list.map((t) => ({ name: t.entry.name, last4: t.entry.last4, priority: t.priority, view: t.view }))]);
+}
+/**
+ * What a usage gate's ref names (w1126): a vault pool (its token's label and when its hold lifts, server/usageGate.ts), else an
+ * account by its email, label or id; undefined for nothing, so decide_work refuses a gate that could never clear.
+ */
+function usageRefOf(ref: string): { ref: string; until?: string } | undefined {
+  const p = poolForRef(ref, gatePools());
+  if (p) return { ref: p.ref, ...(p.until ? { until: p.until } : {}) };
+  const n = ref.trim().toLowerCase();
+  return accountsNow().some((a) => [a.id, a.label, a.email ?? ''].some((x) => x.toLowerCase() === n)) ? { ref: ref.trim() } : undefined;
 }
 /** Whether the Claude account named by its email, label or id has room again (w643: a usage blocker), or undefined when unknown. */
 function accountClear(name: string): boolean | undefined {

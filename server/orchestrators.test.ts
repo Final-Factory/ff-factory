@@ -3268,8 +3268,8 @@ function heldVault(t: { after: (fn: () => void) => void }) {
       forRun: ((run: { userId?: string }, o: { claude: boolean }) =>
         held.on && o.claude
           ? { env: {}, problems: [], claudeHold: { why: 'every token is at a limit (vault-lothsahn-1: 5-hour 92% (>= 80): held until Mon 12:50Z): the first frees up Mon 12:50Z', next: POOL_HELD_UNTIL } }
-          : forRun(run as never, o as never)) as never,
-    },
+          : forRun(run as never, o as never)),
+    } as never,
   });
   t.after(() => setVaultContext(undefined));
   return held;
@@ -3282,7 +3282,9 @@ test('w1126: a Claude pool hold ends and EVERY request blocked on it resumes: th
   putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }]);
   const { pool, pools, usageClear } = lothPool();
   (agents as unknown as { usageRef: (ref: string) => unknown }).usageRef = (ref) => poolForRef(ref, pools());
-  const watch = new BlockerWatch({ store, orchestrators: o, usageClear });
+  // 12:35Z, before the hold's own end (12:50Z): what clears it here is the pool having room again.
+  const clock = Date.parse('2026-10-12T12:35:00Z');
+  const watch = new BlockerWatch({ store, orchestrators: o, usageClear, now: () => clock });
   const a = await startedFor(env, 'w1');
   const b = await startedFor(env, 'w2');
   const decide = (id: string, a2: Record<string, unknown>) => call(dispatcher().info, 'decide_work', { id, note: 'its worker fixes it once the pool frees', ...a2 });
@@ -3327,7 +3329,7 @@ test("w1126: a usage gate also clears at the hold's end when the meters have not
   await watch.tick();
   assert.equal(store.work.get('w1')!.status, 'blocked');
   clock = Date.parse('2026-10-12T12:51:00Z');
-  assert.match((await watch.tick()).get('w1') ?? '', /^clear: the hold on vault-lothsahn-1 …EAAA ended at Mon 12:50Z/);
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: the hold on vault-lothsahn-1 …EAAA ended at 12:50 UTC/);
   assert.equal(store.work.get('w2')!.status, 'blocked', 'its own until is later');
   // An unknown account is refused, with what the pool knows, instead of a gate that can never clear.
   const bad = await block('w2', { kind: 'usage', ref: 'vault-lothsahn-9', what: 'x' });
@@ -3387,7 +3389,7 @@ test('w1129: a message to a worker while its Claude pool is held is queued, not 
   const a = await startedFor(env, 'w1');
   held.on = true;
   // The dispatcher's follow-up (it was refused: "lothsahn's Claude token pool is held").
-  const sent = await call(dispatcher().info, 'message_agent', { session_id: a.id, work_id: 'w1', message: 'Fix the Test Runner failure on #1552.' });
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: a.id, work_id: 'w1', text: 'Fix the Test Runner failure on #1552.' });
   assert.equal(sent.isError, false, sent.text);
   assert.match(sent.text, /Queued, not refused: .*Claude token pool is held/);
   // A harness wake-up (a gate's resume, a check-in): queued as well, never "could not wake this session".

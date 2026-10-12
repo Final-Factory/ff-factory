@@ -133,7 +133,7 @@ export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
   request: 'another request (ref: its id, e.g. "w633"): clears when it closes as done, or with on "report" at its next report',
   deploy: "a deploy (ref: a machine id for that machine's daemon update; none for the portal): clears when a different commit runs there",
   machine: 'a machine offline or asleep (ref: its id): clears when it is online',
-  usage: "a Claude account's usage limit (ref: the account's email or label): clears when its meters are clear; for a vault token (\"vault-lothsahn-1 …EAAA\"), when its person's pool can serve a worker again (w1109)",
+  usage: "a Claude account's usage limit or pool hold (ref: the vault token's name as the pool shows it, \"vault-lothsahn-1\" or \"vault-lothsahn-1 …EAAA\", or the person whose pool it is, \"lothsahn\"; another account by its email or label; until: when the hold ends, optional, the pool's first reset is filled in): clears when that pool can serve a worker again or at until, whichever comes first, and the request's worker is resumed then (w1126)",
   lock: 'a shared lock such as the nightly lab.lock (ref: its name; holder: the request holding it, if one does; until: when to look again): clears when the holder closes or reports, the nightly lab next reports, or at until',
   time: 'a time (until: ISO): clears when it passes',
   ci: 'CI or checks on a pull request (ref: "owner/repo#123"): clears when no check is still running, or the PR merged or closed',
@@ -217,8 +217,11 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts): BlockerVerdict 
       return late(`${b.ref} is offline`);
     }
     case 'usage': {
+      // w1126: whichever comes first, the pool having room again (each usage poll moves it) or the hold's own end (`until`,
+      // the pool's first reset when it was blocked): a reading that lags its reset does not keep the work waiting.
       if (b.ref && f.usageClear?.(b.ref) === true) return { state: 'clear', why: `${b.ref}'s usage meters are clear` };
-      return late(`${b.ref ?? 'the account'} is still at its limit`);
+      if (b.until && f.now >= Date.parse(b.until)) return { state: 'clear', why: `the hold on ${b.ref ?? 'the account'} ended at ${utc(b.until, f.now)}` };
+      return late(`${b.ref ?? 'the account'} is still at its limit${b.until ? ` (until ${utc(b.until, f.now)})` : ''}`);
     }
     case 'lock': {
       const h = b.holder ? follow(b.holder, f) : undefined;
@@ -308,7 +311,7 @@ export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | '
       if (b.ref && f.online?.(b.ref) === undefined) return `no machine "${b.ref}" (leave ref out for a portal deploy)`;
       return undefined;
     case 'usage':
-      return b.ref ? undefined : "blocker.ref: the Claude account (its email or label)";
+      return b.ref ? undefined : 'blocker.ref: the vault token ("vault-lothsahn-1") or the person whose Claude pool it is ("lothsahn")';
     case 'time':
       if (until === undefined) return 'blocker.until: when it may go (ISO)';
       return until! <= f.now ? `${b.until} has passed: start it now` : undefined;
