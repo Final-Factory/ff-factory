@@ -146,7 +146,7 @@ if [ "$(id -u)" -ne 0 ]; then
   printf '%s' "$out" | matches 'run through sudo' || fail "priv: runs without root: $out"
 fi
 # (vault and migrate have a case since w745, for their read-only forms only: the blocks below pin every other form)
-for sub in rollback configure backup claude-token gh-login prepare-shutdown; do
+for sub in rollback configure backup tailscale-join gh-login prepare-shutdown; do
   matches -E "^  $sub\)" $G/fff-ops-priv && fail "priv: has a $sub subcommand"
 done
 matches -F 'take_grant "$DATA/ops-deploy.grant" deploy' $G/fff-ops-priv || fail "priv: update does not need the portal's deploy grant"

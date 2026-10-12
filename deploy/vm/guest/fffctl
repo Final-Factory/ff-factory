@@ -29,10 +29,6 @@
 #                                       drain, stop the portal and keep it stopped until the next boot (the host's
 #                                       nightly restart runs this through the guest agent first)
 #   fffctl start                        start the portal again after prepare-shutdown, without a reboot
-#   fffctl claude-token --file FILE     Lothsahn's subscription token ("claude setup-token", sk-ant-oat01-...) for the
-#                                       orchestrators and the dispatcher (decision D4): stored in $FFF_ROOT/secrets,
-#                                       never in config.json or a unit
-#   fffctl claude-login                 an interactive claude.ai login instead (not the decided route)
 #   fffctl tailscale-join --authkey-file FILE [--hostname fff] [--tag tag:fff-portal]
 #                                       join the tailnet as a tagged node and open the Funnel to the portal
 #   fffctl gh-login --token-file FILE   the portal's GitHub token (a fine-grained token on a machine user)
@@ -42,13 +38,15 @@
 #                                       where the backups go (BACKUP_SSH_TARGET in /etc/fff/fff.conf) and the age public
 #                                       keys they are encrypted to (/etc/fff/backup-recipients.txt); --target "" turns
 #                                       them off
-#   fffctl configure [--owner-name NAME] [--public-url URL] [--claude-tokenfile] [--voice MODEL|off]
-#                                       set config.json's ownerName, publicUrl, and the orchestrators and the dispatcher on
-#                                       the stored subscription token (claudeTokenFile, claudeAccounts "tokenfile"); the
-#                                       portal restarts when it changed. --voice MODEL: local Whisper dictation on this
+#   fffctl configure [--owner-name NAME] [--public-url URL] [--voice MODEL|off]
+#                                       set config.json's ownerName and publicUrl; the portal restarts when it changed. --voice MODEL: local Whisper dictation on this
 #                                       VM's CPU (voice.enabled, model, device cpu, cpuThreads = nproc, autoInstall; no
 #                                       Kokoro TTS), installed by the portal in the background after the restart
 #                                       (docs/voice.md, "On the portal VM"); --voice off turns it off
+#   fffctl config [--check]             config.json to read (w1078): every setting, no secret (a value that looks like one is
+#                                       "[not shown]"). --check: whether config.json and its saved versions hold any secret,
+#                                       the FFBox connector hash file (its last four characters), and whether the retired
+#                                       Claude token file is gone, by key names only; exit 1 while one still holds a secret
 #   fffctl state                        what is set up, as JSON (the host's install.sh reads it to do only what is missing)
 #   fffctl vault list | add | rotate | grant | remove ...
 #                                       the token vault (docs/vault.md): secrets the portal hands worker runs. A value comes
@@ -236,7 +234,6 @@ cmd_status() {
   echo "  funnel: $(tailscale funnel status 2>/dev/null | grep -m1 -o 'https://[^ ]*' || echo none)"
   echo "units (the watchdog in fff-health restarts a failed or stopped one every 30 s):"
   print_units
-  echo "claude login: $([ -s "$FFF_ROOT/home/.claude/.credentials.json" ] && echo stored || echo 'none (fffctl claude-login)')"
   echo "base clone: $([ -d "$BASE_PATH/.git" ] && as_fff git -C "$BASE_PATH" log -1 --format='%h %cr' || echo 'none (fffctl base-clone)')"
   echo "backups: $([ -n "$BACKUP_SSH_TARGET" ] && echo "to $BACKUP_SSH_TARGET:$BACKUP_REMOTE_DIR" || echo off); last: $(journalctl -u fff-backup.service -n 1 --no-pager -o cat 2>/dev/null || true)"
   systemctl list-timers --no-pager 'fff-*' 2>/dev/null | head -n 6
@@ -391,53 +388,6 @@ cmd_prepare_shutdown() {
   echo "portal stopped after $(($(date +%s) - t0)) s; held until the next boot"
 }
 
-cmd_claude_login() {
-  local claude=$FFF_ROOT/home/.local/bin/claude
-  [ -x "$claude" ] || die "no Claude Code CLI at $claude (install.sh installs it)"
-  cat <<EOF
-Sign in with Lothsahn's claude.ai account, as the portal's account $FFF_USER:
-  1. In the Claude Code prompt that opens, type /login and pick the Claude account with a subscription.
-  2. Open the URL it shows on any device, sign in, and paste the code back here.
-  3. Type /exit.
-The login is stored in $FFF_ROOT/home/.claude/.credentials.json (0600, $FFF_USER only). Then set
-claudeAccounts.orchestrator (and claudeAccounts.dispatcher, change 6) to "login" (docs/portal-on-ffbox-host.md, 5.2).
-EOF
-  as_fff bash -c "cd ~ && exec '$claude'" || true
-  if [ -s "$FFF_ROOT/home/.claude/.credentials.json" ]; then echo "login stored"; else echo "no login stored"; exit 1; fi
-}
-
-cmd_claude_token() {
-  local f="" token dest=$FFF_ROOT/secrets/claude-oauth-token tmp
-  while [ $# -gt 0 ]; do case "$1" in --file) f=$2; shift ;; *) die "unknown option $1" ;; esac; shift; done
-  if [ -z "$f" ] || [ ! -r "$f" ]; then die "--file FILE: the subscription token from 'claude setup-token' (sk-ant-oat01-...), alone in a file (chmod 600)"; fi
-  token=$(head -n 1 "$f" | tr -d '[:space:]')
-  case "$token" in sk-ant-oat01-*) ;; *) die "that is not a 'claude setup-token' token (they start sk-ant-oat01-)" ;; esac
-  install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT/secrets"
-  tmp=$(mktemp "$FFF_ROOT/secrets/.token.XXXXXX")
-  printf '%s\n' "$token" >"$tmp"
-  chown "$FFF_USER:$FFF_USER" "$tmp"
-  chmod 0600 "$tmp"
-  mv -f "$tmp" "$dest"
-  # Only its last four characters are ever shown.
-  echo "stored in $dest (0600, $FFF_USER), ending ...${token: -4}. Delete $f now."
-  # The orchestrators and the dispatcher onto it (fffctl configure --claude-tokenfile; docs, 5.2), never workers. While a
-  # migrate dry run is in place the live config.json is BEAST's copy, and this VM's own is kept aside in migrate/before:
-  # that one is set, and the next --dry-run-copy uses it.
-  local saved=$FFF_ROOT/migrate/before/config/config.json
-  if [ -f "$FFF_ROOT/migrate/dry-run.json" ] && [ -f "$saved" ]; then
-    tmp=$(mktemp "$(dirname "$saved")/.config.XXXXXX")
-    jq --arg file "$dest" '.claudeTokenFile = $file | .claudeAccounts = ((.claudeAccounts // {}) + {orchestrator: "tokenfile", dispatcher: "tokenfile"})' "$saved" >"$tmp" ||
-      { rm -f "$tmp"; die "could not edit $saved"; }
-    chown --reference="$saved" "$tmp"
-    chmod --reference="$saved" "$tmp"
-    mv -f "$tmp" "$saved"
-    echo "a migrate dry run is in place: this VM's own config (kept aside in $saved) now runs the orchestrators and the dispatcher on it."
-    echo "sudo fffctl migrate --dry-run-copy again to check it (the resume check), or --rollback-dry-run to put that config back live."
-  else
-    cmd_configure --claude-tokenfile
-  fi
-}
-
 cmd_tailscale_join() {
   local keyfile="" host=fff tag=tag:fff-portal url
   while [ $# -gt 0 ]; do
@@ -584,26 +534,24 @@ cmd_state() {
     --argjson installed "$([ -x "$FFF_LIB/fff-update" ] && [ -e "$CURRENT" ] && echo true || echo false)" \
     --argjson active "$(portal_active && echo true || echo false)" \
     --argjson healthy "$(health_json >/dev/null 2>&1 && echo true || echo false)" \
-    --argjson token "$([ -s "$FFF_ROOT/secrets/claude-oauth-token" ] && echo true || echo false)" \
     --argjson vaultKey "$([ -s "$FFF_VAULT_KEY" ] && echo true || echo false)" \
     --argjson joined "$joined" --arg ip "$ip" --arg funnel "${funnel%/}" --argjson gh "$gh" \
     --argjson base "$([ -d "$BASE_PATH/.git" ] && echo true || echo false)" \
-    --argjson config "$(jq -c '{ownerName: (.ownerName // ""), publicUrl: (.publicUrl // ""), tokenfile: ((.claudeTokenFile // "") != "" and (.claudeAccounts.orchestrator // "") == "tokenfile" and (.claudeAccounts.dispatcher // "") == "tokenfile")}' "$cfg" 2>/dev/null || echo '{}')" \
+    --argjson config "$(jq -c '{ownerName: (.ownerName // ""), publicUrl: (.publicUrl // "")}' "$cfg" 2>/dev/null || echo '{}')" \
     --arg target "$BACKUP_SSH_TARGET" \
     --argjson recipients "${nkeys:-0}" \
-    '{installed: $installed, portal: {active: $active, healthy: $healthy}, claudeToken: $token, vaultKey: $vaultKey,
+    '{installed: $installed, portal: {active: $active, healthy: $healthy}, vaultKey: $vaultKey,
       tailscale: {joined: $joined, ip: $ip, funnelUrl: $funnel}, github: $gh, baseClone: $base, config: $config,
       backup: {target: $target, recipients: $recipients}}'
 }
 
-# config.json's ownerName, publicUrl and the token-file accounts, set by the host's install.sh; restarts if it changed.
+# config.json's ownerName and publicUrl, set by the host's install.sh; restarts if it changed.
 cmd_configure() {
-  local owner="" url="" tokenfile=0 set_owner=0 set_url=0 voice="" cfg=$FFF_ROOT/config/config.json tmp
+  local owner="" url="" set_owner=0 set_url=0 voice="" cfg=$FFF_ROOT/config/config.json tmp
   while [ $# -gt 0 ]; do
     case "$1" in
       --owner-name) owner=$2; set_owner=1; shift ;;
       --public-url) url=$2; set_url=1; shift ;;
-      --claude-tokenfile) tokenfile=1 ;;
       --voice)
         voice=${2:-}
         case "$voice" in "" | [!A-Za-z0-9]* | *[!A-Za-z0-9._-]*) die "--voice is a faster-whisper model name (base.en, small.en, ...) or off, not '$voice'" ;; esac
@@ -613,13 +561,11 @@ cmd_configure() {
     shift
   done
   [ -f "$cfg" ] || die "no $cfg: run deploy/vm/guest/install.sh first"
-  if [ "$tokenfile" = 1 ] && [ ! -s "$FFF_ROOT/secrets/claude-oauth-token" ]; then die "no stored subscription token: fffctl claude-token --file FILE first"; fi
   tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
-  jq --arg owner "$owner" --argjson so "$set_owner" --arg url "$url" --argjson su "$set_url" --argjson tf "$tokenfile" \
-    --arg file "$FFF_ROOT/secrets/claude-oauth-token" --arg voice "$voice" --argjson threads "$(nproc)" \
+  jq --arg owner "$owner" --argjson so "$set_owner" --arg url "$url" --argjson su "$set_url" \
+    --arg voice "$voice" --argjson threads "$(nproc)" \
     '(if $so == 1 then .ownerName = $owner else . end)
      | (if $su == 1 then .publicUrl = $url else . end)
-     | (if $tf == 1 then .claudeTokenFile = $file | .claudeAccounts = ((.claudeAccounts // {}) + {orchestrator: "tokenfile", dispatcher: "tokenfile"}) else . end)
      | (if $voice == "off" then .voice = ((.voice // {}) + {enabled: false})
         elif $voice != "" then .voice = ((.voice // {}) + {enabled: true, model: $voice, device: "cpu", cpuThreads: $threads, autoInstall: true, tts: false})
         else . end)' \
@@ -628,8 +574,62 @@ cmd_configure() {
   chmod 0600 "$tmp"
   if cmp -s "$tmp" "$cfg"; then rm -f "$tmp"; echo "config.json: unchanged"; return 0; fi
   mv -f "$tmp" "$cfg"
-  echo "config.json:$([ "$set_owner" = 0 ] || echo " ownerName $owner;")$([ "$set_url" = 0 ] || echo " publicUrl ${url:-(none)};")$([ "$tokenfile" = 0 ] || echo ' orchestrators and dispatcher on the subscription token;')$([ -z "$voice" ] || echo " voice $voice;") restarting"
+  echo "config.json:$([ "$set_owner" = 0 ] || echo " ownerName $owner;")$([ "$set_url" = 0 ] || echo " publicUrl ${url:-(none)};")$([ -z "$voice" ] || echo " voice $voice;") restarting"
   cmd_restart --drain-minutes 2
+}
+
+# What looks like a secret in a config value: the token patterns the portal redacts (server/secrets.ts) and a URL with a
+# password. jq, for cmd_config.
+CONFIG_SECRETLIKE='def secretlike: type == "string" and (test("sk-ant-|ffpv1_|ffm_[A-Za-z0-9.-]+_[A-Za-z0-9_-]{32}|gh[pousr]_[A-Za-z0-9_]{30}|github_pat_|tskey-|AGE-SECRET-KEY-|PRIVATE KEY") or test("^[a-z][a-z0-9+.-]*://[^/@:]+:[^/@]+@"; "i"));'
+# The key paths in a config file that hold a secret or a key w1078 retired for holding one: names only.
+CONFIG_SECRET_PATHS="$CONFIG_SECRETLIKE"'[(["claudeEnv"], ["userClaudeEnv"], ["claudeTokenFile"], ["providers", "ffbox", "tokenSha256"]) as $p | select(getpath($p) != null) | $p | join(".")] + [paths(secretlike) | map(tostring) | join(".")] | unique | .[]'
+
+# config.json to read (w1078; the orchestration worker's too, through fff-ops-priv): every setting and no secret. What
+# still looks like one is "[not shown]", and the keys the portal's start moves out are left out, so even a config the new
+# release has not started on yet shows none.
+cmd_config() {
+  local cfg=$FFF_ROOT/config/config.json
+  [ -f "$cfg" ] || die "no $cfg: run deploy/vm/guest/install.sh first"
+  case "${1:-}" in
+    "")
+      [ $# -eq 0 ] || die "config [--check]"
+      jq "$CONFIG_SECRETLIKE"'del(.claudeEnv, .userClaudeEnv, .claudeTokenFile, .providers.ffbox.tokenSha256) | (.. | select(secretlike)) |= "[not shown]"' "$cfg"
+      ;;
+    --check) [ $# -eq 1 ] || die "config --check takes nothing more"; config_check "$cfg" ;;
+    *) die "config [--check]" ;;
+  esac
+}
+
+# config_check FILE: the after-deploy check of w1078, by key names and last four characters only. Exit 1 while config.json
+# or one of its saved versions still holds a secret, or the FFBox connector hash file is missing or not 0600.
+config_check() {
+  local cfg=$1 bad=0 f n h hf
+  for f in "$cfg" "$cfg".*; do
+    [ -f "$f" ] || continue
+    if ! n=$(jq -r "$CONFIG_SECRET_PATHS" "$f" 2>/dev/null); then
+      echo "$(basename "$f"): not JSON, so it may hold anything (the portal's start moves such a file into the secrets folder)"
+      bad=1
+    elif [ -n "$n" ]; then
+      echo "$(basename "$f"): HOLDS $(paste -sd, - <<<"$n") (the portal's start moves these out)"
+      bad=1
+    else echo "$(basename "$f"): no secret"; fi
+  done
+  hf=$(jq -r '.providers.ffbox.tokenSha256File // ""' "$cfg")
+  if [ -z "$hf" ]; then
+    echo "FFBox connector hash: no file named (providers.ffbox.tokenSha256File): FFBox's connector cannot connect"
+  elif [ ! -s "$hf" ]; then
+    echo "FFBox connector hash: $hf is MISSING"
+    bad=1
+  else
+    h=$(tr -d '[:space:]' <"$hf")
+    if [[ ! $h =~ ^[0-9a-f]{64}$ ]]; then echo "FFBox connector hash: $hf does not hold one SHA-256"; bad=1
+    else echo "FFBox connector hash: $hf ($(stat -c '%a %U' "$hf")), ending ...${h: -4}"; fi
+    [ "$(stat -c %a "$hf")" = 600 ] || { echo "FFBox connector hash: $hf is not 0600"; bad=1; }
+  fi
+  if [ -e "$FFF_ROOT/secrets/claude-oauth-token" ]; then
+    echo "the retired Claude token file $FFF_ROOT/secrets/claude-oauth-token: still there (the portal deletes it once a deploy has verified and the dispatcher runs on a vault token)"
+  else echo "the retired Claude token file: gone"; fi
+  return "$bad"
 }
 
 # Where the backups go and who can open them.
@@ -665,14 +665,13 @@ case "${1:-status}" in
   rollback) cmd_rollback ;;
   prepare-shutdown) shift; cmd_prepare_shutdown "$@" ;;
   start) rm -f "$HOLD"; systemctl start fff-portal.service; wait_healthy 180 && echo "portal up" ;;
-  claude-token) shift; cmd_claude_token "$@" ;;
-  claude-login) cmd_claude_login ;;
   tailscale-join) shift; cmd_tailscale_join "$@" ;;
   gh-login) shift; cmd_gh_login "$@" ;;
   base-clone) cmd_base_clone ;;
   backup) exec systemctl start --wait fff-backup.service ;;
   backup-config) shift; cmd_backup_config "$@" ;;
   configure) shift; cmd_configure "$@" ;;
+  config) shift; cmd_config "$@" ;;
   state) cmd_state ;;
   migrate) shift; exec "$FFF_LIB/fff-migrate" "$@" ;;
   vault) shift; cmd_vault "$@" ;;

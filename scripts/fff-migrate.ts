@@ -1236,7 +1236,8 @@ export class Migration {
     const pickOne = moves.find((m) => m.sessionId === dispatcher && installed.some((f) => f.endsWith(`${m.sdkSessionId}.jsonl`))) ?? moves.find((m) => m.kind === 'orchestrator' && installed.some((f) => f.endsWith(`${m.sdkSessionId}.jsonl`)));
     if (!pickOne) return { ok: false, line: 'no copied orchestrator conversation to resume' };
     const tokenFile = String(vm.claudeTokenFile ?? '');
-    if (!tokenFile || !fs.existsSync(tokenFile)) return { ok: false, line: `no token file (${tokenFile || 'claudeTokenFile is not set'}): fffctl claude-token first` };
+    // The token file was retired with the BEAST cut-over long done (w1078: every Claude process runs on a vault token).
+    if (!tokenFile || !fs.existsSync(tokenFile)) return { ok: false, line: `no token file (${tokenFile || 'claudeTokenFile is not set'}): w1078 retired it, so this check cannot run; the portal's own orchestrators run on vault tokens` };
     const cwd = String((vm.repo as Json | undefined)?.basePath ?? '');
     if (!cwd || !fs.existsSync(cwd)) return { ok: false, line: `no base clone at ${cwd || '(repo.basePath)'}: fffctl base-clone first` };
     const token = fs.readFileSync(tokenFile, 'utf8').trim();

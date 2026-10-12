@@ -279,11 +279,11 @@ export function portalSecretRules(o: {
     deny: [
       `${o.configFile}*`,
       `${P.join(o.appRoot, 'config.json')}*`,
-      // A config folder of its own (the VM's /srv/fff/config): everything in it but what `allow` names.
-      ...(same(cfgDir, o.appRoot) ? [] : [cfgDir]),
       o.dataDir,
       P.join(o.appRoot, 'secrets'),
       ...(same(cfgDir, o.appRoot) ? [] : [P.join(P.dirname(cfgDir), 'secrets')]),
+      // The secrets folder when it is set elsewhere (w1078, server/configMigration.ts secretsDirOf).
+      ...(env.FFSB_SECRETS_DIR ? [env.FFSB_SECRETS_DIR] : []),
       ...files.map((f) => (P.basename(P.dirname(f)).toLowerCase() === 'secrets' ? P.dirname(f) : f)),
       ...(env.FFBOX_SECRETS ? [env.FFBOX_SECRETS] : []),
       ...(env.FFBOX_CONFIG_DIR ? [env.FFBOX_CONFIG_DIR] : []),

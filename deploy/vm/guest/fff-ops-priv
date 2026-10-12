@@ -5,6 +5,8 @@
 #
 #   fffctl status                      the portal, its release, health, Tailscale, backups (fffctl status)
 #   fffctl state                       what is set up, as JSON (fffctl state)
+#   fffctl config [--check]            config.json to read (w1078): every setting, no secret (fffctl config), or the check
+#                                      that it and its saved versions hold none, by key names and last four characters
 #   fffctl units [--check]             the critical units: active, enabled, the watchdog's verdict and its last restarts (fffctl
 #                                      units). --check prints "down: ..." and exits 1 if one is not (w743); read only, and no
 #                                      other word: `fffctl watchdog` (run, pause, resume, reset) and the restarts stay a person's
@@ -126,6 +128,14 @@ take_grant() {
 case "${1:-help}" in
   status) exec "$FFFCTL" status ;;
   state) exec "$FFFCTL" state ;;
+  config)
+    # Read only (w1078): the settings without any secret, or the check. Exactly these two forms.
+    case "${2:-}" in
+      "") [ $# -eq 1 ] || refuse "config takes nothing more"; exec "$FFFCTL" config ;;
+      --check) [ $# -eq 2 ] || refuse "config --check takes nothing more"; exec "$FFFCTL" config --check ;;
+      *) refuse "config | config --check (changing a setting is set_app_config's, through the dispatcher or an owner's orchestrator)" ;;
+    esac
+    ;;
   units)
     # Read only (cmd_units): the table, or the check's exit status. Exactly these two forms; a unit's change is a person's.
     case "${2:-}" in
@@ -202,5 +212,5 @@ case "${1:-help}" in
     echo "asked for: the portal asks its busy agents to commit, push and end their turn, restarts on the same release and resumes them. Your process ends with the old portal; FF Factory messages you when the new one is up."
     ;;
   help | -h | --help) awk 'NR > 5 && /^#$/ {exit} NR > 5' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) refuse "fffctl $1 is a person's (rollbacks, settings, the vault, migrations). You have: status, state, units [--check], vault list [--names] / vault help, machine-credential list, migrate --help, logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, update with a deploy grant, and restart with a restart grant" ;;
+  *) refuse "fffctl $1 is a person's (rollbacks, settings, the vault, migrations). You have: status, state, config [--check], units [--check], vault list [--names] / vault help, machine-credential list, migrate --help, logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, update with a deploy grant, and restart with a restart grant" ;;
 esac
