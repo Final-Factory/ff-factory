@@ -6,6 +6,11 @@ name: Re-run a job GitHub lost
 # server/machineDeployWin.ts, Get-FFKillSet). Our own hangs end before the timeout with their log kept
 # (scripts/test-watchdog.ts fails the step first), so a job that hit its timeout and has no log lost its runner: re-run
 # the failed jobs once. Anything else is left for a person to read.
+#
+# w1102: this runs on the FFBox runners (ffgithubrunners), whose containers cannot reach api.github.com (docs/
+# ci-placement.md). So the job calls nothing itself: it hands its own GITHUB_TOKEN (actions: write on this
+# repository, expiring with the job) to the host through the drop box, and the host makes the four calls that decide
+# and re-run (ffbox scripts/ci_lane.py serve_rerun_lost, which holds this file's old logic and its tests).
 
 on:
   workflow_run:
@@ -20,24 +25,24 @@ jobs:
     name: Re-run jobs lost with their runner
     # The first attempt only, so a lost runner gets one more try and never a loop.
     if: github.event.workflow_run.run_attempt == 1 && contains(fromJSON('["failure", "cancelled", "timed_out"]'), github.event.workflow_run.conclusion)
-    runs-on: ubuntu-latest
+    runs-on: ffgithubrunners
     timeout-minutes: 5
-    env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
-      RUN: ${{ github.event.workflow_run.id }}
     steps:
-      - name: A job that hit its timeout with no log
+      - name: Ask the runner host to re-run what GitHub lost
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.event.workflow_run.id }}
         run: |
-          lost=0
-          for job in $(gh api "repos/$REPO/actions/runs/$RUN/attempts/1/jobs?per_page=100" --jq '.jobs[] | select(.conclusion == "cancelled" or .conclusion == "failure" or .conclusion == "timed_out") | .id'); do
-            notes=$(gh api "repos/$REPO/check-runs/$job/annotations" --jq '.[].message' || true)
-            grep -qE 'exceeded the maximum execution time|lost communication with the server' <<<"$notes" || continue
-            if gh api "repos/$REPO/actions/jobs/$job/logs" >/dev/null 2>&1; then
-              echo "job $job hit its timeout but kept its log: a hang of ours, left for a person"
-            else
-              echo "::warning::job $job hit its timeout and its log is gone: its runner was lost (actions/runner#4632)"
-              lost=1
-            fi
-          done
-          if [ "$lost" = 1 ]; then gh run rerun "$RUN" --failed -R "$REPO"; else echo "nothing lost with its runner"; fi
+          OUT=${FFGHR_OUT:-/ffghr/out}
+          [ -d "$OUT" ] || { echo "::error::no host drop box at $OUT: this job must run on an ffgithubrunners runner"; exit 1; }
+          rm -f "$OUT/rerun.done"
+          printf 'repo=%s\nrun=%s\ntoken=%s\n' "$REPO" "$RUN" "$GH_TOKEN" > "$OUT/rerun.request"
+          for _ in $(seq 1 60); do [ -f "$OUT/rerun.done" ] && break; sleep 3; done
+          [ -f "$OUT/rerun.done" ] || { echo "::error::the runner host did not answer in 180 s (an older ffbox without rerun.request?)"; exit 1; }
+          jq -r '.notes[]? | "::notice::" + .' "$OUT/rerun.done"
+          if [ "$(jq -r '.ok' "$OUT/rerun.done")" != true ]; then
+            echo "::error::$(jq -r '.error' "$OUT/rerun.done")"
+            exit 1
+          fi
+          jq -e '.rerun == true' "$OUT/rerun.done" >/dev/null && echo "re-ran the failed jobs of run $RUN" || echo "nothing lost with its runner"
