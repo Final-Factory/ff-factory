@@ -38,8 +38,8 @@ const BEFORE: Record<AgentKind, string[]> = {
  * tool cannot become always-loaded by accident: adding one edits the manifest, this list and the doc's numbers.
  */
 const ALWAYS: Record<AgentKind, string[]> = {
-  dispatcher: ['create_sandbox', 'decide_work', 'list_branches', 'list_machines', 'list_sandboxes', 'list_work', 'message_agent', 'read_rules', 'set_agent_title', 'start_agent', 'system_status', 'wake_me'],
-  personal: ['agent_transcript', 'list_machines', 'list_sandboxes', 'list_work', 'message_agent', 'message_person', 'read_rules', 'request_work', 'system_status', 'update_work', 'wake_me'],
+  dispatcher: ['agent_transcript', 'decide_work', 'interrupt_agent', 'list_machines', 'list_sandboxes', 'list_work', 'message_agent', 'read_rules', 'search_transcripts', 'start_agent', 'stop_agent', 'switch_branch', 'system_status', 'unity', 'wake_me'],
+  personal: ['agent_transcript', 'list_machines', 'list_work', 'max_activity', 'message_agent', 'message_person', 'read_rules', 'request_work', 'search_transcripts', 'system_status', 'update_work', 'wake_me'],
   remote: [],
   // No ToolSearch in these processes: Claude Code sends every tool in full, so the manifest says so.
   ops: BEFORE.ops,

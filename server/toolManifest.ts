@@ -60,18 +60,18 @@ export const TOOL_MANIFEST = {
   // workers
   start_agent: { group: 'workers', kinds: [D, R], always: [D] },
   message_agent: { group: 'workers', kinds: [D, P, R], always: [D, P] },
-  set_agent_title: { group: 'workers', kinds: [D, R], always: [D] },
-  interrupt_agent: { group: 'workers', kinds: [D, R] },
-  stop_agent: { group: 'workers', kinds: [D, R] },
-  agent_transcript: { group: 'workers', kinds: [D, P, R], always: [P] },
-  search_transcripts: { group: 'workers', kinds: [D, P, R] },
+  set_agent_title: { group: 'workers', kinds: [D, R] },
+  interrupt_agent: { group: 'workers', kinds: [D, R], always: [D] },
+  stop_agent: { group: 'workers', kinds: [D, R], always: [D] },
+  agent_transcript: { group: 'workers', kinds: [D, P, R], always: [D, P] },
+  search_transcripts: { group: 'workers', kinds: [D, P, R], always: [D, P] },
   // sandboxes
-  list_sandboxes: { group: 'sandboxes', kinds: [D, P, R, O], always: [D, P, O] },
-  create_sandbox: { group: 'sandboxes', kinds: [D, R], always: [D] },
+  list_sandboxes: { group: 'sandboxes', kinds: [D, P, R, O], always: [D, O] },
+  create_sandbox: { group: 'sandboxes', kinds: [D, R] },
   delete_sandbox: { group: 'sandboxes', kinds: [D, R] },
-  list_branches: { group: 'sandboxes', kinds: [D, P, R], always: [D] },
-  switch_branch: { group: 'sandboxes', kinds: [D, R, W] },
-  unity: { group: 'sandboxes', kinds: [D, R, W] },
+  list_branches: { group: 'sandboxes', kinds: [D, P, R] },
+  switch_branch: { group: 'sandboxes', kinds: [D, R, W], always: [D] },
+  unity: { group: 'sandboxes', kinds: [D, R, W], always: [D] },
   // machines
   list_machines: { group: 'machines', kinds: [D, P, R, O], always: [D, P, O] },
   system_status: { group: 'machines', kinds: [D, P, R, O], always: [D, P, O] },
@@ -103,7 +103,7 @@ export const TOOL_MANIFEST = {
   fetch_ffbox_report: { group: 'ffbox', kinds: [W] },
   fetch_discord_thread_files: { group: 'ffbox', kinds: [W] },
   // max
-  max_activity: { group: 'max', kinds: [D, P, R] },
+  max_activity: { group: 'max', kinds: [D, P, R], always: [P] },
   post_as_max: { group: 'max', kinds: [W] },
   // spend
   spend_report: { group: 'spend', kinds: [D, P, R] },

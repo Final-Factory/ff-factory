@@ -71,7 +71,9 @@ before redeploying by hand.
   (`stop_agent`, the UI) is marked `stoppedOnPurpose` (saved, and taken off any cut-off list already noted) and is
   never resumed, by a dropped link or a portal restart, until it is sent a message again.
 - **Tools.** Workers get the machine's tools (`wake_me`, `unity`, `read_work`, …) via a `machine` MCP server
-  whose calls go back to the portal. They set no label: their title says what they are doing, and the dispatcher sets it
+  whose calls go back to the portal. Which ones is the tool manifest's `worker` kind ([tool-manifest.md](tool-manifest.md),
+  w1163): all of them are deferred (measured: carrying any costs workers more than the lookups it saves), each with its
+  group as a `ToolSearch` hint, so `select:<name>` loads one and `group_<group>` a group; the brief says so. They set no label: their title says what they are doing, and the dispatcher sets it
   ([orchestrators.md](orchestrators.md#worker-titles-and-sandbox-labels), w575).
 - **The main clone is the owner's** (w536): the daemon runs no editor, hang/crash watch, Unity MCP place, Unity slot
   place or git status report for it. A `unity` or `switch` message without a sandbox (from an older portal) is answered
