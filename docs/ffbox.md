@@ -640,9 +640,11 @@ The ffbox repo can be changed through workers, like any repo: file it with `requ
   a throwaway branch of the ffbox repo with a workflow that runs `python3 test/test_fffconnector.py` and
   `python3 test/test_ffwatch.py` on `ubuntu-latest`, and compare with the same run on master: `test_ffwatch.py` fails 9
   checks on a GitHub runner on master too (the runner has no `ffdiscord.py`), so a new failure is what counts. Delete the
-  branch afterwards; the workflow never goes to master. A worker's `git push origin HEAD:master` into this repo can be
-  refused by the game-repo master guard; pushing to the repo's URL (`git push https://github.com/Final-Factory/ffbox.git
-  HEAD:refs/heads/master`) is not.
+  branch afterwards; the workflow never goes to master. A worker's `git push origin HEAD:master` into this repo is allowed by the
+  push guard (server/guard.ts, w1132): it refuses master/main only for the game repo, reading the repo from the remote's URL. The
+  shell goes back to the sandbox after every command, so name the clone in the same command (`cd $TMPDIR/ffbox && git push origin
+  HEAD:master`, or `git -C`), or push to the URL (`git push https://github.com/Final-Factory/ffbox.git HEAD:refs/heads/master`). A
+  refusal names the repo and remote it read, or why it could not tell.
   **A Windows machine with WSL runs them itself** (BEAST has Ubuntu, Python 3.12; w831): `wsl.exe -d Ubuntu -- bash -lc
   'cd /mnt/<drive>/<clone> && python3 test/test_ffwatch.py'`. Three traps, each measured on BEAST on 2026-10-10:
   - **Clone with LF endings** (`git -c core.autocrlf=false clone …`, or set `core.autocrlf false` and re-check out with
