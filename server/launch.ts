@@ -45,7 +45,11 @@ export interface LaunchSpec {
   /** Stdio MCP servers the process starts, by name (the daemon's, never the portal's: commands are the machine's). */
   stdioMcp?: Record<string, StdioServer>;
   /** An in-process MCP server whose tool calls are answered by `handlers` (on a machine: the portal). */
-  mcp?: { server: string; tools: { name: CatalogTool; description: string }[] };
+  mcp?: {
+    server: string;
+    /** alwaysLoad and searchHint: from server/toolManifest.ts (w1163); an older daemon ignores them. */
+    tools: { name: CatalogTool; description: string; alwaysLoad?: boolean; searchHint?: string }[];
+  };
   maxBudgetUsd?: number;
   guard: {
     /** Unity instance prefix (project folder name) and the agent's own folder. */
@@ -262,7 +266,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
           } catch (e) {
             return { content: [{ type: 'text' as const, text: `ERROR: ${(e as Error).message}` }], isError: true };
           }
-        }),
+        }, { ...(t.alwaysLoad ? { alwaysLoad: true } : {}), ...(t.searchHint ? { searchHint: t.searchHint } : {}) }),
       ),
     });
   }

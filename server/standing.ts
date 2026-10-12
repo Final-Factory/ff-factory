@@ -1,4 +1,5 @@
 import { machineRunEnv } from './secrets.ts';
+import { sdkExtras, toolsOf } from './toolManifest.ts';
 import { poolHeld } from './sessions.ts';
 import { NIGHTLY_SENTRY, unattributedPerson } from './vault.ts';
 import { randomUUID } from 'node:crypto';
@@ -98,6 +99,13 @@ export interface StandingDeps {
   };
   now?: () => Date;
 }
+
+/** Its MCP tools' descriptions (with the 'delegate' group; which tools: server/toolManifest.ts, kind standing). */
+const STANDING_TOOL_TEXT: Record<'request_delegation' | 'my_delegations', string> = {
+  request_delegation:
+    "Ask for a worker agent to do a task you cannot do yourself (code changes, running the game, anything that writes to the repo). Approved (by your auto-approve rules, or by your owner), it is filed in the work ledger as your owner's request and the dispatcher queues and places it like any other. Write the task as a complete brief: goal, context, done-criteria. Anything that spends money, publishes, changes a setting or releases always waits for a person.",
+  my_delegations: 'Your delegation requests, newest first: status, and for approved ones the ledger request they were filed as, its status and its last outcome.',
+};
 
 const TOOL_GROUPS: StandingToolGroup[] = ['shell_read', 'github_comment', 'delegate'];
 const MAX_RUNS = 50;
@@ -904,14 +912,8 @@ ${a.charter}
       mcp: a.tools.includes('delegate')
         ? {
             server: 'standing',
-            tools: [
-              {
-                name: 'request_delegation',
-                description:
-                  "Ask for a worker agent to do a task you cannot do yourself (code changes, running the game, anything that writes to the repo). Approved (by your auto-approve rules, or by your owner), it is filed in the work ledger as your owner's request and the dispatcher queues and places it like any other. Write the task as a complete brief: goal, context, done-criteria. Anything that spends money, publishes, changes a setting or releases always waits for a person.",
-              },
-              { name: 'my_delegations', description: 'Your delegation requests, newest first: status, and for approved ones the ledger request they were filed as, its status and its last outcome.' },
-            ],
+            // The manifest's standing tools (server/toolManifest.ts): no ToolSearch here, so both load in every call.
+            tools: toolsOf('standing').map((name) => ({ name: name as CatalogTool, description: STANDING_TOOL_TEXT[name as keyof typeof STANDING_TOOL_TEXT], ...sdkExtras('standing', name) })),
           }
         : undefined,
       maxBudgetUsd: cap,

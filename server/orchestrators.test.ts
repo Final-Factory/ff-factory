@@ -22,6 +22,8 @@ import type { PrHealth } from '../shared/blockers.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
+import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
+import { buildOptions } from './launch.ts';
 
 /**
  * People's own orchestrators and the dispatcher (docs/orchestrators.md), end to end on a real Agents with the scripted
@@ -1669,6 +1671,25 @@ test('w575: a sandbox label is its name and never changes: no set_label for work
   const listed = (await call(dispatcher().info, 'list_sandboxes', {})).text;
   assert.match(listed, /- pc\/alpha( FREE)?: ready;/);
   assert.doesNotMatch(listed, /w554/);
+});
+
+test("w1163: a worker gets the manifest's machine tools, each deferred with its group as ToolSearch hint, and its brief says how to load a group", async (t) => {
+  const { store, machines, dispatcher, chat, call } = await setupOnMachine(t);
+  await call(chat(BEN).info, 'request_work', { title: 'Look', brief: 'Look around.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Look around', title: 'Look', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const spec = machines.hooks!.specFor(store.sessions.get(id)!, store.machines.get('pc')!);
+  assert.deepEqual(spec.mcp!.tools.map((x) => x.name), toolsOf('worker'));
+  for (const x of spec.mcp!.tools) {
+    assert.equal(x.alwaysLoad, undefined, `${x.name}: deferred (measured: always-loading it costs workers more than its lookups, docs/tool-manifest.md)`);
+    assert.equal(x.searchHint, `group_${(TOOL_MANIFEST as Record<string, { group: string }>)[x.name].group}`, x.name);
+  }
+  assert.ok(spec.append.includes(deferredToolsLine('worker', 'Your FF Factory tools (mcp__machine__*) are')));
+  // The daemon's SDK server carries both to Claude Code (_meta), as the coordinators' do.
+  const server = buildOptions(spec, {}).mcpServers!.machine as unknown as { instance: { _registeredTools: Record<string, { _meta?: Record<string, unknown> }> } };
+  assert.equal(server.instance._registeredTools.blocked_on._meta?.['anthropic/searchHint'], 'group_timers');
+  assert.equal(server.instance._registeredTools.blocked_on._meta?.['anthropic/alwaysLoad'], undefined);
 });
 
 test('w920: a worker has portal_logs on the machine tool belt and in its brief, and it reads the portal list and a clean-up log without writing', async (t) => {
