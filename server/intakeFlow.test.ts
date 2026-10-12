@@ -891,7 +891,7 @@ test('desync PR policy: what each class ends with; a class 3 PR with a cost goes
   intake.onConversation(conv({ id: 'op1', opener: 'operator', title: 'Tidy logs', branch: 'ffbox/tidy' }));
   const other = work().at(-1)!;
   o.approveIntake(other.id, BEN);
-  await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Review.', title: 'Tidy', work_id: other.id });
+  await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Review.', title: 'Tidy', work_id: other.id, extra_agent: true });
   const ow = store.sessions.get([...store.sessions.values()].find((s) => s.kind === 'worker' && other.sessionIds.includes(s.id))!.id)!;
   await until('the worker idles', () => sessions.get(ow.id).info.status === 'idle');
   o.workerTurnEnded(ow, 'PERF-ESCALATION: tick +5%');
