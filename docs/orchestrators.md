@@ -614,7 +614,7 @@ another agent, and a phrase anyone can type must not widen what a worker reads. 
 `request_work ledger_read: true` when filing a ledger task ("list the finished requests", "which stalled ones can
 close"), or `update_work {id, ledger_read: true|false}` later (`Orchestrators.setLedgerRead`). Only on the person's own
 request, never on one from the intake (its text is not a person's), and not only in a turn the person started: it
-widens reading, changes nothing, and every orchestrator already reads the whole ledger with `list_work`. The log says
+widens reading, changes nothing, and every orchestrator already reads the whole ledger with `list_work` (`list_work {id}` prints the last 15 log entries and a count of the earlier ones; `full_log: true` prints all, `spend: true` adds the request's full cost block, w1159). The log says
 who set or took it back, and `list_work {id}` shows it. It counts only while the granting request is open or stalled;
 a granted worker may then list the open and stalled requests and read any of them by id. Closed requests stay limited
 to its own and named ones.

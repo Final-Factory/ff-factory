@@ -8,6 +8,7 @@ import { Readable } from 'node:stream';
 import type { AttachmentRecord, AttachmentStore } from './attachments.ts';
 import { describeQuery, type ProviderManager, type QueryAnswer, type ReportTransfer, type TransferSink } from './providers.ts';
 import { REPORT_LIMITS } from './providerProtocol.ts';
+import { FFBOX_REPORTS_DEFAULT } from './toolOutput.ts';
 import { redactSecrets } from './secrets.ts';
 
 /** A report id as ffintake mints it: its UTC receive stamp, its kind and a random suffix. */
@@ -42,7 +43,7 @@ export interface ReportsInput {
 
 /** What ffbox_activity takes for show: "reports", as FFBox's `reports` query wants it, checked here first. */
 export function ffboxReportsArgs(input: ReportsInput): { args: Record<string, number | string> } | { error: string } {
-  const args: Record<string, number | string> = { limit: Math.min(Math.max(input.limit ?? 50, 1), 200), offset: Math.min(Math.max(input.offset ?? 0, 0), 100_000) };
+  const args: Record<string, number | string> = { limit: Math.min(Math.max(input.limit ?? FFBOX_REPORTS_DEFAULT, 1), 200), offset: Math.min(Math.max(input.offset ?? 0, 0), 100_000) };
   if (input.id) {
     if (!REPORT_ID.test(input.id)) return { error: `report: an FFBox report id, e.g. 20261003T101500Z-crash-3a9f01c2d4 (got ${JSON.stringify(clean(input.id, 70))}).` };
     args.id = input.id;

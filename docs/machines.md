@@ -501,7 +501,7 @@ sandbox agents in all), `max_unity: 2`.
   which the portal clears, w422).
 - `list_sandboxes` starts with the **Capacity** block (below, "Placing work"), then shows each machine's sandboxes,
   grouped (this host's own daemon's among them; the portal holds none), with each group's limits and free count, one line per sandbox (a **FREE** flag when it is ready and has no live agent) and only
-  its live agents, with their titles: what the sandbox is doing. An offline machine's sandboxes show as last reported.
+  its live agents, with their titles: what the sandbox is doing. Since w1159 a status or editor detail is cut at about 100 characters and git leaves out the last commit's subject and the PR's link (`detail: true` keeps them); `list_machines` leaves out each machine's folders and last clean-up unless `detail: true`. An offline machine's sandboxes show as last reported.
 
 **Agents in a machine sandbox** get their own brief (the worktree, their editor's instance name) and the `machine`
 tools `wake_me`, `cancel_wake` and `blocked_on` (w754: a request that waits only on other requests or PRs is Blocked and its worker stops polling, [orchestrators.md](orchestrators.md#waiting-queued-blocked)), `waiting_on_person` (w691: only a person can move them on; the ledger shows Waiting on input), `unity` (their sandbox's editor), `switch_branch`, `fetch_attachment`, `publish_attachment` (a file of theirs as an attachment id another worker

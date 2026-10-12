@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { ContextMeter, toolKind, stripCd, listUsd, priceOf, zeroTok, type ModelTok, type TurnUsage } from '../shared/spend.ts';
-import { SpendStore, aboutIds, attribute, buildReport, estimateTurn, kindOfWork, namedIdsIn, renderReport, renderRequest, servedAt, type SpendContext } from './spend.ts';
+import { SpendStore, aboutIds, attribute, buildReport, estimateTurn, kindOfWork, namedIdsIn, renderReport, renderRequest, renderSession, servedAt, type SpendContext } from './spend.ts';
 import { DATA_GUARD_DEFAULTS, dataGuardSettings, footprint, gzipFile, planGuard, runDataGuard, type TranscriptFile } from './dataGuard.ts';
 import { Store } from './store.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
@@ -549,4 +549,30 @@ test('priceOf: the models in use, an alias, an unknown one', () => {
   assert.equal(priceOf('claude-haiku-5-5').cr, 0.01);
   assert.equal(priceOf('opus').out, 20);
   assert.equal(priceOf('mystery').in, 2);
+});
+
+test('w1159: renderSession lists the top 20 requests by cost and counts the rest; requests asks for more', () => {
+  const ids = Array.from({ length: 30 }, (_, i) => `w${100 + i}`);
+  const items = ids.map((id) => item(id, { sessionIds: ['d'], links: { d: { at: iso(T0), how: 'sent' } } }));
+  const w = world(items, [session('d', { kind: 'orchestrator', orchestratorRole: 'dispatcher', title: 'Dispatcher' })]);
+  // One turn per request, each [about wNNN]: request 100+i costs i+1 dollars.
+  ids.forEach((id, i) => {
+    w.spend.observe('d', userEvent(T0 + i * 200_000 + 1000, `[about ${id} "x"]\nhello`));
+    w.spend.observe('d', resultEvent(T0 + i * 200_000 + 60_000, { cum: { m: tok({ usd: ((i + 1) * (i + 2)) / 2, cr: 1000 * (i + 1) }) } }, i + 1));
+  });
+  const link = (sid: string) => 'https://p/#/session/' + sid;
+  const small = renderSession(w.spend, 'd', link);
+  const line = small.split('\n').find((l) => l.startsWith('Requests it served'))!;
+  assert.ok(line.startsWith('Requests it served (30; the top 20 by cost): w129 $30.00, w128 $29.00'), line);
+  assert.ok(line.includes('w110 $11.00'), 'the 20th is listed');
+  assert.ok(!line.includes('w109 '), 'the 21st is not');
+  assert.ok(line.includes('and 10 more, $55.00 together (spend_report session with requests: 30 lists them all)'), line);
+  const all = renderSession(w.spend, 'd', link, 2000);
+  const full = all.split('\n').find((l) => l.startsWith('Requests it served'))!;
+  assert.ok(full.startsWith('Requests it served (30): w129'), full);
+  assert.ok(full.includes('w100 $1.00') && !full.includes('more'), full);
+  assert.ok(all.length > small.length);
+  // A session with 20 or fewer is listed whole, as before.
+  const few = renderSession(w.spend, 'd', link, 40).split('\n').find((l) => l.startsWith('Requests it served'))!;
+  assert.ok(few.startsWith('Requests it served (30):'));
 });

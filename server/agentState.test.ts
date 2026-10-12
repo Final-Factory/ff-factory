@@ -223,6 +223,28 @@ test('list_sandboxes: between turns (Working) and on what, sandboxes by status, 
   assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 1, 'the capacity block and placement do not count it free');
 });
 
+test('list_sandboxes (w1159): long status and editor details are cut to about 100 characters and git leaves out the last commit and the PR link, unless detail is set', async (t) => {
+  const { store, agents } = await setup(t);
+  const alpha = store.machines.get('pc')!.sandboxes!.find((x) => x.id === 'alpha')!;
+  const long = 'the editor is importing assets after a branch switch ' + 'and it keeps going '.repeat(12);
+  alpha.statusDetail = long;
+  alpha.unity = { ...alpha.unity, detail: long };
+  alpha.git = { branch: 'sandbox/alpha-w9', dirty: 1, untracked: 0, upstream: 'origin/sandbox/alpha-w9', ahead: 2, behind: 0, head: { sha: 'abc1234', subject: 'Fix the thing that was broken in the belt system' }, pr: { number: 77, url: 'https://github.com/o/r/pull/77', draft: false } } as typeof alpha.git;
+  const cut = agents.describeAllSandboxes();
+  const line = cut.split('\n').find((l) => l.startsWith('- pc/alpha'))!;
+  assert.ok(!line.includes(long), 'the long detail is cut');
+  assert.ok(line.includes('the editor is importing assets after a branch switch and it keeps going'), 'its start stays');
+  assert.ok(line.includes('…'));
+  assert.match(line, /on sandbox\/alpha-w9; 1 changed, 0 untracked; ↑2 ↓0 vs origin\/sandbox\/alpha-w9; PR #77;/);
+  assert.ok(!line.includes('Fix the thing') && !line.includes('github.com/o/r/pull/77'));
+  const whole = agents.describeAllSandboxes(true);
+  const wholeLine = whole.split('\n').find((l) => l.startsWith('- pc/alpha'))!;
+  assert.ok(wholeLine.includes(long));
+  assert.ok(wholeLine.includes('last abc1234 "Fix the thing that was broken in the belt system"') && wholeLine.includes('PR #77 https://github.com/o/r/pull/77'));
+  assert.ok(whole.length > cut.length);
+  assert.match(cut, /- pc\/beta FREE/, 'the Capacity block, FREE marks and agent lines are unchanged');
+});
+
 test('w799: a sandbox where an old agent host still runs is not free: its daemon reports it, the portal counts it taken, and the daemon refuses a new agent there', async (t) => {
   // BEAST, 2026-10-09: the daemon dropped worker 38a203f0's host while its tree ran on in slot1, and the portal gave
   // slot1 to a new worker (6cc70ea1).

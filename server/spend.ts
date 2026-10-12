@@ -17,6 +17,7 @@
 //   server/dataGuard.ts, prunes them): everything the page and the report show comes from spend.json.
 import path from 'node:path';
 import { SnapshotFile, readJsonDurable, checkObject } from './durable.ts';
+import { SESSION_REQUESTS_TOP } from './toolOutput.ts';
 import type { SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { WORK_OPEN } from '../shared/types.ts';
 import { UNRECORDED_ACCOUNT, type How, type ReportOptions, type RequestSpend, type SessionSpend, type SpendReport, type SpendRole } from '../shared/spend.ts';
@@ -693,14 +694,19 @@ export function renderRequest(spend: SpendStore, id: string, link: (sessionId: s
 
 
 /** One session's spend, models, context readings and the requests it served. */
-export function renderSession(spend: SpendStore, id: string, link: (sessionId: string) => string): string {
+export function renderSession(spend: SpendStore, id: string, link: (sessionId: string) => string, requestsTop: number = SESSION_REQUESTS_TOP): string {
   const s = spend.session(id);
   if (!s) return `No spend recorded for session ${id}.`;
   const lines = [`${s.id} ${s.role} "${s.title}"${s.machine ? ` on ${s.machine}` : ''}${s.person ? ` for ${s.person}` : ''}: ${tokLine(s.total)}, ${s.turns} turn(s), ${s.firstAt.slice(0, 16).replace('T', ' ')} to ${s.lastAt.slice(0, 16).replace('T', ' ')}.${s.estimated.usd > 0.005 ? ` ${fmtUsd(s.estimated.usd)} of it is estimated.` : ''} Transcript: ${s.transcript?.state === 'pruned' ? `pruned ${s.transcript.prunedAt?.slice(0, 10) ?? ''}` : s.transcript?.state === 'gz' ? 'compressed' : 'kept'}; ${link(s.id)}`];
   for (const [k, v] of Object.entries(s.models).sort((a, b) => b[1].usd - a[1].usd)) lines.push(`- ${k}: ${tokLine(v)}`);
   for (const [k, v] of Object.entries(s.accounts ?? {}).sort((a, b) => b[1].usd - a[1].usd)) lines.push(`- on ${k}: ${tokLine(v)}`);
   const reqs = Object.entries(s.requests).sort((a, b) => b[1] - a[1]);
-  if (reqs.length) lines.push(`Requests it served: ${reqs.map(([r, usd]) => `${r} ${fmtUsd(usd)}`).join(', ')}.`);
+  if (reqs.length) {
+    const shown = reqs.slice(0, requestsTop);
+    const rest = reqs.slice(shown.length);
+    const restUsd = rest.reduce((a, [, usd]) => a + usd, 0);
+    lines.push(`Requests it served (${reqs.length}${rest.length ? `; the top ${shown.length} by cost` : ''}): ${shown.map(([r, usd]) => `${r} ${fmtUsd(usd)}`).join(', ')}${rest.length ? `; and ${rest.length} more, ${fmtUsd(restUsd)} together (spend_report session with requests: ${Math.min(reqs.length, 2000)} lists them all)` : ''}.`);
+  }
   const sum = Object.values(s.cats).reduce((a, c) => a + c.usd, 0);
   if (sum > 0) {
     lines.push(`Context readings (${s.calls} model calls, largest context ${fmtTokens(s.ctxMax)} tokens, ${s.compactions} compaction(s)); where the money went:`);
