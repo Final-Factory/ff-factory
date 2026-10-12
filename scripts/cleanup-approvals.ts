@@ -30,6 +30,29 @@ export function cleanupKinds(command: string): CleanupKind[] {
   return out;
 }
 
+/**
+ * What a prompt was about, for every prompt, not only deletes (w1097, lothsahn, 2026-10-12: "Why did it do that, and how
+ * do we allow it to do what it just needed to do without a complex bash prompt?"). Claude Code's own reason when the
+ * transcript has it (`reason` on the permission event, from w1097 on); before that, the command's shape.
+ */
+export function promptKind(toolName: string | undefined, input: { command?: unknown } | undefined, reason?: string): string {
+  if (reason) {
+    if (/^Dangerous \S+ operation on possibly-empty variable path/i.test(reason)) return 'Claude Code: dangerous rm of a $VAR path (glob, brace list)';
+    if (/^Dangerous \S+ operation on critical path/i.test(reason)) return 'Claude Code: dangerous rm of a critical path';
+    if (/^Dangerous \S+ operation/i.test(reason)) return 'Claude Code: dangerous rm, other';
+    if (/^touches /.test(reason)) return 'Claude Code: a path outside the allowed folders';
+    return `Claude Code: ${reason.replace(/\s+/g, ' ').replace(/[`'"].*$/, '').slice(0, 70).trim()}`;
+  }
+  if (toolName !== 'Bash' && toolName !== 'PowerShell') return `tool: ${toolName?.replace(/^(mcp__[^_]+(?:_[^_]+)*?)__.*$/, '$1') ?? 'unknown'}`;
+  const cmd = typeof input?.command === 'string' ? input.command : '';
+  const del = cleanupKinds(cmd);
+  if (del.length) return `${toolName} delete: ${del[0]}${/\n|\(\)\s*\{|\bfor\b|\bwhile\b|\buntil\b/.test(cmd) ? ', in a multi-step command' : ''}`;
+  if (/locallow|never games|application support\/never games/i.test(cmd)) return `${toolName}: the game's data folder`;
+  if (/(?:^|[;&|\s])git\s/.test(cmd)) return `${toolName}: git`;
+  if (/\n|\(\)\s*\{/.test(cmd)) return `${toolName}: multi-step, no delete`;
+  return `${toolName}: other`;
+}
+
 export interface DayCount {
   day: string;
   /** Every prompt a person answered that day. */
@@ -37,13 +60,15 @@ export interface DayCount {
   /** The ones for a delete, by kind. */
   cleanup: Partial<Record<CleanupKind, number>>;
   cleanupTotal: number;
+  /** Every prompt, by `promptKind`. */
+  kinds?: Record<string, number>;
 }
 
 /** Count the prompts a person answered in transcript lines (JSONL text), per UTC day. */
 export function countApprovals(lines: Iterable<string>, since = '', days = new Map<string, DayCount>()): Map<string, DayCount> {
   for (const line of lines) {
     if (!line.includes('"permission"')) continue;
-    let e: { kind?: string; t?: string; toolName?: string; input?: { command?: unknown }; decision?: string; decidedBy?: unknown };
+    let e: { kind?: string; t?: string; toolName?: string; input?: { command?: unknown }; reason?: string; decision?: string; decidedBy?: unknown };
     try {
       e = JSON.parse(line);
     } catch {
@@ -54,6 +79,8 @@ export function countApprovals(lines: Iterable<string>, since = '', days = new M
     if (day < since) continue;
     const d = days.get(day) ?? { day, prompts: 0, cleanup: {}, cleanupTotal: 0 };
     d.prompts++;
+    const kind = promptKind(e.toolName, e.input, typeof e.reason === 'string' ? e.reason : undefined);
+    d.kinds = { ...d.kinds, [kind]: (d.kinds?.[kind] ?? 0) + 1 };
     if ((e.toolName === 'Bash' || e.toolName === 'PowerShell') && typeof e.input?.command === 'string') {
       const kinds = cleanupKinds(e.input.command);
       if (kinds.length) {
@@ -90,6 +117,23 @@ function main() {
     }
   }
   if (split) console.log(`clean-up prompts a person answered: before ${split} ${before}, from ${split} ${after}`);
+  console.log(`\nevery prompt a person answered, by kind${split ? ` (before ${split} / from ${split})` : ''}:`);
+  for (const [kind, n] of byKind([...days.values()], split)) console.log(`  ${String(n.total).padStart(4)}${split ? `  (${n.before} / ${n.after})` : ''}  ${kind}`);
+}
+
+/** The kinds over every day, most first; with a split day, how many fell before it and from it on. */
+export function byKind(days: DayCount[], split?: string): [string, { total: number; before: number; after: number }][] {
+  const out = new Map<string, { total: number; before: number; after: number }>();
+  for (const d of days) {
+    for (const [k, n] of Object.entries(d.kinds ?? {})) {
+      const c = out.get(k) ?? { total: 0, before: 0, after: 0 };
+      c.total += n;
+      if (split && d.day < split) c.before += n;
+      else c.after += n;
+      out.set(k, c);
+    }
+  }
+  return [...out.entries()].sort((a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0]));
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) main();

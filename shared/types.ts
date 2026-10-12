@@ -380,7 +380,7 @@ export type TranscriptEvent =
   | { seq: number; t: string; kind: 'system'; text: string }
   | { seq: number; t: string; kind: 'error'; text: string }
   /** decidedBy: the person who answered it in the portal (w891). */
-  | { seq: number; t: string; kind: 'permission'; requestId: string; toolName: string; input: unknown; decision?: 'allow' | 'deny'; decidedBy?: Requester };
+  | { seq: number; t: string; kind: 'permission'; requestId: string; toolName: string; input: unknown; reason?: string; decision?: 'allow' | 'deny'; decidedBy?: Requester };
 
 /** One computer's load: the portal's host (SystemStats) or a machine (its daemon reports it, server/system.ts). */
 export interface HostStats {

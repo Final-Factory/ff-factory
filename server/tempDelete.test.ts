@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { tempOnlyDelete } from './tempDelete.ts';
+import { DANGEROUS_REMOVAL, tempDeletesWithin, tempOnlyDelete } from './tempDelete.ts';
 
 /**
  * w913: the clean-up commands workers ran, copied from the transcripts that needed an approval, are answered by the
@@ -44,6 +44,8 @@ test('w913: a delete outside the temp folder, or one it cannot judge, still asks
   refused('rm -rf ~/x $TMPDIR/y');
   refused('rm -rf $HOME/x');
   refused('rm -rf $TMPDIR/x $UNSET/y');
+  refused('rm -rf "$TMPDIR/$UNSET"', win, /variable/); // empty: the folder itself (w1097)
+  refused('rm -rf $TMPDIR/f$S/x', win, /variable/);
   refused("rm -rf '$TMPDIR/x'", win, /single-quoted/);
   refused('rm -rf $(echo $TMPDIR)/x');
   refused('rm -rf `echo x`');
@@ -106,4 +108,95 @@ test('w913: a save copy named with the session\'s own tag may go; any other save
   refused(`rm -f "${saves}/"*`);
   refused(`rm -f "${saves}/ffa-ee5b82dc-../x.zip"`);
   refused(`rm -f "${saves}/ffa-ee5b82dcx.zip"`);
+  // The game's UserData layout (GameDataPaths.Saves = UserData/saves) is the same folder for this rule.
+  ok(`rm -f "/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory/UserData/saves/ffa-ee5b82dc-a.zip"`);
+  refused(`rm -f "/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory/UserData/saves/MyBigBase.zip"`);
+  refused(`rm -f "/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory/UserData/settings/settings.json"`);
+});
+
+/**
+ * w1097 (lothsahn, 2026-10-12: "Why did it do that, and how do we allow it to do what it just needed to do without a
+ * complex bash prompt?"): w1079's test leg, a shell function with a retry loop that restores the game's settings, runs the
+ * leg and reads the settings back, with a delete of its own output folders in the same command. Claude Code's dangerous-rm
+ * check asks about such a delete even in bypass mode (measured with Claude Code 2.1.284: `rm -rf $TMPDIR/{f1920,f1280}`
+ * and `rm -f $TMPDIR/*.log` ask, the function, the loop and the copy into LocalLow do not). The session answers it when
+ * every delete in the command is one tempOnlyDelete allows, wherever it stands.
+ */
+const L = '/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory';
+const leg = (rmLine: string) => `D="${L}"
+${rmLine}
+run() { # size to S=$1, restore the settings, run the leg
+  S=$1
+  for i in 1 2 3 4 5; do cp "$TMPDIR/settings.bak" "$D/UserData/settings/settings.json" 2>/dev/null && break; sleep 2; done
+  bash "$TMPDIR/leg.sh" "$S" > "$TMPDIR/leg-$S.log" 2>&1
+  grep -o '"Panel\\(Position\\|Size\\)[^,]*' "$D/UserData/settings/settings.json"
+}
+run 1920
+run 1280`;
+const within = (cmd: string, ctx = win) => assert.deepEqual(tempDeletesWithin(cmd, ctx), { ok: true }, cmd);
+const notWithin = (cmd: string, why?: RegExp, ctx = win) => {
+  const r = tempDeletesWithin(cmd, ctx);
+  assert.equal(r.ok, false, `should be refused: ${cmd}`);
+  if (why && !r.ok) assert.match(r.why, why);
+};
+
+test('w1097: a test leg whose only deletes are inside the temp folder is answered, wherever they stand', () => {
+  within(leg('rm -rf $TMPDIR/f1920 $TMPDIR/f1280'));
+  within(leg('rm -rf $TMPDIR/{f1920,f1280}'));
+  within(leg('rm -rf "$TMPDIR/f1920"/*.png $TMPDIR/*.log'));
+  within(leg('[ -d "$TMPDIR/f1920" ] && rm -rf "$TMPDIR/f1920"'));
+  within(leg('if [ -d $TMPDIR/f1920 ]; then rm -rf $TMPDIR/f1920; fi'));
+  within('for i in 1 2 3; do rm -f $TMPDIR/x.lock && break; sleep 1; done');
+  within('{ rm -rf $TMPDIR/a; }; ls $TMPDIR | head -3');
+  within('rm -rf $TMPDIR/out 2>/dev/null; mkdir -p $TMPDIR/out && python scripts/leg.py --out $TMPDIR/out | tail -5');
+  // The w913 save copy, in a longer command.
+  within(`cp x.zip "${L}/UserData/saves/ffa-ee5b82dc-w1097.zip" && echo ok; rm -f "${L}/UserData/saves/ffa-ee5b82dc-w1097.zip"`);
+  // A comment that names rm is not a delete.
+  within('# rm everything old first\nrm -rf $TMPDIR/old; echo done');
+});
+
+test('w1097: a longer command with a delete it cannot judge still asks a person', () => {
+  notWithin(leg('echo no delete'), /no delete/);
+  notWithin(leg('rm -rf $TMPDIR/f1920 /f1280'), /not strictly inside/);
+  notWithin(leg('rm -rf "$D/UserData/settings"'), /variable that is not the temp folder/);
+  notWithin(leg('rm -rf $TMPDIR'), /not strictly inside/);
+  notWithin('run() { rm -rf "$TMPDIR/f$1"; }; run 1920', /variable/); // $1 could be anything
+  notWithin('for d in a b; do rm -rf $TMPDIR/$d; done', /variable/);
+  notWithin('O=$TMPDIR/x; rm -rf $O', /variable/);
+  // Something in the command could change what the delete removes.
+  notWithin('TMPDIR=/; rm -rf $TMPDIR/x', /temp folder variable/);
+  notWithin('export TMP=/c/Users; rm -rf $TMP/x', /temp folder variable/);
+  notWithin('PATH=$TMPDIR:$PATH; rm -rf $TMPDIR/x', /PATH/);
+  notWithin('$env:TEMP = "C:\\"; Remove-Item -Recurse $env:TEMP\\x', /temp folder variable/);
+  notWithin('ln -s /c/Users $TMPDIR/u; rm -rf $TMPDIR/u/*', /link/);
+  notWithin('cmd //c mklink /J %TEMP%\\u C:\\Users & rm -rf $TMPDIR/u/x', /link/);
+  notWithin('rm() { command rm -rf /; }; rm -rf $TMPDIR/x', /function named like a delete/);
+  notWithin('alias rm="rm -rf /"; rm -rf $TMPDIR/x', /alias/);
+  notWithin('eval "rm -rf $TMPDIR/x"', /eval/);
+  // A delete anywhere it is not a statement of its own: counted, not judged.
+  notWithin('rm -rf $TMPDIR/x; ls / | xargs rm -rf', /xargs/);
+  notWithin('rm -rf $TMPDIR/x; echo $(rm -rf /c/Users/rydin)', /cannot judge/);
+  notWithin('rm -rf $TMPDIR/x; bash -c "rm -rf /"', /nested shell/);
+  notWithin('rm -rf $TMPDIR/x; bash -lc "rm -rf /"', /nested shell/);
+  notWithin('rm -rf $TMPDIR/x; git rm -r Assets', /cannot judge/);
+  notWithin('rm -rf $TMPDIR/x; find / -name x -delete', /find -delete/);
+  notWithin('rm -rf $TMPDIR/x; FOO=1 rm -rf /', /cannot judge/);
+  notWithin('rm -rf $TMPDIR/x; (rm -rf /c/x)', /cannot judge/);
+  notWithin('rm -rf $TMPDIR/x; /usr/bin/rm -rf /c/x', /not strictly inside/);
+  notWithin('rm -rf $TMPDIR/x; del /s /q C:\\x', /cannot judge/);
+  notWithin('rm -rf $TMPDIR/x; Remove-Item -Recurse C:\\Users\\rydin', /not strictly inside/);
+  notWithin('rm -rf $TMPDIR/x; echo "unbalanced', /unbalanced/);
+  notWithin('rm -rf $TMPDIR/x > $TMPDIR/y; rm -rf $TMPDIR/z', /redirect/);
+  notWithin(leg('rm -rf $TMPDIR/f1920'), undefined, { tmp: '/tmp', real: none }); // no temp folder of its own
+});
+
+test("w1097: the Git Bash spelling of the game's folder (/c/Users/...) is not cmd's /c", () => {
+  within(`D="${L}"; cp "$TMPDIR/s.json" "$D/UserData/settings/settings.json"; rm -f $TMPDIR/s.json`);
+});
+
+test("w1097: Claude Code's dangerous-rm reasons, as 2.1.284 words them, are recognised; other reasons are not", () => {
+  assert.match('Dangerous rm operation on possibly-empty variable path: $TMPDIR/*.log in `rm -f $TMPDIR/*.log` (use a literal path: $TMPDIR is normally set, so a guard would not stop this)', DANGEROUS_REMOVAL);
+  assert.match('Dangerous rm operation on critical path: /ffa-probe-nonexistent-q1', DANGEROUS_REMOVAL);
+  assert.doesNotMatch('This command uses shell operators that require approval for safety', DANGEROUS_REMOVAL);
+  assert.doesNotMatch('Shell expansion syntax in paths requires manual approval', DANGEROUS_REMOVAL);
 });

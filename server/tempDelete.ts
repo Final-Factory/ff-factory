@@ -41,7 +41,8 @@ const PS_PATH = new Set(['-path', '-literalpath']);
 
 const TMP_VAR = /^(?:\$env:(?:tmp|temp|tmpdir)|\$\{(?:tmp|temp|tmpdir)\}|\$(?:tmp|temp|tmpdir)|%(?:tmp|temp)%)(?=$|[\\/])/i;
 const HOME_VAR = /^(?:~|\$home|\$\{home\}|\$userprofile|\$\{userprofile\}|\$env:userprofile|\$env:home|%userprofile%)(?=$|[\\/])/i;
-const SAVES_DIR = /\/appdata\/locallow\/never games\/finalfactory[^/]*\/saves\/([^/*?]+)$/i;
+/** The game's saves folder: `UserData/saves` since the game's UserData layout (GameDataPaths.Saves), `saves` before it. */
+const SAVES_DIR = /\/appdata\/locallow\/never games\/finalfactory[^/]*\/(?:userdata\/)?saves\/([^/*?]+)$/i;
 
 interface Word {
   text: string;
@@ -157,7 +158,8 @@ export function tempOnlyDelete(cmd: string, ctx: TempDeleteContext): TempDeleteV
     let p = raw;
     const v = TMP_VAR.exec(p);
     if (v) p = tmpRaw + p.slice(v[0].length);
-    else if (/[$%`]/.test(p)) return `${raw} has a variable that is not the temp folder`;
+    // A variable after the folder (`$TMPDIR/$S`) could be empty (the folder itself) or `../..` (w1097).
+    if (/[$%`]/.test(v ? p.slice(tmpRaw.length) : p)) return `${raw} has a variable that is not the temp folder`;
     // A tilde expands only at the start of a word; one inside a path is a Windows short name (C:/Users/RUNNER~1/...).
     if (raw.startsWith('~')) return `${raw} has a ~`;
     const n = norm(p, drive);
@@ -260,3 +262,106 @@ export function tempOnlyDelete(cmd: string, ctx: TempDeleteContext): TempDeleteV
   if (!deletes) return no('no delete in it');
   return { ok: true };
 }
+
+/**
+ * The words that delete, as a command or a program name anywhere in the text (quotes included): each one must be a
+ * statement this file judges, or the command is not answered here.
+ */
+const DELETE_WORD = /(?:^|[\s;&|(){}`'"=/\\])(?:rm|rmdir|unlink|shred|del|erase|rd|ri|remove-item|rimraf|trash)(?:\.exe)?(?=$|[\s;&|(){}`'"])/gi;
+
+/** What a command must not hold for its deletes to be judged one by one: each could change what a judged delete removes. */
+const COMPOUND_REFUSED: [RegExp, string][] = [
+  // A name, not its expansion: `TMPDIR=/`, `export TMP`, `for TEMP in`, `$env:TMP = …`; `"$TMPDIR/x"` and `${TMPDIR}` are reads.
+  [/(?<![$\w{:])(?:TMPDIR|TMP|TEMP|PATH|BASH_ENV|ENV|CDPATH)\s*\+?=|\b(?:export|unset|declare|typeset|local|readonly|read|for)\b[^;&|\n]*(?<![$\w{:])(?:TMPDIR|TMP|TEMP|PATH)\b|\$env:(?:TMP|TEMP|TMPDIR|PATH)\s*=/i, 'it changes the temp folder variable or PATH'],
+  [/\b(?:eval|xargs|source|alias|enable|exec)\b|(?:^|[;&|\n]\s*)\.\s+\S/i, 'eval, xargs, source, alias or exec'],
+  [/\b(?:ln|mklink|subst|mount|junction)\b|-itemtype\s+['"]?(?:symboliclink|junction|hardlink)/i, 'it makes a link'],
+  [/(?:^|[\s;&|])-(?:delete|exec|execdir|ok)\b/i, 'find -delete or -exec'],
+  [/\b(?:function\s+(?:rm|rmdir|remove-item|ri|del|rd)\b|(?:rm|rmdir|del|rd)\s*\(\s*\))/i, 'it defines a function named like a delete'],
+  [/\b(?:sh|bash|zsh|dash|pwsh|powershell)(?:\.exe)?\s+(?:-\w+\s+)*-(?:\w*c|command|encodedcommand)\b|\bcmd(?:\.exe)?\s+\/[ck]\b/i, 'a nested shell'],
+];
+
+/** Comments removed: a `#` that starts a word outside quotes, to the end of its line. */
+function stripComments(cmd: string): string {
+  let out = '';
+  let q = '';
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (q) {
+      out += c;
+      if (c === q) q = '';
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      q = c;
+      out += c;
+    } else if (c === '#' && (i === 0 || /[\s;&|]/.test(cmd[i - 1]))) {
+      while (i < cmd.length && cmd[i] !== '\n') i++;
+      out += '\n';
+    } else out += c;
+  }
+  return out;
+}
+
+/** Simple statements: split at `;`, `&&`, `||`, `|`, `&` and newlines outside quotes (`2>&1` kept). `undefined`: an unbalanced quote. */
+function allStatements(cmd: string): string[] | undefined {
+  const out: string[] = [];
+  let cur = '';
+  let q = '';
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (q) {
+      cur += c;
+      if (c === q) q = '';
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      q = c;
+      cur += c;
+    } else if (c === ';' || c === '\n' || c === '\r' || c === '|' || (c === '&' && cmd[i - 1] !== '>' && cmd[i + 1] !== '>')) {
+      out.push(cur);
+      cur = '';
+      if ((c === '&' || c === '|') && cmd[i + 1] === c) i++;
+    } else cur += c;
+  }
+  if (q) return undefined;
+  out.push(cur);
+  return out.map((s) => s.trim()).filter(Boolean);
+}
+
+/** The shell keywords, openers and function headers a statement may start with before its command (`then rm …`, `run() { rm …`). */
+const LEADING = /^(?:(?:do|then|else|elif|if|while|until|time|!|\{|\()\s+|(?:function\s+)?[\w-]+\s*\(\s*\)\s*\{?\s*|function\s+[\w-]+\s*\{?\s+)+/;
+
+/**
+ * Whether every delete in a longer command (a test leg: a function, a loop, a copy, a script run and a delete of its own
+ * output folders) is one `tempOnlyDelete` allows (w1097, lothsahn, 2026-10-12: "Why did it do that, and how do we allow it
+ * to do what it just needed to do without a complex bash prompt?"). The session asks this only when Claude Code's own
+ * reason for asking is its dangerous-rm check and the session runs in bypass mode, where nothing else in the command
+ * would have been asked about: so the deletes are the whole question. Each statement whose command is a delete must pass
+ * `tempOnlyDelete` alone; every delete word anywhere in the text (inside quotes, `$(...)`, after `xargs`, a `git rm`)
+ * must be one of those statements; and the command may not change what such a delete removes (the temp folder variable,
+ * PATH, a link made first, a function named `rm`, eval, a nested shell). Anything else is asked as before.
+ */
+export function tempDeletesWithin(cmd: string, ctx: TempDeleteContext): TempDeleteVerdict {
+  if (cmd.length > 8000) return no('a long command');
+  const text = stripComments(cmd);
+  for (const [re, why] of COMPOUND_REFUSED) if (re.test(text)) return no(why);
+  const stmts = allStatements(text);
+  if (!stmts) return no('an unbalanced quote');
+  const mentions = [...text.matchAll(DELETE_WORD)].length;
+  let judged = 0;
+  for (const raw of stmts) {
+    const stmt = raw.replace(LEADING, '');
+    const verb = path.posix.basename(slash(stmt.split(/\s+/)[0] ?? '')).replace(/\.exe$/i, '').toLowerCase();
+    if (!RM_VERBS.has(verb) && !PS_VERBS.has(verb)) continue;
+    if (/[(){}]/.test(stmt.replace(/\{[^{}/]*\}/g, ''))) return no(`${stmt} has a parenthesis or a brace`);
+    const r = tempOnlyDelete(stmt, ctx);
+    if (!r.ok) return no(`${stmt}: ${r.why}`);
+    judged++;
+  }
+  if (!judged && !mentions) return no('no delete in it');
+  if (judged !== mentions) return no('a delete it cannot judge (inside quotes, a substitution, xargs, git rm, a path named rm)');
+  return { ok: true };
+}
+
+/** Claude Code's reason when its dangerous-removal check asks, in every mode (`Dangerous rm operation …`). */
+export const DANGEROUS_REMOVAL = /^Dangerous (?:rm|rmdir|remove-item|\S+) operation\b/i;
