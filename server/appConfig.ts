@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VOICE_DEFAULTS, pinnedVaultEntry, type ClaudeAccount, type Config, type IntakeConfig } from './config.ts';
+import { DEFAULT_CLEANUP, HOST_GUARD_DEFAULTS, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VOICE_DEFAULTS, pinnedVaultEntry, type ClaudeAccount, type Config, type IntakeConfig } from './config.ts';
 import { SECRET_KEYS, maskSecret } from './secrets.ts';
 import { FFBOX_HASH_FILE, ffboxTokenHash, secretsDirOf, writeFfboxTokenHash } from './configMigration.ts';
 import { vaultContext } from './vault.ts';
@@ -28,6 +28,9 @@ export const SETTABLE_KEYS = [
   'publicGitIdentity.email',
   // The host guard's housekeeping (docs/self-recovery.md), so it can be tuned without anyone at the desk.
   'hostGuard.devDriveVhdx',
+  // The portal's own disk levels (w1101): low (warn) and critical, in GB free; critical below warn. The machines' are their own.
+  'hostGuard.warnFreeGB',
+  'hostGuard.criticalFreeGB',
   'hostGuard.cleanup.ageRules',
   // The continuous clean-up's pace and soft threshold, on this host and on the machines (optional `machine`).
   'hostGuard.cleanup.everyMinutes',
@@ -440,9 +443,19 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return checkStaleOutput(key, value);
     case 'hostGuard.cleanup.softFreeGB':
     case 'machines.cleanup.softFreeGB': {
+      // The portal's at or below its warn level is fine (w1101: its default is warnFreeGB); above its critical level.
       const n = Number(value);
-      const floor = key === 'hostGuard.cleanup.softFreeGB' && cfg ? cfg.hostGuard.warnFreeGB + 1 : 10;
-      if (!Number.isInteger(n) || n < floor || n > 2000) throw new Error(`${key} is a whole number of GB from ${floor} to 2000${floor > 10 ? ' (above hostGuard.warnFreeGB, where new work is refused)' : ''}`);
+      const floor = key === 'hostGuard.cleanup.softFreeGB' && cfg ? Math.max(cfg.hostGuard.criticalFreeGB + 1, 5) : 10;
+      if (!Number.isInteger(n) || n < floor || n > 2000) throw new Error(`${key} is a whole number of GB from ${floor} to 2000${key === 'hostGuard.cleanup.softFreeGB' && cfg ? ' (above hostGuard.criticalFreeGB)' : ''}`);
+      return n;
+    }
+    case 'hostGuard.warnFreeGB':
+    case 'hostGuard.criticalFreeGB': {
+      // Critical stays below warn (w1101): the other one is the running config's.
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 2000) throw new Error(`${key} is a whole number of GB from 1 to 2000`);
+      if (cfg && key === 'hostGuard.warnFreeGB' && n <= cfg.hostGuard.criticalFreeGB) throw new Error(`${key} (${n}) must be above hostGuard.criticalFreeGB (${cfg.hostGuard.criticalFreeGB}): lower that first`);
+      if (cfg && key === 'hostGuard.criticalFreeGB' && n >= cfg.hostGuard.warnFreeGB) throw new Error(`${key} (${n}) must be below hostGuard.warnFreeGB (${cfg.hostGuard.warnFreeGB}): raise that first`);
       return n;
     }
     case 'providers.ffbox.enabled': {
@@ -694,6 +707,9 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;
   else if (key === 'hostGuard.cleanup.softFreeGB') cfg.hostGuard.cleanup.softFreeGB = (v as number | undefined) ?? DEFAULT_CLEANUP.softFreeGB;
+  // Live: the host guard reads its levels at every look (server/hostHealth.ts).
+  else if (key === 'hostGuard.warnFreeGB') cfg.hostGuard.warnFreeGB = (v as number | undefined) ?? HOST_GUARD_DEFAULTS.warnFreeGB;
+  else if (key === 'hostGuard.criticalFreeGB') cfg.hostGuard.criticalFreeGB = (v as number | undefined) ?? HOST_GUARD_DEFAULTS.criticalFreeGB;
   else if (key === 'machines.cleanup.everyMinutes' || key === 'machines.cleanup.softFreeGB') {
     const field = key === 'machines.cleanup.everyMinutes' ? 'everyMinutes' : 'softFreeGB';
     cfg.machines = { ...cfg.machines, cleanup: { ...cfg.machines?.cleanup, [field]: next as number | Record<string, number> | undefined } };

@@ -315,8 +315,8 @@ export interface Config {
    */
   dataGuard?: { retainDays?: number; gzipAtUsedPercent?: number; pruneAtUsedPercent?: number; alertAtUsedPercent?: number; gzipIdleHours?: number; everyMinutes?: number };
   /**
-   * The portal holds no sandboxes of its own (w510): this is the folder this host's own machine daemon keeps its
-   * sandboxes in (add_machine local takes it as its sandbox_root; BEAST's F:\ffsb), and the default parent of
+   * The portal holds no sandboxes of its own (w510): this is the folder a machine daemon on the portal's own host would keep
+   * its sandboxes in (add_machine local takes it as its sandbox_root; the portal's dedicated VM has none), and the default parent of
    * `review.root` and `standingRoot`. Optional (default <dataDir>/sandboxes).
    */
   sandboxRoot: string;
@@ -344,8 +344,8 @@ export interface Config {
   /** Base ref for new sandbox branches. */
   defaultBase: string;
   /**
-   * Extra volumes the host guard watches besides the data volume, e.g. "C:/" (on BEAST, also handed to its own daemon's
-   * guard, which watches its sandbox drive's host volume with it).
+   * Extra volumes the host guard watches besides the data volume, e.g. "C:/" (also handed to a daemon on the portal's own host,
+   * which watches its sandbox drive's host volume with it; the portal's dedicated VM runs none).
    */
   hostDiskPaths: string[];
   /** The disk guard and the sandbox drive's self-recovery (server/hostHealth.ts, docs/self-recovery.md). */
@@ -620,7 +620,7 @@ export function retiredKeysLine(keys: string[] | undefined): string | undefined 
 export interface CleanupPolicy {
   /** A clean-up pass this often (minutes; 0: only when free space is below softFreeGB). */
   everyMinutes: number;
-  /** Below this much free space: a pass every 15 minutes, including the rules that empty whole caches. 0: warnFreeGB + 40. */
+  /** Below this much free space: a pass every 15 minutes, including the rules that empty whole caches. 0: warnFreeGB (w1101). */
   softFreeGB: number;
   /** Folder name patterns in the temp folder that are scratch, removed when older than tempOlderThanHours. */
   tempPatterns: string[];
@@ -675,8 +675,12 @@ export const DEFAULT_CLEANUP: CleanupPolicy = {
   ageRules: [],
 };
 
-/** The soft threshold the host uses: softFreeGB, or warnFreeGB + 40 when unset. */
-export const hostSoftFreeGB = (g: Pick<HostGuardConfig, 'warnFreeGB' | 'cleanup'>) => g.cleanup.softFreeGB || g.warnFreeGB + 40;
+/**
+ * The soft threshold the portal's host uses: softFreeGB, or warnFreeGB when unset (w1101, lothsahn: "The portal should be
+ * considered to be low below 40GB free, not 120GB"). It was warnFreeGB + 40, for BEAST's sandbox drive; the portal's
+ * dedicated VM keeps no sandboxes, so its clean-up works hard only once it is low.
+ */
+export const hostSoftFreeGB = (g: Pick<HostGuardConfig, 'warnFreeGB' | 'cleanup'>) => g.cleanup.softFreeGB || g.warnFreeGB;
 
 /** A machine's clean-up when config machines.cleanup says nothing about it. */
 export const MACHINE_CLEANUP_DEFAULTS = { everyMinutes: 60, softFreeGB: 80 };
@@ -697,9 +701,9 @@ export function machineCleanupSettings(cfg: Pick<Config, 'machines'>, id: string
 export interface HostGuardConfig {
   /** How often the guard looks (seconds). 0 turns the whole guard off. */
   pollSeconds: number;
-  /** Below this much free space on any watched volume: notify, and refuse new editors and agent processes. */
+  /** Below this much free space on any watched volume: the portal is low; notify (and a daemon on this host refuses new editors and agents). */
   warnFreeGB: number;
-  /** Below this: also ask busy agents to checkpoint and end their turn, stop idle editors, and clean up. */
+  /** Below this: also a clean-up pass with every rule (and a daemon on this host stops idle editors). Below warnFreeGB. */
   criticalFreeGB: number;
   /** A level clears only this far above its threshold, so it does not flap. */
   hysteresisGB: number;
@@ -719,10 +723,15 @@ export interface HostGuardConfig {
   cleanup: CleanupPolicy;
 }
 
-const HOST_GUARD_DEFAULTS: HostGuardConfig = {
+/**
+ * The portal's own host guard (hostGuard.*; the machines' daemons have their own thresholds). Low below 40 GB and critical
+ * below 10 GB (w1101, lothsahn 2026-10-12: "The portal should be considered to be low below 40GB free, not 120GB" and
+ * "Critical level for the portal should be 10GB"): the portal's dedicated VM has a 115 GB disk and keeps no sandboxes.
+ */
+export const HOST_GUARD_DEFAULTS: HostGuardConfig = {
   pollSeconds: 30,
-  warnFreeGB: 80,
-  criticalFreeGB: 40,
+  warnFreeGB: 40,
+  criticalFreeGB: 10,
   hysteresisGB: 10,
   remountMinFreeGB: 30,
   devDriveVhdx: '',
