@@ -6,7 +6,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import net from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import type { Duplex } from 'node:stream';
@@ -266,13 +265,6 @@ test('dry run: intake, the ledger sweep, Max and the usage poll start no timer a
   assert.equal((usage as unknown as { started: boolean }).started, false);
 });
 
-async function freePort(): Promise<number> {
-  const s = net.createServer();
-  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
-  const port = (s.address() as net.AddressInfo).port;
-  await new Promise<void>((r) => s.close(() => r()));
-  return port;
-}
 
 test('dry run: the real server says so in its health and its log, turns away daemons and FFBox, and resumes, wakes and delivers nothing', { timeout: 120_000 }, async (t) => {
   const base = tmp(t, 'ffsb-dry-boot-');
@@ -283,13 +275,14 @@ test('dry run: the real server says so in its health and its log, turns away dae
   fs.mkdirSync(repo);
   execFileSync('git', ['init', '-q', '-b', 'develop'], { cwd: repo });
   execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: repo });
-  const port = await freePort();
+  // Port 0: the server takes the one the OS gives and says it in its log (w1095: a port picked and closed here could go to
+  // another test before the server bound it).
   // A made-up token-shaped value: the log must never show it.
   const fakeToken = `sk-ant-oat01-${'DryRunNotARealToken'.repeat(5)}`;
   fs.writeFileSync(
     path.join(base, 'config.json'),
     JSON.stringify({
-      port,
+      port: 0,
       host: '127.0.0.1',
       trustProxy: false,
       dataDir: data,
@@ -335,7 +328,8 @@ test('dry run: the real server says so in its health and its log, turns away dae
       await new Promise((r) => setTimeout(r, 100));
     }
   };
-  await until(new RegExp(`on http://127\\.0\\.0\\.1:${port}`), 60_000);
+  await until(/on http:\/\/127\.0\.0\.1:\d+ /, 60_000);
+  const port = Number(/on http:\/\/127\.0\.0\.1:(\d+) /.exec(log)![1]);
   assert.match(log, /!!!!!!!! DRY RUN \(FFSB_DRY_RUN=1\)\. Nothing here acts outside/);
   assert.match(log, /config\.json sets .*\bclaudeEnv, which nothing reads any more .*Ignored; remove them/, "w1078: a retired key is named and left in the file: a dry run's config is another portal's");
 

@@ -98,7 +98,8 @@ test('w643: machine, usage, lock, time and CI blockers: clear, open, and stuck p
   const ci = block({ kind: 'ci', ref: 'Final-Factory/ff-factory#205', what: "#205's checks" });
   assert.equal(blockerVerdict(ci, facts([], { ci: () => ({ done: false, text: '2 of 13 checks still running' }) })).state, 'open');
   assert.deepEqual(blockerVerdict(ci, facts([], { ci: () => ({ done: true, text: 'all passed' }) })), { state: 'clear', why: 'all passed' });
-  assert.equal(blockerVerdict({ ...ci, at: ago(6) }, facts([], { ci: () => ({ done: false, text: 'running' }) })).state, 'stuck', 'a hung run');
+  // w1094: a hung run wakes its worker to look, never a silent stall.
+  assert.deepEqual(blockerVerdict({ ...ci, at: ago(6) }, facts([], { ci: () => ({ done: false, text: 'running' }) })), { state: 'clear', why: 'running for 6 h: CI has not finished in 6 h, so its worker looks at it itself' });
 });
 
 test("w643: CI is done when no check is still running, or the PR merged or closed; failures are named", () => {

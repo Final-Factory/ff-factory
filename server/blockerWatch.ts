@@ -18,7 +18,7 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, gatesOf, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, gatesOf, RESUME_SWEEP_MS, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
@@ -41,7 +41,10 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 
 export interface BlockerWatchDeps {
   store: Store;
-  orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'>;
+  orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
+    Partial<Pick<Orchestrators, 'noteCiRead' | 'sweepResumes'>>;
+  /** Whether a message to a session waits in the send queue (for a sandbox, a slot or its machine): its resume is on its way (w1094). */
+  queued?: (sessionId: string) => boolean;
   /** The commit the portal runs. */
   portalSha?: () => string | undefined;
   /** The commit a machine's daemon runs. */
@@ -73,6 +76,10 @@ export class BlockerWatch {
   private busy = false;
   private again = false;
   private readonly ciSeen = new Map<string, { at: number; state?: CiState }>();
+  /** w1094: since when this portal has read each pull request's checks as finished. */
+  private readonly ciDoneAt = new Map<string, number>();
+  /** w1094: requests the sweep has said are still Blocked on finished CI ("<id>@<ref>"), so it says each once. */
+  private readonly swept = new Set<string>();
   /** w829: pull requests whose checks could not be read: since when, why, and when that was last logged. */
   private readonly ciFailing = new Map<string, { since: number; why: string; logged: number }>();
   private readonly healthSeen = new Map<string, { at: number; state?: PrHealth }>();
@@ -92,7 +99,9 @@ export class BlockerWatch {
   }
 
   start() {
-    void this.tick();
+    // The first look waits for the server's module to finish loading (w1094: run at once, it read the usage meters before
+    // they existed, "Cannot access 'usage' before initialization", and every restart lost its first look).
+    this.kick();
     this.timer = setInterval(() => void this.tick(), EVERY_MS);
     this.timer.unref?.();
     return this;
@@ -130,23 +139,56 @@ export class BlockerWatch {
           if ((g.kind === 'ci' || (g.kind === 'pr' && g.by.startsWith('worker '))) && !health.has(g.ref)) health.set(g.ref, await this.healthOf(g.ref, this.d.githubPerson?.(w)));
         }
       }
+      // w1094: what each pull request's checks say now, on its gates, so a gate still open says why in the ledger.
+      for (const [ref, state] of ci) if (state) this.d.orchestrators.noteCiRead?.(ref, state.text);
       const facts = this.facts(ci, pr, health);
       for (const w of blocked) {
-        const live = this.d.store.work.get(w.id);
-        if (!live || live.status !== 'blocked' || !live.blocked) continue;
-        // Every gate (w754): the request starts only when all have cleared. One that is stuck or closed without delivering
-        // decides it at once; the cleared ones are dropped as they clear.
-        const gates = gatesOf(live).map((g) => ({ g, v: blockerVerdict(g, facts) }));
-        const bad = gates.find((x) => x.v.state === 'stuck') ?? gates.find((x) => x.v.state === 'decide');
-        const cleared = gates.filter((x) => x.v.state === 'clear');
-        if (bad?.v.state === 'stuck') this.d.orchestrators.blockerStuck(live.id, bad.v.why, bad.g);
-        else if (bad) this.d.orchestrators.blockerDecide(live.id, bad.v.why, bad.g);
-        else if (cleared.length === gates.length) this.d.orchestrators.unblock(live.id, cleared.map((x) => x.v.why).join('; '));
-        else if (cleared.length) this.d.orchestrators.gatesCleared(live.id, cleared.map((x) => x.g), cleared.map((x) => x.v.why).join('; '));
-        else continue;
-        const was = bad ?? cleared[0];
-        did.set(live.id, `${bad ? was.v.state : 'clear'}: ${(bad ? [bad] : cleared).map((x) => x.v.why).join('; ')}`);
+        // One request that throws does not hold up the others (w1094: a throw ended the whole look).
+        try {
+          const live = this.d.store.work.get(w.id);
+          if (!live || live.status !== 'blocked' || !live.blocked) continue;
+          // Every gate (w754): the request starts only when all have cleared. One that is stuck or closed without delivering
+          // decides it at once; the cleared ones are dropped as they clear.
+          const gates = gatesOf(live).map((g) => ({ g, v: blockerVerdict(g, facts) }));
+          const bad = gates.find((x) => x.v.state === 'stuck') ?? gates.find((x) => x.v.state === 'decide');
+          const cleared = gates.filter((x) => x.v.state === 'clear');
+          if (bad?.v.state === 'stuck') this.d.orchestrators.blockerStuck(live.id, bad.v.why, bad.g);
+          else if (bad) this.d.orchestrators.blockerDecide(live.id, bad.v.why, bad.g);
+          else if (cleared.length === gates.length) this.d.orchestrators.unblock(live.id, cleared.map((x) => x.v.why).join('; '));
+          else if (cleared.length) this.d.orchestrators.gatesCleared(live.id, cleared.map((x) => x.g), cleared.map((x) => x.v.why).join('; '));
+          else continue;
+          const was = bad ?? cleared[0];
+          did.set(live.id, `${bad ? was.v.state : 'clear'}: ${(bad ? [bad] : cleared).map((x) => x.v.why).join('; ')}`);
+        } catch (e) {
+          console.warn(`blocker watch: ${w.id}: ${(e as Error).message}`);
+        }
       }
+      // w1094, the backstop: a request still Blocked on CI that finished more than RESUME_SWEEP_MS ago (the clearing above
+      // threw for it) is said loudly, once, and its CI gate is cleared again.
+      const now = this.now();
+      for (const [ref, state] of ci) {
+        if (!state?.done) this.ciDoneAt.delete(ref);
+        else if (!this.ciDoneAt.has(ref)) this.ciDoneAt.set(ref, now);
+      }
+      for (const w of this.d.store.work.values()) {
+        if (w.status !== 'blocked') continue;
+        const g = gatesOf(w).find((x) => x.kind === 'ci' && x.ref && now - (this.ciDoneAt.get(x.ref) ?? now) >= RESUME_SWEEP_MS);
+        if (!g) continue;
+        const text = ci.get(g.ref!)?.text ?? `CI on ${g.ref} finished`;
+        const key = `${w.id}@${g.ref}`;
+        if (!this.swept.has(key)) console.warn(`blocker watch: SWEEP: ${w.id} is still Blocked on CI on ${g.ref}, which finished ${Math.round((now - this.ciDoneAt.get(g.ref!)!) / 60_000)} min ago (${text}); clearing it again`);
+        this.swept.add(key);
+        try {
+          if (gatesOf(w).length === 1) this.d.orchestrators.unblock(w.id, text);
+          else this.d.orchestrators.gatesCleared(w.id, [g], text);
+          did.set(w.id, `sweep: cleared CI that finished: ${text}`);
+        } catch (e) {
+          console.warn(`blocker watch: SWEEP: ${w.id}: ${(e as Error).message}`);
+        }
+      }
+      // w1094: a worker a gate's clearing resumed that never took the message is resumed again (Orchestrators.sweepResumes).
+      const swept = this.d.orchestrators.sweepResumes?.((sid) => this.d.queued?.(sid) ?? false);
+      if (swept) for (const [id, what] of swept) did.set(id, `sweep: ${what}`);
       // Conditional decisions (w830): a person's "close it once #1314 merges", carried out or dropped when the fact is met.
       const decided = [...this.d.store.work.values()].filter((w) => w.conditional?.length);
       for (const w of decided) for (const c of w.conditional!) if (c.when.kind !== 'request_done' && !pr.has(c.when.ref)) pr.set(c.when.ref, await this.prOf(c.when.ref));

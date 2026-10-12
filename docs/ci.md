@@ -62,6 +62,15 @@ get the whole check. No git hook is installed: a sandbox is a worktree, so a hoo
 worktree and the person's own clone share, and would run on pushes nobody asked it for. `scripts/prepush.test.ts` plants a
 shellcheck finding, a fake key and a personal email, and fails if the check misses any.
 
+## Ports in tests
+
+`node --test` runs the test files in parallel, so a port one test frees goes to the next one that asks. A server a test
+starts listens on port 0 and reads its port back (`server.address()`); a portal it spawns does the same with `port: 0` in
+its config and says the port in its log ("on http://127.0.0.1:<port> ", `server/index.ts`). A port that must be known
+before the process starts, or kept across its restarts, comes from `reservePort` (`server/testPorts.ts`): below the OS's
+ephemeral range, locked per process, checked free. Never listen on 0, close, and hand the number on: that is how
+`crashRecovery.test.ts` died with EADDRINUSE on PR #335 (w1095). `server/testPorts.test.ts` fails on that pattern.
+
 ## Measuring
 
 - The runs list caps a search at 1,000 results: `actions/runs?created=>=DATE` silently stops there (it reached back only

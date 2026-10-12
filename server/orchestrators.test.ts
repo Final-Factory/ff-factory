@@ -2335,8 +2335,9 @@ test("w829: w814 as it happened: the dispatcher blocks a worker on CI and cancel
   assert.equal(w1().blocked, undefined);
   const back = agents.waker.pending(id)!;
   assert.ok(Date.parse(back.at) - Date.now() <= 61_000, 'fires within a minute');
-  assert.match(back.note, /^w1 is unblocked: CI on Final-Factory\/FinalFactory#1338 cleared \(FF Factory could not read CI on .* so its worker checks CI itself\)\. This is your own check-in, which the block cancelled; carry on from it\. Its note was: w1: merge #1338 when Test in editmode is green$/);
-  assert.ok(w1().log.at(-1)!.includes(` unblocked (handed back ${id}'s check-in, which resumes it now): CI on Final-Factory/FinalFactory#1338 cleared (FF Factory could not read CI`), w1().log.at(-1)!);
+  // w1094: the gate's owner is resumed with what to do, its own check-in folded in.
+  assert.match(back.note, /^w1 is unblocked: CI on Final-Factory\/FinalFactory#1338 cleared \(FF Factory could not read CI on .* so its worker checks CI itself\)\. Read its checks now \(gh pr checks Final-Factory\/FinalFactory#1338\): merge on green, fix on red\. Carry on from where you left it\. Your own check-in, which the block cancelled, is folded into this message; its note was: w1: merge #1338 when Test in editmode is green$/);
+  assert.ok(w1().log.at(-1)!.includes(` unblocked (its worker ${id} resumes within a minute): CI on Final-Factory/FinalFactory#1338 cleared (FF Factory could not read CI`), w1().log.at(-1)!);
   await new Promise((r) => setTimeout(r, 200));
   assert.equal(heard(dispatcher().info.id, '[ledger] w1').length, 0);
 
@@ -2397,12 +2398,12 @@ test('w846: a worker blocks on its own PR\'s CI (blocked_on prs "ci:…"); while
     assert.equal(w.status, 'active');
     const wake = agents.waker.pending(id)!;
     assert.ok(Date.parse(wake.at) - Date.now() <= 61_000, 'within a minute');
-    // w1 had polled: its own check-in comes back (w829). w2 had none: it is resumed all the same (w846).
+    // w1 had polled: its own check-in is folded into the resume (w829, w1094). w2 had none: it is resumed all the same (w846).
     if (wid === 'w1') {
-      assert.equal(wake.note, `${wid} is unblocked: CI on ${pr} cleared (${result.text}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${wid}: check CI on ${pr}`);
-      assert.ok(w.log.at(-1)!.includes(`unblocked (handed back ${id}'s check-in, which resumes it now): CI on ${pr} cleared`), w.log.at(-1)!);
+      assert.equal(wake.note, `${wid} is unblocked: CI on ${pr} cleared (${result.text}). Read its checks now (gh pr checks ${pr}): merge on green, fix on red. Carry on from where you left it. Your own check-in, which the block cancelled, is folded into this message; its note was: ${wid}: check CI on ${pr}`);
+      assert.ok(w.log.at(-1)!.includes(`unblocked (its worker ${id} resumes within a minute): CI on ${pr} cleared`), w.log.at(-1)!);
     } else {
-      assert.equal(wake.note, `${wid} is unblocked: CI on ${pr} cleared (${result.text}). Read its checks now (gh pr checks): merge on green, fix on red. Carry on from where you left it.`);
+      assert.equal(wake.note, `${wid} is unblocked: CI on ${pr} cleared (${result.text}). Read its checks now (gh pr checks ${pr}): merge on green, fix on red. Carry on from where you left it.`);
       assert.ok(w.log.at(-1)!.includes(`unblocked (its worker ${id} resumes within a minute): CI on ${pr} cleared`), w.log.at(-1)!);
     }
     assert.equal(agents.ciWait(info), undefined);
@@ -2497,8 +2498,8 @@ test('w754: a worker whose request waits only on a PR and another request calls 
   // itself and the request is its again, with no dispatcher round trip.
   assert.equal(store.work.get('w2')!.status, 'active');
   assert.equal(store.work.get('w2')!.heldCheckIns, undefined);
-  assert.equal(agents.waker.pending(id)?.note, "w2 is unblocked: w1 finishing cleared (w1 closed as done). This is your own check-in, which the block cancelled; carry on from it. Its note was: w2: again");
-  assert.ok(store.work.get('w2')!.log.at(-1)!.endsWith(`unblocked (handed back ${id}'s check-in, which resumes it now): w1 finishing cleared (w1 closed as done)`), store.work.get('w2')!.log.at(-1)!);
+  assert.equal(agents.waker.pending(id)?.note, 'w2 is unblocked: w1 finishing cleared (w1 closed as done). Carry on from where you left it. Your own check-in, which the block cancelled, is folded into this message; its note was: w2: again');
+  assert.ok(store.work.get('w2')!.log.at(-1)!.endsWith(`unblocked (its worker ${id} resumes within a minute): w1 finishing cleared (w1 closed as done)`), store.work.get('w2')!.log.at(-1)!);
   await new Promise((r) => setTimeout(r, 200));
   assert.equal(heard(dispatcher().info.id, '[ledger] w2').length, 0, 'the dispatcher is not asked to start it as well');
   // A message to the worker goes through, with no override: nothing is gated any more.
@@ -2805,4 +2806,224 @@ test('w1099: the capacity ping and the queued-with-room flag list queued request
   });
   const ids = ['s5', 's2', 's4', 's1', 's3'].map((id) => ({ id }) as SessionInfo).sort((a, b) => agents.resumeOrder(a, b)).map((x) => x.id);
   assert.deepEqual(ids, ['s3', 's1', 's2', 's4', 's5']);
+});
+
+// ---------------------------------------------------------------- w1094: a gate's clearing reaches the worker that set it
+
+/** A second worker on request `wid` (w1049: the bug-5 and bug-6 workers shared one request), linked after the first. */
+async function secondWorkerOn(env: Awaited<ReturnType<typeof setupOnMachine>>, wid: string) {
+  const b = await startedFor(env, `${wid}x`, { override_duplicate: 'another bug of the same request' });
+  const w = env.store.work.get(wid)!;
+  w.sessionIds = [...w.sessionIds, b.id];
+  w.links = { ...w.links, [b.id]: { at: new Date(Date.now() + 1000).toISOString(), how: 'sent' } };
+  env.store.putWork(w);
+  const x = env.store.work.get(`${wid}x`)!;
+  x.status = 'done';
+  env.store.putWork(x);
+  return b;
+}
+
+test('w1094: w1049 as it happened: the worker that set a ci: gate keeps its request while another, newer worker waits on Ben; CI finishing resumes the setter, not the newer one, whose own check-in stays its', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w1x' }]);
+  const pr = 'Final-Factory/FinalFactory#1507';
+  let checks: { done: boolean; text: string } = { done: false, text: `1 of 1 workflow runs on ${pr} still running (Test Runner)` };
+  let clock = Date.now();
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, ci: async () => checks });
+  // 0b5f813d (a) works bug 5 on w1049; 39772f0c (b) is linked after it for bug 6 and waits on Ben with a check-in.
+  const a = await startedFor(env, 'w1');
+  const b = await secondWorkerOn(env, 'w1');
+  assert.equal(store.work.get('w1')!.sessionIds.at(-1), b.id, 'b is the newest worker on it');
+  await b.h.wake_me!({ minutes: 120, note: 'w1: ask Ben again about bug 6' });
+  assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], what: 'CI on PR #1507 (bug 5)' })), /^Recorded: w1 is Blocked on CI on/);
+  assert.equal(agents.waker.pending(b.id)?.note, 'w1: ask Ben again about bug 6', "a's gate does not cancel b's own check-in");
+  // The release pass: a waits on CI (its sandbox may go and it is placed again); its work is not "with another worker now".
+  assert.equal(agents.workOver(a.info), undefined, 'the bug: "its request is with another worker now (w1049: 39772f0c)"');
+  assert.equal(agents.ciWait(a.info), `it waits on CI (w1: CI on ${pr})`);
+  assert.equal(agents.ciWait(b.info), undefined, "a's CI is not b's wait");
+  // While it runs, the ledger says what the checks say.
+  await watch.tick();
+  assert.equal(store.work.get('w1')!.blocked!.read!.text, checks.text);
+  assert.match(agents.workLive().get('w1')!.why, /last read: 1 of 1 workflow runs on Final-Factory\/FinalFactory#1507 still running \(Test Runner\) \(0 min ago\)$/);
+  // CI finishes: a is resumed with the hint, b keeps its own check-in.
+  checks = { done: true, text: `CI on ${pr} finished: all 1 workflow runs passed or skipped` };
+  clock += 3 * 60_000;
+  assert.equal((await watch.tick()).get('w1'), `clear: ${checks.text}`);
+  const w = store.work.get('w1')!;
+  assert.equal(w.status, 'active');
+  assert.equal(agents.waker.pending(a.id)?.note, `w1 is unblocked: CI on ${pr} cleared (${checks.text}). Read its checks now (gh pr checks ${pr}): merge on green, fix on red. Carry on from where you left it.`);
+  assert.equal(agents.waker.pending(b.id)?.note, 'w1: ask Ben again about bug 6');
+  assert.ok(w.log.at(-1)!.includes(`unblocked (its worker ${a.id} resumes within a minute)`), w.log.at(-1)!);
+  assert.deepEqual(w.gateResumes?.map((r) => r.session), [a.id], 'recorded for the sweep');
+  agents.waker.cancel(a.id);
+  agents.waker.cancel(b.id);
+});
+
+test('w1094: the worker that set a ci: gate is gone: the newest worker is resumed and told the merge is its now', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w1x' }]);
+  const pr = 'Final-Factory/FinalFactory#1507';
+  let checks = { done: false, text: 'running' };
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks });
+  const a = await startedFor(env, 'w1');
+  const b = await secondWorkerOn(env, 'w1');
+  await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], what: 'CI on PR #1507' });
+  await watch.tick();
+  store.sessions.delete(a.id);
+  checks = { done: true, text: `CI on ${pr} finished: all 1 workflow runs passed or skipped` };
+  (watch as unknown as { ciSeen: Map<string, unknown> }).ciSeen.clear();
+  await watch.tick();
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.equal(agents.waker.pending(b.id)?.note, `w1 is unblocked: CI on ${pr} cleared (${checks.text}). Worker ${a.id} set this gate and is gone, so the merge of ${pr} is yours now: you own it (merge on green, fix on red). Read its checks now (gh pr checks ${pr}): merge on green, fix on red. Carry on from where you left it.`);
+  agents.waker.cancel(b.id);
+});
+
+test('w1094: a worker sent a second request still registers a wait for the first (7d8eebb0: w1078 after w1095); without request it blocks the one it serves now', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  const a = await startedFor(env, 'w1');
+  // The dispatcher sends it w2 (as message_agent does when it keeps the session), a moment later.
+  await new Promise((r) => setTimeout(r, 5));
+  env.o.linkWorker('w2', a.info, 'sent to worker, already in its sandbox');
+  const pr = 'Final-Factory/ff-factory#335';
+  assert.match(String(await a.h.blocked_on!({ request: 'w1', prs: [`ci:${pr}`], what: 'CI on #335' })), /^Recorded: w1 is Blocked on CI on Final-Factory\/ff-factory#335\./);
+  assert.deepEqual([store.work.get('w1')!.status, store.work.get('w1')!.blocked?.by], ['blocked', `worker ${a.id}`]);
+  assert.equal(store.work.get('w2')!.status, 'active');
+  await assert.rejects(async () => a.h.blocked_on!({ request: 'w9', prs: [`ci:${pr}`], what: 'x' }), /you are not on w9 \(you hold w1, w2\)/);
+  assert.match(String(await a.h.blocked_on!({ prs: ['Final-Factory/ff-factory#336'], what: 'the flake fix merged' })), /^Recorded: w2 is Blocked on PR/);
+});
+
+test('w1094: the sweep resumes again, loudly, a worker whose resume was lost (no check-in pending, no message queued, nothing in its transcript), and stops once its transcript shows it', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  const pr = 'Final-Factory/FinalFactory#1526';
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => ({ done: true, text: `CI on ${pr} finished: all 1 workflow runs passed or skipped` }), queued: () => false });
+  const a = await startedFor(env, 'w1');
+  await a.h.blocked_on!({ prs: [`ci:${pr}`], what: 'CI on #1526' });
+  await watch.tick();
+  const note = agents.waker.pending(a.id)!.note;
+  // Lost: the check-in that carries it is gone (a restart that dropped it, a delivery that gave up).
+  agents.waker.cancel(a.id);
+  assert.equal((await watch.tick()).has('w1'), false, 'within 5 minutes nothing is done');
+  const w = store.work.get('w1')!;
+  w.gateResumes = w.gateResumes!.map((r) => ({ ...r, at: new Date(Date.now() - 6 * 60_000).toISOString() }));
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (...x: unknown[]) => void warned.push(x.join(' '));
+  try {
+    assert.equal((await watch.tick()).get('w1'), `sweep: resumed ${a.id} again`);
+  } finally {
+    console.warn = warn;
+  }
+  assert.ok(warned.some((l) => l.startsWith(`ledger: SWEEP: w1: worker ${a.id} was resumed 6 min ago when its gate cleared and has not taken it`)), warned.join(' | '));
+  assert.equal(agents.waker.pending(a.id)?.note, note);
+  assert.equal(store.work.get('w1')!.gateResumes![0].tries, 2);
+  // A check-in pending or a message queued for it is on its way: left alone.
+  store.work.get('w1')!.gateResumes = store.work.get('w1')!.gateResumes!.map((r) => ({ ...r, at: new Date(Date.now() - 6 * 60_000).toISOString() }));
+  assert.equal((await watch.tick()).has('w1'), false, 'its check-in is pending');
+  // Delivered (as the waker sends it, through the machine's daemon): its transcript has it, and the record goes.
+  agents.waker.cancel(a.id);
+  env.sessions.send(a.id, `[wake_me] Time is up. Your note: ${note}`, 'system');
+  await until('the resume in its transcript', () => store.readTranscript(a.id).some((e) => e.kind === 'user' && e.text.includes(note)));
+  await until('its turn ends', () => a.info.status === 'idle');
+  await watch.tick();
+  assert.equal(store.work.get('w1')!.gateResumes, undefined);
+});
+
+test('w1094: a block that ends by stalling or by a question hands back the check-ins it held', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, dispatcher, call } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  await a.h.wake_me!({ minutes: 30, note: 'w1: look at the nightly' });
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'x', blocker: { kind: 'request', ref: 'w2', what: 'w2 first' } })).isError, false);
+  assert.equal(agents.waker.pending(a.id), undefined);
+  store.work.get('w2')!.status = 'cancelled';
+  await new BlockerWatch({ store, orchestrators: o }).tick();
+  assert.equal(store.work.get('w1')!.status, 'question');
+  assert.match(agents.waker.pending(a.id)!.note, /^w1's block ended \(blocker closed without delivering: .*\)\. This is your own check-in, which the block cancelled; carry on from it\. Its note was: w1: look at the nightly$/);
+  agents.waker.cancel(a.id);
+});
+
+test('w1094: one request that throws does not hold up the others, and the first look waits for the server to finish loading', async () => {
+  const past = new Date(Date.now() - 60_000).toISOString();
+  const item = (id: string) => ({ id, status: 'blocked', blocked: { kind: 'time', until: past, what: 'a time', at: past, by: 'dispatcher' } }) as unknown as WorkItem;
+  const work = new Map([['w1', item('w1')], ['w2', item('w2')]]);
+  const unblocked: string[] = [];
+  const orchestrators = {
+    unblock: (id: string) => {
+      if (id === 'w1') throw new Error('boom');
+      unblocked.push(id);
+    },
+  } as unknown as ConstructorParameters<typeof BlockerWatch>[0]['orchestrators'];
+  const warn = console.warn;
+  const warned: string[] = [];
+  console.warn = (...x: unknown[]) => void warned.push(x.join(' '));
+  try {
+    const did = await new BlockerWatch({ store: { work } as unknown as Store, orchestrators }).tick();
+    assert.deepEqual(unblocked, ['w2']);
+    assert.equal(did.get('w2'), 'clear: it is past ' + `${past.slice(11, 16)} UTC`);
+    assert.ok(warned.includes('blocker watch: w1: boom'), warned.join(' | '));
+  } finally {
+    console.warn = warn;
+  }
+  // start(): nothing is read before the module that starts it has finished (index.ts declares the usage meters later).
+  let read = false;
+  const lazy = { get work() {
+    read = true;
+    return new Map();
+  } } as unknown as Store;
+  const watch = new BlockerWatch({ store: lazy, orchestrators }).start();
+  assert.equal(read, false);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(read, true);
+  watch.close();
+});
+
+test('w1094: the backstop: a request still Blocked on CI that finished over 5 minutes ago (its clearing threw) is said loudly, once, and cleared again', async () => {
+  const at = new Date().toISOString();
+  const pr = 'Final-Factory/ff-factory#335';
+  const w = { id: 'w1', status: 'blocked', blocked: { kind: 'ci', ref: pr, what: 'CI on #335', at, by: 'worker a' } } as unknown as WorkItem;
+  const work = new Map([['w1', w]]);
+  let fail = true;
+  const cleared: string[] = [];
+  const orchestrators = {
+    unblock: (id: string, why: string) => {
+      if (fail) throw new Error('boom');
+      cleared.push(`${id}: ${why}`);
+      w.status = 'active';
+    },
+  } as unknown as ConstructorParameters<typeof BlockerWatch>[0]['orchestrators'];
+  let clock = Date.now();
+  const text = `CI on ${pr} finished: all 3 workflow runs passed or skipped`;
+  const watch = new BlockerWatch({ store: { work } as unknown as Store, orchestrators, now: () => clock, ci: async () => ({ done: true, text }) });
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (...x: unknown[]) => void warned.push(x.join(' '));
+  try {
+    await watch.tick();
+    clock += 3 * 60_000;
+    await watch.tick();
+    assert.equal(warned.filter((l) => l.includes('SWEEP')).length, 0, 'not yet 5 minutes');
+    clock += 3 * 60_000;
+    await watch.tick();
+    clock += 60_000;
+    await watch.tick();
+    assert.equal(warned.filter((l) => l.startsWith('blocker watch: SWEEP: w1 is still Blocked on CI on Final-Factory/ff-factory#335, which finished 6 min ago')).length, 1, warned.join(' | '));
+    fail = false;
+    clock += 60_000;
+    assert.equal((await watch.tick()).get('w1'), `clear: ${text}`);
+    assert.deepEqual(cleared, [`w1: ${text}`]);
+  } finally {
+    console.warn = warn;
+  }
 });

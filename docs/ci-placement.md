@@ -10,11 +10,11 @@ Windows, macOS, root, systemd or KVM stays hosted.
 | `ci.yml` `e2e` (Playwright, Chromium and WebKit, 3 shards) | FFBox | Linux, Node, the browsers in the image |
 | `ci.yml` `secrets` (gitleaks), `identity` (noreply emails) | FFBox | Linux, git |
 | `vm-scripts.yml` `plan` | FFBox | reads `git diff`; no API |
+| `rerun-lost-runner.yml` `rerun` (w1102) | FFBox | needs the API, which the host makes for it (below) |
 | `ci.yml` `ops-socket` (w638) | hosted `ubuntu-latest` | `sudo` and a running systemd |
 | `vm-scripts.yml` `lint`, `e2e` | hosted | root, systemd, libvirt, KVM (the end-to-end jobs nest a VM) |
 | `windows.yml`, `dev-drive.yml`, `worker-update.yml` (Windows) | hosted `windows-latest` | Windows |
 | `worker-update.yml` (macOS) | hosted `macos-latest` | macOS |
-| `rerun-lost-runner.yml` | hosted | it re-runs hosted Windows jobs GitHub lost, through the API |
 
 ## What a job on FFBox can and cannot do
 
@@ -23,6 +23,12 @@ A runner container is single-use, runs as root with every capability dropped, an
 - **Reaches from outside:** the npm registry and GitHub's Actions service. **Never `github.com` or `api.github.com`**: an
   SNI fence cannot limit those to one repository, so one POST to `/gists` with a credential lifted out of a test would
   leave through it. A job that needs a fact from GitHub asks the host (ffbox `scripts/ci_lane.py` `serve_github`).
+- **A job that must act on GitHub's API hands the call to the host** (w1102). `rerun-lost-runner.yml` writes its own
+  `GITHUB_TOKEN` (`actions: write` on this repository, gone when the job ends), the run id and the repository into
+  `/ffghr/out/rerun.request` and waits for `rerun.done`; the host (ffbox `scripts/ci_lane.py` `serve_rerun_lost`) makes the
+  four fixed calls with that token (list the run's jobs, read their annotations and logs, re-run the failed jobs). The
+  job's token gives the host no more than the job already had, which is why this is not a hole in the fence. The decision
+  logic, with its tests, lives in ffbox now.
 - **The checkout** comes from the host's mirror of this repository: `/opt/ffghr/ffghr-workspace.sh use-mirror "$sha"`,
   then `actions/checkout`, pinned by commit SHA (the image carries the archive of exactly that commit and cannot download
   any other action).
@@ -62,7 +68,7 @@ None of this moved. What each would need:
   a dedicated machine with `/dev/kvm`, registered as a runner with a label of its own, and a way to give each run an empty
   disk. The nightly production-timing job needs the same machine for about 50 minutes.
 - **`ops-socket`** could join `vm-scripts.yml`'s `lint` on that machine.
-- **`rerun-lost-runner.yml`** is about hosted Windows runners GitHub loses; it goes when those do.
+- **`rerun-lost-runner.yml`** re-runs the hosted Windows jobs GitHub loses; it goes when those do.
 
 ## Notes for the next person
 

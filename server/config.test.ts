@@ -38,7 +38,8 @@ test('loadConfig: defaults fill what the file leaves out, nested objects merge',
   assert.deepEqual(cfg.limits, { minFreeRamGB: 4 });
   assert.deepEqual(cfg.unity, { idleStopMinutes: 60 });
   assert.deepEqual(cfg.retiredKeys, []);
-  assert.equal(cfg.hostGuard.warnFreeGB, 80);
+  assert.equal(cfg.hostGuard.warnFreeGB, 40, 'the portal is low below 40 GB (w1101)');
+  assert.equal(cfg.hostGuard.criticalFreeGB, 10, 'and critical below 10 GB (w1101)');
   assert.ok(cfg.hostGuard.cleanup.tempPatterns.includes('edge-shot-*'));
   assert.equal(cfg.voice.model, 'small.en');
   assert.equal(cfg.voice.tts, VOICE_DEFAULTS.tts);
