@@ -23,6 +23,10 @@ import type { Config } from './config.ts';
 import type { GitStatus, Requester, ServerEvent, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachine } from './testMachine.ts';
+import { useFakeVault } from './testVault.ts';
+
+// Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
+useFakeVault();
 
 /**
  * FFBox dev requests (docs/ffbox.md, "Dev requests"), end to end through a real ProviderManager socket, Agents with the
@@ -393,9 +397,11 @@ test('rate limit: providers.ffbox.devRequests.perHour per person', async (t) => 
 
 test('dedup: covered by an open batch request whose scope holds the channel and window; the worker gets the note and the files', async (t) => {
   const { connect, call, chat, store, alpha, dispatcher, heard } = await setupOnMachine(t);
-  const ben = chat(BEN);
-  ben.lastFrom = 'human';
-  const r = await call(ben.info, 'request_work', {
+  // Lothsahn's own batch: a worker runs on its requests' person's Claude tokens (w1076), so a follow-up from another person would
+  // first restart it on theirs instead of reaching it mid-turn.
+  const owner = chat(LOTH);
+  owner.lastFrom = 'human';
+  const r = await call(owner.info, 'request_work', {
     title: 'Triage the bug reports since October 1',
     brief: 'Go through every new #bug-reports thread since 2026-10-01 and fix what is obvious.',
     scope: { source: 'discord', channel: 'bug_reports', since: '2026-10-01T00:00:00Z' },
@@ -432,7 +438,7 @@ test('dedup: covered by an open batch request whose scope holds the channel and 
   const after = store.work.get(batch.id)!;
   assert.equal(store.work.size, 1, 'nothing new filed');
   assert.ok(after.keys.includes(`discord:${thread}`), 'the thread is its key now');
-  assert.ok(after.requesters.some((x) => x.userId === 'lothsahn'), 'Lothsahn joins it');
+  assert.ok(after.requesters.some((x) => x.userId === 'lothsahn'), 'Lothsahn is on it');
   assert.equal(after.attachments?.length, 1);
   assert.equal(after.ffboxDev?.[0].outcome, 'covered');
   assert.ok(after.log.some((l) => l.includes('FFBox dev request dev-scope from lothsahn (Lothsahn) joins it (inside its scope')));

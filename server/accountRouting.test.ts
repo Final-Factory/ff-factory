@@ -339,7 +339,6 @@ test('Discord by person: Ben\'s own request runs for Ben, lothsahn\'s for lothsa
 const claudeTok = (c: string) => `sk-ant-oat01-${c.repeat(48)}`;
 const B1 = claudeTok('b');
 const L1 = claudeTok('d');
-const HOST = claudeTok('g');
 
 function vaultOf(t: { after: (fn: () => void) => void }, key: () => KeySource | undefined = () => undefined) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-route-v-'));
@@ -359,9 +358,9 @@ const ctxOf = (v: Vault): VaultContext & { problems: string[]; missing: string[]
   const missing: string[] = [];
   return { vault: v, payer: () => 'ben', onProblem: (l) => problems.push(l), onGithubMissing: (p, m) => missing.push(`${p}@${m}`), problems, missing, limits: () => poolLimits(undefined), now: () => Date.parse('2026-10-11T12:00:00Z') };
 };
-const cfgOf = (extra: Record<string, unknown> = {}) => ({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST }, userClaudeEnv: {}, machines: { claudeFromVault: true }, ...extra }) as never;
+const cfgOf = (extra: Record<string, unknown> = {}) => ({ machines: {}, ...extra }) as never;
 
-test("routing reaches the process: an intake or taken-over request starts on lothsahn's pool, never the host token or ben's", (t) => {
+test("routing reaches the process: an intake or taken-over request starts on lothsahn's pool, never another credential or ben's", (t) => {
   const { v } = vaultOf(t);
   const ctx = ctxOf(v);
   // requested by ben (the system payer), routed to lothsahn by the intake default or by lothsahn's action
@@ -373,14 +372,14 @@ test("routing reaches the process: an intake or taken-over request starts on lot
   assert.equal(benRun.env.CLAUDE_CODE_OAUTH_TOKEN, B1);
 });
 
-test("no fallback to the host token: a person with a pool whose tokens the vault cannot give waits, and the claim holds for lothsahn's work", (t) => {
+test("no fallback (w1078): a person with a pool whose tokens the vault cannot give waits, and the claim holds for lothsahn's work", (t) => {
   const { v, make } = vaultOf(t);
   // the vault key is gone: the entries exist but nothing opens
   const nokey = ctxOf(make(() => ({ why: 'no vault key: test' })));
   for (const tokenUser of ['lothsahn', 'ben']) {
     assert.throws(
       () => machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: BEN, tokenUser, sessionId: 's1' }, nokey),
-      (e: unknown) => e instanceof PoolHeldError && new RegExp(`${tokenUser}'s Claude token pool cannot serve this run`).test(e.message) && /does not fall back to the host token/.test(e.message) && !e.message.includes(HOST.slice(13, 40)),
+      (e: unknown) => e instanceof PoolHeldError && new RegExp(`${tokenUser}'s Claude token pool cannot serve a workers run on m3`).test(e.message) && /never runs on another credential/.test(e.message) && !e.message.includes(B1.slice(13, 40)),
       tokenUser,
     );
   }
@@ -389,18 +388,20 @@ test("no fallback to the host token: a person with a pool whose tokens the vault
   const meter = { available: true, asOf: '2026-10-11T12:00:00Z', models: [], session: { label: '5-hour', percent: 95 }, weekly: { label: 'weekly', percent: 99.5 } };
   full.usageOf = (fp: string) => (fp === fingerprintOf(L1) ? (meter as never) : undefined);
   assert.throws(() => machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: BEN, tokenUser: 'lothsahn', sessionId: 's1' }, full), PoolHeldError);
-  // the dispatcher's token (the host token) is untouched in every case
+  // nothing is reported as a fallback: held is not a problem
   assert.equal(full.problems.length, 0);
-  // a person with no token in the vault at all keeps today's account (the transition, docs/vault.md section 10)
-  const sam = machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: { userId: 'sam', displayName: 'Sam' }, sessionId: 's3' }, ctxOf(v));
-  assert.equal(sam.env.CLAUDE_CODE_OAUTH_TOKEN, HOST);
+  // a person with no token in the vault at all does not start a run on any other account (w1078; before, the host token)
+  assert.throws(
+    () => machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: { userId: 'sam', displayName: 'Sam' }, sessionId: 's3' }, ctxOf(v)),
+    (e: unknown) => e instanceof PoolHeldError && /sam has no Claude token in the vault/.test(e.message),
+  );
 });
 
 test('a person with no GitHub token in the vault: the run says so loudly, once per notice, and does not hand over another person\'s', (t) => {
   const { v } = vaultOf(t);
   v.add({ name: 'vault-ben-github', kind: 'github', value: `github_pat_${'a'.repeat(60)}`, owner: 'ben', share: 'owner' });
   const ctx = ctxOf(v);
-  const cfg = cfgOf({ machines: { claudeFromVault: true, githubFromVault: true } });
+  const cfg = cfgOf({ machines: { githubFromVault: true } });
   const loth = machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: BEN, tokenUser: 'lothsahn', sessionId: 's1' }, ctx);
   assert.equal(loth.env.GH_TOKEN, undefined, "never ben's token for lothsahn's run");
   assert.equal(loth.github, undefined);

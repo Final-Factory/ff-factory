@@ -20,6 +20,10 @@ import type { Config } from './config.ts';
 import type { Requester, TranscriptEvent, UserInfo } from '../shared/types.ts';
 import { splitVia } from '../shared/replies.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
+import { useFakeVault } from './testVault.ts';
+
+// Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
+useFakeVault();
 
 /**
  * Talking to your own orchestrator from Claude Code or Desktop (w1021, docs/talk-to-your-orchestrator.md), end to end: a

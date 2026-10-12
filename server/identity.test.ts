@@ -5,14 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import type http from 'node:http';
 import { EventEmitter } from 'node:events';
-import { Identity, actingFor, claudeEnvFor, userToken } from './identity.ts';
+import { Identity, actingFor } from './identity.ts';
 import { Auth } from './auth.ts';
 import { setAppConfig } from './appConfig.ts';
 import { SessionManager, promptText, setQueryForTesting } from './sessions.ts';
 import { StandingAgents, type SessionPort } from './standing.ts';
 import { Store } from './store.ts';
-import { buildAccounts, sessionSource, tokenKey } from './usage.ts';
-import { redactSecrets } from './secrets.ts';
+import { setVaultContext } from './vault.ts';
+import { fakeToken, useFakeVault } from './testVault.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { resumeMessage } from './restart.ts';
 import type { Config } from './config.ts';
@@ -24,7 +24,6 @@ import type { Machine, Requester, Sandbox, SessionInfo, TranscriptEvent, UserInf
 const BEN: UserInfo = { userId: 'ben', displayName: 'Ben', role: 'owner' };
 const LOTH: UserInfo = { userId: 'lothsahn', displayName: 'Lothsahn', role: 'member' };
 const r = (u: UserInfo): Requester => ({ userId: u.userId, displayName: u.displayName });
-const TOKEN_BEN = 'sk-ant-oat01-' + 'B'.repeat(60) + 'bbbb';
 const TOKEN_LOTH = 'sk-ant-oat01-' + 'L'.repeat(60) + 'llll';
 /** A scratch folder, removed after the test; `before` (a Store's flush) runs first, so nothing writes into it after. */
 const tmpDir = (t: { after: (fn: () => void | Promise<void>) => void }, prefix: string, before?: () => void | Promise<void>) => {
@@ -60,48 +59,6 @@ test('acting for: the latest person by default; for_user only names someone the 
   assert.deepEqual(actingFor([ev(LOTH, 'system')], r(BEN), 'lothsahn', r(BEN)), r(LOTH));
   assert.throws(() => actingFor([ev(BEN)], r(BEN), 'lothsahn', r(BEN)), /for_user "lothsahn" has not asked for anything.*it can be ben/);
   assert.throws(() => actingFor([], undefined, 'mallory', r(BEN)), /has not asked/);
-});
-
-test("local billing: an agent runs on its person's own token when they have one, else on the owner's", () => {
-  const cfg = { userClaudeEnv: { Lothsahn: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_LOTH } } };
-  const base = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_BEN, OTHER: '1' };
-  assert.deepEqual(claudeEnvFor(cfg, r(LOTH), base), { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_LOTH, OTHER: '1' });
-  assert.deepEqual(claudeEnvFor(cfg, r(BEN), base), base, "no entry: the owner's account");
-  assert.deepEqual(claudeEnvFor(cfg, undefined, base), base, 'nobody: the owner');
-  assert.deepEqual(claudeEnvFor({}, r(LOTH), {}), {}, "a Mac on its own login stays on it when the person has no token");
-  assert.deepEqual(claudeEnvFor(cfg, r(LOTH), {}), { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_LOTH }, 'a Mac on its own login: the person brings theirs');
-  assert.deepEqual(claudeEnvFor({ userClaudeEnv: { lothsahn: {} } }, r(LOTH), base), base, 'an empty entry changes nothing');
-  assert.equal(userToken(cfg, 'lothsahn'), TOKEN_LOTH);
-  assert.equal(userToken(cfg, 'ben'), undefined);
-  assert.equal(userToken(cfg, undefined), undefined);
-});
-
-test('accounts: a session for a person with their own token counts on that token, shown with their name', () => {
-  const cfg = { userClaudeEnv: { lothsahn: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_LOTH } } };
-  const person = (id: string) => userToken(cfg, id);
-  const machine = () => TOKEN_BEN;
-  assert.equal(sessionSource({ requestedBy: r(LOTH) }, TOKEN_BEN, machine, person), tokenKey(TOKEN_LOTH));
-  assert.equal(sessionSource({ requestedBy: r(LOTH), machineId: 'm3' }, TOKEN_BEN, machine, person), tokenKey(TOKEN_LOTH), 'on a Mac too');
-  assert.equal(sessionSource({ requestedBy: r(BEN) }, TOKEN_BEN, machine, person), tokenKey(TOKEN_BEN));
-  assert.equal(sessionSource({ requestedBy: r(LOTH) }, TOKEN_BEN, machine), tokenKey(TOKEN_BEN), 'without the lookup: as before');
-  const accounts = buildAccounts(new Map(), {
-    hostName: 'BEAST',
-    token: { key: tokenKey(TOKEN_BEN), label: 'host token …bbbb' },
-    people: [{ key: tokenKey(TOKEN_LOTH), label: "Lothsahn's token …llll", displayName: 'Lothsahn' }],
-    machines: [],
-    sessions: [
-      { id: 'w1', source: tokenKey(TOKEN_LOTH), live: true },
-      { id: 'w2', source: tokenKey(TOKEN_BEN) },
-    ],
-  });
-  const loth = accounts.find((a) => a.id === tokenKey(TOKEN_LOTH))!;
-  assert.equal(loth.label, "Lothsahn's token …llll");
-  assert.deepEqual(loth.where, ['agents working for Lothsahn']);
-  assert.deepEqual(loth.sessionIds, ['w1']);
-  assert.deepEqual(accounts.find((a) => a.id === tokenKey(TOKEN_BEN))!.sessionIds, ['w2']);
-  // A person whose token is the host's own is one account, not two.
-  const same = buildAccounts(new Map(), { hostName: 'BEAST', token: { key: tokenKey(TOKEN_BEN), label: 'host token …bbbb' }, people: [{ key: tokenKey(TOKEN_BEN), label: "Ben's token …bbbb", displayName: 'Ben' }], machines: [], sessions: [] });
-  assert.equal(same.filter((a) => a.kind === 'token').length, 1);
 });
 
 test('logins: the first is the owner, later ones members; names and roles are kept across password changes', async (t) => {
@@ -147,23 +104,13 @@ test('API keys: bound to a login, the key says whom it acts for; an unknown logi
   assert.throws(() => auth.createApiKey('x-key', 'mallory'), /no login "mallory"/);
 });
 
-test('set_app_config: a person\'s own Claude token is write-only, per user, and needs the user; systemPayer is a user id', (t) => {
+test('set_app_config: a person\'s own Claude token is no longer set here (w1078: the vault holds it); systemPayer is a user id', (t) => {
   const dir = tmpDir(t, 'ffsb-ident-');
   const file = path.join(dir, 'config.json');
-  fs.writeFileSync(file, JSON.stringify({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_BEN } }));
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_BEN } } as unknown as Config;
-  const r1 = setAppConfig(file, cfg, 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN', TOKEN_LOTH, { user: 'lothsahn' });
-  assert.deepEqual(r1, { before: 'not set', after: 'set (…llll)' }, 'never shown back');
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).userClaudeEnv, { lothsahn: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_LOTH } });
-  assert.equal(cfg.userClaudeEnv?.lothsahn.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_LOTH, 'live');
-  assert.equal(cfg.claudeEnv?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_BEN, "the owner's stays");
-  assert.throws(() => setAppConfig(file, cfg, 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN', TOKEN_LOTH), /needs user/);
-  assert.throws(() => setAppConfig(file, cfg, 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN', TOKEN_LOTH, { user: 'a.b' }), /needs user/, 'no dots: it is a key path');
-  assert.throws(() => setAppConfig(file, cfg, 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN', 'hunter2', { user: 'lothsahn' }), (e: Error) => !e.message.includes('hunter2') && /OAuth token/.test(e.message));
-  setAppConfig(file, cfg, 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN', null, { user: 'lothsahn' });
-  assert.equal(cfg.userClaudeEnv?.lothsahn, undefined, 'removed, entry and all');
-  assert.equal(redactSecrets(`token ${TOKEN_LOTH}`).includes(TOKEN_LOTH), false, 'and redacted wherever it shows up');
-
+  fs.writeFileSync(file, JSON.stringify({}));
+  const cfg = {} as unknown as Config;
+  assert.throws(() => setAppConfig(file, cfg, 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN' as never, TOKEN_LOTH), (e: Error) => /cannot be changed by an agent/.test(e.message) && !e.message.includes(TOKEN_LOTH));
+  assert.equal(fs.readFileSync(file, 'utf8'), '{}');
   assert.deepEqual(setAppConfig(file, cfg, 'systemPayer', 'ben'), { before: undefined, after: 'ben' });
   assert.equal(cfg.systemPayer, 'ben');
   assert.throws(() => setAppConfig(file, cfg, 'systemPayer', 'not a login!'), /user id/);
@@ -287,7 +234,6 @@ function standing(t: { after: (fn: () => void | Promise<void>) => void }) {
     models: ['opus', 'sonnet'],
     defaultModel: 'opus',
     worker: { permissionMode: 'bypassPermissions', effort: 'high' },
-    userClaudeEnv: { lothsahn: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_LOTH } },
   } as unknown as Config;
   store = new Store(cfg.dataDir);
   const port = new Port();
@@ -323,6 +269,8 @@ function standing(t: { after: (fn: () => void | Promise<void>) => void }) {
 }
 
 test('standing runs: a run by hand is its person\'s (on their token), a scheduled one the system payer\'s', (t) => {
+  useFakeVault();
+  t.after(() => setVaultContext(undefined));
   const { st, port, clock, filed } = standing(t);
   const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 }, tools: ['delegate'], machineId: 'm1' });
   st.runNow(a.id, 'message', 'look at #640', r(LOTH));
@@ -333,7 +281,7 @@ test('standing runs: a run by hand is its person\'s (on their token), a schedule
   assert.deepEqual(s.sent[0].by, r(LOTH));
   assert.match(s.sent[0].text, /started by a message from Lothsahn/);
   assert.match(s.sent[0].text, /Lothsahn says:\nlook at #640/, 'no longer hard-wired to one name');
-  assert.equal(st.spec(st.require(a.id)).env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_LOTH, "the run's process runs on Lothsahn's token");
+  assert.equal(st.spec(st.require(a.id)).env?.CLAUDE_CODE_OAUTH_TOKEN, fakeToken('lothsahn'), "the run's process runs on a vault token from Lothsahn's pool (w1078)");
 
   // A delegation filed in that run is for the agent's owner (w527; none set, so the system payer, Ben), not the run's
   // person. Lothsahn approves it: it is filed for Ben, approved by Lothsahn.
@@ -353,7 +301,7 @@ test('standing runs: a run by hand is its person\'s (on their token), a schedule
   const next = st.require(a.id).runs.at(-1)!;
   assert.equal(next.trigger, 'schedule');
   assert.deepEqual(next.requestedBy, r(BEN));
-  assert.equal(st.spec(st.require(a.id)).env?.CLAUDE_CODE_OAUTH_TOKEN, undefined, "Ben has no own token: the machine's own account (none in this test)");
+  assert.equal(st.spec(st.require(a.id)).env?.CLAUDE_CODE_OAUTH_TOKEN, fakeToken('ben'), "the scheduled run: a token from the system payer's pool");
 });
 
 test("delegations (w527): an auto-approved one is filed for the agent's owner, whoever the filing run was for", (t) => {

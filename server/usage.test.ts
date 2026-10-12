@@ -9,10 +9,8 @@ import {
   addSpend,
   buildAccounts,
   HOST_LOGIN,
-  hostToken,
   sessionSource,
   tokenKey,
-  tokenLabel,
   fetchTokenLimits,
   fetchTokenUsage,
   MESSAGES_URL,
@@ -28,11 +26,13 @@ import {
   readStoredLogin,
   usageEnv,
   usageSummary,
-  machineToken,
   weekSpend,
   type StoredLogin,
   type UsageReply,
 } from './usage.ts';
+
+/** How the meters label a vault token (a vault entry's name and the last four characters; never the value). */
+const tokenLabel = (token: string) => `vault-ben-1 …${token.slice(-4)}`;
 
 // Trimmed from a real reply on this host (2026-09-24, a Max plan).
 const REAL: UsageReply = {
@@ -184,31 +184,14 @@ const TOKEN2 = `sk-ant-oat01-${'y'.repeat(60)}7BBB`;
 test('accounts: a token is known by a hash prefix and its last 4 characters, never by its value', () => {
   assert.match(tokenKey(TOKEN), /^token:[0-9a-f]{12}$/);
   assert.notEqual(tokenKey(TOKEN), tokenKey(TOKEN2));
-  assert.equal(tokenLabel(TOKEN), 'host token …9AAA');
+  assert.equal(tokenLabel(TOKEN), 'vault-ben-1 …9AAA');
   assert.doesNotMatch(tokenKey(TOKEN) + tokenLabel(TOKEN), /xxxx/);
 });
 
-test('accounts: the host token is config claudeEnv over the server environment', () => {
-  // claudeEnv wins over the server's own environment, as for the agents.
-  assert.equal(hostToken({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN } }, { CLAUDE_CODE_OAUTH_TOKEN: TOKEN2 }), TOKEN);
-  assert.equal(hostToken({}, { CLAUDE_CODE_OAUTH_TOKEN: TOKEN2 }), TOKEN2);
-  assert.equal(hostToken({}, {}), undefined);
-});
-
-test('accounts: each session is attributed to the credential it runs on', () => {
-  // m3 is set to its own login (machines.useHostClaudeEnv { m3: false }); the others take config claudeEnv.
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN } };
-  const toMachine = (id: string) => machineToken(cfg, id !== 'm3');
-  assert.equal(sessionSource({}, TOKEN, toMachine), tokenKey(TOKEN));
-  assert.equal(sessionSource({}, undefined, toMachine), HOST_LOGIN);
-  assert.equal(sessionSource({ machineId: 'm5' }, TOKEN, toMachine), tokenKey(TOKEN));
-  assert.equal(sessionSource({ machineId: 'm3' }, TOKEN, toMachine), 'login:m3', 'machines.useHostClaudeEnv false: the Mac login');
-  // A token only in the server's own environment is not sent to machines: their agents are on the Mac login.
-  const envOnly = (id: string) => machineToken({}, id !== 'm3');
-  assert.equal(sessionSource({}, TOKEN2, envOnly), tokenKey(TOKEN2));
-  assert.equal(sessionSource({ machineId: 'm5' }, TOKEN2, envOnly), 'login:m5');
-  // A machine may be called "host": its login is not this host's.
-  assert.notEqual(sessionSource({ machineId: 'host' }, undefined, envOnly), HOST_LOGIN);
+test('accounts: a session is attributed to the credential its process started on (w1078)', () => {
+  assert.equal(sessionSource({ account: tokenKey(TOKEN) }), tokenKey(TOKEN));
+  assert.equal(sessionSource({ account: 'login:m3' }), 'login:m3', 'a record from before w1078 keeps its Mac login');
+  assert.equal(sessionSource({}), '', 'a session that never started has none: no host token or login to guess');
 });
 
 const usageOf = (weekly: number, asOf = AS_OF) => ({ ...parseUsage(REAL, asOf), weekly: { label: 'Weekly', percent: weekly } });
@@ -239,7 +222,7 @@ test('accounts: one login on several computers is one account; the token is its 
   assert.deepEqual(
     accounts.map((a) => [a.id, a.label, a.sources, a.where, a.sessionIds, a.usage?.weekly?.percent]),
     [
-      [tokenKey(TOKEN), 'host token …9AAA', [tokenKey(TOKEN)], ["the agents' token on BEAST, m5"], ['orch', 'w1'], 98],
+      [tokenKey(TOKEN), 'vault-ben-1 …9AAA', [tokenKey(TOKEN)], ["the agents' token on BEAST, m5"], ['orch', 'w1'], 98],
       // Ranked by agents running now (2 vs 1), not by every session it ever had (3).
       ['email:other@example.com', 'other@example.com', ['login:m3'], ['m3 login'], ['m3-w', 'old', 'older'], 12],
       // Merged by email (case-insensitive); the newer reading wins.
@@ -260,7 +243,7 @@ test('accounts: before anything is fetched, the host login and token still show,
     accounts.map((a) => [a.id, a.label, a.usage]),
     [
       ['login:m3', 'm3 login', undefined],
-      [tokenKey(TOKEN), 'host token …9AAA', undefined],
+      [tokenKey(TOKEN), 'vault-ben-1 …9AAA', undefined],
       [HOST_LOGIN, 'BEAST login', undefined],
     ],
   );
@@ -285,7 +268,7 @@ test('accounts: the system_status lines name each account, where it is used and 
   ]);
   const lines = accountLines(accounts, sessions, now);
   assert.equal(lines[0], 'Claude accounts in use (2):');
-  assert.match(lines[1], /^- host token …9AAA \[the agents' token on BEAST; agents on it: the orchestrator, w1\]: Claude plan \(max\) usage, as of .+: Weekly 98% used/);
+  assert.match(lines[1], /^- vault-ben-1 …9AAA \[the agents' token on BEAST; agents on it: the orchestrator, w1\]: Claude plan \(max\) usage, as of .+: Weekly 98% used/);
   assert.match(lines[2], /^- BEAST login \[BEAST login; agents on it: no agent right now\]: Claude plan usage: not fetched yet/);
   assert.deepEqual(accountLines([], sessions, now), ['Claude accounts: none known yet']);
 });
@@ -371,7 +354,7 @@ test('token usage: asked of the endpoint with that token alone; failures never c
   assert.match((await failure(leaky)).message, /could not be reached: connect failed for sk-ant-…$/);
 });
 
-/** A tracker on a temp dir with a usable stored login, the token in claudeEnv, and fake fetchers. */
+/** A tracker on a temp dir with one vault token (what index.ts wires as personTokens), and fake fetchers. This host's own login is never polled (w1078). */
 function trackerWith(
   fetchToken: (t: string) => Promise<UsageReply>,
   fetchTokenLimits: (t: string) => Promise<UsageReply> = async () => {
@@ -379,15 +362,13 @@ function trackerWith(
   },
 ) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-creds-'));
-  fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'login-secret', refreshToken: 'r', scopes: ['user:inference', 'user:profile'] } }));
   const calls = { login: [] as Record<string, string | undefined>[], token: [] as string[], limits: [] as string[] };
   const logs: string[] = [];
-  const cfg = { dataDir: dir, claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never;
+  const cfg = { dataDir: dir } as never;
   const t = new UsageTracker(cfg, () => undefined, {
-    // The host login (BEAST's claude.ai account): 98% of its week gone.
     fetchLogin: async (env) => {
       calls.login.push(env);
-      return { reply: { subscription_type: 'max', rate_limits_available: true, rate_limits: endpointBody(98, 0, 22) }, account: { email: 'owner@example.com' } };
+      throw new UsageFetchError('this host\'s login is not polled any more');
     },
     fetchToken: async (tok) => {
       calls.token.push(tok);
@@ -399,41 +380,39 @@ function trackerWith(
     },
     log: (line) => logs.push(line),
   });
+  t.personTokens = () => [{ token: TOKEN, label: tokenLabel(TOKEN) }];
   return { t, dir, calls, logs };
 }
 
 const tokenOnly = (t: UsageTracker) =>
-  buildAccounts(t.entries, { hostName: 'BEAST', token: { key: tokenKey(TOKEN), label: tokenLabel(TOKEN) }, machines: [], sessions: [] });
+  buildAccounts(t.entries, { hostName: 'BEAST', vault: [{ key: tokenKey(TOKEN), label: tokenLabel(TOKEN) }], inUse: { hostLogin: false, hostToken: false, vault: true }, machines: [], sessions: [] });
 
-test('tracker: two accounts, each asked with its own credential, each keeps its own numbers', async () => {
+test("tracker (w1078): the vault's tokens are polled, each asked with its own credential; this host's login is not", async () => {
   // The token's account: 41% of the week, 33% of the session.
   const { t, dir, calls, logs } = trackerWith(async () => ({ rate_limits_available: true, rate_limits: endpointBody(41, 33, 0) }));
+  t.personTokens = () => [
+    { token: TOKEN, label: tokenLabel(TOKEN) },
+    { token: TOKEN2, label: tokenLabel(TOKEN2) },
+    { token: TOKEN, label: 'a duplicate of the first' },
+  ];
   await t.refresh();
-  const login = t.entries.get(HOST_LOGIN)!;
   const tok = t.entries.get(tokenKey(TOKEN))!;
-  assert.deepEqual([login.usage?.weekly?.percent, login.usage?.session?.percent, login.account?.email], [98, 0, 'owner@example.com']);
   assert.deepEqual(
     [tok.kind, tok.label, tok.direct, tok.usage?.weekly?.percent, tok.usage?.session?.percent, tok.usage?.models[0]?.percent],
-    ['token', 'host token …9AAA', true, 41, 33, 0],
+    ['token', 'vault-ben-1 …9AAA', true, 41, 33, 0],
   );
-  // The login's request never sees the token; the token's request is that token.
-  assert.equal(calls.login.length, 1);
-  assert.equal(calls.login[0].CLAUDE_CODE_OAUTH_TOKEN, undefined);
-  assert.equal(calls.login[0].CLAUDE_CODE_OAUTH_SCOPES, undefined);
-  assert.deepEqual(calls.token, [TOKEN]);
+  assert.equal(t.entries.has(HOST_LOGIN), false, "nothing runs on this host's login, so none is polled or shown");
+  assert.equal(calls.login.length, 0);
+  assert.deepEqual(calls.token, [TOKEN, TOKEN2], 'each token once, with that token');
   // One log line per credential, saying which and whether it answered, with no secret in it.
   assert.equal(logs.length, 2);
-  assert.ok(logs.some((l) => /login \(the claude\.ai login stored in .*, owner@example\.com\): ok, Weekly 98%, Session \(5 h\) 0%, Weekly Fable 22%$/.test(l)), logs.join('\n'));
-  assert.ok(logs.includes(`usage: host token …9AAA (${tokenKey(TOKEN)}, asked with that token itself, via the usage endpoint): ok, Weekly 41%, Session (5 h) 33%, Weekly Fable 0%`), logs.join('\n'));
-  assert.doesNotMatch(logs.join('\n'), /sk-ant|login-secret|xxxx/);
-  // The accounts built from them keep the two apart.
-  assert.deepEqual(
-    tokenOnly(t).map((a) => [a.label, a.usage?.weekly?.percent, a.usage?.session?.percent]),
-    [
-      ['host token …9AAA', 41, 33],
-      ['owner@example.com', 98, 0],
-    ],
-  );
+  assert.ok(logs.includes(`usage: vault-ben-1 …9AAA (${tokenKey(TOKEN)}, asked with that token itself, via the usage endpoint): ok, Weekly 41%, Session (5 h) 33%, Weekly Fable 0%`), logs.join('\n'));
+  assert.doesNotMatch(logs.join('\n'), /sk-ant|xxxx/);
+  // A token that leaves the vault drops out of the next poll and its numbers with it.
+  t.personTokens = () => [{ token: TOKEN2, label: tokenLabel(TOKEN2) }];
+  await t.refresh();
+  assert.equal(t.entries.has(tokenKey(TOKEN)), false);
+  assert.equal(t.entries.has(tokenKey(TOKEN2)), true);
   fs.rmSync(dir, { recursive: true });
 });
 
@@ -443,7 +422,7 @@ test("tracker: a token whose request fails is unknown with the reason, never ano
     if (fail) throw fail;
     return { rate_limits_available: true, rate_limits: endpointBody(41, 33, 0) };
   });
-  const tokenLog = () => logs.filter((l) => l.includes('host token')).at(-1)!;
+  const tokenLog = () => logs.filter((l) => l.includes('vault-ben-1')).at(-1)!;
   await t.refresh();
   assert.equal(t.entries.get(tokenKey(TOKEN))?.usage?.weekly?.percent, 41);
 
@@ -453,11 +432,9 @@ test("tracker: a token whose request fails is unknown with the reason, never ano
   let u = t.entries.get(tokenKey(TOKEN))!.usage!;
   assert.deepEqual([u.available, u.weekly, u.session], [false, undefined, undefined]);
   assert.match(u.why!, /^usage unknown: the token was rejected/);
-  assert.match(tokenLog(), /host token …9AAA .*via the usage endpoint\): failed, no numbers: usage unknown: .*HTTP 401/);
+  assert.match(tokenLog(), /vault-ben-1 …9AAA .*via the usage endpoint\): failed, no numbers: usage unknown: .*HTTP 401/);
   assert.equal(calls.limits.length, 0, 'only a rate limit turns to the headers');
-  // The login still has its own numbers.
-  assert.equal(t.usage?.weekly?.percent, 98);
-  assert.match(accountLines(tokenOnly(t), new Map(), new Date(AS_OF))[1], /^- host token …9AAA .*: Claude plan usage: unavailable \(usage unknown: the token was rejected/);
+  assert.match(accountLines(tokenOnly(t), new Map(), new Date(AS_OF))[1], /^- vault-ben-1 …9AAA .*: Claude plan usage: unavailable \(usage unknown: the token was rejected/);
 
   // Rate-limited, and the headers fail too: unknown with both reasons.
   fail = new UsageFetchError('the usage endpoint rate-limits this token, next try in 58 min (HTTP 429)', 3_463_000);
@@ -497,14 +474,13 @@ test("tracker: while the endpoint rate-limits the token, the same token's rate-l
   const u = t.entries.get(tokenKey(TOKEN))!.usage!;
   assert.deepEqual([u.available, u.weekly?.percent, u.session?.percent, u.models, u.source], [true, 42, 43, [], 'rate limits']);
   assert.deepEqual([calls.token, calls.limits], [[TOKEN], [TOKEN]]);
-  assert.equal(t.usage?.weekly?.percent, 98, 'the login is untouched');
   assert.ok(
     logs.includes(
-      `usage: host token …9AAA (${tokenKey(TOKEN)}, asked with that token itself, via the API's rate-limit headers (the usage endpoint rate-limits this token, next try in 58 min (HTTP 429))): ok, Weekly 42%, Session (5 h) 43%`,
+      `usage: vault-ben-1 …9AAA (${tokenKey(TOKEN)}, asked with that token itself, via the API's rate-limit headers (the usage endpoint rate-limits this token, next try in 58 min (HTTP 429))): ok, Weekly 42%, Session (5 h) 43%`,
     ),
     logs.join('\n'),
   );
-  assert.match(accountLines(tokenOnly(t), new Map(), new Date(AS_OF))[1], /^- host token …9AAA .*: Claude plan usage, as of .*, from rate limits: Weekly 42% used/);
+  assert.match(accountLines(tokenOnly(t), new Map(), new Date(AS_OF))[1], /^- vault-ben-1 …9AAA .*: Claude plan usage, as of .*, from rate limits: Weekly 42% used/);
   fs.rmSync(dir, { recursive: true });
 });
 
@@ -556,24 +532,22 @@ test("tracker: a token's numbers saved before it was asked directly (the login's
 test('tracker: every token shows numbers or "usage unknown: <reason>" after one poll, even when a request never answers', async () => {
   const never = () => new Promise<never>(() => undefined);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-hang-'));
-  fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'login-secret', refreshToken: 'r', scopes: ['user:profile'] } }));
-  const cfg = { dataDir: dir, claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never;
-  const summary = (t: UsageTracker) => accountLines(tokenOnly(t), new Map(), new Date(AS_OF)).find((l) => l.includes('host token'))!;
-  // The request that wedged BEAST's portal (2026-09-28): it never settles, nor does the login's CLI.
+  const cfg = { dataDir: dir } as never;
+  const summary = (t: UsageTracker) => accountLines(tokenOnly(t), new Map(), new Date(AS_OF)).find((l) => l.includes('vault-ben-1'))!;
+  // The request that wedged BEAST's portal (2026-09-28): it never settles.
   let hang = { token: never as () => Promise<UsageReply>, limits: never as () => Promise<UsageReply> };
   const logs: string[] = [];
   const t = new UsageTracker(cfg, () => undefined, {
-    fetchLogin: never,
     fetchToken: () => hang.token(),
     fetchTokenLimits: () => hang.limits(),
     log: (line) => logs.push(line),
     answerMs: 30,
   });
+  t.personTokens = () => [{ token: TOKEN, label: tokenLabel(TOKEN) }];
   assert.match(summary(t), /not fetched yet/, 'before the first poll');
   await t.refresh();
   assert.doesNotMatch(summary(t), /not fetched yet/);
   assert.match(t.entries.get(tokenKey(TOKEN))!.usage!.why!, /^usage unknown: the usage endpoint gave no answer within 0 s$/);
-  assert.match(t.usage!.why!, /could not fetch plan usage: the claude\.ai login \(through the CLI\) gave no answer/);
 
   // The next poll runs (the first no longer holds it), and a rate-limited endpoint whose headers hang is unknown too.
   hang = {
@@ -586,15 +560,15 @@ test('tracker: every token shows numbers or "usage unknown: <reason>" after one 
   assert.match(t.entries.get(tokenKey(TOKEN))!.usage!.why!, /^usage unknown: the usage endpoint rate-limits .*HTTP 429\); the API's rate-limit headers gave no answer/);
 
   // An answer nothing can read is a reason as well, never an exception that leaves the entry unset.
-  const odd = new UsageTracker({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'usage-odd-')), claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never, () => undefined, {
-    fetchLogin: never,
+  const odd = new UsageTracker({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'usage-odd-')) } as never, () => undefined, {
     fetchToken: async () => ({ rate_limits_available: true, rate_limits: { limits: 7 as never } }),
     log: () => undefined,
     answerMs: 30,
   });
+  odd.personTokens = () => [{ token: TOKEN, label: tokenLabel(TOKEN) }];
   await odd.refresh();
   assert.match(odd.entries.get(tokenKey(TOKEN))!.usage!.why!, /^usage unknown: /);
-  assert.ok(logs.some((l) => /host token …9AAA .*: failed, no numbers: usage unknown: /.test(l)), logs.join('\n'));
+  assert.ok(logs.some((l) => /vault-ben-1 …9AAA .*: failed, no numbers: usage unknown: /.test(l)), logs.join('\n'));
   fs.rmSync(dir, { recursive: true });
 });
 
@@ -602,19 +576,20 @@ test('tracker: a poll that has run longer than 5 minutes no longer blocks the ne
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-stuck-'));
   const logs: string[] = [];
   let calls = 0;
-  // The login's request hangs for the whole test, then fails: left hanging, its 60 s deadline kept this file's process
-  // alive for a minute on a Mac (where the stored-login check lets it start; w636).
-  const hung: ((e: Error) => void)[] = [];
-  tc.after(() => hung.forEach((fail) => fail(new Error('the test is over'))));
-  const t = new UsageTracker({ dataDir: dir, claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never, () => undefined, {
-    fetchLogin: () => new Promise((_, fail) => hung.push(fail)),
+  // The token's request hangs until the first poll is let go, then answers: left hanging, its deadline kept this file's
+  // process alive for a minute (w636).
+  const hung: (() => void)[] = [];
+  tc.after(() => hung.forEach((release) => release()));
+  const t = new UsageTracker({ dataDir: dir } as never, () => undefined, {
     fetchToken: async () => {
       calls++;
+      if (calls === 1) await new Promise<void>((release) => hung.push(release));
       return { rate_limits_available: true, rate_limits: endpointBody(41, 33, 0) };
     },
     log: (line) => logs.push(line),
     answerMs: 60_000,
   });
+  t.personTokens = () => [{ token: TOKEN, label: tokenLabel(TOKEN) }];
   void t.refresh();
   await t.refresh(); // still in flight, and recent: skipped
   assert.equal(calls, 1);
@@ -630,17 +605,15 @@ test('tracker: one poll at start, then one every usagePollMinutes; Refresh polls
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-every-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   let calls = 0;
-  const cfg = { dataDir: dir, usagePollMinutes: 15, claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never as Config;
+  const cfg = { dataDir: dir, usagePollMinutes: 15 } as never as Config;
   const tr = new UsageTracker(cfg, () => undefined, {
-    fetchLogin: async () => {
-      throw new UsageFetchError('no login here');
-    },
     fetchToken: async () => {
       calls++;
       return { rate_limits_available: true, rate_limits: endpointBody(41, 33, 0) };
     },
     log: () => undefined,
   });
+  tr.personTokens = () => [{ token: TOKEN, label: tokenLabel(TOKEN) }];
   t.after(() => tr.stop());
   const settle = () => new Promise((r) => setImmediate(r));
   const minutes = async (n: number) => {
@@ -750,7 +723,7 @@ test("tracker: a session's rate_limit_event raises its token's meter and never l
   t.noteRateLimit(HOST_LOGIN, { rateLimitType: 'five_hour', utilization: 0.99 });
   t.noteRateLimit(undefined, { rateLimitType: 'five_hour', utilization: 0.99 });
   t.noteRateLimit('token:unknown', { rateLimitType: 'five_hour', utilization: 0.99 });
-  assert.equal(t.entries.get(HOST_LOGIN)!.usage!.session?.percent, 0, "a login's meters are not touched");
+  assert.equal(t.entries.has(HOST_LOGIN), false, "a login's meters are not touched, and there is none");
   await t.refresh();
   assert.equal(sess(), 33, 'the poll replaces the floor');
 });
@@ -777,9 +750,9 @@ test('accounts (w748): only accounts something is set to use; a Mac login leaves
   });
   const labels = (c: ReturnType<typeof ctx>) => buildAccounts(entries, c).map((a) => a.label).sort();
   // LothDesktop on the vault: its login is gone from the list, the portal's own login too (no role is set to it); m3's stays.
-  assert.deepEqual(labels(ctx({ lothVault: true })), ['host token …9AAA', 'lothsahn-1 …EAAA', 'm3@example.com']);
+  assert.deepEqual(labels(ctx({ lothVault: true })), ['lothsahn-1 …EAAA', 'm3@example.com', 'vault-ben-1 …9AAA']);
   // Taken off the vault: it shows again, as "lothdesktop login".
-  assert.deepEqual(labels(ctx({ lothVault: false })), ['host token …9AAA', 'lothsahn-1 …EAAA', 'm3@example.com', 'shamrock@example.com']);
+  assert.deepEqual(labels(ctx({ lothVault: false })), ['lothsahn-1 …EAAA', 'm3@example.com', 'shamrock@example.com', 'vault-ben-1 …9AAA']);
   // A role set to the host login brings the portal's login back.
   assert.ok(labels(ctx({ lothVault: true, inUse: { hostLogin: true, hostToken: true, vault: true } })).includes('portal@example.com'));
   // Nothing set to the host token and nothing on the vault: both leave.
@@ -787,9 +760,9 @@ test('accounts (w748): only accounts something is set to use; a Mac login leaves
   // An agent still running on a hidden account keeps it listed until it stops.
   assert.deepEqual(
     labels(ctx({ lothVault: true, sessions: [{ id: 'w9', source: 'login:lothdesktop', live: true }] })),
-    ['host token …9AAA', 'lothsahn-1 …EAAA', 'm3@example.com', 'shamrock@example.com'],
+    ['lothsahn-1 …EAAA', 'm3@example.com', 'shamrock@example.com', 'vault-ben-1 …9AAA'],
   );
-  assert.deepEqual(labels(ctx({ lothVault: true, sessions: [{ id: 'w9', source: 'login:lothdesktop', live: false }] })), ['host token …9AAA', 'lothsahn-1 …EAAA', 'm3@example.com']);
+  assert.deepEqual(labels(ctx({ lothVault: true, sessions: [{ id: 'w9', source: 'login:lothdesktop', live: false }] })), ['lothsahn-1 …EAAA', 'm3@example.com', 'vault-ben-1 …9AAA']);
   // The machine daemon's own row for a machine on the host token goes too.
   const viaToken = { ...ctx({ lothVault: false }), machines: [{ id: 'lothdesktop', usesToken: true, onVault: false }, { id: 'm3', usesToken: false, onVault: false }] };
   assert.ok(!labels(viaToken).includes('shamrock@example.com'));
@@ -828,9 +801,9 @@ test('accounts (w777): a vault token is always listed under its vault name, once
   assert.deepEqual(asRow(fileAccounts[0]), [key, 'vault-ben-2 …' + TOKEN2.slice(-4), ["fff-portal's token file (the orchestrator)"], ['orch'], 61]);
 
   // equal to the host token: the vault name, the host token's use on the subtext
-  const hostAccounts = buildAccounts(entries('host token …' + TOKEN2.slice(-4)), {
+  const hostAccounts = buildAccounts(entries('vault-ben-1 …' + TOKEN2.slice(-4)), {
     ...base,
-    token: { key, label: 'host token …' + TOKEN2.slice(-4) },
+    token: { key, label: 'vault-ben-1 …' + TOKEN2.slice(-4) },
     vault: [vaultEntry],
     machines: [{ id: 'm5', usesToken: true }],
     sessions: [{ id: 'w1', source: key, live: true }],
@@ -877,7 +850,7 @@ test('accounts (w777): a vault token is always listed under its vault name, once
   const k3 = tokenKey(T3);
   const distinct = buildAccounts(
     new Map<string, UsageEntry>([[k1, { kind: 'token', label: 'host token', usage: usageOf(10) }], [k3, { kind: 'token', label: 'vault-ben-3 …cccc', usage: usageOf(20), direct: true }], [key, { kind: 'token', label: 'vault-ben-2', usage: usageOf(61), direct: true }]]),
-    { ...base, token: { key: k1, label: 'host token …9AAA' }, vault: [{ key: k3, label: 'vault-ben-3 …cccc' }, vaultEntry], sessions: [] },
+    { ...base, token: { key: k1, label: 'vault-ben-1 …9AAA' }, vault: [{ key: k3, label: 'vault-ben-3 …cccc' }, vaultEntry], sessions: [] },
   );
   assert.deepEqual(distinct.map((a) => a.label).sort(), ['host token', 'vault-ben-2 …' + TOKEN2.slice(-4), 'vault-ben-3 …cccc']);
   assert.deepEqual(distinct.filter((a) => a.label.startsWith('vault-')).map((a) => a.where), [[], []], 'a vault token that is no other account has no subtext');
@@ -912,8 +885,8 @@ test('accounts (w785): a vault token shows the account email a person recorded o
   const alsoFile = buildAccounts(entries, { ...base, vault: [{ key, label, email: 'ben@example.com' }], tokenFile: { key, label: 'token file', roles: ['orchestrator'] } });
   assert.deepEqual(alsoFile[0].where, ['ben@example.com', "fff-portal's token file (the orchestrator)"]);
   // a login's own email is its label as before; a host token (not a vault entry) gets none
-  const host = buildAccounts(new Map<string, UsageEntry>([[tokenKey(TOKEN), { kind: 'token', label: 'host token …9AAA' }]]), { ...base, sessions: [], inUse: { hostLogin: false, hostToken: true, vault: false }, token: { key: tokenKey(TOKEN), label: 'host token …9AAA' }, vault: [{ key, label, email: 'ben@example.com' }] });
-  assert.deepEqual(host.map((a) => a.label), ['host token …9AAA']);
+  const host = buildAccounts(new Map<string, UsageEntry>([[tokenKey(TOKEN), { kind: 'token', label: 'vault-ben-1 …9AAA' }]]), { ...base, sessions: [], inUse: { hostLogin: false, hostToken: true, vault: false }, token: { key: tokenKey(TOKEN), label: 'vault-ben-1 …9AAA' }, vault: [{ key, label, email: 'ben@example.com' }] });
+  assert.deepEqual(host.map((a) => a.label), ['vault-ben-1 …9AAA']);
   // system_status carries it on the same line
   const lines = accountLines(withEmail, new Map([['w1', { id: 'w1', kind: 'worker' as const, status: 'running' as const }]]), new Date(AS_OF));
   assert.match(lines[1], /^- vault-ben-2 …7BBB \[ben@example\.com; agents on it: w1\]: /);

@@ -64,7 +64,7 @@ export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; bea
   if (isObj(vm.limits)) out.limits = pick(vm.limits, ['minFreeRamGB']);
   if (!out.ownerName && vm.ownerName) out.ownerName = vm.ownerName;
   // Every Claude process runs on a vault token (w1078): BEAST's accounts that were not the vault's are left behind.
-  if (isObj(out.claudeAccounts)) out.claudeAccounts = { ...currentAccounts(out.claudeAccounts), orchestrator: 'vault' };
+  out.claudeAccounts = { ...currentAccounts(isObj(out.claudeAccounts) ? out.claudeAccounts : {}), orchestrator: 'vault' };
   const machines: Json = { ...(isObj(beast.machines) ? beast.machines : {}), keepAgentsOnRestart: true };
   out.machines = machines;
   // Paths only BEAST had: Max's FFBox config folder and events file, an orchestrator memory folder, voice tools.

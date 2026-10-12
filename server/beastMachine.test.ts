@@ -17,7 +17,9 @@ import { daemonConfig, type DeployOptions } from './machineDeploy.ts';
 import { LOCAL, installScript, scriptCommand } from './machineDeployWin.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { SandboxPool, librarySource, samePath, totalAgentsRefusal, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
-import { accountSource, hostClaudeEnvFor, machineUsesLogin, usesHostClaudeEnv } from './secrets.ts';
+import { machineRunEnv } from './secrets.ts';
+import { setVaultContext } from './vault.ts';
+import { fakeToken, useFakeVault } from './testVault.ts';
 import { sandboxGuard } from './guard.ts';
 import { isProtected } from './reaper.ts';
 import { fleetOf } from '../shared/fleet.ts';
@@ -290,22 +292,16 @@ const PROBES: Probes = {
   usage: async () => ({ account: {}, reply: { rate_limits_available: false } }),
 };
 
-test("beast machine: its agents follow machines.useHostClaudeEnv like any machine's (claudeAccounts.workers is retired, w755)", () => {
-  const token = 'sk-ant-oat01-' + 'x'.repeat(40) + 'WXYZ';
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: token, CLAUDE_CONFIG_DIR: 'C:\\claude-cfg' }, machines: { useHostClaudeEnv: { '*': true, lothdesktop: false } } };
-  const beast = { id: 'beast', local: true };
-  assert.equal(usesHostClaudeEnv(cfg, beast), true, 'no entry naming it: the "*" rule, local or not');
-  assert.match(accountSource(cfg, beast), /host token …WXYZ/);
-  // An entry naming it: the host's own stored login, with the rest of claudeEnv kept.
-  const own = { ...cfg, machines: { useHostClaudeEnv: { beast: false } } };
-  assert.equal(usesHostClaudeEnv(own, beast), false);
-  assert.deepEqual(hostClaudeEnvFor(own, beast), { CLAUDE_CONFIG_DIR: 'C:\\claude-cfg' }, 'no credential, but the config dir stays (resumed sessions find their history)');
-  assert.equal(machineUsesLogin(own, beast), true);
-  assert.match(accountSource(own, beast), /login \(this host's stored Claude login/);
-  assert.equal(usesHostClaudeEnv({ ...cfg, machines: { useHostClaudeEnv: { beast: true } } }, beast), true, 'an entry naming it wins');
-  assert.equal(usesHostClaudeEnv(cfg, 'beast'), true, 'not known to be local: the "*" rule');
-  assert.equal(usesHostClaudeEnv(cfg, 'lothdesktop'), false);
-  assert.deepEqual(hostClaudeEnvFor(cfg, 'lothdesktop'), {}, 'a Mac or PC on its own login gets nothing');
+test("beast machine: its agents run on the vault token of the person their work is for, like any machine's (w1078: no host token or stored login)", (t) => {
+  t.after(() => setVaultContext(undefined));
+  useFakeVault();
+  const loth = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  for (const beast of [{ id: 'beast', local: true }, 'beast', { id: 'beast' }]) {
+    const r = machineRunEnv({}, beast, { role: 'workers', requestedBy: loth });
+    assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, fakeToken('lothsahn'));
+    assert.equal(r.login, true, "the daemon's own credentials are dropped; its stored login is never used");
+    assert.match(r.account, /^vault token vault-lothsahn-1 /);
+  }
 });
 
 test('beast machine: add_machine local takes its settings from the config, deploys without ssh, and is the only one', async (t) => {

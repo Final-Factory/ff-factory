@@ -8,7 +8,6 @@ import { vaultContext } from './vault.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
 import { writeFileDurable } from './durable.ts';
-import { refuseInDryRun } from './dryRun.ts';
 import { placeId } from './placement.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';

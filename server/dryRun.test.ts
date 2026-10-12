@@ -13,7 +13,7 @@ import type { Duplex } from 'node:stream';
 import type http from 'node:http';
 import webpush from 'web-push';
 import WebSocket from 'ws';
-import { DRY_RUN_WHY, defuseConfig, dryRun, dryRunStartRefusal } from './dryRun.ts';
+import { DRY_RUN_WHY, dryRun, dryRunStartRefusal } from './dryRun.ts';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
@@ -26,7 +26,6 @@ import { IntakeManager } from './intake.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
 import { MaxManager } from './max.ts';
 import { UsageTracker } from './usage.ts';
-import { setAppConfig } from './appConfig.ts';
 import type { Config } from './config.ts';
 import type { Machine, SessionInfo } from '../shared/types.ts';
 
@@ -60,7 +59,7 @@ function fakeSocket() {
 }
 const upgradeReq = (authorization: string) => ({ headers: { authorization }, url: '/x' }) as unknown as http.IncomingMessage;
 
-test('dry run: read from FFSB_DRY_RUN=1 only; only a person writing to an orchestrator starts a process; claudeEnv is ignored', (t) => {
+test('dry run: read from FFSB_DRY_RUN=1 only; only a person writing to an orchestrator starts a process', (t) => {
   assert.equal(dryRun({}), false);
   assert.equal(dryRun({ FFSB_DRY_RUN: '0' }), false);
   assert.equal(dryRun({ FFSB_DRY_RUN: 'true' }), false, 'exactly "1", as the unit file writes it');
@@ -71,12 +70,6 @@ test('dry run: read from FFSB_DRY_RUN=1 only; only a person writing to an orches
   assert.match(dryRunStartRefusal({ kind: 'orchestrator' }, 'orchestrator') ?? '', /dry run/, 'another agent');
   for (const kind of ['worker', 'standing'] as const) assert.equal(dryRunStartRefusal({ kind }, 'human'), DRY_RUN_WHY, kind);
   assert.equal(dryRunStartRefusal({ kind: 'worker', machineId: 'm5' }, 'human'), DRY_RUN_WHY, 'an agent on a machine');
-
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'not-a-real-token-a' }, userClaudeEnv: { ben: { CLAUDE_CODE_OAUTH_TOKEN: 'not-a-real-token-b' } } } as Pick<Config, 'claudeEnv' | 'userClaudeEnv'>;
-  assert.deepEqual(defuseConfig(cfg), ['claudeEnv', 'userClaudeEnv']);
-  assert.equal(cfg.claudeEnv, undefined);
-  assert.equal(cfg.userClaudeEnv, undefined);
-  assert.deepEqual(defuseConfig(cfg), [], 'nothing left to drop');
 });
 
 test('dry run: no worker, standing agent or machine agent starts, nor an orchestrator the server itself writes to; queued messages stay the real portal\'s', (t) => {
@@ -273,19 +266,6 @@ test('dry run: intake, the ledger sweep, Max and the usage poll start no timer a
   assert.equal((usage as unknown as { started: boolean }).started, false);
 });
 
-test('dry run: set_app_config takes no Claude token, and leaves the file alone', (t) => {
-  on(t);
-  const dir = tmp(t, 'ffsb-dry-config-');
-  const file = path.join(dir, 'config.json');
-  fs.writeFileSync(file, JSON.stringify({ ownerName: 'Ben' }, null, 2));
-  const cfg = { ownerName: 'Ben' } as Config;
-  for (const key of ['claudeEnv.CLAUDE_CODE_OAUTH_TOKEN', 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN'] as const) {
-    assert.throws(() => setAppConfig(file, cfg, key, 'not-a-real-token', { user: 'ben' }), new RegExp(`${key.replace(/\./g, '\\.')}: refused, this portal is a dry run`));
-  }
-  assert.equal(fs.readFileSync(file, 'utf8'), JSON.stringify({ ownerName: 'Ben' }, null, 2));
-  assert.equal(cfg.claudeEnv, undefined);
-});
-
 async function freePort(): Promise<number> {
   const s = net.createServer();
   await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
@@ -357,7 +337,7 @@ test('dry run: the real server says so in its health and its log, turns away dae
   };
   await until(new RegExp(`on http://127\\.0\\.0\\.1:${port}`), 60_000);
   assert.match(log, /!!!!!!!! DRY RUN \(FFSB_DRY_RUN=1\)\. Nothing here acts outside/);
-  assert.match(log, /Ignored: config claudeEnv\./);
+  assert.match(log, /config\.json sets .*\bclaudeEnv, which nothing reads any more .*Ignored; remove them/, "w1078: a retired key is named and left in the file: a dry run's config is another portal's");
 
   const health = (await (await fetch(`http://127.0.0.1:${port}/api/health`)).json()) as { ok: boolean; dryRun?: boolean };
   assert.equal(health.ok, true);

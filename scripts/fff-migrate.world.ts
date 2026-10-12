@@ -273,8 +273,6 @@ for ($i = 0; $i -lt 120; $i++) { try { $null = Invoke-WebRequest -UseBasicParsin
     hostGuard: { ...template.hostGuard, pollSeconds: 0 },
     unity: { editorPath: path.join(base, 'no-unity'), watchdog: { stallMinutes: 0, runningPollSeconds: 0, autoDismiss: false } },
     orchestrator: { ...template.orchestrator, notifyOnWorkerEvents: false },
-    claudeTokenFile: path.join(vm, 'secrets', 'claude-oauth-token'),
-    claudeAccounts: { orchestrator: 'tokenfile', dispatcher: 'tokenfile' },
   };
   const vmCfgFile = path.join(vm, 'config', 'config.json');
   fs.writeFileSync(vmCfgFile, JSON.stringify(vmCfg, null, 2) + '\n');

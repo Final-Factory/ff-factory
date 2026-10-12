@@ -14,6 +14,10 @@ import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { MachineSandbox, SessionInfo } from '../shared/types.ts';
+import { useFakeVault } from './testVault.ts';
+
+// Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
+useFakeVault();
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
 process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
