@@ -135,7 +135,7 @@ For the ops worker, after the deploy that carries w1078. Never print a token: la
 2. `system_status` shows each role's account as a vault token by its last four characters (the dispatcher's pinned one, each
    person's orchestrator on their pool), and no "host token", "token file" or "login".
 3. FFBox shows online in `system_status`: its connector reconnected with the hash from the file.
-4. The journal (`sudo fffctl logs`) shows the start's line "config: took … out of config.json (w1078 …)" and, later, "config:
+4. The journal (`sudo fffctl logs`) shows the start's line "config: changed config.json (w1078 …): …" and, later, "config:
    deleted the retired Claude token file …".
 
 ## claude.ai connectors (w516)

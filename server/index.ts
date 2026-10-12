@@ -80,7 +80,7 @@ const appNow = () => ({ ...appVersion(), web: webBuild(WEB) });
 if (!dryRun()) {
   try {
     const m = migrateConfig(configPath(), secretsDirOf(configPath()));
-    if (m.changes.length) console.warn(`config: took ${m.changes.join(', ')} out of config.json (w1078: every Claude process runs on a vault token; FFBox's connector hash is in the secrets folder); the file as it was is ${m.backup}`);
+    if (m.changes.length) console.warn(`config: changed config.json (w1078: every Claude process runs on a vault token; FFBox's connector hash is in the secrets folder): ${m.changes.join(', ')}; the file as it was is ${m.backup}`);
     if (m.scrubbed.length) console.warn(`config: took the secrets out of config.json's saved versions (w1078): ${m.scrubbed.join(', ')}`);
     for (const w of m.warnings) console.warn(`config: WARNING config.json ${w} looks like a credential (not shown): agents cannot read config.json until it is moved out (w1078)`);
   } catch (e) {
