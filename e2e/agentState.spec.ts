@@ -31,7 +31,8 @@ test('the Overview shows agents mid-turn, between turns (Working, with what they
   await expect(line(`Check-in ${tag}`)).toContainText('working');
   await expect(line(`Check-in ${tag}`)).not.toContainText('waiting');
   await expect(line(`Check-in ${tag}`).locator('.fl-agent-state')).toHaveClass(/tone-blue/);
-  await expect(line(`Check-in ${tag}`)).toHaveAttribute('title', /working \(check-in \d\d:\d\d.*: “e2e check-in”\)/);
+  // A 30-minute check-in after 23:30 is tomorrow's, and the page says so (w509): CI at 23:43 UTC failed on it (w1158).
+  await expect(line(`Check-in ${tag}`)).toHaveAttribute('title', /working \(check-in (tomorrow )?\d\d:\d\d.*: “e2e check-in”\)/);
   // What it waits on, on the board itself (w509): the running job's description, or the check-in and its note.
   await expect(line(`Build ${tag}`).getByTestId('fl-agent-why')).toHaveText(`CI on PR #1098 ${tag}`);
   await expect(line(`Check-in ${tag}`).getByTestId('fl-agent-why')).toContainText('“e2e check-in”');
@@ -60,6 +61,6 @@ test("an agent's page says Working between turns, and on what (w643: not Waiting
   await hook(page.request, 'wake', { id: s.id, minutes: 30 });
   await go(page, sandboxHash(ALPHA, s.id));
   // Tabs on a wide screen, a picker on a phone: each names the state and what it waits on.
-  if (isMobile(page)) await expect(page.locator('option', { hasText: `Waits ${tag}` })).toHaveText(/Waits \S+ · Working: check-in \d\d:\d\d/);
-  else await expect(page.getByRole('tab', { name: new RegExp(`Waits ${tag}`) })).toHaveAttribute('title', /^Waits \S+: Working: check-in \d\d:\d\d/);
+  if (isMobile(page)) await expect(page.locator('option', { hasText: `Waits ${tag}` })).toHaveText(/Waits \S+ · Working: check-in (tomorrow )?\d\d:\d\d/);
+  else await expect(page.getByRole('tab', { name: new RegExp(`Waits ${tag}`) })).toHaveAttribute('title', /^Waits \S+: Working: check-in (tomorrow )?\d\d:\d\d/);
 });
