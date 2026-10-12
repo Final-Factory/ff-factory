@@ -16,6 +16,7 @@
 // server/ledgerRules.ts. Every action is logged on its request; each person's orchestrator hears one line per pass.
 import fs from 'node:fs';
 import path from 'node:path';
+import { isSamePerson } from './vault.ts';
 import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import { emit } from './store.ts';
@@ -726,9 +727,22 @@ export class LedgerSweep {
       this.stall(w, 'cut-off', reason, acts);
       return true;
     };
+    // A limit of another person's account never holds this request (w1076): the worker is on another person's request too,
+    // so the dispatcher gives this one a session of its own on its person's tokens instead of waiting for the reset.
+    const clash = cut.kind === 'limit' ? this.d.orchestrators.accountClash(w, last.id) : undefined;
+    if (clash && w.resumedBy?.[last.id]) return stall(`${cut.reason}; ${clash}, and the dispatcher was told to give ${w.id} a session of its own (w1076)`);
+    if (clash) {
+      this.d.orchestrators.limitElsewhere(w, last, cut.reason, clash);
+      acts.push({ id: w.id, title: w.title, who, kind: 'note', text: `its worker ${last.id} ${cut.reason}, on another person's account: it does not wait for that limit, the dispatcher gives it a session of its own (w1076)` });
+      return true;
+    }
     if (w.resumedBy?.[last.id]) return stall(`${cut.reason}; the cleanup resumed it once already (${w.resumedBy[last.id].slice(0, 10)}) and it was cut off again`);
     if (cut.kind === 'refused') return stall(`${cut.reason}; resuming would be refused again`);
-    if (cut.kind === 'limit') {
+    // Its next process starts on another person's tokens than the account at its limit (a take-over, w1031): the limit is
+    // not this request's to wait for, and the resume restarts it on theirs (SessionManager.accountMove, w1076).
+    const next = this.d.orchestrators.sessionPersonOf(last.id) ?? last.requestedBy?.userId;
+    const otherAccount = cut.kind === 'limit' && !!last.ranFor && !!next && !isSamePerson(next, last.ranFor);
+    if (cut.kind === 'limit' && !otherAccount) {
       const clear = this.d.limitsClear?.(last);
       if (clear !== true) return stall(`${cut.reason}; ${clear === false ? 'the limit has not reset yet' : 'whether the limit has reset is unknown'}`);
     }

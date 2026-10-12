@@ -179,6 +179,12 @@ export interface SessionInfo {
    * by the portal that built the launch; spend_report attributes a turn to the account its session ran on.
    */
   ranAs?: string;
+  /**
+   * The person whose own Claude tokens (their vault pool or their own token) its current process was started on (w1076);
+   * absent when it ran on the machine's account. A live process whose requests now name another person is restarted at
+   * its next turn boundary (SessionManager.accountMove), so the next turn runs on theirs.
+   */
+  ranFor?: string;
   createdAt: string;
   lastActivityAt: string;
   /** A tool call of its own (not a subagent's) still running: the oldest one, since when (Store.noteActivity). */

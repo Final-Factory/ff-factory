@@ -114,6 +114,31 @@ export function tokenPersonForWork(cfg: { vault?: { unattributed?: Partial<Recor
   return kind ? unattributedPerson(cfg, kind) : undefined;
 }
 
+type UnattributedCfg = { vault?: { unattributed?: Partial<Record<UnattributedKind, string>> } };
+
+/** The person whose Claude pool and GitHub token every turn on `w` runs on (w1076): tokenPersonForWork, else its requester. */
+export const personForWork = (cfg: UnattributedCfg, w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed' | 'runsFor' | 'requestedBy'>): string =>
+  tokenPersonForWork(cfg, w) ?? w.requestedBy.userId;
+
+/**
+ * Whose Claude pool a worker session's next process starts on (w1031, w1076): the person of the open requests it has in hand
+ * (`held`: holdsOf's held and paused), never the person who happened to start the session (w1072 ran on Ben's pool because
+ * a33e1437 had been started for Ben). One session serves one person's requests (Orchestrators.accountClash); when two people's
+ * are in one session anyway (a person took over one request of a worker holding several, or a join from before w1076), the
+ * person its process last ran for keeps it, so it does not flip between accounts, else the latest take-over among `served`
+ * (w1031), else the first request it serves. Undefined when it holds none: the run's own requester then (machineRunEnv).
+ */
+export function sessionPerson(cfg: UnattributedCfg, held: readonly WorkItem[], served: readonly WorkItem[], ranFor?: string): string | undefined {
+  const people = [...new Set(held.map((w) => personForWork(cfg, w).toLowerCase()))];
+  if (people.length <= 1) return held.length ? personForWork(cfg, held[0]) : undefined;
+  if (ranFor && people.includes(ranFor.toLowerCase())) return ranFor;
+  const acted = served.filter((w) => !!w.runsFor).sort((a, b) => b.runsFor!.at.localeCompare(a.runsFor!.at))[0];
+  return acted?.runsFor!.userId ?? (served[0] ? personForWork(cfg, served[0]) : personForWork(cfg, held[0]));
+}
+
+/** Whether two people are one (user ids compare without case). */
+export const isSamePerson = (a: string | undefined, b: string | undefined) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
 // ---------------------------------------------------------------- the key
 
 export interface KeySource {

@@ -55,7 +55,7 @@ import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
-import { tokenPersonForWork } from './vault.ts';
+import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
 import type { AttachmentRef, ConditionalDecision, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -786,6 +786,78 @@ export class Orchestrators {
     if (same(was, login.userId)) return false;
     this.stamp(w, `now runs for ${login.displayName}: ${why} (was ${was}; their Claude pool and GitHub token, from the next worker process start)`);
     return true;
+  }
+
+  /** A person's name for a log line: their display name when they have a login here, else the id. */
+  private personName(userId: string): string {
+    return this.d.identity.get(userId)?.displayName ?? userId;
+  }
+
+  /** The open requests worker `sessionId` has in hand (served, held and paused; shared/workState.ts holdsOf), by id. */
+  private inHand(sessionId: string): { held: WorkItem[]; served: WorkItem[] } {
+    const h = holdsOf(sessionId, [...this.store.work.values()]);
+    const pick = (ids: Iterable<string>) => [...new Set(ids)].sort().map((id) => this.store.work.get(id)).filter((x): x is WorkItem => !!x);
+    return { held: pick([...h.held, ...h.paused.keys()]), served: pick(h.served) };
+  }
+
+  /**
+   * Whose Claude pool worker `sessionId`'s next process starts on (w1031, w1076): the person of the requests it has in hand
+   * (vault.ts sessionPerson), not whoever started the session. Undefined when it has none (its requester's, as before).
+   */
+  sessionPersonOf(sessionId: string): string | undefined {
+    const { held, served } = this.inHand(sessionId);
+    return sessionPerson(this.d.cfg, held, served, this.store.sessions.get(sessionId)?.ranFor);
+  }
+
+  /**
+   * Why request `w` may not go into worker `sessionId`'s session (w1076, lothsahn: "Why was that running on Ben's account? I
+   * messaged that on discord. It should have run on my account"): the worker has another person's open request in hand, so
+   * its process runs on that person's Claude pool, and every turn it spent on `w` would too. One session serves one person;
+   * `w` gets a new session instead (message_agent starts one in the same sandbox). Undefined when it may go there: a worker
+   * on nothing else, or only on requests of `w`'s own person (a live process on another person's account then restarts on
+   * theirs at its next turn, SessionManager.accountMove).
+   */
+  accountClash(w: WorkItem, sessionId: string): string | undefined {
+    const mine = personForWork(this.d.cfg, w);
+    const theirs = this.inHand(sessionId).held.filter((x) => x.id !== w.id && !isSamePerson(personForWork(this.d.cfg, x), mine));
+    if (!theirs.length) return undefined;
+    // Two people's requests in one session already (a take-over, or a join from before w1076): the one whose person the
+    // session runs for stays, the other is the one that moves (sessionPersonOf keeps the person it last ran for).
+    const runs = this.sessionPersonOf(sessionId) ?? personForWork(this.d.cfg, theirs[0]);
+    if (isSamePerson(runs, mine)) return undefined;
+    const whose = (x: WorkItem) => `${x.id} "${clip(x.title, 60)}" (${this.personName(personForWork(this.d.cfg, x))}'s)`;
+    return `${w.id} runs on ${this.personName(mine)}'s Claude tokens, and worker ${sessionId} is on ${theirs.map(whose).join(', ')}, so its process runs on ${this.personName(runs)}'s`;
+  }
+
+  /**
+   * Take request `w` off worker `sessionId` (w1076): it moves to a new session, so the old one no longer serves it, holds it,
+   * or starts a process on its person's account for it. The old worker's turns already spent on it stay in its spend.
+   */
+  moveOff(w: WorkItem, sessionId: string, why: string) {
+    if (!w.sessionIds.includes(sessionId)) return;
+    w.sessionIds = w.sessionIds.filter((x) => x !== sessionId);
+    if (w.links?.[sessionId]) {
+      const { [sessionId]: _gone, ...rest } = w.links;
+      w.links = rest;
+    }
+    this.stamp(w, `taken off worker ${sessionId}: ${why}`);
+    this.store.putWork(w);
+  }
+
+  /**
+   * The worker on `w` stopped on a usage limit, and it is on another person's request too, so that limit is another
+   * person's account's (w1076: "a session that hit one person's usage limit must not hold another person's request
+   * hostage"). `w` does not wait for it: the dispatcher is told to give it a session of its own now (message_agent with its
+   * work_id moves it, accountClash). Recorded in resumedBy, so the next pass stalls it instead of telling again.
+   */
+  limitElsewhere(w: WorkItem, s: Pick<SessionInfo, 'id'>, reason: string, clash: string) {
+    const at = this.now().toISOString();
+    const person = this.personName(personForWork(this.d.cfg, w));
+    this.ledgerEdit(w.id, `ledger cleanup: worker ${s.id} ${reason}; ${clash}, so ${w.id} does not wait for that limit: the dispatcher is told to give it a session of its own on ${person}'s tokens (w1076)`, (x) => void (x.resumedBy = { ...(x.resumedBy ?? {}), [s.id]: at }));
+    this.gatherForDispatcher(
+      w.requestedBy,
+      updateNotice(w, w.requestedBy, `worker ${s.id} ${reason}. ${clash}, so ${w.id} must not wait for that limit (w1076). Give it a session of its own now: message_agent with session_id "${s.id}" and work_id "${w.id}" starts one in its sandbox on ${person}'s tokens (start_agent with its work_id if that sandbox is gone). If no place fits, queue it.`),
+    );
   }
 
   /** takeOver for a request by id, saved (a caller outside this class: FFBox's operator messages). */
@@ -1569,6 +1641,9 @@ It changes nothing else: it answers no question asked of ${names(w.requesters)} 
     for (const sid of w.sessionIds) {
       const s = this.store.sessions.get(sid);
       if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || !servedBy(sid, all).has(w.id)) continue;
+      // A worker on another person's request too (a take-over left it serving two people, w1076) runs on their account: the
+      // note waits for the dispatcher, whose message_agent moves the request to a session of its own.
+      if (this.accountClash(w, sid)) continue;
       try {
         this.sessions.send(sid, `[about ${w.id} "${clip(w.title, 80)}"]
 ${crossOwnerLine(by, w.requesters)}
@@ -1610,6 +1685,9 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
         if (!s || s.kind !== 'worker') throw new Error(`no worker "${sid}"`);
         // Related work shares a session, unrelated work does not (w740): a worker with other requests in hand is linked only
         // to one related to what it did.
+        // One session serves one person (w1076): never link a request to a worker on another person's request.
+        const clash = this.accountClash(w, sid);
+        if (clash) throw new Error(`${clash}. A request runs on its own person's tokens (w1076): give it its own session (start_agent with work_id "${w.id}", or message_agent with work_id, which starts a new session in that worker's sandbox).`);
         const other = this.handsOf(sid).filter((h) => h.id !== w.id);
         const rel = other.length ? this.relationTo(w, sid) : undefined;
         if (rel && !rel.related) {
