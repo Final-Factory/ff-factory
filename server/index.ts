@@ -43,7 +43,7 @@ import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
-import { accountSetupLines, addSecretValues, reserveLines, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, scrubTranscripts, shownRoles } from './secrets.ts';
+import { accountSetupLines, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, scrubTranscripts, shownRoles } from './secrets.ts';
 import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
@@ -2106,10 +2106,10 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
   }
   const others = (key: string, role: 'dispatcher') =>
     role === 'dispatcher' ? [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error' && !(s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher')).length : 0;
-  for (const r of reserveLines(cfg, usageOfKey, others, now)) {
-    lines.push(r.line);
-    if (r.warning) warnings.push({ id: `reserve:${r.cred.key}`, kind: 'reserve', text: r.warning });
-  }
+  const reserves = reserveLines(cfg, usageOfKey, others, now);
+  for (const r of reserves) lines.push(r.line);
+  // Only for the person whose pool holds the dispatcher's token, else the owners (w1108).
+  warnings.push(...reserveWarnings(reserves, identity.list().filter((u) => u.role === 'owner').map((u) => u.userId)));
   // CI the portal cannot read (w889): for everyone, as a CI wait is anybody's.
   const ci = ciReadBanner(ciRead.health);
   if (ci) warnings.push({ id: 'ci-read', kind: 'ci-read', text: ci });

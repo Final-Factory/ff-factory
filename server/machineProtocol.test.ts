@@ -36,7 +36,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // it is updated (a verified deploy updates the machines, w887); an older portal never sends it, and the guard then checks nothing.
 // w936 (no bump): `mainClone` on the launch spec's guard, optional: an older daemon ignores it and its guard keeps refusing every
 // command that names the main clone, as before (the worker then reports the refusal); an older portal never sends it.
-const DECIDED = { protocol: 9, fingerprint: 'edc97d1d6ee5b12f' };
+// w1097 (no bump): `resumable` on `welcome` and a `resumable` message, the sessions whose temp folders survive a stop. An older
+// daemon ignores both (its onMessage has no default) and sweeps as before; an older portal never sends them, and the daemon
+// then sweeps as before.
+const DECIDED = { protocol: 9, fingerprint: 'cda6e7f3db280c3c' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

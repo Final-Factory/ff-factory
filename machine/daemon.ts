@@ -287,6 +287,11 @@ export class Daemon {
   readonly cleaner: CleanupRunner;
   /** Sweeps a stopped worker's temp folder (server/sessionSweep.ts, w913). */
   private readonly sweeper: SessionSweeper;
+  /**
+   * Sessions here that a request still waits for, as the portal last said (welcome, `resumable`; server/resumable.ts, w1097):
+   * their temp folders stay while they are stopped. A portal from before w1097 sends none, and the sweep works as before.
+   */
+  private resumable = new Set<string>();
   private cleanupSettings: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown } = { ...MACHINE_CLEANUP_DEFAULTS };
   /** The ledger's facts for the stale-output rules (w459), as the portal last sent them; kept in memory only. */
   private staleCtx?: StaleContext;
@@ -396,7 +401,7 @@ export class Daemon {
     this.sweeper = new SessionSweeper({
       root: cfg.root,
       tempRoot: () => agentTempRoot(cfg.tempDir),
-      sessions: () => [...this.entries.values()].map((e) => ({ id: e.s.info.id, live: e.s.live })),
+      sessions: () => [...this.entries.values()].map((e) => ({ id: e.s.info.id, live: e.s.live, resumable: this.resumable.has(e.s.info.id) })),
       dirOf: (id) => sessionTempDir(agentTempRoot(cfg.tempDir), id),
       guard: () => this.cleanupGuard(),
       procs: () => this.procs(),
@@ -543,6 +548,7 @@ export class Daemon {
         ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), agentTempRoot(c.tempDir)])].filter((x): x is string => !!x),
       ],
       home: HOME,
+      resumable: [...this.resumable].map((id) => sessionTempDir(agentTempRoot(c.tempDir), id)),
     };
   }
 
@@ -1449,9 +1455,13 @@ export class Daemon {
           },
         );
         return;
+      case 'resumable':
+        this.resumable = new Set(msg.sessionIds);
+        return;
       case 'welcome': {
         // The machine's agent cap (w536; a portal before it sent the old main-clone max_agents here).
         this.maxSessions = msg.maxSessions;
+        if (msg.resumable) this.resumable = new Set(msg.resumable);
         // A portal from before protocol 5 sends no pool settings: keep daemon.json's. So does a worker root install
         // (w513) whose record has no pool yet (an enrollment, never deployed from the portal): its hello tells it.
         if (msg.sandboxes !== undefined && !(msg.sandboxes === null && this.cfg.root)) {
