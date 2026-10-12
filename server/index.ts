@@ -45,6 +45,7 @@ import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
 import { accountSetupLines, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, scrubTranscripts, shownRoles } from './secrets.ts';
 import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
+import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
 import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.ts';
@@ -1993,10 +1994,12 @@ function limitsClearFor(s: SessionInfo): boolean | undefined {
  * token has that label.
  */
 function ownerPoolServes(label: string): boolean | undefined {
-  const n = label.trim().toLowerCase();
+  return poolForRef(label, gatePools())?.serves;
+}
+/** Every person's pool as a usage gate reads it (server/usageGate.ts). */
+function gatePools(): [string, GatePoolToken[]][] {
   const pools = vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor });
-  for (const list of pools.values()) if (list.some((t) => `${t.entry.name} …${t.entry.last4}`.toLowerCase() === n)) return list.some((t) => t.priority);
-  return undefined;
+  return [...pools].map(([person, list]) => [person, list.map((t) => ({ name: t.entry.name, last4: t.entry.last4, priority: t.priority, view: t.view }))]);
 }
 /** Whether the Claude account named by its email, label or id has room again (w643: a usage blocker), or undefined when unknown. */
 function accountClear(name: string): boolean | undefined {
