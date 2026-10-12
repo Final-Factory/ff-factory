@@ -61,9 +61,14 @@ export interface QueuedSend {
    * What holds it (w643): `capacity`, no free agent slot or sandbox (Queued), or `machine`, its machine offline or its
    * daemon outdated, the host guard (Blocked on that machine). Absent on messages queued before: capacity.
    */
-  on?: 'capacity' | 'machine';
+  on?: 'capacity' | 'machine' | 'pool';
   /** The last error a delivery attempt threw (w496): it stays queued and is tried again, up to QUEUE_HOLD_MS. */
   lastError?: string;
+  /**
+   * The request whose gates' clearing this message resumes, and the resume's note (w1128): it is not delivered once that
+   * request is blocked again or closed (SessionManager.staleResume).
+   */
+  resumeOf?: { work: string; note: string };
   /** It waits for its worker's process to restart on another person's Claude tokens (w1076, SessionManager.accountMove). */
   account?: boolean;
 }
@@ -76,6 +81,18 @@ const MOVE_RESTOP_MS = 60_000;
  * tried again before it is given up, with an error in its transcript (w496).
  */
 export const QUEUE_HOLD_MS = 24 * 3_600_000;
+
+/**
+ * How long a message held only by its worker's Claude pool (`on: 'pool'`, w1129) is kept: a weekly limit resets within 7
+ * days, so it is waited out (the usage blocker's own limit, shared/blockers.ts), not given up after QUEUE_HOLD_MS.
+ */
+export const POOL_HOLD_MS = 8 * 24 * 3_600_000;
+
+/**
+ * Whether a start was refused because the worker's person's Claude pool is held (w1129: PoolHeldError from machineRunEnv,
+ * every token over its caps or used up until a reset), not because it has no token at all, which no waiting cures.
+ */
+export const poolHeld = (e: unknown) => (e as Error)?.name === 'PoolHeldError' && (!!(e as { next?: string }).next || /token pool is (held|used up)/.test((e as Error).message));
 
 
 /** The prompt stream for one query(): messages pushed here become user turns, in order. */
@@ -849,6 +866,11 @@ export class SessionManager {
    * a request runs on its person's tokens), or undefined. Set by Agents. Its messages wait meanwhile (moveFor).
    */
   accountMove?: (s: SessionHandle) => string | undefined;
+  /**
+   * Why a resume of `sessionId` for request `work` must not go now, or undefined (w1128): its request was blocked again or
+   * closed while the resume waited. Set by Agents (Orchestrators.staleResume, which keeps it for the new gates).
+   */
+  staleResume?: (work: string, sessionId: string, note: string) => string | undefined;
   /** Workers this manager stopped to restart them on another account, and when (moveFor). */
   private readonly moving = new Map<string, number>();
 
@@ -1008,9 +1030,15 @@ export class SessionManager {
   private enqueue(q: QueuedSend) {
     this.queue.push(q);
     this.saveQueue();
-    this.store.append(q.id, { kind: 'system', text: q.on === 'machine' ? `A message is waiting for its machine (${q.why}); it is delivered as soon as it can go.` : q.account ? `A message is waiting for this worker's process to restart (${q.why}); it is delivered as soon as the new process can start.` : `A message is waiting for a free agent slot (${q.why}); it is delivered as soon as one frees.` });
+    this.store.append(q.id, { kind: 'system', text: q.on === 'pool' ? `A message is waiting for its person's Claude pool (${q.why}); it is delivered as soon as a token has room.` : q.on === 'machine' ? `A message is waiting for its machine (${q.why}); it is delivered as soon as it can go.` : q.account ? `A message is waiting for this worker's process to restart (${q.why}); it is delivered as soon as the new process can start.` : `A message is waiting for a free agent slot (${q.why}); it is delivered as soon as one frees.` });
     console.log(`sessions: queued a message for ${q.id}: ${q.why}`);
     return q.uuid;
+  }
+
+  /** A resume that does not go (w1128): said in its transcript and the server log. */
+  private notDelivered(id: string, why: string) {
+    this.store.append(id, { kind: 'system', text: `A resume was not delivered: ${why}.` });
+    console.log(`sessions: did not deliver a resume to ${id}: ${why}`);
   }
 
   private drainSoon() {
@@ -1033,6 +1061,13 @@ export class SessionManager {
         drop();
         continue;
       }
+      // w1128: a resume whose request was blocked again (or closed) while it waited does not go; its request keeps it.
+      const stale = q.resumeOf ? this.staleResume?.(q.resumeOf.work, q.id, q.resumeOf.note) : undefined;
+      if (stale) {
+        drop();
+        this.notDelivered(q.id, stale);
+        continue;
+      }
       if (this.moveFor(s) || this.fullFor(s)) {
         held.add(q.id);
         continue;
@@ -1043,11 +1078,17 @@ export class SessionManager {
         sent++;
       } catch (e) {
         // Removed only once delivered (w496: a worker's brief was dropped when LothDesktop's daemon was outdated):
-        // tried again on the next pass, given up only after QUEUE_HOLD_MS.
+        // tried again on the next pass, given up only after QUEUE_HOLD_MS, or POOL_HOLD_MS while only its pool holds it (w1129).
         const why = (e as Error).message;
-        if (now - (Date.parse(q.at) || now) >= QUEUE_HOLD_MS) {
+        const pool = s.info.kind === 'worker' && poolHeld(e);
+        if (pool !== (q.on === 'pool')) {
+          q.on = pool ? 'pool' : 'machine';
+          this.saveQueue();
+        }
+        const limit = pool ? POOL_HOLD_MS : QUEUE_HOLD_MS;
+        if (now - (Date.parse(q.at) || now) >= limit) {
           drop();
-          this.store.append(q.id, { kind: 'error', text: `A queued message could not be delivered within ${QUEUE_HOLD_MS / 3_600_000} hours and was given up: ${why}. It began: ${q.text.replace(/\s+/g, ' ').slice(0, 200)}` });
+          this.store.append(q.id, { kind: 'error', text: `A queued message could not be delivered within ${limit / 3_600_000} hours and was given up: ${why}. It began: ${q.text.replace(/\s+/g, ' ').slice(0, 200)}` });
           continue;
         }
         held.add(q.id);
@@ -1069,13 +1110,22 @@ export class SessionManager {
    * `hold` (w496: a worker's first prompt, its brief): what would refuse it now (a machine's daemon that is outdated or
    * offline, or its guard) queues it instead, and it goes as soon as it can, before any later message to the session.
    */
-  send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[], opts: { bypassGate?: boolean; requestedBy?: Requester; attachments?: DeliveredAttachment[]; hold?: boolean; ops?: OpsPass } = {}): string {
+  send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[], opts: { bypassGate?: boolean; requestedBy?: Requester; attachments?: DeliveredAttachment[]; hold?: boolean; ops?: OpsPass; resumeOf?: { work: string; note: string } } = {}): string {
     const s = this.get(id);
     // The orchestration worker (w597, server/opsWorker.ts) hears only Lothsahn's and Ben's own orchestrators (through
     // OpsWorker.send), its own wake_me and a restart's resume: no other sender, a harness notice included, reaches it.
     if (s.info.kind === 'ops' && !opts.ops) throw new Error(OPS_SEND_REFUSED);
-    const queue = (why: string, on: 'capacity' | 'machine', account = false) =>
-      this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), at: new Date().toISOString(), why, on, ...(account ? { account } : {}) });
+    // w1128: a gate's resume for a request blocked again (or closed) since does not go; its request keeps it for the new gates.
+    const stale = opts.resumeOf ? this.staleResume?.(opts.resumeOf.work, id, opts.resumeOf.note) : undefined;
+    if (stale) {
+      this.notDelivered(id, stale);
+      return '';
+    }
+    const queue = (why: string, on: 'capacity' | 'machine' | 'pool', account = false) =>
+      this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), ...(opts.resumeOf ? { resumeOf: opts.resumeOf } : {}), at: new Date().toISOString(), why, on, ...(account ? { account } : {}) });
+    // A worker whose person's Claude pool is held (w1129): its message waits for the pool, never refused or dropped. On
+    // 2026-10-12 every wake-up, gate resume and dispatcher follow-up to lothsahn's workers was refused this way for hours.
+    const pooled = (e: unknown) => s.info.kind === 'worker' && poolHeld(e);
     // ANOTHER PERSON'S ACCOUNT (w1076): its process restarts on its requests' person's tokens first; the message waits.
     const move = this.moveFor(s);
     if (move) return queue(move, 'capacity', true);
@@ -1094,10 +1144,11 @@ export class SessionManager {
         return queue((e as Error).message, 'machine');
       }
     } else this.checkStart(id, opts.bypassGate, from);
-    if (!opts.hold) return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
     try {
       return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
     } catch (e) {
+      if (pooled(e)) return queue((e as Error).message, 'pool');
+      if (!opts.hold) throw e;
       return queue((e as Error).message, 'machine');
     }
   }

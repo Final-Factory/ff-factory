@@ -230,9 +230,10 @@ export interface SessionInfo {
   queuedSend?: string;
   /**
    * What holds that message (w643): `capacity` (no free agent slot or sandbox: Queued) or `machine` (its machine is
-   * offline or its daemon outdated: Blocked on that machine). Absent: capacity.
+   * offline or its daemon outdated: Blocked on that machine) or `pool` (its person's Claude pool is held, w1129: Blocked on
+   * that usage limit). Absent: capacity.
    */
-  queuedOn?: 'capacity' | 'machine';
+  queuedOn?: 'capacity' | 'machine' | 'pool';
   /**
    * The worker declared that only a person can move it on (w691: the waiting_on_person tool): who, and what they must do.
    * The ledger shows its requests Waiting on input (on <who>), also while a check-in of its own is pending, and the agent
@@ -1006,7 +1007,15 @@ export interface StandingAgent {
   /** Next scheduled run; undefined for manual-only or paused agents. */
   nextRunAt?: string;
   /** A run that is due but has not started (waiting for a free agent slot). At most one. */
-  pending?: { trigger: StandingRunTrigger; dueAt: string; deadline: string; text?: string; requestedBy?: Requester };
+  pending?: {
+    trigger: StandingRunTrigger;
+    dueAt: string;
+    deadline: string;
+    text?: string;
+    requestedBy?: Requester;
+    /** w1126: its start was refused because its person's Claude pool is held: why, when it frees (if known), when to try again. */
+    poolWait?: { why: string; next?: string; retryAt: string };
+  };
   /** Runs on this machine instead of this host (its folder is then on that machine). */
   machineId?: string;
   /** File this agent's delegation requests into the ledger without the user's approval, within these limits (w527). */
@@ -1741,6 +1750,8 @@ export interface HeldCheckIn {
   at: string;
   /** Its note, as the worker wrote it. */
   note: string;
+  /** w1128: a gate's resume that came after the request was blocked again (Orchestrators.staleResume), not the worker's own check-in. */
+  resume?: true;
 }
 
 /** Why a request is stalled, and what kind of stop it was. */

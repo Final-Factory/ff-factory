@@ -125,7 +125,7 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
   }
   const jobs = jobsText(s);
   if (jobs) return v('between_turns', { kind: 'job', waitsOn: [jobs, checkIn].filter(Boolean).join(' · '), ...(wakeAhead ? { until: s.wakeAt } : {}) });
-  if (s.queuedSend) return { ...v('between_turns', { kind: 'queued', waitsOn: `a queued message (${s.queuedSend})` }), label: s.queuedOn === 'machine' ? 'Blocked' : 'Queued' };
+  if (s.queuedSend) return { ...v('between_turns', { kind: 'queued', waitsOn: `a queued message (${s.queuedSend})` }), label: s.queuedOn === 'machine' || s.queuedOn === 'pool' ? 'Blocked' : 'Queued' };
   if (checkIn) {
     const note = firstWords(s.wakeNote);
     return v('between_turns', { kind: 'timer', waitsOn: note ? `${checkIn}: ${note}` : checkIn, until: s.wakeAt });

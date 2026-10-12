@@ -171,8 +171,16 @@ export interface OrchestratorsDeps {
   cancelWake?: (sessionId: string) => string | undefined;
   /** A worker's pending wake_me check-in, if any (w829: kept before a block cancels it). */
   pendingWake?: (sessionId: string) => { at: string; note: string } | undefined;
-  /** Arm a worker's check-in to fire at once with `note` (w829: a cancelled one handed back); false when it cannot be. */
-  restoreWake?: (sessionId: string, note: string) => boolean;
+  /**
+   * Arm a worker's check-in to fire at once with `note` (w829: a cancelled one handed back); false when it cannot be.
+   * `resumeOf`: the request whose gates' clearing it is (w1128: not delivered once that request is blocked again).
+   */
+  restoreWake?: (sessionId: string, note: string, resumeOf?: string) => boolean;
+  /**
+   * The Claude pool a usage gate's ref names (w1126, server/usageGate.ts): the label the ledger keeps and when its hold lifts;
+   * undefined for a ref no pool or account answers to.
+   */
+  usageRef?: (ref: string) => { ref: string; until?: string } | undefined;
   now?: () => Date;
   /** How long intake notices gather before they reach the dispatcher (tests shorten it). */
   intakeGatherMs?: number;
@@ -784,7 +792,7 @@ export class Orchestrators {
       w.heldCheckIns = undefined;
       if (isOpen(w) || w.status === 'stalled') {
         for (const h of held) {
-          if (this.store.sessions.get(h.session) && w.sessionIds.includes(h.session)) this.wakeNow(h.session, `${w.id}'s block ended (${clip(line, 200)}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`);
+          if (this.store.sessions.get(h.session) && w.sessionIds.includes(h.session)) this.wakeNow(h.session, `${w.id}'s block ended (${clip(line, 200)}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`, w.id);
         }
       }
     }
@@ -1758,7 +1766,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
         const problem = blockerProblem(b, w.id, facts);
         if (problem) throw new Error(problem);
       }
-      const fresh = asked.map((b) => this.makeGate(b, now.toISOString(), 'dispatcher'));
+      const fresh = asked.map((b) => this.makeGate(this.usageGateOf(b), now.toISOString(), 'dispatcher'));
       // Without a new gate, it blocks again on the ones it kept through a hold (w754). A single blocker replaces what it
       // waited on, unless add_blocker: then it joins the gates it has, and the request starts when all have cleared.
       const gates = !fresh.length ? kept : input.add_blocker && !input.blockers?.length ? [...kept.filter((k) => !fresh.some((f) => sameGate(f, k))), ...fresh] : fresh.filter((g, i) => fresh.findIndex((x) => sameGate(x, g)) === i);
@@ -1834,6 +1842,18 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     });
   }
 
+  /**
+   * A usage blocker as its gate keeps it (w1126): the ref the pool knows ("vault-lothsahn-1" becomes "vault-lothsahn-1 …EAAA";
+   * "lothsahn" their pool's token) and, unless one is given, the hold's end, so it clears when the pool has room or at that
+   * time, whichever comes first. A ref no pool or account answers to is refused: such a gate could never clear.
+   */
+  private usageGateOf<B extends Omit<WorkBlocker, 'at' | 'by' | 'sha'>>(b: B): B {
+    if (b.kind !== 'usage' || !b.ref?.trim() || !this.d.usageRef) return b;
+    const u = this.d.usageRef(b.ref);
+    if (!u) throw new Error(`no Claude account or vault pool is called "${b.ref.trim()}": give the vault token's name as the pool shows it ("vault-lothsahn-1") or the person whose pool it is ("lothsahn")`);
+    return { ...b, ref: u.ref, ...(!b.until && u.until ? { until: u.until } : {}) };
+  }
+
   /** A gate as recorded (w754): the dispatcher's blocker, or a worker's blocked_on. */
   private makeGate(b: Omit<WorkBlocker, 'at' | 'by' | 'sha'>, at: string, by: string): WorkBlocker {
     const ref = b.kind === 'request' || b.kind === 'machine' || b.kind === 'deploy' ? b.ref?.trim().toLowerCase() : b.ref?.trim();
@@ -1886,8 +1906,10 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const back: string[] = [];
     for (const h of w.heldCheckIns ?? []) {
       if (h.session === except || !this.store.sessions.get(h.session) || !w.sessionIds.includes(h.session)) continue;
-      const note = `${lead}. This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`;
-      if (!this.wakeNow(h.session, note)) continue;
+      const note = h.resume
+        ? `${lead}. An earlier resume reached you only after ${w.id} was blocked again, so it was kept until now; carry on from it: ${h.note}`
+        : `${lead}. This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`;
+      if (!this.wakeNow(h.session, note, w.id)) continue;
       this.noteResume(w, h.session, note);
       back.push(h.session);
     }
@@ -1898,10 +1920,10 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * Resume a worker within a minute with `note` (Agents' restoreWake: its check-in, due now). A check-in it still has
    * pending is folded into the note rather than replaced (w1094: one pending wake per worker, so a resume overwrote it).
    */
-  private wakeNow(sid: string, note: string): boolean {
+  private wakeNow(sid: string, note: string, resumeOf?: string): boolean {
     const pending = this.d.pendingWake?.(sid);
     const folded = pending && !note.includes(pending.note) ? `${note}\n\nYour own check-in (due ${pending.at.slice(11, 16)} UTC) is folded into this message; its note was: ${pending.note}` : note;
-    return !!this.d.restoreWake?.(sid, folded);
+    return !!this.d.restoreWake?.(sid, folded, resumeOf);
   }
 
   /**
@@ -1915,7 +1937,9 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const setters = [...new Set(gates.map(gateSetter).filter((x): x is string => !!x))];
     const setter = setters.find(exists);
     if (setter) return { sid: setter };
-    if (!setters.length && !gates.some((g) => g.kind === 'ci' || g.kind === 'deploy')) return undefined;
+    // w1126: a usage hold stopped a worker that has work in hand (w1116..w1124 waited two hours for someone to message them):
+    // its end resumes that worker as CI's and a deploy's do; with none, the dispatcher starts the request.
+    if (!setters.length && !gates.some((g) => g.kind === 'ci' || g.kind === 'deploy' || g.kind === 'usage')) return undefined;
     const sid = [...w.sessionIds].reverse().find(exists);
     return sid ? { sid, ...(setters.length ? { gone: setters[0] } : {}) } : undefined;
   }
@@ -1942,9 +1966,34 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       : '';
     const held = w.heldCheckIns?.find((h) => h.session === sid);
     const note = `${w.id} is unblocked: ${cleared}.${yours}${ci ? ` Read its checks now (gh pr checks${prs ? ` ${prs}` : ''}): merge on green, fix on red.` : ''}${deploy ? ' The deploy you waited for has happened: do the check that comes after it now (the live read, the health check), then report.' : ''} Carry on from where you left it.${held ? ` Your own check-in, which the block cancelled, is folded into this message; its note was: ${held.note}` : ''}`;
-    if (!this.wakeNow(sid, note)) return [];
+    if (!this.wakeNow(sid, note, w.id)) return [];
     this.noteResume(w, sid, note);
     return [sid];
+  }
+
+  /**
+   * A resume (a gate's clearing, a check-in a block handed back) that waited to be delivered, its sandbox busy or its pool held,
+   * while its request was blocked again or closed (w1128): it does not go. A request blocked again keeps it with its new gates
+   * (heldCheckIns), handed back when they clear (unblock); a closed one drops it. Returns why it does not go, or undefined.
+   * w1083 on 2026-10-12: CI's resume of a50a8ee1, queued for a sandbox at 06:48Z, went at 06:50Z, after the dispatcher had
+   * blocked the request on w1070 and w1110 at 06:49Z; w1082's (c37a6ec0) waited from 06:13Z and went at 07:33Z the same way.
+   */
+  staleResume(workId: string, sessionId: string, note: string): string | undefined {
+    const w = this.store.work.get(workId.toLowerCase());
+    if (!w) return undefined;
+    // Blocked again, or held on a person with its gates kept (w754): handed back when the gates clear (unblock). A hold with
+    // no gate left has nothing to hand it back, so the resume goes.
+    if (w.blocked && (w.status === 'blocked' || w.status === 'question')) {
+      const name = gatesName(gatesOf(w), this.now().getTime());
+      if (!(w.heldCheckIns ?? []).some((h) => h.session === sessionId && h.note === note)) w.heldCheckIns = [...(w.heldCheckIns ?? []), { session: sessionId, at: this.now().toISOString(), note, resume: true }];
+      const left = (w.gateResumes ?? []).filter((r) => r.session !== sessionId);
+      w.gateResumes = left.length ? left : undefined;
+      this.stamp(w, `a resume of worker ${sessionId} waited to be delivered while ${w.id} was blocked again on ${name}: kept for when that clears`);
+      this.store.putWork(w);
+      return `${w.id} is blocked again on ${name}; the resume is kept and handed back when that clears`;
+    }
+    if (!isOpen(w) && w.status !== 'stalled') return `${w.id} is ${w.status}`;
+    return undefined;
   }
 
   /** Records a gate's resume of `sid` for the sweep (w1094, sweepResumes). */
@@ -1986,7 +2035,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
           did.set(w.id, `gave up on ${r.session}`);
           continue;
         }
-        const again = this.d.restoreWake?.(r.session, r.note);
+        const again = this.d.restoreWake?.(r.session, r.note, w.id);
         console.warn(`ledger: SWEEP: ${w.id}: worker ${r.session} was resumed ${Math.round((now - Date.parse(r.at)) / 60_000)} min ago when its gate cleared and has not taken it, with nothing pending for it: ${again ? 'resumed again' : 'could not resume it again'} (try ${r.tries + 1})`);
         this.stamp(w, `sweep: worker ${r.session} had not taken its resume ${Math.round((now - Date.parse(r.at)) / 60_000)} min after its gate cleared; ${again ? 'resumed it again' : 'could not resume it again'}`);
         left.push({ ...r, at: this.now().toISOString(), seq: this.store.lastSeq(r.session), tries: r.tries + 1 });
@@ -2031,7 +2080,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const sid = [...w.sessionIds].reverse().find((x) => this.store.sessions.get(x));
     if (!sid) return false;
     const note = `${w.id}: the deploy you waited for has happened (${why}). Your report put a step after it: "${clip(step, 200)}". Do it now, then report.`;
-    if (!this.wakeNow(sid, note)) return false;
+    if (!this.wakeNow(sid, note, w.id)) return false;
     this.noteResume(w, sid, note);
     const was = w.blocked ? ` (it was blocked on ${gatesName(gatesOf(w), this.now().getTime())})` : '';
     w.status = 'active';
@@ -2137,7 +2186,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     for (const id of holdsOf(sessionId, items).held) {
       const w = this.store.work.get(id);
       if (!w || w.status !== 'active') continue;
-      const gate = this.makeGate({ kind: 'usage', ref: a.ref, what: a.what }, now.toISOString(), `worker ${sessionId}`);
+      const until = this.d.usageRef?.(a.ref)?.until;
+      const gate = this.makeGate({ kind: 'usage', ref: a.ref, what: a.what, ...(until ? { until } : {}) }, now.toISOString(), `worker ${sessionId}`);
       w.blocked = gate;
       w.alsoBlocked = undefined;
       w.stalled = undefined;

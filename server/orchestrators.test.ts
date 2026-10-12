@@ -15,6 +15,7 @@ import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { requestAsFiled } from './work.ts';
 import { BlockerWatch } from './blockerWatch.ts';
+import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import type { PrHealth } from '../shared/blockers.ts';
@@ -3241,4 +3242,177 @@ test('w1094: the backstop: a request still Blocked on CI that finished over 5 mi
   } finally {
     console.warn = warn;
   }
+});
+
+// ---------------------------------------------------------------- w1126, w1128, w1129: a Claude pool hold, and resumes that outlive a gate
+
+const LOTH_TOKEN = 'vault-lothsahn-1 …EAAA';
+const POOL_HELD_UNTIL = '2026-10-12T12:50:00.000Z';
+
+/** Lothsahn's pool as the usage gate reads it (index.ts gatePools): held until 12:50Z, or serving. */
+function lothPool() {
+  const pool = { serving: false };
+  const pools = (): [string, GatePoolToken[]][] => [
+    ['lothsahn', [{ name: 'vault-lothsahn-1', last4: 'EAAA', priority: pool.serving, view: pool.serving ? { state: 'ok' } : { state: 'held', until: POOL_HELD_UNTIL } }]],
+  ];
+  return { pool, pools, usageClear: (ref: string) => poolForRef(ref, pools())?.serves };
+}
+
+/** A fake vault whose pool holds every run while `held.on` (machineRunEnv then throws PoolHeldError, as on 2026-10-12). */
+function heldVault(t: { after: (fn: () => void) => void }) {
+  const held = { on: false };
+  const ok = useFakeVault();
+  const forRun = ok.vault.forRun.bind(ok.vault);
+  useFakeVault({
+    vault: {
+      forRun: ((run: { userId?: string }, o: { claude: boolean }) =>
+        held.on && o.claude
+          ? { env: {}, problems: [], claudeHold: { why: 'every token is at a limit (vault-lothsahn-1: 5-hour 92% (>= 80): held until Mon 12:50Z): the first frees up Mon 12:50Z', next: POOL_HELD_UNTIL } }
+          : forRun(run as never, o as never)),
+    } as never,
+  });
+  t.after(() => setVaultContext(undefined));
+  return held;
+}
+
+test('w1126: a Claude pool hold ends and EVERY request blocked on it resumes: the dispatcher\'s block on "vault-lothsahn-1" (w1116..w1124), a worker\'s own token-stop gate, and one with no worker yet', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, dispatcher, call, heard } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }]);
+  const { pool, pools, usageClear } = lothPool();
+  (agents as unknown as { usageRef: (ref: string) => unknown }).usageRef = (ref) => poolForRef(ref, pools());
+  // 12:35Z, before the hold's own end (12:50Z): what clears it here is the pool having room again.
+  const clock = Date.parse('2026-10-12T12:35:00Z');
+  const watch = new BlockerWatch({ store, orchestrators: o, usageClear, now: () => clock });
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  const decide = (id: string, a2: Record<string, unknown>) => call(dispatcher().info, 'decide_work', { id, note: 'its worker fixes it once the pool frees', ...a2 });
+  // 12:35Z, as on w1116: the dispatcher names the token without its last four.
+  const b1 = await decide('w1', { action: 'block', blocker: { kind: 'usage', ref: 'vault-lothsahn-1', what: "lothsahn's Claude pool (held at 89% 5-hour until 12:50Z)" } });
+  assert.equal(b1.isError, false, b1.text);
+  assert.equal(store.work.get('w1')!.blocked!.ref, LOTH_TOKEN, 'kept as the token the pool knows');
+  assert.equal(store.work.get('w1')!.blocked!.until, POOL_HELD_UNTIL, "the hold's end, from the pool");
+  // A worker stopped at the dispatcher token's stop line (w1109): its own gate, the full label.
+  assert.deepEqual(o.tokenStopBlocked(b.id, { ref: LOTH_TOKEN, what: `the dispatcher's token ${LOTH_TOKEN} at its stop line` }), ['w2']);
+  // A request nobody has started yet, blocked on lothsahn's pool by its person.
+  assert.equal((await decide('w3', { action: 'block', blocker: { kind: 'usage', ref: 'lothsahn', what: "lothsahn's Claude pool" } })).isError, false);
+  await watch.tick();
+  for (const id of ['w1', 'w2', 'w3']) assert.equal(store.work.get(id)!.status, 'blocked', `${id} waits while the pool is held`);
+  // The 5-hour window resets: the pool serves again, and nothing else has to nudge them.
+  pool.serving = true;
+  const did = await watch.tick();
+  for (const id of ['w1', 'w2', 'w3']) assert.match(did.get(id) ?? '', /^clear: /, `${id} clears`);
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.match(agents.waker.pending(a.id)?.note ?? '', /^w1 is unblocked: vault-lothsahn-1 …EAAA's usage limit cleared/, "the dispatcher's block resumes w1's worker itself");
+  assert.equal(store.work.get('w2')!.status, 'active');
+  assert.match(agents.waker.pending(b.id)?.note ?? '', /^w2 is unblocked: /, 'the token-stop gate resumes its worker');
+  assert.equal(store.work.get('w3')!.status, 'new', 'no worker: the dispatcher starts it');
+  await until('the dispatcher hears w3 is unblocked', () => heard(dispatcher().info.id, '[ledger] w3').length > 0);
+  agents.waker.cancel(a.id);
+  agents.waker.cancel(b.id);
+});
+
+test("w1126: a usage gate also clears at the hold's end when the meters have not said so yet (a stale reading), and the dispatcher's own until wins", async (t) => {
+  const env = setup(t);
+  const { store, agents, o, dispatcher, call } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  const { pools, usageClear } = lothPool();
+  (agents as unknown as { usageRef: (ref: string) => unknown }).usageRef = (ref) => poolForRef(ref, pools());
+  let clock = Date.parse('2026-10-12T12:35:00Z');
+  const watch = new BlockerWatch({ store, orchestrators: o, usageClear, now: () => clock });
+  const block = (id: string, blocker: Record<string, unknown>) => call(dispatcher().info, 'decide_work', { id, action: 'block', note: 'pool held', blocker });
+  assert.equal((await block('w1', { kind: 'usage', ref: 'vault-lothsahn-1', what: "lothsahn's Claude pool" })).isError, false);
+  assert.equal((await block('w2', { kind: 'usage', ref: 'vault-lothsahn-1', until: '2026-10-12T13:30:00Z', what: "lothsahn's Claude pool" })).isError, false);
+  assert.equal(store.work.get('w2')!.blocked!.until, '2026-10-12T13:30:00.000Z');
+  await watch.tick();
+  assert.equal(store.work.get('w1')!.status, 'blocked');
+  clock = Date.parse('2026-10-12T12:51:00Z');
+  assert.match((await watch.tick()).get('w1') ?? '', /^clear: the hold on vault-lothsahn-1 …EAAA ended at 12:50 UTC/);
+  assert.equal(store.work.get('w2')!.status, 'blocked', 'its own until is later');
+  // An unknown account is refused, with what the pool knows, instead of a gate that can never clear.
+  const bad = await block('w2', { kind: 'usage', ref: 'vault-lothsahn-9', what: 'x' });
+  assert.equal(bad.isError, true);
+  assert.match(bad.text, /no Claude account or vault pool is called "vault-lothsahn-9"/);
+});
+
+test("w1128: a CI gate's resume still waiting to be delivered when its request is blocked again on something else is not delivered: it is kept for the new gate and handed back when that clears", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, dispatcher, call, sessions } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', status: 'active' }]);
+  const pr = 'Final-Factory/FinalFactory#1537';
+  let checks = { done: false, text: `1 of 2 workflow runs on ${pr} still running` };
+  const watch = new BlockerWatch({ store, orchestrators: o, ci: async () => checks });
+  const a = await startedFor(env, 'w1');
+  await a.h.blocked_on!({ prs: [`ci:${pr}`], what: 'CI on #1537' });
+  await watch.tick();
+  // 06:48Z on w1083: CI finishes and a50a8ee1 is resumed, but its sandbox is gone, so the resume waits in the send queue.
+  checks = { done: true, text: `CI on ${pr} finished: 1 of 2 workflow runs failed (Test Runner: failure)` };
+  (watch as unknown as { ciSeen: Map<string, unknown> }).ciSeen.clear();
+  await watch.tick();
+  const note = agents.waker.pending(a.id)!.note;
+  const full = sessions as unknown as { placeFull?: (s: unknown) => string | undefined };
+  const placeFull = full.placeFull;
+  full.placeFull = () => 'no sandbox on pc is free (test)';
+  (agents.waker as unknown as { fire(id: string, tries: number): void }).fire(a.id, 0);
+  assert.ok(sessions.queued().some((q) => q.id === a.id), 'the resume waits for a sandbox');
+  // 06:49Z: the dispatcher blocks w1083 on w1110 before the resume goes.
+  const blocked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'block', note: 'waits on the shared failure', blocker: { kind: 'request', ref: 'w2', on: 'report', what: "w2's finding on the shared Test Runner failure" } });
+  assert.equal(blocked.isError, false, blocked.text);
+  // 06:50Z: a sandbox frees. The resume must not go while w1 is blocked on w2.
+  full.placeFull = placeFull;
+  sessions.drain();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(!store.readTranscript(a.id).some((e) => e.kind === 'user' && e.text.includes(note)), 'the bug: the CI resume reached the worker while w1 was blocked on w2');
+  assert.ok(!sessions.queued().some((q) => q.id === a.id), 'not left in the queue either');
+  const w = store.work.get('w1')!;
+  assert.equal(w.status, 'blocked');
+  assert.equal(w.heldCheckIns?.[0]?.session, a.id, 'kept for when the new gate clears');
+  // w2 is done: w1 is unblocked and the kept resume goes to its worker.
+  const w2 = store.work.get('w2')!;
+  w2.status = 'done';
+  store.putWork(w2);
+  await watch.tick();
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.ok((agents.waker.pending(a.id)?.note ?? '').includes(note), 'handed back: CI cleared while it was blocked, and that is said now');
+  agents.waker.cancel(a.id);
+});
+
+test('w1129: a message to a worker while its Claude pool is held is queued, not refused, and goes when the pool frees; a resume queued so is not counted lost by the sweep, and a pool hold is not given up after 24 hours', async (t) => {
+  const env = await setupOnMachine(t);
+  const held = heldVault(t);
+  const { store, agents, o, dispatcher, call, sessions } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }]);
+  const a = await startedFor(env, 'w1');
+  held.on = true;
+  // The dispatcher's follow-up (it was refused: "lothsahn's Claude token pool is held").
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: a.id, work_id: 'w1', text: 'Fix the Test Runner failure on #1552.' });
+  assert.equal(sent.isError, false, sent.text);
+  assert.match(sent.text, /Queued, not refused: .*Claude token pool is held/);
+  // A harness wake-up (a gate's resume, a check-in): queued as well, never "could not wake this session".
+  agents.waker.schedule(a.id, 1, 'w1 is unblocked: CI cleared.');
+  (agents.waker as unknown as { fire(id: string, tries: number): void }).fire(a.id, 0);
+  assert.equal(sessions.queued().filter((q) => q.id === a.id).length, 2);
+  assert.ok(!store.readTranscript(a.id).some((e) => e.kind === 'system' && /could not wake/.test(e.text)));
+  // The sweep sees a message queued for it: on its way, not lost.
+  const w = store.work.get('w1')!;
+  w.status = 'active';
+  w.gateResumes = [{ session: a.id, at: new Date(Date.now() - 6 * 60_000).toISOString(), mark: 'w1 is unblocked: CI cleared.', note: 'w1 is unblocked: CI cleared.', seq: store.lastSeq(a.id), tries: 3 }];
+  store.putWork(w);
+  const swept = o.sweepResumes((sid) => sessions.queued().some((q) => q.id === sid));
+  assert.equal(swept.has('w1'), false, 'not "the message never reached it"');
+  // A day later the pool is still held (a weekly limit): the messages are kept.
+  for (const q of sessions.queued()) (q as { at: string }).at = new Date(Date.now() - 25 * 3_600_000).toISOString();
+  sessions.drain();
+  assert.equal(sessions.queued().filter((q) => q.id === a.id).length, 2, 'a pool hold with a known end is waited out');
+  // The pool frees: both go, in order.
+  held.on = false;
+  sessions.drain();
+  await until('the follow-up and the resume in its transcript', () => {
+    const tx = store.readTranscript(a.id);
+    return tx.some((e) => e.kind === 'user' && e.text.includes('Fix the Test Runner failure on #1552.')) && tx.some((e) => e.kind === 'user' && e.text.includes('w1 is unblocked: CI cleared.'));
+  });
 });

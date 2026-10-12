@@ -10,6 +10,7 @@ import { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { Machine, SessionInfo } from '../shared/types.ts';
 import { useFakeVault } from './testVault.ts';
+import { PoolHeldError } from './vault.ts';
 
 // Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
 useFakeVault();
@@ -427,4 +428,35 @@ test('w510: standing agents run on machines only; one from before with no machin
   assert.equal(moved.folder, '/home/u/.fff/agents/old-sentry');
   assert.equal(st.noMachineLine(), undefined);
   assert.match(st.runNow(b.id), /Started/);
+});
+
+test("w1126: a standing agent's run that its person's Claude pool holds waits for the pool and starts within a minute of it freeing, instead of ending as an error", (t) => {
+  const { st, port, advance, cleanup } = setup();
+  t.after(cleanup);
+  const a = st.create(def);
+  const s = port.get(a.sessionId);
+  const send = port.send.bind(port);
+  let held = true;
+  port.send = (id: string, text: string) => {
+    if (held) throw new PoolHeldError("lothsahn's Claude token pool is held: every token is at a limit (vault-lothsahn-1: 5-hour 92% (>= 80): held until Wed 11:00Z): the first frees up Wed 11:00Z", '2026-09-23T11:00:00.000Z');
+    return send(id, text);
+  };
+  const agent = () => st.list().find((x) => x.id === a.id)!;
+  advance(30);
+  st.tick();
+  assert.equal(s.live, false);
+  assert.equal(agent().state, 'waiting', 'the bug: it ended as an error ("Could not start: ...pool is held") and the run was lost');
+  assert.match(agent().stateDetail ?? '', /waits for its person's Claude pool \(lothsahn's Claude token pool is held/);
+  assert.deepEqual(agent().runs.map((r) => r.outcome), [], 'no failed run is booked');
+  // Looked at again once a minute, not on every tick.
+  held = false;
+  advance(0.5);
+  st.tick();
+  assert.equal(s.live, false);
+  advance(0.6);
+  st.tick();
+  assert.equal(s.live, true, 'the pool has room again: it starts');
+  assert.equal(agent().state, 'running');
+  assert.equal(agent().pending, undefined);
+  assert.match(s.sent[0], /^\[run \w+\]/);
 });
