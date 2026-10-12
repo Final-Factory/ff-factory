@@ -15,6 +15,7 @@ import {
   agentView,
   standingGlance,
   useNow,
+  useWorkLive,
   versionLabel,
   type Glance,
   type Route,
@@ -52,7 +53,9 @@ export function Sidebar({
   const dispatcher = app.dispatcherId ? sessionsById.get(app.dispatcherId) : undefined;
   // The one orchestration worker in the portal VM (w597, docs/ops-worker.md): its own row, never game capacity.
   const ops = app.sessions.find((s) => s.kind === 'ops');
-  const ledger = dispatcherGlance(dispatcher, (app.work ?? []).filter(isOpenWork), app.me?.userId);
+  // The same live states the Dispatcher page counts (w1089): one workLiveAll map, so the row and the page always agree.
+  const live = useWorkLive(app, app.work ?? [], now);
+  const ledger = dispatcherGlance(dispatcher, (app.work ?? []).filter(isOpenWork), live, app.me?.userId);
   const selection = selectionOf(route, sessionsById);
   const fleet = fleetFor(app);
 

@@ -4,6 +4,7 @@
 // (server/blockerWatch.ts) reads the verdicts and unblocks, stalls or asks; list_work, read_work and the Dispatcher page
 // name the blocker (docs/orchestrators.md, "Waiting, Queued, Blocked").
 import type { WorkBlocker, WorkBlockerKind, WorkItem } from './types.ts';
+import { capacityBlockProblem } from './capacity.ts';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -256,6 +257,9 @@ export function prRefOf(text: string): string | undefined {
 /** Why a blocker cannot be set as given, or undefined (decide_work block). */
 export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | 'on' | 'holder' | 'what'>, self: string, f: Pick<BlockerFacts, 'now' | 'work' | 'online'>): string | undefined {
   if (!b.what.trim()) return 'say what it waits for (blocker.what), e.g. "w633\'s timing table"';
+  // w1089: capacity is Queued, never Blocked on a time (w1084 to w1088 sat "blocked until 04:35" for a free sandbox).
+  const capacity = capacityBlockProblem(b.what, 'dispatcher');
+  if (capacity) return capacity;
   const until = b.until ? Date.parse(b.until) : undefined;
   if (b.until && !Number.isFinite(until)) return `blocker.until "${b.until}" is not a time (ISO, e.g. 2026-10-08T06:00:00Z)`;
   const req = (id: string | undefined, field: string) => {

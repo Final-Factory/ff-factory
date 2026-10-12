@@ -12,6 +12,7 @@
 // CI_UNREADABLE_MS clear the block so its worker looks itself; the check-in a block cancelled is handed back on any clear
 // (Orchestrators.unblock).
 //
+// A block that is only a wait for capacity (a free sandbox, slot, editor, RAM) is Queued instead (requeueCapacityBlocks, w1089).
 // It also flags requests queued for capacity while a computer that could take them has room (flagQueuedWithRoom).
 // A deploy blocker the ledger cleanup set itself (a merged request whose only step left is a deploy) is the cleanup's:
 // it closes the request when the deploy runs the merge (server/ledgerSweep.ts), so this watch leaves it alone.
@@ -22,6 +23,7 @@ import { blockerVerdict, CI_REF, gatesOf, type BlockerFacts, type PrHealth } fro
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
+import type { RoomNow } from './placement.ts';
 
 const EVERY_MS = 60_000;
 /**
@@ -41,7 +43,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 
 export interface BlockerWatchDeps {
   store: Store;
-  orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'>;
+  orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> & Partial<Pick<Orchestrators, 'requeueCapacityBlocks'>>;
   /** The commit the portal runs. */
   portalSha?: () => string | undefined;
   /** The commit a machine's daemon runs. */
@@ -63,8 +65,10 @@ export interface BlockerWatchDeps {
   pr?: (ref: string, person?: string) => Promise<PrState | undefined>;
   /** Whose GitHub token a request's reads use (w868); undefined: the portal's own gh login. */
   githubPerson?: (w: WorkItem) => string | undefined;
-  /** The computers with room for one more worker now. */
+  /** The computers with room for one more game worker now. */
   room?: () => string[];
+  /** Room for each kind of work and the held computers (w1089, w1098); preferred over `room`. */
+  roomFacts?: () => RoomNow;
   now?: () => number;
 }
 
@@ -116,6 +120,8 @@ export class BlockerWatch {
     }
     this.busy = true;
     try {
+      // w1089: a block that is only a wait for capacity is Queued, not Blocked, whoever set it and whenever.
+      for (const id of this.d.orchestrators.requeueCapacityBlocks?.() ?? []) did.set(id, 'requeued: a block that waited only for capacity');
       const blocked = [...this.d.store.work.values()].filter((w) => w.status === 'blocked' && w.blocked && w.blocked.by !== 'ledger cleanup');
       const ci = new Map<string, CiState | undefined>();
       const pr = new Map<string, PrState | undefined>();
@@ -160,8 +166,9 @@ export class BlockerWatch {
           did.set(c.id, `${v.state}: ${v.why}`);
         }
       }
-      const room = this.d.room?.();
-      if (room?.length) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');
+      // Queued with room (w643): the same room test the page and decide_work queue read, for game work and for agent-slot work (w1098).
+      const room: RoomNow | undefined = this.d.roomFacts?.() ?? (this.d.room ? { game: this.d.room(), agent: [], held: [] } : undefined);
+      if (room && (room.game.length || room.agent.length)) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');
     } catch (e) {
       console.warn(`blocker watch: ${(e as Error).message}`);
     } finally {

@@ -616,3 +616,73 @@ test("w890 (measured live): the stop's own transcript line does not make the git
   p.tick();
   assert.equal(a.releaseDue?.workedAt, worked);
 });
+
+test('w1089: no capacity ping for a sandbox that is taken again: an agent started in it while its daemon saved the work, or another working there, keeps it from being announced as released', async () => {
+  // slot1: a1 (stopped, held) released after a save; during the save a new worker c3 starts in the same sandbox and runs.
+  const sb = sandbox('slot1', { sessionIds: ['a1'] }, { dirty: 2 });
+  const a = worker('a1', { heldSince: iso(NOW - 45 * MIN) });
+  const c = worker('c3', { status: 'running' });
+  const sessions: SessionInfo[] = [a];
+  const live = new Set<string>();
+  const machine = { id: 'pc', sandboxes: [sb] } as unknown as Machine;
+  const freed: string[] = [];
+  const p = new PlaceAgain({
+    sessions: () => sessions,
+    machine: () => machine,
+    isLive: (id) => live.has(id),
+    online: () => true,
+    unityHolders: () => [],
+    workOver: () => undefined,
+    keepLive: () => undefined,
+    queued: () => false,
+    stopLive: () => undefined,
+    stopEditor: async () => undefined,
+    switchBranch: async () => ({ notes: [] }),
+    save: () => undefined,
+    saveMachine: () => undefined,
+    note: () => undefined,
+    drain: () => undefined,
+    freed: (what) => void freed.push(what),
+    canSave: () => true,
+    saveWork: async () => {
+      // The dispatcher puts the next worker in the sandbox while the commit and push run.
+      sessions.push(c);
+      live.add('c3');
+      return { sha: 'abc1234', files: 2, pushed: true, notes: ['committed 2 file(s)'] };
+    },
+    now: () => NOW,
+  });
+  p.tick();
+  await Promise.all(p.pending);
+  assert.equal(a.placeReleased?.branch, 'feature/slot1', 'a1 itself is released');
+  assert.deepEqual(freed, [], 'but the sandbox is not free: c3 works in it, so the dispatcher is not told it freed');
+
+  // The plain path (no save) also checks the sandbox is free after the pass: two stopped workers, the second one's sandbox shared with a live agent.
+  const sbB = sandbox('slot2', { sessionIds: ['b2', 'd4'] });
+  const b = worker('b2', { machineSandbox: 'slot2', heldSince: iso(NOW - 45 * MIN) });
+  const d = worker('d4', { machineSandbox: 'slot2', status: 'running' });
+  const live2 = new Set(['d4']);
+  const freed2: string[] = [];
+  const q = new PlaceAgain({
+    sessions: () => [b, d],
+    machine: () => ({ id: 'pc', sandboxes: [sbB] }) as unknown as Machine,
+    isLive: (id) => live2.has(id),
+    online: () => true,
+    unityHolders: () => [],
+    workOver: () => undefined,
+    keepLive: () => undefined,
+    queued: () => false,
+    stopLive: () => undefined,
+    stopEditor: async () => undefined,
+    switchBranch: async () => ({ notes: [] }),
+    save: () => undefined,
+    saveMachine: () => undefined,
+    note: () => undefined,
+    drain: () => undefined,
+    freed: (what) => void freed2.push(what),
+    now: () => NOW,
+  });
+  q.tick();
+  assert.equal(b.placeReleased, undefined, 'a live agent there keeps the sandbox held (keptWhy), as before');
+  assert.deepEqual(freed2, []);
+});

@@ -110,7 +110,8 @@ The dispatcher then does one of these for each request:
 Where it runs is the dispatcher's choice: `list_sandboxes` starts with each computer's room (BUSY or ROOM n%, live
 agents, free sandboxes, RAM, editors) and names the computer the next new game-repo work goes to, and `start_agent` or
 `create_sandbox` that place it elsewhere say so (w416; docs/machines.md, "Placing work"). Game-repo work is spread
-between BEAST and LothDesktop by room; BEAST keeps only what needs it.
+between BEAST and LothDesktop by room; BEAST keeps only what needs it. Work on FF Factory, FFBox, the plugin or any other
+non-Unity repo needs only an agent slot (w1098; "Next non-game work" in the same block) and may run on any computer with one.
 
 `start_agent` refuses a request with a strong overlap still in flight (a commit only informs), or one that already has a
 live worker, unless `override_duplicate` says what is different. `work_id` is the dispatcher's alone. A worker started
@@ -238,6 +239,73 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
    room (red on the page), its log and the server log say so, and the dispatcher gets `[ledger] WRONG STATE: …` (at
    most once an hour per request) to start it or block it (`Orchestrators.flagQueuedWithRoom`, run by the blocker
    watch every minute). A message held in the send queue for a free slot is Queued too.
+
+   **A wait for a free sandbox, slot, editor, RAM or computer is capacity, so it is Queued, never Blocked** (w1089,
+   lothsahn, 2026-10-12: "I see a number of items that are blocked waiting on sandboxes, but they're all in use. These
+   should be in a queued state, not blocked."). At 04:20 UTC the dispatcher had put w1084 to w1088 (five of his requests) into "blocked on 04:35/04:40/04:45/04:50/04:55 UTC (a free sandbox: all in
+   use except the m5's (Ben testing))": a time it made up for a wait on room. Three guards keep that from recurring:
+   - **The block is refused.** `decide_work block` and a worker's `blocked_on` run the words of the wait through
+     `capacityWaitIn` (`shared/capacity.ts`): "a free sandbox", "all in use", "no free slot", "waiting for an editor",
+     "RAM at 91%", "the agent cap". A match is refused whatever the kind (a time, a lock, a machine), with the message that
+     says to use `decide_work queue` (a worker is told FF Factory queues it by itself: a message to it waits in the send
+     queue and the ledger shows Queued; it ends its turn and does not poll). It matches the words of a wait, not the nouns
+     alone: "w633's editor fix" and "the sandbox cleanup is done" still block.
+   - **A block already recorded becomes Queued.** The blocker watch's tick calls `Orchestrators.requeueCapacityBlocks`:
+     a Blocked request whose every gate is a capacity wait (none the cleanup's, none naming a thing as well) is Queued,
+     keeping its priority, order, notes and log (the request's log says what was done). A thing it also waits on keeps it Blocked.
+   - **A held computer is named.** A computer can be held for a person (config `placement.hold`, set with
+     `set_app_config`: `{ "m5": "Ben testing, 2026-10-12" }`). It takes no new work, game or not, even when everything
+     else is busy; the Capacity block shows `ROOM n% but HELD (…)`, and a Queued request's reason reads "queued for
+     capacity: no computer that could take it has room; m5 has room but is held (Ben testing, 2026-10-12)". A held
+     computer is not "room" for the WRONG test: a request waiting while only held computers have room is correctly Queued.
+     `placement.avoid` is softer: an avoided computer takes work when nothing else has room, so it does count as room.
+
+   **"Has room" is one test.** `roomNow` (`server/placement.ts`) returns the room for each kind of work and the held
+   computers, built from the same `hasRoom` / `busyReasons` that print BUSY or ROOM in the Capacity block of
+   `list_sandboxes` and `system_status`. `Agents.roomNow` / `roomFacts` (what `decide_work queue` refuses on, what the
+   blocker watch flags and what the page shows) call it; there is no second count. A computer is BUSY when it is offline,
+   at its live-agent limit, at 85% RAM (`RAM_BUSY_PCT`), or has no free sandbox and cannot make one. The Unity editor limit
+   is not one of them: editors queue inside the machine (`unity-slot`), and the line prints "editors 4 of 4" beside the
+   verdict. (2026-10-12 04:47 UTC: LothDesktop showed BUSY with 0 of 6 sandboxes free, RAM 91%, 6 of 10 agents, 4 of 4
+   editors, while the ledger log still said "lothdesktop has room". The portal journal shows why: the flag lines in a
+   request's log are stamped when they are written, and `ledger: queued while a computer has room` fired for
+   lothdesktop at 01:11 UTC and for beast at 04:44 UTC; a line read hours later looked current. A flag now carries the
+   computer's numbers at that moment: "lothdesktop: 2 of 6 sandboxes free, 6 live agents of 10, RAM 63% at this time".)
+
+   **When room is re-checked, and what starts a queued request.** Nothing starts a queued request by itself: the
+   dispatcher does, when it hears about room.
+   - Every minute, the blocker watch (`server/blockerWatch.ts`) reads `roomNow` and flags a request that has been
+     queued 10 minutes (`ROOM_GRACE_MS`) while a computer that could take it has room: `[ledger] WRONG STATE` to the
+     dispatcher, at most once an hour per request, and a line in its log.
+   - `[ledger] Capacity may have freed (<why>). Queued for capacity: …` (`Orchestrators.capacityMayHaveFreed`) goes
+     to the dispatcher 30 seconds after a worker's turn ends (`finished a turn`), a worker stops (`stopped`, agents.ts),
+     or a sandbox is released and its worker placed again (`placeAgain.ts`); only while something is queued, at least 2
+     minutes apart and 20 an hour at most (`CAPACITY`), a wake that is too soon waits its turn instead of being dropped.
+     The ping lists the queue in order; the dispatcher starts what fits.
+   - **The ping is decided when it fires, from the room then** (w1089; 2026-10-12 ~05:50 UTC: "Capacity may have freed (sandbox
+     lothdesktop/slot5 released)" reached the dispatcher while two agents were Working in slot5, and its `start_agent` there
+     queued a third). The ping waits out its 30 s quiet spell and the 2-minute gap after the last, so it can arrive long after
+     its event, with the sandbox taken again. `capacityMayHaveFreed` keeps each event with its time and, when it fires, reads
+     `roomNow`: no queued request that a computer with room could take, no ping (logged: `ledger: no capacity ping`); otherwise
+     it says how old each event is ("sandbox lothdesktop/slot5 released, 14 min ago") and where there is room now. The release
+     pass (`server/placeAgain.ts`) also announces a sandbox only when nothing occupies it after the pass: a save-then-release
+     takes a moment (the daemon commits and pushes), and a worker started in the sandbox meanwhile kept it.
+   - **`start_agent` refuses a sandbox another request's agent occupies** (w1089, `Agents.sharedSandboxProblem`): "sandbox
+     lothdesktop/slot5 is not free: a50a8ee1 \"w1083: …\" (Working)", and "is full" at `max_agents_per_sandbox`, where it used
+     to start the worker and queue its brief. The dispatcher may pass `extra_agent: true` to share on purpose (work that
+     needs no editor and no game tree, w1098), never past the per-sandbox limit. A second session for the request already
+     there, and `message_agent` with a work_id (w740's new session in the worker's sandbox), are not affected.
+   - The dispatcher also re-reads room whenever it acts (`decide_work queue` checks it again, and `start_agent` adds a note when it
+     places work on a computer other than the next one), and on every `[ledger] … is unblocked`.
+   - The page re-reads room with every state push (`room`, `agentRoom`, `heldRoom` in `AppState`), so its Queued reason
+     is current; the log lines are not (above).
+
+   **The left pane and the right pane count the same thing** (w1089, lothsahn: "Why does the dispatcher queued show 8 on the
+   right side pane, but the left side pane says 34 active 6 queued?"). The sidebar row counted each request's stored status;
+   the Dispatcher page's state chips count what it is doing now (`workLive`), so a request started but whose worker's
+   message waits for a free agent slot (w1059, w1073) was "active" on the left and Queued on the right. Both now count the one
+   `workLiveAll` map through `ledgerGlance` (`shared/workState.ts`; `useWorkLive` and `dispatcherGlance` in
+   `web/src/util.ts`); `server/ledgerGlance.test.ts` fails if either goes back to counting stored status.
 3. **Blocked on <what>**: it waits on a THING, never a person and never capacity, and always names it. The dispatcher
    records it with `decide_work block` and a structured `blocker` (`WorkItem.blocked`, status `blocked`):
 
@@ -401,7 +469,8 @@ days; a deploy is a person's call, and a week without one is worth their look.
 | `shared/workState.ts` `workLive`, `server/sessions.ts` `send` | a held message: agent cap or sandbox (`machines.ts` `placeFull`, `capFull`), placing again (`placeAgain.ts`) | Queued |
 | the same | a held message: machine offline (`placeAgain.ts` "is offline"), a held brief its daemon refuses (outdated, offline, guard) | Blocked on the machine |
 | `shared/agentState.ts` `agentState` | agent between turns: job, check-in (was "Waiting") / held message | Working / Queued or Blocked |
-| `server/orchestrators.ts` `decide` | `queue` (was free text "it waits (say for what)") | Queued, capacity only, refused with room |
+| `server/orchestrators.ts` `decide` | `queue` (was free text "it waits (say for what)") | Queued, capacity only, refused with room (w1089: for the kind of work it needs; a held computer is named, not counted) |
+| `shared/capacity.ts` `capacityBlockProblem`, `server/orchestrators.ts` `requeueCapacityBlocks` | a block (dispatcher's or worker's) whose words are a wait for capacity (w1089) | refused; one already recorded becomes Queued |
 | `server/orchestrators.ts` `decide` | `block` (new; w754: several gates, kept through a hold) | Blocked |
 | `shared/workState.ts` `workLive` | status `blocked` with gates, also with a check-in pending (w754) | Blocked on the gates |
 | `server/orchestrators.ts` `workerBlocked` | the worker's `blocked_on` tool (w754) | Blocked; its check-in cancelled |

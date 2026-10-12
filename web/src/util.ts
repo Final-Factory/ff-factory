@@ -1,6 +1,7 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { agentState, type AgentState, type WaitKind } from '../../shared/agentState.ts';
-import type { AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+import { ledgerGlance, workLiveAll, type WorkLive } from '../../shared/workState.ts';
+import type { AppState, AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
 import { updaterHealth } from '../../shared/updaterHealth';
 import { devRequestsHealth } from '../../shared/devRequestsHealth';
@@ -288,22 +289,28 @@ export const isOpenWork = (w: Pick<WorkItem, 'status'>) => w.status === 'new' ||
 export const chatOwner = (s: SessionInfo | undefined) => (s?.kind === 'orchestrator' && s.orchestratorRole === 'personal' ? s.requestedBy : undefined);
 
 /**
- * The dispatcher at a glance for its sidebar row and page: its open requests by state (questions first). Blue while it
- * works a turn; amber only when one of its questions waits on `me`.
+ * What each open or stalled request is doing now (shared/workState.ts, w418), from the page's own sessions: it follows them
+ * live. A message held in the send queue shows from the session's own copy (queuedSend), and a Queued request while a
+ * computer has room is flagged from the server's room (w643). The one map every count on the page is made from (w1089).
  */
-export function dispatcherGlance(dispatcher: SessionInfo | undefined, work: WorkItem[], me?: string): Glance {
-  const count = (st: WorkStatus) => work.filter((w) => w.status === st).length;
+export function useWorkLive(app: AppState, work: readonly WorkItem[], now: number): Map<string, WorkLive> {
+  return useMemo(() => {
+    const byId = new Map(app.sessions.map((s) => [s.id, s]));
+    return workLiveAll(work, { session: (id) => byId.get(id), ...(app.room ? { room: app.room } : {}), ...(app.agentRoom ? { agentRoom: app.agentRoom } : {}), ...(app.heldRoom ? { heldRoom: app.heldRoom } : {}), now });
+  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, work, now]);
+}
+
+/**
+ * The dispatcher at a glance for its sidebar row and page: its requests by what they are doing now (shared/workState.ts
+ * ledgerGlance, over the same workLiveAll map the page's state chips use, w1089), not by stored status. Blue while it works a
+ * turn; amber only when one of its questions waits on `me`.
+ */
+export function dispatcherGlance(dispatcher: SessionInfo | undefined, work: WorkItem[], live: ReadonlyMap<string, WorkLive>, me?: string): Glance {
   const mine = me ? work.some((w) => w.status === 'question' && w.requestedBy.userId.toLowerCase() === me.toLowerCase()) : false;
-  const parts = [
-    [count('question'), 'question'],
-    [count('active'), 'active'],
-    [count('queued'), 'queued'],
-    [count('blocked'), 'blocked'],
-    [count('new'), 'new'],
-  ].filter(([n]) => n) as [number, string][];
+  const parts = ledgerGlance(live.values());
   const busy = isBusy(dispatcher);
   const tone: Tone = busy ? 'blue' : mine ? 'amber' : 'grey';
-  const label = parts.length ? parts.slice(0, 2).map(([n, w]) => `${n} ${n > 1 && w === 'question' ? 'questions' : w}`).join(' · ') : busy ? 'Working' : 'Nothing open';
+  const label = parts.length ? parts.slice(0, 2).map(([n, w]) => `${n} ${w}`).join(' · ') : busy ? 'Working' : 'Nothing open';
   return { tone, label, attention: 0 };
 }
 
