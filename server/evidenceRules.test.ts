@@ -186,7 +186,9 @@ test("w913: workers are told to leave their temp files, not to clean up; the one
 test("w1097: every worker's brief says which shell step still waits for a person, and the routes that never do", async (t) => {
   const { DISK_HYGIENE, SHELL_STEPS } = await import('./agents.ts');
   // Why w1079 deleted its own temp: to reuse a test's output folder. The brief says to make a new one.
-  assert.match(DISK_HYGIENE, /never delete a folder to use it again, give each run a new one \(`mktemp -d "\$TMPDIR\/leg-XXXX"`/);
+  assert.match(DISK_HYGIENE, /never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, `\$TMPDIR\/<leg>-<timestamp>`/);
+  assert.match(DISK_HYGIENE, /lothsahn, 2026-10-12, w1097: "Can't we have the cleanup process when a worker is done do this for them so the worker doesn't have to worry about it\?"/);
+  assert.match(SHELL_STEPS, /Never delete in \$TMPDIR to reuse a folder: a new `\$TMPDIR\/<leg>-<timestamp>` per leg/);
   assert.match(SHELL_STEPS, /^## Shell steps that never wait for a person\n/);
   assert.match(SHELL_STEPS, /lothsahn, 2026-10-12, w1097: "Why did it do that, and how do we allow it to do what it just needed to do without a complex bash prompt\?"/);
   assert.match(SHELL_STEPS, /except when Claude Code's own dangerous-rm check flags a delete in it/);

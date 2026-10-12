@@ -539,9 +539,22 @@ because the w913 rule (`tempOnlyDelete`) took only a command made of deletes alo
 ran a script. The transcript event did not keep Claude Code's reason, so the exact `rm` cannot be read back; from w1097
 on it is kept (below).
 
-**Why the worker deleted at all.** The brief (`DISK_HYGIENE`) said "do not clean up after yourself", and the worker did
-not think of a rerun's output folders as clean-up: it deleted them so the leg would start empty. The brief now says to give
-each run a new folder.
+**Why the worker deleted at all** (lothsahn, 2026-10-12: "For w1097 why are workers deleting stuff in temp? Can't we have
+the cleanup process when a worker is done do this for them so the worker doesn't have to worry about it?"). To rerun a test
+leg into the same folder. w1079's tour script (`specs/w1079-blueprint-resize/run_tour.sh` in its PR, FinalFactory #1536)
+takes an output folder per screen size and writes the leg's stills there, and the PR says "the evidence was re-run until
+both legs agreed"; the deleted folders, `$TMPDIR/f1920` and `$TMPDIR/f1280`, are those two (sourced from the PR and the
+ledger's copy of the command; the transcript is on beast). The brief said "do not clean up after yourself", and a rerun's
+reset did not read as clean-up. The brief, the evidence-gate delete checklist (item 0) and its two lessons now say: never
+delete in your temp folder, mid-task included; every leg writes to a new `$TMPDIR/<leg>-<timestamp>`, and the daemon
+removes the whole folder when the session ends.
+
+**The end-of-session sweep runs (measured, lothdesktop, 2026-10-12).** Session b3327616 (this request's worker) was
+stopped at about 06:52 UTC; at 08:05 its folder `V:\ffw\tmp\ffa-b3327616` held only its four git clones (kept six hours) and
+what the resumed process made: the scratch from before (a 45 MB `cli.txt`, `probe/`, the probe scripts and their outputs)
+was gone. The portal's clean-up log for lothdesktop (`portal_logs` source `cleanup`) lists whole finished sessions'
+folders removed, e.g. `ffa-dd8193f8` 5.3 GB at 08:06:45 UTC and `ffa-476c7481` 3.8 GB at 04:59 UTC; neither is in
+`V:\ffw\tmp` now.
 
 **What changed**
 
