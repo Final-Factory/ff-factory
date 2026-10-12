@@ -39,7 +39,7 @@ export const midTurnRefusal = (busy: { info: SessionInfo }[], where: string) =>
   `agent(s) ${busy.map((s) => `"${s.info.title}"`).join(', ')} ${busy.length === 1 ? 'is' : 'are'} mid-turn in ${where}; wait for them (or stop them) first`;
 
 /** Who may reach the orchestration worker (w597): its gate in SessionManager.send. */
-export type OpsPass = 'orchestrator' | 'wake' | 'resume';
+export type OpsPass = 'orchestrator' | 'wake' | 'resume' | 'timer';
 export const OPS_SEND_REFUSED = "the orchestration worker takes messages only from Lothsahn's and Ben's own orchestrators (their ops_worker tool), not from people's chats, the dispatcher, workers, standing agents, the intake, FFBox or /mcp";
 
 /** A send-queue reason that names a machine away (placeAgain's "lothdesktop is offline: …"): Blocked, not Queued (w643). */

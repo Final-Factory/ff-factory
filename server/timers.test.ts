@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { TIMER_LIMITS, Timers, nextDaily, type TimerHost } from './timers.ts';
+import { TIMER_LIMITS, Timers, nextDaily, type TimerAuthority, type TimerHost } from './timers.ts';
 
 const T0 = Date.parse('2026-10-04T12:00:00Z');
 const MIN = 60_000;
@@ -11,16 +11,16 @@ const MIN = 60_000;
 /** A clock, a host with two orchestrators ("orch", "other") whose busy flag a test sets, and the messages delivered. */
 function setup(t: { after: (fn: () => void) => void }, dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-timers-'))) {
   const file = path.join(dir, 'timers.json');
-  const sent: { id: string; text: string }[] = [];
+  const sent: { id: string; text: string; authority?: TimerAuthority }[] = [];
   const busy = new Set<string>();
   const clock = { now: T0 };
   let refuse = false;
   const host: TimerHost = {
     exists: (id) => id === 'orch' || id === 'other',
     busy: (id) => busy.has(id),
-    deliver: (id, text) => {
+    deliver: (id, text, authority) => {
       if (refuse) throw new Error('the agent limit');
-      sent.push({ id, text });
+      sent.push({ id, text, ...(authority ? { authority } : {}) });
     },
   };
   const make = () => {
@@ -195,4 +195,38 @@ test('timers: a new conversation keeps them (rehome to the new session)', (t) =>
   assert.deepEqual(ts.list('other').map((v) => v.id), [x.id]);
   assert.equal(ts.list('orch').length, 0);
   assert.equal(ts.rehome('nobody', 'orch'), 0);
+});
+
+test("w1106: the orchestration worker's timers keep their job: each fire carries its person and requests, one person's per message, kept across a restart", (t) => {
+  const { make, sent, busy, advance } = setup(t);
+  const LOTH = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const BEN = { userId: 'ben', displayName: 'Ben' };
+  let ts = make();
+  ts.create('orch', { title: 'w1070 idle check', note: 'Run w1070-idlecheck.ps1.', schedule: { every_minutes: 120 } }, 'lothsahn', { person: LOTH, workIds: ['w1070'] });
+  ts.create('orch', { title: 'm5 disk', note: 'df -h on m5.', schedule: { every_minutes: 120 } }, 'ben', { person: BEN, workIds: [] });
+  advance(120 * MIN);
+  ts.tick();
+  assert.equal(sent.length, 1, "one person's job per message");
+  assert.deepEqual(sent[0].authority, { person: LOTH, workIds: ['w1070'] });
+  assert.match(sent[0].text, /^\[timer t-\w+ "w1070 idle check"\] Run w1070-idlecheck\.ps1\./);
+  assert.match(sent[0].text, /in Lothsahn's job for w1070: it carries that job's authority/);
+  assert.doesNotMatch(sent[0].text, /m5 disk|carries no one's authority/);
+  // Ben's waits for the end of the turn Lothsahn's started, then goes as his own.
+  busy.add('orch');
+  ts.tick();
+  assert.equal(sent.length, 1);
+  busy.delete('orch');
+  ts.turnEnded('orch');
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1].authority, { person: BEN, workIds: [] });
+  assert.match(sent[1].text, /"m5 disk"[\s\S]*in Ben's job: it carries/);
+  // Kept in the file: a restarted portal fires it as the same job.
+  ts.stop();
+  advance(130 * MIN);
+  ts = make();
+  ts.start();
+  ts.stop();
+  assert.equal(sent.length, 3);
+  assert.deepEqual(sent[2].authority, { person: LOTH, workIds: ['w1070'] });
+  assert.match(sent[2].text, /1 fire\(s\) missed while FF Factory was down/);
 });

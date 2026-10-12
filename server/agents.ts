@@ -407,10 +407,12 @@ export class Agents {
     release.unref?.();
     this.timers = new Timers(
       {
-        exists: (id) => this.sessions.sessions.has(id) && this.sessions.get(id).info.kind === 'orchestrator',
+        // The orchestrators' and the orchestration worker's (w1106: its polls survive deploys, restarts and its idle stop).
+        exists: (id) => this.sessions.sessions.has(id) && ['orchestrator', 'ops'].includes(this.sessions.get(id).info.kind),
         busy: (id) => ['running', 'starting', 'waiting_permission'].includes(this.sessions.get(id).info.status),
-        // The harness's message, never a person's: its turn carries no one's authority (SessionHandle.turnFrom).
-        deliver: (id, text) => void this.sessions.send(id, text, 'system'),
+        // The harness's message, never a person's: its turn carries no one's authority (SessionHandle.turnFrom). The
+        // orchestration worker's goes as the job it was set in (OpsWorker.timerFired).
+        deliver: (id, text, authority) => (id === OPS_ID ? this.ops.timerFired(text, authority) : void this.sessions.send(id, text, 'system')),
       },
       path.join(cfg.dataDir, 'timers.json'),
     );
@@ -556,7 +558,7 @@ export class Agents {
     };
     sessions.events.on('turnEnd', (s: SessionHandle, text: string) => this.onWorkerTurnEnd(s, text));
     // A timer that fired while its orchestrator was mid-turn is delivered when that turn ends (server/timers.ts).
-    sessions.events.on('turnEnd', (s: SessionHandle) => s.info.kind === 'orchestrator' && this.timers.turnEnded(s.info.id));
+    sessions.events.on('turnEnd', (s: SessionHandle) => (s.info.kind === 'orchestrator' || s.info.kind === 'ops') && this.timers.turnEnded(s.info.id));
     // A worker of an open request failing (a sandbox that never came up, a crash) is news for the dispatcher.
     bus.on('event', (e) => e.type === 'session' && this.orchestrators.workerStatus(e.session));
     sessions.events.on('ended', (s: SessionHandle) => this.onAgentEnded(s));
@@ -2285,7 +2287,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
               return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb });
             }
-            if (action === 'status') return `${this.ops.status()}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
+            if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
           }),
         ),
@@ -2310,7 +2312,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ),
         tool(
           'set_timer',
-          `Set a standing timer (docs/orchestrators.md, "Timers"): it wakes you with [timer <id> "<title>"] and your note, once at a time, every N minutes, or daily, until you cancel it. Use it for every standing "every N" or "each morning" job your person asks for, so you never have to re-arm anything; use wake_me only for a one-off check-in. A person writing does not cancel a timer: cancel_timer when they say stop. Delivered after your current turn, never dropped; fires that pile up are coalesced into one message with the count. Caps: ${TIMER_LIMITS.activePerOwner} active timers, every_minutes at least ${TIMER_LIMITS.minEveryMinutes}, at most ${TIMER_LIMITS.deliveriesPerDay} timer messages a day (past that, fires wait). A timer's turn carries no one's authority: what needs your person's own words still needs them to write.`,
+          ctx.role === 'ops'
+            ? `Set a timer for this job (docs/ops-worker.md, "Polls and waits: timers"; w1106): every poll or wait of yours is one, never a background shell loop or sleep (your process ends at a portal deploy, a restart and after ${OPS_LIMITS.idleStopMs / 60_000} min idle, and the loop with it). It wakes you with [timer <id> "<title>"] and your note, once at a time, every N minutes, or daily, until it ends (until, max_fires) or you cancel it. It is kept on the portal: a fire that came due during a deploy or restart is delivered once when the portal is back, with the missed count, never lost and never twice; fires that pile up while you are mid-turn are coalesced into one message after the turn. It carries this job: its person and its requests (work_ids, default all of the job's), and each fire comes back as that person's job for those requests, so it can run the check and, when the condition is met, the action they already approved for them, nothing more. Write the note so it stands alone (a fire may open a fresh conversation): the exact check, the condition, the action on it, and what to report. Caps: ${TIMER_LIMITS.activePerOwner} active timers, every_minutes at least ${TIMER_LIMITS.minEveryMinutes}, at most ${TIMER_LIMITS.deliveriesPerDay} timer messages a day.`
+            : `Set a standing timer (docs/orchestrators.md, "Timers"): it wakes you with [timer <id> "<title>"] and your note, once at a time, every N minutes, or daily, until you cancel it. Use it for every standing "every N" or "each morning" job your person asks for, so you never have to re-arm anything; use wake_me only for a one-off check-in. A person writing does not cancel a timer: cancel_timer when they say stop. Delivered after your current turn, never dropped; fires that pile up are coalesced into one message with the count. Caps: ${TIMER_LIMITS.activePerOwner} active timers, every_minutes at least ${TIMER_LIMITS.minEveryMinutes}, at most ${TIMER_LIMITS.deliveriesPerDay} timer messages a day (past that, fires wait). A timer's turn carries no one's authority: what needs your person's own words still needs them to write.`,
           {
             title: z.string().max(TIMER_LIMITS.title).describe('A few words naming the job, e.g. "FFBox desync PR scan".'),
             note: z.string().max(TIMER_LIMITS.note).describe('What to do when it fires, written to yourself: the check, and what to tell your person.'),
@@ -2326,8 +2330,16 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             until: z.string().optional().describe('No fire after this ISO time.'),
             max_fires: z.number().int().min(1).optional().describe('End after this many fires.'),
             skip_if_busy: z.boolean().optional().describe('Skip a fire that comes while you are mid-turn (default: deliver it after the turn).'),
+            ...(ctx.role === 'ops' ? { work_ids: z.array(z.string()).optional().describe("The job's requests this timer serves (default: all of the job's).") } : {}),
           },
           wrap(async (a) => {
+            // The orchestration worker's: for the job it is set in (w1106), whose person and requests each fire carries.
+            if (ctx.role === 'ops') {
+              const { work_ids, ...input } = a as typeof a & { work_ids?: string[] };
+              const auth = this.ops.timerAuthority(work_ids);
+              const t = this.timers.create(timerOwner(), input, auth.person.userId, auth);
+              return `Timer ${t.id} "${t.title}": ${scheduleText(t.schedule)}, next at ${t.nextFireAt}${t.until ? `, until ${t.until}` : ''}${t.maxFires ? `, at most ${t.maxFires} fires` : ''}; each fire comes back as ${auth.person.displayName}'s job${auth.workIds.length ? ` for ${auth.workIds.join(', ')}` : ''}.`;
+            }
             // Its orchestrator's own: made by that orchestrator, for its person (the dispatcher's for nobody in particular).
             const t = this.timers.create(timerOwner(), a, ctx.owner?.userId ?? (ctx.role === 'dispatcher' ? 'dispatcher' : 'orchestrator'));
             return `Timer ${t.id} "${t.title}": ${scheduleText(t.schedule)}, next at ${t.nextFireAt}.`;
