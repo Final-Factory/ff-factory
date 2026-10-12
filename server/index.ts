@@ -1851,6 +1851,8 @@ process.on('uncaughtException', (e) => console.error('UNCAUGHT (kept running):',
 process.on('unhandledRejection', (e) => console.error('UNHANDLED REJECTION (kept running):', e));
 
 server.listen(cfg.port, cfg.host, () => {
+  // Port 0 (a test's, w1095): the one the OS gave, for this line, which the test reads, and every later use of cfg.port.
+  cfg.port = (server.address() as { port: number }).port;
   console.log(`FF Factory ${formatVersion(appVersion())} on http://${cfg.host}:${cfg.port} — base clone ${cfg.repo.basePath}; sandboxes are the machines' (w510)`);
 });
 

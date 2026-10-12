@@ -18,6 +18,7 @@ import { Drainer, RELOCATE_RESULT_FILE, parseRestartRequest, type RestartRequest
 import { Daemon, RECONNECT_MS, RELOCATE_FALLBACK_MS, dialUrl, patchDaemonConfig, type DaemonConfig, type Probes } from '../machine/daemon.ts';
 import type { Config } from './config.ts';
 import type { PermissionMode, SessionInfo } from '../shared/types.ts';
+import { reservePort } from './testPorts.ts';
 
 /** Stands in for AgentSession on the daemon: a message starts a turn that stays open until finish(). */
 class LongAgent implements SessionHandle {
@@ -80,13 +81,12 @@ const listen = async (mm: MachineManager) => {
   return { server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 };
 
-/** A port nothing listens on: a portal URL that never answers. */
+/**
+ * A port nothing listens on: a portal URL that never answers. Reserved, not "listen on 0 and close" (w1095): a closed
+ * ephemeral port can go to another test's server, which would then answer.
+ */
 async function deadUrl() {
-  const s = http.createServer();
-  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
-  const port = (s.address() as AddressInfo).port;
-  await new Promise<void>((r) => s.close(() => r()));
-  return `http://127.0.0.1:${port}`;
+  return `http://127.0.0.1:${await reservePort()}`;
 }
 
 async function setup(t: { after: (fn: () => unknown) => void }) {
