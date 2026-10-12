@@ -25,7 +25,7 @@ A person's own orchestrator (Lothsahn's or Ben's) has the `ops_worker` tool:
 
 | action | what it does |
 |---|---|
-| `send` (`text`, `fresh`) | gives it a job or a follow-up. **Every new job starts a fresh conversation and a fresh process** (w738): `fresh: true` asks for it explicitly, and a new job is also the first message after the last job ended (12 hours), a message from the other person's orchestrator, and a deploy. Nothing, no context and no token, carries over from one job to the next. A **new job** needs a turn the person started with a message of their own. Within that job (12 hours), the orchestrator's harness turns (a check-in, a timer, its `[ops worker]` report) may follow up, with no count (w627) |
+| `send` (`text`, `follow_up`, `fresh`) | gives it a job. **Every send in a turn the person started is a new job: a fresh conversation and a fresh process, without asking** (w738, w1133): no context and no token carries over from the last job, whoever it was for, so the text stands alone. `follow_up: true` is the explicit way to carry on the same job (an answer to its question, the next step, a correction): it keeps the conversation, and works only within the caller's own open job (12 hours), else it is refused. The orchestrator's harness turns (a check-in, a timer, its `[ops worker]` report) cannot open a job, so within the open job each is a follow-up with no flag and no count (w627). A new job is refused while the worker is still in a turn of the open job (it would cut that turn off): wait for the report, follow up, `interrupt`, or pass `fresh: true` to cut the turn off and start over. See [A new job, a follow-up](#a-new-job-a-follow-up-w1133) |
 | `deploy` (`text`: the person's words) | a portal deploy (`fffctl update`). Only in a turn the person started with their own message: never a check-in, a timer, a relayed report or a job's follow-up. See [Deploys](#deploys) |
 | `status` | its state, the job and whose it is, its limits, and its last 20 steps |
 | `interrupt` | ends its turn |
@@ -274,8 +274,32 @@ Fixed in `OPS_LIMITS` (`server/opsWorker.ts`), like the worker itself:
 | a job | 12 hours of follow-ups from the orchestrator's harness turns after a person's own turn opened it, as many as the job needs | a guess: one evening's reinstall. Follow-ups were never counted, and w627 (lothsahn, 2026-10-07: "an infinite number of messages to each other and the portal worker") keeps it so |
 | memory | 1536 MB (`MemoryMax`) | measured basis: an idle claude process used 100-300 MB resident and 450-650 MB committed (BEAST, 2026-10-04, orchestrators.md). The VM has 4 GiB |
 
-The session record stays for good, with its conversation. `fresh: true` starts a new conversation: the transcript
-goes on, with a line marking the new job and whose it is. Every new job does this (w738), not only `fresh: true`; a follow-up within the job keeps the conversation and the process, and with them the token it started on.
+The session record stays for good, with its conversation. Every new job starts a new conversation: the transcript
+goes on, with a line marking the new job and whose it is (w738). A follow-up within the job keeps the conversation and the process, and with them the token it started on.
+
+## A new job, a follow-up (w1133)
+
+lothsahn, 2026-10-12: "Every time you call the ops worker with a new request, you should clear its context or use a new session. Same thing with Ben's operator." Until then a `send` in a turn the person started continued the last conversation for 12 hours unless the caller remembered `fresh: true`, so a reinstall of one machine carried the context of the last three jobs. The default is now the other way round, for every orchestrator (`OpsWorker.send`, `server/opsWorker.ts`):
+
+| the message | when | what happens |
+|---|---|---|
+| `send`, `deploy`, `restart`, `machine_update` | in a turn its person started (or, for `machine_update`, any turn: its request is the gate) | **a new job**: the process stops, the conversation is dropped, a new one starts on the person's own token. The result says so |
+| `send` with `follow_up: true` | within the caller's own open job (12 hours) | **a follow-up**: same conversation, same process, same token; its `work_ids` are added to the job |
+| `send` with `follow_up: true` | no job, the job ended, or the open job is the other person's | refused: there is nothing of theirs to continue. Send it again in full as a new job |
+| `send` from a check-in, a timer or a relayed `[ops worker]` report | within the caller's open job | **a follow-up**, with no flag (these turns cannot open a job) |
+| a timer firing (w1106) | within its person's open job, else not | a follow-up, else a new job on a fresh conversation, as before |
+| a new job (any of the first four) | the worker is mid-turn on the open job | refused as busy: wait for its `[ops worker]` report, `follow_up`, `interrupt`, or (`send` only) `fresh: true` |
+| `fresh: true` | any `send` in the person's turn | a new job that also cuts off a turn the worker is still in. Rarely needed now |
+
+Why this rule and not a smarter one (lothsahn's orchestrator proposed deciding by `work_ids` or text; checked against the code):
+
+- **The harness cannot tell a follow-up from a new job by reading the text or `work_ids`.** A second send for the same request is often a new job ("now reinstall m3"), and an unrelated one can mention the same request. The orchestrator knows which it means; the harness makes the cheap, safe case the default. A forgotten flag then costs a worker that has to be told again in full; the old default cost a worker acting on another job's context, or on another job's facts about a machine.
+- **A follow-up is already something the harness knows about**: its own turns (check-ins, timers, reports) can never open a job (w627), so they stay follow-ups by position, with no flag. Only a send in the person's own turn is ambiguous, and `follow_up` settles it.
+- **Two orchestrators never share context.** The job belongs to one person (`OpsJob.by`); another person's send is always a new job on their token, `follow_up` from the other person is refused, and while the worker is mid-turn on a job it refuses the other person's job as before.
+- **A new job never cuts a running turn off by accident.** Before this change `fresh: true` stopped the process even mid-turn, and `machine_update` always passed it, so a second `machine_update` ended the first machine's install half way. A plain new job (including `deploy`, `restart` and `machine_update`) now refuses while the worker is mid-turn on the open job; `fresh: true` on `send` remains the explicit cut-off. Several machines are therefore updated one after another, each when the last one's report has come.
+- **A job that only expired mid-turn** (12 hours, the turn still running: a 2-hour turn limit makes this a corner) is not cut off, as before: the new job joins that process, which is the same person's token.
+
+The orchestrator prompt (`Agents.personalBrief`, "Every job for the ops worker is a new conversation") and the `ops_worker` tool description say the same, so the text of a `send` is written to stand alone.
 
 ## Polls and waits: timers (w1106)
 
@@ -683,7 +707,7 @@ VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
 - `server/opsWorker.test.ts`: who reaches it, the belts, the shell seatbelt, writes and reads, redaction, the header,
   the spawner against a fake socket, a fresh job from every state the last process can be in (just after a turn,
   mid-turn, after the idle stop, after a failed start, a resume after a stop) through the real Agent SDK and a
-  stand-in for systemd's one-connection socket (w638), the one session with its job rule and lifetime, a deploy
+  stand-in for systemd's one-connection socket (w638), the one session with its job rule and lifetime, a new job against a follow-up (w1133: a send in the person's turn is a fresh conversation, `follow_up` keeps it, the two persons never share one, a new job is refused mid-turn), a deploy
   (only in the person's own turn, the grant, the report after the restart) and a plain restart (w974, [Restarts](#restarts-w974)),
   and its timers (w1106): a timer set in a job carries that job's person and requests, a fire reopens the job (a fresh
   conversation when it had ended), the guard refuses background polls.

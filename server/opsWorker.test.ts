@@ -378,7 +378,7 @@ test('a fresh job starts a new process that runs it, from every state the last o
   assert.equal(errors().length, 1, errors().join('\n'));
   ops.send(loth, 'job six', true);
   await ran('job six');
-  // 5. Stopped by its person, then a follow-up (a resume, not fresh): the same wait.
+  // 5. Stopped by its person, then a send in their turn: a new job (w1133), the same wait.
   await ops.control(loth, 'stop');
   ops.send(loth, 'job seven');
   await ran('job seven');
@@ -507,6 +507,131 @@ test("every new job and every change of caller starts a fresh conversation and p
   ops.close();
 });
 
+/** w1133 (lothsahn, 2026-10-12: "Every time you call the ops worker with a new request, you should clear its context or use a new session. Same thing with Ben's operator"). */
+function freshJobRig(opts: { slowStepMs?: number } = {}) {
+  setQueryForTesting(fakeQuery({ stepMs: 1, slowStepMs: opts.slowStepMs ?? 1 }) as never);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-n-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  const st = { personTurn: true, clock: Date.now(), starts: [] as (string | undefined)[], sent: [] as string[] };
+  const ops = new OpsWorker({
+    sessions,
+    store,
+    options: (info) => {
+      st.starts.push(info.requestedBy?.userId);
+      return {};
+    },
+    tellOrchestrator: () => {},
+    personTurn: () => st.personTurn,
+    file: path.join(dir, 'ops-worker.json'),
+    now: () => st.clock,
+  });
+  const h = () => sessions.get(OPS_ID);
+  const settle = () => new Promise((r) => setTimeout(r, 300));
+  const newJobLines = () => store.readTranscript(OPS_ID, 200).filter((e) => e.kind === 'system' && /A new job from .*: a fresh conversation/.test(e.text)).length;
+  return { ops, sessions, store, st, h, settle, newJobLines };
+}
+
+test('w1133: a send in its person\'s turn is a new job in a fresh conversation without asking; follow_up carries on the same job', async () => {
+  const { ops, st, h, settle, newJobLines } = freshJobRig();
+  const loth = orch('lo', LOTH);
+  assert.match(ops.send(loth, 'job one'), /new job of Lothsahn's, in a fresh conversation/);
+  await settle();
+  const first = h().info.sdkSessionId;
+  assert.ok(first);
+  assert.deepEqual(st.starts, ['lothsahn']);
+  // A second send in a turn Lothsahn started, the job still open (it was not a follow-up): a new conversation and process.
+  assert.match(ops.send(loth, 'job two, a different request'), /new job of Lothsahn's/);
+  await settle();
+  const second = h().info.sdkSessionId;
+  assert.notEqual(second, first, 'no context carries over');
+  assert.deepEqual(st.starts, ['lothsahn', 'lothsahn'], 'a process of its own');
+  assert.equal(newJobLines(), 2);
+  // follow_up: true on the open job: the same conversation and process.
+  assert.match(ops.send(loth, 'and a correction to job two', false, [], false, true), /follow-up in your open job/);
+  await settle();
+  assert.equal(h().info.sdkSessionId, second);
+  assert.deepEqual(st.starts, ['lothsahn', 'lothsahn'], 'no new process');
+  assert.equal(newJobLines(), 2);
+  // A harness turn (a check-in, a timer, the [ops worker] report) follows up with no flag, as before.
+  st.personTurn = false;
+  assert.doesNotMatch(ops.send(loth, 'harness turn follow-up'), /new job/);
+  await settle();
+  assert.equal(h().info.sdkSessionId, second);
+  assert.equal(newJobLines(), 2);
+  // ...and cannot open a job.
+  st.clock += OPS_LIMITS.jobMs + 1;
+  assert.throws(() => ops.send(loth, 'harness turn, job over'), /needs a turn Lothsahn started/);
+  ops.close();
+});
+
+test('w1133: follow_up needs the caller\'s own open job; fresh and follow_up exclude each other', async () => {
+  const { ops, st, settle } = freshJobRig();
+  const loth = orch('lo', LOTH);
+  const ben = orch('bo', BEN);
+  assert.throws(() => ops.send(loth, 'carry on', false, [], false, true), /follow_up: there is no job yet/);
+  ops.send(loth, 'job one');
+  await settle();
+  // Ben's orchestrator cannot continue Lothsahn's job (nor see its context).
+  assert.throws(() => ops.send(ben, 'carry on', false, [], false, true), /follow_up: the job it has is Lothsahn's/);
+  assert.throws(() => ops.send(loth, 'carry on', true, [], false, true), /opposites/);
+  st.clock += OPS_LIMITS.jobMs + 1;
+  assert.throws(() => ops.send(loth, 'carry on', false, [], false, true), /follow_up: your last job ended \(12 hours\)/);
+  ops.close();
+});
+
+test("w1133: two orchestrators' jobs never share context, whichever order and however they send", async () => {
+  const { ops, st, h, settle } = freshJobRig();
+  const loth = orch('lo', LOTH);
+  const ben = orch('bo', BEN);
+  ops.send(loth, "lothsahn's job");
+  await settle();
+  const lothSession = h().info.sdkSessionId;
+  // Ben, in his own turn, wants to "carry on": there is no job of his to carry on, so it is refused, not joined.
+  assert.throws(() => ops.send(ben, 'carry on', false, [], false, true), /the job it has is Lothsahn's/);
+  assert.equal(h().info.sdkSessionId, lothSession, 'Ben\'s refused follow-up did not touch it');
+  // Ben's own job: a new conversation on Ben.
+  ops.send(ben, "ben's job");
+  await settle();
+  const benSession = h().info.sdkSessionId;
+  assert.notEqual(benSession, lothSession);
+  assert.deepEqual(st.starts, ['lothsahn', 'ben']);
+  // Lothsahn's follow_up after Ben's job: Lothsahn's job was replaced, so it is refused rather than landing in Ben's conversation.
+  assert.throws(() => ops.send(loth, 'carry on', false, [], false, true), /the job it has is Ben's/);
+  // Lothsahn's next job: another new conversation, on Lothsahn.
+  ops.send(loth, "lothsahn's next job");
+  await settle();
+  assert.notEqual(h().info.sdkSessionId, benSession);
+  assert.notEqual(h().info.sdkSessionId, lothSession);
+  assert.deepEqual(st.starts, ['lothsahn', 'ben', 'lothsahn']);
+  assert.equal(h().info.requestedBy?.userId, 'lothsahn');
+  ops.close();
+});
+
+test('w1133: a new job is refused while the worker is mid-turn on the open job (it would cut it off); fresh cuts it off, follow_up joins it', async () => {
+  const { ops, st, h, settle } = freshJobRig({ slowStepMs: 40 });
+  const loth = orch('lo', LOTH);
+  ops.send(loth, '#slow job one');
+  for (const end = Date.now() + 3_000; !isMidTurn(h().info) && Date.now() < end; ) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(isMidTurn(h().info), 'the slow turn is running');
+  const first = h().info.sdkSessionId;
+  assert.throws(() => ops.send(loth, 'job two'), /busy with your open job .*follow_up: true.*interrupt.*fresh: true/s);
+  assert.throws(() => ops.deploy(loth, 'deploy'), /busy with your job/);
+  assert.throws(() => ops.restart(loth, 'restart'), /busy with your job/);
+  // machine_update is a new job too (a request is its gate, not a person's turn): it no longer cuts a running turn off (it used to pass fresh).
+  assert.throws(() => ops.send(loth, 'machine update', false, [], true), /busy with your open job/);
+  assert.deepEqual(st.starts, ['lothsahn'], 'nothing was cut off or started');
+  assert.equal(h().info.sdkSessionId, first);
+  // follow_up joins the running turn.
+  assert.match(ops.send(loth, 'also this', false, [], false, true), /follow-up in your open job/);
+  // fresh is the explicit cut-off.
+  assert.match(ops.send(loth, 'job two', true), /new job of Lothsahn's/);
+  await settle();
+  assert.deepEqual(st.starts, ['lothsahn', 'lothsahn']);
+  ops.close();
+  h().stop(true);
+});
+
 test('w631: a job sent for ledger requests: the ids are checked, the worker is told how to close them, and its turn end goes to the ledger', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-w-'));
@@ -589,6 +714,7 @@ test('a deploy: only in a person\'s own turn, a grant good once for 15 minutes, 
   // A check-in, a timer or a relayed report of Lothsahn's own orchestrator: refused, even within an open job.
   personTurn = true;
   ops.send(orch('lo', LOTH), 'look at m5');
+  await new Promise((r) => setTimeout(r, 300)); // its turn ends: a deploy never lands in a turn the worker is still in (w1133)
   personTurn = false;
   assert.throws(() => ops.deploy(orch('lo', LOTH)), /needs Lothsahn's own words in this turn/);
   assert.ok(!fs.existsSync(grant), 'no grant without the person\'s turn');
@@ -642,6 +768,7 @@ test('w974: a restart: only in a person\'s own turn, its own grant good once for
   assert.ok(!fs.existsSync(grant));
   // A harness turn (a check-in, a timer, a relayed report, a [dispatch]) of Lothsahn's own orchestrator: refused, even within an open job.
   ops.send(orch('lo', LOTH), 'look at m5');
+  await new Promise((r) => setTimeout(r, 300));
   personTurn = false;
   assert.throws(() => ops.restart(orch('lo', LOTH), 'restart now'), /a portal restart needs Lothsahn's own words in this turn/);
   assert.ok(!fs.existsSync(grant), 'no grant in the harness\'s turn');

@@ -756,22 +756,36 @@ export class OpsWorker {
   }
 
   /**
-   * A message from an orchestrator. `caller` is the orchestrator's session. Lothsahn's or Ben's own only. A job (a
-   * `fresh` start, or the first message after the last job ended) needs a turn its person started themselves; within a
-   * job their orchestrator's harness turns (a check-in, a timer) may follow up for OPS_LIMITS.jobMs. Follow-ups are not
-   * counted (w627, lothsahn: "an infinite number of messages to each other and the portal worker").
+   * A message from an orchestrator. `caller` is the orchestrator's session. Lothsahn's or Ben's own only.
+   *
+   * A message sent in its person's own turn is a NEW JOB unless it says `followUp` (w1133, lothsahn 2026-10-12: "Every time you
+   * call the ops worker with a new request, you should clear its context or use a new session. Same thing with Ben's
+   * operator"): a fresh conversation and process, on that person's token, whatever job was open. Continuing is the explicit
+   * case, `followUp: true`, on the same person's open job (OPS_LIMITS.jobMs). The harness's own turns (a check-in, a timer, the
+   * `[ops worker]` report) cannot open a job, so within an open job each of them is a follow-up with no flag. Follow-ups are
+   * not counted (w627, lothsahn: "an infinite number of messages to each other and the portal worker").
+   * `fresh` is the stronger form of a new job: it also cuts off a turn the worker is still in, which a plain new job refuses
+   * to do (the worker is busy with the open job: wait for its report, follow up, or interrupt it).
    */
-  send(caller: SessionInfo | undefined, text: string, fresh = false, workIds: readonly string[] = [], byRequest = false): string {
+  send(caller: SessionInfo | undefined, text: string, fresh = false, workIds: readonly string[] = [], byRequest = false, followUp = false): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
     const body = text.trim();
     if (!body) throw new Error('text: what the orchestration worker should do');
+    if (fresh && followUp) throw new Error("fresh and follow_up are opposites: a new job (fresh, the default in your person's turn) or a follow-up on the open job");
     const ids = this.workIdsOf(workIds);
-    const personTurn = this.d.personTurn(caller.id);
+    const theirTurn = this.d.personTurn(caller.id) || byRequest || !!this.d.reactionCovers?.(caller.id, { verb: 'job', refs: ids });
     const jobOpen = !!this.job && this.job.by.userId.toLowerCase() === person.userId.toLowerCase() && this.now() - Date.parse(this.job.at) < OPS_LIMITS.jobMs;
+    if (followUp && !jobOpen) {
+      const why = !this.job ? 'there is no job yet' : this.job.by.userId.toLowerCase() !== person.userId.toLowerCase() ? `the job it has is ${this.job.by.displayName}'s` : `your last job ended (${OPS_LIMITS.jobMs / 3_600_000} hours)`;
+      throw new Error(`follow_up: ${why}, so there is nothing to follow up. Send it again, in full, with no follow_up: that is a new job`);
+    }
     const h = this.handle();
-    const opening = fresh || !jobOpen;
-    if (opening && !personTurn && !byRequest && !this.d.reactionCovers?.(caller.id, { verb: 'job', refs: ids })) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report)`);
+    const opening = fresh || !jobOpen || (theirTurn && !followUp);
+    if (opening && !theirTurn) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report)`);
+    if (opening && !fresh && jobOpen && isMidTurn(h.info)) {
+      throw new Error(`the orchestration worker is busy with your open job (${this.job!.what}), and a new job starts a fresh conversation, which would cut that turn off. Wait for its [ops worker] report, send follow_up: true to add to that job, ops_worker interrupt to end its turn, or fresh: true to cut it off and start over`);
+    }
     if (this.job && this.job.by.userId.toLowerCase() !== person.userId.toLowerCase() && isMidTurn(h.info)) {
       throw new Error(`the orchestration worker is busy with ${this.job.by.displayName}'s job (${this.job.what}); wait for its turn to end, or ask them`);
     }
@@ -797,7 +811,7 @@ export class OpsWorker {
     }
     console.log(`ops-worker: message from ${person.userId}'s orchestrator${opening ? ' (a new job)' : ''}${ids.length ? ` for ${ids.join(', ')}` : ''}: ${redactSecrets(body).replace(/\s+/g, ' ').slice(0, 300)}`);
     this.d.sessions.send(OPS_ID, `${body}${ids.length ? opsWorkRule(ids) : ''}`, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
-    return `Sent to the orchestration worker (${OPS_ID})${opening ? ` as a new job of ${person.displayName}'s` : ''}. Its turn's end comes back to you as an [ops worker] message; its transcript is on the dashboard (Orchestration worker) and in agent_transcript ${OPS_ID}.`;
+    return `Sent to the orchestration worker (${OPS_ID})${opening ? ` as a new job of ${person.displayName}'s, in a fresh conversation (it remembers nothing of earlier jobs, so the text must stand alone; to continue this job later, send with follow_up: true)` : ' as a follow-up in your open job'}. Its turn's end comes back to you as an [ops worker] message; its transcript is on the dashboard (Orchestration worker) and in agent_transcript ${OPS_ID}.`;
   }
 
   /**
@@ -834,7 +848,7 @@ export class OpsWorker {
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, extra)}'`;
     const what = extra ? `with these settings changed: ${extra}` : 'with no setting changed';
     const text = `[machine update for ${id}, approved by ${person.displayName} through that request] Update ${m.id}'s worker install ${what}. Run exactly this, once, and nothing else on the machine (docs/worker-install.md, "Updating"; it asks nothing, keeps every other setting, the machine's own credential and the PATH, restarts the daemon; never issue a credential for it):\n\n${command}\n\nThen check with list_machines that ${m.id} is online again${extra ? ' and shows the new limits' : ''}, and report what the update printed (the \`~ key: before -> after\` lines) and what the portal sees.${dev.moveToDevDrive ? ` This one moves the sandboxes onto a Dev Drive (docs/worker-install.md, "The Dev Drive"): it refuses, naming them, while an agent is in a sandbox or a Unity editor runs from one, and then nothing has changed: report which and stop. When it can go ahead it takes an hour or more (it saves each sandbox's work on its branch first, moves the Library seed, and re-creates each sandbox): run it in the background and read its output until it ends, never twice at once, and never interrupt it; if it stops half way, run the same command again (it picks up where it stopped). Report the free space on the root's drive before and after (\`Get-PSDrive <letter>\` on the machine) and the sandboxes it moved.` : dev.devDrive ? ' This one also makes the Dev Drive (docs/worker-install.md, "The Dev Drive") but moves no sandbox; report the letter it chose and the size it printed.' : ''}`;
-    return this.send(caller, text, true, [id], true);
+    return this.send(caller, text, false, [id], true);
   }
 
   /**
@@ -850,8 +864,9 @@ export class OpsWorker {
     const ids = this.workIdsOf(workIds);
     const at = new Date(this.now());
     const h = this.handle();
-    if (this.job && this.job.by.userId.toLowerCase() !== person.userId.toLowerCase() && isMidTurn(h.info)) {
-      throw new Error(`the orchestration worker is busy with ${this.job.by.displayName}'s job (${this.job.what}); wait for its turn to end, or ask them`);
+    // A deploy or a restart is a new job too (w1133), so it never lands in a turn the worker is still in, anyone's.
+    if (this.job && isMidTurn(h.info)) {
+      throw new Error(`the orchestration worker is busy with ${this.job.by.userId.toLowerCase() === person.userId.toLowerCase() ? 'your' : `${this.job.by.displayName}'s`} job (${this.job.what}); wait for its turn to end (an [ops worker] report), or ops_worker interrupt it, then ask again`);
     }
     const grant = { by: person.userId, name: person.displayName, at: at.toISOString(), expires: new Date(at.getTime() + o.ms).toISOString() };
     fs.writeFileSync(path.join(path.dirname(this.d.file), o.file), `${JSON.stringify(grant)}\n`, { mode: 0o600 });
