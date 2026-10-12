@@ -262,23 +262,9 @@ export interface AccountIdentity {
 
 /** A token's account key: a hash prefix, so equal tokens are one account and the key reveals nothing. */
 export const tokenKey = (token: string) => `token:${createHash('sha256').update(token).digest('hex').slice(0, 12)}`;
-export const tokenLabel = (token: string) => `host token …${token.slice(-4)}`;
-/** This host's own login. Not "login:<id>": a machine may be called "host" (MACHINE_ID). */
+/** This host's own login: no agent runs on it since w1078 (every Claude process is on a vault token); kept to read old records. */
 export const HOST_LOGIN = 'host:login';
 export const machineLogin = (machineId: string) => `login:${machineId}`;
-
-/** The token the host's agents run on (claudeEnv over the server's own environment), if any. */
-export function hostToken(cfg: Pick<Config, 'claudeEnv'>, env: Record<string, string | undefined> = process.env): string | undefined {
-  return { ...env, ...cfg.claudeEnv }.CLAUDE_CODE_OAUTH_TOKEN || undefined;
-}
-
-/**
- * The token a machine's portal-run agents get: config claudeEnv only, and only when that machine takes it
- * (hostClaudeEnvFor, server/secrets.ts). A token in the server's own environment stays on this host.
- */
-export function machineToken(cfg: Pick<Config, 'claudeEnv'>, takesHostEnv: boolean): string | undefined {
-  return (takesHostEnv && cfg.claudeEnv?.CLAUDE_CODE_OAUTH_TOKEN) || undefined;
-}
 
 /**
  * The account source key of a process started with `env`: its token, or else the login stored on the computer
@@ -291,29 +277,11 @@ export function accountKeyOf(env: Record<string, string | undefined>): string {
 }
 
 /**
- * Which credential a portal-run session uses, as an account source key. A running process: the account it
- * started on (SessionInfo.account), so a config change shows only once it restarts. Otherwise the one its next
- * process gets from the current config: a person's own token for their work, on a machine the token it is sent
- * (machineToken), on this host the token (hostToken) unless config claudeAccounts sets the session's role to
- * "login" (`hostLogin`); else the login of the computer it runs on (docs/accounts.md).
+ * Which credential a portal-run session uses, as an account source key: the one its process started on
+ * (SessionInfo.account), running or not. Every process starts on a vault token (w1078); one that never started has none.
  */
-export function sessionSource(
-  info: Pick<SessionInfo, 'machineId' | 'requestedBy'> & Partial<Pick<SessionInfo, 'kind' | 'account' | 'status'>>,
-  hostTok: string | undefined,
-  machineTok: (machineId: string) => string | undefined,
-  personTok: (userId: string) => string | undefined = () => undefined,
-  hostLogin: (kind: SessionKind) => boolean = () => false,
-): string {
-  if (info.account && info.status && info.status !== 'stopped' && info.status !== 'error') return info.account;
-  // An agent working for a person with their own token runs on it, here or on a Mac (docs/identity.md).
-  const own = info.requestedBy ? personTok(info.requestedBy.userId) : undefined;
-  if (own) return tokenKey(own);
-  if (info.machineId) {
-    const t = machineTok(info.machineId);
-    return t ? tokenKey(t) : machineLogin(info.machineId);
-  }
-  if (hostLogin(info.kind ?? 'worker')) return HOST_LOGIN;
-  return hostTok ? tokenKey(hostTok) : HOST_LOGIN;
+export function sessionSource(info: Partial<Pick<SessionInfo, 'account'>>): string {
+  return info.account ?? '';
 }
 
 /** One polled or reported credential. */
@@ -333,9 +301,9 @@ export interface UsageEntry {
 export interface AccountContext {
   /** This host's name, for "BEAST login". */
   hostName: string;
-  /** The current host token's key and label, when one is set. */
+  /** Before w1078: the host token's key and label. Nothing sets it now. */
   token?: { key: string; label: string };
-  /** Machines that exist; `usesToken`: their portal-run agents take the host token; `onVault`: their runs take a vault token (config machines.claudeFromVault). */
+  /** Machines that exist; `usesToken`: their portal-run agents take the host token (before w1078); `onVault`: their runs take a vault token (always, since w1078). */
   machines: { id: string; usesToken: boolean; onVault?: boolean }[];
   /**
    * What the config sets to use each credential (w748): an account nothing is set to use, and no agent runs on now, is not
@@ -346,9 +314,9 @@ export interface AccountContext {
   hostLoginRoles?: HostRole[];
   /** The roles to name apart (secrets.ts shownRoles): the dispatcher only when it has an account of its own. Default: all but the dispatcher. */
   roles?: HostRole[];
-  /** The token file (config claudeTokenFile, w464): its token's key and label, and the roles that run on it. */
+  /** Before w1078: the token file's key and label, and the roles on it. Nothing sets it now. */
   tokenFile?: { key: string; label: string; roles: HostRole[] };
-  /** People's own tokens (config userClaudeEnv): key, label ("Lothsahn's token …abcd") and whose. */
+  /** Before w1078: people's own tokens (config userClaudeEnv). Nothing sets it now. */
   people?: { key: string; label: string; displayName: string }[];
   /** The token vault's Claude tokens (docs/vault.md, w512): key, label ("ben-max …abcd") and the account email a person recorded for it, if any (w785). Their grants are not shown (w748). */
   vault?: { key: string; label: string; email?: string }[];
@@ -705,11 +673,11 @@ export interface UsageDeps {
 }
 
 /**
- * Polls this host's login and the tokens (the host's and people's own) once at startup, then every config
+ * Polls the vault's Claude tokens (w1078: every Claude process runs on one) once at startup, then every config
  * usagePollMinutes (default 15), and keeps what the machine daemons report for their Macs' logins. A manual
  * refresh polls at once; system_status polls only when the numbers are older than the interval. Rate-limit
- * events no longer poll: the endpoint rate-limits, and one poll per interval is enough. `usage` is this host's
- * login, as before.
+ * events no longer poll: the endpoint rate-limits, and one poll per interval is enough. This host's own login is not
+ * polled any more: nothing runs on it.
  */
 export class UsageTracker {
   private readonly cfg: Config;
@@ -800,13 +768,12 @@ export class UsageTracker {
   /** The tokens the last refresh polled, to notice a new one (set_app_config) before the next poll. */
   private tokenSeen?: string;
 
-  /** People's own tokens (config userClaudeEnv) with their labels; wired by index.ts. Polled like the host token. */
+  /** The vault's Claude tokens with their labels; wired by index.ts. */
   personTokens?: () => { token: string; label: string }[];
 
-  /** Every token to poll: the host's, then people's own, each once. */
+  /** Every token to poll, each once. */
   private tokens(): { token: string; label: string }[] {
-    const t = hostToken(this.cfg);
-    const all = [...(t ? [{ token: t, label: tokenLabel(t) }] : []), ...(this.personTokens?.() ?? [])];
+    const all = this.personTokens?.() ?? [];
     return all.filter((x, i) => all.findIndex((y) => y.token === x.token) === i);
   }
 
@@ -975,13 +942,12 @@ export class UsageTracker {
     this.lastFetch = now;
     this.reschedule();
     try {
-      const base = { ...process.env, ...this.cfg.claudeEnv };
       const tokens = this.tokens();
       const keep = new Set(tokens.map((x) => tokenKey(x.token)));
       // A replaced token's numbers are no longer anyone's.
       for (const k of [...this.entries.keys()]) if (k.startsWith('token:') && !keep.has(k)) this.entries.delete(k);
       this.tokenSeen = this.tokensKey();
-      await Promise.all([this.refreshLogin(usageEnv(base)), ...tokens.map((x) => this.refreshToken(x.token, x.label))]);
+      await Promise.all(tokens.map((x) => this.refreshToken(x.token, x.label)));
       this.save();
     } finally {
       if (this.pollId === mine) this.inFlightSince = 0;
@@ -989,46 +955,11 @@ export class UsageTracker {
     this.changed();
   }
 
-  /** This host's stored claude.ai login, through the CLI with no token in its environment. */
-  private async refreshLogin(env: Record<string, string | undefined>) {
-    const asOf = new Date().toISOString();
-    const prev = this.entries.get(HOST_LOGIN);
-    const file = credentialsFile(env);
-    const said = (u: PlanUsage, account?: AccountIdentity) =>
-      this.log(`usage: ${os.hostname()} login (the claude.ai login stored in ${file}${account?.email ? `, ${account.email}` : ''}): ${u.available ? 'ok' : 'failed'}, ${brief(u)}`);
-    let u: PlanUsage;
-    let account = prev?.account;
-    try {
-      const problem = loginProblem(readStoredLogin(file), Date.now(), file, process.platform === 'darwin');
-      if (problem) throw new LoginProblem(problem);
-      const r = await this.within(this.fetchLogin(env), 'the claude.ai login (through the CLI)');
-      u = parseUsage(r.reply, asOf);
-      if (r.account.email || r.account.plan) account = r.account;
-    } catch (e) {
-      if (e instanceof LoginProblem) {
-        // A known, lasting cause: say it plainly instead of showing old numbers.
-        u = { available: false, asOf, models: [], why: e.message };
-      } else if (prev?.usage?.available) {
-        // Keep showing this login's last good numbers, marked stale by their own asOf, rather than nothing.
-        const kept = { ...prev.usage, error: scrub((e as Error).message).slice(0, 200) };
-        this.entries.set(HOST_LOGIN, { ...prev, usage: kept });
-        this.log(`usage: ${os.hostname()} login: failed (${kept.error}), keeping its numbers from ${prev.usage.asOf}`);
-        return;
-      } else {
-        u = { available: false, asOf, models: [], why: `could not fetch plan usage: ${scrub((e as Error).message).slice(0, 200)}` };
-      }
-    }
-    if (!u.available) u.spendWeekUsd = weekSpend(this.ledger, localDay());
-    else this.freshKeys.add(HOST_LOGIN);
-    this.entries.set(HOST_LOGIN, { kind: 'login', account, usage: u });
-    said(u, account);
-  }
-
   /**
    * The agents' token, asked with that token alone (fetchTokenUsage). A failure is "unknown" with its
    * reason: no older numbers are kept, so nothing another credential answered can ever show here.
    */
-  private async refreshToken(token: string, label = tokenLabel(token)) {
+  private async refreshToken(token: string, label = `token …${token.slice(-4)}`) {
     const key = tokenKey(token);
     const asOf = new Date().toISOString();
     const reason = (e: unknown) => scrub(e instanceof Error ? e.message : String(e)).slice(0, 200);

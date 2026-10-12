@@ -53,7 +53,9 @@ test('fffctl migrate --dry-run-copy, again, then --rollback-dry-run: a read-only
   const report = m.report.join('\n');
   t.diagnostic(report);
   assert.equal(code, 0, report);
-  for (const check of ['starts as a dry run', 'no data restored on load', "counts equal BEAST's copy", 'an orchestrator conversation resumes']) assert.match(report, new RegExp(`PASS  ${check.replace(/[()]/g, '\\$&')}`), check);
+  for (const check of ['starts as a dry run', 'no data restored on load', "counts equal BEAST's copy"]) assert.match(report, new RegExp(`PASS  ${check.replace(/[()]/g, '\\$&')}`), check);
+  // The VM's config names no token file since w1078: the resume check says it was skipped, and why; it never passes on nothing.
+  assert.match(report, /SKIP {2}an orchestrator conversation resumes: no token file to resume on .*w1078 retired it/);
   assert.match(report, /copied BEAST's config\.json and data: \d+ files/);
   assert.match(report, /copied 1 conversation\(s\) to resume/);
   assert.match(report, /BEAST's config\.json and data: snapshot: a staged copy on BEAST, .*\(no VSS shadow copy: not Windows\); every file is read from it/);
@@ -82,8 +84,9 @@ test('fffctl migrate --dry-run-copy, again, then --rollback-dry-run: a read-only
   assert.equal(cfg.publicUrl, w.publicUrl);
   assert.equal(cfg.hostSandboxes, undefined, 'w510: no portal-only switch any more');
   assert.equal(cfg.ownerName, 'Ben');
-  assert.equal(cfg.claudeEnv.CLAUDE_CODE_OAUTH_TOKEN, BEAST_TOKEN, 'copied (ignored by the dry run)');
-  assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'tokenfile', dispatcher: 'tokenfile' });
+  assert.equal(cfg.claudeEnv, undefined, "w1078: BEAST's host token is left behind, every Claude process runs on a vault token");
+  assert.equal(cfg.claudeTokenFile, undefined);
+  assert.equal(cfg.claudeAccounts, undefined, "BEAST's file named none; the vault is the default");
   assert.equal(cfg.dataDir, path.join(w.vm, 'data'));
   assert.equal((fs.statSync(w.vmCfgFile).mode & 0o777).toString(8), '600');
   // The data folder closed to others (the portal's own later writes inside it take its umask), the secrets and the
@@ -101,7 +104,7 @@ test('fffctl migrate --dry-run-copy, again, then --rollback-dry-run: a read-only
   assert.equal(fs.readFileSync(path.join(moved, 'sdk-disp-1.jsonl'), 'utf8'), fs.readFileSync(path.join(w.beastClaude, 'projects', claudeProjectFolder(w.beastBase), 'sdk-disp-1.jsonl'), 'utf8'));
   assert.ok(fs.existsSync(path.join(moved, 'sdk-disp-1', 'subagents', 'a.jsonl')), 'its subagents too');
   assert.ok(!fs.existsSync(path.join(moved, 'someone-else.jsonl')), 'only the ones it resumes');
-  assert.deepEqual(fs.readFileSync(path.join(w.base, 'claude.log'), 'utf8').trim().split('\n'), ['token from the environment', 'forked'], 'the token in its environment only, the copy forked, not written');
+  assert.ok(!fs.existsSync(path.join(w.base, 'claude.log')), 'with no token file, claude is never started (w1078)');
   assert.match(w.vmPortal.log(), /!!!!!!!! DRY RUN/);
   assert.doesNotMatch(w.vmPortal.log() + report, new RegExp(`${FAKE_TOKEN}|${BEAST_TOKEN}`), 'no token printed');
 

@@ -51,8 +51,8 @@ export function VaultSettings() {
       )}
       <AddEntry view={view} onChange={act} />
       <p className="small dim">
-        Claude tokens from the vault on: {view.machines.filter((m) => m.claudeFromVault).map((m) => m.id).join(', ') || 'no machine yet'}{' '}
-        <small>(set_app_config machines.claudeFromVault, per machine)</small>
+        Every Claude process runs on a token from the vault: the portal's orchestrators, the dispatcher and the orchestration worker, and every machine's runs{view.machines.length ? ` (${view.machines.map((m) => m.id).join(', ')})` : ''}.{' '}
+        <small>A person with no usable token waits; nothing falls back to another credential.</small>
       </p>
       <p className="small dim" data-testid="vault-github-on">
         GitHub tokens from the vault on: {[...(view.githubPortal ? ['the portal\'s own reads'] : []), ...view.machines.filter((m) => m.githubFromVault).map((m) => m.id)].join(', ') || 'nowhere yet: every caller uses its own gh login'}{' '}

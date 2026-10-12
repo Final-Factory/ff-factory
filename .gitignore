@@ -16,3 +16,5 @@ e2e/__screenshots__/**/*-win32.png
 e2e/__screenshots__/**/*-darwin.png
 # config.json's earlier versions (server/durable.ts) and the copy setAppConfig keeps
 config.json.*
+# The secrets folder beside the app (w1078, server/configMigration.ts secretsDirOf): FFBox's connector hash, config backups
+/secrets/

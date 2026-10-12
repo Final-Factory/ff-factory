@@ -1,21 +1,19 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { HOST_ROLES, TOKEN_FILE_ROLES, pinnedVaultEntry, roleNames, type ClaudeAccount, type Config, type HostRole } from './config.ts';
+import { HOST_ROLES, pinnedVaultEntry, type ClaudeAccount, type Config, type HostRole } from './config.ts';
 import type { Requester, SessionInfo, SessionKind } from '../shared/types.ts';
-import { claudeEnvFor, userToken } from './identity.ts';
 import { PoolHeldError, vaultContext, type VaultContext, type VaultRole } from './vault.ts';
 import { githubFromVault } from './githubTokens.ts';
-import { HOST_LOGIN, credentialsFile, loginUnusable, readStoredLogin, tokenKey, usageEnv } from './usage.ts';
+import { tokenKey, usageEnv } from './usage.ts';
 import { poolLimits, reserveOf, reserveReason, type PoolLimits, type Reserve } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
 import { writeFileDurable } from './durable.ts';
 
 /**
- * Secrets agents may set but nobody may read back (set_app_config's write-only keys): the Claude OAuth token
- * the agents run on. The value is only ever shown as "set (…last 4 chars)", and every transcript event is
- * written (and sent to the UI) with such a token redacted, so neither the orchestrator's own tool call that
- * set it nor a pasted message keeps it on disk. Discord bot tokens (and DISCORD_TOKEN / FFDISCORD_APP_TOKEN
+ * Secrets agents may set but nobody may read back (set_app_config's write-only keys): FFBox's connector token (the Claude
+ * tokens are the vault's, w1078). A value is only ever shown as "set (…last 4 chars)", and every transcript event is
+ * written (and sent to the UI) with a Claude OAuth token redacted, so neither a tool call nor a pasted message keeps one
+ * on disk. Discord bot tokens (and DISCORD_TOKEN / FFDISCORD_APP_TOKEN
  * values) are redacted the same way, and so are provider connector tokens (ffpv1_…, server/providerProtocol.ts).
  * Search reads the transcripts, so it never sees them either.
  */
@@ -25,7 +23,7 @@ export const OAUTH_TOKEN = /^sk-ant-oat01-[A-Za-z0-9_-]{40,}$/;
 const OAUTH_TOKEN_ANYWHERE = /sk-ant-oat01-[A-Za-z0-9_-]{40,}/g;
 
 /** set_app_config keys whose value is never shown. */
-export const SECRET_KEYS: ReadonlySet<string> = new Set(['claudeEnv.CLAUDE_CODE_OAUTH_TOKEN', 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN', 'providers.ffbox.token']);
+export const SECRET_KEYS: ReadonlySet<string> = new Set(['providers.ffbox.token']);
 
 /** A provider connector token (server/providerProtocol.ts, PROVIDER_TOKEN). */
 const PROVIDER_TOKEN_ANYWHERE = /ffpv1_[A-Za-z0-9_-]{43}/g;
@@ -135,28 +133,12 @@ export function scrubTranscripts(dir: string): number {
 /** A machine as the account rules need it: its id, and whether it is the portal's own host (docs/beast-machine.md). */
 export type MachineRef = string | { id: string; local?: boolean };
 const refId = (m: MachineRef) => (typeof m === 'string' ? m : m.id);
-const refLocal = (m: MachineRef) => typeof m !== 'string' && !!m.local;
 
-/**
- * Whether portal-run agents on a machine get this host's claudeEnv (config machines.useHostClaudeEnv; default
- * yes): an entry naming the machine, else the value itself, or "*" for machines not named. The portal's own host as a
- * machine (docs/beast-machine.md) is no different: until w755 it followed claudeAccounts.workers when no entry named it.
- */
-export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'>, machine: MachineRef): boolean {
-  const u = cfg.machines?.useHostClaudeEnv;
-  const id = refId(machine);
-  if (u && typeof u === 'object' && u[id] !== undefined) return u[id];
-  if (u === undefined) return true;
-  if (typeof u === 'boolean') return u;
-  return u['*'] ?? true;
-}
-
-// ---------------------------------------------------------------- this host's agents (docs/accounts.md)
+// ---------------------------------------------------------------- every Claude process on a vault token (docs/accounts.md)
 
 /**
  * Whether a session of `kind` without a machine is one this host runs (w510: only the orchestrators, and the orchestration
- * worker, w597, which works only for their people). Any other kind without a machine is an old portal worker's or standing
- * agent's record, whose account the config no longer says: the host token.
+ * worker, w597, which works only for their people).
  */
 export const runsOnThisHost = (kind: SessionKind): boolean => kind === 'orchestrator' || kind === 'ops';
 
@@ -164,47 +146,22 @@ export const runsOnThisHost = (kind: SessionKind): boolean => kind === 'orchestr
 export const hostRole = (_kind: SessionKind): HostRole => 'orchestrator';
 
 /**
- * The account this host's agents of `role` run on (config claudeAccounts; default the token; the dispatcher, unset:
- * the orchestrator's). "tokenfile" is for the roles in TOKEN_FILE_ROLES (refused at config load for any other). The
- * dispatcher alone may be "vault:<entry name>" (w996): the one vault token, see `pinnedDispatcherEntry`.
+ * The vault token this host's agents of `role` run on (config claudeAccounts, w1078): "vault", their person's own pool (the
+ * dispatcher: the system payer's), or the dispatcher's one named token "vault:<entry name>" (w996). There is nothing else:
+ * no host token, token file or stored login (lothsahn, 2026-10-12: "everything runs off the vault").
  */
-export function hostAccount(cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>, role: HostRole): ClaudeAccount {
-  const v = cfg.claudeAccounts?.[role] ?? (role === 'dispatcher' ? cfg.claudeAccounts?.orchestrator : undefined);
-  // "vault" (w738) is the orchestrators'; the dispatcher that inherits it stays on the token file (else the host token), and
-  // so does anyone with no vault tokens: `poolRunEnv` falls back to this.
-  if (v === 'vault') return role === 'orchestrator' ? 'vault' : cfg.claudeTokenFile ? 'tokenfile' : 'token';
-  // "vault:<entry name>" (w996) is the dispatcher's alone (refused at config load for any other role).
-  if (pinnedVaultEntry(v) !== undefined) return role === 'dispatcher' ? v! : cfg.claudeTokenFile ? 'tokenfile' : 'token';
-  if (v === 'tokenfile') return TOKEN_FILE_ROLES.includes(role) ? 'tokenfile' : 'token';
-  return v === 'login' ? 'login' : 'token';
+export function hostAccount(cfg: Pick<Config, 'claudeAccounts'>, role: HostRole): ClaudeAccount {
+  const v = cfg.claudeAccounts?.[role];
+  return role === 'dispatcher' && pinnedVaultEntry(v) !== undefined ? v! : 'vault';
 }
 
-/**
- * The OAuth token in config claudeTokenFile (w464), read now: a role set to "tokenfile" reads it at each session
- * start, so a new token applies to the next session without a restart. Throws, never showing the content, when no file
- * is named, it cannot be read, or what it holds is not one OAuth token.
- */
-export function readTokenFile(cfg: Partial<Pick<Config, 'claudeTokenFile'>>): string {
-  const file = cfg.claudeTokenFile;
-  if (!file) throw new Error('config claudeTokenFile names no file, but a role is set to "tokenfile"');
-  let text: string;
-  try {
-    text = fs.readFileSync(file, 'utf8');
-  } catch (e) {
-    throw new Error(`cannot read config claudeTokenFile ${file}: ${(e as NodeJS.ErrnoException).code ?? 'unreadable'}`);
-  }
-  const token = text.replace(/^\uFEFF/, '').trim();
-  if (!OAUTH_TOKEN.test(token)) throw new Error(`config claudeTokenFile ${file} does not hold one Claude OAuth token (sk-ant-oat01-…, from \`claude setup-token\`); its content is not shown`);
-  return token;
-}
+/** The vault entry the dispatcher is pinned to (claudeAccounts.dispatcher "vault:<name>", w996), or undefined. */
+export const pinnedDispatcherEntry = (cfg: Pick<Config, 'claudeAccounts'>): string | undefined => pinnedVaultEntry(hostAccount(cfg, 'dispatcher'));
 
-/** A role's credentials replaced by the token file's alone (w464): every other Claude credential removed first. */
-const withTokenFile = <E extends Record<string, string | undefined>>(cfg: Partial<Pick<Config, 'claudeTokenFile'>>, env: E): E => ({ ...usageEnv(env), CLAUDE_CODE_OAUTH_TOKEN: readTokenFile(cfg) });
+/** Whether the dispatcher has a token of its own (pinned, w996): else it runs on the system payer's pool. */
+export const dispatcherOwnAccount = (cfg: Pick<Config, 'claudeAccounts'>) => pinnedDispatcherEntry(cfg) !== undefined;
 
-/** Whether the dispatcher has an account of its own (config claudeAccounts.dispatcher, w464): it then ignores the system payer's own token. */
-export const dispatcherOwnAccount = (cfg: Pick<Config, 'claudeAccounts'>) => cfg.claudeAccounts?.dispatcher !== undefined;
-
-/** The roles worth naming apart: the dispatcher only when it has an account of its own (else it is the orchestrator's). */
+/** The roles worth naming apart: the dispatcher only when it has a token of its own (else it is on a person's pool). */
 export const shownRoles = (cfg: Pick<Config, 'claudeAccounts'>): HostRole[] => HOST_ROLES.filter((r) => r !== 'dispatcher' || dispatcherOwnAccount(cfg));
 
 /**
@@ -222,190 +179,28 @@ export function liveOnAccount(sessions: Iterable<{ id?: string; account?: string
   return n;
 }
 
-/** The vault entry the dispatcher is pinned to (claudeAccounts.dispatcher "vault:<name>", w996), or undefined. */
-export const pinnedDispatcherEntry = (cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>): string | undefined => pinnedVaultEntry(hostAccount(cfg, 'dispatcher'));
-
-/**
- * The environment of the dispatcher's process when it is pinned to a vault token (w996): exactly that token as
- * CLAUDE_CODE_OAUTH_TOKEN, every other Claude credential removed first (as the token file's is). `undefined` when the
- * dispatcher is not pinned. A pinned token the vault cannot give (no such entry, disabled, or the key does not open it) is
- * not a stop: the dispatcher runs on what it falls back to (the token file, else the host token: `fallback`), and the
- * problem is reported (the log and system_status), because a dispatcher that cannot start stops every request.
- */
-export function pinnedDispatcherEnv(
-  cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'> & Partial<Pick<Config, 'claudeTokenFile'>>,
-  fallback: () => Record<string, string | undefined>,
-  ctx: VaultContext | undefined = vaultContext(),
-): { env: Record<string, string | undefined>; account: string } | undefined {
-  const name = pinnedDispatcherEntry(cfg);
-  if (name === undefined) return undefined;
-  const got = ctx?.vault.claudeByName(name);
-  if (got) {
-    const all = { ...process.env, ...cfg.claudeEnv };
-    return { env: { ...usageEnv(all), CLAUDE_CODE_OAUTH_TOKEN: got.token }, account: `vault token ${got.entry.name} …${got.entry.last4} (the dispatcher's, docs/vault.md)` };
-  }
-  ctx?.onProblem?.(`the dispatcher is pinned to vault token ${name} (claudeAccounts.dispatcher), but the vault has no usable Claude entry of that name; it runs on ${baseAccount(cfg, 'dispatcher') === 'tokenfile' ? 'the token file' : 'the host token'} instead`);
-  return { env: fallback(), account: baseAccount(cfg, 'dispatcher') === 'tokenfile' ? 'token file' : 'host token' };
-}
-
-/**
- * Which of this host's own credentials its roles are set to use (w748): the stored login, the host token, or a vault pool.
- * A role on "vault" counts for the account it falls back to (the token file, else the host token) as well, since a person
- * with no tokens of their own yet still runs on it. The accounts list leaves out a credential no role is set to use.
- */
-export function hostAccountsInUse(cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>): { login: boolean; token: boolean; vault: boolean } {
-  const base = HOST_ROLES.map((r) => baseAccount(cfg, r));
-  return { login: base.includes('login'), token: base.includes('token'), vault: HOST_ROLES.some((r) => hostAccount(cfg, r) === 'vault' || pinnedVaultEntry(hostAccount(cfg, r)) !== undefined) };
-}
-
 /** The role a session on this host runs as (claudeAccounts): the dispatcher's own when it has one, else by its kind. */
 export function hostRoleOf(cfg: Pick<Config, 'claudeAccounts'>, info: Pick<SessionInfo, 'kind'> & Partial<Pick<SessionInfo, 'orchestratorRole'>>): HostRole {
   return info.kind === 'orchestrator' && info.orchestratorRole === 'dispatcher' && dispatcherOwnAccount(cfg) ? 'dispatcher' : hostRole(info.kind);
 }
 
-/** The account a host role runs on when it has no vault pool (or pinned vault token) to use: "vault" is the token file (else the host token). */
-const baseAccount = (cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>, role: HostRole): ClaudeAccount => {
-  const a = hostAccount(cfg, role);
-  return a === 'vault' || pinnedVaultEntry(a) !== undefined ? (cfg.claudeTokenFile ? 'tokenfile' : 'token') : a;
-};
+/**
+ * The environment a Claude process this portal starts begins with: the server's own without any Claude credential
+ * (usageEnv), so the vault token put on top is the only one it has.
+ */
+export const hostBaseEnv = (env: Record<string, string | undefined> = process.env): Record<string, string | undefined> => usageEnv({ ...env });
+
+/** Why nothing starts when there is no vault on this portal (tests, or a portal that never set its context). */
+const NO_VAULT = 'the token vault is not loaded on this portal, and every Claude process runs on a vault token (docs/vault.md; w1078: there is no other credential)';
 
 /**
- * Config claudeEnv as a host agent of `role` gets it: whole ("token"), or without its credentials ("login"), so
- * the agent falls back to the claude.ai login stored on this host. Its other variables (CLAUDE_CONFIG_DIR…) stay.
+ * Why a person's pool gave no token (w1078): their tokens do not open, or they have none. Every Claude process runs on a vault
+ * token, so the run does not start; it never falls back to another credential.
  */
-export function hostClaudeEnv(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'> & Partial<Pick<Config, 'claudeTokenFile'>>, role: HostRole): Record<string, string> {
-  const env = { ...cfg.claudeEnv };
-  const a = baseAccount(cfg, role);
-  return a === 'tokenfile' ? withTokenFile(cfg, env) : a === 'login' ? usageEnv(env) : env;
-}
-
-/**
- * The whole environment a Claude process of `role` starts with on this host: the server's own with config
- * claudeEnv over it, and for "login" without any credential, as the usage meters read the host login
- * (server/usage.ts refresh), so what they show as "<host> login" is what the agent runs on.
- */
-export function hostProcessEnv(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'> & Partial<Pick<Config, 'claudeTokenFile'>>, role: HostRole, env: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
-  const all = { ...env, ...cfg.claudeEnv };
-  const a = baseAccount(cfg, role);
-  return a === 'tokenfile' ? withTokenFile(cfg, all) : a === 'login' ? usageEnv(all) : all;
-}
-
-/** The token file's token, or undefined when no role runs on it or it cannot be read (the meters and attribution). */
-export function tokenFileToken(cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>): string | undefined {
-  if (!HOST_ROLES.some((r) => hostAccount(cfg, r) === 'tokenfile')) return undefined;
-  try {
-    return readTokenFile(cfg);
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Why this host's stored claude.ai login cannot run agents (none stored, or expired past refreshing), or
- * undefined. Read from where a "login" agent's Claude Code reads it (hostProcessEnv). macOS keeps it in the
- * Keychain, where a missing file proves nothing.
- */
-export function hostLoginProblem(cfg: Pick<Config, 'claudeEnv'>, env: Record<string, string | undefined> = process.env, now = Date.now()): string | undefined {
-  const file = credentialsFile(usageEnv({ ...env, ...cfg.claudeEnv }));
-  return loginUnusable(readStoredLogin(file), now, file, process.platform === 'darwin');
-}
-
-/**
- * The Claude env a portal-run agent on `machineId` runs with: this host's claudeEnv (with
- * CLAUDE_CODE_OAUTH_TOKEN, it overrides the Mac's keychain login for that agent only), or nothing (the Mac's
- * own login). It travels in the launch spec over the authenticated daemon channel and is never logged.
- */
-export function hostClaudeEnvFor(cfg: Pick<Config, 'machines' | 'claudeEnv'>, machine: MachineRef): Record<string, string> {
-  if (usesHostClaudeEnv(cfg, machine)) return { ...cfg.claudeEnv };
-  // The portal's own host on its login (machines.useHostClaudeEnv false for it): config claudeEnv without its credentials
-  // (CLAUDE_CONFIG_DIR and the like stay, so a resumed session finds its history).
-  return refLocal(machine) ? usageEnv({ ...cfg.claudeEnv }) : {};
-}
-
-/** Whether a machine's portal-run agents run on the Mac's own login: they are sent no token (hostClaudeEnvFor). */
-export const machineUsesLogin = (cfg: Pick<Config, 'machines' | 'claudeEnv'>, machine: MachineRef) => !hostClaudeEnvFor(cfg, machine).CLAUDE_CODE_OAUTH_TOKEN;
-
-/** Which Claude account a machine's portal-run agents use, safe to show: "host token …abcd" or "Mac login". */
-export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'>, machine: MachineRef): string {
-  const token = hostClaudeEnvFor(cfg, machine).CLAUDE_CODE_OAUTH_TOKEN;
-  if (token) return `host token …${token.slice(-4)}`;
-  return refLocal(machine) ? `${os.hostname()} login (this host's stored Claude login, machines.useHostClaudeEnv false)` : "Mac login (the Mac's own Claude Code login)";
-}
-
-/**
- * Whether a machine's runs take their Claude token from the token vault (config machines.claudeFromVault, docs/vault.md;
- * default no): an entry naming the machine, else "*", else the value itself.
- */
-export function claudeFromVault(cfg: Pick<Config, 'machines'>, machine: MachineRef): boolean {
-  const u = cfg.machines?.claudeFromVault;
-  if (u === undefined) return false;
-  if (typeof u === 'boolean') return u;
-  return u[refId(machine)] ?? u['*'] ?? false;
-}
-
-/** What a machine run starts with (machineRunEnv): its environment, whether it drops the daemon's own credentials, and its account for people. */
-export interface MachineRunEnv {
-  env: Record<string, string>;
-  login: boolean;
-  /** "vault token ben-max …abcd", "host token …abcd" or "Mac login", safe to show. */
-  account: string;
-  /** The vault GitHub entry given as GH_TOKEN (w868), "vault-ben-github …abcd"; absent: the machine's own gh login. */
-  github?: string;
-  /** Whose own Claude tokens it got (w1076: their pool token or config userClaudeEnv); absent: the machine's account. */
-  person?: string;
-}
-
-/**
- * The Claude account and the vault's secrets a run on a machine gets (docs/vault.md, sections 3 and 4). In order: a
- * person's own token (config userClaudeEnv) for their work, as before; then, on a machine config machines.claudeFromVault
- * names, a Claude token from the run person's vault pool (server/tokenPool.ts); else the machine's account without the vault (hostClaudeEnvFor:
- * the host token or its own login). Every other vault entry granted to the run's role and machine is added as
- * environment. With a vault token, `login` is true so the daemon's own credentials (an API key in its environment would
- * outrank the token) are dropped and only the token remains. Without a vault context, exactly what it was before.
- */
-export function machineRunEnv(
-  cfg: Pick<Config, 'machines' | 'claudeEnv' | 'userClaudeEnv'> & Partial<Pick<Config, 'claudeAccounts'>>,
-  machine: MachineRef,
-  run: { role: VaultRole; requestedBy?: Requester; sessionId?: string; tokenUser?: string },
-  ctx: VaultContext | undefined = vaultContext(),
-): MachineRunEnv {
-  const vaultOn = !!ctx && claudeFromVault(cfg, machine);
-  // Whose tokens (docs/vault.md, "Whose tokens"): the person who last acted on the request (w1031), else for work nobody
-  // asked for by name the person config vault.unattributed names (both are run.tokenUser); anything else its requester's,
-  // else the system payer's.
-  const person = run.tokenUser ?? run.requestedBy?.userId ?? ctx?.payer?.();
-  const billed = run.tokenUser ? { userId: run.tokenUser, displayName: run.tokenUser } : run.requestedBy;
-  const base = claudeEnvFor(cfg, billed, hostClaudeEnvFor(cfg, machine));
-  const plain = { env: base, login: machineUsesLogin(cfg, machine), account: accountSource(cfg, machine) };
-  const own = userToken(cfg, billed?.userId);
-  const ownPerson = own && billed ? { person: billed.userId } : {};
-  if (!ctx) return { ...plain, ...ownPerson };
-  const wantClaude = vaultOn && !own;
-  const wantGithub = githubFromVault(cfg, refId(machine));
-  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, sessionId: run.sessionId }, { claude: wantClaude, github: wantGithub, githubUsable: ctx.githubUsable, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
-  for (const p of s.problems) ctx.onProblem?.(p);
-  // GitHub (w868): the person's own token, else the machine's own gh login as before; never another person's.
-  const github = s.github ? { github: `${s.github.name} …${s.github.last4}` } : {};
-  if (s.github) ctx.onGithubUse?.(s.github, `given to a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}`);
-  else if (wantGithub) {
-    ctx.onProblem?.(`no usable vault GitHub token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it uses the machine's own gh login`);
-    ctx.onGithubMissing?.(person, refId(machine), `a ${run.role} run`);
-  }
-  if (s.claude) {
-    return { env: { ...usageEnv(base), ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person), ...github, ...(person ? { person } : {}) };
-  }
-  // The person has Claude tokens and none may serve this run (every one over its caps or used up): the run waits for the
-  // first to free up. No other person's token, no shared token, not the dispatcher's, not the host token (w739).
-  if (wantClaude && s.claudeHold) throw new PoolHeldError(`${person ?? 'this run'}'s Claude token pool is held: ${s.claudeHold.why}`, s.claudeHold.next);
-  // A person with a pool never runs on the host token, the machine's login or anyone else's (w1031, lothsahn: their work
-  // "NEVER falls back to the host token or to Ben's pool"): the vault could not give any of their tokens (no key, none opens),
-  // so the run waits for that to be fixed. Only a person with no Claude token in the vault at all keeps today's account.
-  if (wantClaude && (s.poolSize ?? 0) > 0) {
-    throw new PoolHeldError(`${person}'s Claude token pool cannot serve this run: ${s.problems.join('; ') || 'none of their tokens opens'}. It does not fall back to the host token or another person's tokens; fix the vault (docs/vault.md) and it starts`);
-  }
-  // No token of their own: today's account, as before the pool (docs/vault.md, "Cut-over").
-  if (wantClaude) ctx.onProblem?.(`no vault Claude token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it runs on ${plain.account} instead`);
-  return { ...plain, env: { ...base, ...s.env }, ...github, ...ownPerson };
+function noTokenWhy(person: string | undefined, s: { poolSize?: number; problems: string[] }, what: string): string {
+  if (!person) return `${what} is for nobody, so it has no vault pool to run on (config vault.unattributed names whose tokens work nobody asked for runs on, docs/vault.md)`;
+  if ((s.poolSize ?? 0) > 0) return `${person}'s Claude token pool cannot serve ${what}: ${s.problems.join('; ') || 'none of their tokens opens'}. It never runs on another credential; fix the vault (docs/vault.md) and it starts`;
+  return `${person} has no Claude token in the vault, so ${what} cannot start: add one with \`sudo fffctl vault add-claude ${person}\` (docs/vault.md, section 4). It never runs on another credential (w1078)`;
 }
 
 /** "vault token ben-max …abcd" for a run's account line, safe to show. */
@@ -414,71 +209,111 @@ function poolAccount(c: { entry: { name: string; last4: string }; how: 'normal' 
 }
 
 /**
- * The environment of a portal-side Claude process for a person (w738): their own orchestrator ("orchestrator"), or the
- * orchestration worker working for them ("ops"). With `claudeAccounts.orchestrator` set to "vault" and the vault holding
- * Claude tokens for the person, it is exactly that person's pool token as CLAUDE_CODE_OAUTH_TOKEN, every other Claude
- * credential removed first (as the token file's does), picked now so a new token applies to the next session start.
- * All their tokens used up or capped: an orchestrator uses its pool up and then stops, the ops worker is held like a
- * worker; both throw PoolHeldError (the session start fails with the reason and the next reset). No tokens of their own
- * yet (the transition), or the vault cannot open them: `fallback`, today's account.
+ * The environment of the dispatcher's process when it is pinned to a vault token (w996): exactly that token as
+ * CLAUDE_CODE_OAUTH_TOKEN, every other Claude credential removed first. `undefined` when it is not pinned (it runs on the
+ * system payer's pool, poolRunEnv). A pinned token the vault cannot give (no such entry, disabled, or the key does not open
+ * it) stops the dispatcher's start with the reason (w1078: no fallback), which the log and system_status show.
  */
-export function poolRunEnv(
-  cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'> & Partial<Pick<Config, 'claudeTokenFile'>>,
-  run: { role: 'orchestrator' | 'ops'; personId: string | undefined; sessionId?: string },
-  fallback: () => Record<string, string | undefined>,
+export function pinnedDispatcherEnv(cfg: Pick<Config, 'claudeAccounts'>, ctx: VaultContext | undefined = vaultContext()): { env: Record<string, string | undefined>; account: string } | undefined {
+  const name = pinnedDispatcherEntry(cfg);
+  if (name === undefined) return undefined;
+  const got = ctx?.vault.claudeByName(name);
+  if (got) return { env: { ...hostBaseEnv(), CLAUDE_CODE_OAUTH_TOKEN: got.token }, account: `vault token ${got.entry.name} …${got.entry.last4} (the dispatcher's, docs/vault.md)` };
+  const why = ctx
+    ? `the dispatcher is pinned to vault token ${name} (claudeAccounts.dispatcher), but the vault has no usable Claude entry of that name, so it does not start: fix the entry (\`fffctl vault list\`), or pin another`
+    : NO_VAULT;
+  ctx?.onProblem?.(why);
+  throw new PoolHeldError(why);
+}
+
+/** What a machine run starts with (machineRunEnv): its environment, whether it drops the daemon's own credentials, and its account for people. */
+export interface MachineRunEnv {
+  env: Record<string, string>;
+  /** Always true since w1078: the daemon drops its own credentials, so the vault token is the run's only one. */
+  login: boolean;
+  /** "vault token ben-max …abcd (ben's pool, …)", safe to show. */
+  account: string;
+  /** The vault GitHub entry given as GH_TOKEN (w868), "vault-ben-github …abcd"; absent: the machine's own gh login. */
+  github?: string;
+  /** Whose pool the token came from. */
+  person?: string;
+}
+
+/**
+ * The Claude token and the vault's secrets a run on a machine gets (docs/vault.md, sections 3 and 4): a token from the
+ * vault pool of the person the run is for (the person who last acted on the request, w1031, or config vault.unattributed's
+ * for work nobody asked for by name: `run.tokenUser`; else its requester; else the system payer), and every other vault
+ * entry granted to the run's role and machine as environment. `login` is true so the daemon's own credentials (an API key in
+ * its environment would outrank the token) are dropped and only the token remains. No usable token: the run waits (its pool
+ * is held: PoolHeldError with the next reset), or does not start with the reason (no token at all, none opens). It never
+ * runs on another credential (w1078: no host token, no machine login, nobody else's pool).
+ */
+export function machineRunEnv(
+  cfg: Pick<Config, 'machines'> & Partial<Pick<Config, 'claudeAccounts'>>,
+  machine: MachineRef,
+  run: { role: VaultRole; requestedBy?: Requester; sessionId?: string; tokenUser?: string },
   ctx: VaultContext | undefined = vaultContext(),
-): { env: Record<string, string | undefined>; account: string } {
-  const plain = () => ({ env: fallback(), account: baseAccount(cfg, 'orchestrator') === 'tokenfile' ? 'token file' : 'host token' });
-  if (hostAccount(cfg, 'orchestrator') !== 'vault' || !ctx || !run.personId) return plain();
+): MachineRunEnv {
+  if (!ctx) throw new PoolHeldError(NO_VAULT);
+  const person = run.tokenUser ?? run.requestedBy?.userId ?? ctx.payer?.();
+  const wantGithub = githubFromVault(cfg, refId(machine));
+  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, sessionId: run.sessionId }, { claude: true, github: wantGithub, githubUsable: ctx.githubUsable, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
+  for (const p of s.problems) ctx.onProblem?.(p);
+  // GitHub (w868): the person's own token, else the machine's own gh login as before; never another person's.
+  const github = s.github ? { github: `${s.github.name} …${s.github.last4}` } : {};
+  if (s.github) ctx.onGithubUse?.(s.github, `given to a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}`);
+  else if (wantGithub) {
+    ctx.onProblem?.(`no usable vault GitHub token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it uses the machine's own gh login`);
+    ctx.onGithubMissing?.(person, refId(machine), `a ${run.role} run`);
+  }
+  if (s.claude) return { env: { ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person), ...github, ...(person ? { person } : {}) };
+  // Every token of the person's is over its caps or used up: the run waits for the first to free up (w739).
+  if (s.claudeHold) throw new PoolHeldError(`${person ?? 'this run'}'s Claude token pool is held: ${s.claudeHold.why}`, s.claudeHold.next);
+  const why = noTokenWhy(person, s, `a ${run.role} run on ${refId(machine)}`);
+  ctx.onProblem?.(why);
+  throw new PoolHeldError(why);
+}
+
+/**
+ * The environment of a portal-side Claude process for a person (w738): their own orchestrator ("orchestrator"), the
+ * orchestration worker working for them ("ops"), or the dispatcher on the system payer's pool when it is pinned to no token.
+ * Exactly that person's pool token as CLAUDE_CODE_OAUTH_TOKEN, every other Claude credential removed, picked now so a new
+ * token applies to the next session start. All their tokens used up or capped: an orchestrator uses its pool up and then
+ * stops, the ops worker is held like a worker; no token at all, or none opens: the start fails with the reason (w1078: no
+ * fallback). Each throws PoolHeldError, and the session start shows it.
+ */
+export function poolRunEnv(run: { role: 'orchestrator' | 'ops'; personId: string | undefined; sessionId?: string }, ctx: VaultContext | undefined = vaultContext()): { env: Record<string, string | undefined>; account: string } {
+  if (!ctx) throw new PoolHeldError(NO_VAULT);
+  const what = run.role === 'ops' ? 'the orchestration worker' : 'an orchestrator';
+  if (!run.personId) throw new PoolHeldError(noTokenWhy(undefined, { problems: [] }, what));
   const s = ctx.vault.forRun({ machineId: 'portal', role: run.role, userId: run.personId, sessionId: run.sessionId }, { claude: true, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
   for (const p of s.problems) ctx.onProblem?.(p);
-  if (s.claude) {
-    const all = { ...process.env, ...cfg.claudeEnv };
-    return { env: { ...usageEnv(all), CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, account: poolAccount(s.claude, run.personId) };
-  }
+  if (s.claude) return { env: { ...hostBaseEnv(), CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, account: poolAccount(s.claude, run.personId) };
   if (s.claudeHold) throw new PoolHeldError(`${run.personId}'s Claude token pool is ${run.role === 'orchestrator' ? 'used up' : 'held'}: ${s.claudeHold.why}`, s.claudeHold.next);
-  return plain();
+  const why = noTokenWhy(run.personId, s, what);
+  ctx.onProblem?.(why);
+  throw new PoolHeldError(why);
 }
 
 // ---------------------------------------------------------------- the dispatcher's reserve (w739)
 
-/** A credential kept back for one role: the dispatcher's, and the host token's. */
+/** A credential kept back for one role: the dispatcher's pinned vault token. */
 export interface ReservedCredential {
-  /** The usage meters' key (tokenKey), or HOST_LOGIN. */
+  /** The usage meters' key (tokenKey). */
   key: string;
-  /** "the dispatcher's token file …dAAA" */
+  /** "the dispatcher's vault token vault-lothsahn-1 …dAAA" */
   what: string;
-  role: 'dispatcher' | 'host-token';
+  role: 'dispatcher';
 }
 
 /**
- * The credentials with a reserve, worked out from config now (never a fixed token): whatever claudeAccounts.dispatcher
- * resolves to (the token file today, else the host token or this host's login), and the host token
- * (claudeEnv.CLAUDE_CODE_OAUTH_TOKEN) that machine agents and the people with no pool yet run on. When they are one
- * credential it is the dispatcher's. One token is one account: no matching of two tokens to one account.
+ * The credentials with a reserve, worked out from config now (never a fixed token): the vault token the dispatcher is pinned
+ * to (w996). Unpinned, the dispatcher runs on the system payer's pool, whose own limits hold it like anyone's: no reserve.
  */
-export function reservedCredentials(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'> & Partial<Pick<Config, 'claudeTokenFile'>>, ctx: Pick<VaultContext, 'vault'> | undefined = vaultContext()): ReservedCredential[] {
-  const out: ReservedCredential[] = [];
-  const a = hostAccount(cfg, 'dispatcher');
-  const hostTok = cfg.claudeEnv?.CLAUDE_CODE_OAUTH_TOKEN;
-  const pinned = pinnedVaultEntry(a);
-  if (pinned !== undefined) {
-    // The dispatcher on one vault token (w996): the reserve is kept on that token, wherever its pool is. When the vault cannot
-    // give it the dispatcher runs on the token file or host token (pinnedDispatcherEnv), so the reserve is theirs.
-    const got = ctx?.vault.claudeByName(pinned);
-    if (got) out.push({ key: tokenKey(got.token), what: `the dispatcher's vault token ${got.entry.name} …${got.entry.last4}`, role: 'dispatcher' });
-    else if (cfg.claudeTokenFile) {
-      const t = tokenFileToken({ ...cfg, claudeAccounts: { ...cfg.claudeAccounts, dispatcher: 'tokenfile' } });
-      if (t) out.push({ key: tokenKey(t), what: `the dispatcher's token file …${t.slice(-4)}`, role: 'dispatcher' });
-    } else if (hostTok) out.push({ key: tokenKey(hostTok), what: `the dispatcher's host token …${hostTok.slice(-4)}`, role: 'dispatcher' });
-  } else if (a === 'tokenfile') {
-    const t = tokenFileToken(cfg);
-    if (t) out.push({ key: tokenKey(t), what: `the dispatcher's token file …${t.slice(-4)}`, role: 'dispatcher' });
-  } else if (a === 'token') {
-    if (hostTok) out.push({ key: tokenKey(hostTok), what: `the dispatcher's host token …${hostTok.slice(-4)}`, role: 'dispatcher' });
-  } else if (a === 'login') out.push({ key: HOST_LOGIN, what: "the dispatcher's host login", role: 'dispatcher' });
-  if (hostTok && !out.some((c) => c.key === tokenKey(hostTok))) out.push({ key: tokenKey(hostTok), what: `the host token …${hostTok.slice(-4)}`, role: 'host-token' });
-  return out;
+export function reservedCredentials(cfg: Pick<Config, 'claudeAccounts'>, ctx: Pick<VaultContext, 'vault'> | undefined = vaultContext()): ReservedCredential[] {
+  const pinned = pinnedDispatcherEntry(cfg);
+  const got = pinned !== undefined ? ctx?.vault.claudeByName(pinned) : undefined;
+  return got ? [{ key: tokenKey(got.token), what: `the dispatcher's vault token ${got.entry.name} …${got.entry.last4}`, role: 'dispatcher' }] : [];
 }
 
 export interface ReserveLine {
@@ -492,12 +327,12 @@ export interface ReserveLine {
 
 /**
  * system_status's line for each reserved credential and the dashboard's warning. The reserve is the dispatcher's: it may
- * run into it up to 100%, nothing here ever holds the dispatcher. Other runs landing on it (a person with no vault tokens
- * yet, whose orchestrator is on the token file) are not refused, because they have nothing else: the warning says they
- * are using the buffer. `othersOn`: how many live sessions other than the owner's run on a credential key.
+ * run into it up to 100%, nothing here ever holds the dispatcher. Other runs landing on it (its pool's own runs when no other
+ * token has room) are not refused: the warning says they are using the buffer. `othersOn`: how many live sessions other
+ * than the owner's run on a credential key.
  */
 export function reserveLines(
-  cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv' | 'vault'> & Partial<Pick<Config, 'claudeTokenFile'>>,
+  cfg: Pick<Config, 'claudeAccounts' | 'vault'>,
   usageOf: (key: string) => PlanUsage | undefined,
   othersOn: (key: string, role: ReservedCredential['role']) => number,
   now = Date.now(),
@@ -514,47 +349,32 @@ export function reserveLines(
       ? 'no reading yet (counted as inside its reserve)'
       : `weekly ${Math.round(w?.percent ?? 50)}%, reserve ${Math.round(r.weekly)}% (${r.daysLeft.toFixed(r.daysLeft < 1 ? 1 : 0)} day${Math.round(r.daysLeft) === 1 ? '' : 's'} to reset); 5-hour ${Math.round(sess?.percent ?? 50)}%, reserve ${Math.round(r.session)}%`;
     const others = r.inReserve ? othersOn(cred.key, cred.role) : 0;
-    const who = cred.role === 'dispatcher' ? 'the dispatcher' : 'its own roles';
     return {
       cred,
       reserve: r,
-      line: `${name}: ${nums}${u?.reading ? ` [${u.reading.kind} reading: ${u.reading.why}]` : ''}${r.inReserve ? `; inside its reserve (${reserveReason(r, u, now)}), kept for ${who}` : ''}${others ? `; ${others} other run${others === 1 ? '' : 's'} using it` : ''}`,
-      ...(others ? { warning: `${name} is the last token with room for ${others} run${others === 1 ? '' : 's'} and is inside the buffer kept for ${who}: ${reserveReason(r, u, now)}` } : {}),
+      line: `${name}: ${nums}${u?.reading ? ` [${u.reading.kind} reading: ${u.reading.why}]` : ''}${r.inReserve ? `; inside its reserve (${reserveReason(r, u, now)}), kept for the dispatcher` : ''}${others ? `; ${others} other run${others === 1 ? '' : 's'} using it` : ''}`,
+      ...(others ? { warning: `${name} is the last token with room for ${others} run${others === 1 ? '' : 's'} and is inside the buffer kept for the dispatcher: ${reserveReason(r, u, now)}` } : {}),
     };
   });
 }
 
+/** What a worker's brief and list_machines say about the Claude account a machine's runs use (w1078: always a vault token). */
+export const MACHINE_ACCOUNT = "a vault token from the pool of the person the work is for (docs/vault.md)";
+
 /**
- * system_status's lines on which account each kind of agent runs on (docs/accounts.md), safe to show: this
- * host's roles, then every machine. `hostName`: this host, `hostToken`: the token its agents would get (usage.ts
- * hostToken), `people`: display names of those with their own token, which wins for work they asked for.
+ * system_status's line on which account each kind of agent runs on (docs/accounts.md), safe to show: every one a vault
+ * token (w1078). The dispatcher's pinned token by its last four characters, or why the vault cannot give it.
  */
-export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv' | 'machines'> & Partial<Pick<Config, 'claudeTokenFile'>>, hostName: string, hostToken: string | undefined, machineIds: MachineRef[], people: string[] = []): string[] {
-  const fileToken = tokenFileToken(cfg);
-  const pinnedHere = (role: HostRole) => {
-    const name = pinnedVaultEntry(hostAccount(cfg, role));
-    if (name === undefined) return undefined;
-    const got = vaultContext()?.vault.claudeByName(name);
-    return got
-      ? `vault token ${got.entry.name} …${got.entry.last4} (pinned; its dispatcher reserve is kept there)`
-      : `vault token ${name} (pinned, but the vault has no usable Claude entry of that name: it runs on ${cfg.claudeTokenFile ? 'the token file' : 'the host token'} instead)`;
-  };
-  const here = (role: HostRole) =>
-    pinnedHere(role) ??
-    (hostAccount(cfg, role) === 'vault'
-      ? `each person's own vault pool (${fileToken ? `token file …${fileToken.slice(-4)}` : hostToken ? `host token …${hostToken.slice(-4)}` : 'no token'} for a person with no vault token)`
-      : hostAccount(cfg, role) === 'tokenfile'
-      ? fileToken
-        ? `token file …${fileToken.slice(-4)}`
-        : 'token file (UNREADABLE: its sessions will not start)'
-      : hostAccount(cfg, role) === 'login' || !hostToken
-        ? `${hostName} login`
-        : `host token …${hostToken.slice(-4)}`);
-  const roles = shownRoles(cfg);
-  const logins = roles.filter((r) => hostAccount(cfg, r) === 'login');
-  const problem = logins.length ? hostLoginProblem(cfg) : undefined;
+export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts'>, payer: string | undefined, ctx: Pick<VaultContext, 'vault'> | undefined = vaultContext()): string[] {
+  const pinned = pinnedDispatcherEntry(cfg);
+  const got = pinned !== undefined ? ctx?.vault.claudeByName(pinned) : undefined;
+  const dispatcher =
+    pinned === undefined
+      ? `the system payer's pool (${payer ?? 'nobody'}; claudeAccounts.dispatcher pins none)`
+      : got
+        ? `vault token ${got.entry.name} …${got.entry.last4} (pinned; its dispatcher reserve is kept there)`
+        : `vault token ${pinned} (pinned, but the vault has no usable Claude entry of that name: the dispatcher does not start until it is fixed)`;
   return [
-    `Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): ${roles.map((r) => `${roleNames([r])} here: ${here(r)}`).join('; ')}${machineIds.length ? `; ${machineIds.map((m) => `agents on ${refId(m)}: ${accountSource(cfg, m).replace(/ \(.*\)$/, '')}`).join('; ')}` : ''}${people.length ? `; work asked for by ${people.join(', ')}: their own token` : ''}`,
-    ...(problem ? [`WARNING: set to the ${hostName} login (${roleNames(logins)}), which cannot run agents: ${problem}`] : []),
+    `Claude account per agent (every one a vault token, docs/vault.md; w1078: no host token, token file or login): the orchestrators and the orchestration worker on their person's own pool; the dispatcher on ${dispatcher}; workers and standing agents on every machine on the pool of the person their work is for. A person with no usable token waits or is told why; nothing falls back to another credential.`,
   ];
 }

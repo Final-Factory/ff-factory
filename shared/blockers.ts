@@ -42,6 +42,13 @@ export const CI_UNREADABLE_MS = 15 * 60_000;
  */
 export const CI_NO_RUN_MS = 10 * 60_000;
 
+/**
+ * How long after a gate cleared the sweep looks again (w1094; lothsahn: "any ci: gate whose checks finished more than 5
+ * minutes ago and whose worker hasn't been resumed is resumed, and logged loudly"): at a request still Blocked on CI that
+ * finished, and at a worker resumed that has not taken the message.
+ */
+export const RESUME_SWEEP_MS = 5 * 60_000;
+
 /** What a pull request says about its own head and mergeability (w907), read with the Pull requests permission only. */
 export interface PrHealth {
   state: 'open' | 'merged' | 'closed';
@@ -87,6 +94,19 @@ export function blockerName(b: Pick<WorkBlocker, 'kind' | 'ref' | 'on' | 'until'
     case 'pr':
       return `PR ${b.ref} merging`;
   }
+}
+
+/** The worker that set a gate with its blocked_on tool ("worker <id>"), or undefined (the dispatcher, the ledger cleanup). */
+export const gateSetter = (g: Pick<WorkBlocker, 'by'>): string | undefined => /^worker (\S+)$/.exec(g.by)?.[1];
+
+/**
+ * Whether a request is with worker `sessionId` (w1094): it is its newest worker, or it set one of the request's open gates.
+ * w1049 (PR #1507): 0b5f813d blocked on its own PR's CI while 39772f0c, linked later to the same request, waited on Ben;
+ * reading only the newest, the release pass stopped 0b5f813d as "with another worker now", and the CI's end resumed
+ * 39772f0c, which did not know the PR was its to merge.
+ */
+export function isWith(w: Pick<WorkItem, 'sessionIds' | 'status' | 'blocked' | 'alsoBlocked'>, sessionId: string): boolean {
+  return w.sessionIds.at(-1) === sessionId || (w.status === 'blocked' && gatesOf(w).some((g) => gateSetter(g) === sessionId));
 }
 
 /** Every gate of a request, first the primary `blocked` and then `alsoBlocked` (w754); empty when it has none. */
@@ -228,7 +248,10 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts): BlockerVerdict 
       const u = !c && b.ref ? f.ciUnreadable?.(b.ref) : undefined;
       const unreadableFor = u ? f.now - Math.max(u.since, at) : 0;
       if (u && unreadableFor >= CI_UNREADABLE_MS) return { state: 'clear', why: `FF Factory could not read CI on ${b.ref} for ${Math.round(unreadableFor / 60_000)} min (${u.why}), so its worker checks CI itself` };
-      return late(c?.text ?? `CI on ${b.ref} is running`);
+      // w1094: a run hung past its limit wakes the worker that waits on it (it looks for itself), never a silent stall.
+      const open = c?.text ?? `CI on ${b.ref} is running`;
+      const v = late(open);
+      return v.state === 'stuck' ? { state: 'clear', why: `${open} for ${since(age)}: CI has not finished in ${since(BLOCKER_STUCK_MS.ci!)}, so its worker looks at it itself` } : v;
     }
     case 'pr': {
       const p = b.ref ? f.pr?.(b.ref) : undefined;

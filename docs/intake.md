@@ -721,7 +721,7 @@ FF Factory's side speaks protocols 1 and 2; nothing is sent to FFBox until its h
 built in the ffbox repo (the "provider protocol 2" PR), off; the box steps are:
 
 - Merge the ffbox PR (it changes nothing while `fff.board_check.enabled` is false).
-- The connector token: Ben mints it on BEAST (`node server/providerToken.ts`, which sets `providers.ffbox.tokenSha256`)
+- The connector token: Ben mints it on BEAST (`node server/providerToken.ts`, which writes its SHA-256 to the file `providers.ffbox.tokenSha256File` names in the portal's secrets folder; the portal reads it at the connector's next connection)
   and hands it over; on FFBox, `sudo python3 /opt/ffbox/scripts/fffconnector.py set-token` reads it from stdin. The unit
   starts once the token file exists.
 - Only after the w54 security prerequisites (the model proxy and its budget, reply scanning) are merged and live: set
