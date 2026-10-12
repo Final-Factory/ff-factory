@@ -282,7 +282,7 @@ export function eligible(e: VaultEntryMeta, run: VaultRun): boolean {
 
 /**
  * A run that may not start now because its person's Claude pool has no token that may serve it (every one over its caps or
- * used up): a worker or the ops worker waits (queued with this reason), an orchestrator stops. `next` is when the first
+ * used up): a worker waits (queued with this reason), an orchestrator or the ops worker stops (every token used up). `next` is when the first
  * token frees up (ISO). Never holds a token's value.
  */
 export class PoolHeldError extends Error {
@@ -319,7 +319,7 @@ export interface RunSecrets {
   claude?: { entry: VaultEntryMeta; token: string; how: 'normal' | 'over-cap' | 'in-reserve'};
   /**
    * The run's person has Claude tokens in the vault and none may serve this run now (every one over its caps or used up):
-   * the run is held (a worker, the ops worker) or stopped (an orchestrator), with this reason and when the first frees up.
+   * the run is held (a worker) or stopped (an orchestrator or the ops worker: every token used up), with this reason and when the first frees up.
    */
   claudeHold?: { why: string; next?: string };
   /** How many Claude tokens the run's person has (enabled, granted to the run): 0 is the transition, today's account. */
@@ -699,7 +699,7 @@ export class Vault {
       for (;;) {
         const tokens = granted.filter((e) => e.kind === 'claude' && !tried.has(e.id)).map((e) => this.poolToken(e, o.usageOf, o.liveOn, run.sessionId, now, o.reservedFor, limits));
         if (!tokens.length) break;
-        const pick = pickPool(tokens, { orchestrator: run.role === 'orchestrator', limits, sticky, now });
+        const pick = pickPool(tokens, { orchestrator: run.role === 'orchestrator', ops: run.role === 'ops', limits, sticky, now });
         if (!pick.token) {
           out.claudeHold = pick.held;
           break;

@@ -12,7 +12,10 @@
 //   - weekly at or above `retireWeekly` (99): not handed out until the weekly window resets;
 //   - a meter at 100 (or a rejection): used up, handed to nobody until it resets;
 //   - a person's own orchestrator, when every pool token is past its caps but none is used up, still runs on the one with
-//     the most room until it is used up: the caps keep workers from eating the person's own use, they do not lock them out.
+//     the most room until it is used up: the caps keep workers from eating the person's own use, they do not lock them out;
+//   - the ops worker (w1112, lothsahn: "The ops worker should not hold based on tokens, just like the dispatcher") is never held
+//     by the caps either: past them it runs on the person's token with the most room, the dispatcher's reserved token last,
+//     and only a pool whose every token is used up stops it.
 // A token with no numbers yet counts as 50% on both meters: it passes every rule and ranks after the ones with a score.
 // A reading kept from before (data/usage.json) stands in for a poll that failed or has not answered yet, aged by its reset
 // times and floored at 50% once older than STALE_READING_MS (server/usage.ts effectiveUsage, w1041).
@@ -168,7 +171,7 @@ export function scoreOf(t: PoolToken, now: number): { perDay?: number } {
   return { perDay };
 }
 
-/** The state of a token under the limits, for a worker, a standing agent or the ops worker (the strictest reading). */
+/** The state of a token under the limits, for a worker or a standing agent (the strictest reading). */
 export function judge(t: PoolToken, limits: PoolLimits, now: number = Date.now()): PoolView {
   const m = metersOf(t.usage);
   const base = { session: m.session, weekly: m.weekly, known: m.known, sessionResetsAt: m.sessionResetsAt, weeklyResetsAt: m.weeklyResetsAt };
@@ -262,7 +265,7 @@ const room = (t: PoolToken) => {
 export interface PoolPick {
   /** The token, when the run may start. */
   token?: PoolToken;
-  /** A normal pick, the orchestrator's use-it-up of a token past its caps, or of one inside the dispatcher's reserve (nothing else had room). */
+  /** A normal pick, the orchestrator's or the ops worker's use-it-up of a token past its caps, or of one inside the dispatcher's reserve (nothing else had room). */
   how?: 'normal' | 'over-cap' | 'in-reserve';
   /** Every token's state, by id. */
   views: Map<string, PoolView>;
@@ -272,15 +275,17 @@ export interface PoolPick {
 
 /**
  * The token for a run over a person's pool (`tokens` are the pool; the caller keeps other people's out). `orchestrator`:
- * a person's own orchestrator, whose pool is used up past the caps. `sticky`: the id the session ran on last, kept while
- * it still passes. `now`: the clock the scores read (default the current time). No tokens at all is the caller's business
- * (the transition: today's account), not a hold.
+ * a person's own orchestrator, whose pool is used up past the caps. `ops`: the ops worker (w1112), which no cap holds
+ * either. `sticky`: the id the session ran on last, kept while it still passes. `now`: the clock the scores read (default
+ * the current time). No tokens at all is the caller's business (the transition: today's account), not a hold.
  *
  * The order is the highest score first (scoreOf, w971). A token inside the dispatcher's reserve (state `reserved`) is
  * handed to nothing while another token has room; when none has, the person's orchestrator takes it (it uses the pool
- * up), a worker or the ops worker waits (held), so the dispatcher keeps its buffer.
+ * up), a worker waits (held), so the dispatcher keeps its buffer. The ops worker, when no token has room, takes the
+ * person's token past its caps with the most room, and the dispatcher's reserved token only when it is the last one not used
+ * up (w1112): it is the person's own use, like the orchestrator, but short and rare, so it keeps out of the buffer while it can.
  */
-export function pickPool(tokens: readonly PoolToken[], o: { orchestrator: boolean; limits: PoolLimits; sticky?: string; now?: number }): PoolPick {
+export function pickPool(tokens: readonly PoolToken[], o: { orchestrator: boolean; ops?: boolean; limits: PoolLimits; sticky?: string; now?: number }): PoolPick {
   const now = o.now ?? Date.now();
   const views = new Map(tokens.map((t) => [t.id, judge(t, o.limits, now)] as const));
   const state = (t: PoolToken) => views.get(t.id)!.state;
@@ -300,6 +305,12 @@ export function pickPool(tokens: readonly PoolToken[], o: { orchestrator: boolea
     const keptCapped = o.sticky ? capped.find((t) => t.id === o.sticky) : undefined;
     const use = keptCapped ?? [...capped].sort((a, b) => room(b) - room(a) || bySoonestReset(a, b))[0];
     if (use) return { token: use, how: 'over-cap', views };
+  }
+  if (o.ops) {
+    // Every token not used up, the dispatcher's own last (its reserve), then the most room, then the soonest reset (w1112).
+    const left = tokens.filter((t) => state(t) !== 'exhausted');
+    const use = [...left].sort((a, b) => Number(!!a.reserve) - Number(!!b.reserve) || room(b) - room(a) || bySoonestReset(a, b))[0];
+    if (use) return { token: use, how: use.reserve?.inReserve ? 'in-reserve' : 'over-cap', views };
   }
   return { views, held: heldReason(tokens, views) };
 }

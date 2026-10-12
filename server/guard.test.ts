@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { checkEditorSwitch, sandboxGuard } from './guard.ts';
+import { checkEditorSwitch, checkShell, sandboxGuard } from './guard.ts';
 
 const decide = async (g: ReturnType<typeof sandboxGuard>, tool_name: string, tool_input: unknown, cwd = '') => {
   const input = { hook_event_name: 'PreToolUse', tool_name, tool_input, tool_use_id: 'x', session_id: 's', transcript_path: '', cwd };
@@ -134,6 +134,10 @@ test('master/main: blocked for the game repo only, and whenever the target is un
     [tools, 'git push --mir' + 'ror origin', 'deny'],
   ];
   for (const [cwd, command, want] of cases) assert.equal(await decide(g, 'Bash', { command }, cwd), want, `${command} (in ${cwd})`);
+  // w1112: a clone reached through a variable is an unknown repo, refused as the game's; the reason says so and names -R.
+  const ctx = { cwd: sb, gameRepos: ['https://github.com/example-org/example-game.git'], remotes };
+  assert.match(checkShell('cd $TMPDIR/ff-factory && gh pr create --base main --title x', ctx) ?? '', /could not be determined.*gh pr create -R <owner>\/<repo>/);
+  assert.equal(checkShell('cd $TMPDIR/ff-factory && gh pr create -R Final-Factory/ff-factory --base main --title x', ctx), undefined);
 });
 
 test('branch switches: refused in the sandbox while its editor runs, fine otherwise', async () => {

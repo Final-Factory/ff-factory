@@ -126,29 +126,33 @@ test('pool: one process at a time at 95% weekly, counting processes starting now
   assert.equal(v.forRun(run('ben', 'workers', 's1'), { claude: true, ...world(m, mine) }).claude?.entry.name, 'ben-a', 'sticky, and alone on it');
 });
 
-test('pool: every token over its caps holds a worker and the ops worker; the orchestrator uses the pool up; used up stops it too', (t) => {
+test('pool: every token over its caps holds a worker; the orchestrator and the ops worker (w1112) use the pool up; used up stops them too', (t) => {
   const { make } = setup(t);
   const v = poolVault(make);
   const m: Record<string, PlanUsage> = {
     [fp(B1)]: usage(90, 40, { weeklyDays: 3, sessionHours: 2 }),
     [fp(B2)]: usage(85, 30, { weeklyDays: 5, sessionHours: 4 }),
   };
-  for (const role of ['workers', 'standing', 'ops'] as const) {
+  for (const role of ['workers', 'standing'] as const) {
     const r = v.forRun(run('ben', role), { claude: true, ...world(m) });
     assert.equal(r.claude, undefined, role);
     assert.equal(r.poolSize, 2);
     assert.match(r.claudeHold?.why ?? '', /^every token is at a limit \(ben-a: .*\): the first frees up Fri 14:00Z$/, role);
     assert.equal(r.claudeHold?.next, iso(NOW + 2 * 3_600_000));
   }
-  const orch = v.forRun(run('ben', 'orchestrator'), { claude: true, ...world(m) });
-  assert.equal(orch.claude?.entry.name, 'ben-b', 'the most room (85 against 90)');
-  assert.equal(orch.claude?.how, 'over-cap');
-  // Both used up: nobody, the orchestrator included.
+  for (const role of ['orchestrator', 'ops'] as const) {
+    const orch = v.forRun(run('ben', role), { claude: true, ...world(m) });
+    assert.equal(orch.claude?.entry.name, 'ben-b', `${role}: the most room (85 against 90)`);
+    assert.equal(orch.claude?.how, 'over-cap');
+  }
+  // Both used up: nobody, the orchestrator and the ops worker included.
   m[fp(B1)] = usage(100, 40, { sessionHours: 2 });
   m[fp(B2)] = usage(10, 100, { weeklyDays: 4 });
-  const o2 = v.forRun(run('ben', 'orchestrator'), { claude: true, ...world(m) });
-  assert.equal(o2.claude, undefined);
-  assert.match(o2.claudeHold?.why ?? '', /^every token is used up \(/);
+  for (const role of ['orchestrator', 'ops'] as const) {
+    const o2 = v.forRun(run('ben', role), { claude: true, ...world(m) });
+    assert.equal(o2.claude, undefined, role);
+    assert.match(o2.claudeHold?.why ?? '', /^every token is used up \(/);
+  }
   // lothsahn's pool is her own: ben's being held does not touch it.
   assert.equal(v.forRun(run('lothsahn'), { claude: true, ...world(m) }).claude?.token, L1);
 });
@@ -287,7 +291,7 @@ test('poolRunEnv (w1078): no pool token, no person, or tokens the vault cannot o
   assert.match(nokey.problems.join('\n'), /no vault key: test/);
 });
 
-test("poolRunEnv: the orchestrator stops when its pool is used up and the error shows the reset, never a token; the ops worker is held when capped", (t) => {
+test("poolRunEnv: the orchestrator and the ops worker stop when its pool is used up and the error shows the reset, never a token; capped holds neither (w1112)", (t) => {
   const { make } = setup(t);
   const v = poolVault(make);
   const used = ctxOf(v, { [fp(B1)]: usage(100, 40, { sessionHours: 2 }), [fp(B2)]: usage(10, 100, { weeklyDays: 3 }) });
@@ -296,9 +300,13 @@ test("poolRunEnv: the orchestrator stops when its pool is used up and the error 
     (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is used up: every token is used up \(.*\): the first frees up Fri 14:00Z$/.test(e.message) && !e.message.includes(B1.slice(13, 40)) && !e.message.includes(DISP.slice(13, 40)),
   );
   const capped = ctxOf(v, { [fp(B1)]: usage(90, 40, { sessionHours: 2 }), [fp(B2)]: usage(85, 30, { weeklyDays: 3, sessionHours: 4 }) });
-  assert.throws(() => poolRunEnv({ role: 'ops', personId: 'ben' }, capped), (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is held/.test(e.message));
-  // The orchestrator on the same pool still runs: over its cap, on the token with the most room.
+  // The orchestrator and (w1112) the ops worker on the same pool still run: over its cap, on the token with the most room.
   assert.equal(poolRunEnv({ role: 'orchestrator', personId: 'ben' }, capped).env.CLAUDE_CODE_OAUTH_TOKEN, B2);
+  const ops = poolRunEnv({ role: 'ops', personId: 'ben' }, capped);
+  assert.equal(ops.env.CLAUDE_CODE_OAUTH_TOKEN, B2);
+  assert.match(ops.account, /over its caps: used up first/);
+  // Used up stops the ops worker too, and says so.
+  assert.throws(() => poolRunEnv({ role: 'ops', personId: 'ben' }, used), (e: unknown) => e instanceof PoolHeldError && /^ben's Claude token pool is used up, so the orchestration worker cannot start until a token resets/.test(e.message));
   // Neither falls to another credential: the stop is the stop.
 });
 
@@ -455,13 +463,14 @@ test("w971: the dispatcher's token in a person's pool, inside its reserve, goes 
   // Without the reserve known (the old code), the token with the sooner... both reset together, so it would have been by name: the point is the reserve decides.
   const noReserve = { ...ctx, reservedFor: undefined };
   assert.equal(token(machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w2' }, noReserve).env), B2, 'by score alone ben-b wins too');
-  // The other token fills up (5-hour window held): the worker and the ops worker wait, the orchestrator uses the reserve.
+  // The other token fills up (5-hour window held): the worker waits, the orchestrator uses the reserve, the ops worker (w1112)
+  // the held token, keeping the dispatcher's buffer.
   meters[fp(B2)] = usage(90, 27, { weeklyDays: 4, sessionHours: 2 });
   assert.throws(
     () => machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w3' }, ctx),
     (e: unknown) => e instanceof PoolHeldError && /inside the buffer kept for the dispatcher/.test(e.message) && e.next === iso(NOW + 2 * 3_600_000) && !e.message.includes(DISP.slice(13, 40)),
   );
-  assert.throws(() => poolRunEnv({ role: 'ops', personId: 'ben', sessionId: 'ops2' }, ctx), PoolHeldError);
+  assert.equal(token(poolRunEnv({ role: 'ops', personId: 'ben', sessionId: 'ops2' }, ctx).env), B2, 'the ops worker: held by no cap, out of the buffer');
   const orch = poolRunEnv({ role: 'orchestrator', personId: 'ben', sessionId: 'orch2' }, ctx);
   assert.equal(token(orch.env), DISP, 'nothing else has room: today\'s behaviour for the orchestrator');
   assert.match(orch.account, /inside the dispatcher's reserve: no other token has room/);
