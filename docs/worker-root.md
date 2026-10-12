@@ -194,8 +194,11 @@ current sandbox before it picks the folder names. A shorter `sb` instead of `san
   junctions to `<letter>:\sandboxes` and `<letter>:\seed`, and `daemon.json` names the drive's paths. `daemon\`, `secrets\`,
   `players\` and the rest stay on the root's own volume: the daemon must run while the drive is gone, and the firewall
   rules name `players\`. `root.json` lists the drive (`devDrive`, and an `outside` entry for the three SYSTEM tasks).
-- **LothDesktop.** Everything on `D:` (the daemon folder, sandboxes and slots are all there today, from
-  `list_machines`), so `D:\work\ffw` has no junctions.
+- **A root on its Dev Drive (w1070).** A Windows install with a Dev Drive has its root on the drive, `<letter>:\ffw`, with
+  no junctions; the folder given at install keeps the VHDX, `devdrive.json`, `moved.json` and, as BEAST's anchor does,
+  `daemon\` and `secrets\`, which `daemon.json` names directly (`docs/worker-install.md`, "The whole root on the Dev Drive").
+- **LothDesktop.** Root `V:\ffw` on its Dev Drive (`D:\work\ffw\devdrive.vhdx`, 275 GB at most), daemon and credential in
+  `D:\work\ffw` (w1070, after its reinstall).
 - **Macs.** One APFS container, so no junctions. `cp -c` clones the seed (`machine/sandboxes.ts`, the "Warm Library"
   rule).
 - **Rules for junctions.** The installer creates them and `root.json` records each one with its target. Code never

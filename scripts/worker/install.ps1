@@ -50,6 +50,10 @@
   With -Root (w1070): make this machine's install again with its whole root on a new Dev Drive (<letter>:\ffw), as
   `worker.ts reinstall`. Asks nothing; elevated (an administrator's ssh session). -DevDriveMaxGB sizes the new drive.
   Refuses while an agent or a process uses the install or a sandbox holds work that is not on origin.
+.PARAMETER Anchor
+  With -Reinstall: the folder for the new drive's VHDX, the daemon and the credential, e.g. D:\ffw (lothsahn: "The daemon and
+  support files from the installer should go in d:\ffw. But all the players, slots, everything else should go to V:").
+  Default: -Root. The old root's folder is emptied and removed.
 #>
 param(
     [string]$Root = '',
@@ -78,7 +82,8 @@ param(
     [switch]$MoveToDevDrive,
     [int]$DevDriveMaxGB = 0,
     [string]$DevDriveSkip = '',
-    [switch]$Reinstall
+    [switch]$Reinstall,
+    [string]$Anchor = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -179,6 +184,7 @@ $flags = @('--disable-warning=ExperimentalWarning')
 if ($node.Version -lt [version]'23.6') { $flags = @('--experimental-strip-types') + $flags }
 if ($Reinstall) {
     $argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'reinstall', '--root', $Root)
+    if ($Anchor) { $argv += @('--anchor', $Anchor) }
     if ($MaxSandboxes) { $argv += @('--max-sandboxes', $MaxSandboxes) }
     if ($MaxAgentsPerSandbox) { $argv += @('--max-agents-per-sandbox', $MaxAgentsPerSandbox) }
     if ($MaxUnity) { $argv += @('--max-unity', $MaxUnity) }

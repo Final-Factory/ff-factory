@@ -60,16 +60,21 @@ export interface Layout {
   logs: string;
 }
 
-/** Every folder of a worker root. Exported for tests. */
-export function layoutOf(root: string): Layout {
+/**
+ * Every folder of a worker root. `anchor`: a root on its Dev Drive (w1070) keeps the daemon's folder and the credential in the
+ * host folder, off the drive, as BEAST keeps them in C:\ffw-anchor (docs/worker-root.md 2.2): the daemon is what remounts the
+ * drive (its host guard), so it must not run from it. Exported for tests.
+ */
+export function layoutOf(root: string, anchor?: string): Layout {
   const j = (...p: string[]) => path.join(root, ...p);
+  const a = (...p: string[]) => path.join(anchor ?? root, ...p);
   return {
     root,
     manifest: j('root.json'),
-    daemon: j('daemon'),
-    src: j('daemon', 'src'),
-    secrets: j('secrets'),
-    token: j('secrets', 'machine-token'),
+    daemon: a('daemon'),
+    src: a('daemon', 'src'),
+    secrets: a('secrets'),
+    token: a('secrets', 'machine-token'),
     repo: j('repo'),
     sandboxes: j('sandboxes'),
     seed: j('seed'),
@@ -77,9 +82,12 @@ export function layoutOf(root: string): Layout {
     nightly: j('nightly'),
     scratch: j('scratch'),
     tmp: j('tmp'),
-    logs: j('daemon', 'logs'),
+    logs: a('daemon', 'logs'),
   };
 }
+
+/** The anchor of an install whose root is on its Dev Drive: the host folder (w1070); undefined otherwise. */
+export const anchorOf = (m: Pick<Manifest, 'devDrive'> | undefined) => (m?.devDrive?.rootOnDrive && m.devDrive.host ? m.devDrive.host : undefined);
 
 /** What the uninstall removes besides the root, recorded as the install makes it. */
 export interface OutsideItem {
@@ -224,6 +232,14 @@ export interface InstallOptions {
   reinstall?: boolean;
   /** An update that sets the drive up also moves the sandboxes and the seed onto it (needs no agent and no editor in them). */
   moveToDevDrive?: boolean;
+  /** A root on its Dev Drive: the host folder that holds the daemon's folder and the credential (layoutOf, w1070). */
+  anchor?: string;
+  /**
+   * A new root on a Dev Drive: the folder that will hold the VHDX, the daemon and the credential (lothsahn, w1070: "The daemon
+   * and support files from the installer should go in d:\ffw. But all the players, slots, everything else should go to V:").
+   * Default: the root given. A reinstall passes it (--anchor) to leave the old root's folder behind.
+   */
+  driveHome?: string;
   /**
    * Set during install(): the drive's folders, which daemon.json then points at. `onRoot`: the whole root is on the drive
    * (w1070) and `host` the folder that holds the VHDX; `vhdx` and `maxGB` give the host guard the file's room to grow.
@@ -533,7 +549,7 @@ async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?:
     freeGB: freeGB(o.root),
     portal,
     credentialId: id,
-    serviceElsewhere: o.replacesService ? undefined : await serviceElsewhere(o.service, layoutOf(o.root).daemon),
+    serviceElsewhere: o.replacesService ? undefined : await serviceElsewhere(o.service, layoutOf(o.root, o.anchor).daemon),
     loggedOn: probe.loggedOn,
     ...(isLinux ? { display: await managerHasDisplay() } : {}),
     ...vol,
@@ -612,8 +628,8 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     ...carried,
     ...(guard ? { hostGuard: guard } : {}),
     // The drive's folders are part of the install though they are not under the root: clean-up may delete in them (w896's fence).
-    // A root on the drive holds them itself.
-    ...(dd && !dd.onRoot ? { extraRoots: [dd.sandboxes, dd.seed] } : {}),
+    // A root on the drive holds them itself, and its daemon's folder is the part of the install outside it (w1070).
+    ...(dd && !dd.onRoot ? { extraRoots: [dd.sandboxes, dd.seed] } : path.dirname(l.daemon) !== l.root ? { extraRoots: [l.daemon] } : {}),
     ...(voice ? { voice } : {}),
     portalUrl: o.portalUrl,
     id,
@@ -703,14 +719,7 @@ async function installDaemonWin(o: InstallOptions, l: Layout, id: string, probe:
   const version = (await must('git rev-parse', 'git', ['-C', l.src, 'rev-parse', '--short', 'HEAD'])).trim();
   say('npm ci for the daemon...');
   await ps('npm ci', win.npmScript(probe.node!, version, l.daemon), 10 * 60_000);
-  // A root on its Dev Drive (w1070): the task's action waits in the host folder until the drive is attached.
-  const dd = o.devDriveDirs;
-  const start = dd?.onRoot && dd.host ? dd.host : undefined;
-  if (start) {
-    fs.writeFileSync(path.join(start, 'start-daemon.ps1'), '\ufeff' + win.startDaemonScript(path.win32.relative(path.win32.parse(l.root).root, l.root)));
-    say(`The daemon task starts ${path.join(start, 'start-daemon.ps1')}, which waits for the Dev Drive and then runs the daemon from ${l.daemon}.`);
-  }
-  const out = await ps('registering the daemon task', win.installScript({ sid: probe.sid!, home: probe.home, config, node: probe.node!, flag: support.flag, appDir: l.daemon, service, ...(start ? { start } : {}) }));
+  const out = await ps('registering the daemon task', win.installScript({ sid: probe.sid!, home: probe.home, config, node: probe.node!, flag: support.flag, appDir: l.daemon, service }));
   return { version, started: /started=True/.test(out) };
 }
 
@@ -919,6 +928,8 @@ export async function giveTo(owner: string, paths: string[], recursive = true) {
 /** Everything in the root to `owner`, but the sandboxes' own trees: a sandbox moved in by a rename keeps its owner. */
 async function giveRoot(l: Layout, owner: string) {
   await giveTo(owner, [l.root, l.sandboxes], false);
+  // A root on its Dev Drive keeps the daemon's folder and the credential in the host folder (w1070): those too.
+  if (path.dirname(l.daemon) !== l.root) await giveTo(owner, [l.daemon, l.secrets]);
   // Not through the Dev Drive's junctions (w900: that is the sandboxes' and the seed's whole trees), nor the attached VHDX.
   const skip = (e: string) => e === 'sandboxes' || e === 'devdrive.vhdx' || fs.lstatSync(path.join(l.root, e)).isSymbolicLink();
   await giveTo(owner, fs.readdirSync(l.root).filter((e) => !skip(e)).map((e) => path.join(l.root, e)));
@@ -992,7 +1003,7 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
     // An existing drive keeps its maximum: a VHDX's cannot shrink in place (w1070), only a root move makes it again at a new one.
     const maxGB = had?.maxGB || o.devDriveMaxGB || defaultMaxGB(f.rootTotalGB);
     if (had && o.devDriveMaxGB !== undefined && o.devDriveMaxGB !== had.maxGB) say(`Dev Drive: its maximum stays ${had.maxGB} GB: a new maximum (${o.devDriveMaxGB} GB) means making the drive again, which --move-to-dev-drive does while the root moves onto it (w1070).`);
-    const args = ['-Root', host, ...(host !== l.root ? ['-WorkerRoot', l.root] : []), '-MaxGB', String(maxGB)];
+    const args = ['-Root', host, ...(host !== l.root ? ['-WorkerRoot', l.root, '-DaemonConfig', path.join(l.daemon, 'daemon.json')] : []), '-MaxGB', String(maxGB)];
     if (f.probe.user) args.push('-User', f.probe.user);
     if (f.probe.sid) args.push('-UserSid', f.probe.sid);
     if (had?.letter) args.push('-Letter', had.letter);
@@ -1131,8 +1142,9 @@ interface ReinstallCarry {
  * aside in <root>\.reinstall, and deletes everything else of the old install. Everything it deletes is inside the root.
  */
 /** What stops a reinstall (nothing changes then), and whether the Library seed fits beside the new drive meanwhile. Exported for tests. */
-export function reinstallProblems(i: { root: string; windows: boolean; elevated: boolean; manifest?: Manifest; agents?: { id: string; sandbox?: string; midTurn?: boolean }[]; processes: string[]; risks: SandboxRisk[]; seedBytes: number; freeBytes: number }): { problems: string[]; keepSeed: boolean } {
+export function reinstallProblems(i: { root: string; windows: boolean; elevated: boolean; manifest?: Manifest; agents?: { id: string; sandbox?: string; midTurn?: boolean }[]; processes: string[]; risks: SandboxRisk[]; seedBytes: number; freeBytes: number; home?: { path: string; entries: string[] } }): { problems: string[]; keepSeed: boolean } {
   const problems: string[] = [];
+  if (i.home && i.home.entries.length) problems.push(`${i.home.path}, where the drive, the daemon and the credential go, already holds ${i.home.entries.slice(0, 5).join(', ')}: give an empty or new folder`);
   if (!i.windows) problems.push('--reinstall is for a Windows install with a Dev Drive');
   if (!i.elevated) problems.push("--reinstall needs an elevated session (an administrator's ssh session): it deletes a VHDX and its SYSTEM tasks");
   if (!i.manifest) problems.push(`${i.root} holds no install to make again (no root.json)`);
@@ -1156,7 +1168,8 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
   const risks = await sandboxRisks(oldDrive?.sandboxes ?? l.sandboxes);
   const seedLib = oldDrive ? path.join(oldDrive.seed, 'Library') : path.join(l.seed, 'Library');
   const seedBytes = fs.existsSync(seedLib) ? bytesUnder(seedLib, SEED_REBUILT) : 0;
-  const { problems, keepSeed } = reinstallProblems({ root: l.root, windows: isWin, elevated: elevated(), ...(old ? { manifest: old } : {}), ...(view ? { agents: view.agents } : {}), processes: procs, risks, seedBytes, freeBytes: await volumeFree(l.root) });
+  const home = o.driveHome && path.resolve(o.driveHome) !== path.resolve(l.root) ? { path: path.resolve(o.driveHome), entries: fs.existsSync(o.driveHome) ? fs.readdirSync(o.driveHome) : [] } : undefined;
+  const { problems, keepSeed } = reinstallProblems({ root: l.root, windows: isWin, elevated: elevated(), ...(old ? { manifest: old } : {}), ...(view ? { agents: view.agents } : {}), processes: procs, risks, seedBytes, freeBytes: await volumeFree(l.root), ...(home ? { home } : {}) });
   if (problems.length) {
     say(`\nNot reinstalling: ${problems.length} problem(s); nothing was changed:`);
     for (const p of problems) say(`- ${p}`);
@@ -1182,7 +1195,8 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
   }
   for (const n of REINSTALL_KEEPS) if (fs.existsSync(path.join(l.root, n))) fs.renameSync(path.join(l.root, n), path.join(keep, n));
   for (const n of fs.readdirSync(l.root)) {
-    if (isHostFile(n)) continue;
+    // Everything of the old install goes, its daemon folder and credential included (the token is in hand): only what it carries stays.
+    if (n === '.reinstall') continue;
     const p = path.join(l.root, n);
     if (fs.lstatSync(p).isSymbolicLink()) fs.rmSync(p, { force: true, recursive: false });
     else await exec('cmd.exe', ['/d', '/c', fs.lstatSync(p).isDirectory() ? 'rd' : 'del', ...(fs.lstatSync(p).isDirectory() ? ['/s', '/q'] : ['/f', '/q']), p], { timeoutMs: 60 * 60_000 });
@@ -1412,7 +1426,8 @@ function notePinnedDrive(m: Manifest, rec: DevDriveRecord) {
   const host = rec.host!;
   m.outside = m.outside.filter((x) => x.kind !== 'dev-drive');
   noteOutside(m, { kind: 'dev-drive', name: rec.vhdx, note: `the Dev Drive that holds this root: a VHDX in ${host}, mounted at ${rec.letter}:, and the SYSTEM tasks ffsb-helper-mount, -trim and -compact` });
-  noteOutside(m, { kind: 'file', name: path.join(host, 'start-daemon.ps1'), note: 'the daemon task\'s start: waits for the Dev Drive, then runs the daemon on it (w1070)' });
+  noteOutside(m, { kind: 'file', name: path.join(host, 'daemon'), note: 'the daemon\'s folder, off the drive it remounts (w1070, as BEAST\'s C:\\ffw-anchor)' });
+  noteOutside(m, { kind: 'file', name: path.join(host, 'secrets'), note: 'the machine credential, with the daemon' });
   noteOutside(m, { kind: 'file', name: path.join(host, 'moved.json'), note: 'where the root is, for anyone given the folder it was installed into' });
 }
 
@@ -1426,7 +1441,7 @@ async function confirm(question: string, yes: boolean): Promise<boolean> {
 }
 
 export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'prepare' | 'finish' = 'all', facts?: Awaited<ReturnType<typeof gatherFacts>>): Promise<boolean> {
-  let l = layoutOf(path.resolve(o.root));
+  let l = layoutOf(path.resolve(o.root), o.anchor);
   o.root = l.root;
   say(`FF Factory worker install into ${l.root}`);
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -1453,11 +1468,12 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   //    folder structure should be under V:"): the folder given becomes the host folder, which keeps the VHDX and what starts
   //    before the drive is attached (driveRoot.ts HOST_FILES), and the root is <letter>:\ffw.
   let fresh: DevDriveRecord | undefined;
-  if (isWin && !o.update && !readManifest(l.root) && !readMoved(l.root)) {
+  const home = path.resolve(o.driveHome ?? l.root);
+  if (isWin && !o.update && !readManifest(l.root) && !readMoved(l.root) && !readManifest(home) && !readMoved(home)) {
     const dec = decideDevDrive({ platform: process.platform, update: false, flag: o.devDrive, hasOne: false, rootFileSystem: f.rootFileSystem });
     if (dec.action === 'ensure') {
       try {
-        const host = l.root;
+        const host = home;
         fs.mkdirSync(host, { recursive: true });
         const maxGB = o.devDriveMaxGB ?? defaultMaxGB(f.rootTotalGB);
         const st = await devDriveEnsure(host, ['-Root', host, '-MaxGB', String(maxGB), '-NoTasks', ...(carry?.letter ? ['-Letter', carry.letter] : []), ...(f.probe.user ? ['-User', f.probe.user] : []), ...(f.probe.sid ? ['-UserSid', f.probe.sid] : []), ...(o.devDriveSkip ? ['-Skip', o.devDriveSkip] : [])]);
@@ -1466,8 +1482,9 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
         writeMoved(host, root);
         fresh = { vhdx: st.vhdx || path.join(host, 'devdrive.vhdx'), letter: st.letter, maxGB: st.maxGB || maxGB, inUse: true, rootOnDrive: true, host };
         say(`Dev Drive: ${fresh.vhdx} as ${st.letter}: (up to ${fresh.maxGB} GB). The root goes on it, ${root}; ${host} keeps only the drive's file and the daemon's start.`);
-        l = layoutOf(root);
+        l = layoutOf(root, host);
         o.root = root;
+        o.anchor = host;
         if (carry) {
           // What the old daemon.json named in the old root names the same place in the new one; the clone seeds the new clone.
           o.carry = rebaseJson(o.carry ?? {}, moveMap(carry.oldRoot, root, carry.oldDrive)).value;
@@ -1521,6 +1538,15 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
       fs.rmdirSync(carry.keep);
     } catch {
       say(`(${carry.keep} still holds ${fs.existsSync(carry.keep) ? fs.readdirSync(carry.keep).join(', ') : 'nothing'}: left there)`);
+    }
+    // The old root's folder, when the new install's home is elsewhere (D:\ffw for D:\work\ffw): empty now, so it goes.
+    if (path.resolve(carry.oldRoot) !== path.resolve(o.anchor ?? '')) {
+      try {
+        fs.rmdirSync(carry.oldRoot);
+        say(`Removed the old root's folder ${carry.oldRoot} (empty).`);
+      } catch {
+        if (fs.existsSync(carry.oldRoot)) say(`(${carry.oldRoot} still holds ${fs.readdirSync(carry.oldRoot).join(', ')}: left there)`);
+      }
     }
   }
   await syncSource(l, from);
@@ -1636,6 +1662,8 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
 
 /** What `worker.ts update` takes on its command line; every setting it does not name comes from the install there. */
 export interface UpdateFlags {
+  /** reinstall (w1070): the folder for the new drive, the daemon and the credential (default: the old root's). */
+  anchor?: string;
   maxSandboxes?: number;
   maxAgentsPerSandbox?: number;
   maxUnity?: number;
@@ -1669,8 +1697,10 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
   const maxSandboxes = pick(f.maxSandboxes, 'maxSandboxes', m.slots || 3);
   const maxAgentsPerSandbox = pick(f.maxAgentsPerSandbox, 'maxAgentsPerSandbox', 2);
   const maxUnity = pick(f.maxUnity, 'maxUnity', 2);
+  const anchor = anchorOf(m);
   return {
     root,
+    ...(anchor ? { anchor } : {}),
     portalUrl: String(config.portalUrl || m.portalUrl).replace(/\/+$/, ''),
     token,
     maxSandboxes,
@@ -1879,7 +1909,7 @@ export async function reinstall(root: string, f: UpdateFlags): Promise<boolean> 
     say(`Elevated session: what the reinstall makes goes to ${owner}, the user the ${m.service} task runs as.`);
   }
   const { moveToDevDrive: _m, update: _u, ...o } = planUpdate(l.root, m, config, token, { ...f, ...(owner ? { owner } : {}) });
-  return install({ ...o, reinstall: true, devDrive: 'on' });
+  return install({ ...o, reinstall: true, devDrive: 'on', ...(f.anchor ? { driveHome: path.resolve(f.anchor) } : {}) });
 }
 
 export async function update(root: string, f: UpdateFlags): Promise<boolean> {
@@ -1887,9 +1917,9 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   const given = path.resolve(root);
   const moved = !fs.existsSync(path.join(given, 'root.json')) ? readMoved(given) : undefined;
   if (moved) say(`${given} holds the Dev Drive of this install; its root is ${moved} (moved.json): updating it there.`);
-  const l = layoutOf(moved ?? given);
-  const m = readManifest(l.root);
-  if (!m) throw new Error(`no worker install at ${l.root} (no root.json): install it first (docs/worker-install.md, "Install")`);
+  const m = readManifest(moved ?? given);
+  if (!m) throw new Error(`no worker install at ${moved ?? given} (no root.json): install it first (docs/worker-install.md, "Install")`);
+  const l = layoutOf(moved ?? given, anchorOf(m));
   const configFile = path.join(l.daemon, 'daemon.json');
   if (!fs.existsSync(configFile)) throw new Error(`no ${configFile}: this root's daemon was never installed; run the install instead`);
   const config = JSON.parse(fs.readFileSync(configFile, 'utf8')) as Record<string, unknown>;
@@ -2080,9 +2110,11 @@ export interface UninstallOptions {
 }
 
 export async function uninstall(o: UninstallOptions): Promise<void> {
-  const l = layoutOf(path.resolve(o.root));
-  const m = readManifest(l.root);
-  if (!m) throw new Error(`${l.root} is not a worker root (no root.json); nothing removed`);
+  const given = path.resolve(o.root);
+  const at = !fs.existsSync(path.join(given, 'root.json')) ? (readMoved(given) ?? given) : given;
+  const m = readManifest(at);
+  if (!m) throw new Error(`${at} is not a worker root (no root.json); nothing removed`);
+  const l = layoutOf(at, anchorOf(m));
   say(`FF Factory worker uninstall of ${l.root} (machine ${m.machineId})`);
   const token = fs.existsSync(l.token) ? fs.readFileSync(l.token, 'utf8').trim() : '';
 
@@ -2147,7 +2179,7 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
     await bash('unloading the LaunchAgent', `${macControlScript('uninstall', m.service)}i=0\nwhile launchctl print gui/$(id -u)/${m.service} >/dev/null 2>&1 && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done\n`, 2 * 60_000);
   }
   say(`Removed ${serviceNoun(m.service)}.`);
-  say(`Stopped ${await stopRootProcesses(l.root, m.devDrive ? [`${m.devDrive.letter}:\\`] : [])} process(es) still running from the root${m.devDrive ? ` or the Dev Drive ${m.devDrive.letter}:` : ''}.`);
+  say(`Stopped ${await stopRootProcesses(l.root, [...(m.devDrive ? [`${m.devDrive.letter}:\\`] : []), ...(anchorOf(m) ? [l.daemon] : [])])} process(es) still running from the root${m.devDrive ? ` or the Dev Drive ${m.devDrive.letter}:` : ''}.`);
 
   // 4. Firewall rules, the portal's ssh key (w568: exactly its lines, unless they were there before) and the slot config.
   const steps: ElevatedStep[] = [];
@@ -2186,7 +2218,7 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
   say(`Deleted ${l.root}.`);
   if (m.devDrive?.rootOnDrive && m.devDrive.host && fs.existsSync(m.devDrive.host)) {
     const host = m.devDrive.host;
-    for (const n of fs.readdirSync(host).filter(isHostFile)) fs.rmSync(path.join(host, n), { force: true });
+    for (const n of fs.readdirSync(host).filter(isHostFile)) fs.rmSync(path.join(host, n), { force: true, recursive: true });
     if (!fs.readdirSync(host).length) fs.rmdirSync(host);
     say(`Removed what ${host} kept for the drive${fs.existsSync(host) ? ` (the folder stays: it holds ${fs.readdirSync(host).join(', ')})` : ', and the folder'}.`);
   }
@@ -2207,7 +2239,7 @@ export interface CheckItem {
 
 /** Every trace an install leaves, present or not (the leaves-nothing-behind checklist, docs/worker-install.md). */
 export async function check(root: string, m?: Manifest): Promise<CheckItem[]> {
-  const l = layoutOf(root);
+  const l = layoutOf(root, anchorOf(m));
   const service = m?.service ?? (isWin ? win.TASK_NAME : LABEL);
   const items: CheckItem[] = [{ what: `root folder ${l.root}`, present: fs.existsSync(l.root) }];
   if (isWin) {
@@ -2390,7 +2422,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
             [--voice-whisper <model>|off] (Whisper on this machine's GPU for the portal's mic, w615; kept on a re-run)
-  reinstall [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--owner <user>] [--max-sandboxes N] [--max-agents-per-sandbox N] [--max-unity N]
+  reinstall [--anchor <folder for the drive, the daemon and the credential, e.g. D:\\ffw; default the root given>]
+            [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--owner <user>] [--max-sandboxes N] [--max-agents-per-sandbox N] [--max-unity N]
             (Windows, w1070: this machine's install made again with its whole root on a new Dev Drive, <letter>:\\ffw; the root
              given keeps only the VHDX and the daemon's start. Every setting and the credential carried. Refuses while an agent
              or a process uses it, or a sandbox holds work not on origin. Keeps the clone (as the new one's seed), the nightly
@@ -2467,6 +2500,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (!opts.root) throw new Error(USAGE);
     const opt = (k: string) => (opts[k] === undefined ? undefined : Number(opts[k]));
     const ok = await reinstall(opts.root, {
+      ...(opts.anchor ? { anchor: opts.anchor } : {}),
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
       maxUnity: opt('max-unity'),

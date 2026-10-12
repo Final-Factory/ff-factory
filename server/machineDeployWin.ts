@@ -422,43 +422,6 @@ while ($true) {
 `;
 }
 
-/**
- * start-daemon.ps1, the daemon task's action when the worker root lives on its Dev Drive (w1070). The task starts at logon,
- * and the boot mount (ffsb-helper-mount, SYSTEM, 30 s after boot) may not have attached the drive yet; a task whose action and
- * working folder are on a missing drive does not start at all. So this waits in the host folder: it reads the drive's letter
- * from devdrive.json beside it (the boot mount's own record, so a changed letter is followed), starts the mount task after
- * 20 s, and once <letter>:\<rel>\run-daemon.ps1 is there runs it as a child and ends with it (Stop-FFDaemon ends that
- * supervisor by its path). After 10 minutes it gives up with exit 1, and Task Scheduler's restart-on-failure tries again a
- * minute later. Exported for tests.
- */
-export function startDaemonScript(rel: string): string {
-  if (!/^[\w.-]+(\\[\w.-]+)*$/.test(rel) || rel.split('\\').some((s) => /^\.+$/.test(s))) throw new Error(`"${rel}" is not a folder under the drive's root`);
-  return `# FF Factory: the daemon task's start when the worker root is on its Dev Drive (w1070, docs/worker-install.md).
-# Written by the installer into the folder that holds the drive's VHDX; an update rewrites it.
-$ErrorActionPreference = 'Continue'
-$here = $PSScriptRoot
-$log = Join-Path $here 'start-daemon.log'
-function Say([string]$m) { try { "$(Get-Date -Format s) $m" | Out-File -Append -Encoding utf8 $log } catch { } }
-for ($i = 0; $i -lt 120; $i++) {
-  $letter = ''
-  try { $letter = [string](Get-Content -Raw -LiteralPath (Join-Path $here 'devdrive.json') | ConvertFrom-Json).letter } catch { }
-  if ($letter -match '^[A-Za-z]$') {
-    $sup = "$($letter):\\${rel}\\daemon\\run-daemon.ps1"
-    if (Test-Path -LiteralPath $sup) {
-      Say "starting $sup"
-      $p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('"' + $sup + '"')) -WorkingDirectory (Split-Path -Parent $sup) -NoNewWindow -PassThru -Wait
-      Say "the supervisor ended ($($p.ExitCode))"
-      exit 0
-    }
-  }
-  if ($i -eq 4) { Say "the drive is not there yet: starting ffsb-helper-mount"; schtasks.exe /run /tn ffsb-helper-mount | Out-Null }
-  Start-Sleep -Seconds 5
-}
-Say 'the Dev Drive did not come within 10 minutes; Task Scheduler tries again'
-exit 1
-`;
-}
-
 const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 /**
@@ -471,12 +434,9 @@ const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
  * (LothDesktop, 2026-10-07: a "powershell.exe" Terminal window stayed open from the daemon's start, and closing it
  * closes the supervisor's console). conhost --headless gives it a console with no window at all.
  */
-export function taskXml(sid: string, home: string, appDir?: string, start?: string): string {
+export function taskXml(sid: string, home: string, appDir?: string): string {
   if (!/^S-1-[\d-]+$/.test(sid)) throw new Error(`"${sid}" is not a Windows SID`);
   const f = appDir ? winDir(appDir) : `${home.replace(/[\\/]+$/, '')}\\.ff-factory`;
-  // A worker root on its Dev Drive (w1070): the task runs start-daemon.ps1 in the host folder, which is there before the drive.
-  const dir = start ? winDir(start) : f;
-  const script = start ? 'start-daemon.ps1' : 'run-daemon.ps1';
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -521,8 +481,8 @@ export function taskXml(sid: string, home: string, appDir?: string, start?: stri
   <Actions Context="Author">
     <Exec>
       <Command>conhost.exe</Command>
-      <Arguments>--headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${xml(dir)}\\${script}"</Arguments>
-      <WorkingDirectory>${xml(dir)}</WorkingDirectory>
+      <Arguments>--headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${xml(f)}\\run-daemon.ps1"</Arguments>
+      <WorkingDirectory>${xml(f)}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
@@ -537,7 +497,7 @@ const b64 = (s: string, enc: 'utf8' | 'utf8bom') => (enc === 'utf8bom' ? Buffer.
  * PowerShell reads a non-ASCII path right), register the task and run it.
  * Prints `started=True` or `started=False` (nobody is logged on: it starts at the next logon).
  */
-export function installScript(o: { sid: string; home: string; config: string; node: string; flag: boolean; appDir?: string; previousAppDir?: string; service?: WinService; start?: string }): string {
+export function installScript(o: { sid: string; home: string; config: string; node: string; flag: boolean; appDir?: string; previousAppDir?: string; service?: WinService }): string {
   const TASK = taskName(o.service);
   return `${head({ appDir: o.appDir, previous: o.previousAppDir, service: o.service })}
 $app = Join-Path $F 'app'; $old = Join-Path $F 'app.old'; $new = Join-Path $F 'app.new'
@@ -557,7 +517,7 @@ New-Item -ItemType Directory -Force (Join-Path $F 'agents'), (Join-Path $F 'logs
 function Write-B64($name, $data) { [IO.File]::WriteAllBytes((Join-Path $F $name), [Convert]::FromBase64String($data)) }
 Write-B64 'daemon.json' '${b64(o.config, 'utf8')}'
 Write-B64 'run-daemon.ps1' '${b64(supervisorScript(o.node, o.flag, o.service), 'utf8bom')}'
-$xml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(taskXml(o.sid, o.home, o.appDir, o.start), 'utf8')}'))
+$xml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(taskXml(o.sid, o.home, o.appDir), 'utf8')}'))
 try { $null = Register-ScheduledTask -TaskName '${TASK}' -Xml $xml -Force } catch {
   # Not elevated (the portal's own host deploys as the server's non-elevated user): a task an administrator registered
   # once keeps working, since its action runs this folder's run-daemon.ps1. Without one, say exactly what to run once.

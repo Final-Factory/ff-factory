@@ -11,8 +11,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { HOST_FILES, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './worker/driveRoot.ts';
 import { carryDevDrive, devDriveGuard, hostDirOf } from './worker/devdrive.ts';
-import { daemonJson, layoutOf, reinstallProblems, sandboxRisks, type InstallOptions, type Manifest } from './worker/worker.ts';
-import { startDaemonScript, taskXml } from '../server/machineDeployWin.ts';
+import { anchorOf, daemonJson, layoutOf, planUpdate, reinstallProblems, sandboxRisks, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { taskXml } from '../server/machineDeployWin.ts';
 import { roomLevel, blockReason } from '../server/hostHealth.ts';
 import { MachineGuard } from '../machine/hostGuard.ts';
 import { adoptLayout, rebaseUnder } from '../server/machines.ts';
@@ -40,8 +40,8 @@ test('paths: the old root and the drive’s own folders go to the new root; the 
   assert.ok(isHostFile('DevDrive.VHDX') && !isHostFile('repo'));
   const cfg = { root: 'D:\\work\\ffw', repoPath: 'D:\\work\\ffw\\repo', sandboxes: { root: 'V:\\sandboxes', librarySeed: 'V:\\seed\\Library' }, extraRoots: ['V:\\sandboxes', 'V:\\seed'], hostGuard: { hostDiskPaths: ['D:/'] }, maxEventsFile: 'D:\\work\\ffw\\daemon\\max-events.jsonl', n: 3 };
   const r = rebaseJson(cfg, map);
-  assert.equal(r.changed, 7);
-  assert.deepEqual(r.value, { root: 'V:\\ffw', repoPath: 'V:\\ffw\\repo', sandboxes: { root: 'V:\\ffw\\sandboxes', librarySeed: 'V:\\ffw\\seed\\Library' }, extraRoots: ['V:\\ffw\\sandboxes', 'V:\\ffw\\seed'], hostGuard: { hostDiskPaths: ['D:/'] }, maxEventsFile: 'V:\\ffw\\daemon\\max-events.jsonl', n: 3 });
+  assert.equal(r.changed, 6, 'the daemon\'s folder stays in the host folder (it remounts the drive)');
+  assert.deepEqual(r.value, { root: 'V:\\ffw', repoPath: 'V:\\ffw\\repo', sandboxes: { root: 'V:\\ffw\\sandboxes', librarySeed: 'V:\\ffw\\seed\\Library' }, extraRoots: ['V:\\ffw\\sandboxes', 'V:\\ffw\\seed'], hostGuard: { hostDiskPaths: ['D:/'] }, maxEventsFile: 'D:\\work\\ffw\\daemon\\max-events.jsonl', n: 3 });
 });
 
 test('paths: the nightly lab’s task text is repointed in each spelling it uses, and nothing alike is touched', () => {
@@ -86,21 +86,38 @@ test('the drive’s record: a root on it names the host folder, and is rebuilt f
   assert.equal(driveRootOf('v'), 'V:\\ffw');
 });
 
-// ---------------------------------------------------------------- the daemon's start
+// ---------------------------------------------------------------- the daemon stays off the drive it remounts
 
-test('the daemon task of a root on its drive starts from the host folder, which waits for the drive and follows its letter', () => {
-  const x = taskXml('S-1-5-21-1-2-3-1001', 'C:\\Users\\Lothsahn', 'V:\\ffw\\daemon', 'D:\\work\\ffw');
-  assert.match(x, /-File "D:\\work\\ffw\\start-daemon\.ps1"<\/Arguments>/);
-  assert.match(x, /<WorkingDirectory>D:\\work\\ffw<\/WorkingDirectory>/);
-  assert.match(taskXml('S-1-5-21-1-2-3-1001', 'C:\\Users\\Lothsahn', 'D:\\work\\ffw\\daemon'), /-File "D:\\work\\ffw\\daemon\\run-daemon\.ps1"/, 'a root not on a drive: as before');
-  const s = startDaemonScript('ffw');
-  assert.match(s, /Join-Path \$here 'devdrive\.json'/);
-  assert.match(s, /\$sup = "\$\(\$letter\):\\ffw\\daemon\\run-daemon\.ps1"/);
-  assert.match(s, /schtasks\.exe \/run \/tn ffsb-helper-mount/);
-  assert.match(s, /-Wait/);
-  assert.match(s, /exit 1/);
-  assert.throws(() => startDaemonScript('..\\x'), /not a folder/);
-  assert.throws(() => startDaemonScript('ffw"; calc'), /not a folder/);
+test('a root on its drive keeps the daemon, its logs and the credential in the host folder; the task names them there, with no junction', () => {
+  // The daemon's host guard is what remounts the drive (machine/hostGuard.ts): run from the drive, it would go with it (BEAST's
+  // C:\\ffw-anchor, docs/worker-root.md 2.2; review of #331 by e7618560).
+  const l = layoutOf('V:\\ffw', 'D:\\work\\ffw');
+  const P = path;
+  assert.equal(l.daemon, P.join('D:\\work\\ffw', 'daemon'));
+  assert.equal(l.logs, P.join('D:\\work\\ffw', 'daemon', 'logs'));
+  assert.equal(l.src, P.join('D:\\work\\ffw', 'daemon', 'src'));
+  assert.equal(l.secrets, P.join('D:\\work\\ffw', 'secrets'));
+  assert.equal(l.token, P.join('D:\\work\\ffw', 'secrets', 'machine-token'));
+  for (const k of ['repo', 'sandboxes', 'seed', 'players', 'nightly', 'scratch', 'tmp', 'manifest'] as const) assert.ok(l[k].startsWith('V:\\ffw'), k);
+  assert.deepEqual(layoutOf('D:\\ffw'), layoutOf('D:\\ffw', undefined), 'no anchor: everything in the root, as before');
+  const m = { devDrive: { vhdx: 'D:\\work\\ffw\\devdrive.vhdx', letter: 'V', maxGB: 275, inUse: true, rootOnDrive: true, host: 'D:\\work\\ffw' } } as Manifest;
+  assert.equal(anchorOf(m), 'D:\\work\\ffw');
+  assert.equal(anchorOf({ devDrive: { ...m.devDrive!, rootOnDrive: false } } as Manifest), undefined);
+  // An update reads and writes the daemon there.
+  const o = planUpdate('V:\\ffw', { ...m, machineId: 'lothdesktop', portalUrl: 'https://p', service: 'FFFactoryDaemon', slots: 6, repoUrl: 'r', outside: [] } as unknown as Manifest, { portalUrl: 'https://p', sandboxes: { maxSandboxes: 6 } }, 'ffm_x', {});
+  assert.equal(o.anchor, 'D:\\work\\ffw');
+  // daemon.json: the daemon's own folders on D:, the work on V:.
+  const j = daemonJson({ ...o, devDriveDirs: { sandboxes: l.sandboxes, seed: l.seed, seedReady: false, blockClone: true, onRoot: true, host: 'D:\\work\\ffw', vhdx: 'D:\\work\\ffw\\devdrive.vhdx', maxGB: 275 } } as InstallOptions, l, 'lothdesktop', undefined) as Record<string, any>;
+  assert.equal(j.appDir, l.daemon);
+  assert.equal(j.tokenFile, l.token);
+  assert.equal(j.maxEventsFile, P.join(l.daemon, 'max-events.jsonl'));
+  assert.equal(j.root, 'V:\\ffw');
+  assert.equal(j.repoPath, l.repo);
+  assert.equal(j.tempDir, l.tmp);
+  assert.deepEqual(j.extraRoots, [l.daemon], 'the clean-up may still tidy the daemon\'s folder, the one part of the install off the drive');
+  // The task runs the supervisor from the host folder, which is there before the drive and stays while it is gone.
+  assert.match(taskXml('S-1-5-21-1-2-3-1001', 'C:\\Users\\Lothsahn', 'D:\\work\\ffw\\daemon'), /-File "D:\\work\\ffw\\daemon\\run-daemon\.ps1"<\/Arguments>/);
+  assert.ok(['daemon', 'secrets'].every(isHostFile));
 });
 
 // ---------------------------------------------------------------- V:'s space, not D:'s
@@ -145,16 +162,16 @@ test('the daemon’s guard on LothDesktop after the move: V: is the disk; D: bel
 // ---------------------------------------------------------------- the portal's record
 
 test('the portal’s record follows a root that moved onto its drive: folders, seed and its copy mode, protected paths', () => {
-  const m = { id: 'lothdesktop', root: 'D:\\work\\ffw', appDir: 'D:\\work\\ffw\\daemon', repoPath: 'D:\\work\\ffw\\repo', tempDir: 'D:\\work\\ffw\\tmp', sandboxRoot: 'V:\\sandboxes', librarySeed: 'V:\\seed\\Library', maxSandboxes: 6, protectedPaths: ['D:\\work\\ffw\\repo', 'C:\\Users\\Lothsahn\\Documents'] } as unknown as Machine;
-  adoptLayout(m, { root: 'V:\\ffw', appDir: 'V:\\ffw\\daemon', repoPath: 'V:\\ffw\\repo', tempDir: 'V:\\ffw\\tmp', sandboxes: { root: 'V:\\ffw\\sandboxes', maxSandboxes: 6, maxAgentsPerSandbox: 2, maxUnity: 4, librarySeed: 'V:\\ffw\\seed\\Library', librarySeedCopy: 'clone' } } as any);
+  const m = { id: 'lothdesktop', root: 'D:\\work\\ffw', appDir: 'D:\\work\\ffw\\daemon', repoPath: 'D:\\work\\ffw\\repo', tempDir: 'D:\\work\\ffw\\tmp', sandboxRoot: 'V:\\sandboxes', librarySeed: 'V:\\seed\\Library', maxSandboxes: 6, protectedPaths: ['D:\\work\\ffw\\repo', 'D:\\work\\ffw\\daemon\\unity-mcp', 'C:\\Users\\Lothsahn\\Documents'] } as unknown as Machine;
+  adoptLayout(m, { root: 'V:\\ffw', appDir: 'D:\\work\\ffw\\daemon', repoPath: 'V:\\ffw\\repo', tempDir: 'V:\\ffw\\tmp', sandboxes: { root: 'V:\\ffw\\sandboxes', maxSandboxes: 6, maxAgentsPerSandbox: 2, maxUnity: 4, librarySeed: 'V:\\ffw\\seed\\Library', librarySeedCopy: 'clone' } } as any);
   assert.equal(m.root, 'V:\\ffw');
-  assert.equal(m.appDir, 'V:\\ffw\\daemon');
+  assert.equal(m.appDir, 'D:\\work\\ffw\\daemon', 'the daemon stays off the drive');
   assert.equal(m.repoPath, 'V:\\ffw\\repo');
   assert.equal(m.tempDir, 'V:\\ffw\\tmp');
   assert.equal(m.sandboxRoot, 'V:\\ffw\\sandboxes');
   assert.equal(m.librarySeed, 'V:\\ffw\\seed\\Library');
   assert.equal(m.librarySeedCopy, 'clone');
-  assert.deepEqual(m.protectedPaths, ['V:\\ffw\\repo', 'C:\\Users\\Lothsahn\\Documents']);
+  assert.deepEqual(m.protectedPaths, ['V:\\ffw\\repo', 'D:\\work\\ffw\\daemon\\unity-mcp', 'C:\\Users\\Lothsahn\\Documents']);
   assert.equal(rebaseUnder('d:/work/ffw/daemon', 'D:\\work\\ffw', 'V:\\ffw'), 'V:\\ffw/daemon');
   assert.equal(rebaseUnder('D:\\work\\ffw2', 'D:\\work\\ffw', 'V:\\ffw'), 'D:\\work\\ffw2');
 });
@@ -171,6 +188,9 @@ test('the reinstall refuses, changing nothing, while an agent, a process or unpu
   assert.match(r.problems[1], /Unity\.exe/);
   assert.match(r.problems[2], /sandbox slot3 holds work that is not on origin \(1 unpushed commit/);
   assert.match(reinstallProblems({ ...base, elevated: false }).problems.join(), /elevated session/);
+  // lothsahn: "The daemon and support files from the installer should go in d:\ffw": that folder must be new or empty.
+  assert.deepEqual(reinstallProblems({ ...base, home: { path: 'D:\\ffw', entries: [] } }).problems, []);
+  assert.match(reinstallProblems({ ...base, home: { path: 'D:\\ffw', entries: ['notes.txt'] } }).problems.join(), /D:\\ffw, where the drive, the daemon and the credential go, already holds notes\.txt/);
   assert.match(reinstallProblems({ ...base, agents: undefined }).problems.join(), /could not be asked/);
   assert.match(reinstallProblems({ ...base, manifest: { ...manifest, devDrive: { ...manifest.devDrive!, rootOnDrive: true } } as Manifest }).problems.join(), /on its Dev Drive already/);
   // D: at 19.5 GB (2026-10-12 ~02:00Z) holds the 13.3 GB seed with 5 GB to spare; at 17 GB it does not, and the first sandbox imports.

@@ -2254,8 +2254,9 @@ export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, 
     // A root that moved onto its Dev Drive (w1070) brings its seed's copy mode with it: a block clone there.
     if (moved && pool.librarySeedCopy) m.librarySeedCopy = pool.librarySeedCopy;
   }
-  // Protected paths in the old root are the same places in the new one (w1070): the clone, the daemon's folder.
-  if (moved && oldRoot && m.protectedPaths?.length) m.protectedPaths = m.protectedPaths.map((p) => rebaseUnder(p, oldRoot, layout.root));
+  // Protected paths in the old root are the same places in the new one (w1070), but for what stayed where it was: a root on its
+  // Dev Drive keeps the daemon's folder in the old one (layout.appDir there).
+  if (moved && oldRoot && m.protectedPaths?.length) m.protectedPaths = m.protectedPaths.map((p) => (rebaseUnder(p, layout.appDir, '') !== p ? p : rebaseUnder(p, oldRoot, layout.root)));
   // Its sandbox folder is its installer's too (add_machine refuses to change it on a root install, setRootSettings), so a daemon that now
   // reports another one has moved it: a Dev Drive (w900) puts the sandboxes on V:, and the record kept D:\\work\\ffw\\sandboxes, the
   // junction, which the portal then sent back in every welcome as the pool's root (w1038). The seed and how it is copied follow it
