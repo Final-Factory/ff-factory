@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { AppState, IntakeSummary, WorkItem, WorkSource } from '../../../shared/types';
+import type { AppState, IntakeSummary, WorkItem } from '../../../shared/types';
 import { decisionOf } from '../../../shared/decision';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../../../shared/workState';
 import { gatesName, gatesOf } from '../../../shared/blockers';
+import { namesReporter, namesRequesters, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { FFBOX_LAN_LABEL, ffboxConversationHref, isFfboxConversationId } from '../../../shared/ffboxLinks';
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
@@ -20,32 +21,6 @@ import { TimersButton } from './Timers';
 type Tab = 'requests' | 'intake' | 'spend' | 'conversation';
 
 const names = (w: WorkItem) => w.requesters.map((r) => r.displayName).join(', ');
-
-/** "Discord bug", "Discord request", "FFBox branch", …: where an intake request came from (docs/intake.md). */
-export function sourceLabel(s: WorkSource): string {
-  switch (s.kind) {
-    case 'discord-bug':
-      return 'Discord bug';
-    case 'discord-request':
-      return `Discord request${s.reporter ? ` from ${s.reporter}` : ''}`;
-    case 'ffbox-branch':
-      return 'FFBox branch';
-    case 'ffbox-diagnosis':
-      return 'FFBox diagnosis';
-    case 'ffbox-request':
-      return 'FFBox request';
-    case 'ffbox-dev':
-      return `FFBox dev request${s.reporter ? ` from ${s.reporter}` : ''}`;
-    case 'release':
-      return 'Release follow-up';
-    case 'nightly':
-      return `Nightly regression${s.nightly?.date ? ` ${s.nightly.date}` : ''}`;
-    case 'nightly-run':
-      return `Nightly run${s.nightlyRun?.date ? ` ${s.nightlyRun.date}` : ''}`;
-    case 'nightly-review':
-      return `Nightly merge review${s.nightlyReview?.date ? ` ${s.nightlyReview.date}` : ''}`;
-  }
-}
 
 const pendingApproval = (w: WorkItem) => w.approval?.state === 'pending' && isOpenWork(w);
 
@@ -599,7 +574,14 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             ) : (
               <span className={`tone-${tone}`}>{statusText(w)}</span>
             )}
-            {w.mergedInto ? ` into ${w.mergedInto}` : ''} · <span className="mono">{w.id}</span> · {s ? sourceLabel(s) : names(w)}
+            {w.mergedInto ? ` into ${w.mergedInto}` : ''} · <span className="mono">{w.id}</span>
+            {live?.state === 'working' && live.machines?.length ? (
+              <span title={`Working on ${live.machines.join(', ')}`} data-testid={`work-machine-${w.id}`}>
+                {' · '}
+                {live.machines.join(', ')}
+              </span>
+            ) : null}{' '}
+            · {s ? sourceLabel(s) : names(w)}
             {w.delegation ? (
               <span data-testid={`work-delegation-${w.id}`}>
                 {' '}
@@ -623,9 +605,9 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
           {s && (
             <p className="small intake-facts">
               {sourceLabel(s)}
-              {s.untrusted ? <span className="tone-amber"> · players’ text, untrusted</span> : null}
+              {s.untrusted ? <span className="tone-amber"> · {untrustedLabel(s)}</span> : null}
               {s.version ? ` · version ${s.version}` : ''}
-              {s.reporter ? ` · reported by ${s.reporter}` : ''}
+              {namesReporter(s) ? ` · reported by ${s.reporter}` : ''}
               {s.kind.startsWith('ffbox') && isFfboxConversationId(s.conversation) ? (
                 <>
                   {' · '}
@@ -649,8 +631,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
                 </>
               ) : null}
               {s.alsoThreads?.length ? ` · also reported ${s.alsoThreads.length} more time(s)` : ''}
-              {' · for '}
-              {names(w)}
+              {namesRequesters(s, names(w)) ? ` · for ${names(w)}` : ''}
             </p>
           )}
           {live && (
