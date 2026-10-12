@@ -36,7 +36,16 @@ export interface DevDriveRecord {
   maxGB: number;
   /** The sandboxes and the seed live on it (daemon.json points there). False: the drive is there, the folders still on the root's own volume. */
   inUse: boolean;
+  /**
+   * The whole root lives on the drive (w1070, <letter>:\\ffw), and `host` is the folder the person installed into, which holds
+   * the VHDX and what starts before the drive is attached (rootMove.ts HOST_FILES). Absent: w900's layout, the VHDX in the root.
+   */
+  rootOnDrive?: boolean;
+  host?: string;
 }
+
+/** The folder that holds the VHDX: the host folder for a root on the drive, else the root itself. */
+export const hostDirOf = (rec: DevDriveRecord | undefined, root: string) => (rec?.rootOnDrive && rec.host ? rec.host : root);
 
 /** The two folders on the drive: canonical paths, the ones git, Unity and the daemon see (docs/worker-root.md 2.2: never through a junction). */
 export function devDriveDirs(letter: string): { sandboxes: string; seed: string } {
@@ -63,15 +72,20 @@ export function defaultMaxGB(hostTotalGB: number | undefined): number {
  * devdrive.json, written by devdrive.ps1, with the VHDX beside it), which also heals a root.json already wiped. `inUse`: the
  * root's sandboxes folder is a junction to the drive, so the sandboxes are on it. Exported for tests.
  */
-export function carryDevDrive(prev: { devDrive?: DevDriveRecord } | undefined, root: string, io: { read(file: string): string | undefined; exists(p: string): boolean; isLink(p: string): boolean } = realDriveIo): DevDriveRecord | undefined {
+export function carryDevDrive(prev: { devDrive?: DevDriveRecord } | undefined, root: string, io: { read(file: string): string | undefined; exists(p: string): boolean; isLink(p: string): boolean } = realDriveIo, vhdxHint?: string): DevDriveRecord | undefined {
   if (prev?.devDrive) return prev.devDrive;
-  if (!io.exists(path.join(root, 'devdrive.vhdx'))) return undefined;
-  const text = io.read(path.join(root, 'devdrive.json'));
+  // A root on the drive (w1070) has no VHDX beside it: daemon.json's host guard names the one it lives on.
+  const onDrive = !io.exists(path.join(root, 'devdrive.vhdx')) && !!vhdxHint && io.exists(vhdxHint);
+  const vhdx = onDrive ? vhdxHint! : path.join(root, 'devdrive.vhdx');
+  if (!io.exists(vhdx)) return undefined;
+  const text = io.read(path.join(path.dirname(vhdx), 'devdrive.json'));
   if (!text) return undefined;
   try {
     const st = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Partial<DevDriveState>;
     if (typeof st.letter !== 'string' || !/^[A-Za-z]$/.test(st.letter)) return undefined;
-    return { vhdx: path.join(root, 'devdrive.vhdx'), letter: st.letter.toUpperCase(), maxGB: Number(st.maxGB) || 0, inUse: io.isLink(path.join(root, 'sandboxes')) };
+    const letter = st.letter.toUpperCase();
+    if (onDrive) return { vhdx, letter, maxGB: Number(st.maxGB) || 0, inUse: true, rootOnDrive: true, host: path.dirname(vhdx) };
+    return { vhdx, letter, maxGB: Number(st.maxGB) || 0, inUse: io.isLink(path.join(root, 'sandboxes')) };
   } catch {
     return undefined;
   }
@@ -123,8 +137,12 @@ export function parseDevDriveOutput(text: string): (Partial<DevDriveState> & { r
   }
 }
 
-/** The host guard daemon.json gets with the drive (machine/hostGuard.ts): the drive's remount, and the volume the VHDX grows on. Exported for tests. */
-export function devDriveGuard(rootDrive: string, pool: { diskWarnGB?: number; diskCriticalGB?: number } = {}): Record<string, unknown> {
+/**
+ * The host guard daemon.json gets with the drive (machine/hostGuard.ts): the drive's remount, and the volume the VHDX grows on.
+ * `vhdx`: the file and its maximum, so the guard judges that volume by whether the file can still grow to its maximum, not by
+ * a fixed number of GB (w1070, lothsahn: "report space of the V: drive to ff factory instead of the D: space"). Exported for tests.
+ */
+export function devDriveGuard(rootDrive: string, pool: { diskWarnGB?: number; diskCriticalGB?: number } = {}, vhdx?: { path: string; maxGB: number }): Record<string, unknown> {
   const warn = pool.diskWarnGB ?? DISK_WARN_GB_DEFAULT;
   return {
     pollSeconds: 30,
@@ -138,6 +156,7 @@ export function devDriveGuard(rootDrive: string, pool: { diskWarnGB?: number; di
     hostDiskPaths: [`${rootDrive.replace(/[:\\/]+$/, '').toUpperCase()}:/`],
     reapBrowsersAfterHours: 0,
     reapEveryMinutes: 15,
+    ...(vhdx ? { devDriveVhdx: vhdx.path, devDriveMaxGB: vhdx.maxGB } : {}),
   };
 }
 

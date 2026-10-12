@@ -46,6 +46,10 @@
   The VHDX's maximum size in GB (default: 90 % of the root's volume, 100 to 1024). It takes only what is written.
 .PARAMETER DevDriveSkip
   Drive letters the Dev Drive never takes, e.g. U,T.
+.PARAMETER Reinstall
+  With -Root (w1070): make this machine's install again with its whole root on a new Dev Drive (<letter>:\ffw), as
+  `worker.ts reinstall`. Asks nothing; elevated (an administrator's ssh session). -DevDriveMaxGB sizes the new drive.
+  Refuses while an agent or a process uses the install or a sandbox holds work that is not on origin.
 #>
 param(
     [string]$Root = '',
@@ -73,7 +77,8 @@ param(
     [switch]$DevDrive,
     [switch]$MoveToDevDrive,
     [int]$DevDriveMaxGB = 0,
-    [string]$DevDriveSkip = ''
+    [string]$DevDriveSkip = '',
+    [switch]$Reinstall
 )
 $ErrorActionPreference = 'Stop'
 
@@ -92,15 +97,20 @@ $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.
 # An elevated install would leave the root's files owned by Administrators, and the daemon's non-elevated git refuses
 # such a clone. An update (or -Owner) gives what it makes back to the task's user (icacls /setowner, as the portal's ssh
 # deploy does), so it may run elevated: an administrator's ssh session always is (BEAST, w613).
-if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -and -not $Update -and -not $Owner) {
+if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -and -not $Update -and -not $Reinstall -and -not $Owner) {
     Write-Host 'Run this from a normal PowerShell, not as administrator: the one step that needs admin rights (the firewall rules) asks for them itself.'
     exit 2
 }
 
-if ($Update) {
+if ($Reinstall) {
+    if (-not $Root) { Write-Host '-Reinstall needs -Root (the root of the install to make again).'; exit 2 }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root 'root.json'))) { Write-Host "$Root holds no worker install to make again (no root.json)."; exit 2 }
+} elseif ($Update) {
     # Asks nothing (an ssh session has no console to answer in): the install that is there says everything else.
     if (-not $Root) { Write-Host '-Update needs -Root (the root of the install to update).'; exit 2 }
-    if (-not (Test-Path -LiteralPath (Join-Path $Root 'root.json'))) { Write-Host "$Root holds no worker install (no root.json): install it first, without -Update."; exit 2 }
+    # A root that moved onto its Dev Drive (w1070) left moved.json in the folder it was installed into, and a move stopped
+    # part way its journal: worker.ts follows both.
+    if (-not (Test-Path -LiteralPath (Join-Path $Root 'root.json')) -and -not (Test-Path -LiteralPath (Join-Path $Root 'moved.json')) -and -not (Test-Path -LiteralPath (Join-Path $Root 'root-move.json'))) { Write-Host "$Root holds no worker install (no root.json): install it first, without -Update."; exit 2 }
 } else {
 # --- the questions, all at the start
 Write-Host 'FF Factory worker install. Everything this machine''s worker uses goes in one folder (the root).'
@@ -167,6 +177,22 @@ if (-not $Source) {
 
 $flags = @('--disable-warning=ExperimentalWarning')
 if ($node.Version -lt [version]'23.6') { $flags = @('--experimental-strip-types') + $flags }
+if ($Reinstall) {
+    $argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'reinstall', '--root', $Root)
+    if ($MaxSandboxes) { $argv += @('--max-sandboxes', $MaxSandboxes) }
+    if ($MaxAgentsPerSandbox) { $argv += @('--max-agents-per-sandbox', $MaxAgentsPerSandbox) }
+    if ($MaxUnity) { $argv += @('--max-unity', $MaxUnity) }
+    if ($Owner) { $argv += @('--owner', $Owner) }
+    if ($DevDriveMaxGB) { $argv += @('--dev-drive-max-gb', $DevDriveMaxGB) }
+    if ($DevDriveSkip) { $argv += @('--dev-drive-skip', $DevDriveSkip) }
+    try {
+        $null | & $node.Path @argv
+        $code = $LASTEXITCODE
+    } finally {
+        if ($temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    exit $code
+}
 if ($Update) {
     $argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'update', '--root', $Root)
     if ($MaxSandboxes) { $argv += @('--max-sandboxes', $MaxSandboxes) }

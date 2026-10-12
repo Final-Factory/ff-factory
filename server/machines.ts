@@ -2196,6 +2196,16 @@ export function machineDir(p: string | undefined, what: string): string | undefi
  * The folder options a deploy stores (add_machine): each given one checked and normalised (machineDir), "" back to the
  * default, an unset one kept from the previous deploy. Exported for tests.
  */
+/** `p` under `from` put under `to` (either slash, Windows paths in any case); anything else unchanged. Exported for tests. */
+export function rebaseUnder(p: string, from: string, to: string): string {
+  const win = /^[A-Za-z]:|\\\\/.test(from);
+  const k = (x: string) => (win ? x.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() : x.replace(/\/+$/, ''));
+  const f = k(from);
+  const v = k(p);
+  if (v !== f && !v.startsWith(f + (win ? '\\' : '/'))) return p;
+  return to.replace(/[\\/]+$/, '') + p.replace(/[\\/]+$/, '').slice(f.length);
+}
+
 /** Two folder paths as one place (either slash, case-insensitive on Windows paths, no trailing slash). */
 const samePoolPath = (a: string, b: string) => {
   const k = (p: string) => (/^[A-Za-z]:|\\\\/.test(p) ? p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() : p.replace(/\/+$/, ''));
@@ -2212,6 +2222,7 @@ const samePoolPath = (a: string, b: string) => {
 export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, { type: 'hello' }>['layout']>): boolean {
   const moved = m.root !== layout.root;
   const before = m.sandboxRoot;
+  const oldRoot = m.root;
   // Moving from today's layout into a root (a migration): keep where it was, for a rollback.
   if (moved && !m.root) m.preRoot = { appDir: m.appDir, repoPath: m.repoPath, tempDir: m.tempDir, sandboxRoot: m.sandboxRoot, librarySeed: m.librarySeed };
   m.root = layout.root;
@@ -2230,7 +2241,11 @@ export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, 
       ...(m.maxSandboxAgents === undefined && pool.maxAgents !== undefined ? { maxSandboxAgents: pool.maxAgents } : {}),
       ...(pool.librarySeed && (moved || !m.librarySeed) ? { librarySeed: pool.librarySeed } : {}),
     });
+    // A root that moved onto its Dev Drive (w1070) brings its seed's copy mode with it: a block clone there.
+    if (moved && pool.librarySeedCopy) m.librarySeedCopy = pool.librarySeedCopy;
   }
+  // Protected paths in the old root are the same places in the new one (w1070): the clone, the daemon's folder.
+  if (moved && oldRoot && m.protectedPaths?.length) m.protectedPaths = m.protectedPaths.map((p) => rebaseUnder(p, oldRoot, layout.root));
   // Its sandbox folder is its installer's too (add_machine refuses to change it on a root install, setRootSettings), so a daemon that now
   // reports another one has moved it: a Dev Drive (w900) puts the sandboxes on V:, and the record kept D:\\work\\ffw\\sandboxes, the
   // junction, which the portal then sent back in every welcome as the pool's root (w1038). The seed and how it is copied follow it

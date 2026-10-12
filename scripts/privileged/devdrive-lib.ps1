@@ -258,6 +258,11 @@ function Update-JsonFileLetter([string]$File, [string]$From, [string]$To) {
 # the worktrees' recorded paths. Each step is its own try, so one that fails does not stop the rest; the summary says which.
 function Update-LetterDependents([string]$From, [string]$To) {
   $done = @()
+  # A worker root on the drive itself (w1070, <letter>:\ffw): its daemon.json and its folders are on the new letter now.
+  $DaemonConfig = if ($DaemonConfig) { Convert-PathLetter $DaemonConfig $From $To } else { $DaemonConfig }
+  $WorkerRoot = if ($WorkerRoot) { Convert-PathLetter $WorkerRoot $From $To } else { $WorkerRoot }
+  $onDrive = $WorkerRoot -and $WorkerRoot -match "^$($To):"
+  $sandboxDir = if ($onDrive) { Join-Path $WorkerRoot 'sandboxes' } else { "$($To):\sandboxes" }
   if ($StateFile -and (Test-Path -LiteralPath $StateFile)) {
     try { $n = Update-JsonFileLetter $StateFile $From $To; $st = Get-Content -Raw -LiteralPath $StateFile | ConvertFrom-Json; $st.letter = $To.ToUpper(); [IO.File]::WriteAllText($StateFile, (ConvertTo-Json -InputObject $st -Depth 8), (New-Object Text.UTF8Encoding($false))); $done += "state file" } catch { $done += "state file FAILED: $($_.Exception.Message)" }
   }
@@ -279,7 +284,7 @@ function Update-LetterDependents([string]$From, [string]$To) {
     try {
       $git = (Get-Command git.exe -ErrorAction SilentlyContinue).Source
       if (-not $git -and $env:ProgramFiles) { $git = Join-Path $env:ProgramFiles 'Git\cmd\git.exe' }
-      $dirs = @(Get-ChildItem -LiteralPath "$($To):\sandboxes" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+      $dirs = @(Get-ChildItem -LiteralPath $sandboxDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
       if ($dirs.Count -and (-not $git -or -not (Test-Path -LiteralPath $git))) { $done += 'git worktree repair SKIPPED: git.exe not found (run: git -C <root>\repo worktree repair <each sandbox>)' }
       elseif ($dirs.Count) {
         $out = & $git -c safe.directory=* -C (Join-Path $WorkerRoot 'repo') worktree repair @dirs 2>&1 | Out-String

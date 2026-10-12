@@ -718,6 +718,11 @@ export interface HostGuardConfig {
   remountMinFreeGB: number;
   /** The Dev Drive's VHDX file, for growth checks and compaction (empty: no Dev Drive). */
   devDriveVhdx: string;
+  /**
+   * Its maximum size in GB (w1070). With it, the volume that holds the VHDX is judged by whether the file can still grow to that
+   * maximum (hostHealth.ts roomLevel), not by warnFreeGB: the space the guard reports and gates on is the drive's own.
+   */
+  devDriveMaxGB?: number;
   /** Kill automation browsers (headless, temp profile, or Playwright's) running longer than this, and orphans. 0: never. */
   reapBrowsersAfterHours: number;
   /** How often the reaper looks (it also runs once at startup). */

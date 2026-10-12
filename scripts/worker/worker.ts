@@ -27,7 +27,9 @@ import { linuxControlScript, linuxReloadLines, parseUnitShow, systemdUnit, unitF
 import * as win from '../../server/machineDeployWin.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
-import { carryDevDrive, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
+import { carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, gbOf, hostDirOf, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
+import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
+import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
 export const LAYOUT_VERSION = 1;
@@ -214,10 +216,19 @@ export interface InstallOptions {
   devDriveMaxGB?: number;
   /** Letters the drive never takes, e.g. "U,T". */
   devDriveSkip?: string;
+  /**
+   * Windows (w1070, `worker.ts reinstall`): make an install whose root is not on its Dev Drive again with the whole root on a
+   * new drive. The old install's sandboxes must hold nothing unpushed; its clone seeds the new one, and its nightly lab, temp
+   * and scratch folders and its Library seed are carried over; the rest, the old VHDX included, is deleted.
+   */
+  reinstall?: boolean;
   /** An update that sets the drive up also moves the sandboxes and the seed onto it (needs no agent and no editor in them). */
   moveToDevDrive?: boolean;
-  /** Set during install(): the drive's folders, which daemon.json then points at. */
-  devDriveDirs?: { sandboxes: string; seed: string; seedReady: boolean; blockClone: boolean };
+  /**
+   * Set during install(): the drive's folders, which daemon.json then points at. `onRoot`: the whole root is on the drive
+   * (w1070) and `host` the folder that holds the VHDX; `vhdx` and `maxGB` give the host guard the file's room to grow.
+   */
+  devDriveDirs?: { sandboxes: string; seed: string; seedReady: boolean; blockClone: boolean; onRoot?: boolean; host?: string; vhdx?: string; maxGB?: number };
 }
 
 /**
@@ -592,11 +603,17 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
   }
   const voice = voiceSetting(o.voiceWhisper, 'voice' in carried ? carried.voice : existingVoice(l));
   delete carried.voice;
+  // The host guard watches the volume the VHDX grows on (the host folder's, w1070), and with the file and its maximum it judges
+  // that volume by the file's room to grow, so the space reported and gated on is the drive's own.
+  const room = dd?.vhdx && dd.maxGB ? { path: dd.vhdx, maxGB: dd.maxGB } : undefined;
+  const guard = dd ? (carried.hostGuard && typeof carried.hostGuard === 'object' ? { ...(carried.hostGuard as Record<string, unknown>), ...(room ? { devDriveVhdx: room.path, devDriveMaxGB: room.maxGB } : {}) } : devDriveGuard(path.win32.parse(dd.host ?? l.root).root, sandboxes, room)) : undefined;
+  if (dd?.onRoot) delete carried.extraRoots;
   return {
     ...carried,
-    ...(dd && !carried.hostGuard ? { hostGuard: devDriveGuard(path.win32.parse(l.root).root, sandboxes) } : {}),
+    ...(guard ? { hostGuard: guard } : {}),
     // The drive's folders are part of the install though they are not under the root: clean-up may delete in them (w896's fence).
-    ...(dd ? { extraRoots: [dd.sandboxes, dd.seed] } : {}),
+    // A root on the drive holds them itself.
+    ...(dd && !dd.onRoot ? { extraRoots: [dd.sandboxes, dd.seed] } : {}),
     ...(voice ? { voice } : {}),
     portalUrl: o.portalUrl,
     id,
@@ -686,7 +703,14 @@ async function installDaemonWin(o: InstallOptions, l: Layout, id: string, probe:
   const version = (await must('git rev-parse', 'git', ['-C', l.src, 'rev-parse', '--short', 'HEAD'])).trim();
   say('npm ci for the daemon...');
   await ps('npm ci', win.npmScript(probe.node!, version, l.daemon), 10 * 60_000);
-  const out = await ps('registering the daemon task', win.installScript({ sid: probe.sid!, home: probe.home, config, node: probe.node!, flag: support.flag, appDir: l.daemon, service }));
+  // A root on its Dev Drive (w1070): the task's action waits in the host folder until the drive is attached.
+  const dd = o.devDriveDirs;
+  const start = dd?.onRoot && dd.host ? dd.host : undefined;
+  if (start) {
+    fs.writeFileSync(path.join(start, 'start-daemon.ps1'), '\ufeff' + win.startDaemonScript(path.win32.relative(path.win32.parse(l.root).root, l.root)));
+    say(`The daemon task starts ${path.join(start, 'start-daemon.ps1')}, which waits for the Dev Drive and then runs the daemon from ${l.daemon}.`);
+  }
+  const out = await ps('registering the daemon task', win.installScript({ sid: probe.sid!, home: probe.home, config, node: probe.node!, flag: support.flag, appDir: l.daemon, service, ...(start ? { start } : {}) }));
   return { version, started: /started=True/.test(out) };
 }
 
@@ -906,16 +930,16 @@ const devDriveScript = () => path.join(SRC, 'scripts', 'worker', 'devdrive.ps1')
 const devDrivePsArgs = (a: string[]) => ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', devDriveScript(), ...a];
 export const devDriveFile = (root: string) => path.join(root, 'devdrive.json');
 
-/** What devdrive.ps1 says about the drive without changing it (no administrator needed): attached? which letter? */
-async function devDriveStatus(l: Layout): Promise<{ exists: boolean; attached: boolean; letter: string }> {
-  const r = await exec('powershell.exe', devDrivePsArgs(['-Action', 'status', '-Root', l.root]), { timeoutMs: 2 * 60_000 });
+/** What devdrive.ps1 says about the drive without changing it (no administrator needed): attached? which letter? `host`: the folder that holds the VHDX. */
+async function devDriveStatus(host: string): Promise<{ exists: boolean; attached: boolean; letter: string }> {
+  const r = await exec('powershell.exe', devDrivePsArgs(['-Action', 'status', '-Root', host]), { timeoutMs: 2 * 60_000 });
   const out = parseDevDriveOutput(r.stdout);
   return { exists: !!out?.exists, attached: !!out?.attached, letter: String(out?.letter ?? '') };
 }
 
-/** Run devdrive.ps1 -Action ensure: in this process when it is elevated, else in an elevated copy (one UAC prompt). */
-async function devDriveEnsure(l: Layout, args: string[]): Promise<DevDriveState> {
-  const psArgs = devDrivePsArgs(['-Action', 'ensure', ...args]);
+/** Run devdrive.ps1 (-Action ensure by default): in this process when it is elevated, else in an elevated copy (one UAC prompt). `host`: the folder that holds the VHDX. */
+async function devDriveEnsure(host: string, args: string[], action = 'ensure', stateName = 'devdrive'): Promise<DevDriveState> {
+  const psArgs = devDrivePsArgs(['-Action', action, ...args]);
   let text: string;
   if (elevated()) {
     const r = await exec('powershell.exe', psArgs, { timeoutMs: 30 * 60_000 });
@@ -925,8 +949,9 @@ async function devDriveEnsure(l: Layout, args: string[]): Promise<DevDriveState>
   for (const line of text.split('\n')) if (line && !line.startsWith('FFW-DEVDRIVE')) say(`  ${line.trim()}`);
   const out = parseDevDriveOutput(text);
   if (out?.letter) return out as DevDriveState;
+  if (action !== 'ensure') return (out ?? {}) as DevDriveState;
   // The elevated copy's log may be cut short: the state file is what the script wrote last.
-  return JSON.parse(fs.readFileSync(devDriveFile(l.root), 'utf8')) as DevDriveState;
+  return JSON.parse(fs.readFileSync(path.join(host, `${stateName}.json`), 'utf8')) as DevDriveState;
 }
 
 /** Whether a folder is a real one (not a junction) with something in it. */
@@ -948,31 +973,43 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
   if (dec.action === 'none') return void say(`Dev Drive: none (${dec.why}).${m.devDrive ? ` The existing one (${m.devDrive.letter}:) is left as it is.` : ''}`);
   say(`Dev Drive: ${dec.why}.`);
   const had = m.devDrive;
+  const host = hostDirOf(had, l.root);
   let state: DevDriveState;
   if (!elevated() && !process.stdin.isTTY && o.update) {
     // Nobody can answer an administrator prompt here (an ssh session that is not elevated): only an existing, attached drive can be used.
-    const st = await devDriveStatus(l);
+    const st = await devDriveStatus(host);
     if (!st.exists) return void say('Dev Drive: not made: this session is not elevated and nobody can answer a prompt. Run the update from an administrator\'s ssh session, or the installer at the PC.');
     if (!st.attached) {
       say('Dev Drive: not attached; starting its boot-mount task (ffsb-helper-mount)...');
       await exec('schtasks', ['/run', '/tn', 'ffsb-helper-mount'], { timeoutMs: 30_000 });
-      for (let i = 0; i < 30 && !(await devDriveStatus(l)).attached; i++) await new Promise((r) => setTimeout(r, 2000));
+      for (let i = 0; i < 30 && !(await devDriveStatus(host)).attached; i++) await new Promise((r) => setTimeout(r, 2000));
     }
-    const now = await devDriveStatus(l);
+    const now = await devDriveStatus(host);
     if (!now.attached || !now.letter) throw new Error('the Dev Drive is not attached and this session cannot attach it (not elevated): run the update from an administrator\'s ssh session, or start the task by hand: schtasks /run /tn ffsb-helper-mount');
-    state = JSON.parse(fs.readFileSync(devDriveFile(l.root), 'utf8')) as DevDriveState;
+    state = JSON.parse(fs.readFileSync(devDriveFile(host), 'utf8')) as DevDriveState;
     state.letter = now.letter;
   } else {
-    const maxGB = o.devDriveMaxGB ?? had?.maxGB ?? defaultMaxGB(f.rootTotalGB);
-    const args = ['-Root', l.root, '-MaxGB', String(maxGB)];
+    // An existing drive keeps its maximum: a VHDX's cannot shrink in place (w1070), only a root move makes it again at a new one.
+    const maxGB = had?.maxGB || o.devDriveMaxGB || defaultMaxGB(f.rootTotalGB);
+    if (had && o.devDriveMaxGB !== undefined && o.devDriveMaxGB !== had.maxGB) say(`Dev Drive: its maximum stays ${had.maxGB} GB: a new maximum (${o.devDriveMaxGB} GB) means making the drive again, which --move-to-dev-drive does while the root moves onto it (w1070).`);
+    const args = ['-Root', host, ...(host !== l.root ? ['-WorkerRoot', l.root] : []), '-MaxGB', String(maxGB)];
     if (f.probe.user) args.push('-User', f.probe.user);
     if (f.probe.sid) args.push('-UserSid', f.probe.sid);
     if (had?.letter) args.push('-Letter', had.letter);
     if (o.devDriveSkip) args.push('-Skip', o.devDriveSkip);
-    state = await devDriveEnsure(l, args);
+    state = await devDriveEnsure(host, args);
   }
   say(`Dev Drive: ${state.created ? 'created' : 'reused'} ${state.vhdx} as ${state.letter}: (${state.fileSystem || 'ReFS'}${state.devDrive ? ', Dev Drive' : ', not a Dev Drive format'}, block clone ${state.blockClone ? 'yes' : 'not reported'}, up to ${state.maxGB} GB).`);
   if (state.letterChangedFrom) say(`Dev Drive: its letter was ${state.letterChangedFrom}: and is taken, so it is ${state.letter}: now.`);
+  const room = { vhdx: state.vhdx || path.join(host, 'devdrive.vhdx'), maxGB: state.maxGB || had?.maxGB || 0 };
+  if (had?.rootOnDrive) {
+    // The whole root is on the drive (w1070): no junctions, the root's own folders are the drive's.
+    m.devDrive = { ...had, letter: state.letter, maxGB: room.maxGB };
+    writeManifest(l.root, m);
+    if (state.letterChangedFrom) say(`Dev Drive: the root is on ${state.letter}: now; the boot mount repointed daemon.json, and the next update runs from ${driveRootOf(state.letter)}.`);
+    o.devDriveDirs = { sandboxes: l.sandboxes, seed: l.seed, seedReady: fs.existsSync(path.join(l.seed, 'Library')) && fs.readdirSync(path.join(l.seed, 'Library')).length > 0, blockClone: !!state.blockClone, onRoot: true, host, ...room };
+    return;
+  }
   const dirs = devDriveDirs(state.letter);
   const inUse0 = had?.inUse ?? false;
 
@@ -1009,7 +1046,187 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
   for (const k of links) say(`Dev Drive: ${k.name}: ${k.action} (${k.detail}).`);
   if (links.some((k) => k.action === 'blocked')) throw new Error(`the root's ${links.filter((k) => k.action === 'blocked').map((k) => k.detail).join('; ')}: it cannot become a junction to the Dev Drive`);
   if (!state.blockClone) say(`Dev Drive: ${state.letter}: does not report block cloning (Microsoft: Dev Drive supports it from Windows 11 24H2 and Windows Server 2025), so each sandbox's Library is a full copy of the seed and the pool counts it so. The drive still keeps the sandboxes together and fast.`);
-  o.devDriveDirs = { ...dirs, seedReady: fs.existsSync(path.join(dirs.seed, 'Library')) && fs.readdirSync(path.join(dirs.seed, 'Library')).length > 0, blockClone: !!state.blockClone };
+  o.devDriveDirs = { ...dirs, seedReady: fs.existsSync(path.join(dirs.seed, 'Library')) && fs.readdirSync(path.join(dirs.seed, 'Library')).length > 0, blockClone: !!state.blockClone, ...room };
+}
+
+// ---------------------------------------------------------------- the whole root onto the Dev Drive (w1070)
+
+/** Bytes under a folder, not through junctions or symlinks. */
+function bytesUnder(p: string, skipTop: string[] = []): number {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(p);
+  } catch {
+    return 0;
+  }
+  if (st.isSymbolicLink()) return 0;
+  if (!st.isDirectory()) return st.size;
+  let n = 0;
+  for (const e of fs.readdirSync(p)) if (!skipTop.some((s) => s.toLowerCase() === e.toLowerCase())) n += bytesUnder(path.join(p, e));
+  return n;
+}
+
+async function volumeFree(p: string): Promise<number> {
+  try {
+    const s = await fs.promises.statfs(p);
+    return s.bavail * s.bsize;
+  } catch {
+    return 0;
+  }
+}
+
+/** Processes other than this run and its parents that use the root or the old drive's folders (Windows): `pid name: command`. */
+async function processesUsing(paths: string[], except: string[]): Promise<string[]> {
+  const out = await ps(
+    'looking for processes that use the root or the drive',
+    `$paths = @(${paths.map((a) => win.psq(a)).join(', ')})
+$except = @(${except.map((a) => win.psq(a)).join(', ')})
+$all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, ExecutablePath)
+$mine = New-Object System.Collections.Generic.HashSet[int]
+$id = $PID
+while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId -eq $id } | Select-Object -First 1).ParentProcessId }
+foreach ($p in $all) {
+  if ($mine.Contains([int]$p.ProcessId) -or [string]$p.Name -match '^Unity Hub\\.exe$') { continue }
+  $c = ([string]$p.CommandLine + ' ' + [string]$p.ExecutablePath).Replace('/', '\\')
+  if (@($except | Where-Object { $c.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count) { continue }
+  if (@($paths | Where-Object { $c.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count) {
+    $s = [string]$p.CommandLine; if ($s.Length -gt 160) { $s = $s.Substring(0, 160) + '...' }
+    "proc=$($p.ProcessId) $($p.Name): $s"
+  }
+}
+`,
+  );
+  return out.split('\n').filter((x) => x.startsWith('proc=')).map((x) => x.slice(5).trim());
+}
+
+/** Point the nightly lab's task at the moved root (w577: its command line names the root). */
+async function repointNightlyTask(map: [string, string][]) {
+  const r = await exec('schtasks', ['/query', '/tn', NIGHTLY_TASK, '/xml'], { timeoutMs: 30_000 });
+  if (r.code !== 0) return; // no nightly lab here
+  const next = rebaseText(r.stdout, map);
+  if (next === r.stdout) return void say(`The nightly lab's task ${NIGHTLY_TASK} names nothing that moved.`);
+  const file = path.join(os.tmpdir(), `ff-nightly-task-${process.pid}.xml`);
+  fs.writeFileSync(file, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(next.replace(/encoding="UTF-8"/i, 'encoding="UTF-16"'), 'utf16le')]));
+  const c = await exec('schtasks', ['/create', '/tn', NIGHTLY_TASK, '/xml', file, '/f'], { timeoutMs: 60_000 });
+  fs.rmSync(file, { force: true });
+  say(c.code === 0 ? `The nightly lab's task ${NIGHTLY_TASK} now runs from the moved root.` : `WARNING: could not repoint the nightly lab's task ${NIGHTLY_TASK} (${(c.stderr || c.stdout).trim().slice(-300)}); the update's check below says how.`);
+}
+
+/** What `--reinstall` keeps of the old install while it is made again: the folder in the host it put them in, and where they were. */
+interface ReinstallCarry {
+  keep: string;
+  oldRoot: string;
+  oldDrive?: { sandboxes: string; seed: string };
+  /** The old sandboxes' folders: their Claude conversations follow them to the same names in the new root. */
+  sandboxes: string[];
+  /** The old drive's letter, which the new one takes (Windows keeps it reserved for the old volume, so it must be asked for). */
+  letter?: string;
+}
+
+/**
+ * The old install's half of `--reinstall` (w1070): check, then take it away. Refuses, changing nothing, while an agent or a
+ * process uses the install, or a sandbox holds work that is not on origin (commit and push it first; the sandboxes are not
+ * carried over). Then: stops the daemon, copies the Library seed off the old drive (so new sandboxes still block-clone one
+ * instead of importing for an hour), deletes the old drive and its tasks, puts the clone, the nightly lab, tmp and scratch
+ * aside in <root>\.reinstall, and deletes everything else of the old install. Everything it deletes is inside the root.
+ */
+/** What stops a reinstall (nothing changes then), and whether the Library seed fits beside the new drive meanwhile. Exported for tests. */
+export function reinstallProblems(i: { root: string; windows: boolean; elevated: boolean; manifest?: Manifest; agents?: { id: string; sandbox?: string; midTurn?: boolean }[]; processes: string[]; risks: SandboxRisk[]; seedBytes: number; freeBytes: number }): { problems: string[]; keepSeed: boolean } {
+  const problems: string[] = [];
+  if (!i.windows) problems.push('--reinstall is for a Windows install with a Dev Drive');
+  if (!i.elevated) problems.push("--reinstall needs an elevated session (an administrator's ssh session): it deletes a VHDX and its SYSTEM tasks");
+  if (!i.manifest) problems.push(`${i.root} holds no install to make again (no root.json)`);
+  if (i.manifest?.devDrive?.rootOnDrive) problems.push(`${i.root}'s root is on its Dev Drive already`);
+  if (!i.agents) problems.push('the portal could not be asked which agents run here: it must say none do');
+  else if (i.agents.length) problems.push(`${i.agents.length} agent(s) run here: ${i.agents.map((a) => `${a.id}${a.sandbox ? ` in ${a.sandbox}` : ''}${a.midTurn ? ' (mid-turn)' : ''}`).join(', ')}; let them finish their turns`);
+  if (i.processes.length) problems.push(`${i.processes.length} process(es) use the install or its drive (Unity, a player, a build, the nightly lab?): ${i.processes.slice(0, 6).join('; ')}`);
+  for (const r of i.risks) problems.push(`sandbox ${r.sandbox} holds work that is not on origin (${r.unpushed.length} unpushed commit(s), ${r.dirty.length} uncommitted file(s)): commit it on its branch and push, then run this again`);
+  // The seed (without its rebuilt caches) is copied to the host volume while the old drive goes, with 5 GB to spare there: by then
+  // nothing writes to that volume (no agent, no process, the daemon stopped), so the reserve is only for the copy's own slack.
+  return { problems, keepSeed: i.seedBytes > 0 && i.freeBytes > i.seedBytes + 5 * 1024 ** 3 };
+}
+
+async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<ReinstallCarry | undefined> {
+  const old = readManifest(l.root);
+  const rec = old?.devDrive;
+  const oldDrive = rec?.inUse ? { sandboxes: `${rec.letter}:\\sandboxes`, seed: `${rec.letter}:\\seed` } : undefined;
+  const view = await portalView(o.portalUrl, o.token);
+  const daemonMarks = [path.join(l.daemon, 'app', 'machine', 'daemon.ts'), path.join(l.daemon, 'run-daemon.ps1'), path.join(l.daemon, 'app', 'machine', 'agentHost.ts')];
+  const procs = isWin ? await processesUsing([l.root, ...(oldDrive ? [oldDrive.sandboxes, oldDrive.seed] : [])], daemonMarks) : [];
+  const risks = await sandboxRisks(oldDrive?.sandboxes ?? l.sandboxes);
+  const seedLib = oldDrive ? path.join(oldDrive.seed, 'Library') : path.join(l.seed, 'Library');
+  const seedBytes = fs.existsSync(seedLib) ? bytesUnder(seedLib, SEED_REBUILT) : 0;
+  const { problems, keepSeed } = reinstallProblems({ root: l.root, windows: isWin, elevated: elevated(), ...(old ? { manifest: old } : {}), ...(view ? { agents: view.agents } : {}), processes: procs, risks, seedBytes, freeBytes: await volumeFree(l.root) });
+  if (problems.length) {
+    say(`\nNot reinstalling: ${problems.length} problem(s); nothing was changed:`);
+    for (const p of problems) say(`- ${p}`);
+    process.exitCode = 2;
+    return undefined;
+  }
+  say(`\nReinstalling ${l.root} with its whole root on a new Dev Drive (w1070). The old install goes: its daemon, its sandboxes (their work is on origin), its players' copies${rec ? `, its drive ${rec.vhdx} (${rec.maxGB} GB at most)` : ''}. Carried over: ${REINSTALL_KEEPS.join(', ')}${keepSeed ? `, the Library seed (${gbOf(seedBytes)} GB)` : seedBytes ? ` (not the Library seed: ${gbOf(seedBytes)} GB does not fit beside the drive on this volume, so the first sandbox imports its Library)` : ''}.`);
+  const hold = await holdRedeploys(o.portalUrl, o.token);
+  if (!hold.ok) say(`(${hold.error}; carrying on: no agent runs here)`);
+  say('Stopping the old daemon...');
+  await ps('stopping the daemon', win.stopScript(true, l.daemon, { task: o.service, only: true })).catch((e) => say(`(stopping it: ${(e as Error).message})`));
+  const pool = (readJsonFile<{ path: string }[]>(path.join(l.daemon, 'sandboxes.json')) ?? []).map((r) => r.path).filter((p): p is string => typeof p === 'string');
+  const keep = path.join(l.root, '.reinstall');
+  fs.mkdirSync(keep, { recursive: true });
+  if (keepSeed) {
+    say(`Copying the Library seed ${seedLib} -> ${path.join(keep, 'seed', 'Library')}...`);
+    await robocopy(seedLib, path.join(keep, 'seed', 'Library'), false, SEED_REBUILT);
+  }
+  for (const n of ['sandboxes', 'seed']) if (unlinkRootFolder(path.join(l.root, n))) say(`Removed the junction ${path.join(l.root, n)}.`);
+  if (rec) {
+    say(`Deleting the old drive ${rec.vhdx} and its tasks...`);
+    await devDriveEnsure(l.root, ['-Root', l.root], 'remove');
+  }
+  for (const n of REINSTALL_KEEPS) if (fs.existsSync(path.join(l.root, n))) fs.renameSync(path.join(l.root, n), path.join(keep, n));
+  for (const n of fs.readdirSync(l.root)) {
+    if (isHostFile(n)) continue;
+    const p = path.join(l.root, n);
+    if (fs.lstatSync(p).isSymbolicLink()) fs.rmSync(p, { force: true, recursive: false });
+    else await exec('cmd.exe', ['/d', '/c', fs.lstatSync(p).isDirectory() ? 'rd' : 'del', ...(fs.lstatSync(p).isDirectory() ? ['/s', '/q'] : ['/f', '/q']), p], { timeoutMs: 60 * 60_000 });
+    if (fs.existsSync(p)) throw new Error(`could not delete ${p} (a process holds a file in it?); run the reinstall again once it is free`);
+    say(`Deleted ${p}.`);
+  }
+  return { keep, oldRoot: l.root, ...(oldDrive ? { oldDrive } : {}), sandboxes: pool, ...(rec?.letter ? { letter: rec.letter } : {}) };
+}
+
+/** The caches in a Library that Unity rebuilds on demand (the daemon's clean-up trims them in sandboxes too): not carried in a seed. */
+const SEED_REBUILT = ['BurstCache', 'BuildCache'];
+
+/** robocopy a folder (`move`: file by file, the source freeing as the target fills; `skip`: folder names left out). Windows; elsewhere a plain copy (tests). */
+async function robocopy(src: string, dst: string, move: boolean, skip: string[] = []) {
+  if (!isWin) {
+    fs.cpSync(src, dst, { recursive: true, force: true });
+    if (move) fs.rmSync(src, { recursive: true, force: true });
+    return;
+  }
+  const r = await exec('robocopy.exe', [src, dst, '/E', '/XJ', ...(skip.length ? ['/XD', ...skip] : []), ...(move ? ['/MOVE'] : []), '/MT:8', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'], { timeoutMs: 6 * 60 * 60_000 });
+  if (r.code >= 8) throw new Error(`robocopy ${src} -> ${dst} failed (${r.code}): ${(r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ')}`);
+}
+
+/** The new root's half of `--reinstall`: what the old install carried, moved into the new root on the drive (the clone only seeds the new one). */
+async function reinstallCarryIn(c: ReinstallCarry, l: Layout) {
+  for (const n of [...REINSTALL_KEEPS.filter((x) => x !== 'repo'), 'seed']) {
+    const from = path.join(c.keep, n);
+    if (!fs.existsSync(from)) continue;
+    say(`Moving ${from} -> ${path.join(l.root, n)} (file by file)...`);
+    await robocopy(from, path.join(l.root, n), true);
+  }
+  const map = moveMap(c.oldRoot, l.root, c.oldDrive);
+  await repointNightlyTask(map);
+  // A sandbox's agents keep their conversations under its path's slug (~/.claude/projects): the new sandbox of the same name
+  // is where FF Factory places them again, so the conversations go there, and the agents resume with their context.
+  const projects = path.join(os.homedir(), '.claude', 'projects');
+  for (const p of c.sandboxes) {
+    const from = path.join(projects, claudeSlug(p));
+    const to = path.join(projects, claudeSlug(rebasePath(p, map)));
+    if (from !== to && fs.existsSync(from) && !fs.existsSync(to)) {
+      fs.renameSync(from, to);
+      say(`The Claude conversations of ${p} now belong to ${rebasePath(p, map)}.`);
+    }
+  }
 }
 
 /** Run scripts/worker/firewall.ps1 elevated (one UAC prompt): the slot rules, the editors' rules, the slot config. */
@@ -1189,6 +1406,16 @@ export function manifestFor(prev: Manifest | undefined, o: Pick<InstallOptions, 
   };
 }
 
+/** root.json's record of a drive that holds the whole root (w1070), and what its host folder keeps, for the uninstall. */
+function notePinnedDrive(m: Manifest, rec: DevDriveRecord) {
+  m.devDrive = rec;
+  const host = rec.host!;
+  m.outside = m.outside.filter((x) => x.kind !== 'dev-drive');
+  noteOutside(m, { kind: 'dev-drive', name: rec.vhdx, note: `the Dev Drive that holds this root: a VHDX in ${host}, mounted at ${rec.letter}:, and the SYSTEM tasks ffsb-helper-mount, -trim and -compact` });
+  noteOutside(m, { kind: 'file', name: path.join(host, 'start-daemon.ps1'), note: 'the daemon task\'s start: waits for the Dev Drive, then runs the daemon on it (w1070)' });
+  noteOutside(m, { kind: 'file', name: path.join(host, 'moved.json'), note: 'where the root is, for anyone given the folder it was installed into' });
+}
+
 /** Ask a yes/no question on the terminal; `yes` answers it. */
 async function confirm(question: string, yes: boolean): Promise<boolean> {
   if (yes) return true;
@@ -1199,7 +1426,7 @@ async function confirm(question: string, yes: boolean): Promise<boolean> {
 }
 
 export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'prepare' | 'finish' = 'all', facts?: Awaited<ReturnType<typeof gatherFacts>>): Promise<boolean> {
-  const l = layoutOf(path.resolve(o.root));
+  let l = layoutOf(path.resolve(o.root));
   o.root = l.root;
   say(`FF Factory worker install into ${l.root}`);
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -1215,6 +1442,46 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   const id = f.credentialId!;
   say(`OK: machine ${id}, node ${f.nodeVersion}, git ${f.git!.join('.')}, Claude Code ${f.claude ?? `${f.claudeShim} (an npm shim: agents use the Agent SDK's own Claude Code)`}, ${f.freeGB ?? '?'} GB free.`);
 
+  // The old install's half of a reinstall (w1070): checked, then taken away; it leaves only what it carries over.
+  let carry: ReinstallCarry | undefined;
+  if (o.reinstall) {
+    carry = await reinstallPrepare(o, l);
+    if (!carry) return false;
+  }
+
+  // 0. A new Windows install with a Dev Drive puts the whole root on it (w1070, lothsahn: "If using a dev drive, the entire
+  //    folder structure should be under V:"): the folder given becomes the host folder, which keeps the VHDX and what starts
+  //    before the drive is attached (driveRoot.ts HOST_FILES), and the root is <letter>:\ffw.
+  let fresh: DevDriveRecord | undefined;
+  if (isWin && !o.update && !readManifest(l.root) && !readMoved(l.root)) {
+    const dec = decideDevDrive({ platform: process.platform, update: false, flag: o.devDrive, hasOne: false, rootFileSystem: f.rootFileSystem });
+    if (dec.action === 'ensure') {
+      try {
+        const host = l.root;
+        fs.mkdirSync(host, { recursive: true });
+        const maxGB = o.devDriveMaxGB ?? defaultMaxGB(f.rootTotalGB);
+        const st = await devDriveEnsure(host, ['-Root', host, '-MaxGB', String(maxGB), '-NoTasks', ...(carry?.letter ? ['-Letter', carry.letter] : []), ...(f.probe.user ? ['-User', f.probe.user] : []), ...(f.probe.sid ? ['-UserSid', f.probe.sid] : []), ...(o.devDriveSkip ? ['-Skip', o.devDriveSkip] : [])]);
+        const root = driveRootOf(st.letter);
+        fs.mkdirSync(root, { recursive: true });
+        writeMoved(host, root);
+        fresh = { vhdx: st.vhdx || path.join(host, 'devdrive.vhdx'), letter: st.letter, maxGB: st.maxGB || maxGB, inUse: true, rootOnDrive: true, host };
+        say(`Dev Drive: ${fresh.vhdx} as ${st.letter}: (up to ${fresh.maxGB} GB). The root goes on it, ${root}; ${host} keeps only the drive's file and the daemon's start.`);
+        l = layoutOf(root);
+        o.root = root;
+        if (carry) {
+          // What the old daemon.json named in the old root names the same place in the new one; the clone seeds the new clone.
+          o.carry = rebaseJson(o.carry ?? {}, moveMap(carry.oldRoot, root, carry.oldDrive)).value;
+          if (fs.existsSync(path.join(carry.keep, 'repo', 'HEAD'))) o.seedFrom = path.join(carry.keep, 'repo');
+          await reinstallCarryIn(carry, l);
+        }
+      } catch (e) {
+        if (o.devDrive === 'on' || carry) throw e;
+        o.devDrive = 'off';
+        say(`Dev Drive: not made, and the install carries on without it in ${l.root}: ${(e as Error).message}\nRun the update with -DevDrive once that is fixed, or install with -NoDevDrive to stop this message.`);
+      }
+    }
+  }
+
   // 1. The root and its manifest.
   // A junction to a Dev Drive that is detached right now dangles (mkdir would refuse it): setupDevDrive attaches the drive and looks after those two.
   const isLink = (d: string) => {
@@ -1228,6 +1495,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   const now = new Date().toISOString();
   const prev = readManifest(l.root);
   const m = manifestFor(prev, o, id, l.root, now);
+  if (fresh) notePinnedDrive(m, fresh);
   writeManifest(l.root, m);
   const pf = syncPlayerFolders(l.players, playerFolders(o.maxSandboxes));
   say(`Player folders: ${playerFolders(o.maxSandboxes).length} (slot1-0..slot${o.maxSandboxes}-1 and slotnightly-0, -1)${pf.made.length ? `, ${pf.made.length} made` : ''}${pf.removed.length ? `; removed ${pf.removed.join(', ')}` : ''}${pf.kept.length ? `; still in use: ${pf.kept.join(', ')}` : ''}.`);
@@ -1240,6 +1508,21 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
 
   // 3. The game repo, bare, and the installer's own checkout.
   await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees, o.seedFrom, !o.update);
+  if (carry && o.seedFrom) {
+    // Every local branch of the old clone as well (the seed brings origin's only): a branch whose newest commits never reached
+    // origin is kept.
+    const heads = await exec('git', ['-C', l.repo, 'fetch', '--no-tags', '--update-head-ok', o.seedFrom, '+refs/heads/*:refs/heads/*'], { timeoutMs: 30 * 60_000 });
+    if (heads.code !== 0) throw new Error(`could not carry the old clone's branches: ${(heads.stderr || heads.stdout).trim().split('\n').slice(-2).join(' ')}; ${o.seedFrom} is left as it was`);
+    // The old clone's Git LFS objects too (a fetch from it copies none): the new sandboxes check out without downloading them again.
+    const lfs = path.join(o.seedFrom, 'lfs', 'objects');
+    if (fs.existsSync(lfs)) await robocopy(lfs, path.join(l.repo, 'lfs', 'objects'), true);
+    await exec('cmd.exe', ['/d', '/c', 'rd', '/s', '/q', o.seedFrom], { timeoutMs: 30 * 60_000 });
+    try {
+      fs.rmdirSync(carry.keep);
+    } catch {
+      say(`(${carry.keep} still holds ${fs.existsSync(carry.keep) ? fs.readdirSync(carry.keep).join(', ') : 'nothing'}: left there)`);
+    }
+  }
   await syncSource(l, from);
   if (o.owner) await giveRoot(l, o.owner);
 
@@ -1574,8 +1857,37 @@ export function updateVerdict(target: string, installed: string | undefined, vie
  * task's user. It fetches no game repo, takes ff-factory anonymously, restarts the daemon and checks the portal sees the
  * new code online. Prints the commit and settings before and after. Returns whether the portal sees it.
  */
-export async function update(root: string, f: UpdateFlags): Promise<boolean> {
+/**
+ * `worker.ts reinstall` (w1070, lothsahn: "Instead of doing a move, can we just do a fresh reinstall on LothDesktop instead?"):
+ * make this machine's install again with its whole root on a new Dev Drive. Every setting and the credential come from the
+ * install there, as for an update; --dev-drive-max-gb sizes the new drive. Asks nothing (an ssh session has no console).
+ */
+export async function reinstall(root: string, f: UpdateFlags): Promise<boolean> {
   const l = layoutOf(path.resolve(root));
+  const m = readManifest(l.root);
+  if (!m) throw new Error(`no worker install at ${l.root} (no root.json)${readMoved(l.root) ? `: its root is ${readMoved(l.root)} already` : ''}`);
+  const configFile = path.join(l.daemon, 'daemon.json');
+  const config = JSON.parse(fs.readFileSync(configFile, 'utf8')) as Record<string, unknown>;
+  if (!fs.existsSync(l.token)) throw new Error(`no credential at ${l.token}: a reinstall reuses the machine's own`);
+  const token = fs.readFileSync(l.token, 'utf8').trim();
+  if (credentialId(token) !== m.machineId) throw new Error(`${l.token} does not hold machine ${m.machineId}'s credential`);
+  let owner = f.owner;
+  if (isWin && elevated() && !owner) {
+    const who = await taskUser(m.service);
+    if (!who) throw new Error(`this session is elevated and the ${m.service} task is missing, so there is no user to give the files to: pass --owner <user>`);
+    owner = who.owner;
+    say(`Elevated session: what the reinstall makes goes to ${owner}, the user the ${m.service} task runs as.`);
+  }
+  const { moveToDevDrive: _m, update: _u, ...o } = planUpdate(l.root, m, config, token, { ...f, ...(owner ? { owner } : {}) });
+  return install({ ...o, reinstall: true, devDrive: 'on' });
+}
+
+export async function update(root: string, f: UpdateFlags): Promise<boolean> {
+  // The root moved onto its Dev Drive (w1070): the folder it was installed into says where.
+  const given = path.resolve(root);
+  const moved = !fs.existsSync(path.join(given, 'root.json')) ? readMoved(given) : undefined;
+  if (moved) say(`${given} holds the Dev Drive of this install; its root is ${moved} (moved.json): updating it there.`);
+  const l = layoutOf(moved ?? given);
   const m = readManifest(l.root);
   if (!m) throw new Error(`no worker install at ${l.root} (no root.json): install it first (docs/worker-install.md, "Install")`);
   const configFile = path.join(l.daemon, 'daemon.json');
@@ -1779,13 +2091,13 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
   const busy = w.ok ? w.me.agents.filter((a) => a.midTurn) : [];
   // The sandboxes on a Dev Drive can only be read while it is attached (w900): attach it first, or refuse.
   if (isWin && m.devDrive?.inUse) {
-    let st = await devDriveStatus(l);
+    let st = await devDriveStatus(hostDirOf(m.devDrive, l.root));
     if (!st.attached) {
       say(`The Dev Drive (${m.devDrive.letter}:) is not attached; starting ffsb-helper-mount...`);
       await exec('schtasks', ['/run', '/tn', 'ffsb-helper-mount'], { timeoutMs: 30_000 });
       for (let i = 0; i < 30 && !st.attached; i++) {
         await new Promise((r) => setTimeout(r, 2000));
-        st = await devDriveStatus(l);
+        st = await devDriveStatus(hostDirOf(m.devDrive, l.root));
       }
     }
     if (!st.attached && !o.force) {
@@ -1847,7 +2159,7 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
   if (isWin && m.devDrive) {
     // The root's two junctions first (a recursive delete must never meet them), then the drive: its tasks, the attachment and the VHDX.
     for (const dir of [l.sandboxes, l.seed]) if (unlinkRootFolder(dir)) say(`Removed the junction ${dir}.`);
-    steps.push({ kind: 'dev-drive', args: devDrivePsArgs(['-Action', 'remove', '-Root', l.root]) });
+    steps.push({ kind: 'dev-drive', args: devDrivePsArgs(['-Action', 'remove', '-Root', hostDirOf(m.devDrive, l.root)]) });
   }
   if (steps.length) say(await elevatedSteps(steps));
   if (!isWin && slotConfigRoot(macSlotConfig())?.startsWith(l.root)) {
@@ -1864,11 +2176,20 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
     say(`Removed the Unity slots mailbox ${o2.name}.`);
   }
 
-  // 5. The root itself: rmdir /s and rm -rf unlink junctions and symlinks, they never follow them.
+  // 5. The root itself: rmdir /s and rm -rf unlink junctions and symlinks, they never follow them. A root on its Dev Drive
+  //    (w1070) went with the drive; what its host folder kept goes now, and the folder when that was all.
   process.chdir(os.tmpdir());
-  const rm = isWin ? await exec('cmd.exe', ['/d', '/c', 'rmdir', '/s', '/q', l.root]) : await exec('rm', ['-rf', l.root]);
-  if (fs.existsSync(l.root)) throw new Error(`could not delete ${l.root} (${rm.code}): ${(rm.stderr || rm.stdout).trim().slice(-400)}; a process may still hold a file there`);
+  if (fs.existsSync(l.root)) {
+    const rm = isWin ? await exec('cmd.exe', ['/d', '/c', 'rmdir', '/s', '/q', l.root]) : await exec('rm', ['-rf', l.root]);
+    if (fs.existsSync(l.root)) throw new Error(`could not delete ${l.root} (${rm.code}): ${(rm.stderr || rm.stdout).trim().slice(-400)}; a process may still hold a file there`);
+  }
   say(`Deleted ${l.root}.`);
+  if (m.devDrive?.rootOnDrive && m.devDrive.host && fs.existsSync(m.devDrive.host)) {
+    const host = m.devDrive.host;
+    for (const n of fs.readdirSync(host).filter(isHostFile)) fs.rmSync(path.join(host, n), { force: true });
+    if (!fs.readdirSync(host).length) fs.rmdirSync(host);
+    say(`Removed what ${host} kept for the drive${fs.existsSync(host) ? ` (the folder stays: it holds ${fs.readdirSync(host).join(', ')})` : ', and the folder'}.`);
+  }
 
   // 6. Prove it.
   const left = await check(l.root, m);
@@ -2050,7 +2371,7 @@ async function readCredential(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0].trim();
 }
 
-const USAGE = `node scripts/worker/worker.ts <install|update|uninstall|check> --root <folder> [options]
+const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall|check> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
             [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
             [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
@@ -2069,6 +2390,11 @@ const USAGE = `node scripts/worker/worker.ts <install|update|uninstall|check> --
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
             [--voice-whisper <model>|off] (Whisper on this machine's GPU for the portal's mic, w615; kept on a re-run)
+  reinstall [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--owner <user>] [--max-sandboxes N] [--max-agents-per-sandbox N] [--max-unity N]
+            (Windows, w1070: this machine's install made again with its whole root on a new Dev Drive, <letter>:\\ffw; the root
+             given keeps only the VHDX and the daemon's start. Every setting and the credential carried. Refuses while an agent
+             or a process uses it, or a sandbox holds work not on origin. Keeps the clone (as the new one's seed), the nightly
+             lab, tmp, scratch and the Library seed; deletes the rest, the old VHDX included)
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
   migrate   [--from <old daemon folder>] [--from-service <its task or label>] [--old-slots <dir>]
@@ -2137,6 +2463,19 @@ export async function main(argv = process.argv.slice(2)) {
       ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
       ...devDriveFlags(opts, flags),
     });
+  } else if (cmd === 'reinstall') {
+    if (!opts.root) throw new Error(USAGE);
+    const opt = (k: string) => (opts[k] === undefined ? undefined : Number(opts[k]));
+    const ok = await reinstall(opts.root, {
+      maxSandboxes: opt('max-sandboxes'),
+      maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
+      maxUnity: opt('max-unity'),
+      ...(opts.owner ? { owner: opts.owner } : {}),
+      ...(flags.has('no-firewall') ? { firewall: false } : {}),
+      ...(flags.has('no-ssh') ? { ssh: false } : {}),
+      ...devDriveFlags(opts, flags),
+    });
+    if (!ok && !process.exitCode) process.exitCode = 1;
   } else if (cmd === 'elevated') {
     // The install's one administrator step (elevatedSteps): run by an elevated copy of this script.
     if (!opts.steps || !opts.log) throw new Error(USAGE);

@@ -12,16 +12,16 @@ decisions of 2026-10-06 override it where they differ (listed at the end).
 ## The layout
 
 ```text
-<root>/                 any folder (lothsahn, decision 1): D:\work\ffw, F:\ffw, ~/ffw ...
+<root>/                 any folder (lothsahn, decision 1): D:\work\ffw, F:\ffw, ~/ffw ... On Windows with a Dev Drive the root
+                        is <letter>:\ffw on the drive, and the folder given keeps only the drive (see "The whole root on
+                        the Dev Drive")
   root.json             the install's id, layout version, machine, service name, and every thing outside the root it made
   daemon/               app/ (the daemon's code), src/ (the ff-factory checkout it was installed from), daemon.json (no
                         token), run-daemon.ps1, logs/, agents/ (standing agents), unity-mcp/, state files
   secrets/              machine-token: the machine's credential, owner-only (Windows ACL: the user and SYSTEM; macOS 0700)
   repo/                 the install's own bare clone of the game repo; every sandbox is a worktree of it
-  sandboxes/<name>/     the sandboxes (with a Dev Drive: a junction to <letter>:\sandboxes, see "The Dev Drive")
-  seed/Library/         the Library seed new sandboxes are warmed from (with a Dev Drive: a junction to <letter>:\seed)
-  devdrive.vhdx         Windows, only with a Dev Drive (w900): the drive's file, dynamically expanding; devdrive.json beside it
-                        says which letter it holds and how it was formatted
+  sandboxes/<name>/     the sandboxes
+  seed/Library/         the Library seed new sandboxes are warmed from
   players/slotK-0, -1/  each sandbox slotK's two player folders, K = 1..N, and slotnightly-0, -1 for the nightly lab
                         (scripts/nightly/player_slots.py, layout sandbox-pairs, w576): FF_PLAYER_SLOT_ROOT for agents
   nightly/              the nightly lab: FF_NIGHTLY_ROOT
@@ -53,7 +53,7 @@ MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\
 | Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile) and group "Final Factory Unity editors" (each Unity editor the Hub has) | none |
 | The slot config for scripts outside the daemon | `%ProgramData%\FinalFactory\player-slots.json` | `~/.config/finalfactory/player-slots.json` |
 | The Unity slots mailbox (`~/.ff-factory/unity-slots`, its standard place: no pointer is written, so the daemon, its agents and the nightly harness all use the same one, w469) | `%USERPROFILE%\.ff-factory\unity-slots` | `~/.ff-factory/unity-slots` |
-| The Dev Drive (w900) | the SYSTEM tasks `ffsb-helper-mount` (also at every boot), `-trim` and `-compact`, and their script in `%ProgramData%\ffsb-helpers`; the drive's file is inside the root | none |
+| The Dev Drive (w900, w1070) | the SYSTEM tasks `ffsb-helper-mount` (also at every boot), `-trim` and `-compact`, and their script in `%ProgramData%\ffsb-helpers`; the folder given at install, which keeps the drive's file and what starts before it (`devdrive.vhdx`, `devdrive.json`, `start-daemon.ps1`, `moved.json`) | none |
 | The portal's record | removed through `POST /machine/unenroll` | the same |
 | The portal's ssh key (w568) | its line in `C:\ProgramData\ssh\administrators_authorized_keys` (a member of Administrators) or `%USERPROFILE%\.ssh\authorized_keys`; removed unless it was there before | its line in `~/.ssh/authorized_keys`; the same |
 
@@ -402,6 +402,57 @@ The installer starts the daemon only with `Start-ScheduledTask` after it has sto
 stops what runs from the root or the drive, takes the junctions away, removes the three SYSTEM tasks (only those whose
 arguments name this root's VHDX), detaches the drive and deletes the file, then deletes the root. `check` lists the
 tasks and the file. Nothing is deleted outside the root's folder; the drive's contents go with its file.
+
+### The whole root on the Dev Drive (w1070)
+
+**TL;DR:** On Windows with a Dev Drive the **whole worker root lives on the drive**, at `<letter>:\ffw` (`V:\ffw` on
+LothDesktop), with no junctions. The folder the person gave (`D:\work\ffw`) is only the drive's **host folder**. FF Factory
+reports and guards the drive's space as the machine's disk. lothsahn, 2026-10-12: "If using a dev drive, the entire folder
+structure should be under V: Then we won't need the folder symlinks or anything"; "report space of the V: drive to ff factory
+instead of the D: space for disk. And then cap the vdisk file at 275GB".
+
+**What stays in the host folder, and why** (`scripts/worker/driveRoot.ts` `HOST_FILES`):
+
+| File | Why it cannot be on the drive |
+|---|---|
+| `devdrive.vhdx` | the drive itself: a file cannot hold the volume it is the file of |
+| `devdrive.json` | its letter, read by the boot mount (`ffsb-helper-mount`, SYSTEM, 30 s after boot) and by `start-daemon.ps1` before the drive is attached |
+| `start-daemon.ps1` (and `start-daemon.log`) | the `FFFactoryDaemon` task's action. The task starts at logon, which can come before the boot mount; a task whose action is on a missing drive does not start. It reads the letter from `devdrive.json`, starts `ffsb-helper-mount` after 20 s, runs `<letter>:\ffw\daemon\run-daemon.ps1` as its child once it is there, and gives up after 10 minutes (Task Scheduler retries a minute later) (`server/machineDeployWin.ts` `startDaemonScript`) |
+| `moved.json` | where the root is: `worker.ts update --root D:\work\ffw` and `install.ps1 -Update -Root D:\work\ffw` follow it |
+
+The helper scripts the boot mount runs stay in `%ProgramData%\ffsb-helpers`. A changed letter is followed: the boot mount
+repoints `daemon.json`, the pool's record and the worktrees on the drive (`devdrive-lib.ps1` `Update-LetterDependents`), and
+`start-daemon.ps1` reads the letter each time.
+
+**A new install** (`install.ps1`, `worker.ts install`) makes the drive first, in the folder given, and installs the root on it
+(`install` step 0). **An existing w900 install** (sandboxes and seed on the drive behind junctions, the rest on D:) is made
+again with **`install.ps1 -Reinstall -Root D:\work\ffw [-DevDriveMaxGB 275]`** (`worker.ts reinstall`; lothsahn: "Instead of
+doing a move, can we just do a fresh reinstall on LothDesktop instead?"):
+
+1. It refuses, changing nothing, while the portal names an agent on the machine, a process uses the root or the drive (an
+   editor, a build, a player, the nightly lab), or a sandbox holds a commit no remote has or an uncommitted file
+   (`sandboxRisks`; commit each on its branch and push first). It needs an elevated session (an administrator's ssh).
+2. It stops the daemon, copies the Library seed off the old drive into `<host>\.reinstall` when it fits with 10 GB to spare
+   (else the first new sandbox imports its Library, an hour or more), deletes the old drive and its tasks, puts the clone,
+   `nightly`, `tmp` and `scratch` aside in `<host>\.reinstall`, and deletes everything else of the old install.
+3. It installs as new with every setting and the credential of the old install (paths in the carried `daemon.json` settings
+   rebased onto the new root): a new drive (`-DevDriveMaxGB`), the root on it, the clone seeded from the old one (its Git LFS
+   objects too), `nightly`, `tmp`, `scratch` and the seed moved in file by file, the nightly lab's task repointed, the sandboxes'
+   Claude conversations renamed to the same sandbox names in the new root.
+
+Lost by a reinstall: the sandboxes' worktrees (made again from their pushed branches when work is placed there), their
+Libraries (block-cloned from the seed again), the players' copied builds, and the daemon's own state (its pool record, ended
+agents' records).
+
+**The disk FF Factory reports for the machine is the drive's.** The meters (`stats`) measure the volume of the clone, the
+clean-up the volumes of the home folder, the clone and the sandboxes, the pool's guard the sandboxes' volume: all `V:` once
+the root is there. The host guard still watches the host volume, because a dynamic VHDX that cannot grow takes the drive away
+(BEAST, 2026-09-24), but it judges it by **whether the file can still grow to its maximum** (`hostGuard.devDriveVhdx`,
+`devDriveMaxGB`; `server/hostHealth.ts` `roomLevel`), not by a number of GB: with a 275 GB cap and a file at 250 GB, D: at
+39 GB free is fine; with the file at 200 GB it warns (no new editors or agents), and below `criticalFreeGB` it is critical.
+
+The maximum of an existing drive cannot be lowered in place (ReFS cannot shrink a volume, and `Optimize-VHD` needs the Hyper-V
+tools; both measured on LothDesktop on 2026-10-12): an update keeps it and says so; a reinstall makes the drive again.
 
 ### The portal's ssh (w568)
 

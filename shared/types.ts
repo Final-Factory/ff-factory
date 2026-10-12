@@ -1218,7 +1218,7 @@ export type DiskLevel = 'ok' | 'warn' | 'critical';
 export interface HostHealth {
   checkedAt: string;
   /** Each watched volume (the sandbox root's and config hostDiskPaths'), with its guard level. */
-  disks: { path: string; freeBytes?: number; totalBytes?: number; level: DiskLevel }[];
+  disks: { path: string; freeBytes?: number; totalBytes?: number; level: DiskLevel; growthBytes?: number }[];
   /** The worst disk level. */
   level: DiskLevel;
   /** The sandbox drive: there, gone, being reattached, or given up on (see detail). */
@@ -1248,6 +1248,12 @@ export interface MachineGuardSettings {
   remountMinFreeGB: number;
   /** The volumes that hold the Dev Drive's VHDX (config hostDiskPaths, e.g. ["C:/"]). */
   hostDiskPaths: string[];
+  /**
+   * The VHDX and its maximum size in GB (w1070): its volume is then judged by whether the file can still grow that far
+   * (server/hostHealth.ts roomLevel), not by warnFreeGB. Without them, by warnFreeGB as before.
+   */
+  devDriveVhdx?: string;
+  devDriveMaxGB?: number;
   /** Automation browsers older than this, and orphans, are ended (hours; 0: never), every reapEveryMinutes. */
   reapBrowsersAfterHours: number;
   reapEveryMinutes: number;
