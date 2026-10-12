@@ -92,8 +92,8 @@
     "reviewers": []
   },
   "hostGuard": {
-    "warnFreeGB": 80,
-    "criticalFreeGB": 40,
+    "warnFreeGB": 40,
+    "criticalFreeGB": 10,
     "remountMinFreeGB": 30,
     "devDriveVhdx": "",
     "cleanup": {

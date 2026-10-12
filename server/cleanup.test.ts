@@ -326,7 +326,7 @@ test('runner: hourly, every 15 minutes below the soft threshold, one notice a da
 });
 
 test('thresholds: host soft default, per-machine settings, and what set_app_config accepts', (t) => {
-  assert.equal(hostSoftFreeGB({ warnFreeGB: 80, cleanup: { ...DEFAULT_CLEANUP } }), 120);
+  assert.equal(hostSoftFreeGB({ warnFreeGB: 80, cleanup: { ...DEFAULT_CLEANUP } }), 80, 'unset: the warn level (w1101), no longer warn + 40');
   assert.equal(hostSoftFreeGB({ warnFreeGB: 80, cleanup: { ...DEFAULT_CLEANUP, softFreeGB: 150 } }), 150);
   assert.deepEqual(machineCleanupSettings({}, 'm3'), { everyMinutes: 60, softFreeGB: 80, staleOutput: STALE_OUTPUT_DEFAULTS });
   const machines = { cleanup: { softFreeGB: { '*': 70, m3: 40 }, everyMinutes: 30 } };
@@ -334,8 +334,9 @@ test('thresholds: host soft default, per-machine settings, and what set_app_conf
   assert.deepEqual(machineCleanupSettings({ machines }, 'lothdesktop'), { everyMinutes: 30, softFreeGB: 70, staleOutput: STALE_OUTPUT_DEFAULTS });
   assert.equal(machineCleanupSettings({ machines: { cleanup: { staleOutput: { mode: 'dry-run', shaBuildDays: 5 } } } }, 'm5').staleOutput.mode, 'dry-run', 'machines.cleanup.staleOutput reaches every daemon');
 
-  const cfg = { hostGuard: { warnFreeGB: 80, cleanup: { ...DEFAULT_CLEANUP } } } as unknown as Config;
-  assert.throws(() => normalizeSetting('hostGuard.cleanup.softFreeGB', 60, cfg), /from 81 to 2000/);
+  const cfg = { hostGuard: { warnFreeGB: 80, criticalFreeGB: 40, cleanup: { ...DEFAULT_CLEANUP } } } as unknown as Config;
+  assert.throws(() => normalizeSetting('hostGuard.cleanup.softFreeGB', 30, cfg), /from 41 to 2000 \(above hostGuard\.criticalFreeGB\)/);
+  assert.equal(normalizeSetting('hostGuard.cleanup.softFreeGB', 60, cfg), 60, 'at or below the warn level is fine (w1101)');
   assert.equal(normalizeSetting('hostGuard.cleanup.softFreeGB', '130', cfg), 130);
   assert.throws(() => normalizeSetting('machines.cleanup.everyMinutes', 5, cfg), /0 \(only when disk space is low\) or/);
   assert.equal(normalizeSetting('machines.cleanup.everyMinutes', 0, cfg), 0);
