@@ -6,3 +6,6 @@
   is used up stops it, and the error says so ("... is used up, so the orchestration worker cannot start until a token
   resets"). The orchestrators already used the pool up past the caps; follow-ups to workers (`message_agent`) stay held like
   any worker run. Applies after a portal deploy. Docs: vault.md section 4, ops-worker.md. Tests: `opsWorkerPool.test.ts`.
+- **The sandbox guard's "PRs into master/main" refusal says when the repo was only unknown** (w1112): `cd $TMPDIR/ff-factory &&
+  gh pr create --base main` was refused as the game repo's, because a `cd` to a path with a variable is not followed. The
+  reason now says so and names the way: `gh pr create -R <owner>/<repo>`.
