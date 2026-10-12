@@ -236,8 +236,10 @@ sends each connected page only its own: `warningsForUser`, `hostForUser`); the o
 or retired ("Every one of your Claude tokens is at a limit (...). New work waits until the first one frees up (Fri 14:00Z).")
 or every one used up ("All your Claude tokens are used up (...) ... and the orchestrator is stopped; there is no override.").
 A token that is merely busy with its one job (`slot-taken`) shows no banner: the next job starts when the running one
-finishes, which the queue's "held" reason says. The banner about the dispatcher's reserve (`reserve:…`, no person)
-is for **everyone logged in**, as before.
+finishes, which the queue's "held" reason says. The banner about the dispatcher's reserve (`reserve:…`) is for **the
+person whose pool holds the dispatcher's token** (its vault entry's owner), and for each owner when the entry has none; never
+for everyone (w1108, lothsahn: "Please only show the dispatcher message to the operator whose pool that token is in.";
+`reserveWarnings`, `server/secrets.ts`). Its text and the system_status line are unchanged.
 
 **No token, no run (w1078).** A person with **no** Claude token in the vault, or none that the key opens, has no account to
 run on, and nothing stands in for it: the host token, the token file, the stored login, a machine's login and a per-person

@@ -309,6 +309,8 @@ export interface ReservedCredential {
   /** "the dispatcher's vault token vault-lothsahn-1 …dAAA" */
   what: string;
   role: 'dispatcher';
+  /** Whose pool the token is in: its vault entry's owner (Vault.pools groups by it), absent when it has none (w1108). */
+  person?: string;
 }
 
 /**
@@ -318,7 +320,7 @@ export interface ReservedCredential {
 export function reservedCredentials(cfg: Pick<Config, 'claudeAccounts'>, ctx: Pick<VaultContext, 'vault'> | undefined = vaultContext()): ReservedCredential[] {
   const pinned = pinnedDispatcherEntry(cfg);
   const got = pinned !== undefined ? ctx?.vault.claudeByName(pinned) : undefined;
-  return got ? [{ key: tokenKey(got.token), what: `the dispatcher's vault token ${got.entry.name} …${got.entry.last4}`, role: 'dispatcher' }] : [];
+  return got ? [{ key: tokenKey(got.token), what: `the dispatcher's vault token ${got.entry.name} …${got.entry.last4}`, role: 'dispatcher', ...(got.entry.owner ? { person: got.entry.owner.toLowerCase() } : {}) }] : [];
 }
 
 export interface ReserveLine {
@@ -382,4 +384,13 @@ export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts'>, payer: st
   return [
     `Claude account per agent (every one a vault token, docs/vault.md; w1078: no host token, token file or login): the orchestrators and the orchestration worker on their person's own pool; the dispatcher on ${dispatcher}; workers and standing agents on every machine on the pool of the person their work is for. A person with no usable token waits or is told why; nothing falls back to another credential.`,
   ];
+}
+
+/**
+ * The dashboard banners for the dispatcher's buffer (w1108, lothsahn: "Please only show the dispatcher message to the
+ * operator whose pool that token is in."): one for the person whose vault pool holds the dispatcher's token, never for
+ * everyone; a token in nobody's pool goes to each owner instead. The text is reserveLines' own.
+ */
+export function reserveWarnings(lines: readonly ReserveLine[], owners: readonly string[]): { id: string; kind: 'reserve'; person: string; text: string }[] {
+  return lines.flatMap((r) => (r.warning ? (r.cred.person ? [r.cred.person] : owners).map((person) => ({ id: `reserve:${r.cred.key}`, kind: 'reserve' as const, person, text: r.warning! })) : []));
 }
