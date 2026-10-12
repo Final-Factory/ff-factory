@@ -28,7 +28,7 @@ const tok = (name: string, o: { session?: number; weekly?: number; sessionHours?
 const L = POOL_DEFAULTS;
 
 /** pickPool at the test clock (the tokens' resets are relative to NOW). */
-const pickAt = (tokens: PoolToken[], o: { orchestrator: boolean; limits: typeof L; sticky?: string }) => pickPool(tokens, { ...o, now: NOW });
+const pickAt = (tokens: PoolToken[], o: { orchestrator: boolean; ops?: boolean; limits: typeof L; sticky?: string }) => pickPool(tokens, { ...o, now: NOW });
 
 test('pool limits: defaults 80 / 95 / 99 and 5% a day + 20%, config overrides, bad values refused', () => {
   assert.deepEqual(poolLimits(undefined), { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20 });
@@ -146,21 +146,29 @@ test('pickPool: every token capped holds a worker with the reason and the first 
   assert.equal(pickAt([tok('ret', { weekly: 99.5, weeklyDays: 2 })], { orchestrator: true, limits: L }).how, 'over-cap');
   // Its own sticky token stays while capped.
   assert.equal(pickAt([a, b], { orchestrator: true, limits: L, sticky: 'a' }).token?.name, 'a');
+  // w1112: no cap holds the ops worker either (held, one at a time with its slot taken, retired): the most room first.
+  const ops = pickAt([a, b], { orchestrator: false, ops: true, limits: L });
+  assert.equal(ops.token?.name, 'b');
+  assert.equal(ops.how, 'over-cap');
+  assert.equal(pickAt([one], { orchestrator: false, ops: true, limits: L }).token?.name, 'one');
+  assert.equal(pickAt([tok('ret', { weekly: 99.5, weeklyDays: 2 })], { orchestrator: false, ops: true, limits: L }).how, 'over-cap');
 });
 
 test('pickPool: used up is used up for everyone; a pool with one token left serves the orchestrator', () => {
   const dead = tok('dead', { weekly: 100, weeklyDays: 2 });
   const dead2 = tok('dead2', { session: 100, sessionHours: 1 });
-  for (const orchestrator of [false, true]) {
-    const p = pickAt([dead, dead2], { orchestrator, limits: L });
-    assert.equal(p.token, undefined, `orchestrator=${orchestrator}`);
+  for (const [orchestrator, ops] of [[false, false], [true, false], [false, true]]) {
+    const p = pickAt([dead, dead2], { orchestrator, ops, limits: L });
+    assert.equal(p.token, undefined, `orchestrator=${orchestrator} ops=${ops}`);
     assert.match(p.held?.why ?? '', /^every token is used up \(/);
     assert.equal(p.held?.next, iso(NOW + 1 * 3_600_000), 'the 5-hour window frees first');
   }
   const capped = tok('capped', { session: 91, sessionHours: 1 });
   assert.equal(pickAt([dead, capped], { orchestrator: true, limits: L }).token?.name, 'capped');
   assert.equal(pickAt([dead, capped], { orchestrator: false, limits: L }).token, undefined);
+  assert.equal(pickAt([dead, capped], { orchestrator: false, ops: true, limits: L }).token?.name, 'capped', 'w1112: the ops worker too');
   assert.equal(pickAt([], { orchestrator: true, limits: L }).token, undefined, 'no tokens: the caller decides (the transition)');
+  assert.equal(pickAt([], { orchestrator: false, ops: true, limits: L }).token, undefined);
   assert.match(heldReason([dead], new Map([[dead.id, judge(dead, L)]])).why, /^every token is used up \(dead: /);
   assert.equal(clock(undefined), 'its next reset');
   assert.equal(clock('2026-10-09T14:05:00Z'), 'Fri 14:05Z');
@@ -375,9 +383,9 @@ test("w971: a pool token inside the dispatcher's reserve goes to no worker, no o
   const v = judge(ben2, L, NOW);
   assert.equal(v.state, 'reserved');
   assert.match(v.why, /inside the buffer kept for the dispatcher \(weekly 97% \(buffer 20%\), resets /);
-  for (const orchestrator of [false, true]) {
+  for (const [orchestrator, ops] of [[false, false], [true, false], [false, true]]) {
     for (const list of [[ben2, ben1], [ben1, ben2]]) {
-      const p = pickAt(list, { orchestrator, limits: L });
+      const p = pickAt(list, { orchestrator, ops, limits: L });
       assert.equal(p.token?.name, 'vault-ben-1', `orchestrator=${orchestrator}`);
       assert.equal(p.how, 'normal');
     }
@@ -391,7 +399,7 @@ test("w971: a pool token inside the dispatcher's reserve goes to no worker, no o
   assert.equal(pickAt([roomy, tok('other', { weekly: 90, weeklyDays: 6, session: 0 })], { orchestrator: false, limits: L }).token?.name, 'other');
 });
 
-test('w971: nothing else has room: a worker (and the ops worker) is held with the reason, the orchestrator uses the reserved token', () => {
+test('w971: nothing else has room: a worker is held with the reason, the orchestrator uses the reserved token; the ops worker the other token first (w1112)', () => {
   const ben2 = withReserve(tok('vault-ben-2', { weekly: 97, weeklyDays: 4, session: 5 }));
   const ben1held = tok('vault-ben-1', { weekly: 30, weeklyDays: 4, session: 90, sessionHours: 2 });
   const worker = pickAt([ben2, ben1held], { orchestrator: false, limits: L });
@@ -403,9 +411,23 @@ test('w971: nothing else has room: a worker (and the ops worker) is held with th
   assert.equal(orch.how, 'in-reserve');
   assert.equal(pickAt([ben2], { orchestrator: true, limits: L }).token?.name, 'vault-ben-2', 'a pool of one reserved token: the orchestrator runs on it as before');
   assert.equal(pickAt([ben2], { orchestrator: false, limits: L }).token, undefined);
+  // w1112: the ops worker is held by no cap, but keeps out of the dispatcher's buffer while the person has another token not
+  // used up: the held vault-ben-1 first; the reserved token only when it is the last.
+  const ops = pickAt([ben2, ben1held], { orchestrator: false, ops: true, limits: L });
+  assert.equal(ops.token?.name, 'vault-ben-1');
+  assert.equal(ops.how, 'over-cap');
+  const opsLast = pickAt([ben2, tok('gone', { session: 100, sessionHours: 1 })], { orchestrator: false, ops: true, limits: L });
+  assert.equal(opsLast.token?.name, 'vault-ben-2');
+  assert.equal(opsLast.how, 'in-reserve');
+  // The dispatcher's token held past the 5-hour cap (the 07:30Z picture, a pool of one): the ops worker runs on it.
+  const held = withReserve(tok('vault-lothsahn-1', { session: 92, sessionHours: 0.3, weekly: 40, weeklyDays: 3 }));
+  assert.equal(judge(held, L, NOW).state, 'held');
+  assert.equal(pickAt([held], { orchestrator: false, ops: true, limits: L }).token?.name, 'vault-lothsahn-1');
+  assert.equal(pickAt([held], { orchestrator: false, limits: L }).token, undefined, 'a worker waits');
   // A reserved token that is itself held or used up stays as those: used up is used up.
   const dead = withReserve(tok('dead', { weekly: 100, weeklyDays: 4 }));
   assert.equal(pickAt([dead], { orchestrator: true, limits: L }).token, undefined);
+  assert.equal(pickAt([dead], { orchestrator: false, ops: true, limits: L }).token, undefined);
   // The reserved token being the only one that is ok for the orchestrator, but the other capped: it prefers the reserved one (today's behaviour: an ok token wins).
   const capped = tok('capped', { weekly: 96, weeklyDays: 2, others: 1 });
   assert.equal(pickAt([ben2, capped], { orchestrator: true, limits: L }).token?.name, 'vault-ben-2');

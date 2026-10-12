@@ -278,9 +278,10 @@ export function machineRunEnv(
  * The environment of a portal-side Claude process for a person (w738): their own orchestrator ("orchestrator"), the
  * orchestration worker working for them ("ops"), or the dispatcher on the system payer's pool when it is pinned to no token.
  * Exactly that person's pool token as CLAUDE_CODE_OAUTH_TOKEN, every other Claude credential removed, picked now so a new
- * token applies to the next session start. All their tokens used up or capped: an orchestrator uses its pool up and then
- * stops, the ops worker is held like a worker; no token at all, or none opens: the start fails with the reason (w1078: no
- * fallback). Each throws PoolHeldError, and the session start shows it.
+ * token applies to the next session start. All their tokens capped: an orchestrator and the ops worker use the pool up past
+ * the caps (w1112: the ops worker is never held by them, like the dispatcher) and stop only once every token is used up;
+ * no token at all, or none opens: the start fails with the reason (w1078: no fallback). Each throws PoolHeldError, and the
+ * session start shows it.
  */
 export function poolRunEnv(run: { role: 'orchestrator' | 'ops'; personId: string | undefined; sessionId?: string }, ctx: VaultContext | undefined = vaultContext()): { env: Record<string, string | undefined>; account: string } {
   if (!ctx) throw new PoolHeldError(NO_VAULT);
@@ -289,7 +290,11 @@ export function poolRunEnv(run: { role: 'orchestrator' | 'ops'; personId: string
   const s = ctx.vault.forRun({ machineId: 'portal', role: run.role, userId: run.personId, sessionId: run.sessionId }, { claude: true, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
   for (const p of s.problems) ctx.onProblem?.(p);
   if (s.claude) return { env: { ...hostBaseEnv(), CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, account: poolAccount(s.claude, run.personId) };
-  if (s.claudeHold) throw new PoolHeldError(`${run.personId}'s Claude token pool is ${run.role === 'orchestrator' ? 'used up' : 'held'}: ${s.claudeHold.why}`, s.claudeHold.next);
+  // Only a pool whose every token is used up gets here (pickPool's use-it-up for both roles): Claude would refuse them all.
+  if (s.claudeHold) {
+    const stop = run.role === 'ops' ? ", so the orchestration worker cannot start until a token resets (Claude refuses a used-up token; the pool's limits never hold it, w1112)" : '';
+    throw new PoolHeldError(`${run.personId}'s Claude token pool is used up${stop}: ${s.claudeHold.why}`, s.claudeHold.next);
+  }
   const why = noTokenWhy(run.personId, s, what);
   ctx.onProblem?.(why);
   throw new PoolHeldError(why);

@@ -204,9 +204,10 @@ used up):
 
 | Role | What happens |
 |---|---|
-| A worker, a standing agent, the ops worker for them | **Held** with the reason ("lothsahn's Claude token pool is held: every token is at a limit (a: 5-hour 90% (>= 80): held until Fri 14:00Z; b: …): the first frees up Fri 14:00Z"): a worker's first prompt queues and is tried again, a standing agent's run ends "Could not start: <reason>" and the next scheduled run tries again; no fallback to another credential (none exists since w1078) or anyone else's pool |
+| A worker, a standing agent | **Held** with the reason ("lothsahn's Claude token pool is held: every token is at a limit (a: 5-hour 90% (>= 80): held until Fri 14:00Z; b: …): the first frees up Fri 14:00Z"): a worker's first prompt queues and is tried again, a standing agent's run ends "Could not start: <reason>" and the next scheduled run tries again; no fallback to another credential (none exists since w1078) or anyone else's pool |
+| The **ops worker** (w1112) | **Never held by the caps** (lothsahn, 2026-10-12: "The ops worker should not hold based on tokens, just like the dispatcher"): like the orchestrator below, it runs on the person's token with the most room while any is only past its caps, one at a time not binding it, but it takes the dispatcher's reserved token **last**, after every other token not used up. Once every token is used up (100%: Claude refuses them) it does not start: "<person>'s Claude token pool is used up, so the orchestration worker cannot start until a token resets (...)" with the reset (`poolRunEnv`). Its job is short and rare (a deploy, a restart, a machine update) and a person asked for it in their own words, so a cap that keeps workers from eating the person's own use has nothing to keep here |
 | A person's own **orchestrator** | **Uses the pool up**: while some token is only past its caps (held, one-at-a-time, retired) but not used up, it runs on the one with the most room (the soonest reset on a tie), and the one-at-a-time rule does not bind it. A token inside the dispatcher's reserve (next section) is used before any of those, and only when no other token passes its caps. Once every token is used up it **stops** with the reason and the next reset on the dashboard; there is no override and no fallback |
-| A token **inside the dispatcher's reserve**, when no other token of the person has room (w971) | A worker, a standing agent or the ops worker is **held** like at any limit (the reason names the buffer and when it lifts); the person's orchestrator runs on it, as it did before |
+| A token **inside the dispatcher's reserve**, when no other token of the person has room (w971) | A worker or a standing agent is **held** like at any limit (the reason names the buffer and when it lifts); the person's orchestrator runs on it, as it did before; the ops worker runs on the person's other tokens past their caps first and on it only when it is the last one not used up (w1112) |
 | The **dispatcher** | The token `claudeAccounts.dispatcher` pins (w996, "The dispatcher on a vault token" below) and is never held; unpinned, the system payer's pool like an orchestrator (w1078). A pinned token the vault cannot give stops it with the reason |
 
 **What a token at the one-at-a-time limit is (w747, relabelled w979).** A token at 95% weekly is not over its cap: it still
@@ -264,7 +265,8 @@ standing agent, no ops worker, no orchestrator). "Has room" means passes every c
 not retired, not used up). When none does:
 - a person's own **orchestrator** takes the reserved token as before (it uses the pool up; docs above), so nothing new
   locks it out;
-- a **worker, a standing agent and the ops worker wait** (held), like at any other limit. *Why workers wait* (a judgment, with
+- the **ops worker** (w1112) runs on the person's other tokens past their caps first, and on the reserved token only when every other one is used up: it may eat into the buffer, like the dispatcher, but last. *Why last and not never* (a judgment): a pool of one token, lothsahn's on 2026-10-12, is the dispatcher's own token, and "never" would hold the deploy lothsahn asked for whenever that token is inside its buffer, which is what w1112 removes; a deploy or a machine update is a few dollars of use, against the hours a worker can run;
+- a **worker and a standing agent wait** (held), like at any other limit. *Why workers wait* (a judgment, with
   the sources I have): the reserve exists so the dispatcher, which starts every worker, never runs dry (the section above and
   w739); a worker that eats the last of it can stop the dispatcher for everyone, while a waiting worker costs a delay. The
   same reasoning already holds workers at 95% and 99% so the person's own orchestrator keeps the pool's last part (this
@@ -297,7 +299,8 @@ config check refuses the value for the orchestrator. What it changes, each point
 - **The reserve moves with it** (`reservedCredentials` in `server/secrets.ts`). The 5%-a-day weekly and 20% 5-hour buffer
   (the numbers above, `vault.pool.reservePerDayPercent` / `reserveSessionPercent`) is kept on that token from the next look,
   matched by its fingerprint. So the rule holds on the pinned token: no new worker, standing agent, ops worker or orchestrator while the
-  person's other tokens have room; when none does, the orchestrator takes it and workers **wait**. *Consequence worth knowing:*
+  person's other tokens have room; when none does, the orchestrator takes it, the ops worker takes it once the person's other tokens
+  are used up (w1112), and workers **wait**. *Consequence worth knowing:*
   on a pool of **one** token, the person's workers wait whenever that token is inside the buffer (e.g. weekly above 75% with five
   days to the reset, above 95% with one). With two or more
   tokens workers move to the others. The dispatcher itself is never held: it may run into the buffer up to 100%.

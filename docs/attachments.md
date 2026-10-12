@@ -85,9 +85,11 @@ an MCP call to the portal may take.
 ### Saves
 
 The workers' brief says where a save goes: Final Factory loads saves by name from
-`SaveGameManager.SaveGamePath` = `<persistentDataPath>/saves/` (`Assets/Scripts/Serialization/SaveGameManager.cs`):
-`%USERPROFILE%\AppData\LocalLow\Never Games\finalfactory\saves\` on Windows and
-`~/Library/Application Support/Never Games/finalfactory/saves/` on a Mac. Every editor and player on a machine
+`SaveGameManager.SaveGamePath` = `GameDataPaths.Saves` = `<data root>/UserData/saves/`
+(`Assets/Scripts/Serialization/SaveGameManager.cs:294`, `Assets/Scripts/FFCore/GameData/GameDataPaths.cs:60`; the game's
+UserData layout of 2026-10-11, `Documentation/User-Data-Folder.md`; older branches read `<data root>/saves/`):
+`%USERPROFILE%\AppData\LocalLow\Never Games\finalfactory\UserData\saves\` on Windows and
+`~/Library/Application Support/Never Games/finalfactory/UserData/saves/` on a Mac. Every editor and player on a machine
 shares that folder, the live game's too, so a worker copies the save there under a name nobody else uses (its
 `<id>-<name>` is one), never overwrites or deletes a save already there, and removes its copy when done. The ff-agents
 drive-game skill loads a save by name.

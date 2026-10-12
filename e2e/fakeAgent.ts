@@ -5,7 +5,7 @@
  * blocks, tool calls, a result), chosen by a tag in the message:
  *
  *   "#perm"        asks canUseTool for a Bash call, then reports whether it was allowed
- *   "#permcmd <command>"  the same for that Bash command (to the end of the line): "Allowed: ran it." or "Denied: it asked." (w913)
+ *   "#permcmd [why: <reason>] <command>"  the same for that Bash command (to the end of the line, ⏎ for a newline), with Claude Code's decisionReason when given: "Allowed: ran it." or "Denied: it asked." (w913, w1097)
  *   "#long"        a reply of 60 paragraphs (for scrolling and jump-to-latest)
  *   "#screenshot"  a tool result carrying a PNG (an inline image)
  *   "#slow"        streams for a few seconds (for the running state and interrupts)
@@ -166,10 +166,12 @@ export function fakeQuery(fake: FakeOptions = {}) {
           yield result(uuid, true, answers.join('\n\n'));
         } else if (/#permcmd\b/i.test(words)) {
           const toolId = `tool-${++msgId}`;
-          const input = { command: /#permcmd[ \t]+([^\n]*)/i.exec(words)?.[1] ?? '', description: 'A command' };
+          // `#permcmd [why: <Claude Code's reason>] <command>`, a ⏎ in the command standing for a newline (w1097).
+          const m = /#permcmd[ \t]+(?:\[why: ([^\]]*)\][ \t]*)?([^\n]*)/i.exec(words);
+          const input = { command: (m?.[2] ?? '').replaceAll('⏎', '\n'), description: 'A command' };
           yield toolUse(toolId, 'Bash', input);
           const decision: PermissionResult = (options?.canUseTool
-            ? await options.canUseTool('Bash', input, { signal: abort.signal, toolUseID: toolId } as never)
+            ? await options.canUseTool('Bash', input, { signal: abort.signal, toolUseID: toolId, ...(m?.[1] ? { decisionReason: m[1] } : {}) } as never)
             : { behavior: 'allow', updatedInput: input }) ?? { behavior: 'deny', message: 'no answer' };
           yield toolResult(toolId, decision.behavior === 'allow' ? 'done' : 'denied', decision.behavior !== 'allow');
           yield text(decision.behavior === 'allow' ? 'Allowed: ran it.' : 'Denied: it asked.');

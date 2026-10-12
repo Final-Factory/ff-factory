@@ -148,6 +148,40 @@ test("w913: a worker's clean-up of its own temp folder is answered by the sessio
   other.decide(other.info.pendingPermissions[0].requestId, false);
 });
 
+test("w1097: a test leg whose delete Claude Code flags is answered by the session in bypass mode; another reason or mode asks, with Claude Code's reason on the card", async (t) => {
+  const { dir, store, sessions } = setup(t);
+  const tmp = path.join(dir, 'ffa-bbbb2222');
+  fs.mkdirSync(tmp);
+  const make = (permissionMode: SessionInfo['permissionMode']) =>
+    sessions.create({ kind: 'worker', title: 'w', permissionMode, options: () => ({ model: 'opus', env: { TMPDIR: tmp } }) });
+  const leg = 'D="/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory"⏎rm -rf $TMPDIR/{f1920,f1280}⏎run() { S=$1; for i in 1 2 3; do cp "$TMPDIR/s.bak" "$D/UserData/settings/settings.json" && break; sleep 2; done; bash "$TMPDIR/leg.sh" $S; }⏎run 1920';
+  const rmWhy = 'Dangerous rm operation on possibly-empty variable path: $TMPDIR/{f1920,f1280} in `rm -rf $TMPDIR/{f1920,f1280}` (use a literal path: $TMPDIR is normally set, so a guard would not stop this)';
+  const s = make('bypassPermissions');
+  sessions.send(s.info.id, `#permcmd [why: ${rmWhy}] ${leg}`);
+  await until(() => s.info.status === 'idle', 'idle');
+  assert.equal(s.info.pendingPermissions.length, 0, 'nobody was asked');
+  assert.ok(texts(store, s.info.id).includes('Allowed: ran it.'));
+  assert.equal(store.readTranscript(s.info.id).filter((e) => e.kind === 'permission').length, 0, 'no prompt event: the prompt count does not see it');
+  // Another reason: a person is asked, and sees Claude Code's reason; the transcript keeps it for the prompt count.
+  sessions.send(s.info.id, `#permcmd [why: This command uses shell operators that require approval for safety] ${leg}`);
+  await until(() => s.info.pendingPermissions.length === 1, 'the prompt for another reason');
+  assert.equal(s.info.pendingPermissions[0].reason, 'This command uses shell operators that require approval for safety');
+  const ev = store.readTranscript(s.info.id).find((e) => e.kind === 'permission');
+  assert.equal(ev && 'reason' in ev && ev.reason, 'This command uses shell operators that require approval for safety');
+  s.decide(s.info.pendingPermissions[0].requestId, false);
+  await until(() => s.info.status === 'idle', 'idle');
+  // A delete outside the folder in the same leg: asked.
+  sessions.send(s.info.id, `#permcmd [why: ${rmWhy}] ${leg.replace('$TMPDIR/{f1920,f1280}', '$TMPDIR/f1920 /f1280')}`);
+  await until(() => s.info.pendingPermissions.length === 1, 'the prompt for a delete outside');
+  s.decide(s.info.pendingPermissions[0].requestId, false);
+  await until(() => s.info.status === 'idle', 'idle');
+  // Not in bypass mode: the rest of the command would have been asked about too, so the session does not answer.
+  const d = make('default');
+  sessions.send(d.info.id, `#permcmd [why: ${rmWhy}] ${leg}`);
+  await until(() => d.info.pendingPermissions.length === 1, 'the prompt in default mode');
+  d.decide(d.info.pendingPermissions[0].requestId, false);
+});
+
 test('permission: Deny tells the agent why', async (t) => {
   const { store, sessions, worker } = setup(t);
   const s = worker('default');

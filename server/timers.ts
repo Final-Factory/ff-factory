@@ -15,7 +15,14 @@
 //
 // AUTHORITY. The message is the harness's (from 'system'), so its turn is not the person's (SessionHandle.turnFrom): every
 // tool that needs a person's own words refuses it, as it refuses a wake_me turn.
+//
+// THE ORCHESTRATION WORKER'S TIMERS (w1106, lothsahn: "Please make sure polls are done via the timer framework and don't
+// get interrupted by portal updates"). The ops worker (docs/ops-worker.md) sets timers too. Each one keeps the job it was
+// set in: the person whose orchestrator gave that job and the ledger requests it serves (`person`, `workIds`), so a fire
+// after a deploy, a restart or the worker's idle stop comes back as that person's job, for those requests, with nothing
+// more. Fires of different people's timers never share a message: each goes as its own turn.
 import { randomBytes } from 'node:crypto';
+import type { Requester } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun, refuseInDryRun } from './dryRun.ts';
 
@@ -61,6 +68,16 @@ export interface TimerRecord {
   /** Ended (it will not fire again): when and why. */
   endedAt?: string;
   endReason?: 'fired' | 'until' | 'max_fires' | 'cancelled';
+  /** The orchestration worker's timers (w1106): whose job it was set in; its fires go as that person's job. */
+  person?: Requester;
+  /** ...and the ledger requests that job serves, which each fire carries as its work_ids. */
+  workIds?: string[];
+}
+
+/** The job a timer acts for (the orchestration worker's, w1106): absent for an orchestrator's own timers. */
+export interface TimerAuthority {
+  person: Requester;
+  workIds: string[];
 }
 
 /** What a timer's owner, a person's view or a tool sees of one. */
@@ -72,8 +89,8 @@ export interface TimerHost {
   exists(sessionId: string): boolean;
   /** It is mid-turn (running, starting, waiting on a permission). */
   busy(sessionId: string): boolean;
-  /** Send it a harness message (starts it when it is stopped). Throws when it cannot take one now (the agent limit). */
-  deliver(sessionId: string, text: string): void;
+  /** Send it a harness message (starts it when it is stopped), for `authority`'s job when the timers carry one. Throws when it cannot take one now (the agent limit). */
+  deliver(sessionId: string, text: string, authority?: TimerAuthority): void;
 }
 
 /**
@@ -172,7 +189,7 @@ export class Timers {
   // ---------------------------------------------------------------- the tools' half
 
   /** A new timer for `owner`; its record. Throws a sentence saying what was wrong. */
-  create(owner: string, input: TimerInput, createdBy: string): TimerRecord {
+  create(owner: string, input: TimerInput, createdBy: string, authority?: TimerAuthority): TimerRecord {
     refuseInDryRun('a new timer');
     if (!this.host.exists(owner)) throw new Error('no such orchestrator');
     const active = this.of(owner).filter((t) => !t.endedAt);
@@ -190,6 +207,7 @@ export class Timers {
       updatedAt: iso,
       fires: 0,
       enabled: true,
+      ...(authority ? { person: authority.person, workIds: [...authority.workIds] } : {}),
     };
     this.apply(t, input, now, true);
     this.timers.set(t.id, t);
@@ -323,8 +341,14 @@ export class Timers {
   /** Deliver every pending fire of `owner` in one message, when it is not mid-turn and the budget allows. */
   private flush(owner: string) {
     if (dryRun()) return;
-    const due = this.of(owner).filter((t) => t.pending);
-    if (!due.length || !this.host.exists(owner) || this.host.busy(owner)) return;
+    const pending = this.of(owner).filter((t) => t.pending);
+    if (!pending.length || !this.host.exists(owner) || this.host.busy(owner)) return;
+    // One person's job per message (w1106): the first pending timer's person, and every pending one of that person's. The
+    // rest wait for the end of the turn this one starts (turnEnded). An orchestrator's own timers have no person: all go.
+    const whose = (t: TimerRecord) => t.person?.userId.toLowerCase() ?? '';
+    const due = pending.filter((t) => whose(t) === whose(pending[0]));
+    const person = due[0].person;
+    const authority: TimerAuthority | undefined = person ? { person, workIds: [...new Set(due.flatMap((t) => t.workIds ?? []))] } : undefined;
     const now = this.now();
     const since = now - DAY_MS;
     const sent = (this.deliveries[owner] ?? []).filter((x) => x > since);
@@ -349,10 +373,12 @@ export class Timers {
     const text = [
       ...lines,
       ...(held ? [`(These waited for the timer budget: at most ${TIMER_LIMITS.deliveriesPerDay} timer messages a day. Slow or cancel a timer if this keeps happening.)`] : []),
-      'A timer is the harness reminding you, not your person: it carries no one\'s authority. Anything that needs their own words still needs them to write.',
+      authority
+        ? `You set ${due.length > 1 ? 'these timers' : 'this timer'} in ${authority.person.displayName}'s job${authority.workIds.length ? ` for ${authority.workIds.join(', ')}` : ''}: it carries that job's authority (what ${authority.person.displayName} already asked for or approved there), nothing more. Anything new that needs their own words still needs them to write.`
+        : 'A timer is the harness reminding you, not your person: it carries no one\'s authority. Anything that needs their own words still needs them to write.',
     ].join('\n\n');
     try {
-      this.host.deliver(owner, text);
+      this.host.deliver(owner, text, authority);
     } catch (e) {
       console.warn(`timers: could not wake ${owner} now (${(e as Error).message}); trying again on the next tick`);
       return;

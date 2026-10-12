@@ -431,7 +431,8 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
       }
       // PRs and merges into develop are the normal flow; anything aimed at master is the user's release call.
       if ((sub === 'pr create' || sub === 'pr edit') && lower.some((w, i) => w === '--base=master' || w === '--base=main' || ((w === '--base' || w === '-b') && /^(master|main)$/.test(lower[i + 1] ?? '')))) {
-        if (ghIsGameRepo(ctx, repoFlag, dir)) return "PRs into the Final Factory game repo's master/main are the user's release call. Target develop.";
+        // Unknown counts as the game repo; say so, and how to name the repo (w1112: `cd $TMPDIR/ff-factory && gh pr create --base main` was refused as the game's).
+        if (ghIsGameRepo(ctx, repoFlag, dir)) return "PRs into the Final Factory game repo's master/main are the user's release call (or this PR's repo could not be determined: a `cd` to a path with a variable is not followed). Target develop; for another repo, name it: `gh pr create -R <owner>/<repo> ...`.";
       }
       if (lower[1] === 'api') {
         const method = lower.find((w, i) => (lower[i - 1] === '-x' || lower[i - 1] === '--method') && !!w)?.toUpperCase();

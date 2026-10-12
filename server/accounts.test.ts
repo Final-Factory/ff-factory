@@ -94,7 +94,8 @@ test('accounts (w1078): a run with no usable vault token does not start, with th
     () => poolRunEnv({ role: 'orchestrator', personId: 'ben' }),
     (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is used up: every token is at its 5-hour limit/.test(e.message) && e.next === '2026-10-12T05:00:00.000Z',
   );
-  assert.throws(() => poolRunEnv({ role: 'ops', personId: 'ben' }), (e: unknown) => e instanceof PoolHeldError && /pool is held: /.test(e.message));
+  // w1112: the pick gives the ops worker any token not used up, so a hold reaching it means used up, and it says so.
+  assert.throws(() => poolRunEnv({ role: 'ops', personId: 'ben' }), (e: unknown) => e instanceof PoolHeldError && /^ben's Claude token pool is used up, so the orchestration worker cannot start until a token resets/.test(e.message));
   assert.throws(() => machineRunEnv({}, 'm3', { role: 'workers', requestedBy: BEN }), (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is held: /.test(e.message) && e.next === '2026-10-12T05:00:00.000Z');
 });
 

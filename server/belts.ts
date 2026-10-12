@@ -57,8 +57,11 @@ export const PERSONAL_TOOLS: ReadonlySet<string> = new Set([
   'set_app_config',
 ]);
 
-/** The orchestration worker's own belt (w597, docs/ops-worker.md): the portal's state, read-only, and its own check-ins. */
-export const OPS_TOOLS: ReadonlySet<string> = new Set(['list_machines', 'list_sandboxes', 'system_status', 'wake_me']);
+/**
+ * The orchestration worker's own belt (w597, docs/ops-worker.md): the portal's state, read-only, its own check-ins, and its
+ * own timers (w1106: a poll is a timer, which survives deploys, restarts and its idle stop, never a background shell loop).
+ */
+export const OPS_TOOLS: ReadonlySet<string> = new Set(['list_machines', 'list_sandboxes', 'system_status', 'wake_me', 'set_timer', 'list_timers', 'update_timer', 'cancel_timer']);
 
 /** Tools that need a person's own orchestrator (its chat's budget, its person's requests, its person as the sender). */
 const PERSONAL_ONLY: ReadonlySet<string> = new Set(['request_work', 'update_work', 'conditional_decisions', 'message_person', 'reply_to_ffbox', 'ops_worker']);

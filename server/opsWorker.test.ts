@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner } from './opsWorker.ts';
+import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem } from './opsWorker.ts';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { isMidTurn, OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
@@ -774,5 +774,89 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.ok(mv.text.includes(`-Update -Root C:\\ffw -MoveToDevDrive"'`), mv.text);
   assert.match(mv.text, /refuses, naming them, while an agent is in a sandbox/);
   assert.match(mv.text, /free space on the root's drive before and after/);
+  ops.close();
+});
+
+test('w1106: a background poll is refused, in the command or in a scratch script it runs; a backgrounded installer and a foreground loop pass', async () => {
+  const scripts: Record<string, string> = {
+    [`${OPS_PATHS.scratch}/w1070-wait.sh`]: '#!/bin/bash\nwhile true; do ssh lothdesktop powershell -File w1070-idlecheck.ps1; sleep 1080; done\n',
+    [`${OPS_PATHS.scratch}/once.sh`]: '#!/bin/bash\nssh lothdesktop hostname\n',
+  };
+  const script = (abs: string) => scripts[abs];
+  const poll = (cmd: string, bg = false) => pollProblem(cmd, bg, script);
+  // The w1070 loop as it ran (the Bash tool's run_in_background), and its shapes.
+  assert.match(poll('bash w1070-wait.sh', true) ?? '', /a poll or a wait is a timer \(set_timer[\s\S]*\(w1070-wait\.sh loops or sleeps\)$/);
+  assert.match(poll(`./w1070-wait.sh > ${OPS_PATHS.scratch}/w.log 2>&1 &`) ?? '', /w1070-wait\.sh loops or sleeps/);
+  assert.ok(poll('while true; do ssh m5 uptime; sleep 600; done', true));
+  assert.ok(poll('nohup bash -c "until ssh m5 test -f /tmp/done; do sleep 60; done"'));
+  assert.ok(poll("ssh lothdesktop 'while ($true) { .\\check.ps1; Start-Sleep 600 }' &"));
+  assert.ok(poll('setsid sleep 3600'));
+  // Not a poll that outlives the turn: in the foreground, a one-off in the background, a backgrounded installer.
+  assert.equal(poll('for m in m3 m5; do ssh $m hostname; done'), undefined);
+  assert.equal(poll('sleep 30 && ssh m5 uptime'), undefined);
+  assert.equal(poll('bash once.sh', true), undefined);
+  assert.equal(poll(`ssh lothdesktop 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root D:\\work\\ffw -MoveToDevDrive"' > ${OPS_PATHS.scratch}/move.log 2>&1`, true), undefined);
+  assert.equal(poll('ssh m5 uptime && ssh m3 uptime 2>&1'), undefined);
+  // Through the guard, with its reason logged.
+  const logged: string[] = [];
+  const hook = opsGuard((l) => logged.push(l), read, script);
+  const r = (await hook({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'bash w1070-wait.sh', run_in_background: true } } as never, undefined, { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision: string; permissionDecisionReason: string } };
+  assert.equal(r.hookSpecificOutput?.permissionDecision, 'deny');
+  assert.match(r.hookSpecificOutput!.permissionDecisionReason, /set_timer/);
+  assert.match(logged.join('\n'), /REFUSED Bash: bash w1070-wait\.sh/);
+  const ok = (await hook({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ssh m5 uptime' } } as never, undefined, { signal: new AbortController().signal })) as object;
+  assert.deepEqual(ok, {});
+});
+
+test('w1106: a timer is set within a job and keeps it; a fire reopens that job (fresh after it ended), carries its open requests, and its turn end goes to that person', async () => {
+  setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-t-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  const told: string[] = [];
+  const closed = new Set<string>();
+  let now = Date.now();
+  const ops = new OpsWorker({
+    sessions,
+    store,
+    options: () => ({}),
+    tellOrchestrator: (p, t) => told.push(`${p.userId}: ${t}`),
+    personTurn: () => true,
+    file: path.join(dir, 'ops-worker.json'),
+    workProblem: (ids) => (ids.some((x) => closed.has(x)) ? `${ids[0]} is done` : undefined),
+    now: () => now,
+  });
+  const settle = () => new Promise((r) => setTimeout(r, 300));
+  assert.throws(() => ops.timerAuthority(), /a timer is set within a job/);
+  ops.send(orch('lo', LOTH), 'poll LothDesktop for idle', false, ['w1070', 'w1106']);
+  await settle();
+  assert.deepEqual(ops.timerAuthority(), { person: LOTH, workIds: ['w1070', 'w1106'] });
+  assert.deepEqual(ops.timerAuthority(['W1070']), { person: LOTH, workIds: ['w1070'] });
+  assert.throws(() => ops.timerAuthority(['w9']), /w9 is not a request of this job \(w1070, w1106\)/);
+  // Within the job: a follow-up in the same conversation.
+  const conversation = sessions.get(OPS_ID).info.sdkSessionId;
+  ops.timerFired('[timer t-1 "w1070 idle check"] Run w1070-idlecheck.ps1.', { person: LOTH, workIds: ['w1070'] });
+  await settle();
+  let last = store.readTranscript(OPS_ID, 50).filter((e) => e.kind === 'user').at(-1) as { text: string; from: string };
+  assert.equal(last.from, 'system');
+  assert.match(last.text, /^\[timer t-1 "w1070 idle check"\] Run w1070-idlecheck\.ps1\.\n\n\[ledger\] This job is the step left on w1070\./);
+  assert.equal(sessions.get(OPS_ID).info.sdkSessionId, conversation, 'a follow-up keeps the conversation');
+  // Ben's job comes in between, and Lothsahn's has run out: the next fire opens Lothsahn's job again, fresh, and Lothsahn hears its end.
+  ops.send(orch('bo', BEN), 'ssh m5 uptime', true);
+  await settle();
+  now += OPS_LIMITS.jobMs + 60_000;
+  told.length = 0;
+  closed.add('w1106');
+  ops.timerFired('[timer t-1 "w1070 idle check"] Run w1070-idlecheck.ps1.', { person: LOTH, workIds: ['w1070', 'w1106'] });
+  await settle();
+  assert.match(ops.status(), /job of Lothsahn since .*: a timer of Lothsahn's job/);
+  assert.deepEqual(ops.timerAuthority(), { person: LOTH, workIds: ['w1070'] }, 'the reopened job carries the open request only');
+  last = store.readTranscript(OPS_ID, 80).filter((e) => e.kind === 'user').at(-1) as { text: string; from: string };
+  assert.match(last.text, /step left on w1070\.[\s\S]*\(w1106: closed or unknown in the ledger now\. If this timer's job was for it, cancel_timer it and say so\.\)$/);
+  assert.ok(store.readTranscript(OPS_ID, 80).some((e) => e.kind === 'system' && /A timer of Lothsahn's job fired: a fresh conversation/.test(e.text)));
+  assert.ok(told.length && told.every((t) => t.startsWith('lothsahn: [ops worker] finished a turn')), told.join('\n'));
+  // Only Lothsahn's and Ben's jobs; never into a running turn (the timers try again on their next tick).
+  assert.throws(() => ops.timerFired('[timer t-2 "x"] y', { person: { userId: 'cara', displayName: 'Cara' }, workIds: [] }), /only for Lothsahn's or Ben's job/);
+  assert.throws(() => ops.timerFired('[timer t-2 "x"] y', undefined), /only for Lothsahn's or Ben's job/);
   ops.close();
 });

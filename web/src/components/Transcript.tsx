@@ -604,7 +604,7 @@ const EventRow = memo(function EventRow({ ev, sessionId, pending }: { ev: Transc
     case 'permission': {
       const isPending = !ev.decision && pending.has(ev.requestId);
       const p = pending.get(ev.requestId);
-      return <PermissionCard sessionId={sessionId} requestId={ev.requestId} toolName={ev.toolName} input={ev.input} reason={p?.reason} pending={isPending} decision={ev.decision} decidedBy={ev.decidedBy?.displayName} />;
+      return <PermissionCard sessionId={sessionId} requestId={ev.requestId} toolName={ev.toolName} input={ev.input} reason={p?.reason ?? ev.reason} pending={isPending} decision={ev.decision} decidedBy={ev.decidedBy?.displayName} />;
     }
     case 'tool_result':
       return (
