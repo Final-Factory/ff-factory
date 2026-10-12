@@ -16,6 +16,14 @@ and `unity.editorPath` at nothing is enough to run everything except Unity. See 
 section of the README. Node 23.6 or newer runs the TypeScript directly; there is no build step for
 the server.
 
+On a worker machine with Node 22.6 to 23.5 (the worker install needs only 22.6+), `npm test` and `npm run prepush` fail with
+`ERR_UNKNOWN_FILE_EXTENSION ".ts"`: add the flag yourself, `node --experimental-strip-types --no-warnings --test server/x.test.ts`
+and `NODE_OPTIONS="--experimental-strip-types --no-warnings" node scripts/prepush.ts` (measured on lothdesktop, Node 22.17,
+w1109). There, nine tests also fail on a clean `main` (file modes on Windows, the watchdog, agentHost, crashRecovery, the
+prepush identity test): compare a failure with `main` before you chase it; CI on Linux is the judge. In a clone inside a game
+sandbox, the sandbox's guard refuses `git checkout -b` while its Unity editor runs: make the branch with `git branch <name>` and
+`git symbolic-ref HEAD refs/heads/<name>` (same commit), or `git worktree add <dir> -b <name> origin/main`.
+
 ## Tests
 
 CI runs everything below on every pull request to `main`; a push to `main` runs only the secret scan and the identity
