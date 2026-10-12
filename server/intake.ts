@@ -1407,7 +1407,7 @@ export class IntakeManager {
   /**
    * The environment of a worker on a nightly run request (w864; server/agents.ts machineSandboxSpec): FF Factory's URL as
    * that machine reaches it, and the night's nightly-scoped key, which the lab's `ffnightly.py deliver` reads
-   * (FF_FACTORY_URL, FF_FACTORY_NIGHTLY_KEY) and passes on to nothing else. Only for a night fired in the last day. After a
+   * (FF_FACTORY_URL, FF_FACTORY_NIGHTLY_KEY) and passes on to nothing else, and when the night was fired (FF_NIGHTLY_FIRED_AT, w1099). Only for a night fired in the last day. After a
    * portal restart the key is gone from memory: a night whose worker already got it keeps it in the lab's running
    * process (the stored key is still valid), and one whose worker never did gets a fresh one now.
    */
@@ -1420,7 +1420,8 @@ export class IntakeManager {
       n.keyGivenAt = iso(now);
       this.changed();
     }
-    return { FF_FACTORY_URL: portalUrl.replace(/\/+$/, ''), FF_FACTORY_NIGHTLY_KEY: this.runKey!.key };
+    // FF_NIGHTLY_FIRED_AT (w1099): when the schedule fired the night, so the worker says how long it waited to start.
+    return { FF_FACTORY_URL: portalUrl.replace(/\/+$/, ''), FF_FACTORY_NIGHTLY_KEY: this.runKey!.key, ...(n.firedAt ? { FF_NIGHTLY_FIRED_AT: n.firedAt } : {}) };
   }
 
   // ---------------------------------------------------------------- the nightly merge review (w905)

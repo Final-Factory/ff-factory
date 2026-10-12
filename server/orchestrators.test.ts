@@ -2769,6 +2769,45 @@ test("w936: main_clone grants a machine's main clone to a request's workers: its
   assert.equal(store.work.get('w2')!.mainCloneAccess, undefined);
 });
 
+test('w1099: the capacity ping and the queued-with-room flag list queued requests by priority, then oldest', async (t) => {
+  const { store, agents, o, dispatcher, chat, call, heard } = setup(t);
+  agentsRoom(agents, []);
+  await call(chat(BEN).info, 'request_work', { title: 'Old normal', brief: 'First.' });
+  await call(chat(BEN).info, 'request_work', { title: 'Newer normal', brief: 'Second.' });
+  await call(chat(BEN).info, 'request_work', { title: 'Nightly e2e run', brief: 'Third.', priority: 'high' });
+  await call(chat(LOTH).info, 'request_work', { title: 'Someday', brief: 'Fourth.', priority: 'low' });
+  const at = ['2026-10-12T01:00:00.000Z', '2026-10-12T02:00:00.000Z', '2026-10-12T03:00:00.000Z', '2026-10-12T00:00:00.000Z'];
+  ['w1', 'w2', 'w3', 'w4'].forEach((id, i) => {
+    const w = store.work.get(id)!;
+    w.createdAt = at[i];
+    store.putWork(w);
+  });
+  for (const id of ['w2', 'w4', 'w1', 'w3']) {
+    const r = await call(dispatcher().info, 'decide_work', { id, action: 'queue', note: 'every place is busy' });
+    assert.equal(r.isError, false, r.text);
+  }
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  o.capacityMayHaveFreed('worker x stopped');
+  t.mock.timers.tick(30_000);
+  t.mock.timers.reset();
+  const ping = heard(dispatcher().info.id, '[ledger] Capacity may have freed').at(-1)!.text;
+  const order = ['w3', 'w1', 'w2', 'w4'].map((id) => ping.indexOf(`${id} "`));
+  assert.ok(order.every((x, i) => x >= 0 && (i === 0 || x > order[i - 1])), `high first, then the normal ones oldest first, then low: ${ping}`);
+  assert.match(ping, /Queued for capacity, by priority, then oldest: w3 "Nightly e2e run"/);
+  // The flag for requests left queued while a computer has room, in the same order.
+  agentsRoom(agents, ['lothdesktop']);
+  const later = Date.now() + 11 * 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(later);
+  assert.deepEqual(o.flagQueuedWithRoom(['lothdesktop']), ['w3', 'w1', 'w2', 'w4']);
+  // Released workers waiting for a sandbox resume in the same order (placeAgain claims, Agents.resumeOrder); one with no
+  // open request last.
+  ['w1', 'w2', 'w3', 'w4'].forEach((id, i) => {
+    store.work.get(id)!.sessionIds = [`s${i + 1}`];
+  });
+  const ids = ['s5', 's2', 's4', 's1', 's3'].map((id) => ({ id }) as SessionInfo).sort((a, b) => agents.resumeOrder(a, b)).map((x) => x.id);
+  assert.deepEqual(ids, ['s3', 's1', 's2', 's4', 's5']);
+});
+
 // ---------------------------------------------------------------- w1094: a gate's clearing reaches the worker that set it
 
 /** A second worker on request `wid` (w1049: the bug-5 and bug-6 workers shared one request), linked after the first. */
