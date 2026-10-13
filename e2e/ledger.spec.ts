@@ -1,6 +1,6 @@
-import type { APIRequestContext } from '@playwright/test';
-import { appState, expect, go, patchWork, sendToChat, test, uniq } from './fixtures.ts';
-import type { TranscriptEvent, WorkItem } from '../shared/types.ts';
+import type { APIRequestContext, Locator } from '@playwright/test';
+import { appState, expect, go, patchWork, test, uniq, useTool } from './fixtures.ts';
+import type { WorkItem } from '../shared/types.ts';
 
 /**
  * The ledger cleanup (docs/orchestrators.md, "Ledger cleanup") on the Requests tab: a request nothing has touched for a
@@ -8,21 +8,6 @@ import type { TranscriptEvent, WorkItem } from '../shared/types.ts';
  * pull requests, and a note from its person revives it. The test server links no repo's PRs (e2e/server.ts), so only the
  * quiet-request rule runs here; the PR rules are server/ledgerSweep.test.ts.
  */
-
-async function useTool(request: APIRequestContext, chatId: string, tool: string, args: Record<string, unknown>): Promise<string> {
-  const events = async () => (await (await request.get(`/api/sessions/${chatId}/events?limit=500`)).json()) as TranscriptEvent[];
-  const before = (await events()).at(-1)?.seq ?? 0;
-  await sendToChat(request, chatId, `#tool ${tool} ${JSON.stringify(args)}`);
-  let answer = '';
-  await expect
-    .poll(async () => {
-      const r = (await events()).find((e) => e.seq > before && e.kind === 'assistant' && e.text.startsWith(`Called ${tool}:`));
-      answer = r && r.kind === 'assistant' ? r.text : '';
-      return answer;
-    }, { timeout: 15_000 })
-    .not.toBe('');
-  return answer.slice(`Called ${tool}: `.length);
-}
 
 test('a quiet request stalls on "Clean up now", shows under Stalled with its reason and PRs, and a note revives it', async ({ authed: page }) => {
   const tag = uniq('ledger');
@@ -57,10 +42,25 @@ test('a quiet request stalls on "Clean up now", shows under Stalled with its rea
   await expect(panel.getByTestId('stalled-list').getByTestId(`work-${id}`)).toHaveCount(0);
 });
 
-test('the Requests tab shows what each request is doing now, with counts per state and a filter (w418, w643)', async ({ authed: page }) => {
+/** File a request through the orchestrator's request_work, as a person's orchestrator does; its id. */
+async function fileWork(request: APIRequestContext, orchestratorId: string, title: string, tag: string): Promise<string> {
+  return (await useTool(request, orchestratorId, 'request_work', { title: `${title} ${tag}`, brief: `For the live states ${tag}.` })).match(/Filed (w\d+)/)![1];
+}
+
+/**
+ * A picture of the panel for the PR's reviewer, not a check. Not on WebKit: there it took 2.7 s of the test's 30 s on a
+ * loaded CI runner (w1173), where the same test ran 2.3 times slower than on a quiet one.
+ */
+async function picture(panel: Locator, name: string) {
+  if (panel.page().context().browser()?.browserType().name() !== 'webkit') await panel.screenshot({ path: test.info().outputPath(name) });
+}
+
+// The w418/w643 Requests tab is two tests (w1173): one test of both ran 15 s on mobile-safari on a quiet CI runner and
+// went past the 30 s limit when the runner was busy.
+test('the Requests tab shows what each request is doing now, with counts per state (w418, w643)', async ({ authed: page }) => {
   const tag = uniq('states');
   const me = await appState(page.request);
-  const file = async (title: string) => (await useTool(page.request, me.orchestratorId, 'request_work', { title: `${title} ${tag}`, brief: `For the live states ${tag}.` })).match(/Filed (w\d+)/)![1];
+  const file = (title: string) => fileWork(page.request, me.orchestratorId, title, tag);
   const queued = await file('Queued one');
   const stalled = await file('Stalled one');
   const waiting = await file('Waiting one');
@@ -93,8 +93,28 @@ test('the Requests tab shows what each request is doing now, with counts per sta
   await expect(panel.getByTestId(`live-${followup}`)).toContainText('Merged, follow-up pending');
   await panel.getByTestId(`work-${stalled}`).getByRole('button', { name: new RegExp(`Stalled one ${tag}`) }).click();
   await expect(panel.getByTestId(`live-why-${stalled}`)).toContainText('Stalled: no worker was ever started for it');
-  await panel.screenshot({ path: test.info().outputPath('ledger-states.png') });
+  await picture(panel, 'ledger-states.png');
+});
 
+test('the Requests tab filters by several states at once, kept across a reload (w418, w643)', async ({ authed: page }) => {
+  const tag = uniq('filter');
+  const me = await appState(page.request);
+  const file = (title: string) => fileWork(page.request, me.orchestratorId, title, tag);
+  const queued = await file('Queued one');
+  const stalled = await file('Stalled one');
+  const followup = await file('Follow-up one');
+  await patchWork(page.request, queued, { status: 'queued', queuedFor: { at: new Date().toISOString(), needs: ['nowhere'] } });
+  await patchWork(page.request, stalled, { status: 'active' });
+  await patchWork(page.request, followup, {
+    status: 'active',
+    prs: [{ repo: 'Final-Factory/FinalFactory', number: 1024, state: 'merged', at: new Date().toISOString() }],
+    log: ['01:50 PR #1024 merged; still open: its brief asks for a step after the merge (a check, an audit, a verification)'],
+  });
+
+  await go(page, '#/dispatcher');
+  const panel = page.locator('.dispatcher-panel');
+  const states = panel.getByTestId('ledger-states');
+  await expect(panel.getByTestId(`live-${stalled}`)).toContainText('Stalled');
   // Several states at once (Lothsahn: "select multiple types"), kept across a reload.
   await states.getByTestId('ledger-state-stalled').click();
   await states.getByTestId('ledger-state-followup').click();
@@ -104,8 +124,7 @@ test('the Requests tab shows what each request is doing now, with counts per sta
   await expect(picked.getByTestId(`work-${stalled}`)).toBeVisible();
   await expect(picked.getByTestId(`work-${followup}`)).toBeVisible();
   await expect(picked.getByTestId(`work-${queued}`)).toHaveCount(0);
-  await expect(picked.getByTestId(`work-${waiting}`)).toHaveCount(0);
-  await panel.screenshot({ path: test.info().outputPath('ledger-states-multi.png') });
+  await picture(panel, 'ledger-states-multi.png');
   await page.reload();
   await go(page, '#/dispatcher');
   const again = page.locator('.dispatcher-panel');
