@@ -77,6 +77,25 @@ A turn on several requests (linked requests share a worker) is split evenly betw
 shown. Overhead that no request owns is listed apart (`spend_report` "Not any request's"). A request's `tied by` line on its page says how
 each session's turns were tied: `about`, `link`, `message`, `bucket`, `backfill`.
 
+### The rules as they stand (w1209 audit)
+
+- **Money is conserved.** A turn's dollars are the SDK's difference of cumulative totals; `attribute` returns weights that sum to 1, so every
+  dollar of a session is in exactly one share of requests and buckets (`_dispatcher`, `_personal:<user>`, `_ops`, `_standing:<id>`,
+  `_unattributed`). Tested: workers' own + coordination + not-any-request's = the window's total, and requests + buckets = sessions, for a mix
+  of every kind of session (spend.test.ts "whatever the mix of turns").
+- **A coordinator is never billed through the worker rules.** The session's role (`dispatcher`, `personal`, `ops`, `standing`) comes from the
+  session when it is live and from the record when the store no longer holds it (`infoOfRecord`); before, a turn of such a session fell through
+  to the worker rules (`_unattributed`) and its role would have been rewritten.
+- **A worker's linked requests that closed before the turn began are left out** while another is open (`openFirst`): the ledger never unlinks a
+  request, so a worker that finished w1 and went on with w2 used to put half of every later turn on w1. A reopened request is open again; all
+  closed: they share it, the money has to go somewhere. An `[about]` line is always taken as written.
+- **Ids inside parentheses in a harness notice are citations** (`[machines]`, `[app restarted]`, `[restart]`, `[host]`, `[heartbeat]`,
+  `[data restored]`, `[machine updates]`), not the turn's subject. The coordinators' rule text is the system prompt, never a message, so it is not read at all.
+- **Where the tokens go: `carried`.** The context meter starts empty with each process. A conversation resumed after a restart reads a
+  context it never saw built, and that read used to count as `base`. The first call of a resumed process now puts that unexplained cache read in
+  `carried` (and later calls keep reading it as carried). Dollars and attribution are unaffected either way: it moves a share of a request's
+  dollars between two categories.
+
 ## Coordination: billed apart from the workers' own cost (w1160)
 
 Lothsahn, w1160: "We should still track per request, but bill it separately." The dispatcher's, a person's orchestrator's and the
@@ -125,7 +144,7 @@ Claude Code reports how big each model call's context was (input, cache read, ca
 `ContextMeter` (shared/spend.ts) shares each call's real token counts among the kinds of content the context holds, by characters:
 cache reads go to what was in the context before the call, cache writes and uncached input to what is new since the previous
 call, output tokens to the agent's own text. The agent's own output (thinking included) is carried in the next call's
-context exactly (the fit below: 1.01 tokens per output token), so it is counted by tokens, not characters. What no content explains is `base`
+context exactly (the fit below: 1.01 tokens per output token), so it is counted by tokens, not characters. What no content explains is `base` (on a resumed conversation, `carried`: the context the process never saw built)
 (the system prompt, tool definitions, CLAUDE.md, skill lists, reminders). Categories come from what the week's tool results held
 (`toolKind`): `file-read` (Read, `sed -n`, `cat`, `head`), `reread` (a range of a file already read in the session; `afterCompact`
 when the summary dropped it), `search`, `git`, `ci-poll` (`gh pr checks`, `gh run`, `sleep`/`until` loops, Monitor, wake_me),
