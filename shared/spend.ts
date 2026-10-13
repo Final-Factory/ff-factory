@@ -475,12 +475,15 @@ export interface SessionSpend {
   /** The seq of the first transcript event recorded live; the backfill takes only the events before it. */
   liveFrom?: number;
   /**
-   * A coordinator session (dispatcher, orchestrator, ops worker) recorded before the coordination split (w1160): its usd by
-   * request as it stood when that code first ran. `splitLegacyCoordination` gives that spend its days from the transcript,
-   * once (`coordSplit`). `coordFrom` is the seq of the first result recorded after that start.
+   * A coordinator session (dispatcher, orchestrator, ops worker; w1160). `coordV` 2: its per-day coordination (`RequestSpend.coordDays`,
+   * keyed by this session's id) is complete; a coordinator without it is rebuilt from its transcript (`rebuildCoordination`).
+   * `coordFrom`: the seq of the first result recorded by the code that bills coordination (2026-10-13, a9d5eae): the turns before it
+   * were recorded by the older attribution and cost rules, which the rebuild replays as they were. `legacyRequests` and `coordSplit`
+   * are the first version's marks (kept in the record, no longer read).
    */
-  legacyRequests?: Record<string, number>;
+  coordV?: number;
   coordFrom?: number;
+  legacyRequests?: Record<string, number>;
   coordSplit?: boolean;
   /** The backfill has read this session's transcript. */
   backfilled?: boolean;
@@ -511,8 +514,8 @@ export interface RequestSpend {
   days: Record<string, Tok>;
   /**
    * The part of `days` that coordinators' turns (dispatcher, a person's orchestrator, the ops worker) spent on this request
-   * (w1160), by coordinator (`coordKey`) and UTC day. The workers' own cost is `days` minus this. Turns from before the
-   * split get their days from `splitLegacyCoordination`, an estimate (docs/spend.md).
+   * (w1160), by the coordinator's SESSION id and UTC day. The workers' own cost is `days` minus this. Turns from before the
+   * split get their days from `rebuildCoordination`, an estimate (docs/spend.md).
    */
   coordDays?: Record<string, Record<string, Tok>>;
 }

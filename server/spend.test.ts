@@ -714,45 +714,53 @@ test('coordination: split by coordinator, and the record keeps the days through 
   w.spend.flush();
   const again = new SpendStore(w.dir, { work: () => w.items, session: () => undefined, priorResults: () => 1 });
   const r = again.request('w1')!;
-  assert.deepEqual(Object.keys(r.coordDays!).sort(), ['dispatcher', 'personal:Lothsahn']);
-  assert.ok(Math.abs(again.windowSplit(r, '2026-10-09', '2026-10-09', r.days['2026-10-09']).coordination.usd - 2) < 1e-9);
-  assert.equal(again.session('d')!.coordSplit, true, 'a session first seen by this code has nothing to split');
+  assert.deepEqual(Object.keys(r.coordDays!).sort(), ['d', 'o'], 'the days are kept per coordinator session');
+  const win = again.windowSplit(r, '2026-10-09', '2026-10-09', r.days['2026-10-09']);
+  assert.ok(Math.abs(win.coordination.usd - 2) < 1e-9);
+  assert.deepEqual(win.coordination.by.map((b) => b.who), ["Lothsahn's orchestrator"]);
+  assert.equal(again.session('d')!.coordV, 2, 'a session first seen by this code has nothing to rebuild');
 });
 
-/** What the store held before the split: coordinator sessions with their usd by request, and no days for the coordination. */
+/** What the store held before coordination had days: coordinator sessions without them, as an older portal wrote them. */
 function makeLegacy(w: ReturnType<typeof world>, ids: string[]) {
   for (const r of w.spend.requests.values()) r.coordDays = undefined;
   for (const id of ids) {
     const s = w.spend.session(id)!;
     s.legacyRequests = Object.fromEntries(Object.entries(s.requests).filter(([k]) => !k.startsWith('_')));
-    s.coordSplit = undefined;
+    s.coordV = undefined;
     s.coordFrom = undefined;
   }
 }
 
-test('coordination: turns recorded before the split get their days from the transcript, and the totals do not move', () => {
-  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } }), item('w2')], [session('s1'), DISPATCHER()]);
-  seq = 0;
+/** A dispatcher whose turns are observed one by one and kept as the transcript a rebuild reads. */
+function recorded(w: ReturnType<typeof world>) {
   const events: TranscriptEvent[] = [];
   const push = (e: TranscriptEvent) => {
     events.push(e);
     w.spend.observe('d', e);
   };
-  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 4, cr: 1 }) } }, 4));
   const turn = (at: number, text: string, cum: number) => {
     push(userEvent(at, text));
     push(resultEvent(at + 30_000, { cum: { m: tok({ usd: cum, cr: 1 }) } }, cum));
   };
+  return { events, push, turn };
+}
+
+test('coordination: turns recorded before days existed get their days from the transcript, and the totals do not move', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } }), item('w2')], [session('s1'), DISPATCHER()]);
+  seq = 0;
+  const { events, turn } = recorded(w);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 4, cr: 1 }) } }, 4));
   turn(T0 + 100_000, '[worker update] w1', 1);
   turn(T0 + DAY, '[worker update] w1 w2', 4); // 3 dollars: 1.5 each, a day later
   turn(T0 + 2 * DAY, '[worker update] w1', 4.5);
   const before = { w1: w.spend.request('w1')!.total.usd, w2: w.spend.request('w2')!.total.usd, d: w.spend.session('d')!.total.usd };
   makeLegacy(w, ['d']);
   assert.equal(w.spend.splitOf(w.spend.request('w1')!).coordination.usd, 3, 'the all-time split never needed the days');
-  assert.equal(w.spend.windowSplit(w.spend.request('w1')!, '2026-10-08', '2026-10-12', w.spend.request('w1')!.total).coordination.usd, 0, 'but a window finds none before the split is done');
-  const given = w.spend.splitLegacyCoordination('d', events, w.sessions[1]);
+  assert.equal(w.spend.windowSplit(w.spend.request('w1')!, '2026-10-08', '2026-10-12', w.spend.request('w1')!.total).coordination.usd, 0, 'but a window finds none before the rebuild');
+  const given = w.spend.rebuildCoordination('d', events, w.sessions[1]);
   assert.ok(Math.abs(given - 4.5) < 1e-9);
-  assert.equal(w.spend.session('d')!.coordSplit, true);
+  assert.equal(w.spend.session('d')!.coordV, 2);
   const r1 = w.spend.request('w1')!;
   const day = (d: string) => w.spend.windowSplit(r1, d, d, r1.days[d] ?? { in: 0, out: 0, cr: 0, cw: 0, usd: 0 }).coordination.usd;
   assert.ok(Math.abs(day('2026-10-08') - 1) < 1e-9);
@@ -763,57 +771,99 @@ test('coordination: turns recorded before the split get their days from the tran
   assert.equal(w.spend.request('w1')!.total.usd, before.w1);
   assert.equal(w.spend.request('w2')!.total.usd, before.w2);
   assert.equal(w.spend.session('d')!.total.usd, before.d);
-  assert.equal(w.spend.splitLegacyCoordination('d', events, w.sessions[1]), 0);
+  assert.equal(w.spend.rebuildCoordination('d', events, w.sessions[1]), 0);
 });
 
-test('coordination: a turn recorded after the split, before the old ones were split, is not counted twice', () => {
+test('coordination: w605 — an old turn billed to a request by a citation keeps the day it was spent, not the days of the real mentions (the first rebuild scaled the wrong shape)', () => {
+  // Recorded by the old rules: the restart notice cites (w605), so the dispatcher's expensive turn on 10-11 was billed to it.
+  const notice = '[app restarted] The portal restarted. Could not resume: x waits for the daemon (an update available is no reason to wait; only a protocol this portal no longer drives is, w605); resumed after that';
+  const w = world([item('w605', { status: 'done', sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1'), DISPATCHER()]);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 2, cr: 1 }) } }, 2));
+  seq = 0;
+  const { events, turn } = recorded(w);
+  turn(T0 + 100_000, '[worker update] w605 "x"', 1); // 10-08: a real mention
+  w.spend.observe('d', userEvent(T0 + 3 * DAY, '[work request] w605')); // stands in for the notice: the old rule billed it to w605
+  w.spend.observe('d', resultEvent(T0 + 3 * DAY + 30_000, { cum: { m: tok({ usd: 101, cr: 1 }) } }, 101));
+  events.push(userEvent(T0 + 3 * DAY, notice), resultEvent(T0 + 3 * DAY + 30_000, { cum: { m: tok({ usd: 101, cr: 1 }) } }, 101));
+  makeLegacy(w, ['d']);
+  w.spend.rebuildCoordination('d', events, w.sessions[1]);
+  const r = w.spend.request('w605')!;
+  const day = (d: string) => w.spend.windowSplit(r, d, d, r.days[d] ?? { in: 0, out: 0, cr: 0, cw: 0, usd: 0 });
+  assert.ok(Math.abs(day('2026-10-11').coordination.usd - 100) < 1e-9, 'the 100 stays on the day it was spent');
+  assert.equal(day('2026-10-11').workers.usd, 0, 'and is not worker cost in a window that holds that day');
+  assert.ok(Math.abs(day('2026-10-08').coordination.usd - 1) < 1e-9);
+  assert.ok(Math.abs(day('2026-10-08').workers.usd - 2) < 1e-9);
+  const rep = buildReport(w.spend, T0 + 3 * DAY + 3_600_000, { days: 2 });
+  assert.equal(rep.top.find((t) => t.id === 'w605')?.usd ?? 0, 0);
+  assert.ok(Math.abs(rep.coordination.usd - 100) < 1e-9);
+});
+
+test('coordination: no day holds more coordination than the request spent that day; what the replay misses goes where there is room', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1'), DISPATCHER()]);
+  seq = 0;
+  const { events, turn } = recorded(w);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 1, cr: 1 }) } }, 1));
+  turn(T0 + 2 * DAY, '[worker update] w1', 10); // recorded on 10-10: the request spent 11 that day, 1 on 10-08
+  makeLegacy(w, ['d']);
+  // a transcript that puts the turn on the wrong day (10-12, a day the request never spent on): it cannot be placed there
+  const wrong = [userEvent(T0 + 4 * DAY, '[worker update] w1'), resultEvent(T0 + 4 * DAY + 30_000, { cum: { m: tok({ usd: 10, cr: 1 }) } }, 10)];
+  w.spend.rebuildCoordination('d', wrong, w.sessions[1]);
+  const r = w.spend.request('w1')!;
+  for (const [d, t] of Object.entries(r.days)) {
+    const c = Object.values(r.coordDays!).reduce((a, days) => a + (days[d]?.usd ?? 0), 0);
+    assert.ok(c <= t.usd + 1e-9, `${d}: ${c} of coordination in ${t.usd}`);
+  }
+  const all = Object.values(r.coordDays!.d).reduce((a, t) => a + t.usd, 0);
+  assert.ok(Math.abs(all - 10) < 1e-9, 'the whole recorded 10 is placed, on the days with room');
+  assert.equal(events.length, 2);
+});
+
+test('coordination: a turn recorded by the current code before the rebuild runs is not counted twice', () => {
   const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [DISPATCHER()]);
   seq = 0;
-  const events: TranscriptEvent[] = [];
-  const push = (e: TranscriptEvent) => {
-    events.push(e);
-    w.spend.observe('d', e);
-  };
-  push(userEvent(T0, '[worker update] w1'));
-  push(resultEvent(T0 + 30_000, { cum: { m: tok({ usd: 2, cr: 1 }) } }, 2));
+  const { events, turn } = recorded(w);
+  turn(T0, '[worker update] w1', 2);
   makeLegacy(w, ['d']);
-  // the portal is back up with the new code: the next turn is recorded live, with its day, before the old ones are split
-  push(userEvent(T0 + DAY, '[worker update] w1'));
-  push(resultEvent(T0 + DAY + 30_000, { cum: { m: tok({ usd: 5, cr: 1 }) } }, 5));
+  // the portal is back up with the new code: the next turn is recorded live, with its day, before the old ones are rebuilt
+  turn(T0 + DAY, '[worker update] w1', 5);
   assert.equal(w.spend.session('d')!.coordFrom, events[3].seq);
-  w.spend.splitLegacyCoordination('d', events, w.sessions[0]);
+  w.spend.rebuildCoordination('d', events, w.sessions[0]);
   const r = w.spend.request('w1')!;
-  const total = Object.values(r.coordDays!.dispatcher).reduce((a, t) => a + t.usd, 0);
+  const total = Object.values(r.coordDays!.d).reduce((a, t) => a + t.usd, 0);
   assert.ok(Math.abs(total - 5) < 1e-9, '2 from before + 3 live, each once');
-  assert.ok(Math.abs(r.coordDays!.dispatcher['2026-10-08'].usd - 2) < 1e-9);
-  assert.ok(Math.abs(r.coordDays!.dispatcher['2026-10-09'].usd - 3) < 1e-9);
+  assert.ok(Math.abs(r.coordDays!.d['2026-10-08'].usd - 2) < 1e-9);
+  assert.ok(Math.abs(r.coordDays!.d['2026-10-09'].usd - 3) < 1e-9);
 });
 
-test("coordination: with no transcript left the old coordination takes the shape of the request's own days", () => {
+test("coordination: with no transcript left the coordination takes the days with room: the request's own", () => {
   const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1'), DISPATCHER()]);
   w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 3, cr: 1 }) } }, 3));
   coordTurn(w, 'd', T0 + DAY, '[worker update] w1', 3);
   makeLegacy(w, ['d']);
-  assert.equal(w.spend.splitLegacyCoordination('d', undefined, w.sessions[1]), 3);
+  assert.equal(w.spend.rebuildCoordination('d', undefined, w.sessions[1]), 3);
   const r = w.spend.request('w1')!;
   // the request spent 3 on day one and 3 on day two: the 3 of coordination is spread 1.5 and 1.5
-  assert.ok(Math.abs(r.coordDays!.dispatcher['2026-10-08'].usd - 1.5) < 1e-9);
-  assert.ok(Math.abs(r.coordDays!.dispatcher['2026-10-09'].usd - 1.5) < 1e-9);
+  assert.ok(Math.abs(r.coordDays!.d['2026-10-08'].usd - 1.5) < 1e-9);
+  assert.ok(Math.abs(r.coordDays!.d['2026-10-09'].usd - 1.5) < 1e-9);
 });
 
-test('coordination: a record from before the split marks its coordinator sessions for the split when it loads', () => {
+test('coordination: a record from the first version (days keyed by "dispatcher") loses them and its coordinators are rebuilt', () => {
   const w = world([item('w1')], [DISPATCHER(), session('s1')]);
   coordTurn(w, 'd', T0, '[worker update] w1', 1);
-  coordTurn(w, 'd', T0 + 1000, '[heartbeat] x', 1);
   w.spend.flush();
   const file = path.join(w.dir, 'spend.json');
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  delete raw.sessions.d.legacyRequests;
-  delete raw.sessions.d.coordSplit;
+  raw.requests.w1.coordDays = { dispatcher: raw.requests.w1.coordDays.d }; // how the first version wrote them
+  delete raw.sessions.d.coordV;
+  raw.sessions.d.coordSplit = true;
+  raw.sessions.d.legacyRequests = { w1: 1 };
+  raw.sessions.d.coordFrom = 99;
   fs.writeFileSync(file, JSON.stringify(raw));
   const again = new SpendStore(w.dir, { work: () => w.items, session: () => undefined, priorResults: () => 1 });
-  assert.deepEqual(again.session('d')!.legacyRequests, { w1: 1 }, 'the request it named, not its bucket');
-  assert.equal(again.session('d')!.coordSplit, undefined);
+  assert.equal(again.request('w1')!.coordDays?.dispatcher, undefined, 'the wrong days are dropped');
+  assert.equal(again.session('d')!.coordV, undefined, 'and the session waits for its rebuild');
+  assert.equal(again.rebuildCoordination('d', [userEvent(T0, '[worker update] w1'), resultEvent(T0 + 30_000, { cum: { m: tok({ usd: 1, cr: 1 }) } }, 1)], undefined), 1);
+  assert.equal(again.request('w1')!.coordDays!.d['2026-10-08'].usd, 1);
 });
 
 test('namedIdsIn: a request cited in parentheses by a harness notice is not what the turn is about (w1161: the restart notices billed the dispatcher to w605)', () => {

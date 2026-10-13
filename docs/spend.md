@@ -104,15 +104,20 @@ unmeasured and would cost more to explain. A turn that names no request is in it
 portal restart billed those turns to w605 (a citation of the update rule, not the subject). That fixes turns from the deploy on; turns
 already recorded stay where they were put.
 
-**What is stored.** A request keeps `coordDays`: dollars and tokens of coordinator turns by coordinator and UTC day (`coordKey`:
-`dispatcher`, `ops`, `personal:<name>`), a part of `days`; workers' own cost in a window is `days` minus it. The all-time split needs
-nothing new: each of the request's `sessions` already has its role, so `SpendStore.splitOf` is exact for every request, old ones too.
-Only a window report needs the days. **Turns recorded before this change have none**, so at the first start with this code a coordinator session
-keeps what it had spent on each request (`legacyRequests`) and, 150 seconds later (`splitLegacyCoordination`, in the background, one
-session at a time), its transcript (a chat is never pruned) is replayed up to its first turn recorded under the new code (`coordFrom`):
-the replay gives each request its *shape over days*, and the dollars stay what the record held, so totals do not move. A request the
-replay does not find (no transcript) takes the shape of its own days. Until that finishes, a window report shows these requests' coordination
-as $0; the days of the old part are an estimate, the sums are not.
+**What is stored.** A request keeps `coordDays`: dollars and tokens of coordinator turns by the coordinator's **session id** and UTC day,
+a part of `days`; workers' own cost in a window is `days` minus it. The all-time split needs nothing new: each of the request's
+`sessions` already has its role, so `SpendStore.splitOf` is exact for every request, old ones too. Only a window report needs the days.
+Turns recorded before days existed get them from the coordinator's own transcript (a chat is never pruned), 150 seconds after the
+portal starts, one session at a time (`rebuildCoordination`; a session with `coordV` 2 is done). The replay is **by the rules that recorded
+each turn**: before `coordFrom` (the first turn the current code recorded) the old attribution (an id cited in parentheses in a harness
+notice counted) and the old cost rule (a restart's whole running total was one turn); after it, the current ones. No day holds more
+coordination than the request spent that day, and what the replay does not explain goes to the days with room. Until the rebuild finishes a
+window report shows $0 coordination for the old part; the days of the old part are an estimate, the sums are not.
+
+*The first version got this wrong (w1160, 2026-10-13):* it replayed old turns by the new rules and scaled the result up to the recorded size,
+so w605's $1,836 of dispatcher turns (billed to it by the restart notices that cite "(w605)") were spread over the days of its few real mentions,
+and the 3-day window read $1,475 of **worker** cost (days minus too little coordination) beside $0.13 of coordination. Its days, keyed by
+"dispatcher" and the like, are dropped at load and every coordinator is rebuilt.
 
 ## Where the tokens go inside a session
 
