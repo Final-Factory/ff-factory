@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -453,7 +453,13 @@ test('on this machine: `ff-leftovers end` run through its shim from a bash pipel
   assert.ok(got.out.includes('sleep 600'), `its background job was:\n${got.out}`);
 });
 
-test('on a real Linux machine: a detached "player" and "Xvfb" of a stopped session end, a live session\'s player stays', { skip: process.platform !== 'linux' }, async () => {
+// Linux and a Mac (w1197: the m5's path is this one, with `ps -E` for the environments; the macOS CI job runs this file).
+const posixPlatform = process.platform === 'linux' ? 'linux' : process.platform === 'darwin' ? 'darwin' : undefined;
+
+test('on a real Linux machine or Mac: a detached "player" and "Xvfb" of a stopped session end, a live session\'s player stays', { skip: !posixPlatform && 'Linux and macOS only' }, async () => {
+  const plat = posixPlatform!;
+  // A Mac's player is the binary inside finalfactory.app, a Linux one finalfactory.x86_64 (unitySlots.ts gamePlayers).
+  const playerIn = (slot: string) => (plat === 'darwin' ? path.join(root, 'players', slot, 'player', 'finalfactory.app', 'Contents', 'MacOS', 'finalfactory') : path.join(root, 'players', slot, 'player', 'finalfactory.x86_64'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-'));
   // node under the player's and Xvfb's names (a symlink: argv[0] and so the command line keep the name; Ubuntu's sleep is a
   // multicall binary that refuses to run under another one).
@@ -462,8 +468,8 @@ test('on a real Linux machine: a detached "player" and "Xvfb" of a stopped sessi
     fs.symlinkSync(process.execPath, p);
     return p;
   };
-  const stoppedPlayer = bin(path.join(root, 'players', 'slot9-0', 'player', 'finalfactory.x86_64'));
-  const livePlayer = bin(path.join(root, 'players', 'slot9-1', 'player', 'finalfactory.x86_64'));
+  const stoppedPlayer = bin(playerIn('slot9-0'));
+  const livePlayer = bin(playerIn('slot9-1'));
   const display = bin(path.join(root, 'tmp', 'ffa-deadbeef', 'xv', 'Xvfb'));
   const start = (file: string, session: string) => {
     const c = spawn(file, ['-e', 'setTimeout(() => {}, 600000)'], { env: { ...process.env, FF_SESSION_ID: session, FF_MACHINE_ID: 'testbox', FF_SANDBOX_ID: 'slot9' }, detached: true, stdio: 'ignore' });
@@ -471,15 +477,15 @@ test('on a real Linux machine: a detached "player" and "Xvfb" of a stopped sessi
     return c.pid!;
   };
   const pids = { player: start(stoppedPlayer, 'deadbeef'), xvfb: start(display, 'deadbeef'), live: start(livePlayer, 'cafecafe') };
-  const unity = realUnityDeps('linux');
+  const unity = realUnityDeps(plat);
   let now = Date.now();
   const reaper = new LeftoverReaper({
-    platform: 'linux',
+    platform: plat,
     machineId: 'testbox',
     // Only this test's processes: nothing else on the machine is ever looked at.
     procs: async () => (await unity.procs()).filter((p) => Object.values(pids).includes(p.pid)),
-    envOf: (p) => readEnvs('linux', p),
-    inspect: realInspect('linux'),
+    envOf: (p) => readEnvs(plat, p),
+    inspect: realInspect(plat),
     sessionLive: (id) => id === 'cafecafe',
     sessionKnown: () => false,
     resumable: () => false,
@@ -501,10 +507,11 @@ test('on a real Linux machine: a detached "player" and "Xvfb" of a stopped sessi
     log: () => undefined,
     onEvent: () => undefined,
   });
+  // Gone, or a zombie (an ended child of this test that nobody reaped yet): ps says so on Linux and a Mac alike.
   const alive = (pid: number) => {
     try {
-      process.kill(pid, 0);
-      return !fs.readFileSync(`/proc/${pid}/stat`, 'utf8').includes(') Z ');
+      const stat = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+      return stat !== '' && !stat.startsWith('Z');
     } catch {
       return false;
     }
