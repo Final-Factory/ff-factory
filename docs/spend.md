@@ -127,6 +127,16 @@ coordination days are rebuilt from the corrected record.
 | 8 | A turn that names several requests is split evenly over the first 4 | no loss or double count (weights sum to 1, tested); a batch of messages naming different requests puts the whole turn on the first four: not measured | `attribute`, `namedIdsIn` | not changed. After the repair coordination is $701 of $12,073 in 7 days (5.8%) and not-any-request's $679, so a per-message weighting could move a part of $701 between requests: not worth a second method (a guess at the size, from those two figures) |
 | 9 | The repair's first release took each turn out of, and put it back on, the session's biggest account, so other accounts read negative | measured: token:5d6d575eda30 -$2,018 and token:0d94ad2b5488 -$1,428 in the 7-day report (-$565 and -$757 in 3 days) | `correctHistory` `add(account)` | spread by the session's own mix; the accounts of the 11 sessions corrected are rebuilt from `spend.json.pre-w1209` (`repairAccounts`, an estimate for the requests) |
 
+**Checking the restart repair against the transcripts** (measured by the orchestrator in /srv/fff/data/transcripts, 2026-10-13; the conclusion is mine):
+the dispatcher's transcript (f8862ae9) has `"restarted":true` on 22 result lines; at the two restart lines with a value on each side the
+CLI's total CONTINUED (line 31875 → 31880: 198.0636 → 198.1108, the turn cost $0.05; line 31968 → 31974: 199.4973 → 199.5540), and its
+`cum.<model>.usd` equals `costUsd` in every line sampled (last 243.73). The old rule counted ~$198 for each of those restart turns. 22 such lines at a
+running total of about $100–245 is about $3.6k–4.3k; the repair took $3,648 off this session ($5,167 → $1,519). Its live-recorded part now
+is about $275 against a final running total of $243.73 (lothsahn's orchestrator $134 against $253.17, Ben's $269 against $226.93, estimated: the rest of
+each session's total is backfilled from the older `costUsd` lines and cannot be checked this way). Drops of `costUsd` exist but early (a fresh process
+or a /clear, e.g. line 227 → 246) and without the flag; both rules count those in full. Only 2 of the 22 restart lines were sampled with a value on each
+side: the full list of drops is not pulled.
+
 Not any request's, after the repair: $413 in 3 days (Ben's orchestrator $185, the dispatcher $172, lothsahn's $42.23, the sentry $7.44, ops $6.11) and $679 in 7 (measured).
 They are conversations and heartbeats that name no request, not misbilled worker spend. In the 7-day window $5,513 of $12,073 is under "not recorded" as an account
 (turns from before w1031 and backfilled ones: estimated, $6,203 of the window).
