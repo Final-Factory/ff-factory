@@ -324,6 +324,21 @@ test('a new agent process whose totals started again counts its first turn in fu
   assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 16) < 1e-9);
 });
 
+test('a resumed process that carries its saved totals counts only the rise, even when flagged restarted (w1161)', () => {
+  // The dispatcher's first turn after each portal restart, 2026-10-07..12: the CLI resumed from its saved running total, the
+  // portal before w1161 flagged it restarted, and the whole total ($200 and more) was counted again each time.
+  const w = world([item('w1')], [session('d', { kind: 'orchestrator', orchestratorRole: 'dispatcher', title: 'Dispatcher' })]);
+  w.spend.observe('d', userEvent(T0, '[work request] w1 "x"'));
+  w.spend.observe('d', resultEvent(T0 + 60_000, { cum: { m: tok({ in: 900, out: 400_000, cr: 400_000_000, cw: 9_000_000, usd: 200 }) } }, 200));
+  const before = w.spend.session('d')!.total.usd;
+  w.spend.observe('d', userEvent(T0 + 120_000, '[app restarted] FF Factory restarted'));
+  w.spend.observe('d', resultEvent(T0 + 180_000, { restarted: true, cum: { m: tok({ in: 901, out: 400_500, cr: 401_000_000, cw: 9_010_000, usd: 200.5 }) } }, 200.5));
+  const s = w.spend.session('d')!;
+  assert.ok(Math.abs(s.total.usd - before - 0.5) < 1e-9, `the turn added ${s.total.usd - before}`);
+  assert.equal(s.total.cr, 401_000_000, 'cache reads: only the 1M this turn read');
+  assert.equal(s.turns, 2);
+});
+
 test('a compaction between turns costs nothing extra to record: the next result totals carry it', () => {
   const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1')]);
   w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 1, cr: 1000 }) } }, 1));
