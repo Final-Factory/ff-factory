@@ -1013,6 +1013,21 @@ permissions it could not check (the write halves). Its **Re-check now** button p
 once (`POST /api/github/recheck`, anyone signed in, at most every 30 seconds); the banner clears by itself on the next
 probe that finds nothing missing. Closing it hides it until its text changes.
 
+**A rate limit is not a missing permission (w1186).** On 2026-10-13 about 00:47 UTC GitHub's rate limit on lothsahn's account
+(403 "API rate limit exceeded for user ID 10092359") refused the probe's Artifact metadata and Self-hosted runners reads and
+the banner said "read refused", and lothsahn was asked to edit a token that had those permissions all along. The probe now
+tells the two apart from the real answer's own headers and body, never from `gh api rate_limit` (it reported 5000 left all
+night while real calls were refused): a 403 or 429 with `X-RateLimit-Remaining: 0` or a `Retry-After` (a secondary limit),
+or any answer whose message says "rate limit exceeded" or whose GraphQL error is `RATE_LIMITED` (server/githubTokens.ts
+`rateLimitOf`). A rate-limited read stops the probe where it is and **keeps the credential's last verdict** (what it lacked,
+when it was read); nothing is counted as refused, no token banner and no `[host]` notice is raised for it, and the token is
+still used. A separate banner **"GitHub is rate limiting us."** (kind `github-rate-limit`, for the token's person and the
+owners, one per GitHub account since its tokens share one budget) names the token or tokens, the account, GitHub's words and
+the reset time from `X-RateLimit-Reset` (or `Retry-After`); without one the credential is read again every 10 minutes. The
+credential is not probed again before the reset, and the banner clears by itself on the first good call after it (the
+probe's own, or any portal gh call that succeeds on that credential). The CI-read check (w889) keeps its last measurement
+the same way. `system_status` shows `RATE LIMITED by GitHub (…)` on the credential's line.
+
 **Also loud:** a `WARNING: GitHub token …` line per such token in `system_status`, and a `[host]` notice to the dispatcher
 plus the host notification, once when a token turns bad (or what it lacks changes) and once when it has everything again.
 

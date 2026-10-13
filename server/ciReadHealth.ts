@@ -5,6 +5,7 @@
 // start and every half hour, and says loudly what it cannot read: a system_status line, a dashboard banner for everyone,
 // and a [host] notice to the dispatcher when it turns bad and when it recovers. Never a token: only what GitHub answered.
 import type { RunOptions, RunResult } from './proc.ts';
+import { isRateLimitText } from './githubTokens.ts';
 
 /** What the credential reads, best first: the checks themselves, the Actions runs (w829), only the merge state (w889), nothing. */
 export type CiReadLevel = 'checks' | 'actions' | 'merge-state' | 'none';
@@ -110,6 +111,9 @@ export class CiReadWatch {
     } catch (e) {
       h = { level: 'none', repo, at: (this.d.now?.() ?? new Date()).toISOString(), why: (e as Error).message.slice(0, 200) };
     }
+    // GitHub's rate limit (w1186) says nothing about what the credential can read: keep the last measurement. The banner
+    // "GitHub is rate limiting us" (githubTokens.ts) is what a person sees; it is measured again at the next half hour.
+    if (!ciReadOk(h.level) && isRateLimitText(h.why)) return this.health;
     const before = this.health?.level;
     this.health = h;
     if (h.level !== before) {

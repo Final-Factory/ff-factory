@@ -99,3 +99,24 @@ test('ghChecks with a token that reads neither checks nor Actions runs: unreadab
   await ghChecks('Final-Factory/FinalFactory#7002', actions.run);
   assert.ok(!actions.calls.some((a) => a[0] === 'api' && /\/pulls\/\d+$/.test(a[1])));
 });
+
+test('a rate-limited measurement (w1186) is not "cannot read CI": the last measurement stands and nothing is reported', async () => {
+  const reports: string[] = [];
+  const LIMITED = 'gh: API rate limit exceeded for user ID 10092359. If you reach out to GitHub Support for help, please include the request ID (HTTP 403)';
+  let limited = false;
+  const run = async (_cmd: string, args: string[], _opts?: RunOptions): Promise<RunResult> => {
+    if (limited) return { code: 1, stdout: '', stderr: LIMITED };
+    return gh({ rollup: true }).run(_cmd, args, _opts);
+  };
+  const w = new CiReadWatch({ repo: () => 'Final-Factory/FinalFactory', runner: () => run, report: (title, body) => reports.push(`${title}: ${body}`) });
+  assert.equal((await w.check())?.level, 'checks');
+  limited = true;
+  await w.check();
+  assert.equal(w.health?.level, 'checks', 'kept, not "none"');
+  assert.equal(ciReadBanner(w.health), undefined);
+  assert.equal(reports.length, 0);
+  // A real refusal still turns it bad.
+  const refused = new CiReadWatch({ repo: () => 'Final-Factory/FinalFactory', runner: () => gh({}).run, report: (title) => void reports.push(title) });
+  await refused.check();
+  assert.equal(refused.health?.level, 'none');
+});
