@@ -306,7 +306,7 @@ export function culpritDraft(a: { repo: string; run: BatchRun; v: BatchVerdict; 
     fence([...(c.title ? [`PR title: ${c.title}`] : []), ...(c.subject ? [`Merge subject: ${c.subject}`] : []), 'Failing tests:', ...testLines(c.tests), ...(unresolved.length ? ['Also failing, no merge found for them:', ...testLines(unresolved)] : []), ...(v.note ? [`Note: ${v.note}`] : [])]),
     '',
     'Method, in this order:',
-    `1. Revert first: \`git fetch origin && git switch -c ${branch} origin/master && git revert -m 1 ${c.sha}\`${c.pr ? '' : ' (drop `-m 1` if it is not a merge commit)'}, open a PR into master whose description carries \`Part of: <this request>\` and \`Reverts ${c.pr ? `#${c.pr}` : short(c.sha)}\`, merge it on a green Merge gate.`,
+    `1. Revert first: \`git fetch origin && git switch -c ${branch} origin/master && git revert -m 1 ${c.sha}\`${c.pr ? '' : ' (drop `-m 1` if it is not a merge commit)'}, open a PR into master whose description carries \`Part of: <this request>\` and \`Reverts ${c.pr ? `#${c.pr}` : short(c.sha)}\`, merge it on a green Test in editmode.`,
     '2. Then re-land the fix on a new PR with the failing tests green locally (scripts/test_select.py), or hand the fix back to the linked request\'s worker. Never loosen or skip the failing test to get the batch green.',
   ].join('\n');
   return {
@@ -329,7 +329,7 @@ export function noResultsDraft(a: { repo: string; run: BatchRun; v: BatchVerdict
     '',
     'Method, in this order:',
     `1. Read the run's job log (${JOB_NAME}) and find the first error. \`git log --first-parent origin/master\` names the merges up to the tip; find the one that introduced it.`,
-    '2. Revert that merge first (`git fetch origin && git switch -c revert-<pr> origin/master && git revert -m 1 <merge sha>`), open a PR into master whose description carries `Part of: <this request>` and `Reverts #<pr>`, merge it on a green Merge gate. Then re-land the fix on a new PR with the tests green locally (scripts/test_select.py). Never loosen or skip a test to get the batch green.',
+    '2. Revert that merge first (`git fetch origin && git switch -c revert-<pr> origin/master && git revert -m 1 <merge sha>`), open a PR into master whose description carries `Part of: <this request>` and `Reverts #<pr>`, merge it on a green Test in editmode. Then re-land the fix on a new PR with the tests green locally (scripts/test_select.py). Never loosen or skip a test to get the batch green.',
   ].join('\n');
   return {
     title: `Master batch red at ${short(v.tip)}: no results (compile error or crash)`,
@@ -353,7 +353,7 @@ export function unbisectedDraft(a: { repo: string; run: BatchRun; v: BatchVerdic
     '',
     'Method, in this order:',
     '1. Reproduce at the tip with the failing tests (scripts/test_select.py), then find the merge that broke them (`git log --first-parent origin/master`, `git bisect`). If it is a flaky test, say so with the evidence.',
-    '2. Revert that merge first (`git fetch origin && git switch -c revert-<pr> origin/master && git revert -m 1 <merge sha>`), open a PR into master whose description carries `Part of: <this request>` and `Reverts #<pr>`, merge it on a green Merge gate. Then re-land the fix on a new PR with the failing tests green locally. Never loosen or skip the failing test to get the batch green.',
+    '2. Revert that merge first (`git fetch origin && git switch -c revert-<pr> origin/master && git revert -m 1 <merge sha>`), open a PR into master whose description carries `Part of: <this request>` and `Reverts #<pr>`, merge it on a green Test in editmode. Then re-land the fix on a new PR with the failing tests green locally. Never loosen or skip the failing test to get the batch green.',
   ].join('\n');
   return {
     title: `Master batch red: ${n} tests not bisected`,
