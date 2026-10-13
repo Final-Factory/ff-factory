@@ -109,7 +109,10 @@ Two rules changed in the a9d5eae restart (2026-10-13 01:52:30 -06:00, `RULES_FRO
 background (`repairSpend` in server/index.ts, which first keeps a copy of the record as `spend.json.pre-w1209`): the transcript is replayed twice, by
 the old rules and by the current ones, and for each live-recorded turn the two read differently the old reading is taken out and the current one put
 in, in the session and in every request it touched. It changes the record by the difference and nothing else (the context categories come from the calls' own
-usage and do not move). It refuses a session whose replay does not explain its recorded total within 5% and says so in the journal
+usage and do not move). The turns the backfill estimated from the portal's cost totals (before the live recording started) carry the same double count in another form: the portal's own
+total doubled at a restart, so the turn after it reads as the whole running total again. A backfilled turn that costs at least 90% of what the session had cost so far, from $20
+up, is that restart and nothing else (a real turn cannot cost as much as the whole session so far), and what it really cost is what is left over; its tokens are estimated again from that.
+It refuses a session whose replay does not explain its recorded total within 5% and says so in the journal
 (`spend repair: … left as recorded`); a session whose transcript is gone, and every turn backfilled before the live recording started, stay as recorded. A coordinator's
 coordination days are rebuilt from the corrected record.
 
@@ -126,6 +129,8 @@ coordination days are rebuilt from the corrected record.
 | 7 | A bucket's request view labelled its days "workers" under a "coordination" header; `_unattributed` answered 87,000 characters | presentation | `renderRequest` | one figure per day; 25 sessions then a count |
 | 8 | A turn that names several requests is split evenly over the first 4 | no loss or double count (weights sum to 1, tested); a batch of messages naming different requests puts the whole turn on the first four: not measured | `attribute`, `namedIdsIn` | not changed. After the repair coordination is $701 of $12,073 in 7 days (5.8%) and not-any-request's $679, so a per-message weighting could move a part of $701 between requests: not worth a second method (a guess at the size, from those two figures) |
 | 9 | The repair's first release took each turn out of, and put it back on, the session's biggest account, so other accounts read negative | measured: token:5d6d575eda30 -$2,018 and token:0d94ad2b5488 -$1,428 in the 7-day report (-$565 and -$757 in 3 days) | `correctHistory` `add(account)` | spread by the session's own mix; the accounts of the 11 sessions corrected are rebuilt from `spend.json.pre-w1209` (`repairAccounts`, an estimate for the requests) |
+| 10 | The backfilled (estimated) part has the same restart double count, by the portal's doubled own total | the largest 7-day coordination after the repair is w863 $68.09 (dispatcher $67.35) and w788 $66.86 (dispatcher $66.75): single $67 turns, the size of a running total, supported but not proven to be restarts; the estimated part of the 7-day window is $6,203 of | 9 | The repair's first release took each turn out of, and put it back on, the session's biggest account, so other accounts read negative | measured: token:5d6d575eda30 -$2,018 and token:0d94ad2b5488 -$1,428 in the 7-day report (-$565 and -$757 in 3 days) | `correctHistory` `add(account)` | spread by the session's own mix; the accounts of the 11 sessions corrected are rebuilt from `spend.json.pre-w1209` (`repairAccounts`, an estimate for the requests) |
+2,073 | `backfillSession` `d` | `correctHistory` (fixV 2) |
 
 **Checking the restart repair against the transcripts** (measured by the orchestrator in /srv/fff/data/transcripts, 2026-10-13; the conclusion is mine):
 the dispatcher's transcript (f8862ae9) has `"restarted":true` on 22 result lines; at the two restart lines with a value on each side the
