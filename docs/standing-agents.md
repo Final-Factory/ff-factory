@@ -96,7 +96,7 @@ ordinary request in the work ledger ([orchestrators.md](orchestrators.md#request
 agent's **owner** (`owner`, set to the person who created the agent; agents from before have none and use the system
 payer, config `systemPayer`, else the owner), with the task verbatim as its brief and a fixed constraints line
 (written by the agent; a PR into master, the one trunk, never pushed or force-pushed to master directly, which its worker
-merges itself once verified and CI is green when it fixes a clear, demonstrated bug or only adds tests or verdicts, and
+merges itself once verified and CI is green (in the game repo, its required `Test in editmode` check) when it fixes a clear, demonstrated bug or only adds tests or verdicts, and
 leaves open for a person when it is a judgement call (w694); anything that spends money, publishes,
 changes a live setting, releases or deploys needs a person). The dispatcher gets it as a normal `[work request]`, with the agent and who
 approved it in its first line, and queues, places (LothDesktop, the Macs, BEAST within its caps, by the placement

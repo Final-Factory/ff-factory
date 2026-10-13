@@ -224,7 +224,7 @@ export function delegationConstraints(f: Pick<DelegationFiling, 'agentName' | 'm
     // Merging (w694; the owner, 2026-10-08: "as long as they were obvious bugs merging is fine from sentry investigations"):
     // the worker merges its own PR on green CI when it fixes a demonstrated bug or only adds tests or verdicts; a judgement call waits for a person.
     "Deliver through a pull request into master, the game repo's one trunk (develop is retired, w1137): never push to master directly and never force-push.",
-    "Merge your own pull request into master once its verification is done and CI is green when it fixes a clear, demonstrated bug (a failing-first test or a reproduction) or only adds tests or verdicts. A pull request that changes design or behaviour beyond fixing the bug is a judgement call: leave it open for a person and say so in your report.",
+    "Merge your own pull request into master once its verification is done and CI is green when it fixes a clear, demonstrated bug (a failing-first test or a reproduction) or only adds tests or verdicts (in the game repo, CI is green when its required `Test in editmode` check passes; the whole suite runs after the merge and a PR that breaks it comes back as an urgent revert request). A pull request that changes design or behaviour beyond fixing the bug is a judgement call: leave it open for a person and say so in your report.",
     'Anything that spends money, publishes or posts outside, changes a live setting, releases or deploys needs a person in their own words: ask through the request (decide_work ask), never on this brief alone.',
     ...(f.model ? [`Suggested worker: ${f.model}${f.effort ? `, ${f.effort} effort` : ''} (the agent's auto-approve rule; the dispatcher decides).`] : []),
   ].join(' ');
@@ -2837,13 +2837,13 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const now = this.now().getTime();
     // Within one family only: an FFBox review request carries its Discord thread's key too, and is not a repeat of the
     // bug report filed from that thread (nor the other way round).
-    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' || k === 'nightly-run' || k === 'nightly-review' ? k : 'release');
+    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' || k === 'nightly-run' || k === 'nightly-review' || k === 'master-batch' ? k : 'release');
     const prefix = family(kind);
     const ids = keys.filter((k) => k.startsWith(`${prefix}:`));
     if (!ids.length) return undefined;
     // A scenario failing again after its request closed is news (the fix did not hold, or it regressed again): only an
-    // open nightly request takes it.
-    const lookback = prefix === 'nightly' ? -1 : lookbackMs;
+    // open nightly request takes it. Likewise a red master batch (w1180): a closed revert request does not swallow a new red.
+    const lookback = prefix === 'nightly' || prefix === 'master-batch' ? -1 : lookbackMs;
     for (const w of this.store.work.values()) {
       if (!w.source || family(w.source.kind) !== prefix || (!isOpen(w) && now - Date.parse(w.updatedAt) > lookback)) continue;
       if (w.keys.some((k) => ids.includes(k))) return w;
@@ -2877,6 +2877,31 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
         // it is at a limit; the request's log has it
       }
     }
+    return true;
+  }
+
+  /**
+   * A red master batch named a pull request of this request (w1180, server/masterBatch.ts): one log line that carries `mark`
+   * (once per mark), a worker busy on it told, and its people told `text` (not for a request nobody asked for by name). A
+   * closed request is only logged and its people told: nothing here reopens one. False when the mark is already on it.
+   */
+  tellMasterBatch(id: string, a: { mark: string; line: string; text: string }): boolean {
+    const w = this.store.work.get(id);
+    if (!w || w.log.some((l) => l.includes(a.mark))) return false;
+    this.stamp(w, a.line);
+    this.store.putWork(w);
+    if (isOpen(w)) {
+      for (const sid of w.sessionIds) {
+        const s = this.store.sessions.get(sid);
+        if (!s || !BUSY.includes(s.status)) continue;
+        try {
+          this.sessions.send(sid, `[master batch] ${a.text} (${w.id})`, 'system', undefined, { requestedBy: w.requestedBy });
+        } catch {
+          // it is at a limit; the request's log has it
+        }
+      }
+    }
+    if (!w.unattributed) this.toPeople(w.requesters, a.text);
     return true;
   }
 
@@ -3073,14 +3098,14 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    */
   private intakeCap(now: number, kind: WorkSourceKind): string | undefined {
     // The server's own filings (a release follow-up, the night's scheduled run) are no flood to cap.
-    if (kind === 'release' || kind === 'nightly-run' || kind === 'nightly-review') return undefined;
+    if (kind === 'release' || kind === 'nightly-run' || kind === 'nightly-review' || kind === 'master-batch') return undefined;
     const lim = limitsFor('intake', this.d.cfg.workLimits);
     if (!lim) return undefined;
     let hour = 0;
     let day = 0;
     for (const w of this.store.work.values()) {
       // An operator's dev request is their own request (its own cap: providers.ffbox.devRequests.perHour).
-      if (!w.source || w.source.kind === 'release' || w.source.kind === 'nightly-run' || w.source.kind === 'nightly-review' || w.source.kind === 'ffbox-dev') continue;
+      if (!w.source || w.source.kind === 'release' || w.source.kind === 'nightly-run' || w.source.kind === 'nightly-review' || w.source.kind === 'master-batch' || w.source.kind === 'ffbox-dev') continue;
       const age = now - Date.parse(w.createdAt);
       if (age < 3_600_000) hour++;
       if (age < 86_400_000) day++;
