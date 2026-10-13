@@ -474,6 +474,14 @@ export interface SessionSpend {
   transcript?: { state: 'full' | 'gz' | 'pruned'; bytes?: number; prunedAt?: string };
   /** The seq of the first transcript event recorded live; the backfill takes only the events before it. */
   liveFrom?: number;
+  /**
+   * A coordinator session (dispatcher, orchestrator, ops worker) recorded before the coordination split (w1160): its usd by
+   * request as it stood when that code first ran. `splitLegacyCoordination` gives that spend its days from the transcript,
+   * once (`coordSplit`). `coordFrom` is the seq of the first result recorded after that start.
+   */
+  legacyRequests?: Record<string, number>;
+  coordFrom?: number;
+  coordSplit?: boolean;
   /** The backfill has read this session's transcript. */
   backfilled?: boolean;
 }
@@ -499,8 +507,31 @@ export interface RequestSpend {
   calls: number;
   compactions: number;
   reread?: { n: number; chars: number; afterCompact: number };
-  /** Tokens and dollars by UTC day, for a report over a window. */
+  /** Tokens and dollars by UTC day, for a report over a window. Workers and coordinators together. */
   days: Record<string, Tok>;
+  /**
+   * The part of `days` that coordinators' turns (dispatcher, a person's orchestrator, the ops worker) spent on this request
+   * (w1160), by coordinator (`coordKey`) and UTC day. The workers' own cost is `days` minus this. Turns from before the
+   * split get their days from `splitLegacyCoordination`, an estimate (docs/spend.md).
+   */
+  coordDays?: Record<string, Record<string, Tok>>;
+}
+
+/** The sessions whose turns are billed as coordination: they run the work, they do not do it. */
+export const isCoordinatorRole = (r: SpendRole | undefined): boolean => r === 'dispatcher' || r === 'personal' || r === 'ops';
+/** Who a coordinator is, for the breakdown of a request's coordination cost: "dispatcher", "ops", "personal:<person>". */
+export const coordKey = (role: SpendRole, person?: string): string => (role === 'personal' ? `personal:${person ?? 'unknown'}` : role);
+export const coordLabel = (key: string): string => (key === 'dispatcher' ? 'dispatcher' : key === 'ops' ? 'ops worker' : key.startsWith('personal:') ? `${key.slice(9)}'s orchestrator` : key);
+
+/** How coordination is counted, said wherever it is shown (docs/spend.md "Coordination"). */
+export const COORDINATION_NOTE =
+  "Coordination = the dispatcher's, orchestrators' and ops worker's turns, counted for the requests their messages name; a turn naming several requests is split evenly among them (up to 4): an estimate. Turns naming no request are listed apart.";
+
+/** Coordinators' cost on one request (or in a window), by coordinator. */
+export interface Coordination {
+  usd: number;
+  tokens: Tok;
+  by: { who: string; usd: number }[];
 }
 
 export interface ReportOptions {
@@ -519,8 +550,15 @@ export interface SpendReport {
   models: ModelTok;
   /** The window's dollars by the Claude account the turns ran on (w1031). */
   accounts: { account: string; usd: number; tokens: Tok }[];
-  top: { id: string; title: string; kind: string; status?: string; person?: string; usd: number; tokens: Tok; estimatedUsd: number; sessions: number; closed: boolean; cats: { cat: string; usd: number; pct: number }[] }[];
-  kinds: { kind: string; usd: number; requests: number; avg: number }[];
+  /** Requests ranked by the workers' own cost (`usd`, `tokens`); the coordinators' cost on them is billed apart (w1160). */
+  top: { id: string; title: string; kind: string; status?: string; person?: string; usd: number; tokens: Tok; coordination: Coordination; estimatedUsd: number; sessions: number; closed: boolean; cats: { cat: string; usd: number; pct: number }[] }[];
+  /** The window's dollars on requests, the workers' own and the coordinators' (w1160); with `buckets` they add up to `total`. */
+  workers: Tok;
+  coordination: Coordination;
+  /** The requests with the most coordination in the window, whatever their workers cost (w1160). */
+  topCoordination: { id: string; title: string; status?: string; coordination: Coordination; workers: number }[];
+  /** By kind of request: `usd` is the workers' own cost, `coordination` the coordinators'. */
+  kinds: { kind: string; usd: number; requests: number; avg: number; coordination: number }[];
   /** Where the context tokens went across the window's requests, by category (list-price shares applied to the measured dollars). */
   where: { cat: string; label: string; usd: number; pct: number }[];
   /** Spend that is no request's: the dispatcher, orchestrators, ops, standing agents, unattributed. */
@@ -566,7 +604,8 @@ export interface Footprint {
 
 /** GET /api/spend/summary: the cost of each request the page holds. */
 export interface SpendSummaryReply {
-  requests: Record<string, { usd: number; in: number; out: number; cr: number; cw: number; sessions: number; estimatedUsd: number }>;
+  /** `usd` and the tokens are the workers' own; `coordinationUsd` is the coordinators' turns on the request (w1160). */
+  requests: Record<string, { usd: number; in: number; out: number; cr: number; cw: number; sessions: number; estimatedUsd: number; coordinationUsd: number }>;
 }
 /** GET /api/spend/request/<id>: one request's spend with its sessions and what happens to their transcripts. */
 export interface SpendRequestReply {

@@ -7,7 +7,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { HOST_ROLES, configPath, loadConfig, machineCleanupSettings, pruneRetiredKeys, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus } from './store.ts';
-import { SessionManager, compactCommand, snapshotOf } from './sessions.ts';
+import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessions.ts';
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
 import { MachineManager, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
@@ -68,6 +68,7 @@ import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, typ
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
 import { SpendStore, buildReport } from './spend.ts';
+import type { SpendSummaryReply } from '../shared/spend.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 
 const WEB = path.join(ROOT, 'web', 'dist');
@@ -135,6 +136,8 @@ const store = new Store(cfg.dataDir);
 // What each request costs (w859, docs/spend.md): fed by every transcript event, whether the session runs here or on a machine.
 const spend = new SpendStore(cfg.dataDir, { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: (id) => store.countResults(id), accountLabel: (i) => (i.account ? `account ${i.account}` : undefined) });
 store.onEvent = (sid, e) => spend.observe(sid, e);
+// Sessions from before w1161 learn the CLI's own total at their last result, so their next resume is not counted twice.
+if (seedSdkCost(store.sessions.values(), (id) => spend.session(id)?.lastCost)) store.save();
 // The orchestrators' memory (Claude Code writes it, so it cannot be written crash-safe): a file a crash damaged gets its
 // newest good backup back, and a backup is taken every 10 minutes when something changed (server/orchestratorMemory.ts).
 const memoryRoot = memoryRootOf(cfg);
@@ -409,6 +412,23 @@ const backfillSpend = async () => {
   }
 };
 setTimeout(() => void backfillSpend(), 90_000).unref();
+// The coordination recorded before the split (w1160, docs/spend.md "Coordination") gets its days from the coordinators' transcripts, once.
+const splitCoordinationSpend = async () => {
+  if (isDryRun) return;
+  let done = 0;
+  let usd = 0;
+  for (const s of [...spend.sessions.values()].filter((x) => x.legacyRequests && !x.coordSplit)) {
+    try {
+      usd += spend.splitLegacyCoordination(s.id, store.hasTranscript(s.id) ? store.readTranscript(s.id) : undefined, store.sessions.get(s.id));
+      done++;
+    } catch (e) {
+      console.warn(`spend coordination split: ${s.id}: ${(e as Error).message}`);
+    }
+    await new Promise((r) => setImmediate(r));
+  }
+  if (done) console.log(`spend coordination split: ${done} coordinator session(s), $${usd.toFixed(2)} given its days`);
+};
+setTimeout(() => void splitCoordinationSpend(), 150_000).unref();
 // The ledger moves on (requests close, titles change, closed ones drop out after a week): the spend record follows (w859).
 setInterval(() => spend.syncWork(), 5 * 60_000).unref();
 // Who hears about a session (docs/orchestrators.md): a person's own orchestrator only them, the dispatcher's turns
@@ -937,10 +957,14 @@ route('POST', '/api/machines/([a-z0-9-]{1,40})/revoke-credential', async (req, [
 // What work costs (w859, docs/spend.md): the cost of each request in the ledger, one request in full, and the analysis.
 route('GET', '/api/spend/summary', async () => {
   spend.syncWork();
-  const requests: Record<string, { usd: number; in: number; out: number; cr: number; cw: number; sessions: number; estimatedUsd: number }> = {};
+  const requests: SpendSummaryReply['requests'] = {};
   for (const w of store.work.values()) {
     const r = spend.request(w.id);
-    if (r) requests[w.id] = { usd: r.total.usd, in: r.total.in, out: r.total.out, cr: r.total.cr, cw: r.total.cw, sessions: Object.keys(r.sessions).length, estimatedUsd: r.estimated.usd };
+    if (r) {
+      // the workers' own cost; the coordinators' turns on the request are beside it (w1160)
+      const { workers, coordination } = spend.splitOf(r);
+      requests[w.id] = { usd: workers.usd, in: workers.in, out: workers.out, cr: workers.cr, cw: workers.cw, sessions: Object.values(r.sessions).filter((s) => s.role !== 'dispatcher' && s.role !== 'personal' && s.role !== 'ops').length, estimatedUsd: r.estimated.usd, coordinationUsd: coordination.usd };
+    }
   }
   return { requests };
 });

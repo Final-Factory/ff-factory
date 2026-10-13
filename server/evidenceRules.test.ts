@@ -226,8 +226,11 @@ test("w896: clean-up deletes only inside the worker install folder, in every wor
   // The old line told workers to remove Unity editor versions; those live outside the root (Unity Hub), so the list stops at what is inside.
   assert.ok(!/Unity editor versions no project uses/.test(DISK_HYGIENE));
   const brief = (info: SessionInfo) => (agents.orchestratorOptions(info) as { systemPrompt: { append: string } }).systemPrompt.append;
-  const dispatcher = brief(sessions.get(agents.dispatcherId!).info);
-  const personal = brief(agents.orchestrators.personalFor(BEN).info);
+  // The coordinators read the full rule with read_rules machines (w1158); their briefs keep the trigger and the gist.
+  assert.match(brief(sessions.get(agents.dispatcherId!).info), /`read_rules machines`.*low disk \(w626, w896: machine_cleanup, then a clean-up worker that deletes only inside the worker install folder; never ask anyone to free space\)/);
+  assert.match(brief(agents.orchestrators.personalFor(BEN).info), /`read_rules machines`.*low disk on a machine \(w626: file clean-up work, never ask anyone to free space; it deletes only inside the worker install folder, w896\)/);
+  const dispatcher = agents.rulesText('machines');
+  const personal = agents.rulesText('machines', BEN);
   assert.match(dispatcher, words);
   assert.match(dispatcher, /A clean-up worker deletes only inside the machine's worker install folder/);
   assert.match(dispatcher, /never write a delete outside the folder into one \(C:, AppData, system temp, Temp entries, the Unity Hub installer, dotnet or package caches, the game's data folder under LocalLow, ~\/\.claude transcripts, a person's files\)/);

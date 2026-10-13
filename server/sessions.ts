@@ -285,11 +285,50 @@ export function compactedLine(before: number, after: { total: number; max?: numb
 }
 
 /**
+ * How a new process's first result relates to the session's earlier spend (w859, w1161). The CLI resumes from the total its
+ * transcript saved (SDK docs, `total_cost_usd`: "a resumed or forked session continues from the total its transcript
+ * saved"), so a first total at or above the last one it reported (`sdkCostUsd`) holds every earlier turn and only the rise
+ * is new: the base is what costUsd holds beyond the CLI's total. Below it, the totals began again (nothing saved, a /clear):
+ * the whole total is new, and the result says so (`usage.restarted`). Comparing with costUsd instead (before w1161) called
+ * every resume after one such restart a restart, since costUsd then runs ahead of the CLI's total for good: each portal
+ * restart counted the CLI's whole running total again (about $200 a time on each orchestrator and the dispatcher).
+ * A session older than sdkCostUsd keeps the rule before it.
+ */
+export function firstResultBase(costUsd: number, sdkCostUsd: number | undefined, total: number): { base: number; restarted: boolean } {
+  if (sdkCostUsd !== undefined) return total + 1e-9 >= sdkCostUsd ? { base: costUsd - sdkCostUsd, restarted: false } : { base: costUsd, restarted: sdkCostUsd > 0 };
+  return total >= costUsd ? { base: 0, restarted: false } : { base: costUsd, restarted: costUsd > 0 };
+}
+
+/**
+ * The portal's own sessions recorded before sdkCostUsd (w1161: the dispatcher, the orchestrators, the ops worker) take the
+ * CLI's total at their last result from the spend record (`lastCost`, the result's own `total_cost_usd`), so their first
+ * resume after the update is measured right too. A machine's session is left alone: its daemon keeps its own copy and
+ * sends the field once it has this code; one seeded here would go stale under a daemon that does not.
+ */
+export function seedSdkCost(sessions: Iterable<SessionInfo>, lastCostOf: (sessionId: string) => number | undefined): number {
+  let n = 0;
+  for (const s of sessions) {
+    if (s.sdkCostUsd !== undefined || s.machineId) continue;
+    const c = lastCostOf(s.id);
+    if (c === undefined || !Number.isFinite(c)) continue;
+    s.sdkCostUsd = c;
+    n++;
+  }
+  return n;
+}
+
+/**
  * One Claude Code conversation, driven through the Agent SDK in streaming-input mode so a person
  * (or the orchestrator) can keep talking to it, interrupt it and answer its permission prompts.
  * The process is started lazily on the first message and resumed from the SDK session id after
  * a stop or a server restart.
  */
+/**
+ * The model for a message about to be sent to a session (w1158, server/turnModel.ts): undefined leaves it as it is.
+ * `opens`: the message starts a turn rather than joining one.
+ */
+export type TurnModelPick = (info: SessionInfo, from: 'human' | 'orchestrator' | 'system', text: string, opens: boolean) => { model: string; kind: string } | undefined;
+
 export class AgentSession implements SessionHandle {
   readonly info: SessionInfo;
   private q?: Query;
@@ -324,12 +363,19 @@ export class AgentSession implements SessionHandle {
   private readonly store: SessionSink;
   private readonly makeOptions: OptionsFactory;
   private readonly events: EventEmitter;
+  /** The coordinators' per-turn model (w1158); workers have none. */
+  private readonly pickModel?: TurnModelPick;
+  /** The model the live process answers with now: set at its start, changed by setModel (w1158). */
+  private liveModel?: string;
 
-  constructor(info: SessionInfo, store: SessionSink, makeOptions: OptionsFactory, events: EventEmitter) {
+  constructor(info: SessionInfo, store: SessionSink, makeOptions: OptionsFactory, events: EventEmitter, pickModel?: TurnModelPick) {
     this.info = info;
     this.store = store;
     this.makeOptions = makeOptions;
     this.events = events;
+    this.pickModel = pickModel;
+    // A turn left open by a restart is measured from here, not from zero (w1161: the whole session's spend read as one turn).
+    this.costAtTurnOpen = info.costUsd;
   }
 
   get live() {
@@ -364,9 +410,13 @@ export class AgentSession implements SessionHandle {
     // A person's message (or the orchestrator's on a person's behalf) says who this session now works for; the
     // harness's own messages carry the person they are about, but do not change that.
     if (requestedBy && from !== 'system') this.info.lastRequestedBy = requestedBy;
-    if (!this.q) this.start();
+    const opensTurn = !this.info.turnOpenSince || !this.turnStarter;
+    // A coordinator's turn runs on its own model or the routine one (w1158): chosen before its message reaches the process.
+    const pick = this.pickModel?.(this.info, from, text, opensTurn);
+    if (!this.q) this.start(pick?.model);
+    else if (pick && pick.model !== this.liveModel) this.switchModel(pick.model, pick.kind);
     // The message that opens a turn decides whose it is (w607); one sent while it runs joins it without changing that.
-    if (!this.info.turnOpenSince || !this.turnStarter) this.turnStarter = { uuid, from };
+    if (opensTurn) this.turnStarter = { uuid, from };
     this.lastFrom = from;
     this.stoppedOnPurpose = false;
     clearTimeout(this.graceTimer);
@@ -439,13 +489,32 @@ export class AgentSession implements SessionHandle {
     }
   }
 
-  private start() {
+  /**
+   * The live process answers from its next API call on with `model` (w1158): the SDK's setModel, a control message
+   * written before the next user message, so the turn that message opens runs on it (measured: one session, five turns,
+   * each answered by the model asked for). The transcript says so, one line per change.
+   */
+  private switchModel(model: string, kind: string) {
+    const q = this.q;
+    if (!q) return;
+    const from = this.liveModel;
+    this.liveModel = model;
+    void q.setModel(model).catch((e: unknown) => {
+      // The next turn runs on the old model; the next message tries again.
+      if (this.q === q && this.liveModel === model) this.liveModel = from;
+      this.store.append(this.info.id, { kind: 'error', text: `Could not switch to ${model}: ${e instanceof Error ? e.message : String(e)}` });
+    });
+    this.store.append(this.info.id, { kind: 'system', text: `Model: ${model} from this turn on (${kind === 'routine' ? 'a turn no person started' : kind === 'person' ? "a person's own message" : 'a decision turn'}; w1158).` });
+  }
+
+  private start(model?: string) {
     this.input = new InputQueue();
     this.abort = new AbortController();
     const base = this.makeOptions(this.info);
+    this.liveModel = model ?? this.info.model ?? base.model;
     const options: Options = {
       ...base,
-      model: this.info.model ?? base.model,
+      model: this.liveModel,
       permissionMode: this.info.permissionMode,
       allowDangerouslySkipPermissions: true,
       includePartialMessages: true,
@@ -603,10 +672,13 @@ export class AgentSession implements SessionHandle {
         return;
       case 'result': {
         const total = m.total_cost_usd ?? 0;
-        // A resumed process whose totals did not carry the earlier spend starts from zero (below the base): its cumulative usage is this turn in full (w859).
-        const restarted = this.firstResult && this.costBase > 0 && total < this.costBase;
-        // A resumed session's first result may already carry the earlier spend; do not count it twice.
-        if (this.firstResult && total >= this.costBase) this.costBase = 0;
+        // A process's first result: did the CLI continue from its saved total, or begin again from zero (w859, w1161)?
+        let restarted = false;
+        if (this.firstResult) {
+          const first = firstResultBase(this.info.costUsd, this.info.sdkCostUsd, total);
+          this.costBase = first.base;
+          restarted = first.restarted;
+        }
         this.firstResult = false;
         const answered = m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : []);
         // A /compact's own result (w518) is no turn: its cost counts, but it leaves no reply and keeps the last report.
@@ -614,7 +686,7 @@ export class AgentSession implements SessionHandle {
           for (const u of answered) this.compactUuids.delete(u);
           if (m.subtype !== 'success' || m.is_error) this.compactFailed(m.subtype === 'success' ? m.result || 'an error result' : m.subtype);
           // Its cost is in the SDK's cumulative totals, so the next turn's result carries it (w859): no line of its own.
-          this.update({ costUsd: this.costBase + total });
+          this.update({ costUsd: this.costBase + total, sdkCostUsd: total });
           if (!this.stateEvents) {
             this.update({ status: this.pending.size ? 'waiting_permission' : 'idle', turnOpenSince: undefined });
             this.emitTurnEnd(this.lastTurnText);
@@ -642,7 +714,7 @@ export class AgentSession implements SessionHandle {
         });
         this.lastTurnText = text;
         const spent = this.costBase + total;
-        this.update({ turns: this.info.turns + 1, costUsd: spent, lastResult: reportClip(text), lastTurnCostUsd: Math.max(0, spent - this.costAtTurnOpen) });
+        this.update({ turns: this.info.turns + 1, costUsd: spent, sdkCostUsd: total, lastResult: reportClip(text), lastTurnCostUsd: Math.max(0, spent - this.costAtTurnOpen) });
         this.events.emit('result', this, m.subtype);
         if (!this.stateEvents) {
           // Older CLI without state events: best effort from the result itself.
@@ -840,6 +912,9 @@ export class AgentSession implements SessionHandle {
 }
 
 export class SessionManager {
+  /** The coordinators' per-turn model (w1158, server/turnModel.ts), set by Agents at boot; nothing else is switched. */
+  turnModel?: TurnModelPick;
+  private readonly pickModel: TurnModelPick = (info, from, text, opens) => this.turnModel?.(info, from, text, opens);
   readonly sessions = new Map<string, SessionHandle>();
   /**
    * 'turnEnd' (session, text, TurnEndMeta) and 'permission' (session, pending) — the orchestrator listens;
@@ -938,7 +1013,7 @@ export class SessionManager {
         cutOff.push({ ...info });
       }
       if (info.status !== 'stopped') info.status = 'stopped';
-      this.sessions.set(info.id, new AgentSession(info, this.store, f, this.events));
+      this.sessions.set(info.id, new AgentSession(info, this.store, f, this.events, this.pickModel));
       this.store.putSession(info);
     }
     return cutOff;
@@ -964,7 +1039,7 @@ export class SessionManager {
       ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
       ...(opts.orchestratorRole ? { orchestratorRole: opts.orchestratorRole } : {}),
     };
-    const s = new AgentSession(info, this.store, opts.options, this.events);
+    const s = new AgentSession(info, this.store, opts.options, this.events, this.pickModel);
     this.sessions.set(info.id, s);
     this.store.putSession(info);
     return s;
