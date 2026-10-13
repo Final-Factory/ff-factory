@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
 import { reserveLines } from '../server/secrets.ts';
+import { GithubTokens } from '../server/githubTokens.ts';
 import type { PlanUsage, TokenWarning } from '../shared/types.ts';
 import { ALPHA, appState, expect, go, isMobile, sandboxHash, test, uniq } from './fixtures.ts';
 
@@ -298,4 +299,65 @@ test("the dispatcher's token buffer banner names both limits when both are insid
   await expect(text).toHaveAttribute('title', /: 5-hour 93% \(buffer 20%\), resets in 1[01] min; weekly 80% \(buffer 26%\), resets \w{3} \d\d:\d\dZ$/);
   await text.click(); // the bar cuts a long line short; a tap unfolds it
   await testInfo.attach('banner-both', { body: await page.screenshot(), contentType: 'image/png' });
+});
+
+/**
+ * The banner texts the portal would send for a lothsahn token (w1186): the real GithubTokens against a fake GitHub, so the
+ * words on the screen are the ones the server writes. \`mode\` is what GitHub does to the second probe (6 hours on).
+ */
+async function githubBanners(mode: 'rate-limit' | 'permission'): Promise<TokenWarning[]> {
+  const entry = { fingerprint: 'fp-loth', name: 'vault-lothsahn-github', owner: 'lothsahn', last4: 'yVC9', kind: 'github' };
+  const vault = { list: () => [entry], githubTokens: () => [{ entry, token: 'fixture' }] };
+  let now = Date.parse('2026-10-12T18:46:59Z'); // the second probe runs 6 hours on, at 00:47 UTC, as on 2026-10-13
+  let spent = false;
+  let calls = 0;
+  // The second probe's budget: /user and the runners read pass, the third read (Artifact metadata) is refused.
+  const budget = 2;
+  const fetch = async (url: string) => {
+    calls++;
+    const reply = (status: number, body: unknown, headers: Record<string, string> = {}) => ({ status, headers: { get: (n: string) => headers[n.toLowerCase()] ?? null }, json: async () => body });
+    const p = url.slice('https://api.github.com/'.length);
+    if (spent && mode === 'rate-limit' && calls > budget) {
+      return reply(403, { message: 'API rate limit exceeded for user ID 10092359.' }, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Date.parse('2026-10-13T01:03:58Z') / 1000) });
+    }
+    if (p === 'user') return reply(200, { login: 'Lothsahn', id: 10092359 }, { 'github-authentication-token-expiration': '2027-10-01 00:00:00 UTC' });
+    if (p === 'graphql') return reply(200, { data: {} });
+    if (spent && mode === 'permission' && /^orgs\/Final-Factory\/(actions\/runners|artifacts)/.test(p)) return reply(403, { message: 'Resource not accessible by personal access token' }, { 'x-ratelimit-remaining': '4321' });
+    return reply(200, []);
+  };
+  const g = new GithubTokens({ vault: () => vault as never, cfg: {}, fetch: fetch as never, probePortalLogin: false, now: () => now });
+  await g.tick();
+  now += 6 * 3600_000 + 1000;
+  calls = 0;
+  spent = true;
+  await g.tick();
+  return g.banners().map((b) => ({ id: b.id, kind: b.kind, ...(b.person ? { person: b.person } : {}), text: b.text }));
+}
+
+test('GitHub rate limit (w1186): "GitHub is rate limiting us" with the account, the words and the reset; not the token banner', async ({ authed: page }, testInfo) => {
+  const warnings = await githubBanners('rate-limit');
+  expect(warnings.map((w) => w.kind)).toEqual(['github-rate-limit']);
+  await withTokenWarnings(page, warnings);
+  const bar = page.locator('.gbar', { hasText: 'GitHub is rate limiting us.' });
+  await expect(bar).toBeVisible();
+  await expect(bar.locator('.gbar-text')).toHaveAttribute('title', /vault-lothsahn-github …yVC9 \(GitHub Lothsahn, user ID 10092359\) is refused: the hourly request budget is spent \("API rate limit exceeded for user ID 10092359\."\)\. It resets at 01:03Z\./);
+  await expect(page.locator('.gbar', { hasText: 'A GitHub token needs updating.' })).toHaveCount(0);
+  await expect(bar.getByRole('button', { name: 'Re-check now' })).toBeVisible();
+  await testInfo.attach('banner-github-rate-limit', { body: await page.screenshot(), contentType: 'image/png' });
+  await bar.locator('.gbar-text').click(); // unfolds the whole line
+  await testInfo.attach('banner-github-rate-limit-unfolded', { body: await page.screenshot(), contentType: 'image/png' });
+  // The first good call after the reset clears it: the server stops sending it.
+  await withTokenWarnings(page, []);
+  await expect(page.locator('.gbar', { hasText: 'GitHub is rate limiting us.' })).toHaveCount(0);
+});
+
+test('GitHub permission refused (w1186): a real 403 still says "A GitHub token needs updating."', async ({ authed: page }, testInfo) => {
+  const warnings = await githubBanners('permission');
+  expect(warnings.map((w) => w.kind)).toEqual(['github-token']);
+  await withTokenWarnings(page, warnings);
+  const bar = page.locator('.gbar', { hasText: 'A GitHub token needs updating.' });
+  await expect(bar).toBeVisible();
+  await expect(bar.locator('.gbar-text')).toHaveAttribute('title', /lacks: Artifact metadata \(organization Final-Factory\): read refused; Self-hosted runners \(organization Final-Factory\): read refused\./);
+  await expect(page.locator('.gbar', { hasText: 'GitHub is rate limiting us.' })).toHaveCount(0);
+  await testInfo.attach('banner-github-token', { body: await page.screenshot(), contentType: 'image/png' });
 });

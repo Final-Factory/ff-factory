@@ -11,7 +11,7 @@
 import type { Config } from './config.ts';
 import type { Vault, VaultEntryMeta } from './vault.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import type { GithubAccess, GithubTokenHealth, WorkItem } from '../shared/types.ts';
+import type { GithubAccess, GithubRateLimit, GithubTokenHealth, WorkItem } from '../shared/types.ts';
 import { GITHUB_ORG, GITHUB_REQUIRED_PERMISSIONS, GITHUB_REQUIRED_REPOS, GITHUB_UNPROBED } from '../shared/githubRequirements.ts';
 
 /** The machine id machines.githubFromVault uses for the portal's own GitHub reads. */
@@ -47,6 +47,54 @@ const REFUSED = /HTTP 401|Bad credentials/i;
 const DENIED = /Resource not accessible by personal access token/i;
 /** No fine-grained token can read check runs (GitHub has no Checks permission for them): an expected refusal, not the token's fault. */
 const NO_CHECKS = /statusCheckRollup/;
+
+/**
+ * GitHub's words for a rate limit, in a REST body, a GraphQL error or gh's stderr: "API rate limit exceeded for user ID
+ * 10092359" (the primary budget, w1186: this was refused for Artifact metadata and Self-hosted runners and read as a missing
+ * permission), "You have exceeded a secondary rate limit", the GraphQL type RATE_LIMITED.
+ */
+const RATE_LIMIT_TEXT = /rate limit exceeded|exceeded a secondary rate limit|secondary rate limit|abuse detection|RATE_LIMITED/i;
+
+/** When GitHub gave no reset time, a rate-limited credential is read again after this long. */
+export const RATE_LIMIT_RETRY_MS = 10 * 60_000;
+
+export const isRateLimitText = (s: string | undefined) => !!s && RATE_LIMIT_TEXT.test(s);
+
+/**
+ * Whether one GitHub answer is a rate-limit refusal (w1186), never a missing permission: HTTP 403 or 429 with
+ * X-RateLimit-Remaining 0 or a Retry-After (a secondary limit), or a message saying "rate limit exceeded" (any status:
+ * GraphQL answers 200 with a RATE_LIMITED error). A permission 403 ("Resource not accessible by ...") has neither.
+ * `message` is the body's message or errors, or gh's stderr.
+ */
+export function rateLimitOf(status: number, header: (name: string) => string | null, message: string | undefined, now: number): GithubRateLimit | undefined {
+  const retryAfter = header('retry-after');
+  const exhausted = header('x-ratelimit-remaining')?.trim() === '0';
+  const said = isRateLimitText(message);
+  if (!said && !((status === 403 || status === 429) && (exhausted || retryAfter))) return undefined;
+  const secondary = /secondary|abuse/i.test(message ?? '') || (!!retryAfter && !exhausted);
+  const after = Number(retryAfter);
+  const epoch = Number(header('x-ratelimit-reset'));
+  const resetMs = retryAfter && Number.isFinite(after) ? now + after * 1000 : epoch > 0 ? epoch * 1000 : undefined;
+  const line = (message ?? '').trim().split('\n')[0].slice(0, 160) || `HTTP ${status}, X-RateLimit-Remaining ${header('x-ratelimit-remaining') ?? '?'}`;
+  const userId = /user ID (\d+)/i.exec(message ?? '')?.[1];
+  return {
+    at: new Date(now).toISOString(),
+    ...(resetMs ? { resetAt: new Date(resetMs).toISOString() } : {}),
+    retryAt: new Date(resetMs ? Math.max(resetMs + 5000, now + 30_000) : now + RATE_LIMIT_RETRY_MS).toISOString(),
+    ...(secondary ? { secondary: true } : {}),
+    ...(userId ? { userId: Number(userId) } : {}),
+    message: line,
+  };
+}
+
+/** A probe read that GitHub rate limited: the probe stops there and keeps the credential's last verdict. */
+class RateLimited extends Error {
+  readonly limit: GithubRateLimit;
+  constructor(limit: GithubRateLimit) {
+    super(limit.message);
+    this.limit = limit;
+  }
+}
 
 /** "2027-10-01 00:00:00 UTC" (the header's form, sourced: composer/composer#11688) or ISO, as ISO; undefined otherwise. */
 export function parseExpiry(h: string | null | undefined): string | undefined {
@@ -121,6 +169,22 @@ export class GithubTokens {
     this.of(e).lastUse = { at: this.at(), what };
   }
 
+  /**
+   * GitHub rate limited a credential (w1186): not a missing permission and not the token's fault, so its verdict and its use
+   * stay as they were. The banner "GitHub is rate limiting us" shows until the first good call (clearRateLimit).
+   */
+  noteRateLimit(h: GithubTokenHealth, limit: GithubRateLimit) {
+    if (!h.rateLimit) this.o.log?.(`github ${tokenName(h)}: rate limited: ${limit.message}${limit.resetAt ? ` (resets ${limit.resetAt})` : ''}`);
+    h.rateLimit = limit;
+  }
+
+  /** The first good call after a rate limit ends it; the banner clears on its next refresh. */
+  private clearRateLimit(h: GithubTokenHealth) {
+    if (!h.rateLimit) return;
+    delete h.rateLimit;
+    this.o.log?.(`github ${tokenName(h)}: no longer rate limited`);
+  }
+
   /** GitHub refused a token for `what`; `bad` marks it unusable until it is rotated or a probe passes again. */
   noteError(e: Pick<VaultEntryMeta, 'fingerprint' | 'name' | 'owner' | 'last4'>, what: string, bad?: boolean) {
     const h = this.of(e);
@@ -133,7 +197,7 @@ export class GithubTokens {
   list(): GithubTokenHealth[] {
     const tokens = (this.o.vault()?.list() ?? []).filter((e) => e.kind === 'github').map((e) => ({ ...this.of(e), ...(e.disabled ? { disabled: true } : {}) }));
     const portal = this.health.get(PORTAL_LOGIN.fingerprint);
-    return [...tokens, ...(portal?.checkedAt ? [portal] : [])].map((h) => ({ ...h, problems: githubProblems(h, this.repos(), this.now()) }));
+    return [...tokens, ...(portal?.checkedAt || portal?.rateLimit ? [portal] : [])].map((h) => ({ ...h, problems: githubProblems(h, this.repos(), this.now()) }));
   }
 
   /**
@@ -156,11 +220,30 @@ export class GithubTokens {
     return async (cmd, args, opts = {}) => {
       const plain = { ...(opts.env ?? process.env), GH_PROMPT_DISABLED: '1' };
       const t = this.tokenFor(person);
-      if (!t) return run(cmd, args, { ...opts, env: plain });
+      if (!t) {
+        // The portal's own login: its rate limit is noted and cleared the same way (a successful call is the first good one).
+        const r = await run(cmd, args, { ...opts, env: plain });
+        const login = this.health.get(PORTAL_LOGIN.fingerprint);
+        const said = `${r.stderr || r.stdout}`;
+        if (r.code === 0) {
+          if (login) this.clearRateLimit(login);
+        } else if (isRateLimitText(said)) {
+          const h = this.of(PORTAL_LOGIN);
+          h.portal = true;
+          this.noteRateLimit(h, rateLimitOf(403, () => null, said, this.now())!);
+        }
+        return r;
+      }
       const r = await run(cmd, args, { ...opts, env: { ...plain, GH_TOKEN: t.token } });
       const said = `${r.stderr || r.stdout}`;
       if (r.code === 0) {
         this.noteUse(t.entry, what);
+        this.clearRateLimit(this.of(t.entry));
+        return r;
+      }
+      // GitHub's rate limit is a 403 too, but the token lacks nothing: no "permission is missing", no second try.
+      if (isRateLimitText(said)) {
+        this.noteRateLimit(this.of(t.entry), rateLimitOf(403, () => null, said, this.now())!);
         return r;
       }
       if (NO_CHECKS.test(said) && DENIED.test(said)) return r;
@@ -206,18 +289,29 @@ export class GithubTokens {
     try {
       for (const { entry, token } of this.o.vault()?.githubTokens() ?? []) {
         const h = this.of(entry);
-        if (!force && h.checkedAt && this.now() - Date.parse(h.checkedAt) < PROBE_EVERY_MS) continue;
+        if (!this.due(h, force)) continue;
         await this.probe(entry, token);
       }
       if (this.o.probePortalLogin !== false) {
         const h = this.of(PORTAL_LOGIN);
         h.portal = true;
-        if (force || !h.checkedAt || this.now() - Date.parse(h.checkedAt) >= PROBE_EVERY_MS) await this.probeWith(h, ghReader(this.o.run ?? runProc));
+        if (this.due(h, force)) await this.probeWith(h, ghReader(this.o.run ?? runProc, this.o.now));
       }
     } finally {
       this.probing = false;
     }
     this.reportChanges();
+  }
+
+  /**
+   * Whether a credential is probed at this tick: when forced, when never probed, when the last probe is PROBE_EVERY_MS old,
+   * or, rate limited (w1186), once its reset has passed (and not before: reading it again while GitHub refuses only spends
+   * the next budget).
+   */
+  private due(h: GithubTokenHealth, force: boolean): boolean {
+    if (force) return true;
+    if (h.rateLimit) return this.now() >= Date.parse(h.rateLimit.retryAt);
+    return !h.checkedAt || this.now() - Date.parse(h.checkedAt) >= PROBE_EVERY_MS;
   }
 
   /** When the last probe ran on any token, for "Re-check now" (it may not run more often than RECHECK_MIN_MS). */
@@ -247,7 +341,7 @@ export class GithubTokens {
 
   /** What GitHub says about one vault token (probeWith), read with the token itself. */
   async probe(entry: VaultEntryMeta, token: string): Promise<GithubTokenHealth> {
-    return this.probeWith(this.of(entry), fetchReader(token, this.o.fetch ?? (globalThis.fetch as unknown as Fetch)));
+    return this.probeWith(this.of(entry), fetchReader(token, this.o.fetch ?? (globalThis.fetch as unknown as Fetch), this.o.now));
   }
 
   /**
@@ -259,6 +353,12 @@ export class GithubTokens {
    */
   async probeWith(h: GithubTokenHealth, r: GithubReader): Promise<GithubTokenHealth> {
     const me = await r.get('user');
+    // Rate limited (w1186): not a missing permission. Keep the last verdict (and when it was read, so the next tick after the reset reads again).
+    if (me?.rateLimit) {
+      this.noteRateLimit(h, me.rateLimit);
+      return h;
+    }
+    const checkedBefore = h.checkedAt;
     h.checkedAt = new Date(this.now()).toISOString();
     if (!me) {
       h.lastError = { at: h.checkedAt, what: 'probe: GitHub did not answer' };
@@ -281,39 +381,50 @@ export class GithubTokens {
     const u = (await me.json().catch(() => ({}))) as { login?: unknown; id?: unknown };
     if (typeof u.login === 'string') h.login = u.login;
     if (typeof u.id === 'number') h.userId = u.id;
+    // A rate-limited read stops the probe where it is: what was read so far is thrown away, the last verdict stands.
     const status = async (p: string, notFound: GithubAccess) => {
       const x = await r.get(p);
+      if (x?.rateLimit) throw new RateLimited(x.rateLimit);
       return x ? access(x.status, notFound) : 'error';
     };
-    h.org = {
-      'self-hosted-runners': await status(`orgs/${GITHUB_ORG}/actions/runners?per_page=1`, 'denied'),
-      // An unknown digest: 404 when the read is allowed, 403 when refused (measured with a token that may read: 404).
-      'artifact-metadata': await status(`orgs/${GITHUB_ORG}/artifacts/sha256:${'0'.repeat(64)}/metadata/storage-records`, 'read'),
-    };
-    const repos: NonNullable<GithubTokenHealth['repos']> = [];
-    for (const repo of this.repos()) {
-      const meta = await status(`repos/${repo}`, 'not-selected');
-      if (meta !== 'read') {
-        repos.push({ repo, access: { metadata: meta } });
-        continue;
+    try {
+      const org = {
+        'self-hosted-runners': await status(`orgs/${GITHUB_ORG}/actions/runners?per_page=1`, 'denied'),
+        // An unknown digest: 404 when the read is allowed, 403 when refused (measured with a token that may read: 404).
+        'artifact-metadata': await status(`orgs/${GITHUB_ORG}/artifacts/sha256:${'0'.repeat(64)}/metadata/storage-records`, 'read'),
+      };
+      const repos: NonNullable<GithubTokenHealth['repos']> = [];
+      for (const repo of this.repos()) {
+        const meta = await status(`repos/${repo}`, 'not-selected');
+        if (meta !== 'read') {
+          repos.push({ repo, access: { metadata: meta } });
+          continue;
+        }
+        const contents = await status(`repos/${repo}/commits?per_page=1`, 'denied');
+        const [owner, name] = repo.split('/');
+        repos.push({
+          repo,
+          access: {
+            metadata: 'read',
+            contents,
+            'pull-requests': await status(`repos/${repo}/pulls?per_page=1&state=all`, 'denied'),
+            actions: await status(`repos/${repo}/actions/runs?per_page=1`, 'denied'),
+            issues: await status(`repos/${repo}/issues?per_page=1&state=all`, 'denied'),
+            // An empty repository has no commit to ask about (409): its statuses are not counted against the token.
+            'commit-statuses': contents === 'read' ? await status(`repos/${repo}/commits/HEAD/status`, 'denied') : 'error',
+            discussions: await r.graphql(`query{repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){discussions(first:1){totalCount}}}`),
+          },
+        });
       }
-      const contents = await status(`repos/${repo}/commits?per_page=1`, 'denied');
-      const [owner, name] = repo.split('/');
-      repos.push({
-        repo,
-        access: {
-          metadata: 'read',
-          contents,
-          'pull-requests': await status(`repos/${repo}/pulls?per_page=1&state=all`, 'denied'),
-          actions: await status(`repos/${repo}/actions/runs?per_page=1`, 'denied'),
-          issues: await status(`repos/${repo}/issues?per_page=1&state=all`, 'denied'),
-          // An empty repository has no commit to ask about (409): its statuses are not counted against the token.
-          'commit-statuses': contents === 'read' ? await status(`repos/${repo}/commits/HEAD/status`, 'denied') : 'error',
-          discussions: await r.graphql(`query{repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){discussions(first:1){totalCount}}}`),
-        },
-      });
+      h.org = org;
+      h.repos = repos;
+      this.clearRateLimit(h);
+    } catch (e) {
+      if (!(e instanceof RateLimited)) throw e;
+      this.noteRateLimit(h, e.limit);
+      if (checkedBefore) h.checkedAt = checkedBefore;
+      else delete h.checkedAt;
     }
-    h.repos = repos;
     return h;
   }
 
@@ -324,14 +435,30 @@ export class GithubTokens {
   /** system_status lines, one per GitHub token and the portal login: WARNING when something required is missing. Never a value. */
   statusLines(): string[] {
     const on = githubFromVault(this.o.cfg, PORTAL_MACHINE);
-    return this.list().map((h) => `${h.problems?.length ? 'WARNING: ' : ''}${githubHealthLine(h, on, this.now())}`);
+    return this.list().map((h) => `${h.problems?.length || h.rateLimit ? 'WARNING: ' : ''}${githubHealthLine(h, on, this.now())}`);
   }
 
-  /** The dashboard banners (w904): one per token missing something, for owners and the token's own person. */
-  banners(): { id: string; person?: string; text: string }[] {
-    return this.list()
+  /**
+   * The dashboard banners: one per token missing something (w904, kind github-token), for owners and the token's own person;
+   * and, separately, one per rate-limited GitHub account (w1186, kind github-rate-limit), never mixed with the first.
+   */
+  banners(): { id: string; kind: 'github-token' | 'github-rate-limit'; person?: string; text: string }[] {
+    const all = this.list();
+    const out: { id: string; kind: 'github-token' | 'github-rate-limit'; person?: string; text: string }[] = all
       .filter((h) => h.problems?.length)
-      .map((h) => ({ id: `github:${h.fingerprint}`, ...(h.owner ? { person: h.owner } : {}), text: githubBannerText(h) }));
+      .map((h) => ({ id: `github:${h.fingerprint}`, kind: 'github-token' as const, ...(h.owner ? { person: h.owner } : {}), text: githubBannerText(h) }));
+    // Tokens of one GitHub account share one budget: one banner per account (by id, else login, else the token itself).
+    const accounts = new Map<string, GithubTokenHealth[]>();
+    for (const h of all.filter((x) => x.rateLimit && !x.disabled)) {
+      const key = String(h.userId ?? h.rateLimit!.userId ?? h.login ?? h.fingerprint);
+      accounts.set(key, [...(accounts.get(key) ?? []), h]);
+    }
+    for (const [key, group] of accounts) {
+      const owners = new Set(group.map((h) => h.owner));
+      const person = owners.size === 1 ? [...owners][0] : undefined;
+      out.push({ id: `github-rate-limit:${key}`, kind: 'github-rate-limit', ...(person ? { person } : {}), text: githubRateLimitText(group, this.now()) });
+    }
+    return out;
   }
 }
 
@@ -349,24 +476,31 @@ interface Answer {
   status: number;
   header(name: string): string | null;
   json(): Promise<unknown>;
+  /** Set when the answer is GitHub's rate limit (rateLimitOf), whatever its status: the caller must not read it as a permission. */
+  rateLimit?: GithubRateLimit;
 }
 
 /** How a probe reads GitHub: a vault token over fetch, or the portal's gh login. */
 export interface GithubReader {
   get(path: string): Promise<Answer | undefined>;
-  /** A GraphQL read: read, denied ("Resource not accessible"), or error. */
+  /** A GraphQL read: read, denied ("Resource not accessible"), or error; throws RateLimited when GitHub's budget is spent. */
   graphql(query: string): Promise<GithubAccess>;
 }
 
 const HEADERS = (token: string) => ({ Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'ff-factory' });
 
 /** A reader with a vault token: the token goes in the Authorization header only. */
-export function fetchReader(token: string, f: Fetch): GithubReader {
+export function fetchReader(token: string, f: Fetch, now: () => number = Date.now): GithubReader {
   return {
     get: async (p) => {
       try {
         const x = await f(`https://api.github.com/${p}`, { headers: HEADERS(token), signal: AbortSignal.timeout(20_000) });
-        return { status: x.status, header: (n) => x.headers.get(n), json: () => x.json() };
+        // The body is read once (a fetch body is single use) and handed on.
+        let body: Promise<unknown> | undefined;
+        const json = () => (body ??= x.json());
+        const message = x.status === 403 || x.status === 429 ? ((await json().catch(() => undefined)) as { message?: string } | undefined)?.message : undefined;
+        const rateLimit = rateLimitOf(x.status, (n) => x.headers.get(n), message, now());
+        return { status: x.status, header: (n) => x.headers.get(n), json, ...(rateLimit ? { rateLimit } : {}) };
       } catch {
         return undefined;
       }
@@ -374,11 +508,16 @@ export function fetchReader(token: string, f: Fetch): GithubReader {
     graphql: async (query) => {
       try {
         const x = await f('https://api.github.com/graphql', { method: 'POST', headers: { ...HEADERS(token), 'Content-Type': 'application/json' }, body: JSON.stringify({ query }), signal: AbortSignal.timeout(20_000) });
+        const b = (await x.json().catch(() => ({}))) as { message?: string; errors?: { message?: string; type?: string }[]; data?: unknown };
+        // GraphQL answers a spent budget with 200 and a RATE_LIMITED error, or with a REST-style 403/429.
+        const text = [b.message, ...(b.errors ?? []).map((e) => `${e.type ?? ''} ${e.message ?? ''}`)].filter(Boolean).join('; ');
+        const rateLimit = rateLimitOf(x.status, (n) => x.headers.get(n), text, now());
+        if (rateLimit) throw new RateLimited(rateLimit);
         if (x.status === 401 || x.status === 403) return 'denied';
-        const b = (await x.json().catch(() => ({}))) as { errors?: { message?: string; type?: string }[]; data?: unknown };
         if (b.errors?.some((e) => /not accessible|FORBIDDEN/i.test(`${e.message} ${e.type}`))) return 'denied';
         return x.status === 200 && b.data ? 'read' : 'error';
-      } catch {
+      } catch (e) {
+        if (e instanceof RateLimited) throw e;
         return 'error';
       }
     },
@@ -394,7 +533,7 @@ export function parseGhInclude(out: string): Answer | undefined {
 }
 
 /** A reader on the portal's own gh login (D7): gh reads its own credential; nothing here sees it. */
-export function ghReader(run: Runner): GithubReader {
+export function ghReader(run: Runner, now: () => number = Date.now): GithubReader {
   const env = () => {
     const e: NodeJS.ProcessEnv = { ...process.env, GH_PROMPT_DISABLED: '1' };
     delete e.GH_TOKEN;
@@ -403,12 +542,23 @@ export function ghReader(run: Runner): GithubReader {
   return {
     get: async (p) => {
       const r = await run('gh', ['api', '-i', p], { timeoutMs: 30_000, env: env() });
-      return parseGhInclude(r.stdout) ?? (r.code === 0 ? undefined : parseGhInclude(r.stderr));
+      const a = parseGhInclude(r.stdout) ?? (r.code === 0 ? undefined : parseGhInclude(r.stderr));
+      if (!a) {
+        // gh may print only its own words ("gh: API rate limit exceeded ... (HTTP 403)"): still a rate limit, not "no answer".
+        const text = `${r.stderr}${r.stdout}`;
+        const rateLimit = r.code === 0 ? undefined : rateLimitOf(403, () => null, isRateLimitText(text) ? text : undefined, now());
+        return rateLimit ? { status: 403, header: () => null, json: async () => undefined, rateLimit } : undefined;
+      }
+      const message = a.status === 403 || a.status === 429 ? ((await a.json().catch(() => undefined)) as { message?: string } | undefined)?.message : undefined;
+      const rateLimit = rateLimitOf(a.status, a.header, message, now());
+      return rateLimit ? { ...a, rateLimit } : a;
     },
     graphql: async (query) => {
       const r = await run('gh', ['api', 'graphql', '-f', `query=${query}`], { timeoutMs: 30_000, env: env() });
       if (r.code === 0) return 'read';
-      return /not accessible|FORBIDDEN|HTTP 403/i.test(`${r.stderr}${r.stdout}`) ? 'denied' : 'error';
+      const text = `${r.stderr}${r.stdout}`;
+      if (isRateLimitText(text)) throw new RateLimited(rateLimitOf(403, () => null, text, now())!);
+      return /not accessible|FORBIDDEN|HTTP 403/i.test(text) ? 'denied' : 'error';
     },
   };
 }
@@ -455,14 +605,40 @@ export function githubBannerText(h: GithubTokenHealth): string {
   return `${tokenName(h)}${h.login ? ` (GitHub ${h.login})` : ''} lacks: ${(h.problems ?? []).join('; ')}. ${fix}; the probe reads it again within 6 hours, or at once with Re-check now on Settings, Token vault. Not checked (they cannot be read without writing): ${GITHUB_UNPROBED}.`;
 }
 
+const clockUtc = (iso: string) => `${iso.slice(11, 16)}Z`;
+
+/** The status line's words for a rate limit: it is GitHub's budget, not a missing permission, so the verdict beside it stands. */
+const rateLimitPart = (l: GithubRateLimit) => `RATE LIMITED by GitHub (${l.message}; ${l.resetAt ? `resets ${l.resetAt.slice(0, 16)}Z` : 'reset time unknown'}); the permission verdict below is the last one read`;
+
+/**
+ * The "GitHub is rate limiting us" banner (w1186) for the credentials of one GitHub account: who is refused, GitHub's own
+ * words, when it resets, and that nothing is wrong with the token. The text holds no countdown, so it stays the same until
+ * the limit changes and a closed banner stays closed.
+ */
+export function githubRateLimitText(group: GithubTokenHealth[], now: number): string {
+  const first = group[0];
+  const limit = group.map((h) => h.rateLimit!).sort((a, b) => Date.parse(b.retryAt) - Date.parse(a.retryAt))[0];
+  const userId = first.userId ?? limit.userId;
+  const account = [first.login ? `GitHub ${first.login}` : undefined, userId ? `user ID ${userId}` : undefined].filter(Boolean).join(', ');
+  const names = group.map(tokenName).join(' and ');
+  const reset = !limit.resetAt
+    ? 'GitHub did not say when it resets; the portal reads it again every 10 minutes'
+    : Date.parse(limit.resetAt) > now
+      ? `It resets at ${clockUtc(limit.resetAt)}`
+      : `It was due to reset at ${clockUtc(limit.resetAt)}; the next check clears this if it has`;
+  return `${names}${account ? ` (${account})` : ''} is refused: ${limit.secondary ? 'a secondary rate limit' : 'the hourly request budget is spent'} ("${limit.message}"). ${reset}. The token needs no change: its last permission check stands, and the portal's reads carry on by themselves. This clears on the first good call after the reset.`;
+}
+
 /** One credential's line (system_status, docs/vault.md section 13.6). */
 export function githubHealthLine(h: GithubTokenHealth, portalOn: boolean, now: number): string {
   const parts = [`GitHub token ${tokenName(h)}${h.owner ? ` (${h.owner}'s)` : ''}`];
   if (h.disabled) parts.push('disabled');
-  if (!h.checkedAt) parts.push('not probed yet');
+  if (!h.checkedAt && h.rateLimit) parts.push(rateLimitPart(h.rateLimit), 'not probed yet');
+  else if (!h.checkedAt) parts.push('not probed yet');
   else {
     if (h.login) parts.push(`GitHub account ${h.login}${h.userId ? ` (id ${h.userId})` : ''}`);
     if (h.bad) parts.push(`NOT USED: ${h.bad}`);
+    if (h.rateLimit) parts.push(rateLimitPart(h.rateLimit));
     if (h.expiresAt) {
       const days = Math.floor((Date.parse(h.expiresAt) - now) / 86_400_000);
       parts.push(days < 0 ? `EXPIRED ${h.expiresAt.slice(0, 10)}` : `expires ${h.expiresAt.slice(0, 10)} (${days} days)${days < 14 ? ': rotate it soon' : ''}`);
