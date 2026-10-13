@@ -25,6 +25,8 @@ export function sourceLabel(s: WorkSource): string {
       return `Nightly run${s.nightlyRun?.date ? ` ${s.nightlyRun.date}` : ''}`;
     case 'nightly-review':
       return `Nightly merge review${s.nightlyReview?.date ? ` ${s.nightlyReview.date}` : ''}`;
+    case 'master-batch':
+      return `Master batch red${s.masterBatch?.pr ? ` (#${s.masterBatch.pr})` : ''}`;
   }
 }
 

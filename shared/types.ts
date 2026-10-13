@@ -1828,10 +1828,11 @@ export interface WorkFfboxDev {
  * an FFBox fix branch or diagnosis, a request FFBox filed, an operator's ffdev turn FFBox handed over (ffbox-dev,
  * docs/ffbox.md "Dev requests"), a release follow-up the server filed itself, a regression the nightly e2e lab found
  * (docs/intake.md, "Nightly e2e regressions"), or the night's run of that lab, which the portal's nightly schedule files
- * itself (nightly-run, w864; docs/intake.md, "The nightly run").
+ * itself (nightly-run, w864; docs/intake.md, "The nightly run"), or a red master batch the game repo's CI found after
+ * merges (master-batch, w1180; docs/intake.md, "Master batch reds").
  */
-export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run' | 'nightly-review';
-export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run', 'nightly-review'];
+export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run' | 'nightly-review' | 'master-batch';
+export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run', 'nightly-review', 'master-batch'];
 
 export interface WorkSource {
   kind: WorkSourceKind;
@@ -1879,6 +1880,12 @@ export interface WorkSource {
    * the master commit the last review got to (it reviews the merges after it).
    */
   nightlyReview?: { date: string; machine: string; since?: string };
+  /**
+   * A red master batch (w1180): the Actions run, the tip it tested, and what the request is for: `culprit` (revert the merge
+   * `sha` of PR `pr`), `no-results` (nothing ran at the tip: a compile error or a crash) or `unbisected` (failing tests no
+   * merge in the window explains). Not `pr` or `branch` above: those would make the merge watch close it when the culprit's PR merged.
+   */
+  masterBatch?: { run: string; tip: string; kind: 'culprit' | 'no-results' | 'unbisected'; sha?: string; pr?: number };
 }
 
 /** One night's merge review as the portal saw it (w905): fired, then done with what it filed, or missing. */
