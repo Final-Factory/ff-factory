@@ -106,8 +106,9 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // Characters (exact); the API's own count was ~2.9 characters a token for this text. Before w1158: the dispatcher's
   // prompt 37,004 characters and every one of its 51 tools in full, 84,200 (measured).
   const PROMPT_MAX = 26_000;
-  // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 22,551 characters.
-  const ALWAYS_LOADED_MAX = 23_000;
+  // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
+  // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options.
+  const ALWAYS_LOADED_MAX = 24_000;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = promptOf(agents, info).length;

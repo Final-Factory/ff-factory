@@ -107,7 +107,7 @@ Measured on the API with each coordinator's own options and no conversation (Opu
 
 `node scripts/coordinatorContext.ts [--dump DIR]` prints each kind's brief and tool sizes (characters; the API counted
 about 2.9 characters a token for this text). `server/coordinatorContext.test.ts` fails when a brief passes 26,000
-characters or the always-loaded tools 23,000 (22,500 until w1163 moved the sets to measured use), when a topic is not named in the brief that reads it, and when a moved rule
+characters or the always-loaded tools 24,000 (22,500 until w1163 moved the sets to measured use and w1159 gave four of them output options), when a topic is not named in the brief that reads it, and when a moved rule
 loses its words or w-number: move a rarely needed rule into a topic, or defer a tool, rather than raise the budget.
 
 ## Which model answers a turn (w1158)

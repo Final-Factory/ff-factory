@@ -81,8 +81,8 @@ one extra API call (the lookup reads the whole context again) plus its definitio
 
 | Carried | Share | | Deferred | Share |
 |---|---|---|---|---|
-| `message_agent` | 22.6% | | `set_app_config` (3,931 tokens) | 1.5% |
-| `start_agent` | 14.5% | | `ffbox_activity` (2,752 tokens) | 0.6% |
+| `message_agent` | 22.6% | | `set_app_config` (4,266 tokens) | 1.5% |
+| `start_agent` | 14.5% | | `ffbox_activity` (2,959 tokens) | 0.6% |
 | `agent_transcript` | 12.6% | | `create_sandbox` | 0.5% |
 | `decide_work` | 9.9% | | `set_timer`, `list_timers`, `update_timer`, `cancel_timer` | 1.1% together |
 | `stop_agent` | 8.0% | | `delete_sandbox` | 0.1% |
@@ -104,7 +104,7 @@ Against w1158's set: `agent_transcript`, `stop_agent`, `switch_branch`, `unity`,
 
 | Carried | Share | | Deferred | Share |
 |---|---|---|---|---|
-| `message_agent` | 17.2% | | `ffbox_activity` (2,752 tokens) | 9.7% |
+| `message_agent` | 17.2% | | `ffbox_activity` (2,959 tokens) | 9.7% |
 | `update_work` | 16.7% | | `ops_worker` (2,682 tokens) | 2.5% |
 | `request_work` | 15.9% | | `reply_to_ffbox` | ~1.4% |
 | `list_work` | 10.7% | | `list_sandboxes` | 1.1% |
@@ -147,7 +147,7 @@ game repo's CLAUDE.md, the worker brief and the plugin skills' list; the `machin
   hint, and a kind with deferred tools has `ToolSearch` while one without it (ops) carries all of its tools.
 
 The worker spec (`orchestrators.test.ts`) and the standing spec (`standing.test.ts`) are checked against the manifest
-too. `server/coordinatorContext.test.ts` keeps w1158's size budget (always-carried tools at most 23,000 characters).
+too. `server/coordinatorContext.test.ts` keeps w1158's size budget (always-carried tools at most 24,000 characters; the dispatcher's are 23,436).
 
 ## Changing it
 
