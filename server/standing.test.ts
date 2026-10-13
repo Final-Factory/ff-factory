@@ -10,6 +10,7 @@ import { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { Machine, SessionInfo } from '../shared/types.ts';
 import { useFakeVault } from './testVault.ts';
+import { toolsOf } from './toolManifest.ts';
 import { PoolHeldError } from './vault.ts';
 
 // Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
@@ -395,6 +396,16 @@ test('delegation: needs the tool group, notifies the orchestrator, and approval 
   assert.throws(() => st.approveDelegation(d.id), /no work ledger here/);
   assert.equal(st.rejectDelegation(d.id, 'not now').status, 'rejected');
   assert.throws(() => st.rejectDelegation(d.id), /already rejected/);
+});
+
+test("w1163: a standing agent with delegate gets the manifest's standing tools, loaded in every call (it has no ToolSearch)", (t) => {
+  const { st, cleanup } = setup();
+  t.after(cleanup);
+  assert.equal(st.spec(st.create(def)).mcp, undefined, 'no delegate group, no tools');
+  const spec = st.spec(st.create({ ...def, name: 'Delegator', tools: ['delegate'] }));
+  assert.deepEqual(spec.mcp!.tools.map((x) => [x.name, x.alwaysLoad, x.searchHint]), toolsOf('standing').map((n) => [n, true, 'group_standing']));
+  for (const x of spec.mcp!.tools) assert.ok(x.description.length > 40, x.name);
+  assert.ok(!spec.tools!.includes('ToolSearch'));
 });
 
 test('w510: standing agents run on machines only; one from before with no machine keeps its record but never runs', (t) => {

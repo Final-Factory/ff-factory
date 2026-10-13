@@ -39,7 +39,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w1097 (no bump): `resumable` on `welcome` and a `resumable` message, the sessions whose temp folders survive a stop. An older
 // daemon ignores both (its onMessage has no default) and sweeps as before; an older portal never sends them, and the daemon
 // then sweeps as before.
-const DECIDED = { protocol: 9, fingerprint: 'cda6e7f3db280c3c' };
+// w1163 (no bump): `alwaysLoad` and `searchHint` on the launch spec's MCP tools, optional: an older daemon builds its tools
+// from name and description only (no hint, every tool deferred, as before); an older portal never sends them.
+const DECIDED = { protocol: 9, fingerprint: 'b7f20bae0d922f2b' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

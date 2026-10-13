@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { withCoordinators } from '../scripts/coordinatorContext.ts';
 import { ALWAYS_LOADED } from './belts.ts';
+import { deferredToolsLine } from './toolManifest.ts';
 import { RULE_TOPICS, type Agents, type RuleTopic } from './agents.ts';
 import { REACTION_MEANINGS } from '../shared/replies.ts';
 import type { Requester, SessionInfo } from '../shared/types.ts';
@@ -38,7 +39,7 @@ test('w1158: every read_rules topic is named in the brief of each coordinator th
         assert.ok(agents.rulesText(topic, owner).length > 400, `${kind}: ${topic} has its text`);
       }
       // The brief tells it how the deferred tools and the topics work.
-      assert.match(prompt, /The portal tools you use less are deferred: their names are listed, and ToolSearch \(`select:<name>`\) loads one before you call it\./);
+      assert.ok(prompt.includes(deferredToolsLine(role)), `${kind}: how to load a deferred tool or a group (w1163)`);
       assert.match(prompt, /read the topic before you act in that case; it binds like this brief/);
     }
     // read_rules answers the caller: a person's topics name their person.
@@ -105,7 +106,9 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // Characters (exact); the API's own count was ~2.9 characters a token for this text. Before w1158: the dispatcher's
   // prompt 37,004 characters and every one of its 51 tools in full, 84,200 (measured).
   const PROMPT_MAX = 26_000;
-  const ALWAYS_LOADED_MAX = 22_500;
+  // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
+  // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options.
+  const ALWAYS_LOADED_MAX = 24_000;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = promptOf(agents, info).length;
@@ -114,7 +117,7 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
         .filter((t) => t._meta?.['anthropic/alwaysLoad'])
         .reduce((n, t) => n + t.name.length + t.description.length + JSON.stringify(z.toJSONSchema(z.object(t.inputSchema))).length, 0);
       assert.ok(prompt <= PROMPT_MAX, `${kind}: its brief is ${prompt} characters, over ${PROMPT_MAX}: move a rarely needed rule to a read_rules topic, or cut duplication`);
-      assert.ok(tools <= ALWAYS_LOADED_MAX, `${kind}: its always-loaded tools are ${tools} characters, over ${ALWAYS_LOADED_MAX}: defer one (belts.ts ALWAYS_LOADED) or shorten it`);
+      assert.ok(tools <= ALWAYS_LOADED_MAX, `${kind}: its always-loaded tools are ${tools} characters, over ${ALWAYS_LOADED_MAX}: defer one (server/toolManifest.ts) or shorten it`);
     }
   });
 });

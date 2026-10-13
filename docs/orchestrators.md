@@ -74,15 +74,18 @@ the personal orchestrators were about $5.8k of the top-20 requests' $6.9k, and i
 (system prompt, tool definitions, reminders) at 52-63% of their spend. Every call carries that base context, and a call
 that has to write it to the prompt cache pays the write price on all of it. So it is kept small:
 
-- **Deferred tools.** A coordinator has `ToolSearch` (Claude Code's own), so only its everyday tools are sent in full in
-  every call: `ALWAYS_LOADED` in `server/belts.ts` (the dispatcher's `list_work`, `list_sandboxes`, `list_machines`,
-  `system_status`, `start_agent`, `message_agent`, `decide_work`, `create_sandbox`, `list_branches`, `set_agent_title`,
-  `wake_me`, `read_rules`; a person's `list_work`, `request_work`, `update_work`, `message_agent`, `list_sandboxes`,
-  `list_machines`, `system_status`, `agent_transcript`, `message_person`, `wake_me`, `read_rules`), marked
-  `_meta["anthropic/alwaysLoad"]` (the SDK's `tool(..., { alwaysLoad: true })`). Every other tool is listed by name and
-  `ToolSearch` (`select:<name>`) loads its description and schema when the coordinator needs it; its description is
-  where its long rules live (`ops_worker`'s jobs, deploys, restarts and machine updates; `set_app_config`'s every key).
-  Without `ToolSearch` in `tools`, Claude Code sends every MCP tool in full: that was the state before w1158.
+- **Deferred tools.** A coordinator has `ToolSearch` (Claude Code's own), so only its most used tools are sent in full in
+  every call, the ones the tool manifest marks for its kind ([tool-manifest.md](tool-manifest.md), w1163, chosen from
+  measured use: the dispatcher's `message_agent`, `start_agent`, `agent_transcript`, `decide_work`, `stop_agent`,
+  `list_work`, `list_sandboxes`, `wake_me`, `switch_branch`, `unity`, `list_machines`, `system_status`,
+  `search_transcripts`, `interrupt_agent`, `read_rules`; a person's `message_agent`, `update_work`, `request_work`,
+  `list_work`, `agent_transcript`, `search_transcripts`, `wake_me`, `message_person`, `max_activity`, `list_machines`,
+  `system_status`, `read_rules`), marked `_meta["anthropic/alwaysLoad"]` (the SDK's `tool(..., { alwaysLoad: true })`).
+  Every other tool is listed by name and `ToolSearch` loads its description and schema when the coordinator needs it:
+  `select:<name>` for one, or `group_<group>` (max_results 20) for a whole group, through each tool's search hint; the
+  brief names its groups. A tool's description is where its long rules live (`ops_worker`'s jobs, deploys, restarts and
+  machine updates; `set_app_config`'s every key). Without `ToolSearch` in `tools`, Claude Code sends every MCP tool in
+  full: that was the state before w1158.
 - **`read_rules <topic>`.** Rules most turns do not need are a topic of `Agents.rulesText`: `ffbox` (Lothsahn's FFBox
   text, `ffbox_activity`'s views, and for a person's orchestrator the `[via FFBox: …]` and `[from FFBox …]` messages),
   `intake` (the dispatcher's: sharing a worker, Lothsahn's desync PR policy, `ffbox-f/` branches, `send_to_ffbox`),
@@ -104,7 +107,7 @@ Measured on the API with each coordinator's own options and no conversation (Opu
 
 `node scripts/coordinatorContext.ts [--dump DIR]` prints each kind's brief and tool sizes (characters; the API counted
 about 2.9 characters a token for this text). `server/coordinatorContext.test.ts` fails when a brief passes 26,000
-characters or the always-loaded tools 22,500, when a topic is not named in the brief that reads it, and when a moved rule
+characters or the always-loaded tools 24,000 (22,500 until w1163 moved the sets to measured use and w1159 gave four of them output options), when a topic is not named in the brief that reads it, and when a moved rule
 loses its words or w-number: move a rarely needed rule into a topic, or defer a tool, rather than raise the budget.
 
 ## Which model answers a turn (w1158)
