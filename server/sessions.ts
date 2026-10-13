@@ -285,6 +285,39 @@ export function compactedLine(before: number, after: { total: number; max?: numb
 }
 
 /**
+ * How a new process's first result relates to the session's earlier spend (w859, w1161). The CLI resumes from the total its
+ * transcript saved (SDK docs, `total_cost_usd`: "a resumed or forked session continues from the total its transcript
+ * saved"), so a first total at or above the last one it reported (`sdkCostUsd`) holds every earlier turn and only the rise
+ * is new: the base is what costUsd holds beyond the CLI's total. Below it, the totals began again (nothing saved, a /clear):
+ * the whole total is new, and the result says so (`usage.restarted`). Comparing with costUsd instead (before w1161) called
+ * every resume after one such restart a restart, since costUsd then runs ahead of the CLI's total for good: each portal
+ * restart counted the CLI's whole running total again (about $200 a time on each orchestrator and the dispatcher).
+ * A session older than sdkCostUsd keeps the rule before it.
+ */
+export function firstResultBase(costUsd: number, sdkCostUsd: number | undefined, total: number): { base: number; restarted: boolean } {
+  if (sdkCostUsd !== undefined) return total + 1e-9 >= sdkCostUsd ? { base: costUsd - sdkCostUsd, restarted: false } : { base: costUsd, restarted: sdkCostUsd > 0 };
+  return total >= costUsd ? { base: 0, restarted: false } : { base: costUsd, restarted: costUsd > 0 };
+}
+
+/**
+ * The portal's own sessions recorded before sdkCostUsd (w1161: the dispatcher, the orchestrators, the ops worker) take the
+ * CLI's total at their last result from the spend record (`lastCost`, the result's own `total_cost_usd`), so their first
+ * resume after the update is measured right too. A machine's session is left alone: its daemon keeps its own copy and
+ * sends the field once it has this code; one seeded here would go stale under a daemon that does not.
+ */
+export function seedSdkCost(sessions: Iterable<SessionInfo>, lastCostOf: (sessionId: string) => number | undefined): number {
+  let n = 0;
+  for (const s of sessions) {
+    if (s.sdkCostUsd !== undefined || s.machineId) continue;
+    const c = lastCostOf(s.id);
+    if (c === undefined || !Number.isFinite(c)) continue;
+    s.sdkCostUsd = c;
+    n++;
+  }
+  return n;
+}
+
+/**
  * One Claude Code conversation, driven through the Agent SDK in streaming-input mode so a person
  * (or the orchestrator) can keep talking to it, interrupt it and answer its permission prompts.
  * The process is started lazily on the first message and resumed from the SDK session id after
@@ -341,6 +374,8 @@ export class AgentSession implements SessionHandle {
     this.makeOptions = makeOptions;
     this.events = events;
     this.pickModel = pickModel;
+    // A turn left open by a restart is measured from here, not from zero (w1161: the whole session's spend read as one turn).
+    this.costAtTurnOpen = info.costUsd;
   }
 
   get live() {
@@ -637,10 +672,13 @@ export class AgentSession implements SessionHandle {
         return;
       case 'result': {
         const total = m.total_cost_usd ?? 0;
-        // A resumed process whose totals did not carry the earlier spend starts from zero (below the base): its cumulative usage is this turn in full (w859).
-        const restarted = this.firstResult && this.costBase > 0 && total < this.costBase;
-        // A resumed session's first result may already carry the earlier spend; do not count it twice.
-        if (this.firstResult && total >= this.costBase) this.costBase = 0;
+        // A process's first result: did the CLI continue from its saved total, or begin again from zero (w859, w1161)?
+        let restarted = false;
+        if (this.firstResult) {
+          const first = firstResultBase(this.info.costUsd, this.info.sdkCostUsd, total);
+          this.costBase = first.base;
+          restarted = first.restarted;
+        }
         this.firstResult = false;
         const answered = m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : []);
         // A /compact's own result (w518) is no turn: its cost counts, but it leaves no reply and keeps the last report.
@@ -648,7 +686,7 @@ export class AgentSession implements SessionHandle {
           for (const u of answered) this.compactUuids.delete(u);
           if (m.subtype !== 'success' || m.is_error) this.compactFailed(m.subtype === 'success' ? m.result || 'an error result' : m.subtype);
           // Its cost is in the SDK's cumulative totals, so the next turn's result carries it (w859): no line of its own.
-          this.update({ costUsd: this.costBase + total });
+          this.update({ costUsd: this.costBase + total, sdkCostUsd: total });
           if (!this.stateEvents) {
             this.update({ status: this.pending.size ? 'waiting_permission' : 'idle', turnOpenSince: undefined });
             this.emitTurnEnd(this.lastTurnText);
@@ -676,7 +714,7 @@ export class AgentSession implements SessionHandle {
         });
         this.lastTurnText = text;
         const spent = this.costBase + total;
-        this.update({ turns: this.info.turns + 1, costUsd: spent, lastResult: reportClip(text), lastTurnCostUsd: Math.max(0, spent - this.costAtTurnOpen) });
+        this.update({ turns: this.info.turns + 1, costUsd: spent, sdkCostUsd: total, lastResult: reportClip(text), lastTurnCostUsd: Math.max(0, spent - this.costAtTurnOpen) });
         this.events.emit('result', this, m.subtype);
         if (!this.stateEvents) {
           // Older CLI without state events: best effort from the result itself.
@@ -904,6 +942,12 @@ export class SessionManager {
    */
   accountMove?: (s: SessionHandle) => string | undefined;
   /**
+   * Why a worker's live process must restart on the FF Factory code its machine runs now before its next turn (w1166: an
+   * agent host keeps the guard and system prompt it started with across daemon updates), or undefined. Set by Agents.
+   * Its messages wait meanwhile, as for an account move (moveFor).
+   */
+  codeMove?: (s: SessionHandle) => string | undefined;
+  /**
    * Why a resume of `sessionId` for request `work` must not go now, or undefined (w1128): its request was blocked again or
    * closed while the resume waited. Set by Agents (Orchestrators.staleResume, which keeps it for the new gates).
    */
@@ -1021,7 +1065,9 @@ export class SessionManager {
    * on every turn end), so the message is never a turn of the old account's.
    */
   private moveFor(s: SessionHandle): string | undefined {
-    const why = this.accountMove?.(s);
+    const account = this.accountMove?.(s);
+    // w1166: or on the FF Factory code its machine runs now, so its next turn has the current guard and system prompt.
+    const why = account ?? this.codeMove?.(s);
     if (!why) {
       this.moving.delete(s.info.id);
       return undefined;
@@ -1029,7 +1075,7 @@ export class SessionManager {
     const since = this.moving.get(s.info.id);
     if (!isMidTurn(s.info) && (since === undefined || Date.now() - since > MOVE_RESTOP_MS)) {
       this.moving.set(s.info.id, Date.now());
-      this.store.append(s.info.id, { kind: 'system', text: `Its process stops and starts again on another Claude account: ${why}.` });
+      this.store.append(s.info.id, { kind: 'system', text: `Its process stops and starts again ${account ? 'on another Claude account' : "on its machine's FF Factory code"}: ${why}.` });
       s.stop(false);
     }
     return why;

@@ -20,7 +20,8 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     no --mirror/--all, no `gh` calls that rewrite refs/branches.
  *   - git, the game repo only (config repo.url / repo.basePath): master is its one trunk (w1137, 2026-10-12; develop is
  *     retired) and takes changes only through a pull request: no pushes to master/main, no pushes to develop and no PRs
- *     into develop. A PR into master (`gh pr create --base master`, then `gh pr merge`) is the normal flow; the game
+ *     into develop, opened, retargeted or merged (w1166: `gh pr merge` and `gh api .../pulls/<n>/merge` read the PR's
+ *     base, `prBase`; `gh api .../pulls -f base=develop` is refused). A PR into master (`gh pr create --base master`, then `gh pr merge`) is the normal flow; the game
  *     repo has no main, so a PR's `--base main` is not judged. The target is read from the push's remote (`git remote -v` in the command's
  *     directory, following `cd` and `git -C`, through the variables the worker's shell has: $TMPDIR, $HOME, ~) or
  *     gh's -R/--repo/GH_REPO; when it cannot be determined, it counts as the game repo, and the refusal says why
@@ -60,6 +61,8 @@ export function sandboxGuard(opts: {
   /** URLs or paths that name the game repo, whose master/main takes no direct push and whose develop is retired. Empty: every repo counts. */
   gameRepos?: string[];
   remotes?: RemoteResolver;
+  /** A PR's base, for a merge into the retired develop (w1166). Default: gh. */
+  prBase?: PrBaseResolver;
   /** The environment of the worker's shell: `cd $TMPDIR/ffbox` and `git -C ~/x` are followed through it (w1132). Absent: variables are not followed. */
   env?: Record<string, string | undefined>;
   /** Tool name prefixes to refuse, e.g. "mcp__ffsb__" (the portal's own MCP, which would let an agent launch agents). */
@@ -106,7 +109,7 @@ export function sandboxGuard(opts: {
     if (tool === 'Bash' || tool === 'PowerShell') {
       const cmd = String(args.command ?? '');
       const reason =
-        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity, env: opts.env }) ??
+        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, prBase: opts.prBase ?? ghPrBase, publicIdentity: opts.publicIdentity, env: opts.env }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
@@ -285,10 +288,28 @@ export function repoKey(url: string): string {
   return u;
 }
 
+/**
+ * The base branch of a pull request (`pr`: its number, URL or branch; absent: the current branch's), in `repo` (gh's -R)
+ * or the repo of `dir`, or undefined when it cannot be read.
+ */
+export type PrBaseResolver = (pr: string | undefined, repo: string | undefined, dir: string | undefined) => string | undefined;
+
+/** PrBaseResolver through gh (`gh pr view --json baseRefName`); a failure (offline, no such PR) reads as unknown. */
+export const ghPrBase: PrBaseResolver = (pr, repo, dir) => {
+  try {
+    const out = execFileSync('gh', ['pr', 'view', ...(pr ? [pr] : []), ...(repo ? ['-R', repo] : []), '--json', 'baseRefName', '-q', '.baseRefName'], { cwd: dir, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    return out.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 export interface ShellContext {
   cwd?: string;
   gameRepos: string[];
   remotes: RemoteResolver;
+  /** w1166: reads a PR's base for `gh pr merge` and `gh api .../pulls/<n>/merge`, so a merge into the retired develop is refused. Absent: not checked. */
+  prBase?: PrBaseResolver;
   publicIdentity?: PublicIdentity;
   /** The worker shell's environment, for `cd $TMPDIR/x`. */
   env?: Record<string, string | undefined>;
@@ -400,6 +421,31 @@ function ghIsGameRepo(ctx: ShellContext | undefined, repo: string | undefined, d
   const remotes = dir ? ctx.remotes(dir) : undefined;
   if (!remotes?.size) return true;
   return [...remotes.values()].some((u) => game.has(repoKey(u)));
+}
+
+const retiredMerge = (pr: string | undefined) =>
+  `This PR${pr ? ` (${pr})` : ''} targets the Final Factory game repo's develop, which is retired (w1137, 2026-10-12), so merging it is blocked (w1166). Retarget it to master first (\`gh pr edit ${pr ?? '<n>'} --base master\`), merge origin/master into its branch and push, let CI run, then merge it.`;
+
+/** gh pr merge flags that take a value, so the word after them is not the PR. Case matters: -r is --rebase, -R the repo. */
+const GH_PR_MERGE_VALUE_FLAGS = new Set(['-R', '--repo', '-t', '--subject', '-b', '--body', '-F', '--body-file', '-A', '--author-email', '--match-head-commit']);
+
+/**
+ * The PR argument of `gh pr merge [<number> | <url> | <branch>] ...` in one simple command, if any (none: the current
+ * branch's PR). Quoted values are one word here (`--subject "w1147: labels" 1579`).
+ */
+function ghPrMergeArgument(seg: string): string | undefined {
+  const words = (seg.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? []).map((w) => w.replace(/"([^"]*)"|'([^']*)'/g, '$1$2'));
+  const at = words.findIndex((w, i) => w.toLowerCase() === 'merge' && words[i - 1]?.toLowerCase() === 'pr');
+  if (at < 0) return undefined;
+  for (let i = at + 1; i < words.length; i++) {
+    const w = words[i];
+    if (w.startsWith('-')) {
+      if (!w.includes('=') && GH_PR_MERGE_VALUE_FLAGS.has(w)) i++;
+      continue;
+    }
+    return w;
+  }
+  return undefined;
 }
 
 /** gh repo flags that take a value, so the word after them is not the repository argument. */
@@ -515,11 +561,30 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
         // Unknown counts as the game repo; say so, and how to name the repo (w1112: a clone reached through a variable was refused as the game's).
         if (ghIsGameRepo(ctx, repoFlag, dir)) return `PRs into the Final Factory game repo's develop are blocked (or this PR's repo could not be determined: a cd to a path with a variable is not followed). ${DEVELOP_RETIRED} For another repo, name it: gh pr create -R <owner>/<repo> ...`;
       }
+      // w1166: a PR opened into develop before it was retired (or by a session on older code) is not merged there: #1579
+      // merged into develop at 23:20 UTC on 2026-10-12, after the last sweep into master, and had to be carried over again.
+      if (sub === 'pr merge' && ctx?.prBase && ghIsGameRepo(ctx, repoFlag, dir)) {
+        const pr = ghPrMergeArgument(seg);
+        const base = ctx.prBase(pr, repoFlag, dir);
+        if (base && RETIRED_BRANCH.test(base)) return retiredMerge(pr);
+      }
       if (lower[1] === 'api') {
         const method = lower.find((w, i) => (lower[i - 1] === '-x' || lower[i - 1] === '--method') && !!w)?.toUpperCase();
         const writes = (method && method !== 'GET') || lower.some((w) => w === '-f' || w === '--field' || w === '--raw-field' || w === '--input');
         if (writes && lower.some((w) => /\/git\/refs|\/branches|\/protection|\/merges|\/rulesets/.test(w))) {
           return 'Rewriting branches or refs through the GitHub API is blocked in sandboxes.';
+        }
+        // w1166: the API's ways to open, retarget or merge a PR into the retired develop, as gh pr create/edit/merge are.
+        const pulls = raw.map((w) => /(?:^|\/)repos\/([^/\s]+\/[^/\s]+)\/pulls(?:\/(\d+)(\/merge)?)?\/?$/i.exec(w)).find(Boolean);
+        // gh fills {owner}/{repo} from the directory's repo.
+        const apiRepo = pulls?.[1].includes('{') ? undefined : pulls?.[1];
+        if (writes && pulls && ghIsGameRepo(ctx, apiRepo, dir)) {
+          const intoDevelop = lower.some((w, i) => ['-f', '--field', '--raw-field'].includes(lower[i - 1] ?? '') && /^base=(?:refs\/heads\/)?develop$/.test(w));
+          if (intoDevelop && !pulls[3]) return `PRs into the Final Factory game repo's develop are blocked. ${DEVELOP_RETIRED}`;
+          if (pulls[3] && ctx?.prBase) {
+            const base = ctx.prBase(pulls[2], apiRepo, dir);
+            if (base && RETIRED_BRANCH.test(base)) return retiredMerge(pulls[2]);
+          }
         }
         const pvr = lower.map((w) => /(?:^|\/)repos\/([^/\s]+\/[^/\s]+)\/private-vulnerability-reporting/.exec(w)?.[1]).find(Boolean);
         if (pvr && method && method !== 'GET' && ghIsGameRepo(ctx, pvr, dir)) return "Changing the game repo's security settings is the user's call, not an agent's.";

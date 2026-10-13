@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
-import { promptText, SessionManager, setQueryForTesting } from './sessions.ts';
+import { promptText, SessionManager, setQueryForTesting, type SessionHandle } from './sessions.ts';
 import { MachineManager, STANDING_CAP_NO_POOL, agentCap } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
@@ -2311,6 +2311,59 @@ test("w1076: a request taken over by another person restarts its worker's proces
   assert.equal(events.filter((e) => e.kind === 'system' && /Its process stops and starts again/.test((e as { text: string }).text)).length, 1, 'one restart: the daemon\'s copy does not put it back on ben');
   assert.ok(sessions.get(a).info.turns > turnsBefore, 'the same session went on');
   assert.equal(store.sessions.get(a)!.queuedSend, undefined, 'nothing left waiting');
+});
+
+// ---------------------------------------------------------------- w1166: a process carried over by a daemon update
+
+test('w1166: a worker whose process outlived a daemon update restarts on the new FF Factory code before its next turn, and hears so first', async (t) => {
+  const { store, sessions, machines, dispatcher, chat, call } = await setupOnMachine(t);
+  // On 2026-10-12 the update to ba015be (#359, develop retired) adopted the agent hosts started on 5b129b4 at 21:30-21:37
+  // UTC; they kept the old guard and the "develop is the integration branch" prompt and opened game PRs into develop.
+  const OLD = '5b129b4662b35a482564f94a70b8bcf6606fb153';
+  const NEW = 'ba015be249737669ea7bf47425ba88f6817babf9';
+  const hello = (machines as unknown as { hellos: Map<string, { daemon?: string }> }).hellos.get('pc')!;
+  hello.daemon = OLD;
+  await call(chat(BEN).info, 'request_work', { title: 'Blueprint folder share', brief: 'Share a folder.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Share a blueprint folder', title: 'Folder share', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const w = sessions.get(id);
+  await until('idle on the old code', () => w.info.status === 'idle' && w.info.ranOn === OLD);
+  assert.ok(w.live, 'its process stays up between turns');
+  const firstPrompt = store.readTranscript(id).find((e) => e.kind === 'user') as { text: string };
+  assert.doesNotMatch(firstPrompt.text, /\[updated\]/, 'a first process has nothing to compare with');
+
+  // The update: the daemon runs the new commit; the worker's process carried on (adopted), still on the old code.
+  hello.daemon = NEW;
+  const r = await call(dispatcher().info, 'message_agent', { session_id: id, text: 'Open the PR now.', work_id: 'w1' });
+  assert.equal(r.isError, false, r.text);
+  await until('the turn ran on a new process', () => w.info.ranOn === NEW && w.info.status === 'idle' && store.readTranscript(id).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('Open the PR now.')), 10_000);
+  const events = store.readTranscript(id);
+  const stops = events.filter((e) => e.kind === 'system' && /Its process stops and starts again on its machine's FF Factory code: its process started on FF Factory 5b129b4 and pc runs ba015be now, so it restarts on the new code \(its guard and system prompt\) before this turn \(w1166\)/.test((e as { text: string }).text));
+  assert.equal(stops.length, 1, 'one restart');
+  const turn = events.find((e) => e.kind === 'user' && (e as { text: string }).text.includes('Open the PR now.')) as { seq: number; text: string };
+  assert.ok(turn.seq > stops[0].seq, 'the message is a turn of the new process, never of the one on the old code');
+  assert.match(turn.text, /^\[updated\] FF Factory was updated since your last process started \(it ran 5b129b4; this machine runs ba015be now\)\. Your process started again on the new code, in the same conversation, so your system prompt and the guard are the current ones\. Where they differ from what you were told or read earlier in this conversation \(the branch to integrate into, a PR's base, a rule\), follow them\./);
+  assert.equal(store.sessions.get(id)!.queuedSend, undefined, 'nothing left waiting');
+
+  // On the current code now: the next message goes straight to the same process, with no note.
+  await call(dispatcher().info, 'message_agent', { session_id: id, text: 'And merge it on green.', work_id: 'w1' });
+  await until('the next turn', () => w.info.status === 'idle' && store.readTranscript(id).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('And merge it on green.')));
+  const after = store.readTranscript(id);
+  assert.equal(after.filter((e) => e.kind === 'system' && /Its process stops and starts again/.test((e as { text: string }).text)).length, 1, 'no second restart');
+  assert.doesNotMatch((after.findLast((e) => e.kind === 'user') as { text: string }).text, /\[updated\]/);
+
+  // Mid-turn or with a background task running, a message reaches the running process (a restart would cut it off).
+  hello.daemon = OLD;
+  const move = (i: Partial<SessionInfo>, live = true) => (sessions as unknown as { codeMove(s: SessionHandle): string | undefined }).codeMove({ info: { ...w.info, ...i }, live } as unknown as SessionHandle);
+  assert.match(move({}) ?? '', /restarts on the new code/);
+  assert.equal(move({ status: 'running', turnOpenSince: new Date().toISOString() }), undefined, 'mid-turn');
+  assert.equal(move({ backgroundTasks: 1 }), undefined, 'a background task runs');
+  assert.equal(move({}, false), undefined, 'no live process: the next one starts on the current code anyway');
+  assert.equal(move({ kind: 'orchestrator' }), undefined, 'workers only');
+  assert.match(move({ ranOn: undefined }) ?? '', /started on FF Factory from before w1166/, 'a process from before ranOn was recorded counts as other code');
+  hello.daemon = undefined;
+  assert.equal(move({}), undefined, 'the machine did not say what it runs: nothing to compare');
 });
 
 test('w1076: sessionPerson: the person of the requests in hand, never the session\'s starter; a mixed session keeps the person it ran for', () => {

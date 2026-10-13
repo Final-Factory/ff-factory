@@ -494,6 +494,7 @@ export class UnitySlots {
   private overSince = 0;
   private ramSince = 0;
   private busy?: Promise<Assessment>;
+  private closed = false;
 
   constructor(d: ArbiterDeps) {
     this.d = d;
@@ -566,6 +567,15 @@ export class UnitySlots {
     return out;
   }
 
+  /**
+   * Its daemon stopped (Daemon.shutdown): no more looks, and a look already waiting on the process list writes nothing
+   * when it comes back. A stopped arbiter must not grant slots or freshen arbiter.json, and its folder may be going (a
+   * test removes its temp folder right after: w1173, a look landing mid-rmSync failed the w615 voice test with ENOTEMPTY).
+   */
+  close() {
+    this.closed = true;
+  }
+
   /** One look: free gone holders, count, grant or refuse, and write arbiter.json. Overlapping calls share one look. */
   tick(): Promise<Assessment> {
     this.busy ??= this.look().finally(() => (this.busy = undefined));
@@ -573,12 +583,14 @@ export class UnitySlots {
   }
 
   private async look(): Promise<Assessment> {
+    if (this.closed) throw new Error('the Unity slots arbiter is closed (its daemon stopped)');
     fs.mkdirSync(this.d.dir, { recursive: true });
     const reqs = this.readRequests();
     const procs = await this.d.procs();
     const now = this.d.now();
     const ramPct = this.d.ramPct();
     const a = assess({ platform: this.d.platform, procs, requests: reqs, places: this.d.places(), limit: this.d.limit(), now, ramPct, ramLimitPct: this.d.ramLimitPct, holderWaitMs: this.d.holderWaitMs });
+    if (this.closed) return a;
     const byId = new Map(reqs.map((r) => [r.id, r]));
     for (const id of a.grant) {
       writeAtomic(grantFile(this.d.dir, id), JSON.stringify({ id, grantedAt: new Date(now).toISOString() }));

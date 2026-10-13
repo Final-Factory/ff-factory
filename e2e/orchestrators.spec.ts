@@ -1,5 +1,5 @@
 import type { APIRequestContext, Browser, BrowserContext, BrowserContextOptions, Page } from '@playwright/test';
-import { ALPHA, BOX, appState, expect, go, isMobile, openSidebar, sendMessage, sendToChat, test, uniq } from './fixtures.ts';
+import { ALPHA, appState, BOX, expect, go, isMobile, openSidebar, sendMessage, test, uniq, useTool } from './fixtures.ts';
 import type { ServerEvent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /**
@@ -32,21 +32,6 @@ async function transcript(request: APIRequestContext, id: string): Promise<Trans
 /** What a harness message said to a session, by its tag at a line start ("[dispatch]", "[worker update]"). */
 async function heard(request: APIRequestContext, id: string, tag: string, containing = ''): Promise<string[]> {
   return (await transcript(request, id)).filter((e) => e.kind === 'user' && e.from === 'system' && e.text.split('\n').some((l) => l.startsWith(tag)) && e.text.includes(containing)).map((e) => (e as { text: string }).text);
-}
-
-/** Ask an orchestrator's fake model to call one of its tools; resolves to what the tool answered. */
-async function useTool(request: APIRequestContext, chatId: string, tool: string, args: Record<string, unknown>): Promise<string> {
-  const before = (await transcript(request, chatId)).at(-1)?.seq ?? 0;
-  await sendToChat(request, chatId, `#tool ${tool} ${JSON.stringify(args)}`);
-  let answer = '';
-  await expect
-    .poll(async () => {
-      const r = (await transcript(request, chatId)).find((e) => e.seq > before && e.kind === 'assistant' && e.text.startsWith(`Called ${tool}:`));
-      answer = r && r.kind === 'assistant' ? r.text : '';
-      return answer;
-    }, { timeout: 15_000 })
-    .not.toBe('');
-  return answer.slice(`Called ${tool}: `.length);
 }
 
 async function workTitled(request: APIRequestContext, title: string): Promise<WorkItem> {

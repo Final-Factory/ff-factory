@@ -28,7 +28,7 @@ import { MachineRollout } from './machineRollout.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
-import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, parseSandboxRef, poolSettingsOf } from './machines.ts';
+import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, parseSandboxRef, poolSettingsOf, sameCommit } from './machines.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG } from './launch.ts';
 import { AutoCompactor } from './autoCompact.ts';
@@ -388,6 +388,7 @@ export class Agents {
     sessions.keepIdle = (s) => this.keepIdle(s);
     // One person's tokens per turn (w1076): a live worker whose requests changed person restarts on theirs first.
     sessions.accountMove = (s) => this.accountMove(s);
+    sessions.codeMove = (s) => this.codeMove(s);
     // w1128: a gate's resume that waited while its request was blocked again is kept for the new gates, not delivered.
     sessions.staleResume = (work, sid, note) => this.orchestrators?.staleResume(work, sid, note);
     // The coordinators' routine turns on the routine model, a person's on their own (w1158, server/turnModel.ts).
@@ -1621,6 +1622,23 @@ export class Agents {
   private readonly startingFor = new Map<string, string>();
 
   /**
+   * Why a message to a worker must wait for its process to restart on the FF Factory code its machine runs now (w1166,
+   * sessions.codeMove). An agent host keeps the code it started with (machine/agentHost.ts: the guard hooks, the system
+   * prompt of its launch spec) across daemon updates, which adopt it: on 2026-10-12 workers started before ba015be (#359,
+   * develop retired) were adopted by the update at 21:30-21:37 UTC and opened game PRs #1579-#1582 into develop until
+   * 22:43, one merged there. Between turns only (a message sent mid-turn reaches the running process), and not while a
+   * background task runs (a build the restart would kill), as accountMove. A process from before ranOn was recorded counts
+   * as other code.
+   */
+  private codeMove(s: SessionHandle): string | undefined {
+    const i = s.info;
+    if (i.kind !== 'worker' || !i.machineId || !s.live || i.backgroundTasks || isMidTurn(i)) return undefined;
+    const now = this.machines.daemonCommit(i.machineId);
+    if (!now || (i.ranOn && sameCommit(i.ranOn, now))) return undefined;
+    return `its process started on FF Factory ${i.ranOn ? i.ranOn.slice(0, 7) : 'from before w1166'} and ${i.machineId} runs ${now.slice(0, 7)} now, so it restarts on the new code (its guard and system prompt) before this turn (w1166)`;
+  }
+
+  /**
    * Why a message to a worker must wait for its process to restart on another Claude account (w1076, sessions.accountMove):
    * its live process was started on one person's own tokens (SessionInfo.ranFor) and its requests are another person's now
    * (a take-over, w1031). The restart keeps the conversation; only the account changes, at a turn boundary. Not while a
@@ -2502,7 +2520,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ),
         tool(
           'spend_report',
-          "What work costs, so token use can be optimized (w859, docs/spend.md). Dollars and tokens (input, output, cache read, cache write) come from Claude Code's own per-turn usage, per model, per session and per request; every turn is counted for the request the worker was on when it began (an [about wNNN] line, else the request it was last sent), the dispatcher's and orchestrators' turns for the requests their messages name, and what no request owns (the dispatcher, chats, the ops worker, standing agents, turns tied to nothing) is listed apart. Estimated parts (sessions that ran before the tracking, backfilled transcripts) are labelled. Default: the last 7 days' top requests by cost with where their tokens went, cost by kind of work (bug fix, feature, release, review, investigation, ops), where the money goes inside sessions (file reads, re-reads, CI polling, tool output, the agent's own text, the base context), and the data guard's footprint. request: one request in full (models, every session with its cost, tokens and a link to its transcript, how long each transcript is kept). session: one session's spend and the requests it served. footprint: what the transcripts weigh, their growth a day and the projection.",
+          "What work costs, so token use can be optimized (w859, docs/spend.md). Dollars and tokens (input, output, cache read, cache write) come from Claude Code's own per-turn usage, per model, per session and per request; every turn is counted for the request the worker was on when it began (an [about wNNN] line, else the request it was last sent), the dispatcher's, orchestrators' and ops worker's turns for the requests their messages name, billed apart as that request's COORDINATION (a turn naming several requests is split evenly: an estimate), so a request's headline cost and the ranking are its workers' own cost; and what no request owns (the dispatcher, chats, the ops worker, standing agents, turns tied to nothing) is listed apart. Estimated parts (sessions that ran before the tracking, backfilled transcripts) are labelled. Default: the last 7 days' top requests by cost with where their tokens went, cost by kind of work (bug fix, feature, release, review, investigation, ops), where the money goes inside sessions (file reads, re-reads, CI polling, tool output, the agent's own text, the base context), and the data guard's footprint. request: one request in full (models, every session with its cost, tokens and a link to its transcript, how long each transcript is kept). session: one session's spend and the requests it served. footprint: what the transcripts weigh, their growth a day and the projection.",
           {
             days: z.number().int().min(1).max(120).optional().describe('Window in days, UTC (default 7).'),
             top: z.number().int().min(1).max(50).optional().describe('How many requests to list (default 10).'),
