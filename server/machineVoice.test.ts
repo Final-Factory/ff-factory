@@ -226,8 +226,10 @@ async function setup(opts: { used?: { mib: number }; voice?: Partial<VoiceConfig
     d.shutdown();
     await until('disconnect', () => !mm.isOnline('beast')).catch(() => undefined);
     server.close();
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for the writes into tmp to end, not a fixed time (w1173): a background state save still running when rmSync
+    // starts adds a file under it and fails the test with ENOTEMPTY. The daemon writes nothing once shut down.
     store.flush();
+    await store.saved();
     fs.rmSync(tmp, { recursive: true, force: true });
   };
   await until('the daemon offers its Whisper', () => mm.voiceMachines().length === 1);

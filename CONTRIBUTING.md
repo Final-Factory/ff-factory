@@ -130,16 +130,24 @@ npm --prefix web run build
 node web/perf/bench.ts                                   # 7,000 stopped agents, an 8,000-event chat, live traffic
 node web/perf/bench.ts --route '#/machine/beast/sandbox/agent-mcp'# the chat beside the sandbox holding most past agents
 node web/perf/bench.ts --cpu 4 --memory 60               # a 4x slower CPU; the JS heap over an hour
-node web/perf/bench.ts --check --live 0                  # the budgets CI holds the page to
+node web/perf/bench.ts --check --live 0                  # the budgets (npm run perf: both pages, after a build)
 ```
 
 `web/perf/bench.ts` runs the built page against the mock backend (`web/mock/`) at a real portal's scale
 (`web/mock/scale.ts`) in headless Chromium: per key typed, the time to the next frame, React commits and components
 rendered, and long tasks; at rest, the main thread's busy share and layouts per second; the heap over time. With
 `MOCK_STATE_FILE`, `MOCK_TRANSCRIPT_FILE` and `MOCK_WORK_FILE` it uses a portal's own `state.json`, a transcript
-and `work.json` instead of generated ones (strip any secrets first, and never commit them). CI runs `--check`, which
-fails on components rendered per key, DOM size, typing p95, long tasks and layouts at rest: counts where possible,
-so a slow runner does not fail it.
+and `work.json` instead of generated ones (strip any secrets first, and never commit them). `--check` fails on
+components rendered per key, DOM size, typing p95, long tasks and layouts at rest.
+
+**CI runs no performance, load or timing tests** (lothsahn, 2026-10-12, w1173: "Let's move performance benchmarks out
+of the CI pipeline and just have the agents run it locally"). The budgets moved out of the e2e job when CI moved to
+FFBox's shared runners (docs/ci-placement.md): another job on the host took the typing p95 from under 50 ms to 75-116 ms
+and failed 4 of 72 runs in two days, against none of 276 on GitHub's runners before. **Run `npm run perf` before you
+push a change to the web UI's hot paths**: what renders per key typed or per live event (the composer, a transcript,
+the sidebar and its lists, the Overview board, the Requests list), the state store and its updates, or anything that
+adds DOM to a page of thousands of agents. It builds the page and runs `--check` on the orchestrator and beside the
+busiest sandbox; run it on a machine that is otherwise quiet, and put its result in your pull request.
 
 ## Versions and releases
 
