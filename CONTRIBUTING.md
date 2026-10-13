@@ -104,6 +104,7 @@ npx playwright install chromium webkit        # once
 npm --prefix web run build                    # the test server serves web/dist
 npm run test:e2e                              # all three projects
 npm run test:e2e -- --project=mobile-safari e2e/chat.spec.ts   # one project, one file
+E2E_PROJECTS=mobile-safari,ipad-safari npm run test:e2e      # only these projects, and only their servers start
 npx playwright show-report                    # after a run: the HTML report, with traces of failures
 ```
 
@@ -112,8 +113,12 @@ temp directory, with a fake agent (`e2e/fakeAgent.ts`) in place of Claude: no Un
 credentials. The fake answers by tag (`#perm` asks for a permission, `#long`, `#screenshot`, `#slow`,
 `#fail`; anything else is echoed). It seeds three sandboxes (`alpha` for tests to use, `gallery` with a
 fixed transcript for screenshots, `stuck` with a blocked Unity editor) and the login `tester` /
-`e2e-password-123`. Each project (desktop Chromium, Pixel-sized Chrome, iPhone-sized WebKit) gets its
-own server on ports 8791-8793, so run nothing else there.
+`e2e-password-123`. Each project (desktop Chromium, Pixel-sized Chrome for the phone-specific specs only, iPhone-sized
+WebKit) gets its own server on ports 8791-8793, so run nothing else there. Playwright starts every project's server
+whatever `--project` picks; `E2E_PROJECTS` limits both. CI runs two jobs, one per browser engine, each with its projects
+listed in `ci.yml` (w1191; `scripts/e2e-legs.test.ts` fails a project left out of both or put in both), and skips them
+for a pull request that touches only `docs/`, `changelog.d/`, a top-level `*.md`, `deploy/` or `.github/` other than
+`ci.yml`.
 
 Tests in one project share one server, so they share the owner's orchestrator chat (w866, which went red twice on CI
 for it). In a test that reads that chat: find your own lines by the unique tag or the text you quoted, never by position

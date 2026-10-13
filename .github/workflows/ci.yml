@@ -98,8 +98,12 @@ jobs:
   e2e:
     # Not on a push to main (w925): see concurrency above.
     if: github.event_name != 'push'
-    name: Playwright (Chromium + WebKit, ${{ matrix.shard }}/3)
-    # The same tests, split across three runners by file (playwright test --shard); each starts its own servers.
+    name: Playwright (${{ matrix.engine }})
+    # One job per browser engine (w1191), each running its own projects (E2E_PROJECTS), starting only their servers and
+    # installing only its browser. Playwright starts every webServer in the config whatever a job runs, so each of the
+    # three --shard jobs before booted all nine servers (about 32 s a job, measured on FFBox) and installed both browsers
+    # with their system libraries; and every job counts against the organisation's 20 hosted jobs at once
+    # (docs/ci-placement.md). scripts/e2e-legs.test.ts fails a project left out of both legs, or in both.
     # The Linux screenshot baselines match ubuntu-latest's fonts: re-render them with the update_snapshots input when they
     # stop matching (docs/ci-placement.md).
     runs-on: ubuntu-latest
@@ -107,27 +111,54 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
-    env:
-      # The shards' shares of the tests, in config order (Playwright's PWTEST_SHARD_WEIGHTS): the last holds the slow
-      # WebKit projects, so it takes fewer. Each file goes to one shard whatever the weights, so none is ever left out.
-      PWTEST_SHARD_WEIGHTS: '5:5:3'
+        include:
+          # Test time per leg, summed from run 38333790206's three shards: Chromium about 486 s (645 before mobile-chrome ran
+          # only the phone specs, playwright.config.ts ANDROID), WebKit about 574 s.
+          # ipad-chrome is in the WebKit leg: it is the iPad device with Chrome's user agent, so its engine is WebKit.
+          - engine: Chromium
+            browser: chromium
+            projects: desktop-chromium,mobile-chrome,provider-desktop,provider-mobile,intake-desktop
+          - engine: WebKit
+            browser: webkit
+            projects: mobile-safari,ipad-safari,ipad-chrome,intake-mobile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - name: Does this change reach the end-to-end tests
+        # A pull request that changes only words or what these tests never load skips them (w1191): docs/, changelog.d/, a
+        # top-level *.md, deploy/ (the VM scripts, tested in vm-scripts.yml) and .github/ other than this file. Neither
+        # server/, machine/, shared/, web/ nor e2e/ reads any of them at run time (grep, 2026-10-13); unit tests do, so the
+        # checks job always runs. A pull request's merge commit has the base as its first parent: HEAD^1..HEAD is its change.
+        id: need
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          files=$(git diff --name-only HEAD^1 HEAD)
+          rest=$(grep -vE '^(docs/|changelog\.d/|deploy/|\.github/)|^[^/]+\.md$' <<<"$files" || true)
+          ci=$(grep -xF '.github/workflows/ci.yml' <<<"$files" || true)
+          if [ -z "$rest" ] && [ -z "$ci" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No end-to-end tests: this change touches only docs, changelog notes, deploy/ or .github/."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.need.outputs.run == 'true'
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: |
             package-lock.json
             web/package-lock.json
-      - run: npm ci --no-audit --no-fund
-      - run: npm ci --prefix web --no-audit --no-fund
-      - name: Playwright's browsers and their system libraries
-        run: npx playwright install --with-deps chromium webkit
-      - name: Build the web UI
-        run: npm --prefix web run build
+      - if: steps.need.outputs.run == 'true'
+        run: npm ci --no-audit --no-fund
+      - if: steps.need.outputs.run == 'true'
+        run: npm ci --prefix web --no-audit --no-fund
       - name: Snapshot mode
+        if: steps.need.outputs.run == 'true'
         id: snap
         shell: bash
         run: |
@@ -136,10 +167,19 @@ jobs:
             echo "update=true" >> "$GITHUB_OUTPUT"
             echo "::warning::Rendering visual baselines instead of comparing them; commit the linux-snapshots artifact into e2e/__screenshots__/."
           fi
+      - name: This job's browser and its system libraries (both when rendering baselines)
+        if: steps.need.outputs.run == 'true'
+        run: npx playwright install --with-deps ${{ steps.snap.outputs.update == 'true' && 'chromium webkit' || matrix.browser }}
+      - name: Build the web UI
+        if: steps.need.outputs.run == 'true'
+        run: npm --prefix web run build
       - name: Run Playwright
-        # Rendering baselines runs every test in the first shard alone, so its linux-snapshots artifact is whole.
-        if: steps.snap.outputs.update != 'true' || matrix.shard == 1
-        run: npx playwright test ${{ steps.snap.outputs.update == 'true' && '--update-snapshots=all' || format('--shard={0}/3', matrix.shard) }}
+        # Rendering baselines runs every project in the Chromium leg alone (E2E_PROJECTS empty: all of them, with both
+        # browsers installed above), so its linux-snapshots artifact is whole.
+        if: steps.need.outputs.run == 'true' && (steps.snap.outputs.update != 'true' || matrix.engine == 'Chromium')
+        env:
+          E2E_PROJECTS: ${{ steps.snap.outputs.update != 'true' && matrix.projects || '' }}
+        run: npx playwright test ${{ steps.snap.outputs.update == 'true' && '--update-snapshots=all' || '' }}
       # No performance budgets here (web/perf/bench.ts): CI runs no perf, load or timing tests (lothsahn, 2026-10-12, w1173:
       # "We don't want load or performance tests in the ff factory CI pipeline"). Agents run `npm run perf` locally
       # (CONTRIBUTING.md, "Performance").
@@ -152,17 +192,20 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: playwright-report-${{ matrix.shard }}
+          name: playwright-report-${{ matrix.engine }}
           path: pw-artifacts
       - name: Upload rendered snapshots
-        if: always() && steps.snap.outputs.update == 'true' && matrix.shard == 1
+        if: always() && steps.snap.outputs.update == 'true' && matrix.engine == 'Chromium'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-snapshots
           path: e2e/__screenshots__
 
-  secrets:
-    name: Secret scan (gitleaks)
+  hygiene:
+    # One job for both, on pull requests and on a push to main (w925): each was 10 to 20 seconds of work in a runner of its
+    # own, and every job counts against the organisation's 20 hosted jobs at once (w1191). Each check runs even when the
+    # one before it failed, so every one answers.
+    name: Secret scan and commit identities
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -177,24 +220,18 @@ jobs:
         # HEAD only: other branches on the remote are not what is being merged.
         run: gitleaks git . --log-opts=HEAD --redact --no-banner --verbose
       - name: Scan the working tree
+        if: ${{ !cancelled() }}
         run: gitleaks dir . --redact --no-banner
-
-  identity:
-    name: Commit identities are noreply
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - if: ${{ !cancelled() }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: |
             package-lock.json
             web/package-lock.json
-      - name: Check the new commits
+      - name: Commit identities are noreply (the new commits)
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           EVENT: ${{ github.event_name }}
