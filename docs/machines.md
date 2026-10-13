@@ -260,6 +260,18 @@ it running, mid-turn or idle. The next daemon takes it back.
   gone has what it recorded forwarded, and its session is not live: the portal resumes it with its conversation if it was
   mid-turn (as for any agent cut off), and its next message starts a new host otherwise. A host of another host protocol
   (`HOST_PROTOCOL`) is left running and not adopted.
+- **An adopted host runs the code it started with** (w1166). Its guard hooks and the system prompt of its launch spec
+  are in its memory, so an update does not reach them: on 2026-10-12 the update to ba015be (#359, the game's develop
+  retired) adopted every host at 21:30-21:37 UTC, and workers started before it kept the old guard and the old "develop
+  is the integration branch" prompt. w1145's worker (ffe7fcc1 on BEAST, started 21:04) opened game PR #1580 with
+  `gh pr create --base develop` at 22:33, which the new guard refuses; w1147's (lothdesktop, started 21:06) merged #1579
+  into develop at 23:20. So the portal records the daemon commit each worker process started on (`SessionInfo.ranOn`,
+  from the hello), and a worker whose machine now runs another commit restarts on it at its next turn boundary, in the
+  same conversation (`SessionManager.codeMove`, `Agents.codeMove`, the account move's path: its message waits until the
+  old process has stopped). Never mid-turn and never while a background task runs (a build the restart would kill): that
+  message reaches the running process, and the restart comes with a later one. The first message of a process on other
+  code than its last opens with an `[updated]` line (`updatedNote`): its system prompt and guard are the current ones,
+  and where they differ from what it read earlier in the conversation, they win.
 - **A host's end** (w799, BEAST 2026-10-09: the daemon dropped two hosts whose heartbeats were 30 s late under a release
   build while their processes ran on; it could not remove their folders, `EPERM` on Windows, and never ended them. One,
   w790's worker 38a203f0 in slot1, ran half an hour more with its claude.exe and Unity MCP chain, its `publish_attachment`

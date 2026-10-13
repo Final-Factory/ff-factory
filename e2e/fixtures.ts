@@ -1,5 +1,5 @@
 import { expect, test as base, type APIRequestContext, type Cookie, type Locator, type Page } from '@playwright/test';
-import type { AppState, MachineSandbox, SessionInfo } from '../shared/types.ts';
+import type { AppState, MachineSandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 export const USER = 'tester';
 export const PASSWORD = 'e2e-password-123';
@@ -125,6 +125,30 @@ export async function sendToChat(request: APIRequestContext, sessionId: string, 
   const port = Number(new URL(test.info().project.use.baseURL!).port) + 200;
   const r = await request.post(`http://127.0.0.1:${port}/dispatcher-turn`, { data: { text } });
   expect(r.ok(), await r.text()).toBeTruthy();
+}
+
+/**
+ * Call one of a chat's tools through the scripted fake agent ("#tool <name> <json>", e2e/fakeAgent.ts) and return what it
+ * answered. The answer is this call's own: the chat's tool_use with these very arguments, then the "Called <tool>:" line
+ * after it (a chat takes one turn at a time). Tests running at once share the dispatcher, and the first "Called
+ * start_agent:" after sending was once another test's (w1173: orchestrators.spec.ts got replies.spec.ts's agent).
+ */
+export async function useTool(request: APIRequestContext, chatId: string, tool: string, args: Record<string, unknown>): Promise<string> {
+  const events = async () => (await (await request.get(`/api/sessions/${chatId}/events?limit=500`)).json()) as TranscriptEvent[];
+  const before = (await events()).at(-1)?.seq ?? 0;
+  const input = JSON.stringify(args);
+  await sendToChat(request, chatId, `#tool ${tool} ${input}`);
+  let answer = '';
+  await expect
+    .poll(async () => {
+      const all = await events();
+      const call = all.find((e) => e.seq > before && e.kind === 'tool_use' && e.name.endsWith(`__${tool}`) && JSON.stringify(e.input) === input);
+      const r = call && all.find((e) => e.seq > call.seq && e.kind === 'assistant' && e.text.startsWith(`Called ${tool}:`));
+      answer = r && r.kind === 'assistant' ? r.text : '';
+      return answer;
+    }, { timeout: 15_000 })
+    .not.toBe('');
+  return answer.slice(`Called ${tool}: `.length);
 }
 
 /** Set fields on a request through the test server's own door (e2e/server.ts): to age it, or give it pull requests. */

@@ -110,6 +110,63 @@ about 2.9 characters a token for this text). `server/coordinatorContext.test.ts`
 characters or the always-loaded tools 23,000 (22,500 until w1163 moved the sets to measured use), when a topic is not named in the brief that reads it, and when a moved rule
 loses its words or w-number: move a rarely needed rule into a topic, or defer a tool, rather than raise the budget.
 
+## Which model answers a turn (w1158)
+
+lothsahn, w1158: "2) Do it, use sonnet" (a cheaper model for routine coordinator turns), and "5) Do not do this" to
+Sonnet for workers. A coordinator's turn that no person's own message started runs on `orchestrator.routineModel`
+(default `claude-sonnet-5-5`); a turn a person's own words started runs on `orchestrator.model` (Opus). Workers,
+standing agents and the ops worker are never switched (`server/turnModel.ts` returns nothing for them).
+
+- **A person's turn**: any message sent as `human`: the person's chat, their words matched by FFBox
+  (`[via FFBox: …]`, w831), a remote session (`[via …]`), voice. One that arrives mid-turn moves the rest of that turn
+  to `orchestrator.model` at once.
+- **Kept on the coordinator's own model** although no person wrote them (`OWN_MODEL_TAGS`): the dispatcher's
+  `[work request]`, `[work update]` and `[ledger]` (its placement and dispatch decisions), and a person's `[reaction]`
+  (a 👍 on a question of the orchestrator's counts as their words, w1039).
+- **Routine**, everything else: `[worker update]`, `[dispatch]`, `[timer …]`, `[wake_me]`, `[ledger cleanup]`,
+  `[heartbeat]`, `[machines]`, `[machine …]`, `[machine updates]`, `[ops worker]`, `[intake auto-closed]`,
+  `[intake question]`, `[intake escalation]`, `[app restarted]`, `[unity]`, `[unity blocked]`, `[host]`,
+  `[person message]`, `[conditional decision]`, `[from FFBox, …]`, `[from another owner]`, `[auto-delegation]`,
+  `[standing agent]`.
+- **The window after a turn on the own model** (`orchestrator.routineAfterMinutes`, default 60): a routine turn within
+  it stays on `orchestrator.model`. Prompt caches are per model: a switch writes into the other model's cache everything
+  it has not seen yet, at that model's cache-write price, and a cache read costs the same $0.20 per million tokens on
+  Opus 5.5 and Sonnet 5.5 (the claude-api price table). Measured on one live session (w1158): the first switch to
+  Sonnet wrote the whole context (23,570 tokens); after that each switch wrote only what was added since that model's
+  last turn (630-1,520 tokens), and the cache is the one-hour kind. So switching back and forth while a person is
+  writing pays twice for every new token, and the quiet hours, when only the harness writes, are where Sonnet saves.
+
+**Why the dispatcher's decisions stay on Opus** (measured, w1158). The dispatcher's real options (brief, tools, guards)
+were run on both models against an in-process FF Factory with two machines and real daemons (the tests' world), each
+request filed through a person's orchestrator so the `[work request]` was the harness's own text, modelled on the
+dispatcher's turns of 2026-10-12 that lothsahn's orchestrator listed (w1155-w1162, w1141). Both chose the same on: a
+full computer (the free one the Capacity block names), a true duplicate (merge), a different verb on the same spec
+(start with `override_duplicate` and a reason; Sonnet needed the refusal first, as the real dispatcher did on w1160), a
+correction to a worker's PR (`message_agent`, same session), FF Factory work with every game sandbox busy
+(`extra_agent`, w1098), everything full (queue, w1089), a wait for a PR (block, kind pr), a note on running work, a
+"stuck" sandbox (no delete; Sonnet also started an editor nobody needed), and for Ben's orchestrator a stalled request
+(asked, never closed). One differed: blocked on PR #1291, with Ben's note "Unblock this one, go ahead.", Sonnet started
+the work with `override_gate` in 3 runs of 3, the w754 mistake (lothsahn lifted a hold with "unblock the release" while
+w727's PR was open); Opus kept it blocked and asked Ben in 3 of 3. A wrong start costs a worker's whole run, more than
+the dispatcher's turn saves. Sonnet cost about half per decision (cold cache: $0.06-0.09 against $0.11-0.19).
+
+**What it saves** (lothsahn's orchestrator's `spend_report`, the three coordinators' lifetimes, all Opus): cache reads
+were 57-59% of their cost (the dispatcher 14B tokens, $2,800 of $4,918), writes 25% and output 17%. A read costs the same
+on both models, so Sonnet saves at most half of the writes and the output of the turns it takes, about a fifth of a
+coordinator's cost if it took every turn; the smaller context (above) cuts the reads themselves. Output was about 0.27
+tokens per cache-write token (34M against 128M for lothsahn's), so a switch on every turn would lose money (output saves
+$10 per million on Sonnet, the second write costs $4 per million); hence the window.
+
+How: one session, one process. `AgentSession.send` asks `SessionManager.turnModel` for the message's model before the
+message reaches the process. A process that is not running starts on it; a live one gets the SDK's `setModel`, a control
+message written ahead of the user message, so the turn it opens runs on the new model (measured: four and five turns in
+one session, each answered by the model asked for, awaited or not). The transcript gets one line per change:
+"Model: claude-sonnet-5-5 from this turn on (a turn no person started; w1158)". The session's `model` shows the live one.
+
+Off switch: `set_app_config orchestrator.routineModel "off"` puts every coordinator turn on `orchestrator.model` from the
+next message on, with no restart; `orchestrator.routineAfterMinutes` (0-1440) changes the window. Tests:
+`server/turnModel.test.ts` (every tag above, the window, workers untouched, the live switch).
+
 ## Requests and the ledger
 
 `request_work {title, brief, priority, constraints, related_ids, attachments}` files a request (`w12`). `attachments`

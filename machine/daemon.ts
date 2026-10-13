@@ -748,6 +748,7 @@ export class Daemon {
     this.guard?.stop();
     clearTimeout(this.usageTimer);
     for (const t of this.timers) clearInterval(t);
+    this.slots.close();
     // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
     // portal knows which ones were mid-turn and resumes them when the daemon is back (MachineManager.resumeCutOff).
     // Agents in hosts (w605) run on: the next daemon takes them back. Detached here, never stopped.

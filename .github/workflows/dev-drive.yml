@@ -29,12 +29,12 @@ permissions:
 jobs:
   dev-drive:
     name: Dev Drive (windows-latest)
-    runs-on: windows-latest
+    runs-on: ${{ vars.FF_WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: Final-Factory/ci-actions/setup@c5584f1c8b3f62823efd7a74d88019c2d1f40565
         with:
-          node-version: 24
+          node: '24'
       - name: The VHDX, its letter, a re-run, a reboot and a taken letter
         run: node scripts/worker/test/devdrive-e2e.ts "${{ runner.temp }}\w900-devdrive"
