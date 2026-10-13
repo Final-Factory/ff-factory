@@ -1026,7 +1026,7 @@ one rule, and it is the agent's own to enforce (`server/evidenceRules.test.ts` p
   its own guesses by research (the tool's own docs and on-screen recommendation first), then carries on without asking.
   It asks the person only to confirm a money value, for what the rules already reserve for them, or when research
   leaves a real fork. It merges its own pull request once its verification is done and CI is green (`MERGE_RULES`; in the game repo
-  that is its required `Merge gate` check, and the whole suite runs after the merge in the master batch, w1180;
+  that is its required `Test in editmode` check, and the whole suite runs after the merge in the master batch, w1180;
   the owner, 2026-10-02: "stop holding prs, just merge them"), and holds one only for exceptional risk or a concrete
   timing reason, saying which and when it will merge. Its report labels each number and recommendation (`REPORT_LABELS`) and leads with the result,
   because an orchestrator is sent only the first 3000 characters of a worker's final message.
@@ -1042,7 +1042,7 @@ were obvious bugs merging is fine from sentry investigations"). Its request's co
 `server/orchestrators.ts`) say it is delivered as a pull request into master (the game repo's one trunk, w1137), never pushed to master
 directly and never force-pushed, and that its worker merges the PR itself once verified and CI is green when the PR fixes
 a clear, demonstrated bug (a failing-first test or a reproduction) or only adds tests or verdicts (in the game repo, CI is
-green when its required `Merge gate` check passes; a PR that breaks the whole suite, run after the merge, comes back as an
+green when its required `Test in editmode` check passes; a PR that breaks the whole suite, run after the merge, comes back as an
 urgent revert request, w1180). A PR that changes
 design or behaviour beyond fixing the bug is a judgement call: the worker leaves it open for a person and says so in its
 report. Before w694 the constraints told the worker never to merge ("a person's merge is the review of an agent's

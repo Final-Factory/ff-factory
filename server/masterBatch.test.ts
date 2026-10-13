@@ -197,7 +197,7 @@ test('w1180: the culprit request is urgent and gives the revert method in order,
   const revert = d.brief.indexOf(`1. Revert first: \`git fetch origin && git switch -c revert-1234 origin/master && git revert -m 1 ${MERGE}\``);
   const reland = d.brief.indexOf('2. Then re-land the fix on a new PR with the failing tests green locally (scripts/test_select.py), or hand the fix back to the linked request\'s worker. Never loosen or skip the failing test to get the batch green.');
   assert.ok(revert > 0 && reland > revert, 'revert first, then re-land');
-  assert.ok(d.brief.includes('`Part of: <this request>` and `Reverts #1234`, merge it on a green Merge gate.'));
+  assert.ok(d.brief.includes('`Part of: <this request>` and `Reverts #1234`, merge it on a green Test in editmode.'));
   // More than 20 tests: 20 named, then a count.
   const long = { ...v.culprits[0], tests: Array.from({ length: 30 }, (_, i) => `Tests.T${i}`) };
   const more = culpritDraft({ repo: REPO, run: run(101, 'failure'), v, c: long, linked: [] }).brief;
@@ -543,7 +543,7 @@ test('w1180: the gh reads are api calls on the system payer\'s runner, and the v
   const gh = ghMasterBatch(
     fake({
       'workflows/master-batch.yml/runs': JSON.stringify({ workflow_runs: [{ id: 5, head_sha: TIP, status: 'completed', conclusion: 'failure', created_at: '2026-10-12T10:00:00Z', updated_at: '2026-10-12T10:30:00Z', html_url: `https://github.com/${REPO}/actions/runs/5` }] }),
-      'runs/5/jobs': JSON.stringify({ jobs: [{ id: 11, name: 'Merge gate' }, { id: 12, name: JOB_NAME }] }),
+      'runs/5/jobs': JSON.stringify({ jobs: [{ id: 11, name: 'Test in editmode' }, { id: 12, name: JOB_NAME }] }),
       'jobs/12/logs': 'the log',
       'pr view 1234': JSON.stringify({ body: 'b', title: 'T', url: 'u', author: { login: 'someone' } }),
     }),

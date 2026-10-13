@@ -475,7 +475,7 @@ ledger request, or a line on the request already fixing it.
 ## Master batch reds
 
 Ben, 2026-10-12 (w1180): "we'll just do the recommendation for the queue." The game repo merges a PR on a fast required
-`Merge gate` check (compile, the tests the change touches, one smoke PlayMode test); the whole editmode suite runs after the
+`Test in editmode` check (compile, the tests the change touches, one smoke PlayMode test); the whole editmode suite runs after the
 merge, on master, in batches (`.github/workflows/master-batch.yml`, job `Master batch (full editmode)`). A PR that
 breaks the suite is therefore found after it merged, and this watch (`server/masterBatch.ts`, `MasterBatchWatch`) hands it
 back to its request.
@@ -494,7 +494,7 @@ back to its request.
   system payer, with the constraint "Do not touch Steam branches or the release lane." The brief has the run, the tip, the
   merge and PR link, the failing tests (20 shown), the unresolved ones, the linked request(s), and the method in order:
   revert first (`git revert -m 1 <merge sha>` on a `revert-<pr>` branch, a PR whose description carries `Part of: <this
-  request>` and `Reverts #<pr>`, merged on a green Merge gate), then re-land the fix on a new PR with the failing tests
+  request>` and `Reverts #<pr>`, merged on a green Test in editmode), then re-land the fix on a new PR with the failing tests
   green locally, or hand it back to the linked request's worker; never loosen or skip the failing test. The worker rules
   (`workerRules`) repeat it. No culprit but failing tests: one request `Master batch red: <n> tests not bisected`.
   A tip that ran nothing (`no-results`: a compile error or a crash): one request `Master batch red at <sha9>: no results
