@@ -72,6 +72,14 @@ Two more rules from flakes (w858, corrected by w906):
   node too when it cuts the output short: PowerShell's `& node ... | Select-Object -First 1` ends node mid-exit; take
   `(& node ...) | Select-Object -First 1` (w906: the probe's `node -p` was every empty file).
 
+One from a process tree (w1196):
+
+- **A fake process list has the real machine's shape.** The leftover reaper spared the daemon's parent with its whole tree;
+  its tests ran the daemon under pid 1 and the orphans under a user's systemd (9212), so they passed, and the deployed
+  reaper ended nothing on biscuit, where the daemon's parent IS that systemd (and on a Mac, launchd, pid 1). A test of
+  anything that walks or spares process trees puts the daemon under the same parent its orphans are reparented to
+  (`server/leftovers.test.ts` `machine()`), and runs once against the real process table before it is called done.
+
 Two from hangs (w906):
 
 - **Never end a process by a stale id.** Windows reuses process ids and never clears a dead parent's id from
