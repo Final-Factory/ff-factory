@@ -10,7 +10,8 @@ const decide = async (g: ReturnType<typeof sandboxGuard>, tool_name: string, too
   return r.hookSpecificOutput?.permissionDecision ?? 'allow';
 };
 
-const make = () => sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: ['C:/Users/dev/games/MyGame', path.join(os.homedir(), 'games', 'MyGame')] });
+// No PR is ever looked up on GitHub here (w1166: gh pr merge reads its PR's base).
+const make = () => sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: ['C:/Users/dev/games/MyGame', path.join(os.homedir(), 'games', 'MyGame')], prBase: () => undefined });
 
 test('shell access to the protected checkout is denied in every spelling', async () => {
   const g = make();
@@ -96,7 +97,7 @@ test('master/main: blocked for the game repo only, and whenever the target is un
     if (d === 'c:/tmp/tools') return new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git']]);
     return undefined;
   };
-  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git', 'C:/ffsb/_base'], remotes });
+  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git', 'C:/ffsb/_base'], remotes, prBase: () => 'master' });
   const sb = 'C:/ffsb/sb1';
   const tools = 'C:/tmp/tools';
   const cases: [string, string, 'allow' | 'deny'][] = [
@@ -333,4 +334,52 @@ test('public repos: the real lookup lists the unpushed commits\' emails', async 
   git(w, 'fetch', '-q', 'origin');
   git(w, '-c', 'user.name=b', '-c', 'user.email=b@example.com', 'commit', '-q', '--allow-empty', '-m', 'not yet');
   assert.deepEqual(gitPushedEmails(w, 'origin', ['HEAD']), ['b@example.com']);
+});
+
+test('w1166: a PR into the retired develop is not merged or opened through gh pr merge or the API, whatever the prompt said', async () => {
+  // On 2026-10-12 sessions started before ba015be (#359) kept the old guard after the update adopted them: #1580 was
+  // opened with `gh pr create --base develop` at 22:33 UTC and #1579 merged into develop at 23:20. The current guard
+  // refused the first; nothing refused a merge of a PR already based on develop.
+  const remotes = (dir: string) => {
+    const d = dir.replace(/\\/g, '/').toLowerCase();
+    if (d === 'c:/ffsb/sb1') return new Map([['origin', 'git@github.com:example-org/example-game.git']]);
+    if (d === 'c:/tmp/tools') return new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git']]);
+    return undefined;
+  };
+  const bases: Record<string, string> = { '1579': 'develop', '1580': 'master', 'sandbox/slot3-w1147': 'develop' };
+  const asked: [string | undefined, string | undefined][] = [];
+  const prBase = (pr: string | undefined, repo: string | undefined) => {
+    asked.push([pr, repo]);
+    return pr === undefined ? 'develop' : bases[pr];
+  };
+  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git'], remotes, prBase });
+  const sb = 'C:/ffsb/sb1';
+  const tools = 'C:/tmp/tools';
+  const cases: [string, string, 'allow' | 'deny'][] = [
+    [sb, 'gh pr merge 1579 --merge', 'deny'],
+    [sb, 'gh pr merge --merge 1579', 'deny'],
+    [sb, 'gh pr merge -R example-org/example-game 1579 --squash', 'deny'],
+    [sb, 'gh pr merge --subject "w1147: labels" 1579', 'deny'],
+    [sb, 'gh pr merge sandbox/slot3-w1147 -r', 'deny'], // -r is --rebase, not the repo
+    [sb, 'gh pr merge --merge', 'deny'], // the current branch's PR
+    [sb, 'gh pr merge 1580 --merge', 'allow'], // into master: the normal flow
+    [sb, 'gh pr merge 999 --merge', 'allow'], // its base could not be read: not judged
+    [tools, 'gh pr merge 1579 --merge', 'allow'], // another repo's develop is its own business
+    [sb, 'gh api -X PUT repos/example-org/example-game/pulls/1579/merge', 'deny'],
+    [sb, 'gh api -X PUT repos/{owner}/{repo}/pulls/1579/merge -f merge_method=merge', 'deny'],
+    [sb, 'gh api -X PUT repos/example-org/example-game/pulls/1580/merge', 'allow'],
+    [sb, 'gh api repos/example-org/example-game/pulls -f base=develop -f head=sandbox/x -f title=x', 'deny'],
+    [sb, 'gh api -X PATCH repos/example-org/example-game/pulls/1580 -f base=develop', 'deny'],
+    [sb, 'gh api -X PATCH repos/example-org/example-game/pulls/1580 -f base=master', 'allow'],
+    [sb, 'gh api repos/example-org/example-game/pulls/1579', 'allow'], // a read
+    [sb, 'gh api repos/Final-Factory/ff-factory/pulls -f base=develop -f head=x -f title=x', 'allow'],
+  ];
+  for (const [cwd, command, want] of cases) assert.equal(await decide(g, 'Bash', { command }, cwd), want, `${command} (in ${cwd})`);
+  assert.ok(asked.some(([pr, repo]) => pr === '1579' && repo === 'example-org/example-game'), 'gh -R names the repo the base is read from');
+  assert.ok(asked.some(([pr, repo]) => pr === '1579' && repo === undefined), "{owner}/{repo}: the directory's repo");
+  // The refusal says what to do instead.
+  const ctx = { cwd: sb, gameRepos: ['https://github.com/example-org/example-game.git'], remotes, prBase };
+  assert.match(checkShell('gh pr merge 1579 --merge', ctx) ?? '', /This PR \(1579\) targets the Final Factory game repo's develop, which is retired.*gh pr edit 1579 --base master.*merge origin\/master into its branch/);
+  // Without a resolver (checkShell's other callers), merges are not looked up.
+  assert.equal(checkShell('gh pr merge 1579 --merge', { cwd: sb, gameRepos: ['https://github.com/example-org/example-game.git'], remotes }), undefined);
 });

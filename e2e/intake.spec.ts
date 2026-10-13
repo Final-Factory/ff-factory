@@ -1,6 +1,5 @@
-import type { APIRequestContext } from '@playwright/test';
-import { appState, expect, go, sendToChat, test, uniq } from './fixtures.ts';
-import type { TranscriptEvent, WorkItem } from '../shared/types.ts';
+import { appState, expect, go, test, uniq, useTool } from './fixtures.ts';
+import type { WorkItem } from '../shared/types.ts';
 
 /**
  * The intake (docs/intake.md) in the browser, on servers of their own with the Discord intake switched on
@@ -22,27 +21,6 @@ function mockUrl(baseURL: string | undefined) {
 async function post(url: string, body: unknown) {
   const r = await fetch(url, { method: 'POST', body: JSON.stringify(body) });
   expect(r.ok).toBe(true);
-}
-
-async function transcript(request: APIRequestContext, id: string): Promise<TranscriptEvent[]> {
-  const r = await request.get(`/api/sessions/${id}/events?limit=500`);
-  expect(r.ok()).toBe(true);
-  return (await r.json()) as TranscriptEvent[];
-}
-
-/** Ask the dispatcher's fake model to call one of its tools (through the test server's door, e2e/server.ts); what the tool answered. */
-async function useTool(request: APIRequestContext, chatId: string, tool: string, args: Record<string, unknown>): Promise<string> {
-  const before = (await transcript(request, chatId)).at(-1)?.seq ?? 0;
-  await sendToChat(request, chatId, `#tool ${tool} ${JSON.stringify(args)}`);
-  let answer = '';
-  await expect
-    .poll(async () => {
-      const r = (await transcript(request, chatId)).find((e) => e.seq > before && e.kind === 'assistant' && e.text.startsWith(`Called ${tool}:`));
-      answer = r && r.kind === 'assistant' ? r.text : '';
-      return answer;
-    }, { timeout: 15_000 })
-    .not.toBe('');
-  return answer.slice(`Called ${tool}: `.length);
 }
 
 test('Discord reports and trusted requests land in the Intake tab, wait for a person, and reach the dispatcher once approved', async ({ authed: page, baseURL }) => {

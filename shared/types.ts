@@ -185,12 +185,26 @@ export interface SessionInfo {
    * its next turn boundary (SessionManager.accountMove), so the next turn runs on theirs.
    */
   ranFor?: string;
+  /**
+   * The FF Factory commit of the daemon that started its current process (w1166), as the machine's hello gave it. An agent
+   * host keeps the code it started with (its guard, its system prompt) across daemon updates: on 2026-10-12 workers
+   * started before ba015be opened game PRs into the retired develop for an hour after it rolled out. A worker whose
+   * machine now runs another commit restarts on it at its next turn boundary (SessionManager.codeMove), and the first
+   * message of the new process says FF Factory changed under it.
+   */
+  ranOn?: string;
   createdAt: string;
   lastActivityAt: string;
   /** A tool call of its own (not a subagent's) still running: the oldest one, since when (Store.noteActivity). */
   activeTool?: { id: string; name: string; since: string };
   turns: number;
   costUsd: number;
+  /**
+   * The CLI's own running total (`total_cost_usd`) at this session's last result, any process (w1161). A resumed process
+   * continues from the total its transcript saved, so its first result is this plus the new turn; costUsd may run
+   * ahead of it (a process that started from zero adds to costUsd, not to this). Absent on sessions older than w1161.
+   */
+  sdkCostUsd?: number;
   pendingPermissions: PendingPermission[];
   /** Last assistant text of the most recent finished turn, trimmed; for cards and summaries. */
   lastResult?: string;

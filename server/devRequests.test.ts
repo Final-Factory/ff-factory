@@ -34,7 +34,9 @@ useFakeVault();
  * ledger, the operator's follow-ups, reply_to_ffbox, and the automatic "done" reply resent until FFBox has it.
  */
 
-setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+// A "#slow" turn lasts 40 x slowStepMs. The default 100 ms (4 s) left the 8 s waits for idle 2x headroom, and a loaded
+// CI runner went past it (w1173: "timed out waiting for idle" in the w831 tests); 25 ms (1 s), as the other server tests.
+setQueryForTesting(fakeQuery({ stepMs: 1, slowStepMs: 25 }) as never);
 
 const BEN: Requester = { userId: 'ben', displayName: 'Ben' };
 const LOTH: Requester = { userId: 'lothsahn', displayName: 'Lothsahn' };
