@@ -284,6 +284,11 @@ machines.report = (text) => {
 // Each machine's own clean-up (docs/self-recovery.md): its settings, and a notice when it cannot free enough.
 // The portal's own host as a machine (docs/beast-machine.md) cleans nothing itself: this host's guard already cleans
 // this computer, with its own rules, and counts that daemon's running agents' temp folders as in use.
+// w1249: a machine offline 30 min with work waiting on it, to the orchestrator and the host's devices.
+machines.offlineAlert = (machineId, title, text) => {
+  notifier.host(title, text);
+  machines.report?.(text);
+};
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
 // The stale-output rules (w459) attribute build and run output to the ledger's requests: each daemon gets its facts
 // at connect and every 10 minutes, and its every pass is kept here too (data/cleanup/<machine>/cleanup-log.jsonl).
