@@ -22,11 +22,16 @@ const IPAD = /ipad\.spec\.ts/;
 const PROVIDER = /provider\.spec\.ts/;
 // The intake (e2e/intake.spec.ts) likewise, with the Discord intake switched on (E2E_INTAKE=1).
 const INTAKE = /intake\.spec\.ts/;
+// Chrome on an Android phone runs only what a phone does differently (w1191; Ben, 2026-10-13: "I approve everything"):
+// attachments (Android's file picker, w528), the chat and its composer, replies by tap, the chat keeping its place
+// (w1100, w1164), rotation, the phone layout and its screenshots. Every other spec runs on desktop Chromium (the engine)
+// and on the iPhone (the phone layout, 390 px against the Pixel's 393), which was 159 of mobile-chrome's 290 test-seconds.
+const ANDROID = /(attachments|chat|composerClears|replies|rotate|scrollKeep|layout|visual)\.spec\.ts/;
 
 const PROJECTS = [
   { name: 'desktop-chromium', port: 8791, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
   // Pixel 5: 393 px wide, Chrome on Android.
-  { name: 'mobile-chrome', port: 8792, use: { ...devices['Pixel 5'] } },
+  { name: 'mobile-chrome', port: 8792, use: { ...devices['Pixel 5'] }, only: ANDROID },
   // iPhone 13: 390 px wide, WebKit (Safari's engine).
   { name: 'mobile-safari', port: 8793, use: { ...devices['iPhone 13'] } },
   // iPad Pro 11 (834 x 1194), in Safari and in Chrome: the iPad tests only (e2e/ipad.spec.ts).
@@ -37,6 +42,18 @@ const PROJECTS = [
   { name: 'intake-desktop', port: 8798, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } }, only: INTAKE, env: { E2E_INTAKE: '1' } },
   { name: 'intake-mobile', port: 8799, use: { ...devices['iPhone 13'] }, only: INTAKE, env: { E2E_INTAKE: '1' } },
 ] as { name: string; port: number; use: Record<string, unknown>; only?: RegExp; env?: Record<string, string> }[];
+
+// E2E_PROJECTS=a,b runs only those projects and starts only their servers (ci.yml runs one browser engine per job, w1191).
+// --project alone would not do: Playwright starts every webServer in the config whatever it runs. Unset: every project.
+// A name that is no project fails here, so a renamed project cannot drop out of CI unseen (scripts/e2e-legs.test.ts checks
+// that ci.yml's legs name every project once).
+const PICKED = (process.env.E2E_PROJECTS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+const unknown = PICKED.filter((n) => !PROJECTS.some((p) => p.name === n));
+if (unknown.length) throw new Error(`E2E_PROJECTS names no such project: ${unknown.join(', ')}`);
+const ACTIVE = PICKED.length ? PROJECTS.filter((p) => PICKED.includes(p.name)) : PROJECTS;
+
+/** Every project's name, for scripts/e2e-legs.test.ts. */
+export const PROJECT_NAMES = PROJECTS.map((p) => p.name);
 
 export default defineConfig({
   testDir: './e2e',
@@ -61,12 +78,12 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
-  projects: PROJECTS.map((p) => ({
+  projects: ACTIVE.map((p) => ({
     name: p.name,
     use: { ...p.use, baseURL: `http://127.0.0.1:${p.port}` },
     ...(p.only ? { testMatch: p.only } : { testIgnore: [IPAD, PROVIDER, INTAKE] }),
   })),
-  webServer: PROJECTS.map((p) => ({
+  webServer: ACTIVE.map((p) => ({
     command: 'node e2e/server.ts',
     url: `http://127.0.0.1:${p.port}/api/health`,
     env: { E2E_PORT: String(p.port), ...p.env },

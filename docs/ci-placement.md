@@ -7,8 +7,8 @@ on the FFBox build server's runner containers (`ffgithubrunners`); those now ser
 | Workflow, job | Runs on | Why that runner |
 |---|---|---|
 | `ci.yml` `checks` (typecheck, unit tests with coverage, web build) | `ubuntu-latest` | Linux, Node; PowerShell 7 is in the image, so the scripts' `pwsh` tests run |
-| `ci.yml` `e2e` (Playwright, Chromium and WebKit, 3 shards) | `ubuntu-latest` | the Linux screenshot baselines match its fonts (below) |
-| `ci.yml` `secrets` (gitleaks), `identity` (noreply emails) | `ubuntu-latest` | Linux, git |
+| `ci.yml` `e2e` (Playwright, one job per browser engine, w1191) | `ubuntu-latest` | the Linux screenshot baselines match its fonts (below) |
+| `ci.yml` `hygiene` (gitleaks and noreply emails, one job since w1191) | `ubuntu-latest` | Linux, git |
 | `vm-scripts.yml` `plan` | `ubuntu-latest` | reads `git diff`; no API |
 | `vm-scripts.yml` `lint` | `ubuntu-26.04` | the guest's release (D14): root, the installers' dry runs, `systemd-analyze verify` |
 | `vm-scripts.yml` `e2e` | `ubuntu-24.04` and `ubuntu-26.04` | root, systemd, ZFS, libvirt and KVM: each nests a VM |
@@ -34,8 +34,8 @@ for w1167 (Actions API, 2026-09-12 to 2026-10-12, mostly before w911 moved them:
 minutes and the VM, Windows and macOS jobs.
 
 **What it does cost is concurrency**: 20 hosted jobs at once for the whole organisation on the free plan, 5 of them macOS
-(sourced: docs.github.com, Actions limits). A pull request that touches everything starts about a dozen jobs (checks, three
-Playwright shards, secrets, identity, the VM plan, lint and end-to-end jobs, Windows), so several such pull requests at once
+(sourced: docs.github.com, Actions limits). A pull request that touches everything starts about a dozen jobs (checks, two
+Playwright jobs, the secret and identity scan, the VM plan, lint and end-to-end jobs, Windows), so several such pull requests at once
 queue. The game repository asks only for self-hosted labels and takes none of them.
 
 ## Fork pull requests
