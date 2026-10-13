@@ -892,3 +892,98 @@ test('w1159: a worker session that served more than 20 requests lists the top 20
   const all = renderSession(w.spend, 's1', link, 2000).split('\n').find((l) => l.startsWith('Requests it served'))!;
   assert.ok(all.startsWith("Requests it served (the workers' own cost): ") && !all.includes('more'), all);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// the attribution audit (w1209)
+// ---------------------------------------------------------------------------------------------------------------------
+
+test('audit: a worker keeping a closed request linked spends the turn on the open one; reopened, it shares again', () => {
+  const closed = item('w1', { sessionIds: ['s1'], status: 'done', updatedAt: iso(T0 - 5000), links: { s1: { at: iso(T0), how: 'sent' } } });
+  const open = item('w2', { sessionIds: ['s1'], links: { s1: { at: iso(T0 + 500), how: 'linked' } } });
+  const w = world([closed, open], [session('s1')]);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 2, cr: 1 }) } }, 2));
+  assert.equal(w.spend.request('w1'), undefined, 'nothing on the request that closed before the turn began');
+  assert.equal(w.spend.request('w2')!.total.usd, 2);
+  closed.status = 'active'; // reopened
+  w.spend.observe('s1', resultEvent(T0 + 120_000, { cum: { m: tok({ usd: 6, cr: 1 }) } }, 6));
+  assert.equal(w.spend.request('w1')!.total.usd, 2);
+  assert.equal(w.spend.request('w2')!.total.usd, 4);
+  // every linked request closed: they still share it, the money has to go somewhere
+  closed.status = 'done';
+  open.status = 'done';
+  open.updatedAt = iso(T0 + 1000);
+  w.spend.observe('s1', resultEvent(T0 + 180_000, { cum: { m: tok({ usd: 8, cr: 1 }) } }, 8));
+  assert.equal(w.spend.request('w1')!.total.usd, 3);
+  assert.equal(w.spend.request('w2')!.total.usd, 5);
+});
+
+test("audit: a coordinator whose session the store no longer holds is still a coordinator, never a worker's turn", () => {
+  const w = world([item('w1')], [DISPATCHER()]);
+  coordTurn(w, 'd', T0, '[worker update] w1', 1);
+  // the store forgets the session (the record keeps its role)
+  w.sessions.length = 0;
+  w.spend.observe('d', userEvent(T0 + 10_000, '[worker update] w1'));
+  w.spend.observe('d', resultEvent(T0 + 40_000, { cum: { m: tok({ usd: 3, cr: 3000 }) } }, 3));
+  assert.equal(w.spend.session('d')!.role, 'dispatcher');
+  assert.equal(w.spend.request('_unattributed'), undefined, 'not billed through the worker rules');
+  assert.equal(w.spend.splitOf(w.spend.request('w1')!).workers.usd, 0);
+  assert.equal(w.spend.splitOf(w.spend.request('w1')!).coordination.usd, 3);
+});
+
+test("audit: ContextMeter — a resumed conversation's unexplained cache read is carried over, not base (w1209, w1163's measurement)", () => {
+  const read = (resumed: boolean) => {
+    const m = new ContextMeter();
+    if (resumed) m.carry();
+    m.addUser(2000);
+    m.call({ id: 'a', model: 'claude-sonnet-5-5', in: 1, out: 50, cr: 300_000, cw: 3000 });
+    m.addToolResult('x', 100);
+    m.call({ id: 'b', model: 'claude-sonnet-5-5', in: 1, out: 50, cr: 303_000, cw: 500 });
+    return m.drain().cats;
+  };
+  const resumed = read(true);
+  const fresh = read(false);
+  assert.ok(resumed.carried.tok > 590_000, 'both calls read the carried context');
+  assert.ok((resumed.base?.tok ?? 0) < 5000, 'and it is not base');
+  assert.equal(fresh.carried, undefined);
+  assert.ok(fresh.base.tok > 590_000, 'a session the meter built itself keeps counting the unexplained read as base');
+  const total = (c: typeof resumed) => Object.values(c).reduce((a, x) => a + x.usd, 0);
+  assert.ok(Math.abs(total(resumed) - total(fresh)) < 1e-9, 'the dollars are the same either way');
+});
+
+test('audit: whatever the mix of turns, workers + coordination + not-any-request-s = the total and the requests add up to the sessions', () => {
+  const sessions = [session('s1'), session('s2', { title: 'w3: x' }), session('s3', { title: 'no id' }), DISPATCHER(), ORCH(), OPS(), session('st', { kind: 'standing', standingId: 'sentry' })];
+  const items = [
+    item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } }),
+    item('w2', { sessionIds: ['s1'], links: { s1: { at: iso(T0 + 1), how: 'linked' } } }),
+    item('w3'),
+    item('w4', { status: 'done', updatedAt: iso(T0) }),
+    item('w5'),
+    item('w6'),
+    item('w7'),
+  ];
+  const w = world(items, sessions);
+  const msgs = ['[worker update] w1', '[work request] w2 and w3 w4 w5 w6 w7', '[heartbeat] quiet', '[app restarted] x (w1)', '[machines] y (w2)', '[ops worker] w3', 'hello'];
+  let n = 7;
+  const cum: Record<string, number> = {};
+  for (let i = 0; i < 120; i++) {
+    const sid = ['s1', 's2', 's3', 'd', 'o', 'ops', 'st'][(i * 7 + (i >> 2)) % 7];
+    const usd = ((i * 37) % 11) / 10 + 0.05;
+    cum[sid] = (cum[sid] ?? 0) + usd;
+    const at = T0 + i * 7 * 3_600_000;
+    if (sid !== 's1' && sid !== 's2' && sid !== 's3' && sid !== 'st') w.spend.observe(sid, userEvent(at, msgs[(i * 5) % msgs.length]));
+    w.spend.observe(sid, resultEvent(at + 30_000, { cum: { m: tok({ usd: cum[sid], cr: 1 }) } }, cum[sid]));
+    n++;
+  }
+  const grand = Object.values(cum).reduce((a, x) => a + x, 0);
+  const fromSessions = [...w.spend.sessions.values()].reduce((a, s) => a + s.total.usd, 0);
+  const fromRequests = [...w.spend.requests.values()].reduce((a, r) => a + r.total.usd, 0);
+  assert.ok(Math.abs(fromSessions - grand) < 1e-6, 'every dollar a session spent is in its record');
+  assert.ok(Math.abs(fromRequests - grand) < 1e-6, 'and in exactly one share of requests and buckets');
+  const rep = buildReport(w.spend, T0 + 120 * 7 * 3_600_000, { days: 120, top: 50 });
+  const loose = rep.buckets.reduce((a, b) => a + b.usd, 0);
+  assert.ok(Math.abs(rep.workers.usd + rep.coordination.usd + loose - rep.total.usd) < 1e-6);
+  assert.ok(Math.abs(rep.total.usd - grand) < 1e-6);
+  assert.ok(rep.coordination.usd > 0 && rep.workers.usd > 0 && loose > 0);
+  assert.equal(w.spend.request('w4')?.sessions?.s1, undefined, 'the closed request got no worker turn');
+  void n;
+});

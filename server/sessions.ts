@@ -529,6 +529,7 @@ export class AgentSession implements SessionHandle {
     };
     this.tempDir = typeof options.env?.TMPDIR === 'string' ? options.env.TMPDIR : undefined;
     this.costBase = this.info.costUsd;
+    if (this.info.sdkSessionId) this.meter.carry();
     this.firstResult = true;
     // A new process: the last one's background tasks ended with it.
     this.backgroundTasks = 0;

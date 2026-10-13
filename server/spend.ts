@@ -173,6 +173,28 @@ export function servedAt(sessionId: string, items: readonly WorkItem[], startMs:
   return (served.length ? served : pool.slice(-1)).map((x) => x.id);
 }
 
+const CLOSED = new Set<string>(['merged', 'done', 'rejected', 'cancelled']);
+/**
+ * Of the requests a worker serves, those not closed before the turn began, unless all are (w1209): a worker that keeps its
+ * closed request linked (the ledger never unlinks) spent the turn on the one still open, not half on the closed one. A request reopened is open again.
+ */
+export function openFirst(ids: readonly string[], items: readonly WorkItem[], startMs: number): string[] {
+  if (ids.length < 2) return [...ids];
+  const byId = new Map(items.map((w) => [w.id.toLowerCase(), w]));
+  const live = ids.filter((id) => {
+    const w = byId.get(id.toLowerCase());
+    return !(w && CLOSED.has(w.status) && (Date.parse(w.updatedAt) || 0) <= startMs);
+  });
+  return live.length ? live : [...ids];
+}
+
+/** What a session's record says about its kind, for a turn whose session the store no longer holds (a coordinator must never fall to the worker rules). */
+function infoOfRecord(s: SessionSpend): Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'standingId' | 'requestedBy' | 'title'> | undefined {
+  if (s.role === 'worker') return undefined;
+  const kind = s.role === 'ops' ? 'ops' : s.role === 'standing' ? 'standing' : 'orchestrator';
+  return { id: s.id, kind, title: s.title, ...(kind === 'orchestrator' ? { orchestratorRole: s.role === 'dispatcher' ? ('dispatcher' as const) : ('personal' as const) } : {}), ...(s.person ? { requestedBy: { userId: s.person, displayName: s.person } } : {}) };
+}
+
 /** Which request(s) or bucket a turn goes to. `info` is the session; `texts` the messages that began the turn (oldest first). */
 export function attribute(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'standingId' | 'requestedBy' | 'title'> | undefined, items: readonly WorkItem[], texts: readonly string[], startMs: number, known?: ReadonlySet<string>, legacy = false): Alloc[] {
   const exists = new Set(items.map((w) => w.id.toLowerCase()));
@@ -194,7 +216,7 @@ export function attribute(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorR
   // a worker
   const about = aboutIds(texts);
   if (about.length) return even(about, 'about');
-  const served = info ? servedAt(info.id, items, startMs) : [];
+  const served = info ? openFirst(servedAt(info.id, items, startMs), items, startMs) : [];
   if (served.length) return even(served, 'link');
   // The ledger forgot the request (closed more than a week ago) or never linked it: the dispatcher titles a worker "wNNN: …".
   const titled = /^(w\d{1,7})\s*:/i.exec(info?.title ?? '')?.[1];
@@ -351,7 +373,7 @@ export class SpendStore {
     const total = sumTok(Object.values(models));
     const startMs = (Date.parse(at) || this.now()) - durationMs;
     const items = [...this.ctx.work()];
-    const allocs = attribute(info, items, texts, startMs);
+    const allocs = attribute(info ?? infoOfRecord(s), items, texts, startMs);
     this.add({ s, at, models, total, estimated, meter: u?.meter, allocs, items, info, account: this.accountOf(info) });
     this.changed();
   }

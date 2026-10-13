@@ -78,6 +78,7 @@ export interface TurnUsage {
 export const CATEGORIES = [
   'base',
   'summary',
+  'carried',
   'brief',
   'assistant',
   'file-read',
@@ -98,6 +99,7 @@ export type Category = (typeof CATEGORIES)[number];
 export const CATEGORY_LABEL: Record<string, string> = {
   base: 'Base context (system prompt, tool definitions, CLAUDE.md, skill lists, reminders)',
   summary: 'Summary left by a compaction',
+  carried: 'Context carried over from before this process started (a conversation resumed after a restart): not itemised, the base context included',
   brief: 'Messages to the agent (briefs, follow-ups, harness notices)',
   assistant: "The agent's own text, thinking and tool calls (output tokens included)",
   'file-read': 'File reads (Read, sed -n, cat, head, tail)',
@@ -284,6 +286,13 @@ export class ContextMeter {
   private lastCtx = 0;
   private turn = blankTurn();
   private compactedOnce = false;
+  /** The next call's unexplained cache read is a conversation resumed from before this process, not the base context (w1209). */
+  private carriedNext = false;
+
+  /** This process resumed an earlier conversation: its first call reads a context the meter never saw built. */
+  carry() {
+    if (this.lastCtx === 0) this.carriedNext = true;
+  }
 
   /** Text that goes into the context from outside: a message to the agent. */
   addUser(chars: number) {
@@ -367,7 +376,13 @@ export class ContextMeter {
     give('base', 0, Math.max(0, newTok - freshSum * fscale));
     const hscale = heldSum > u.cr ? u.cr / heldSum : 1;
     for (const [k, v] of heldEst) give(k, v * hscale, 0);
-    give('base', Math.max(0, u.cr - heldSum * hscale), 0);
+    const unexplained = Math.max(0, u.cr - heldSum * hscale);
+    if (this.carriedNext && unexplained > 0) {
+      // a resumed conversation: what this process never saw built is carried, not base; later calls read it as held
+      give('carried', unexplained, 0);
+      this.held.set('carried', (this.held.get('carried') ?? 0) + unexplained * CHARS_PER_TOKEN);
+    } else give('base', unexplained, 0);
+    this.carriedNext = false;
     const p = priceOf(u.model);
     const cw5 = Math.min(u.cw, u.cw5 ?? 0);
     const wPrice = u.cw + u.in > 0 ? (u.in * p.in + (u.cw - cw5) * 2 * p.in + cw5 * 1.25 * p.in) / (u.cw + u.in) : p.in;
