@@ -86,7 +86,9 @@ test('fffctl migrate --dry-run-copy, again, then --rollback-dry-run: a read-only
   assert.equal(cfg.ownerName, 'Ben');
   assert.equal(cfg.claudeEnv, undefined, "w1078: BEAST's host token is left behind, every Claude process runs on a vault token");
   assert.equal(cfg.claudeTokenFile, undefined);
-  assert.equal(cfg.claudeAccounts, undefined, "BEAST's file named none; the vault is the default");
+  // BEAST's file named none; the VM's start writes the orchestrators' "vault" out (server/configMigration.ts, w1078).
+  // This test needs pwsh, so it was skipped on FFBox's runners (w911 to w1194) and missed that change.
+  assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'vault' }, "BEAST's file named none: only the orchestrators' vault, written out at start");
   assert.equal(cfg.dataDir, path.join(w.vm, 'data'));
   assert.equal((fs.statSync(w.vmCfgFile).mode & 0o777).toString(8), '600');
   // The data folder closed to others (the portal's own later writes inside it take its umask), the secrets and the

@@ -1,0 +1,30 @@
+name: gitleaks
+description: >
+  gitleaks at the version asked for, on the PATH of a GitHub-hosted Linux runner: the release tarball, checked against
+  the release's own checksums file before it is unpacked.
+inputs:
+  version:
+    description: gitleaks version, e.g. '8.30.1'.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        WANT: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        case "$RUNNER_ARCH" in X64) arch=x64 ;; ARM64) arch=arm64 ;; *) echo "::error::no gitleaks build for $RUNNER_ARCH"; exit 1 ;; esac
+        file="gitleaks_${WANT}_linux_${arch}.tar.gz"
+        base="https://github.com/gitleaks/gitleaks/releases/download/v${WANT}"
+        dir="$RUNNER_TEMP/gitleaks-$WANT"
+        mkdir -p "$dir"
+        curl -fsSL --retry 3 -o "$dir/$file" "$base/$file"
+        curl -fsSL --retry 3 -o "$dir/checksums.txt" "$base/gitleaks_${WANT}_checksums.txt"
+        expected=$(awk -v f="$file" '$2 == f { print $1 }' "$dir/checksums.txt")
+        [ -n "$expected" ] || { echo "::error::$file is not in the release's checksums file"; exit 1; }
+        actual=$(sha256sum "$dir/$file" | cut -d' ' -f1)
+        [ "$actual" = "$expected" ] || { echo "::error::$file does not match its checksum ($actual, want $expected)"; exit 1; }
+        tar -xzf "$dir/$file" -C "$dir" gitleaks
+        echo "$dir" >> "$GITHUB_PATH"
+        "$dir/gitleaks" version
