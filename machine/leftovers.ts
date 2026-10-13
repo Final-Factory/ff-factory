@@ -135,6 +135,8 @@ export interface LeftoverDeps {
 
 // ---------------------------------------------------------------- the pure decisions
 
+/** init, a user's systemd, launchd: what orphans are reparented to, never a tree to spare. */
+const INIT = /^\S*(\/|^)(systemd|init|launchd)(\s|$)/;
 const DISPLAY = /^(xvfb|xvnc|xephyr|xdummy|x11vnc|xvfb-run|openbox|fluxbox|icewm|twm|xfwm4|metacity|matchbox-window-manager)$/i;
 const SERVER = /VBCSCompiler|MSBuild(\.dll|\.exe)?["']?\s.*node(mode|reuse)|dotnet[^\n]*build-server|bee_backend/i;
 
@@ -341,9 +343,14 @@ export class LeftoverReaper {
       }
     };
     for (const u of top) if (u.kind === 'interactive') spare(u.pid);
+    // The daemon and its parents alone, never their trees (w1196, after the deploy): under systemd the daemon's parent is
+    // `systemd --user`, under launchd pid 1, the very process every detached player and orphan is reparented to; sparing
+    // its tree spared everything, and the deployed reaper on biscuit ended nothing. The daemon's own tree is spared by
+    // the protected-path rule below (its command line names its folder).
+    for (const pid of self) spared.add(pid);
     for (const p of procs) {
       const c = d.platform === 'win32' ? posix(p.cmd).toLowerCase() : p.cmd;
-      if (self.has(p.pid) || prot.some((re) => re.test(c))) spare(p.pid);
+      if (!INIT.test(c) && prot.some((re) => re.test(c))) spare(p.pid);
     }
     const env = await d.envOf(procs.map((p) => p.pid).filter((pid) => pid > 0 && !spared.has(pid)));
     const leases = d.leases();
