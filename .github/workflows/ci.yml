@@ -31,21 +31,12 @@ env:
   # processes under it. Before, a hung run was cancelled at the job's timeout with its whole log lost (w906).
   TEST_FLAGS: --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout
 
-# WHERE THESE JOBS RUN (w911, lothsahn 2026-10-10; portable since w1170). The Linux jobs run on the FFBox build server's
-# runner containers (label ffgithubrunners) by default; the repository variable FF_LINUX_RUNNER moves checks, secrets
-# and identity to any other label (ubuntu-latest, a self-hosted machine's label) with no workflow edit, and
-# FF_E2E_RUNNER moves e2e, whose Linux screenshot baselines match one machine's fonts (docs/ci-placement.md). The steps
-# that differ between runners are Final-Factory/ci-actions, pinned by commit: checkout (the FFBox host's mirror, then
-# actions/checkout), setup (Node and gitleaks from the FFBox image, installed elsewhere), playwright and upload (the
-# FFBox host hands artifacts over; elsewhere actions/upload-artifact). The FFBox host keeps every ci-actions commit in its
-# action cache (ffbox scripts/actioncache.py), so a new pin works there within a minute.
-# What stays on a hosted runner needs root, systemd or Windows/macOS: ops-socket.yml (only when its own files change), windows.yml,
-# worker-update.yml, dev-drive.yml and vm-scripts.yml's lint and end-to-end jobs. rerun-lost-runner.yml runs on FFBox
-# only (w1102): the host makes its API calls for it.
-# The repository is public and the runners are shared with the private Final Factory repositories, so FFBox runs no job
-# from a fork: its runner image fails one before its first step (ffbox scripts/ci-job-started.sh, w1167), where a pull
-# request cannot edit it out. Fork pull requests also need an owner's approval (Settings, Actions, General), and these jobs
-# hold no secret. docs/ci-placement.md says where every job runs and why.
+# WHERE THESE JOBS RUN (w1194, lothsahn 2026-10-13: "I'd like to move the ff-factory CI processes off githubrunner and
+# back to hosted githubrunner processes"). Every job runs on GitHub's hosted runners, which cost this public repository
+# nothing (docs/ci-placement.md). The FFBox build server's runners (ffgithubrunners) serve the game repository only.
+# Fork pull requests run here like any other (pull_request, never pull_request_target): GitHub gives them a read-only
+# GITHUB_TOKEN and no secrets, these jobs use none, and a first-time contributor's run waits for an owner's approval
+# (Settings, Actions, General).
 jobs:
   checks:
     # Not on a push to main (w925): see concurrency above.
@@ -54,15 +45,21 @@ jobs:
     # touches what they cover (.github/windows-tests.txt; w910, lothsahn 2026-10-10). Until w910 the whole suite ran
     # again on two Windows runners for every pull request.
     name: Typecheck, unit tests, build (Linux)
-    runs-on: ${{ vars.FF_LINUX_RUNNER || 'ffgithubrunners' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
-      - uses: Final-Factory/ci-actions/setup@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node: ${{ env.NODE_VERSION }}
-          gitleaks: ${{ env.GITLEAKS_VERSION }}
-          shellcheck: 'true'
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+      # The pre-push check's test (w924) runs gitleaks; shellcheck comes with the runner image.
+      - uses: ./.github/actions/gitleaks
+        with:
+          version: ${{ env.GITLEAKS_VERSION }}
       - name: A git identity for the tests that commit
         # Global config, not GIT_AUTHOR_* variables: some tests set a commit's identity with -c on purpose.
         run: |
@@ -103,10 +100,9 @@ jobs:
     if: github.event_name != 'push'
     name: Playwright (Chromium + WebKit, ${{ matrix.shard }}/3)
     # The same tests, split across three runners by file (playwright test --shard); each starts its own servers.
-    # The browsers are in the runner image, not downloaded: Chromium's build comes from storage.googleapis.com, which is every
-    # Google Cloud bucket and cannot be fenced by name. They are the ones for ONE Playwright version (ffbox scripts/Dockerfile,
-    # PLAYWRIGHT_VERSION); the first step below fails with that instruction when package-lock.json has moved on.
-    runs-on: ${{ vars.FF_E2E_RUNNER || 'ffgithubrunners' }}
+    # The Linux screenshot baselines match ubuntu-latest's fonts: re-render them with the update_snapshots input when they
+    # stop matching (docs/ci-placement.md).
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -117,16 +113,18 @@ jobs:
       # WebKit projects, so it takes fewer. Each file goes to one shard whatever the weights, so none is ever left out.
       PWTEST_SHARD_WEIGHTS: '5:5:3'
     steps:
-      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
-      - uses: Final-Factory/ci-actions/setup@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node: ${{ env.NODE_VERSION }}
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm ci --prefix web --no-audit --no-fund
-      - name: Playwright's browsers (baked into the FFBox image; installed elsewhere)
-        uses: Final-Factory/ci-actions/playwright@c5584f1c8b3f62823efd7a74d88019c2d1f40565
-        with:
-          browsers: chromium webkit
+      - name: Playwright's browsers and their system libraries
+        run: npx playwright install --with-deps chromium webkit
       - name: Build the web UI
         run: npm --prefix web run build
       - name: Snapshot mode
@@ -145,8 +143,6 @@ jobs:
       # No performance budgets here (web/perf/bench.ts): CI runs no perf, load or timing tests (lothsahn, 2026-10-12, w1173:
       # "We don't want load or performance tests in the ff factory CI pipeline"). Agents run `npm run perf` locally
       # (CONTRIBUTING.md, "Performance").
-      # On FFBox the artifacts go to the host, which uploads them on this job's own credential: a runner container cannot
-      # reach the blob storage actions/upload-artifact writes to. ci-actions/upload picks the way.
       - name: Gather the report and traces
         if: failure()
         run: |
@@ -154,29 +150,29 @@ jobs:
           cp -R playwright-report test-results pw-artifacts/ 2>/dev/null || true
       - name: Upload the report and traces
         if: failure()
-        uses: Final-Factory/ci-actions/upload@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: playwright-report-${{ matrix.shard }}
           path: pw-artifacts
       - name: Upload rendered snapshots
         if: always() && steps.snap.outputs.update == 'true' && matrix.shard == 1
-        uses: Final-Factory/ci-actions/upload@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-snapshots
           path: e2e/__screenshots__
 
   secrets:
     name: Secret scan (gitleaks)
-    runs-on: ${{ vars.FF_LINUX_RUNNER || 'ffgithubrunners' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: gitleaks (baked into the FFBox image, GITLEAKS_VERSION there too; downloaded and checksum-verified elsewhere)
-        uses: Final-Factory/ci-actions/setup@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - name: gitleaks (downloaded and checksum-verified)
+        uses: ./.github/actions/gitleaks
         with:
-          gitleaks: ${{ env.GITLEAKS_VERSION }}
+          version: ${{ env.GITLEAKS_VERSION }}
       - name: Scan the history of this commit
         # HEAD only: other branches on the remote are not what is being merged.
         run: gitleaks git . --log-opts=HEAD --redact --no-banner --verbose
@@ -185,12 +181,19 @@ jobs:
 
   identity:
     name: Commit identities are noreply
-    runs-on: ${{ vars.FF_LINUX_RUNNER || 'ffgithubrunners' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
       - name: Check the new commits
         shell: bash
         env:
