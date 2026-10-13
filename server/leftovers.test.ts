@@ -62,7 +62,8 @@ function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[
     leases: () => st.leases,
     protectedPaths: () => [`${ROOT}/repo`, `${ROOT}/daemon`],
     places: () => [1, 2, 3].map((k) => ({ id: `slot${k}`, path: `${ROOT}/sandboxes/slot${k}` })),
-    self: () => [100, 1],
+    // As on biscuit: the daemon (100) runs under `systemd --user` (9212), which every orphan here is reparented to too.
+    self: () => [100, 9212],
     host: 'biscuit',
     kill: (pid, sig) => {
       st.signals.push(`${sig} ${pid}`);
