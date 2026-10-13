@@ -96,6 +96,56 @@ each session's turns were tied: `about`, `link`, `message`, `bucket`, `backfill`
   `carried` (and later calls keep reading it as carried). Dollars and attribution are unaffected either way: it moves a share of a request's
   dollars between two categories.
 
+### Corrections to history (w1209)
+
+Two rules changed in the a9d5eae restart (2026-10-13 01:52:30 -06:00, `RULES_FROM_MS`), and the turns recorded before it by the old ones were wrong:
+
+| | Old rule | Cost, measured | Now |
+|---|---|---|---|
+| A restart's first result | the CLI resumes from its saved running total, so the portal read the whole total as one turn (`delta`, w1161) | the portal's own auto-compact lines on 2026-10-12 give 7 such turns of $197.89 to $215.30 for the dispatcher and the two orchestrators, **$1,456.89** in one day; the same applies to every resumed worker (not measured) | the difference against the last totals |
+| An id cited in parentheses in a harness notice | billed the turn to that request (`namedIdsIn`, w1160) | w605: $1,836 (60 dispatcher turns) | the turn is the coordinator's own |
+
+`SpendStore.correctHistory` records those turns again by the current rules, once per session, 150 seconds after the portal starts, in the
+background (`repairSpend` in server/index.ts, which first keeps a copy of the record as `spend.json.pre-w1209`): the transcript is replayed twice, by
+the old rules and by the current ones, and for each live-recorded turn the two read differently the old reading is taken out and the current one put
+in, in the session and in every request it touched. It changes the record by the difference and nothing else (the context categories come from the calls' own
+usage and do not move). The turns the backfill estimated from the portal's cost totals (before the live recording started) carry the same double count in another form: the portal's own
+total doubled at a restart, so the turn after it reads as the whole running total again. A backfilled turn that costs at least 90% of what the session had cost so far, from $20
+up, is that restart and nothing else (a real turn cannot cost as much as the whole session so far), and what it really cost is what is left over; its tokens are estimated again from that.
+It refuses a session whose replay does not explain its recorded total within 5% and says so in the journal
+(`spend repair: … left as recorded`); a session whose transcript is gone, and every turn backfilled before the live recording started, stay as recorded. A coordinator's
+coordination days are rebuilt from the corrected record.
+
+### Audit findings (w1209, 2026-10-13; measured = from the portal's `spend_report` on 3c98743 or its journal, estimated = said so)
+
+| # | Finding | $ | Where | Fixed |
+|---|---|---|---|---|
+| 1 | The restart notices cited "(w605)" and billed the dispatcher's restart turns to it | measured: w605 coordination $1,836 over 7 days, $1,475 of it 10-11 and 10-12; after the repair $0.49 (its real mentions) | machines.ts:802 and agents.ts:1168 texts, `namedIdsIn` | going forward in a9d5eae (#362); history by `correctHistory` |
+| 2 | After the first fix w605 read as $1,475 of *worker* cost in a 3-day window | measured | the first split's replay (spend.ts `rebuildCoordination`) | #381 |
+| 3 | A restart counted the CLI's whole running total as one turn | measured, before and after the repair (spend_report, 2026-10-13 14:10Z and 15:35Z): 3 days total $14,908 → $5,563, coordination on requests $8,117 → $226, not any request's $1,630 → $413, workers on requests $5,161 → $4,924 (-$237: resumed workers too; w1063 $270 → $153); 7 days total $23,034 → $12,073, coordination $9,674 → $701. The portal's own lines: $1,456.89 on 10-12 for three coordinators | `delta` (w1161) | going forward in a9d5eae; history by `correctHistory` |
+| 4 | A worker kept its closed requests linked and put a share of every later turn on them | not measured (needs the ledger's links over time) | `servedAt` | `openFirst` |
+| 5 | A coordinator whose session the store no longer holds was billed through the worker rules | not measured; no case seen | `record` → `attribute(info undefined)` | `infoOfRecord` |
+| 6 | A resumed conversation's context counted as `base` | category only, no dollars: base is 71% of in-session spend in the last 3 days (measured), the part that is resumed context is not separable from the record | `ContextMeter.call` | `carried` going forward |
+| 7 | A bucket's request view labelled its days "workers" under a "coordination" header; `_unattributed` answered 87,000 characters | presentation | `renderRequest` | one figure per day; 25 sessions then a count |
+| 8 | A turn that names several requests is split evenly over the first 4 | no loss or double count (weights sum to 1, tested); a batch of messages naming different requests puts the whole turn on the first four: not measured | `attribute`, `namedIdsIn` | not changed. After the repair coordination is $701 of $12,073 in 7 days (5.8%) and not-any-request's $679, so a per-message weighting could move a part of $701 between requests: not worth a second method (a guess at the size, from those two figures) |
+| 9 | The repair's first release took each turn out of, and put it back on, the session's biggest account, so other accounts read negative | measured: token:5d6d575eda30 -$2,018 and token:0d94ad2b5488 -$1,428 in the 7-day report (-$565 and -$757 in 3 days) | `correctHistory` `add(account)` | spread by the session's own mix; the accounts of the 11 sessions corrected are rebuilt from `spend.json.pre-w1209` (`repairAccounts`, an estimate for the requests) |
+| 10 | The backfilled (estimated) part has the same restart double count, by the portal's doubled own total | measured: the repair on d00bfa8 took **$72.52** out of 3 backfilled sessions (the signature: a turn that cost at least 90% of the session so far, from $20 up), against $10,980.08 in the live part. The largest 7-day coordination, w863 $68.10 (dispatcher $67.35, 9 turns) and w788 $66.87 (dispatcher $66.75, 5 turns), both on 10-10 and all estimated, were NOT restart double counts: $7.5 and $13 a turn is not the running total (about $100 or more on 10-10). Most likely real, heavy dispatcher turns (a release's CI polling); not provable, because a backfilled turn has no per-call usage ("a context reading of 1 model call") | `backfillSession` `d` | `correctHistory` (fixV 2) |
+2,073 | `backfillSession` `d` | `correctHistory` (fixV 2) |
+
+**Checking the restart repair against the transcripts** (measured by the orchestrator in /srv/fff/data/transcripts, 2026-10-13; the conclusion is mine):
+the dispatcher's transcript (f8862ae9) has `"restarted":true` on 22 result lines; at the two restart lines with a value on each side the
+CLI's total CONTINUED (line 31875 → 31880: 198.0636 → 198.1108, the turn cost $0.05; line 31968 → 31974: 199.4973 → 199.5540), and its
+`cum.<model>.usd` equals `costUsd` in every line sampled (last 243.73). The old rule counted ~$198 for each of those restart turns. 22 such lines at a
+running total of about $100–245 is about $3.6k–4.3k; the repair took $3,648 off this session ($5,167 → $1,519). Its live-recorded part now
+is about $275 against a final running total of $243.73 (lothsahn's orchestrator $134 against $253.17, Ben's $269 against $226.93, estimated: the rest of
+each session's total is backfilled from the older `costUsd` lines and cannot be checked this way). Drops of `costUsd` exist but early (a fresh process
+or a /clear, e.g. line 227 → 246) and without the flag; both rules count those in full. Only 2 of the 22 restart lines were sampled with a value on each
+side: the full list of drops is not pulled.
+
+Not any request's, after the repair: $413 in 3 days (Ben's orchestrator $185, the dispatcher $172, lothsahn's $42.23, the sentry $7.44, ops $6.11) and $679 in 7 (measured).
+They are conversations and heartbeats that name no request, not misbilled worker spend. In the 7-day window $5,513 of $12,073 is under "not recorded" as an account
+(turns from before w1031 and backfilled ones: estimated, $6,203 of the window).
+
 ## Coordination: billed apart from the workers' own cost (w1160)
 
 Lothsahn, w1160: "We should still track per request, but bill it separately." The dispatcher's, a person's orchestrator's and the

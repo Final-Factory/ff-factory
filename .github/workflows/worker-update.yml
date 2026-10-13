@@ -12,6 +12,7 @@ on:
     paths:
       - 'scripts/worker/**'
       - 'machine/**'
+      - 'server/leftovers.test.ts'
       - 'server/machineDeploy.ts'
       - 'server/machineDeployWin.ts'
       - 'server/machines.ts'
@@ -50,6 +51,12 @@ jobs:
           git config --global user.name "FF Factory CI"
           git config --global user.email "ci@users.noreply.github.com"
       - run: npm ci --no-audit --no-fund
+      # w1197: the leftover reaper's macOS path on a real Mac: other processes' environments read with `ps -E`, a stopped
+      # session's "player" and "Xvfb" ended, a live one's kept, ff-leftovers through its shim. No other job runs unit tests
+      # on a Mac, and the m5's daemon runs this same code as its user, as this runner does.
+      - name: The leftover reaper on a real Mac
+        if: runner.os == 'macOS'
+        run: node --test --test-timeout=300000 server/leftovers.test.ts
       - name: Install a test root, tune it, update it as over ssh, and check what the update promises
         run: node scripts/worker/test/update-e2e.ts "${{ runner.temp }}/w613-update" 8797
       - name: The test daemon's log

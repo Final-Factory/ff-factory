@@ -15,6 +15,7 @@
 //   start are requests like any other.
 // - The record outlives the ledger (which drops requests a week after they close) and the transcripts (the data guard,
 //   server/dataGuard.ts, prunes them): everything the page and the report show comes from spend.json.
+import fs from 'node:fs';
 import path from 'node:path';
 import { SnapshotFile, readJsonDurable, checkObject } from './durable.ts';
 import { SESSION_REQUESTS_TOP } from './toolOutput.ts';
@@ -65,6 +66,8 @@ export function estimateTurn(model: string, usd: number, outChars: number, fresh
   return { in: 0, out, cr, cw, usd };
 }
 const day = (iso: string) => iso.slice(0, 10);
+/** When the portal began recording by the rules of w1160 and w1161 (the a9d5eae restart, 2026-10-13 01:52:30 -06:00, from the journal's first spend backfill line 90 s later). Turns before it were recorded by the old ones. */
+export const RULES_FROM_MS = Date.parse('2026-10-13T07:52:30Z');
 const round = (n: number, d = 4) => Math.round(n * 10 ** d) / 10 ** d;
 const roundTok = (t: Tok): Tok => ({ in: Math.round(t.in), out: Math.round(t.out), cr: Math.round(t.cr), cw: Math.round(t.cw), usd: round(t.usd) });
 const roundModels = (m: ModelTok): ModelTok => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, roundTok(v)]));
@@ -196,7 +199,7 @@ function infoOfRecord(s: SessionSpend): Pick<SessionInfo, 'id' | 'kind' | 'orche
 }
 
 /** Which request(s) or bucket a turn goes to. `info` is the session; `texts` the messages that began the turn (oldest first). */
-export function attribute(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'standingId' | 'requestedBy' | 'title'> | undefined, items: readonly WorkItem[], texts: readonly string[], startMs: number, known?: ReadonlySet<string>, legacy = false): Alloc[] {
+export function attribute(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'standingId' | 'requestedBy' | 'title'> | undefined, items: readonly WorkItem[], texts: readonly string[], startMs: number, known?: ReadonlySet<string>, legacy = false, closedAware = true): Alloc[] {
   const exists = new Set(items.map((w) => w.id.toLowerCase()));
   // `known`: ids the spend record holds too (the replay of an old turn names a request the ledger has since dropped)
   if (known) for (const id of known) if (!id.startsWith('_')) exists.add(id);
@@ -216,7 +219,7 @@ export function attribute(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorR
   // a worker
   const about = aboutIds(texts);
   if (about.length) return even(about, 'about');
-  const served = info ? openFirst(servedAt(info.id, items, startMs), items, startMs) : [];
+  const served = info ? (closedAware ? openFirst(servedAt(info.id, items, startMs), items, startMs) : servedAt(info.id, items, startMs)) : [];
   if (served.length) return even(served, 'link');
   // The ledger forgot the request (closed more than a week ago) or never linked it: the dispatcher titles a worker "wNNN: …".
   const titled = /^(w\d{1,7})\s*:/i.exec(info?.title ?? '')?.[1];
@@ -236,6 +239,7 @@ export class SpendStore {
   readonly sessions = new Map<string, SessionSpend>();
   backfill?: SpendFile['backfill'];
   private readonly file: SnapshotFile;
+  private readonly path: string;
   private readonly ctx: SpendContext;
   /** The messages that began each session's current turn, newest last: in memory only; a restart falls back to the links. */
   private readonly texts = new Map<string, { uuid?: string; text: string }[]>();
@@ -245,6 +249,7 @@ export class SpendStore {
     this.ctx = ctx;
     this.now = ctx.now ?? Date.now;
     const file = path.join(dataDir, 'spend.json');
+    this.path = file;
     this.file = new SnapshotFile(file, () => JSON.stringify(this.persisted()), SAVE);
     const f = readJsonDurable<SpendFile>(file, { check: checkObject });
     for (const r of Object.values(f?.requests ?? {})) this.requests.set(r.id, r);
@@ -307,6 +312,7 @@ export class SpendStore {
       s = { id, role: roleOf(info), title: info?.title ?? id, machine: info?.machineId, person: info?.requestedBy?.displayName, firstAt: at, lastAt: at, turns: 0, total: zeroTok(), models: {}, estimated: zeroTok(), requests: {}, cats: {}, calls: 0, ctxMax: 0, compactions: 0, transcript: { state: 'full' } };
       // a coordinator first seen by this code records its days live: nothing to split afterwards (w1160)
       if (isCoordinatorRole(s.role)) s.coordV = 2;
+      s.fixV = 2; // recorded by the current rules from its first turn
       this.sessions.set(id, s);
     }
     if (info) {
@@ -384,46 +390,55 @@ export class SpendStore {
   }
 
   /** Add one turn's spend to its session and, by weight, to its requests. Also the backfill's entry (no account). */
-  add(a: { s: SessionSpend; at: string; models: ModelTok; total: Tok; estimated: boolean; meter?: MeterTurn; allocs: Alloc[]; items?: readonly WorkItem[]; info?: SessionInfo; account?: string }) {
-    const { s, at, models, total, allocs } = a;
-    const account = a.account ?? UNRECORDED_ACCOUNT;
-    s.accounts = addModels(s.accounts ?? {}, { [account]: total });
-    s.lastAt = at > s.lastAt ? at : s.lastAt;
-    if (at < s.firstAt) s.firstAt = at;
-    s.turns++;
+  add(a: { s: SessionSpend; at: string; models: ModelTok; total: Tok; estimated: boolean; meter?: MeterTurn; allocs: Alloc[]; items?: readonly WorkItem[]; info?: SessionInfo; account?: string; accountMix?: Record<string, number>; sign?: 1 | -1 }) {
+    const { s, at, allocs } = a;
+    // sign -1 takes a turn back out (correctHistory, w1209): every figure is linear in it except the largest context and the dates
+    const k = a.sign ?? 1;
+    const total = k === 1 ? a.total : scaleTok(a.total, -1);
+    const models = k === 1 ? a.models : addModels({}, a.models, -1);
+    // the account(s) the turn ran on: one, or (a turn put back by correctHistory, whose account is not known) the session's own mix
+    const parts: [string, number][] = a.accountMix ? Object.entries(a.accountMix) : [[a.account ?? UNRECORDED_ACCOUNT, 1]];
+    for (const [acc, p] of parts) s.accounts = addModels(s.accounts ?? {}, { [acc]: total }, p);
+    if (k === 1) {
+      s.lastAt = at > s.lastAt ? at : s.lastAt;
+      if (at < s.firstAt) s.firstAt = at;
+    }
+    s.turns += k;
     s.total = addTok(s.total, total);
     s.models = addModels(s.models, models);
     if (a.estimated) s.estimated = addTok(s.estimated, total);
     if (a.meter) {
-      s.cats = addCats(s.cats, a.meter.cats);
-      s.calls += a.meter.calls;
-      s.ctxMax = Math.max(s.ctxMax, a.meter.ctxMax);
-      if (a.meter.compacted) s.compactions++;
-      if (a.meter.reread) s.reread = { n: (s.reread?.n ?? 0) + a.meter.reread.n, chars: (s.reread?.chars ?? 0) + a.meter.reread.chars, afterCompact: (s.reread?.afterCompact ?? 0) + a.meter.reread.afterCompact };
+      s.cats = addCats(s.cats, a.meter.cats, k);
+      s.calls += a.meter.calls * k;
+      if (k === 1) s.ctxMax = Math.max(s.ctxMax, a.meter.ctxMax);
+      if (a.meter.compacted) s.compactions += k;
+      if (a.meter.reread) s.reread = { n: (s.reread?.n ?? 0) + a.meter.reread.n * k, chars: (s.reread?.chars ?? 0) + a.meter.reread.chars * k, afterCompact: (s.reread?.afterCompact ?? 0) + a.meter.reread.afterCompact * k };
     }
     for (const al of allocs) {
-      const f = al.weight;
+      const f = al.weight * k;
       const r = this.requestRec(al.id, a.items, at);
-      r.lastAt = at > r.lastAt ? at : r.lastAt;
-      if (at < r.firstAt) r.firstAt = at;
+      if (k === 1) {
+        r.lastAt = at > r.lastAt ? at : r.lastAt;
+        if (at < r.firstAt) r.firstAt = at;
+      }
       r.turns += f;
-      r.total = addTok(r.total, scaleTok(total, f));
-      r.models = addModels(r.models, models, f);
-      r.accounts = addModels(r.accounts ?? {}, { [account]: total }, f);
-      if (a.estimated) r.estimated = addTok(r.estimated, scaleTok(total, f));
+      r.total = addTok(r.total, scaleTok(a.total, f));
+      r.models = addModels(r.models, a.models, f);
+      for (const [acc, p] of parts) r.accounts = addModels(r.accounts ?? {}, { [acc]: a.total }, f * p);
+      if (a.estimated) r.estimated = addTok(r.estimated, scaleTok(a.total, f));
       const d = day(at);
-      r.days[d] = addTok(r.days[d] ?? zeroTok(), scaleTok(total, f));
+      r.days[d] = addTok(r.days[d] ?? zeroTok(), scaleTok(a.total, f));
       if (isCoordinatorRole(s.role) && !isBucket(al.id)) {
         const byDay = ((r.coordDays ??= {})[s.id] ??= {});
-        byDay[d] = addTok(byDay[d] ?? zeroTok(), scaleTok(total, f));
+        byDay[d] = addTok(byDay[d] ?? zeroTok(), scaleTok(a.total, f));
       }
       const rs = (r.sessions[s.id] ??= { role: s.role, total: zeroTok(), models: {}, turns: 0, how: {} });
-      rs.total = addTok(rs.total, scaleTok(total, f));
-      rs.models = addModels(rs.models, models, f);
+      rs.total = addTok(rs.total, scaleTok(a.total, f));
+      rs.models = addModels(rs.models, a.models, f);
       rs.turns += f;
       rs.how[al.how] = (rs.how[al.how] ?? 0) + f;
       if (allocs.length > 1) rs.shared = (rs.shared ?? 0) + f;
-      s.requests[al.id] = (s.requests[al.id] ?? 0) + total.usd * f;
+      s.requests[al.id] = (s.requests[al.id] ?? 0) + a.total.usd * f;
       if (a.meter) {
         r.cats = addCats(r.cats, a.meter.cats, f);
         r.calls += a.meter.calls * f;
@@ -542,6 +557,162 @@ export class SpendStore {
   }
 
   /**
+   * Record the turns the old rules got wrong again by the current rules (w1209; lothsahn: "The billing needs to be accurate so we can
+   * optimize."). Two rules changed on 2026-10-13 (`RULES_FROM_MS`): a restart's first result no longer counts the CLI's whole running total
+   * as one turn (w1161: about $200 each for the dispatcher and each orchestrator, per restart, and the same for every resumed worker), and an
+   * id cited in parentheses in a harness notice no longer bills the turn to that request (w1160: w605's $1,836). The session's transcript is
+   * replayed twice, by the old rules and by the current ones; for each live-recorded turn before then that the two read differently, the
+   * old reading is taken out of the record and the current one put in, so the session and every request it touched change by the
+   * difference and nothing else. The category figures (`cats`) come from the calls' own usage and do not move with the cost rule.
+   * Guarded: the replay must explain the session's recorded total within 5% (backfilled turns are replayed the same way), else nothing is
+   * changed and the reason is returned. Once per session (`fixV` 1). Returns what it did.
+   */
+  correctHistory(sessionId: string, events: readonly TranscriptEvent[] | undefined, info: SessionInfo | undefined): { removedUsd: number; movedUsd: number; turns: number; skipped?: string } {
+    const none = { removedUsd: 0, movedUsd: 0, turns: 0 };
+    const s = this.sessions.get(sessionId);
+    if (!s || s.fixV === 2) return none;
+    // fixV 1 (the first release) corrected the live-recorded turns; this one also looks at the backfilled ones, so a session that release corrected is not corrected twice
+    const liveDone = s.fixApplied === true;
+    s.fixV = 2;
+    this.changed();
+    if (!events?.length) return { ...none, skipped: 'no transcript' };
+    const items = [...this.ctx.work()];
+    const known = new Set(this.requests.keys());
+    const scL = { models: {} } as SessionSpend;
+    const scN = { models: {} } as SessionSpend;
+    const liveFrom = s.liveFrom ?? Infinity;
+    const diffs: { at: string; mL: ModelTok; mN: ModelTok; tL: Tok; tN: Tok; AL: Alloc[]; AN: Alloc[]; meter?: MeterTurn; estimated?: boolean; backfill?: boolean }[] = [];
+    let replayed = 0;
+    let pending: { uuid?: string; text: string }[] = [];
+    // the backfill's own reading (backfillSession): the recorded cost totals differenced, tokens estimated from the characters
+    let prevCost: number | undefined;
+    let outChars = 0;
+    let freshChars = 0;
+    const model = info?.model ?? 'unknown';
+    for (const e of events) {
+      if (e.kind === 'assistant' || e.kind === 'thinking') outChars += e.text.length;
+      else if (e.kind === 'tool_use') outChars += Math.min(20_000, JSON.stringify(e.input ?? {}).length);
+      else if (e.kind === 'tool_result') freshChars += e.text.length;
+      if (e.kind === 'user') {
+        pending.push({ uuid: e.uuid, text: e.text.slice(0, 1500) });
+        freshChars += e.text.length;
+      } else if (e.kind === 'result' && e.seq < liveFrom) {
+        // A turn backfilled from the cost totals. Before w1161 the portal's own total doubled at a restart (it added the CLI's whole running
+        // total to its own), so the turn after a restart read as the running total again: a turn that costs as much as the session had cost
+        // so far, from $20 up, is that and nothing else (a real turn cannot), and what it really cost is what is left over.
+        const before = prevCost ?? 0;
+        let dOld = e.costUsd >= before ? e.costUsd - before : e.costUsd;
+        prevCost = e.costUsd;
+        if (info && info.costUsd > 0 && dOld > info.costUsd * 1.05) dOld = info.costUsd;
+        const restart = before >= 20 && e.costUsd >= before && dOld >= before * 0.9;
+        const dNew = restart ? Math.max(0, dOld - before) : dOld;
+        replayed += dOld;
+        const mine = e.answers?.length ? pending.filter((t) => t.uuid && e.answers!.includes(t.uuid)) : [];
+        const used = mine.length ? mine : pending;
+        pending = mine.length ? pending.filter((t) => !mine.includes(t)) : [];
+        if (dNew !== dOld) {
+          const tokOld = dOld > 0 ? estimateTurn(model, dOld, outChars, freshChars) : zeroTok();
+          const tokNew = dNew > 0 ? estimateTurn(model, dNew, outChars, freshChars) : zeroTok();
+          const startMs = (Date.parse(e.t) || 0) - e.durationMs;
+          const texts = used.map((t) => t.text);
+          diffs.push({ at: e.t, mL: { [model]: tokOld }, mN: { [model]: tokNew }, tL: tokOld, tN: tokNew, AL: attribute(info ?? infoOfRecord(s), items, texts, startMs, known, true, false), AN: attribute(info ?? infoOfRecord(s), items, texts, startMs, known, false, false), estimated: true, backfill: true });
+        }
+        outChars = 0;
+        freshChars = 0;
+      } else if (e.kind === 'result') {
+        const old = (Date.parse(e.t) || 0) < RULES_FROM_MS;
+        const mL = this.delta(scL, sessionId, e.usage, e.costUsd, info, true, true).models;
+        const mN = this.delta(scN, sessionId, e.usage, e.costUsd, info, true, false).models;
+        const mine = e.answers?.length ? pending.filter((t) => t.uuid && e.answers!.includes(t.uuid)) : [];
+        const used = mine.length ? mine : pending;
+        pending = mine.length ? pending.filter((t) => !mine.includes(t)) : [];
+        const tL = sumTok(Object.values(mL));
+        const tN = sumTok(Object.values(mN));
+        replayed += old && !liveDone ? tL.usd : tN.usd;
+        outChars = 0;
+        freshChars = 0;
+        if (!old || liveDone) continue;
+        const startMs = (Date.parse(e.t) || 0) - e.durationMs;
+        const texts = used.map((t) => t.text);
+        const AL = attribute(info ?? infoOfRecord(s), items, texts, startMs, known, true, false);
+        const AN = attribute(info ?? infoOfRecord(s), items, texts, startMs, known, false, false);
+        const sameAlloc = AL.length === AN.length && AL.every((x, i) => x.id === AN[i].id && Math.abs(x.weight - AN[i].weight) < 1e-9);
+        if (sameAlloc && Math.abs(tL.usd - tN.usd) < 1e-9) continue;
+        diffs.push({ at: e.t, mL, mN, tL, tN, AL, AN, meter: e.usage?.meter });
+      }
+    }
+    if (!diffs.length) return none;
+    if (!(s.total.usd > 0) || Math.abs(replayed - s.total.usd) > s.total.usd * 0.05) return { ...none, skipped: `the replay reads $${replayed.toFixed(2)} where the record holds $${s.total.usd.toFixed(2)}` };
+    // the turns' accounts are not in the transcript: spread by the mix the session ran on, so no account goes below what it spent
+    const accTotal = Object.values(s.accounts ?? {}).reduce((x, t) => x + Math.max(0, t.usd), 0);
+    const accountMix = accTotal > 0 ? Object.fromEntries(Object.entries(s.accounts!).filter(([, t]) => t.usd > 0).map(([k, t]) => [k, t.usd / accTotal])) : undefined;
+    let removedUsd = 0;
+    let movedUsd = 0;
+    for (const d of diffs) {
+      this.add({ s, at: d.at, models: d.mL, total: d.tL, estimated: d.estimated ?? false, meter: d.meter, allocs: d.AL, items, accountMix, sign: -1 });
+      this.add({ s, at: d.at, models: d.mN, total: d.tN, estimated: d.estimated ?? false, meter: d.meter, allocs: d.AN, items, accountMix, sign: 1 });
+      removedUsd += d.tL.usd - d.tN.usd;
+      if (d.AL.length !== d.AN.length || d.AL.some((x, i) => x.id !== d.AN[i].id)) movedUsd += d.tN.usd;
+    }
+    if (diffs.some((d) => !d.backfill) || liveDone) s.fixApplied = true;
+    s.acctV = 1;
+    if (isCoordinatorRole(s.role)) s.coordV = undefined; // its days are rebuilt from the corrected record
+    this.changed();
+    return { removedUsd, movedUsd, turns: diffs.length };
+  }
+
+  /**
+   * Put right the accounts of what correctHistory changed in its first release (w1209): it took each turn out of, and put it back on, the
+   * session's biggest account, so other accounts read negative (-$2,018 and -$1,428 in a 7-day report). The accounts of a corrected session
+   * are its accounts before the correction (from the copy of the record, `spend.json.pre-w1209`) scaled to what it now holds, and a request
+   * those sessions touched has its accounts spread from its sessions' mixes: an estimate, the totals unchanged. Once per session.
+   */
+  repairAccounts(): { sessions: number; requests: number } {
+    const none = { sessions: 0, requests: 0 };
+    const todo = [...this.sessions.values()].filter((x) => x.fixApplied && x.acctV !== 1);
+    if (!todo.length) return none;
+    let backup: SpendFile | undefined;
+    try {
+      backup = JSON.parse(fs.readFileSync(`${this.path}.pre-w1209`, 'utf8')) as SpendFile;
+    } catch {
+      return none;
+    }
+    const touched = new Set<string>();
+    let n = 0;
+    for (const s of todo) {
+      s.acctV = 1;
+      const was = backup.sessions?.[s.id]?.accounts;
+      const sum = Object.values(was ?? {}).reduce((x, t) => x + Math.max(0, t.usd), 0);
+      if (!was || sum <= 0 || !(s.total.usd > 0)) continue;
+      s.accounts = Object.fromEntries(Object.entries(was).filter(([, t]) => t.usd > 0).map(([k, t]) => [k, scaleTok(t, s.total.usd / sum)]));
+      for (const id of Object.keys(s.requests)) touched.add(id);
+      n++;
+    }
+    for (const id of touched) {
+      const r = this.requests.get(id);
+      if (!r) continue;
+      let acc: ModelTok = {};
+      for (const [sid, rs] of Object.entries(r.sessions)) {
+        const s = this.sessions.get(sid);
+        const tot = Object.values(s?.accounts ?? {}).reduce((x, t) => x + Math.max(0, t.usd), 0);
+        if (!s?.accounts || tot <= 0) acc = addModels(acc, { [UNRECORDED_ACCOUNT]: rs.total });
+        else for (const [k, t] of Object.entries(s.accounts)) if (t.usd > 0) acc = addModels(acc, { [k]: rs.total }, t.usd / tot);
+      }
+      r.accounts = acc;
+    }
+    this.changed();
+    return { sessions: n, requests: touched.size };
+  }
+
+  /** A copy of the record before something rewrites history in it (once per tag). */
+  backupOnce(tag: string): void {
+    const to = `${this.path}.${tag}`;
+    if (!fs.existsSync(this.path) || fs.existsSync(to)) return;
+    this.file.flushSync();
+    fs.copyFileSync(this.path, to);
+  }
+
+  /**
    * Give a coordinator session's coordination its days (w1160), from its own transcript (a chat is never pruned). Its turns are
    * replayed the way they were recorded: before `coordFrom` (the first turn the current code recorded) by the older attribution
    * and cost rules (`legacy`: an id cited in parentheses in a harness notice counted, a restart's whole running total was one
@@ -556,7 +727,6 @@ export class SpendStore {
     const s = this.sessions.get(sessionId);
     if (!s || !isCoordinatorRole(s.role) || s.coordV === 2) return 0;
     for (const r of this.requests.values()) if (r.coordDays?.[sessionId]) delete r.coordDays[sessionId];
-    const boundary = s.coordFrom ?? (s.legacyRequests ? Infinity : 0);
     const items = [...this.ctx.work()];
     const known = new Set(this.requests.keys());
     const scratch = { models: {} } as SessionSpend;
@@ -565,7 +735,8 @@ export class SpendStore {
     for (const e of events ?? []) {
       if (e.kind === 'user') pending.push({ uuid: e.uuid, text: e.text.slice(0, 1500) });
       else if (e.kind === 'result') {
-        const legacy = e.seq < boundary;
+        // before the rules changed, a turn was read by the old ones unless correctHistory has already put the current reading in the record
+        const legacy = !s.fixApplied && (Date.parse(e.t) || 0) < RULES_FROM_MS;
         const { models } = this.delta(scratch, sessionId, e.usage, e.costUsd, info, true, legacy);
         const mine = e.answers?.length ? pending.filter((t) => t.uuid && e.answers!.includes(t.uuid)) : [];
         const used = mine.length ? mine : pending;
@@ -877,13 +1048,21 @@ export function renderRequest(spend: SpendStore, id: string, link: (sessionId: s
   if (!r) return `No spend recorded for ${id} (spend is recorded from the turns after the w859 deploy and backfilled from older transcripts).`;
   const lines: string[] = [];
   const { workers, coordination } = spend.splitOf(r);
+  if (isBucket(r.id)) {
+    // Spend that is no request's (w1209: its days used to read "workers", the header "coordination"): one figure, said once
+    const who = coordination.usd > workers.usd ? 'coordinators (dispatcher, orchestrators, ops worker, standing agents)' : 'workers tied to no request';
+    lines.push(`${r.id} "${r.title}" [not any request's]: ${tokLine(r.total)}, from ${who}, ${Math.round(r.turns)} turn(s), ${r.firstAt.slice(0, 16).replace('T', ' ')} to ${r.lastAt.slice(0, 16).replace('T', ' ')}.${r.estimated.usd > 0.005 ? ` ${fmtUsd(r.estimated.usd)} of it is estimated.` : ''}`);
+    const byDay = Object.entries(r.days).sort((a, b) => b[0].localeCompare(a[0]));
+    if (byDay.length) lines.push(`By UTC day, newest first: ${byDay.slice(0, 14).map(([d, t]) => `${d} ${fmtUsd(t.usd)}`).join('; ')}${byDay.length > 14 ? `; ${byDay.length - 14} earlier day(s)` : ''}.`);
+  } else {
   lines.push(`${r.id} "${r.title}" [${r.kind}${r.closedAt ? `, closed ${r.closedAt.slice(0, 10)}` : r.status ? `, ${r.status}` : ''}]: workers' own cost ${tokLine(workers)}; coordination ${fmtUsd(coordination.usd)}${byLine(coordination)}; all together ${fmtUsd(r.total.usd)}. ${Math.round(r.turns)} turn(s), ${r.firstAt.slice(0, 16).replace('T', ' ')} to ${r.lastAt.slice(0, 16).replace('T', ' ')}.${r.estimated.usd > 0.005 ? ` ${fmtUsd(r.estimated.usd)} of the all-together figure is estimated.` : ''}`);
   if (coordination.usd > 0.005) lines.push(COORDINATION_NOTE);
   const dayRows = daySplit(r);
   if (dayRows.length) lines.push(`By UTC day (workers / coordination), newest first: ${dayRows.slice(0, 14).map((d) => `${d.day} ${fmtUsd(d.workers)} / ${fmtUsd(d.coordination)}`).join('; ')}${dayRows.length > 14 ? `; ${dayRows.length - 14} earlier day(s)` : ''}.`);
+  }
   const m = Object.entries(r.models).sort((a, b) => b[1].usd - a[1].usd);
   if (m.length) {
-    lines.push('Per model (workers and coordination together):');
+    lines.push(isBucket(r.id) ? 'Per model:' : 'Per model (workers and coordination together):');
     for (const [k, v] of m) lines.push(`- ${k}: ${tokLine(v)}`);
   }
   const accounts = Object.entries(r.accounts ?? {}).sort((a, b) => b[1].usd - a[1].usd);
@@ -893,13 +1072,16 @@ export function renderRequest(spend: SpendStore, id: string, link: (sessionId: s
   }
   lines.push('Sessions, the workers first, then the coordinators (a session that served several requests shows only this request\'s share):');
   const sessionRows = spend.sessionsOf(id).sort((a, b) => Number(isCoordinatorRole(a.share.role)) - Number(isCoordinatorRole(b.share.role)));
-  for (const { session: s, share } of sessionRows) {
+  // _unattributed holds hundreds of sessions (an 87k-character answer, w1209): the biggest 25, then a count and their sum
+  const SHOWN = 25;
+  for (const { session: s, share } of sessionRows.slice(0, SHOWN)) {
     const how = Object.entries(share.how).map(([h, n]) => `${h} ${Math.round(n)}`).join(', ');
     const until = spend.protectedUntil(s.id, retainDays);
     const t = s.transcript;
     const kept = t?.state === 'pruned' ? `transcript pruned ${t.prunedAt?.slice(0, 10) ?? ''}` : `transcript ${t?.state === 'gz' ? 'compressed' : 'kept'}${until && Number.isFinite(until) ? ` until ${new Date(until).toISOString().slice(0, 10)}` : until === Infinity ? ' while the request is open' : ''}`;
     lines.push(`- ${s.id} ${isCoordinatorRole(s.role) ? `coordination (${s.role})` : s.role} "${s.title}"${s.machine ? ` on ${s.machine}` : ''}: ${tokLine(share.total)}, ${Math.round(share.turns)} turn(s) [${how}${share.shared ? `; ${Math.round(share.shared)} shared with other requests` : ''}]; ${kept}; ${link(s.id)}`);
   }
+  if (sessionRows.length > SHOWN) lines.push(`- and ${sessionRows.length - SHOWN} more session(s), ${fmtUsd(sessionRows.slice(SHOWN).reduce((a, x) => a + x.share.total.usd, 0))} together`);
   const sum = Object.values(r.cats).reduce((a, c) => a + c.usd, 0);
   if (sum > 0) {
     lines.push(`Where the money went, all its sessions (a context reading of ${Math.round(r.calls)} model calls; shares by characters, exact in total):`);

@@ -1,0 +1,58 @@
+// The "Waiting on input" queue (w1228, shared/waiting.ts): whose move each waiting request is, the order, the age, the
+// recommendation, and the cheap count the sidebar and the phone's bell use.
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import type { WorkItem } from '../shared/types.ts';
+import { decisionsOnMe, intakeRecommendation, waitAge, waitingItems } from '../shared/waiting.ts';
+import type { WorkLive } from '../shared/workState.ts';
+
+const BEN = { userId: 'ben', displayName: 'Ben' };
+const LOTH = { userId: 'lothsahn', displayName: 'Lothsahn' };
+const NOW = Date.parse('2026-10-13T12:00:00Z');
+const ago = (days: number) => new Date(NOW - days * 86_400_000).toISOString();
+
+function item(id: string, o: Partial<WorkItem> = {}): WorkItem {
+  return { id, title: id, brief: 'b', priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'new', createdAt: ago(1), updatedAt: ago(0), sessionIds: [], overlaps: [], asks: 0, log: [], ...o };
+}
+const pending = (id: string, days: number, o: Partial<WorkItem> = {}) => item(id, { createdAt: ago(days), approval: { state: 'pending', why: 'auto-approve is off' }, triage: { class: 'needs-human', reason: 'no clear defect' }, ...o });
+const waiting = (why = 'x', waitsOn?: string[]): WorkLive => ({ state: 'waiting', why, ...(waitsOn ? { waitsOn } : {}) });
+
+test('a reviewer\'s approvals and their own question are theirs, oldest first; another person\'s design question is not', () => {
+  const work = [
+    pending('w2', 2),
+    pending('w1', 10),
+    item('w3', { status: 'question', question: { text: 'Which?', at: ago(1) } }),
+    item('w4', { status: 'question', requestedBy: LOTH, requesters: [LOTH], flag: { kind: 'design', text: 'Per output?', at: ago(3), for: [LOTH] } }),
+  ];
+  const live = new Map(work.map((w) => [w.id, waiting()]));
+  const items = waitingItems(work, live, { ...BEN, reviewer: true });
+  assert.deepEqual(items.map((i) => [i.w.id, i.mine, i.ask]), [['w1', true, 'approve'], ['w2', true, 'approve'], ['w3', true, 'answer'], ['w4', false, 'answer']]);
+  // A non-reviewer waits on the reviewers for an approval.
+  assert.deepEqual(waitingItems([pending('w1', 1)], new Map([['w1', waiting()]]), { ...BEN, reviewer: false }).map((i) => i.mine), [false]);
+});
+
+test('only requests whose live state is waiting are listed; a declared wait names who', () => {
+  const w = item('w5');
+  assert.deepEqual(waitingItems([w], new Map([['w5', { state: 'working', why: 'x' }]]), { ...BEN, reviewer: false }), []);
+  const [mineItem] = waitingItems([w], new Map([['w5', waiting('w5 waits on Ben: log in', ['Ben'])]]), { ...BEN, reviewer: false });
+  assert.deepEqual([mineItem.mine, mineItem.ask, mineItem.on], [true, 'check', ['Ben']]);
+  const [other] = waitingItems([w], new Map([['w5', waiting('waits on Lothsahn', ['Lothsahn'])]]), { ...BEN, reviewer: false });
+  assert.equal(other.mine, false);
+});
+
+test('a recommendation only where triage gives one: a possible repeat first, else the class; a needs-human is the person\'s call', () => {
+  assert.equal(intakeRecommendation(pending('w1', 1)), undefined);
+  assert.match(intakeRecommendation(pending('w1', 1, { triage: { class: 'obvious-bug', reason: 'a crash on 0.50.0.46' } }))!, /^Approve \(an obvious bug\): a crash on 0\.50\.0\.46$/);
+  assert.match(intakeRecommendation(pending('w1', 1, { overlaps: [{ ref: 'w9', title: 'Same', why: 'same title' }] as WorkItem['overlaps'] }))!, /^Check first: it may repeat w9/);
+});
+
+test('decisionsOnMe counts the approvals of a reviewer, their question and their design questions, with the oldest date', () => {
+  const work = [pending('w1', 4), pending('w2', 1), item('w3', { status: 'question', question: { text: 'q', at: ago(2) } }), item('w4', { flag: { kind: 'design', text: 'd', at: ago(9), for: [LOTH] } })];
+  assert.deepEqual(decisionsOnMe(work, { ...BEN, reviewer: true }), { count: 3, since: ago(4) });
+  assert.deepEqual(decisionsOnMe(work, { ...BEN, reviewer: false }), { count: 1, since: ago(2) });
+  assert.deepEqual(decisionsOnMe(work, { ...LOTH, reviewer: false }), { count: 1, since: ago(9) });
+});
+
+test('a wait is old after a day and stale after three', () => {
+  assert.deepEqual([ago(0.5), ago(2), ago(4)].map((s) => waitAge(s, NOW)), ['fresh', 'old', 'stale']);
+});

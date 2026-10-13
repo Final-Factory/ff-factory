@@ -497,6 +497,11 @@ export interface SessionSpend {
    * are the first version's marks (kept in the record, no longer read).
    */
   coordV?: number;
+  /** `fixV` 1: correctHistory has looked at this session (w1209); `fixApplied`: it changed the record, so the record now reads every turn by the current rules. */
+  fixV?: number;
+  fixApplied?: boolean;
+  /** `acctV` 1: its accounts are right after correctHistory (repairAccounts, w1209). */
+  acctV?: number;
   coordFrom?: number;
   legacyRequests?: Record<string, number>;
   coordSplit?: boolean;
