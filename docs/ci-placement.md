@@ -40,7 +40,8 @@ and browsers are installed per job instead (`setup` and `playwright` do it).
 
 ## What a job on FFBox can and cannot do
 
-A runner container is single-use, runs as root with every capability dropped, and sits behind an egress fence.
+A runner container is single-use, runs as root with every capability but CAP_CHOWN, CAP_DAC_OVERRIDE and CAP_FOWNER dropped
+(measured, w1167), and sits behind an egress fence.
 
 - **Reaches from outside:** the npm registry and GitHub's Actions service. **Never `github.com` or `api.github.com`**: an
   SNI fence cannot limit those to one repository, so one POST to `/gists` with a credential lifted out of a test would
@@ -67,9 +68,14 @@ on other runners. There is no `actions/cache` and no `sudo`. Versions: ffbox
   uploads them on the job's own credential; elsewhere it is `actions/upload-artifact`.
 - **PowerShell 7** is not in the image, so the scripts' tests that need `pwsh` skip (`server/testPowershell.ts`); the
   Windows job (`windows.yml`) is where they run.
-- **The repository is public and the runners are shared with private repositories.** Fork pull requests need an
-  owner's approval before any job runs (Settings, Actions, General, "Require approval for all external contributors"),
-  and no FFBox job holds a secret.
+- **The repository is public and the runners are shared with private repositories, so no job from a fork runs on
+  FFBox** (w1167). FFBox's runner image runs a job-started hook (ffbox `scripts/ci-job-started.sh`, ffbox PR #25) before a
+  job's first step, and it fails any job whose event names a head repository other than this one: a fork's pull request
+  (`pull_request`, `pull_request_target`) or a `workflow_run` fired by a fork's run. It is in the image, so a pull request
+  cannot edit it out, which it can do to an `if:` in a workflow (a `pull_request` run uses the workflow file from the pull
+  request). Behind it stays the repository setting (Settings, Actions, General, "Require approval for all external
+  contributors"), and no FFBox job holds a secret. A maintainer who wants CI on a contributor's change pushes it to a branch
+  here and opens the pull request from that.
 
 ## The visual baselines
 
@@ -78,24 +84,51 @@ are Ubuntu 22.04 with other font versions. Setting `FF_E2E_RUNNER` moves the job
 the same change. The first FFBox run is the one that tells whether they still match; if they do not, re-render them with
 the `update_snapshots` input (the `linux-snapshots` artifact) and commit them. See the pull request that moved CI here.
 
-## The future step: Windows, macOS and the VM tests
+## What is still hosted, and why (w1167, 2026-10-12)
 
-The workflows are ready for it (the variables above); the runners are not. What each would need:
+The workflows are ready to move (the variables above); the runners are not. Hosted runners cost this repository nothing
+(the cost table above), so what moving buys is the organisation's hosted concurrency (20 jobs at once on the free plan, 5
+of them macOS), which the game's repository does not use (its workflows ask only for self-hosted labels).
 
-- **Windows jobs** (`windows.yml`, `dev-drive.yml`, `worker-update.yml`): a self-hosted Windows runner that is not the
-  determinism gate's. The only one the organisation has is `FinalFactory-Mode2-Windows-BEAST` (label
-  `finalfactory-mode2-windows`), kept for the Final Factory nightly and deliberately label-locked so generic jobs stay off
-  it. These jobs need a real elevated Windows with the virtual disk service and PowerShell 5 and 7, and a clean machine per
-  run (the Dev Drive job makes and detaches a VHDX). A second Windows machine registered as an org runner, in a runner
-  group that serves this repository, would do; the tests assume a throwaway user profile.
-- **macOS** (`worker-update.yml`): a Mac registered as a runner, again clean per run. m3 and m5 are the machines the team
-  works on, so a Mac used for CI would be one that nobody develops on. The job installs and updates a worker under launchd.
-- **`vm-scripts.yml` `lint` and `e2e`**: root, systemd, nftables, libvirt and KVM, and the end-to-end job nests a VM. A
-  runner container on FFBox has none of them. They need a privileged runner on the FFBox host itself (not a container), or
-  a dedicated machine with `/dev/kvm`, registered as a runner with a label of its own, and a way to give each run an empty
-  disk. The nightly production-timing job needs the same machine for about 50 minutes.
-- **`ops-socket.yml`** could join `vm-scripts.yml`'s `lint` on that machine.
-- **`rerun-lost-runner.yml`** re-runs the hosted Windows jobs GitHub loses; it goes when those do.
+Measured from the Actions API, 2026-09-12 to 2026-10-12, each job rounded up to a minute (most of the Linux minutes were
+`ci.yml` before w911 moved it):
+
+| Still hosted | Minutes in 30 days | Of which the last 7 days |
+|---|---|---|
+| `vm-scripts.yml` `e2e` (nested VM; before w925 it also ran on every push to main) | 9,320 | 9,157 (pull requests 4,748, pushes 3,483, nightly 479, by hand 447) |
+| `vm-scripts.yml` `lint` | 715 | 668 |
+| `worker-update.yml` Windows / macOS | 465 / 179 | all |
+| `windows.yml` | 145 | all |
+| `dev-drive.yml` | 33 | 33 |
+| `ops-socket.yml` (and its earlier job in `ci.yml`) | 87 | 6 since w1102's path filter |
+
+**What a runner container on FFBox can do**, measured by a probe job (ff-factory PR #367, run 38322512537): Ubuntu 22.04,
+root with three capabilities, PID 1 is the runner (no systemd), no `/dev/kvm` (the host's CPUs have VT-x/AMD-V), cgroups
+read-only, `unshare` refused, no `sudo`, `nft`, `zfs`, `qemu` or `pwsh`, and no package mirror or other outside host beyond
+the fence's list. So none of the Linux jobs still hosted fits in one:
+
+- **`ops-socket.yml`** needs root and a running systemd (it installs a socket unit and reads the journal).
+- **`vm-scripts.yml` `lint`** runs as root on Ubuntu 26.04 on purpose (the guest's release, D14): the installers' dry runs,
+  `nft`, and `systemd-analyze verify` of the guest's units against 26.04's systemd. A 22.04 container would check them
+  against an older systemd and shellcheck (0.8.0).
+- **`vm-scripts.yml` `e2e`** needs KVM, root, ZFS and libvirt on the runner, and reaches github.com, claude.ai, the Ubuntu
+  archive and cloud images, NodeSource, cli.github.com and pkgs.tailscale.com, which the fence keeps from FFBox's containers.
+
+What FFBox would need to run them: a second, privileged runner class, one fresh Ubuntu VM per job (24.04 or 26.04) booted
+from a cloud image inside a single-use container that is given `/dev/kvm`, with the runner and the fork hook inside the VM
+and its own egress list. That needs a root step on the FFBox host (the container daemon's account in the `kvm` group), a
+wider egress list for that class only, and puts KVM, a kernel attack surface, within reach of a public repository's jobs on
+the host that runs the portal's VM (whose design keeps every FFBox account out of libvirt, w441). It is lothsahn's call
+(w1167); until then these jobs stay hosted.
+
+- **Windows jobs** (`windows.yml`, `dev-drive.yml`, `worker-update.yml`) need an elevated Windows with the virtual disk
+  service and PowerShell 5 and 7, clean per run (the Dev Drive job makes and detaches a VHDX). The organisation's only
+  self-hosted Windows runner, `FinalFactory-Mode2-Windows-BEAST` (label `finalfactory-mode2-windows`), is the determinism
+  gate's and label-locked. The free plan has only the Default runner group, so a new runner cannot be limited to this
+  repository by group (ffbox `docs/ci-runner-security-findings.md` F2).
+- **macOS** (`worker-update.yml`) may run only on Apple hardware (Apple's licence), so not on FFBox; m3 and m5 are machines
+  the team works on, and the job installs and updates a worker under launchd.
+- **`rerun-lost-runner.yml`** (on FFBox since w1102) re-runs the hosted Windows jobs GitHub loses.
 
 ## Notes for the next person
 
