@@ -10,7 +10,7 @@ import type { Duplex } from 'node:stream';
 import { Store } from './store.ts';
 import { QUEUE_HOLD_MS, SessionManager, snapshotOf, type SessionHandle, type SessionSink } from './sessions.ts';
 import { collectResume } from './restart.ts';
-import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, enrolledMachines, issueMachineToken, revokeMachineToken } from './machines.ts';
+import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, enrolledMachines, issueMachineToken, minutesText, revokeMachineToken } from './machines.ts';
 import { OLDEST_DAEMON_PROTOCOL, PROTOCOL_VERSION, protocolProblem } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
@@ -671,6 +671,54 @@ test('machine: stopping or restarting a daemon is refused while agents run unles
   assert.deepEqual(redeployed, []);
   mm.update('mx', { daemonStopped: undefined });
   assert.deepEqual(await mm.watchOffline(Date.now() + 20 * 60_000, async () => true), ['mx'], 'otherwise it is redeployed as before');
+});
+
+test('machine: one offline 30 min with work waiting on it is reported once, and its return; one with nothing waiting is not (w1249)', async (t) => {
+  const { mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  fastReconnect(t);
+  const alerts: { title: string; text: string }[] = [];
+  const reports: string[] = [];
+  mm.offlineAlert = (_id, title, text) => alerts.push({ title, text });
+  mm.report = (text) => reports.push(text);
+  const unreachable = async () => false; // no ssh redeploy in this test
+  // A Mac asleep for the night with no work on it: no alert.
+  let d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  d.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  const t0 = Date.now();
+  await mm.watchOffline(t0, unreachable);
+  await mm.watchOffline(t0 + 40 * 60_000, unreachable);
+  assert.equal(alerts.length, 0);
+  d = daemon();
+  await until('back', () => mm.isOnline('mx'));
+  await mm.watchOffline(Date.now(), unreachable);
+  assert.deepEqual(reports.filter((r) => r.includes('back online')), [], 'no alert, no return notice');
+
+  // The m3 on 2026-10-13: it crashed with a worker on it and a message waiting for it (w1234's 59fc44d8).
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w665: Mac GPU page fault repro', permissionMode: 'default' });
+  d.shutdown();
+  await until('offline again', () => !mm.isOnline('mx'));
+  Object.assign(s.info, { queuedOn: 'machine', queuedSend: 'mx is offline: it is placed again once its daemon is back' });
+  const t1 = Date.now();
+  await mm.watchOffline(t1, unreachable);
+  await mm.watchOffline(t1 + 29 * 60_000, unreachable);
+  assert.equal(alerts.length, 0, 'not before 30 min');
+  await mm.watchOffline(t1 + 31 * 60_000, unreachable);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].title, 'mx offline for 31 min');
+  assert.match(alerts[0].text, new RegExp(`mx has been offline for 31 min .*with work waiting on it: ${s.info.id} "w665: Mac GPU page fault repro"\\. .*login screen`));
+  await mm.watchOffline(t1 + 300 * 60_000, unreachable);
+  assert.equal(alerts.length, 1, 'once per outage');
+  daemon();
+  await until('back again', () => mm.isOnline('mx'));
+  await mm.watchOffline(Date.now(), unreachable);
+  assert.ok(reports.some((r) => /^\[machines\] mx is back online after \d+ min offline\.$/.test(r)), reports.join('\n'));
+});
+
+test('machine: minutesText says minutes, then hours and minutes', () => {
+  assert.deepEqual([minutesText(31 * 60_000), minutesText(60 * 60_000), minutesText(241 * 60_000)], ['31 min', '1 h', '4 h 1 min']);
 });
 
 test('machine: a daemon stopping on purpose (a worker migration, w513) is not redeployed until a daemon says hello again', async (t) => {

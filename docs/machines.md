@@ -70,6 +70,13 @@ before redeploying by hand.
   noted, and a refused start (`failed`) does not move `lastActivityAt`. An agent stopped or interrupted on purpose
   (`stop_agent`, the UI) is marked `stoppedOnPurpose` (saved, and taken off any cut-off list already noted) and is
   never resumed, by a dropped link or a portal restart, until it is sent a message again.
+- **Offline with work waiting (w1249).** A machine offline 30 minutes (`OFFLINE_ALERT_MS`; its `lastSeen` counts from
+  before a portal restart) with work stranded on it (agents cut off mid-turn, workers it holds a sandbox for, messages
+  queued for it: `strandedOn`) is told once per outage to the orchestrator and pushed to the host's devices
+  (`notifier.host`), naming the stranded work; its return is told too. Worker-root installs count, which the ssh
+  redeploy skips. A stopped, relocated or not-yet-installed machine, or one with nothing waiting (a person's own Mac
+  asleep), is not. Why: the m3 panicked 7 times in 2026-10-07..13 (a GPU page fault in game clients workers ran there)
+  and each time sat at its FileVault unlock screen for up to 14 hours, unnoticed, with workers stranded on it.
 - **Tools.** Workers get the machine's tools (`wake_me`, `unity`, `read_work`, …) via a `machine` MCP server
   whose calls go back to the portal. Which ones is the tool manifest's `worker` kind ([tool-manifest.md](tool-manifest.md),
   w1163): all of them are deferred (measured: carrying any costs workers more than the lookups it saves), each with its

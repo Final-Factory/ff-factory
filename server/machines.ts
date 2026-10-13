@@ -66,6 +66,11 @@ export function cutOffMidTurn(i: Pick<SessionInfo, 'kind' | 'status' | 'turnOpen
 
 /** Agents cut off longer ago than this are reported, not resumed. */
 const RESUME_WITHIN_MS = 6 * 3_600_000;
+/**
+ * A machine offline this long with work waiting on it is reported (w1249: the m3 sat at its FileVault unlock screen for
+ * 4 to 13 hours after each crash, with workers stranded on it, and nobody heard). Exported for tests.
+ */
+export const OFFLINE_ALERT_MS = { value: 30 * 60_000 };
 /** How long after a daemon's hello the resume messages go out. */
 export const RESUME_DELAY_MS = { value: 3000 };
 export { MAIN_CLONE_NO_AGENTS };
@@ -468,6 +473,10 @@ export class MachineManager {
 
   /** Tells the orchestrator (wired by index.ts). */
   report?: (text: string) => void;
+  /** A machine has been offline OFFLINE_ALERT_MS with work waiting on it (w1249; wired by index.ts: the orchestrator and a push). */
+  offlineAlert?: (machineId: string, title: string, text: string) => void;
+  /** The machines offlineAlert told about, with when they went offline, until they are back. */
+  private offlineAlerted = new Map<string, number>();
 
   // ---------------------------------------------------------------- agents cut off by a dropped link
 
@@ -612,9 +621,15 @@ export class MachineManager {
     for (const m of this.list()) {
       if (this.isOnline(m.id)) {
         this.offlineSince.delete(m.id);
+        const since = this.offlineAlerted.get(m.id);
+        if (since !== undefined) {
+          this.offlineAlerted.delete(m.id);
+          this.report?.(`[machines] ${m.id} is back online after ${minutesText(now - since)} offline.`);
+        }
         continue;
       }
       if (!this.offlineSince.has(m.id)) this.offlineSince.set(m.id, now);
+      this.alertOffline(m, now);
       if (m.daemonStopped) continue; // stopped on purpose (machine_daemon stop): it stays down until started
       if (m.relocatedTo) continue; // sent to another portal (relocate): a redeploy from here would pull it back
       if (m.root) continue; // a worker root install (w513) is started and updated on its computer, never over ssh
@@ -633,6 +648,44 @@ export class MachineManager {
       }
     }
     return done;
+  }
+
+  /**
+   * Work an offline machine strands (w1249): agents cut off mid-turn when it dropped, workers it holds a sandbox for,
+   * and messages queued until it is back.
+   */
+  strandedOn(id: string): string[] {
+    const ids = new Set(this.cutOff.get(id)?.sessions ?? []);
+    for (const s of this.sessions.sessions.values()) {
+      if (s.info.machineId !== id || s.info.stoppedOnPurpose) continue;
+      if (s.info.queuedOn === 'machine' || s.info.heldSince) ids.add(s.info.id);
+    }
+    return [...ids];
+  }
+
+  /**
+   * Tell once per outage when a machine has been offline OFFLINE_ALERT_MS with work stranded on it (w1249). Its last
+   * sighting counts from before a portal restart. One stopped, relocated or not yet installed on purpose is left alone,
+   * and so is one with nothing waiting on it (a person's own Mac asleep for the night).
+   */
+  private alertOffline(m: Machine, now: number) {
+    if (m.daemonStopped || m.relocatedTo || m.awaitingInstall || this.offlineAlerted.has(m.id)) return;
+    const since = Math.min(this.offlineSince.get(m.id) ?? now, Date.parse(m.lastSeen ?? '') || now);
+    if (now - since < OFFLINE_ALERT_MS.value) return;
+    const stranded = this.strandedOn(m.id);
+    if (!stranded.length) return;
+    this.offlineAlerted.set(m.id, since);
+    const titles = stranded.map((sid) => {
+      const t = this.handle(sid)?.info.title;
+      return t ? `${sid} "${t.length > 60 ? t.slice(0, 59) + '…' : t}"` : sid;
+    });
+    this.offlineAlert?.(
+      m.id,
+      `${m.name ?? m.id} offline for ${minutesText(now - since)}`,
+      `[machines] ${m.id} has been offline for ${minutesText(now - since)} (since ${new Date(since).toISOString().slice(0, 16)}Z) with work waiting on it: ${titles.join(', ')}. ` +
+        `Nothing runs there until its daemon is back. It may be asleep, off the network, or restarted after a crash and waiting at its login screen (a Mac with FileVault waits for its person to log in). ` +
+        `Tell its owner, or place the work on another machine.`,
+    );
   }
 
   // ---------------------------------------------------------------- daemon versions
@@ -2213,6 +2266,12 @@ export class MachineManager {
     }
     this.post(id, reply, false);
   }
+}
+
+/** "45 min" or "3 h 20 min". */
+export function minutesText(ms: number): string {
+  const min = Math.round(ms / 60_000);
+  return min < 60 ? `${min} min` : `${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60} min` : ''}`;
 }
 
 /** Whether an offline machine should be redeployed now, and why (undefined: not yet, or not at all). */
