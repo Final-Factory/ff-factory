@@ -72,7 +72,7 @@ function sendReport(c: MockConnector, id: string, body: Buffer, opts: { name?: s
 }
 
 test('reports: the args are checked here first; ids that are paths are refused', () => {
-  assert.deepEqual(ffboxReportsArgs({}), { args: { limit: 50, offset: 0 } });
+  assert.deepEqual(ffboxReportsArgs({}), { args: { limit: 20, offset: 0 } });
   const a = ffboxReportsArgs({ id: RID, since: '2026-10-03T10:00:00Z', kind: 'desync', session: '0123456789abcdef0123456789abcdef', limit: 500 });
   assert.deepEqual(a, { args: { limit: 200, offset: 0, id: RID, since: 1791021600, kind: 'desync', session: '0123456789abcdef0123456789abcdef' } });
   assert.match((ffboxReportsArgs({ id: '../../opt/ffreports' }) as { error: string }).error, /an FFBox report id/);

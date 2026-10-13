@@ -2159,8 +2159,8 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
   // CI the portal cannot read (w889): for everyone, as a CI wait is anybody's.
   const ci = ciReadBanner(ciRead.health);
   if (ci) warnings.push({ id: 'ci-read', kind: 'ci-read', text: ci });
-  // A GitHub token that lacks a required repository or permission (w904): for its person and the owners.
-  for (const b of github.banners()) warnings.push({ id: b.id, kind: 'github-token', ...(b.person ? { person: b.person } : {}), owners: true, text: b.text });
+  // A GitHub token that lacks a required repository or permission (w904), or GitHub rate limiting its account (w1186): for its person and the owners.
+  for (const b of github.banners()) warnings.push({ id: b.id, kind: b.kind, ...(b.person ? { person: b.person } : {}), owners: true, text: b.text });
   return { lines, warnings };
 }
 let tokenWarningsShown = '';

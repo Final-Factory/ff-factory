@@ -42,8 +42,10 @@ env:
 # What stays on a hosted runner needs root, systemd or Windows/macOS: ops-socket.yml (only when its own files change), windows.yml,
 # worker-update.yml, dev-drive.yml and vm-scripts.yml's lint and end-to-end jobs. rerun-lost-runner.yml runs on FFBox
 # only (w1102): the host makes its API calls for it.
-# The repository is public and the runners are shared with the private Final Factory repositories, so fork pull requests
-# need an owner's approval before any of this runs (Settings, Actions, General) and these jobs hold no secret.
+# The repository is public and the runners are shared with the private Final Factory repositories, so FFBox runs no job
+# from a fork: its runner image fails one before its first step (ffbox scripts/ci-job-started.sh, w1167), where a pull
+# request cannot edit it out. Fork pull requests also need an owner's approval (Settings, Actions, General), and these jobs
+# hold no secret. docs/ci-placement.md says where every job runs and why.
 jobs:
   checks:
     # Not on a push to main (w925): see concurrency above.

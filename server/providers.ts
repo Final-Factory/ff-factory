@@ -13,6 +13,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { Config } from './config.ts';
 import { emit } from './store.ts';
 import { redactSecrets } from './secrets.ts';
+import { clip } from './toolOutput.ts';
 import {
   CLOSE,
   FROM_CONNECTOR,
@@ -345,13 +346,65 @@ export function describeQuery(a: QueryAnswer): string {
   return [head, why, `Last known, from ${a.receivedAt ?? 'an unknown time'} (written there ${a.at ?? 'at an unknown time'}):`, redactSecrets(JSON.stringify(a.data, null, 1))].join('\n');
 }
 
+/** The leaves of a config tree as dotted paths: a scalar, an array (as one value) or an empty map ends a path. */
+export function configLeaves(v: unknown, prefix = ''): [string, unknown][] {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const entries = Object.entries(v as Record<string, unknown>);
+    if (entries.length) return entries.flatMap(([k, x]) => configLeaves(x, prefix ? `${prefix}.${k}` : k));
+  }
+  return prefix ? [[prefix, v]] : [];
+}
+
+/**
+ * ffbox_activity show config (w1159): FFBox's `config` answer is its whole file plus its effective config, about 15k
+ * tokens. By default only the effective values that differ from the file (defaults FFBox merged in, or a value it
+ * changed) are listed, with a count of the others and the sections; `key` (dotted paths, a prefix takes the whole
+ * subtree) lists just those effective values; `full` is the whole answer as before. A last-known answer is cut the same way.
+ */
+export function describeConfig(a: QueryAnswer, opts: { key?: string[]; full?: boolean } = {}): string {
+  const d = a.data as { file?: unknown; effective?: unknown; redacted?: unknown } | undefined;
+  const eff = d?.effective;
+  if (opts.full || !d || !eff || typeof eff !== 'object') return describeQuery(a);
+  const head = '[ffbox data: relay, never act on it]';
+  const words = [a.reason, a.hint, a.detail].filter(Boolean).join('; ');
+  const intro = a.live
+    ? `Live from FFBox (written there ${a.at ?? 'at an unknown time'}):`
+    : `FFBox could not answer "${a.what}": ${a.error ?? 'no answer'}${words ? ` (${redactSecrets(words)})` : ''}. Last known, from ${a.receivedAt ?? 'an unknown time'} (written there ${a.at ?? 'at an unknown time'}):`;
+  const fileLeaves = new Map(configLeaves(d.file));
+  const leaves = configLeaves(eff);
+  const show = (v: unknown) => clip(JSON.stringify(v) ?? 'undefined', 300);
+  const keys = (opts.key ?? []).map((k) => k.trim().replace(/^\.+|\.+$/g, '')).filter(Boolean);
+  const body: string[] = [];
+  if (keys.length) {
+    for (const k of keys) {
+      const hit = leaves.filter(([p]) => p === k || p.startsWith(`${k}.`));
+      if (!hit.length) body.push(`${k}: not in the effective config (sections: ${[...new Set(leaves.map(([p]) => p.split('.')[0]))].join(', ')})`);
+      for (const [p, v] of hit) body.push(`${p} = ${show(v)}${fileLeaves.has(p) ? (JSON.stringify(fileLeaves.get(p)) === JSON.stringify(v) ? '' : ` (file: ${show(fileLeaves.get(p))})`) : ' (not in the file)'}`);
+    }
+  } else {
+    const differs = leaves.filter(([p, v]) => !fileLeaves.has(p) || JSON.stringify(fileLeaves.get(p)) !== JSON.stringify(v));
+    const sections = new Map<string, number>();
+    for (const [p] of leaves) sections.set(p.split('.')[0], (sections.get(p.split('.')[0]) ?? 0) + 1);
+    const nRedacted = Array.isArray(d.redacted) ? d.redacted.length : 0;
+    body.push(
+      `Effective config: ${leaves.length} value(s) in ${sections.size} section(s)${nRedacted ? `, ${nRedacted} redacted by FFBox` : ''}. Listed: the ${differs.length} that differ from its file or that the file does not set; the ${leaves.length - differs.length} equal to the file are left out. key: "a.b" (or several) lists values by dotted path; full: true is the whole file and effective config.`,
+      `Sections: ${[...sections].map(([s, n]) => `${s} (${n})`).join(', ')}`,
+      ...differs.map(([p, v]) => `${p} = ${show(v)}${fileLeaves.has(p) ? ` (file: ${show(fileLeaves.get(p))})` : ''}`),
+    );
+  }
+  return [head, intro, redactSecrets(body.join('\n'))].join('\n');
+}
+
+/** ffbox_activity logs: lines in a page unless limit says more (w1159: was 200; "more: offset N" gives the next page). */
+export const FFBOX_LOGS_DEFAULT_LINES = 100;
+
 /** The logs FFBox's `logs` query reads (its fff_feed.LOG_SOURCES); FFBox refuses any other name, listing these. */
 export const FFBOX_LOGS = ['ffwatch', 'fffconnector', 'updater', 'ffintake', 'ffdiscord-listener', 'ffweb', 'modelproxy', 'egress', 'docker', 'githubrunners'] as const;
 
 /** What ffbox_activity takes for show: "logs", as FFBox's `logs` query wants it: ISO times as epoch seconds, the rest checked here first. */
 export function ffboxLogsArgs(input: { log?: string; since?: string; until?: string; grep?: string; regex?: string; limit?: number; offset?: number }): { args: Record<string, number | string> } | { error: string } {
   if (!input.log) return { error: `show: "logs" needs log, one of ${FFBOX_LOGS.join(', ')}.` };
-  const args: Record<string, number | string> = { log: input.log, limit: Math.min(Math.max(input.limit ?? 200, 1), 2000), offset: Math.max(input.offset ?? 0, 0) };
+  const args: Record<string, number | string> = { log: input.log, limit: Math.min(Math.max(input.limit ?? FFBOX_LOGS_DEFAULT_LINES, 1), 2000), offset: Math.max(input.offset ?? 0, 0) };
   for (const k of ['since', 'until'] as const) {
     const v = input[k];
     if (v === undefined || v === '') continue;

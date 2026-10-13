@@ -101,7 +101,7 @@ function Shell({ app }: { app: AppState }) {
 async function recheckGithub() {
   try {
     const r = await api.githubRecheck();
-    toast(r.ran ? 'GitHub tokens checked again: the banner clears if nothing is missing' : 'Checked less than 30 seconds ago; try again shortly');
+    toast(r.ran ? 'GitHub tokens checked again: the banner clears if nothing is missing and GitHub is not rate limiting us' : 'Checked less than 30 seconds ago; try again shortly');
   } catch (e) {
     toastError(e);
   }
@@ -262,6 +262,11 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
     // A GitHub token that lacks a requirement (w904): its fix is on github.com; Re-check now reads it again at once.
     if (w.kind === 'github-token') {
       bars.push({ key: `token-${w.id}`, kind: 'warn', lead: 'A GitHub token needs updating.', rest: w.text, action: { label: 'Re-check now', onClick: () => void recheckGithub() } });
+      continue;
+    }
+    // GitHub's rate limit on a token's account (w1186): no permission is missing, so nothing to edit on github.com.
+    if (w.kind === 'github-rate-limit') {
+      bars.push({ key: `token-${w.id}`, kind: 'warn', lead: 'GitHub is rate limiting us.', rest: w.text, action: { label: 'Re-check now', onClick: () => void recheckGithub() } });
       continue;
     }
     bars.push({ key: `token-${w.id}`, kind: w.kind === 'exhausted' ? 'error' : 'warn', lead: w.kind === 'ci-read' ? 'FF Factory cannot read CI on pull requests.' : w.kind === 'reserve' ? 'The dispatcher\'s Claude token buffer is in use.' : w.kind === 'exhausted' ? 'All your Claude tokens are used up.' : 'All your Claude tokens are at a limit.', rest: w.text });

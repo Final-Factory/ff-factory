@@ -1148,9 +1148,10 @@ export interface TokenWarning {
   /**
    * exhausted: every token of the person is used up; held: every token is at a limit (new work waits); reserve: runs are
    * inside the dispatcher's buffer; ci-read: the portal's GitHub token cannot read CI on pull requests (w889); github-token:
-   * a GitHub token lacks a required repository or permission, or nears its expiry (w904).
+   * a GitHub token lacks a required repository or permission, or nears its expiry (w904); github-rate-limit: GitHub is rate
+   * limiting a token's account, which says nothing about the token's permissions (w1186).
    */
-  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token';
+  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token' | 'github-rate-limit';
   /** The user id whose pool it is: only that person's pages show it (server/index.ts hostForUser). Absent: for everyone. */
   person?: string;
   /** The owners see it too, besides `person` (w904: a GitHub token that lacks a requirement). */
@@ -2344,8 +2345,28 @@ export interface GithubTokenHealth {
   problems?: string[];
   /** The portal's own gh login (D7), not a vault entry. */
   portal?: boolean;
+  /**
+   * GitHub is rate limiting this credential's account: not a missing permission, so `repos`, `org` and `problems` keep the
+   * last verdict. Cleared by the first good call after it (w1186).
+   */
+  rateLimit?: GithubRateLimit;
   lastUse?: { at: string; what: string };
   lastError?: { at: string; what: string };
+}
+
+/** One rate-limit refusal GitHub gave a credential (w1186, server/githubTokens.ts rateLimitOf). */
+export interface GithubRateLimit {
+  at: string;
+  /** X-RateLimit-Reset (or Retry-After) as ISO, when GitHub said. */
+  resetAt?: string;
+  /** Not probed again before this: the reset, else a few minutes on. */
+  retryAt: string;
+  /** A secondary (abuse) limit, not the hourly budget. */
+  secondary?: boolean;
+  /** The account GitHub named ("for user ID 10092359"). */
+  userId?: number;
+  /** GitHub's own words, one line. */
+  message: string;
 }
 
 /** What the owner's vault dialog shows (GET /api/vault). */

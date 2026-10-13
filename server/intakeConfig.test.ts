@@ -295,7 +295,7 @@ test('ffbox_activity: one schema for every belt, with the live views, id and pag
     assert.ok(tool, `${role} has ffbox_activity`);
     const show = tool.schema.show as unknown as { unwrap: () => { options: string[] } };
     assert.deepEqual(show.unwrap().options, ['summary', 'conversations', 'intake', 'signatures', 'config', 'board_log', 'status', 'conversation', 'dev_requests', 'logs', 'reports', 'report', 'thread_files', 'thread_file'], role);
-    assert.deepEqual(Object.keys(tool.schema).sort(), ['file', 'grep', 'id', 'kind', 'limit', 'log', 'offset', 'platform', 'regex', 'report', 'session', 'sha256', 'show', 'signature', 'since', 'thread', 'until', 'version'], role);
+    assert.deepEqual(Object.keys(tool.schema).sort(), ['file', 'full', 'grep', 'id', 'key', 'kind', 'limit', 'log', 'offset', 'platform', 'regex', 'report', 'session', 'sha256', 'show', 'signature', 'since', 'thread', 'until', 'version'], role);
     descriptions.add(tool.description);
   }
   assert.equal(descriptions.size, 1, 'the same description everywhere');
