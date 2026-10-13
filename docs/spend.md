@@ -3,7 +3,7 @@
 Lothsahn, w859: "I would like you to track the per workitem spend as well as the transcript so we can optimize token usage."
 And: "We should keep worker transcripts and numbers for at least 7 days. But make sure we don't run the portal out of disk."
 
-**TL;DR:** every turn of every agent is now priced from Claude Code's own per-turn usage (the SDK result's `modelUsage`: input,
+**TL;DR:** (w1160: a request's headline cost is its **workers' own** cost; the dispatcher's, orchestrators' and ops worker's turns on it are its **coordination**, billed beside it, see "Coordination".) Every turn of every agent is now priced from Claude Code's own per-turn usage (the SDK result's `modelUsage`: input,
 output, cache read and cache write tokens and dollars, per model) and added to the request the agent was on when the turn began.
 `data/spend.json` keeps, per request (`wNNN`), its dollars and tokens per model and per session, and where the context tokens went.
 It outlives both the ledger (which drops a request a week after it closes) and the transcripts. A request's transcripts are kept
@@ -18,7 +18,7 @@ among kinds of content (always an estimate; the totals it splits are not).
 |---|---|
 | `list_work` | each request's line ends `Cost so far: $12.34 (3 session(s); in …, out …, read …, write …)`; `list_work` with an `id` adds the full spend (below) |
 | `read_work` (workers) | the same cost line on their own requests |
-| `spend_report` (orchestrators) | no argument: the last 7 days' top requests with where their tokens went, cost by kind of work, where the money goes inside sessions, the transcripts' footprint. `days`, `top`; `request: "w859"` one request in full (models, every session with tokens, cost and a link to its transcript, how long each transcript is kept); `session: "<id>"`; `footprint: true` |
+| `spend_report` (orchestrators) | no argument: the last 7 days' top requests (by the workers' own cost, coordination beside it: see "Coordination") with where their tokens went, cost by kind of work, where the money goes inside sessions, the transcripts' footprint. `days`, `top`; `request: "w859"` one request in full (models, every session with tokens, cost and a link to its transcript, how long each transcript is kept); `session: "<id>"`; `footprint: true` |
 | Dashboard | Dispatcher page: a cost on each request's row, a **Spend** block in its opened row (models, sessions with transcript links, categories), and a **Spend** tab: the analysis |
 | HTTP | `GET /api/spend/summary`, `/api/spend/request/<id>`, `/api/spend/report?days=7&top=10` |
 | Scripts | `scripts/transcript-footprint.ts <data dir>` (the three transcript measurements, exact, read-only, run on the portal host); `scripts/spend-claude.ts` (the same analysis over a machine's own `~/.claude/projects` transcripts: sessions that ran before this existed, and any machine's, without the portal) |
@@ -69,13 +69,50 @@ dispatcher) shows its account key; a turn from before w1031, or a backfilled one
 | Session | The turn goes to |
 |---|---|
 | worker | the request in an `[about wNNN …]` line of a message that began the turn (a follow-up from an orchestrator names its request); else the request it was last sent: the ledger's `links` as they stood when the turn began (`servedAt`: the latest `sent` and the `linked` since, as `servedBy` in shared/workState.ts does, but at the turn's start, so a message that arrived mid-turn does not move it); else the `wNNN:` prefix of its title; else `_unattributed` |
-| dispatcher, a person's orchestrator | the requests (in the ledger) named in the first lines of the messages that began the turn (`[work request] w859 …`, `[worker update] …`, `[dispatch] …`), split evenly, at most 4; none: its own bucket (`_dispatcher`, `_personal:<user>`) |
+| dispatcher, a person's orchestrator | the requests (in the ledger) named in the first lines of the messages that began the turn (`[work request] w859 …`, `[worker update] …`, `[dispatch] …`), split evenly, at most 4, as that request's **coordination** (below); none: its own bucket (`_dispatcher`, `_personal:<user>`) |
 | ops worker | the requests its job messages name; else `_ops` |
 | standing agent | `_standing:<id>`; the workers its delegations start are ordinary requests (the delegation's work item) |
 
 A turn on several requests (linked requests share a worker) is split evenly between them; the share is recorded (`shared`) and
 shown. Overhead that no request owns is listed apart (`spend_report` "Not any request's"). A request's `tied by` line on its page says how
 each session's turns were tied: `about`, `link`, `message`, `bucket`, `backfill`.
+
+## Coordination: billed apart from the workers' own cost (w1160)
+
+Lothsahn, w1160: "We should still track per request, but bill it separately." The dispatcher's, a person's orchestrator's and the
+ops worker's turns (the **coordinators**) are still counted for the requests their messages name, but as that request's
+**coordination**, beside its **workers' own cost**, never inside it. Before, w605 read $1,836 and w979 $308 over 2026-10-10..12, nearly all
+of it dispatcher and orchestrator turns that happened to name them (the orchestrator's reading of that window's top 20: about $5.8k of $6.9k
+was coordinator spend; an estimate, not a measurement).
+
+| Where | Shows |
+|---|---|
+| `spend_report` (default) | one line: *the workers' own cost on requests $A; coordination on requests $B (dispatcher $, Lothsahn's orchestrator $, ops worker $); not any request's $C* (A + B + C = the window's total, with no turn counted twice). **Top requests are ranked by the workers' own cost**; each row reads `workers $X, coordination $Y (by coordinator)`. A short list "Most coordination on a request" ranks by coordination, so a request with no worker cost still shows. Kinds of work are the workers' own cost, with coordination beside it. "Where it went" (the category split) and "by model" and "by account" stay over every session, coordinators included |
+| `spend_report request:` | workers' own cost, coordination (per coordinator), all together; the days (workers / coordination); sessions with workers first, each coordinator marked *coordination* |
+| `spend_report session:` | a coordinator session says its cost is coordination and lists the requests it billed it to, apart from *Not any request's* (its `_dispatcher`, `_personal:<user>`, `_ops` bucket); a worker's list is its workers' own cost |
+| `list_work id`, `read_work` | `Cost so far` is the workers' own; a second sentence gives the coordination |
+| Dashboard | a request's chip reads `$workers + $coordination coord.`; the opened row and the Spend tab show both |
+| HTTP | `/api/spend/summary` `usd` and the tokens are the workers'; `coordinationUsd` is the coordination; `/api/spend/report` has `workers`, `coordination`, `topCoordination` and, per row, `coordination` |
+
+**The method (an estimate).** A coordinator's turn is split **evenly** among the requests (at most 4) named in the first lines of the
+messages that began it, the rule that was already in force (`attribute`, `namedIdsIn`). Dollars and tokens of the turn are measured;
+how many requests it served is not knowable (the model works on all the messages of a turn together), so the shares are an even split and
+are labelled as an estimate in every output. The alternatives (by message length, by the tokens each id's text takes) would be as
+unmeasured and would cost more to explain. A turn that names no request is in its bucket, as before; it is in the total, never in a request.
+`namedIdsIn` ignores an id inside parentheses in a harness notice (`[machines]`, `[app restarted]`, `[restart]`, `[host]`,
+`[heartbeat]`, `[data restored]`, `[machine updates]`): w1161 found that "(w605)" in two notices that reach the dispatcher on every
+portal restart billed those turns to w605 (a citation of the update rule, not the subject). That fixes turns from the deploy on; turns
+already recorded stay where they were put.
+
+**What is stored.** A request keeps `coordDays`: dollars and tokens of coordinator turns by coordinator and UTC day (`coordKey`:
+`dispatcher`, `ops`, `personal:<name>`), a part of `days`; workers' own cost in a window is `days` minus it. The all-time split needs
+nothing new: each of the request's `sessions` already has its role, so `SpendStore.splitOf` is exact for every request, old ones too.
+Only a window report needs the days. **Turns recorded before this change have none**, so at the first start with this code a coordinator session
+keeps what it had spent on each request (`legacyRequests`) and, 150 seconds later (`splitLegacyCoordination`, in the background, one
+session at a time), its transcript (a chat is never pruned) is replayed up to its first turn recorded under the new code (`coordFrom`):
+the replay gives each request its *shape over days*, and the dollars stay what the record held, so totals do not move. A request the
+replay does not find (no transcript) takes the shape of its own days. Until that finishes, a window report shows these requests' coordination
+as $0; the days of the old part are an estimate, the sums are not.
 
 ## Where the tokens go inside a session
 
@@ -154,7 +191,7 @@ It cannot know a pre-existing session's cache split exactly, nor its context rea
 - A machine's daemon sends `usage` (tokens per model, context readings) only after it has this code; until then its turns are
   dollars only and estimated. `machine_update` (the ops worker) brings a machine up to date; the portal needs a deploy first.
 - Attribution rests on the ledger's `links` and the messages. A message that names two requests for a worker in one go splits the turn
-  evenly. An orchestrator turn that names no request is overhead, not any request's.
+  evenly. An orchestrator turn that names no request is overhead, not any request's. A coordinator turn that names several is split evenly too: an estimate ("Coordination").
 - The categories are by characters. Tool results are clipped to 6,000 characters in the transcript but counted whole by the meter (it sees them before the clip).
 - A turn is tied to the messages its result answers (`answers`), so a message that arrives mid-turn belongs to the next turn. A new agent
   process whose totals started again (the SDK did not carry the saved ones) says so (`usage.restarted`), and its first turn counts in full.

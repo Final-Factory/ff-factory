@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { ContextMeter, toolKind, stripCd, listUsd, priceOf, zeroTok, type ModelTok, type TurnUsage } from '../shared/spend.ts';
-import { SpendStore, aboutIds, attribute, buildReport, estimateTurn, kindOfWork, namedIdsIn, renderReport, renderRequest, servedAt, type SpendContext } from './spend.ts';
+import { SpendStore, aboutIds, attribute, buildReport, costLine, estimateTurn, kindOfWork, namedIdsIn, renderReport, renderRequest, renderSession, servedAt, type SpendContext } from './spend.ts';
 import { DATA_GUARD_DEFAULTS, dataGuardSettings, footprint, gzipFile, planGuard, runDataGuard, type TranscriptFile } from './dataGuard.ts';
 import { Store } from './store.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
@@ -357,7 +357,7 @@ test('the context reading adds up per request and shows in the report', () => {
   assert.ok(Math.abs(rep.top[0].cats[0].pct - 0.75) < 1e-9);
   assert.equal(rep.where[0].cat, 'file-read');
   assert.equal(rep.reread?.n, 2);
-  assert.match(renderReport(rep), /Top 1 requests by cost/);
+  assert.match(renderReport(rep), /Top 1 requests by the workers' own cost/);
   assert.match(renderRequest(w.spend, 'w1', (sid) => `https://p/#/session/${sid}`, 7), /https:\/\/p\/#\/session\/s1/);
 });
 
@@ -564,4 +564,242 @@ test('priceOf: the models in use, an alias, an unknown one', () => {
   assert.equal(priceOf('claude-haiku-5-5').cr, 0.01);
   assert.equal(priceOf('opus').out, 20);
   assert.equal(priceOf('mystery').in, 2);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// coordination billed apart from the workers' own cost (w1160)
+// ---------------------------------------------------------------------------------------------------------------------
+
+const DISPATCHER = (): SessionInfo => session('d', { kind: 'orchestrator', orchestratorRole: 'dispatcher', title: 'Dispatcher', requestedBy: undefined });
+const ORCH = (): SessionInfo => session('o', { kind: 'orchestrator', orchestratorRole: 'personal', title: 'Lothsahn orchestrator', requestedBy: { userId: 'lothsahn', displayName: 'Lothsahn' } });
+const OPS = (): SessionInfo => session('ops', { kind: 'ops', title: 'Ops worker' });
+const DAY = 86_400_000;
+
+/** A coordinator turn: the message that began it and what the turn cost (the session's cumulative total goes up by it). */
+function coordTurn(w: ReturnType<typeof world>, sid: string, at: number, message: string, usd: number) {
+  const cum = (w.spend.session(sid)?.cum?.m?.usd ?? 0) + usd;
+  w.spend.observe(sid, userEvent(at, message));
+  w.spend.observe(sid, resultEvent(at + 30_000, { cum: { m: tok({ usd: cum, cr: Math.round(cum * 1000) }) } }, cum));
+}
+
+test("coordination: a coordinator turn is the request's coordination, not the workers' own cost; a turn naming two requests splits evenly", () => {
+  const a = item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } });
+  const b = item('w2');
+  const w = world([a, b], [session('s1'), DISPATCHER()]);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 2, cr: 2000 }) } }, 2));
+  coordTurn(w, 'd', T0 + 100_000, '[worker update] w1 and w2 "x"', 1);
+  coordTurn(w, 'd', T0 + 200_000, '[work request] w2 "y"', 0.5);
+  const s1 = w.spend.splitOf(w.spend.request('w1')!);
+  const s2 = w.spend.splitOf(w.spend.request('w2')!);
+  assert.equal(s1.workers.usd, 2);
+  assert.ok(Math.abs(s1.coordination.usd - 0.5) < 1e-9, 'half of the turn that named w1 and w2');
+  assert.equal(s2.workers.usd, 0);
+  assert.ok(Math.abs(s2.coordination.usd - 1) < 1e-9, 'the other half and the turn that named only w2');
+  assert.deepEqual(s2.coordination.by.map((x) => x.who), ['dispatcher']);
+  // nothing is counted twice: a request's whole spend is its workers' plus its coordination
+  assert.ok(Math.abs(w.spend.request('w1')!.total.usd - (s1.workers.usd + s1.coordination.usd)) < 1e-9);
+  assert.ok(Math.abs(w.spend.request('w2')!.total.usd - (s2.workers.usd + s2.coordination.usd)) < 1e-9);
+  assert.ok(Math.abs(w.spend.session('d')!.total.usd - (s1.coordination.usd + s2.coordination.usd)) < 1e-9, "the dispatcher's own total is its coordination on the requests");
+  assert.equal(w.spend.request('w1')!.sessions.d.shared, 0.5);
+});
+
+test("coordination: a coordinator turn that names no request stays in its bucket, not in any request's coordination", () => {
+  const w = world([item('w1')], [DISPATCHER()]);
+  coordTurn(w, 'd', T0, '[heartbeat] all quiet', 0.4);
+  assert.ok(Math.abs(w.spend.request('_dispatcher')!.total.usd - 0.4) < 1e-9);
+  assert.equal(w.spend.request('w1'), undefined);
+  assert.equal(w.spend.request('_dispatcher')!.coordDays, undefined, 'a bucket is not a request');
+  const rep = buildReport(w.spend, T0 + 600_000);
+  assert.equal(rep.coordination.usd, 0);
+  assert.equal(rep.buckets[0].id, '_dispatcher');
+});
+
+test("coordination: the report ranks by the workers' own cost and the totals add up with no double counting", () => {
+  const sessions = [session('s1'), session('s2'), DISPATCHER(), ORCH(), OPS()];
+  const items = [item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } }), item('w2', { sessionIds: ['s2'], links: { s2: { at: iso(T0), how: 'sent' } } }), item('w3'), item('w4')];
+  const w = world(items, sessions);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 3, cr: 1 }) } }, 3));
+  w.spend.observe('s2', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 1, cr: 1 }) } }, 1));
+  coordTurn(w, 'd', T0 + 100_000, '[worker update] w3 "x"', 50); // a request with no worker cost and a lot of coordination
+  coordTurn(w, 'o', T0 + 110_000, '[work request] w1 "x"', 2);
+  coordTurn(w, 'ops', T0 + 120_000, '[job] w1 w4', 1);
+  coordTurn(w, 'd', T0 + 130_000, '[heartbeat] nothing', 0.7);
+  const rep = buildReport(w.spend, T0 + 3_600_000, { days: 1, top: 10 });
+  assert.deepEqual(rep.top.map((t) => t.id).slice(0, 2), ['w1', 'w2'], 'w3 took 50 of coordination but its workers cost nothing');
+  assert.equal(rep.top[0].usd, 3);
+  assert.ok(Math.abs(rep.top[0].coordination.usd - 2.5) < 1e-9);
+  assert.deepEqual(rep.top[0].coordination.by.map((x) => x.who), ["Lothsahn's orchestrator", 'ops worker']);
+  assert.equal(rep.topCoordination[0].id, 'w3');
+  assert.ok(Math.abs(rep.workers.usd - 4) < 1e-9);
+  assert.ok(Math.abs(rep.coordination.usd - 53) < 1e-9);
+  const loose = rep.buckets.reduce((a, b) => a + b.usd, 0);
+  assert.ok(Math.abs(rep.workers.usd + rep.coordination.usd + loose - rep.total.usd) < 1e-9, "workers + coordination + not-any-request's = the total");
+  assert.ok(Math.abs(rep.top.reduce((a, t) => a + t.usd + t.coordination.usd, 0) - (rep.total.usd - loose)) < 1e-9, 'the rows add up too');
+  assert.ok(Math.abs(rep.kinds.reduce((a, k) => a + k.usd + k.coordination, 0) - (rep.total.usd - loose)) < 1e-9);
+  const text = renderReport(rep);
+  assert.match(text, /workers' own cost on requests \$4\.00; coordination on requests \$53\.00/);
+  assert.match(text, /split evenly/);
+  assert.match(text, /1\. w1 workers \$3\.00, coordination \$2\.50 \(Lothsahn's orchestrator \$2\.00, ops worker \$0\.50\)/);
+  assert.match(text, /Most coordination on a request[^]*- w3 coordination \$50\.00 \(dispatcher \$50\.00\), workers \$0\.00/);
+});
+
+test('coordination: a window takes the coordination of its own days only', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1'), DISPATCHER()]);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 5, cr: 1 }) } }, 5));
+  coordTurn(w, 'd', T0 + 2 * DAY, '[worker update] w1 "x"', 20);
+  const r = w.spend.request('w1')!;
+  const day0 = '2026-10-08';
+  const day2 = '2026-10-10';
+  assert.equal(w.spend.windowSplit(r, day0, day0, r.days[day0]).coordination.usd, 0);
+  assert.equal(w.spend.windowSplit(r, day0, day0, r.days[day0]).workers.usd, 5);
+  assert.equal(w.spend.windowSplit(r, day2, day2, r.days[day2]).coordination.usd, 20);
+  assert.equal(w.spend.windowSplit(r, day2, day2, r.days[day2]).workers.usd, 0);
+  const rep = buildReport(w.spend, T0 + 2 * DAY + 600_000, { days: 1 });
+  assert.equal(rep.top[0].usd, 0);
+  assert.equal(rep.coordination.usd, 20);
+  const all = buildReport(w.spend, T0 + 2 * DAY + 600_000, { days: 7 });
+  assert.equal(all.top[0].usd, 5);
+  assert.equal(all.top[0].coordination.usd, 20);
+});
+
+test('coordination: the request view, the session view and the cost line show the two apart', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } }), item('w2')], [session('s1'), DISPATCHER()]);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 2, cr: 2000 }) } }, 2));
+  coordTurn(w, 'd', T0 + 100_000, '[worker update] w1 w2 "x"', 3);
+  coordTurn(w, 'd', T0 + 200_000, '[heartbeat] nothing', 0.25);
+  const req = renderRequest(w.spend, 'w1', (sid) => `#/session/${sid}`, 7);
+  assert.match(req, /workers' own cost \$2\.00[^;]*; coordination \$1\.50 \(dispatcher \$1\.50\); all together \$3\.50/);
+  assert.match(req, /split evenly/);
+  assert.match(req, /By UTC day \(workers \/ coordination\)[^]*2026-10-08 \$2\.00 \/ \$1\.50/);
+  assert.ok(req.indexOf('- s1 worker') < req.indexOf('- d coordination (dispatcher)'), 'workers listed before coordinators');
+  const sess = renderSession(w.spend, 'd', (sid) => `#/session/${sid}`);
+  assert.match(sess, /dispatcher \(its cost is coordination\)/);
+  assert.match(sess, /Coordination it billed to requests[^]*w1 \$1\.50, w2 \$1\.50/);
+  assert.match(sess, /Not any request's: _dispatcher \$0\.25/);
+  assert.match(renderSession(w.spend, 's1', () => ''), /Requests it served \(the workers' own cost\): w1 \$2\.00/);
+  assert.match(costLine(w.spend, 'w1'), /Cost so far: \$2\.00 \(1 session\(s\)[^)]*\)\. Coordination[^:]*: \$1\.50\./);
+  assert.match(costLine(w.spend, 'w2'), /Cost so far: \$0\.00/);
+});
+
+test('coordination: split by coordinator, and the record keeps the days through a restart', () => {
+  const w = world([item('w1')], [DISPATCHER(), ORCH()]);
+  coordTurn(w, 'd', T0, '[worker update] w1', 1);
+  coordTurn(w, 'o', T0 + DAY, '[work request] w1', 2);
+  w.spend.flush();
+  const again = new SpendStore(w.dir, { work: () => w.items, session: () => undefined, priorResults: () => 1 });
+  const r = again.request('w1')!;
+  assert.deepEqual(Object.keys(r.coordDays!).sort(), ['dispatcher', 'personal:Lothsahn']);
+  assert.ok(Math.abs(again.windowSplit(r, '2026-10-09', '2026-10-09', r.days['2026-10-09']).coordination.usd - 2) < 1e-9);
+  assert.equal(again.session('d')!.coordSplit, true, 'a session first seen by this code has nothing to split');
+});
+
+/** What the store held before the split: coordinator sessions with their usd by request, and no days for the coordination. */
+function makeLegacy(w: ReturnType<typeof world>, ids: string[]) {
+  for (const r of w.spend.requests.values()) r.coordDays = undefined;
+  for (const id of ids) {
+    const s = w.spend.session(id)!;
+    s.legacyRequests = Object.fromEntries(Object.entries(s.requests).filter(([k]) => !k.startsWith('_')));
+    s.coordSplit = undefined;
+    s.coordFrom = undefined;
+  }
+}
+
+test('coordination: turns recorded before the split get their days from the transcript, and the totals do not move', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } }), item('w2')], [session('s1'), DISPATCHER()]);
+  seq = 0;
+  const events: TranscriptEvent[] = [];
+  const push = (e: TranscriptEvent) => {
+    events.push(e);
+    w.spend.observe('d', e);
+  };
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 4, cr: 1 }) } }, 4));
+  const turn = (at: number, text: string, cum: number) => {
+    push(userEvent(at, text));
+    push(resultEvent(at + 30_000, { cum: { m: tok({ usd: cum, cr: 1 }) } }, cum));
+  };
+  turn(T0 + 100_000, '[worker update] w1', 1);
+  turn(T0 + DAY, '[worker update] w1 w2', 4); // 3 dollars: 1.5 each, a day later
+  turn(T0 + 2 * DAY, '[worker update] w1', 4.5);
+  const before = { w1: w.spend.request('w1')!.total.usd, w2: w.spend.request('w2')!.total.usd, d: w.spend.session('d')!.total.usd };
+  makeLegacy(w, ['d']);
+  assert.equal(w.spend.splitOf(w.spend.request('w1')!).coordination.usd, 3, 'the all-time split never needed the days');
+  assert.equal(w.spend.windowSplit(w.spend.request('w1')!, '2026-10-08', '2026-10-12', w.spend.request('w1')!.total).coordination.usd, 0, 'but a window finds none before the split is done');
+  const given = w.spend.splitLegacyCoordination('d', events, w.sessions[1]);
+  assert.ok(Math.abs(given - 4.5) < 1e-9);
+  assert.equal(w.spend.session('d')!.coordSplit, true);
+  const r1 = w.spend.request('w1')!;
+  const day = (d: string) => w.spend.windowSplit(r1, d, d, r1.days[d] ?? { in: 0, out: 0, cr: 0, cw: 0, usd: 0 }).coordination.usd;
+  assert.ok(Math.abs(day('2026-10-08') - 1) < 1e-9);
+  assert.ok(Math.abs(day('2026-10-09') - 1.5) < 1e-9);
+  assert.ok(Math.abs(day('2026-10-10') - 0.5) < 1e-9);
+  assert.ok(Math.abs(w.spend.windowSplit(w.spend.request('w2')!, '2026-10-09', '2026-10-09', w.spend.request('w2')!.days['2026-10-09']).coordination.usd - 1.5) < 1e-9);
+  // the totals did not move, and it does not run twice
+  assert.equal(w.spend.request('w1')!.total.usd, before.w1);
+  assert.equal(w.spend.request('w2')!.total.usd, before.w2);
+  assert.equal(w.spend.session('d')!.total.usd, before.d);
+  assert.equal(w.spend.splitLegacyCoordination('d', events, w.sessions[1]), 0);
+});
+
+test('coordination: a turn recorded after the split, before the old ones were split, is not counted twice', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [DISPATCHER()]);
+  seq = 0;
+  const events: TranscriptEvent[] = [];
+  const push = (e: TranscriptEvent) => {
+    events.push(e);
+    w.spend.observe('d', e);
+  };
+  push(userEvent(T0, '[worker update] w1'));
+  push(resultEvent(T0 + 30_000, { cum: { m: tok({ usd: 2, cr: 1 }) } }, 2));
+  makeLegacy(w, ['d']);
+  // the portal is back up with the new code: the next turn is recorded live, with its day, before the old ones are split
+  push(userEvent(T0 + DAY, '[worker update] w1'));
+  push(resultEvent(T0 + DAY + 30_000, { cum: { m: tok({ usd: 5, cr: 1 }) } }, 5));
+  assert.equal(w.spend.session('d')!.coordFrom, events[3].seq);
+  w.spend.splitLegacyCoordination('d', events, w.sessions[0]);
+  const r = w.spend.request('w1')!;
+  const total = Object.values(r.coordDays!.dispatcher).reduce((a, t) => a + t.usd, 0);
+  assert.ok(Math.abs(total - 5) < 1e-9, '2 from before + 3 live, each once');
+  assert.ok(Math.abs(r.coordDays!.dispatcher['2026-10-08'].usd - 2) < 1e-9);
+  assert.ok(Math.abs(r.coordDays!.dispatcher['2026-10-09'].usd - 3) < 1e-9);
+});
+
+test("coordination: with no transcript left the old coordination takes the shape of the request's own days", () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1'), DISPATCHER()]);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 3, cr: 1 }) } }, 3));
+  coordTurn(w, 'd', T0 + DAY, '[worker update] w1', 3);
+  makeLegacy(w, ['d']);
+  assert.equal(w.spend.splitLegacyCoordination('d', undefined, w.sessions[1]), 3);
+  const r = w.spend.request('w1')!;
+  // the request spent 3 on day one and 3 on day two: the 3 of coordination is spread 1.5 and 1.5
+  assert.ok(Math.abs(r.coordDays!.dispatcher['2026-10-08'].usd - 1.5) < 1e-9);
+  assert.ok(Math.abs(r.coordDays!.dispatcher['2026-10-09'].usd - 1.5) < 1e-9);
+});
+
+test('coordination: a record from before the split marks its coordinator sessions for the split when it loads', () => {
+  const w = world([item('w1')], [DISPATCHER(), session('s1')]);
+  coordTurn(w, 'd', T0, '[worker update] w1', 1);
+  coordTurn(w, 'd', T0 + 1000, '[heartbeat] x', 1);
+  w.spend.flush();
+  const file = path.join(w.dir, 'spend.json');
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete raw.sessions.d.legacyRequests;
+  delete raw.sessions.d.coordSplit;
+  fs.writeFileSync(file, JSON.stringify(raw));
+  const again = new SpendStore(w.dir, { work: () => w.items, session: () => undefined, priorResults: () => 1 });
+  assert.deepEqual(again.session('d')!.legacyRequests, { w1: 1 }, 'the request it named, not its bucket');
+  assert.equal(again.session('d')!.coordSplit, undefined);
+});
+
+test('namedIdsIn: a request cited in parentheses by a harness notice is not what the turn is about (w1161: the restart notices billed the dispatcher to w605)', () => {
+  const machines = "[machines] beast's daemon has an update available (0.9.1 behind 0.9.2). It keeps taking, starting and resuming agents meanwhile; a verified portal deploy updates it by itself (docs/ops-worker.md, \"After a verified deploy\"); if it stays behind, ops_worker machine_update does it now. No drain or wait is needed: agents run on through an update (w605).";
+  const restarted = "[app restarted] The portal restarted. Could not resume: x waits for beast's daemon to be connected (an update available is no reason to wait; only a protocol this portal no longer drives is, w605); resumed after that, and you get a message";
+  assert.equal(machines.indexOf('w605') < 400, true, 'the id sits inside the 400 characters the attribution reads');
+  assert.deepEqual(namedIdsIn([machines]), []);
+  assert.deepEqual(namedIdsIn([restarted]), []);
+  assert.deepEqual(namedIdsIn(["[app restarted] Resumed w12 and w13 (see w605)"]), ['w12', 'w13'], 'ids that are the notice\'s own subject still count');
+  assert.deepEqual(namedIdsIn(['[work request] w859 "Spend (like w605)"']), ['w859', 'w605'], 'only harness notices are read this way');
+  const w = world([item('w605')], [DISPATCHER()]);
+  coordTurn(w, 'd', T0, machines, 0.3);
+  assert.equal(w.spend.request('w605'), undefined);
+  assert.ok(Math.abs(w.spend.request('_dispatcher')!.total.usd - 0.3) < 1e-9);
 });

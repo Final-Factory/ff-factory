@@ -227,7 +227,8 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
   assert.deepEqual(dirs, ['person-ben', 'person-lothsahn', 'dispatcher'].map((k) => path.join(dir, 'orchestrator-memory', k)));
   for (const [x, d] of [ben, loth, disp].map((x, i) => [x, dirs[i]] as const)) {
     assert.equal(x.settings.autoMemoryEnabled, true);
-    assert.deepEqual(x.tools, ['Read', 'Glob', 'Grep', 'Write', 'Edit']);
+    // ToolSearch loads the deferred portal tools (w1158); still no shell.
+    assert.deepEqual(x.tools, ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ToolSearch']);
     assert.equal(x.hooks.PreToolUse.length, 1);
     assert.ok(x.systemPrompt.append.includes(`Your memory folder is \`${d}\``), 'the brief names its own folder');
     assert.ok(fs.statSync(d).isDirectory());
@@ -239,13 +240,19 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
   // w1137: a bump merged into master sets development live; pre-release and the default branch are moved by hand.
   assert.ok(FFBOX_BRIEF.includes('a version bump merged into master builds both apps, uploads them and sets the main app live on Steam development by itself; nothing sets pre-release or the default (public) branch: Ben or Lothsahn move those by hand'));
   assert.ok(!/bump on develop|bump on master/.test(FFBOX_BRIEF));
-  for (const x of [ben, loth, disp]) {
-    assert.ok(x.systemPrompt.append.includes(`- **FFBox**: ${FFBOX_BRIEF} \`ffbox_activity\` (read-only)`), 'the FFBox paragraph is in the brief');
-    assert.ok(!x.systemPrompt.append.includes('read-only for now'));
-    // The views it can ask FFBox live for (w218), named in the brief, so a stale schema copy in a resumed chat is not
-    // taken as the truth (w224).
+  // w1158: the paragraph is read on demand (read_rules ffbox), verbatim; the brief keeps FFBox's hard rules and the trigger.
+  // Posting the patch notes goes through post_as_max (w901), as the release rule says, not a machine's ffdiscord config.
+  assert.ok(FFBOX_BRIEF.includes('the worker posts them with post_as_max, which has FFBox post as Max (w901)'));
+  for (const [x, owner] of [[ben, BEN], [loth, LOTH], [disp, undefined]] as const) {
+    const rules = agents.rulesText('ffbox', owner);
+    assert.ok(rules.startsWith(`FFBox: ${FFBOX_BRIEF}\n\nffbox_activity (read-only)`), 'the FFBox paragraph is in read_rules ffbox');
+    assert.match(x.systemPrompt.append, /\*\*FFBox owns #bug-reports and dev_bug_reports\*\*: never file work that posts, replies, reacts or closes there, and nobody announces a merged fix/);
+    assert.match(x.systemPrompt.append, /No agent changes a Steam branch\. `ffbox_activity` \(read-only\) shows and asks it\. Read `read_rules ffbox` before you say nothing will investigate a report/);
+    assert.ok(!x.systemPrompt.append.includes('read-only for now') && !rules.includes('read-only for now'));
+    // The views it can ask FFBox live for (w218), named where it reads about FFBox, so a stale schema copy in a resumed
+    // chat is not taken as the truth (w224).
     for (const v of ['show config', 'board_log', 'status', 'conversation with id', 'Last known, from <time>', 'it is out of date: the tool takes all nine', 'show dev_requests']) {
-      assert.ok(x.systemPrompt.append.includes(v), `the FFBox paragraph names ${v}`);
+      assert.ok(rules.includes(v), `the FFBox rules name ${v}`);
     }
   }
   // The same folder after a fresh conversation (and after a restart: it depends only on who the chat is for).
