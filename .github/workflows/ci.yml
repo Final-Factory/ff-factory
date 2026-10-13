@@ -55,8 +55,8 @@ jobs:
     runs-on: ${{ vars.FF_LINUX_RUNNER || 'ffgithubrunners' }}
     timeout-minutes: 15
     steps:
-      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
-      - uses: Final-Factory/ci-actions/setup@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+      - uses: Final-Factory/ci-actions/setup@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
         with:
           node: ${{ env.NODE_VERSION }}
           gitleaks: ${{ env.GITLEAKS_VERSION }}
@@ -115,14 +115,14 @@ jobs:
       # WebKit projects, so it takes fewer. Each file goes to one shard whatever the weights, so none is ever left out.
       PWTEST_SHARD_WEIGHTS: '5:5:3'
     steps:
-      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
-      - uses: Final-Factory/ci-actions/setup@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+      - uses: Final-Factory/ci-actions/setup@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
         with:
           node: ${{ env.NODE_VERSION }}
       - run: npm ci --no-audit --no-fund
       - run: npm ci --prefix web --no-audit --no-fund
       - name: Playwright's browsers (baked into the FFBox image; installed elsewhere)
-        uses: Final-Factory/ci-actions/playwright@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+        uses: Final-Factory/ci-actions/playwright@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
         with:
           browsers: chromium webkit
       - name: Build the web UI
@@ -156,13 +156,13 @@ jobs:
           cp -R playwright-report test-results pw-artifacts/ 2>/dev/null || true
       - name: Upload the report and traces
         if: failure()
-        uses: Final-Factory/ci-actions/upload@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+        uses: Final-Factory/ci-actions/upload@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
         with:
           name: playwright-report-${{ matrix.shard }}
           path: pw-artifacts
       - name: Upload rendered snapshots
         if: always() && steps.snap.outputs.update == 'true' && matrix.shard == 1
-        uses: Final-Factory/ci-actions/upload@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+        uses: Final-Factory/ci-actions/upload@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
         with:
           name: linux-snapshots
           path: e2e/__screenshots__
@@ -172,11 +172,11 @@ jobs:
     runs-on: ${{ vars.FF_LINUX_RUNNER || 'ffgithubrunners' }}
     timeout-minutes: 5
     steps:
-      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
         with:
           fetch-depth: 0
       - name: gitleaks (baked into the FFBox image, GITLEAKS_VERSION there too; downloaded and checksum-verified elsewhere)
-        uses: Final-Factory/ci-actions/setup@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+        uses: Final-Factory/ci-actions/setup@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
         with:
           gitleaks: ${{ env.GITLEAKS_VERSION }}
       - name: Scan the history of this commit
@@ -190,7 +190,7 @@ jobs:
     runs-on: ${{ vars.FF_LINUX_RUNNER || 'ffgithubrunners' }}
     timeout-minutes: 5
     steps:
-      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
         with:
           fetch-depth: 0
       - name: Check the new commits
