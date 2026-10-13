@@ -4,22 +4,26 @@ import os from 'node:os';
 import path from 'node:path';
 
 /**
- * Web previews of review videos (docs/review.md, w1248): a small H.264 copy of each clip, at most 1280 px on its long
+ * Web previews of review videos (docs/review.md, w1248): a small H.264 copy of each clip, at most 1920 px on its long
  * side, with its index at the front (`+faststart`), so the chat's inline player starts at once and streams. Workers'
- * clips are 60 fps captures at 4 to 20 Mbit/s, half of them with the index at the end; the preview is 7 to 14% of
+ * clips are 60 fps captures at 4 to 20 Mbit/s, half of them with the index at the end; the preview is 10 to 14% of
  * the original (measured on 3 review clips, w1248). The original is never touched: the preview is written beside it,
  * `<topic>/.preview/<name>.mp4`, so it goes when its topic folder goes, and one whose original is gone is removed.
  */
 
-/** ffmpeg's arguments for a preview of `input` written to `output`. CRF 26: chosen by measurement (w1248). */
+/**
+ * ffmpeg's arguments for a preview of `input` written to `output` (w1248, measured on 3 review clips): 1080p kept,
+ * because a 1080p four-panel clip's debug text was unreadable at 720p; CRF 28, whose text read as the original's,
+ * at 10 to 14% of its size.
+ */
 export function previewArgs(input: string, output: string): string[] {
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     '-i', input,
     '-map', '0:v:0', '-map', '0:a:0?',
-    // At most 1280 px on the long side, never larger than the original, even sizes (H.264 4:2:0 needs them).
-    '-vf', "scale='min(1280,iw)':'min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26', '-pix_fmt', 'yuv420p', '-threads', '2',
+    // At most 1920 px on the long side, never larger than the original, even sizes (H.264 4:2:0 needs them).
+    '-vf', "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28', '-pix_fmt', 'yuv420p', '-threads', '2',
     '-c:a', 'aac', '-b:a', '96k',
     '-movflags', '+faststart',
     '-f', 'mp4', output,

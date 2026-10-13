@@ -15,7 +15,7 @@ export const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
 export { isVideoPath, mentionedPaths };
 /** "#t=0.1" makes Safari (iPad) and Chrome paint the first frame as the poster before playing. */
 export const posterSrc = (src: string) => `${src}#t=0.1`;
-/** A video's web preview (w1248): a review clip at most 1280 px, CRF 26, its index first; the server sends the original for anything else. */
+/** A video's web preview (w1248): a review clip at most 1920 px, CRF 28, its index first; the server sends the original for anything else. */
 export const previewSrc = (src: string) => (src.startsWith('/api/image?') ? `${src}&preview=1` : src);
 
 /**

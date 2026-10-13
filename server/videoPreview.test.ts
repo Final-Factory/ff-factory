@@ -43,16 +43,16 @@ fs.copyFileSync(input, a[a.length - 1]);
 
 const runs = (dir: string) => (fs.existsSync(path.join(dir, 'runs')) ? fs.readFileSync(path.join(dir, 'runs'), 'utf8').trim().split('\n') : []);
 
-test('preview args: H.264 at most 1280 px on the long side, never upscaled, faststart, CRF 26 (w1248)', () => {
+test('preview args: H.264 at most 1920 px on the long side, never upscaled, faststart, CRF 28 (w1248)', () => {
   const a = previewArgs('/r/t/clip.mp4', '/r/t/.preview/clip.mp4.mp4.part');
   const after = (flag: string) => a[a.indexOf(flag) + 1];
   assert.equal(after('-i'), '/r/t/clip.mp4');
   assert.equal(a.at(-1), '/r/t/.preview/clip.mp4.mp4.part');
   assert.equal(after('-c:v'), 'libx264');
-  assert.equal(after('-crf'), '26');
+  assert.equal(after('-crf'), '28');
   assert.equal(after('-movflags'), '+faststart');
   assert.equal(after('-pix_fmt'), 'yuv420p');
-  assert.match(after('-vf'), /min\(1280,iw\).*min\(1280,ih\).*force_original_aspect_ratio=decrease/);
+  assert.match(after('-vf'), /min\(1920,iw\).*min\(1920,ih\).*force_original_aspect_ratio=decrease/);
   assert.equal(after('-f'), 'mp4', 'the .part name says nothing of the format');
   assert.ok(a.includes('-nostdin'));
 });
@@ -144,8 +144,8 @@ test('previews follow their originals: one whose original is gone is removed wit
   assert.deepEqual(fs.readdirSync(path.join(dir, '.preview')), ['b.mp4.mp4']);
 });
 
-// The real encoder, where there is one (FF_FFMPEG or ffmpeg on PATH): a 1920x1080 clip with its index at the end
-// becomes a 1280x720 H.264 preview with its index first.
+// The real encoder, where there is one (FF_FFMPEG or ffmpeg on PATH): a 2560x1440 clip with its index at the end
+// becomes a 1920x1080 H.264 preview with its index first.
 const realFfmpeg = (() => {
   for (const c of [process.env.FF_FFMPEG, 'ffmpeg']) {
     if (!c) continue;
@@ -173,10 +173,10 @@ function boxes(file: string): string[] {
   return out;
 }
 
-test('real ffmpeg: a 1080p clip without faststart becomes a 720p preview whose index comes first', { skip: !realFfmpeg && 'no ffmpeg here' }, async (t) => {
+test('real ffmpeg: a 1440p clip without faststart becomes a 1080p preview whose index comes first', { skip: !realFfmpeg && 'no ffmpeg here' }, async (t) => {
   const { dir } = topic(t);
   const original = path.join(dir, 'clip.mp4');
-  execFileSync(realFfmpeg!, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30:duration=2', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', original]);
+  execFileSync(realFfmpeg!, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=2560x1440:rate=30:duration=1', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', original]);
   assert.ok(boxes(original).indexOf('moov') > boxes(original).indexOf('mdat'), 'the fixture has its index at the end');
   const p = new VideoPreviews({ ffmpeg: realFfmpeg });
   const made = await p.ensure(original);
@@ -191,5 +191,5 @@ test('real ffmpeg: a 1080p clip without faststart becomes a 720p preview whose i
     }
   })();
   assert.match(info, /Video: h264/);
-  assert.match(info, /1280x720/);
+  assert.match(info, /1920x1080/);
 });

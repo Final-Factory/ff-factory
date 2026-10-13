@@ -75,7 +75,7 @@ makes a preview of every review-folder `.mp4`, `.m4v` and `.webm`:
 
 | What | Where |
 |---|---|
-| H.264 at most 1280 px on its long side (never upscaled), CRF 26, `veryfast`, AAC 96k, `-movflags +faststart`. 7 to 14% of the original on 3 real clips, 5 to 11 s to make on 2 cores. | `previewArgs` |
+| H.264 at most 1920 px on its long side (never upscaled), CRF 28, `veryfast`, AAC 96k, `-movflags +faststart`. 10 to 14% of the original on 3 real clips, 5 to 12 s to make on 2 cores. 1080p is kept: a 1080p four-panel clip's small debug text was unreadable at 720p, and read as the original's at CRF 26 and 28. | `previewArgs` |
 | Written to `<topic>/.preview/<name>.mp4` (`clip.mp4` → `.preview/clip.mp4.mp4`) through a `.part` file. The original is never opened for writing. | `previewPathOf`, `VideoPreviews.make` |
 | Made when the file is published (`ReviewStore.onPublished`), or on its first view. One encode at a time, at nice 10, ended after 10 minutes. A failed encode is not tried again until the portal restarts. | `VideoPreviews.ensure` |
 | Retention: a preview lives in its original's topic folder and goes with it; one whose original is gone is removed with the next encode in that topic, and one older than its original is made again. | `VideoPreviews.prune`, `ready` |
