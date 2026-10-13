@@ -3,9 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { APIRequestContext } from '@playwright/test';
-import { appState, expect, expectNoHorizontalOverflow, go, openSidebar, sendMessage, test, uniq } from './fixtures.ts';
-import type { TranscriptEvent } from '../shared/types.ts';
+import { appState, expect, expectNoHorizontalOverflow, go, openSidebar, test, uniq, useTool } from './fixtures.ts';
 import { E2E_PROVIDER_TOKEN, MockConnector, SAMPLE_CLASSES, SAMPLE_CONVERSATION_ANSWER, SAMPLE_CONVERSATIONS, SAMPLE_INTAKE } from './mockConnector.ts';
 
 test('FFBox: the card follows the connector, and its page lists capacity, conversations and intake reports', async ({ authed: page, request }) => {
@@ -109,22 +107,6 @@ test('FFBox: the card follows the connector, and its page lists capacity, conver
   sidebar = await openSidebar(page);
   await expect(sidebar.locator('.row.place', { hasText: 'FFBox' })).toContainText('Connector offline');
 });
-
-/** Ask an orchestrator's fake model to call one of its tools (e2e/fakeAgent.ts "#tool"); what the tool answered. */
-async function useTool(request: APIRequestContext, chatId: string, tool: string, args: Record<string, unknown>): Promise<string> {
-  const events = async () => (await (await request.get(`/api/sessions/${chatId}/events?limit=500`)).json()) as TranscriptEvent[];
-  const before = (await events()).at(-1)?.seq ?? 0;
-  await sendMessage(request, chatId, `#tool ${tool} ${JSON.stringify(args)}`);
-  let answer = '';
-  await expect
-    .poll(async () => {
-      const r = (await events()).find((e) => e.seq > before && e.kind === 'assistant' && e.text.startsWith(`Called ${tool}:`));
-      answer = r && r.kind === 'assistant' ? r.text : '';
-      return answer;
-    }, { timeout: 15_000 })
-    .not.toBe('');
-  return answer.slice(`Called ${tool}: `.length);
-}
 
 test('FFBox protocol 2: the handshake, a board_check by thread key, and an ffbox/* PR filed as a review request', async ({ authed: page }) => {
   const base = test.info().project.use.baseURL!;

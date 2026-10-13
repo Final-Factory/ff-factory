@@ -254,7 +254,10 @@ test('a person acting on a request takes it over: each action type, logged, show
   }
   const tokenUserOf = (agents as unknown as { tokenUserOf(id: string): string | undefined }).tokenUserOf.bind(agents);
   assert.equal(tokenUserOf('s9'), 'lothsahn');
-  await new Promise((r) => setTimeout(r, 5));
+  // The later action wins by its runsFor.at, to the millisecond: wait until the clock has passed the approval's stamp. A
+  // 5 ms timer could fire within the same millisecond on a loaded runner, and a tie kept lothsahn (w1173).
+  const approved = store.work.get(b.id)!.runsFor!.at;
+  while (new Date().toISOString() <= approved) await new Promise((r) => setTimeout(r, 1));
   o.bumpWork(a.id, BEN);
   assert.equal(tokenUserOf('s9'), 'ben');
 

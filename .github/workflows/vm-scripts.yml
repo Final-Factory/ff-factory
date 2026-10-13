@@ -46,20 +46,18 @@ permissions:
 jobs:
   plan:
     name: Plan (which VM jobs this change needs)
-    # ON FFBOX (w911): the pull request's files come from git, not from the API. A runner container cannot reach
-    # api.github.com, and the pull request's merge commit (what actions/checkout checks out) has the base as its first
-    # parent, so HEAD^1..HEAD is exactly the pull request's change. The lint and end-to-end jobs below stay hosted:
-    # they need root, systemd and KVM.
-    runs-on: ffgithubrunners
+    # ON FFBOX by default (w911; FF_LINUX_RUNNER moves it, w1170): the pull request's files come from git, not from the
+    # API. A runner container cannot reach api.github.com, and the pull request's merge commit (what actions/checkout
+    # checks out) has the base as its first parent, so HEAD^1..HEAD is exactly the pull request's change, on any runner.
+    # The lint and end-to-end jobs below stay hosted: they need root, systemd and KVM.
+    runs-on: ${{ vars.FF_LINUX_RUNNER || 'ffgithubrunners' }}
     timeout-minutes: 5
     outputs:
       lint: ${{ steps.plan.outputs.lint }}
       e2e: ${{ steps.plan.outputs.e2e }}
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      - name: The host's mirror of this repository at this commit
-        run: /opt/ffghr/ffghr-workspace.sh use-mirror "${{ github.sha }}"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
         with:
           fetch-depth: 2
       - id: plan

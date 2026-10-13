@@ -456,6 +456,12 @@ Each step can be undone on its own. The commands are in [Cut-over](#cut-over).
    machine's Claude login since w1078, so they are only stale credentials on the machine. **Keep the
    machine's `gh` login** (w868): the daemon's own fetches (a new sandbox, the base refresh) and the pushes of a branch
    handover still use it (section 13.3).
+   Until a machine's login is retired, a Claude process a worker starts itself from its shell (`claude -p`, a script on
+   the Agent SDK: a measurement, a replay) does not get the worker's vault token, which is only in the agent process's
+   environment, and silently runs on that login: someone else's account (w1158: the first context probes on biscuit ran
+   on biscuit's own login, about $1.70, and that login then answered with its seven-day limit). Give such a process the
+   agent's own token (`CLAUDE_CODE_OAUTH_TOKEN` of the agent process, `/proc/$PPID/environ` on Linux; never print it)
+   and check its last four characters against the worker brief's "Claude account" line before the first call.
 
 **Rolling back** a machine's grants: take the machine out of the entry's grants. A Claude token has no machine to roll back
 to (w1078); a release from before w1078 would read `claudeFromVault` again, which the newer release's start removed

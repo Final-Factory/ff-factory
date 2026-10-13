@@ -762,6 +762,12 @@ export class MachineManager {
     return h && this.isOnline(id) ? protocolProblem(h) : undefined;
   }
 
+  /** The FF Factory commit a connected daemon runs (its hello), or undefined when it is offline or did not say (w1166). */
+  daemonCommit(id: string): string | undefined {
+    const d = this.hellos.get(id)?.daemon?.trim().toLowerCase();
+    return d && this.isOnline(id) && /^[0-9a-f]{7,40}$/.test(d) ? d : undefined;
+  }
+
   /**
    * A connected daemon installed from another commit than this portal's, which speaks a protocol both serve: an update
    * is available, and nothing waits for it (w605: after a portal update every daemon was refused its paused agents).
@@ -1425,6 +1431,14 @@ export class MachineManager {
       else delete s.info.ranFor;
       this.touch(s);
     }
+    // The FF Factory code a new process starts on (w1166): its daemon's commit. One that ran other code before hears so
+    // first: its system prompt and guard may now say otherwise than what it read earlier in the conversation.
+    const code = s.live ? undefined : this.daemonCommit(m.id);
+    const updated = code && s.info.turns > 0 && (!s.info.ranOn || !sameCommit(s.info.ranOn, code)) ? updatedNote(s.info.ranOn, code) : undefined;
+    if (code && s.info.ranOn !== code) {
+      s.info.ranOn = code;
+      this.touch(s);
+    }
     const catalog = this.hellos.get(m.id)?.catalog;
     if (spec.mcp && catalog) spec.mcp = { ...spec.mcp, tools: spec.mcp.tools.filter((t) => catalog.includes(t.name)) };
     // Stored here first, so the daemon's transcript event can name them without sending them back.
@@ -1436,7 +1450,7 @@ export class MachineManager {
     const moved = !s.live && s.info.movedFrom && sbId ? this.requireSandbox(m.id, sbId) : undefined;
     // Its uncommitted work was committed before its sandbox was released (w656): it hears so first.
     const saved = !s.live && s.info.savedWork ? savedNote(s.info.savedWork) : undefined;
-    const said = [moved ? movedNote(m, s.info.movedFrom!, moved) : undefined, saved, text].filter(Boolean).join('\n\n');
+    const said = [updated, moved ? movedNote(m, s.info.movedFrom!, moved) : undefined, saved, text].filter(Boolean).join('\n\n');
     this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), ...(files.length ? { attachments: files } : {}) });
     if (moved || saved) {
       delete s.info.movedFrom;
@@ -1714,7 +1728,7 @@ export class MachineManager {
         // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
         // The account its process started on (ranAs, ranFor) is the portal's too: the daemon keeps the copy of the session's
         // first start, which would put a restart on another person's tokens back on the first account (w1076).
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ...run } = msg.info;
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host
@@ -2367,6 +2381,22 @@ function gitHead(dir: string): string | undefined {
  * else). info.daemon is the short hash machineDeploy or the installer stamped into machine/VERSION; unknown versions
  * count as current. Whether the two can work together is protocolProblem's call alone.
  */
+/** Whether two commit ids (either may be abbreviated) name the same commit. */
+export function sameCommit(a: string, b: string): boolean {
+  const x = a.trim().toLowerCase();
+  const y = b.trim().toLowerCase();
+  return !!x && !!y && (x.startsWith(y) || y.startsWith(x));
+}
+
+/**
+ * What opens the first message of a process started on other FF Factory code than its last one (w1166): an update
+ * carried its session over, so what it read earlier in the conversation (the branch to integrate into, a PR's base, a
+ * rule) may be out of date; its system prompt and guard are the current ones now.
+ */
+export function updatedNote(was: string | undefined, now: string): string {
+  return `[updated] FF Factory was updated since your last process started (it ran ${was ? was.slice(0, 7) : 'an older commit'}; this machine runs ${now.slice(0, 7)} now). Your process started again on the new code, in the same conversation, so your system prompt and the guard are the current ones. Where they differ from what you were told or read earlier in this conversation (the branch to integrate into, a PR's base, a rule), follow them. Then carry on.`;
+}
+
 export function daemonBehind(h: { daemon?: string }, portalHead: string | undefined): string | undefined {
   const d = h.daemon?.trim().toLowerCase();
   const p = portalHead?.trim().toLowerCase();

@@ -16,6 +16,8 @@ export interface BeltTool {
 export const PERSONAL_TOOLS: ReadonlySet<string> = new Set([
   // looking
   'list_sandboxes',
+  // its rules that most turns do not need (w1158)
+  'read_rules',
   'list_machines',
   'list_branches',
   'agent_transcript',
@@ -96,6 +98,20 @@ export const USER_ASKED_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 export type BeltRole = 'dispatcher' | 'personal' | 'remote' | 'ops';
+
+/**
+ * The tools a coordinator carries in full in every call (w1158, docs/orchestrators.md "What a coordinator's context
+ * costs"): the ones most of its turns use. Every other tool of its belt is deferred: Claude Code lists its name and
+ * loads its schema with ToolSearch when the coordinator needs it, so its text costs nothing in the calls that do not.
+ * The whole set of tools was about 28,600 of the dispatcher's 48,200 input tokens per call (measured, w1158).
+ */
+export const ALWAYS_LOADED: Readonly<Record<'dispatcher' | 'personal', ReadonlySet<string>>> = {
+  dispatcher: new Set(['list_work', 'list_sandboxes', 'list_machines', 'system_status', 'start_agent', 'message_agent', 'decide_work', 'create_sandbox', 'list_branches', 'set_agent_title', 'wake_me', 'read_rules']),
+  personal: new Set(['list_work', 'request_work', 'update_work', 'message_agent', 'list_sandboxes', 'list_machines', 'system_status', 'agent_transcript', 'message_person', 'wake_me', 'read_rules']),
+};
+
+/** Whether a coordinator's tool is loaded in every call (ALWAYS_LOADED) rather than found with ToolSearch. */
+export const alwaysLoaded = (role: 'dispatcher' | 'personal', tool: string): boolean => ALWAYS_LOADED[role].has(tool);
 
 /**
  * The tools of a role. `guard` (dispatcher) is asked before a user_asked tool runs, with the work_id it was given;

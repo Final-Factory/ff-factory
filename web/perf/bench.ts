@@ -16,7 +16,8 @@
 //   idle     the main thread's busy share (DevTools TaskDuration) and React commits per second, sitting on the
 //            home page with live traffic and nothing typed.
 //   --check  fail (exit 1) when a budget is broken: components per key, DOM size, typing p95, long tasks, layouts
-//            per second at rest (with --live 0). CI runs it on the orchestrator and on the busiest sandbox.
+//            per second at rest (with --live 0). `npm run perf` runs it on the orchestrator and on the busiest
+//            sandbox; agents run that locally (CI runs no perf tests, w1173).
 //   memory   the JS heap after a forced GC, sampled each minute over --memory minutes of live traffic.
 //   payload  the size of /api/state and the time to the first usable page.
 import { spawn } from 'node:child_process';
@@ -43,7 +44,7 @@ const JSON_OUT = opt('json', '');
 // The page to measure on: '' (the orchestrator), or e.g. '#/machine/beast/sandbox/agent-mcp' (on a wide screen the orchestrator's
 // chat beside a sandbox with thousands of past agents).
 const ROUTE = opt('route', '');
-// --check: exit 1 when a budget below is broken (CI runs it). Counts, not milliseconds, where possible: they do not
+// --check: exit 1 when a budget below is broken (npm run perf). Counts, not milliseconds, where possible: they do not
 // depend on how fast the machine is.
 const CHECK = args.includes('--check');
 const BUDGET = { rendersPerKey: 30, domNodes: 8000, workP95Ms: 50, layoutsPerSecIdle: 20, longTasksTyping: 2 };
