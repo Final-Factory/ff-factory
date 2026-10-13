@@ -16,7 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
-import { HOST_PROTOCOL, HostedSession, hostFolders, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
+import { HOST_PROTOCOL, HostedSession, hostFolders, hostLook, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import type { TrimPolicy } from '../server/cacheTrim.ts';
@@ -40,6 +40,7 @@ import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
 import { hubEditorDirs, hubListedEditors, realDeps as realUnityDeps } from './unity.ts';
 import { UnityReaper, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
+import { LeftoverReaper, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
@@ -238,6 +239,11 @@ const USAGE_DEFAULT_MINUTES = 15;
 // Never a Claude OAuth token in the daemon log (the launch spec carries the host's, server/secrets.ts).
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a.map((x) => (typeof x === 'string' ? redactSecrets(x) : x)));
 
+/** The portal's pending check-ins by session (ISO times) as ms; an unreadable one is left out. */
+function wakesOf(w: Record<string, string>): Map<string, number> {
+  return new Map(Object.entries(w).map(([id, at]) => [id, Date.parse(at)] as [string, number]).filter(([, t]) => Number.isFinite(t)));
+}
+
 export class Daemon {
   private readonly cfg: DaemonConfig;
   /** The outside watchdog of the portal's host, when this machine is the watcher (machine/outsideWatch.ts). */
@@ -279,6 +285,14 @@ export class Daemon {
   readonly slots: UnitySlots;
   /** Ends a sandbox's orphaned or hung batch build, which would hold its Unity slot for hours (machine/unityReaper.ts, w791). */
   readonly reaper: UnityReaper;
+  /** Ends what a stopped worker left running: game players, Xvfb, builds, servers (machine/leftovers.ts, w1196, w1197). */
+  readonly leftovers: LeftoverReaper;
+  /** The pending wake_me check-ins of this machine's sessions (ms), as the portal last said (welcome, `resumable`; w1196). */
+  private wakes = new Map<string, number>();
+  /** The sessions the portal's last welcome listed for this machine: a process of one of them is this machine's. */
+  private portalSessions = new Set<string>();
+  /** The portal's welcome came since this daemon started: until then who is live or waited for is not known (w1196). */
+  private welcomed = false;
   /** Where the `unity-slot` commands are, once written (first on agents' PATH). */
   private slotBin?: string;
   private lastSlotTick = 0;
@@ -307,7 +321,7 @@ export class Daemon {
   guard?: MachineGuard;
   private readonly guardEffects?: MachineGuardEffects;
 
-  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps) {
+  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>) {
     this.cfg = cfg;
     this.guardEffects = guardEffects;
     this.probes = probes;
@@ -348,6 +362,40 @@ export class Daemon {
           ? { ...realReaperDeps(platform, realUnityDeps(platform), reaperHands), procs: async () => [], inspect: async () => [] }
           : realReaperDeps(platform, { ...realUnityDeps(platform), procs: () => pd.procs() }, reaperHands)),
     );
+    // What stopped workers left running (w1196, w1197). Only a real daemon (no test session factory, no test pool) ever
+    // sees the machine's processes; a test hands it deps.
+    const real = !makeSession && !poolDeps;
+    const unityHands = realUnityDeps(platform);
+    const slotRoots = () => playerSlotRoots({ platform: process.platform, home: HOME, workerRoot: cfg.root, env: process.env });
+    this.leftovers = new LeftoverReaper({
+      platform,
+      machineId: cfg.id,
+      procs: real ? () => pd.procs() : async () => [],
+      envOf: (pids) => readEnvs(platform, pids),
+      inspect: realInspect(platform),
+      sessionLive: (id) => this.sessionLive(id),
+      sessionKnown: (id) => this.entries.has(id) || this.portalSessions.has(id) || this.hostSessions.has(id),
+      resumable: (id) => this.resumable.has(id),
+      wakeAt: (id) => this.wakes.get(id),
+      liveSandboxes: () => new Set([...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox).map((e) => e.spec!.sandbox!)),
+      ready: () => this.welcomed,
+      slotRoots,
+      tempRoot: () => agentTempRoot(cfg.tempDir),
+      leases: () => readLeases(slotRoots()),
+      protectedPaths: () => [cfg.repoPath, appDirOfConfig(cfg), ...(this.currentPool()?.protectedPaths ?? [])],
+      places: () => this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
+      self: () => [process.pid, process.ppid],
+      host: os.hostname().toLowerCase(),
+      kill: (pid, signal) => unityHands.kill(pid, signal),
+      exists: (p) => fs.existsSync(p),
+      remove: (p) => fs.rmSync(p, { force: true }),
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      now: () => Date.now(),
+      log: (line) => log(line),
+      onEvent: (text) => this.send({ type: 'sandbox_event', text: `Leftover processes: ${text}` }),
+      afterKill: () => this.slots.tick(),
+      ...leftoverDeps,
+    });
     this.pool = new SandboxPool(
       {
         repoPath: cfg.repoPath,
@@ -666,6 +714,8 @@ export class Daemon {
     // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
     try {
       this.slotBin = installShims(this.slots.dir);
+      // ff-leftovers (w1197): a worker lists and ends what it started before DONE or a stop.
+      installLeftoversShim(this.slotBin);
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
     }
@@ -673,6 +723,8 @@ export class Daemon {
     void this.slotTick();
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
     this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
+    // What stopped workers left running (w1196, w1197): looked at once a minute.
+    this.timers.push(setInterval(() => void this.leftovers.tick(), 15_000));
     // Agent hosts nobody follows (w799): an orphan is stopped, a gone host's folder removed after a while.
     if (this.hosted) {
       this.hostWatch = new HostWatch({
@@ -960,6 +1012,9 @@ export class Daemon {
       this.voice?.onStats();
       if (this.ws?.readyState !== WebSocket.OPEN) return;
       const unity = this.slots.report();
+      // Each game player with its owner and age (w1196): list_sandboxes and the dashboard flag the orphans.
+      const left = this.leftovers.report();
+      if (unity && left.at) Object.assign(unity, { playerList: left.players, leftoverProcesses: left.others });
       this.send({ type: 'stats', stats, ...(unity ? { unity } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);
@@ -1210,6 +1265,20 @@ export class Daemon {
     return { ...spec, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...this.slotEnv(spec) } };
   }
 
+  /**
+   * Whether a session's agent process runs here (w1196): its entry says so, or its agent host is up (after a daemon restart
+   * a host runs before the daemon takes it back). A host folder still starting counts while it is fresh.
+   */
+  private sessionLive(id: string): boolean {
+    if (this.entries.get(id)?.s.live) return true;
+    if (!this.hosted || !/^[\w-]+$/.test(id)) return false;
+    const dir = path.join(this.hostsRoot, id);
+    if (!fs.existsSync(dir)) return false;
+    const look = hostLook(dir);
+    if (look === 'alive' || look === 'stale') return true;
+    return look === 'starting' && Date.now() - (folderLastWrite(dir) ?? 0) < 5 * 60_000;
+  }
+
   /** Where agent hosts keep their files (machine/agentHost.ts). */
   private get hostsRoot() {
     return hostsDir(appDirOfConfig(this.cfg));
@@ -1458,11 +1527,15 @@ export class Daemon {
         return;
       case 'resumable':
         this.resumable = new Set(msg.sessionIds);
+        if (msg.wakes) this.wakes = wakesOf(msg.wakes);
         return;
       case 'welcome': {
         // The machine's agent cap (w536; a portal before it sent the old main-clone max_agents here).
         this.maxSessions = msg.maxSessions;
         if (msg.resumable) this.resumable = new Set(msg.resumable);
+        if (msg.wakes) this.wakes = wakesOf(msg.wakes);
+        this.portalSessions = new Set(msg.sessions.map((s) => s.id));
+        this.welcomed = true;
         // A portal from before protocol 5 sends no pool settings: keep daemon.json's. So does a worker root install
         // (w513) whose record has no pool yet (an enrollment, never deployed from the portal): its hello tells it.
         if (msg.sandboxes !== undefined && !(msg.sandboxes === null && this.cfg.root)) {

@@ -1297,6 +1297,26 @@ test("w1097: the daemon hears which stopped workers a request still waits for, a
   assert.deepEqual(guard().resumable, []);
 });
 
+test("w1196: the daemon hears each worker's pending check-in, so what a stopped worker left running stays until it is due", async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  const at = new Date(Date.now() + 3 * 3_600_000).toISOString();
+  s.info.wakeAt = at;
+  store.putSession(s.info);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  const wakes = () => (d as unknown as { wakes: Map<string, number> }).wakes;
+  await until('the welcome names it', () => wakes().get(s.info.id) === Date.parse(at));
+  assert.equal((d as unknown as { welcomed: boolean }).welcomed, true, 'after the welcome the daemon judges leftovers');
+  assert.ok((d as unknown as { portalSessions: Set<string> }).portalSessions.has(s.info.id));
+  // The check-in is cancelled: the next heartbeat tells the daemon.
+  delete s.info.wakeAt;
+  store.putSession(s.info);
+  (mm as unknown as { heartbeat: () => void }).heartbeat();
+  await until('the daemon is told', () => !wakes().has(s.info.id));
+});
+
 test('w1135: a message queued while its machine was offline goes as soon as the daemon is back (its hello), not at the next half-minute pass; the queue says what holds it now', async (t) => {
   const { store, sessions, mm, daemon, cleanup } = await setup();
   t.after(cleanup);

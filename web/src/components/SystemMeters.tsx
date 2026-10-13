@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
-import type { AccountUsage, AppState, CleanupSummary, HostHealth, HostStats, PlanUsage, Provider, ProviderMetrics, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
+import type { AccountUsage, AppState, CleanupSummary, HostHealth, HostStats, PlanUsage, Provider, ProviderMetrics, SessionInfo, SystemStats, UnitySlotsReport, UsageMeter } from '../../../shared/types';
+import { unitySlotsLine } from '../../../shared/fleet';
 import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
 import { memUsed as memUsedOf } from '../../../shared/stats';
 import { fmtBytes, fmtClock, fmtCost, fmtRelative, lsGet, lsSet, useNow } from '../util';
@@ -18,7 +19,7 @@ const worse = (a: Lvl, b: Lvl): Lvl => (a === 'crit' || b === 'crit' ? 'crit' : 
 /** One computer in the footer: the host (always first) or a machine, with its numbers when it has any. */
 export interface Computer {
   name: string;
-  stats?: HostStats;
+  stats?: HostStats & { unity?: UnitySlotsReport };
   online: boolean;
   host?: boolean;
   /** Its last clean-up pass (server/cleanup.ts). */
@@ -73,6 +74,8 @@ export function describe(c: Computer): string {
     `RAM ${Math.round(ramPct(s))}% (${fmtBytes(memUsedOf(s))} of ${fmtBytes(s.memTotalBytes)})${s.memPressure ? `, pressure ${s.memPressure}` : ''}`,
     gpu,
     s.diskFreeBytes !== undefined ? `Disk ${fmtBytes(s.diskFreeBytes)} free` : '',
+    // Its Unity editors and game players, each player with its owner and age; an orphan says so (w1196).
+    s.unity ? `Unity ${unitySlotsLine(s.unity)}` : '',
     c.cleanup ? `Last clean-up ${fmtClock(c.cleanup.at)}: ${fmtBytes(c.cleanup.freedBytes ?? 0)} freed (${c.cleanup.removed} item(s))` : '',
   ]
     .filter(Boolean)

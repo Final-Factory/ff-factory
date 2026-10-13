@@ -169,6 +169,8 @@ export function parsePsClock(text: string): number | undefined {
 // ---------------------------------------------------------------- the reaper
 
 interface Seen {
+  /** Its start time at first sight: one more than a few seconds off is another process under the same pid. */
+  born: number;
   firstSeen: number;
   orphanLooks: number;
   cpuMs?: number;
@@ -184,7 +186,7 @@ export interface Reaped {
 
 export class UnityReaper {
   private readonly d: ReaperDeps;
-  /** By pid and start time, so a reused pid is a new build. */
+  /** By pid and command line, with the start time it had, so a reused pid is a new build. */
   private readonly seen = new Map<string, Seen>();
   private busy?: Promise<Reaped[]>;
   private lastLook = 0;
@@ -244,10 +246,12 @@ export class UnityReaper {
         out.push({ pid: u.pid, sandbox: place.id, killed: false, line: `${label}: kept, its start time could not be read` });
         continue;
       }
-      const key = `${u.pid}@${born}`;
+      // By pid and command line, not start time: on a Mac or Linux the start time is now minus ps's elapsed seconds, which
+      // moves by up to a second between looks (measured on biscuit, w1196: 715 ms), so no build was ever seen twice there.
+      const key = `${u.pid}|${cmd}`;
       live.add(key);
       let s = this.seen.get(key);
-      if (!s) this.seen.set(key, (s = { firstSeen: now, orphanLooks: 0, cpuAt: now }));
+      if (!s || Math.abs(s.born - born) > 5_000) this.seen.set(key, (s = { born, firstSeen: now, orphanLooks: 0, cpuAt: now }));
       const owner = ownerOf(u, procs, facts, d.platform);
       s.orphanLooks = owner.gone ? s.orphanLooks + 1 : 0;
       const tree = treeOf(procs, u.pid);

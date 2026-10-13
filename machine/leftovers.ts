@@ -1,0 +1,723 @@
+// What a worker leaves running after it stops (w1196, w1197). On 2026-10-13 biscuit ran its fans at 100% around the clock:
+// two headless game players that workers had started were still up 27 h and 34 h after those workers stopped and their
+// requests (w1072, w1025) closed, about 6 cores between them, with 17 Xvfb displays of earlier workers beside them.
+// Nothing reaped them: the Unity slots listed them as "game players (not counted)", the batch reaper (unityReaper.ts)
+// looks only at Unity, and the agent host's end (hostWatch.ts) takes only its own tree, which a detached player, an
+// Xvfb started with setsid or anything reparented to init has left. Ben (w1197): "please update the fff harness to
+// ensure everything is properly cleaned up so we arent wasting system resources on our machines after work is done".
+//
+// Who started a process: every process a worker starts inherits its environment, FF_SESSION_ID and FF_MACHINE_ID
+// included (server/agents.ts), wherever it went since: a new session or process group, a detached launch, a parent that
+// exited. So that is the owner, read from the process itself (Linux /proc/<pid>/environ, a Mac's `ps -E`, Windows the
+// process's own environment block), not from its parent or its process group, which a detached player has left, and not
+// from a job object, which only a native helper holding a handle across daemon restarts could keep. A game player started
+// through the player slots (players/slotK-P) also names its session in its lease (player_slots.py, w1196); a program run
+// from a worker's temp folder (<install>/tmp/ffa-<session>/...) names it in its path.
+//
+// When its owner is gone (the session's agent process is not running here), the daemon ends what it left, a grace after:
+//   - DONE_GRACE_MS after the process stopped when no request waits for the session (its work is over);
+//   - STOPPED_GRACE_MS after, when a request still waits for it (CI, a person, a pause): it comes back to its files, not
+//     to a process left running unattended;
+//   - and never before its pending wake_me check-in is due plus WAKE_GRACE_MS: a worker that set one is coming back to
+//     look at a job (a soak run, a long test) and says so.
+// A game player under a player slot that names no session (no environment, no lease) and whose starter is gone, whose
+// slot nobody else holds and whose sandbox has no live worker, is an orphan: it ends ORPHAN_GRACE_MS after it was first
+// seen so.
+//
+// Never touched: anything while its worker's process runs (between turns too); an interactive Unity editor, and what it
+// started (the sandbox pool stops idle editors; a person's editor is never ours); a process that names the machine's main
+// clone or the daemon's own folder (the agent hosts, which hostWatch.ts owns); a process carrying another machine's id or
+// a session this machine never ran (the portal's own orchestrators where a daemon shares its host); a shared build server
+// (VBCSCompiler, MSBuild nodes, bee) while it still uses CPU, since another worker's build may be using it; anything
+// before the portal's welcome since the daemon started (until then who is live or waited for is not known). Every end is
+// logged with what, why and whose, and told to the portal.
+import fs from 'node:fs';
+import path from 'node:path';
+import { run } from '../server/proc.ts';
+import { parsePsJson } from '../server/watchdog.ts';
+import type { Proc, UnityPlatform } from './unity.ts';
+import { gamePlayers, isUnityBinary, splitArgs, unityProcesses } from './unitySlots.ts';
+import { inspectProcs, type ProcFacts } from './unityReaper.ts';
+
+const MIN = 60_000;
+
+/**
+ * The limits. Where each comes from:
+ * - DONE_GRACE_MS: a guess with a margin. The portal stops a worker whose requests are all closed at once (Agents.reapIdle,
+ *   every 5 min); nothing comes back for what it left. Two looks a minute apart fit inside it.
+ * - STOPPED_GRACE_MS: sourced. The session sweep empties a stopped worker's temp folder after the same 10 min
+ *   (server/sessionSweep.ts graceMin): a resume within it finds both, after it neither.
+ * - WAKE_GRACE_MS: a guess. A check-in that came due resumes the worker within a minute or two (server/wake.ts fires at its
+ *   time; a held Claude pool queues it); 10 min more covers a slow start. Once resumed the worker is live again.
+ * - ORPHAN_GRACE_MS: a guess, as STOPPED_GRACE_MS: an orphan has no owner to come back for it.
+ * - LOOKS: a process ends only once two looks (a minute apart) have seen it, so one odd listing never ends it.
+ * - SERVER_IDLE_CPU_MS: as unityReaper.ts CPU_ADVANCE_MS: a compiler server serving a build uses seconds of CPU a minute.
+ * - TERM_WAIT_MS: a guess: a player or an Xvfb ends within a second of SIGTERM; what still runs 5 s later is killed.
+ */
+export const LEFTOVER = {
+  DONE_GRACE_MS: 2 * MIN,
+  STOPPED_GRACE_MS: 10 * MIN,
+  WAKE_GRACE_MS: 10 * MIN,
+  ORPHAN_GRACE_MS: 10 * MIN,
+  LOOKS: 2,
+  SERVER_IDLE_CPU_MS: 2_000,
+  TERM_WAIT_MS: 5_000,
+  LOOK_EVERY_MS: MIN,
+} as const;
+
+/** What a process is, for what may end it. */
+export type LeftoverKind = 'player' | 'display' | 'unity-batch' | 'editor' | 'server' | 'process';
+
+/** The FF Factory variables of a process's environment that say who started it. */
+export interface ProcEnv {
+  session?: string;
+  sandbox?: string;
+  machine?: string;
+}
+
+/** One lease file of a player slot (scripts/nightly/player_slots.py `_lease`), with the slot it is in. */
+export interface PlayerLease {
+  /** The slot's folder name: "slot1-1", "slotnightly-0", "slot3". */
+  slot: string;
+  pid?: number;
+  host?: string;
+  /** The worker session that took it (FF_SESSION_ID; player_slots.py since w1196). */
+  session?: string;
+  /** The folder it was taken from (a sandbox's path) or its label. */
+  sandbox?: string;
+  /** Seconds since the epoch, as player_slots.py writes it. */
+  time?: number;
+}
+
+export interface LeftoverDeps {
+  platform: UnityPlatform;
+  /** This machine's id (FF_MACHINE_ID of its workers' processes). */
+  machineId: string;
+  procs(): Promise<Proc[]>;
+  /** FF_SESSION_ID, FF_SANDBOX_ID and FF_MACHINE_ID of the given processes, where the machine lets them be read. */
+  envOf(pids: number[]): Promise<Map<number, ProcEnv>>;
+  inspect(pids: number[]): Promise<ProcFacts[]>;
+  /** The session's agent process runs here (the daemon's entry, or its agent host still up). */
+  sessionLive(id: string): boolean;
+  /** A session this machine runs or ran (the daemon's entries, the portal's list in its welcome). */
+  sessionKnown(id: string): boolean;
+  /** A request still waits for the session (the portal's `resumable`, w1097). */
+  resumable(id: string): boolean;
+  /** When the session's pending wake_me check-in comes due (ms), as the portal last said. */
+  wakeAt(id: string): number | undefined;
+  /** The sandboxes with a live worker. */
+  liveSandboxes(): Set<string>;
+  /** The portal's welcome came since the daemon started. */
+  ready(): boolean;
+  /** The player slot roots (server/ownLeftovers.ts playerSlotRoots). */
+  slotRoots(): string[];
+  /** The workers' temp root, <install>/tmp. */
+  tempRoot(): string | undefined;
+  leases(): PlayerLease[];
+  /** A process that names one of these is never touched: the main clone, the daemon's own folder. */
+  protectedPaths(): string[];
+  /** The sandboxes, for a killed batch Unity's stale Temp/UnityLockfile. */
+  places(): { id: string; path: string }[];
+  /** Never touched: the daemon and its parents. */
+  self(): number[];
+  host: string;
+  kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void;
+  exists(p: string): boolean;
+  remove(p: string): void;
+  sleep(ms: number): Promise<void>;
+  now(): number;
+  log(line: string): void;
+  /** Something the orchestrators should hear: what was ended, why and whose. */
+  onEvent(text: string): void;
+  /** After an end: the Unity slots look again (a killed batch build frees one). */
+  afterKill?(): Promise<unknown>;
+}
+
+// ---------------------------------------------------------------- the pure decisions
+
+const DISPLAY = /^(xvfb|xvnc|xephyr|xdummy|x11vnc|xvfb-run|openbox|fluxbox|icewm|twm|xfwm4|metacity|matchbox-window-manager)$/i;
+const SERVER = /VBCSCompiler|MSBuild(\.dll|\.exe)?["']?\s.*node(mode|reuse)|dotnet[^\n]*build-server|bee_backend/i;
+
+const posix = (p: string) => p.replace(/\\/g, '/');
+const key = (p: string, platform: UnityPlatform) => (platform === 'win32' ? posix(p).replace(/\/+$/, '').toLowerCase() : p.replace(/\/+$/, ''));
+
+/** A path as a whole word of a command line: not a longer path that starts with it (~/FinalFactory-sandboxes for ~/FinalFactory). */
+const names = (k: string) => new RegExp(`${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s/"'])`);
+
+/** The program of a command line (Windows: its image name). */
+export function programOf(p: Pick<Proc, 'cmd' | 'name'>, platform: UnityPlatform): string {
+  if (platform === 'win32' && p.name) return p.name.replace(/\.exe$/i, '');
+  const first = platform === 'win32' ? (splitArgs(p.cmd)[0] ?? '') : (p.cmd.trim().split(/\s+/)[0] ?? '');
+  return path.posix.basename(posix(first)).replace(/\.exe$/i, '');
+}
+
+/** What a process is. `topBatch`: the pids of top-level batch-mode Unity processes (unitySlots.ts unityProcesses). */
+export function kindOf(p: Proc, platform: UnityPlatform, topBatch: Set<number>): LeftoverKind {
+  if (gamePlayers([p], platform).length) return 'player';
+  if (isUnityBinary(p, platform)) return topBatch.has(p.pid) ? 'unity-batch' : 'editor';
+  if (DISPLAY.test(programOf(p, platform))) return 'display';
+  if (SERVER.test(p.cmd)) return 'server';
+  return 'process';
+}
+
+/** The player slot (its folder name) a player runs from, or undefined when it is not under one of `roots`. */
+export function slotOf(cmd: string, roots: string[], platform: UnityPlatform): string | undefined {
+  const c = key(platform === 'win32' ? (splitArgs(cmd)[0] ?? cmd) : cmd, platform);
+  for (const r of roots) {
+    const k = key(r, platform) + '/';
+    const at = c.indexOf(k);
+    if (at < 0 || (at > 0 && !/["'\s]/.test(c[at - 1]))) continue;
+    const slot = c.slice(at + k.length).split('/')[0];
+    if (/^slot[\w-]*$/i.test(slot)) return slot;
+  }
+  return undefined;
+}
+
+/** The session whose temp folder (<tempRoot>/ffa-<session>/) a command line's program runs from. */
+export function tempSessionOf(cmd: string, tempRoot: string | undefined, platform: UnityPlatform): string | undefined {
+  if (!tempRoot) return undefined;
+  const prog = key(platform === 'win32' ? (splitArgs(cmd)[0] ?? '') : (cmd.trim().split(/\s+/)[0] ?? ''), platform);
+  const k = key(tempRoot, platform) + '/ffa-';
+  if (!prog.startsWith(k)) return undefined;
+  return /^([\w-]+)\//.exec(prog.slice(k.length))?.[1];
+}
+
+/** The sandbox of a player slot: "slot3-1" -> "slot3" (the sandbox-pairs layout, w576); a pool slot has none. */
+export const slotSandbox = (slot: string | undefined) => /^(slot\d+)-[01]$/i.exec(slot ?? '')?.[1];
+
+/** The sandbox id of a lease's folder: <root>/sandboxes/<id>/... -> id. */
+export const leaseSandbox = (folder: string | undefined) => /[/\\]sandboxes[/\\]([^/\\]+)/.exec(folder ?? '')?.[1];
+
+/** Whether a lease still holds its slot (player_slots.py Pool._live): a remote holder only by its age. */
+export function leaseHeld(l: PlayerLease, o: { host: string; now: number; alive: (pid: number) => boolean; maxAgeHours?: number }): boolean {
+  const t = Number(l.time) * 1000;
+  if (!Number.isFinite(t) || o.now - t > (o.maxAgeHours ?? 12) * 60 * MIN) return false;
+  if (String(l.host ?? '').toLowerCase() !== o.host.toLowerCase()) return true;
+  return o.alive(Number(l.pid));
+}
+
+export interface SessionFacts {
+  live: boolean;
+  resumable: boolean;
+  wakeAt?: number;
+  /** When this daemon first saw the session not live (its first sight of it, when it never saw it live). */
+  stoppedSince: number;
+  now: number;
+}
+
+const mins = (ms: number) => `${Math.max(0, Math.round(ms / MIN))} min`;
+const ago = (ms: number) => (ms >= 2 * 60 * MIN ? `${(ms / (60 * MIN)).toFixed(1)} h` : mins(ms));
+const clock = (t: number) => new Date(t).toISOString().slice(11, 16) + ' UTC';
+
+/**
+ * Whether what a session left may end now: `until` is when it may, while it is kept. The worker's process running keeps
+ * everything; a stopped one's leftovers end a grace after it stopped, and never before its pending check-in plus a grace.
+ */
+export function sessionVerdict(s: SessionFacts): { end: boolean; until?: number; why: string } {
+  if (s.live) return { end: false, why: 'its worker is running' };
+  const grace = s.resumable ? LEFTOVER.STOPPED_GRACE_MS : LEFTOVER.DONE_GRACE_MS;
+  const after = s.stoppedSince + grace;
+  const wake = s.wakeAt !== undefined ? s.wakeAt + LEFTOVER.WAKE_GRACE_MS : 0;
+  const until = Math.max(after, wake);
+  const state = `its worker stopped ${ago(s.now - s.stoppedSince)} ago`;
+  if (s.now < until) {
+    const why = wake > after ? `its check-in comes due at ${clock(s.wakeAt!)}` : s.resumable ? 'a request still waits for it' : 'its work is over';
+    return { end: false, until, why: `${state}; ${why}: kept until ${clock(until)}` };
+  }
+  return { end: true, why: `${state}${s.resumable ? ' (a request still waits for it, with no check-in pending)' : ' and no request waits for it'}` };
+}
+
+export interface OrphanFacts {
+  /** Its starter, when that still runs: "python3 (pid 12)". */
+  parent?: string;
+  /** A remote run's live lease holds its slot. */
+  heldBy?: string;
+  /** Its slot's sandbox has a live worker. */
+  sandboxLive?: string;
+  firstSeen: number;
+  now: number;
+}
+
+/** A game player under a player slot that names no session: kept while anything may still own it. */
+export function orphanVerdict(o: OrphanFacts): { end: boolean; until?: number; why: string } {
+  if (o.parent) return { end: false, why: `no session named, but its starter ${o.parent} still runs` };
+  if (o.heldBy) return { end: false, why: `no session named, but its slot is held by ${o.heldBy}` };
+  if (o.sandboxLive) return { end: false, why: `no session named, and its sandbox ${o.sandboxLive} has a live worker that may own it` };
+  const until = o.firstSeen + LEFTOVER.ORPHAN_GRACE_MS;
+  if (o.now < until) return { end: false, until, why: `an orphan (no session, its starter gone, nobody holds its slot): ends at ${clock(until)}` };
+  return { end: true, why: `an orphan: it names no session, its starter is gone and nobody holds its slot, seen so for ${ago(o.now - o.firstSeen)}` };
+}
+
+/** The parent that still owns a process (as unityReaper.ts ownerOf), or undefined when it is gone, init or reused. */
+export function liveParent(p: Proc, procs: Proc[], facts: Map<number, ProcFacts>, platform: UnityPlatform): string | undefined {
+  if (platform !== 'win32' && p.ppid <= 1) return undefined;
+  const parent = procs.find((x) => x.pid === p.ppid);
+  if (!parent) return undefined;
+  if (platform !== 'win32' && /(^|\/)(systemd|init|launchd)(\s|$)/.test(parent.cmd)) return undefined;
+  const born = facts.get(p.pid)?.startedAt;
+  const parentBorn = facts.get(parent.pid)?.startedAt;
+  if (born === undefined || parentBorn === undefined || parentBorn > born + 1_000) return undefined;
+  return `${programOf(parent, platform) || 'process'} (pid ${parent.pid})`;
+}
+
+// ---------------------------------------------------------------- the reaper
+
+/** One game player as list_sandboxes and the dashboard show it (shared/types.ts PlayerSeen). */
+export interface PlayerLine {
+  pid: number;
+  slot?: string;
+  session?: string;
+  sandbox?: string;
+  ageMin?: number;
+  owner: 'live' | 'stopped' | 'orphan' | 'held';
+  /** Minutes until it ends, while it is kept for now. */
+  endsInMin?: number;
+}
+
+interface Candidate {
+  p: Proc;
+  kind: LeftoverKind;
+  session?: string;
+  sandbox?: string;
+  via?: 'env' | 'lease' | 'path';
+  slot?: string;
+}
+
+export interface Ended {
+  session?: string;
+  pids: number[];
+  line: string;
+}
+
+export class LeftoverReaper {
+  private readonly d: LeftoverDeps;
+  /** When each session was first seen not live. */
+  private readonly stopped = new Map<string, number>();
+  /** Looks that saw a process (by pid and command line), and when it was first seen an orphan. */
+  private readonly looks = new Map<string, { n: number; orphanSince?: number; cpuMs?: number }>();
+  private busy?: Promise<Ended[]>;
+  private lastLook = 0;
+  private players: PlayerLine[] = [];
+  private others = 0;
+  private lastAt?: number;
+
+  constructor(d: LeftoverDeps) {
+    this.d = d;
+  }
+
+  async tick(): Promise<void> {
+    if (this.d.now() - this.lastLook < LEFTOVER.LOOK_EVERY_MS) return;
+    await this.look().catch((e) => this.d.log(`leftovers: look failed: ${(e as Error).message}`));
+  }
+
+  look(): Promise<Ended[]> {
+    this.busy ??= this.run().finally(() => (this.busy = undefined));
+    return this.busy;
+  }
+
+  /** The game players of the last look, with their owner and age (list_sandboxes, the dashboard). */
+  report(): { players: PlayerLine[]; others: number; at?: string } {
+    return { players: this.players, others: this.others, ...(this.lastAt ? { at: new Date(this.lastAt).toISOString() } : {}) };
+  }
+
+  private async run(): Promise<Ended[]> {
+    const d = this.d;
+    this.lastLook = d.now();
+    const procs = await d.procs();
+    const self = new Set(d.self());
+    const prot = d.protectedPaths().filter(Boolean).map((p) => names(key(p, d.platform)));
+    const roots = d.slotRoots();
+    const top = unityProcesses(procs, d.platform);
+    const topBatch = new Set(top.filter((u) => u.kind === 'batch').map((u) => u.pid));
+    // Interactive editors (and what they started) and processes that name a protected folder are spared, trees and all.
+    const spared = new Set<number>();
+    const spare = (pid: number) => {
+      const q = [pid];
+      while (q.length) {
+        const x = q.pop()!;
+        if (spared.has(x)) continue;
+        spared.add(x);
+        for (const c of procs) if (c.ppid === x && c.pid !== x) q.push(c.pid);
+      }
+    };
+    for (const u of top) if (u.kind === 'interactive') spare(u.pid);
+    for (const p of procs) {
+      const c = d.platform === 'win32' ? posix(p.cmd).toLowerCase() : p.cmd;
+      if (self.has(p.pid) || prot.some((re) => re.test(c))) spare(p.pid);
+    }
+    const env = await d.envOf(procs.map((p) => p.pid).filter((pid) => pid > 0 && !spared.has(pid)));
+    const leases = d.leases();
+    const now = d.now();
+    const cands: Candidate[] = [];
+    for (const p of procs) {
+      if (spared.has(p.pid) || p.pid <= 0) continue;
+      const kind = kindOf(p, d.platform, topBatch);
+      if (kind === 'editor') continue;
+      const e = env.get(p.pid);
+      const slot = kind === 'player' ? slotOf(p.cmd, roots, d.platform) : undefined;
+      let c: Candidate | undefined;
+      if (e?.session) {
+        // Ours: a process of this machine's workers, or of a session this machine runs or ran.
+        const ours = e.machine ? e.machine.toLowerCase() === d.machineId.toLowerCase() : d.sessionKnown(e.session);
+        if (!ours) continue;
+        c = { p, kind, session: e.session, sandbox: e.sandbox, via: 'env', slot };
+      } else {
+        const lease = slot ? leases.find((l) => l.slot === slot && Number(l.pid) === p.pid && String(l.host ?? '').toLowerCase() === d.host.toLowerCase()) : undefined;
+        const fromPath = tempSessionOf(p.cmd, d.tempRoot(), d.platform);
+        if (lease?.session) c = { p, kind, session: lease.session, sandbox: leaseSandbox(lease.sandbox) ?? slotSandbox(slot), via: 'lease', slot };
+        else if (fromPath) c = { p, kind, session: fromPath, via: 'path', slot };
+        else if (kind === 'player' && slot) c = { p, kind, slot, sandbox: leaseSandbox(lease?.sandbox) ?? slotSandbox(slot) };
+      }
+      if (c) cands.push(c);
+    }
+    // The session clocks: a session not live starts (or keeps) its clock; a live one clears it.
+    const sessions = new Set(cands.map((c) => c.session).filter((s): s is string => !!s));
+    for (const s of sessions) {
+      if (d.sessionLive(s)) this.stopped.delete(s);
+      else if (!this.stopped.has(s)) this.stopped.set(s, now);
+    }
+    for (const s of [...this.stopped.keys()]) if (!sessions.has(s) && d.sessionLive(s)) this.stopped.delete(s);
+    const facts = new Map((await d.inspect(cands.map((c) => c.p.pid).concat(cands.map((c) => c.p.ppid))).catch(() => [] as ProcFacts[])).map((f) => [f.pid, f]));
+    const ready = d.ready();
+    const liveSb = d.liveSandboxes();
+    const toEnd = new Map<string, { c: Candidate; why: string }[]>();
+    // A process ends only once two looks have seen it, so one odd listing never ends anything.
+    const players: PlayerLine[] = [];
+    let others = 0;
+    const seen = new Set<string>();
+    for (const c of cands) {
+      const born = facts.get(c.p.pid)?.startedAt;
+      // By pid and command line: a start time read from ps's elapsed seconds moves by a second between looks.
+      const id = `${c.p.pid}|${c.p.cmd}`;
+      seen.add(id);
+      const look = this.looks.get(id) ?? { n: 0 };
+      this.looks.set(id, look);
+      const age = born !== undefined ? now - born : undefined;
+      let v: { end: boolean; until?: number; why: string };
+      let owner: PlayerLine['owner'];
+      if (c.session) {
+        v = sessionVerdict({ live: d.sessionLive(c.session), resumable: d.resumable(c.session), wakeAt: d.wakeAt(c.session), stoppedSince: this.stopped.get(c.session) ?? now, now });
+        owner = d.sessionLive(c.session) ? 'live' : 'stopped';
+      } else {
+        // A remote run's lease (lab.py acquires a peer's slot over ssh, the player has none of its own here). A local lease
+        // of another pid is another player's: runs of one build share a slot, so it says nothing about this one.
+        const held = leases.find((l) => l.slot === c.slot && String(l.host ?? '').toLowerCase() !== d.host.toLowerCase() && leaseHeld(l, { host: d.host, now, alive: () => true }));
+        const sb = c.sandbox && liveSb.has(c.sandbox) ? c.sandbox : undefined;
+        const parent = liveParent(c.p, procs, facts, d.platform);
+        if (parent || held || sb) look.orphanSince = undefined;
+        else look.orphanSince ??= now;
+        v = orphanVerdict({ parent, heldBy: held ? `${held.host === d.host ? '' : `${held.host} `}pid ${held.pid}${held.session ? ` (session ${held.session})` : ''}` : undefined, sandboxLive: sb, firstSeen: look.orphanSince ?? now, now });
+        owner = parent || held || sb ? 'held' : 'orphan';
+      }
+      // A shared build server ends only once it is idle: another worker's build may be compiling through it.
+      const cpu = facts.get(c.p.pid)?.cpuMs;
+      if (v.end && c.kind === 'server' && (look.cpuMs === undefined || cpu === undefined || cpu - look.cpuMs >= LEFTOVER.SERVER_IDLE_CPU_MS)) v = { end: false, why: `${v.why}; a shared build server still at work, ended once idle` };
+      look.cpuMs = cpu;
+      if (!ready && v.end) v = { end: false, why: `${v.why}; waiting for the portal's welcome before ending anything` };
+      look.n++;
+      if (c.kind === 'player') players.push({ pid: c.p.pid, ...(c.slot ? { slot: c.slot } : {}), ...(c.session ? { session: c.session } : {}), ...(c.sandbox ? { sandbox: c.sandbox } : {}), ...(age !== undefined ? { ageMin: Math.round(age / MIN) } : {}), owner, ...(v.until !== undefined ? { endsInMin: Math.max(0, Math.ceil((v.until - now) / MIN)) } : {}) });
+      else if (owner === 'stopped') others++;
+      if (!v.end || look.n < LEFTOVER.LOOKS || born === undefined) continue;
+      const group = c.session ?? `orphan:${c.p.pid}`;
+      if (!toEnd.has(group)) toEnd.set(group, []);
+      toEnd.get(group)!.push({ c, why: v.why });
+    }
+    for (const id of [...this.looks.keys()]) if (!seen.has(id)) this.looks.delete(id);
+    for (const s of [...this.stopped.keys()]) if (!sessions.has(s)) this.stopped.delete(s);
+    this.players = players;
+    this.others = others;
+    this.lastAt = now;
+    const out: Ended[] = [];
+    for (const [group, items] of toEnd) out.push(await this.end(group, items, procs));
+    return out;
+  }
+
+  /** End one session's leftovers (or one orphan): SIGTERM, then SIGKILL what still runs; log and tell the portal. */
+  private async end(group: string, items: { c: Candidate; why: string }[], procs: Proc[]): Promise<Ended> {
+    const d = this.d;
+    // Children before their parents, so a supervisor (xvfb-run, a script) does not start them again.
+    const depth = (pid: number) => {
+      let n = 0;
+      const seen = new Set<number>();
+      for (let x = procs.find((p) => p.pid === pid); x && !seen.has(x.pid); x = procs.find((p) => p.pid === x!.ppid)) {
+        seen.add(x.pid);
+        n++;
+      }
+      return n;
+    };
+    const order = [...items].sort((a, b) => depth(b.c.p.pid) - depth(a.c.p.pid));
+    for (const { c } of order) d.kill(c.p.pid, 'SIGTERM');
+    await d.sleep(LEFTOVER.TERM_WAIT_MS);
+    const after = await d.procs().catch(() => [] as Proc[]);
+    const left = order.filter(({ c }) => after.some((p) => p.pid === c.p.pid && p.cmd === c.p.cmd));
+    for (const { c } of left) d.kill(c.p.pid, 'SIGKILL');
+    // A killed batch build's stale lock, once no Unity has its project open (as unityReaper.ts does).
+    const projects = new Set<string>();
+    for (const { c } of order) {
+      if (c.kind !== 'unity-batch') continue;
+      const proj = unityProcesses([c.p], d.platform)[0]?.project;
+      const place = proj && d.places().find((pl) => key(pl.path, d.platform) === key(proj, d.platform));
+      if (place) projects.add(place.path);
+    }
+    if (projects.size) {
+      const still = unityProcesses(await d.procs().catch(() => [] as Proc[]), d.platform);
+      for (const proj of projects) {
+        if (still.some((u) => u.project && key(u.project, d.platform) === key(proj, d.platform))) continue;
+        const lock = (d.platform === 'win32' ? path.win32 : path.posix).join(proj, 'Temp', 'UnityLockfile');
+        if (d.exists(lock)) d.remove(lock);
+      }
+    }
+    const what = (c: Candidate) => `${c.kind === 'player' ? `game player${c.slot ? ` ${c.slot}` : ''}` : c.kind === 'display' ? programOf(c.p, d.platform) : c.kind === 'unity-batch' ? 'batch Unity' : programOf(c.p, d.platform) || 'process'} pid ${c.p.pid}`;
+    const first = order[0].c;
+    const whose = first.session ? `worker ${first.session}${first.sandbox ? ` (sandbox ${first.sandbox})` : ''}` : 'no worker';
+    const list = order.map(({ c }) => what(c));
+    const text = `ended ${order.length} process(es) left by ${whose}: ${list.slice(0, 8).join(', ')}${list.length > 8 ? `, and ${list.length - 8} more` : ''}. Why: ${order[0].why}${left.length ? `; ${left.length} needed SIGKILL` : ''}.`;
+    d.log(`leftovers: ${text} Command lines: ${order.map(({ c }) => `[${c.p.pid}] ${c.p.cmd.slice(0, 160)}`).join(' | ')}`);
+    d.onEvent(text);
+    await d.afterKill?.().catch(() => undefined);
+    return { session: group.startsWith('orphan:') ? undefined : group, pids: order.map(({ c }) => c.p.pid), line: text };
+  }
+}
+
+// ---------------------------------------------------------------- the real machine
+
+const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID)=(.*)$/;
+
+/** The FF variables of an environment's "NAME=value" entries. */
+export function envFrom(entries: Iterable<string>): ProcEnv {
+  const o: ProcEnv = {};
+  for (const kv of entries) {
+    const m = WANT.exec(kv);
+    if (!m) continue;
+    if (m[1] === 'FF_SESSION_ID') o.session = m[2];
+    else if (m[1] === 'FF_SANDBOX_ID') o.sandbox = m[2];
+    else o.machine = m[2];
+  }
+  return o;
+}
+
+/**
+ * A Mac's `ps -E -ww -o pid=,command=` line: the command line, then the environment, space-separated, so a value is a
+ * run of non-space characters and the last mention wins (an argument that says FF_SESSION_ID=... comes before the
+ * environment).
+ */
+export function macEnvLine(line: string): { pid: number; env: ProcEnv } | undefined {
+  const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+  if (!m) return undefined;
+  const env: ProcEnv = {};
+  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
+  return { pid: Number(m[1]), env };
+}
+
+/**
+ * Windows: the environment block of other processes of this user, from their PEB (NtQueryInformationProcess, then
+ * ReadProcessMemory of RTL_USER_PROCESS_PARAMETERS.Environment, x64 offsets 0x20, 0x80 and EnvironmentSize 0x3F0). A
+ * 32-bit process, one of another user or one that refuses the read is skipped: nothing of it is ever ended for its owner.
+ */
+export const WIN_ENV_CS = `
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class FFProcEnv {
+  [StructLayout(LayoutKind.Sequential)]
+  struct PBI { public IntPtr R1; public IntPtr Peb; public IntPtr R2a; public IntPtr R2b; public IntPtr Pid; public IntPtr R3; }
+  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int c, ref PBI p, int l, out int r);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(int a, bool i, int pid);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool ReadProcessMemory(IntPtr h, IntPtr a, byte[] b, IntPtr s, out IntPtr r);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32.dll")] static extern bool IsWow64Process(IntPtr h, out bool w);
+  static long Read8(IntPtr h, long a) { byte[] b = new byte[8]; IntPtr n; if (!ReadProcessMemory(h, new IntPtr(a), b, new IntPtr(8), out n)) return 0; return BitConverter.ToInt64(b, 0); }
+  public static string Block(int pid) {
+    if (IntPtr.Size != 8) return null;
+    IntPtr h = OpenProcess(0x0410, false, pid);
+    if (h == IntPtr.Zero) return null;
+    try {
+      bool wow;
+      if (IsWow64Process(h, out wow) && wow) return null;
+      PBI p = new PBI(); int r;
+      if (NtQueryInformationProcess(h, 0, ref p, Marshal.SizeOf(typeof(PBI)), out r) != 0) return null;
+      long pp = Read8(h, p.Peb.ToInt64() + 0x20);
+      if (pp == 0) return null;
+      long env = Read8(h, pp + 0x80);
+      if (env == 0) return null;
+      long size = Read8(h, pp + 0x3F0);
+      if (size <= 0 || size > (1 << 22)) size = 65536;
+      for (; size >= 4096; size /= 2) {
+        byte[] buf = new byte[size]; IntPtr n;
+        if (ReadProcessMemory(h, new IntPtr(env), buf, new IntPtr(size), out n)) return Encoding.Unicode.GetString(buf, 0, (int)n.ToInt64());
+      }
+      return null;
+    } finally { CloseHandle(h); }
+  }
+}`;
+
+export function winEnvScript(pids: number[]): string {
+  const list = pids.filter((p) => Number.isInteger(p) && p > 4).join(',');
+  return [
+    `Add-Type -TypeDefinition @'\n${WIN_ENV_CS}\n'@`,
+    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and $b.Contains('FF_SESSION_ID=')) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID'] } } }`,
+    `@($out) | ConvertTo-Json -Compress`,
+  ].join('\n');
+}
+
+/** The FF variables of each process, as this platform lets them be read. */
+export async function readEnvs(platform: UnityPlatform, pids: number[]): Promise<Map<number, ProcEnv>> {
+  const out = new Map<number, ProcEnv>();
+  if (!pids.length) return out;
+  if (platform === 'linux') {
+    for (const pid of pids) {
+      try {
+        const e = envFrom(fs.readFileSync(`/proc/${pid}/environ`, 'latin1').split('\0'));
+        if (e.session) out.set(pid, e);
+      } catch {
+        // gone, or another user's
+      }
+    }
+    return out;
+  }
+  if (platform === 'darwin') {
+    const want = new Set(pids);
+    const r = await run('ps', ['-x', '-E', '-ww', '-o', 'pid=,command='], { timeoutMs: 30_000 });
+    for (const line of r.stdout.split('\n')) {
+      const x = macEnvLine(line);
+      if (x && want.has(x.pid) && x.env.session) out.set(x.pid, x.env);
+    }
+    return out;
+  }
+  const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winEnvScript(pids)], { timeoutMs: 120_000 });
+  if (r.code !== 0) throw new Error(`reading process environments failed (${r.code}): ${r.stderr.trim().slice(0, 200)}`);
+  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string }>(r.stdout, 'the Windows process environments')) {
+    if (x.session) out.set(Number(x.pid), { session: x.session, ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}) });
+  }
+  return out;
+}
+
+/** Every lease file under the slot roots. */
+export function readLeases(roots: string[]): PlayerLease[] {
+  const out: PlayerLease[] = [];
+  for (const root of roots) {
+    let slots: string[] = [];
+    try {
+      slots = fs.readdirSync(root).filter((n) => /^slot[\w-]*$/i.test(n));
+    } catch {
+      continue;
+    }
+    for (const slot of slots) {
+      let files: string[] = [];
+      try {
+        files = fs.readdirSync(path.join(root, slot, 'leases')).filter((n) => n.endsWith('.json'));
+      } catch {
+        continue;
+      }
+      for (const f of files) {
+        try {
+          const l = JSON.parse(fs.readFileSync(path.join(root, slot, 'leases', f), 'utf8'));
+          out.push({ slot, pid: Number(l.pid), host: l.host, time: Number(l.time), ...(l.session ? { session: String(l.session) } : {}), ...(l.sandbox ? { sandbox: String(l.sandbox) } : {}) });
+        } catch {
+          // being written, or unreadable: player_slots.py drops it too
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** The facts the reaper reads on the real machine (start times and CPU as unityReaper.ts reads them). */
+export const realInspect = (platform: UnityPlatform) => (pids: number[]) => inspectProcs(platform, [...new Set(pids)].filter((p) => p > 0));
+
+// ---------------------------------------------------------------- ff-leftovers: a worker's own teardown
+
+const SHELL = /^(bash|sh|zsh|dash|fish|cmd|powershell|pwsh)$/i;
+
+/**
+ * What a worker started that still runs (the `ff-leftovers` command, w1197): the processes carrying its own session id,
+ * not its own chain (this command, its shell, claude, the agent host), not what claude runs for itself (its MCP servers:
+ * the non-shell children of that chain) and not an interactive editor or what it started. Background jobs (a shell claude
+ * keeps for a background task, or one reparented to init) are in it.
+ */
+export function ownLeftovers(session: string, procs: Proc[], env: Map<number, ProcEnv>, selfPid: number, platform: UnityPlatform): Proc[] {
+  const byPid = new Map(procs.map((p) => [p.pid, p]));
+  const chain = new Set<number>();
+  for (let x = byPid.get(selfPid); x && !chain.has(x.pid); x = byPid.get(x.ppid)) chain.add(x.pid);
+  chain.add(selfPid);
+  const out = new Set<number>();
+  const skip = new Set<number>();
+  const sub = (root: number, into: Set<number>) => {
+    const q = [root];
+    while (q.length) {
+      const x = q.pop()!;
+      if (into.has(x) || chain.has(x)) continue;
+      into.add(x);
+      for (const c of procs) if (c.ppid === x && c.pid !== x) q.push(c.pid);
+    }
+  };
+  // What the worker's own chain (claude, its host: the members carrying its session, not init or a terminal) runs that is
+  // not a shell: its MCP servers.
+  const own = new Set([...chain].filter((pid) => env.get(pid)?.session === session));
+  for (const p of procs) if (own.has(p.ppid) && !chain.has(p.pid) && !SHELL.test(programOf(p, platform))) sub(p.pid, skip);
+  for (const u of unityProcesses(procs, platform)) if (u.kind === 'interactive') sub(u.pid, skip);
+  for (const p of procs) if (!chain.has(p.pid) && !skip.has(p.pid) && env.get(p.pid)?.session === session) out.add(p.pid);
+  return procs.filter((p) => out.has(p.pid));
+}
+
+/** `ff-leftovers [list|end]`: what this worker's session started that still runs, and ending it. */
+export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = process.env): Promise<number> {
+  const cmd = argv[0] ?? 'list';
+  const session = e.FF_SESSION_ID;
+  const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
+  if (!session || !['list', 'end'].includes(cmd)) {
+    process.stdout.write(`usage: ff-leftovers [list|end]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
+    return session ? 2 : 1;
+  }
+  const { realDeps } = await import('./unity.ts');
+  const hands = realDeps(platform);
+  const procs = await hands.procs();
+  const mine = ownLeftovers(session, procs, await readEnvs(platform, procs.map((p) => p.pid)), process.pid, platform);
+  const facts = new Map((await realInspect(platform)(mine.map((p) => p.pid)).catch(() => [] as ProcFacts[])).map((f) => [f.pid, f]));
+  const topBatch = new Set(unityProcesses(procs, platform).filter((u) => u.kind === 'batch').map((u) => u.pid));
+  const line = (p: Proc) => {
+    const born = facts.get(p.pid)?.startedAt;
+    const age = born === undefined ? '' : ` up ${ago(Date.now() - born)}`;
+    return `  pid ${p.pid} ${kindOf(p, platform, topBatch)}${age}: ${p.cmd.slice(0, 160)}`;
+  };
+  if (!mine.length) {
+    process.stdout.write(`Nothing your session (${session}) started is still running.\n`);
+    return 0;
+  }
+  if (cmd === 'list') {
+    process.stdout.write(`Still running from your session (${session}): ${mine.length}\n${mine.map(line).join('\n')}\n\`ff-leftovers end\` ends them; FF Factory ends them anyway a few minutes after your process stops.\n`);
+    return 0;
+  }
+  for (const p of mine) hands.kill(p.pid, 'SIGTERM');
+  await new Promise((r) => setTimeout(r, LEFTOVER.TERM_WAIT_MS));
+  const after = await hands.procs();
+  const left = mine.filter((p) => after.some((x) => x.pid === p.pid && x.cmd === p.cmd));
+  for (const p of left) hands.kill(p.pid, 'SIGKILL');
+  await new Promise((r) => setTimeout(r, 500));
+  const still = (await hands.procs()).filter((x) => left.some((p) => p.pid === x.pid && p.cmd === x.cmd));
+  process.stdout.write(`Ended ${mine.length - still.length} of ${mine.length} process(es) your session (${session}) started${left.length ? ` (${left.length} needed SIGKILL)` : ''}:\n${mine.map(line).join('\n')}\n${still.length ? `Still running: ${still.map((p) => p.pid).join(', ')}\n` : 'None is left.\n'}`);
+  return still.length ? 1 : 0;
+}
+
+/** Write the `ff-leftovers` command beside `unity-slot` (<bin>, first on the agents' PATH). */
+export function installLeftoversShim(bin: string, node = process.execPath, nodeArgs = process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), script = import.meta.filename): void {
+  const fwd = (p: string) => p.replace(/\\/g, '/');
+  const q = (s: string) => `"${s.replace(/(["$`\\])/g, '\\$1')}"`;
+  fs.mkdirSync(bin, { recursive: true });
+  const sh = path.join(bin, 'ff-leftovers');
+  fs.writeFileSync(`${sh}.tmp`, `#!/bin/sh\n# FF Factory: what this worker started that still runs (machine/leftovers.ts). Written by the machine daemon at start.\nexec ${[fwd(node), ...nodeArgs, fwd(script)].map(q).join(' ')} "$@"\n`);
+  fs.chmodSync(`${sh}.tmp`, 0o755);
+  fs.renameSync(`${sh}.tmp`, sh);
+  fs.writeFileSync(`${sh}.cmd`, `@echo off\r\nrem FF Factory: what this worker started that still runs (machine/leftovers.ts).\r\n${[node, ...nodeArgs, script].map((s) => `"${s}"`).join(' ')} %*\r\n`);
+}
+
+// Run when started directly (the ff-leftovers shim).
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+  leftoversMain(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    (e) => {
+      process.stderr.write(`ff-leftovers: ${(e as Error).message}\n`);
+      process.exit(2);
+    },
+  );
+}

@@ -29,6 +29,7 @@ on:
       - 'server/elevation.test.ts'
       - 'server/elevation.ts'
       - 'server/hostWatch.test.ts'
+      - 'server/leftovers.test.ts'
       - 'server/machineDeploy.ts'
       - 'server/machineDeployWin.test.ts'
       - 'server/machineDeployWin.ts'

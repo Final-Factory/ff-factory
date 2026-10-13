@@ -232,6 +232,19 @@ test('w791: the lock stays when another Unity still has the project open', async
   assert.match(st.events[0], /left Temp\/UnityLockfile, a Unity \(pid 961\) still has the project open/);
 });
 
+test('w1196: on a Mac or Linux the start time moves by up to a second between looks (ps elapsed seconds); the orphan is still ended on the second look', async () => {
+  const log = '/home/u/ffw/sandboxes/slot1/Logs/build.log';
+  const m = machine('linux', [{ pid: 4242, ppid: 1, cmd: `/opt/Unity/Hub/Editor/6000.3.19f1/Editor/Unity -batchmode -quit -projectPath /home/u/ffw/sandboxes/slot1 -logFile ${log}` }], [{ id: 'slot1', path: '/home/u/ffw/sandboxes/slot1' }]);
+  const { st } = m;
+  st.born.set(4242, st.now - 15 * HOUR);
+  st.mtimes.set(log, st.now - 14 * HOUR);
+  assert.equal((await m.reaper.look())[0].killed, false);
+  st.now += MIN;
+  st.born.set(4242, st.now - 15 * HOUR - MIN + 715); // measured on biscuit: 715 ms off between two looks
+  const second = await m.reaper.look();
+  assert.equal(second[0].killed, true, second[0].line);
+});
+
 test('w791: a reused pid is a new build, not the old one\'s history', async () => {
   const log = `${SLOT4}\\Logs\\b.log`;
   const m = machine('win32', [{ pid: 500, ppid: 400, name: 'bash.exe', cmd: 'bash.exe x.sh' }, winBatch(970, 500, SLOT4, log)], [{ id: 'slot4', path: SLOT4 }]);

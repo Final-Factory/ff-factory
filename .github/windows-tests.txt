@@ -15,6 +15,7 @@ server/machineSandboxes.test.ts | server/proc.ts, machine/sandboxes.ts | git wor
 server/copyTree.test.ts | server/proc.ts | copyTree's robocopy /XD and Copy-Item branches
 server/hostWatch.test.ts | machine/hostWatch.ts | taskkill /T /F, and Windows locking a live process's folder
 server/unityReaper.test.ts | machine/unityReaper.ts | the process list from CIM
+server/leftovers.test.ts | machine/leftovers.ts | another process's environment block read through Windows PowerShell 5.1 (Add-Type, the PEB): whose worker started it
 server/sandboxes.test.ts | server/sandboxes.ts | a file held without delete sharing gives EPERM
 server/elevation.test.ts | server/elevation.ts | the real signed-in-desktop check through CIM
 server/opsWorker.test.ts | server/opsWorker.ts | named pipes, as on the Windows portal host
