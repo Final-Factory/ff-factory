@@ -140,11 +140,11 @@ const withoutParens = (s: string): string => {
 };
 
 /** Request ids named in the first line(s) of each message: an orchestrator's trigger ("[work request] w859 …", "[worker update] …"). */
-export function namedIdsIn(texts: readonly string[], max = 4): string[] {
+export function namedIdsIn(texts: readonly string[], max = 4, legacy = false): string[] {
   const out: string[] = [];
   for (const t of texts) {
     let head = t.split('\n').slice(0, 3).join('\n').slice(0, 400);
-    if (NOTICE.test(head)) head = withoutParens(head);
+    if (!legacy && NOTICE.test(head)) head = withoutParens(head);
     for (const m of head.matchAll(ID)) {
       const id = m[0].toLowerCase();
       if (!out.includes(id)) out.push(id);
@@ -174,7 +174,7 @@ export function servedAt(sessionId: string, items: readonly WorkItem[], startMs:
 }
 
 /** Which request(s) or bucket a turn goes to. `info` is the session; `texts` the messages that began the turn (oldest first). */
-export function attribute(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'standingId' | 'requestedBy' | 'title'> | undefined, items: readonly WorkItem[], texts: readonly string[], startMs: number, known?: ReadonlySet<string>): Alloc[] {
+export function attribute(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'standingId' | 'requestedBy' | 'title'> | undefined, items: readonly WorkItem[], texts: readonly string[], startMs: number, known?: ReadonlySet<string>, legacy = false): Alloc[] {
   const exists = new Set(items.map((w) => w.id.toLowerCase()));
   // `known`: ids the spend record holds too (the replay of an old turn names a request the ledger has since dropped)
   if (known) for (const id of known) if (!id.startsWith('_')) exists.add(id);
@@ -183,12 +183,12 @@ export function attribute(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorR
   if (kind === 'standing') return [{ id: `_standing:${info?.standingId ?? 'unknown'}`, weight: 1, how: 'bucket' }];
   if (kind === 'orchestrator') {
     // The ids a message names must be requests (a "w3" in prose is not): only ones the ledger holds count.
-    const ids = namedIdsIn(texts).filter((id) => exists.has(id));
+    const ids = namedIdsIn(texts, 4, legacy).filter((id) => exists.has(id));
     if (ids.length) return even(ids, 'message');
     return [{ id: info?.orchestratorRole === 'dispatcher' ? '_dispatcher' : `_personal:${info?.requestedBy?.userId ?? 'unknown'}`, weight: 1, how: 'bucket' }];
   }
   if (kind === 'ops') {
-    const ids = namedIdsIn(texts).filter((id) => exists.has(id));
+    const ids = namedIdsIn(texts, 4, legacy).filter((id) => exists.has(id));
     return ids.length ? even(ids, 'message') : [{ id: '_ops', weight: 1, how: 'bucket' }];
   }
   // a worker
@@ -228,12 +228,11 @@ export class SpendStore {
     for (const r of Object.values(f?.requests ?? {})) this.requests.set(r.id, r);
     for (const s of Object.values(f?.sessions ?? {})) this.sessions.set(s.id, s);
     this.backfill = f?.backfill;
-    // w1160: a coordinator session recorded before the coordination split keeps what it had spent on each request until its days are found.
-    for (const s of this.sessions.values()) {
-      if (!isCoordinatorRole(s.role) || s.coordSplit || s.legacyRequests) continue;
-      const legacy = Object.fromEntries(Object.entries(s.requests).filter(([id, usd]) => !isBucket(id) && usd > 0));
-      if (Object.keys(legacy).length) s.legacyRequests = legacy;
-      else s.coordSplit = true;
+    // w1160: coordination days are keyed by the coordinator's session; the first version keyed them by "dispatcher" and the like,
+    // on days that were wrong. Those go, and every coordinator without coordV 2 is rebuilt from its transcript (rebuildCoordination).
+    for (const r of this.requests.values()) {
+      if (!r.coordDays) continue;
+      for (const k of Object.keys(r.coordDays)) if (!this.sessions.has(k)) delete r.coordDays[k];
     }
   }
 
@@ -285,7 +284,7 @@ export class SpendStore {
     if (!s) {
       s = { id, role: roleOf(info), title: info?.title ?? id, machine: info?.machineId, person: info?.requestedBy?.displayName, firstAt: at, lastAt: at, turns: 0, total: zeroTok(), models: {}, estimated: zeroTok(), requests: {}, cats: {}, calls: 0, ctxMax: 0, compactions: 0, transcript: { state: 'full' } };
       // a coordinator first seen by this code records its days live: nothing to split afterwards (w1160)
-      if (isCoordinatorRole(s.role)) s.coordSplit = true;
+      if (isCoordinatorRole(s.role)) s.coordV = 2;
       this.sessions.set(id, s);
     }
     if (info) {
@@ -298,7 +297,7 @@ export class SpendStore {
   }
 
   /** The turn's own spend: the difference of the SDK's cumulative totals, or an estimate when there is no baseline. */
-  private delta(s: SessionSpend, id: string, u: TurnUsage | undefined, cost: number | undefined, info: SessionInfo | undefined, fromStart = false): { models: ModelTok; estimated: boolean } {
+  private delta(s: SessionSpend, id: string, u: TurnUsage | undefined, cost: number | undefined, info: SessionInfo | undefined, fromStart = false, legacy = false): { models: ModelTok; estimated: boolean } {
     const cum = u?.cum && Object.keys(u.cum).length ? u.cum : undefined;
     const fallbackModel = info?.model ?? Object.keys(s.models)[0] ?? 'unknown';
     if (cum) {
@@ -321,7 +320,7 @@ export class SpendStore {
         // its own figure ran ahead, and each portal restart then counted the whole running total again).
         const grew = c.usd >= p.usd && c.in >= p.in && c.out >= p.out && c.cr >= p.cr && c.cw >= p.cw;
         // totals that began again: the agent process says so (usage.restarted), else a drop to half or less (a /clear, an older daemon)
-        const reset = !grew && (u?.restarted === true || c.usd < p.usd * 0.5 || c.in < p.in * 0.5 || c.cr < p.cr * 0.5);
+        const reset = (legacy || !grew) && (u?.restarted === true || c.usd < p.usd * 0.5 || c.in < p.in * 0.5 || c.cr < p.cr * 0.5);
         const d = reset ? c : { in: Math.max(0, c.in - p.in), out: Math.max(0, c.out - p.out), cr: Math.max(0, c.cr - p.cr), cw: Math.max(0, c.cw - p.cw), usd: Math.max(0, c.usd - p.usd) };
         if (d.in || d.out || d.cr || d.cw || d.usd) out[model] = d;
       }
@@ -339,7 +338,7 @@ export class SpendStore {
     const info = this.ctx.session(sessionId);
     const s = this.sessionRec(sessionId, info, at);
     s.liveFrom ??= seq;
-    if (s.legacyRequests && !s.coordSplit) s.coordFrom ??= seq;
+    if (isCoordinatorRole(s.role) && s.coordV !== 2) s.coordFrom ??= seq;
     const { models, estimated } = this.delta(s, sessionId, u, cost, info);
     // The messages this result answers (its `answers` uuids): one that arrived mid-turn is the next turn's, not this one's.
     const all = this.texts.get(sessionId) ?? [];
@@ -393,7 +392,7 @@ export class SpendStore {
       const d = day(at);
       r.days[d] = addTok(r.days[d] ?? zeroTok(), scaleTok(total, f));
       if (isCoordinatorRole(s.role) && !isBucket(al.id)) {
-        const byDay = ((r.coordDays ??= {})[coordKey(s.role, s.person)] ??= {});
+        const byDay = ((r.coordDays ??= {})[s.id] ??= {});
         byDay[d] = addTok(byDay[d] ?? zeroTok(), scaleTok(total, f));
       }
       const rs = (r.sessions[s.id] ??= { role: s.role, total: zeroTok(), models: {}, turns: 0, how: {} });
@@ -521,33 +520,37 @@ export class SpendStore {
   }
 
   /**
-   * Give the coordination recorded before the split (w1160) its days. A coordinator session's turns were added to the requests
-   * they named without saying whose they were; the days of that part come from the session's own transcript (a chat is never
-   * pruned): its result lines are replayed up to `coordFrom` (the first turn recorded after the split) and tied to requests
-   * the way they were. The replay gives each request the SHAPE over days; the size is what the record already holds
-   * (`legacyRequests`), so the totals do not move. A request the replay does not find (the ledger dropped it, the transcript is
-   * gone) gets the shape of its own days. Estimated: the days are the replay's, the dollars are the record's. Returns the usd given days.
+   * Give a coordinator session's coordination its days (w1160), from its own transcript (a chat is never pruned). Its turns are
+   * replayed the way they were recorded: before `coordFrom` (the first turn the current code recorded) by the older attribution
+   * and cost rules (`legacy`: an id cited in parentheses in a harness notice counted, a restart's whole running total was one
+   * turn), after it by the current ones, so each request gets the days its recorded dollars were really spent on. The first version
+   * replayed old turns by the new rules and scaled the result to the recorded size, which put w605's $1,836 on the wrong days
+   * (it read as $1,475 of worker cost in the 3-day window). What the replay does not explain is spread over the days with room
+   * left (the request's spend that day minus what coordinators already hold), and no day holds more coordination than the request
+   * spent. The session's recorded dollars per request (`SessionSpend.requests`) stay the totals. Estimated where the replay differs.
+   * Runs for a session without `coordV` 2; forgets what the session put in the days first. Returns the usd given days.
    */
-  splitLegacyCoordination(sessionId: string, events: readonly TranscriptEvent[] | undefined, info: SessionInfo | undefined): number {
+  rebuildCoordination(sessionId: string, events: readonly TranscriptEvent[] | undefined, info: SessionInfo | undefined): number {
     const s = this.sessions.get(sessionId);
-    if (!s || s.coordSplit || !s.legacyRequests) return 0;
-    const limit = s.coordFrom ?? Infinity;
+    if (!s || !isCoordinatorRole(s.role) || s.coordV === 2) return 0;
+    for (const r of this.requests.values()) if (r.coordDays?.[sessionId]) delete r.coordDays[sessionId];
+    const boundary = s.coordFrom ?? (s.legacyRequests ? Infinity : 0);
     const items = [...this.ctx.work()];
     const known = new Set(this.requests.keys());
     const scratch = { models: {} } as SessionSpend;
     const replay = new Map<string, Map<string, Tok>>();
     let pending: { uuid?: string; text: string }[] = [];
     for (const e of events ?? []) {
-      if (e.seq >= limit) break;
       if (e.kind === 'user') pending.push({ uuid: e.uuid, text: e.text.slice(0, 1500) });
       else if (e.kind === 'result') {
-        const { models } = this.delta(scratch, sessionId, e.usage, e.costUsd, info, true);
+        const legacy = e.seq < boundary;
+        const { models } = this.delta(scratch, sessionId, e.usage, e.costUsd, info, true, legacy);
         const mine = e.answers?.length ? pending.filter((t) => t.uuid && e.answers!.includes(t.uuid)) : [];
         const used = mine.length ? mine : pending;
         pending = mine.length ? pending.filter((t) => !mine.includes(t)) : [];
         const total = sumTok(Object.values(models));
         const startMs = (Date.parse(e.t) || 0) - e.durationMs;
-        for (const al of attribute(info, items, used.map((t) => t.text), startMs, known)) {
+        for (const al of attribute(info, items, used.map((t) => t.text), startMs, known, legacy)) {
           if (isBucket(al.id)) continue;
           const days = replay.get(al.id) ?? new Map<string, Tok>();
           days.set(day(e.t), addTok(days.get(day(e.t)) ?? zeroTok(), scaleTok(total, al.weight)));
@@ -555,27 +558,51 @@ export class SpendStore {
         }
       }
     }
-    const key = coordKey(s.role, s.person);
     let given = 0;
-    for (const [rid, usd] of Object.entries(s.legacyRequests)) {
+    for (const [rid, recorded] of Object.entries(s.requests)) {
       const r = this.requests.get(rid);
-      if (!r || usd <= 0) continue;
-      const shape = new Map<string, Tok>();
-      let basis = 0;
-      const days = replay.get(rid);
-      if (days) for (const [d, t] of days) basis += t.usd;
-      if (days && basis > 0) for (const [d, t] of days) shape.set(d, scaleTok(t, usd / basis));
-      else {
-        // the request's own days, with this session's share of its tokens
-        const share = r.sessions[sessionId]?.total;
-        const all = Object.values(r.days).reduce((a, t) => a + t.usd, 0);
-        if (all > 0) for (const [d, t] of Object.entries(r.days)) shape.set(d, scaleTok(share && share.usd > 0 ? scaleTok(share, usd / share.usd) : { ...zeroTok(), usd }, t.usd / all));
+      if (!r || isBucket(rid) || recorded <= 0) continue;
+      // room each day has: what the request spent, less what other coordinators already hold
+      const room = new Map<string, number>();
+      for (const [d, t] of Object.entries(r.days)) {
+        let others = 0;
+        for (const [sid, days] of Object.entries(r.coordDays ?? {})) if (sid !== sessionId) others += days[d]?.usd ?? 0;
+        room.set(d, Math.max(0, t.usd - others));
       }
-      const byDay = ((r.coordDays ??= {})[key] ??= {});
-      for (const [d, t] of shape) byDay[d] = addTok(byDay[d] ?? zeroTok(), t);
-      given += usd;
+      const mine = new Map<string, Tok>();
+      const found = replay.get(rid);
+      let basis = 0;
+      if (found) for (const t of found.values()) basis += t.usd;
+      const f = basis > recorded ? recorded / basis : 1;
+      let placed = 0;
+      if (found) {
+        for (const [d, t] of found) {
+          const take = Math.min(t.usd * f, room.get(d) ?? 0);
+          if (take <= 0) continue;
+          mine.set(d, scaleTok(t, take / t.usd));
+          room.set(d, (room.get(d) ?? 0) - take);
+          placed += take;
+        }
+      }
+      const rest = recorded - placed;
+      const roomLeft = [...room.values()].reduce((a, x) => a + x, 0);
+      if (rest > 1e-6 && roomLeft > 0) {
+        const share = r.sessions[sessionId]?.total;
+        const give = Math.min(rest, roomLeft);
+        for (const [d, x] of room) {
+          if (x <= 0) continue;
+          const part = (give * x) / roomLeft;
+          const tok = share && share.usd > 0 ? scaleTok(share, part / share.usd) : { ...zeroTok(), usd: part };
+          mine.set(d, addTok(mine.get(d) ?? zeroTok(), tok));
+          placed += part;
+        }
+      }
+      if (!mine.size) continue;
+      const byDay = ((r.coordDays ??= {})[sessionId] ??= {});
+      for (const [d, t] of mine) byDay[d] = addTok(byDay[d] ?? zeroTok(), t);
+      given += placed;
     }
-    s.coordSplit = true;
+    s.coordV = 2;
     this.changed();
     return given;
   }
@@ -602,7 +629,9 @@ export class SpendStore {
   windowSplit(r: RequestSpend, sinceDay: string, untilDay: string, window: Tok): { workers: Tok; coordination: Coordination } {
     let coord = zeroTok();
     const by = new Map<string, number>();
-    for (const [k, days] of Object.entries(r.coordDays ?? {})) {
+    for (const [sid, days] of Object.entries(r.coordDays ?? {})) {
+      const who = this.sessions.get(sid);
+      const k = who ? coordKey(who.role, who.person) : 'coordinator';
       for (const [d, t] of Object.entries(days)) {
         if (d < sinceDay || d > untilDay) continue;
         coord = addTok(coord, t);
