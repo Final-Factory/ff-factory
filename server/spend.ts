@@ -390,14 +390,15 @@ export class SpendStore {
   }
 
   /** Add one turn's spend to its session and, by weight, to its requests. Also the backfill's entry (no account). */
-  add(a: { s: SessionSpend; at: string; models: ModelTok; total: Tok; estimated: boolean; meter?: MeterTurn; allocs: Alloc[]; items?: readonly WorkItem[]; info?: SessionInfo; account?: string; sign?: 1 | -1 }) {
+  add(a: { s: SessionSpend; at: string; models: ModelTok; total: Tok; estimated: boolean; meter?: MeterTurn; allocs: Alloc[]; items?: readonly WorkItem[]; info?: SessionInfo; account?: string; accountMix?: Record<string, number>; sign?: 1 | -1 }) {
     const { s, at, allocs } = a;
     // sign -1 takes a turn back out (correctHistory, w1209): every figure is linear in it except the largest context and the dates
     const k = a.sign ?? 1;
     const total = k === 1 ? a.total : scaleTok(a.total, -1);
     const models = k === 1 ? a.models : addModels({}, a.models, -1);
-    const account = a.account ?? UNRECORDED_ACCOUNT;
-    s.accounts = addModels(s.accounts ?? {}, { [account]: total });
+    // the account(s) the turn ran on: one, or (a turn put back by correctHistory, whose account is not known) the session's own mix
+    const parts: [string, number][] = a.accountMix ? Object.entries(a.accountMix) : [[a.account ?? UNRECORDED_ACCOUNT, 1]];
+    for (const [acc, p] of parts) s.accounts = addModels(s.accounts ?? {}, { [acc]: total }, p);
     if (k === 1) {
       s.lastAt = at > s.lastAt ? at : s.lastAt;
       if (at < s.firstAt) s.firstAt = at;
@@ -423,7 +424,7 @@ export class SpendStore {
       r.turns += f;
       r.total = addTok(r.total, scaleTok(a.total, f));
       r.models = addModels(r.models, a.models, f);
-      r.accounts = addModels(r.accounts ?? {}, { [account]: a.total }, f);
+      for (const [acc, p] of parts) r.accounts = addModels(r.accounts ?? {}, { [acc]: a.total }, f * p);
       if (a.estimated) r.estimated = addTok(r.estimated, scaleTok(a.total, f));
       const d = day(at);
       r.days[d] = addTok(r.days[d] ?? zeroTok(), scaleTok(a.total, f));
@@ -605,19 +606,65 @@ export class SpendStore {
     }
     if (!diffs.length) return none;
     if (!(s.total.usd > 0) || Math.abs(replayed - s.total.usd) > s.total.usd * 0.05) return { ...none, skipped: `the replay reads $${replayed.toFixed(2)} where the record holds $${s.total.usd.toFixed(2)}` };
-    const account = Object.entries(s.accounts ?? {}).sort((a, b) => b[1].usd - a[1].usd)[0]?.[0];
+    // the turns' accounts are not in the transcript: spread by the mix the session ran on, so no account goes below what it spent
+    const accTotal = Object.values(s.accounts ?? {}).reduce((x, t) => x + Math.max(0, t.usd), 0);
+    const accountMix = accTotal > 0 ? Object.fromEntries(Object.entries(s.accounts!).filter(([, t]) => t.usd > 0).map(([k, t]) => [k, t.usd / accTotal])) : undefined;
     let removedUsd = 0;
     let movedUsd = 0;
     for (const d of diffs) {
-      this.add({ s, at: d.at, models: d.mL, total: d.tL, estimated: false, meter: d.meter, allocs: d.AL, items, account, sign: -1 });
-      this.add({ s, at: d.at, models: d.mN, total: d.tN, estimated: false, meter: d.meter, allocs: d.AN, items, account, sign: 1 });
+      this.add({ s, at: d.at, models: d.mL, total: d.tL, estimated: false, meter: d.meter, allocs: d.AL, items, accountMix, sign: -1 });
+      this.add({ s, at: d.at, models: d.mN, total: d.tN, estimated: false, meter: d.meter, allocs: d.AN, items, accountMix, sign: 1 });
       removedUsd += d.tL.usd - d.tN.usd;
       if (d.AL.length !== d.AN.length || d.AL.some((x, i) => x.id !== d.AN[i].id)) movedUsd += d.tN.usd;
     }
     s.fixApplied = true;
+    s.acctV = 1;
     if (isCoordinatorRole(s.role)) s.coordV = undefined; // its days are rebuilt from the corrected record
     this.changed();
     return { removedUsd, movedUsd, turns: diffs.length };
+  }
+
+  /**
+   * Put right the accounts of what correctHistory changed in its first release (w1209): it took each turn out of, and put it back on, the
+   * session's biggest account, so other accounts read negative (-$2,018 and -$1,428 in a 7-day report). The accounts of a corrected session
+   * are its accounts before the correction (from the copy of the record, `spend.json.pre-w1209`) scaled to what it now holds, and a request
+   * those sessions touched has its accounts spread from its sessions' mixes: an estimate, the totals unchanged. Once per session.
+   */
+  repairAccounts(): { sessions: number; requests: number } {
+    const none = { sessions: 0, requests: 0 };
+    const todo = [...this.sessions.values()].filter((x) => x.fixApplied && x.acctV !== 1);
+    if (!todo.length) return none;
+    let backup: SpendFile | undefined;
+    try {
+      backup = JSON.parse(fs.readFileSync(`${this.path}.pre-w1209`, 'utf8')) as SpendFile;
+    } catch {
+      return none;
+    }
+    const touched = new Set<string>();
+    let n = 0;
+    for (const s of todo) {
+      s.acctV = 1;
+      const was = backup.sessions?.[s.id]?.accounts;
+      const sum = Object.values(was ?? {}).reduce((x, t) => x + Math.max(0, t.usd), 0);
+      if (!was || sum <= 0 || !(s.total.usd > 0)) continue;
+      s.accounts = Object.fromEntries(Object.entries(was).filter(([, t]) => t.usd > 0).map(([k, t]) => [k, scaleTok(t, s.total.usd / sum)]));
+      for (const id of Object.keys(s.requests)) touched.add(id);
+      n++;
+    }
+    for (const id of touched) {
+      const r = this.requests.get(id);
+      if (!r) continue;
+      let acc: ModelTok = {};
+      for (const [sid, rs] of Object.entries(r.sessions)) {
+        const s = this.sessions.get(sid);
+        const tot = Object.values(s?.accounts ?? {}).reduce((x, t) => x + Math.max(0, t.usd), 0);
+        if (!s?.accounts || tot <= 0) acc = addModels(acc, { [UNRECORDED_ACCOUNT]: rs.total });
+        else for (const [k, t] of Object.entries(s.accounts)) if (t.usd > 0) acc = addModels(acc, { [k]: rs.total }, t.usd / tot);
+      }
+      r.accounts = acc;
+    }
+    this.changed();
+    return { sessions: n, requests: touched.size };
   }
 
   /** A copy of the record before something rewrites history in it (once per tag). */

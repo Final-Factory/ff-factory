@@ -117,17 +117,19 @@ coordination days are rebuilt from the corrected record.
 
 | # | Finding | $ | Where | Fixed |
 |---|---|---|---|---|
-| 1 | The restart notices cited "(w605)" and billed the dispatcher's restart turns to it | measured: w605 coordination $1,836 over 7 days, $1,475 of it 10-11 and 10-12 | machines.ts:802 and agents.ts:1168 texts, `namedIdsIn` | going forward in a9d5eae (#362); history by `correctHistory` |
+| 1 | The restart notices cited "(w605)" and billed the dispatcher's restart turns to it | measured: w605 coordination $1,836 over 7 days, $1,475 of it 10-11 and 10-12; after the repair $0.49 (its real mentions) | machines.ts:802 and agents.ts:1168 texts, `namedIdsIn` | going forward in a9d5eae (#362); history by `correctHistory` |
 | 2 | After the first fix w605 read as $1,475 of *worker* cost in a 3-day window | measured | the first split's replay (spend.ts `rebuildCoordination`) | #381 |
-| 3 | A restart counted the CLI's whole running total as one turn | measured: $1,456.89 on 10-12 for three coordinators; workers estimated, not measured | `delta` (w1161) | going forward in a9d5eae; history by `correctHistory` |
+| 3 | A restart counted the CLI's whole running total as one turn | measured, before and after the repair (spend_report, 2026-10-13 14:10Z and 15:35Z): 3 days total $14,908 → $5,563, coordination on requests $8,117 → $226, not any request's $1,630 → $413, workers on requests $5,161 → $4,924 (-$237: resumed workers too; w1063 $270 → $153); 7 days total $23,034 → $12,073, coordination $9,674 → $701. The portal's own lines: $1,456.89 on 10-12 for three coordinators | `delta` (w1161) | going forward in a9d5eae; history by `correctHistory` |
 | 4 | A worker kept its closed requests linked and put a share of every later turn on them | not measured (needs the ledger's links over time) | `servedAt` | `openFirst` |
 | 5 | A coordinator whose session the store no longer holds was billed through the worker rules | not measured; no case seen | `record` → `attribute(info undefined)` | `infoOfRecord` |
 | 6 | A resumed conversation's context counted as `base` | category only, no dollars: base is 71% of in-session spend in the last 3 days (measured), the part that is resumed context is not separable from the record | `ContextMeter.call` | `carried` going forward |
 | 7 | A bucket's request view labelled its days "workers" under a "coordination" header; `_unattributed` answered 87,000 characters | presentation | `renderRequest` | one figure per day; 25 sessions then a count |
-| 8 | A turn that names several requests is split evenly over the first 4 | no loss or double count (weights sum to 1, tested); a batch of messages naming different requests puts the whole turn on the first four: not measured | `attribute`, `namedIdsIn` | not changed: needs the data below first |
+| 8 | A turn that names several requests is split evenly over the first 4 | no loss or double count (weights sum to 1, tested); a batch of messages naming different requests puts the whole turn on the first four: not measured | `attribute`, `namedIdsIn` | not changed. After the repair coordination is $701 of $12,073 in 7 days (5.8%) and not-any-request's $679, so a per-message weighting could move a part of $701 between requests: not worth a second method (a guess at the size, from those two figures) |
+| 9 | The repair's first release took each turn out of, and put it back on, the session's biggest account, so other accounts read negative | measured: token:5d6d575eda30 -$2,018 and token:0d94ad2b5488 -$1,428 in the 7-day report (-$565 and -$757 in 3 days) | `correctHistory` `add(account)` | spread by the session's own mix; the accounts of the 11 sessions corrected are rebuilt from `spend.json.pre-w1209` (`repairAccounts`, an estimate for the requests) |
 
-Not any request's: $1,630 in 3 days (measured): Ben's orchestrator $984, lothsahn's $626, ops $8.24, the sentry $7.44, the dispatcher $3.94.
-They are conversations that name no request, not misbilled worker spend.
+Not any request's, after the repair: $413 in 3 days (Ben's orchestrator $185, the dispatcher $172, lothsahn's $42.23, the sentry $7.44, ops $6.11) and $679 in 7 (measured).
+They are conversations and heartbeats that name no request, not misbilled worker spend. In the 7-day window $5,513 of $12,073 is under "not recorded" as an account
+(turns from before w1031 and backfilled ones: estimated, $6,203 of the window).
 
 ## Coordination: billed apart from the workers' own cost (w1160)
 

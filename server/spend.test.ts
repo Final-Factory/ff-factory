@@ -1096,3 +1096,44 @@ test("spend_report: a bucket's request view says it is no request's and shows on
   assert.equal((big.match(/^- u\d+ /gm) ?? []).length, 25);
   assert.match(big, /and 15 more session\(s\), \$/);
 });
+
+test("correctHistory: the turns it puts back keep the session's accounts: none goes below zero, and they add up to what the session holds", () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1', { ranAs: 'vault A' })]);
+  seq = 0;
+  const e1u = userEvent(T0, 'start');
+  const e1 = resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 10, cr: 1000 }) } }, 10);
+  const e2u = userEvent(T0 + 3_600_000, 'go on');
+  const e2 = resultEvent(T0 + 3_660_000, { restarted: true, cum: { m: tok({ usd: 10.5, cr: 1100 }) } }, 10.5);
+  for (const e of [e1u, e1]) w.spend.observe('s1', e);
+  w.sessions[0].ranAs = 'vault B';
+  const s = legacyOf(w, 's1');
+  w.spend.add({ s, at: e2.t, models: { m: tok({ usd: 10.5, cr: 1100 }) }, total: tok({ usd: 10.5, cr: 1100 }), estimated: false, allocs: [{ id: 'w1', weight: 1, how: 'link' }], account: 'vault B' });
+  assert.equal(w.spend.correctHistory('s1', [e1u, e1, e2u, e2], w.sessions[0]).turns, 1);
+  const accs = w.spend.session('s1')!.accounts!;
+  assert.ok(Object.values(accs).every((t) => t.usd >= 0), JSON.stringify(accs));
+  assert.ok(Math.abs(Object.values(accs).reduce((a, t) => a + t.usd, 0) - w.spend.session('s1')!.total.usd) < 1e-9);
+  const racc = w.spend.request('w1')!.accounts!;
+  assert.ok(Object.values(racc).every((t) => t.usd >= 0), JSON.stringify(racc));
+  assert.ok(Math.abs(Object.values(racc).reduce((a, t) => a + t.usd, 0) - w.spend.request('w1')!.total.usd) < 1e-9);
+});
+
+test('repairAccounts: a corrected session gets the accounts it had before, scaled to what it holds; a request gets them spread from its sessions', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1', { ranAs: 'vault A' })]);
+  w.spend.observe('s1', userEvent(T0, 'start'));
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 4, cr: 1000 }) } }, 4));
+  // what the first release left: corrected (fixApplied), total now 4, accounts with a negative one
+  const s = w.spend.session('s1')!;
+  s.fixApplied = true;
+  s.accounts = { 'vault A': tok({ usd: 14, cr: 1000 }), 'vault B': tok({ usd: -10 }) };
+  w.spend.request('w1')!.accounts = { 'vault A': tok({ usd: 14 }), 'vault B': tok({ usd: -10 }) };
+  // the copy of the record from before the correction: 60 on A, 40 on B
+  const before = JSON.parse(JSON.stringify({ version: 1, requests: {}, sessions: { s1: { ...s, accounts: { 'vault A': tok({ usd: 60 }), 'vault B': tok({ usd: 40 }) } } } }));
+  fs.writeFileSync(path.join(w.dir, 'spend.json.pre-w1209'), JSON.stringify(before));
+  const r = w.spend.repairAccounts();
+  assert.deepEqual(r, { sessions: 1, requests: 1 });
+  const a = w.spend.session('s1')!.accounts!;
+  assert.ok(Math.abs(a['vault A'].usd - 2.4) < 1e-9 && Math.abs(a['vault B'].usd - 1.6) < 1e-9, JSON.stringify(a));
+  const ra = w.spend.request('w1')!.accounts!;
+  assert.ok(Math.abs(ra['vault A'].usd - 2.4) < 1e-9 && Math.abs(ra['vault B'].usd - 1.6) < 1e-9, JSON.stringify(ra));
+  assert.deepEqual(w.spend.repairAccounts(), { sessions: 0, requests: 0 }, 'once');
+});
