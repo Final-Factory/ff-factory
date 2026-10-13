@@ -315,8 +315,12 @@ export class SpendStore {
       const out: ModelTok = {};
       for (const [model, c] of Object.entries(cum)) {
         const p = prev[model] ?? zeroTok();
+        // Totals that grew on every count since the last result continued (a resumed process carries its saved totals, w1161):
+        // the difference is the turn, whatever the restarted flag says (a portal before w1161 set it on every resume once
+        // its own figure ran ahead, and each portal restart then counted the whole running total again).
+        const grew = c.usd >= p.usd && c.in >= p.in && c.out >= p.out && c.cr >= p.cr && c.cw >= p.cw;
         // totals that began again: the agent process says so (usage.restarted), else a drop to half or less (a /clear, an older daemon)
-        const reset = u?.restarted === true || c.usd < p.usd * 0.5 || c.in < p.in * 0.5 || c.cr < p.cr * 0.5;
+        const reset = !grew && (u?.restarted === true || c.usd < p.usd * 0.5 || c.in < p.in * 0.5 || c.cr < p.cr * 0.5);
         const d = reset ? c : { in: Math.max(0, c.in - p.in), out: Math.max(0, c.out - p.out), cr: Math.max(0, c.cr - p.cr), cw: Math.max(0, c.cw - p.cw), usd: Math.max(0, c.usd - p.usd) };
         if (d.in || d.out || d.cr || d.cw || d.usd) out[model] = d;
       }
