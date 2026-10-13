@@ -208,7 +208,7 @@ in their `build-manifest.json`) took 4.5 to 36.9 min, median 8.4; the hung one r
 one. The stall windows (30 min, 10 min for an orphan), the 90 min and 6 h ceilings and the 2 s of CPU are guesses on top of
 that measurement, chosen wide; the owner test (parent gone) is sourced from how Windows and POSIX report a dead parent (a
 dead parent's pid stays in `ParentProcessId`; a POSIX child is re-parented to pid 1 or a user's systemd). All of them are in
-`REAP` and the table above. A daemon restart forgets what it saw, which only delays a kill (progress counts from first sight).
+`REAP` and the table above. A daemon restart forgets what it saw, which only delays a kill (progress counts from first sight). Builds are told apart by pid and command line (w1196): a Mac's and Linux's start time is now minus `ps`'s elapsed seconds and moved by up to a second between looks (715 ms measured on biscuit), so until w1196 no build there was ever seen by two looks and none was ended.
 
 **A worker that waits** on a slot a stuck build holds calls `mcp__machine__unity` with `action: "clear_batch"`: the same look
 at once, for the whole machine, answered with what was ended or, for every build kept, why (no limit is lowered on request).

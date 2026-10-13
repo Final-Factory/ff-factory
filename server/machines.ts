@@ -71,6 +71,9 @@ export const RESUME_DELAY_MS = { value: 3000 };
 export { MAIN_CLONE_NO_AGENTS };
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
+/** What a daemon was told of its resumable sessions and their check-ins, so a change is sent once (w1097, w1196). */
+const resumableKey = (ids: string[], wakes: Record<string, string>) => `${ids.join(',')}|${Object.entries(wakes).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}@${v}`).join(',')}`;
+
 
 /** Machine ids: short, lower-case, safe in a path and a LaunchAgent label. */
 export { MACHINE_ID, enrolledMachines, issueMachineToken, revokeMachineToken };
@@ -1538,8 +1541,9 @@ export class MachineManager {
     // A worker root install (w513) whose record has no pool of its own yet keeps daemon.json's until its hello says it.
     const pool = m.sandboxRoot || !m.root ? poolSettingsOf(m) : undefined;
     const resumable = this.resumableOf(m);
-    this.sentResumable.set(m.id, resumable.join(','));
-    return { type: 'welcome' as const, machineId: m.id, maxSessions: agentCap(m), sessions, sandboxes: pool, resumable };
+    const wakes = this.wakesOf(m);
+    this.sentResumable.set(m.id, resumableKey(resumable, wakes));
+    return { type: 'welcome' as const, machineId: m.id, maxSessions: agentCap(m), sessions, sandboxes: pool, resumable, wakes };
   }
 
   /** What each daemon was last told of its resumable sessions (joined ids), so a change is sent once. */
@@ -1550,16 +1554,27 @@ export class MachineManager {
     return resumableSessions(m.sessionIds.filter((sid) => this.store.sessions.has(sid)), this.store.work.values());
   }
 
+  /** The pending wake_me check-ins of a machine's sessions (w1196): its daemon keeps what they left running until then. */
+  private wakesOf(m: Machine): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const sid of m.sessionIds) {
+      const at = this.store.sessions.get(sid)?.wakeAt;
+      if (at) out[sid] = at;
+    }
+    return out;
+  }
+
   /** Tell every connected daemon whose resumable set changed (a request closed, a worker linked; each heartbeat). */
   private pushResumable() {
     for (const [id, link] of this.links) {
       const m = this.store.machines.get(id);
       if (!m) continue;
       const ids = this.resumableOf(m);
-      const key = ids.join(',');
+      const wakes = this.wakesOf(m);
+      const key = resumableKey(ids, wakes);
       if (this.sentResumable.get(id) === key) continue;
       this.sentResumable.set(id, key);
-      link.ws.send(JSON.stringify({ type: 'resumable', sessionIds: ids } satisfies ToDaemon));
+      link.ws.send(JSON.stringify({ type: 'resumable', sessionIds: ids, wakes } satisfies ToDaemon));
     }
   }
 

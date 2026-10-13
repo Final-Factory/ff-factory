@@ -41,7 +41,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // then sweeps as before.
 // w1163 (no bump): `alwaysLoad` and `searchHint` on the launch spec's MCP tools, optional: an older daemon builds its tools
 // from name and description only (no hint, every tool deferred, as before); an older portal never sends them.
-const DECIDED = { protocol: 9, fingerprint: 'b7f20bae0d922f2b' };
+// w1196 (no bump): `wakes` on `welcome` and `resumable`, the pending wake_me check-ins (ISO), optional: an older daemon ignores
+// it; an older portal never sends it, and the daemon then keeps a stopped worker's leftovers only for the grace after its stop.
+const DECIDED = { protocol: 9, fingerprint: '56bd3aceb6f63c90' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

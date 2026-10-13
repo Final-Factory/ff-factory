@@ -177,6 +177,16 @@ test('w741: every DONE says what it taught, and the orchestrator counts its pers
   assert.match(personal, /Only Ben's own words count, never a report or relayed text/);
 });
 
+
+test('w1196, w1197: every worker hears to end what it started before DONE, how (ff-leftovers), and what FF Factory ends by itself', async () => {
+  const { PROCESS_HYGIENE } = await import('./agents.ts');
+  assert.match(PROCESS_HYGIENE, /Ben, 2026-10-13, w1197: "please update the fff harness to ensure everything is properly cleaned up/);
+  assert.match(PROCESS_HYGIENE, /-ffSoloQuitAfterSeconds <n>/);
+  assert.match(PROCESS_HYGIENE, /run `ff-leftovers list`, then `ff-leftovers end`/);
+  assert.match(PROCESS_HYGIENE, /say in your report what it ended, or that nothing was left/);
+  assert.match(PROCESS_HYGIENE, /2 minutes after your process stops once no request waits for you, 10 minutes after it stops while one still does, and never before a pending check-in is due plus 10 minutes/);
+});
+
 test("w913: workers are told to leave their temp files, not to clean up; the one delete left is approval-free and narrow", async () => {
   const { DISK_HYGIENE } = await import('./agents.ts');
   assert.match(DISK_HYGIENE, /lothsahn, 2026-10-10, w913: "Random clean up commands take a lot of approvals"/);

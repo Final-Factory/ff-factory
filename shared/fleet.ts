@@ -2,7 +2,7 @@
 // first (with its own daemon's sandboxes when it has one, as BEAST does; the portal itself holds none, w510), then each
 // machine, each with its sandboxes and the agents in them (every worker runs in a sandbox, w536). Pure, so the server's
 // tests can check it and the browser can run it.
-import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
+import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, PlayerSeen, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
 import { holdsSandbox, placeRank, sortAgents } from './agentState.ts';
 
 /**
@@ -54,7 +54,7 @@ export interface FleetComputer {
   daemon?: Machine;
   platform?: MachinePlatform | string;
   online: boolean;
-  stats?: HostStats;
+  stats?: HostStats & { unity?: UnitySlotsReport };
   sandboxes: FleetSandbox[];
   /** max_sandboxes (machines) or limits.maxSandboxes (host), when known. */
   sandboxLimit?: number;
@@ -181,6 +181,20 @@ export function unitySlotsLine(r: UnitySlotsReport): string {
   if (r.overLimit) parts.push('OVER LIMIT: nothing more starts until it drops');
   if (r.waiting.length) parts.push(`${r.waiting.length} waiting (${r.waiting.slice(0, 3).map((w) => `"${w.label}" for ${w.count}`).join(', ')}${r.waiting.length > 3 ? ', ...' : ''})`);
   if (r.ramPct !== undefined && r.ramPct >= r.ramLimitPct) parts.push(`RAM ${r.ramPct}%: new launches wait below ${r.ramLimitPct}%`);
-  if (r.players) parts.push(`${r.players} game player${r.players === 1 ? '' : 's'} (not counted)`);
+  if (r.players) parts.push(`${r.players} game player${r.players === 1 ? '' : 's'} (not counted)${r.playerList?.length ? `: ${r.playerList.map(playerText).join(', ')}` : ''}`);
+  if (r.leftoverProcesses) parts.push(`${r.leftoverProcesses} other process${r.leftoverProcesses === 1 ? '' : 'es'} of stopped workers, ending`);
   return parts.join('; ');
+}
+
+/** "pid 2459040 slot1-1, worker a33e1437 (stopped: ends in 2 min), up 27.0 h", "pid 7 slot2-0, ORPHAN (no owner: ends in 9 min)" (w1196). */
+export function playerText(p: PlayerSeen): string {
+  const age = p.ageMin === undefined ? '' : `, up ${p.ageMin >= 120 ? `${(p.ageMin / 60).toFixed(1)} h` : `${p.ageMin} min`}`;
+  const ends = p.endsInMin !== undefined ? `: ends in ${p.endsInMin} min` : '';
+  const who =
+    p.owner === 'orphan'
+      ? `ORPHAN (no owner${ends})`
+      : p.owner === 'held'
+        ? 'no worker named (its starter or slot still holds it)'
+        : `worker ${p.session ?? '?'}${p.sandbox ? ` in ${p.sandbox}` : ''} (${p.owner === 'live' ? 'running' : `stopped${ends}`})`;
+  return `pid ${p.pid}${p.slot ? ` ${p.slot}` : ''}, ${who}${age}`;
 }

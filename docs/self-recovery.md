@@ -500,6 +500,63 @@ them; the rule lets a worker remove exactly the files named `<its temp folder's 
 --since 2026-10-03 --split <deploy date>` prints, per day, the prompts a person answered and the clean-up ones by kind
 (the session's own answer leaves no event, so a drop is real).
 
+### Processes a stopped worker left running are ended (w1196, w1197)
+
+**Why.** On 2026-10-13 biscuit ran its fans at 100% around the clock: two headless game players that workers had started
+were still up 27 h and 34 h after those workers stopped and their requests closed (pid 2459040, slot1-1 under Xvfb :101,
+worker a33e1437, w1072; pid 2311211, slot2-0 under Xvfb :62, worker 1290a5e0, w1025), about 6 cores between them, with 17
+Xvfb displays of earlier workers beside them and a whole dbus/gvfs session of a third worker 38 h old. Nothing reaped them:
+`list_sandboxes` showed "game players (not counted)", the batch reaper (w791) looks only at Unity, and an agent host's end
+(w799) takes only its own process tree, which a detached player, an Xvfb started with setsid or anything reparented to init
+has left. Ben (w1197): "please update the fff harness to ensure everything is properly cleaned up so we arent wasting system
+resources on our machines after work is done".
+
+**Whose a process is** (`machine/leftovers.ts`). Every process a worker starts inherits its environment, `FF_SESSION_ID` and
+`FF_MACHINE_ID` included (`server/agents.ts`), wherever it went since: a new session or process group, a detached launch, a
+parent that exited. The daemon reads it from the process itself: `/proc/<pid>/environ` on Linux, `ps -E` on a Mac, the
+process's environment block (its PEB, through Windows PowerShell 5.1) on Windows. Not its parent or process group (a
+detached player has left both) and not a job object (it would need a native helper holding a handle across daemon
+restarts). Two fallbacks: a player started through the player slots names its session in its lease (`player_slots.py`,
+`session`), and a program run from a worker's temp folder (`<install>/tmp/ffa-<session>/...`) names it in its path.
+
+**When it ends** (looked at once a minute; a process must have been seen by two looks):
+
+| Its worker | Ended |
+|---|---|
+| its process runs (mid-turn or between turns) | never |
+| stopped, no request waits for it | 2 min after it stopped |
+| stopped, a request still waits for it (CI, a person, a pause) | 10 min after it stopped |
+| stopped with a pending wake_me check-in | not before the check-in is due plus 10 min |
+| none named: a game player under a player slot whose starter is gone, whose slot no other lease holds and whose sandbox has no live worker | 10 min after it was first seen so |
+
+SIGTERM first, SIGKILL for what still runs 5 s later, children before parents; a stopped batch Unity's stale
+`Temp/UnityLockfile` goes when no Unity has the project open. Each end is logged (`leftovers: ended N process(es) left by
+worker <id> (sandbox <id>): game player slot1-1 pid ..., Xvfb pid ... Why: ...`, with the command lines) and told to the
+orchestrators as a `sandbox_event` ("Leftover processes: ..."). `list_sandboxes` and the dashboard's meters (hover; a
+"leftover players" flag) show each game player with its owner, its age and when it ends.
+
+**Never ended:** anything while its worker's process runs; an interactive Unity editor and what it started (the sandbox
+pool stops idle editors; a person's editor is never ours); a process that names the main clone or the daemon's own folder
+(agent hosts are `hostWatch.ts`'s); a process carrying another machine's id, or with no machine id and a session this
+machine never ran (the portal's orchestrators, where a daemon shares the portal's host); a shared build server
+(VBCSCompiler, MSBuild nodes, bee) while it still uses CPU; anything before the portal's welcome since the daemon started.
+
+**Where the numbers come from.** 10 min for a stopped worker a request waits for: sourced, the session sweep's own grace for
+its temp folder (`SWEEP_DEFAULTS.graceMin`), so a resume within it finds both and after it neither. 2 min for a worker whose
+work is over, 10 min past a check-in and 10 min for an orphan: guesses, wide against what they guard (a check-in resumes its
+worker within a minute or two; the portal stops a worker whose requests are closed at its next 5-minute pass). They are
+`LEFTOVER` in `machine/leftovers.ts`. The pending check-ins come from the portal with the resumable sessions
+(`resumable`/`welcome` `wakes`, no protocol bump: an older daemon ignores them).
+
+**A worker's own teardown.** `ff-leftovers list` and `ff-leftovers end` (written beside `unity-slot`, first on agents' PATH)
+list and end what the caller's own session started that still runs, never its own chain, claude's MCP servers or an
+interactive editor. Every worker's brief (`PROCESS_HYGIENE`) asks for it before DONE, with a quit timer on every player.
+
+Tests: `server/leftovers.test.ts` (biscuit's two players and their Xvfb end; a waited-for worker's, a gnome session's and a
+batch build's leftovers end; the orphan ends; a live worker's player, a check-in's run, an interactive editor, the main
+clone, another machine's process and anything before the welcome stay; a busy compiler server stays; real processes on
+Linux; `readEnvs` on the machine it runs on, Windows included), `machines.test.ts` (the daemon hears the check-ins).
+
 ### Routine test steps without a prompt (w1097)
 
 Lothsahn (2026-10-12): "I just got prompted to accept a bash prompt in w1079. Why did it do that, and how do we allow it to

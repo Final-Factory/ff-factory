@@ -441,6 +441,14 @@ export interface UnitySlotsReport {
   outside: number;
   /** Built game players running (not counted). */
   players: number;
+  /**
+   * Each game player with its owner and age (w1196, machine/leftovers.ts): `live` while its worker runs, `stopped` once it
+   * has stopped (it ends `endsInMin` from now), `orphan` with no owner (it ends too), `held` with no session named but a
+   * live starter, slot lease or sandbox worker. Absent from a daemon before w1196.
+   */
+  playerList?: PlayerSeen[];
+  /** Other processes of stopped workers still here, ending within their grace (w1197). */
+  leftoverProcesses?: number;
   overLimit: boolean;
   ramPct?: number;
   /** New launches wait at or above this RAM use. */
@@ -448,6 +456,19 @@ export interface UnitySlotsReport {
   waiting: { label: string; count: number; holder: string; since: string; why: string }[];
   granted: { label: string; count: number; holder: string; since: string }[];
   at: string;
+}
+
+/** One game player as its machine's daemon saw it (UnitySlotsReport.playerList, w1196). */
+export interface PlayerSeen {
+  pid: number;
+  /** Its player slot folder ("slot1-1"), when it runs from one. */
+  slot?: string;
+  /** The worker session that started it. */
+  session?: string;
+  sandbox?: string;
+  ageMin?: number;
+  owner: 'live' | 'stopped' | 'orphan' | 'held';
+  endsInMin?: number;
 }
 
 /** A machine's load, as its daemon last reported it (protocol 4+); not kept in state.json. */

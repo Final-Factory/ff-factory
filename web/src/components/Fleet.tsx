@@ -84,6 +84,7 @@ function Meters({ c, health, now }: { c: FleetComputer; health?: HostHealth; now
       ? { used: ((s.diskTotalBytes - s.diskFreeBytes) / s.diskTotalBytes) * 100, free: s.diskFreeBytes, lvl: level(((s.diskTotalBytes - s.diskFreeBytes) / s.diskTotalBytes) * 100, 85, 95) }
       : undefined;
   const g = gpuPct(s);
+  const orphans = s.unity?.playerList?.filter((p) => p.owner === 'orphan' || p.owner === 'stopped').length ?? 0;
   const cells: { label: string; pct?: number; text: string; lvl: Lvl }[] = [
     { label: 'CPU', pct: s.loadPct, text: `${Math.round(s.loadPct)}%`, lvl: level(s.loadPct) },
     { label: 'RAM', pct: ramPct(s), text: `${Math.round(ramPct(s))}%`, lvl: ramLvl(s) },
@@ -102,6 +103,12 @@ function Meters({ c, health, now }: { c: FleetComputer; health?: HostHealth; now
           {m.label} <b className={`lvl-${m.lvl}`}>{m.text}</b>
         </span>
       ))}
+      {/* Game players nobody owns (w1196): the daemon ends them; until it has, they show here. The hover lists each. */}
+      {orphans > 0 && (
+        <span className="fl-meter lvl-warn" data-testid="orphan-players">
+          {orphans} leftover player{orphans === 1 ? '' : 's'}
+        </span>
+      )}
     </span>
   );
 }
