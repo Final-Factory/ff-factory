@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { DATA_IMAGE_URI, isVideoPath, localPath, MAX_DATA_URI } from '../../../shared/imagePaths';
 import { sanitizeSvg } from '../../../shared/svg';
 import { openLightbox } from '../store';
-import { baseName, posterSrc } from './Images';
+import { baseName, FullQualityLink, PreviewVideo } from './Images';
 import { CopyButton, Icon } from './ui';
 
 const Mermaid = lazy(() => import('./Mermaid'));
@@ -67,17 +67,18 @@ function InlineImage({ src, name, alt }: { src: string; name: string; alt?: stri
 }
 
 /**
- * A video written as a markdown image, `![clip](</srv/fff/review/w1/clip.mp4>)`: an inline player that loads only
- * its metadata until played (seeking uses HTTP ranges). Spans, not a figure: the text sits in a paragraph.
+ * A video written as a markdown image, `![clip](</srv/fff/review/w1/clip.mp4>)`: an inline player on its web preview
+ * (w1248) that loads only its metadata until played (seeking uses HTTP ranges), and a link to the full-quality original. Spans, not a figure: the text sits in a paragraph.
  */
 function InlineVideo({ src, name, alt }: { src: string; name: string; alt?: string }) {
   const [broken, setBroken] = useState(false);
   if (broken) return <code title="This video is not available">{alt || name}</code>;
   return (
     <span className="md-video">
-      <video src={posterSrc(src)} controls playsInline muted preload="metadata" onError={() => setBroken(true)} />
+      <PreviewVideo src={src} onBroken={() => setBroken(true)} />
       <span className="md-video-cap dim small">
         <span className="ellipsis mono">{alt || name}</span>
+        <FullQualityLink src={src} />
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => openLightbox([{ src, name, video: true }], 0)} title="Open large">
           <Icon name="expand" size={12} />
         </button>

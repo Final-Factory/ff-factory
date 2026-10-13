@@ -62,3 +62,24 @@ plain copy (`ReviewStore.publishLocal`).
 A file in the review folder can go on to a worker as an attachment: an orchestrator or the dispatcher calls
 `attach_review_file` with its path and passes the id it answers with `attachments: [id]`
 ([attachments.md](attachments.md#agents-files)).
+
+## Web previews of videos
+
+**TL;DR:** the chat plays a small copy of each review video, and a **Full quality** link opens the original (w1248, Ben:
+"these videos work but they take FOREVER to load"; earlier: "sometimes I might need a really high-fidelity video, but most
+of the time I don't").
+
+Workers' clips are 60 fps captures at 4 to 20 Mbit/s, and half of them have their index (`moov`) at the end of the file,
+so a browser must fetch the end before it can play (measured on 40 review clips, w1248). The portal (`server/videoPreview.ts`)
+makes a preview of every review-folder `.mp4`, `.m4v` and `.webm`:
+
+| What | Where |
+|---|---|
+| H.264 at most 1280 px on its long side (never upscaled), CRF 26, `veryfast`, AAC 96k, `-movflags +faststart`. 7 to 14% of the original on 3 real clips, 5 to 11 s to make on 2 cores. | `previewArgs` |
+| Written to `<topic>/.preview/<name>.mp4` (`clip.mp4` → `.preview/clip.mp4.mp4`) through a `.part` file. The original is never opened for writing. | `previewPathOf`, `VideoPreviews.make` |
+| Made when the file is published (`ReviewStore.onPublished`), or on its first view. One encode at a time, at nice 10, ended after 10 minutes. A failed encode is not tried again until the portal restarts. | `VideoPreviews.ensure` |
+| Retention: a preview lives in its original's topic folder and goes with it; one whose original is gone is removed with the next encode in that topic, and one older than its original is made again. | `VideoPreviews.prune`, `ready` |
+| `GET /api/image?…&preview=1` on a review video sends the preview, with HTTP ranges (206) like any video; it waits up to 30 s for one being made, then sends the original. No ffmpeg (`FF_FFMPEG`, else `ffmpeg` on PATH), or not a review file: the original. | `server/index.ts` `/api/image` |
+| The page: the inline player and the large view ask for `&preview=1`; on a player error they fall back to the original once. **Full quality** in the caption, and the large view's open and download buttons, are the original. | `web/src/components/Images.tsx` `PreviewVideo`, `FullQualityLink` |
+
+The VM's guest `install.sh` installs `ffmpeg` (every portal update runs it).

@@ -15,6 +15,28 @@ export const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
 export { isVideoPath, mentionedPaths };
 /** "#t=0.1" makes Safari (iPad) and Chrome paint the first frame as the poster before playing. */
 export const posterSrc = (src: string) => `${src}#t=0.1`;
+/** A video's web preview (w1248): a review clip at most 1280 px, CRF 26, its index first; the server sends the original for anything else. */
+export const previewSrc = (src: string) => (src.startsWith('/api/image?') ? `${src}&preview=1` : src);
+
+/**
+ * A video player on the clip's web preview, which starts at once and streams. On an error it plays the original once
+ * (a preview that was finished while the player had the original), then calls `onBroken`.
+ */
+export function PreviewVideo({ src, onBroken }: { src: string; onBroken: () => void }) {
+  const [original, setOriginal] = useState(false);
+  const url = original ? src : previewSrc(src);
+  return <video key={url} src={posterSrc(url)} controls playsInline muted preload="metadata" onError={() => (url === src ? onBroken() : setOriginal(true))} />;
+}
+
+/** "Full quality": the original file in a tab of its own, for a video that plays its preview here. */
+export function FullQualityLink({ src }: { src: string }) {
+  if (previewSrc(src) === src) return null;
+  return (
+    <a className="btn btn-ghost btn-sm video-full" href={src} target="_blank" rel="noreferrer" title="The original video, full size and quality">
+      Full quality
+    </a>
+  );
+}
 
 /** Thumbnails; a click opens the lightbox on that image, with the others to page through. */
 export function ImageStrip({ items, size = 'normal' }: { items: LightboxItem[]; size?: 'normal' | 'small' }) {
@@ -57,9 +79,10 @@ export function VideoStrip({ items }: { items: LightboxItem[] }) {
     <div className="video-strip">
       {shown.map((it, i) => (
         <figure key={it.src} className="video-item">
-          <video src={posterSrc(it.src)} controls playsInline muted preload="metadata" onError={() => setBroken((b) => new Set(b).add(it.src))} />
+          <PreviewVideo src={it.src} onBroken={() => setBroken((b) => new Set(b).add(it.src))} />
           <figcaption className="dim small">
             <span className="ellipsis mono">{it.name}</span>
+            <FullQualityLink src={it.src} />
             <button className="btn btn-ghost btn-sm" onClick={() => openLightbox(shown, i)} title="Open large">
               <Icon name="expand" size={12} />
             </button>
@@ -113,7 +136,7 @@ export function Lightbox() {
           <Icon name="download" size={14} /> <span className="hide-sm">Download</span>
         </a>
         {!it.src.startsWith('data:') && (
-          <a className="btn btn-ghost btn-sm" href={it.src} target="_blank" rel="noreferrer" title="Open on its own">
+          <a className="btn btn-ghost btn-sm" href={it.src} target="_blank" rel="noreferrer" title={it.video ? 'Open the original, full quality' : 'Open on its own'}>
             <Icon name="expand" size={14} />
           </a>
         )}
@@ -128,7 +151,7 @@ export function Lightbox() {
           </button>
         )}
         {it.video ? (
-          <video key={it.src} src={it.src} controls playsInline autoPlay />
+          <video key={it.src} src={previewSrc(it.src)} controls playsInline autoPlay />
         ) : (
           <img src={it.src} alt={it.name} title={zoomed ? 'Fit to the screen' : 'Actual size'} onClick={() => setZoomed(!zoomed)} />
         )}

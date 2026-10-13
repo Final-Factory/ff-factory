@@ -89,6 +89,10 @@ fs.mkdirSync(clips, { recursive: true });
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.webm'));
 // The same bytes named .mp4: Playwright's Chromium has no H.264, so this one only proves the page asks for it as a video.
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.mp4'));
+// A clip whose web preview is already made (server/videoPreview.ts, w1248): 100 bytes of original, the fixture as its preview.
+fs.writeFileSync(path.join(clips, 'previewed.mp4'), Buffer.alloc(100, 1));
+fs.mkdirSync(path.join(clips, '.preview'), { recursive: true });
+fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, '.preview', 'previewed.mp4.mp4'));
 
 // Max (docs/max.md): the token in a scratch ffbox config, a mock Discord, and what agents' ffdiscord calls wrote.
 const discordPort = port + 100;
@@ -209,6 +213,8 @@ process.env.GH_CONFIG_DIR = path.join(base, 'gh');
 delete process.env.GH_TOKEN;
 // Not "elevated" even when the runner is root, as an FFBox runner container is (a root server shows an admin-rights bar on every page).
 process.env.FFSB_TEST_ELEVATED = '0';
+// No video previews here (server/videoPreview.ts, w1248): whether the runner has ffmpeg or not, a clip plays its original.
+process.env.FF_FFMPEG = path.join(base, 'no-ffmpeg-here');
 delete process.env.GITHUB_TOKEN;
 delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 // Nor a real Discord token: Max reads only the scratch ffbox config above.
