@@ -1078,7 +1078,7 @@ test('correctHistory: turns the current code recorded are not touched, and a ses
   const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1')]);
   w.spend.observe('s1', userEvent(T0, 'start'));
   w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 1, cr: 1000 }) } }, 1));
-  assert.equal(w.spend.session('s1')!.fixV, 1);
+  assert.equal(w.spend.session('s1')!.fixV, 2);
   assert.equal(w.spend.correctHistory('s1', [], w.sessions[0]).turns, 0);
 });
 
@@ -1136,4 +1136,62 @@ test('repairAccounts: a corrected session gets the accounts it had before, scale
   const ra = w.spend.request('w1')!.accounts!;
   assert.ok(Math.abs(ra['vault A'].usd - 2.4) < 1e-9 && Math.abs(ra['vault B'].usd - 1.6) < 1e-9, JSON.stringify(ra));
   assert.deepEqual(w.spend.repairAccounts(), { sessions: 0, requests: 0 }, 'once');
+});
+
+test("correctHistory: a backfilled restart turn (the portal's own total doubled, so the turn read as the whole running total again) is recorded as what it cost", () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1', { costUsd: 500 })]);
+  seq = 0;
+  const events: TranscriptEvent[] = [];
+  // the portal's lifetime total after each turn: 10, 30 (a turn of 20), then a restart: 2 × 30 + a 2 dollar turn = 62, then 64.5
+  let t = T0;
+  for (const cost of [10, 30, 62, 64.5]) {
+    events.push(userEvent((t += 60_000), 'go'), resultEvent((t += 60_000), undefined, cost));
+  }
+  const r0 = w.spend.backfillSession('s1', events, w.sessions[0]);
+  assert.ok(Math.abs(r0.usd - 64.5) < 1e-9);
+  assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 64.5) < 1e-9);
+  w.spend.session('s1')!.fixV = undefined;
+  const r = w.spend.correctHistory('s1', events, w.sessions[0]);
+  assert.equal(r.skipped, undefined, r.skipped ?? '');
+  assert.equal(r.turns, 1);
+  assert.ok(Math.abs(r.removedUsd - 30) < 1e-9, 'the 32 of the restart turn was 2 of turn and 30 of the old total');
+  assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 34.5) < 1e-9);
+  assert.ok(Math.abs(w.spend.session('s1')!.total.usd - 34.5) < 1e-9);
+  assert.ok(Math.abs(w.spend.request('w1')!.estimated.usd - 34.5) < 1e-9, 'still all estimated');
+  assert.equal(w.spend.session('s1')!.fixApplied, undefined, 'only the live-recorded turns make the record read by the current rules');
+  assert.equal(w.spend.correctHistory('s1', events, w.sessions[0]).turns, 0, 'once');
+});
+
+test('correctHistory: a real big turn in a backfilled session is not a restart (under $20 so far, or less than the running total)', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1', { costUsd: 500 })]);
+  seq = 0;
+  const events: TranscriptEvent[] = [];
+  let t = T0;
+  // 3 → 9 (a turn of 6 against 3 so far: the session is young), 9 → 60 (a turn of 51 against 9: under $20 so far), 60 → 100 (40 against 60)
+  for (const cost of [3, 9, 60, 100]) events.push(userEvent((t += 60_000), 'go'), resultEvent((t += 60_000), undefined, cost));
+  w.spend.backfillSession('s1', events, w.sessions[0]);
+  w.spend.session('s1')!.fixV = undefined;
+  assert.equal(w.spend.correctHistory('s1', events, w.sessions[0]).turns, 0);
+  assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 100) < 1e-9);
+});
+
+test('correctHistory: a session the first release already corrected (live turns done) gets only its backfilled restart turns corrected now', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1', { costUsd: 500 })]);
+  seq = 0;
+  const back: TranscriptEvent[] = [];
+  let t = T0;
+  for (const cost of [10, 30, 62, 64.5]) back.push(userEvent((t += 60_000), 'go'), resultEvent((t += 60_000), undefined, cost));
+  w.spend.backfillSession('s1', back, w.sessions[0]);
+  // then the live-recorded turns, already by the current rules
+  const live = [userEvent((t += 60_000), 'on'), resultEvent((t += 60_000), { cum: { m: tok({ usd: 5, cr: 1000 }) } }, 70), userEvent((t += 60_000), 'again'), resultEvent((t += 60_000), { restarted: true, cum: { m: tok({ usd: 5.5, cr: 1100 }) } }, 70.5)];
+  for (const e of live) w.spend.observe('s1', e);
+  const s = w.spend.session('s1')!;
+  s.fixV = 1;
+  s.fixApplied = true;
+  assert.ok(Math.abs(s.total.usd - 70) < 1e-9, '64.5 backfilled + 5 + 0.5');
+  const r = w.spend.correctHistory('s1', [...back, ...live], w.sessions[0]);
+  assert.equal(r.skipped, undefined, r.skipped ?? '');
+  assert.ok(Math.abs(r.removedUsd - 30) < 1e-9);
+  assert.ok(Math.abs(w.spend.session('s1')!.total.usd - 40) < 1e-9);
+  assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 40) < 1e-9);
 });

@@ -312,7 +312,7 @@ export class SpendStore {
       s = { id, role: roleOf(info), title: info?.title ?? id, machine: info?.machineId, person: info?.requestedBy?.displayName, firstAt: at, lastAt: at, turns: 0, total: zeroTok(), models: {}, estimated: zeroTok(), requests: {}, cats: {}, calls: 0, ctxMax: 0, compactions: 0, transcript: { state: 'full' } };
       // a coordinator first seen by this code records its days live: nothing to split afterwards (w1160)
       if (isCoordinatorRole(s.role)) s.coordV = 2;
-      s.fixV = 1; // recorded by the current rules from its first turn
+      s.fixV = 2; // recorded by the current rules from its first turn
       this.sessions.set(id, s);
     }
     if (info) {
@@ -570,8 +570,10 @@ export class SpendStore {
   correctHistory(sessionId: string, events: readonly TranscriptEvent[] | undefined, info: SessionInfo | undefined): { removedUsd: number; movedUsd: number; turns: number; skipped?: string } {
     const none = { removedUsd: 0, movedUsd: 0, turns: 0 };
     const s = this.sessions.get(sessionId);
-    if (!s || s.fixV === 1) return none;
-    s.fixV = 1;
+    if (!s || s.fixV === 2) return none;
+    // fixV 1 (the first release) corrected the live-recorded turns; this one also looks at the backfilled ones, so a session that release corrected is not corrected twice
+    const liveDone = s.fixApplied === true;
+    s.fixV = 2;
     this.changed();
     if (!events?.length) return { ...none, skipped: 'no transcript' };
     const items = [...this.ctx.work()];
@@ -579,12 +581,45 @@ export class SpendStore {
     const scL = { models: {} } as SessionSpend;
     const scN = { models: {} } as SessionSpend;
     const liveFrom = s.liveFrom ?? Infinity;
-    const diffs: { at: string; mL: ModelTok; mN: ModelTok; tL: Tok; tN: Tok; AL: Alloc[]; AN: Alloc[]; meter?: MeterTurn }[] = [];
+    const diffs: { at: string; mL: ModelTok; mN: ModelTok; tL: Tok; tN: Tok; AL: Alloc[]; AN: Alloc[]; meter?: MeterTurn; estimated?: boolean; backfill?: boolean }[] = [];
     let replayed = 0;
     let pending: { uuid?: string; text: string }[] = [];
+    // the backfill's own reading (backfillSession): the recorded cost totals differenced, tokens estimated from the characters
+    let prevCost: number | undefined;
+    let outChars = 0;
+    let freshChars = 0;
+    const model = info?.model ?? 'unknown';
     for (const e of events) {
-      if (e.kind === 'user') pending.push({ uuid: e.uuid, text: e.text.slice(0, 1500) });
-      else if (e.kind === 'result') {
+      if (e.kind === 'assistant' || e.kind === 'thinking') outChars += e.text.length;
+      else if (e.kind === 'tool_use') outChars += Math.min(20_000, JSON.stringify(e.input ?? {}).length);
+      else if (e.kind === 'tool_result') freshChars += e.text.length;
+      if (e.kind === 'user') {
+        pending.push({ uuid: e.uuid, text: e.text.slice(0, 1500) });
+        freshChars += e.text.length;
+      } else if (e.kind === 'result' && e.seq < liveFrom) {
+        // A turn backfilled from the cost totals. Before w1161 the portal's own total doubled at a restart (it added the CLI's whole running
+        // total to its own), so the turn after a restart read as the running total again: a turn that costs as much as the session had cost
+        // so far, from $20 up, is that and nothing else (a real turn cannot), and what it really cost is what is left over.
+        const before = prevCost ?? 0;
+        let dOld = e.costUsd >= before ? e.costUsd - before : e.costUsd;
+        prevCost = e.costUsd;
+        if (info && info.costUsd > 0 && dOld > info.costUsd * 1.05) dOld = info.costUsd;
+        const restart = before >= 20 && e.costUsd >= before && dOld >= before * 0.9;
+        const dNew = restart ? Math.max(0, dOld - before) : dOld;
+        replayed += dOld;
+        const mine = e.answers?.length ? pending.filter((t) => t.uuid && e.answers!.includes(t.uuid)) : [];
+        const used = mine.length ? mine : pending;
+        pending = mine.length ? pending.filter((t) => !mine.includes(t)) : [];
+        if (dNew !== dOld) {
+          const tokOld = dOld > 0 ? estimateTurn(model, dOld, outChars, freshChars) : zeroTok();
+          const tokNew = dNew > 0 ? estimateTurn(model, dNew, outChars, freshChars) : zeroTok();
+          const startMs = (Date.parse(e.t) || 0) - e.durationMs;
+          const texts = used.map((t) => t.text);
+          diffs.push({ at: e.t, mL: { [model]: tokOld }, mN: { [model]: tokNew }, tL: tokOld, tN: tokNew, AL: attribute(info ?? infoOfRecord(s), items, texts, startMs, known, true, false), AN: attribute(info ?? infoOfRecord(s), items, texts, startMs, known, false, false), estimated: true, backfill: true });
+        }
+        outChars = 0;
+        freshChars = 0;
+      } else if (e.kind === 'result') {
         const old = (Date.parse(e.t) || 0) < RULES_FROM_MS;
         const mL = this.delta(scL, sessionId, e.usage, e.costUsd, info, true, true).models;
         const mN = this.delta(scN, sessionId, e.usage, e.costUsd, info, true, false).models;
@@ -593,8 +628,10 @@ export class SpendStore {
         pending = mine.length ? pending.filter((t) => !mine.includes(t)) : [];
         const tL = sumTok(Object.values(mL));
         const tN = sumTok(Object.values(mN));
-        replayed += old ? tL.usd : tN.usd;
-        if (!old || e.seq < liveFrom) continue;
+        replayed += old && !liveDone ? tL.usd : tN.usd;
+        outChars = 0;
+        freshChars = 0;
+        if (!old || liveDone) continue;
         const startMs = (Date.parse(e.t) || 0) - e.durationMs;
         const texts = used.map((t) => t.text);
         const AL = attribute(info ?? infoOfRecord(s), items, texts, startMs, known, true, false);
@@ -612,12 +649,12 @@ export class SpendStore {
     let removedUsd = 0;
     let movedUsd = 0;
     for (const d of diffs) {
-      this.add({ s, at: d.at, models: d.mL, total: d.tL, estimated: false, meter: d.meter, allocs: d.AL, items, accountMix, sign: -1 });
-      this.add({ s, at: d.at, models: d.mN, total: d.tN, estimated: false, meter: d.meter, allocs: d.AN, items, accountMix, sign: 1 });
+      this.add({ s, at: d.at, models: d.mL, total: d.tL, estimated: d.estimated ?? false, meter: d.meter, allocs: d.AL, items, accountMix, sign: -1 });
+      this.add({ s, at: d.at, models: d.mN, total: d.tN, estimated: d.estimated ?? false, meter: d.meter, allocs: d.AN, items, accountMix, sign: 1 });
       removedUsd += d.tL.usd - d.tN.usd;
       if (d.AL.length !== d.AN.length || d.AL.some((x, i) => x.id !== d.AN[i].id)) movedUsd += d.tN.usd;
     }
-    s.fixApplied = true;
+    if (diffs.some((d) => !d.backfill) || liveDone) s.fixApplied = true;
     s.acctV = 1;
     if (isCoordinatorRole(s.role)) s.coordV = undefined; // its days are rebuilt from the corrected record
     this.changed();
