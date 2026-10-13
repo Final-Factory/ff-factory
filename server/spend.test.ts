@@ -566,6 +566,32 @@ test('priceOf: the models in use, an alias, an unknown one', () => {
   assert.equal(priceOf('mystery').in, 2);
 });
 
+test('w1159: renderSession lists the top 20 requests by cost and counts the rest; requests asks for more', () => {
+  const ids = Array.from({ length: 30 }, (_, i) => `w${100 + i}`);
+  const items = ids.map((id) => item(id, { sessionIds: ['d'], links: { d: { at: iso(T0), how: 'sent' } } }));
+  const w = world(items, [session('d', { kind: 'orchestrator', orchestratorRole: 'dispatcher', title: 'Dispatcher' })]);
+  // One turn per request, each [about wNNN]: request 100+i costs i+1 dollars.
+  ids.forEach((id, i) => {
+    w.spend.observe('d', userEvent(T0 + i * 200_000 + 1000, `[about ${id} "x"]\nhello`));
+    w.spend.observe('d', resultEvent(T0 + i * 200_000 + 60_000, { cum: { m: tok({ usd: ((i + 1) * (i + 2)) / 2, cr: 1000 * (i + 1) }) } }, i + 1));
+  });
+  const link = (sid: string) => 'https://p/#/session/' + sid;
+  const small = renderSession(w.spend, 'd', link);
+  const line = small.split('\n').find((l) => l.startsWith('Coordination it billed'))!;
+  assert.ok(line.includes('(a turn naming several is split evenly, an estimate; 30 requests, the top 20 by cost): w129 $30.00, w128 $29.00'), line);
+  assert.ok(line.includes('w110 $11.00'), 'the 20th is listed');
+  assert.ok(!line.includes('w109 '), 'the 21st is not');
+  assert.ok(line.includes('and 10 more, $55.00 together (spend_report session with requests: 30 lists them all)'), line);
+  const all = renderSession(w.spend, 'd', link, 2000);
+  const full = all.split('\n').find((l) => l.startsWith('Coordination it billed'))!;
+  assert.ok(full.includes('an estimate): w129'), full);
+  assert.ok(full.includes('w100 $1.00') && !full.includes('more'), full);
+  assert.ok(all.length > small.length);
+  // A session with 20 or fewer is listed whole, as before.
+  const few = renderSession(w.spend, 'd', link, 40).split('\n').find((l) => l.startsWith('Coordination it billed'))!;
+  assert.ok(few.includes('an estimate): w129'));
+});
+
 // ---------------------------------------------------------------------------------------------------------------------
 // coordination billed apart from the workers' own cost (w1160)
 // ---------------------------------------------------------------------------------------------------------------------
@@ -802,4 +828,17 @@ test('namedIdsIn: a request cited in parentheses by a harness notice is not what
   coordTurn(w, 'd', T0, machines, 0.3);
   assert.equal(w.spend.request('w605'), undefined);
   assert.ok(Math.abs(w.spend.request('_dispatcher')!.total.usd - 0.3) < 1e-9);
+});
+
+test('w1159: a worker session that served more than 20 requests lists the top 20 as well', () => {
+  const ids = Array.from({ length: 25 }, (_, i) => `w${300 + i}`);
+  const items = ids.map((id) => item(id, { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } }));
+  const w = world(items, [session('s1')]);
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 25, cr: 1000 }) } }, 25));
+  const link = (sid: string) => 'https://p/#/session/' + sid;
+  const line = renderSession(w.spend, 's1', link).split('\n').find((l) => l.startsWith('Requests it served'))!;
+  assert.ok(line.startsWith("Requests it served (the workers' own cost; 25 requests, the top 20 by cost): "), line);
+  assert.ok(line.includes('and 5 more, $5.00 together (spend_report session with requests: 25 lists them all)'), line);
+  const all = renderSession(w.spend, 's1', link, 2000).split('\n').find((l) => l.startsWith('Requests it served'))!;
+  assert.ok(all.startsWith("Requests it served (the workers' own cost): ") && !all.includes('more'), all);
 });

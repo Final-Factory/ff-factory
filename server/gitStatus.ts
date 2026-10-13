@@ -82,13 +82,13 @@ export async function prView(repo: string, number: number): Promise<PrView | und
 }
 
 /** One line for the orchestrator: "on 098-belts (was sandbox/x), 3 uncommitted, ↑2 ↓0, last abc123 'Fix…', PR #41". */
-export function describeGit(g: GitStatus | undefined, createdBranch?: string): string {
+export function describeGit(g: GitStatus | undefined, createdBranch?: string, compact = false): string {
   if (!g) return 'git: unknown';
   const parts = [`on ${g.branch}${createdBranch && createdBranch !== g.branch ? ` (created on ${createdBranch})` : ''}`];
   parts.push(g.dirty || g.untracked ? `${g.dirty} changed, ${g.untracked} untracked` : 'clean');
   if (g.upstream) parts.push(`↑${g.ahead ?? 0} ↓${g.behind ?? 0} vs ${g.upstream}`);
   else parts.push('no upstream');
-  if (g.head) parts.push(`last ${g.head.sha} "${g.head.subject.slice(0, 80)}"`);
-  if (g.pr) parts.push(`PR #${g.pr.number}${g.pr.draft ? ' (draft)' : ''} ${g.pr.url}`);
+  if (g.head && !compact) parts.push(`last ${g.head.sha} "${g.head.subject.slice(0, 80)}"`);
+  if (g.pr) parts.push(`PR #${g.pr.number}${g.pr.draft ? ' (draft)' : ''}${compact ? '' : ` ${g.pr.url}`}`);
   return `git: ${parts.join('; ')}`;
 }
