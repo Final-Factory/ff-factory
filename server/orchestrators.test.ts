@@ -737,6 +737,39 @@ test('list_work: open requests by default, one in full with its log', async (t) 
   assert.equal((await call(chat(LOTH).info, 'list_work', { mine: true })).text, 'No open requests.');
 });
 
+test('list_work with id (w1159): the last 15 log entries and a count of the earlier ones; full_log prints all; the cost block only with spend', async (t) => {
+  const { store, dispatcher, chat, call } = setup(t);
+  await call(chat(BEN).info, 'request_work', { title: 'Tidy the docs', brief: 'Fix the dead links in docs/.' });
+  const w = store.work.get('w1')!;
+  for (let i = 0; i < 40; i++) w.log.push(`12:${String(i).padStart(2, '0')} note number ${i}`);
+  const short = (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
+  const entries = (text: string) => text.split('\n').filter((l) => /^ {2}12:\d\d note number/.test(l));
+  assert.equal(entries(short).length, 15);
+  assert.match(short, /\nLog \(the last 15 of 41 entries; 26 earlier left out, list_work with full_log: true prints them\):\n {2}12:25 note number 25\n/);
+  assert.ok(short.includes('note number 39'), 'the newest is there');
+  assert.ok(!short.includes('note number 24\n'), 'the 16th from the end is not');
+  assert.ok(!short.includes('\nSpend:'), 'no cost block unless asked');
+  const full = (await call(dispatcher().info, 'list_work', { id: 'w1', full_log: true })).text;
+  assert.equal(entries(full).length, 40);
+  assert.match(full, /\nLog:\n {2}\d\d:\d\d filed by Ben/);
+  assert.ok(full.length > short.length);
+  // The list view (no id) is untouched.
+  assert.match((await call(dispatcher().info, 'list_work', {})).text, /^- w1 /);
+});
+
+test('list_machines (w1159): folders and the last clean-up only with detail', async (t) => {
+  const { dispatcher, call } = await setupOnMachine(t);
+  const short = (await call(dispatcher().info, 'list_machines', {})).text;
+  const full = (await call(dispatcher().info, 'list_machines', { detail: true })).text;
+  assert.match(short, /machine pc/);
+  assert.doesNotMatch(short, /\n {2}folders: /);
+  assert.doesNotMatch(short, /\n {2}last clean-up: /);
+  assert.match(full, /\n {2}folders: /);
+  assert.match(full, /\n {2}last clean-up: /);
+  assert.ok(full.length > short.length);
+  assert.match(short, /\n {2}sandboxes: /, 'the sandboxes line stays');
+});
+
 test("message_person: one person's orchestrator reaches another's chat as a tagged harness message, kept and unread", async (t) => {
   const { dir, store, sessions, o, dispatcher, chat, call, heard } = setup(t);
   const loth = chat(LOTH).info;

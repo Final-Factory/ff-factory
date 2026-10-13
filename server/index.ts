@@ -18,6 +18,7 @@ import { IntakeManager } from './intake.ts';
 import { toggleNightly } from './appConfig.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
 import { BlockerWatch, ghPrHealth } from './blockerWatch.ts';
+import { MasterBatchWatch } from './masterBatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
@@ -723,6 +724,8 @@ runWaitsMigration({
   tell: (text) => agents.orchestrators.toDispatcher(text),
 });
 blockerWatch.start();
+// A red master batch of the game repo goes back to the culprit PR's request as an urgent revert request (w1180, docs/intake.md).
+const masterBatch = new MasterBatchWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
 
 let lastSystem: SystemStats | undefined;
 
@@ -1926,6 +1929,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   intake.close();
   ledgerSweep.close();
   blockerWatch.close();
+  masterBatch.close();
   store.flush();
   spend.flush();
   process.exit(0);
@@ -2155,8 +2159,8 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
   // CI the portal cannot read (w889): for everyone, as a CI wait is anybody's.
   const ci = ciReadBanner(ciRead.health);
   if (ci) warnings.push({ id: 'ci-read', kind: 'ci-read', text: ci });
-  // A GitHub token that lacks a required repository or permission (w904): for its person and the owners.
-  for (const b of github.banners()) warnings.push({ id: b.id, kind: 'github-token', ...(b.person ? { person: b.person } : {}), owners: true, text: b.text });
+  // A GitHub token that lacks a required repository or permission (w904), or GitHub rate limiting its account (w1186): for its person and the owners.
+  for (const b of github.banners()) warnings.push({ id: b.id, kind: b.kind, ...(b.person ? { person: b.person } : {}), owners: true, text: b.text });
   return { lines, warnings };
 }
 let tokenWarningsShown = '';

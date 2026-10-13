@@ -472,6 +472,54 @@ ledger request, or a line on the request already fixing it.
   night ([The nightly run](#the-nightly-run)), files nothing, and answers `{enabled: false}`; the lab prints that in
   its log.
 
+## Master batch reds
+
+Ben, 2026-10-12 (w1180): "we'll just do the recommendation for the queue." The game repo merges a PR on a fast required
+`Test in editmode` check (compile, the tests the change touches, one smoke PlayMode test); the whole editmode suite runs after the
+merge, on master, in batches (`.github/workflows/master-batch.yml`, job `Master batch (full editmode)`). A PR that
+breaks the suite is therefore found after it merged, and this watch (`server/masterBatch.ts`, `MasterBatchWatch`) hands it
+back to its request.
+
+- **The source.** Every 3 minutes the watch lists the workflow's newest 10 runs on master (`gh api
+  repos/<repo>/actions/workflows/<workflow>/runs`, on the system payer's GitHub token: the portal's own login lacks
+  "Actions: read", portal-on-ffbox-host.md D7). For each run that finished since it last looked it reads the job's log
+  and takes the **last** `MASTER_BATCH_VERDICT {json}` line (`parseVerdict`: version 1; `verdict` red, green, flaky or
+  no-results; the tip; `culprits` with the merge sha, PR number, subject, PR title and failing tests; `flaky`;
+  `unresolved`). The log is data: every field is checked, a culprit without a full sha is dropped, a bad PR number
+  becomes null, texts are cleaned and cut, and what reaches a brief sits in a fence. Runs that ended cancelled or timed
+  out have no verdict and are skipped.
+- **A red run, a culprit.** For each culprit merge, **one** request, source `master-batch` (key `master-batch:<merge
+  sha>`; a later red run naming the same merge while that request is open adds a line to it, a closed one does not
+  swallow it), titled `Master batch red: revert #<pr> (<PR title>)`, **urgent**, triage `regression`, billed to the
+  system payer, with the constraint "Do not touch Steam branches or the release lane." The brief has the run, the tip, the
+  merge and PR link, the failing tests (20 shown), the unresolved ones, the linked request(s), and the method in order:
+  revert first (`git revert -m 1 <merge sha>` on a `revert-<pr>` branch, a PR whose description carries `Part of: <this
+  request>` and `Reverts #<pr>`, merged on a green Test in editmode), then re-land the fix on a new PR with the failing tests
+  green locally, or hand it back to the linked request's worker; never loosen or skip the failing test. The worker rules
+  (`workerRules`) repeat it. No culprit but failing tests: one request `Master batch red: <n> tests not bisected`.
+  A tip that ran nothing (`no-results`: a compile error or a crash): one request `Master batch red at <sha9>: no results
+  (compile error or crash)`, once per tip.
+- **The hand-back.** The culprit PR's request is the one whose `prs` (filled by the ledger sweep) holds that PR in the
+  game repo (`requestsForPr`: the repo is checked, PR numbers repeat across repos); with none, the requests named by
+  `Request:` / `Part of:` lines in the PR's description (`gh pr view`). Each gets one log line (`Orchestrators.tellMasterBatch`), a
+  worker busy on it is told, and its person's orchestrator hears "Your PR #N (wNNN) broke master's batch: <tests>. Filed
+  wMMM to revert it first." A closed request is only logged and told: nothing reopens it. A request nobody asked for by
+  name (an intake one) tells no person.
+- **Auto-approve.** `masterBatch.autoApprove` (default on, 10 a day). The culprit's own request is in flight on the same
+  words, so the usual "strong overlap in flight" rule is not applied to these requests, only the daily count (and 20 filed in
+  24 hours as a flood guard); with it off, or past the day's count, the request waits on the Intake tab.
+- **Flaky.** A `flaky` verdict, or a green run with a flaky list, files nothing: one warning in the portal log per run.
+  A red run that a **later run passed** (the tip is fixed or reverted by now) files nothing either.
+- **Once.** Each (run, culprit) is filed once, kept with the runs already seen in `<dataDir>/master-batch.json`, so a
+  restart repeats nothing. On a first start (no file) the runs already finished are only **recorded**: a deploy never files
+  for an old red batch. A run that finished more than 48 hours ago is not acted on, and a switch turned off and on again
+  starts from the runs then finished.
+- **Config and the off switch.** `masterBatch.enabled` (default **true**) and `masterBatch.autoApprove` `{ enabled,
+  maxPerDay }`, both settable with `set_app_config` by anyone and read at every look, so turning it off needs no restart;
+  `masterBatch.repo` (default `Final-Factory/FinalFactory`) and `masterBatch.workflow` (default `master-batch.yml`) are
+  config.json only. A dry run polls nothing. The read failing (no token, the workflow absent) is logged at the start and every
+  30 minutes.
+
 ## The nightly run
 
 Lothsahn, 2026-10-10 (w864): "Let's restructure the nightly desync run. It shouldn't be a scheduled windows task. Let's
@@ -694,8 +742,11 @@ setting under the same guard as `intake.ffbox`, and it applies at once, with no 
   "reviewers": ["ben", "lothsahn"],
   "lookbackDays": 14
 },
-"providers": { "ffbox": { "enabled": false, "sendWork": false, "devRequests": { "enabled": true, "perHour": 20, "maxFiles": 10, "maxRequestMB": 500 } } }
+"providers": { "ffbox": { "enabled": false, "sendWork": false, "devRequests": { "enabled": true, "perHour": 20, "maxFiles": 10, "maxRequestMB": 500 } } },
+"masterBatch": { "enabled": true, "autoApprove": { "enabled": true, "maxPerDay": 10 }, "repo": "Final-Factory/FinalFactory", "workflow": "master-batch.yml" }
 ```
+
+`masterBatch` (w1180, [Master batch reds](#master-batch-reds)) is the one block that is **on** by default.
 
 Channel names are the ffbox config's `discord.channels` aliases (or channel ids). Discord ids in `trusted` are
 snowflakes; an entry that is not one trusts nobody.

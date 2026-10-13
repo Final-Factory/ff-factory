@@ -28,7 +28,7 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     and what it saw. Other repos' master/main are fair game: Final-Factory/ffbox is pushed straight to master by
  *     design (docs/ffbox.md; w1132), the repo read from the remote's URL, never from a folder's name. Pushing your own branch and
  *     merging your PR into master is the normal, encouraged flow. (GitHub itself also refuses force pushes, deletion
- *     and direct pushes to master: branch protection requires a PR and green CI.)
+ *     and direct pushes to master: branch protection requires a PR and green CI, the game repo's `Test in editmode` check since w1180.)
  *   - repository settings: `gh repo delete` never. `gh repo rename|create|edit|archive|unarchive` and
  *     writes to `.../private-vulnerability-reporting` only for repos other than the game repo (so an
  *     agent can publish or retire the app's own repos when the user asks); the target comes from
@@ -166,8 +166,8 @@ export function sandboxGuard(opts: {
 const PROTECTED_BRANCH = /^(?:refs\/heads\/)?(?:master|main)$/i;
 /** w1137: the game repo's develop branch is retired; master is the one trunk. */
 const RETIRED_BRANCH = /^(?:refs\/heads\/)?develop$/i;
-const DEVELOP_RETIRED = 'develop is retired (w1137, 2026-10-12): master is the one trunk; push your own branch and open a PR into master (`gh pr create --base master`), then merge it when CI is green.';
-const MASTER_BY_PR = 'master takes changes only through a pull request: push your own branch, open a PR into master (`gh pr create --base master`), and merge it when CI is green.';
+const DEVELOP_RETIRED = 'develop is retired (w1137, 2026-10-12): master is the one trunk; push your own branch and open a PR into master (`gh pr create --base master`), then merge it when CI is green (the required `Test in editmode` check; the whole suite runs after the merge).';
+const MASTER_BY_PR = 'master takes changes only through a pull request: push your own branch, open a PR into master (`gh pr create --base master`), and merge it when CI is green (the game repo\'s required `Test in editmode` check; the whole suite runs after the merge).';
 
 /** A built Final Factory player (or server) binary: finalfactory.exe, a finalfactory .app bundle or the binary inside one, a Linux build's finalfactory.x86_64. */
 const PLAYER_BINARY = /(?:^|[\\/])finalfactory(?:\.exe|\.x86_64|\.app(?:[\\/]contents[\\/]macos[\\/]finalfactory)?)$/i;
