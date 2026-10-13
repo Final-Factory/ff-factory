@@ -1,0 +1,216 @@
+import { useState } from 'react';
+import type { AppState, WorkItem } from '../../../shared/types';
+import { waitAge, type WaitingAsk, type WaitingItem } from '../../../shared/waiting';
+import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
+import { api } from '../api';
+import { sessionRoute } from '../attention';
+import { attempt, sessionsByIds, toast } from '../store';
+import { fmtRelative, navigate } from '../util';
+import { Markdown } from './Markdown';
+import { PermissionCard } from './Transcript';
+import { Dot, Icon } from './ui';
+
+const ASK_LABEL: Record<WaitingAsk, string> = { approve: 'Approve or decline', answer: 'Answer', check: 'Check' };
+const AGE_TONE = { fresh: 'grey', old: 'amber', stale: 'red' } as const;
+
+/**
+ * Every request that waits on a person (w1228, Ben: "please make a good UI for intake in FFF"): one queue, the viewer's own
+ * moves first, then what waits on someone else. Each card says what it is, what is asked, how long it has waited, the
+ * evidence (the player's words, the source, the triage, repeats) and FF Factory's recommendation, with the buttons that
+ * clear it: Approve, Decline with a reason, Answer (sent to the viewer's own orchestrator, the way they would say it),
+ * or Open. The same endpoints the Intake tab and the orchestrator chat use; nothing new is allowed here.
+ */
+export function WaitingTab({ app, items, now }: { app: AppState; items: WaitingItem[]; now: number }) {
+  const mine = items.filter((i) => i.mine);
+  const others = items.filter((i) => !i.mine);
+  return (
+    <div className="sa-scroll waiting-tab" data-testid="waiting-tab">
+      <p className="dim small ledger-none" data-testid="waiting-summary">
+        {items.length
+          ? `${items.length} ${items.length === 1 ? 'request waits' : 'requests wait'} on input: ${mine.length} on you, ${others.length} on someone else. The oldest waits first.`
+          : 'Nothing waits on input.'}
+      </p>
+      <h3 className="intake-h">Waiting on you · {mine.length}</h3>
+      {mine.length ? (
+        <div className="wait-list" data-testid="waiting-mine">
+          {mine.map((i) => (
+            <WaitCard key={i.w.id} app={app} item={i} now={now} />
+          ))}
+        </div>
+      ) : (
+        <p className="dim small ledger-none">Nothing waits on you.</p>
+      )}
+      {others.length > 0 && (
+        <>
+          <h3 className="intake-h">Waiting on someone else · {others.length}</h3>
+          <div className="wait-list" data-testid="waiting-others">
+            {others.map((i) => (
+              <WaitCard key={i.w.id} app={app} item={i} now={now} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Evidence({ w }: { w: WorkItem }) {
+  const s = w.source;
+  return (
+    <div className="wait-evidence" data-testid={`wait-evidence-${w.id}`}>
+      {s && (
+        <p className="small intake-facts">
+          {sourceLabel(s)}
+          {s.untrusted ? <span className="tone-amber"> · {untrustedLabel(s)}</span> : null}
+          {s.version ? ` · version ${s.version}` : ''}
+          {namesReporter(s) ? ` · reported by ${s.reporter}` : ''}
+          {s.url?.startsWith('https://') ? (
+            <>
+              {' · '}
+              <a href={s.url} target="_blank" rel="noreferrer noopener">
+                {s.url.startsWith('https://discord.com/') ? 'Discord thread' : 'source'}
+              </a>
+            </>
+          ) : null}
+          {s.alsoThreads?.length ? ` · also reported ${s.alsoThreads.length} more time(s)` : ''}
+        </p>
+      )}
+      {w.triage && (
+        <p className="small dim" data-testid="triage">
+          Triage: {w.triage.reason}
+        </p>
+      )}
+      {/* Players' text is shown as it is, never as Markdown: no links, images or formatting from it. */}
+      <div className="wait-brief">{s?.untrusted ? <pre className="code intake-brief">{w.brief}</pre> : <Markdown text={w.brief} />}</div>
+      {w.overlaps.length > 0 && (
+        <p className="dim small">Found at filing, may repeat: {w.overlaps.map((o) => `${o.ref} “${o.title}” (${o.why})`).join('; ')}</p>
+      )}
+    </div>
+  );
+}
+
+function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: number }) {
+  const { w, ask, mine, since } = item;
+  const [busy, setBusy] = useState(false);
+  const [declining, setDeclining] = useState(false);
+  const [reason, setReason] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [sent, setSent] = useState(false);
+  const workers = sessionsByIds(app.sessions, w.sessionIds);
+  const age = waitAge(since, now);
+  const act = async (f: () => Promise<unknown>, done?: string) => {
+    setBusy(true);
+    const ok = await attempt(f());
+    setBusy(false);
+    if (ok !== undefined && done) toast(done);
+    return ok !== undefined;
+  };
+  const sendAnswer = async () => {
+    const text = answer.trim();
+    if (!text || !app.orchestratorId) return;
+    const asked = w.question?.text ?? w.flag?.text ?? '';
+    const ok = await act(
+      () => api.sendMessage(app.orchestratorId, `Answer on ${w.id} (${w.title}). It asked: “${asked.slice(0, 300)}”\n\n${text}\n\nPlease put this on ${w.id} as my answer (update_work note).`),
+      `Sent to your orchestrator: it records the answer on ${w.id}.`,
+    );
+    if (ok) setSent(true);
+  };
+  return (
+    <article className={`wait-card${mine ? ' mine' : ''}`} data-testid={`wait-${w.id}`}>
+      <header className="wait-head">
+        <Dot tone={mine ? 'amber' : 'grey'} />
+        <span className="wait-title">{w.title}</span>
+        <span className="mono dim">{w.id}</span>
+        <span className="spacer" />
+        <span className={`wait-age tone-${AGE_TONE[age]}`} title={new Date(since).toLocaleString()} data-testid={`wait-age-${w.id}`}>
+          {age === 'stale' ? 'stale · ' : ''}
+          {fmtRelative(since, now)}
+        </span>
+      </header>
+      <p className="small wait-ask" data-testid={`wait-ask-${w.id}`}>
+        <strong>{mine ? ASK_LABEL[ask] : `Waits on ${item.on.join(', ') || 'someone else'}`}:</strong> {item.text}
+      </p>
+      {item.recommendation && (
+        <p className="small tone-blue" data-testid={`wait-recommendation-${w.id}`}>
+          FF Factory recommends: {item.recommendation}
+        </p>
+      )}
+      <Evidence w={w} />
+      {ask === 'check' &&
+        workers.flatMap((x) =>
+          x.pendingPermissions.map((p) => (
+            <div key={p.requestId}>
+              <p className="small tone-amber">
+                {x.title} ({x.id}) waits for an OK:
+              </p>
+              <PermissionCard sessionId={x.id} requestId={p.requestId} toolName={p.toolName} input={p.input} reason={p.reason} pending />
+            </div>
+          )),
+        )}
+      <div className="wait-actions">
+        {mine && ask === 'approve' && !declining && (
+          <>
+            <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => void act(() => api.approveWork(w.id), `${w.id} approved: the dispatcher decides it now.`)}>
+              Approve {w.id}
+            </button>
+            <button className="btn btn-sm btn-ghost" disabled={busy} onClick={() => setDeclining(true)}>
+              Decline…
+            </button>
+          </>
+        )}
+        {mine && ask === 'approve' && declining && (
+          <>
+            <input
+              className="input wait-reason"
+              autoFocus
+              placeholder="Why (kept on the request)"
+              aria-label={`Reason to decline ${w.id}`}
+              value={reason}
+              maxLength={300}
+              onChange={(e) => setReason(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !busy && void act(() => api.declineWork(w.id, reason.trim() || undefined), `${w.id} declined.`)}
+            />
+            <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => void act(() => api.declineWork(w.id, reason.trim() || undefined), `${w.id} declined.`)}>
+              Decline {w.id}
+            </button>
+            <button className="btn btn-sm btn-ghost" disabled={busy} onClick={() => setDeclining(false)}>
+              Back
+            </button>
+          </>
+        )}
+        {!mine && ask === 'approve' && <span className="dim small">{app.intake?.reviewers.join(' or ') || 'A reviewer'} decides</span>}
+        {mine && ask === 'answer' && (
+          <div className="wait-answer">
+            {sent ? (
+              <span className="small tone-green">Sent to your orchestrator. The card goes when it has recorded the answer.</span>
+            ) : (
+              <>
+                <textarea
+                  className="input wait-answer-text"
+                  rows={2}
+                  placeholder="Your answer"
+                  aria-label={`Answer on ${w.id}`}
+                  value={answer}
+                  onChange={(e) => setAnswer(e.target.value)}
+                />
+                <button className="btn btn-sm btn-primary" disabled={busy || !answer.trim() || !app.orchestratorId} onClick={() => void sendAnswer()}>
+                  Send answer
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        <div className="spacer" />
+        <button className="link-btn small" onClick={() => navigate({ view: 'dispatcher', tab: w.id })}>
+          Open {w.id}
+        </button>
+        {ask === 'check' &&
+          workers.slice(0, 2).map((x) => (
+            <button key={x.id} className="link-btn small" onClick={() => navigate(sessionRoute(x, app))}>
+              <Icon name="chevron" size={11} /> Open {x.id}
+            </button>
+          ))}
+      </div>
+    </article>
+  );
+}

@@ -17,9 +17,11 @@ import { PermissionCard } from './Transcript';
 import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu, ToggleChip } from './ui';
 import { TimersButton } from './Timers';
+import { WaitingTab } from './WaitingTab';
+import { waitingItems } from '../../../shared/waiting';
 import { useKeepScroll } from '../scrollKeep';
 
-type Tab = 'requests' | 'intake' | 'spend' | 'conversation';
+type Tab = 'requests' | 'waiting' | 'intake' | 'spend' | 'conversation';
 
 const names = (w: WorkItem) => w.requesters.map((r) => r.displayName).join(', ');
 
@@ -80,11 +82,16 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   const open = work.filter(isOpenWork);
   const stalled = work.filter((w) => w.status === 'stalled');
   const closed = work.filter((w) => !isOpenWork(w) && w.status !== 'stalled');
-  const current: Tab = tab === 'conversation' ? 'conversation' : tab === 'intake' ? 'intake' : tab === 'spend' ? 'spend' : 'requests';
+  const current: Tab = tab === 'conversation' ? 'conversation' : tab === 'waiting' ? 'waiting' : tab === 'intake' ? 'intake' : tab === 'spend' ? 'spend' : 'requests';
   const focus = tab && /^w\d+$/.test(tab) ? tab : undefined;
   const setTab = (t: Tab) => navigate({ view: 'dispatcher', tab: t === 'requests' ? undefined : t }, true);
   const owner = app.me?.role === 'owner';
-  const glance = dispatcherGlance(session, open, useWorkLive(app, work, now), app.me?.userId);
+  const live = useWorkLive(app, work, now);
+  const glance = dispatcherGlance(session, open, live, app.me?.userId);
+  // Everything waiting on a person, in one queue (w1228): the tab, its count and the links to it count the same items.
+  const reviewer = !!app.me && !!app.intake?.reviewerIds.some((id) => id.toLowerCase() === app.me!.userId.toLowerCase());
+  const queue = app.me ? waitingItems(open, live, { userId: app.me.userId, displayName: app.me.displayName, reviewer }) : [];
+  const onMe = queue.filter((i) => i.mine).length;
   const account = session ? accountOf(app, session.id) : undefined;
   // Its context and last compaction (w535).
   const ctx = session ? contextGlance(session, now) : undefined;
@@ -154,6 +161,14 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
         <button role="tab" aria-selected={current === 'requests'} className={`tab${current === 'requests' ? ' active' : ''}`} onClick={() => setTab('requests')}>
           Requests <span className="dim">{open.length}</span>
         </button>
+        <button role="tab" aria-selected={current === 'waiting'} className={`tab${current === 'waiting' ? ' active' : ''}`} onClick={() => setTab('waiting')} data-testid="tab-waiting">
+          Waiting on input{' '}
+          {queue.length > 0 && (
+            <span className={onMe ? 'tone-amber' : 'dim'} title={`${onMe} on you, ${queue.length - onMe} on someone else`}>
+              {queue.length}
+            </span>
+          )}
+        </button>
         {app.intake && (
           <button role="tab" aria-selected={current === 'intake'} className={`tab${current === 'intake' ? ' active' : ''}`} onClick={() => setTab('intake')}>
             Intake {waiting > 0 && <span className="tone-amber" title="Needs a human">{waiting}</span>}
@@ -167,7 +182,8 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
         </button>
       </nav>
 
-      {current === 'requests' && <Requests app={app} work={work} open={open} stalled={stalled} closed={closed} focus={focus} now={now} />}
+      {current === 'requests' && <Requests app={app} work={work} open={open} stalled={stalled} closed={closed} focus={focus} now={now} waiting={queue.length} onMe={onMe} />}
+      {current === 'waiting' && <WaitingTab app={app} items={queue} now={now} />}
       {current === 'intake' && app.intake && <IntakeTab app={app} intake={app.intake} work={work} now={now} />}
       {current === 'spend' && <SpendTab />}
       {current === 'conversation' &&
@@ -242,7 +258,7 @@ function StateFilter({ live, picked, onChange, testId }: { live: ReadonlyMap<str
 
 const pickedLabel = (picked: ReadonlySet<WorkLiveState>) => WORK_LIVE_STATES.filter((s) => picked.has(s)).map((s) => WORK_LIVE_LABEL[s].toLowerCase()).join(' or ');
 
-function Requests({ app, work, open, stalled, closed, focus, now }: { app: AppState; work: WorkItem[]; open: WorkItem[]; stalled: WorkItem[]; closed: WorkItem[]; focus?: string; now: number }) {
+function Requests({ app, work, open, stalled, closed, focus, now, waiting, onMe }: { app: AppState; work: WorkItem[]; open: WorkItem[]; stalled: WorkItem[]; closed: WorkItem[]; focus?: string; now: number; waiting: number; onMe: number }) {
   const keep = useKeepScroll('dispatcher:requests');
   const live = useWorkLive(app, work, now);
   const [picked, setPicked] = usePickedStates('requests');
@@ -275,6 +291,14 @@ function Requests({ app, work, open, stalled, closed, focus, now }: { app: AppSt
   const shown = only ? [...open, ...stalled].filter((w) => picked.has(live.get(w.id)?.state as WorkLiveState)) : [];
   return (
     <div className="sa-scroll" ref={keep}>
+      {waiting > 0 && (
+        <p className="wait-banner" data-testid="waiting-banner">
+          <Dot tone={onMe ? 'amber' : 'grey'} /> {waiting} waiting on input · {onMe} on you.{' '}
+          <button className="link-btn small" onClick={() => navigate({ view: 'dispatcher', tab: 'waiting' }, true)}>
+            Go through them
+          </button>
+        </p>
+      )}
       {live.size > 0 && <StateFilter live={live} picked={picked} onChange={setPicked} testId="ledger-states" />}
       {only ? (
         shown.length ? <div className="run-list" data-testid="ledger-picked">{shown.map(row)}</div> : <p className="dim small ledger-none">None {pickedLabel(picked)} now.</p>

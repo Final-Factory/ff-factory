@@ -1,5 +1,5 @@
-import { appState, expect, go, test, uniq, useTool } from './fixtures.ts';
-import type { WorkItem } from '../shared/types.ts';
+import { appState, expect, go, isMobile, patchWork, settle, signIn, test, uniq, useTool } from './fixtures.ts';
+import type { AppState, ServerEvent, WorkItem } from '../shared/types.ts';
 
 /**
  * The intake (docs/intake.md) in the browser, on servers of their own with the Discord intake switched on
@@ -235,3 +235,140 @@ test('the Intake tab keeps its scroll position across the Conversation tab and a
   await go(page, '#/dispatcher/intake');
   await expect.poll(() => tab.evaluate((el) => Math.round(el.scrollTop))).toBe(at);
 });
+
+// ---- "Waiting on input" (w1228, Ben: "please make a good UI for intake in FFF") ----
+
+test('the Waiting on input tab clears a request each way: approve, decline with a reason, answer; the counts link to it (w1228)', async ({ authed: page, baseURL }) => {
+  test.setTimeout(120_000);
+  const tag = uniq('wait');
+  const mock = mockUrl(baseURL);
+  await post(`${mock}/_e2e/thread`, { forum: 'beta', name: `Drills stop at night ${tag}`, description: 'Drills stop when the sun sets.', version: '0.50.0.47' });
+  await post(`${mock}/_e2e/message`, { authorId: TRUSTED, name: 'Tester', content: `please look at the loading screen ${tag}`, toBot: true });
+  await post(`${mock}/_e2e/message`, { authorId: TRUSTED, name: 'Tester', content: `please look at the save menu ${tag}`, toBot: true });
+  const find = async (pred: (w: WorkItem) => boolean) => (await appState(page.request)).work?.find(pred);
+  await go(page, '#/dispatcher/intake');
+  await expect
+    .poll(
+      async () => {
+        const n = ((await appState(page.request)).work ?? []).filter((w) => w.title.includes(tag)).length;
+        if (n < 3) await page.getByRole('button', { name: 'Check Discord now' }).click();
+        return n;
+      },
+      { timeout: 80_000, intervals: [1000, 2000, 5000] },
+    )
+    .toBe(3);
+  const filed = ((await appState(page.request)).work ?? []).filter((w) => w.title.includes(tag));
+  const bug = filed.find((w) => w.source?.kind === 'discord-bug')!;
+  const decline = filed.find((w) => w.brief.includes('loading screen'))!;
+  const ask = filed.find((w) => w.brief.includes('save menu'))!;
+  // The third becomes a question from the dispatcher to tester (approved, then asked).
+  await patchWork(page.request, ask.id, { approval: { state: 'approved', by: 'auto' }, status: 'question', question: { text: `Should the save menu keep its old order ${tag}?`, at: new Date().toISOString() } });
+
+  // The count in the dispatcher links to the queue: the Requests tab's banner, the tab's own count, the sidebar's "Needs you".
+  await go(page, '#/dispatcher');
+  await expect(page.getByTestId('waiting-banner')).toContainText('3 waiting on input · 3 on you');
+  await expect(page.getByTestId('tab-waiting')).toContainText('3');
+  await page.getByTestId('waiting-banner').getByRole('button', { name: 'Go through them' }).click();
+  await expect(page).toHaveURL(/#\/dispatcher\/waiting/);
+  const tab = page.getByTestId('waiting-tab');
+  await expect(tab.getByTestId('waiting-summary')).toContainText('3 requests wait on input: 3 on you, 0 on someone else');
+
+  // Each card says what it is, what is asked and its evidence; the player's words stay text.
+  const bugCard = tab.getByTestId(`wait-${bug.id}`);
+  await expect(bugCard.getByTestId(`wait-ask-${bug.id}`)).toContainText('Approve or decline');
+  await expect(bugCard.getByTestId(`wait-evidence-${bug.id}`)).toContainText('Drills stop when the sun sets.');
+  await expect(bugCard.getByTestId(`wait-evidence-${bug.id}`)).toContainText('version 0.50.0.47');
+  await expect(tab.getByTestId(`wait-ask-${ask.id}`)).toContainText('The dispatcher asks: Should the save menu keep its old order');
+
+  // Approve in one click.
+  await bugCard.getByRole('button', { name: `Approve ${bug.id}` }).click();
+  await expect.poll(async () => (await find((w) => w.id === bug.id))?.approval?.state).toBe('approved');
+  await expect(tab.getByTestId(`wait-${bug.id}`)).toHaveCount(0);
+
+  // Decline with a reason: two clicks and the reason.
+  const declineCard = tab.getByTestId(`wait-${decline.id}`);
+  await declineCard.getByRole('button', { name: 'Decline…' }).click();
+  await declineCard.getByLabel(`Reason to decline ${decline.id}`).fill(`not a bug ${tag}`);
+  await declineCard.getByRole('button', { name: `Decline ${decline.id}` }).click();
+  await expect.poll(async () => (await find((w) => w.id === decline.id))?.status).toBe('rejected');
+  expect(((await find((w) => w.id === decline.id))!.log ?? []).join('\n')).toContain(`not a bug ${tag}`);
+
+  // Answer: the answer goes to the person's own orchestrator, where the dispatcher's question is answered.
+  const askCard = tab.getByTestId(`wait-${ask.id}`);
+  const orchestrator = (await appState(page.request)).orchestratorId;
+  await askCard.getByLabel(`Answer on ${ask.id}`).fill(`Keep it ${tag}`);
+  await askCard.getByRole('button', { name: 'Send answer' }).click();
+  await expect(askCard).toContainText('Sent to your orchestrator');
+  await expect
+    .poll(async () => {
+      const events = (await (await page.request.get(`/api/sessions/${orchestrator}/events?limit=200`)).json()) as { kind: string; text?: string }[];
+      return events.some((e) => e.kind === 'user' && e.text?.includes(`Answer on ${ask.id}`) && e.text.includes(`Keep it ${tag}`));
+    })
+    .toBe(true);
+});
+
+test('the Waiting on input tab with seven requests: the screenshot of the flow (w1228, test data)', async ({ page }) => {
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((raw) => {
+      const e = JSON.parse(String(raw)) as ServerEvent;
+      if (e.type === 'state') return ws.send(JSON.stringify({ type: 'state', state: waitingState(e.state) } satisfies ServerEvent));
+      if (e.type === 'session' || e.type === 'session_removed' || e.type === 'work') return;
+      ws.send(raw);
+    });
+    ws.onMessage((m) => server.send(m));
+  });
+  if (!isMobile(page)) await page.setViewportSize({ width: 1440, height: 1900 });
+  await signIn(page);
+  await page.goto('/#/dispatcher/waiting');
+  const tab = page.getByTestId('waiting-tab');
+  await expect(tab.getByTestId('waiting-summary')).toContainText('7 requests wait on input: 6 on you, 1 on someone else');
+  // Oldest first among the viewer's; a stale one stands out.
+  await expect(tab.getByTestId('waiting-mine').locator('.wait-card').first()).toHaveAttribute('data-testid', 'wait-w9101');
+  await expect(tab.getByTestId('wait-age-w9101')).toContainText('stale');
+  await expect(tab.getByTestId('wait-recommendation-w9104')).toContainText('Check first: it may repeat w9100');
+  await expect(tab.getByTestId('waiting-others')).toContainText('Waits on Lothsahn');
+  await expect(tab.getByTestId('wait-w9107').getByRole('button', { name: /Approve|Send answer/ })).toHaveCount(0);
+  await settle(page);
+  const file = test.info().outputPath('waiting-on-input.png');
+  await page.screenshot({ path: file, fullPage: isMobile(page) });
+  await test.info().attach('waiting-on-input', { path: file, contentType: 'image/png' });
+  // Declining takes a reason.
+  await tab.getByTestId('wait-w9101').getByRole('button', { name: 'Decline…' }).click();
+  await tab.getByTestId('wait-w9101').getByLabel('Reason to decline w9101').fill('Cannot reproduce on 0.50.0.47');
+  const file2 = test.info().outputPath('waiting-on-input-decline.png');
+  await page.screenshot(isMobile(page) ? { path: file2 } : { path: file2, clip: { x: 880, y: 0, width: 560, height: 700 } });
+  await test.info().attach('waiting-on-input-decline', { path: file2, contentType: 'image/png' });
+});
+
+/** Seven test requests that wait on a person: five Discord reports, a question to tester, and a design question for Lothsahn. */
+function waitingState(s: AppState): AppState {
+  const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+  const TESTER = { userId: 'tester', displayName: 'tester' };
+  const LOTH = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const base = { priority: 'normal', keys: [], requestedBy: TESTER, requesters: [TESTER], humanAsked: false, status: 'new', updatedAt: ago(0.01), sessionIds: [], overlaps: [], asks: 0, log: [] } satisfies Partial<WorkItem> as Pick<WorkItem, 'priority' | 'keys' | 'requestedBy' | 'requesters' | 'humanAsked' | 'status' | 'updatedAt' | 'sessionIds' | 'overlaps' | 'asks' | 'log'>;
+  const bug = (id: string, days: number, title: string, brief: string, extra: Partial<WorkItem> = {}): WorkItem => ({
+    ...base,
+    id,
+    title,
+    brief,
+    createdAt: ago(days),
+    source: { kind: 'discord-bug', untrusted: true, channel: '#beta-bugs', url: `https://discord.com/channels/1/${id.slice(1)}`, reporter: 'PlayerOne', version: '0.50.0.46' },
+    triage: { class: 'needs-human', reason: 'needs a human: no clear defect in the report, no save or log attached' },
+    approval: { state: 'pending', why: 'auto-approve is off' },
+    ...extra,
+  });
+  const work: WorkItem[] = [
+    bug('w9101', 10, 'Discord bug: Belts stop after loading', 'After loading my save the belts stop moving. <b>Not bold</b>'),
+    bug('w9102', 6, 'Discord bug: Splitter prefers the left belt', 'The splitter sends everything left when the right belt is full.'),
+    bug('w9103', 3, 'Discord request: A hotkey for the minimap', 'Could the minimap toggle have a hotkey?', {
+      source: { kind: 'discord-request', untrusted: false, channel: '#dev-chat', reporter: 'tester' },
+      triage: { class: 'person', reason: 'asked by a trusted person' },
+    }),
+    bug('w9104', 2, 'Discord bug: Belts stop after loading (again)', 'Belts stopped again after loading on 0.50.0.46.', { overlaps: [{ ref: 'w9100', title: 'Belts stop after loading', why: 'same thread title' }] as WorkItem['overlaps'] }),
+    bug('w9105', 0.2, 'Discord bug: Drills stop at night', 'Drills stop when the sun sets.'),
+    { ...base, id: 'w9106', title: 'Rework the save menu order', brief: 'Reorder the save menu.', status: 'question', createdAt: ago(1.5), question: { text: 'Should the save menu keep its old order, or show the newest save first?', at: ago(1.5) } },
+    { ...base, id: 'w9107', title: 'Change the splitter priority UI', brief: 'A new splitter priority panel.', requestedBy: LOTH, requesters: [LOTH], status: 'question', createdAt: ago(2), flag: { kind: 'design', text: 'Should priorities be per output or per splitter?', at: ago(2), for: [LOTH] } },
+  ];
+  return { ...s, work };
+}
