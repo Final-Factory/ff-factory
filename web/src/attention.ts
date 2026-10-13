@@ -4,11 +4,12 @@
 import type { AppState, SessionInfo } from '../../shared/types';
 import { summarizeToolInput, toolDisplayName } from './components/toolSummary';
 import { focusPermission } from './store';
-import { navigate, type Route } from './util';
+import { decisionsOnMe } from '../../shared/waiting';
+import { isOpenWork, navigate, type Route } from './util';
 
 export interface AttentionItem {
   key: string;
-  kind: 'permission' | 'unity' | 'delegation';
+  kind: 'permission' | 'unity' | 'delegation' | 'intake';
   /** Who or where: the agent, the sandbox, the standing agent. */
   title: string;
   /** What it wants, in one line. */
@@ -63,6 +64,21 @@ export function attentionItems(app: AppState): AttentionItem[] {
       at: d.createdAt,
       open: () => navigate({ view: 'agent', agentId: d.agentId, tab: 'delegations' }),
     });
+  }
+  // Intake approvals, the dispatcher's questions and design questions that wait on this person (w1228): one item, which opens the
+  // Dispatcher's "Waiting on input" tab where each is cleared.
+  if (app.me) {
+    const reviewer = !!app.intake?.reviewerIds.some((id) => id.toLowerCase() === app.me!.userId.toLowerCase());
+    const d = decisionsOnMe((app.work ?? []).filter(isOpenWork), { userId: app.me.userId, displayName: app.me.displayName, reviewer });
+    if (d.count)
+      items.push({
+        key: 'intake',
+        kind: 'intake',
+        title: 'Dispatcher',
+        detail: `${d.count} ${d.count === 1 ? 'request waits' : 'requests wait'} on you: approve, decline or answer`,
+        at: d.since,
+        open: () => navigate({ view: 'dispatcher', tab: 'waiting' }),
+      });
   }
   return items.sort((a, b) => a.at.localeCompare(b.at));
 }

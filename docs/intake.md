@@ -116,6 +116,22 @@ stop with a design question. The classification and its reason are on the reques
   /api/work/<id>/approve|decline`, or by telling their own orchestrator ("approve w41"), which calls `update_work
   approve` only in a turn the reviewer started (a relayed report or a worker's words cannot approve anything).
   Approved, it reaches the dispatcher like any request.
+- **One queue for everything that waits on a person** (w1228, Ben: "theres 7 things waiting on input in the dispatcher ... its
+  not clear in the UI how to go through and clear out the intake"). Before it, the "7 waiting" in the sidebar and the
+  Requests tab's "Waiting on input" chip were counts with no link, the Intake tab counted only Discord/FFBox requests (so
+  a dispatcher question like w708 was not in it), and nothing said "waiting on you". The Dispatcher page's **Waiting on
+  input** tab (`#/dispatcher/waiting`, `web/src/components/WaitingTab.tsx`, the list from `shared/waiting.ts`) lists every
+  open request whose live state is Waiting on input: "Waiting on you" first (a reviewer's approvals, the dispatcher's
+  question to you, a design question for you, a worker's wait that names you), then "Waiting on someone else". Oldest
+  first; a wait past a day is amber and past three days "stale". Each card says what is asked, FF Factory's recommendation
+  where its triage gives one (a possible repeat first, else an obvious bug, a trusted person's request, a regression or an
+  FFBox desync PR; a needs-human report gets none, it is the reviewer's call), the evidence (source, reporter, version, the
+  players' words as text, the triage, repeats) and the buttons: Approve, Decline with a reason (`POST
+  /api/work/<id>/decline`, the reason is kept on the request), Answer, Open. **Answer** sends your words to your own
+  orchestrator (the message endpoint) with the question quoted; it records them on the request with `update_work`, in your
+  turn, as it would if you had typed them; the card goes once it has. No new endpoint, no new power. The sidebar's
+  "Needs you" list and the phone's bell count the decisions on you (`decisionsOnMe`), the Dispatcher row opens this tab
+  while any wait, and the Requests tab opens with a "Go through them" link.
 - **A reviewer's decision for later** (w830): "decline w811 as a duplicate once #1314 is merged" is recorded in the
   reviewer's own turn (`update_work` decline with `when` and the reviewer's verbatim `words`), and the server declines it
   itself when #1314 merges, telling the reviewer; if #1314 closes unmerged it is dropped, never declined.

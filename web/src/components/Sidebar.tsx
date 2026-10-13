@@ -56,6 +56,8 @@ export function Sidebar({
   // The same live states the Dispatcher page counts (w1089): one workLiveAll map, so the row and the page always agree.
   const live = useWorkLive(app, app.work ?? [], now);
   const ledger = dispatcherGlance(dispatcher, (app.work ?? []).filter(isOpenWork), live, app.me?.userId);
+  // Something waits on this person at the dispatcher (w1228): its row opens the page that clears it.
+  const waitsOnMe = attention.some((i) => i.kind === 'intake');
   const selection = selectionOf(route, sessionsById);
   const fleet = fleetFor(app);
 
@@ -129,8 +131,8 @@ export function Sidebar({
             pulse={isBusy(dispatcher)}
             title="Dispatcher"
             sub={<span className={`tone-${ledger.tone}`}>{ledger.label}</span>}
-            hint={ctxHint('Everyone’s requests for work and what became of them', dispatcher)}
-            onClick={() => go({ view: 'dispatcher' })}
+            hint={ctxHint(waitsOnMe ? 'Requests that wait on you to approve, decline or answer' : 'Everyone’s requests for work and what became of them', dispatcher)}
+            onClick={() => go({ view: 'dispatcher', ...(waitsOnMe ? { tab: 'waiting' } : {}) })}
           />
         )}
         {ops && (
@@ -326,7 +328,7 @@ function Section({ title, count, add, onAdd, children }: { title: string; count:
   );
 }
 
-const ATTN_ICON: Record<AttentionItem['kind'], IconName> = { permission: 'bell', unity: 'alert', delegation: 'inbox' };
+const ATTN_ICON: Record<AttentionItem['kind'], IconName> = { permission: 'bell', unity: 'alert', delegation: 'inbox', intake: 'inbox' };
 
 /** Everything waiting on the user, oldest first; each opens where it is answered. */
 function AttentionList({ items, onPick }: { items: AttentionItem[]; onPick: () => void }) {

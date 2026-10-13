@@ -5936,3 +5936,89 @@ button.board-head-link:hover {
     grid-template-columns: 1fr;
   }
 }
+
+/* The Dispatcher's "Waiting on input" tab (w1228): one card per request that waits on a person. */
+.waiting-tab > * {
+  flex-shrink: 0;
+}
+
+.wait-list {
+  display: grid;
+  gap: var(--s-2);
+}
+
+.wait-card {
+  display: grid;
+  gap: var(--s-1);
+  padding: var(--s-2) 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.wait-card.mine {
+  border-color: var(--amber, var(--border));
+}
+
+.wait-card p {
+  margin: 0;
+}
+
+.wait-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.wait-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.wait-age {
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+
+.wait-brief {
+  max-height: 9em;
+  overflow: auto;
+}
+
+.wait-brief .intake-brief {
+  max-height: none;
+}
+
+.wait-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.wait-reason {
+  flex: 1 1 14em;
+  min-width: 0;
+}
+
+.wait-answer {
+  display: flex;
+  flex: 1 1 100%;
+  align-items: flex-end;
+  gap: var(--s-2);
+}
+
+.wait-answer-text {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+}
+
+.wait-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-1);
+  margin: var(--s-1) 2px;
+  font-size: var(--fs-sm);
+}
