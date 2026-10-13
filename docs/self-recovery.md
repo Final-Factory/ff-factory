@@ -549,13 +549,20 @@ worker within a minute or two; the portal stops a worker whose requests are clos
 (`resumable`/`welcome` `wakes`, no protocol bump: an older daemon ignores them).
 
 **A worker's own teardown.** `ff-leftovers list` and `ff-leftovers end` (written beside `unity-slot`, first on agents' PATH)
-list and end what the caller's own session started that still runs, never its own chain, claude's MCP servers or an
-interactive editor. Every worker's brief (`PROCESS_HYGIENE`) asks for it before DONE, with a quit timer on every player.
+list and end what the caller's own session started that still runs, never its own chain, the agent process, claude's MCP
+servers or an interactive editor. Every worker's brief (`PROCESS_HYGIENE`) asks for it before DONE, with a quit timer on every
+player. The agent process is found two ways (w1222): up the parent chain from the command, and from the environment, as the
+session's root (a process carrying the session whose live parent, its agent host, does not). The chain alone failed on
+Windows: Git Bash's fork+exec leaves each MSYS program a Windows parent that has already exited, so on 2026-10-13 the walk
+stopped at the shim's `sh.exe` and four workers' `ff-leftovers end` killed their own claude.exe (exit code 1). The `sh`
+shim also hands node the Windows pids of its MSYS parents (`/proc/<pid>/winpid`, in `FF_LEFTOVERS_CALLERS`), so the shell
+that runs it is spared too; a Mac and Linux keep an intact chain (`exec` replaces the process) and set nothing.
 
 Tests: `server/leftovers.test.ts` (biscuit's two players and their Xvfb end; a waited-for worker's, a gnome session's and a
 batch build's leftovers end; the orphan ends; a live worker's player, a check-in's run, an interactive editor, the main
 clone, another machine's process and anything before the welcome stay; a busy compiler server stays; real processes on
-Linux; `readEnvs` on the machine it runs on, Windows included), `machines.test.ts` (the daemon hears the check-ins).
+Linux; `readEnvs` on the machine it runs on, Windows included; BEAST's measured process tree of a worker's own
+`ff-leftovers end`, and the real shim run from a bash pipeline under a stand-in agent, which must survive it), `machines.test.ts` (the daemon hears the check-ins).
 
 ### Routine test steps without a prompt (w1097)
 
