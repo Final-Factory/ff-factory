@@ -114,12 +114,13 @@ jobs:
         include:
           # Test time per leg, summed from run 38333790206's three shards: Chromium about 486 s (645 before mobile-chrome ran
           # only the phone specs, playwright.config.ts ANDROID), WebKit about 574 s.
+          # ipad-chrome is in the WebKit leg: it is the iPad device with Chrome's user agent, so its engine is WebKit.
           - engine: Chromium
             browser: chromium
-            projects: desktop-chromium,mobile-chrome,ipad-chrome,provider-desktop,provider-mobile,intake-desktop
+            projects: desktop-chromium,mobile-chrome,provider-desktop,provider-mobile,intake-desktop
           - engine: WebKit
             browser: webkit
-            projects: mobile-safari,ipad-safari,intake-mobile
+            projects: mobile-safari,ipad-safari,ipad-chrome,intake-mobile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

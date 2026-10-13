@@ -34,7 +34,8 @@ const PROJECTS = [
   { name: 'mobile-chrome', port: 8792, use: { ...devices['Pixel 5'] }, only: ANDROID },
   // iPhone 13: 390 px wide, WebKit (Safari's engine).
   { name: 'mobile-safari', port: 8793, use: { ...devices['iPhone 13'] } },
-  // iPad Pro 11 (834 x 1194), in Safari and in Chrome: the iPad tests only (e2e/ipad.spec.ts).
+  // iPad Pro 11 (834 x 1194), in Safari and in Chrome: the iPad tests only (e2e/ipad.spec.ts). Both run on the WebKit engine:
+// ipad-chrome is the iPad device with Chrome's user agent (iOS Chrome is WebKit too), so ci.yml puts it in the WebKit leg.
   { name: 'ipad-safari', port: 8794, use: { ...devices['iPad Pro 11'] }, only: IPAD },
   { name: 'ipad-chrome', port: 8795, use: { ...devices['iPad Pro 11'], userAgent: CHROME_IPAD_UA }, only: IPAD },
   { name: 'provider-desktop', port: 8796, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } }, only: PROVIDER, env: { E2E_PROVIDER: '1' } },
