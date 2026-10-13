@@ -247,9 +247,12 @@ test('a person acting on a request takes it over: each action type, logged, show
   const [a, b] = [bug(), bug()];
   o.approveIntake(a.id, BEN);
   o.approveIntake(b.id, LOTH);
+  // One stamp for both links: a worker serves the request it was LAST sent, so two stamps a millisecond apart made it serve only the
+  // second (b), whose person then won whatever came after. It failed about 1 run in 30 under load, on main too (w1160, measured).
+  const sentAt = new Date().toISOString();
   for (const x of [a, b]) {
     x.sessionIds = ['s9'];
-    x.links = { s9: { at: new Date().toISOString(), how: 'sent' } };
+    x.links = { s9: { at: sentAt, how: 'sent' } };
     store.putWork(x);
   }
   const tokenUserOf = (agents as unknown as { tokenUserOf(id: string): string | undefined }).tokenUserOf.bind(agents);
