@@ -426,6 +426,14 @@ export interface Config {
     followUpsPerMessage?: number;
     /** message_person messages to one person until the sender or the recipient writes to their own orchestrator, default 10. Not between the owners (w627, server/orchestrators.ts ownersPair). */
     messagesPerPerson?: number;
+    /**
+     * The model of the coordinators' routine turns, those no person's own message started (w1158, server/turnModel.ts,
+     * docs/orchestrators.md "Which model answers a turn"). Default claude-sonnet-5-5; "off" keeps every turn on `model`.
+     * Workers never use it.
+     */
+    routineModel?: string | null;
+    /** Minutes after a turn on `model` during which routine turns stay on `model` too (w1158), default 60: switching back and forth rewrites the conversation into each model's cache. */
+    routineAfterMinutes?: number;
   };
   worker: {
     permissionMode: PermissionMode;
