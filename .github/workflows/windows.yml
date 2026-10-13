@@ -75,14 +75,14 @@ permissions:
 jobs:
   windows:
     name: Windows tests${{ (github.event_name == 'schedule' || inputs.all) && ' (the whole suite)' || '' }}
-    runs-on: windows-latest
+    runs-on: ${{ vars.FF_WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 22
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: Final-Factory/ci-actions/setup@c5584f1c8b3f62823efd7a74d88019c2d1f40565
         with:
-          node-version: 24
-          cache: npm
+          node: '24'
+          node-cache: npm
       - name: A git identity for the tests that commit
         run: |
           git config --global user.name "FF Factory CI"
