@@ -428,7 +428,9 @@ test('on this machine: `ff-leftovers end` run through its shim from a bash pipel
   // A stand-in for claude: it keeps a background job, then runs the command as the workers of 2026-10-13 did.
   const agent = `
     const { spawn, execFile } = require('node:child_process');
-    const bg = spawn(${JSON.stringify(BASH)}, ['-c', 'sleep 600'], { stdio: 'ignore' });
+    // A compound command, as claude's background tasks are: bash stays (a lone \`bash -c 'sleep 600'\` execs into sleep on
+    // Linux, and a non-shell child of the agent is one of its own tools, like an MCP server, so it is spared by design).
+    const bg = spawn(${JSON.stringify(BASH)}, ['-c', 'sleep 600; true'], { stdio: 'ignore' });
     setTimeout(() => execFile(${JSON.stringify(BASH)}, ['-c', ${JSON.stringify(`'${shim}' end 2>&1 | tail -20; echo "status=\${PIPESTATUS[0]}"`)}], { timeout: 120000 }, (e, out, err) => {
       setTimeout(() => {
         let bgAlive = true;
