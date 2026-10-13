@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, openSandbox, startWorker, test, uniq } from './fixtures.ts';
@@ -19,6 +20,11 @@ test('video: a clip an agent mentions plays inline and seeks with HTTP ranges (a
     const video = panel.locator('.msg-assistant .video-item video').first();
     await expect(video).toBeVisible();
     await expect(video).toHaveAttribute('preload', 'metadata');
+    // The player asks for the web preview (w1248); with no ffmpeg here the server sends the original. The link opens it.
+    expect(await video.getAttribute('src')).toContain('preview=1');
+    const full = panel.locator('.msg-assistant .video-item a.video-full').first();
+    await expect(full).toHaveText('Full quality');
+    expect(await full.getAttribute('href')).not.toContain('preview=1');
     expect(await video.evaluate((v: HTMLVideoElement) => v.controls && v.muted && v.playsInline)).toBe(true);
     await expect.poll(() => video.evaluate((v: HTMLVideoElement) => (v.readyState >= 1 ? Math.round(v.duration) : -1))).toBe(2);
   }
@@ -31,6 +37,10 @@ test('video: a clip an agent mentions plays inline and seeks with HTTP ranges (a
   expect(part.headers()['accept-ranges']).toBe('bytes');
   expect((await part.body()).length).toBe(100);
   expect((await page.request.get(src, { headers: { Range: 'bytes=99999999-' } })).status()).toBe(416);
+  // ?preview=1 (w1248): with no preview to send, the original, ranges and all.
+  const viaPreview = await page.request.get(`${src}&preview=1`, { headers: { Range: 'bytes=0-99' } });
+  expect(viaPreview.status()).toBe(206);
+  expect(viaPreview.headers()['content-type']).toBe('video/webm');
   const whole = await page.request.get(src);
   expect(whole.status()).toBe(200);
   expect(whole.headers()['content-type']).toBe('video/webm');
@@ -58,4 +68,29 @@ test('video: a clip written as a markdown image, in the <angle> path form, is a 
     await expect.poll(() => video.evaluate((v: HTMLVideoElement) => (v.readyState >= 1 ? Math.round(v.duration) : -1))).toBe(2);
     await expect(message.locator('.md-video-cap').first()).toContainText('md clip');
   }
+});
+
+test('video: ?preview=1 sends a review clip\'s web preview, with ranges; the original stays one link away (w1248)', async ({ authed: page }) => {
+  const port = new URL(test.info().project.use.baseURL!).port;
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'sandboxes', '_review');
+  const clip = path.join(review, 'w000-clips', 'previewed.mp4').replace(/\\/g, '/');
+  const s = await startWorker(page.request, `preview ${uniq('pv')}`, { title: 'Preview' });
+  const src = `/api/image?${new URLSearchParams({ session: s.id, path: clip })}`;
+  const preview = fs.statSync(path.join(path.dirname(clip), '.preview', 'previewed.mp4.mp4')).size;
+  const part = await page.request.get(`${src}&preview=1`, { headers: { Range: 'bytes=0-99' } });
+  expect(part.status()).toBe(206);
+  expect(part.headers()['content-range']).toBe(`bytes 0-99/${preview}`);
+  expect(part.headers()['content-type']).toBe('video/mp4');
+  expect((await part.body()).length).toBe(100);
+  const tail = await page.request.get(`${src}&preview=1`, { headers: { Range: `bytes=${preview - 10}-` } });
+  expect(tail.status()).toBe(206);
+  expect(tail.headers()['content-range']).toBe(`bytes ${preview - 10}-${preview - 1}/${preview}`);
+  expect((await page.request.get(`${src}&preview=1`, { headers: { Range: `bytes=${preview}-` } })).status()).toBe(416);
+  const whole = await page.request.get(`${src}&preview=1`);
+  expect(whole.status()).toBe(200);
+  expect(Number(whole.headers()['content-length'])).toBe(preview);
+  // Without it, the original: 100 bytes.
+  const original = await page.request.get(src);
+  expect(original.status()).toBe(200);
+  expect((await original.body()).length).toBe(100);
 });

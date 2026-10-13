@@ -31,6 +31,8 @@ import { Identity, asRequester } from './identity.ts';
 import { routeMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
+import { VideoPreviews } from './videoPreview.ts';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { keepMessageImages } from './inlineImages.ts';
 import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, machineUploadHttp, publicRef } from './attachments.ts';
 import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
@@ -337,6 +339,11 @@ agents.attachments = attachments;
 agents.spend = spend;
 // Review media workers publish (docs/review.md): <sandboxRoot>/_review unless config review.root says otherwise.
 const review = new ReviewStore(() => ({ ...REVIEW_DEFAULTS, ...cfg.review, root: cfg.review?.root ?? path.join(cfg.sandboxRoot, '_review') }));
+// A small streamable copy of each review video for the chat's player (w1248), made when it is published, or on first view.
+const previews = new VideoPreviews({ ffmpeg: process.env.FF_FFMPEG || undefined });
+review.onPublished = (file) => {
+  if (VIDEO_FILE.test(file)) void previews.ensure(file);
+};
 agents.review = review;
 
 /** The signed-in person making this request, as work records them (a route only runs for a signed-in user). */
@@ -1259,6 +1266,9 @@ function sessionImageRoots(sessionId: string, file?: string): ImageRoots {
   throw new HttpError(404, 'no folder for this session');
 }
 
+/** How long a request for a video's preview waits for it to be made before it gets the original (an encode takes 5-11 s). */
+const PREVIEW_WAIT_MS = 30_000;
+
 const readImageIn = (where: ImageRoots, file: string) => (where.machine ? machines.readImage(where.machine, file, where.session) : Promise.resolve(readImage(file, where.roots)));
 
 route('GET', '/api/image', async (_r, _p, url) => {
@@ -1268,6 +1278,14 @@ route('GET', '/api/image', async (_r, _p, url) => {
     if (VIDEO_FILE.test(file)) {
       if (where.machine) throw new Error('videos on a machine cannot be shown yet');
       const v = openVideo(file, where.roots);
+      // ?preview=1: a review video's web preview (server/videoPreview.ts), waited for a while when it is still being
+      // made; the original when it cannot be (no ffmpeg, a failed encode, not a review file).
+      if (url.searchParams.get('preview') === '1' && review.contains(v.path)) {
+        const waited = new AbortController();
+        const p = await Promise.race([previews.ensure(v.path), sleep(PREVIEW_WAIT_MS, undefined, { signal: waited.signal }).catch(() => undefined)]).finally(() => waited.abort());
+        const st = p ? fs.statSync(p, { throwIfNoEntry: false }) : undefined;
+        if (p && st) return new StreamReply('video/mp4', p, st.size);
+      }
       return new StreamReply(v.mediaType, v.path, v.size);
     }
     const img = await readImageIn(where, file);

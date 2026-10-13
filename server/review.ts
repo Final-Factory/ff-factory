@@ -104,6 +104,8 @@ export class ReviewStore {
   private readonly uploads = new Map<string, Upload>();
   /** Uploads with a chunk being written: one writer per upload. */
   private readonly writing = new Set<string>();
+  /** Told of every file published (a machine's upload or a local copy): the portal starts its video preview (w1248). */
+  onPublished?: (file: string) => void;
 
   constructor(config: () => ReviewConfig & { root: string }, now: () => number = Date.now) {
     this.config = config;
@@ -207,6 +209,7 @@ export class ReviewStore {
       }
       const dest = this.place(u.topic, u.name, (to) => fs.linkSync(this.partPath(uploadId), to));
       this.drop(uploadId);
+      this.onPublished?.(dest);
       return { received, size: u.size, path: dest };
     } finally {
       this.writing.delete(uploadId);
@@ -227,6 +230,7 @@ export class ReviewStore {
     for (const [i, s] of stats.entries()) {
       const p = this.place(topic, names[i], (to) => fs.copyFileSync(s.from, to, fs.constants.COPYFILE_EXCL));
       out.push({ from: s.from, path: p, size: s.size, sha256: await sha256Of(p) });
+      this.onPublished?.(p);
     }
     return { topic, files: out };
   }
