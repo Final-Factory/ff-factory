@@ -36,14 +36,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # FF_WINDOWS_RUNNER and FF_MACOS_RUNNER move either leg to another label (w1170); the job needs a clean machine
+    # per run (it installs and updates a worker under the OS's service manager), so a self-hosted one must be single-use.
+    runs-on: ${{ matrix.os == 'windows-latest' && (vars.FF_WINDOWS_RUNNER || 'windows-latest') || (vars.FF_MACOS_RUNNER || 'macos-latest') }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: Final-Factory/ci-actions/checkout@c5584f1c8b3f62823efd7a74d88019c2d1f40565
+      - uses: Final-Factory/ci-actions/setup@c5584f1c8b3f62823efd7a74d88019c2d1f40565
         with:
-          node-version: 24
-          cache: npm
+          node: '24'
+          node-cache: npm
       - name: A git identity (the test's game repo commits)
         run: |
           git config --global user.name "FF Factory CI"
