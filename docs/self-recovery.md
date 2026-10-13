@@ -232,6 +232,29 @@ it goes down with the portal (w424: after `add_machine beast local` the m5 check
 and pinged itself). Without any of them (and no `healthUrl`) there is nothing to watch. The Macs get the watch with
 the daemon: they redeploy themselves when idle after an update.
 
+### Why a Mac went offline (w1249)
+
+Read-only, on the Mac itself once it is back. Panic and GPU reports move to `/Library/Logs/DiagnosticReports/Retired/`
+within a day, so look there as well as in the folder above it.
+
+- `panic-full-*.panic`: the file's name and `date` are when the report was written, at the next login. The panic's own
+  time is `Calendar` in the panic string (an epoch in hex: `date -r $((16#<hex>))`). "userspace watchdog timeout: no
+  successful checkins from WindowServer" means the GPU or WindowServer wedged and the kernel restarted the Mac.
+- `gpuEvent-<process>-*.ips`: a GPU restart charged to that process (`restart_reason_desc`, e.g. "BIF0 page fault").
+  `finalfactory` means a built game player.
+- `ResetCounter-*.diag`: `Boot faults: wdog` is a watchdog restart, and `btn_rst` is someone holding the power button
+  after a hang.
+- `pmset -g log | grep "powerd process is started"` gives the login after each restart. With FileVault on and no
+  auto-login (`fdesetup status`), the daemon, a LaunchAgent, runs only once its person has logged in. So the gap from
+  the panic to that line is the time the Mac was dark.
+- `sysctl kern.boottime` gives the boot itself, and the portal journal (`portal_logs`, grep `machine <id>`) gives when
+  the portal lost and regained it.
+
+On the m3 from 2026-10-07 to 10-13 there were 7 outages, and each was a game client that workers had started there and
+that hit w665's GPU page fault. The game repo's `player_slots.py` now refuses a multiplayer client on a Mac
+(`FF_MAC_GPU_HANG_OK`), and `watchOffline` reports a machine that has been offline 30 min with work stranded on it
+([machines.md](machines.md)).
+
 ## 5. Continuous clean-up
 
 On 2026-09-28 BEAST's guard refused new agents at 75 GB free on C:, and `host_recovery cleanup` freed
