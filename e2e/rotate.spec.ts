@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Locator, Page, TestInfo } from '@playwright/test';
-import { appState, expect, go, sendMessage, test, uniq } from './fixtures.ts';
+import { expect, go, sendMessage, startWorker, test, uniq } from './fixtures.ts';
 
 /**
  * Turning a phone between portrait and landscape keeps the reader's place in the chat (w1164): at the bottom, the chat is
@@ -58,11 +58,15 @@ async function shot(page: Page, info: TestInfo, name: string) {
   }
 }
 
+/**
+ * A long chat of a worker of its own, on its full-width page: the Transcript is the one the orchestrator chat uses, and a chat
+ * of its own is not grown by the messages other tests send to the owner's orchestrator (scrollKeep.spec.ts reads that one).
+ */
 async function longChat(page: Page, tag: string) {
-  await go(page, '#/');
-  const me = await appState(page.request);
-  for (let i = 0; i < 14; i++) await sendMessage(page.request, me.orchestratorId, rowText(i, tag));
-  const scope = page.locator('.orch').first();
+  const s = await startWorker(page.request, `first ${tag}`, { title: `Turn ${tag}` });
+  await go(page, `#/session/${s.id}`);
+  for (let i = 0; i < 14; i++) await sendMessage(page.request, s.id, rowText(i, tag));
+  const scope = page.locator('.session-view');
   await expect(reply(scope, tag, 13)).toHaveCount(1);
   return scope;
 }
