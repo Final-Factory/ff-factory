@@ -342,6 +342,23 @@ test('intake.nightly.review (w905): settable by anyone, checked like the run\'s,
   assert.ok(SETTABLE_KEYS.includes('intake.nightly.review'));
 });
 
+test('masterBatch.enabled and .autoApprove (w1180): settable by anyone, checked, written, applied live, null back to the default', (t) => {
+  const { file, cfg } = setup(t);
+  assert.deepEqual(setAppConfig(file, cfg, 'masterBatch.enabled', 'false'), { before: undefined, after: false });
+  assert.equal(cfg.masterBatch?.enabled, false, 'the watch reads it at its next look: no restart');
+  setAppConfig(file, cfg, 'masterBatch.autoApprove', '{"enabled": true, "maxPerDay": 3}');
+  assert.deepEqual(cfg.masterBatch, { enabled: false, autoApprove: { enabled: true, maxPerDay: 3 } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')).masterBatch, { enabled: false, autoApprove: { enabled: true, maxPerDay: 3 } });
+  setAppConfig(file, cfg, 'masterBatch.enabled', null);
+  assert.equal(cfg.masterBatch?.enabled, undefined, 'null is the default (on)');
+  assert.throws(() => normalizeSetting('masterBatch.enabled', 'yes'), /true or false/);
+  assert.throws(() => normalizeSetting('masterBatch.autoApprove', { maxPerDay: 101 }), /whole number from 0 to 100/);
+  assert.throws(() => normalizeSetting('masterBatch.autoApprove', { enabled: 'yes' }), /enabled is true or false/);
+  assert.throws(() => normalizeSetting('masterBatch.autoApprove', { repo: 'x/y' }), /unknown key/);
+  assert.ok(!OWNER_ONLY_KEYS.has('masterBatch.enabled') && !OWNER_ONLY_KEYS.has('masterBatch.autoApprove'));
+  assert.ok(SETTABLE_KEYS.includes('masterBatch.enabled') && SETTABLE_KEYS.includes('masterBatch.autoApprove'));
+});
+
 test('set_app_config: placement.hold (w1089) keeps a computer off for everything, with who holds it and why; null releases it and leaves the rest', (t) => {
   const { file, cfg } = setup(t);
   setAppConfig(file, cfg, 'placement.avoid', { beast: 'BEAST unstable' });
