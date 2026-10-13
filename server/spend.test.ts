@@ -987,3 +987,112 @@ test('audit: whatever the mix of turns, workers + coordination + not-any-request
   assert.equal(w.spend.request('w4')?.sessions?.s1, undefined, 'the closed request got no worker turn');
   void n;
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// correcting history (w1209)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** A live-recorded session as the old portal left it: fixV not set, the cost rule and the notice rule of before 2026-10-13. */
+function legacyOf(w: ReturnType<typeof world>, sid: string) {
+  const s = w.spend.session(sid)!;
+  s.fixV = undefined;
+  return s;
+}
+
+test('correctHistory: a restart that counted the CLI\'s whole running total as one turn is recorded again as the turn it was', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1')]);
+  seq = 0;
+  const e1u = userEvent(T0, 'start');
+  const e1 = resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 10, cr: 1000 }) } }, 10);
+  const e2u = userEvent(T0 + 3_600_000, 'go on');
+  // the process restarted and resumed: its totals continue from the saved ones (10 → 10.5), and the flag says restarted
+  const e2 = resultEvent(T0 + 3_660_000, { restarted: true, cum: { m: tok({ usd: 10.5, cr: 1100 }) } }, 10.5);
+  for (const e of [e1u, e1]) w.spend.observe('s1', e);
+  const s = legacyOf(w, 's1');
+  // what the old portal recorded for the second turn: the whole 10.5
+  w.spend.add({ s, at: e2.t, models: { m: tok({ usd: 10.5, cr: 1100 }) }, total: tok({ usd: 10.5, cr: 1100 }), estimated: false, allocs: [{ id: 'w1', weight: 1, how: 'link' }] });
+  assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 20.5) < 1e-9);
+  const r = w.spend.correctHistory('s1', [e1u, e1, e2u, e2], w.sessions[0]);
+  assert.equal(r.skipped, undefined);
+  assert.equal(r.turns, 1);
+  assert.ok(Math.abs(r.removedUsd - 10) < 1e-9);
+  assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 10.5) < 1e-9, 'the request holds the 10 and the 0.5');
+  assert.ok(Math.abs(w.spend.session('s1')!.total.usd - 10.5) < 1e-9);
+  assert.ok(Math.abs(w.spend.request('w1')!.models.m.usd - 10.5) < 1e-9);
+  assert.ok(Math.abs(w.spend.request('w1')!.days['2026-10-08'].usd - 10.5) < 1e-9);
+  assert.equal(w.spend.session('s1')!.turns, 2, 'the turn count did not move');
+  // once
+  assert.equal(w.spend.correctHistory('s1', [e1u, e1, e2u, e2], w.sessions[0]).turns, 0);
+});
+
+test("correctHistory: a request a notice only cited loses the turns billed to it; they are in the coordinator's own bucket, and the totals add up", () => {
+  const notice = '[app restarted] The portal restarted. Could not resume: x waits for the daemon (an update available is no reason to wait; only a protocol this portal no longer drives is, w605); resumed after that';
+  const w = world([item('w605', { status: 'done' }), item('w9')], [DISPATCHER()]);
+  seq = 0;
+  coordTurn(w, 'd', T0, '[worker update] w9', 1); // creates the session; billed to w9
+  const s = legacyOf(w, 'd');
+  const u = userEvent(T0 + DAY, notice);
+  const e = resultEvent(T0 + DAY + 30_000, { cum: { m: tok({ usd: 101, cr: 100_000 }) } }, 101);
+  // what the old portal recorded: billed to w605
+  w.spend.add({ s, at: e.t, models: { m: tok({ usd: 100, cr: 99_000 }) }, total: tok({ usd: 100, cr: 99_000 }), estimated: false, allocs: [{ id: 'w605', weight: 1, how: 'message' }] });
+  s.cum = { m: tok({ usd: 101, cr: 100_000 }) };
+  const first = [userEvent(T0, '[worker update] w9'), resultEvent(T0 + 30_000, { cum: { m: tok({ usd: 1, cr: 1000 }) } }, 1)];
+  const events = [...first, u, e];
+  const grand = w.spend.session('d')!.total.usd;
+  assert.ok(Math.abs(w.spend.request('w605')!.total.usd - 100) < 1e-9);
+  const r = w.spend.correctHistory('d', events, w.sessions[0]);
+  assert.equal(r.skipped, undefined, r.skipped ?? "");
+  assert.ok(Math.abs(r.movedUsd - 100) < 1e-9);
+  assert.ok(Math.abs(w.spend.request('w605')!.total.usd) < 1e-9, 'nothing left on the request that was only cited');
+  assert.ok(Math.abs(w.spend.request('_dispatcher')!.total.usd - 100) < 1e-9, "and it is the dispatcher's own");
+  assert.ok(Math.abs(w.spend.session('d')!.total.usd - grand) < 1e-9, 'the session spent what it spent');
+  const sumReq = [...w.spend.requests.values()].reduce((a, x) => a + x.total.usd, 0);
+  assert.ok(Math.abs(sumReq - grand) < 1e-9, 'requests and buckets still add up to the session');
+  // its days are rebuilt from the corrected record
+  assert.equal(w.spend.session('d')!.coordV, undefined);
+  w.spend.rebuildCoordination('d', events, w.sessions[0]);
+  assert.equal(w.spend.request('w605')!.coordDays?.d, undefined);
+  const rep = buildReport(w.spend, T0 + 2 * DAY, { days: 7 });
+  assert.ok(Math.abs(rep.workers.usd + rep.coordination.usd + rep.buckets.reduce((a, b) => a + b.usd, 0) - rep.total.usd) < 1e-9);
+  assert.ok(Math.abs(rep.coordination.usd - 1) < 1e-9, 'only the real mention is coordination');
+});
+
+test('correctHistory: a record the replay does not explain is left as it was, with the reason', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1')]);
+  seq = 0;
+  const e1u = userEvent(T0, 'start');
+  const e1 = resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 10, cr: 1000 }) } }, 10);
+  const e2u = userEvent(T0 + 3_600_000, 'go on');
+  const e2 = resultEvent(T0 + 3_660_000, { restarted: true, cum: { m: tok({ usd: 10.5, cr: 1100 }) } }, 10.5);
+  for (const e of [e1u, e1]) w.spend.observe('s1', e);
+  const s = legacyOf(w, 's1');
+  w.spend.add({ s, at: e2.t, models: { m: tok({ usd: 10.5 }) }, total: tok({ usd: 10.5 }), estimated: false, allocs: [{ id: 'w1', weight: 1, how: 'link' }] });
+  s.total = tok({ usd: 50 }); // the record holds far more than the transcript explains (a transcript that lost its first half, say)
+  const r = w.spend.correctHistory('s1', [e1u, e1, e2u, e2], w.sessions[0]);
+  assert.match(r.skipped!, /replay reads \$20\.50 where the record holds \$50\.00/);
+  assert.equal(r.turns, 0);
+  assert.ok(Math.abs(w.spend.request('w1')!.total.usd - 20.5) < 1e-9, 'untouched');
+});
+
+test('correctHistory: turns the current code recorded are not touched, and a session first seen by it has nothing to correct', () => {
+  const w = world([item('w1', { sessionIds: ['s1'], links: { s1: { at: iso(T0), how: 'sent' } } })], [session('s1')]);
+  w.spend.observe('s1', userEvent(T0, 'start'));
+  w.spend.observe('s1', resultEvent(T0 + 60_000, { cum: { m: tok({ usd: 1, cr: 1000 }) } }, 1));
+  assert.equal(w.spend.session('s1')!.fixV, 1);
+  assert.equal(w.spend.correctHistory('s1', [], w.sessions[0]).turns, 0);
+});
+
+test("spend_report: a bucket's request view says it is no request's and shows one figure per day; a long session list is cut", () => {
+  const w = world([item('w1')], [DISPATCHER()]);
+  for (let i = 0; i < 3; i++) coordTurn(w, 'd', T0 + i * DAY, '[heartbeat] quiet', 2);
+  const text = renderRequest(w.spend, '_dispatcher', (sid) => `#/session/${sid}`, 7);
+  assert.match(text, /\[not any request's\]: \$6\.00[^\n]*from coordinators/);
+  assert.match(text, /By UTC day, newest first: 2026-10-10 \$2\.00; 2026-10-09 \$2\.00; 2026-10-08 \$2\.00/);
+  assert.doesNotMatch(text, /workers \/ coordination/);
+  // many worker sessions in one bucket
+  const many = world([], Array.from({ length: 40 }, (_, i) => session(`u${i}`, { title: `none ${i}` })));
+  for (let i = 0; i < 40; i++) many.spend.observe(`u${i}`, resultEvent(T0 + i * 1000, { cum: { m: tok({ usd: 1 + i / 100, cr: 1 }) } }, 1 + i / 100));
+  const big = renderRequest(many.spend, '_unattributed', () => '', 7);
+  assert.equal((big.match(/^- u\d+ /gm) ?? []).length, 25);
+  assert.match(big, /and 15 more session\(s\), \$/);
+});
