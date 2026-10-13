@@ -638,15 +638,35 @@ const SHELL = /^(bash|sh|zsh|dash|fish|cmd|powershell|pwsh)$/i;
 
 /**
  * What a worker started that still runs (the `ff-leftovers` command, w1197): the processes carrying its own session id,
- * not its own chain (this command, its shell, claude, the agent host), not what claude runs for itself (its MCP servers:
- * the non-shell children of that chain) and not an interactive editor or what it started. Background jobs (a shell claude
- * keeps for a background task, or one reparented to init) are in it.
+ * not its own chain (this command, its shell, claude, the agent host), not the agent process itself, not what claude runs
+ * for itself (its MCP servers: the non-shell children of that chain and of the agent) and not an interactive editor or
+ * what it started. Background jobs (a shell claude keeps for a background task, or one reparented to init) are in it.
+ *
+ * The chain alone is not enough on Windows (w1219: three workers' `ff-leftovers end` ended their own claude.exe, exit
+ * code 1): Git Bash's fork+exec leaves each MSYS program a Windows parent that has already exited, so the walk up from
+ * this command stopped at the shim's sh.exe and claude, its shells and its MCP servers all looked like leftovers. So the
+ * agent process is also found from the environment: the session's root, a process carrying the session whose live
+ * parent (its agent host) does not. `callers`: more pids the chain is walked up from (the shim's MSYS parents, by their
+ * Windows pids); `born`: start times, so a parent pid Windows reused for a newer process is no parent.
  */
-export function ownLeftovers(session: string, procs: Proc[], env: Map<number, ProcEnv>, selfPid: number, platform: UnityPlatform): Proc[] {
+export function ownLeftovers(session: string, procs: Proc[], env: Map<number, ProcEnv>, selfPid: number, platform: UnityPlatform, o: { callers?: number[]; born?: (pid: number) => number | undefined } = {}): Proc[] {
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   const chain = new Set<number>();
-  for (let x = byPid.get(selfPid); x && !chain.has(x.pid); x = byPid.get(x.ppid)) chain.add(x.pid);
-  chain.add(selfPid);
+  for (const from of [selfPid, ...(o.callers ?? [])]) {
+    for (let x = byPid.get(from); x && !chain.has(x.pid); x = byPid.get(x.ppid)) chain.add(x.pid);
+    chain.add(from);
+  }
+  const ours = (pid: number) => env.get(pid)?.session === session;
+  for (const p of procs) {
+    const parent = byPid.get(p.ppid);
+    if (!ours(p.pid) || !parent || parent.pid === p.pid || ours(parent.pid)) continue;
+    // Orphans are reparented to init, launchd or a user's systemd: that is no agent host.
+    if (platform !== 'win32' && (p.ppid <= 1 || INIT.test(parent.cmd))) continue;
+    const born = o.born?.(p.pid);
+    const parentBorn = o.born?.(parent.pid);
+    if (born !== undefined && parentBorn !== undefined && parentBorn > born + 2_000) continue;
+    chain.add(p.pid);
+  }
   const out = new Set<number>();
   const skip = new Set<number>();
   const sub = (root: number, into: Set<number>) => {
@@ -660,12 +680,15 @@ export function ownLeftovers(session: string, procs: Proc[], env: Map<number, Pr
   };
   // What the worker's own chain (claude, its host: the members carrying its session, not init or a terminal) runs that is
   // not a shell: its MCP servers.
-  const own = new Set([...chain].filter((pid) => env.get(pid)?.session === session));
+  const own = new Set([...chain].filter(ours));
   for (const p of procs) if (own.has(p.ppid) && !chain.has(p.pid) && !SHELL.test(programOf(p, platform))) sub(p.pid, skip);
   for (const u of unityProcesses(procs, platform)) if (u.kind === 'interactive') sub(u.pid, skip);
-  for (const p of procs) if (!chain.has(p.pid) && !skip.has(p.pid) && env.get(p.pid)?.session === session) out.add(p.pid);
+  for (const p of procs) if (!chain.has(p.pid) && !skip.has(p.pid) && ours(p.pid)) out.add(p.pid);
   return procs.filter((p) => out.has(p.pid));
 }
+
+/** The Windows pids the shim found for its MSYS parents (FF_LEFTOVERS_CALLERS, space-separated). */
+export const callerPids = (v: string | undefined) => (v ?? '').split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0);
 
 /** `ff-leftovers [list|end]`: what this worker's session started that still runs, and ending it. */
 export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = process.env): Promise<number> {
@@ -679,8 +702,11 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   const { realDeps } = await import('./unity.ts');
   const hands = realDeps(platform);
   const procs = await hands.procs();
-  const mine = ownLeftovers(session, procs, await readEnvs(platform, procs.map((p) => p.pid)), process.pid, platform);
-  const facts = new Map((await realInspect(platform)(mine.map((p) => p.pid)).catch(() => [] as ProcFacts[])).map((f) => [f.pid, f]));
+  const env = await readEnvs(platform, procs.map((p) => p.pid));
+  // The session's processes and their parents: start times, so a reused parent pid is told from the agent's host.
+  const sessionPids = procs.filter((p) => env.get(p.pid)?.session === session).flatMap((p) => [p.pid, p.ppid]);
+  const facts = new Map((await realInspect(platform)(sessionPids).catch(() => [] as ProcFacts[])).map((f) => [f.pid, f]));
+  const mine = ownLeftovers(session, procs, env, process.pid, platform, { callers: callerPids(e.FF_LEFTOVERS_CALLERS), born: (pid) => facts.get(pid)?.startedAt });
   const topBatch = new Set(unityProcesses(procs, platform).filter((u) => u.kind === 'batch').map((u) => u.pid));
   const line = (p: Proc) => {
     const born = facts.get(p.pid)?.startedAt;
@@ -706,13 +732,31 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   return still.length ? 1 : 0;
 }
 
+/**
+ * The shim's part for Git Bash on Windows (w1219): MSYS's fork+exec leaves each MSYS program a Windows parent that has
+ * exited, so the Windows chain of this command stops at the shim. Its MSYS parents (/proc/<pid>/ppid) are still known, and
+ * their Windows pids (/proc/<pid>/winpid) go to node in FF_LEFTOVERS_CALLERS, so the shell that runs ff-leftovers, and
+ * through it claude, is never taken for a leftover. Elsewhere /proc/<pid>/winpid does not exist and nothing is set.
+ */
+const MSYS_CALLERS = `if [ -r "/proc/$$/winpid" ]; then
+  p=$$ n=0 w=
+  while [ "$n" -lt 64 ] && [ "$p" -gt 1 ] && [ -r "/proc/$p/winpid" ] && read -r x < "/proc/$p/winpid"; do
+    w="$w $x"
+    read -r p < "/proc/$p/ppid" || break
+    n=$((n + 1))
+  done
+  FF_LEFTOVERS_CALLERS=$w
+  export FF_LEFTOVERS_CALLERS
+fi
+`;
+
 /** Write the `ff-leftovers` command beside `unity-slot` (<bin>, first on the agents' PATH). */
 export function installLeftoversShim(bin: string, node = process.execPath, nodeArgs = process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), script = import.meta.filename): void {
   const fwd = (p: string) => p.replace(/\\/g, '/');
   const q = (s: string) => `"${s.replace(/(["$`\\])/g, '\\$1')}"`;
   fs.mkdirSync(bin, { recursive: true });
   const sh = path.join(bin, 'ff-leftovers');
-  fs.writeFileSync(`${sh}.tmp`, `#!/bin/sh\n# FF Factory: what this worker started that still runs (machine/leftovers.ts). Written by the machine daemon at start.\nexec ${[fwd(node), ...nodeArgs, fwd(script)].map(q).join(' ')} "$@"\n`);
+  fs.writeFileSync(`${sh}.tmp`, `#!/bin/sh\n# FF Factory: what this worker started that still runs (machine/leftovers.ts). Written by the machine daemon at start.\n${MSYS_CALLERS}exec ${[fwd(node), ...nodeArgs, fwd(script)].map(q).join(' ')} "$@"\n`);
   fs.chmodSync(`${sh}.tmp`, 0o755);
   fs.renameSync(`${sh}.tmp`, sh);
   fs.writeFileSync(`${sh}.cmd`, `@echo off\r\nrem FF Factory: what this worker started that still runs (machine/leftovers.ts).\r\n${[node, ...nodeArgs, script].map((s) => `"${s}"`).join(' ')} %*\r\n`);

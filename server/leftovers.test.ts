@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LEFTOVER, LeftoverReaper, envFrom, kindOf, macEnvLine, orphanVerdict, ownLeftovers, readEnvs, readLeases, realInspect, sessionVerdict, slotOf, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
+import { LEFTOVER, LeftoverReaper, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, readEnvs, readLeases, realInspect, sessionVerdict, slotOf, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
 import { realDeps as realUnityDeps, type Proc, type UnityPlatform } from '../machine/unity.ts';
 import { playerText, unitySlotsLine } from '../shared/fleet.ts';
 
@@ -342,6 +342,52 @@ test('ff-leftovers: a worker\'s own processes, not its own chain, not claude\'s 
   assert.deepEqual(ownLeftovers('me', procs, env, 15, 'linux').map((p) => p.pid), [16, 17, 18, 19]);
 });
 
+test('ff-leftovers on Windows (w1219): Git Bash breaks the parent chain at the shim, and claude, its shell and its MCP servers are still never its leftovers', () => {
+  // BEAST, 2026-10-13, as Win32_Process listed it from a worker's own Bash tool: the shim's sh.exe names as its parent a
+  // forked copy of bash that had already exited (MSYS fork+exec), so the walk up from node stopped there, and the old
+  // ff-leftovers listed claude.exe, its conhost, its Unity MCP server and its shells; `end` killed them (exit code 1).
+  const W = (pid: number, ppid: number, name: string, cmd: string) => ({ pid, ppid, name, cmd });
+  const procs: Proc[] = [
+    W(31748, 14732, 'node.exe', '"C:\\nvm4w\\nodejs\\node.exe" F:/ffw/daemon/app/machine/daemon.ts'),
+    W(21376, 31748, 'node.exe', '"C:\\nvm4w\\nodejs\\node.exe" F:\\ffw\\daemon\\app\\machine\\agentHost.ts F:\\ffw\\daemon\\hosts\\me'),
+    W(4584, 21376, 'claude.exe', 'C:\\Users\\u\\.local\\bin\\claude.exe --output-format stream-json --verbose'),
+    W(41784, 4584, 'conhost.exe', '\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4'),
+    W(54960, 4584, 'uvx.exe', 'C:/Users/u/uvx.exe --offline --from mcpforunityserver==10.0.0 mcp-for-unity'),
+    W(50816, 54960, 'uv.exe', '"C:\\Users\\u\\uv.exe" tool uvx --offline --from mcpforunityserver==10.0.0'),
+    // This Bash tool call: Git's bash.exe launcher, the MSYS bash, then the shim (its Windows parent 44516 is gone) and node.
+    W(35268, 4584, 'bash.exe', '"C:\\Program Files\\Git\\bin\\bash.exe" -c "ff-leftovers end 2>&1 | tail -5"'),
+    W(32460, 35268, 'bash.exe', '"C:\\Program Files\\Git\\usr\\bin\\bash.exe" -c "ff-leftovers end 2>&1 | tail -5"'),
+    W(59212, 32460, 'tail.exe', 'C:\\Program Files\\Git\\usr\\bin\\tail.exe -5'),
+    W(55384, 44516, 'sh.exe', 'C:\\Program Files\\Git\\usr\\bin\\sh.exe /c/Users/u/.ff-factory/unity-slots/bin/ff-leftovers end'),
+    W(43776, 55384, 'node.exe', '"C:\\nvm4w\\nodejs\\node.exe" F:/ffw/daemon/app/machine/leftovers.ts end'),
+    // A background task claude keeps (its shells and what they run), and a detached player whose starter is gone.
+    W(24740, 4584, 'bash.exe', '"C:\\Program Files\\Git\\bin\\bash.exe" -c "python soak.py"'),
+    W(40680, 24740, 'bash.exe', '"C:\\Program Files\\Git\\usr\\bin\\bash.exe" -c "python soak.py"'),
+    W(58408, 46000, 'python.exe', 'python.exe soak.py'),
+    W(6000, 7000, 'finalfactory.exe', '"F:\\ffw\\players\\slot5-0\\player\\finalfactory.exe" -batchmode'),
+    // Another worker beside it, with a background job of its own.
+    W(8100, 31748, 'node.exe', '"C:\\nvm4w\\nodejs\\node.exe" F:\\ffw\\daemon\\app\\machine\\agentHost.ts F:\\ffw\\daemon\\hosts\\other'),
+    W(8000, 8100, 'claude.exe', 'C:\\Users\\u\\.local\\bin\\claude.exe --output-format stream-json'),
+    W(8001, 8000, 'bash.exe', '"C:\\Program Files\\Git\\bin\\bash.exe" -c "sleep 600"'),
+  ];
+  const env = new Map<number, ProcEnv>(procs.filter((p) => ![31748, 21376, 8100, 8000, 8001].includes(p.pid)).map((p) => [p.pid, { session: 'me', machine: 'beast' }]));
+  for (const pid of [8000, 8001]) env.set(pid, { session: 'other', machine: 'beast' });
+  const never = [4584, 41784, 54960, 50816, 21376, 31748, 8000, 8001];
+  // With the shim's MSYS parents (FF_LEFTOVERS_CALLERS: the sh and the bash of this call), only the background task and
+  // the player.
+  const withCallers = ownLeftovers('me', procs, env, 43776, 'win32', { callers: callerPids(' 55384 32460') }).map((p) => p.pid);
+  assert.deepEqual(withCallers, [24740, 40680, 58408, 6000]);
+  // An older shim that sends none: this call's own shells are taken, but claude and what it runs for itself never are.
+  const without = ownLeftovers('me', procs, env, 43776, 'win32').map((p) => p.pid);
+  assert.deepEqual(without, [35268, 32460, 59212, 24740, 40680, 58408, 6000]);
+  for (const pid of never) assert.ok(!without.includes(pid) && !withCallers.includes(pid), `pid ${pid} is never a leftover of 'me'`);
+  // A parent pid Windows gave a newer process is no agent host: a player whose starter is gone stays a leftover.
+  const reused = [...procs, W(7000, 1, 'chrome.exe', 'chrome.exe')];
+  const born = (pid: number) => (pid === 7000 ? 2_000_000 : 1_000_000);
+  assert.ok(ownLeftovers('me', reused, env, 43776, 'win32', { callers: [32460], born }).some((p) => p.pid === 6000));
+  assert.ok(!ownLeftovers('me', reused, env, 43776, 'win32', { callers: [32460] }).some((p) => p.pid === 6000), 'without start times a live parent is trusted: kept, never the wrong way');
+});
+
 test('readLeases: every slot\'s lease files, the session player_slots.py writes included; an unreadable one skipped', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'leases-'));
   fs.mkdirSync(path.join(root, 'slot1-1', 'leases'), { recursive: true });
@@ -367,6 +413,44 @@ test('readEnvs on this machine finds the session of a process started with it, a
     a.kill('SIGKILL');
     b.kill('SIGKILL');
   }
+});
+
+// Git Bash on Windows (not WSL's System32\bash.exe), bash elsewhere.
+const BASH = process.platform === 'win32' ? ['C:\\Program Files\\Git\\bin\\bash.exe'].find((b) => fs.existsSync(b)) : '/bin/bash';
+
+test('on this machine: `ff-leftovers end` run through its shim from a bash pipeline ends the agent\'s background job, never the agent or its shell (w1219)', { skip: !BASH && 'no Git Bash' }, async () => {
+  // A throwaway session of its own: only this test's processes carry it, so nothing else can be listed or ended.
+  const session = `w1219t${process.pid}`;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffleft-'));
+  const bin = path.join(root, 'bin');
+  installLeftoversShim(bin);
+  const shim = path.join(bin, 'ff-leftovers').replace(/\\/g, '/');
+  // A stand-in for claude: it keeps a background job, then runs the command as the workers of 2026-10-13 did.
+  const agent = `
+    const { spawn, execFile } = require('node:child_process');
+    // A compound command, as claude's background tasks are: bash stays (a lone \`bash -c 'sleep 600'\` execs into sleep on
+    // Linux, and a non-shell child of the agent is one of its own tools, like an MCP server, so it is spared by design).
+    const bg = spawn(${JSON.stringify(BASH)}, ['-c', 'sleep 600; true'], { stdio: 'ignore' });
+    setTimeout(() => execFile(${JSON.stringify(BASH)}, ['-c', ${JSON.stringify(`'${shim}' end 2>&1 | tail -20; echo "status=\${PIPESTATUS[0]}"`)}], { timeout: 120000 }, (e, out, err) => {
+      setTimeout(() => {
+        let bgAlive = true;
+        try { process.kill(bg.pid, 0); } catch { bgAlive = false; }
+        process.stdout.write(JSON.stringify({ pid: process.pid, bg: bg.pid, bgAlive, out: String(out) + String(err) }));
+        setTimeout(() => process.exit(0), 200);
+      }, 500);
+    }), 1500);`;
+  const child = spawn(process.execPath, ['-e', agent], { env: { ...process.env, FF_SESSION_ID: session, FF_MACHINE_ID: 'testbox', FF_SANDBOX_ID: 'slot9' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  let err = '';
+  child.stdout.on('data', (b) => (out += b));
+  child.stderr.on('data', (b) => (err += b));
+  const code = await new Promise<number | null>((r) => child.on('exit', (c) => r(c)));
+  assert.equal(code, 0, `the agent survived its own ff-leftovers end (it exited ${code}; ${err.slice(0, 300)})`);
+  const got = JSON.parse(out) as { pid: number; bg: number; bgAlive: boolean; out: string };
+  assert.match(got.out, /status=0/, got.out);
+  assert.match(got.out, /Ended \d+ of \d+ process/, got.out);
+  assert.ok(!got.out.includes(`pid ${got.pid} `), `the agent itself is not in what was ended:\n${got.out}`);
+  assert.ok(got.out.includes('sleep 600'), `its background job was:\n${got.out}`);
 });
 
 test('on a real Linux machine: a detached "player" and "Xvfb" of a stopped session end, a live session\'s player stays', { skip: process.platform !== 'linux' }, async () => {
