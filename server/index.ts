@@ -18,6 +18,7 @@ import { IntakeManager } from './intake.ts';
 import { toggleNightly } from './appConfig.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
 import { BlockerWatch, ghPrHealth } from './blockerWatch.ts';
+import { MasterBatchWatch } from './masterBatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
@@ -703,6 +704,8 @@ runWaitsMigration({
   tell: (text) => agents.orchestrators.toDispatcher(text),
 });
 blockerWatch.start();
+// A red master batch of the game repo goes back to the culprit PR's request as an urgent revert request (w1180, docs/intake.md).
+const masterBatch = new MasterBatchWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
 
 let lastSystem: SystemStats | undefined;
 
@@ -1902,6 +1905,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   intake.close();
   ledgerSweep.close();
   blockerWatch.close();
+  masterBatch.close();
   store.flush();
   spend.flush();
   process.exit(0);

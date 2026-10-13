@@ -80,6 +80,10 @@ export const SETTABLE_KEYS = [
   'intake.nightly.enabled',
   'intake.nightly.run',
   'intake.nightly.review',
+  // The game repo's red master batches handed back to the culprit PR's request (w1180, docs/intake.md "Master batch reds"): the
+  // switch and the auto-approve rule. Anyone may set them: they file the team's own CI work, never players' words.
+  'masterBatch.enabled',
+  'masterBatch.autoApprove',
   // Where new game-repo work goes first, and which computers it stays off (w428, docs/machines.md "Placing work").
   'placement.prefer',
   'placement.avoid',
@@ -172,6 +176,23 @@ function checkNightlySchedule(value: unknown, users: readonly string[], key: 'in
   if (o.reportWithinHours !== undefined) {
     if (!Number.isInteger(o.reportWithinHours) || (o.reportWithinHours as number) < 1 || (o.reportWithinHours as number) > 20) throw new Error(`${key}.reportWithinHours is a whole number from 1 to 20`);
     out.reportWithinHours = o.reportWithinHours as number;
+  }
+  return out;
+}
+
+/** masterBatch.autoApprove as set_app_config takes it (w1180): { enabled, maxPerDay 0-100 }, known keys only. */
+export function checkMasterBatchAutoApprove(value: unknown): NonNullable<NonNullable<Config['masterBatch']>['autoApprove']> {
+  const o = objectOf(value, 'masterBatch.autoApprove', '{ "enabled": true, "maxPerDay": 10 }');
+  const unknown = Object.keys(o).filter((k) => k !== 'enabled' && k !== 'maxPerDay');
+  if (unknown.length) throw new Error(`masterBatch.autoApprove: unknown key(s) ${unknown.map((k) => JSON.stringify(k.slice(0, 40))).join(', ')}; known: enabled, maxPerDay`);
+  const out: NonNullable<NonNullable<Config['masterBatch']>['autoApprove']> = {};
+  if (o.enabled !== undefined) {
+    if (typeof o.enabled !== 'boolean') throw new Error('masterBatch.autoApprove.enabled is true or false');
+    out.enabled = o.enabled;
+  }
+  if (o.maxPerDay !== undefined) {
+    if (!Number.isInteger(o.maxPerDay) || (o.maxPerDay as number) < 0 || (o.maxPerDay as number) > 100) throw new Error('masterBatch.autoApprove.maxPerDay is a whole number from 0 to 100');
+    out.maxPerDay = o.maxPerDay as number;
   }
   return out;
 }
@@ -482,6 +503,13 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return checkNightlyRun(value, users ?? []);
     case 'intake.nightly.review':
       return checkNightlyReview(value, users ?? []);
+    case 'masterBatch.enabled': {
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      throw new Error('masterBatch.enabled is true or false');
+    }
+    case 'masterBatch.autoApprove':
+      return checkMasterBatchAutoApprove(value);
     case 'providers.ffbox.devRequests':
       return checkDevRequests(value);
     case 'intake.reviewers':
@@ -691,6 +719,13 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else if (key === 'intake.nightly.run') nightly.run = v as NonNullable<IntakeConfig['nightly']>['run'];
     else nightly.review = v as NonNullable<IntakeConfig['nightly']>['review'];
     cfg.intake = { ...cfg.intake, nightly };
+  }
+  else if (key === 'masterBatch.enabled' || key === 'masterBatch.autoApprove') {
+    // Live: the master batch watch reads its settings at every look.
+    const mb = { ...cfg.masterBatch };
+    if (key === 'masterBatch.enabled') mb.enabled = v as boolean | undefined;
+    else mb.autoApprove = v as NonNullable<Config['masterBatch']>['autoApprove'];
+    cfg.masterBatch = mb;
   }
   else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold') {
     const p = { ...cfg.placement };

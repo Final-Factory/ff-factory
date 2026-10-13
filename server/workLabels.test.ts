@@ -18,6 +18,8 @@ test('workLabels: the other sources keep their labels', () => {
   assert.equal(sourceLabel({ ...dev('Pat'), kind: 'discord-request' }), 'Discord request from Pat');
   assert.equal(sourceLabel({ ...dev(), kind: 'discord-bug' }), 'Discord bug');
   assert.equal(sourceLabel({ ...dev(), kind: 'nightly', nightly: { date: '2026-10-11' } } as WorkSource), 'Nightly regression 2026-10-11');
+  assert.equal(sourceLabel({ ...dev(), kind: 'master-batch', masterBatch: { run: '5', tip: 'a'.repeat(40), kind: 'culprit', pr: 1234 } } as WorkSource), 'Master batch red (#1234)');
+  assert.equal(sourceLabel({ ...dev(), kind: 'master-batch' } as WorkSource), 'Master batch red');
 });
 
 test('workLabels: the detail names the operator once and keeps a short untrusted marking (w1105)', () => {

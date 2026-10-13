@@ -173,6 +173,13 @@ export interface Config {
    */
   workLimits?: Partial<Record<'standing' | 'intake', Partial<{ perHour: number; perDay: number }>>>;
   /**
+   * The game repo's red master batches (w1180; docs/intake.md, "Master batch reds"): the portal reads the `master-batch.yml`
+   * runs of `repo` every 3 minutes and hands a red one back to the culprit PR's request as an urgent revert request.
+   * `enabled` defaults to true (an off switch needs no restart), `autoApprove` to { enabled: true, maxPerDay: 10 }, `repo` to
+   * Final-Factory/FinalFactory and `workflow` to master-batch.yml.
+   */
+  masterBatch?: { enabled?: boolean; autoApprove?: { enabled?: boolean; maxPerDay?: number }; repo?: string; workflow?: string };
+  /**
    * Repos whose history is public, and the identity agents commit to them with. The guard refuses a push
    * to one of `repos` (default: this app's own origin) when a commit in it has an author or committer
    * email that is neither a GitHub noreply address nor `email`. Example:
