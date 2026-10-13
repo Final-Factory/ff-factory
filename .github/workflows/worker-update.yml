@@ -41,8 +41,8 @@ jobs:
     runs-on: ${{ matrix.os == 'windows-latest' && (vars.FF_WINDOWS_RUNNER || 'windows-latest') || (vars.FF_MACOS_RUNNER || 'macos-latest') }}
     timeout-minutes: 30
     steps:
-      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
-      - uses: Final-Factory/ci-actions/setup@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+      - uses: Final-Factory/ci-actions/checkout@v1
+      - uses: Final-Factory/ci-actions/setup@v1
         with:
           node: '24'
           node-cache: npm

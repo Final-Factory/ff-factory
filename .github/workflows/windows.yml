@@ -78,8 +78,8 @@ jobs:
     runs-on: ${{ vars.FF_WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 22
     steps:
-      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
-      - uses: Final-Factory/ci-actions/setup@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+      - uses: Final-Factory/ci-actions/checkout@v1
+      - uses: Final-Factory/ci-actions/setup@v1
         with:
           node: '24'
           node-cache: npm

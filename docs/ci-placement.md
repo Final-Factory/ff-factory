@@ -7,7 +7,8 @@ Windows, macOS, root, systemd or KVM stays hosted.
 **Portable since w1170 (2026-10-12).** Each job's `runs-on` reads a repository variable (Settings, Secrets and variables,
 Actions, Variables), so a job moves between FFBox, GitHub's runners and another self-hosted machine without a workflow edit,
 and the steps that differ between runners are [Final-Factory/ci-actions](https://github.com/Final-Factory/ci-actions)
-(`checkout`, `setup`, `playwright`, `upload`), pinned by commit. Unset, every job runs where the table says.
+(`checkout`, `setup`, `playwright`, `upload`), at the major version `@v1`: a compatible change reaches every job when the
+tag moves, with no edit here (the ci-actions README says how and when to move it). Unset, every job runs where the table says.
 
 | Workflow, job | Runs on (default) | Variable | Why |
 |---|---|---|---|
@@ -52,9 +53,9 @@ A runner container is single-use, runs as root with every capability dropped, an
   job's token gives the host no more than the job already had, which is why this is not a hole in the fence. The decision
   logic, with its tests, lives in ffbox now.
 - **The checkout** comes from the host's mirror of this repository: `ci-actions/checkout` runs
-  `/opt/ffghr/ffghr-workspace.sh use-mirror "$sha"`, then `actions/checkout`. Every action is pinned by commit: the
-  container cannot download one, and the runner reads each from the host's action cache (ffbox `scripts/actioncache.py`),
-  which archives every commit of ci-actions and the actions it pins, about a minute after they are pushed. This
+  `/opt/ffghr/ffghr-workspace.sh use-mirror "$sha"`, then `actions/checkout`. The container cannot download an action, so the runner reads each from the host's action cache
+  (ffbox `scripts/actioncache.py`), which archives every branch and tag commit of ci-actions and the third-party actions
+  it pins by commit, about a minute after they are pushed. `@v1` resolves to one of those commits, so it is found there. This
   repository must stay on the host's `extra_mirrors`.
 - **In the image, not installed by the job:** Node 24, npm, gitleaks, jq, Playwright's Chromium and WebKit, and the system
   libraries they link against; `ci-actions/setup` and `ci-actions/playwright` check the versions there and install them only

@@ -57,7 +57,7 @@ jobs:
       e2e: ${{ steps.plan.outputs.e2e }}
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+      - uses: Final-Factory/ci-actions/checkout@v1
         with:
           fetch-depth: 2
       - id: plan

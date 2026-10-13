@@ -35,10 +35,10 @@ env:
 # runner containers (label ffgithubrunners) by default; the repository variable FF_LINUX_RUNNER moves checks, secrets
 # and identity to any other label (ubuntu-latest, a self-hosted machine's label) with no workflow edit, and
 # FF_E2E_RUNNER moves e2e, whose Linux screenshot baselines match one machine's fonts (docs/ci-placement.md). The steps
-# that differ between runners are Final-Factory/ci-actions, pinned by commit: checkout (the FFBox host's mirror, then
+# that differ between runners are Final-Factory/ci-actions@v1: checkout (the FFBox host's mirror, then
 # actions/checkout), setup (Node and gitleaks from the FFBox image, installed elsewhere), playwright and upload (the
 # FFBox host hands artifacts over; elsewhere actions/upload-artifact). The FFBox host keeps every ci-actions commit in its
-# action cache (ffbox scripts/actioncache.py), so a new pin works there within a minute.
+# action cache (ffbox scripts/actioncache.py), so whichever commit v1 points at loads there (ci-actions README: moving v1).
 # What stays on a hosted runner needs root, systemd or Windows/macOS: ops-socket.yml (only when its own files change), windows.yml,
 # worker-update.yml, dev-drive.yml and vm-scripts.yml's lint and end-to-end jobs. rerun-lost-runner.yml runs on FFBox
 # only (w1102): the host makes its API calls for it.
@@ -55,8 +55,8 @@ jobs:
     runs-on: ${{ vars.FF_LINUX_RUNNER || 'ffgithubrunners' }}
     timeout-minutes: 15
     steps:
-      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
-      - uses: Final-Factory/ci-actions/setup@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+      - uses: Final-Factory/ci-actions/checkout@v1
+      - uses: Final-Factory/ci-actions/setup@v1
         with:
           node: ${{ env.NODE_VERSION }}
           gitleaks: ${{ env.GITLEAKS_VERSION }}
@@ -115,14 +115,14 @@ jobs:
       # WebKit projects, so it takes fewer. Each file goes to one shard whatever the weights, so none is ever left out.
       PWTEST_SHARD_WEIGHTS: '5:5:3'
     steps:
-      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
-      - uses: Final-Factory/ci-actions/setup@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+      - uses: Final-Factory/ci-actions/checkout@v1
+      - uses: Final-Factory/ci-actions/setup@v1
         with:
           node: ${{ env.NODE_VERSION }}
       - run: npm ci --no-audit --no-fund
       - run: npm ci --prefix web --no-audit --no-fund
       - name: Playwright's browsers (baked into the FFBox image; installed elsewhere)
-        uses: Final-Factory/ci-actions/playwright@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+        uses: Final-Factory/ci-actions/playwright@v1
         with:
           browsers: chromium webkit
       - name: Build the web UI
@@ -156,13 +156,13 @@ jobs:
           cp -R playwright-report test-results pw-artifacts/ 2>/dev/null || true
       - name: Upload the report and traces
         if: failure()
-        uses: Final-Factory/ci-actions/upload@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+        uses: Final-Factory/ci-actions/upload@v1
         with:
           name: playwright-report-${{ matrix.shard }}
           path: pw-artifacts
       - name: Upload rendered snapshots
         if: always() && steps.snap.outputs.update == 'true' && matrix.shard == 1
-        uses: Final-Factory/ci-actions/upload@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+        uses: Final-Factory/ci-actions/upload@v1
         with:
           name: linux-snapshots
           path: e2e/__screenshots__
@@ -172,11 +172,11 @@ jobs:
     runs-on: ${{ vars.FF_LINUX_RUNNER || 'ffgithubrunners' }}
     timeout-minutes: 5
     steps:
-      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+      - uses: Final-Factory/ci-actions/checkout@v1
         with:
           fetch-depth: 0
       - name: gitleaks (baked into the FFBox image, GITLEAKS_VERSION there too; downloaded and checksum-verified elsewhere)
-        uses: Final-Factory/ci-actions/setup@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+        uses: Final-Factory/ci-actions/setup@v1
         with:
           gitleaks: ${{ env.GITLEAKS_VERSION }}
       - name: Scan the history of this commit
@@ -190,7 +190,7 @@ jobs:
     runs-on: ${{ vars.FF_LINUX_RUNNER || 'ffgithubrunners' }}
     timeout-minutes: 5
     steps:
-      - uses: Final-Factory/ci-actions/checkout@fa72019b1f6247c11f0bae5bf9c986191a4ea57f
+      - uses: Final-Factory/ci-actions/checkout@v1
         with:
           fetch-depth: 0
       - name: Check the new commits
