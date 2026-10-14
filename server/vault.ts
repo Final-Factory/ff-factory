@@ -586,6 +586,17 @@ export class Vault {
     return e && token ? { entry: this.meta(e), token } : undefined;
   }
 
+  /**
+   * Whether `person` has a Claude pool: an enabled Claude entry they own that the key opens. What set_app_config checks before
+   * it names them in vault.unattributed (w1289); their runs would otherwise not start (section 4, "No token, no run").
+   */
+  hasClaudeFor(person: string): boolean {
+    this.reload();
+    const { key } = this.key();
+    if (!key) return false;
+    return this.data.entries.some((e) => e.kind === 'claude' && !e.disabled && same(e.owner, person) && !!this.open(key, e));
+  }
+
   /** Every enabled GitHub entry the key opens, with its value: the health probe's list (server/githubTokens.ts, w868). */
   githubTokens(): { entry: VaultEntryMeta; token: string }[] {
     this.reload();

@@ -50,6 +50,12 @@ export const SETTABLE_KEYS = [
   // Whether a machine's runs (and, for the machine id "portal", the portal's own gh reads) use the run person's vault GitHub
   // token (docs/vault.md section 13, w868; optional `machine`). The owner's only.
   'machines.githubFromVault',
+  // Whose Claude pool (and GitHub token) work nobody asked for by name runs on (w1289, docs/vault.md section 10): the intake's,
+  // FFBox's without an operator, and the nightly run, review and regression sentry. Each a user id with a Claude pool in the
+  // vault; null goes back to the default (lothsahn). The owner's only.
+  'vault.unattributed.intake',
+  'vault.unattributed.ffbox',
+  'vault.unattributed.nightly',
   // The Claude token pool's limits (w739, docs/vault.md section 4): one system-wide set, anyone may change them (not owner-only).
   // Each is a percent, 0-100; the one-at-a-time limit may not be above the retire limit.
   'vault.pool.sessionHoldPercent',
@@ -108,7 +114,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync'];
@@ -394,6 +400,20 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       const context = vaultContext();
       if (context && !context.vault.claudeByName(pinned)) throw new Error(`${key}: the vault has no enabled Claude token named "${pinned}" that its key opens (\`fffctl vault list\` shows the names)`);
       return v as ClaudeAccount;
+    }
+    case 'vault.unattributed.intake':
+    case 'vault.unattributed.ffbox':
+    case 'vault.unattributed.nightly': {
+      // The person whose tokens that kind of nobody's work runs on (w1289): a login that exists and has a Claude pool in the vault.
+      // Stored in the login's own spelling. null (above) removes the key: back to the default (UNATTRIBUTED_DEFAULTS).
+      if (typeof value !== 'string' || !value.trim()) throw new Error(`${key} is a user id (a login name, e.g. "ben") with a Claude pool in the vault; null goes back to the default`);
+      const id = value.trim();
+      const known = (users ?? []).find((u) => u.toLowerCase() === id.toLowerCase());
+      if (!known) throw new Error(`${key}: no login ${JSON.stringify(id.slice(0, 40))}; the logins are ${(users ?? []).join(', ') || '(none)'}`);
+      const context = vaultContext();
+      if (!context) throw new Error(`${key}: the vault is not loaded in this process, so ${known}'s Claude pool cannot be checked`);
+      if (!context.vault.hasClaudeFor(known)) throw new Error(`${key}: ${known} has no enabled Claude token in the vault that its key opens (fffctl vault list; docs/vault.md section 10): their runs would not start`);
+      return known;
     }
     case 'machines.githubFromVault': {
       if (value === true || value === 'true') return true;
@@ -688,6 +708,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   const before = getPath(raw, key);
   const next = perMachine ? nextPerMachine(before, opts.machine, v as boolean | number | undefined) : v;
   setPath(raw, key, next);
+  // The last vault.unattributed key removed leaves no empty block behind.
+  if (key.startsWith('vault.unattributed.') && Object.keys((getPath(raw, 'vault.unattributed') as object) ?? {}).length === 0) setPath(raw, 'vault.unattributed', undefined);
   writeFileDurable(file + '.prev', text, { generations: 0 });
   writeFileDurable(file, JSON.stringify(raw, null, 2) + '\n');
   // Live: the running server reads these through the shared config object.
@@ -716,6 +738,14 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (v === undefined) delete pool[field];
     else pool[field] = v as number;
     cfg.vault = { ...cfg.vault, pool: pool as NonNullable<Config['vault']>['pool'] };
+  }
+  else if (key.startsWith('vault.unattributed.')) {
+    // Live: the intake, the standing agent runs and the token picks read cfg.vault.unattributed at each use (unattributedPerson).
+    const unattributed = { ...cfg.vault?.unattributed } as Record<string, string | undefined>;
+    const kind = key.slice('vault.unattributed.'.length);
+    if (v === undefined) delete unattributed[kind];
+    else unattributed[kind] = v as string;
+    cfg.vault = { ...cfg.vault, unattributed: Object.keys(unattributed).length ? (unattributed as NonNullable<Config['vault']>['unattributed']) : undefined };
   }
   else if (key === 'systemPayer') cfg.systemPayer = v as string | undefined;
   else if (key === 'providers.ffbox.enabled' || key === 'providers.ffbox.devRequests') {
