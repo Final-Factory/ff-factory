@@ -100,13 +100,18 @@ ambiguous is "notify": it is reported to the orchestrator, which restarts the ed
   unasked. Not used.
 - **Package Manager**: `-noUpm` is documented, but it disables the Package Manager, and with it the
   MCP bridge package. Not usable.
-- **FMOD line endings**: the dialog appears when a mac bundle's `Contents/Info.plist` is checked out
-  with CRLF. The game repo has no `.gitattributes` rule for those files, and the reference host has
-  `core.autocrlf=true`. This worktree has them as LF (`git ls-files --eol`), so it depends on how
-  a checkout was made. Without touching the game repo, the base clone could get a machine-local rule
-  in `.git/info/attributes` (shared by every worktree): `Assets/Plugins/FMOD/**/Info.plist text eol=lf`,
-  followed by a re-checkout of those three files in existing sandboxes. Not applied: Ignore already
-  handles it, and the rule should be tested on one sandbox first.
+- **FMOD line endings**: the dialog appears when a mac bundle's `Contents/Info.plist` holds a CRLF
+  (`CheckMacLibraries` reads the file and tests for `
+`). The committed blobs are LF, and Git for
+  Windows' system `core.autocrlf=true` wrote them as CRLF. The game repo fixed the cause in w1275: a
+  `.gitattributes` rule marks the bundles' `Info.plist` and `_CodeSignature/CodeResources` `-text`, so
+  a fresh checkout keeps the committed bytes (the bundle's Mach-O signature seals their SHA-256). A
+  pull does not rewrite a file whose blob did not change, so a checkout made before the rule keeps its
+  CRLF copies, with `git status` clean: the daemon puts the committed bytes back
+  (`server/committedBytes.ts`) before it starts a sandbox's editor and on `switch_branch`, for any
+  `-text` file whose copy differs only by CRLF. A main clone needs one re-checkout:
+  `git rm -q --cached -r Assets/Plugins/FMOD/platforms/mac/lib && git checkout HEAD -- Assets/Plugins/FMOD/platforms/mac/lib`.
+  The always-Ignore rule stays as the safety net for a checkout nothing has repaired yet.
 - Unity's own "inconsistent line endings in the '%s' script" message is a console warning from the
   importer, not a dialog. Only the FMOD one blocks.
 
