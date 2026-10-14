@@ -1,5 +1,6 @@
 import { run } from './proc.ts';
 import { parseStatus } from './gitStatus.ts';
+import { restoreCommittedBytes } from './committedBytes.ts';
 
 const ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
 const SHARED = /^(master|main|develop)$/;
@@ -53,6 +54,8 @@ export async function switchBranch(opts: {
   const notes: string[] = [];
   if ((await git(dir, ['check-ref-format', '--branch', branch])).code !== 0 || branch.startsWith('-')) throw new Error(`"${branch}" is not a valid branch name`);
 
+  // Before the dirty check: a stale CRLF copy of a -text file whose stat changed reads as an uncommitted change (w1275).
+  const restored = await restoreCommittedBytes(dir, (a) => git(dir, a)).catch(() => [] as string[]);
   const st = parseStatus(await must(dir, ['status', '--porcelain=v2', '--branch'], 'git status'));
   if (st.dirty) {
     const files = (await must(dir, ['status', '--porcelain'], 'git status')).split('\n').filter((l) => l && !l.startsWith('??'));
@@ -93,6 +96,9 @@ export async function switchBranch(opts: {
   if (r.code !== 0) {
     throw new Error(explainCheckoutError(r.stderr, branch, opts.nameOf) ?? `git switch failed: ${r.stderr.trim().split('\n').slice(-3).join(' ')}`);
   }
+  // The new branch may bring the .gitattributes rule that makes them -text: a switch rewrites only files whose blob changed.
+  restored.push(...(await restoreCommittedBytes(dir, (a) => git(dir, a)).catch(() => [] as string[])));
+  if (restored.length) notes.push(`put back the committed bytes of ${restored.length} file(s) checked out with CRLF (${restored.slice(0, 3).join(', ')}${restored.length > 3 ? ', …' : ''})`);
   if (st.untracked) notes.push(`${st.untracked} untracked file(s) came along unchanged`);
   return { from, to: branch, notes };
 }

@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { branchProblem, pickEditorLog, pruneEditorLogs, slugify, withBaseRepoLock } from '../server/sandboxes.ts';
 import { switchBranch } from '../server/switchBranch.ts';
+import { restoreCommittedBytes } from '../server/committedBytes.ts';
 import { saveWork, type SaveResult } from '../server/saveWork.ts';
 import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
@@ -706,6 +707,14 @@ export class SandboxPool {
         const up = this.runningEditors().filter((x) => x !== id);
         if (up.length >= s.maxUnity) throw new Error(`already ${up.length} sandbox editors running on this machine (${up.join(', ')}; max_unity ${s.maxUnity}); stop one first`);
       }
+    }
+    // A checkout written under core.autocrlf=true keeps CRLF copies of files a later .gitattributes rule made -text (a pull
+    // rewrites only changed blobs): FMOD's mac bundle plists showed its "Repair FMOD Libraries" dialog at every start (w1275).
+    try {
+      const restored = await restoreCommittedBytes(r.path, (a) => this.d.git(['-C', r.path, ...a]));
+      if (restored.length) out.push(`Put back the committed bytes of ${restored.length} file(s) checked out with CRLF.`);
+    } catch (e) {
+      this.o.onEvent({ text: `sandbox ${id}: could not check its -text files for CRLF copies: ${(e as Error).message}`, sandbox: id });
     }
     const logsDir = path.join(r.path, 'Logs');
     const logFile = pickEditorLog(logsDir, new Date(this.d.now()));
