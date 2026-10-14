@@ -618,6 +618,32 @@ about it, and the usage attribution stay as they are.
 the vault gets nobody else's: it does not start, and `system_status` warns (w1078; before, it ran on the machine's own login or the host token). Change the defaults with `vault.unattributed` in `config.json`, e.g.
 `"vault": { "unattributed": { "intake": "lothsahn", "ffbox": "lothsahn", "nightly": "ben" } }` (user ids).
 
+**Setting it without editing config.json (w1289).** `set_app_config` takes `vault.unattributed.intake`, `vault.unattributed.ffbox`
+and `vault.unattributed.nightly` (`server/appConfig.ts`; lothsahn, 2026-10-14: moving the nightly review and its regression
+jobs onto Ben's pool). Each value is a user id, and the change is checked before anything is written:
+
+- **A login that exists.** An unknown id is refused, naming the logins (`identity` users). The id is stored in the login's own
+  spelling (`Ben` becomes `ben`).
+- **A person with a Claude pool.** `Vault.hasClaudeFor` (`server/vault.ts`): an enabled Claude entry the person owns that the
+  vault key opens. A person with none is refused, because every run of that kind would then not start ("No fallback", above).
+  With no vault loaded in the process the check cannot be made, so the change is refused.
+- **`null` clears the key** back to the default (`UNATTRIBUTED_DEFAULTS`: `lothsahn` for all three kinds). It is always allowed,
+  needs neither a login nor a pool, and removes `vault.unattributed` from `config.json` once its last key is gone. (A `null`
+  that was refused would leave no way back to the default short of editing the file by hand.)
+- **The owner's only**, like `claudeAccounts.dispatcher` (`OWNER_ONLY_KEYS`): the dispatcher runs it for a request an owner asked
+  for in their own words (`work_id`), or from an owner's own orchestrator.
+- **Live, no restart.** `setAppConfig` updates the running config object, and every reader looks the person up when it needs
+  them and keeps no copy from startup: `unattributedPerson` and `tokenPersonForWork` (`server/vault.ts`) from the token picks and
+  `machineRunEnv`, the standing-agent launch for the Nightly Regression Sentry (`server/standing.ts`), and the nightly review's
+  filing (`onNightlyWorkerTurn`, `server/intake.ts`). The next run or process start of that kind takes the new person; a request
+  a person has acted on (`runsFor`) stays with them, as before. A live process follows at its turn boundary (w1076).
+
+Changing `vault.unattributed.nightly` changes whose Claude pool and GitHub token the nightly run, review and sentry jobs use, and
+nothing else about the nightly: `intake.nightly.run.person` and `intake.nightly.review.person` stay as set (that login hears a
+missing or broken night). One consequence is older than this setting: the review jobs the nightly merge review files
+(`onNightlyWorkerTurn`) are filed with the nightly person as their owner, so with `nightly` set to `ben` they are Ben's requests
+in the ledger and his orchestrator hears their reports.
+
 ## 11. The tokens on the FFBox host
 
 **Where:** on the FFBox host (Loth2400), root only, beside what the VM installer already keeps:

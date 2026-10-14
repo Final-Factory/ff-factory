@@ -39,6 +39,7 @@ export function useFakeVault(over: Partial<VaultContext> & { vault?: Partial<Vau
     }),
     claudeByName: (name: string) => ({ entry: { ...fakeEntry(name), name }, token: fakeToken(name) }),
     claudeTokens: () => [],
+    hasClaudeFor: () => true,
     lastPickOf: () => undefined,
     ...over.vault,
   } as unknown as Vault;
