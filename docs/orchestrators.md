@@ -1183,6 +1183,12 @@ since 2026-09-22 without stopping it. So the learning is enforced where agents a
 - **Where it goes**: the `evidence-gate` skill's `lessons/lessons-belong-in-the-harness-repo.md` (a tool check first,
   then a checklist line, the task's skill, the doc beside the code in the game repo), and `design-w741.md` beside it
   for the design and its sources.
+- **"Can't" is filed work, not an answer** (w1288, the second correction of its kind: w935, a worker told Ben to close
+  Unity on his m5; w1287, his orchestrator twice told him it could not make a Claude Design project and to upload the
+  HTML himself; Ben: "I already asked for this"). A line of `personalBrief`: an orchestrator's own limits (no shell, no
+  browser) are not FF Factory's, so a thing its tools do not reach is a `request_work` for a worker to research the
+  route and try it, and the person hears only a worker's concrete blocker with its evidence and the smallest step only
+  they can take. The rule for every agent: the `evidence-gate` skill's `lessons/research-the-route-before-you-say-cant.md`.
 
 `server/evidenceRules.test.ts` and `server/ledgerRules.test.ts` pin the text and the rule.
 

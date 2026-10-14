@@ -124,6 +124,10 @@ test('orchestrators: keep the labels, send a guess back to be researched, and do
   assert.match(personal, /Never call a fix done from a PR title, a measurement table or a tool verdict, and never pass a guess on as a recommendation/);
   assert.match(personal, /send it back to the worker to research \(message_agent\) or file the research/);
   assert.match(personal, /Ben is not there to settle guesses: workers research their own and carry on/);
+  // w1288: "can't" from the orchestrator's own toolset is filed work, not an answer (w935 Unity, w1287 Claude Design).
+  assert.match(personal, /Never tell Ben "I can't" or "you can do it yourself" from your own toolset/);
+  assert.match(personal, /request_work for a worker to research the route .* and try it/);
+  assert.match(personal, /the smallest step only they can take \(their own login, password or 2FA code, an approval\)/);
   assert.match(personal, /only for a money value to confirm \(with what it rests on\)/);
   assert.match(personal, /or for a fork research could not settle \(the options and the worker's recommendation\)/);
   assert.match(personal, /the brief also lists the decisions the work must settle \(a list of topics gets topic research\)/);
