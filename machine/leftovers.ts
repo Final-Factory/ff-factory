@@ -34,6 +34,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
+import { factsProblem, judgePath, planFolders, renderFolders, type CleanupFacts } from '../server/cleanupFolders.ts';
 import { parsePsJson } from '../server/watchdog.ts';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { gamePlayers, isUnityBinary, splitArgs, unityProcesses } from './unitySlots.ts';
@@ -690,13 +691,50 @@ export function ownLeftovers(session: string, procs: Proc[], env: Map<number, Pr
 /** The Windows pids the shim found for its MSYS parents (FF_LEFTOVERS_CALLERS, space-separated). */
 export const callerPids = (v: string | undefined) => (v ?? '').split(/\s+/).map(Number).filter((n) => Number.isInteger(n) && n > 0);
 
+/** The facts the daemon wrote for `folders` and `check` (FF_CLEANUP_FACTS, set by the shim); undefined when missing or unreadable. */
+export function readCleanupFacts(file: string | undefined): CleanupFacts | undefined {
+  if (!file) return undefined;
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as CleanupFacts;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `ff-leftovers folders` and `ff-leftovers check <path>...` (w1379): a clean-up worker's deletes judged by the ledger. `folders`
+ * lists every folder a clean-up could take under the install folder with its owner, KEEP or DELETE and why; `check` judges
+ * given paths and exits 1 when any is to be kept. Whatever is not provably closed or ownerless is kept.
+ */
+export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: NodeJS.ProcessEnv = process.env, now = Date.now(), out: (s: string) => void = (s) => void process.stdout.write(s)): Promise<number> {
+  const facts = readCleanupFacts(e.FF_CLEANUP_FACTS);
+  if (cmd === 'check') {
+    if (!args.length) {
+      out('usage: ff-leftovers check <path>...\n');
+      return 2;
+    }
+    const bad = factsProblem(facts, now);
+    let kept = 0;
+    for (const a of args) {
+      const r = bad ? { verdict: 'keep' as const, why: bad } : judgePath(path.resolve(a), facts!, now);
+      if (r.verdict === 'keep') kept++;
+      out(`${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${a}\n        ${r.why}\n`);
+    }
+    return kept ? 1 : 0;
+  }
+  const rows = factsProblem(facts, now) ? [] : await planFolders(facts!, { now });
+  out(renderFolders(rows, facts, now));
+  return factsProblem(facts, now) ? 1 : 0;
+}
+
 /** `ff-leftovers [list|end]`: what this worker's session started that still runs, and ending it. */
 export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = process.env): Promise<number> {
   const cmd = argv[0] ?? 'list';
+  if (cmd === 'folders' || cmd === 'check') return foldersMain(cmd, argv.slice(1), e);
   const session = e.FF_SESSION_ID;
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
   if (!session || !['list', 'end'].includes(cmd)) {
-    process.stdout.write(`usage: ff-leftovers [list|end]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
+    process.stdout.write(`usage: ff-leftovers [list|end|folders|check <path>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
     return session ? 2 : 1;
   }
   const { realDeps } = await import('./unity.ts');
@@ -751,15 +789,15 @@ fi
 `;
 
 /** Write the `ff-leftovers` command beside `unity-slot` (<bin>, first on the agents' PATH). */
-export function installLeftoversShim(bin: string, node = process.execPath, nodeArgs = process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), script = import.meta.filename): void {
+export function installLeftoversShim(bin: string, node = process.execPath, nodeArgs = process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), script = import.meta.filename, factsFile?: string): void {
   const fwd = (p: string) => p.replace(/\\/g, '/');
   const q = (s: string) => `"${s.replace(/(["$`\\])/g, '\\$1')}"`;
   fs.mkdirSync(bin, { recursive: true });
   const sh = path.join(bin, 'ff-leftovers');
-  fs.writeFileSync(`${sh}.tmp`, `#!/bin/sh\n# FF Factory: what this worker started that still runs (machine/leftovers.ts). Written by the machine daemon at start.\n${MSYS_CALLERS}exec ${[fwd(node), ...nodeArgs, fwd(script)].map(q).join(' ')} "$@"\n`);
+  fs.writeFileSync(`${sh}.tmp`, `#!/bin/sh\n# FF Factory: what this worker started that still runs (machine/leftovers.ts). Written by the machine daemon at start.\n${MSYS_CALLERS}${factsFile ? `FF_CLEANUP_FACTS=${q(fwd(factsFile))}\nexport FF_CLEANUP_FACTS\n` : ''}exec ${[fwd(node), ...nodeArgs, fwd(script)].map(q).join(' ')} "$@"\n`);
   fs.chmodSync(`${sh}.tmp`, 0o755);
   fs.renameSync(`${sh}.tmp`, sh);
-  fs.writeFileSync(`${sh}.cmd`, `@echo off\r\nrem FF Factory: what this worker started that still runs (machine/leftovers.ts).\r\n${[node, ...nodeArgs, script].map((s) => `"${s}"`).join(' ')} %*\r\n`);
+  fs.writeFileSync(`${sh}.cmd`, `@echo off\r\nrem FF Factory: what this worker started that still runs (machine/leftovers.ts).\r\n${factsFile ? `set "FF_CLEANUP_FACTS=${factsFile}"\r\n` : ''}${[node, ...nodeArgs, script].map((s) => `"${s}"`).join(' ')} %*\r\n`);
 }
 
 // Run when started directly (the ff-leftovers shim).

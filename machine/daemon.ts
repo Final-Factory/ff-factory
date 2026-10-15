@@ -40,6 +40,8 @@ import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
 import { hubEditorDirs, hubListedEditors, realDeps as realUnityDeps } from './unity.ts';
 import { UnityReaper, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
+import type { CleanupFacts } from '../server/cleanupFolders.ts';
+import type { SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -209,6 +211,8 @@ export function trimLogEntry(e: object): Record<string, unknown> {
 }
 
 export const cleanupConfigFile = (appDir: string) => path.join(appDir, 'cleanup.json');
+/** The ledger facts a clean-up worker's `ff-leftovers folders` judges its deletes by (server/cleanupFolders.ts, w1379). */
+export const cleanupFactsFile = (appDir: string) => path.join(appDir, 'cleanup-facts.json');
 
 /** How the daemon measures its Mac and reads its login's plan usage; tests pass fakes (no CLI, no tools). */
 export interface Probes {
@@ -307,6 +311,8 @@ export class Daemon {
    * their temp folders stay while they are stopped. A portal from before w1097 sends none, and the sweep works as before.
    */
   private resumable = new Set<string>();
+  /** Every session here with a request not closed, and its requests, as the portal last said (w1379); undefined: it never did. */
+  private owners?: Record<string, SessionOwner>;
   private cleanupSettings: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown } = { ...MACHINE_CLEANUP_DEFAULTS };
   /** The ledger's facts for the stale-output rules (w459), as the portal last sent them; kept in memory only. */
   private staleCtx?: StaleContext;
@@ -450,6 +456,7 @@ export class Daemon {
     this.sweeper = new SessionSweeper({
       root: cfg.root,
       tempRoot: () => agentTempRoot(cfg.tempDir),
+      ready: () => this.welcomed,
       sessions: () => [...this.entries.values()].map((e) => ({ id: e.s.info.id, live: e.s.live, resumable: this.resumable.has(e.s.info.id) })),
       dirOf: (id) => sessionTempDir(agentTempRoot(cfg.tempDir), id),
       guard: () => this.cleanupGuard(),
@@ -597,8 +604,38 @@ export class Daemon {
         ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), agentTempRoot(c.tempDir)])].filter((x): x is string => !!x),
       ],
       home: HOME,
-      resumable: [...this.resumable].map((id) => sessionTempDir(agentTempRoot(c.tempDir), id)),
+      // Before the portal's welcome nobody knows which stopped workers a request waits for (w1379): every worker folder stays.
+      resumable: this.welcomed ? [...this.resumable].map((id) => sessionTempDir(agentTempRoot(c.tempDir), id)) : [agentTempRoot(c.tempDir)],
     };
+  }
+
+  /** What a clean-up worker may delete is judged by the ledger's facts, not by a list in its brief (server/cleanupFolders.ts, w1379). */
+  private cleanupFacts(): CleanupFacts {
+    const c = this.cfg;
+    const sessionIds = [...this.entries.keys()].filter((id) => this.sessionLive(id));
+    return {
+      at: new Date().toISOString(),
+      connected: this.ws?.readyState === WebSocket.OPEN && this.welcomed,
+      ...(c.root ? { root: c.root, tempRoot: agentTempRoot(c.tempDir) } : {}),
+      sandboxes: this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
+      live: sessionIds,
+      resumable: [...this.resumable],
+      ...(this.owners ? { owners: this.owners } : {}),
+      open: this.staleCtx?.open ?? [],
+      closed: this.staleCtx?.closed ?? [],
+      ...(this.staleCtx ? { contextAt: this.staleCtx.at } : {}),
+    };
+  }
+
+  private writeCleanupFacts() {
+    const file = cleanupFactsFile(appDirOfConfig(this.cfg));
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(`${file}.tmp`, JSON.stringify(this.cleanupFacts()));
+      fs.renameSync(`${file}.tmp`, file);
+    } catch (e) {
+      log(`clean-up facts: could not write ${file}: ${(e as Error).message}`);
+    }
   }
 
   /** Git Bash's /tmp (Windows): looked up again, and made when something removed it (w603). */
@@ -716,7 +753,7 @@ export class Daemon {
     try {
       this.slotBin = installShims(this.slots.dir);
       // ff-leftovers (w1197): a worker lists and ends what it started before DONE or a stop.
-      installLeftoversShim(this.slotBin);
+      installLeftoversShim(this.slotBin, undefined, undefined, undefined, cleanupFactsFile(appDirOfConfig(this.cfg)));
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
     }
@@ -726,6 +763,9 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
     // What stopped workers left running (w1196, w1197): looked at once a minute.
     this.timers.push(setInterval(() => void this.leftovers.tick(), 15_000));
+    // The ledger facts for a clean-up worker's deletes (w1379): written every 30 s, so a stale file means a daemon that is not running.
+    this.timers.push(setInterval(() => this.writeCleanupFacts(), 30_000));
+    this.writeCleanupFacts();
     // Agent hosts nobody follows (w799): an orphan is stopped, a gone host's folder removed after a while.
     if (this.hosted) {
       this.hostWatch = new HostWatch({
@@ -1529,12 +1569,15 @@ export class Daemon {
       case 'resumable':
         this.resumable = new Set(msg.sessionIds);
         if (msg.wakes) this.wakes = wakesOf(msg.wakes);
+        if (msg.owners) this.owners = msg.owners;
+        this.writeCleanupFacts();
         return;
       case 'welcome': {
         // The machine's agent cap (w536; a portal before it sent the old main-clone max_agents here).
         this.maxSessions = msg.maxSessions;
         if (msg.resumable) this.resumable = new Set(msg.resumable);
         if (msg.wakes) this.wakes = wakesOf(msg.wakes);
+        if (msg.owners) this.owners = msg.owners;
         this.portalSessions = new Set(msg.sessions.map((s) => s.id));
         this.welcomed = true;
         // A portal from before protocol 5 sends no pool settings: keep daemon.json's. So does a worker root install

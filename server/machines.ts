@@ -18,7 +18,7 @@ import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
 import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
-import { resumableSessions } from './resumable.ts';
+import { ownersOf, resumableSessions, type SessionOwner } from './resumable.ts';
 import { movedNote, savedNote } from './placeAgain.ts';
 import { safeImage } from './images.ts';
 import { hostStartFailed } from '../shared/agentState.ts';
@@ -78,7 +78,7 @@ export { MAIN_CLONE_NO_AGENTS };
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
 /** What a daemon was told of its resumable sessions and their check-ins, so a change is sent once (w1097, w1196). */
-const resumableKey = (ids: string[], wakes: Record<string, string>) => `${ids.join(',')}|${Object.entries(wakes).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}@${v}`).join(',')}`;
+const resumableKey = (ids: string[], wakes: Record<string, string>, owners: Record<string, SessionOwner> = {}) => `${ids.join(',')}|${Object.entries(wakes).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}@${v}`).join(',')}|${JSON.stringify(owners)}`;
 
 
 /** Machine ids: short, lower-case, safe in a path and a LaunchAgent label. */
@@ -1596,8 +1596,9 @@ export class MachineManager {
     const pool = m.sandboxRoot || !m.root ? poolSettingsOf(m) : undefined;
     const resumable = this.resumableOf(m);
     const wakes = this.wakesOf(m);
-    this.sentResumable.set(m.id, resumableKey(resumable, wakes));
-    return { type: 'welcome' as const, machineId: m.id, maxSessions: agentCap(m), sessions, sandboxes: pool, resumable, wakes };
+    const owners = this.ownersOfMachine(m);
+    this.sentResumable.set(m.id, resumableKey(resumable, wakes, owners));
+    return { type: 'welcome' as const, machineId: m.id, maxSessions: agentCap(m), sessions, sandboxes: pool, resumable, wakes, owners };
   }
 
   /** What each daemon was last told of its resumable sessions (joined ids), so a change is sent once. */
@@ -1606,6 +1607,15 @@ export class MachineManager {
   /** A machine's sessions that a request still waits for: their temp folders survive a stop (server/resumable.ts, w1097). */
   private resumableOf(m: Machine): string[] {
     return resumableSessions(m.sessionIds.filter((sid) => this.store.sessions.has(sid)), this.store.work.values());
+  }
+
+  /** The machine's sessions with a request not yet closed, and the requests they are on (w1379): what `ff-leftovers folders` checks a delete against. */
+  private ownersOfMachine(m: Machine): Record<string, SessionOwner> {
+    const sessions = m.sessionIds.flatMap((sid) => {
+      const info = this.store.sessions.get(sid);
+      return info ? [{ id: sid, machineSandbox: info.machineSandbox }] : [];
+    });
+    return ownersOf(sessions, this.store.work.values());
   }
 
   /** The pending wake_me check-ins of a machine's sessions (w1196): its daemon keeps what they left running until then. */
@@ -1625,10 +1635,11 @@ export class MachineManager {
       if (!m) continue;
       const ids = this.resumableOf(m);
       const wakes = this.wakesOf(m);
-      const key = resumableKey(ids, wakes);
+      const owners = this.ownersOfMachine(m);
+      const key = resumableKey(ids, wakes, owners);
       if (this.sentResumable.get(id) === key) continue;
       this.sentResumable.set(id, key);
-      link.ws.send(JSON.stringify({ type: 'resumable', sessionIds: ids, wakes } satisfies ToDaemon));
+      link.ws.send(JSON.stringify({ type: 'resumable', sessionIds: ids, wakes, owners } satisfies ToDaemon));
     }
   }
 

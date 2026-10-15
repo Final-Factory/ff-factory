@@ -145,6 +145,12 @@ export interface SweeperDeps {
   root?: string;
   /** The agent temp root, `<install>/tmp`. */
   tempRoot: () => string;
+  /**
+   * The portal's welcome has come since the daemon started, so `resumable` is known (w1379): until then every stopped session
+   * looks finished, and a daemon restarted while the portal was down would sweep the folders of workers a request waits for.
+   * Absent: always ready.
+   */
+  ready?: () => boolean;
   /** The sessions this daemon knows. */
   sessions: () => SweepSession[];
   /** The folder of a session (cleanup.ts sessionTempDir). */
@@ -186,7 +192,7 @@ export class SessionSweeper {
   }
 
   async tick(): Promise<void> {
-    if (!this.d.root || this.running) return;
+    if (!this.d.root || this.running || this.d.ready?.() === false) return;
     const now = (this.d.now ?? Date.now)();
     const s = this.d.settings?.() ?? SWEEP_DEFAULTS;
     const known = new Set<string>();

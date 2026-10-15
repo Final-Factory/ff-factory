@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { neverDelete } from './cleanup.ts';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -1343,6 +1344,32 @@ test("w1097: the daemon hears which stopped workers a request still waits for, a
   (mm as unknown as { heartbeat: () => void }).heartbeat();
   await until('the daemon is told', () => held().length === 0);
   assert.deepEqual(guard().resumable, []);
+});
+
+test("w1379: the daemon's clean-up facts name a stopped worker on a stalled request, and drop it when the request closes", async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  const w = { id: 'W9002', title: 'comet tail', status: 'stalled', sessionIds: [s.info.id], requesters: [], requestedBy: { userId: 'l', displayName: 'L' }, createdAt: '', updatedAt: '', log: [] } as unknown as WorkItem;
+  store.putWork(w);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  const facts = () => (d as unknown as { cleanupFacts: () => { owners?: Record<string, { requests: { id: string; status: string; with: boolean }[] }> } }).cleanupFacts();
+  await until('the welcome names its owner', () => !!facts().owners?.[s.info.id]);
+  assert.deepEqual(facts().owners![s.info.id]!.requests, [{ id: 'w9002', status: 'stalled', with: true }]);
+  // Its request closes: the next heartbeat tells the daemon, and the session is an orphan of no request.
+  w.status = 'done';
+  store.putWork(w);
+  (mm as unknown as { heartbeat: () => void }).heartbeat();
+  await until('the daemon is told', () => !facts().owners?.[s.info.id]);
+  assert.deepEqual(facts().owners, {}, 'told, with nobody on an open request');
+  // Before the portal's welcome the daemon does not know which stopped workers a request waits for: every worker folder stays.
+  const guard = () => (d as unknown as { cleanupGuard: () => { resumable?: string[] } }).cleanupGuard();
+  assert.deepEqual(guard().resumable, [], 'welcomed, nobody waits');
+  (d as unknown as { welcomed: boolean }).welcomed = false;
+  const g = guard();
+  assert.equal(g.resumable!.length, 1);
+  assert.match(neverDelete(path.join(g.resumable![0]!, 'ffa-anyone', 'build'), { keep: [], inUse: [], home: '/h', resumable: g.resumable })!, /will resume/);
 });
 
 test("w1196: the daemon hears each worker's pending check-in, so what a stopped worker left running stays until it is due", async (t) => {
