@@ -34,7 +34,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
-import { factsProblem, judgePath, planFolders, renderFolders, type CleanupFacts } from '../server/cleanupFolders.ts';
+import { factsProblem, judgePath, planFolders, renderFolders, withGitCheck, type CleanupFacts } from '../server/cleanupFolders.ts';
 import { parsePsJson } from '../server/watchdog.ts';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { gamePlayers, isUnityBinary, splitArgs, unityProcesses } from './unitySlots.ts';
@@ -704,7 +704,8 @@ export function readCleanupFacts(file: string | undefined): CleanupFacts | undef
 /**
  * `ff-leftovers folders` and `ff-leftovers check <path>...` (w1379): a clean-up worker's deletes judged by the ledger. `folders`
  * lists every folder a clean-up could take under the install folder with its owner, KEEP or DELETE and why; `check` judges
- * given paths and exits 1 when any is to be kept. Whatever is not provably closed or ownerless is kept.
+ * given paths and exits 1 when any is to be kept. Whatever is not provably closed or ownerless is kept, and so is a folder
+ * holding a git repo with uncommitted changes, commits on no remote or a stash (w1387), as the portal's own clean-up keeps it.
  */
 export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: NodeJS.ProcessEnv = process.env, now = Date.now(), out: (s: string) => void = (s) => void process.stdout.write(s)): Promise<number> {
   const facts = readCleanupFacts(e.FF_CLEANUP_FACTS);
@@ -716,7 +717,7 @@ export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: N
     const bad = factsProblem(facts, now);
     let kept = 0;
     for (const a of args) {
-      const r = bad ? { verdict: 'keep' as const, why: bad } : judgePath(path.resolve(a), facts!, now);
+      const r = bad ? { verdict: 'keep' as const, why: bad } : await withGitCheck(judgePath(path.resolve(a), facts!, now), facts!.root);
       if (r.verdict === 'keep') kept++;
       out(`${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${a}\n        ${r.why}\n`);
     }

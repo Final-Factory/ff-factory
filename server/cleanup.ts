@@ -295,16 +295,35 @@ export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRul
 
 /** Whether a clone has work that exists nowhere else: uncommitted changes or commits no remote has. Unknown counts as yes. */
 export async function hasLocalWork(dir: string, timeoutMs = 15_000): Promise<boolean> {
+  return (await localWorkWhy(dir, timeoutMs)) !== undefined;
+}
+
+/**
+ * What work a clone holds that exists nowhere else, in words ("3 uncommitted changes, 2 commits on no remote, 1 stash"), or
+ * undefined when it holds none. Unknown counts as work. A stash counts (w1387): it is work set aside, and no remote has it.
+ * A linked worktree's stashes are its main clone's (refs/stash is shared), so they keep the main clone, not the worktree.
+ */
+export async function localWorkWhy(dir: string, timeoutMs = 15_000): Promise<string | undefined> {
   const git = (...a: string[]) =>
     new Promise<string>((resolve, reject) =>
       // --no-optional-locks: status must not rewrite .git/index, or the clone looks touched and never ages out.
       execFile('git', ['--no-optional-locks', '-C', dir, ...a], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))),
     );
+  const n = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
   try {
-    if (await git('status', '--porcelain')) return true;
-    return Number(await git('rev-list', '--count', 'HEAD', '--not', '--remotes')) > 0;
-  } catch {
-    return true;
+    const work: string[] = [];
+    const status = await git('status', '--porcelain');
+    if (status) work.push(n(status.split('\n').length, 'uncommitted change'));
+    const ahead = Number(await git('rev-list', '--count', 'HEAD', '--not', '--remotes'));
+    if (ahead > 0) work.push(n(ahead, 'commit', 'commits') + ' on no remote');
+    const [gitDir, common] = (await git('rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir')).split('\n');
+    if (gitDir === common) {
+      const stashes = await git('stash', 'list');
+      if (stashes) work.push(n(stashes.split('\n').length, 'stash', 'stashes'));
+    }
+    return work.length ? work.join(', ') : undefined;
+  } catch (e) {
+    return `its git state could not be read (${String((e as Error).message ?? e).split('\n')[0]!.slice(0, 120)})`;
   }
 }
 
