@@ -43,7 +43,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // from name and description only (no hint, every tool deferred, as before); an older portal never sends them.
 // w1196 (no bump): `wakes` on `welcome` and `resumable`, the pending wake_me check-ins (ISO), optional: an older daemon ignores
 // it; an older portal never sends it, and the daemon then keeps a stopped worker's leftovers only for the grace after its stop.
-const DECIDED = { protocol: 9, fingerprint: '56bd3aceb6f63c90' };
+// w1379 (no bump): `owners` on `welcome` and `resumable`, each session of the machine with a request not closed and its requests,
+// optional: an older daemon ignores it; an older portal never sends it, and the daemon's `ff-leftovers folders` then says it has no
+// owners and nothing is deletable.
+const DECIDED = { protocol: 9, fingerprint: '4a75dfe3bc09e464' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

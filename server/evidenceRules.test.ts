@@ -197,6 +197,9 @@ test("w913: workers are told to leave their temp files, not to clean up; the one
   assert.match(DISK_HYGIENE, /Leave it there: do not clean up after yourself/);
   assert.match(DISK_HYGIENE, /The harness removes it: your temp folder a few minutes after no request waits for you any more \(it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole\), your git clones six hours after that \(unless one holds work nothing else has\)/);
   assert.match(DISK_HYGIENE, /no clean-up step before DONE, no `player_slots\.py prune`/);
+  // w1379: a clean-up is judged by the ledger, not by a list in its brief.
+  assert.match(DISK_HYGIENE, /run `ff-leftovers folders` and delete only its DELETE rows/);
+  assert.match(DISK_HYGIENE, /open, stalled or paused are KEEP rows whether or not its process runs/);
   assert.match(DISK_HYGIENE, /publish the proofs your report links .* before you end/);
   assert.match(DISK_HYGIENE, /a delete whose every path is written out under \$TMPDIR is answered by the session itself with no approval, alone or inside a longer command; anything else .* still asks a person/);
   assert.match(DISK_HYGIENE, /name it with your temp folder's name in front/);
@@ -252,4 +255,6 @@ test("w896: clean-up deletes only inside the worker install folder, in every wor
   assert.match(personal, words);
   assert.match(personal, /The work deletes only inside the machine's worker install folder/);
   assert.match(personal, /Never write a delete outside the folder into the brief/);
+  // w1379: the ledger, not a list in the brief, says which stopped workers' folders stay.
+  for (const text of [dispatcher, personal]) assert.match(text, /Never write a list of live or "will resume" workers into a clean-up brief.*`ff-leftovers folders` and delete only its DELETE rows/);
 });

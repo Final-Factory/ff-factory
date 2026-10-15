@@ -4,6 +4,7 @@ import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { AccountIdentity } from './usage.ts';
 import type { StaleContext } from './staleOutput.ts';
+import type { SessionOwner } from './resumable.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
@@ -104,15 +105,18 @@ export type ToDaemon =
    * `maxSessions` (its name kept so an older daemon still reads it, w536): the machine's agent cap, which the daemon
    * applies to agents outside sandboxes (standing agents) with its sandboxes' mid-turn agents counted in.
    */
-  | { type: 'welcome'; machineId: string; maxSessions: number; sessions: { id: string; lastSeq: number }[]; sandboxes?: SandboxPoolSettings | null; resumable?: string[]; wakes?: Record<string, string> }
+  | { type: 'welcome'; machineId: string; maxSessions: number; sessions: { id: string; lastSeq: number }[]; sandboxes?: SandboxPoolSettings | null; resumable?: string[]; wakes?: Record<string, string>; owners?: Record<string, SessionOwner> }
   /**
    * The sessions here whose temp folder must survive while they are stopped: a request they are on still waits for them
    * (server/resumable.ts, w1097). Sent in the welcome and again whenever the set changes; the daemon's sweep and clean-up
    * passes leave those folders (machine/daemon.ts cleanupGuard). An older daemon ignores it and sweeps as before.
    * `wakes` (w1196): the pending wake_me check-ins of the machine's sessions (ISO), sent with it and on each change: what
    * a stopped worker left running stays until its check-in is due (machine/leftovers.ts). An older daemon ignores it.
+   * `owners` (w1379): each session of the machine with a request not yet closed, with every request it is on and its
+   * status (server/resumable.ts ownersOf). The daemon writes it, with its own facts, to the file `ff-leftovers folders`
+   * reads, so a clean-up worker's deletes are checked against the ledger. An older daemon ignores it.
    */
-  | { type: 'resumable'; sessionIds: string[]; wakes?: Record<string, string> }
+  | { type: 'resumable'; sessionIds: string[]; wakes?: Record<string, string>; owners?: Record<string, SessionOwner> }
   /**
    * Start the session's process if needed (from `spec`) and send it a message. `attachments` (protocol 7): files the
    * daemon fetches into `<spec.cwd>/Inbox/` first; the message then names where each is, or why it is not.
