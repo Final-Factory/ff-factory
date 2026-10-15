@@ -621,6 +621,17 @@ kept while a worker in it runs or is on a request not closed. **Whatever is not 
 (the daemon is not writing), a daemon not connected to the portal, a portal that sends no `owners` (before w1379), a machine
 with no worker install folder, a path outside it (w896). The answer says why, so the worker reports what it skipped.
 
+**And git keeps a folder whatever the ledger says** (w1387). The same evening w1385, LothDesktop's next low-disk clean-up, deleted
+`tmp/ffa-31ffe8cc` (538 MB, the nightly merge review w1367's clone `ff`) and `tmp/ffa-28ebd585` (45 MB, w1258's worktree
+`wt-w1258-claims-gather-parallel`) on DELETE rows: their requests were closed. The portal's own clean-up had kept both for hours,
+"kept for a person: holds a git repo with uncommitted or unpushed work" (its log, source `cleanup`, 21:11Z to 22:11Z; 28ebd585
+since 2026-10-14 05:40Z), and the uncommitted files could not be recovered. Now a row the ledger frees is checked as the sweeps
+check a clone (`server/cleanup.ts` `localWorkWhy`, which `hasLocalWork` and every sweep use): a git repo in the folder, up to
+three levels below it, or around it (a `check` of a path inside a clone, unless git ignores that path: a sandbox's `Builds/`)
+with uncommitted changes, commits on no remote or a stash makes it `KEEP`, naming the repo and what it holds, with the ledger's
+own verdict beside it. A stash counts in the sweeps too since w1387; a linked worktree's stashes are its main clone's, so they
+keep the main clone only. Tests: `server/cleanupFolders.test.ts` (w1387).
+
 **The rule for people writing briefs**: a clean-up brief never carries a list of live or "will resume" workers; it says to run
 `ff-leftovers folders` and delete only the DELETE rows (`server/agents.ts`: `DISK_HYGIENE`, the dispatcher's and the orchestrators'
 low-disk rules). The ff-agents lesson `clean-up-after-yourself` and the delete checklist say the same.

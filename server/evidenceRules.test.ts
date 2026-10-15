@@ -200,6 +200,9 @@ test("w913: workers are told to leave their temp files, not to clean up; the one
   // w1379: a clean-up is judged by the ledger, not by a list in its brief.
   assert.match(DISK_HYGIENE, /run `ff-leftovers folders` and delete only its DELETE rows/);
   assert.match(DISK_HYGIENE, /open, stalled or paused are KEEP rows whether or not its process runs/);
+  // w1387: and by git: a clone with work on no remote keeps its folder, and the portal's clean-up log says so too.
+  assert.match(DISK_HYGIENE, /A folder holding a git clone with uncommitted changes, unpushed commits or a stash is KEEP too, whatever the ledger says/);
+  assert.match(DISK_HYGIENE, /check its git state .* or the portal's clean-up log \(`portal_logs` source cleanup: "kept for a person"\)/);
   assert.match(DISK_HYGIENE, /publish the proofs your report links .* before you end/);
   assert.match(DISK_HYGIENE, /a delete whose every path is written out under \$TMPDIR is answered by the session itself with no approval, alone or inside a longer command; anything else .* still asks a person/);
   assert.match(DISK_HYGIENE, /name it with your temp folder's name in front/);

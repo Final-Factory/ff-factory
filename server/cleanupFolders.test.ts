@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { hasLocalWork, localWorkWhy, norm } from './cleanup.ts';
 import { FACTS_MAX_AGE_MS, factsProblem, judgePath, judgeSession, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
 import { ownersOf } from './resumable.ts';
 import { foldersMain, installLeftoversShim } from '../machine/leftovers.ts';
@@ -165,4 +167,125 @@ test('w1379: the shim hands the facts file to the command', (t) => {
   installLeftoversShim(bin, 'node', [], 'leftovers.ts', path.join(bin, 'cleanup-facts.json'));
   assert.match(fs.readFileSync(path.join(bin, 'ff-leftovers'), 'utf8'), /FF_CLEANUP_FACTS=".*cleanup-facts\.json"\nexport FF_CLEANUP_FACTS\n/);
   assert.match(fs.readFileSync(path.join(bin, 'ff-leftovers.cmd'), 'utf8'), /set "FF_CLEANUP_FACTS=.*cleanup-facts\.json"/);
+});
+
+/**
+ * w1387: the ledger is not a clone's only owner. 2026-10-15, w1385 (LothDesktop's next low-disk clean-up) deleted
+ * V:\ffw\tmp\ffa-31ffe8cc on a DELETE row (its request w1367 was done) while the portal's clean-up had kept it three times
+ * that evening: "holds a git repo with uncommitted or unpushed work (...\ffa-31ffe8cc\ff)". A clone with work on no remote
+ * now keeps its folder in `folders` and `check`, with the repo and what it holds, as the portal's sweeps keep it.
+ */
+function git(cwd: string, ...a: string[]) {
+  return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'init.defaultBranch=main', '-c', 'core.autocrlf=false', ...a], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+/** A bare remote and a clone of it at `dir` with one pushed commit: no local work. */
+function pushedClone(remotes: string, dir: string) {
+  const bare = path.join(remotes, `${path.basename(path.dirname(dir))}-${path.basename(dir)}.git`);
+  git(remotes, 'init', '-q', '--bare', bare);
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  git(path.dirname(dir), 'clone', '-q', bare, dir);
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'Builds/\n');
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-q', '-m', 'one');
+  git(dir, 'push', '-q', 'origin', 'HEAD');
+  return dir;
+}
+
+test('w1387: localWorkWhy names uncommitted changes, commits on no remote and stashes; a pushed clone holds none', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-w1387-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 }));
+  const remotes = path.join(base, 'remotes');
+  fs.mkdirSync(remotes);
+  const clean = pushedClone(remotes, path.join(base, 'clean', 'ff'));
+  assert.equal(await localWorkWhy(clean), undefined);
+
+  const dirty = pushedClone(remotes, path.join(base, 'dirty', 'ff'));
+  fs.writeFileSync(path.join(dirty, 'report.md'), 'the report\n');
+  assert.equal(await localWorkWhy(dirty), '1 uncommitted change');
+
+  const ahead = pushedClone(remotes, path.join(base, 'ahead', 'ff'));
+  for (const n of ['b', 'c']) {
+    fs.writeFileSync(path.join(ahead, `${n}.txt`), n);
+    git(ahead, 'add', '.');
+    git(ahead, 'commit', '-q', '-m', n);
+  }
+  assert.equal(await localWorkWhy(ahead), '2 commits on no remote');
+
+  const stashed = pushedClone(remotes, path.join(base, 'stashed', 'ff'));
+  fs.writeFileSync(path.join(stashed, 'a.txt'), 'changed\n');
+  git(stashed, 'stash', 'push', '-q', '-m', 'set aside');
+  assert.equal(await localWorkWhy(stashed), '1 stash');
+  assert.equal(await hasLocalWork(stashed), true, "the portal's sweeps keep a stash too");
+
+  // A linked worktree shares its main clone's stashes: they keep the main clone, not the worktree.
+  const wt = path.join(base, 'stashed', 'wt');
+  git(stashed, 'worktree', 'add', '-q', '--detach', wt);
+  assert.equal(await localWorkWhy(wt), undefined);
+
+  assert.match((await localWorkWhy(path.join(base, 'no-such-repo')))!, /could not be read/, 'unknown counts as work');
+});
+
+test('w1387: a folder the ledger frees stays KEEP while a git repo in it holds work on no remote; check exits 1 and says why', async (t) => {
+  const { root, tempRoot, facts } = world(t);
+  const remotes = path.join(root, 'remotes');
+  fs.mkdirSync(remotes);
+  // b0b0b0b0's request closed and c1c1c1c1 is an orphan: both DELETE by the ledger (the w1379 control above).
+  const closed = path.join(tempRoot, 'ffa-b0b0b0b0');
+  const orphan = path.join(tempRoot, 'ffa-c1c1c1c1');
+  // b0b0b0b0 left a clone with a report it never committed, as 31ffe8cc's ff clone was kept for.
+  const ff = pushedClone(remotes, path.join(closed, 'ff'));
+  fs.writeFileSync(path.join(ff, 'report.md'), 'x');
+  // c1c1c1c1's clone, three levels down, is pushed and clean: nothing to lose.
+  const deep = pushedClone(remotes, path.join(orphan, 'legs', 'leg1', 'game'));
+
+  const rows = await planFolders(facts);
+  const row = (p: string) => rows.find((r) => norm(r.path) === norm(p))!;
+  assert.equal(row(closed).verdict, 'keep');
+  assert.match(row(closed).why, /holds a git repo with uncommitted or unpushed work \(.*ff: 1 uncommitted change\)/);
+  assert.match(row(closed).why, /The ledger alone said: no open, stalled or paused request names worker b0b0b0b0/);
+  assert.equal(row(orphan).verdict, 'delete', 'a pushed, clean clone loses nothing');
+  assert.match(renderFolders(rows, facts), /KEEP .*ffa-b0b0b0b0\n\s+holds a git repo/);
+
+  // Unpushed commits, a stash, and a clone nested deeper than the portal's one level each keep it too.
+  git(ff, 'add', '.');
+  git(ff, 'commit', '-q', '-m', 'report');
+  assert.match((await planFolders(facts)).find((r) => norm(r.path) === norm(closed))!.why, /1 commit on no remote/);
+  fs.writeFileSync(path.join(deep, 'a.txt'), 'changed\n');
+  git(deep, 'stash', 'push', '-q');
+  const o = (await planFolders(facts)).find((r) => norm(r.path) === norm(orphan))!;
+  assert.equal(o.verdict, 'keep');
+  assert.match(o.why, /game: 1 stash/);
+
+  // `check` on the folder, and on a path inside the clone (the clone around it), says KEEP and exits 1.
+  const file = path.join(root, 'cleanup-facts.json');
+  fs.writeFileSync(file, JSON.stringify(facts));
+  const out: string[] = [];
+  const say = (s: string) => void out.push(s);
+  const env = { FF_CLEANUP_FACTS: file } as NodeJS.ProcessEnv;
+  assert.equal(await foldersMain('check', [closed], env, Date.now(), say), 1);
+  fs.mkdirSync(path.join(ff, 'notes'));
+  fs.writeFileSync(path.join(ff, 'notes', 'brief.md'), 'job brief');
+  assert.equal(await foldersMain('check', [path.join(ff, 'notes')], env, Date.now(), say), 1);
+  assert.match(out.join(''), /KEEP .*notes\n\s+holds a git repo .*\(around it\)/);
+  // An ignored folder inside the clone (its Builds/) takes nothing git holds: the ledger's verdict stands.
+  fs.mkdirSync(path.join(ff, 'Builds', 'x'), { recursive: true });
+  assert.equal(await foldersMain('check', [path.join(ff, 'Builds')], env, Date.now(), say), 0);
+});
+
+test("w1387: a sandbox's ignored build output stays deletable though the sandbox's own worktree has work", async (t) => {
+  const { root, facts } = world(t);
+  const remotes = path.join(root, 'remotes');
+  fs.mkdirSync(remotes);
+  // slot1 becomes a clone whose Builds/ git ignores, with uncommitted work of its own; its worker's request closes.
+  const sb = path.join(root, 'sandboxes', 'slot1');
+  const held = path.join(root, 'held');
+  fs.renameSync(sb, held);
+  pushedClone(remotes, sb);
+  fs.renameSync(path.join(held, 'Builds'), path.join(sb, 'Builds'));
+  fs.writeFileSync(path.join(sb, 'a.txt'), 'in progress\n');
+  const closed = { ...facts, owners: ownersOf([{ id: 'a735f37c', machineSandbox: 'slot1' }], [item('w1332', 'done', ['a735f37c'])]), live: [], resumable: [] };
+  const rows = await planFolders(closed);
+  assert.equal(rows.find((r) => norm(r.path).endsWith('slot1/builds/cache'))!.verdict, 'delete');
 });
