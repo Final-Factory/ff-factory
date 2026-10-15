@@ -140,7 +140,8 @@ test('worker daemon: a root gives the folders, the agents\' environment and the 
   assert.equal(cfg.unitySlotsDir, undefined, 'the Unity slots mailbox stays where every script finds it (w469)');
   assert.equal(cfg.maxEventsFile, path.join('/r', 'daemon', 'max-events.jsonl'));
   assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r' }).appDir, undefined, 'no root: unchanged');
-  assert.deepEqual(rootEnv('/r'), { FF_WORKER_ROOT: '/r', FF_PLAYER_SLOT_ROOT: path.join('/r', 'players'), FF_NIGHTLY_ROOT: path.join('/r', 'nightly') });
+  // w1099: no FF_NIGHTLY_ROOT: the nightly lab root is gone (the night keeps its history in <root>/nightly-history).
+  assert.deepEqual(rootEnv('/r'), { FF_WORKER_ROOT: '/r', FF_PLAYER_SLOT_ROOT: path.join('/r', 'players') });
   assert.equal(readToken({ token: 'in-json' }), 'in-json');
   assert.equal(readToken({ token: '', tokenFile: 'f' }, () => `${TOKEN}\r\n`), TOKEN);
   assert.throws(() => readToken({ token: '', tokenFile: 'f' }, () => '\n'), /is empty/);
@@ -433,8 +434,9 @@ test('worker install: a nightly lab task left on an old root is named, with the 
 });
 
 test("worker install: each sandbox owns two player folders, and a new count adds or removes pairs (w576)", () => {
-  assert.deepEqual(playerFolders(2), ['slot1-0', 'slot1-1', 'slot2-0', 'slot2-1', 'slotnightly-0', 'slotnightly-1']);
-  assert.equal(playerFolders(5).length, 12, "5 sandboxes' pairs and the nightly lab's");
+  // w1099: no nightly pair; syncPlayerFolders removes an old slotnightly-0/-1 like any slot folder not kept.
+  assert.deepEqual(playerFolders(2), ['slot1-0', 'slot1-1', 'slot2-0', 'slot2-1']);
+  assert.equal(playerFolders(5).length, 10, "5 sandboxes' pairs");
   const players = fs.mkdtempSync(path.join(os.tmpdir(), 'players-'));
   try {
     // LothDesktop before: the old pool slot0..slot7, one with a leftover build and its lease files.
@@ -443,7 +445,7 @@ test("worker install: each sandbox owns two player folders, and a new count adds
     fs.writeFileSync(path.join(players, 'pool.lock'), '');
     const lines: string[] = [];
     const first = syncPlayerFolders(players, playerFolders(5), (l) => lines.push(l));
-    assert.equal(first.made.length, 12);
+    assert.equal(first.made.length, 10);
     assert.deepEqual(first.removed.sort(), ['slot0', 'slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6', 'slot7']);
     assert.deepEqual(fs.readdirSync(players).sort(), ['pool.lock', ...playerFolders(5)].sort(), 'other files stay');
     // Lowered to 4 sandboxes: slot5's pair goes; the rest are kept as they are.
@@ -452,6 +454,11 @@ test("worker install: each sandbox owns two player folders, and a new count adds
     assert.deepEqual([second.made, second.removed.sort(), second.kept], [[], ['slot5-0', 'slot5-1'], []]);
     assert.equal(fs.readFileSync(path.join(players, 'slot1-0', 'slot.json'), 'utf8'), '{"sha":"a"}');
     assert.deepEqual(lines, []);
+    // w1099: LothDesktop's old nightly pair goes at the next install or update.
+    for (const n of ['slotnightly-0', 'slotnightly-1']) fs.mkdirSync(path.join(players, n, 'player'), { recursive: true });
+    const third = syncPlayerFolders(players, playerFolders(4), () => undefined);
+    assert.deepEqual(third.removed.sort(), ['slotnightly-0', 'slotnightly-1']);
+    assert.deepEqual(fs.readdirSync(players).sort(), ['pool.lock', ...playerFolders(4)].sort());
   } finally {
     fs.rmSync(players, { recursive: true, force: true });
   }

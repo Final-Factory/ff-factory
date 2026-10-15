@@ -1276,8 +1276,8 @@ async function reinstallCarryIn(c: ReinstallCarry, l: Layout) {
 export function playerFolders(sandboxes: number): string[] {
   const out: string[] = [];
   for (let k = 1; k <= sandboxes; k++) out.push(`slot${k}-0`, `slot${k}-1`);
-  // The nightly lab is no sandbox: its own pair (lothsahn, w576: "Let's use slotnightly-0 and slotnightly-1").
-  out.push('slotnightly-0', 'slotnightly-1');
+  // No nightly pair since w1099: the nightly run is a job in a sandbox and plays from that sandbox's pair, so
+  // syncPlayerFolders removes the old slotnightly-0 and -1 (lothsahn: "get rid of ffw\nightly").
   return out;
 }
 
@@ -1538,7 +1538,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   if (fresh) notePinnedDrive(m, fresh);
   writeManifest(l.root, m);
   const pf = syncPlayerFolders(l.players, playerFolders(o.maxSandboxes));
-  say(`Player folders: ${playerFolders(o.maxSandboxes).length} (slot1-0..slot${o.maxSandboxes}-1 and slotnightly-0, -1)${pf.made.length ? `, ${pf.made.length} made` : ''}${pf.removed.length ? `; removed ${pf.removed.join(', ')}` : ''}${pf.kept.length ? `; still in use: ${pf.kept.join(', ')}` : ''}.`);
+  say(`Player folders: ${playerFolders(o.maxSandboxes).length} (slot1-0..slot${o.maxSandboxes}-1)${pf.made.length ? `, ${pf.made.length} made` : ''}${pf.removed.length ? `; removed ${pf.removed.join(', ')}` : ''}${pf.kept.length ? `; still in use: ${pf.kept.join(', ')}` : ''}.`);
 
   // 2. The credential, owner-only.
   // The folder first: a file written after inherits its owner-only rights (and one from an earlier run gets them back).
@@ -1626,7 +1626,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   if (isWin && o.firewall) {
     const editors = unityEditors(f.probe.home);
     const sfx = o.firewallSuffix ? ` ${o.firewallSuffix}` : '';
-    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.maxSandboxes} sandboxes' player folders (slot1-0..slot${o.maxSandboxes}-1) and the nightly lab's (slotnightly-0, -1) under ${l.players}` });
+    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.maxSandboxes} sandboxes' player folders (slot1-0..slot${o.maxSandboxes}-1) under ${l.players}` });
     if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP + sfx, note: editors.join('; ') });
     if (!o.firewallSuffix) noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);

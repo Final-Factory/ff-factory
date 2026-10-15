@@ -566,15 +566,15 @@ shouldn't assume silence means a successful (or failed) run." The Windows tasks 
   reads the report the check names, says how long the night waited, and ends with
   `RESOLVED: nightly <date> <passed|failed|broken>: <TL;DR>`. It posts nothing and files nothing by hand.
 - **Where the night runs** (w1099, lothsahn, 2026-10-12: "Can we have it use a slot like a regular job and get rid of
-  ffw
-ightly?"): the game repo decides (`nightly_root.sh ff_nightly_mode`: `FF_NIGHTLY_MODE`, else `lab.win.json`
-  `runIn`). `lab` is the old way: the lab root `FF_NIGHTLY_ROOT` (`<install>/nightly`) with its own clone, Library,
-  `builds/` and the `slotnightly-0/1` player folders. `sandbox` is a regular job: the worker's own sandbox, fast-forwarded
+  ffw\nightly?"): a regular job in the worker's own sandbox, fast-forwarded
   on its throwaway branch to origin/master (nothing pushed; `start` refuses a branch with commits of its own, tracked
   changes or an open editor), built from its own tree and Library into `Builds/cache` through the machine's Unity slot
   queue, played from its own `slotK-0/1`; only the state, logs, runs, reports and lab fixtures go to
   `<install>/nightly-history/`, which the clean-up passes trim like the lab (`installLeftovers.ts`, `staleOutput.ts`
-  `defaultNightlyRoots`). The cost of a per-sandbox build cache: a rerun of a night in another sandbox builds again, and a
+  `defaultNightlyRoots`). The night is launched as its own job (no `FF_SESSION_ID`, its own temp folder), so the
+  daemon's leftover sweep (`machine/leftovers.ts`) does not end it when its worker stops. The old lab root
+  (`<install>/nightly` with its own clone, Library and `builds/`), the daemon's `FF_NIGHTLY_ROOT` and the `slotnightly-0/1`
+  player folders are gone (verified on the nights of 2026-10-14 and 2026-10-15). The cost of a per-sandbox build cache: a rerun of a night in another sandbox builds again, and a
   sandbox whose Library is far from master takes longer to build than the lab's always-warm one.
 - **Room and waits** (w1099): `start` prints the machine's RAM in use and Unity slots and how long after the fire it starts
   (the portal gives the worker `FF_NIGHTLY_FIRED_AT`, `IntakeManager.nightlyRunEnv`); the build waits in the Unity slot

@@ -4,8 +4,8 @@
 `scripts/worker/install.ps1` (Windows) or `install.sh` (macOS and Linux) installs it, `uninstall` removes it and proves nothing is
 left, and `migrate` moves a machine from today's scattered layout into a root (copy-first and verified, with rollback).
 Built players run only from fixed player folders: each sandbox slotK owns `<root>/players/slotK-0/player/` (peer 0,
-the host) and `slotK-1/player/` (peer 1, the client), the nightly lab (no sandbox) owns `slotnightly-0` and
-`slotnightly-1`, and Windows Firewall gets one inbound rule per folder (w576).
+the host) and `slotK-1/player/` (peer 1, the client), and Windows Firewall gets one inbound rule per folder (w576).
+The nightly run plays from its sandbox's pair since w1099; the nightly lab's own `slotnightly-0`/`-1` are gone.
 `--max-sandboxes N` makes the sandboxes' count and these N pairs together. The design and the inventory it rests on: [worker-root.md](worker-root.md). lothsahn's
 decisions of 2026-10-06 override it where they differ (listed at the end).
 
@@ -22,11 +22,11 @@ decisions of 2026-10-06 override it where they differ (listed at the end).
   repo/                 the install's own bare clone of the game repo; every sandbox is a worktree of it
   sandboxes/<name>/     the sandboxes
   seed/Library/         the Library seed new sandboxes are warmed from
-  players/slotK-0, -1/  each sandbox slotK's two player folders, K = 1..N, and slotnightly-0, -1 for the nightly lab
+  players/slotK-0, -1/  each sandbox slotK's two player folders, K = 1..N
                         (scripts/nightly/player_slots.py, layout sandbox-pairs, w576): FF_PLAYER_SLOT_ROOT for agents
-  nightly/              the nightly lab: FF_NIGHTLY_ROOT (mode lab; goes once a sandbox night is verified, w1099)
-  nightly-history/      since w1099 (mode sandbox): a sandbox night's state, logs, runs, reports and lab fixtures; no
-                        clone, Library or builds (the night builds in its sandbox)
+  nightly-history/      the nightly run's history (w1099): state, logs, runs, reports, lab fixtures and the lab lock; no
+                        clone, Library or builds (the night is a job in a sandbox and builds there). The old nightly/
+                        lab root is gone.
   scratch/              long-lived scratch; scratch/legacy/ holds what a migration archived
   tmp/                  agents' TMP, TEMP and TMPDIR (one ffa-<session> folder each)
   voice/                only with --voice-whisper (w615): the GPU Whisper for the portal's mic, uv's Python, its venv,
@@ -35,7 +35,7 @@ decisions of 2026-10-06 override it where they differ (listed at the end).
 ```
 
 The daemon reads `root` from its `daemon.json` and derives the rest (`machine/daemon.ts` `withRootDefaults`, `rootEnv`).
-Its agents get `FF_WORKER_ROOT`, `FF_PLAYER_SLOT_ROOT` and `FF_NIGHTLY_ROOT`. The credential is read from
+Its agents get `FF_WORKER_ROOT` and `FF_PLAYER_SLOT_ROOT` (`FF_NIGHTLY_ROOT` went with the nightly lab root, w1099). The credential is read from
 `secrets/machine-token` at start (`readToken`); a portal redeploy over ssh that writes a fresh token into `daemon.json`
 still works, since that one wins.
 
@@ -668,8 +668,8 @@ for the moved sandboxes.
   working folder under `<root>/sandboxes/slotK`) and uses only `slotK-0` and `slotK-1`. A build already in one is
   reused; a second, different build takes the other; `--peer 0|1` (or `FF_PLAYER_PEER`) picks one. So a 2-peer run of
   one build shares `slotK-0` unless its client passes `--peer 1`, and a cross-build desync check (host on one build,
-  client on another) gets one folder each. A process outside every sandbox (the nightly lab's scheduled task, which
-  has no FF_* variables) uses `slotnightly-0` and `slotnightly-1`; the sandbox is `FF_SANDBOX_ID`, else
+  client on another) gets one folder each. A process outside every sandbox has no player slot (the nightly lab's
+  `slotnightly-0` and `-1` are gone since w1099; the installer removes them); the sandbox is `FF_SANDBOX_ID`, else
   `FF_UNITY_HOLDER`, else the working folder.
 - The workers' guard refuses a shell command that starts `finalfactory.exe` or a `finalfactory.app` outside a slot
   (`server/guard.ts` `checkPlayerLaunch`), naming the slot launcher to use; in sandbox slotK it also refuses another
