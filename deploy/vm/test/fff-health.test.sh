@@ -109,7 +109,7 @@ ok "an hour after the last restart, 4 checks again"
 # ---------------------------------------------------------------- the grace and the hold
 fresh
 FAKE_STARTED_US=$(((100000 - 60) * 1000000)) check $START
-[ ! -s "$tmp/log" ] && ! grep -q '^restart' "$FAKE/calls" || fail "inside the grace: $(cat "$tmp/log")"
+if [ -s "$tmp/log" ] || grep -q '^restart' "$FAKE/calls"; then fail "inside the grace: $(cat "$tmp/log")"; fi
 touch "$tmp/run/portal.hold"
 for i in 1 2 3 4 5; do check $((START + i * 30)); done
 [ "$(restarted)" = 0 ] && [ ! -s "$tmp/log" ] || fail "while held: $(cat "$tmp/log")"
