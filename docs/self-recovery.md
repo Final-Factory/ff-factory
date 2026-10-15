@@ -587,6 +587,58 @@ clone, another machine's process and anything before the welcome stay; a busy co
 Linux; `readEnvs` on the machine it runs on, Windows included; BEAST's measured process tree of a worker's own
 `ff-leftovers end`, and the real shim run from a bash pipeline under a stand-in agent, which must survive it), `machines.test.ts` (the daemon hears the check-ins).
 
+### A clean-up worker's deletes are judged by the ledger (w1379)
+
+2026-10-15: w1374, LothDesktop's low-disk clean-up (worker d314b54b, `V:\ffw`), deleted the temp folder of stopped worker
+a735f37c. That worker is on w1332 (the comet catch-tail VFX), which the ledger had stalled at 13:15 on a usage limit and which
+then waited for Ben's OK of the look; it lost its player builds and preview clips and had to rebuild (the look itself was
+committed). **Probably not the daemon, not proven**: the machine's daemon (commit 38f8812, which has w1097) leaves a session a
+request still waits for (`server/resumable.ts`, stalled counts as open), and the portal's clean-up log for that day (`portal_logs`
+source `cleanup`, machine `lothdesktop`) has no entry naming a735f37c; the session sweep logs only to the daemon's own log
+(`~/.ff-factory/logs/daemon.log` on the machine), which the portal does not keep, and the worker's transcript was not read. What
+the ledger shows is the brief the clean-up worker got: it named five live workers and "39b00201 and d4c4ff2c are stopped but will
+resume", written out by hand, and told it to remove "stopped agents' temp and clone folders"; a735f37c was on neither list, and a
+worker cannot read other requests from the ledger (`read_work` shows its own). One daemon gap did exist and is closed below.
+
+**Now the machine tells the worker.** The portal sends each daemon, with `resumable`, an `owners` map (`ownersOf`,
+`server/resumable.ts`): every session of the machine with at least one request that is not closed (open, queued, blocked,
+stalled; a pause is a blocked request), each with all its requests, their status and whether the session is the one the request
+is with now. The daemon (`machine/daemon.ts` `cleanupFacts`, every 30 s and on every portal message) writes it, with its live
+sessions, the sandboxes and the ledger's open and closed request ids, to `<daemon folder>/cleanup-facts.json`. Two commands on
+every worker's PATH read it (`machine/leftovers.ts`, beside `ff-leftovers list/end`; the shim sets `FF_CLEANUP_FACTS`):
+
+- `ff-leftovers folders`: every folder a clean-up could take under the install folder (`tmp/ffa-<session>`, `scratch/*`, each
+  sandbox's `Builds/*` and `.nightly-builds/*`), each `KEEP` or `DELETE` with its owner and why, deletable ones measured.
+- `ff-leftovers check <path>...`: the same verdict for paths about to be deleted; exit 1 if any is to be kept.
+
+**Verdicts** (`server/cleanupFolders.ts`): a session's folder is kept while its worker runs, and while any request that is not
+closed names the session (also one the request has moved on from: the daemon's sweep takes those after the grace of w1097, a hand
+delete does not); it is deletable when no open, stalled or paused request names it: its requests are closed (done, merged,
+rejected, cancelled), or it belongs to no request at all (an orphan). A `scratch/` folder or any folder named for requests
+(`w1332-comet-catch-tail`, a review folder) is kept while one of them is open, deletable when every one is closed, and kept when
+one is in neither list or none is named ("cannot be attributed": listed for a person). A sandbox's build and capture output is
+kept while a worker in it runs or is on a request not closed. **Whatever is not provable is kept**: facts older than 5 min
+(the daemon is not writing), a daemon not connected to the portal, a portal that sends no `owners` (before w1379), a machine
+with no worker install folder, a path outside it (w896). The answer says why, so the worker reports what it skipped.
+
+**The rule for people writing briefs**: a clean-up brief never carries a list of live or "will resume" workers; it says to run
+`ff-leftovers folders` and delete only the DELETE rows (`server/agents.ts`: `DISK_HYGIENE`, the dispatcher's and the orchestrators'
+low-disk rules). The ff-agents lesson `clean-up-after-yourself` and the delete checklist say the same.
+
+**The daemon's own sweeps wait for the welcome too.** `resumable` is empty until the portal's welcome has come since the daemon
+started, so a stopped worker a request waits for looked finished: a daemon restarted while the portal was down could sweep its
+folder. Now the session sweep does nothing until then (`SweeperDeps.ready`, `server/sessionSweep.ts`) and the clean-up guard
+keeps the whole agent temp root (`cleanupGuard` in `machine/daemon.ts`); a daemon that never hears a portal sweeps no worker folder.
+Tests: `server/sessionSweep.test.ts` (w1379), `server/machines.test.ts`.
+
+Not covered: the portal host's own review folder (`/srv/fff/review/<topic>`) is outside any worker root and no daemon sweep
+takes it; a hand delete there still goes by the request id in the topic name (`ff-leftovers check` judges any path whose name
+carries one, but only inside an install folder). Needs a portal deploy (the `owners` field) and the daemon update that follows
+it; until a machine's daemon is updated the commands answer "no ledger facts" and nothing is deletable.
+Tests: `server/cleanupFolders.test.ts` (a stopped worker on a stalled request kept, a worker on a closed request and an orphan
+deleted, scratch and sandbox output, every untrusted-facts case, the command's exit codes, the shim), `server/machines.test.ts`
+(the daemon's facts follow a request from stalled to done), `server/evidenceRules.test.ts` (the briefs).
+
 ### Routine test steps without a prompt (w1097)
 
 Lothsahn (2026-10-12): "I just got prompted to accept a bash prompt in w1079. Why did it do that, and how do we allow it to

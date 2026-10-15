@@ -141,3 +141,31 @@ test('w913: without a worker root nothing is swept, and the settings are clamped
   assert.equal(names(dir).length, 7);
   assert.deepEqual(sweepSettings({ graceMin: 0, cloneKeepHours: 'x', quietMin: 5 }), { ...SWEEP_DEFAULTS, quietMin: 5 });
 });
+
+test("w1379: the sweeper waits for the portal's welcome: until then nobody knows which stopped workers a request waits for", async (t) => {
+  const { root, temp, guard, session } = world(t);
+  const dir = session('ffff6666');
+  let now = Date.now() + 1000 * MIN;
+  let ready = false;
+  const sw = new SessionSweeper({
+    root,
+    tempRoot: () => temp,
+    ready: () => ready,
+    sessions: () => [{ id: 'ffff6666', live: false, resumable: false }],
+    dirOf: (id) => sessionTempDir(temp, id),
+    guard: () => guard,
+    localWork: async () => false,
+    now: () => now,
+  });
+  await sw.tick();
+  now += 30 * MIN;
+  await sw.tick();
+  assert.equal(names(dir).length, 7, 'the daemon has not heard the portal yet: nothing swept, no clock started');
+  assert.deepEqual(sw.pending(), []);
+  ready = true;
+  await sw.tick(); // the welcome came and says nothing waits for it: the clock starts now
+  assert.equal(names(dir).length, 7);
+  now += 11 * MIN;
+  await sw.tick();
+  assert.deepEqual(names(dir), ['ff-factory']);
+});
