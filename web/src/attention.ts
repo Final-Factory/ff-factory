@@ -3,8 +3,8 @@
 // tab title count them, and each one opens the place where it is answered.
 import type { AppState, SessionInfo } from '../../shared/types';
 import { summarizeToolInput, toolDisplayName } from './components/toolSummary';
-import { focusPermission } from './store';
-import { decisionsOnMe } from '../../shared/waiting';
+import { focusPermission, focusWait } from './store';
+import { decisionsOn } from '../../shared/waiting';
 import { isOpenWork, navigate, type Route } from './util';
 
 export interface AttentionItem {
@@ -65,22 +65,27 @@ export function attentionItems(app: AppState): AttentionItem[] {
       open: () => navigate({ view: 'agent', agentId: d.agentId, tab: 'delegations' }),
     });
   }
-  // Intake approvals, the dispatcher's questions and design questions that wait on this person (w1228): one item, which opens the
-  // Dispatcher's "Waiting on input" tab where each is cleared.
+  // Intake approvals, the dispatcher's questions and design questions that wait on this person (w1228), one item each (w1356): it
+  // opens the Dispatcher's "Waiting on input" tab at that request's card, where Approve, Decline or the answer box is.
   if (app.me) {
     const reviewer = !!app.intake?.reviewerIds.some((id) => id.toLowerCase() === app.me!.userId.toLowerCase());
-    const d = decisionsOnMe((app.work ?? []).filter(isOpenWork), { userId: app.me.userId, displayName: app.me.displayName, reviewer });
-    if (d.count)
+    for (const d of decisionsOn((app.work ?? []).filter(isOpenWork), { userId: app.me.userId, displayName: app.me.displayName, reviewer }))
       items.push({
-        key: 'intake',
+        key: `i:${d.w.id}`,
         kind: 'intake',
-        title: 'Dispatcher',
-        detail: `${d.count} ${d.count === 1 ? 'request waits' : 'requests wait'} on you: approve, decline or answer`,
-        at: d.since,
-        open: () => navigate({ view: 'dispatcher', tab: 'waiting' }),
+        title: d.w.title,
+        detail: d.text,
+        at: d.at,
+        open: () => {
+          navigate({ view: 'dispatcher', tab: 'waiting' });
+          focusWait(d.w.id);
+        },
       });
   }
-  return items.sort((a, b) => a.at.localeCompare(b.at));
+  // A live agent's permission or a standing agent's request comes before the requests that wait in the ledger, oldest first in each,
+  // so a long run of old intake approvals never pushes them out of the sidebar's first rows.
+  const rank = (i: AttentionItem) => (i.kind === 'intake' ? 1 : 0);
+  return items.sort((x, y) => rank(x) - rank(y) || x.at.localeCompare(y.at));
 }
 
 const attentionCache = new WeakMap<AppState, AttentionItem[]>();

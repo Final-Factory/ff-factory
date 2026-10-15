@@ -130,8 +130,14 @@ stop with a design question. The classification and its reason are on the reques
   /api/work/<id>/decline`, the reason is kept on the request), Answer, Open. **Answer** sends your words to your own
   orchestrator (the message endpoint) with the question quoted; it records them on the request with `update_work`, in your
   turn, as it would if you had typed them; the card goes once it has. No new endpoint, no new power. The sidebar's
-  "Needs you" list and the phone's bell count the decisions on you (`decisionsOnMe`), the Dispatcher row opens this tab
-  while any wait, and the Requests tab opens with a "Go through them" link.
+  "Needs you" list and the phone's bell count the decisions on you, one item each (`decisionsOn`, w1356; w1228 made them
+  one item, "6 requests wait on you", which opened the top of the tab): a click opens this tab scrolled to that request's
+  card, its Approve / Decline or answer box in view (`focusWait`, `WaitingTab`). The tab lists every such decision
+  whatever the request is doing meanwhile: a worker mid-turn on a request makes its live state Working, which `workLive`
+  checks first, so the first tab left out a question the sidebar counted (w1356, measured: 10 counted, 8 cards). The
+  Dispatcher row opens this tab while any wait, and the Requests tab opens with a "Go through them" link. In the list,
+  permissions and delegations come before these ledger decisions, so a run of old approvals does not push them out of the
+  first four rows.
 - **A reviewer's decision for later** (w830): "decline w811 as a duplicate once #1314 is merged" is recorded in the
   reviewer's own turn (`update_work` decline with `when` and the reviewer's verbatim `words`), and the server declines it
   itself when #1314 merges, telling the reviewer; if #1314 closes unmerged it is dropped, never declined.
