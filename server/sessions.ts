@@ -946,6 +946,12 @@ export class SessionManager {
    */
   accountMove?: (s: SessionHandle) => string | undefined;
   /**
+   * Why a message to this agent must wait because its computer is on hold (w1376, config placement.hold), or undefined. Set by
+   * Agents. It is checked first, before any restart or slot: nothing may start, resume or run again on a held computer. The
+   * message waits as `machine` (the request reads Blocked on its machine) and goes once the hold is lifted.
+   */
+  machineHold?: (s: SessionHandle) => string | undefined;
+  /**
    * Why a worker's live process must restart on the FF Factory code its machine runs now before its next turn (w1166: an
    * agent host keeps the guard and system prompt it started with across daemon updates), or undefined. Set by Agents.
    * Its messages wait meanwhile, as for an account move (moveFor).
@@ -1155,13 +1161,15 @@ export class SessionManager {
         this.notDelivered(q.id, stale);
         continue;
       }
-      const hold = this.moveFor(s) || this.fullFor(s);
+      // w1376: a held computer resumes nobody; checked before a restart (moveFor) or a slot, so nothing stops or starts there.
+      const onHold = this.machineHold?.(s);
+      const hold = onHold ?? (this.moveFor(s) || this.fullFor(s));
       if (hold) {
         // w1135: what holds it NOW, not what held it when it was queued ("lothdesktop is offline" stayed on dd8193f8's line
         // after the daemon was back and it had been placed again): the session's line and the reply read this.
         if (q.why !== hold) {
           q.why = hold;
-          q.on = OFFLINE.test(hold) ? 'machine' : 'capacity';
+          q.on = onHold || OFFLINE.test(hold) ? 'machine' : 'capacity';
           this.saveQueue();
         }
         held.add(q.id);
@@ -1222,6 +1230,9 @@ export class SessionManager {
     // 2026-10-12 every wake-up, gate resume and dispatcher follow-up to lothsahn's workers was refused this way for hours.
     const pooled = (e: unknown) => s.info.kind === 'worker' && poolHeld(e);
     // ANOTHER PERSON'S ACCOUNT (w1076): its process restarts on its requests' person's tokens first; the message waits.
+    // A computer on hold (w1376, config placement.hold) resumes nobody: the message waits for the hold to lift, Blocked on its machine.
+    const onHold = this.machineHold?.(s);
+    if (onHold) return queue(onHold, 'machine');
     const move = this.moveFor(s);
     if (move) return queue(move, 'capacity', true);
     // ALL RUNNING SLOTS BUSY (w384): the message waits and goes when a turn ends, instead of being refused. So does any

@@ -179,6 +179,25 @@ nearly used-up one first (vault-ben-2 at 97% on 2026-10-11 04:32Z). Details *(gu
 - A token with no weekly reset time (no numbers yet) has no score and goes after every scored token.
 - The same order applies to workers, standing agents, a person's orchestrator and the ops worker; a session still keeps its token
   while it passes (sticky), but not one inside the dispatcher's reserve (below).
+- **A resume picks its account by the same rule as a new job (w1375).** Ben, 2026-10-15: "Resuming a worker whose vault account is
+  retired must move it to the person's usable account, not loop". On 2026-10-15 vault-ben-3 was retired (weekly 100%, until
+  Mon 05:00Z) and workers 19939b45 (w1335), 14fac04c (w1360), 012acc44 (w1329) and a735f37c (w1332) stalled on it again at
+  once after being resumed. Every resume (a limit or restart resume, the ledger cleanup's revival, a CI or blocker unblock, a
+  dispatcher follow-up, `message_agent`, a `wake_me` check-in) is one `SessionManager.send`, which does one of two things:
+  - **no live process:** the message starts a new one, and `machineRunEnv` → `Vault.forRun` → `pickPool` picks the account.
+    The saved pick is only the sticky one, kept while it still passes (`ok`, or `one-at-a-time` with its slot free), so a
+    retired or used-up account is skipped for the person's usable one (for Ben, vault-ben-2). Nothing usable: `PoolHeldError`,
+    the message waits in the send queue (`on: 'pool'`, Blocked, up to 8 days) and goes when a token frees, as a new job's first
+    prompt does. It never starts on the retired account, so it cannot hit its limit again and loop;
+  - **a live idle process** keeps the token it started on, and that was the leak: the 13:15Z resumes of w1335 went to a process
+    still on vault-ben-3 ("already on it"). `Agents.accountMove` now also returns a reason when its token (`SessionInfo.account`)
+    is `retired` or `exhausted` (`agents.tokenUnusable`, wired in `server/index.ts` from `vault.pools`), so `moveFor` stops
+    the idle process and the message starts the next one as above. Not mid-turn (the message reaches the running turn, which
+    moves at its next message) and not with a background task running. A `held` (5-hour 80%) or `one-at-a-time` token still
+    works, so a live process on one is left alone.
+  The ledger cleanup decides whether to resume a worker a limit cut off from its person's pool too (`limitsClearFor` →
+  `poolForRef`: some token of the pool is one a new worker would get), not from the meters of the one account that hit it. Without
+  a pool for that person it reads that account's meters as before.
 The meters are the ones `UsageTracker` polls (section 4a).
 
 **The limits** (one system-wide set, config `vault.pool.*`, percent 0 to 100, defaults below; **anyone** may change them

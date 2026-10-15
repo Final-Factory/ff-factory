@@ -147,6 +147,15 @@ export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {})
   return out;
 }
 
+/**
+ * Why the computer `id` takes no work now: its hold (prefs.hold, w1089) with who and why, or undefined. For a message to an
+ * agent already on it (w1376): a hold also stops resumes there, not only new placements.
+ */
+export function holdReason(id: string, prefs: PlacementPrefs = {}): string | undefined {
+  const why = holdOf(prefs).get(placeId(id));
+  return why === undefined ? undefined : `${id} is on hold (${why}): nothing resumes there until the hold is lifted (placement.hold)`;
+}
+
 /** "m5 has room but is held (Ben testing)": how a Queued reason says a computer with room is not usable. */
 export const heldText = (held: RoomNow['held'], kind?: NeedKind) => held.filter((h) => !kind || h.for.includes(kind)).map((h) => `${h.id} has room but is held (${h.why})`).join('; ');
 

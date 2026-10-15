@@ -2057,6 +2057,11 @@ function sourceOf(s: SessionInfo): string {
 }
 /** Whether the Claude account a session ran on has room again (no meter at 90% or more), or undefined when unknown (the ledger cleanup, before it resumes a worker a limit cut off). */
 function limitsClearFor(s: SessionInfo): boolean | undefined {
+  // w1375: a resume starts on the pool's pick, never on the account that hit its limit, so what matters is whether its person's pool
+  // can serve a worker now (the rule a new job gets, retired and used-up accounts skipped), not that one account's meters.
+  const person = agents.orchestrators.sessionPersonOf(s.id) ?? s.requestedBy?.userId;
+  const pool = person ? poolForRef(person, gatePools()) : undefined;
+  if (pool) return pool.serves;
   const source = sourceOf(s);
   const u = accountsNow().find((a) => a.sources.includes(source))?.usage;
   if (!u?.available) return undefined;
@@ -2071,8 +2076,11 @@ function ownerPoolServes(label: string): boolean | undefined {
   return poolForRef(label, gatePools())?.serves;
 }
 /** Every person's pool as a usage gate reads it (server/usageGate.ts). */
+function gatePoolsRaw() {
+  return vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor });
+}
 function gatePools(): [string, GatePoolToken[]][] {
-  const pools = vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor });
+  const pools = gatePoolsRaw();
   return [...pools].map(([person, list]) => [person, list.map((t) => ({ name: t.entry.name, last4: t.entry.last4, priority: t.priority, view: t.view }))]);
 }
 /**
@@ -2240,6 +2248,16 @@ const tokenStop = new DispatcherStop({
 agents.tokenStopped = (account) => {
   const t = dispatcherToken();
   return t && t.key === account && stopMeters(usage.usageOf(t.key), poolLimits(cfg)).length ? t.name : undefined;
+};
+// w1375: a retired or used-up token is one the pool skips for every new job; a live worker process on it restarts on its person's usable account at its next message.
+agents.tokenUnusable = (account) => {
+  for (const list of gatePoolsRaw().values()) {
+    for (const t of list) {
+      if (`token:${t.entry.fingerprint}` !== account || (t.view.state !== 'retired' && t.view.state !== 'exhausted')) continue;
+      return `vault token ${t.entry.name} …${t.entry.last4} (${t.view.why})`;
+    }
+  }
+  return undefined;
 };
 if (!isDryRun) setInterval(() => tokenStop.tick(), 30_000).unref();
 const outsideWatchLines = () => {

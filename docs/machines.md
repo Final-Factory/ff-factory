@@ -661,6 +661,16 @@ LothDesktop and Beast, not just when BEAST is full").
   computer last. A held computer with room is shown as such (`ROOM n% but HELD`), is never picked, is not "room" for
   `decide_work queue` or the Queued WRONG flag, and a Queued request's reason names it ("m5 has room but is held (Ben testing,
   2026-10-12)"). Before this the m5's hold lived in the dispatcher's memory only, so it could not be named in a reason.
+  - **A hold also stops resumes there (w1376).** Ben held the m5 on 2026-10-15 ("dont use the m5 i need to shut it down") and
+    workers 667f8865 (w1304) and 65f17649 (w1262/w1182) were still resumed and ran on it: the hold read only new placements. Every
+    resume of an agent already on a held computer (a limit or restart resume, the ledger cleanup's revival, a CI or blocker
+    unblock, a dispatch follow-up, `message_agent`, a `wake_me` check-in, the host guard's resume) is one `SessionManager.send`,
+    which asks `Agents.machineHold` first (`holdReason` in `server/placement.ts`) and queues the message with `on: 'machine'`:
+    the agent's request reads **Blocked** on that computer ("m5 is on hold (…): nothing resumes there until the hold is lifted").
+    It is checked before any restart or sandbox slot, so a held computer stops and starts nothing, a live idle process
+    included. The drain re-reads the hold every 30 seconds, delivers in order once `placement.hold` no longer names the computer,
+    and never gives it up while the hold stands. A worker mid-turn there is not interrupted, and a message sent to a running turn
+    (a stop-and-save request) still reaches it. Tests: `server/resumeRules.test.ts`.
 - **Work that needs no Unity editor is placed by agent slot alone** (w1098, lothsahn, 2026-10-12: "Yes, please tell the
   dispatcher that.  Please update the rules to also indicate that--FFBox and FF Factory updates don't need unity editors").
   Which repositories: Final-Factory/ff-factory, Final-Factory/ffbox, the ff-agents plugin (Final-Factory/final-factory-agents)
