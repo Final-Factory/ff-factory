@@ -73,6 +73,7 @@ import { slugify } from './sandboxes.ts';
 import { SpendStore, buildReport } from './spend.ts';
 import { isCoordinatorRole, type SpendSummaryReply } from '../shared/spend.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
+import { LoopWatch } from './loopWatch.ts';
 
 const WEB = path.join(ROOT, 'web', 'dist');
 
@@ -134,6 +135,8 @@ if (host.elevated) {
 const lastAlive = readAlive(cfg.dataDir);
 writeAlive(cfg.dataDir);
 setInterval(() => writeAlive(cfg.dataDir), 30_000);
+// A blocked event loop says so in the log, and /api/health carries the last minute's worst lag (w1377).
+const loopWatch = new LoopWatch().start();
 
 const store = new Store(cfg.dataDir);
 // What each request costs (w859, docs/spend.md): fed by every transcript event, whether the session runs here or on a machine.
@@ -1751,8 +1754,8 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, 'diagnosis' in parsed ? intake.onDiagnosis(parsed.diagnosis) : intake.onEscalation(parsed.escalation));
     }
     // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
-    // version of an open-source app is public anyway.
-    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), ...(isDryRun ? { dryRun: true } : {}) });
+    // version of an open-source app is public anyway. loopLagMs: the event loop's worst lag of the last minute (w1377).
+    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), loopLagMs: loopWatch.lagMs(), ...(isDryRun ? { dryRun: true } : {}) });
     if (url.pathname === '/api/login' && req.method === 'POST') {
       const { username, password } = await readJson<{ username?: string; password?: string }>(req);
       if (typeof username !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'username and password required' });
