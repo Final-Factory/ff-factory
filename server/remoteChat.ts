@@ -221,7 +221,7 @@ const isMessage = (e: TranscriptEvent) => e.kind === 'assistant' || e.kind === '
 // ---------------------------------------------------------------- the tools
 
 export interface RemoteDeps {
-  store: Pick<Store, 'readTranscript'>;
+  store: Pick<Store, 'readTranscript' | 'readTranscriptFrom'>;
   sessions: { get(id: string): { info: SessionInfo } };
   orchestrators: Pick<Orchestrators, 'personalFor' | 'personWrote' | 'heldOffer' | 'isPersonal' | 'ownerOf'>;
   waker: { cancel(sessionId: string): unknown };
@@ -323,8 +323,10 @@ export class RemoteChat {
     const info = this.chat(c);
     const id = info.id;
     const key = this.cursorKey(c);
-    const all = () => this.d.store.readTranscript(id);
     let since = a.since ?? this.cursors.get(key);
+    // What the call can show, from the end of the chat (w1377: an orchestrator's chat is never pruned, and a whole read of it
+    // held the portal's one thread): after the cursor, or on a first call the last 2,000 events, ample for its last 15 messages.
+    const all = () => (since === undefined ? this.d.store.readTranscript(id, 2000) : this.d.store.readTranscriptFrom(id, since + 1));
     const first = since === undefined;
     const wait = Math.min(MAX_WAIT_SECONDS, Math.max(0, a.waitSeconds ?? 0));
     const watch = new Watch(id);

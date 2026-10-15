@@ -17,7 +17,7 @@ scripts=(deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm
   deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-vm-path.test.sh deploy/vm/test/fff-machine-ssh.test.sh
   deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync
   deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/guest/ops-bin/fff-machine-ssh deploy/vm/test/fff-ops.test.sh
-  deploy/vm/test/fff-ops-socket.test.sh deploy/vm/guest/fff-watchdog deploy/vm/test/fff-watchdog.test.sh deploy/vm/test/fff-units.test.sh deploy/vm/test/fff-vault-sync.test.sh deploy/vm/test/fff-vault-add.test.sh)
+  deploy/vm/test/fff-ops-socket.test.sh deploy/vm/guest/fff-watchdog deploy/vm/test/fff-watchdog.test.sh deploy/vm/test/fff-health.test.sh deploy/vm/test/fff-units.test.sh deploy/vm/test/fff-vault-sync.test.sh deploy/vm/test/fff-vault-add.test.sh)
 for f in "${scripts[@]}"; do bash -n "$f"; done
 echo "bash -n: ${#scripts[@]} files parse"
 shellcheck --version | sed -n 2p
@@ -29,7 +29,7 @@ echo "shellcheck: clean"
 for f in deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm-rollback.sh deploy/vm/host/fff-vm deploy/vm/guest/install.sh \
   deploy/vm/guest/fffctl deploy/vm/guest/fff-update deploy/vm/guest/fff-health deploy/vm/guest/fff-backup deploy/vm/guest/fff-base-refresh \
   deploy/vm/guest/fff-migrate deploy/vm/host/machine-ssh.sh deploy/vm/guest/fff-machine-ssh deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh \
-  deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-vm-path.test.sh deploy/vm/test/fff-machine-ssh.test.sh deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv   deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/guest/ops-bin/fff-machine-ssh deploy/vm/test/fff-ops.test.sh deploy/vm/test/fff-ops-socket.test.sh deploy/vm/guest/fff-watchdog deploy/vm/test/fff-watchdog.test.sh deploy/vm/test/fff-units.test.sh deploy/vm/test/fff-vault-sync.test.sh deploy/vm/test/fff-vault-add.test.sh; do
+  deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-vm-path.test.sh deploy/vm/test/fff-machine-ssh.test.sh deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv   deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/guest/ops-bin/fff-machine-ssh deploy/vm/test/fff-ops.test.sh deploy/vm/test/fff-ops-socket.test.sh deploy/vm/guest/fff-watchdog deploy/vm/test/fff-watchdog.test.sh deploy/vm/test/fff-health.test.sh deploy/vm/test/fff-units.test.sh deploy/vm/test/fff-vault-sync.test.sh deploy/vm/test/fff-vault-add.test.sh; do
   [ "$(git ls-files -s "$f" | cut -c1-6)" = 100755 ] || { echo "$f is not executable in git (git update-index --chmod=+x)"; exit 1; }
 done
 python3 -m json.tool deploy/vm/guest/config.vm.example.json >/dev/null && echo "config.vm.example.json: valid JSON"
@@ -44,6 +44,9 @@ deploy/vm/test/fff-machine-ssh.test.sh
 deploy/vm/test/fff-ops.test.sh
 # The unit watchdog (w698): restarts, back-off, give-up, what it leaves alone, against a fake systemctl; needs jq and node.
 deploy/vm/test/fff-watchdog.test.sh
+# The health restart (w1377): the count, the back-off within the hour, the diagnostics line, the grace and the hold, against a
+# fake systemctl and curl.
+deploy/vm/test/fff-health.test.sh
 # The host side of the vault (w744): fff-vm vault-sync and the installer's sync agree, claude-tokens/ alone, nothing removed
 # whose file exists, the installed scripts follow the checkout; and (w749) the copy of the VM's own entries to the host, the
 # conflict rule, removal for good.

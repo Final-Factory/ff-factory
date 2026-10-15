@@ -394,6 +394,22 @@ that machine does not have the portal's key yet; the output ends with the `from=
 redeploy one machine's daemon from the portal (an orchestrator: `machine_daemon` redeploy, the m3 first) and check it
 connects.
 
+## 10. A portal that runs but does not answer (w1377)
+
+On 2026-10-15 fff-health restarted the portal 16 times in 72 minutes, and it took an hour to find out why. These are the
+lines to read first, in the order they help (`portal_logs` for a worker, `fffctl logs` on the VM):
+
+- `event loop: blocked for N s` (the portal, since w1377): its one thread was held; the lines just before it name what ran.
+  `/api/health` carries the last minute's worst lag as `loopLagMs`.
+- `before the restart: load …, … available, the portal's cgroup … MB; its processes, busiest first: …` (fff-health): which
+  process was busy, node or a Claude, when it gave up on the portal.
+- `fff-portal.service: Consumed X CPU time over Y wall clock time`: X above Y means more than a core the whole run (the
+  cgroup's total, its Claude processes included); on 10-15 every run of the loop was about 5 min in 4.
+- Many machines "connected" and "disconnected" in the same second, and `machine …: no answer for 45-59 s` for all of them at
+  once: the portal's loop was blocked, not their network. A single machine dropping alone is that machine's link.
+- `/api/health did not answer (n of m)` with the count going back to 1: a slow portal that answers between misses. m grows
+  with each restart within the hour (4, 8, 16, 32): fff-health backs off instead of restarting every 4 minutes.
+
 ## If it must come off again
 
 ```bash

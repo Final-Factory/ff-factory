@@ -18,6 +18,10 @@ NODE_MAJOR=24
 # fff-health.timer checks /api/health every 30 s; this many failures in a row restart the portal.
 HEALTH_FAILS_BEFORE_RESTART=4
 HEALTH_START_GRACE_SEC=120
+# A health restart within this many seconds of an earlier one waits for twice the failed checks of the one before (w1377:
+# 4, 8, 16, 32), at most HEALTH_FAILS_MAX: a portal too busy to answer gets time to finish, not a restart every 4 minutes.
+HEALTH_BACKOFF_WINDOW_SEC=3600
+HEALTH_FAILS_MAX=32
 # The unit watchdog (fff-health, w698; the units are FFF_CRITICAL_UNITS in lib.sh): a critical unit found failed, or stopped
 # when it should run, is restarted. The n-th restart in a row waits WATCHDOG_BACKOFF_SEC * 2^(n-1) seconds after the one
 # before (30, 60, 120, 240, 480, 900), at most WATCHDOG_BACKOFF_MAX_SEC; after WATCHDOG_MAX_ATTEMPTS restarts that did not hold

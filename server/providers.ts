@@ -12,6 +12,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Config } from './config.ts';
 import { emit } from './store.ts';
+import { beatWasLate } from './loopWatch.ts';
 import { redactSecrets } from './secrets.ts';
 import { clip } from './toolOutput.ts';
 import {
@@ -464,6 +465,8 @@ export class ProviderManager {
   private statusDetail?: string;
   /** Tests move the clock, shorten the hello wait and tighten the rate limit. */
   now = () => Date.now();
+  /** When the heartbeat last ran (w1377: a late beat judges no link). */
+  private lastBeat = Date.now();
   helloTimeoutMs: number = LIMITS.helloTimeoutMs;
   rate: { perSecond: number; burst: number } = { perSecond: LIMITS.messagesPerSecond, burst: LIMITS.burst };
 
@@ -775,6 +778,11 @@ export class ProviderManager {
   }
 
   private heartbeat() {
+    // A late beat (the event loop was blocked) runs before the connector's queued pongs are read: ping, judge at the next
+    // beat (w1377: "connector no answer for 45 s" at 09:56:09Z, in the same second as every machine).
+    const now = this.now();
+    const late = beatWasLate(now, this.lastBeat, PING_MS);
+    this.lastBeat = now;
     const link = this.link;
     if (!link) return;
     // Switched off while connected (set_app_config, or config.json edited and reloaded).
@@ -783,7 +791,7 @@ export class ProviderManager {
       this.detach('switched off');
       return;
     }
-    if (this.now() - link.lastPong > DEAD_MS) {
+    if (!late && now - link.lastPong > DEAD_MS) {
       link.ws.terminate();
       this.detach(`no answer for ${Math.round(DEAD_MS / 1000)} s`);
     } else link.ws.ping();

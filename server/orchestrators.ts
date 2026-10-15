@@ -59,7 +59,7 @@ import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
-import type { AttachmentRef, ConditionalDecision, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, ConditionalDecision, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -1228,7 +1228,7 @@ export class Orchestrators {
     const info = this.sessions.get(sessionId).info;
     if (info.kind !== 'orchestrator' || this.isDispatcher(info)) throw new Error("replies and reactions are for a person's own orchestrator chat");
     if (!Number.isInteger(seq) || seq < 0) throw new Error('replyTo: the number of a message in this chat');
-    const ev = this.store.readTranscript(sessionId).find((e) => e.seq === seq);
+    const ev = this.store.eventAt(sessionId, seq);
     if (!ev || (ev.kind !== 'user' && ev.kind !== 'assistant')) throw new Error(`#${seq} is not a message of this chat (replies and reactions go on the orchestrator's answers, a person's messages and relayed lines)`);
     let from = 'the orchestrator';
     if (ev.kind === 'user') {
@@ -1255,7 +1255,7 @@ export class Orchestrators {
   react(sessionId: string, seq: number, emoji: string, on: boolean, by: Requester): boolean {
     if (!isEmoji(emoji)) throw new Error('emoji: one emoji');
     const quoted = this.quoteOf(sessionId, seq);
-    const marks = reactionsByMessage(this.store.readTranscript(sessionId).filter((e): e is Extract<typeof e, { kind: 'user' | 'system' }> => e.kind === 'user' || e.kind === 'system'));
+    const marks = reactionsByMessage(this.store.readTranscriptFrom(sessionId, seq).filter((e): e is Extract<typeof e, { kind: 'user' | 'system' }> => e.kind === 'user' || e.kind === 'system'));
     const there = marks.get(seq)?.includes(emoji) ?? false;
     if (there === on) return false;
     if (!on) {
@@ -1279,7 +1279,7 @@ export class Orchestrators {
     const info = this.sessions.get(sessionId).info;
     const owner = this.ownerOf(info);
     if (!owner || !same(owner.userId, by.userId)) return undefined;
-    const ev = this.store.readTranscript(sessionId).find((e) => e.seq === seq);
+    const ev = this.store.eventAt(sessionId, seq);
     if (!ev || ev.kind !== 'assistant') return undefined;
     const now = this.now().getTime();
     if (now - Date.parse(ev.t) > PROPOSAL_MAX_AGE_MS) return undefined;
@@ -3997,7 +3997,9 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * answering their own worker are not told about themselves.
    */
   private permissionAnswered(by: Requester, worker: SessionInfo, perm: { requestId: string; toolName: string; input: unknown }, allow: boolean, access: PermissionAccess) {
-    const ev = this.store.readTranscript(worker.id).find((e) => e.kind === 'permission' && e.requestId === perm.requestId);
+    const isIt = (e: TranscriptEvent) => e.kind === 'permission' && e.requestId === perm.requestId;
+    // The prompt is recent: the end of the transcript first, the whole one only if it is not there (w1377).
+    const ev = this.store.readTranscript(worker.id, 2000).find(isIt) ?? this.store.readTranscript(worker.id).find(isIt);
     if (ev) this.store.amend(worker.id, ev.seq, { decidedBy: asRequester(by) });
     const items = this.itemsOf(worker.id);
     const verb = allow ? 'approved' : 'denied';

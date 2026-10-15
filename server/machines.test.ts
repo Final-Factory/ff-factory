@@ -1389,3 +1389,21 @@ test('w1135: a message queued while its machine was offline goes as soon as the 
   await until('delivered after the reconnect', () => store.readTranscript(s.info.id).some((e) => e.kind === 'user' && e.text === 'resume: carry on'), 10_000);
   assert.equal(sessions.queued().length, 0);
 });
+
+test('w1377: a heartbeat that runs late (the event loop was blocked) drops no link; an on-time one still drops a silent link', async (t) => {
+  const { mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  daemon();
+  await until('online', () => mm.isOnline('mx'));
+  const inside = mm as unknown as { links: Map<string, { lastPong: number }>; lastBeat: number; heartbeat: (now?: number) => void };
+  const now = Date.now();
+  // 2026-10-15 09:56:09Z: the loop was blocked for about 50 s; the beat after it found every link 45-59 s without a pong.
+  inside.links.get('mx')!.lastPong = now - 50_000;
+  inside.lastBeat = now - 70_000;
+  inside.heartbeat(now);
+  assert.equal(mm.isOnline('mx'), true, 'a late beat pings and judges nothing: the pongs that queued during the block are read next');
+  // The next beat is on time: a link still silent for over DEAD_MS is dropped, as before.
+  inside.links.get('mx')!.lastPong = now - 50_000;
+  inside.heartbeat(now + 20_000);
+  assert.equal(mm.isOnline('mx'), false, 'an on-time beat drops a link silent for over 45 s');
+});

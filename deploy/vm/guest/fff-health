@@ -3,37 +3,84 @@
 # (fff-watchdog, w698: any critical unit that is failed or stopped is restarted). Then what supervise.ps1 did beyond restarting
 # a crashed server (systemd's Restart=always does that): a server that runs but no longer answers is restarted after
 # HEALTH_FAILS_BEFORE_RESTART checks in a row, and an update being verified is confirmed or rolled back (fff-update verify).
+#
+# Restarts back off (w1377). On 2026-10-15 a portal too busy to answer was restarted every 4 minutes for 72 minutes: each new
+# server began with the same work (every machine reconnecting at once) and was stopped before it got through it. A restart
+# within HEALTH_BACKOFF_WINDOW_SEC of an earlier one waits for twice the failed checks of the one before (4, 8, 16, 32 checks:
+# 2, 4, 8, 16 minutes at 30 s), at most HEALTH_FAILS_MAX. Before each restart the journal gets what the portal's processes
+# were doing (CPU, memory, the load), so the next such morning says what held it.
 set -o errexit -o nounset -o pipefail
 # shellcheck source=lib.sh
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
 need_root
 load_conf
-state=/run/fff/health.fails
-install -d -m 0755 /run/fff
+RUN=${FFF_RUN_DIR:-/run/fff}
+state=$RUN/health.fails
+restarts=$RUN/health.restarts
+install -d -m 0755 "$RUN"
+now=${FFF_NOW:-$(date +%s)}
 
 # The unit watchdog (w698; fff-watchdog): every critical unit that is failed or stopped is restarted, with a back-off. Its own
 # failure never keeps the portal check below from running. It looks even while the portal is held for the nightly restart.
 "$FFF_LIB/fff-watchdog" || warn "fff-watchdog failed (exit $?)"
 
-[ -e /run/fff/portal.hold ] && exit 0
+[ -e "$RUN/portal.hold" ] && exit 0
 # Before the "is it running" check: a new release that crash-loops is rarely "active" when this looks.
 "$FFF_LIB/fff-update" verify || warn "fff-update verify failed"
 portal_active || { rm -f "$state"; exit 0; }
 # Seconds since the server process started (systemd's monotonic clock, as /proc/uptime counts it).
-started_us=$(systemctl show -p ExecMainStartTimestampMonotonic --value fff-portal.service)
-up_s=$(cut -d. -f1 /proc/uptime)
+started_us=$(sc show -p ExecMainStartTimestampMonotonic --value fff-portal.service)
+up_s=${FFF_UPTIME:-$(cut -d. -f1 /proc/uptime)}
 age=$((up_s - started_us / 1000000))
 [ "$age" -ge "$HEALTH_START_GRACE_SEC" ] || exit 0
 if health_json >/dev/null 2>&1; then
   rm -f "$state"
   exit 0
 fi
+
+# health_fails_needed RECENT: the failed checks in a row that restart the portal after RECENT restarts of this script within
+# the back-off window: HEALTH_FAILS_BEFORE_RESTART doubled for each, at most HEALTH_FAILS_MAX.
+health_fails_needed() {
+  local n=$HEALTH_FAILS_BEFORE_RESTART i
+  for ((i = 0; i < $1; i++)); do n=$((n * 2)); [ "$n" -lt "$HEALTH_FAILS_MAX" ] || { n=$HEALTH_FAILS_MAX; break; }; done
+  [ "$n" -ge "$HEALTH_FAILS_BEFORE_RESTART" ] || n=$HEALTH_FAILS_BEFORE_RESTART
+  echo "$n"
+}
+# This script's own restarts within the window (one epoch second a line), the older ones dropped.
+recent=0
+if [ -f "$restarts" ]; then
+  awk -v since=$((now - HEALTH_BACKOFF_WINDOW_SEC)) '$1 >= since' "$restarts" >"$restarts.tmp" || true
+  mv -f "$restarts.tmp" "$restarts"
+  recent=$(wc -l <"$restarts")
+fi
+needed=$(health_fails_needed "$recent")
+
+# portal_diag: one line of what the portal's processes do (each one's CPU over its life, resident memory, age, command name;
+# never its arguments, which can carry a token), its cgroup's memory, the VM's load and available memory.
+portal_diag() {
+  local cg procs="" mem="?" load avail
+  cg=$(sc show -p ControlGroup --value fff-portal.service 2>/dev/null || true)
+  if [ -n "$cg" ] && [ -r "${FFF_CGROUP_ROOT:-/sys/fs/cgroup}$cg/cgroup.procs" ]; then
+    procs=$(paste -sd, "${FFF_CGROUP_ROOT:-/sys/fs/cgroup}$cg/cgroup.procs")
+    mem=$(awk '{printf "%.0f MB", $1 / 1048576}' "${FFF_CGROUP_ROOT:-/sys/fs/cgroup}$cg/memory.current" 2>/dev/null || echo "?")
+  fi
+  load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo "?")
+  avail=$(awk '/^MemAvailable:/ {printf "%.0f MB", $2 / 1024}' /proc/meminfo 2>/dev/null || echo "?")
+  local top="?"
+  [ -z "$procs" ] || top=$(ps -o pid=,pcpu=,rss=,etimes=,comm= -p "$procs" 2>/dev/null | sort -k2 -rn | head -n 6 |
+    awk '{printf "%s%s pid %s %s%% cpu %.0f MB %s s", (NR > 1 ? "; " : ""), $5, $1, $2, $3 / 1024, $4}')
+  echo "load ${load}, ${avail} available, the portal's cgroup ${mem}; its processes, busiest first: ${top:-none}"
+}
+
 fails=$(($(cat "$state" 2>/dev/null || echo 0) + 1))
 echo "$fails" >"$state"
-log "/api/health did not answer ($fails of $HEALTH_FAILS_BEFORE_RESTART)"
-if [ "$fails" -ge "$HEALTH_FAILS_BEFORE_RESTART" ]; then
+log "/api/health did not answer ($fails of $needed)"
+if [ "$fails" -ge "$needed" ]; then
   rm -f "$state"
-  log "restarting the portal: it runs ($age s) but has not answered /api/health for $fails checks"
+  log "before the restart: $(portal_diag)"
+  echo "$now" >>"$restarts"
+  next=$(health_fails_needed $((recent + 1)))
+  log "restarting the portal: it runs ($age s) but has not answered /api/health for $fails checks (restart $((recent + 1)) within $((HEALTH_BACKOFF_WINDOW_SEC / 60)) min; another one in that time waits for $next checks)"
   # SIGTERM first: a server that still handles signals records what to resume; TimeoutStopSec then kills it.
-  systemctl restart fff-portal.service
+  sc restart fff-portal.service
 fi

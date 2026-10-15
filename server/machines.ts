@@ -30,6 +30,7 @@ import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
 import { writeKnownHosts, type MachineSsh } from './machineSsh.ts';
+import { beatWasLate } from './loopWatch.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -1720,11 +1721,19 @@ export class MachineManager {
     console.log(`machine ${id} disconnected`);
   }
 
-  private heartbeat() {
+  /** When the heartbeat last ran: a late beat (the event loop was blocked) judges no link (w1377). */
+  private lastBeat = Date.now();
+
+  private heartbeat(now = Date.now()) {
     this.dropRevoked();
-    const now = Date.now();
+    // A late beat runs before the pongs that queued meanwhile are read, so every link would look dead at once: on 2026-10-15
+    // that dropped all five machines in one second (09:56:09Z), their reconnects kept the portal busy, and it went on for an
+    // hour (w1377). It pings, and the next beat judges them.
+    const late = beatWasLate(now, this.lastBeat, PING_MS);
+    if (late) console.warn(`machines: the heartbeat ran ${Math.round((now - this.lastBeat - PING_MS) / 1000)} s late (the event loop was blocked); no link is dropped on this beat`);
+    this.lastBeat = now;
     for (const [id, link] of this.links) {
-      if (now - link.lastPong > DEAD_MS) {
+      if (!late && now - link.lastPong > DEAD_MS) {
         console.warn(`machine ${id}: no answer for ${Math.round((now - link.lastPong) / 1000)} s, dropping the connection`);
         link.ws.terminate();
         this.detach(id);

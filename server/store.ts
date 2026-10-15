@@ -48,6 +48,38 @@ export const checkWork: Check = (v) => {
 /** state.json: a write starts at most 200 ms after a change and at most once a second (4.5 MB at 7,000 sessions). */
 const STATE_SAVE = { delayMs: 200, intervalMs: 1000 };
 const WORK_SAVE = { delayMs: 300, intervalMs: 1000 };
+/** The first read from a transcript's end (Store.tailText); each further one doubles. */
+const TAIL_CHUNK = 64 * 1024;
+/** Lines lastSeq looks back over, so a torn last line (a crash) does not read as an empty transcript. */
+const LAST_LINES = 4;
+
+/** A transcript's events from its text: the last `limit` lines when given; a line that does not parse (torn by a crash) is skipped. */
+function parseLines(text: string, limit?: number): TranscriptEvent[] {
+  const lines = text.split('\n').filter(Boolean);
+  const out: TranscriptEvent[] = [];
+  for (const line of limit ? lines.slice(-limit) : lines) {
+    try {
+      // A crash can leave zero bytes where the last lines were; the next line then starts after them.
+      out.push(JSON.parse(line.replace(/^\0+/, '')));
+    } catch {
+      // a torn last line after a crash; skip it
+    }
+  }
+  return out;
+}
+
+/** Non-empty lines in `buf` after its first newline: the lines a tail read holds whole. */
+function completeLines(buf: Buffer): number {
+  let n = 0;
+  let i = buf.indexOf(0x0a);
+  while (i >= 0) {
+    const next = buf.indexOf(0x0a, i + 1);
+    const end = next < 0 ? buf.length : next;
+    if (end > i + 1) n++;
+    i = next;
+  }
+  return n;
+}
 
 /**
  * The durable record: sandboxes and session metadata in one JSON file (rewritten whole), transcripts as one
@@ -227,10 +259,17 @@ export class Store {
     this.putSession(s);
   }
 
+  /**
+   * The seq of the transcript's last event (0: none), remembered for the rest of the process: every daemon connect asks it for
+   * each session of that machine (machines.ts welcomeOf), and until w1377 each ask read the whole file, so a reconnect storm
+   * read every transcript of every machine again and again (2026-10-15). A torn last line (a crash) is skipped.
+   */
   lastSeq(sessionId: string): number {
     const n = this.seqs.get(sessionId);
     if (n !== undefined) return n;
-    return this.readTranscript(sessionId, 1)[0]?.seq ?? 0;
+    const last = this.readTranscript(sessionId, LAST_LINES).at(-1)?.seq ?? 0;
+    this.seqs.set(sessionId, last);
+    return last;
   }
 
   append(sessionId: string, e: DistributiveOmit<TranscriptEvent, 'seq' | 't'>): TranscriptEvent {
@@ -254,20 +293,11 @@ export class Store {
     emit({ type: 'transcript', sessionId, event: all[i] });
   }
 
+  /** The last `limit` events (all without one). A limited read takes only the end of the file (tailText), whatever its size. */
   readTranscript(sessionId: string, limit?: number): TranscriptEvent[] {
-    const text = this.transcriptText(sessionId);
+    const text = limit && limit > 0 ? this.tailText(sessionId, limit) : this.transcriptText(sessionId);
     if (text === undefined) return [];
-    const lines = text.split('\n').filter(Boolean);
-    const out: TranscriptEvent[] = [];
-    for (const line of limit ? lines.slice(-limit) : lines) {
-      try {
-        // A crash can leave zero bytes where the last lines were; the next line then starts after them.
-        out.push(JSON.parse(line.replace(/^\0+/, '')));
-      } catch {
-        // a torn last line after a crash; skip it
-      }
-    }
-    return out;
+    return parseLines(text, limit);
   }
 
   /** The transcript's text, from its file or, once the data guard compressed it (server/dataGuard.ts), its .gz; undefined: none. */
@@ -282,6 +312,54 @@ export class Store {
       return zlib.gunzipSync(fs.readFileSync(`${f}.gz`)).toString('utf8');
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * The end of a transcript holding at least its last `lines` non-empty lines (fewer only when the file has fewer), read
+   * backwards from the end in growing chunks: the cost follows `lines`, not the file (w1377: a 300 MB transcript cost 0.36 s
+   * for its last line, measured on BEAST, and the VM's two shared vCPUs are slower). The first, partial line of the chunk is
+   * left out, so the text starts at a line (a newline is one byte in UTF-8, never inside a character). A compressed transcript
+   * is read whole, as before: the data guard only compresses ones idle for a day.
+   */
+  tailText(sessionId: string, lines: number): string | undefined {
+    return this.tail(sessionId, lines)?.text;
+  }
+
+  /** tailText, and whether the text is the whole transcript. */
+  private tail(sessionId: string, lines: number): { text: string; whole: boolean } | undefined {
+    const f = this.transcriptPath(sessionId);
+    let fd: number;
+    try {
+      fd = fs.openSync(f, 'r');
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      const text = this.transcriptText(sessionId);
+      return text === undefined ? undefined : { text, whole: true };
+    }
+    try {
+      const size = fs.fstatSync(fd).size;
+      let start = size;
+      let chunk = TAIL_CHUNK;
+      let buf = Buffer.alloc(0);
+      while (start > 0) {
+        const from = Math.max(0, start - chunk);
+        const part = Buffer.alloc(start - from);
+        let got = 0;
+        while (got < part.length) {
+          const n = fs.readSync(fd, part, got, part.length - got, from + got);
+          if (n <= 0) break;
+          got += n;
+        }
+        buf = Buffer.concat([part.subarray(0, got), buf]);
+        start = from;
+        if (start > 0 && completeLines(buf) >= lines) break;
+        chunk *= 2;
+      }
+      if (start > 0) buf = buf.subarray(buf.indexOf(0x0a) + 1);
+      return { text: buf.toString('utf8'), whole: start === 0 };
+    } finally {
+      fs.closeSync(fd);
     }
   }
 
@@ -324,6 +402,7 @@ export class Store {
   }
 
   deleteTranscript(sessionId: string) {
+    this.seqs.delete(sessionId);
     fs.rmSync(this.transcriptPath(sessionId), { force: true });
     fs.rmSync(`${this.transcriptPath(sessionId)}.gz`, { force: true });
     this.deleteUploads(sessionId);
@@ -361,7 +440,18 @@ export class Store {
 
   /** Events from `seq` on (to show an older search hit in context). */
   readTranscriptFrom(sessionId: string, seq: number): TranscriptEvent[] {
-    return this.readTranscript(sessionId).filter((e) => e.seq >= seq);
+    // From the end back to `seq` (w1377): a recent message costs a little of a long chat, not all of it.
+    for (let n = 500; ; n *= 4) {
+      const t = this.tail(sessionId, n);
+      if (!t) return [];
+      const events = parseLines(t.text);
+      if (t.whole || (events[0] && events[0].seq <= seq)) return events.filter((e) => e.seq >= seq);
+    }
+  }
+
+  /** One event by its seq (undefined: none), read from the end back to it. */
+  eventAt(sessionId: string, seq: number): TranscriptEvent | undefined {
+    return this.readTranscriptFrom(sessionId, seq).find((e) => e.seq === seq);
   }
 
   private transcriptPath(id: string) {
@@ -369,11 +459,7 @@ export class Store {
   }
 
   private nextSeq(sessionId: string) {
-    let n = this.seqs.get(sessionId);
-    if (n === undefined) {
-      const last = this.readTranscript(sessionId, 1)[0];
-      n = last ? last.seq : 0;
-    }
+    const n = this.lastSeq(sessionId);
     this.seqs.set(sessionId, n + 1);
     return n + 1;
   }
