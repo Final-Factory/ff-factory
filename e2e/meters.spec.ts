@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import type { AccountUsage, AppState, Machine, MachineStats, ServerEvent, SystemStats } from '../shared/types.ts';
+import type { AccountUsage, AppState, CleanupSummary, Machine, MachineStats, ServerEvent, SystemStats } from '../shared/types.ts';
 import { appState, expect, openSidebar, settle, signIn, test } from './fixtures.ts';
 
 // The sidebar footer: every computer's load and every Claude account's usage. The page's WebSocket is
@@ -84,7 +84,7 @@ const ACCOUNTS = (agentIds: string[]): AccountUsage[] => [
 type Shape = 'machines' | 'host-only' | 'old-server';
 
 /** Serve the page a fixed world: the orchestrator only, no sandboxes, and the machines and accounts of `shape`. */
-async function fixedWorld(page: Page, shape: Shape, extra: AccountUsage[] = []) {
+async function fixedWorld(page: Page, shape: Shape, extra: AccountUsage[] = [], m5Cleanup?: CleanupSummary) {
   await page.routeWebSocket('**/ws', (ws) => {
     const server = ws.connectToServer();
     let orchId = '';
@@ -102,7 +102,7 @@ async function fixedWorld(page: Page, shape: Shape, extra: AccountUsage[] = []) 
           providers: [],
           system: SYSTEM,
           host: { elevated: false },
-          machines: shape === 'machines' ? [machine('m5', true), machine('m3', false)] : [],
+          machines: shape === 'machines' ? [{ ...machine('m5', true), lastCleanup: m5Cleanup }, machine('m3', false)] : [],
           machineStats: shape === 'machines' ? { m5: M5 } : {},
           usage: ACCOUNTS([]).at(1)!.usage,
           accounts: shape === 'machines' ? [...ACCOUNTS([orchId, 'w-busy']), ...extra] : ACCOUNTS([orchId, 'w-busy']).slice(0, 1),
@@ -147,8 +147,11 @@ test('meters: every machine gets a cell with three bars, in the footprint of the
   // The numbers are one hover away (and read out to screen readers).
   await expect(foot.getByTestId('mcell-m5')).toHaveAttribute('title', /CPU 64%\nRAM 53% \(34\.0 GB of 64\.0 GB\), pressure normal\nGPU 71% busy/);
   await expect(foot.getByTestId('mcell-BEAST')).toHaveAttribute('aria-label', /VRAM 45%/);
-  // The plan cell: the account nearest its weekly limit, which one, and how many more.
-  await expect(foot.getByTestId('plan-glance')).toHaveText('Plan 98% …9AAA +1');
+  // The plan cell (w1389): one chip per account, not only the one nearest its limit: its tag, two bars (session, weekly) and its weekly share.
+  await expect(foot.getByTestId('plan-glance').locator('.plan-chip')).toHaveCount(2);
+  await expect(foot.getByTestId('plan-…9AAA')).toContainText(/…9AAA\s*98%/);
+  await expect(foot.getByTestId('plan-owner')).toContainText(/owner\s*23%/);
+  await expect(foot.getByTestId('plan-…9AAA').locator('.mbar')).toHaveCount(2);
   await expect(foot.getByTestId('plan-glance')).toHaveAttribute('title', 'host token …9AAA: weekly 98%\nowner@example.com: weekly 23%');
   // The cells fit in two text lines, the footprint the host alone had with its editor and agent counts before w510
   // (52 px measured at this size; those counts went with the portal's own pool).
@@ -262,4 +265,50 @@ test('meters (w785): a vault token is one row under its vault name, the Claude a
     await settle(page);
     await foot.locator('.sys-detail').screenshot({ path: process.env.E2E_SHOT });
   }
+});
+
+test('meters (w1389): every account is a chip in the footer; one in use now is marked, one spent says when it is back', async ({ page }) => {
+  const spent: AccountUsage = {
+    ...VAULT('vault-ben-1', 'cBBB', 100, ['ben@example.com']),
+    usage: { available: true, asOf: NOW.toISOString(), plan: 'max', weekly: { label: 'Weekly', percent: 100, resetsAt: at(70) }, session: { label: 'Session (5 h)', percent: 40, resetsAt: at(2) }, models: [{ label: 'Weekly Fable', percent: 61, resetsAt: at(70) }] },
+  };
+  const foot = await fixedWorld(page, 'machines', [spent]);
+  const chips = foot.getByTestId('plan-glance').locator('.plan-chip');
+  await expect(chips).toHaveCount(3);
+  // The host token has agents on it (the orchestrator and a busy worker): marked, not spent.
+  await expect(foot.getByTestId('plan-…9AAA')).toHaveClass(/plan-live/);
+  await expect(foot.getByTestId('plan-…9AAA')).not.toHaveClass(/plan-spent/);
+  await expect(foot.getByTestId('plan-owner')).not.toHaveClass(/plan-live|plan-spent/);
+  // Spent until the weekly reset, in the viewer's own time (the browser's zone; a day name, as it is days away).
+  const chip = foot.getByTestId('plan-…cBBB');
+  await expect(chip).toHaveClass(/plan-spent/);
+  await expect(chip).toContainText(/back \w{3} \d\d:\d\d/);
+  await expect(chip).toHaveAttribute('title', /weekly: 100%, resets [^\n]*\nWeekly Fable: 61%\nSpent until /);
+  await foot.locator('.sys-toggle').click();
+  await settle(page);
+  await expect(foot.getByTestId('account-…cBBB').getByTestId('account-state')).toContainText(/spent until \w{3} \d\d:\d\d/);
+  await expect(foot.getByTestId('account-…9AAA').getByTestId('account-state')).toHaveText('in use now');
+  // Session and weekly side by side, each with its reset time; the per-model window after them.
+  const meters = foot.getByTestId('account-…cBBB').locator('xpath=..').locator('.meter');
+  await expect(meters.nth(0)).toContainText(/Session 5h\s*40%/);
+  await expect(meters.nth(0)).toContainText(/resets \d\d:\d\d/);
+  await expect(meters.nth(1)).toContainText(/Weekly\s*100%/);
+  await expect(meters.nth(2)).toContainText(/Weekly Fable\s*61%/);
+});
+
+test('meters (w1389): the panel lists no clean-up lines; a disk still under its soft threshold is flagged on its own bar', async ({ page }) => {
+  const pass: CleanupSummary = { at: NOW.toISOString(), trigger: 'low-space', removed: 3, freedBytes: 4 * GB, softFreeGB: 80, freeBytes: 70 * GB, belowSoft: true, listed: [{ path: '/Users/dev/x', bytes: GB, why: 'unattributed' }] };
+  const foot = await fixedWorld(page, 'machines', [], pass);
+  await foot.locator('.sys-toggle').click();
+  await settle(page);
+  await expect(foot.getByTestId('cleanup-lines')).toHaveCount(0);
+  await expect(foot.locator('.sys-detail')).not.toContainText('Clean-up');
+  // m5's disk (900 GB free of 2 TB: 55% used) would be an ordinary blue bar; below its soft threshold it is amber, and its hover says why.
+  const disk = foot.getByTestId('mrow-m5').locator('.mt-cell').nth(3);
+  await expect(disk).toHaveClass(/meter-warn/);
+  await expect(disk).toHaveAttribute('title', /below the clean-up's soft threshold of 80 GB/);
+  // The data is still there: the row's hover has the last pass.
+  await expect(foot.getByTestId('mrow-m5')).toHaveAttribute('title', /Last clean-up .*: 4\.0 GB freed \(3 item\(s\)\)/);
+  // Another machine's disk, not below its threshold, stays as it was.
+  await expect(foot.getByTestId('mrow-BEAST').locator('.mt-cell').nth(3)).not.toHaveClass(/meter-warn|meter-crit/);
 });

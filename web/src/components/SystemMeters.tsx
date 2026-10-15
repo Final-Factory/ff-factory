@@ -76,7 +76,7 @@ export function describe(c: Computer): string {
     s.diskFreeBytes !== undefined ? `Disk ${fmtBytes(s.diskFreeBytes)} free` : '',
     // Its Unity editors and game players, each player with its owner and age; an orphan says so (w1196).
     s.unity ? `Unity ${unitySlotsLine(s.unity)}` : '',
-    c.cleanup ? `Last clean-up ${fmtClock(c.cleanup.at)}: ${fmtBytes(c.cleanup.freedBytes ?? 0)} freed (${c.cleanup.removed} item(s))` : '',
+    c.cleanup ? `Last clean-up ${fmtClock(c.cleanup.at)}: ${fmtBytes(c.cleanup.freedBytes ?? 0)} freed (${c.cleanup.removed} item(s))${c.cleanup.listed?.length ? `, ${c.cleanup.listed.length} stale-looking item(s) kept for a person` : ''}` : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -91,6 +91,17 @@ export const accountOf = (app: AppState, sessionId: string) => (app.accounts && 
 export function accountTag(a: AccountUsage): string {
   if (a.kind === 'token') return a.label.slice(a.label.indexOf('…'));
   return (a.email ?? a.label).split('@')[0].slice(0, 10);
+}
+
+/**
+ * Where an account stands now: spent until a reset (its weekly or 5-hour window is full and not yet reset), and whether
+ * agents run on it this minute. A window whose reset time passed is not spent.
+ */
+export function accountState(a: AccountUsage, now: number, live = 0): { spentUntil?: string; inUse: boolean } {
+  const u = a.usage?.available ? a.usage : undefined;
+  const full = [u?.weekly, u?.session].filter((m): m is UsageMeter => !!m && m.percent >= 99.5 && !(m.resetsAt && Date.parse(m.resetsAt) <= now));
+  const until = full.map((m) => m.resetsAt).filter((t): t is string => !!t).sort((x, y) => Date.parse(y) - Date.parse(x))[0];
+  return { spentUntil: full.length ? (until ?? '') : undefined, inUse: live > 0 };
 }
 
 const isLive = (s: SessionInfo | undefined) => !!s && s.status !== 'stopped' && s.status !== 'error';
@@ -128,6 +139,7 @@ export function SystemFooter({ app }: { app: AppState }) {
   const providers = (app.providers ?? []).map((p) => providerLoad(p, now));
   const many = computers.length + providers.length > 1;
   const plan = planGlance(app);
+  const sessionsById = sessionIndex(app.sessions);
   const short = (label: string) => label.replace(/^Weekly\s+/i, '').replace(/^Session \(5 h\)$/i, '5h');
   const Val = ({ pct, children, warn, crit, lvl }: { pct: number; children: ReactNode; warn?: number; crit?: number; lvl?: Lvl }) => <b className={`lvl-${lvl ?? level(pct, warn, crit)}`}>{children}</b>;
   const vram = gpuPct(sys);
@@ -147,9 +159,8 @@ export function SystemFooter({ app }: { app: AppState }) {
           {many ? (
             <MachineTable computers={computers} providers={providers} health={app.host?.health} />
           ) : (
-            <Meters sys={sys} health={app.host?.health} />
+            <Meters sys={sys} health={app.host?.health} belowSoft={computers[0]?.cleanup?.belowSoft} />
           )}
-          <CleanupLines computers={computers} />
           {hasPlan && <UsageRefresh />}
           {app.accounts ? <AccountsMeters app={app} /> : app.usage && <PlanMeters usage={app.usage} />}
         </div>
@@ -173,7 +184,15 @@ export function SystemFooter({ app }: { app: AppState }) {
                 )}
               </>
             )}
-            {hasPlan && (
+            {hasPlan && app.accounts && app.accounts.length > 1 && (
+              <span className="plan-chips" data-testid="plan-glance" title={plan.title}>
+                Plan
+                {app.accounts.map((a) => (
+                  <PlanChip key={a.id} a={a} now={now} live={a.sessionIds.filter((id) => isLive(sessionsById.get(id))).length} />
+                ))}
+              </span>
+            )}
+            {hasPlan && !(app.accounts && app.accounts.length > 1) && (
               <span title={plan.title} data-testid="plan-glance">
                 Plan{' '}
                 {plan.weekly ? (
@@ -197,6 +216,46 @@ export function SystemFooter({ app }: { app: AppState }) {
         <Icon name="chevron" size={12} />
       </button>
     </div>
+  );
+}
+
+/**
+ * A Claude account in the collapsed footer, drawn like a computer's cell: its tag, two bars (5-hour session, weekly) and
+ * the weekly share, or, once spent, when it is back. A dot marks the ones agents run on now; a spent one is dimmed.
+ */
+function PlanChip({ a, now, live }: { a: AccountUsage; now: number; live: number }) {
+  const u = a.usage?.available ? a.usage : undefined;
+  const st = accountState(a, now, live);
+  const bars: [string, UsageMeter | undefined][] = [
+    ['5-hour session', u?.session],
+    ['weekly', u?.weekly],
+  ];
+  const w = u?.weekly;
+  const spent = st.spentUntil !== undefined;
+  const title = [
+    a.label,
+    ...bars.map(([name, m]) => `${name}: ${m ? `${Math.round(m.percent)}%${m.resetsAt ? `, resets ${localTime(m.resetsAt, now)}` : ''}` : 'unknown'}`),
+    ...u?.models.map((m) => `${m.label}: ${Math.round(m.percent)}%`) ?? [],
+    spent ? `Spent${st.spentUntil ? ` until ${localTime(st.spentUntil, now)}` : ''}` : st.inUse ? `In use now (${live} agent${live === 1 ? '' : 's'})` : 'Free',
+  ].join('\n');
+  return (
+    <span className={`plan-chip${spent ? ' plan-spent' : ''}${st.inUse ? ' plan-live' : ''}`} title={title} aria-label={title.replace(/\n/g, ', ')} data-testid={`plan-${accountTag(a)}`}>
+      <span className="mname">{st.inUse && <span className="plan-dot">● </span>}{accountTag(a)}</span>
+      <span className="mbars" aria-hidden>
+        {bars.map(([name, m]) => (
+          <span key={name} className={`mbar lvl-bg-${m ? level(m.percent) : 'none'}`}>
+            <i style={{ height: `${m ? Math.max(8, Math.min(100, m.percent)) : 0}%` }} />
+          </span>
+        ))}
+      </span>
+      {spent ? (
+        <b className="lvl-crit">{st.spentUntil ? `back ${localTime(st.spentUntil, now)}` : 'spent'}</b>
+      ) : w ? (
+        <b className={`lvl-${level(w.percent)}`}>{Math.round(w.percent)}%</b>
+      ) : (
+        <b className="lvl-warn">?</b>
+      )}
+    </span>
   );
 }
 
@@ -258,7 +317,7 @@ function ProviderMiniBars({ l }: { l: ProviderLoad }) {
   );
 }
 
-function Meter({ label, pct, value, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; warn?: number; crit?: number; lvl?: Lvl }) {
+function Meter({ label, pct, value, note, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; note?: string; warn?: number; crit?: number; lvl?: Lvl }) {
   const p = Math.max(0, Math.min(100, pct));
   return (
     <div className={`meter meter-${lvl ?? level(p, warn, crit)}`}>
@@ -269,12 +328,13 @@ function Meter({ label, pct, value, warn = 75, crit = 90, lvl }: { label: string
       <div className="meter-bar">
         <i style={{ width: `${p}%` }} />
       </div>
+      {note && <div className="meter-note">{note}</div>}
     </div>
   );
 }
 
 /** The host alone (no machines): its meters, as before. */
-function Meters({ sys, health }: { sys: SystemStats; health?: HostHealth }) {
+function Meters({ sys, health, belowSoft }: { sys: SystemStats; health?: HostHealth; belowSoft?: boolean }) {
   const memUsed = memUsedOf(sys);
   return (
     <div className="meters">
@@ -291,12 +351,15 @@ function Meters({ sys, health }: { sys: SystemStats; health?: HostHealth }) {
           }
         />
       )}
-      <HostDisks sys={sys} health={health} />
+      <HostDisks sys={sys} health={health} belowSoft={belowSoft} />
     </div>
   );
 }
 
-function HostDisks({ sys, health }: { sys: HostStats; health?: HostHealth }) {
+/** A disk still under the clean-up's soft free-space threshold after its last pass is at least a warning (it was the orange clean-up line). */
+const lowLvl = (belowSoft?: boolean): Lvl => (belowSoft ? 'warn' : 'ok');
+
+function HostDisks({ sys, health, belowSoft }: { sys: HostStats; health?: HostHealth; belowSoft?: boolean }) {
   if (health?.disks.length) {
     // The host guard's volumes, coloured by its own levels (hostGuard.warnFreeGB / criticalFreeGB).
     return (
@@ -308,7 +371,7 @@ function HostDisks({ sys, health }: { sys: HostStats; health?: HostHealth }) {
               label={`Disk ${d.path.replace(/[\\/]+$/, '')}`}
               pct={((d.totalBytes - d.freeBytes) / d.totalBytes) * 100}
               value={`${fmtBytes(d.freeBytes)} free`}
-              lvl={d.level === 'critical' ? 'crit' : d.level}
+              lvl={worse(d.level === 'critical' ? 'crit' : d.level, lowLvl(belowSoft))}
             />
           ) : (
             <Meter key={d.path} label={`Disk ${d.path.replace(/[\\/]+$/, '')}`} pct={0} value="offline" lvl="crit" />
@@ -318,7 +381,8 @@ function HostDisks({ sys, health }: { sys: HostStats; health?: HostHealth }) {
     );
   }
   if (sys.diskTotalBytes === undefined || sys.diskFreeBytes === undefined) return null;
-  return <Meter label="Disk" pct={((sys.diskTotalBytes - sys.diskFreeBytes) / sys.diskTotalBytes) * 100} value={`${fmtBytes(sys.diskFreeBytes)} free`} warn={85} crit={95} />;
+  const used = ((sys.diskTotalBytes - sys.diskFreeBytes) / sys.diskTotalBytes) * 100;
+  return <Meter label="Disk" pct={used} value={`${fmtBytes(sys.diskFreeBytes)} free`} lvl={worse(level(used, 85, 95), lowLvl(belowSoft))} />;
 }
 
 /** Every computer, one compact row each: a bar and a number per resource. */
@@ -351,6 +415,7 @@ function MachineTable({ computers, providers = [], health }: { computers: Comput
           );
         const g = gpuPct(s);
         // The host's disks are the guard's volumes where it has them: the fullest one stands for them all.
+        const low = lowLvl(c.cleanup?.belowSoft);
         const disks = c.host && health?.disks.length ? health.disks.filter((d) => d.totalBytes && d.freeBytes !== undefined) : [];
         const disk = disks.length
           ? disks.map((d) => ({ used: ((d.totalBytes! - d.freeBytes!) / d.totalBytes!) * 100, free: d.freeBytes!, lvl: (d.level === 'critical' ? 'crit' : d.level) as Lvl })).sort((a, b) => b.used - a.used)[0]
@@ -363,7 +428,7 @@ function MachineTable({ computers, providers = [], health }: { computers: Comput
             <Cell pct={s.loadPct} text={`${Math.round(s.loadPct)}%`} />
             <Cell pct={ramPct(s)} lvl={ramLvl(s)} text={`${Math.round(ramPct(s))}%`} title={`${fmtBytes(memUsedOf(s))} of ${fmtBytes(s.memTotalBytes)}${s.memPressure ? `, pressure ${s.memPressure}` : ''}`} />
             {g === undefined ? <span className="mt-note">n/a</span> : <Cell pct={g} text={`${Math.round(g)}%`} title={s.gpu?.unified ? 'GPU busy (Apple Silicon shares the RAM)' : 'VRAM in use'} />}
-            {disk ? <Cell pct={disk.used} lvl={disk.lvl} text={fmtBytes(disk.free)} title={`${fmtBytes(disk.free)} free`} /> : <span className="mt-note">n/a</span>}
+            {disk ? <Cell pct={disk.used} lvl={worse(disk.lvl, low)} text={fmtBytes(disk.free)} title={`${fmtBytes(disk.free)} free${c.cleanup?.belowSoft ? `, below the clean-up's soft threshold of ${c.cleanup.softFreeGB} GB after its last pass` : ''}`} /> : <span className="mt-note">n/a</span>}
           </div>
         );
       })}
@@ -404,40 +469,6 @@ ${disksHint(m)}`} /> : <span className="mt-note">n/a</span>}
   );
 }
 
-/** A pass's hover: what it removed and why, what it would remove in dry-run mode, and what it kept for a person (w459). */
-function cleanupTitle(x: CleanupSummary): string {
-  const item = (t: { path: string; bytes: number; why?: string; rule?: string }) => `${t.path}: ${fmtBytes(t.bytes)}${t.why ? ` (${t.why})` : ''}`;
-  return [
-    ...(x.top ?? []).map(item),
-    ...(x.planned?.length ? ['Would remove (dry-run mode):', ...x.planned.slice(0, 10).map(item)] : []),
-    ...(x.listed?.length ? ['Kept, could not attribute (cleanup_log has them all):', ...x.listed.slice(0, 10).map(item)] : []),
-    // A temp folder apart from the disk (the VM's /tmp is a tmpfs: RAM), never counted as free disk (w566).
-    ...(x.temp?.length ? ['Temp, apart from the disk:', ...x.temp.map((t) => `${t.path}: ${fmtBytes(t.freeBytes ?? 0)} free of ${fmtBytes(t.totalBytes ?? 0)} (${t.ram ? 'RAM' : 'a disk of its own'})`)] : []),
-  ].join('\n');
-}
-
-/** Each computer's last clean-up pass: when, what it freed, and whether free space is still below its soft threshold. */
-function CleanupLines({ computers }: { computers: Computer[] }) {
-  const now = useNow(60_000);
-  const withCleanup = computers.filter((c) => c.cleanup);
-  if (!withCleanup.length) return null;
-  return (
-    <div className="meters cleanup-lines" data-testid="cleanup-lines">
-      {withCleanup.map((c) => {
-        const x = c.cleanup!;
-        return (
-          <div key={c.name} className={`plan-asof${x.belowSoft ? ' lvl-warn' : ''}`} title={cleanupTitle(x) || undefined}>
-            Clean-up {c.name}: {fmtRelative(x.at, now)}, {fmtBytes(x.freedBytes ?? 0)} freed
-            {x.belowSoft && x.freeBytes !== undefined ? ` · only ${fmtBytes(x.freeBytes)} free (soft ${x.softFreeGB} GB)` : ''}
-            {x.planned?.length ? ` · ${fmtBytes(x.plannedBytes ?? 0)} stale output in dry-run mode` : ''}
-            {x.listed?.length ? <span data-testid="cleanup-listed">{` · ${x.listed.length} stale-looking item(s) kept for a person`}</span> : null}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 /**
  * Poll every Claude account's usage now (they are polled every config usagePollMinutes, default 15): here and on each
  * connected machine. The numbers arrive by themselves; each account's "as of" says when.
@@ -463,10 +494,12 @@ function UsageRefresh() {
 /** Every Claude account in use: who it is, where it is used, which agents run on it, its limits. */
 function AccountsMeters({ app }: { app: AppState }) {
   const sessions = sessionIndex(app.sessions);
+  const now = useNow(60_000);
   return (
     <>
       {app.accounts!.map((a) => {
         const live = a.sessionIds.map((id) => sessions.get(id)).filter(isLive);
+        const st = accountState(a, now, live.length);
         return (
           <PlanMeters
             key={a.id}
@@ -475,6 +508,11 @@ function AccountsMeters({ app }: { app: AppState }) {
               <div className="acct-head" data-testid={`account-${accountTag(a)}`}>
                 <span className="acct-label">{a.label}</span>
                 <span className="acct-agents">{live.length === 1 ? '1 agent' : `${live.length} agents`}</span>
+                {st.spentUntil !== undefined ? (
+                  <span className="acct-state lvl-crit" data-testid="account-state">{st.spentUntil ? `spent until ${localTime(st.spentUntil, now)}` : 'spent'}</span>
+                ) : (
+                  st.inUse && <span className="acct-state" data-testid="account-state">in use now</span>
+                )}
                 {a.where.length > 0 && <div className="acct-where">{a.where.join(' · ')}</div>}
                 {a.pool && (
                   <div className="acct-where" title={`${a.pool.person}'s Claude token pool: priority marks the token a new job gets now`} data-testid="account-pool">
@@ -521,13 +559,16 @@ function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode })
       </div>
     );
   }
-  const rows = [u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m);
+  // Session first, then weekly, then each model's weekly window, two to a row (a phone's width holds two).
+  const rows = [u.session, u.weekly, ...u.models].filter((m): m is UsageMeter => !!m);
   return (
     <div className="meters plan-meters" title={`Claude ${u.plan ?? ''} plan usage limits, from ${u.source ? `the API's ${u.source}` : 'the claude.ai usage endpoint'}`}>
       {head}
-      {rows.map((m) => (
-        <Meter key={m.label} label={m.label} pct={m.percent} value={`${Math.round(m.percent)}%${m.resetsAt ? ` · ${resetLabel(m.resetsAt, now)}` : ''}`} />
-      ))}
+      <div className="plan-grid">
+        {rows.map((m) => (
+          <Meter key={m.label} label={m.label.replace(/^Session \(5 h\)$/i, 'Session 5h')} pct={m.percent} value={`${Math.round(m.percent)}%`} note={m.resetsAt ? (Date.parse(m.resetsAt) <= now ? 'resetting' : `resets ${localTime(m.resetsAt, now)}`) : undefined} />
+        ))}
+      </div>
       <div className="plan-asof">
         Claude {u.plan ?? 'plan'} · {asOf}
         {u.source ? ` · from ${u.source}` : ''}
@@ -536,13 +577,11 @@ function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode })
   );
 }
 
-function resetLabel(iso: string, now: number): string {
+/** A time in the viewer's own zone: "3:40 PM" today, "Thu 9:00 AM" on another day. */
+export function localTime(iso: string, now: number): string {
   const t = Date.parse(iso);
   if (isNaN(t)) return '';
-  const h = (t - now) / 3_600_000;
-  if (h <= 0) return 'resetting';
-  if (h < 1) return `resets in ${Math.max(1, Math.round(h * 60))}m`;
-  if (h < 24) return `resets in ${Math.round(h)}h`;
   const d = new Date(t);
-  return `resets ${d.toLocaleDateString([], { weekday: 'short' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  const time = fmtClock(iso);
+  return d.toDateString() === new Date(now).toDateString() ? time : `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
 }

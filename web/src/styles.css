@@ -1201,6 +1201,77 @@ select.input {
   font-size: var(--fs-xs);
 }
 
+/* An account's state beside its agent count: "in use now", or "spent until Thu 9:00 AM". */
+.acct-state {
+  flex-basis: 100%;
+  color: var(--green);
+  font-size: var(--fs-xs);
+}
+
+.acct-state.lvl-crit {
+  color: var(--red);
+}
+
+/* An account's windows two to a row: 5-hour session and weekly, then each model's weekly. */
+.plan-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-2);
+}
+
+.plan-grid .meter-row {
+  gap: var(--s-1);
+}
+
+.plan-grid .meter-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-grid .meter-value {
+  white-space: nowrap;
+}
+
+.meter-note {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-family: var(--mono);
+}
+
+.plan-dot {
+  color: var(--green);
+}
+
+/* The collapsed footer's plan cell: one chip per account, drawn like a computer's cell (name, two bars, a number). */
+.plan-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 12px;
+}
+
+.plan-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.plan-chip .mname {
+  max-width: 72px;
+}
+
+.plan-live .mname {
+  color: var(--text);
+}
+
+.plan-spent .mbars,
+.plan-spent .mname {
+  opacity: 0.55;
+}
+
 /* "Needs you" on a phone: the bell with a count, in the page's header. */
 .needs-you {
   display: inline-flex;
