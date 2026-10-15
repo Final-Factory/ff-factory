@@ -63,8 +63,9 @@ export interface DaemonConfig {
   tokenFile?: string;
   /**
    * The worker root it was installed in (w513, scripts/worker; docs/worker-install.md). The daemon's folder, temp,
-   * Unity slots mailbox and Max events file default to places in it, and agents get FF_WORKER_ROOT,
-   * FF_PLAYER_SLOT_ROOT (<root>/players) and FF_NIGHTLY_ROOT (<root>/nightly).
+   * Unity slots mailbox and Max events file default to places in it, and agents get FF_WORKER_ROOT and
+   * FF_PLAYER_SLOT_ROOT (<root>/players). FF_NIGHTLY_ROOT (<root>/nightly) went with the nightly lab root (w1099): the
+   * nightly run is a job in a sandbox and keeps its history in <root>/nightly-history, which its scripts find from FF_WORKER_ROOT.
    */
   root?: string;
   repoPath: string;
@@ -179,9 +180,9 @@ export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
   };
 }
 
-/** The environment a worker root gives every agent and script (w513): where the player slots and the nightly lab are. Exported for tests. */
+/** The environment a worker root gives every agent and script (w513): the root and its player slots. Exported for tests. */
 export function rootEnv(root: string): Record<string, string> {
-  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), FF_NIGHTLY_ROOT: path.join(root, 'nightly') };
+  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players') };
 }
 
 /** The machine credential: daemon.json's, else the token file's first line (w513). Exported for tests. */
@@ -1806,7 +1807,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   // configFile: where a relocate keeps the portal's new URL (w466). A BOM (an editor's) is not JSON.
   const cfg: DaemonConfig = withRootDefaults({ ...JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text), configFile: file });
   cfg.token = readToken(cfg);
-  // A worker root (w513): agents and the scripts they run find the player slots and the nightly lab in it.
+  // A worker root (w513): agents and the scripts they run find the player slots (and the nightly history) in it.
   if (cfg.root) for (const [k, v] of Object.entries(rootEnv(cfg.root))) process.env[k] ??= v;
   // server/launch.ts keeps the public identity's gitconfig in the daemon's folder.
   process.env.FF_APP_DIR = appDirOfConfig(cfg);

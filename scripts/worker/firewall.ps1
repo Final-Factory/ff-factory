@@ -85,10 +85,10 @@ try {
         exit 0
     }
     $made = 0
-    # Each sandbox's pair, then the nightly lab's (lothsahn: "Let's use slotnightly-0 and slotnightly-1").
-    foreach ($k in @(1..$Pairs) + 'nightly') {
+    # Each sandbox's pair (w576). The nightly lab's own pair is gone since w1099: the night plays from its sandbox's pair.
+    foreach ($k in 1..$Pairs) {
         foreach ($p in 0, 1) {
-            $who = if ($k -eq 'nightly') { 'The nightly lab' } else { "Sandbox slot$k" }
+            $who = "Sandbox slot$k"
             $made += Add-Allow (Join-Path $Root "slot$k-$p\player\finalfactory.exe") "Final Factory player slot$k-$p" $SlotGroup "$who's player $p (scripts/nightly/player_slots.py, w576)" -One
         }
     }
@@ -101,7 +101,7 @@ try {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
         [IO.File]::WriteAllText($Config, (@{ root = $Root; layout = 'sandbox-pairs'; count = $Pairs } | ConvertTo-Json))
     }
-    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1 and slotnightly-0, -1 ($(2 * $Pairs + 2) player folders, one rule each) and $editors Unity editor(s)$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
+    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1 ($(2 * $Pairs) player folders, one rule each) and $editors Unity editor(s)$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
 } catch {
     Say "FAILED: $($_.Exception.Message)"
     exit 1

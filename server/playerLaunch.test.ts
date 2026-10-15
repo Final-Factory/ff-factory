@@ -51,7 +51,9 @@ test("w576: a sandbox's players run from its own pair, slotK-0 and slotK-1, neve
   assert.match(checkPlayerLaunch('D:/work/ffw/sandboxes/slot3/Builds/w/finalfactory.exe', 'slot3') ?? '', /outside a player slot/);
 });
 
-test("w576: the nightly lab's pair, slotnightly-0 and -1, is a slot; a sandbox may not start from it", () => {
-  assert.equal(checkPlayerLaunch('D:/work/ffw/players/slotnightly-1/player/finalfactory.exe -x'), undefined, 'the nightly lab, outside any sandbox');
-  assert.match(checkPlayerLaunch('D:/work/ffw/players/slotnightly-0/player/finalfactory.exe', 'slot2') ?? '', /the nightly lab's player folder; this is sandbox slot2/);
+test("w1099: the nightly lab's old pair, slotnightly-0 and -1, is no slot any more", () => {
+  // The nightly run plays from its sandbox's own pair since w1099; the installer removes the old folders.
+  assert.match(checkPlayerLaunch('V:/ffw/players/slotnightly-1/player/finalfactory.exe -x') ?? '', /outside a player slot/);
+  assert.match(checkPlayerLaunch('V:/ffw/players/slotnightly-0/player/finalfactory.exe', 'slot2') ?? '', /outside a player slot/);
+  assert.equal(checkPlayerLaunch('V:/ffw/players/slot2-1/player/finalfactory.exe', 'slot2'), undefined);
 });
