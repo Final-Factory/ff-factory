@@ -8,6 +8,7 @@
 // anything. The person's answer, given in their own turn, is a note on the request (update_work); FF Factory resumes the
 // waiting worker with it (Orchestrators.updateNow). The pure parts are here; docs/orchestrators.md, "Questions for a person".
 import type { Requester, UserInfo, WorkItem, WorkNeedsYou } from '../shared/types.ts';
+import { absoluteTargets, mediaLine, mediaNamed, MEDIA_FILE, PORTAL_REVIEW_ROOT } from './reviewMedia.ts';
 
 /** The tag of the message, at the start of its first line. */
 export const NEEDS_YOU_TAG = '[needs you]';
@@ -16,7 +17,7 @@ export const NEEDS_YOU_REPORT_CHARS = 3000;
 /** The longest question kept. */
 export const NEEDS_YOU_QUESTION_CHARS = 2000;
 /** At most this many review files and pull requests are listed. */
-const MAX_LISTED = 12;
+const MAX_LISTED = 24;
 
 /** A wait on a person found on a request, before it is sent. */
 export interface NeedsYouWait {
@@ -37,24 +38,14 @@ const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 export const reportTail = (s: string, n = NEEDS_YOU_REPORT_CHARS) => (s.length > n ? `…${s.slice(-(n - 1))}` : s);
 
 /**
- * The review stills, clips and folders a text names: paths under the review root (`/srv/fff/review/<topic>/…` on the
- * portal, docs/review.md) and any path or file name that ends in an image or video extension. In the order first named.
+ * The review stills and clips a text names, as absolute paths on this computer, newest first (w1384, server/reviewMedia.ts):
+ * a folder is its files (no `.preview/`), a wildcard its matches, a bare name the file of that name (in a folder the text
+ * names, the request's topic, any topic), and a file that is not there (a name cut off mid-word) its folder's files. Where
+ * the review root is not on this computer, files and folders are kept as written.
  */
-export function previewsIn(texts: readonly (string | undefined)[], reviewRoot?: string): string[] {
-  const roots = ['/srv/fff/review', ...(reviewRoot ? [reviewRoot] : [])].map((r) => escape(r.replace(/[\\/]+$/, '')));
-  const underRoot = new RegExp(`(?:${roots.join('|')})[\\\\/][^\\s)'"\`\\]>,;]*`, 'g');
-  const media = /(?:[A-Za-z]:\\|\/|\b)[\w.\\/*-]*\.(?:png|jpe?g|gif|webp|mp4|webm|mov)\b/gi;
-  const out: string[] = [];
-  const add = (p: string) => {
-    const t = p.replace(/[.:]+$/, '');
-    if (t && !out.includes(t) && !out.some((o) => o.length > t.length && o.endsWith(t))) out.push(t);
-  };
-  for (const text of texts) {
-    if (!text) continue;
-    for (const m of text.matchAll(underRoot)) add(m[0]);
-    for (const m of text.matchAll(media)) if (!out.some((o) => o.includes(m[0]))) add(m[0]);
-  }
-  return out.slice(0, MAX_LISTED);
+export function previewsIn(texts: readonly (string | undefined)[], reviewRoot = PORTAL_REVIEW_ROOT, ids: readonly string[] = []): string[] {
+  const m = mediaNamed(texts, { root: reviewRoot, ids });
+  return [...m.files, ...m.folders].slice(0, MAX_LISTED);
 }
 
 /**
@@ -94,9 +85,12 @@ export function whoOf(names: readonly string[], people: readonly UserInfo[], fal
 export const alreadySent = (w: Pick<WorkItem, 'needsYou'>, key: string) => w.needsYou?.key === key;
 
 /** The record kept on the request when its wait is sent. */
-export function needsYouRecord(w: Pick<WorkItem, 'prs'>, wait: NeedsYouWait, to: readonly Requester[], at: string, opts: { reviewRoot?: string; digest?: boolean } = {}): WorkNeedsYou {
-  const question = clip(wait.question.trim(), NEEDS_YOU_QUESTION_CHARS);
-  const report = wait.report?.trim() ? reportTail(wait.report.trim()) : undefined;
+export function needsYouRecord(w: Pick<WorkItem, 'prs'> & { id?: string }, wait: NeedsYouWait, to: readonly Requester[], at: string, opts: { reviewRoot?: string; digest?: boolean } = {}): WorkNeedsYou {
+  const root = opts.reviewRoot ?? PORTAL_REVIEW_ROOT;
+  const ids = w.id ? [w.id] : [];
+  // Relative image names in the worker's words made absolute, so the page and the orchestrator's relay can show them (w1384).
+  const question = absoluteTargets(clip(wait.question.trim(), NEEDS_YOU_QUESTION_CHARS), { root, ids }).text;
+  const report = wait.report?.trim() ? absoluteTargets(reportTail(wait.report.trim()), { root, ids }).text : undefined;
   return {
     key: wait.key,
     kind: wait.kind,
@@ -106,19 +100,19 @@ export function needsYouRecord(w: Pick<WorkItem, 'prs'>, wait: NeedsYouWait, to:
     at,
     ...(wait.worker ? { worker: wait.worker } : {}),
     ...(report ? { report } : {}),
-    previews: previewsIn([question, report], opts.reviewRoot),
+    // The full report first: the kept tail can cut a file name off mid-word (w1241's "glow_800_closeup.jp").
+    previews: previewsIn([question, wait.report ?? report], root, ids),
     prs: prsIn([question, report], w),
     ...(opts.digest ? { digest: true } : {}),
   };
 }
 
 /**
- * One file to look at, as a line of Markdown: a still or a clip inline (`![name](<path>)`: the page shows it, and the
- * orchestrator's relay of it), a folder or a wildcard as code.
+ * One file to look at, as a line of Markdown: a still or a clip inline (`![name](<absolute path>)`: the page shows it, and so
+ * does the orchestrator's relay of it). A folder or a wildcard only where the review root is not on this computer, as code.
  */
 export function previewLine(p: string): string {
-  const name = p.split(/[\\/]/).pop() ?? p;
-  return !p.includes('*') && /\.(?:png|jpe?g|gif|webp|mp4|webm|mov)$/i.test(p) ? `- ![${name}](<${p}>)` : `- \`${p}\``;
+  return !p.includes('*') && MEDIA_FILE.test(p) ? `- ${mediaLine(p)}` : `- \`${p}\``;
 }
 
 /** Who asks, in words: the dispatcher, or the worker. */

@@ -54,6 +54,7 @@ import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQ
 import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
+import { reviewRootOf } from './reviewMedia.ts';
 import { alreadySent, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
@@ -710,7 +711,7 @@ export class Orchestrators {
   needsYou(w: WorkItem, wait: NeedsYouWait): Requester[] {
     if (!isOpen(w) || alreadySent(w, wait.key)) return [];
     const to = whoOf(wait.names, this.d.identity.list(), wait.kind === 'question' ? [w.requestedBy] : w.requesters);
-    const r = needsYouRecord(w, wait, to, this.now().toISOString(), { reviewRoot: this.d.cfg.review?.root });
+    const r = needsYouRecord(w, wait, to, this.now().toISOString(), { reviewRoot: reviewRootOf(this.d.cfg) });
     this.keepNeedsYou(w, r);
     for (const p of to) this.toPeople([p], needsYouText(w, r, p.displayName));
     return to;
@@ -727,7 +728,7 @@ export class Orchestrators {
     for (const { w, wait } of waits) {
       if (!isOpen(w) || alreadySent(w, wait.key)) continue;
       const to = whoOf(wait.names, this.d.identity.list(), wait.kind === 'question' ? [w.requestedBy] : w.requesters);
-      const r = needsYouRecord(w, wait, to, at, { reviewRoot: this.d.cfg.review?.root, digest: true });
+      const r = needsYouRecord(w, wait, to, at, { reviewRoot: reviewRootOf(this.d.cfg), digest: true });
       this.keepNeedsYou(w, r);
       n++;
       for (const p of to) {
