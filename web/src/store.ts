@@ -18,6 +18,8 @@ export interface StoreState {
   loaded: Record<string, true>;
   /** A permission request the UI should scroll to (set by the "needs you" jump). */
   focusRequestId: string | null;
+  /** A request on the Dispatcher's "Waiting on input" tab to scroll to (set by a "needs you" item, w1356). */
+  focusWaitId: string | null;
   toasts: Toast[];
   /** A transcript event to scroll to and flash (a search hit). */
   focusEvent: { sessionId: string; seq: number } | null;
@@ -63,6 +65,7 @@ let state: StoreState = {
   streaming: {},
   loaded: {},
   focusRequestId: null,
+  focusWaitId: null,
   toasts: [],
   lightbox: null,
   focusEvent: null,
@@ -435,6 +438,11 @@ export async function login(username: string, password: string) {
 
 export function focusPermission(requestId: string | null) {
   set({ focusRequestId: requestId });
+}
+
+/** The request whose card the "Waiting on input" tab scrolls to when it shows (null: done). */
+export function focusWait(id: string | null) {
+  set({ focusWaitId: id });
 }
 
 /** Open the details of this sandbox or machine when its page shows (null: done). */

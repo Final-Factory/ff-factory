@@ -82,7 +82,9 @@ export function waitingItems(work: readonly WorkItem[], live: ReadonlyMap<string
   const out: WaitingItem[] = [];
   for (const w of work) {
     const l = live.get(w.id);
-    if (l?.state !== 'waiting') continue;
+    // A decision is listed whatever the request is doing meanwhile (w1356): a worker mid-turn on it makes its live state Working,
+    // which workLive checks first, but the sidebar's Needs you counts the question, and its click has to find it here.
+    if (!l || (l.state !== 'waiting' && !isDecision(w))) continue;
     const d = describe(w, l);
     out.push({ w, live: l, ...d, mine: isMyMove(w, l, d.ask, me), on: l.waitsOn ?? [] });
   }
@@ -95,22 +97,42 @@ export function waitAge(since: string, now: number): 'fresh' | 'old' | 'stale' {
   return age > 3 * 86_400_000 ? 'stale' : age > 86_400_000 ? 'old' : 'fresh';
 }
 
+/** An approval, a question or a design question: something a person decides, whatever else the request is doing. */
+const isDecision = (w: WorkItem) => w.approval?.state === 'pending' || !!w.question || !!w.flag;
+
+export interface Decision {
+  w: WorkItem;
+  /** Approve or decline it, or answer it. */
+  ask: 'approve' | 'answer';
+  /** When it began to wait (ISO). */
+  at: string;
+  /** What is asked, in a line for the sidebar's Needs you list. */
+  text: string;
+}
+
 /**
  * The decisions that wait on the viewer and need no live state to find: an intake approval (a reviewer's), the dispatcher's
- * question to them, a design question for them. The sidebar's "Needs you" list and the phone's bell count these (cheap
- * field reads on every state push); the tab adds the waits only a live state shows (a worker's declared wait, its report).
+ * question to them, a design question for them, oldest first. The sidebar's "Needs you" list (one item each, w1356) and the
+ * phone's bell count these (cheap field reads on every state push). The tab shows every one as a card with its buttons
+ * (waitingItems lists them whatever the request is doing), so a click on an item finds its card; it adds the waits only a
+ * live state shows (a worker's declared wait, its report).
  */
-export function decisionsOnMe(work: readonly WorkItem[], me: WaitingViewer): { count: number; since: string } {
-  let count = 0;
-  let since = '';
+export function decisionsOn(work: readonly WorkItem[], me: WaitingViewer): Decision[] {
+  const out: Decision[] = [];
   for (const w of work) {
-    let at: string | undefined;
-    if (w.approval?.state === 'pending') at = me.reviewer ? w.createdAt : undefined;
-    else if (w.question) at = same(w.requestedBy.userId, me.userId) ? w.question.at : undefined;
-    else if (w.flag) at = w.flag.for.some((r) => same(r.userId, me.userId)) ? w.flag.at : undefined;
-    if (!at) continue;
-    count++;
-    if (!since || at < since) since = at;
+    if (w.approval?.state === 'pending') {
+      if (me.reviewer) out.push({ w, ask: 'approve', at: w.createdAt, text: `Approve or decline ${w.id}` });
+    } else if (w.question) {
+      if (same(w.requestedBy.userId, me.userId)) out.push({ w, ask: 'answer', at: w.question.at, text: `Answer ${w.id}: ${clip(w.question.text, 90)}` });
+    } else if (w.flag) {
+      if (w.flag.for.some((r) => same(r.userId, me.userId))) out.push({ w, ask: 'answer', at: w.flag.at, text: `Answer ${w.id}: ${clip(w.flag.text, 90)}` });
+    }
   }
-  return { count, since };
+  return out.sort((a, b) => a.at.localeCompare(b.at));
+}
+
+/** How many decisions wait on the viewer, and since when. */
+export function decisionsOnMe(work: readonly WorkItem[], me: WaitingViewer): { count: number; since: string } {
+  const d = decisionsOn(work, me);
+  return { count: d.length, since: d[0]?.at ?? '' };
 }

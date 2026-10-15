@@ -1,5 +1,5 @@
-import { appState, expect, go, isMobile, patchWork, settle, signIn, test, uniq, useTool } from './fixtures.ts';
-import type { AppState, ServerEvent, WorkItem } from '../shared/types.ts';
+import { appState, expect, go, isMobile, patchWork, settle, signIn, startWorker, test, uniq, useTool } from './fixtures.ts';
+import type { AppState, DelegationRequest, ServerEvent, SessionInfo, StandingAgent, WorkItem } from '../shared/types.ts';
 
 /**
  * The intake (docs/intake.md) in the browser, on servers of their own with the Discord intake switched on
@@ -371,4 +371,99 @@ function waitingState(s: AppState): AppState {
     { ...base, id: 'w9107', title: 'Change the splitter priority UI', brief: 'A new splitter priority panel.', requestedBy: LOTH, requesters: [LOTH], status: 'question', createdAt: ago(2), flag: { kind: 'design', text: 'Should priorities be per output or per splitter?', at: ago(2), for: [LOTH] } },
   ];
   return { ...s, work };
+}
+
+// ---- "Needs you" opens the control (w1356, Ben: "when you clicked on it it opened the thing that literally had the accept or
+// decline button right there on the panel it opened") ----
+
+test('each kind of Needs you item opens the panel with its Allow, Approve, Decline or answer control on screen (w1356)', async ({ page }) => {
+  const tag = uniq('ny');
+  const shot = async (name: string) => {
+    if (process.env.NEEDS_YOU_SHOTS) await page.screenshot({ path: `${process.env.NEEDS_YOU_SHOTS}/${name}-${isMobile(page) ? 'phone' : 'desktop'}.png` });
+  };
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((raw) => {
+      const e = JSON.parse(String(raw)) as ServerEvent;
+      if (e.type === 'state') return ws.send(JSON.stringify({ type: 'state', state: needsYouState(e.state, tag) } satisfies ServerEvent));
+      if (e.type === 'session' || e.type === 'session_removed' || e.type === 'work') return;
+      ws.send(raw);
+    });
+    ws.onMessage((m) => server.send(m));
+  });
+  await signIn(page);
+  // A worker that asks to run a command: the permission kind (a real session on the test server).
+  await startWorker(page.request, `#perm ${tag}`, { title: `Perm ${tag}`, permissionMode: 'default' });
+
+  /** Click the Needs you item that says `text`, whichever row of the list (or "more") it sits in. */
+  const clickItem = async (text: string) => {
+    await page.goto('/');
+    // Not openSidebar: its Menu button is matched by name, and on this server's shared ledger a Needs you item with "menu" in its
+    // title (a save-menu request from another test) is a second match.
+    if (isMobile(page)) {
+      await page.getByRole('button', { name: 'Menu', exact: true }).click();
+      await expect(page.locator('.shell.drawer-open')).toBeAttached();
+      await expect.poll(async () => (await page.locator('.sidebar').boundingBox())?.x ?? -1).toBeGreaterThanOrEqual(0);
+    }
+    const list = page.locator('.sidebar section.attn');
+    // The seeded state has arrived once the delegation (listed before the ledger's requests) is there.
+    await expect(list).toContainText(`Delegation ${tag}`);
+    const more = list.locator('.attn-more');
+    if (await more.count()) await more.click();
+    await list.locator('.attn-item', { hasText: text }).click();
+    await settle(page);
+  };
+
+  // A worker's permission: the card in its conversation, Allow and Deny in view.
+  await clickItem(`Perm ${tag}`);
+  await expect(page.locator('.perm-pending').getByRole('button', { name: 'Allow', exact: true }).first()).toBeInViewport({ ratio: 1 });
+  await shot('permission');
+
+  // A standing agent's delegation request: its Delegations tab, Approve and Reject in view.
+  await clickItem(`Wants a worker: Delegation ${tag}`);
+  await expect(page).toHaveURL(new RegExp(`#/agent/sa-${tag}/delegations`));
+  await expect(page.getByRole('button', { name: 'Reject' }).first()).toBeInViewport({ ratio: 1 });
+  await expect(page.getByRole('button', { name: /^Approve/ }).first()).toBeInViewport({ ratio: 1 });
+  await shot('delegation');
+
+  // An intake approval, a dispatcher's question and a design question: each opens the Waiting on input tab at its own card, even
+  // after seven older requests above it, and when a worker is mid-turn on the request (its state then says Working).
+  const card = (id: string) => page.getByTestId(`wait-${id}`);
+  await clickItem(`Approve or decline w${tag}1`);
+  await expect(page).toHaveURL(/#\/dispatcher\/waiting/);
+  await expect(card(`w${tag}1`).getByRole('button', { name: `Approve w${tag}1` })).toBeInViewport({ ratio: 1 });
+  await expect(card(`w${tag}1`).getByRole('button', { name: 'Decline…' })).toBeInViewport({ ratio: 1 });
+  await shot('intake-approval');
+
+  await clickItem(`Answer w${tag}2`);
+  await expect(card(`w${tag}2`).getByLabel(`Answer on w${tag}2`)).toBeInViewport({ ratio: 1 });
+  await expect(card(`w${tag}2`).getByRole('button', { name: 'Send answer' })).toBeInViewport({ ratio: 1 });
+  await shot('dispatcher-question');
+
+  await clickItem(`Answer w${tag}3`);
+  await expect(card(`w${tag}3`).getByLabel(`Answer on w${tag}3`)).toBeInViewport({ ratio: 1 });
+  await shot('design-question');
+});
+
+/**
+ * The state with what waits on this person added: a standing agent's delegation request, an intake approval behind seven older
+ * ones, and a question and a design question whose requests a worker is mid-turn on (Working in the live states, so the tab's
+ * old "waiting only" list left them out).
+ */
+function needsYouState(s: AppState, tag: string): AppState {
+  const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+  const ME = { userId: 'tester', displayName: 'tester' };
+  const base = { priority: 'normal', keys: [], requestedBy: ME, requesters: [ME], humanAsked: false, status: 'new', updatedAt: ago(0.01), sessionIds: [] as string[], overlaps: [], asks: 0, log: [] } as Pick<WorkItem, 'priority' | 'keys' | 'requestedBy' | 'requesters' | 'humanAsked' | 'status' | 'updatedAt' | 'sessionIds' | 'overlaps' | 'asks' | 'log'>;
+  const orch = s.sessions.find((x) => x.id === s.orchestratorId)!;
+  const busy = { ...orch, id: `busy-${tag}`, kind: 'worker', title: `Busy ${tag}`, status: 'running', pendingPermissions: [], requestedBy: undefined } as SessionInfo;
+  const old = Array.from({ length: 7 }, (_, i): WorkItem => ({ ...base, id: `w${tag}9${i}`, title: `Older report ${i} ${tag}`, brief: 'An older report.', createdAt: ago(20 - i), approval: { state: 'pending', why: 'auto-approve is off' }, triage: { class: 'needs-human', reason: 'no clear defect' } }));
+  const work: WorkItem[] = [
+    ...old,
+    { ...base, id: `w${tag}1`, title: `Intake report ${tag}`, brief: 'Drills stop at night.', createdAt: ago(5), approval: { state: 'pending', why: 'auto-approve is off' }, triage: { class: 'needs-human', reason: 'no clear defect' } },
+    { ...base, id: `w${tag}2`, title: `Question ${tag}`, brief: 'Reorder the save menu.', status: 'question', createdAt: ago(4), sessionIds: [busy.id], question: { text: 'Keep the old order?', at: ago(4) } },
+    { ...base, id: `w${tag}3`, title: `Design ${tag}`, brief: 'A splitter panel.', createdAt: ago(3), sessionIds: [busy.id], flag: { kind: 'design', text: 'Per output or per splitter?', at: ago(3), for: [ME] } },
+  ];
+  const agent = { id: `sa-${tag}`, name: `Agent ${tag}`, charter: 'x', model: 'sonnet', trigger: { kind: 'manual' }, folder: '/x', enabled: true, budget: { perRunUsd: 1, perDayUsd: 1, maxMinutes: 5 }, tools: [], sessionId: `sa-s-${tag}`, createdAt: ago(9), updatedAt: ago(9), state: 'asleep', spend: { day: '', usd: 0 }, runs: [] } as unknown as StandingAgent;
+  const delegation = { id: `d-${tag}`, agentId: agent.id, agentName: agent.name, title: `Delegation ${tag}`, task: 'Do the thing.', createdAt: ago(1), status: 'pending', log: [] } as unknown as DelegationRequest;
+  return { ...s, work, sessions: [...s.sessions, busy], standingAgents: [...s.standingAgents, agent], delegations: [...s.delegations, delegation], intake: { ...s.intake!, reviewerIds: ['tester'] } };
 }
