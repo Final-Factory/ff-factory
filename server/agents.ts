@@ -34,7 +34,7 @@ import { CATALOG } from './launch.ts';
 import { AutoCompactor } from './autoCompact.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, pinnedWork, placementHint, roomNow, voiceVram, type Computer, type NeedKind, type RoomNow } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, holdReason, pinnedWork, placementHint, roomNow, voiceVram, type Computer, type NeedKind, type RoomNow } from './placement.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import { WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
@@ -346,6 +346,13 @@ export class Agents {
    */
   tokenStopped?: (account: string) => string | undefined;
   /**
+   * A vault token the pool rule skips for every new job because it is retired (weekly at the retire line) or used up (w1375): its
+   * label and why when `account` (a session's credential key) is such a token, else undefined; wired by index.ts. A live worker
+   * process keeps the token it started on, so a message to one on such a token restarts it on its person's usable account
+   * first (accountMove).
+   */
+  tokenUnusable?: (account: string) => string | undefined;
+  /**
    * The Claude pool a usage gate's ref names (w1126, server/usageGate.ts poolForRef over the vault's pools, else an account):
    * the label the ledger keeps and when its hold lifts; undefined when nothing answers to it. Wired by index.ts.
    */
@@ -397,6 +404,8 @@ export class Agents {
     // One person's tokens per turn (w1076): a live worker whose requests changed person restarts on theirs first.
     sessions.accountMove = (s) => this.accountMove(s);
     sessions.codeMove = (s) => this.codeMove(s);
+    // w1376: a computer on hold (config placement.hold) resumes nobody, not even the workers it already has.
+    sessions.machineHold = (s) => this.machineHold(s);
     // w1128: a gate's resume that waited while its request was blocked again is kept for the new gates, not delivered.
     sessions.staleResume = (work, sid, note) => this.orchestrators?.staleResume(work, sid, note);
     // The coordinators' routine turns on the routine model, a person's on their own (w1158, server/turnModel.ts).
@@ -1660,10 +1669,26 @@ export class Agents {
     // the stop message itself, and anything else sent during that turn, must reach the running process.
     const stopped = i.account && !isMidTurn(i) ? this.tokenStopped?.(i.account) : undefined;
     if (stopped) return `its process runs on the dispatcher's token ${stopped}, which is at its stop line, so it restarts on a token with room before this turn (w1109)`;
+    // w1375: its token is retired or used up, which the pool rule skips for every new job, so a resume (a limit, a restart, a
+    // cleanup revival, a dispatch, a check-in) restarts it on its person's usable account, or queues it on the pool as a new job.
+    const unusable = i.account && !isMidTurn(i) ? this.tokenUnusable?.(i.account) : undefined;
+    if (unusable) return `its process runs on ${unusable}, which the Claude token pool skips for every new job, so it restarts on its person's usable account before this turn (w1375)`;
     if (!i.ranFor) return undefined;
     const want = this.tokenUserOf(i.id) ?? i.requestedBy?.userId;
     if (!want || isSamePerson(want, i.ranFor)) return undefined;
     return `its process runs on ${i.ranFor}'s Claude tokens and its requests are ${want}'s now, so it restarts on ${want}'s before this turn (w1076)`;
+  }
+
+  /**
+   * Why a message to this agent must wait because its computer is on hold (w1376, config placement.hold): a hold keeps
+   * every agent from running there, so a resume of one already on it (a limit or restart resume, the ledger cleanup, a CI or
+   * blocker unblock, a dispatch, message_agent, a check-in) waits in the send queue (Blocked on its machine) until the hold is
+   * lifted. Not mid-turn: that process already runs, and a message to it (a stop-and-save request) must reach it.
+   */
+  private machineHold(s: SessionHandle): string | undefined {
+    const i = s.info;
+    if (!i.machineId || isMidTurn(i)) return undefined;
+    return holdReason(i.machineId, this.cfg.placement);
   }
 
   /**

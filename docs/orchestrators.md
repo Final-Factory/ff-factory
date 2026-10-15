@@ -460,6 +460,12 @@ days; a deploy is a person's call, and a week without one is worth their look.
   (c37a6ec0) waited from 06:13Z and went at 07:33Z the same way. A gate's resume carries its request (`resumeOf`, through
   the wake and the send queue); when it is due and the request is Blocked again, `Orchestrators.staleResume` keeps it on the
   request (`heldCheckIns`, `resume: true`) and the new gates' clearing hands it back. A closed request drops it.
+- **A resume obeys the account pool and the machine hold (w1375, w1376).** Every resume (a limit or restart resume, the ledger
+  cleanup's revival, a CI or blocker unblock, a dispatch follow-up, `message_agent`, a check-in) goes through one
+  `SessionManager.send`. A worker whose Claude token is retired or used up restarts on its person's usable account first (Ben's
+  vault-ben-3 retired on 2026-10-15 stalled four workers; docs/vault.md section 4), and with no usable account it waits on the
+  pool, as a new job. A worker on a computer in `placement.hold` is not resumed there: its message waits and its request reads
+  Blocked on that machine until the hold is lifted (docs/machines.md, "Placing work": a hold).
 - **CI it cannot read does not hold a request in silence** (w829). On 2026-10-10 w814, w818 and w808 sat Blocked on CI for
   2 to 3 hours after their checks had finished (#1338 green at 00:26Z, #1335 at 00:06Z, #1328's editmode run cancelled at
   23:38Z): every `gh pr view --json statusCheckRollup` failed, and the watch took a failed read for "still running" and
