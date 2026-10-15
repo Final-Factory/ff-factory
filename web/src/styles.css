@@ -6022,3 +6022,9 @@ button.board-head-link:hover {
   margin: var(--s-1) 2px;
   font-size: var(--fs-sm);
 }
+
+/* The model in a conversation header (w1358): the header's quiet chip (.hb-on); before a first reply it is the configured one, dimmer. */
+.model-chip-configured {
+  font-style: italic;
+  opacity: 0.8;
+}

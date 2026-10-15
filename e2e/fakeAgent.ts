@@ -57,10 +57,12 @@ export function fakeQuery(fake: FakeOptions = {}) {
     let context = 20_000;
     // What "#spend" added to the session's spend, on top of the scripted cost.
     let extra = 0;
+    // The model that answers, as the SDK puts it on each assistant message (w1358); `#model <id>` in a message switches it.
+    let answering = 'claude-opus-5-5';
     const usage = () => ({ input_tokens: 0, cache_read_input_tokens: context, cache_creation_input_tokens: 0, output_tokens: 0 });
 
     const text = (t: string): SDKMessage =>
-      ({ type: 'assistant', parent_tool_use_id: null, uuid: `a${++msgId}`, session_id: sessionId, message: { id: `m${msgId}`, role: 'assistant', content: [{ type: 'text', text: t }], usage: usage() } }) as never;
+      ({ type: 'assistant', parent_tool_use_id: null, uuid: `a${++msgId}`, session_id: sessionId, message: { id: `m${msgId}`, role: 'assistant', model: answering, content: [{ type: 'text', text: t }], usage: usage() } }) as never;
     const delta = (t: string): SDKMessage =>
       ({ type: 'stream_event', parent_tool_use_id: null, uuid: `d${++msgId}`, session_id: sessionId, event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: t } } }) as never;
     const state = (s: 'running' | 'idle' | 'requires_action'): SDKMessage => ({ type: 'system', subtype: 'session_state_changed', state: s, session_id: sessionId, uuid: `s${++msgId}` }) as never;
@@ -138,6 +140,8 @@ export function fakeQuery(fake: FakeOptions = {}) {
           continue;
         }
         context += 5_000;
+        const switchTo = /#model\s+(claude-[\w.-]+)/.exec(said);
+        if (switchTo) answering = switchTo[1];
         const setCtx = /#ctx\s+(\d+)/.exec(said);
         if (setCtx) context = Number(setCtx[1]);
         const spend = /#spend\s+([\d.]+)/.exec(said);

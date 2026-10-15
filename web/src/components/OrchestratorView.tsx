@@ -6,7 +6,7 @@ import { Composer } from './Composer';
 import { ModeSelect } from './SessionView';
 import { Transcript } from './Transcript';
 import { AttentionButton, DrawerButton } from './ShellButtons';
-import { Confirm, Icon, Menu, StateText } from './ui';
+import { Confirm, Icon, Menu, ModelChip, StateText } from './ui';
 import { chatOwner, contextGlance, fmtCost, fmtRelative, sessionLabel, sessionTone, useNow } from '../util';
 import { accountOf } from './SystemMeters';
 import { TimersButton } from './Timers';
@@ -88,6 +88,7 @@ export const OrchestratorView = memo(function OrchestratorView({ session, compac
             <span className="orch-name">{owner.displayName}</span>
             <StateText tone={sessionTone(session.status)} label={sessionLabel[session.status]} pulse={running} className="orch-state" />
           </div>
+          <ModelChip session={session} />
           {ctxChip}
           {!compact && <AttentionButton />}
         </header>
@@ -139,6 +140,7 @@ export const OrchestratorView = memo(function OrchestratorView({ session, compac
             <Icon name="pulse" size={13} /> {heartbeat} min
           </span>
         )}
+        <ModelChip session={session} />
         {ctxChip}
         <TimersButton sessionId={session.id} />
         {!compact && <AttentionButton />}
