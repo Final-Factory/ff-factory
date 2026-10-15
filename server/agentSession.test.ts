@@ -442,3 +442,26 @@ test('w1135: a queued message says what holds it now: "offline" goes once the ma
   sessions.drain();
   await until(() => store.readTranscript(c.info.id).some((e) => e.kind === 'user' && (e as { text: string }).text === 'carry on'), 'delivered');
 });
+
+test('the model a session shows is the one its last reply came from, not the configured one (w1358)', async (t) => {
+  const { dir, store, sessions, worker } = setup(t);
+  const s = worker();
+  assert.equal(s.info.activeModel, undefined, 'unknown before the first reply');
+  const changes: (string | undefined)[] = [];
+  const onEvent = (e: ServerEvent) => e.type === 'session' && e.session.id === s.info.id && changes.push(e.session.activeModel);
+  bus.on('event', onEvent);
+  t.after(() => bus.off('event', onEvent));
+
+  sessions.send(s.info.id, 'hello');
+  await until(() => s.info.status === 'idle', 'first reply');
+  assert.equal(s.info.model, 'opus', 'the configured model is what the process started with');
+  assert.equal(s.info.activeModel, 'claude-opus-5-5', "the reply's own model");
+  assert.ok(changes.includes('claude-opus-5-5'), 'announced to the web as it changed');
+
+  // A switch (a coordinator's routine model, a fallback) shows from the reply that came from the other model.
+  sessions.send(s.info.id, 'again #model claude-sonnet-5-5');
+  await until(() => s.info.turns === 2 && s.info.status === 'idle', 'second reply');
+  assert.equal(s.info.activeModel, 'claude-sonnet-5-5');
+  store.flush();
+  assert.equal(new Store(dir).sessions.get(s.info.id)?.activeModel, 'claude-sonnet-5-5', 'saved with the session, so a restart keeps it');
+});

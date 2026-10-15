@@ -166,6 +166,8 @@ const gallery: SessionInfo = {
   title: 'Seeded worker',
   status: 'idle',
   model: 'opus',
+  // The model its last reply came from (w1358): what the header shows.
+  activeModel: 'claude-opus-5-5',
   permissionMode: 'bypassPermissions',
   sdkSessionId: 'fake-gallery',
   createdAt: T0,

@@ -266,6 +266,12 @@ export interface SessionInfo {
    * output, as the SDK reported it; after a compaction, the size Claude Code measured. This host's sessions only.
    */
   contextTokens?: number;
+  /**
+   * The model its last reply came from (w1358): the `model` Claude Code put on the assistant message, the same per-call
+   * model the spend tracking counts, so a switch (the coordinators' routine model, w1158; an alias; a fallback) shows at
+   * once. `model` above is only what the process was started with. Absent until its first reply.
+   */
+  activeModel?: string;
   /** What its last finished turn cost, in USD (w535): what the automatic compaction's cost trigger reads. */
   lastTurnCostUsd?: number;
   /** Its last compaction (w518, w535), whoever started it. */

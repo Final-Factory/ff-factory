@@ -8,7 +8,7 @@ import { GitFacts, SwitchBranchModal } from './Git';
 import { UnityLogDrawer } from './UnityLogDrawer';
 import { SessionDetails, SessionView } from './SessionView';
 import { AgentPicker, AgentTabs, AttentionStrip, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
-import { Chip, CopyButton, Icon, StateText } from './ui';
+import { Chip, CopyButton, Icon, ModelChip, StateText } from './ui';
 
 /**
  * A sandbox on one of the user's machines (docs/machines.md, "Machine sandboxes"): a worktree of the machine's main
@@ -68,6 +68,7 @@ export function MachineSandboxPanel({ app, machine: m, sandbox: sb, sessionId, o
               <span className="ph-sep">·</span>
               <span className="mono">{sb.git?.branch ?? sb.branch}</span>
             </span>
+            {selected && <ModelChip session={selected} who={selected.title} className="hide-phone" />}
             {ready && <AgentPicker place={displayName(sb)} sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!reachable} />}
           </>
         }

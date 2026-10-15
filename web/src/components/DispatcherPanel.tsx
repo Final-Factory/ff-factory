@@ -15,7 +15,7 @@ import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
 import { PermissionCard } from './Transcript';
 import { accountOf } from './SystemMeters';
-import { Chip, Confirm, Dot, Icon, Menu, ToggleChip } from './ui';
+import { Chip, Confirm, Dot, Icon, Menu, ModelChip, ToggleChip } from './ui';
 import { TimersButton } from './Timers';
 import { WaitingTab } from './WaitingTab';
 import { waitingItems } from '../../../shared/waiting';
@@ -109,6 +109,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
           <Dot tone={glance.tone} pulse={isBusy(session)} />
           <h2 className="ellipsis">Dispatcher</h2>
           <div className="spacer" />
+          {session && <ModelChip session={session} />}
           {ctx && (
             <span className="hb-on hide-phone" title={ctx.line} data-testid="context-size">
               Context {ctx.short}

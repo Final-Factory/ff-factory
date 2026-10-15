@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import type { SessionInfo } from '../../../shared/types';
+import { modelGlance } from '../../../shared/models';
 import type { Tone } from '../util';
 import { copyText } from '../util';
 
@@ -332,5 +334,27 @@ export function Confirm({
     >
       <div className="confirm-body">{body}</div>
     </Modal>
+  );
+}
+
+/**
+ * The model a conversation runs on, for its header (w1358): "Opus 5.5", the full id on hover. The model its last reply came
+ * from; before a first reply, the configured one, marked. Nothing when neither is known. Styled as the header's quiet chips
+ * (`hb-on`, as "Context 81k" is), so no header moves.
+ */
+export function ModelChip({ session, className = '', who }: { session: Pick<SessionInfo, 'activeModel' | 'model'>; className?: string; who?: string }) {
+  const g = modelGlance(session);
+  if (!g) return null;
+  const of = who ? `${who}: ` : '';
+  return (
+    <span
+      className={`hb-on model-chip${g.configured ? ' model-chip-configured' : ''} ${className}`.trim()}
+      title={g.configured ? `${of}${g.id}: the model it was started with; no reply yet` : `${of}${g.id}: the model of its last reply`}
+      data-testid="active-model"
+      data-source={g.configured ? 'configured' : 'reply'}
+    >
+      {g.name}
+      {g.configured && ' (configured)'}
+    </span>
   );
 }

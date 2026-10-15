@@ -12,7 +12,8 @@ import { senderOf, type SessionSnapshot, type Unanswered } from './restart.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun, dryRunStartRefusal } from './dryRun.ts';
 import { DANGEROUS_REMOVAL, tempDeletesWithin, tempOnlyDelete } from './tempDelete.ts';
-import { ContextMeter, IMAGE_CHARS, type Cumulative, type TurnUsage } from '../shared/spend.ts';
+import { isRealModelId } from '../shared/models.ts';
+import { ContextMeter,IMAGE_CHARS, type Cumulative, type TurnUsage } from '../shared/spend.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
 export const MID_TURN: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
@@ -638,6 +639,8 @@ export class AgentSession implements SessionHandle {
           const n = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.output_tokens ?? 0);
           if (n > 0) this.info.contextTokens = n;
           // The model call this message belongs to (a message's content blocks arrive as separate messages with one id).
+          // The model that answered (w1358), for the conversation header: not the configured one, which a switch leaves behind.
+          if (isRealModelId(m.message.model) && m.message.model !== this.info.activeModel) this.update({ activeModel: m.message.model });
           const mid = (m.message as { id?: string }).id;
           if (mid) this.meter.call({ id: mid, model: m.message.model, in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0, cw: u.cache_creation_input_tokens ?? 0, cw5: u.cache_creation?.ephemeral_5m_input_tokens ?? 0 });
         }

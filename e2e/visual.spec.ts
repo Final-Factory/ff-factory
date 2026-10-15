@@ -32,7 +32,7 @@ test('visual: orchestrator home', async ({ page }) => {
   await page.addStyleTag({
     content: `
       section.orch .transcript-inner, section.orch .orch-state, section.orch .hb-on, section.orch .needs-you, section.orch .drawer-dot { visibility: hidden !important; }
-      section.orch [data-testid="context-size"],
+      section.orch [data-testid="context-size"], section.orch [data-testid="active-model"],
       section.orch .composer-hint, section.orch .jump-pill, section.orch .btn-stop-main, section.orch .btn-stop-mini,
       section.orch .composer-actions [aria-label="Voice mode"] { display: none !important; }
       section.orch .composer-input::before { color: transparent !important; }
@@ -45,6 +45,8 @@ test('visual: the seeded sandbox page', async ({ page }) => {
   await open(page);
   const panel = await openSandbox(page, GALLERY);
   await expect(panel.locator('.msg-assistant[data-turn-end="ok"]')).toBeVisible();
+  // The model chip (w1358, e2e/headerModel.spec.ts) is left out, as the orchestrator's context size is: the header is as before it existed.
+  await page.addStyleTag({ content: '[data-testid="active-model"] { display: none !important; }' });
   await expect(panel).toHaveScreenshot('sandbox-gallery.png');
 });
 
