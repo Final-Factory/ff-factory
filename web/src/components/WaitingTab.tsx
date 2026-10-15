@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AppState, WorkItem } from '../../../shared/types';
+import type { AppState, WorkItem, WorkNeedsYou } from '../../../shared/types';
 import { waitAge, type WaitingAsk, type WaitingItem } from '../../../shared/waiting';
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
 import { attempt, focusWait, sessionsByIds, toast, useStore } from '../store';
-import { fmtRelative, navigate } from '../util';
+import { fmtClock, fmtRelative, navigate } from '../util';
 import { Markdown } from './Markdown';
 import { PermissionCard } from './Transcript';
 import { Dot, Icon } from './ui';
@@ -102,6 +102,82 @@ function Evidence({ w }: { w: WorkItem }) {
   );
 }
 
+/** A pull request ref ("owner/repo#12" or "#12") as a link to it on GitHub when its repo is known. */
+function PrLink({ pr }: { pr: string }) {
+  const m = /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(pr);
+  if (!m) return <span className="mono">{pr}</span>;
+  return (
+    <a href={`https://github.com/${m[1]}/pull/${m[2]}`} target="_blank" rel="noreferrer noopener" className="mono">
+      {pr}
+    </a>
+  );
+}
+
+/** A still or a clip inline, a folder or a wildcard as code (server/needsYou.ts previewLine). */
+const previewMd = (p: string) => {
+  const name = p.split(/[\\/]/).pop() ?? p;
+  // The path always, so it can be found when the file cannot be shown; the still or the clip under it.
+  return !p.includes('*') && /\.(?:png|jpe?g|gif|webp|mp4|webm|mov)$/i.test(p) ? `\`${p}\`\n\n![${name}](<${p}>)` : `\`${p}\``;
+};
+
+/**
+ * The question in full with what it is about (w1378, Ben: "it wants me to reply to a conversation but I can't really see the
+ * conversation"): who asks, the question, the files to look at, the pull requests and the end of the worker's report, and
+ * where it went: the person's own orchestrator chat, which asks and relays the answer.
+ */
+function NeedsYouBlock({ app, w, r, mine }: { app: AppState; w: WorkItem; r: WorkNeedsYou; mine: boolean }) {
+  const askedBy = r.kind === 'question' ? 'The dispatcher' : `Worker ${r.worker ?? ''}`.trim();
+  return (
+    <div className="wait-needs-you" data-testid={`wait-needs-you-${w.id}`}>
+      {r.kind !== 'question' && (
+        <div className="wait-question" data-testid={`wait-question-${w.id}`}>
+          <p className="small">
+            <strong>{askedBy} asks {r.who.join(', ')}:</strong>
+          </p>
+          <Markdown text={r.question} />
+        </div>
+      )}
+      {r.previews.length > 0 && (
+        <div className="wait-previews" data-testid={`wait-previews-${w.id}`}>
+          <p className="small">
+            <strong>Look at:</strong>
+          </p>
+          <Markdown text={r.previews.map(previewMd).join('\n\n')} />
+        </div>
+      )}
+      {r.prs.length > 0 && (
+        <p className="small" data-testid={`wait-prs-${w.id}`}>
+          <strong>Pull requests:</strong>{' '}
+          {r.prs.map((pr, i) => (
+            <span key={pr}>
+              {i ? ', ' : ''}
+              <PrLink pr={pr} />
+            </span>
+          ))}
+        </p>
+      )}
+      {r.report && r.report.trim() !== r.question.trim() && (
+        <details className="wait-report" data-testid={`wait-report-${w.id}`}>
+          <summary className="small">The end of {r.worker ? `worker ${r.worker}'s` : 'its worker’s'} last report</summary>
+          <Markdown text={r.report} />
+        </details>
+      )}
+      <p className="small dim" data-testid={`wait-routed-${w.id}`}>
+        {r.answered
+          ? `${r.answered.by} answered ${fmtClock(r.answered.at)}; ${r.worker ? `worker ${r.worker} resumes with it.` : 'the dispatcher carries on.'}`
+          : mine
+            ? `Sent to your orchestrator ${fmtClock(r.at)}: answer it there, in your own words, and it goes back to ${r.worker ? `worker ${r.worker}` : 'the dispatcher'}.`
+            : `Sent to ${r.who.join(', ')}'s orchestrator ${fmtClock(r.at)}.`}{' '}
+        {mine && !r.answered && app.orchestratorId && (
+          <button className="link-btn small" onClick={() => navigate({ view: 'home' })} data-testid={`wait-chat-${w.id}`}>
+            <Icon name="chevron" size={11} /> Answer in your chat
+          </button>
+        )}
+      </p>
+    </div>
+  );
+}
+
 function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: number }) {
   const { w, ask, mine, since } = item;
   const [busy, setBusy] = useState(false);
@@ -121,7 +197,7 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
   const sendAnswer = async () => {
     const text = answer.trim();
     if (!text || !app.orchestratorId) return;
-    const asked = w.question?.text ?? w.flag?.text ?? '';
+    const asked = w.question?.text ?? w.flag?.text ?? w.needsYou?.question ?? '';
     const ok = await act(
       () => api.sendMessage(app.orchestratorId, `Answer on ${w.id} (${w.title}). It asked: “${asked.slice(0, 300)}”\n\n${text}\n\nPlease put this on ${w.id} as my answer (update_work note).`),
       `Sent to your orchestrator: it records the answer on ${w.id}.`,
@@ -141,13 +217,18 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
         </span>
       </header>
       <p className="small wait-ask" data-testid={`wait-ask-${w.id}`}>
-        <strong>{mine ? ASK_LABEL[ask] : `Waits on ${item.on.join(', ') || 'someone else'}`}:</strong> {item.text}
+        <strong>{mine ? ASK_LABEL[ask] : `Waits on ${item.on.join(', ') || 'someone else'}`}:</strong>{' '}
+        {/* A worker's question is shown whole below (w1378); this line says only whose it is. */}
+        {ask === 'check' && w.needsYou && !w.needsYou.answered && w.needsYou.kind !== 'question'
+          ? `worker ${w.needsYou.worker ?? ''} waits on ${w.needsYou.who.join(', ')} (since ${fmtRelative(w.needsYou.at, now)}): its question is below.`
+          : item.text}
       </p>
       {item.recommendation && (
         <p className="small tone-blue" data-testid={`wait-recommendation-${w.id}`}>
           FF Factory recommends: {item.recommendation}
         </p>
       )}
+      {w.needsYou && <NeedsYouBlock app={app} w={w} r={w.needsYou} mine={mine} />}
       <Evidence w={w} />
       {ask === 'check' &&
         workers.flatMap((x) =>
@@ -192,7 +273,7 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
           </>
         )}
         {!mine && ask === 'approve' && <span className="dim small">{app.intake?.reviewers.join(' or ') || 'A reviewer'} decides</span>}
-        {mine && ask === 'answer' && (
+        {mine && (ask === 'answer' || (ask === 'check' && !!w.needsYou && !w.needsYou.answered)) && (
           <div className="wait-answer">
             {sent ? (
               <span className="small tone-green">Sent to your orchestrator. The card goes when it has recorded the answer.</span>

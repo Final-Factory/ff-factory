@@ -141,3 +141,15 @@ test('[person message]: who it is from, what they wrote (without the relay instr
   const quoted = parseNotice(personMessage({ userId: 'lothsahn', displayName: 'Lothsahn' }, { userId: 'ben', displayName: 'Ben' }, "Hi\n\nThis is Lothsahn's message to Ben, as a test."));
   assert.equal(quoted.body, "Hi\n\nThis is Lothsahn's message to Ben, as a test.");
 });
+
+test('[needs you] (w1378): a question for the person, amber and about its request; the digest says how many', async () => {
+  const { needsYouRecord, needsYouText, needsYouDigestText } = await import('./needsYou.ts');
+  const w = { id: 'w1360', title: 'Circuits: pills → circuit icon button / back arrow', prs: [] };
+  const r = needsYouRecord(w, { kind: 'declared', key: 'k', question: 'OK the look in /srv/fff/review/w1360/a.png', names: ['Ben'], worker: '14fac04c' }, [{ userId: 'ben', displayName: 'Ben' }], '2026-10-15T16:14:20Z');
+  const n = parseNotice(needsYouText(w, r, 'Ben'));
+  assert.deepEqual([n.kind, n.attention, n.workId], ['needs-you', true, 'w1360']);
+  assert.equal(n.summary, 'Needs you: w1360 “Circuits: pills → circuit icon button / back arrow”');
+  assert.match(n.body!, /^Question \(its worker 14fac04c stopped and waits on Ben\):\n\nOK the look/);
+  const d = parseNotice(needsYouDigestText([{ w, r }, { w: { ...w, id: 'w1346' }, r }], 'Ben'));
+  assert.deepEqual([d.kind, d.attention, d.summary], ['needs-you', true, 'Needs you: 2 questions waiting']);
+});

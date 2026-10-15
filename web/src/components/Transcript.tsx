@@ -665,6 +665,7 @@ const NOTICE_ICON: Record<NoticeKind, IconName> = {
   'work-update': 'inbox',
   ledger: 'clock',
   'person-message': 'chat',
+  'needs-you': 'bell',
   other: 'info',
 };
 
@@ -704,6 +705,7 @@ function describeNotice(n: Notice, { s, m, standing, orchestratorId }: NoticeRef
     case 'auto-finished':
       return { text: n.summary, route, where: placeName };
     case 'dispatch':
+    case 'needs-you':
     case 'work-request':
     case 'work-update':
       // The request on the dispatcher's page (docs/orchestrators.md).
@@ -720,8 +722,8 @@ function describeNotice(n: Notice, { s, m, standing, orchestratorId }: NoticeRef
 function NoticeRow({ ev }: { ev: UserEv }) {
   const n = useMemo(() => parseNotice(ev.text), [ev.text]);
   const d = describeNotice(n, useNoticeRefs(n));
-  // A message from another person is to be read, not skimmed: it starts open.
-  const [open, setOpen] = useState(n.kind === 'person-message');
+  // A message from another person, or a question for you (w1378), is to be read, not skimmed: it starts open.
+  const [open, setOpen] = useState(n.kind === 'person-message' || n.kind === 'needs-you');
   const chat = useContext(ChatActionsContext);
   const host = useActionsHost(!!chat?.interactive);
   const tag = NOTICE_TAG.exec(ev.text)?.[1];
@@ -753,7 +755,7 @@ function NoticeRow({ ev }: { ev: UserEv }) {
           </button>
         )}
       </div>
-      {open && <div className="notice-body">{n.kind === 'worker-done' || n.kind === 'auto-finished' ? <Markdown text={n.body ?? ev.text} /> : <div className="pre-wrap">{n.body ?? ev.text}</div>}</div>}
+      {open && <div className="notice-body">{n.kind === 'worker-done' || n.kind === 'auto-finished' || n.kind === 'needs-you' ? <Markdown text={n.body ?? ev.text} /> : <div className="pre-wrap">{n.body ?? ev.text}</div>}</div>}
       <Reactions seq={ev.seq} />
     </div>
   );

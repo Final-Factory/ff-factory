@@ -1512,9 +1512,92 @@ but the question it labelled ("brighten the lamps after w478?") was kept.
 | `[person message]` | the recipient's own orchestrator (message_person), and a notification to the recipient alone |
 | `[work request]` marked intake | the dispatcher, once approved (by a reviewer, or an auto-approve rule for an obvious bug), gathered a minute at a time ([intake.md](intake.md)) |
 | `[intake question]` | the reviewers' own orchestrators, when a worker on an intake request stops at a design decision |
+| `[needs you] wNNN "title"` | the own orchestrator of each person a request waits on: the dispatcher's question, a worker's `waiting_on_person`, or a worker report whose "still open" line names a person; once per question ([Questions for a person](#questions-for-a-person-needs-you-w1378)) |
+| `[needs you] digest` | the same, for the waits open when w1378 shipped (or begun while the portal was down): one message per person, once, 3 minutes after a start |
 | push notifications and in-page notices | a person's own orchestrator's only to that person; a worker's finished turn to the people it works for; the dispatcher's turns to nobody, its questions and errors to the owner |
 
 `/mcp` `ask_orchestrator`, `orchestrator_transcript`, `orchestrator_send` and `orchestrator_inbox` talk to the key's person's own orchestrator; a message from there is the person's own turn, tagged "via Claude Code or Desktop (key)" in their chat ([talk-to-your-orchestrator.md](talk-to-your-orchestrator.md), w1021).
+
+## Questions for a person: `[needs you]` (w1378)
+
+Ben, 2026-10-15: "I have 4 alerts to get feedback but the ui is still hard to understand it wants me to reply to a
+conversation but I can't really see the conversation. Those should just be surfaced to you the orchestrator and then I'll
+answer you and you send the response back".
+
+What the page showed him (the Needs you list and the Dispatcher page's Waiting on input tab, before w1378, read from
+`web/src/components/WaitingTab.tsx` and the mock at `web/mock/scenario.ts` w18 and w19): a dispatcher question, which its brief
+told it to ask for a worker's wait on a person, with a "Your answer" box under the request's brief. The question was about a worker's report, clip or stills, none of which the card showed; a worker's own
+`waiting_on_person` ("OK the w1360 circuit button look … stills in /srv/fff/review/…") showed as one clipped line with a link
+to the worker's transcript. The questions reached his orchestrator only as a one-line `[dispatch] … a question.`, and a
+worker's wait not at all unless his orchestrator had started that turn (`onWorkerTurnEnd` tells people only of turns an
+orchestrator started).
+
+**Now a question goes to the person's own orchestrator, once, in full.** `server/needsYou.ts` builds it; `Orchestrators.needsYou`
+sends it and keeps it on the request (`WorkItem.needsYou`):
+
+| the wait | sent when | to |
+|---|---|---|
+| the dispatcher's question (`decide_work ask`, or a dead gate's "is it still needed?", `blockerDecide`) | it is asked (`askPerson`), in place of the `[dispatch] … a question` notice | the request's filer |
+| a worker's `waiting_on_person` | its turn ends (`Agents.onWorkerTurnEnd` → `personWaits`) | the people its `who` names, else the requesters |
+| a worker report whose `wNNN: still open:` line names a person (`personWaitIn`), or that ends asking for a decision while the ledger reads Waiting | its turn ends | the person the line names, else the requesters |
+
+Not here: an intake approval, a design question (`[intake question]`) and a permission (its card is the answer).
+
+The message:
+
+```
+[needs you] w1360 "Circuits: pills → circuit icon button / back arrow"
+Question (its worker 14fac04c stopped and waits on Ben):
+OK the w1360 circuit button look (… /srv/fff/review/w1360-circuit-icon-button/w1360b-*.png) so PR #1799 can merge on green CI
+
+Look at:
+- `/srv/fff/review/w1360-circuit-icon-button/w1360b-*.png`
+- ![w1360b-main-1920.png](</srv/fff/review/w1360-circuit-icon-button/w1360b-main-1920.png>)
+Pull requests: Final-Factory/FinalFactory#1799
+
+The end of its last report:
+…
+
+To answer: show Ben the question in full, with the files … and ask. When Ben answers in their own words, record it with
+update_work on w1360, their answer as the note: FF Factory resumes worker 14fac04c with their words, and the alert on the
+page clears. Never answer it for them. …
+```
+
+- **Files and pull requests** (`previewsIn`, `prsIn`): paths under the review root (`/srv/fff/review/…`, config `review.root`)
+  and any image or video path the question or the report names; `owner/repo#n`, github.com pull links, `PR #n` and `#nnn`, plus
+  the request's own open PRs. A single still or clip is written `![name](<path>)`, which the page shows inline (`/api/image`).
+- **Whom** (`whoOf`): every person FF Factory knows whose name is a word in the wait's `who` ("Ben (or his orchestrator)" is
+  Ben; "Ben, Lothsahn" is both), else the requesters (the filer, for the dispatcher's question).
+- **Once per question.** Each wait has a key: `question:<asked at>`, `declared:<worker>:<declared at>` or
+  `report:<worker>:<its line>`. A wait whose key is already on the request is not sent again, whatever turn end, check-in,
+  heartbeat or restart comes; a new declaration or a new line is a new question. A dispatcher question asked while a worker's
+  wait is unanswered is that same wait: no second message, and `decide_work` says so. The record survives restarts (it is on
+  the request in `state.json`).
+- **The digest.** 3 minutes after the portal starts (`NEEDS_YOU_DIGEST_MS`, once the machines' workers have reported in),
+  every wait on a person the ledger shows whose key was never sent goes as one `[needs you] digest` per person, and is
+  recorded as sent. The first start after w1378 ships sends the waits already open; later starts find none unless something
+  began waiting while the portal was down.
+
+**How an orchestrator answers it** (its brief, `personalBrief`): show the person the question in full, with its files and pull
+requests, and ask. When they answer in their own words, `update_work` on that request with their answer as the note. In their
+own turn only (`humanAsked`): a note in a turn that is not theirs answers nothing. Then `answerNeedsYou`:
+
+- marks the question answered (`needsYou.answered`), clears the dispatcher's question (as any note does);
+- resumes the waiting worker within a minute with `[answer] Ben answered on w1360 "…", in their own words: <note>`
+  (`wakeNow`, the same path a cleared CI gate resumes it by). That message ends its `waiting_on_person`, so the request leaves
+  Waiting on input and the card goes. A worker mid-turn, or gone, is named in the dispatcher's `[work update]` instead
+  ("pass it on with message_agent").
+- The dispatcher's `[work update]` says "sent to its worker …, which resumes with it (nothing for you to pass on)"; its brief
+  says not to message the worker again, and not to `decide_work ask` for a worker's own wait.
+
+A dashboard answer goes the same way: the Waiting on input card's answer box sends the person's words to their own
+orchestrator, which records the note in that turn.
+
+**The page.** A Waiting on input card whose request has a `needsYou` shows it whole above the brief: who asks, the question,
+the files (the path, and the still or clip under it), the pull requests as links, the end of the worker's report (folded),
+when it went to whose orchestrator, and "Answer in your chat" (the person's own chat). A worker's question gets the answer box
+too. In the chat, a `[needs you]` notice is amber and starts open, its body shown as Markdown (`shared/notices.ts`,
+`needs-you`).
 
 ## Agent states: Working, Needs you, Queued, Blocked, Idle, Stopped
 
@@ -1811,6 +1894,8 @@ words are never taken from it. The orchestrator prompt's "How to work" says the 
 - Each message of your own chat has Reply and React (hover, or a tap on a touch screen); replies show the message they answer, reactions show as chips ([Replies and reactions](#replies-and-reactions-w866)).
 - The sidebar lists, under it, the other people's orchestrators (read only) and the Dispatcher, with its open requests
   ("1 question · 2 active").
+- A question a request waits on you for arrives in your chat as an amber `[needs you]` notice with the question in full, its files
+  and pull requests; answer your orchestrator there ([Questions for a person](#questions-for-a-person-needs-you-w1378)).
 - The Dispatcher page has two tabs. Requests lists everyone's open requests, questions first, with the stalled and the closed ones behind
   links; a row opens to its brief, workers, pull requests, overlaps and log. Conversation is the dispatcher's log, read only. Where the
   composer would be, a line says nobody writes to the dispatcher and links "Talk to your orchestrator" (your own chat).
