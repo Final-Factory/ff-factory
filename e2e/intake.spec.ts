@@ -1,4 +1,4 @@
-import { appState, expect, go, isMobile, openSidebar, patchWork, settle, signIn, startWorker, test, uniq, useTool } from './fixtures.ts';
+import { appState, expect, go, isMobile, patchWork, settle, signIn, startWorker, test, uniq, useTool } from './fixtures.ts';
 import type { AppState, DelegationRequest, ServerEvent, SessionInfo, StandingAgent, WorkItem } from '../shared/types.ts';
 
 /**
@@ -398,8 +398,14 @@ test('each kind of Needs you item opens the panel with its Allow, Approve, Decli
   /** Click the Needs you item that says `text`, whichever row of the list (or "more") it sits in. */
   const clickItem = async (text: string) => {
     await page.goto('/');
-    const side = await openSidebar(page);
-    const list = side.locator('section.attn');
+    // Not openSidebar: its Menu button is matched by name, and on this server's shared ledger a Needs you item with "menu" in its
+    // title (a save-menu request from another test) is a second match.
+    if (isMobile(page)) {
+      await page.getByRole('button', { name: 'Menu', exact: true }).click();
+      await expect(page.locator('.shell.drawer-open')).toBeAttached();
+      await expect.poll(async () => (await page.locator('.sidebar').boundingBox())?.x ?? -1).toBeGreaterThanOrEqual(0);
+    }
+    const list = page.locator('.sidebar section.attn');
     // The seeded state has arrived once the delegation (listed before the ledger's requests) is there.
     await expect(list).toContainText(`Delegation ${tag}`);
     const more = list.locator('.attn-more');
