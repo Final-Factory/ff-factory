@@ -1637,12 +1637,14 @@ targets in the question and the report are made absolute. Where the review root 
 and folders are kept as written.
 
 **The outgoing check.** Every reply a person's own orchestrator writes goes through `Agents.inlineForPerson` before it is
-kept and shown (`Store.assistantText`, applied in `Store.append` to `assistant` events of personal orchestrators only). Each
-review path, folder, wildcard, bare media name or other absolute media path the reply names without `![..](..)` gets its
-stills and clips as `![name](<absolute path>)` lines under the paragraph (or code block) that names it, and a relative
-image target becomes absolute. The words stay as written; media already shown is not repeated, so it is idempotent; web
-links and replies naming no media are left alone. The portal log says how many files it added (`review media: N file(s) put
-inline in a reply of …`).
+kept and shown (`Store.assistantText`, applied in `Store.append` to `assistant` events of personal orchestrators only). The
+page already shows a whole path to an existing still or clip as a thumbnail or player under the message
+(`shared/imagePaths.ts` `mentionedPaths`, `web/src/components/Images.tsx`; an e2e test pins it, `e2e/images.spec.ts`), so
+those are left as written. The check covers what that strip cannot show: a review folder, a wildcard, a file that is not
+there (a name cut off mid-word), a bare media name and a relative image target. Each gets its stills and clips as
+`![name](<absolute path>)` lines under the paragraph (or code block) that names it, and a relative target becomes absolute.
+The words stay as written; media already shown is not repeated, so it is idempotent; web links and replies naming no media
+are left alone. The portal log says how many files it added (`review media: N file(s) put inline in a reply of …`).
 
 **Why rewrite, not send it back.** Both were weighed:
 

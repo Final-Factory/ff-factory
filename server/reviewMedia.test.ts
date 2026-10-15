@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { absoluteTargets, inlineReviewMedia, mediaFor, mediaNamed, onDisk } from './reviewMedia.ts';
+import { absoluteTargets, inlineReviewMedia, mediaFor, mediaLine, mediaNamed, onDisk } from './reviewMedia.ts';
 import { needsYouRecord, needsYouText } from './needsYou.ts';
 
 /**
@@ -104,14 +104,16 @@ test('the outgoing check: a reply that names a review folder, file or name bare 
   assert.deepEqual(inlineReviewMedia(out.text, o), { text: out.text, added: 0 });
   const shown = `Here: ![v4](<${r.fog.v4}>)`;
   assert.deepEqual(inlineReviewMedia(shown, o), { text: shown, added: 0 });
-  // A bare file, a bare name, a relative target, a path in a code block.
-  assert.match(inlineReviewMedia('The clip: /srv/fff/review/w1300-other/clip.mp4.', o).text, new RegExp(`\\n\\n!\\[clip\\.mp4\\]\\(<${r.other.replace(/[\\\\.]/g, '\\$&')}>\\)$`));
+  // A bare name, a relative target, a folder in a code block.
   assert.ok(inlineReviewMedia('Look at glow_800_closeup.jpg please', { root: r.dir, ids: ['w1241'] }).text.endsWith(`![glow_800_closeup.jpg](<${r.glow.closeup}>)`));
   assert.equal(inlineReviewMedia('![c](<glow_800_closeup.jpg>)', { root: r.dir, ids: ['w1241'] }).text, `![c](<${r.glow.closeup}>)`);
-  const fenced = inlineReviewMedia('Run:\n```\nls /srv/fff/review/w1300-other/clip.mp4\n```\nthen tell me.', o).text;
+  const fenced = inlineReviewMedia('Run:\n```\nls /srv/fff/review/w1300-other/\n```\nthen tell me.', o).text;
   assert.ok(fenced.includes('```\n\n![clip.mp4]'), fenced);
-  // Media elsewhere (a machine's file) is shown as written; a web link and a plain reply are left alone.
-  assert.ok(inlineReviewMedia('Still: C:\\work\\shot.png', o).text.endsWith('![shot.png](<C:\\work\\shot.png>)'));
-  assert.deepEqual(inlineReviewMedia('See https://example.com/a.png for the logo.', o), { text: 'See https://example.com/a.png for the logo.', added: 0 });
-  assert.deepEqual(inlineReviewMedia('Merged PR #1799; nothing to look at.', o), { text: 'Merged PR #1799; nothing to look at.', added: 0 });
+  // A whole path to a file that is there: the page's strip under the message shows it already (shared/imagePaths.ts),
+  // so the text is left as written; so is a machine's file, a web link and a reply with no media.
+  for (const same of ['The clip: /srv/fff/review/w1300-other/clip.mp4.', 'Still: C:\\work\\shot.png', 'See https://example.com/a.png for the logo.', 'Merged PR #1799; nothing to look at.'])
+    assert.deepEqual(inlineReviewMedia(same, o), { text: same, added: 0 });
+  // A name cut off mid-word (w1241) is its folder's files.
+  assert.ok(inlineReviewMedia('Stills: /srv/fff/review/w1241-super-enemies/glow_800_closeup.jp', o).text.endsWith(`![glow_800_closeup.jpg](<${r.glow.closeup}>)\n\n![glow_super-enemies_1920x1080.mp4](<${r.glow.clip}>)`));
+  assert.equal(mediaLine('C:\\work\\shot.png'), '![shot.png](<C:\\work\\shot.png>)', 'either slash, on any OS');
 });

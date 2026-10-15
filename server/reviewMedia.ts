@@ -127,7 +127,7 @@ function nameIn(name: string, folders: readonly string[], o: ReviewMediaOptions)
 }
 
 /** A still or a clip as the page shows it inline. */
-export const mediaLine = (p: string) => `![${path.basename(p)}](<${p}>)`;
+export const mediaLine = (p: string) => `![${p.split(/[\\/]/).pop() ?? p}](<${p}>)`;
 
 /** Review paths written in a text (files, folders, wildcards), in order. */
 function reviewRefsIn(text: string, root: string): { ref: string; at: number }[] {
@@ -216,14 +216,15 @@ export function absoluteTargets(text: string, o: ReviewMediaOptions): { text: st
 }
 
 /**
- * A reply to a person with its review media inline (w1384, the outgoing check): every review path, folder, wildcard,
- * bare media name or other absolute media path that the text names and does not already show as `![..](..)` gets its
- * stills and clips inserted, as `![name](<absolute path>)` lines, after the paragraph (or code block) that names it; a
- * relative image target (`![x.mp4](<x.mp4>)`) becomes absolute. The words are left as written. `added`: how many files.
+ * A reply to a person with its review media inline (w1384, the outgoing check). The page already shows a bare absolute path
+ * to a still or a clip as a thumbnail or a player under the message (shared/imagePaths.ts mentionedPaths, Images.tsx), so
+ * what it cannot show is what this fixes: a review folder, a wildcard, a file that is not there (a name cut off mid-word),
+ * a bare media name and a relative image target. Each gets its stills and clips as `![name](<absolute path>)` lines after
+ * the paragraph (or code block) that names it, and a relative target becomes absolute. The words are left as written;
+ * media already shown inline is not repeated. `added`: how many files.
  */
 export function inlineReviewMedia(text: string, o: ReviewMediaOptions): { text: string; added: number } {
-  if (!text || !/\.(?:mp4|webm|mov|png|jpe?g|gif|webp)\b|review/i.test(text)) return { text, added: 0 };
-  const here = isDir(o.root);
+  if (!text || !isDir(o.root) || !/\.(?:mp4|webm|mov|png|jpe?g|gif|webp)\b|review/i.test(text)) return { text, added: 0 };
   const { text: out, fixed } = absoluteTargets(text, o);
   const folders = foldersNamed(out, o);
   const shown = new Set(embedsIn(out).map((e) => slash(onDisk(e.target, o.root) ?? e.target).toLowerCase()));
@@ -236,13 +237,13 @@ export function inlineReviewMedia(text: string, o: ReviewMediaOptions): { text: 
     result.push(block);
     if (!block.trim() || /^\n{2,}$/.test(block)) continue;
     const spans = embedsIn(block);
-    const refs = [...reviewRefsIn(block, o.root), ...otherMediaIn(block).filter((r) => !onDisk(r.ref, o.root)), ...(here ? namesIn(block) : [])].filter((r) => !inEmbed(r.at, spans));
+    const refs = [...reviewRefsIn(block, o.root), ...namesIn(block)].filter((r) => !inEmbed(r.at, spans));
     const lines: string[] = [];
     for (const { ref } of refs) {
-      let files: string[];
-      if (!onDisk(ref, o.root) && !/[\\/]/.test(ref)) files = (() => { const hit = nameIn(ref, folders, o); return hit ? [hit] : []; })();
-      else if (onDisk(ref, o.root) && here) files = mediaFor(ref, o);
-      else files = MEDIA_FILE.test(ref) && !ref.includes('*') ? [ref] : [];
+      const full = onDisk(ref, o.root);
+      // A file that is there, written whole: the page's strip shows it already.
+      if (full && MEDIA_FILE.test(full) && exists(full)) continue;
+      const files = full ? mediaFor(ref, o) : (() => { const hit = nameIn(ref, folders, o); return hit ? [hit] : []; })();
       for (const f of files) {
         const key = slash(f).toLowerCase();
         if (shown.has(key) || added >= MEDIA_PER_TEXT) continue;
