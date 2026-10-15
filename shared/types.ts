@@ -1593,6 +1593,12 @@ export interface WorkItem {
    * FFBox posts it in the requester's thread). A design question is `flag` instead.
    */
   question?: { text: string; at: string };
+  /**
+   * The newest wait on a person that went to their own orchestrators as a `[needs you]` message (w1378, Ben: "Those should
+   * just be surfaced to you the orchestrator and then I'll answer you and you send the response back"): the question in
+   * full with its context, so the page shows it whole and the message goes once per question (server/needsYou.ts).
+   */
+  needsYou?: WorkNeedsYou;
   /** What happened, oldest first: "10:02 filed by Lothsahn", "10:03 merged into w11: same fix". */
   log: string[];
   /**
@@ -1694,6 +1700,33 @@ export interface WorkDelegation {
 }
 
 /** One pull request linked to a request: where it is, and what it did. */
+/** A wait on a person that reached their orchestrators as `[needs you]` (w1378, server/needsYou.ts). */
+export interface WorkNeedsYou {
+  /** What the wait is, for de-duplication: the dispatcher's question, a worker's declaration, or the "still open" line of its report. */
+  key: string;
+  kind: 'question' | 'declared' | 'report';
+  /** The question in full: the dispatcher's words, or the worker's "what" and its report's line. */
+  question: string;
+  /** Who it waits on, as the page and the message name them. */
+  who: string[];
+  /** The people whose orchestrators were sent it (user ids). */
+  to: string[];
+  /** When it was sent (ISO). */
+  at: string;
+  /** The worker that waits, resumed with the answer. Absent for a dispatcher question with no worker. */
+  worker?: string;
+  /** The end of that worker's last report, for its context (at most NEEDS_YOU_REPORT_CHARS). */
+  report?: string;
+  /** Review stills, clips and folders the question or report names. */
+  previews: string[];
+  /** Pull requests it names ("Final-Factory/FinalFactory#1799"). */
+  prs: string[];
+  /** Sent in the one-off digest of waits already open when w1378 shipped, or after a restart. */
+  digest?: boolean;
+  /** A person answered it with a note in their own turn: who and when. */
+  answered?: { by: string; at: string };
+}
+
 export interface WorkPr {
   /** GitHub owner/name. */
   repo: string;

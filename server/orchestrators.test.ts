@@ -571,8 +571,10 @@ test('requests: a question goes to its filer, whose answer brings it back; closi
   await call(loth, 'request_work', { title: 'Playtest the new tutorial', brief: 'Look for soft locks.' });
   await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Single-player or co-op?' });
   assert.equal(store.work.get('w1')!.status, 'question');
-  await until('Lothsahn hears the question', () => heard(loth.id, '[dispatch]').length === 1);
-  assert.match(heard(loth.id, '[dispatch]')[0].text, /: a question\.\nSingle-player or co-op\?$/);
+  // w1378: a question for a person comes as [needs you], in full, with how to answer it.
+  await until('Lothsahn hears the question', () => heard(loth.id, '[needs you]').length === 1);
+  assert.match(heard(loth.id, '[needs you]')[0].text, /^\[needs you\] w1 "Playtest the new tutorial"\nQuestion \(the dispatcher asks Lothsahn\):\n\nSingle-player or co-op\?\n\nTo answer: /);
+  assert.equal(heard(loth.id, '[dispatch]').length, 0, 'not a second message as [dispatch]');
   assert.match((await call(loth, 'update_work', { id: 'w1', note: 'Single-player' })).text, /^w1 is new: note: Single-player\./);
   // Filed and answered within a moment: the dispatcher gets both in one message.
   await until('the dispatcher hears the answer', () => heard(dispatcher().info.id, '[work update]').length === 1);
@@ -1987,6 +1989,95 @@ test('w691: a worker that needs a person declares it (waiting_on_person) and its
   // Its next message ends the declaration.
   sessions.send(id, 'the m3 is up', 'human', undefined, { requestedBy: BEN });
   await until('the next turn', () => info.waitingOn === undefined);
+});
+
+test('w1378: a worker waiting on a person reaches that person’s orchestrator once, as [needs you] with the question in full; the answer in chat resumes the worker', async (t) => {
+  const { store, machines, sessions, agents, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Circuit icon button', brief: 'Pills become an icon button.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: Circuit icon button', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const m = store.machines.get('pc')!;
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  assert.equal(heard(ben.id, '[needs you]').length, 0, 'a turn that waits on nobody sends nothing');
+
+  // It stops for Ben's OK of a look (w1360's words, 2026-10-15) and ends its turn saying so.
+  const h = machines.hooks!.handlersFor(info, m);
+  await h.waiting_on_person!({ who: 'Ben', what: 'OK the circuit button look (stills in /srv/fff/review/w1-icon/w1b-*.png) so PR #1799 can merge on green CI', request: 'w1' });
+  const report = 'Stills published: ![main](/srv/fff/review/w1-icon/main.png)\n\nw1: still open: waiting on Ben to OK the look';
+  const handle = sessions.get(id);
+  sessions.events.emit('turnEnd', handle, report);
+  await until('Ben’s orchestrator hears it', () => heard(ben.id, '[needs you]').length === 1);
+  const msg = heard(ben.id, '[needs you]')[0].text;
+  assert.match(msg, new RegExp(`^\\[needs you\\] w1 "Circuit icon button"\\nQuestion \\(its worker ${id} stopped and waits on Ben\\):\\n\\nOK the circuit button look \\(stills in /srv/fff/review/w1-icon/w1b-\\*\\.png\\) so PR #1799 can merge on green CI\\n`));
+  assert.match(msg, /Look at:\n\n- `\/srv\/fff\/review\/w1-icon\/w1b-\*\.png`\n- !\[main\.png\]\(<\/srv\/fff\/review\/w1-icon\/main\.png>\)/);
+  assert.match(msg, /Pull requests: #1799/);
+  assert.match(msg, /The end of its last report:\n\nStills published/);
+  assert.match(msg, new RegExp(`record it with update_work on w1, their answer as the note: FF Factory resumes worker ${id}`));
+  const kept = store.work.get('w1')!.needsYou!;
+  assert.deepEqual({ kind: kept.kind, worker: kept.worker, to: kept.to }, { kind: 'declared', worker: id, to: ['ben'] });
+
+  // The same wait again: another turn end (a check-in it set), the dispatcher asking for it, the digest: no second message.
+  const dispatched = heard(ben.id, '[dispatch]').length;
+  sessions.events.emit('turnEnd', handle, report);
+  // (decide_work ask is for a request that is not active: one put back to new, as a hold would.)
+  Object.assign(store.work.get('w1')!, { status: 'new' });
+  const asked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben, is the look OK?' });
+  assert.match(asked.text, /Ben's orchestrator already has this wait as \[needs you\] .*no second message/);
+  assert.equal(agents.orchestrators.needsYouDigest(agents.personWaits()), 0);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(heard(ben.id, '[needs you]').length, 1, 'one message per question');
+  assert.equal(heard(ben.id, '[dispatch]').length, dispatched, 'and no [dispatch] question beside it');
+
+  // A note in a turn that is not Ben's (a relayed report) does not answer for him.
+  chat(BEN).lastFrom = 'system';
+  await call(ben, 'update_work', { id: 'w1', note: 'the worker says it is ready' });
+  assert.equal(store.work.get('w1')!.needsYou!.answered, undefined);
+  // Ben answers in his own words; his orchestrator records it: the worker resumes with them, and the wait clears.
+  chat(BEN).lastFrom = 'human';
+  const r = await call(ben, 'update_work', { id: 'w1', note: 'Looks good, merge it' });
+  assert.match(r.text, new RegExp(`answers the \\[needs you\\] question: sent to its worker ${id}, which resumes with it`));
+  const pending = (agents as unknown as { waker: { pending(id: string): { note: string } | undefined } }).waker.pending(id);
+  assert.match(pending!.note, /^\[answer\] Ben answered on w1 "Circuit icon button", in their own words: Looks good, merge it\n\nIt answers what you waited on: "OK the circuit button look/);
+  assert.equal(store.work.get('w1')!.needsYou!.answered!.by, 'Ben');
+  assert.equal(store.work.get('w1')!.question, undefined, "the dispatcher's question clears with it");
+  sessions.send(id, pending!.note, 'system');
+  await until('its declaration ends with that message', () => info.waitingOn === undefined);
+  await until('the resumed turn', () => info.status === 'idle');
+
+  // A new question later (its report's "still open" line names Ben) is a new message.
+  sessions.events.emit('turnEnd', handle, 'Merged.\n\nw1: still open: waiting on Ben to pick A or B for the hover colour');
+  await until('the second question', () => heard(ben.id, '[needs you]').length === 2);
+  assert.match(heard(ben.id, '[needs you]')[1].text, /Question \(its worker \w+ ended its turn saying it needs Ben\):\n\nw1: still open: waiting on Ben to pick A or B for the hover colour/);
+  assert.equal(store.work.get('w1')!.needsYou!.kind, 'report');
+});
+
+test('w1378: waits on a person already open when it ships go once, as one [needs you] digest per person', async (t) => {
+  const { store, agents, chat, call, heard } = setup(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Comet hit delay', brief: 'Explosions lag.' });
+  await call(ben, 'request_work', { title: 'Hint placement', brief: 'Where the yellow hint goes.' });
+  await call(chat(LOTH).info, 'request_work', { title: 'Steam Cloud on Mac', brief: 'Path mismatch.' });
+  // Questions recorded before w1378 shipped: no [needs you] was sent for them.
+  for (const [id, text] of [['w1', 'Which delay did you see: (1), (2) or (3)?'], ['w2', 'Pick A, B or C (PR #1779; stills in /srv/fff/review/w1342-hint/)'], ['w3', 'Did you change the Steamworks override?']]) {
+    const w = store.work.get(id)!;
+    Object.assign(w, { status: 'question', question: { text, at: T0 } });
+    store.putWork(w);
+  }
+  assert.equal(agents.orchestrators.needsYouDigest(agents.personWaits()), 3);
+  await until('one digest each', () => heard(ben.id, '[needs you]').length === 1 && heard(chat(LOTH).info.id, '[needs you]').length === 1);
+  const digest = heard(ben.id, '[needs you]')[0].text;
+  assert.match(digest, /^\[needs you\] digest: 2 requests wait on Ben's input, sent once/);
+  assert.match(digest, /w1 "Comet hit delay"\nQuestion \(the dispatcher asks Ben\):\n\nWhich delay did you see/);
+  assert.match(digest, /w2 "Hint placement"[\s\S]*Look at:\n\n- `\/srv\/fff\/review\/w1342-hint\/`\n\nPull requests: #1779/);
+  assert.doesNotMatch(digest, /Steam Cloud/, "Lothsahn's question is in his own digest");
+  assert.equal(store.work.get('w1')!.needsYou!.digest, true);
+  // Never again: not at the next boot, not as a single message.
+  assert.equal(agents.orchestrators.needsYouDigest(agents.personWaits()), 0);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(heard(ben.id, '[needs you]').length, 1);
 });
 
 test('w694: a delegated request lets its worker merge a clear bug fix or a tests-only PR, keeps a judgement call for a person, and keeps the person-only gates', () => {

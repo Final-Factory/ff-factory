@@ -23,6 +23,7 @@ export type NoticeKind =
   | 'work-update'
   | 'ledger'
   | 'person-message'
+  | 'needs-you'
   | 'other';
 
 export interface Notice {
@@ -152,6 +153,14 @@ export function parseNotice(text: string): Notice {
       (/^started /.test(what) ? 'Started' : /^sent to /.test(what) ? 'Given to its worker' : /^linked to /.test(what) ? 'Linked to a running worker' : /^approved /.test(what) ? 'Approved' : what.charAt(0).toUpperCase() + what.slice(1));
     const body = question ? said || undefined : [`${workId}: ${what}.`, said].filter(Boolean).join('\n');
     return { kind: 'dispatch', summary: question ? `The dispatcher asks about “${clip(title, 70)}”` : `${verdict}: “${clip(title, 90)}”`, attention: question, body, workId };
+  }
+  // A question for the person, from the dispatcher or a worker that waits on them (w1378, server/needsYou.ts): amber, open.
+  if (tag === 'needs you') {
+    const head = rest.split('\n')[0].trim();
+    const d = /^(w\d+) "(.+?)"$/.exec(head);
+    if (d) return { kind: 'needs-you', summary: `Needs you: ${d[1]} “${clip(d[2], 90)}”`, attention: true, body: rest.slice(rest.indexOf('\n') + 1).trim(), workId: d[1] };
+    const n = /^digest: (\d+)/.exec(head);
+    return { kind: 'needs-you', summary: n ? `Needs you: ${n[1]} ${n[1] === '1' ? 'question' : 'questions'} waiting` : clip(oneLine(rest), 160), attention: true, body: rest.trim() };
   }
   if (tag === 'work request') {
     const r = /^(w\d+) from (.+?)(?: \((?:low|high|urgent)\))?: "(.+?)"/.exec(rest);

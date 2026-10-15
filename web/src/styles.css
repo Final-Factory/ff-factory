@@ -5989,6 +5989,35 @@ button.board-head-link:hover {
   max-height: none;
 }
 
+/* The question in full with its files, PRs and report (w1378): what the person answers, above the request's brief. */
+.wait-needs-you {
+  display: grid;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-2);
+  border-left: 3px solid var(--amber, var(--border));
+  background: var(--bg-2, transparent);
+  border-radius: var(--radius);
+}
+
+.wait-question,
+.wait-previews {
+  overflow-wrap: anywhere;
+}
+
+.wait-previews img,
+.wait-previews video {
+  max-width: min(100%, 520px);
+}
+
+.wait-report > summary {
+  cursor: pointer;
+}
+
+.wait-report {
+  max-height: 22em;
+  overflow: auto;
+}
+
 .wait-actions {
   display: flex;
   flex-wrap: wrap;

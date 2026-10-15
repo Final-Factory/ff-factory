@@ -54,12 +54,13 @@ import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQ
 import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
+import { alreadySent, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
-import type { AttachmentRef, ConditionalDecision, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, ConditionalDecision, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -488,7 +489,28 @@ export class Orchestrators {
   }
 
   /** Stop the timers (notices gathered for the dispatcher, the capacity wake): the server or a test is ending. */
+  /** The one-off [needs you] digest after a boot (w1378, scheduleNeedsYouDigest). */
+  private digestTimer: NodeJS.Timeout | undefined;
+
+  /**
+   * After a boot, once the sessions and the machines' workers have reported in: the waits on a person not yet sent as
+   * `[needs you]` go out as one digest per person (needsYouDigest). `waits` reads them then (Agents.personWaits).
+   */
+  scheduleNeedsYouDigest(waits: () => { w: WorkItem; wait: NeedsYouWait }[], ms: number) {
+    clearTimeout(this.digestTimer);
+    this.digestTimer = setTimeout(() => {
+      try {
+        const n = this.needsYouDigest(waits());
+        if (n) console.log(`ledger: [needs you] digest: ${n} wait(s) on a person sent`);
+      } catch (e) {
+        console.warn('ledger: [needs you] digest failed:', (e as Error).message);
+      }
+    }, ms);
+    this.digestTimer.unref?.();
+  }
+
   close() {
+    clearTimeout(this.digestTimer);
     for (const g of this.gathered.values()) clearTimeout(g.timer);
     this.gathered.clear();
     clearTimeout(this.capacityTimer);
@@ -676,6 +698,93 @@ export class Orchestrators {
     }, lane ? (this.d.intakeGatherMs ?? INTAKE_GATHER_MS) : (this.d.gatherMs ?? GATHER_MS));
     g.timer.unref?.();
     this.gathered.set(key, g);
+  }
+
+  // ---------------------------------------------------------------- questions for a person (w1378, server/needsYou.ts)
+
+  /**
+   * Send a wait on a person to their own orchestrators as one `[needs you]` message with the question in full, its files
+   * and pull requests, and keep it on the request (the page shows it whole). Once per question: a wait whose key was sent
+   * already is not sent again, whatever turn, heartbeat or restart comes. Returns the people told ([] when sent before).
+   */
+  needsYou(w: WorkItem, wait: NeedsYouWait): Requester[] {
+    if (!isOpen(w) || alreadySent(w, wait.key)) return [];
+    const to = whoOf(wait.names, this.d.identity.list(), wait.kind === 'question' ? [w.requestedBy] : w.requesters);
+    const r = needsYouRecord(w, wait, to, this.now().toISOString(), { reviewRoot: this.d.cfg.review?.root });
+    this.keepNeedsYou(w, r);
+    for (const p of to) this.toPeople([p], needsYouText(w, r, p.displayName));
+    return to;
+  }
+
+  /**
+   * The one-off digest (w1378): every wait on a person not yet sent as `[needs you]` (open when this shipped, or begun while
+   * the portal was down), one message per person, each recorded as sent so it never goes again. Returns how many waits.
+   */
+  needsYouDigest(waits: readonly { w: WorkItem; wait: NeedsYouWait }[]): number {
+    const at = this.now().toISOString();
+    const per = new Map<string, { p: Requester; items: { w: WorkItem; r: WorkNeedsYou }[] }>();
+    let n = 0;
+    for (const { w, wait } of waits) {
+      if (!isOpen(w) || alreadySent(w, wait.key)) continue;
+      const to = whoOf(wait.names, this.d.identity.list(), wait.kind === 'question' ? [w.requestedBy] : w.requesters);
+      const r = needsYouRecord(w, wait, to, at, { reviewRoot: this.d.cfg.review?.root, digest: true });
+      this.keepNeedsYou(w, r);
+      n++;
+      for (const p of to) {
+        const k = p.userId.toLowerCase();
+        const e = per.get(k) ?? { p, items: [] };
+        e.items.push({ w, r });
+        per.set(k, e);
+      }
+    }
+    for (const { p, items } of per.values()) this.toPeople([p], needsYouDigestText(items, p.displayName));
+    return n;
+  }
+
+  private keepNeedsYou(w: WorkItem, r: WorkNeedsYou) {
+    w.needsYou = r;
+    this.stamp(w, `[needs you]${r.digest ? ' (digest)' : ''} sent to ${r.who.join(', ')}'s orchestrator: ${clip(r.question.replace(/\s+/g, ' '), 160)}`);
+    this.store.putWork(w);
+    console.log(`ledger: [needs you]${r.digest ? ' (digest)' : ''} ${w.id} to ${r.who.join(', ')} (${r.kind}${r.worker ? `, worker ${r.worker}` : ''})`);
+  }
+
+  /**
+   * The dispatcher's question (decide_work ask, or a dead gate's "is it still needed?"), to its filer as `[needs you]`, with
+   * the end of its newest worker's report for context. A question while a worker's wait on a person is still unanswered is
+   * the same wait (the dispatcher asking on the worker's behalf, as its brief told it before w1378): no second message.
+   */
+  private askPerson(w: WorkItem): string {
+    const q = w.question;
+    if (!q) return '';
+    const open = w.needsYou && !w.needsYou.answered && w.needsYou.kind !== 'question' ? w.needsYou : undefined;
+    if (open) {
+      this.stamp(w, `the dispatcher's question folded into the [needs you] already with ${open.who.join(', ')} (sent ${open.at.slice(11, 16)} UTC): not sent again`);
+      this.store.putWork(w);
+      return `${open.who.join(', ')}'s orchestrator already has this wait as [needs you] (worker ${open.worker ?? '?'}'s question, sent ${open.at.slice(11, 16)} UTC): no second message. Their answer comes back as a [work update] and goes to that worker.`;
+    }
+    const worker = [...w.sessionIds].reverse().map((id) => this.store.sessions.get(id)).find((s) => s?.kind === 'worker' && s.lastResult);
+    const to = this.needsYou(w, { kind: 'question', key: `question:${q.at}`, question: q.text, names: [w.requestedBy.displayName], ...(worker?.lastResult ? { report: worker.lastResult } : {}) });
+    return to.length ? `${names(to)}'s orchestrator has your question as [needs you].` : `${names([w.requestedBy])}'s orchestrator already has this question.`;
+  }
+
+  /**
+   * A person answered a `[needs you]` question in their own turn (updateNow): the worker that waits on it resumes with their
+   * words within a minute, as a dashboard answer would make it (w1378: "I'll answer you and you send the response back").
+   * Its declaration ends with that message, and the alert clears. A dispatcher question with no worker goes to the
+   * dispatcher as before. Returns the line for the request's log and the dispatcher's [work update].
+   */
+  private answerNeedsYou(w: WorkItem, by: Requester, note: string): string {
+    const r = w.needsYou!;
+    r.answered = { by: by.displayName, at: this.now().toISOString() };
+    const sid = r.worker;
+    const s = sid ? this.store.sessions.get(sid) : undefined;
+    if (!sid || !s) return `answers the [needs you] question${sid ? ` (its worker ${sid} is gone: start the work with it)` : ''}`;
+    if (BUSY.includes(s.status)) return `answers the [needs you] question; its worker ${sid} is mid-turn: pass it on with message_agent`;
+    const text =
+      `[answer] ${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\n` +
+      `It answers what you waited on: "${clip(r.question, 300)}". Carry on with it.`;
+    if (!this.wakeNow(sid, text, w.id)) return `answers the [needs you] question; its worker ${sid} could not be resumed: pass it on with message_agent`;
+    return `answers the [needs you] question: sent to its worker ${sid}, which resumes with it (nothing for you to pass on)`;
   }
 
   /** Send each of these people's own orchestrators a harness message (made if missing). */
@@ -1194,6 +1303,8 @@ export class Orchestrators {
         what.push(`answers the design question "${clip(w.flag.text, 120)}"`);
         w.flag = undefined;
       }
+      // w1378: a person's own answer to a [needs you] question goes to the worker that waits on it.
+      if (w.humanAsked && w.needsYou && !w.needsYou.answered) what.push(this.answerNeedsYou(w, owner, note));
     }
     if (input.close) {
       // A PERSON'S CLOSE IS FINAL (w370): no automatic-close mark or loose PR link survives it for the cleanup's
@@ -1786,9 +1897,10 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     if (input.action === 'reject' || input.action === 'done') w.outcome = clip(note, 300);
     this.stamp(w, `dispatcher: ${what}: ${note}`);
     this.store.putWork(w);
-    // A question is for the person who asked; the rest is news for everyone the request is for.
-    this.toPeople(input.action === 'ask' ? [w.requestedBy] : w.requesters, dispatchNotice(w, what, note));
-    return `${w.id} ${w.status}: ${what}. ${input.action === 'ask' ? names([w.requestedBy]) : names(w.requesters)}'s orchestrator has your note.`;
+    // A question is for the person who asked, as [needs you] (w1378); the rest is news for everyone the request is for.
+    if (input.action === 'ask') return `${w.id} ${w.status}: ${what}. ${this.askPerson(w)}`;
+    this.toPeople(w.requesters, dispatchNotice(w, what, note));
+    return `${w.id} ${w.status}: ${what}. ${names(w.requesters)}'s orchestrator has your note.`;
   }
 
   /**
@@ -4132,7 +4244,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     w.question = { text, at: this.now().toISOString() };
     this.stamp(w, `blocker closed without delivering: ${why}; asked ${w.requestedBy.displayName}`);
     this.store.putWork(w);
-    this.toPeople([w.requestedBy], dispatchNotice(w, 'a question', text));
+    this.askPerson(w);
   }
 
   /**
