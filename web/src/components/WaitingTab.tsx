@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { AppState, WorkItem } from '../../../shared/types';
 import { waitAge, type WaitingAsk, type WaitingItem } from '../../../shared/waiting';
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
-import { attempt, sessionsByIds, toast } from '../store';
+import { attempt, focusWait, sessionsByIds, toast, useStore } from '../store';
 import { fmtRelative, navigate } from '../util';
 import { Markdown } from './Markdown';
 import { PermissionCard } from './Transcript';
@@ -23,8 +23,21 @@ const AGE_TONE = { fresh: 'grey', old: 'amber', stale: 'red' } as const;
 export function WaitingTab({ app, items, now }: { app: AppState; items: WaitingItem[]; now: number }) {
   const mine = items.filter((i) => i.mine);
   const others = items.filter((i) => !i.mine);
+  // A "Needs you" item names the request it is about (w1356): put its card at the top, with its buttons in view, and flash it.
+  const focusId = useStore((s) => s.focusWaitId);
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!focusId) return;
+    const el = root.current?.querySelector<HTMLElement>(`[data-testid="wait-${CSS.escape(focusId)}"]`);
+    if (el) {
+      el.scrollIntoView({ block: 'start' });
+      el.classList.add('flash');
+      setTimeout(() => el.classList.remove('flash'), 1600);
+    }
+    focusWait(null);
+  }, [focusId, items.length]);
   return (
-    <div className="sa-scroll waiting-tab" data-testid="waiting-tab">
+    <div className="sa-scroll waiting-tab" data-testid="waiting-tab" ref={root}>
       <p className="dim small ledger-none" data-testid="waiting-summary">
         {items.length
           ? `${items.length} ${items.length === 1 ? 'request waits' : 'requests wait'} on input: ${mine.length} on you, ${others.length} on someone else. The oldest waits first.`

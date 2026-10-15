@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkItem } from '../shared/types.ts';
-import { decisionsOnMe, intakeRecommendation, waitAge, waitingItems } from '../shared/waiting.ts';
+import { decisionsOn, decisionsOnMe, intakeRecommendation, waitAge, waitingItems } from '../shared/waiting.ts';
 import type { WorkLive } from '../shared/workState.ts';
 
 const BEN = { userId: 'ben', displayName: 'Ben' };
@@ -55,4 +55,20 @@ test('decisionsOnMe counts the approvals of a reviewer, their question and their
 
 test('a wait is old after a day and stale after three', () => {
   assert.deepEqual([ago(0.5), ago(2), ago(4)].map((s) => waitAge(s, NOW)), ['fresh', 'old', 'stale']);
+});
+
+test('a decision the sidebar counts is in the tab even while a worker is mid-turn on its request (w1356)', () => {
+  // workLive says Working first when a worker is mid-turn, so the old tab (waiting only) dropped these: the Needs you item
+  // opened a page where its question was nowhere to be found.
+  const work = [pending('w1', 3), item('w2', { status: 'question', question: { text: 'Which?', at: ago(2) } }), item('w3', { flag: { kind: 'design', text: 'd', at: ago(1), for: [BEN] } }), item('w4')];
+  const live = new Map<string, WorkLive>(work.map((w) => [w.id, { state: 'working', why: 'w9 mid-turn' }]));
+  const me = { ...BEN, reviewer: true };
+  assert.deepEqual(waitingItems(work, live, me).map((i) => [i.w.id, i.mine, i.ask]), [['w1', true, 'approve'], ['w2', true, 'answer'], ['w3', true, 'answer']]);
+  // Every decision the count finds is a card, and the list says what each asks.
+  const ids = decisionsOn(work, me).map((d) => d.w.id);
+  assert.deepEqual(ids, ['w1', 'w2', 'w3']);
+  assert.deepEqual(waitingItems(work, live, me).map((i) => i.w.id), ids);
+  assert.deepEqual(decisionsOn(work, me).map((d) => d.text), ['Approve or decline w1', 'Answer w2: Which?', 'Answer w3: d']);
+  // A closed request has no live state and stays out.
+  assert.deepEqual(waitingItems(work, new Map(), me), []);
 });
