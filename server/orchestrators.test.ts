@@ -2012,7 +2012,8 @@ test('w1378: a worker waiting on a person reaches that person’s orchestrator o
   await until('Ben’s orchestrator hears it', () => heard(ben.id, '[needs you]').length === 1);
   const msg = heard(ben.id, '[needs you]')[0].text;
   assert.match(msg, new RegExp(`^\\[needs you\\] w1 "Circuit icon button"\\nQuestion \\(its worker ${id} stopped and waits on Ben\\):\\n\\nOK the circuit button look \\(stills in /srv/fff/review/w1-icon/w1b-\\*\\.png\\) so PR #1799 can merge on green CI\\n`));
-  assert.match(msg, /Look at:\n\n- `\/srv\/fff\/review\/w1-icon\/w1b-\*\.png`\n- !\[main\.png\]\(<\/srv\/fff\/review\/w1-icon\/main\.png>\)/);
+  // (This harness has no review root on disk: files are kept as written, a wildcard as code, after them. w1384's test has one.)
+  assert.match(msg, /Look at:\n\n- !\[main\.png\]\(<\/srv\/fff\/review\/w1-icon\/main\.png>\)\n- `\/srv\/fff\/review\/w1-icon\/w1b-\*\.png`/);
   assert.match(msg, /Pull requests: #1799/);
   assert.match(msg, /The end of its last report:\n\nStills published/);
   assert.match(msg, new RegExp(`record it with update_work on w1, their answer as the note: FF Factory resumes worker ${id}`));
@@ -2078,6 +2079,35 @@ test('w1378: waits on a person already open when it ships go once, as one [needs
   assert.equal(agents.orchestrators.needsYouDigest(agents.personWaits()), 0);
   await new Promise((r) => setTimeout(r, 200));
   assert.equal(heard(ben.id, '[needs you]').length, 1);
+});
+
+test('w1384: review media reaches the person inline: a [needs you] for a folder lists each clip, and a reply naming it bare gets them', async (t) => {
+  const { dir, store, agents, dispatcher, chat, call, heard, sessions } = setup(t);
+  // The review root the portal serves (config review.root, here the default <sandboxRoot>/_review), with fog preview v4.
+  const topic = path.join(dir, '_review', 'w1-fog-look-v4');
+  fs.mkdirSync(path.join(topic, '.preview'), { recursive: true });
+  const clip = path.join(topic, 'fog-v4-1920.mp4');
+  const still = path.join(topic, 'sheet.png');
+  for (const f of [clip, still, path.join(topic, '.preview', 'fog-v4-1920.mp4')]) fs.writeFileSync(f, 'x');
+  fs.utimesSync(still, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Fog of war', brief: 'Explored stays explored.' });
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben: does fog preview v4 at /srv/fff/review/w1-fog-look-v4/ look right?' });
+  await until('Ben hears it', () => heard(ben.id, '[needs you]').length === 1);
+  const msg = heard(ben.id, '[needs you]')[0].text;
+  assert.ok(msg.includes(`- ![fog-v4-1920.mp4](<${clip}>)\n- ![sheet.png](<${still}>)`), msg);
+  assert.ok(!msg.includes('.preview'));
+
+  // The outgoing check: Ben's orchestrator relays it with the folder bare; what is kept and shown has the clip and the still.
+  const reply = store.append(ben.id, { kind: 'assistant', text: 'w1 (fog of war) waits on you: does preview v4 at `/srv/fff/review/w1-fog-look-v4/` look right?' });
+  assert.equal(reply.kind === 'assistant' && reply.text, `w1 (fog of war) waits on you: does preview v4 at \`/srv/fff/review/w1-fog-look-v4/\` look right?\n\n![fog-v4-1920.mp4](<${clip}>)\n\n![sheet.png](<${still}>)`);
+  // Only a person's own orchestrator: a worker's reply is kept as written.
+  const w = sessions.create({ kind: 'worker', title: 'Fog', model: 'opus', permissionMode: 'bypassPermissions', options: () => ({ model: 'opus' }), id: 'wk1', requestedBy: BEN });
+  const own = store.append(w.info.id, { kind: 'assistant', text: 'Published /srv/fff/review/w1-fog-look-v4/' });
+  assert.equal(own.kind === 'assistant' && own.text, 'Published /srv/fff/review/w1-fog-look-v4/');
+  // And the brief says it as a rule, with Ben's words.
+  const brief = (agents as unknown as { personalBrief(r: Requester): string }).personalBrief(BEN);
+  assert.match(brief, /\*\*Review media goes inline, never a bare path, folder or name\*\*[^\n]*I've reminded you as such like 100 times[^\n]*a folder \(`\/srv\/fff\/review\/<topic>\/`\) is each of its files, newest first, never `\.preview\/`/);
 });
 
 test('w694: a delegated request lets its worker merge a clear bug fix or a tests-only PR, keeps a judgement call for a person, and keeps the person-only gates', () => {

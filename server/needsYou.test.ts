@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
 import { alreadySent, needsYouDigestText, needsYouRecord, needsYouText, previewLine, previewsIn, prsIn, reportTail, whoOf, NEEDS_YOU_REPORT_CHARS } from './needsYou.ts';
 import type { UserInfo, WorkItem } from '../shared/types.ts';
 
@@ -14,16 +16,20 @@ const w = { id: 'w1360', title: 'Circuits: pills → circuit icon button / back 
 // The worker's words as the portal's journal had them on 2026-10-15 (place again: released lothdesktop/slot2 of 14fac04c).
 const W1360 = "OK the w1360 circuit button look (white circuit icon on Main, back arrow on the Circuit view; new stills after w1349's status-line fix in /srv/fff/review/w1360-circuit-icon-button/w1360b-*.png) so PR #1799 can merge on green CI";
 
-test('previews: review paths, wildcards and media files, once each, in the order named', () => {
-  assert.deepEqual(previewsIn([W1360]), ['/srv/fff/review/w1360-circuit-icon-button/w1360b-*.png']);
-  const report = 'Clips: /srv/fff/review/w1332-comet-catch-tail/before.mp4 and /srv/fff/review/w1332-comet-catch-tail/after.mp4.\nSheet: F:\\ffsb\\_review\\w1331\\sheet-1920.png; again /srv/fff/review/w1332-comet-catch-tail/after.mp4';
-  assert.deepEqual(previewsIn([report], 'F:\\ffsb\\_review'), [
+// Where the review root is not on this computer (a dev machine): what is named is kept as written, files first. The
+// portal's own case (folders expanded, files checked on disk) is in reviewMedia.test.ts.
+const NOWHERE = path.join(os.tmpdir(), 'no-such-review-root-w1384');
+
+test('previews where the review root is not here: files and folders kept as written, each once', () => {
+  assert.deepEqual(previewsIn([W1360], NOWHERE), ['/srv/fff/review/w1360-circuit-icon-button/w1360b-*.png']);
+  const report = 'Clips: /srv/fff/review/w1332-comet-catch-tail/before.mp4 and /srv/fff/review/w1332-comet-catch-tail/after.mp4.\nSheet: C:\\work\\w1331\\sheet-1920.png; again /srv/fff/review/w1332-comet-catch-tail/after.mp4';
+  assert.deepEqual(previewsIn([report], NOWHERE), [
     '/srv/fff/review/w1332-comet-catch-tail/before.mp4',
     '/srv/fff/review/w1332-comet-catch-tail/after.mp4',
-    'F:\\ffsb\\_review\\w1331\\sheet-1920.png',
+    'C:\\work\\w1331\\sheet-1920.png',
   ]);
-  assert.deepEqual(previewsIn(['Watch /srv/fff/review/w1332-comet-catch-tail/ and OK the look']), ['/srv/fff/review/w1332-comet-catch-tail/']);
-  assert.deepEqual(previewsIn([undefined, 'nothing to look at']), []);
+  assert.deepEqual(previewsIn(['Watch /srv/fff/review/w1332-comet-catch-tail/ and OK the look'], NOWHERE), ['/srv/fff/review/w1332-comet-catch-tail/']);
+  assert.deepEqual(previewsIn([undefined, 'nothing to look at'], NOWHERE), []);
 });
 
 test('previews show inline in Markdown when they are one file, as code otherwise', () => {

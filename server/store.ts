@@ -94,6 +94,11 @@ export class Store {
   readonly standing = new Map<string, StandingAgent>();
   readonly delegations = new Map<string, DelegationRequest>();
   readonly machines = new Map<string, Machine>();
+  /**
+   * What a session's reply becomes before it is kept and shown (w1384): Agents sets it to put review media inline in a
+   * personal orchestrator's replies (server/reviewMedia.ts inlineReviewMedia). The model's own conversation is unchanged.
+   */
+  assistantText?: (sessionId: string, text: string) => string;
   /** The work ledger (docs/orchestrators.md), kept in its own file, data/work.json. */
   readonly work = new Map<string, WorkItem>();
   /** The number of the last work item ("w12" is 12). */
@@ -273,6 +278,13 @@ export class Store {
   }
 
   append(sessionId: string, e: DistributiveOmit<TranscriptEvent, 'seq' | 't'>): TranscriptEvent {
+    if (e.kind === 'assistant' && this.assistantText) {
+      try {
+        e = { ...e, text: this.assistantText(sessionId, e.text) };
+      } catch (err) {
+        console.warn(`store: the reply filter failed for ${sessionId}; kept as written:`, (err as Error).message);
+      }
+    }
     const seq = this.nextSeq(sessionId);
     const full = redactValue({ ...e, seq, t: new Date().toISOString() } as TranscriptEvent);
     this.appendLine(sessionId, JSON.stringify(full));

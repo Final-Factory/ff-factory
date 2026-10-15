@@ -1563,9 +1563,11 @@ update_work on w1360, their answer as the note: FF Factory resumes worker 14fac0
 page clears. Never answer it for them. …
 ```
 
-- **Files and pull requests** (`previewsIn`, `prsIn`): paths under the review root (`/srv/fff/review/…`, config `review.root`)
-  and any image or video path the question or the report names; `owner/repo#n`, github.com pull links, `PR #n` and `#nnn`, plus
-  the request's own open PRs. A single still or clip is written `![name](<path>)`, which the page shows inline (`/api/image`).
+- **Files and pull requests** (`previewsIn`, `prsIn`): every still and clip the question or the report names, as its own
+  `![name](<absolute path>)` line, which the page shows inline (`/api/image`), resolved on the portal's disk by
+  `server/reviewMedia.ts` ([Review media inline](#review-media-inline-never-a-bare-path-w1384)): a folder is its files, a bare
+  name its absolute path, a name cut off mid-word its folder's files. Pull requests: `owner/repo#n`, github.com pull links,
+  `PR #n` and `#nnn`, plus the request's own open PRs.
 - **Whom** (`whoOf`): every person FF Factory knows whose name is a word in the wait's `who` ("Ben (or his orchestrator)" is
   Ben; "Ben, Lothsahn" is both), else the requesters (the filer, for the dispatcher's question).
 - **Once per question.** Each wait has a key: `question:<asked at>`, `declared:<worker>:<declared at>` or
@@ -1599,7 +1601,62 @@ when it went to whose orchestrator, and "Answer in your chat" (the person's own 
 too. In the chat, a `[needs you]` notice is amber and starts open, its body shown as Markdown (`shared/notices.ts`,
 `needs-you`).
 
-## Agent states: Working, Needs you, Queued, Blocked, Idle, Stopped
+## Review media inline, never a bare path (w1384)
+
+Ben, 2026-10-13: "you have to inline preview videos in this chat for me to verify them". Ben, 2026-10-15, after a
+`[needs you]` for w1182 whose "Look at" was only `/srv/fff/review/w1182-fog-look-v4/`: "I need to see the preview video for
+the fog. Stop giving me paths to videos and inline the videos like you should be doing and I've reminded you as such like
+100 times".
+
+**The rule** (the personal orchestrator's brief, `personalBrief`, says it as a bold rule with his words): every still and clip
+a worker, the dispatcher or a `[needs you]` names goes into the message to the person as its own
+`![name](<absolute path>)` line. A folder is each of its clips and stills, newest first, never its `.preview/` encodes; a bare
+name is its absolute path. A path, folder or media name not in `![..](<..>)` form is a miss.
+
+What went wrong (measured, the ledger and the portal journal, 2026-10-15):
+
+- w1182: the dispatcher's question named only the folder, and w1378's `previewsIn` passed a folder through as code text.
+  The orchestrator relayed the path.
+- w1241: the `[needs you]` digest built its files from the worker's kept report, `SessionInfo.lastResult`, which
+  `reportClip` (`server/sessions.ts`) cuts in the middle: `glow_800_closeup.jpg` became `glow_800_closeup.jp`.
+
+**What resolves a path** (`server/reviewMedia.ts`, on the portal's disk under `review.root`; `/srv/fff/review/…` and the
+root's own path both work):
+
+| written | stands for |
+|---|---|
+| a file that exists | itself |
+| a folder | its stills and clips (mp4, webm, mov, png, jpg, gif, webp), two levels, newest first by mtime then name, no dot-folders (`.preview/`), at most 8 |
+| a wildcard (`w1360b-*.png`) | its matches, newest first |
+| a file that is not there (cut off, renamed) | its topic folder's files |
+| a bare name (`glow_800_closeup.jpg`, or a relative target `![x](<x.mp4>)`) | the file of that name in a folder the text names, then the request's own topics (`wNNN-*`), then any topic's top level |
+| another absolute media path (a machine's file) | itself, as written |
+
+The `[needs you]` record lists them (`needsYouRecord`, from the full report when the turn just ended), and the relative image
+targets in the question and the report are made absolute. Where the review root is not on the computer (a dev machine), files
+and folders are kept as written.
+
+**The outgoing check.** Every reply a person's own orchestrator writes goes through `Agents.inlineForPerson` before it is
+kept and shown (`Store.assistantText`, applied in `Store.append` to `assistant` events of personal orchestrators only). The
+page already shows a whole path to an existing still or clip as a thumbnail or player under the message
+(`shared/imagePaths.ts` `mentionedPaths`, `web/src/components/Images.tsx`; an e2e test pins it, `e2e/images.spec.ts`), so
+those are left as written. The check covers what that strip cannot show: a review folder, a wildcard, a file that is not
+there (a name cut off mid-word), a bare media name and a relative image target. Each gets its stills and clips as
+`![name](<absolute path>)` lines under the paragraph (or code block) that names it, and a relative target becomes absolute.
+The words stay as written; media already shown is not repeated, so it is idempotent; web links and replies naming no media
+are left alone. The portal log says how many files it added (`review media: N file(s) put inline in a reply of …`).
+
+**Why rewrite, not send it back.** Both were weighed:
+
+- Sending it back means refusing the reply and having the orchestrator write it again. That is unsafe for this case. The
+  reply streams to the page as it is written (`stream_event` deltas, `server/sessions.ts`), so the person has the bare path
+  before any check at the turn's end could refuse it. A second turn costs a model call, and the fix again depends on the
+  model following a rule it has already missed many times.
+- The rewrite is deterministic. It only adds media lines and never removes words. It runs on what is kept and shown, so the
+  person sees the media whatever the model wrote.
+- Its cost: the model's own conversation keeps the bare text, so the orchestrator does not learn from it. The brief's rule
+  stays, the check is the backstop, and the log line shows each time it had to act.
+
 
 Every agent shows one of these (w475, asked by Lothsahn: "clear between 'available' workers (idle) and 'waiting'
 workers"; `shared/agentState.ts` `agentState`). Since w643 the words follow the ledger's three waits ([Waiting,
