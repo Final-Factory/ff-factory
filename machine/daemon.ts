@@ -240,6 +240,8 @@ interface Entry {
 }
 
 const HOME = os.homedir();
+/** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
+const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
 /** How often this Mac's own login's usage is polled until the portal says (usage_config: config usagePollMinutes). */
 const USAGE_DEFAULT_MINUTES = 15;
@@ -1200,14 +1202,17 @@ export class Daemon {
   private readonly lives = new Map<string, { s: LiveSession; link?: WebSocket; latest?: Buffer; sandbox: string; sessionId: string; timer?: NodeJS.Timeout }>();
   /** The last knob move per sandbox (ms): counted as activity, so its editor is not stopped as idle. */
   private readonly liveTouched = new Map<string, number>();
-  /** Knob moves a session's agent has not heard of yet: they open its next message. */
-  private readonly liveNotes = new Map<string, string[]>();
+  /** Knob moves a session's agent has not heard of yet, newest per knob: they open its next message. */
+  private readonly liveNotes = new Map<string, { key: string; text: string }[]>();
+  /** The last knob line written into a session's conversation: a drag's later moves amend it rather than add lines. */
+  private readonly liveLines = new Map<string, { key: string; seq: number; at: number }>();
 
   private withLiveNotes(sessionId: string, text: string): string {
     const notes = this.liveNotes.get(sessionId);
     if (!notes?.length) return text;
     this.liveNotes.delete(sessionId);
-    return `[live view] Since your last message, in the live view:\n${notes.map((n) => `- ${n}`).join('\n')}\n(Not saved: keep a value by editing the .mat yourself.)\n\n${text}`;
+    this.liveLines.delete(sessionId);
+    return `[live view] Since your last message, in the live view:\n${notes.map((n) => `- ${n.text}`).join('\n')}\n(Not saved: keep a value by editing the .mat yourself.)\n\n${text}`;
   }
 
   private async onLive(msg: Extract<ToDaemon, { type: 'live' }>): Promise<string> {
@@ -1230,10 +1235,24 @@ export class Daemon {
       const reply = await l.s.command(command);
       if (!reply.ok) throw new Error(reply.result || `the game answered ${reply.status}`);
       if (msg.note) {
-        this.liveTouched.set(msg.sandbox, Date.now());
-        if (this.entries.has(msg.sessionId)) this.sink().append(msg.sessionId, { kind: 'system', text: `[live view] ${msg.note}` });
-        const notes = this.liveNotes.get(msg.sessionId) ?? [];
-        notes.push(msg.note);
+        const now = Date.now();
+        this.liveTouched.set(msg.sandbox, now);
+        // The knob: material and property of a set; a reset is its own line.
+        const parts = command.split('|');
+        const key = parts[0] === 'look.material.set' ? `${parts[1]}|${parts[2]}` : `${command}|${now}`;
+        const text = `[live view] ${msg.note}`;
+        const last = this.liveLines.get(msg.sessionId);
+        if (this.entries.has(msg.sessionId)) {
+          if (last && last.key === key && now - last.at < LIVE_LINE_MERGE_MS) {
+            this.sink().amend(msg.sessionId, last.seq, { text });
+            last.at = now;
+          } else {
+            const e = this.sink().append(msg.sessionId, { kind: 'system', text });
+            this.liveLines.set(msg.sessionId, { key, seq: e.seq, at: now });
+          }
+        }
+        const notes = (this.liveNotes.get(msg.sessionId) ?? []).filter((n) => n.key !== key);
+        notes.push({ key, text: msg.note });
         this.liveNotes.set(msg.sessionId, notes.slice(-20));
       }
       return reply.result;

@@ -6,6 +6,7 @@ import { toastError } from '../store';
 type Value = number | number[];
 
 const THROTTLE_MS = 100;
+const REREAD_MS = 5000;
 const keyOf = (material: string, name: string) => `${material}\u0000${name}`;
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 const same = (a: Value, b: Value) => (Array.isArray(a) && Array.isArray(b) ? a.length === b.length && a.every((x, i) => x === b[i]) : a === b);
@@ -99,6 +100,22 @@ function NumberField({ value, onMove, onCommit, int, label, step = int ? 1 : 0.1
   );
 }
 
+/** A knob's value as the toast says it: a colour by its hue and intensity (a raw HDR channel above 1 would read as white), else the numbers. */
+function sayValue(knob: LiveKnob, v: Value): string {
+  if (!Array.isArray(v)) return fmtNum(v);
+  if (knob.type === 'color') {
+    const { hue, k } = colorParts(v, !!knob.hdr);
+    return hexOf(hue) + (knob.hdr ? ` ×${fmtNum(Math.round(k * 100) / 100)}` : '');
+  }
+  return v.map(fmtNum).join(', ');
+}
+
+/** The game's reason for an unreadable material, without its error code; a material that is not loaded yet comes by itself. */
+function sayMaterialError(error: string): string {
+  const text = error.replace(/^bad_arguments:\s*/, '').replace(/[.\s]+$/, '');
+  return /no loaded material/i.test(error) ? `${text}. It is read again every few seconds (a material loads when the game first draws it).` : `${text}.`;
+}
+
 function KnobRow({ knob, value, error, onMove, onCommit }: { knob: LiveKnob; value: Value; error?: string; onMove: (v: Value) => void; onCommit: () => void }) {
   const num = typeof value === 'number' ? value : (value[0] ?? 0);
   const [floatHi, growFloat] = useSpan(num, 1, 2);
@@ -124,7 +141,7 @@ function KnobRow({ knob, value, error, onMove, onCommit }: { knob: LiveKnob; val
   } else if (knob.type === 'color' && colors) {
     const alpha = arr[3] ?? 1;
     const { hue, k } = colors;
-    if (knob.hdr) growK(k);
+    if (knob.hdr && Array.isArray(knob.value)) growK(colorParts(knob.value, true).k); // from what the game holds: growing from the drag would run away
     control = (
       <span className="lv-color">
         <input
@@ -181,6 +198,10 @@ function KnobRow({ knob, value, error, onMove, onCommit }: { knob: LiveKnob; val
 }
 
 interface Lane {
+  /** The value the knob had when this drag or edit started: the toast's "from", until an answer settles it. */
+  origin?: Value;
+  /** The hand is still on the control (no release or blur yet): the origin outlives answers until it lets go. */
+  held?: boolean;
   inflight: boolean;
   latest?: Value;
   timer?: ReturnType<typeof setTimeout>;
@@ -230,6 +251,14 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
 
   useEffect(() => () => lanes.current.forEach((l) => clearTimeout(l.timer)), []);
 
+  // A material the game cannot read yet (it loads when first drawn) is read again until it answers.
+  const unreadable = !!mats?.some((m) => m.error);
+  useEffect(() => {
+    if (!unreadable) return;
+    const t = setInterval(() => void load(), REREAD_MS);
+    return () => clearInterval(t);
+  }, [unreadable, load]);
+
   const find = (material: string, name: string) => matsRef.current?.find((m) => m.material === material)?.knobs.find((k) => k.name === name);
 
   const flush = (material: string, name: string) => {
@@ -251,15 +280,16 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
         if (next) setMats((ms) => ms?.map((m) => (m.material === material ? { ...m, knobs: m.knobs.map((k) => (k.name === name ? next : k)) } : m)) ?? ms);
         if (lane.latest === undefined) setDraft((d) => (key in d ? Object.fromEntries(Object.entries(d).filter(([k]) => k !== key)) : d));
         else schedule(material, name);
-        if (before && !same(before.value, sent)) {
-          const f = (v: Value) => (Array.isArray(v) ? (v.length >= 3 ? hexOf(v) : v.map(fmtNum).join(', ')) : fmtNum(v));
-          onMovedRef.current?.(`${before.label || before.name} ${f(before.value)} → ${f(sent)}`);
-        }
+        // "from" is what the knob held when the drag started, "to" what the game answered for this send.
+        const answered = r.knob?.value ?? sent;
+        if (before && lane.origin !== undefined && !same(lane.origin, answered)) onMovedRef.current?.(`${before.label || before.name} ${sayValue(before, lane.origin)} → ${sayValue(before, answered)}`);
+        if (lane.latest === undefined && !lane.timer && !lane.held) lane.origin = undefined;
       })
       .catch((e: unknown) => {
         // Snap back to what the game last answered, and say why.
         lane.inflight = false;
         lane.latest = undefined;
+        lane.origin = undefined;
         clearTimeout(lane.timer);
         lane.timer = undefined;
         setDraft((d) => Object.fromEntries(Object.entries(d).filter(([k]) => k !== key)));
@@ -280,6 +310,8 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
     const key = keyOf(material, name);
     let lane = lanes.current.get(key);
     if (!lane) lanes.current.set(key, (lane = { inflight: false, last: 0 }));
+    if (lane.origin === undefined) lane.origin = find(material, name)?.value;
+    lane.held = true;
     lane.latest = value;
     setDraft((d) => ({ ...d, [key]: value }));
     setErrors((x) => (key in x ? Object.fromEntries(Object.entries(x).filter(([k]) => k !== key)) : x));
@@ -287,7 +319,13 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
   };
 
   /** Released: the final value goes now, not after the throttle. */
-  const commit = (material: string, name: string) => flush(material, name);
+  const commit = (material: string, name: string) => {
+    const lane = lanes.current.get(keyOf(material, name));
+    if (!lane) return;
+    lane.held = false;
+    flush(material, name);
+    if (!lane.inflight && lane.latest === undefined && !lane.timer) lane.origin = undefined;
+  };
 
   const reset = async (material: string) => {
     setResetting(material);
@@ -351,7 +389,7 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
               </button>
             </div>
             {m.error ? (
-              <div className="lv-note lv-err">Could not read this material: {m.error}</div>
+              <div className="lv-note lv-err">Could not read this material: {sayMaterialError(m.error)}</div>
             ) : m.knobs.length === 0 ? (
               <div className="lv-note">No knobs: its shader has no properties to move.</div>
             ) : (

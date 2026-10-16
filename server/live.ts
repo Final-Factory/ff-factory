@@ -9,8 +9,11 @@ import type { FromDaemon, ToDaemon } from './machineProtocol.ts';
 const VIEWER_BACKLOG_BYTES = 1024 * 1024;
 export const LIVE_FPS = { default: 15, max: 30 };
 export const LIVE_WIDTH = { default: 960, min: 320, max: 1920 };
-/** A material and a property name as the game's shaders have them ("VfxComet", "_ComaColor"); nothing else reaches it. */
-const NAME = /^[A-Za-z0-9_][A-Za-z0-9_ .()-]{0,79}$/;
+/**
+ * A material as the game names it ("VfxComet") or its Resources path ("Vfx/VfxComet", loaded even before anything draws it),
+ * and a shader property name ("_ComaColor"); nothing else reaches the game.
+ */
+const NAME = /^[A-Za-z0-9_][A-Za-z0-9_ .()\/-]{0,79}$/;
 const PROPERTY = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
 export interface LiveHubDeps {
@@ -151,7 +154,8 @@ export class LiveHub {
       try {
         const text = await this.command(v, `look.material.list|${material}`);
         const j = JSON.parse(text) as { material?: string; shader?: string; knobs?: LiveMaterialKnobs['knobs'] };
-        out.push({ material: j.material ?? material, ...(j.shader ? { shader: j.shader } : {}), knobs: Array.isArray(j.knobs) ? j.knobs : [] });
+        // The name the view was started with, not the game's: a knob move must name one of the view's materials.
+        out.push({ material, ...(j.shader ? { shader: j.shader } : {}), knobs: Array.isArray(j.knobs) ? j.knobs : [] });
       } catch (e) {
         out.push({ material, knobs: [], error: (e as Error).message });
       }

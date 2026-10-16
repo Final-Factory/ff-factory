@@ -38,12 +38,17 @@ test('a worker\'s live view: frames beside its chat, a knob that reaches the gam
   // Move the knob: the game takes it, the picture follows, and the conversation says who set what.
   const before = await stage.locator('canvas').evaluate((c: HTMLCanvasElement) => c.toDataURL());
   const posted = page.waitForResponse((r) => r.url().endsWith(`/api/live/${worker.id}/knob`) && r.request().method() === 'POST');
-  await intensity.locator('input[type="range"]').fill('4');
+  await intensity.locator('input[type="range"]').fill('2');
   expect((await posted).ok()).toBeTruthy();
+  const second = page.waitForResponse((r) => r.url().endsWith(`/api/live/${worker.id}/knob`) && r.request().method() === 'POST');
+  await intensity.locator('input[type="range"]').fill('4');
+  expect((await second).ok()).toBeTruthy();
   await expect.poll(() => stage.locator('canvas').evaluate((c: HTMLCanvasElement) => c.toDataURL()), { timeout: 15_000 }).not.toBe(before);
   await expect
     .poll(async () => (await events(ctx, worker.id)).some((e) => e.kind === 'system' && /^\[live view\] tester set VfxComet\._Intensity to 4 in the live view$/i.test(e.text)), { timeout: 15_000 })
     .toBe(true);
+  // One drag is one line: the knob's later moves amended it rather than adding a line each.
+  expect((await events(ctx, worker.id)).filter((e) => e.kind === 'system' && e.text.startsWith('[live view]')).length).toBe(1);
   const knobs = await (await ctx.get(`/api/live/${worker.id}/knobs`)).json();
   expect(knobs[0].knobs.find((k: { name: string }) => k.name === '_Intensity').value).toBe(4);
 
