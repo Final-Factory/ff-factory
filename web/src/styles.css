@@ -1199,63 +1199,36 @@ select.input {
   font-family: var(--mono);
 }
 
-/* Every Claude account, one row like a computer's: name and state, then session and weekly with their resets. */
-.pt-row {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
+/* Every Claude account, one line each: "name - weekly 62%, session 38%", red when spent, yellow from 80%, blue otherwise. */
+.plan-list {
+  gap: var(--s-1);
 }
 
-/* The account's name (an email can be long) has the row's whole width, with its state at the right. */
-.pt-who {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: baseline;
-  gap: var(--s-2);
-  min-width: 0;
+.plan-item {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1.4;
 }
 
-.pt-who .mt-name {
-  flex: 1;
-  min-width: 0;
-  color: var(--text);
-}
-
-.pt-row > .mt-note {
-  grid-column: 1 / -1;
-}
-
-.pt-state {
-  font-size: var(--fs-xs);
-  white-space: nowrap;
+.plan-item-name {
+  display: inline-block;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--text-3);
+  white-space: nowrap;
+  vertical-align: bottom;
 }
 
-.pt-use { color: var(--green); }
-.pt-spent { color: var(--red); }
-.pt-next { color: var(--blue); }
-
-.ptable .mt-num {
-  display: grid;
-}
+.pl-red { color: var(--red); }
+.pl-yellow { color: var(--amber); }
+.pl-blue { color: var(--blue); }
 
 .sys-detail > .plan-refresh:first-child {
   padding-top: 0;
 }
 
-.pt-when {
-  color: var(--text-3);
-  font-size: var(--fs-xs);
-  font-family: var(--font);
-}
-
 .nowrap {
   white-space: nowrap;
-}
-
-.pt-old {
-  opacity: 0.6;
 }
 
 /* The collapsed footer's plan line: which plan is in use and how many are spent, in words. */

@@ -168,14 +168,16 @@ test('meters: open, every computer is a row and every account its limits and age
   // No editor or agent limits of the portal's own (w510): each machine's are on its row.
   await expect(foot.locator('.limits')).toHaveCount(0);
 
-  // Plans first, one row per account (w1389): its name, where it stands, session and weekly with their resets; the details are its hover.
+  // Plans first (w1389, Ben: "just list them in squence with name - weekly %, session% thats it"): one line each, red when spent, yellow from 80%, blue otherwise; the details are the hover.
   const plans = foot.getByTestId('plans-table');
-  await expect(plans.locator('.mt-row:not(.mt-head)')).toHaveCount(2);
+  await expect(plans.locator('.plan-item')).toHaveCount(2);
   const token = foot.getByTestId('account-…9AAA');
-  await expect(token).toContainText(/host token\s*in use\s*12%.*98%/s);
+  await expect(token).toHaveText('host token - weekly 98%, session 12%');
+  await expect(token).toHaveClass(/pl-yellow/);
   await expect(token).toHaveAttribute('title', /host token …9AAA\n5-hour session: 12%, resets .*\nWeekly: 98%, resets .*\nWeekly Fable: 22%, resets .*\nIn use now: \d agents?\nthe agents' token on BEAST, m5/);
   const login = foot.getByTestId('account-owner');
-  await expect(login).toContainText(/owner\s*free/);
+  await expect(login).toHaveText('owner - weekly 23%, session ?');
+  await expect(login).toHaveClass(/pl-blue/);
   await expect(login).toHaveAttribute('title', /Not in use\nBEAST login\nm5 login/);
   // The plans come before the computers.
   expect((await plans.boundingBox())!.y).toBeLessThan((await foot.getByRole('table', { name: 'Load of every computer' }).boundingBox())!.y);
@@ -254,19 +256,19 @@ test('meters (w785): a vault token is one row under its vault name, the Claude a
   await settle(page);
   const both = foot.getByTestId('account-…dAAA');
   // Named by the email a person recorded (w1389), not by the vault name; the vault name is on its hover; with none recorded the vault name stands (ben-1 below).
-  await expect(both).toContainText(/ben@example\.com\s*in use/);
+  await expect(both).toHaveText('ben@example.com - weekly 71%, session 9%');
   await expect(both).not.toContainText('ben-2');
   await expect(both).toHaveAttribute('title', /^ben@example\.com\nvault-ben-2 …dAAA\n[\s\S]*fff-portal's token file \(the orchestrator\)/);
   await expect(both).not.toContainText('vault:');
   // A long address is cut with an ellipsis, never wrapped or clipped by the row, and whole on its hover.
   const loth = foot.getByTestId('account-…EAAA');
   await expect(loth).toContainText('a.very.long.address.for.loth@finalfactory-example.test');
-  await expect(loth.locator('.mt-name')).toHaveAttribute('title', 'a.very.long.address.for.loth@finalfactory-example.test');
+  await expect(loth.locator('.plan-item-name')).toHaveAttribute('title', 'a.very.long.address.for.loth@finalfactory-example.test');
   await expect(loth).toHaveAttribute('title', /^a\.very\.long\.address\.for\.loth@finalfactory-example\.test\nvault-lothsahn-1 …EAAA/);
-  await expect(loth.locator('.mt-name')).toHaveCSS('text-overflow', 'ellipsis');
+  await expect(loth.locator('.plan-item-name')).toHaveCSS('text-overflow', 'ellipsis');
   // The vault's own name without "vault-"; one row each, never the token file's name for a vault token, and the usage line says "rate limits" on hover.
-  await expect(foot.getByTestId('account-…cBBB')).toContainText(/ben-1\s*free/);
-  await expect(plans(foot).locator('.mt-row:not(.mt-head)')).toHaveCount(5);
+  await expect(foot.getByTestId('account-…cBBB')).toHaveText('ben-1 - weekly 12%, session 9%');
+  await expect(plans(foot).locator('.plan-item')).toHaveCount(5);
   await expect(foot.locator('.plan-asof').first()).toHaveAttribute('title', /from rate limits/);
   if (process.env.E2E_SHOT) {
     await page.setViewportSize({ width: 1440, height: 2200 });
@@ -288,21 +290,24 @@ test('meters (w1389): the footer says which plan is in use and how many are spen
   await expect(foot.locator('.plan-chip, .plan-chips')).toHaveCount(0);
   await foot.locator('.sys-toggle').click();
   await settle(page);
-  const rows = foot.getByTestId('plans-table').locator('.mt-row:not(.mt-head)');
+  const rows = foot.getByTestId('plans-table').locator('.plan-item');
   await expect(rows).toHaveCount(3);
-  // Session and weekly, each with its reset time in the viewer's own zone (a day name when it is days away).
+  // name - weekly %, session %, nothing else on the line; the colour says how worn it is: red used up, yellow from 80%, blue otherwise.
   const row = foot.getByTestId('account-…cBBB');
-  await expect(row.getByTestId('account-state')).toHaveText('spent');
-  await expect(row).toContainText(/40%\s*\d{1,2}:\d\d\s?[AP]M/);
-  await expect(row).toContainText(/100%\s*\w{3} \d{1,2}:\d\d\s?[AP]M/);
-  await expect(foot.getByTestId('account-…9AAA').getByTestId('account-state')).toHaveText('in use');
-  await expect(foot.getByTestId('account-owner').getByTestId('account-state')).toHaveText('free');
-  // The hover has the per-model window and the state.
+  await expect(row).toHaveText('ben-1 - weekly 100%, session 40%');
+  await expect(row).toHaveClass(/pl-red/);
+  await expect(foot.getByTestId('account-…9AAA')).toHaveClass(/pl-yellow/);
+  await expect(foot.getByTestId('account-owner')).toHaveClass(/pl-blue/);
+  const red = await row.evaluate((e) => getComputedStyle(e).color);
+  const yellow = await foot.getByTestId('account-…9AAA').evaluate((e) => getComputedStyle(e).color);
+  const blue = await foot.getByTestId('account-owner').evaluate((e) => getComputedStyle(e).color);
+  expect(new Set([red, yellow, blue]).size, 'three different colours').toBe(3);
+  // The hover has the windows with their resets, the per-model window and the state.
   await expect(row).toHaveAttribute('title', /Weekly Fable: 61%, resets .*\nSpent until /);
-  // Nothing needs a scroll to read the plans: the whole table is inside the sheet's visible area.
+  // Nothing needs a scroll to read the plans: the whole list is inside the sheet's visible area.
   const detail = (await foot.locator('.sys-detail').boundingBox())!;
-  const table = (await foot.getByTestId('plans-table').boundingBox())!;
-  expect(table.y + table.height, 'the plans end inside the sheet').toBeLessThanOrEqual(detail.y + detail.height + 1);
+  const list = (await foot.getByTestId('plans-table').boundingBox())!;
+  expect(list.y + list.height, 'the plans end inside the sheet').toBeLessThanOrEqual(detail.y + detail.height + 1);
 });
 
 test('meters (w1389): the panel lists no clean-up lines; a disk still under its soft threshold is flagged on its own bar', async ({ page }) => {
