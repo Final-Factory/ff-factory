@@ -23,8 +23,8 @@ const kindOf = (kinds: [string, SessionInfo][], k: string) => kinds.find(([name]
 
 /** Which coordinator reads which topic: the dispatcher's are about placing work, the person's about their chat. */
 const TOPICS: Record<'dispatcher' | 'personal', readonly RuleTopic[]> = {
-  dispatcher: ['ffbox', 'intake', 'release', 'machines'],
-  personal: ['ffbox', 'machines', 'reactions'],
+  dispatcher: ['ffbox', 'intake', 'release', 'machines', 'ui'],
+  personal: ['ffbox', 'machines', 'reactions', 'ui'],
 };
 
 test('w1158: every read_rules topic is named in the brief of each coordinator that reads it, and has its text', async () => {
@@ -44,6 +44,22 @@ test('w1158: every read_rules topic is named in the brief of each coordinator th
     }
     // read_rules answers the caller: a person's topics name their person.
     assert.match(agents.rulesText('reactions', BEN), /a 👍 or ✅ on your own message that asks Ben a yes-or-no question/);
+  });
+});
+
+test("w1399: the UI-stills topic holds the look-first rule, the critic report and Ben's words, for both coordinators", async () => {
+  await withCoordinators((agents) => {
+    for (const text of [agents.rulesText('ui'), agents.rulesText('ui', BEN)]) {
+      assert.ok(text.includes('"you make bad UI mistakes constantly"'), "Ben's words");
+      assert.ok(text.includes(`"the active stop color is bleeding into a bunch of the panel's elements, it looks bad, like its washing everything out"`));
+      assert.match(text, /Open every still yourself before you read the worker's words about it/);
+      assert.match(text, /critic\.md from a fresh ff-agents ui-critic/);
+      assert.match(text, /None, or one left open: send it back with what is missing; do not relay\./);
+      assert.match(text, /Colour: and Shape: lines/);
+      assert.match(text, /2 or 3 clearly different options/);
+    }
+    assert.match(agents.rulesText('ui', BEN), /show Ben a UI still/);
+    assert.match(agents.rulesText('ui'), /A brief for UI work says: build from the game's own components/);
   });
 });
 
@@ -105,7 +121,10 @@ test('w1158: each coordinator loads its everyday tools in every call and finds t
 test('w1158: what a coordinator carries in every call stays within its budget', async () => {
   // Characters (exact); the API's own count was ~2.9 characters a token for this text. Before w1158: the dispatcher's
   // prompt 37,004 characters and every one of its 51 tools in full, 84,200 (measured).
-  const PROMPT_MAX = 26_000;
+  // w1399 (Ben, 2026-10-16: "you make bad UI mistakes constantly") added the one-line UI-stills trigger to both briefs; the
+  // owner's brief measured 26,180 characters with it (Lothsahn's name, the longest, about 100 times), so the cap moved from
+  // 26,000 to 26,500. The rule itself is the read_rules ui topic.
+  const PROMPT_MAX = 26_500;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options.
   const ALWAYS_LOADED_MAX = 24_000;

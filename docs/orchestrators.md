@@ -90,7 +90,8 @@ that has to write it to the prompt cache pays the write price on all of it. So i
   text, `ffbox_activity`'s views, and for a person's orchestrator the `[via FFBox: …]` and `[from FFBox …]` messages),
   `intake` (the dispatcher's: sharing a worker, Lothsahn's desync PR policy, `ffbox-f/` branches, `send_to_ffbox`),
   `release` (the dispatcher's: done means landed and the notes posted), `machines` (main clones w936, installers w855,
-  daemon updates w605/w887, low disk w626/w896) and `reactions` (a person's: replies and reactions, w866, w1039). The
+  daemon updates w605/w887, low disk w626/w896), `reactions` (a person's: replies and reactions, w866, w1039) and `ui` (both:
+  before a UI still or mock reaches a person, look at it first and require its worker's critic report, w1399). The
   brief keeps one line per topic: the gist that must hold without reading it, the w-numbers, and when to read it. The
   topic's text binds like the brief.
 - **No duplication.** A rule lives in one place: the brief, or the description of the tool it is about.
