@@ -1710,6 +1710,124 @@ button.react-chip:hover {
   background: rgba(255, 159, 28, 0.22);
 }
 
+/* A question with buttons (ask_person, w1397): one button per option, the recommended first, and "Chat more about this". */
+.ask {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  max-width: 560px;
+  min-width: 0;
+  padding: var(--s-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  background: var(--panel);
+  animation: rise 0.25s var(--ease);
+}
+
+.ask-q {
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ask-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), opacity 0.15s;
+}
+
+.ask-opt:hover:not(:disabled) {
+  border-color: var(--text-3);
+  background: var(--hover);
+}
+
+.ask-opt:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.ask-opt:disabled {
+  cursor: default;
+}
+
+.ask-rec {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.ask-rec:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgba(255, 159, 28, 0.2);
+}
+
+.ask-opt-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ask-opt-label {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ask-opt-desc {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.ask-tag {
+  font-size: var(--fs-xs);
+  padding: 1px 7px;
+}
+
+.ask-more {
+  border-style: dashed;
+  color: var(--text-2);
+}
+
+.ask-chosen {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  color: var(--green);
+}
+
+/* Answered: the pick stays marked, the rest step back. */
+.ask-locked .ask-opt:not(.ask-picked) {
+  opacity: 0.45;
+}
+
+.ask-picked {
+  border-color: var(--green);
+  background: var(--green-soft);
+  opacity: 1;
+}
+
 /* What a reply answers: a line above the bubble that goes to the message when pressed. */
 .reply-quote {
   display: flex;

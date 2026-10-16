@@ -1923,6 +1923,47 @@ person's own personal orchestrator takes them (a worker, a standing agent or the
   `server/opsWorker.test.ts` (a click and a deploy or a job) and `e2e/replies.spec.ts` (desktop
   and both phones: the buttons, the composer bar, the quote, the chips, over a reload, the API's refusals).
 
+### Questions with buttons (w1397)
+
+Ben, 2026-10-16: "when you are asking me questions lets do it like claude code where you give whatever your recommended
+options are (saying which one you most prefer) and then a 'chat more about this' option. make a button for each to accept
+that answer then just use it instead of me having to type". It is Claude Code's AskUserQuestion, in the portal chat: the
+orchestrator asks every question to its person with **`ask_person`**, one at a time, and the person answers with one click.
+
+- **The tool** (`ask_person`, a person's orchestrator only, loaded in every call: `server/toolManifest.ts`): a `question`
+  (one sentence, its context goes in the message above), 2 to 4 `options`, each a `label` (the complete answer in the person's
+  voice, "Close w983 as handled", at most 90 characters) and a one-line `description`, and at most one marked `recommended`.
+  `shared/ask.ts` `checkAsk` refuses anything else (two picks, a duplicate label, the reserved "Chat more about this") and the
+  recommended option moves to the front. The tool answers "Shown to Ben as 3 buttons ... End your turn now": the orchestrator
+  writes its message, calls the tool and stops. The call stays in the transcript as a `tool_use`, and the page draws that event
+  as the question (`web/src/components/AskCard.tsx`): the question, one button per option (the recommended one first, an amber
+  "Recommended" chip) and a last, dashed "Chat more about this". It reuses what the chat has: the reply bar and `startReply` of w866 for "Chat more", the reply quote line for the answer, the `.chip` and the colour tokens (the same borders, accent and green as the rest of the page). The Intake tab's Approve and Decline (`DispatcherPanel.tsx`) are one-line `.btn` buttons in a table row, with no component to lift out, so the option buttons (`.ask-opt`) are two-line cards of the same radius and tokens.
+- **A click is the person's own message.** `POST /api/sessions/<id>/answer` with the question's seq and the option's index
+  (`Orchestrators.answerWords`). The server reads the label and the question from the transcript, never from the page, and
+  sends it as a reply (shared/replies.ts, "Replies and reactions"): the person's words are the label, then `REPLY_MARK` and
+  the question quoted with its numbered options. It is `from: 'human'` with `requestedBy` the person, in the person's own turn
+  (`turnFrom === 'human'`), so it approves, declines, closes, or answers a `[needs you]` with `update_work` exactly as the
+  same words typed would, with no reaction and no click-grant involved (w1039's rules are for the emoji). A held call
+  (w830) rides along as with any message. Only the quote is FF Factory's, so a label is the only thing of theirs that counts as
+  their words: it is why the tool tells the orchestrator to write labels as full answers, not "Yes".
+- **The buttons lock after one choice.** Whether a question is answered is read from the transcript (`answerOf`): a message
+  of the person's whose quote is that question and whose words are one of its labels. So it survives a reload, another tab
+  and the phone, and the server refuses a second click (409 `already answered: "<label>"`, the page shows the pick locked,
+  "Your answer", the rest dimmed). A click is shut in the page at once, before the message is in the transcript. Someone
+  else's chat shows the buttons shut.
+- **"Chat more about this" sends nothing.** The page adds it (the server and the tool never see it): it starts a reply to the
+  question in the composer ("Replying to Orchestrator: <question>"), which focuses the box. What the person types then goes
+  as an ordinary reply that quotes the question, and does NOT settle it: the buttons stay until one is clicked. A reply's quote
+  line shows the question alone (`questionOf`), not the options.
+- **Typing still works** as ever: a message of theirs is read by the orchestrator whether or not buttons were shown.
+- **With the rest.** A reaction (w1039) still answers a yes-or-no proposal; `ask_person` is for choosing, and the brief says
+  to propose one action per sentence when a 👍 should do. A `[needs you]` (w1378) is asked with `ask_person` too: the worker's
+  own options, or the orchestrator's, as the buttons with its recommendation first, and the answer (the clicked label or the
+  typed words) is the `update_work` note as before. One question at a time: with two, ask the one that unblocks the other.
+- **Tests:** `server/ask.test.ts` (the question's shape; a click is the person's message, attributed to them, in their own
+  turn, and approves what they clicked; the lock after one choice; "chat more" sends nothing and settles nothing; the brief),
+  `e2e/ask.spec.ts` (desktop and iPhone-sized: the card, the click and its lock over a reload, "chat more", the API's refusals).
+
 ### Calls a gate refused (w830)
 
 Lothsahn's second correction of one kind (w741): the orchestrator asked him for what he had already decided, once

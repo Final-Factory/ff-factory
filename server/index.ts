@@ -29,7 +29,7 @@ import { machineLoadLine, systemStats } from './system.ts';
 import { Auth } from './auth.ts';
 import { Identity, asRequester } from './identity.ts';
 import { routeMcp } from './mcp.ts';
-import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
+import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type AnswerRequest, type ReactRequest, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { VideoPreviews } from './videoPreview.ts';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -1107,6 +1107,30 @@ route('POST', '/api/sessions/([\\w-]+)/react', async (req, [id]) => {
   mayDrive(req, s.info);
   const { seq, emoji, on } = await readJson<ReactRequest>(req);
   return { changed: agents.orchestrators.react(id, Number(seq), String(emoji ?? ''), on !== false, requesterOf(req)) };
+});
+
+// A click on a button of a question with buttons (ask_person, w1397): it is sent as the person's own reply to the question, as
+// a typed reply is (the same turn, the same budgets). The label and the quote come from the transcript, never from the page;
+// a question that is answered already refuses (409), so the buttons lock whoever clicks twice.
+route('POST', '/api/sessions/([\\w-]+)/answer', async (req, [id]) => {
+  const s = sessions.get(id);
+  if (s.info.kind !== 'orchestrator') throw new HttpError(400, "questions with buttons are for the orchestrators' chats");
+  mayDrive(req, s.info);
+  const { seq, choice, clientId } = await readJson<AnswerRequest>(req);
+  const sendKey = typeof clientId === 'string' && clientId && clientId.length <= 80 ? `${id}:${clientId}` : undefined;
+  if (sendKey && takenSends.has(sendKey)) return { duplicate: true };
+  let words: string;
+  try {
+    words = agents.orchestrators.answerWords(id, Number(seq), Number(choice));
+  } catch (e) {
+    const m = (e as Error).message;
+    throw new HttpError(m.startsWith('already answered') ? 409 : 400, m);
+  }
+  agents.waker.cancel(id);
+  agents.orchestrators.personWrote(id);
+  await agents.sendWithAttachments(id, words + agents.orchestrators.heldOffer(id), 'human', { images: [], attachments: [], requestedBy: requesterOf(req) });
+  if (sendKey) takenSends.set(sendKey, Date.now());
+  return {};
 });
 
 /** Compact an orchestrator's conversation (w518); a refusal is a 409 the page shows. */

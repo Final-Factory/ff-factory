@@ -51,6 +51,7 @@ import { capacityBlockProblem, capacityWaitIn, needsOf, resolveNeeds } from '../
 import { heldText, roomIds, type RoomNow } from './placement.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
+import { askExcerpt, answerOf, checkAsk, isAskTool, type Ask } from '../shared/ask.ts';
 import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
@@ -1336,11 +1337,16 @@ export class Orchestrators {
    * reads the chat, not the model's own "I"), when, and its own words clipped. Read from the transcript by seq, never from
    * what the page says it is, so a quote cannot be made up. Throws for an event that is no message (a tool call, a result).
    */
-  quoteOf(sessionId: string, seq: number): Quoted {
+  quoteOf(sessionId: string, seq: number, askToo = false): Quoted {
     const info = this.sessions.get(sessionId).info;
     if (info.kind !== 'orchestrator' || this.isDispatcher(info)) throw new Error("replies and reactions are for a person's own orchestrator chat");
     if (!Number.isInteger(seq) || seq < 0) throw new Error('replyTo: the number of a message in this chat');
     const ev = this.store.eventAt(sessionId, seq);
+    // A question with buttons (ask_person, w1397) is quoted by its question and options: a click and "Chat more" reply to it.
+    if (askToo && ev?.kind === 'tool_use' && isAskTool(ev.name)) {
+      const checked = checkAsk(ev.input);
+      if ('ask' in checked) return { seq, from: 'the orchestrator', at: ev.t, excerpt: askExcerpt(checked.ask) };
+    }
     if (!ev || (ev.kind !== 'user' && ev.kind !== 'assistant')) throw new Error(`#${seq} is not a message of this chat (replies and reactions go on the orchestrator's answers, a person's messages and relayed lines)`);
     let from = 'the orchestrator';
     if (ev.kind === 'user') {
@@ -1352,7 +1358,46 @@ export class Orchestrators {
 
   /** A person's words, with the message they reply to quoted after them when `replyTo` is given (w866); throws when it is no message of the chat. */
   replyWords(sessionId: string, words: string, replyTo?: number): string {
-    return replyTo === undefined ? words : replyText(words, this.quoteOf(sessionId, replyTo));
+    return replyTo === undefined ? words : replyText(words, this.quoteOf(sessionId, replyTo, true));
+  }
+
+  // ---------------------------------------------------------------- questions with buttons (ask_person, w1397)
+
+  /** The orchestrator's ask_person call: checked, and answered so it ends its turn. The page draws the call as buttons. */
+  askWithButtons(chat: SessionHandle, input: unknown): string {
+    const owner = this.isDispatcher(chat.info) ? undefined : this.ownerOf(chat.info);
+    if (!owner) throw new Error('only a person’s own orchestrator asks with buttons');
+    const checked = checkAsk(input);
+    if ('problem' in checked) throw new Error(checked.problem);
+    const pick = checked.ask.options[0].recommended ? `, ${checked.ask.options[0].label} recommended` : '';
+    return `Shown to ${owner.displayName} as ${checked.ask.options.length} buttons${pick}, and a last "Chat more about this" that only opens their reply box. End your turn now. Their click arrives as their own message (their words are the label, your question quoted under the reply mark), in their own turn; they may also just type. Do not ask it again in text.`;
+  }
+
+  /** The ask_person call at `seq` of a chat and its person's answer to it, if any (a click on an option; typing leaves it open). */
+  private askAt(sessionId: string, seq: number): { ask: Ask; chosen?: number } {
+    const info = this.sessions.get(sessionId).info;
+    if (info.kind !== 'orchestrator' || this.isDispatcher(info)) throw new Error("questions with buttons are for a person's own orchestrator chat");
+    if (!Number.isInteger(seq) || seq < 0) throw new Error('seq: the number of a question in this chat');
+    const later = this.store.readTranscriptFrom(sessionId, seq);
+    const ev = later.find((e) => e.seq === seq);
+    if (!ev || ev.kind !== 'tool_use' || !isAskTool(ev.name)) throw new Error(`#${seq} is not a question with buttons`);
+    const checked = checkAsk(ev.input);
+    if ('problem' in checked) throw new Error(checked.problem);
+    const humans = later.filter((e): e is Extract<typeof e, { kind: 'user' }> => e.kind === 'user' && e.from === 'human');
+    return { ask: checked.ask, chosen: answerOf(checked.ask, seq, humans, HELD_MARK)?.chosen };
+  }
+
+  /**
+   * A click on option `choice` of the question at `seq`: the person's words for it, which the route sends as their own
+   * message exactly as it sends a typed reply (their label, then REPLY_MARK and the question quoted). The page sends
+   * only the question and the number; the label and the quote are read from the transcript here. A question answered
+   * already refuses (the buttons lock), whoever clicks.
+   */
+  answerWords(sessionId: string, seq: number, choice: number): string {
+    const { ask, chosen } = this.askAt(sessionId, seq);
+    if (chosen !== undefined) throw new Error(`already answered: "${ask.options[chosen].label}"`);
+    if (!Number.isInteger(choice) || choice < 0 || choice >= ask.options.length) throw new Error(`choice: 0 to ${ask.options.length - 1}`);
+    return replyText(ask.options[choice].label, this.quoteOf(sessionId, seq, true));
   }
 
   /**

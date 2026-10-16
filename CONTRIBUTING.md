@@ -80,6 +80,16 @@ One from a process tree (w1196):
   anything that walks or spares process trees puts the daemon under the same parent its orphans are reparented to
   (`server/leftovers.test.ts` `machine()`), and runs once against the real process table before it is called done.
 
+Two from a feature that adds to a person's orchestrator (w1397):
+
+- **A new orchestrator tool or brief rule is measured against two budgets before it is written.** `server/coordinatorContext.test.ts`
+  fails a personal brief over 26,000 characters and always-loaded tools over 24,000: `ask_person` first came in at 1,200 and
+  1,350 characters over both, and was cut to a one-line brief rule and a shorter tool description, the long form living in
+  docs/orchestrators.md. Run that test after the first draft of a brief line or tool description, not at the end.
+- **An e2e test of a shared chat counts only what carries its own tag.** The desktop project's tests share one orchestrator
+  chat and run in parallel: "no new event after a click" as a transcript length failed once another spec wrote to it
+  (`e2e/ask.spec.ts`, "Chat more"). Filter the events by the test's unique tag (`uniq()`).
+
 Two from hangs (w906):
 
 - **Never end a process by a stale id.** Windows reuses process ids and never clears a dead parent's id from
