@@ -190,6 +190,11 @@ export class Auth {
     return key;
   }
 
+  /** Every key without its hash: name, the login it acts for, its scope and when it was made (fffctl apikey list, w1415). */
+  apiKeyInfos(): { name: string; createdAt: string; user?: string; scope?: ApiKeyScope }[] {
+    return this.keys().map(({ name, createdAt, user, scope }) => ({ name, createdAt, ...(user ? { user } : {}), ...(scope ? { scope } : {}) }));
+  }
+
   revokeApiKey(name: string) {
     const keys = this.keys();
     writeJsonDurable(this.keysFile, keys.filter((k) => k.name !== name), { indent: 2 });

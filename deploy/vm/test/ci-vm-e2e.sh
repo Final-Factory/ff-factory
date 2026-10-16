@@ -266,6 +266,16 @@ echo "$out"
 printf '%s' "$out" | matches '^600 root$' || fail "the issued machine credential's file is not 0600 root"
 if printf '%s' "$out" | matches 'ffm_ci-m1_'; then fail "fffctl machine-credential printed the credential"; fi
 g 'sudo fffctl vault remove ci-env' >/dev/null
+# A member login's API key (w1415): made through the portal's code as the portal's account, so its files stay the portal's;
+# the key is in the 0600 file only.
+out=$(g 'sudo fffctl apikey issue ci-key --user ci-member --create-member --out /tmp/ci-key && sudo stat -c "%a %U" /tmp/ci-key /srv/fff/data/users.json /srv/fff/data/api-keys.json && sudo fffctl apikey list && sudo fffctl apikey revoke ci-key; sudo rm -f /tmp/ci-key')
+echo "$out"
+printf '%s' "$out" | matches -F 'made the member login ci-member' || fail "fffctl apikey issue: $out"
+modes=$(printf '%s\n' "$out" | grep -E '^[0-7]{3} [a-z-]+$' | tr '\n' ' ')
+case "$modes" in "600 fff "[0-7][0-7][0-7]" fff "[0-7][0-7][0-7]" fff ") ;; *) fail "the key's file is not 0600 fff, or users.json or api-keys.json not the portal's: $modes" ;; esac
+printf '%s' "$out" | matches -E '^ci-key +ci-member ' || fail "fffctl apikey list does not show the key: $out"
+printf '%s' "$out" | matches -F 'revoked ci-key' || fail "fffctl apikey revoke: $out"
+if printf '%s' "$out" | matches 'ffsb_[A-Za-z0-9_-]{20}'; then fail "fffctl apikey printed the key"; fi
 echo "ok: the vault key is root's and loaded by the portal; values and credentials never printed"
 # Whose tokens (w512, docs/vault.md): a person's tokens kept on the host go into the vault with fff-vm vault-sync, never
 # printed; a classic GitHub token is refused; a second sync changes nothing; a removed file removes its entry; the key's
@@ -396,6 +406,12 @@ if g 'test -e /tmp/ci-ops-key'; then fail "fff-ops copied the vault key"; fi
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl credential issue ci-m2 --to nosuchhost.invalid 2>&1' || true)
 printf '%s' "$out" | matches 'does not answer ssh' || fail "credential issue to an unreachable machine: $out"
 if g 'sudo fffctl machine-credential list' | matches -x 'ci-m2'; then fail "a credential was issued for a machine that cannot get it"; fi
+# The worker's API keys (w1415): never for ben or lothsahn, and none minted for a machine that does not answer ssh.
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl apikey issue ci-k2 --user ben --machine nosuchhost.invalid --path k 2>&1' || true)
+printf '%s' "$out" | matches "a person's own login" || fail "the worker's apikey issue for ben: $out"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl apikey issue ci-k2 --user ci-member2 --create-member --machine nosuchhost.invalid --path k 2>&1' || true)
+printf '%s' "$out" | matches 'does not answer ssh' || fail "the worker's apikey issue to an unreachable machine: $out"
+if g 'sudo fffctl apikey list' | matches '^ci-k2 '; then fail "a key was minted for a machine that cannot get it"; fi
 # The launcher, through the socket, as the portal's account: the header, OK, then Claude Code itself (its --version needs
 # no credential to answer, but the launcher wants one: a dummy).
 # Its Claude credential lives only in claude's memory: Yama keeps the commands it runs from reading their parent's.

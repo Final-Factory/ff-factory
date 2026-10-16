@@ -61,6 +61,10 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     'fffctl machine-credential list',
     'fffctl migrate --help',
     'fffctl credential issue m5 --to m5',
+    // w1415: a member login's API key, straight into a file on a machine
+    'fffctl apikey issue w1021-m3 --user w1021-test --create-member --machine m3 --path ~/.ff-factory/w1021-m3.key',
+    'fffctl apikey list',
+    'fffctl apikey revoke w1021-m3',
     // w676: the portal's machine ssh tool, through fff-ops-priv (which takes only --check, --key and --pin)
     'fff-machine-ssh --check',
     'fff-machine-ssh --key',
@@ -106,6 +110,8 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     ['fffctl vault', /a person's/],
     ['fffctl vault export-key --out /tmp/k', /a person's/],
     ['fffctl machine-credential issue m5 --out f', /a person's/],
+    ['fffctl apikey', /a person's/],
+    ['fffctl apikey export w1021-m3', /a person's/],
     ['fffctl migrate --cut-over', /a person's/],
     ['fffctl migrate --key', /a person's/],
     ['systemctl restart fff-portal', /services are a person's/],
