@@ -185,7 +185,14 @@ export type ToDaemon =
    * answered by save_result. Refused while an agent there has a process. Sent only to a daemon whose hello offered
    * `saveWork`, so an older daemon never gets one.
    */
-  | { type: 'save_work'; id: string; sandbox: string; branch: string; message: string; githubToken?: string };
+  | { type: 'save_work'; id: string; sandbox: string; branch: string; message: string; githubToken?: string }
+  /**
+   * A live view (w1398, docs/live-view.md), answered by `live_result`. start: stream the sandbox's running game to the
+   * portal at /machine/live/<liveId>; stop; command: one of the game's live commands (look.material.list|set|reset), with
+   * `note` (who moved which knob) written into the session's conversation, held for its next message and counted as
+   * activity. Sent only to a daemon whose hello offered `liveView`, so an older daemon never gets one.
+   */
+  | { type: 'live'; id: string; op: 'start' | 'stop' | 'command'; liveId: string; sessionId: string; sandbox: string; fps?: number; width?: number; command?: string; note?: string };
 
 export type FromDaemon =
   /**
@@ -208,6 +215,8 @@ export type FromDaemon =
       voice?: RemoteVoiceStatus;
       /** It saves a sandbox's uncommitted work on request (w656, `save_work`). An older portal ignores it. */
       saveWork?: boolean;
+      /** It streams a sandbox's running game for a live view (w1398, `live`). An older portal ignores it. */
+      liveView?: boolean;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */
       layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null };
     }
@@ -260,4 +269,8 @@ export type FromDaemon =
   /** Its GPU Whisper's state, when it changes (w615): loaded, unloaded for the editors' VRAM, installing. An older portal drops it. */
   | { type: 'voice'; status: RemoteVoiceStatus }
   /** The answer to a `transcribe` (w615): the text and timings, or why not (the portal then uses its own CPU). */
-  | { type: 'transcribe_result'; id: string; ok: boolean; error?: string; text?: string; audioSeconds?: number; seconds?: number; model?: string; device?: string; loadSeconds?: number };
+  | { type: 'transcribe_result'; id: string; ok: boolean; error?: string; text?: string; audioSeconds?: number; seconds?: number; model?: string; device?: string; loadSeconds?: number }
+  /** The answer to a `live` (w1398): the command's result text (JSON for look.material.list), or why not. */
+  | { type: 'live_result'; id: string; ok: boolean; text: string }
+  /** A live view's state when it changes (w1398): live, holding (detail says why), stopped. An older portal drops it. */
+  | { type: 'live_state'; liveId: string; state: 'starting' | 'live' | 'holding' | 'stopped'; detail: string; frames: number };
