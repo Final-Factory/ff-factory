@@ -30,7 +30,7 @@ import { run } from '../server/proc.ts';
 import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
-import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel } from './live.ts';
+import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveSessionDeps } from './live.ts';
 import { bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
@@ -330,8 +330,9 @@ export class Daemon {
   guard?: MachineGuard;
   private readonly guardEffects?: MachineGuardEffects;
 
-  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>) {
+  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>, liveDeps?: (sandbox: string) => Partial<LiveSessionDeps>) {
     this.cfg = cfg;
+    this.liveDeps = liveDeps;
     this.guardEffects = guardEffects;
     this.probes = probes;
     const platform = machinePlatformOf(process.platform);
@@ -1194,6 +1195,8 @@ export class Daemon {
 
   // ---------------------------------------------------------------- live view (w1398, docs/live-view.md)
 
+  /** Tests' fake game for a live view (server/testLiveGame.ts); the real one is the sandbox editor's (machine/live.ts). */
+  private readonly liveDeps?: (sandbox: string) => Partial<LiveSessionDeps>;
   private readonly lives = new Map<string, { s: LiveSession; link?: WebSocket; latest?: Buffer; sandbox: string; sessionId: string; timer?: NodeJS.Timeout }>();
   /** The last knob move per sandbox (ms): counted as activity, so its editor is not stopped as idle. */
   private readonly liveTouched = new Map<string, number>();
@@ -1254,6 +1257,7 @@ export class Daemon {
       },
       state: (state, detail) => this.send({ type: 'live_state', liveId: msg.liveId, state, detail, frames: entry.s.frames }),
       now: () => Date.now(),
+      ...(this.liveDeps?.(msg.sandbox) ?? {}),
     });
     this.lives.set(msg.liveId, entry);
     this.liveTouched.set(msg.sandbox, Date.now());

@@ -10,6 +10,7 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { Daemon, type Probes, type SessionFactory } from '../machine/daemon.ts';
+import type { LiveSessionDeps } from '../machine/live.ts';
 import { SandboxPool, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { mergeSandboxes, type MachineManager } from './machines.ts';
 import { machineAttachment } from './attachments.ts';
@@ -164,6 +165,8 @@ export interface TestMachineOptions {
   maxUnity?: number;
   /** The daemon's agents (default: the real AgentSession, answered by whatever query the test installed). */
   makeSession?: SessionFactory;
+  /** A stand-in game for live views (server/testLiveGame.ts, w1398), per sandbox. */
+  liveDeps?: (sandbox: string) => Partial<LiveSessionDeps>;
   /** The daemon's trim of a released sandbox's Library caches (default off in tests, so no sandbox is ever briefly 'cleanup'). */
   cacheTrim?: Partial<TrimPolicy> | false;
   /** Free bytes on the sandbox volume (default 500 GB). */
@@ -270,7 +273,12 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
           res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(r.record.size) });
           fs.createReadStream(r.file).pipe(res);
         });
-        server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
+        server.on('upgrade', (req, socket, head) => {
+          // A live view's frame socket (w1398) goes where index.ts sends it.
+          const live = /^\/machine\/live\/([\w-]{1,80})$/.exec(req.url ?? '');
+          if (live) mm.upgradeLive(req, socket, head, '127.0.0.1', live[1]);
+          else mm.upgrade(req, socket, head, '127.0.0.1');
+        });
         await new Promise<void>((res) => server!.listen(0, '127.0.0.1', res));
         url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
       }
@@ -287,6 +295,11 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
         o.makeSession,
         FAKE_PROBES,
         poolDeps,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        o.liveDeps,
       );
       // In one process the daemon and the portal share the event bus: the daemon's agents' text deltas already reach the
       // portal's pages there, and the daemon forwarding them too would loop (the portal re-emits each on the same bus,
