@@ -10,6 +10,9 @@ import type {
   Machine,
   NotifyPrefs,
   IntakeGroups,
+  LiveKnob,
+  LiveKnobRequest,
+  LiveMaterialKnobs,
   MaxEvent,
   MaxInboundChannel,
   MaxInboundItem,
@@ -227,6 +230,11 @@ export const api = {
     request<DelegationRequest>('POST', `/api/delegations/${enc(id)}/${approve ? 'approve' : 'reject'}`, { note }),
   /** "Start now" (w527): approves a pending one, and asks the dispatcher to start its ledger request ahead of the queue. */
   bumpDelegation: (id: string) => request<DelegationRequest>('POST', `/api/delegations/${enc(id)}/bump`, {}),
+  // The live view of a session's asset (docs/live-view.md): its materials' knobs, one knob move, a material's knobs put back.
+  liveKnobs: (sessionId: string) => request<LiveMaterialKnobs[]>('GET', `/api/live/${enc(sessionId)}/knobs`),
+  /** `knob`: the knob as the game now holds it, when the answer carries it. */
+  liveKnob: (sessionId: string, req: LiveKnobRequest) => request<{ ok?: boolean; knob?: LiveKnob }>('POST', `/api/live/${enc(sessionId)}/knob`, req),
+  liveReset: (sessionId: string, material?: string) => request<{ ok?: boolean }>('POST', `/api/live/${enc(sessionId)}/reset`, material ? { material } : {}),
 };
 
 export type WsStatus = 'connecting' | 'open' | 'closed';

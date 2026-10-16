@@ -861,6 +861,7 @@ const liveCall = async <T>(f: () => Promise<T>): Promise<T> => {
   try {
     return await f();
   } catch (e) {
+    if (e instanceof HttpError) throw e;
     throw new HttpError(e instanceof LiveError ? e.status : 502, (e as Error).message);
   }
 };
