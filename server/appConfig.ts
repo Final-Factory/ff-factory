@@ -90,6 +90,9 @@ export const SETTABLE_KEYS = [
   // switch and the auto-approve rule. Anyone may set them: they file the team's own CI work, never players' words.
   'masterBatch.enabled',
   'masterBatch.autoApprove',
+  // The live view (w1398, docs/live-view.md): a sandbox's running game streamed beside its agent's chat, with the shader's
+  // knobs. Off unless true. The owner's only (OWNER_ONLY_KEYS): it opens a new stream from the machines to the pages.
+  'live.enabled',
   // Where new game-repo work goes first, and which computers it stays off (w428, docs/machines.md "Placing work").
   'placement.prefer',
   'placement.avoid',
@@ -114,7 +117,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync'];
@@ -544,6 +547,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'masterBatch.autoApprove':
       return checkMasterBatchAutoApprove(value);
+    case 'live.enabled': {
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      throw new Error('live.enabled is true or false');
+    }
     case 'providers.ffbox.devRequests':
       return checkDevRequests(value);
     case 'intake.reviewers':
@@ -771,6 +779,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else mb.autoApprove = v as NonNullable<Config['masterBatch']>['autoApprove'];
     cfg.masterBatch = mb;
   }
+  // Live: the live view reads cfg.live.enabled at every use (server/live.ts); null is the default, off.
+  else if (key === 'live.enabled') cfg.live = v === undefined ? undefined : { ...cfg.live, enabled: v as boolean };
   else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold') {
     const p = { ...cfg.placement };
     const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : 'hold';

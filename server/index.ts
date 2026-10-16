@@ -346,6 +346,10 @@ const liveHub = new LiveHub({
   session: (id) => store.sessions.get(id),
   roleOf: (userId) => identity.get(userId)?.role,
   changed: () => pushLive(),
+  // The switch is in AppState.config (w1417): a page shows the Live view button and route only while it is on.
+  switched: () => {
+    for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
+  },
 });
 agents.liveHub = liveHub;
 machines.onLiveFrames = (machineId, liveId, ws) => liveHub.attachFrames(machineId, liveId, ws);
