@@ -16,6 +16,7 @@ import { AddMachineModal, MachinePanel } from './components/MachinePanel';
 import { ProviderPanel } from './components/ProviderPanel';
 import { MaxPanel } from './components/MaxPanel';
 import { MachineSandboxPanel } from './components/MachineSandboxPanel';
+import { LiveView } from './components/LiveView';
 import { OverviewBoard } from './components/Fleet';
 import { Toasts } from './components/Toasts';
 import { Lightbox } from './components/Images';
@@ -428,6 +429,13 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
       };
     }
     return { layout: 'single', title: a.name, node: panel };
+  }
+  if (route.view === 'live') {
+    // Off, or no view for this session (it ended, or this person may not watch it): the same panel as any page that is gone.
+    const s = app.sessions.find((x) => x.id === route.sessionId);
+    const v = app.live?.find((x) => x.sessionId === route.sessionId);
+    if (!app.config.live?.enabled || !s || !v) return { node: <Missing what="live view" />, layout: 'single', title: 'Not found' };
+    return { layout: wide ? 'live' : 'single', title: s.title, node: <LiveView app={app} session={s} view={v} wide={wide} /> };
   }
   if (route.view === 'session') {
     const s = app.sessions.find((x) => x.id === route.sessionId);

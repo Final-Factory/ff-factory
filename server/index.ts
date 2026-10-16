@@ -11,6 +11,7 @@ import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessi
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
 import { MachineManager, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
+import { LiveError, LiveHub } from './live.ts';
 import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationView } from './providers.ts';
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
@@ -68,7 +69,7 @@ import { DRY_RUN_BANNER, DRY_RUN_WHY, dryRun } from './dryRun.ts';
 import { portalPublicKey, tailnetAddress } from './machineSsh.ts';
 import { machineSshHttp } from './machineSshHttp.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
-import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
+import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
 import { SpendStore, buildReport } from './spend.ts';
 import { isCoordinatorRole, type SpendSummaryReply } from '../shared/spend.ts';
@@ -338,6 +339,17 @@ const auth = new Auth(cfg.dataDir, { trustProxy: cfg.trustProxy });
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);
+// The live view (w1398, docs/live-view.md): a sandbox's game streamed beside its agent's chat, behind config live.enabled.
+const liveHub = new LiveHub({
+  enabled: () => cfg.live?.enabled === true,
+  machines,
+  session: (id) => store.sessions.get(id),
+  roleOf: (userId) => identity.get(userId)?.role,
+  changed: () => pushLive(),
+});
+agents.liveHub = liveHub;
+machines.onLiveFrames = (machineId, liveId, ws) => liveHub.attachFrames(machineId, liveId, ws);
+machines.onLiveState = (machineId, msg) => liveHub.onState(machineId, msg);
 agents.attachments = attachments;
 agents.spend = spend;
 // Review media workers publish (docs/review.md): <sandboxRoot>/_review unless config review.root says otherwise.
@@ -789,8 +801,9 @@ function appState(user: string | undefined): AppState {
     ...agents.roomExtras(),
     intake: intake.summary(),
     ledger: ledgerSweep.state(),
-    config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings },
+    config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings, live: { enabled: cfg.live?.enabled === true } },
     settings: store.settings,
+    live: liveHub.viewsFor(me.userId),
   };
 }
 
@@ -838,6 +851,31 @@ const routes: [string, RegExp, Handler][] = [];
 const route = (method: string, pattern: string, h: Handler) => routes.push([method, new RegExp(`^${pattern}$`), h]);
 
 route('GET', '/api/state', async (req) => appState(auth.user(req)));
+
+// ---- the live view (w1398, docs/live-view.md): a session's knobs, for its requester and the owners
+const liveFor = (req: http.IncomingMessage, sessionId: string) => {
+  if (!liveHub.canWatch(sessionId, requesterOf(req).userId)) throw new HttpError(403, "only this session's person and the owners use its live view");
+  return liveHub;
+};
+const liveCall = async <T>(f: () => Promise<T>): Promise<T> => {
+  try {
+    return await f();
+  } catch (e) {
+    if (e instanceof HttpError) throw e;
+    throw new HttpError(e instanceof LiveError ? e.status : 502, (e as Error).message);
+  }
+};
+route('GET', '/api/live/([\\w-]{1,80})/knobs', async (req, [id]) => liveCall(() => liveFor(req, id).knobs(id)));
+route('POST', '/api/live/([\\w-]{1,80})/knob', async (req, [id]) => {
+  const body = await readJson<LiveKnobRequest>(req, 16 * 1024);
+  const knob = await liveCall(() => liveFor(req, id).setKnob(id, body, requesterOf(req)));
+  return { ok: true, knob };
+});
+route('POST', '/api/live/([\\w-]{1,80})/reset', async (req, [id]) => {
+  const body = await readJson<{ material?: string }>(req, 16 * 1024);
+  const text = await liveCall(() => liveFor(req, id).reset(id, typeof body.material === 'string' ? body.material : undefined, requesterOf(req)));
+  return { ok: true, result: text };
+});
 route('GET', '/api/me', async (req) => {
   const u = auth.userInfo(auth.user(req));
   return { username: auth.user(req), ...(u ?? {}) };
@@ -1817,6 +1855,17 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
+/** Pages watching a live view (w1398): binary JPEG frames, never compressed (they do not compress). */
+const liveWss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 64 * 1024 });
+
+/** The live views changed: each page gets the ones its person may watch (w1398). */
+function pushLive() {
+  for (const [c, user] of clients) {
+    if (c.readyState !== c.OPEN) continue;
+    const u = auth.userInfo(user);
+    c.send(JSON.stringify({ type: 'live', views: liveHub.viewsFor(u?.userId ?? identity.owner().userId) } satisfies ServerEvent));
+  }
+}
 
 server.on('upgrade', (req, socket, head) => {
   // Cross-site WebSocket hijacking: the page's own origin only. Compared as strings; parsing an
@@ -1826,6 +1875,14 @@ server.on('upgrade', (req, socket, head) => {
     const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
     const peer = req.socket.remoteAddress ?? '';
     providers.upgrade(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer);
+    return;
+  }
+  const livePath = /^\/machine\/live\/([\w-]{1,80})$/.exec(parseUrl(req.url)?.pathname ?? '');
+  if (livePath) {
+    // A daemon's live frame socket (w1398, docs/live-view.md): the machine token, as /machine.
+    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
+    const peer = req.socket.remoteAddress ?? '';
+    machines.upgradeLive(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer, livePath[1]);
     return;
   }
   if (parseUrl(req.url)?.pathname === '/machine') {
@@ -1838,6 +1895,20 @@ server.on('upgrade', (req, socket, head) => {
   const origin = req.headers.origin;
   const host = req.headers.host ?? '';
   const sameOrigin = !origin || origin === `https://${host}` || origin === `http://${host}`;
+  const watch = /^\/live\/([\w-]{1,80})$/.exec(parseUrl(req.url)?.pathname ?? '');
+  if (watch) {
+    // A page watching a live view (w1398): signed in, same origin, the session's person or an owner.
+    const me = auth.user(req) ? requesterOf(req).userId : undefined;
+    if (!sameOrigin || !me || !liveHub.canWatch(watch[1], me)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      return socket.destroy();
+    }
+    liveWss.handleUpgrade(req, socket, head, (ws) => {
+      ws.on('error', () => undefined);
+      if (!liveHub.addViewer(watch[1], ws)) ws.close(4404, 'no live view for this session');
+    });
+    return;
+  }
   if (parseUrl(req.url)?.pathname !== '/ws' || !auth.user(req) || !sameOrigin) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     return socket.destroy();
@@ -1913,6 +1984,7 @@ function broadcast(e: ServerEvent) {
 bus.on('event', broadcast);
 // A removed session's own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene").
 bus.on('event', (e: ServerEvent) => {
+  if (e.type === 'session_removed') void liveHub.sessionGone(e.id);
   if (e.type === 'session_removed') void fs.promises.rm(sessionTempDir(os.tmpdir(), e.id), { recursive: true, force: true, maxRetries: 2 }).catch(() => undefined);
 });
 // The images an agent's message shows are copied into the transcript's store as it arrives (server/inlineImages.ts).

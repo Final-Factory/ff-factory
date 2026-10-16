@@ -73,6 +73,7 @@ export const TOOL_MANIFEST = {
   list_branches: { group: 'sandboxes', kinds: [D, P, R] },
   switch_branch: { group: 'sandboxes', kinds: [D, R, W], always: [D] },
   unity: { group: 'sandboxes', kinds: [D, R, W], always: [D] },
+  live_view: { group: 'sandboxes', kinds: [W] },
   // machines
   list_machines: { group: 'machines', kinds: [D, P, R, O], always: [D, P, O] },
   system_status: { group: 'machines', kinds: [D, P, R, O], always: [D, P, O] },

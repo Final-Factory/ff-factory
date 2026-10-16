@@ -178,6 +178,8 @@ export interface Config {
    * `enabled` defaults to true (an off switch needs no restart), `autoApprove` to { enabled: true, maxPerDay: 10 }, `repo` to
    * Final-Factory/FinalFactory and `workflow` to master-batch.yml.
    */
+  /** The live view (w1398, docs/live-view.md): a sandbox game streamed beside its agent's chat. Off unless enabled is true. */
+  live?: { enabled?: boolean };
   masterBatch?: { enabled?: boolean; autoApprove?: { enabled?: boolean; maxPerDay?: number }; repo?: string; workflow?: string };
   /**
    * Repos whose history is public, and the identity agents commit to them with. The guard refuses a push

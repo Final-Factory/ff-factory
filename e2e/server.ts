@@ -132,6 +132,8 @@ fs.writeFileSync(
       orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: true, compactAtTokens: 900_000, compactAtTurnUsd: 0, compactSettleMs: 200 },
       worker: { permissionMode: 'bypassPermissions', effort: 'low' },
       voice: { enabled: false, autoInstall: false, tts: false },
+      // The live view (w1398, e2e/live.spec.ts): on here, with a stand-in game in the machine "pc" (server/testLiveGame.ts).
+      live: { enabled: true },
       // The machine "pc" never watches this host from outside (it would ping it and alert a phone).
       outsideWatch: { enabled: false },
       // The disk-space guard's thresholds (80 GB warn, 40 critical) are for a developer's drive, and a runner with less free
@@ -181,7 +183,9 @@ process.env.FFSB_CONFIG = configFile;
 // The machine "pc" and its sandboxes alpha and gallery, made before the portal boots so its record (with gallery1) is
 // there when the portal restores its sessions; its daemon connects once the portal listens.
 const { createTestMachine } = await import('../server/testMachine.ts');
-const pc = await createTestMachine({ id: 'pc', portalUrl: `http://127.0.0.1:${port}`, parent: base, prefix: 'machine-', maxSandboxes: 4, maxAgentsPerSandbox: 50, sandboxes: ['alpha', 'gallery'] });
+const { fakeLiveGame } = await import('../server/testLiveGame.ts');
+const liveGame = fakeLiveGame();
+const pc = await createTestMachine({ id: 'pc', portalUrl: `http://127.0.0.1:${port}`, parent: base, prefix: 'machine-', maxSandboxes: 4, maxAgentsPerSandbox: 50, sandboxes: ['alpha', 'gallery'], liveDeps: () => liveGame.deps });
 for (const id of ['alpha', 'gallery']) fs.mkdirSync(path.join(pc.path(id), 'Screenshots'), { recursive: true });
 // A screenshot in a sandbox that the orchestrator mentions by path (e2e/images.spec.ts).
 fs.writeFileSync(path.join(pc.path('gallery'), 'Screenshots', 'orch-proof.png'), Buffer.from(RED_PNG, 'base64'));

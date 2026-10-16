@@ -3,6 +3,7 @@ import type { AppState, Machine, MachineSandbox } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, sessionsByIds, toast, useStore } from '../store';
 import { displayName, fmtRelative, machineSandboxGlance, navigate, unityLabel, unityTone, useNow } from '../util';
+import { LiveButton } from './LiveButton';
 import { NewAgentModal } from './Modals';
 import { GitFacts, SwitchBranchModal } from './Git';
 import { UnityLogDrawer } from './UnityLogDrawer';
@@ -69,6 +70,7 @@ export function MachineSandboxPanel({ app, machine: m, sandbox: sb, sessionId, o
               <span className="mono">{sb.git?.branch ?? sb.branch}</span>
             </span>
             {selected && <ModelChip session={selected} who={selected.title} className="hide-phone" />}
+            {selected && <LiveButton sessionId={selected.id} />}
             {ready && <AgentPicker place={displayName(sb)} sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!reachable} />}
           </>
         }

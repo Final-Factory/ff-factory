@@ -30,6 +30,8 @@ import { run } from '../server/proc.ts';
 import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
+import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveSessionDeps } from './live.ts';
+import { bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
@@ -238,6 +240,8 @@ interface Entry {
 }
 
 const HOME = os.homedir();
+/** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
+const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
 /** How often this Mac's own login's usage is polled until the portal says (usage_config: config usagePollMinutes). */
 const USAGE_DEFAULT_MINUTES = 15;
@@ -328,8 +332,9 @@ export class Daemon {
   guard?: MachineGuard;
   private readonly guardEffects?: MachineGuardEffects;
 
-  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>) {
+  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>, liveDeps?: (sandbox: string) => Partial<LiveSessionDeps>) {
     this.cfg = cfg;
+    this.liveDeps = liveDeps;
     this.guardEffects = guardEffects;
     this.probes = probes;
     const platform = machinePlatformOf(process.platform);
@@ -1019,6 +1024,8 @@ export class Daemon {
       ...(this.voice ? { voice: this.voice.status() } : {}),
       // It saves a sandbox's uncommitted work before the portal releases it (w656).
       saveWork: true,
+      // It streams a sandbox's running game for a live view (w1398, docs/live-view.md).
+      liveView: true,
       // A worker root install (w513): its folders, for a record the portal never deployed.
       ...(this.cfg.root
         ? { layout: { root: this.cfg.root, appDir: appDirOfConfig(this.cfg), repoPath: this.cfg.repoPath, tempDir: this.cfg.tempDir, sandboxes: this.cfg.sandboxes ?? null } }
@@ -1183,8 +1190,130 @@ export class Daemon {
     const mine = [...this.entries.values()].filter((e) => e.spec?.sandbox === id);
     return {
       busy: mine.some((e) => e.s.live && BUSY.has(e.s.info.status)),
-      lastActivityMs: Math.max(0, ...mine.map((e) => Date.parse(e.s.info.lastActivityAt) || 0)),
+      // A knob moved in a live view counts too (w1398): someone is tuning in this editor.
+      lastActivityMs: Math.max(this.liveTouched.get(id) ?? 0, ...mine.map((e) => Date.parse(e.s.info.lastActivityAt) || 0)),
     };
+  }
+
+  // ---------------------------------------------------------------- live view (w1398, docs/live-view.md)
+
+  /** Tests' fake game for a live view (server/testLiveGame.ts); the real one is the sandbox editor's (machine/live.ts). */
+  private readonly liveDeps?: (sandbox: string) => Partial<LiveSessionDeps>;
+  private readonly lives = new Map<string, { s: LiveSession; link?: WebSocket; latest?: Buffer; sandbox: string; sessionId: string; timer?: NodeJS.Timeout }>();
+  /** The last knob move per sandbox (ms): counted as activity, so its editor is not stopped as idle. */
+  private readonly liveTouched = new Map<string, number>();
+  /** Knob moves a session's agent has not heard of yet, newest per knob: they open its next message. */
+  private readonly liveNotes = new Map<string, { key: string; text: string }[]>();
+  /** The last knob line written into a session's conversation: a drag's later moves amend it rather than add lines. */
+  private readonly liveLines = new Map<string, { key: string; seq: number; at: number }>();
+
+  private withLiveNotes(sessionId: string, text: string): string {
+    const notes = this.liveNotes.get(sessionId);
+    if (!notes?.length) return text;
+    this.liveNotes.delete(sessionId);
+    this.liveLines.delete(sessionId);
+    return `[live view] Since your last message, in the live view:\n${notes.map((n) => `- ${n.text}`).join('\n')}\n(Not saved: keep a value by editing the .mat yourself.)\n\n${text}`;
+  }
+
+  private async onLive(msg: Extract<ToDaemon, { type: 'live' }>): Promise<string> {
+    const sb = this.pool.list().find((x) => x.id === msg.sandbox);
+    if (!sb) throw new Error(`no sandbox ${msg.sandbox} here`);
+    if (msg.op === 'stop') {
+      const l = this.lives.get(msg.liveId);
+      if (!l) return 'not running';
+      this.lives.delete(msg.liveId);
+      clearTimeout(l.timer);
+      l.link?.close(1000, 'stopped');
+      await l.s.stop();
+      return 'stopped';
+    }
+    if (msg.op === 'command') {
+      const l = this.lives.get(msg.liveId);
+      if (!l) throw new Error('this live view is not running on the machine (a daemon restart ends it: start it again)');
+      const command = String(msg.command ?? '');
+      if (!/^look\.material\.(list|set|reset)(\||$)/.test(command)) throw new Error(`not a live view command: ${command.slice(0, 60)}`);
+      const reply = await l.s.command(command);
+      if (!reply.ok) throw new Error(reply.result || `the game answered ${reply.status}`);
+      if (msg.note) {
+        const now = Date.now();
+        this.liveTouched.set(msg.sandbox, now);
+        // The knob: material and property of a set; a reset is its own line.
+        const parts = command.split('|');
+        const key = parts[0] === 'look.material.set' ? `${parts[1]}|${parts[2]}` : `${command}|${now}`;
+        const text = `[live view] ${msg.note}`;
+        const last = this.liveLines.get(msg.sessionId);
+        if (this.entries.has(msg.sessionId)) {
+          if (last && last.key === key && now - last.at < LIVE_LINE_MERGE_MS) {
+            this.sink().amend(msg.sessionId, last.seq, { text });
+            last.at = now;
+          } else {
+            const e = this.sink().append(msg.sessionId, { kind: 'system', text });
+            this.liveLines.set(msg.sessionId, { key, seq: e.seq, at: now });
+          }
+        }
+        const notes = (this.liveNotes.get(msg.sessionId) ?? []).filter((n) => n.key !== key);
+        notes.push({ key, text: msg.note });
+        this.liveNotes.set(msg.sessionId, notes.slice(-20));
+      }
+      return reply.result;
+    }
+    // start
+    const old = this.lives.get(msg.liveId);
+    if (old) return 'already running';
+    const pidOf = () => this.pool.list().find((x) => x.id === msg.sandbox)?.unity?.pid;
+    const entry: { s: LiveSession; link?: WebSocket; latest?: Buffer; sandbox: string; sessionId: string; timer?: NodeJS.Timeout } = { sandbox: msg.sandbox, sessionId: msg.sessionId } as never;
+    entry.s = new LiveSession(msg.fps ?? 15, msg.width ?? 960, {
+      editorPid: pidOf,
+      channel: (pid) => readGameChannel(pid),
+      devTier: async () => {
+        const port = bridgeInfo(sb.path).port;
+        return port ? bridgeExecute(port, DEV_TIER_SNIPPET) : 'no MCP bridge for this editor';
+      },
+      command: (ch, text) => gameCommand(ch, text),
+      frame: (jpeg) => {
+        entry.latest = jpeg;
+        this.pumpLive(msg.liveId);
+      },
+      state: (state, detail) => this.send({ type: 'live_state', liveId: msg.liveId, state, detail, frames: entry.s.frames }),
+      now: () => Date.now(),
+      ...(this.liveDeps?.(msg.sandbox) ?? {}),
+    });
+    this.lives.set(msg.liveId, entry);
+    this.liveTouched.set(msg.sandbox, Date.now());
+    this.linkLive(msg.liveId);
+    await entry.s.start();
+    return `streaming ${sb.id}'s game when it is in play mode (port ${entry.s.listenPort})`;
+  }
+
+  /** The view's frame socket to the portal (/machine/live/<liveId>), dialled again while the view runs. */
+  private linkLive(liveId: string) {
+    const l = this.lives.get(liveId);
+    if (!l || this.stopped) return;
+    const base = dialUrl(this.cfg, 0, Date.now(), RELOCATE_FALLBACK_MS.value);
+    const url = base.replace(/^http/, 'ws').replace(/\/+$/, '') + `/machine/live/${encodeURIComponent(liveId)}`;
+    const ws = new WebSocket(url, { headers: { authorization: `Bearer ${this.cfg.token}` }, handshakeTimeout: 8_000, perMessageDeflate: false });
+    l.link = ws;
+    ws.on('open', () => this.pumpLive(liveId));
+    ws.on('error', (e) => log(`live view ${liveId}: frame link: ${e.message}`));
+    ws.on('close', () => {
+      if (this.lives.get(liveId) !== l || l.link !== ws) return;
+      l.link = undefined;
+      l.timer = setTimeout(() => this.linkLive(liveId), 3000);
+    });
+  }
+
+  /** Newest wins: the frame waits while the link is still sending the one before, and a newer one replaces it. */
+  private pumpLive(liveId: string) {
+    const l = this.lives.get(liveId);
+    const ws = l?.link;
+    if (!l?.latest || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (ws.bufferedAmount > 256 * 1024) {
+      setTimeout(() => this.pumpLive(liveId), 20);
+      return;
+    }
+    const frame = l.latest;
+    l.latest = undefined;
+    ws.send(frame, { binary: true, compress: false });
   }
 
   // ---------------------------------------------------------------- sessions
@@ -1613,7 +1742,7 @@ export class Daemon {
             // The vault's secrets for this run (docs/vault.md): this daemon's log redacts them by value too.
             addSecretValues(Object.entries(msg.spec.env ?? {}).filter(([k]) => SECRET_ENV.test(k)).map(([, v]) => v));
             if (!e.s.live) prepare(msg.spec, this.cfg.tempDir);
-            e.s.send(msg.text, msg.from, msg.uuid, msg.images, msg.requestedBy, attachments);
+            e.s.send(this.withLiveNotes(id, msg.text), msg.from, msg.uuid, msg.images, msg.requestedBy, attachments);
           } catch (err) {
             this.out({ type: 'failed', sessionId: id, error: (err as Error).message });
           }
@@ -1696,6 +1825,12 @@ export class Daemon {
         }
         return;
       }
+      case 'live':
+        void this.onLive(msg).then(
+          (text) => this.send({ type: 'live_result', id: msg.id, ok: true, text }),
+          (err) => this.send({ type: 'live_result', id: msg.id, ok: false, text: (err as Error).message }),
+        );
+        return;
       case 'unity': {
         // An older portal may still ask for the main clone's editor: the daemon manages none there (w536).
         if (!msg.sandbox) {

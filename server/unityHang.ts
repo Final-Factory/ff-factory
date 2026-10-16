@@ -156,3 +156,53 @@ export function bridgePing(port: number, timeoutMs = 8000, host = '127.0.0.1'): 
     });
   });
 }
+
+/**
+ * Run a C# snippet in the editor through its MCP bridge (w1398, the live view's dev tier: machine/live.ts): connect,
+ * read the WELCOME line, send a framed {"type":"execute_code"} and resolve the editor's answer text, or an error text.
+ * Never throws. The editor compiles the snippet first (about a second).
+ */
+export function bridgeExecute(port: number, code: string, timeoutMs = 45_000, host = '127.0.0.1'): Promise<string> {
+  return new Promise((resolve) => {
+    let done = false;
+    let buf = Buffer.alloc(0);
+    let welcomed = false;
+    const sock = net.connect({ port, host });
+    const finish = (text: string) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(text);
+    };
+    const timer = setTimeout(() => finish('the editor did not answer in time (compiling, or its main thread is busy)'), timeoutMs);
+    sock.on('error', (e) => finish(`no bridge: ${e.message}`));
+    sock.on('close', () => finish('the bridge closed the connection'));
+    sock.on('data', (d: Buffer) => {
+      buf = Buffer.concat([buf, d]);
+      if (!welcomed) {
+        const nl = buf.indexOf(0x0a);
+        if (nl < 0) return;
+        if (!buf.subarray(0, nl).toString('ascii').startsWith('WELCOME UNITY-MCP')) return finish('not a Unity MCP bridge');
+        welcomed = true;
+        buf = buf.subarray(nl + 1);
+        const payload = Buffer.from(JSON.stringify({ type: 'execute_code', params: { action: 'execute', code, safety_checks: true } }), 'utf8');
+        const header = Buffer.alloc(8);
+        header.writeBigUInt64BE(BigInt(payload.length));
+        sock.write(Buffer.concat([header, payload]));
+      }
+      if (buf.length >= 8) {
+        const len = Number(buf.readBigUInt64BE(0));
+        if (buf.length < 8 + len) return;
+        const text = buf.subarray(8, 8 + len).toString('utf8');
+        try {
+          const j = JSON.parse(text) as { status?: string; result?: { success?: boolean; data?: { result?: unknown }; message?: string; error?: string }; error?: string };
+          const r = j.result;
+          finish(r?.success ? String(r.data?.result ?? '') : `error: ${r?.error ?? r?.message ?? j.error ?? text.slice(0, 200)}`);
+        } catch {
+          finish(text.slice(0, 200));
+        }
+      }
+    });
+  });
+}

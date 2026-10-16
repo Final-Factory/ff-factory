@@ -478,6 +478,8 @@ export type Route =
   /** item: the tab's one thing, e.g. #/provider/ffbox/conversation/812 (w426). */
   | { view: 'provider'; providerId: string; tab?: string; item?: string }
   | { view: 'max'; tab?: string }
+  /** A session's live view of the game beside its conversation (docs/live-view.md): #/live/<sessionId>. */
+  | { view: 'live'; sessionId: string }
   | { view: 'search'; q?: string };
 
 export function parseRoute(hash: string): Route {
@@ -486,6 +488,7 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === 'dispatcher') return { view: 'dispatcher', tab: parts[1] };
   if (parts[0] === 'sandbox' && parts[1]) return { view: 'sandbox', sandboxId: parts[1], sessionId: parts[2] };
   if (parts[0] === 'session' && parts[1]) return { view: 'session', sessionId: parts[1] };
+  if (parts[0] === 'live' && parts[1]) return { view: 'live', sessionId: parts[1] };
   if (parts[0] === 'search') return { view: 'search', q: parts[1] };
   if (parts[0] === 'machine' && parts[1] && parts[2] === 'sandbox' && parts[3]) return { view: 'msandbox', machineId: parts[1], sandboxId: parts[3], sessionId: parts[4] };
   if (parts[0] === 'machine' && parts[1]) return { view: 'machine', machineId: parts[1], sessionId: parts[2] };
@@ -522,6 +525,8 @@ export function href(r: Route): string {
       return `#/provider/${encodeURIComponent(r.providerId)}${r.tab ? '/' + encodeURIComponent(r.tab) + (r.item ? '/' + encodeURIComponent(r.item) : '') : ''}`;
     case 'max':
       return `#/max${r.tab ? '/' + encodeURIComponent(r.tab) : ''}`;
+    case 'live':
+      return `#/live/${encodeURIComponent(r.sessionId)}`;
   }
 }
 

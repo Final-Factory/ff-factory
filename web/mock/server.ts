@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { AppState, Machine, MachineSandbox, SearchHit, ServerEvent, SessionInfo, TranscriptEvent } from '../../shared/types.ts';
+import type { AppState, LiveKnob, LiveViewInfo, Machine, MachineSandbox, SearchHit, ServerEvent, SessionInfo, TranscriptEvent } from '../../shared/types.ts';
 import { buildWorld, localMachine, type ImageKey, type Scenario } from './scenario.ts';
 import { phoneShot, spaceScene } from './png.ts';
 import { scaleWorld, startLiveTraffic } from './scale.ts';
@@ -60,9 +60,68 @@ function picture(key: ImageKey): Buffer {
   return png;
 }
 
+// ---------------------------------------------------------------- live view (w1398, docs/live-view.md)
+
+// The comet catch session's materials and their knobs, as the game's look.material.list reports them; values live here.
+const liveMaterials: Record<string, { shader: string; knobs: (LiveKnob & { original: number | number[] })[] }> = {};
+function addMaterial(material: string, shader: string, knobs: Omit<LiveKnob, 'moved'>[]) {
+  liveMaterials[material] = { shader, knobs: knobs.map((k) => ({ ...k, value: Array.isArray(k.value) ? [...k.value] : k.value, original: Array.isArray(k.value) ? [...k.value] : k.value })) };
+}
+addMaterial('VfxComet', 'FinalFactory/VfxComet', [
+  { name: '_Intensity', label: 'Overall Intensity', type: 'range', value: 1, min: 0, max: 4 },
+  { name: '_ComaColor', label: 'Coma Color', type: 'color', value: [0.4, 0.9, 2.4, 1], hdr: true },
+  { name: '_ComaCore', label: 'Coma Core', type: 'color', value: [2.4, 2.2, 1.8, 1], hdr: true },
+  { name: '_ComaRadius', label: 'Coma Radius', type: 'range', value: 2.5, min: 0.5, max: 8 },
+  { name: '_IonSpeed', label: 'Ion Speed', type: 'float', value: 1.2 },
+  { name: '_Rings', label: 'Ring Count', type: 'int', value: 3 },
+  { name: '_Flow', label: 'Flow Direction', type: 'vector', value: [0.2, -0.4, 0, 0] },
+]);
+addMaterial('CometCatcherMaterial', 'FinalFactory/CometCatcher', [{ name: '_EmissionAG', label: 'Emission AG', type: 'color', value: [64, 0, 33.6, 1], hdr: true }]);
+const liveKnobsOf = () => Object.entries(liveMaterials).map(([material, m]) => ({ material, shader: m.shader, knobs: m.knobs.map(({ original, ...k }) => ({ ...k, moved: JSON.stringify(k.value) !== JSON.stringify(original) || undefined })) }));
+const liveKnob = (material: string, name: string) => liveMaterials[material]?.knobs.find((k) => k.name === name);
+
+/** The picture the knobs describe: bloom from the intensity, the nebula's tint from the coma colour, the glowing body from the radius. */
+function liveParams() {
+  const v = liveMaterials.VfxComet.knobs;
+  const get = (n: string) => v.find((k) => k.name === n)!.value;
+  const color = get('_ComaColor') as number[];
+  const k = Math.max(color[0], color[1], color[2], 1e-6);
+  const q = (x: number, step: number) => Math.round(x / step) * step;
+  const ems = liveMaterials.CometCatcherMaterial.knobs[0].value as number[];
+  return {
+    bloom: q((get('_Intensity') as number) * 0.55, 0.05),
+    tint: [q(color[0] / k, 0.1), q(color[1] / k, 0.1), q(color[2] / k, 0.1)] as [number, number, number],
+    r: q(0.05 + ((get('_ComaRadius') as number) / 8) * 0.17, 0.005),
+    belts: q(Math.min(1.5, Math.max(...ems.slice(0, 3)) / 64), 0.1),
+  };
+}
+const liveFrames = new Map<string, Buffer>();
+function liveFrame(): Buffer {
+  const p = liveParams();
+  const key = JSON.stringify(p);
+  let png = liveFrames.get(key);
+  if (!png) {
+    png = spaceScene({ width: 640, height: 360, seed: 29, bloom: p.bloom, beltGlow: p.belts, hole: { x: 0.5, y: 0.4, r: p.r }, tint: p.tint });
+    if (liveFrames.size > 200) liveFrames.clear();
+    liveFrames.set(key, png);
+  }
+  return png;
+}
+const liveViewers = new Set<{ ws: WebSocket; sessionId: string }>();
+const liveSend = (frame: Buffer) => {
+  for (const v of liveViewers) if (v.ws.readyState === 1 && v.ws.bufferedAmount < 1_000_000) v.ws.send(frame, { binary: true });
+};
+function liveSetState(next: LiveViewInfo['state'], detail = '') {
+  const view = state.live?.[0];
+  if (!view) return;
+  Object.assign(view, { state: next, detail, updatedAt: new Date().toISOString() });
+  broadcast({ type: 'live', views: state.live! });
+}
+
 // ---------------------------------------------------------------- transcripts & broadcast
 
 const wss = new WebSocketServer({ noServer: true });
+const liveWss = new WebSocketServer({ noServer: true });
 const now = () => new Date().toISOString();
 const find = (id: string) => state.sessions.find((s) => s.id === id);
 
@@ -470,6 +529,37 @@ const server = http.createServer(async (req, res) => {
     broadcast({ type: 'settings', settings: state.settings });
     return json(200, state.settings);
   }
+  // The live view (docs/live-view.md): knobs of the session's materials, kept in memory.
+  if ((r = m(/^\/api\/live\/([^/]+)\/(knobs|knob|reset)$/))) {
+    const view = state.live?.find((v) => v.sessionId === decodeURIComponent(r![1]));
+    if (!view) return json(404, { error: 'no live view for this session: its agent starts one with live_view' });
+    if (r[2] === 'knobs') return json(200, liveKnobsOf());
+    if (r[2] === 'reset') {
+      for (const [name, mat] of Object.entries(liveMaterials)) {
+        if (data.material !== undefined && data.material !== name) continue;
+        for (const k of mat.knobs) k.value = Array.isArray(k.original) ? [...k.original] : k.original;
+      }
+      if (FROZEN) liveSend(liveFrame());
+      return json(200, { ok: true });
+    }
+    const knob = liveKnob(String(data.material), String(data.name));
+    if (!knob) return json(400, { error: `"${data.material}.${data.name}" is not a knob of this view's materials` });
+    const value = data.value;
+    const numbers = Array.isArray(value) ? value : [value];
+    if (!numbers.length || numbers.some((x: unknown) => typeof x !== 'number' || !isFinite(x))) return json(400, { error: 'a knob value is a number, or 3 or 4 numbers (a colour or a vector)' });
+    // One refusal to see: the game rejects an ion speed that would tear the trail.
+    if (knob.name === '_IonSpeed' && (value as number) > 6) return json(400, { error: '_IonSpeed above 6 tears the ion trail: the game kept 1.2' });
+    knob.value = Array.isArray(value) ? [...value] : (knob.type === 'int' ? Math.round(value) : value);
+    await sleep(25);
+    if (FROZEN) liveSend(liveFrame());
+    const { original, ...answer } = knob;
+    return json(200, { ok: true, knob: { ...answer, moved: JSON.stringify(knob.value) !== JSON.stringify(original) || undefined } });
+  }
+  // Mock only: put the live view in a state, to see how the page shows it. {"state":"holding","detail":"Reloading scripts…"}
+  if (url.pathname === '/api/mock/live' && state.live?.length) {
+    liveSetState(data.state ?? 'live', data.detail ?? '');
+    return json(200, state.live[0]);
+  }
   if (url.pathname === '/api/search') return json(200, search(url.searchParams.get('q') ?? ''));
   if (url.pathname === '/api/push') return json(200, { publicKey: 'BNmockmockmockmockmockmockmockmockmockmockmockmockmockmockmockmockmockmockmock', subscriptions: [] });
   if (url.pathname.startsWith('/api/push/')) return json(200, { prefs: data.prefs ?? {}, delivered: 0 });
@@ -486,6 +576,19 @@ server.on('upgrade', (req, sock, head) => {
     sock.destroy();
     return;
   }
+  // /live/<sessionId>: binary JPEG frames in the real portal; the mock sends PNGs of a space scene that follows the knobs.
+  const liveSession = /^\/live\/([^/?]+)/.exec(new URL(req.url ?? '/', 'http://x').pathname)?.[1];
+  if (liveSession) {
+    liveWss.handleUpgrade(req, sock, head, (ws: WebSocket) => {
+      const id = decodeURIComponent(liveSession);
+      if (!state.live?.some((v) => v.sessionId === id)) return ws.close(1008, 'no live view for this session');
+      const viewer = { ws, sessionId: id };
+      liveViewers.add(viewer);
+      ws.on('close', () => liveViewers.delete(viewer));
+      ws.send(liveFrame(), { binary: true });
+    });
+    return;
+  }
   wss.handleUpgrade(req, sock, head, (ws: WebSocket) => ws.send(JSON.stringify({ type: 'state', state } satisfies ServerEvent)));
 });
 
@@ -497,6 +600,13 @@ if (!FROZEN) {
     broadcast({ type: 'system', system: sys });
   }, 3000);
 }
+
+// About 10 frames a second to whoever watches; MOCK_FROZEN sends the same bytes until a knob moves (stable screenshots).
+setInterval(() => {
+  if (!liveViewers.size || state.live?.[0]?.state !== 'live') return;
+  liveSend(liveFrame());
+}, 100);
+if (process.env.MOCK_LIVE_STATE && state.live?.length) liveSetState(process.env.MOCK_LIVE_STATE as LiveViewInfo['state'], process.env.MOCK_LIVE_DETAIL ?? 'Reloading scripts: a script change (CometVfxPresentationSystem.cs). Back in about a minute.');
 
 startLiveTraffic(world, broadcast, append as never);
 
