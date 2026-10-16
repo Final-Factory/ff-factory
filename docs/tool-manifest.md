@@ -25,7 +25,7 @@ The groups (`TOOL_GROUPS`), picked from what the tools are used for together:
 
 | Group | Tools |
 |---|---|
-| `core` | `read_rules`, `compact_conversation`, `message_person` |
+| `core` | `read_rules`, `compact_conversation`, `message_person`, `ask_person` |
 | `ledger` | `list_work`, `request_work`, `update_work`, `decide_work`, `conditional_decisions`, `read_work` |
 | `workers` | `start_agent`, `message_agent`, `set_agent_title`, `interrupt_agent`, `stop_agent`, `agent_transcript`, `search_transcripts` |
 | `sandboxes` | `list_sandboxes`, `create_sandbox`, `delete_sandbox`, `list_branches`, `switch_branch`, `unity` |
@@ -112,10 +112,13 @@ Against w1158's set: `agent_transcript`, `stop_agent`, `switch_branch`, `unity`,
 | `search_transcripts` | 8.0% | | `spend_report`, `conditional_decisions` and the rest | among ~575 calls not counted one by one |
 | `wake_me` | 1.4% | | | |
 | `message_person` | ~1.4% | | | |
+| `ask_person` (w1397) | no counts yet | | | |
 | `max_activity` | ~1.4% | | | |
 | `list_machines` | 1.2% | | | |
 | `system_status` | 1.1% | | | |
 | `read_rules` | (no counts) | | | |
+
+`ask_person` is new (w1397): it is carried because the orchestrator's brief tells it to ask EVERY question to its person through it, so a deferred schema would cost a ToolSearch before each question; no call counts exist, the choice is a guess until they do.
 
 `reply_to_ffbox`, `message_person` and `max_activity` were counted together (286 calls); the split in thirds is a guess.
 `ffbox_activity` is the one close call: the model carries it in all three settings, but its calls are mostly lothsahn's

@@ -2325,6 +2325,13 @@ export interface ReactRequest {
   on?: boolean;
 }
 
+/** A click on a button of a question with buttons (ask_person, w1397): the question's transcript seq and the option's index. */
+export interface AnswerRequest {
+  seq: number;
+  choice: number;
+  clientId?: string;
+}
+
 export interface PermissionDecisionRequest {
   requestId: string;
   allow: boolean;

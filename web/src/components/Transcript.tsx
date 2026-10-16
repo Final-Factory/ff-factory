@@ -3,6 +3,8 @@ import type { Machine, PendingPermission, SessionInfo, StandingAgent, Transcript
 import { NOTICE_TAG, parseNotice, type Notice, type NoticeKind } from '../../../shared/notices';
 import { parseReaction, reactionsByMessage, splitReply, splitVia } from '../../../shared/replies';
 import { HELD_MARK } from '../../../shared/conditional';
+import { checkAsk, isAskTool, type Ask } from '../../../shared/ask';
+import { AskCard } from './AskCard';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
 import { attempt, clearFocusEvent, focusEvent, focusPermission, sessionIndex, useStore } from '../store';
@@ -36,7 +38,9 @@ type Item =
   | { type: 'notice'; key: string; ev: UserEv }
   | { type: 'assistant'; key: string; ev: AssistantEv; end?: ResultEv }
   | { type: 'activity'; key: string; steps: Step[] }
-  | { type: 'event'; key: string; ev: TranscriptEvent };
+  | { type: 'event'; key: string; ev: TranscriptEvent }
+  /** A question the orchestrator asked with buttons (ask_person, w1397): its tool call, drawn as the question. */
+  | { type: 'ask'; key: string; seq: number; ask: Ask };
 
 const GAP_MS = 15 * 60_000;
 
@@ -72,7 +76,16 @@ function buildItems(events: TranscriptEvent[], now: number): Item[] {
   };
   for (const e of events) {
     if (e.kind === 'tool_result' && uses.has(e.toolUseId)) continue;
-    if (e.kind === 'tool_use' || e.kind === 'thinking' || e.kind === 'tool_result') {
+    if (e.kind === 'tool_use' && !e.parentToolUseId && isAskTool(e.name)) {
+      const checked = checkAsk(e.input);
+      if ('ask' in checked) {
+        flush();
+        divide(e);
+        items.push({ type: 'ask', key: `q${e.seq}`, seq: e.seq, ask: checked.ask });
+        continue;
+      }
+    }
+    if (e.kind === 'tool_use' ||e.kind === 'thinking' || e.kind === 'tool_result') {
       if (!group) {
         divide(e);
         group = [];
@@ -454,6 +467,8 @@ const ItemView = memo(function ItemView({ it, sessionId, pending, live, owner }:
       return <NoticeRow ev={it.ev} />;
     case 'assistant':
       return <AssistantMessage ev={it.ev} end={it.end} sessionId={sessionId} />;
+    case 'ask':
+      return <AskCard seq={it.seq} ask={it.ask} sessionId={sessionId} />;
     case 'activity':
       return <ActivityGroup steps={it.steps} sessionId={sessionId} live={live} />;
     case 'event':

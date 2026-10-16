@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type MouseEvent } from 'react';
 import { REACTION_PALETTE } from '../../../shared/replies';
 import { parseNotice } from '../../../shared/notices';
+import { questionOf } from '../../../shared/ask';
 import { api } from '../api';
 import { attempt, startReply } from '../store';
 import { Icon } from './ui';
@@ -40,7 +41,7 @@ const NOTICE_FROM = /^a \[(.+)\] line$/;
 export function quoteLabel(from: string, excerpt: string, meName?: string): { from: string; text: string } {
   const notice = NOTICE_FROM.exec(from)?.[1];
   if (notice) return { from: notice[0].toUpperCase() + notice.slice(1), text: glance(parseNotice(excerpt).summary || excerpt) };
-  if (from === 'the orchestrator') return { from: 'Orchestrator', text: glance(excerpt) };
+  if (from === 'the orchestrator') return { from: 'Orchestrator', text: glance(questionOf(excerpt) ?? excerpt) };
   return { from: meName && from === meName ? 'You' : from, text: glance(excerpt) };
 }
 
