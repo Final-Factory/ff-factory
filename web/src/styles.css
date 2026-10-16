@@ -1171,47 +1171,6 @@ select.input {
   color: var(--amber);
 }
 
-/* One Claude account: who, how many agents, where it is used. */
-.acct-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px var(--s-2);
-  font-size: var(--fs-sm);
-}
-
-.acct-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text);
-  font-weight: 600;
-}
-
-.acct-agents {
-  color: var(--text-3);
-  font-size: var(--fs-xs);
-}
-
-.acct-where {
-  flex-basis: 100%;
-  color: var(--text-3);
-  font-size: var(--fs-xs);
-}
-
-/* An account's state beside its agent count: "in use now", or "spent until Thu 9:00 AM". */
-.acct-state {
-  flex-basis: 100%;
-  color: var(--green);
-  font-size: var(--fs-xs);
-}
-
-.acct-state.lvl-crit {
-  color: var(--red);
-}
-
 /* An account's windows two to a row: 5-hour session and weekly, then each model's weekly. */
 .plan-grid {
   display: grid;
@@ -1240,36 +1199,60 @@ select.input {
   font-family: var(--mono);
 }
 
-.plan-dot {
-  color: var(--green);
+/* Every Claude account, one row like a computer's: name and state, then session and weekly with their resets. */
+.pt-row {
+  grid-template-columns: minmax(78px, 1fr) repeat(2, minmax(0, 1.25fr));
+  align-items: center;
 }
 
-/* The collapsed footer's plan cell: one chip per account, drawn like a computer's cell (name, two bars, a number). */
-.plan-chips {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px 12px;
-}
-
-.plan-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.pt-who {
+  display: grid;
+  gap: 1px;
   min-width: 0;
 }
 
-.plan-chip .mname {
-  max-width: 72px;
+.pt-state {
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-3);
 }
 
-.plan-live .mname {
+.pt-use { color: var(--green); }
+.pt-spent { color: var(--red); }
+.pt-next { color: var(--blue); }
+
+.ptable .mt-num {
+  display: grid;
+}
+
+.sys-detail > .plan-refresh:first-child {
+  padding-top: 0;
+}
+
+.pt-when {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-family: var(--font);
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.pt-old {
+  opacity: 0.6;
+}
+
+/* The collapsed footer's plan line: which plan is in use and how many are spent, in words. */
+.plan-line {
+  flex-basis: 100%;
+}
+
+.plan-name {
   color: var(--text);
-}
-
-.plan-spent .mbars,
-.plan-spent .mname {
-  opacity: 0.55;
+  font-weight: 600;
 }
 
 /* "Needs you" on a phone: the bell with a count, in the page's header. */

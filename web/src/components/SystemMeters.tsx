@@ -139,7 +139,6 @@ export function SystemFooter({ app }: { app: AppState }) {
   const providers = (app.providers ?? []).map((p) => providerLoad(p, now));
   const many = computers.length + providers.length > 1;
   const plan = planGlance(app);
-  const sessionsById = sessionIndex(app.sessions);
   const short = (label: string) => label.replace(/^Weekly\s+/i, '').replace(/^Session \(5 h\)$/i, '5h');
   const Val = ({ pct, children, warn, crit, lvl }: { pct: number; children: ReactNode; warn?: number; crit?: number; lvl?: Lvl }) => <b className={`lvl-${lvl ?? level(pct, warn, crit)}`}>{children}</b>;
   const vram = gpuPct(sys);
@@ -156,13 +155,13 @@ export function SystemFooter({ app }: { app: AppState }) {
       )}
       {open && (
         <div className="sys-detail">
+          {hasPlan && <UsageRefresh />}
+          {app.accounts ? <PlansTable rows={planRows(app, now)} now={now} /> : app.usage && <PlanMeters usage={app.usage} />}
           {many ? (
             <MachineTable computers={computers} providers={providers} health={app.host?.health} />
           ) : (
             <Meters sys={sys} health={app.host?.health} belowSoft={computers[0]?.cleanup?.belowSoft} />
           )}
-          {hasPlan && <UsageRefresh />}
-          {app.accounts ? <AccountsMeters app={app} /> : app.usage && <PlanMeters usage={app.usage} />}
         </div>
       )}
       <button className="sys-toggle" onClick={toggle} aria-expanded={open} title={many ? 'Every computer and Claude account. Tap for the meters.' : `${sys.cpuModel} · ${sys.cpuCount} threads. Tap for the meters.`}>
@@ -184,14 +183,7 @@ export function SystemFooter({ app }: { app: AppState }) {
                 )}
               </>
             )}
-            {hasPlan && app.accounts && app.accounts.length > 1 && (
-              <span className="plan-chips" data-testid="plan-glance" title={plan.title}>
-                Plan
-                {app.accounts.map((a) => (
-                  <PlanChip key={a.id} a={a} now={now} live={a.sessionIds.filter((id) => isLive(sessionsById.get(id))).length} />
-                ))}
-              </span>
-            )}
+            {hasPlan && app.accounts && app.accounts.length > 1 && <PlanSummary rows={planRows(app, now)} now={now} />}
             {hasPlan && !(app.accounts && app.accounts.length > 1) && (
               <span title={plan.title} data-testid="plan-glance">
                 Plan{' '}
@@ -219,41 +211,76 @@ export function SystemFooter({ app }: { app: AppState }) {
   );
 }
 
+/** One account as the sheet and the footer read it: a short name, where it stands, and the agents on it. */
+interface PlanRow {
+  a: AccountUsage;
+  /** "ben-2" for the vault token vault-ben-2; a login's name before the @. */
+  name: string;
+  live: number;
+  inUse: boolean;
+  /** Spent: a window is full and not yet reset; the empty string when it gives no reset time. */
+  spentUntil?: string;
+  /** The token the pool gives a new job next. */
+  next: boolean;
+  /** Per-model weekly windows that are full ("Fable"), while the account itself is not spent. */
+  fullModels: string[];
+  title: string;
+  /** One line for the footer's hover: "ben-2: in use, 5h 38%, weekly 62%". */
+  line: string;
+}
+
+const accountName = (a: AccountUsage) => (a.kind === 'token' ? a.label.split(' …')[0].replace(/^vault-/, '') : (a.email ?? a.label).split('@')[0]);
+
+export function planRows(app: AppState, now: number): PlanRow[] {
+  const sessions = sessionIndex(app.sessions);
+  return (app.accounts ?? []).map((a) => {
+    const live = a.sessionIds.filter((id) => isLive(sessions.get(id))).length;
+    const st = accountState(a, now, live);
+    const u = a.usage?.available ? a.usage : undefined;
+    const fullModels = u && st.spentUntil === undefined ? u.models.filter((m) => m.percent >= 99.5).map((m) => m.label.replace(/^Weekly\s+/i, '')) : [];
+    const win = (name: string, m?: UsageMeter) => `${name}: ${m ? `${Math.round(m.percent)}%${m.resetsAt ? `, resets ${localTime(m.resetsAt, now)}` : ''}` : 'unknown'}`;
+    const title = [
+      a.label,
+      ...(u ? [win('5-hour session', u.session), win('Weekly', u.weekly), ...u.models.map((m) => win(m.label, m))] : [a.usage ? `Usage unavailable${a.usage.why ? `: ${a.usage.why}` : ''}` : 'Usage not fetched yet']),
+      st.spentUntil !== undefined ? `Spent${st.spentUntil ? ` until ${localTime(st.spentUntil, now)}` : ''}` : live ? `In use now: ${live} agent${live === 1 ? '' : 's'}` : 'Not in use',
+      ...a.where,
+      ...(a.pool ? [a.pool.text] : []),
+    ].join('\n');
+    const state = st.spentUntil !== undefined ? `spent${st.spentUntil ? ` until ${localTime(st.spentUntil, now)}` : ''}` : live ? 'in use' : 'free';
+    const line = `${accountName(a)}: ${state}${u?.session ? `, 5h ${Math.round(u.session.percent)}%` : ''}${u?.weekly ? `, weekly ${Math.round(u.weekly.percent)}%` : ''}`;
+    return { a, name: accountName(a), line, live, inUse: live > 0, spentUntil: st.spentUntil, next: !!a.pool && /\bpriority\b/.test(a.pool.text), fullModels, title };
+  });
+}
+
 /**
- * A Claude account in the collapsed footer, drawn like a computer's cell: its tag, two bars (5-hour session, weekly) and
- * the weekly share, or, once spent, when it is back. A dot marks the ones agents run on now; a spent one is dimmed.
+ * The collapsed footer's plan cell with more than one account, in plain words: the plan agents run on now with its two
+ * windows, and how many are spent. Each account is in the open sheet.
  */
-function PlanChip({ a, now, live }: { a: AccountUsage; now: number; live: number }) {
-  const u = a.usage?.available ? a.usage : undefined;
-  const st = accountState(a, now, live);
-  const bars: [string, UsageMeter | undefined][] = [
-    ['5-hour session', u?.session],
-    ['weekly', u?.weekly],
-  ];
-  const w = u?.weekly;
-  const spent = st.spentUntil !== undefined;
-  const title = [
-    a.label,
-    ...bars.map(([name, m]) => `${name}: ${m ? `${Math.round(m.percent)}%${m.resetsAt ? `, resets ${localTime(m.resetsAt, now)}` : ''}` : 'unknown'}`),
-    ...u?.models.map((m) => `${m.label}: ${Math.round(m.percent)}%`) ?? [],
-    spent ? `Spent${st.spentUntil ? ` until ${localTime(st.spentUntil, now)}` : ''}` : st.inUse ? `In use now (${live} agent${live === 1 ? '' : 's'})` : 'Free',
-  ].join('\n');
+function PlanSummary({ rows, now }: { rows: PlanRow[]; now: number }) {
+  const using = rows.filter((r) => r.inUse).sort((x, y) => y.live - x.live);
+  const spent = rows.filter((r) => r.spentUntil !== undefined);
+  const first = using[0];
+  const u = first?.a.usage?.available ? first.a.usage : undefined;
+  const Pct = ({ m }: { m?: UsageMeter }) => (m ? <b className={`lvl-${level(m.percent)}`}>{Math.round(m.percent)}%</b> : <b className="lvl-warn">?</b>);
+  const back = spent.map((r) => r.spentUntil!).filter(Boolean).sort((x, y) => Date.parse(x) - Date.parse(y))[0];
   return (
-    <span className={`plan-chip${spent ? ' plan-spent' : ''}${st.inUse ? ' plan-live' : ''}`} title={title} aria-label={title.replace(/\n/g, ', ')} data-testid={`plan-${accountTag(a)}`}>
-      <span className="mname">{st.inUse && <span className="plan-dot">● </span>}{accountTag(a)}</span>
-      <span className="mbars" aria-hidden>
-        {bars.map(([name, m]) => (
-          <span key={name} className={`mbar lvl-bg-${m ? level(m.percent) : 'none'}`}>
-            <i style={{ height: `${m ? Math.max(8, Math.min(100, m.percent)) : 0}%` }} />
-          </span>
-        ))}
-      </span>
-      {spent ? (
-        <b className="lvl-crit">{st.spentUntil ? `back ${localTime(st.spentUntil, now)}` : 'spent'}</b>
-      ) : w ? (
-        <b className={`lvl-${level(w.percent)}`}>{Math.round(w.percent)}%</b>
+    <span className="plan-line" data-testid="plan-glance" title={rows.map((r) => r.line).join('\n')}>
+      Plans{' '}
+      {first ? (
+        <>
+          <span className="plan-name">{first.name}</span> in use{u ? <span className="nowrap"> · 5h <Pct m={u.session} /> · week <Pct m={u.weekly} /></span> : null}
+          {using.length > 1 && <span className="plan-more"> +{using.length - 1}</span>}
+        </>
       ) : (
-        <b className="lvl-warn">?</b>
+        'none in use'
+      )}
+      {' · '}
+      {spent.length === rows.length ? (
+        <b className="lvl-crit nowrap">all {rows.length} spent{back ? `, first back ${localTime(back, now)}` : ''}</b>
+      ) : spent.length ? (
+        <b className="lvl-crit nowrap">{spent.length} of {rows.length} spent</b>
+      ) : (
+        'none spent'
       )}
     </span>
   );
@@ -491,50 +518,61 @@ function UsageRefresh() {
   );
 }
 
-/** Every Claude account in use: who it is, where it is used, which agents run on it, its limits. */
-function AccountsMeters({ app }: { app: AppState }) {
-  const sessions = sessionIndex(app.sessions);
-  const now = useNow(60_000);
+/** Every Claude account, one row each, like a computer's: who, where it stands, and its 5-hour session and weekly usage with their resets. */
+function PlansTable({ rows, now }: { rows: PlanRow[]; now: number }) {
+  const Cell = ({ m, stale }: { m: UsageMeter; stale?: boolean }) => (
+    <span className={`mt-cell meter-${level(m.percent)}${stale ? ' pt-old' : ''}`}>
+      <span className="mt-num">
+        <span>{Math.round(m.percent)}%</span>
+        {m.resetsAt && <span className="pt-when">{Date.parse(m.resetsAt) <= now ? 'resetting' : localTime(m.resetsAt, now)}</span>}
+      </span>
+      <span className="meter-bar">
+        <i style={{ width: `${Math.max(0, Math.min(100, m.percent))}%` }} />
+      </span>
+    </span>
+  );
+  const asOf = rows.map((r) => r.a.usage?.asOf).filter((t): t is string => !!t).sort()[0];
+  const old = rows.filter((r) => r.a.usage?.reading || r.a.usage?.error);
   return (
-    <>
-      {app.accounts!.map((a) => {
-        const live = a.sessionIds.map((id) => sessions.get(id)).filter(isLive);
-        const st = accountState(a, now, live.length);
+    <div className="meters mtable ptable" role="table" aria-label="Plan usage of every Claude account" data-testid="plans-table">
+      <div className="mt-row pt-row mt-head" role="row">
+        <span />
+        <span>Session</span>
+        <span>Weekly</span>
+      </div>
+      {rows.map((r) => {
+        const u = r.a.usage?.available ? r.a.usage : undefined;
+        const spent = r.spentUntil !== undefined;
+        const state = spent ? 'spent' : r.inUse ? 'in use' : r.next ? 'next up' : 'free';
+        const stale = !!(r.a.usage?.reading || r.a.usage?.error);
         return (
-          <PlanMeters
-            key={a.id}
-            usage={a.usage}
-            head={
-              <div className="acct-head" data-testid={`account-${accountTag(a)}`}>
-                <span className="acct-label">{a.label}</span>
-                <span className="acct-agents">{live.length === 1 ? '1 agent' : `${live.length} agents`}</span>
-                {st.spentUntil !== undefined ? (
-                  <span className="acct-state lvl-crit" data-testid="account-state">{st.spentUntil ? `spent until ${localTime(st.spentUntil, now)}` : 'spent'}</span>
-                ) : (
-                  st.inUse && <span className="acct-state" data-testid="account-state">in use now</span>
-                )}
-                {a.where.length > 0 && <div className="acct-where">{a.where.join(' · ')}</div>}
-                {a.pool && (
-                  <div className="acct-where" title={`${a.pool.person}'s Claude token pool: priority marks the token a new job gets now`} data-testid="account-pool">
-                    {a.pool.text}
-                  </div>
-                )}
-              </div>
-            }
-          />
+          <div key={r.a.id} className="mt-row pt-row" role="row" data-testid={`account-${accountTag(r.a)}`} title={r.title}>
+            <span className="pt-who">
+              <span className="mt-name">{r.name}</span>
+              <span className={`pt-state pt-${spent ? 'spent' : r.inUse ? 'use' : r.next ? 'next' : 'free'}`} data-testid="account-state">
+                {state}
+              </span>
+              {r.fullModels.length > 0 && <span className="pt-state pt-spent">{r.fullModels.join(', ')} full</span>}
+            </span>
+            {u && u.session ? <Cell m={u.session} stale={stale} /> : <span className="mt-note">{u ? 'n/a' : r.a.usage ? 'unavailable' : 'not fetched yet'}</span>}
+            {u && u.weekly ? <Cell m={u.weekly} stale={stale} /> : u ? <span className="mt-note">n/a</span> : null}
+          </div>
         );
       })}
-    </>
+      <div className="plan-asof" title={rows.map((r) => (r.a.usage?.source ? `${r.name}: from ${r.a.usage.source}` : '')).filter(Boolean).join('\n') || undefined}>
+        {asOf ? `as of ${fmtClock(asOf)}` : 'not fetched yet'}
+        {old.length ? ` · ${old.length === 1 ? 'one reading is' : `${old.length} readings are`} older: ${old.map((r) => r.name).join(', ')}` : ''}
+      </div>
+    </div>
   );
 }
 
 /** One account's plan limits (server/usage.ts): weekly first, then the 5-hour session and per-model weekly windows. */
-function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode }) {
+function PlanMeters({ usage: u }: { usage?: PlanUsage }) {
   const now = useNow(60_000);
   if (!u) {
     return (
       <div className="meters plan-meters">
-        {head}
         <div className="plan-asof">not fetched yet</div>
       </div>
     );
@@ -543,7 +581,6 @@ function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode })
   if (!u.available) {
     return (
       <div className="meters plan-meters" title={u.why}>
-        {head}
         <div className="meter-row">
           <span className="meter-label">Claude plan</span>
           <span className="meter-value">unavailable</span>
@@ -563,7 +600,6 @@ function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode })
   const rows = [u.session, u.weekly, ...u.models].filter((m): m is UsageMeter => !!m);
   return (
     <div className="meters plan-meters" title={`Claude ${u.plan ?? ''} plan usage limits, from ${u.source ? `the API's ${u.source}` : 'the claude.ai usage endpoint'}`}>
-      {head}
       <div className="plan-grid">
         {rows.map((m) => (
           <Meter key={m.label} label={m.label.replace(/^Session \(5 h\)$/i, 'Session 5h')} pct={m.percent} value={`${Math.round(m.percent)}%`} note={m.resetsAt ? (Date.parse(m.resetsAt) <= now ? 'resetting' : `resets ${localTime(m.resetsAt, now)}`) : undefined} />
@@ -582,6 +618,6 @@ export function localTime(iso: string, now: number): string {
   const t = Date.parse(iso);
   if (isNaN(t)) return '';
   const d = new Date(t);
-  const time = fmtClock(iso);
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   return d.toDateString() === new Date(now).toDateString() ? time : `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
 }
