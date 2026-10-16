@@ -27,6 +27,8 @@ export interface LiveHubDeps {
   roleOf(userId: string): UserRole | undefined;
   /** The views changed: tell the pages (each gets the ones it may watch). */
   changed(): void;
+  /** The switch moved: every page needs its state again (the switch is in AppState.config). */
+  switched?(): void;
   now?(): number;
 }
 
@@ -136,6 +138,15 @@ export class LiveHub {
     for (const w of v.viewers) w.close(1000, 'the live view stopped');
     this.deps.changed();
     await this.deps.machines.live(v.info.machineId, { op: 'stop', liveId: v.info.liveId, sessionId: v.info.sessionId, sandbox: v.info.sandbox }).catch(() => undefined);
+  }
+
+  /**
+   * The switch (config live.enabled, set_app_config) moved: off stops every running view; either way every page gets the
+   * switch and the views it may watch again (w1417).
+   */
+  async switched(on: boolean) {
+    if (!on) for (const v of [...this.views.values()]) await this.stopView(v);
+    this.deps.switched?.();
   }
 
   /** Every live view of a session that is gone (its worker ended). */

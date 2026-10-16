@@ -6,8 +6,11 @@ game should just show a preview of that asset rendering in the engine, so the ri
 I can say, like, oh, change how much this glows". The plan and its measurements are in the w1393 review folder
 (`w1393-live-asset-plan.md`).
 
-**Off by default.** It is on only when the portal's config has `"live": { "enabled": true }`. With the switch off,
-the `live_view` tool refuses, the routes answer 404, and the page shows nothing new.
+**Off by default.** It is on only when the portal's config has `"live": { "enabled": true }`. An owner's orchestrator
+turns it on with `set_app_config` key `live.enabled`, value `true` (w1417; an owner's only, applied at once, no
+restart). `false` or `null` turns it off and stops every running view. With the switch off, the `live_view` tool
+refuses, the routes answer 404, and the page shows nothing new. Machines offer a live view only once their daemon has
+the w1398 code (a verified deploy updates them).
 
 ## How it fits together
 

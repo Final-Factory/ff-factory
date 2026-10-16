@@ -103,6 +103,30 @@ test('live: knob values become the game\'s text', () => {
   assert.equal(knobValue('3'), undefined);
 });
 
+test('live: switching it off stops every view and tells the pages (w1417)', async () => {
+  let on = true;
+  let switched = 0;
+  const calls: Record<string, unknown>[] = [];
+  const h = new LiveHub({
+    enabled: () => on,
+    machines: { canLive: () => true, live: async (_m, op) => (calls.push(op as Record<string, unknown>), 'ok') },
+    session: (id) => (id === 's1' ? session : undefined),
+    roleOf: () => 'owner',
+    changed: () => undefined,
+    switched: () => switched++,
+  });
+  await h.tool(session, { action: 'start', materials: ['VfxComet'] });
+  assert.equal(h.viewsFor('ben').length, 1);
+  on = false;
+  await h.switched(false);
+  assert.equal(calls.at(-1)?.op, 'stop', 'the machine stops streaming');
+  assert.equal(switched, 1);
+  on = true;
+  assert.deepEqual(h.viewsFor('ben'), [], 'nothing comes back when it is on again: the agent starts a new view');
+  await h.switched(true);
+  assert.equal(switched, 2);
+});
+
 test('live: frames go to every page, newest first, and a page that is behind skips one', async () => {
   const { h } = hub();
   await h.tool(session, { action: 'start', materials: [] });
