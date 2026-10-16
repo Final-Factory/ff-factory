@@ -721,6 +721,7 @@ is whatever someone types, and is shown only then (nothing is shown, never a gue
   Add a token, "account email";
 - afterwards, without the token: `sudo fffctl vault grant vault-ben-2 --email <address>` (`--email ''` clears), or Settings, Token vault,
   the entry's **Grant**, "account email". `fffctl vault put --email` does the same; `put` without `--email` (the host's sync) leaves it alone.
+The Claude usage sheet and the footer's plan line name a plan by it (`AccountUsage.vaultEmail`, a display field apart from `email`, which usage gates match; w1389), the vault name ("ben-2") when none is recorded; the full address and the vault name are on the row's hover.
 It is on the entry's subtext line on the dashboard and in `system_status` ("- vault-ben-2 …dAAA [ben@example.com; agents on it: …]"), before
 the other uses of the same token (docs/accounts.md). It lives in the VM's `vault.json` only, which the daily backup leaves out (section 8): a rebuilt
 VM needs it typed again.

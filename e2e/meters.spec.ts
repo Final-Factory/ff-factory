@@ -231,8 +231,9 @@ test('meters: the server lists its accounts: the vault tokens, never a login or 
 });
 
 /** A vault Claude token as the accounts list carries it (server/usage.ts buildAccounts, w777/w785): its vault name, no description. */
-const VAULT = (name: string, last4: string, weekly: number, where: string[], agentIds: string[] = []): AccountUsage => ({
+const VAULT = (name: string, last4: string, weekly: number, where: string[], agentIds: string[] = [], vaultEmail?: string): AccountUsage => ({
   id: `token:e2e-${name}`,
+  ...(vaultEmail ? { vaultEmail } : {}),
   kind: 'token',
   label: `${name} …${last4}`,
   sources: [`token:e2e-${name}`],
@@ -245,17 +246,24 @@ const plans = (foot: Locator) => foot.getByTestId('plans-table');
 
 test('meters (w785): a vault token is one row under its vault name, the Claude account email on its subtext; none recorded shows no subtext', async ({ page }) => {
   const foot = await fixedWorld(page, 'machines', [
-    VAULT('vault-ben-2', 'dAAA', 71, ['ben@example.com', "fff-portal's token file (the orchestrator)"], ['w-busy']),
-    VAULT('vault-lothsahn-1', 'EAAA', 95, ['lothsahn@example.com']),
+    VAULT('vault-ben-2', 'dAAA', 71, ['ben@example.com', "fff-portal's token file (the orchestrator)"], ['w-busy'], 'ben@example.com'),
+    VAULT('vault-lothsahn-1', 'EAAA', 95, ['lothsahn@example.com'], [], 'a.very.long.address.for.loth@finalfactory-example.test'),
     VAULT('vault-ben-1', 'cBBB', 12, []),
   ]);
   await foot.locator('.sys-toggle').click();
   await settle(page);
   const both = foot.getByTestId('account-…dAAA');
-  await expect(both).toContainText(/ben-2\s*in use/);
-  await expect(both).toHaveAttribute('title', /vault-ben-2 …dAAA[\s\S]*ben@example.com\nfff-portal's token file \(the orchestrator\)/);
+  // Named by the email a person recorded (w1389), not by the vault name; the vault name is on its hover; with none recorded the vault name stands (ben-1 below).
+  await expect(both).toContainText(/ben@example\.com\s*in use/);
+  await expect(both).not.toContainText('ben-2');
+  await expect(both).toHaveAttribute('title', /^ben@example\.com\nvault-ben-2 …dAAA\n[\s\S]*fff-portal's token file \(the orchestrator\)/);
   await expect(both).not.toContainText('vault:');
-  await expect(foot.getByTestId('account-…EAAA')).toHaveAttribute('title', /lothsahn@example.com/);
+  // A long address is cut with an ellipsis, never wrapped or clipped by the row, and whole on its hover.
+  const loth = foot.getByTestId('account-…EAAA');
+  await expect(loth).toContainText('a.very.long.address.for.loth@finalfactory-example.test');
+  await expect(loth.locator('.mt-name')).toHaveAttribute('title', 'a.very.long.address.for.loth@finalfactory-example.test');
+  await expect(loth).toHaveAttribute('title', /^a\.very\.long\.address\.for\.loth@finalfactory-example\.test\nvault-lothsahn-1 …EAAA/);
+  await expect(loth.locator('.mt-name')).toHaveCSS('text-overflow', 'ellipsis');
   // The vault's own name without "vault-"; one row each, never the token file's name for a vault token, and the usage line says "rate limits" on hover.
   await expect(foot.getByTestId('account-…cBBB')).toContainText(/ben-1\s*free/);
   await expect(plans(foot).locator('.mt-row:not(.mt-head)')).toHaveCount(5);

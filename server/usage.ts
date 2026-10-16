@@ -411,7 +411,7 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
       : e.kind === 'token'
         ? tokenUsers.length ? `the agents' token on ${tokenUsers.join(', ')}` : "the agents' token (no agent set to it)"
         : key === HOST_LOGIN ? hostLoginWhere : `${key.slice(6)} login`;
-    const a = out.get(id) ?? { id, kind: e.kind, label: e.kind === 'token' ? (e.label ?? 'a token') : (e.account?.email ?? where), email: e.account?.email, sources: [], where: [], sessionIds: [], usage: undefined };
+    const a = out.get(id) ?? { id, kind: e.kind, label: e.kind === 'token' ? (e.label ?? 'a token') : (e.account?.email ?? where), email: e.account?.email, ...(vaultByKey.get(key)?.email ? { vaultEmail: vaultByKey.get(key)!.email } : {}), sources: [], where: [], sessionIds: [], usage: undefined };
     a.sources.push(key);
     if (where) a.where.push(where);
     // A vault token's subtext, like a Mac login's "m3 login": the account email a person recorded (w785, never read from the token), then the other uses of the token.

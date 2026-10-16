@@ -1429,6 +1429,8 @@ export interface AccountUsage {
   /** "host token …9AAA", or the login's email. */
   label: string;
   email?: string;
+  /** A vault token only: the account email a person recorded on the vault entry (w785), shown instead of the vault name (w1389). Display only: no gate or pool reads it, and it is never read from the token. */
+  vaultEmail?: string;
   /**
    * The credentials that are this account: "token:<sha256 prefix>", "host:login" (this host's own claude.ai
    * login) or "login:<machine id>" (a Mac's own login). Several when one login is signed in on several computers.

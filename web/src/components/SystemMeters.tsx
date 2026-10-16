@@ -229,7 +229,11 @@ interface PlanRow {
   line: string;
 }
 
-const accountName = (a: AccountUsage) => (a.kind === 'token' ? a.label.split(' …')[0].replace(/^vault-/, '') : (a.email ?? a.label).split('@')[0]);
+/**
+ * What a plan is called: the account's email where a person recorded one on the vault entry (w785; a setup-token cannot say
+ * whose it is, docs/vault.md 12.0), else the vault name without "vault-" ("ben-2"); a login's name before the @.
+ */
+const accountName = (a: AccountUsage) => a.vaultEmail ?? (a.kind === 'token' ? a.label.split(' …')[0].replace(/^vault-/, '') : (a.email ?? a.label).split('@')[0]);
 
 export function planRows(app: AppState, now: number): PlanRow[] {
   const sessions = sessionIndex(app.sessions);
@@ -240,10 +244,11 @@ export function planRows(app: AppState, now: number): PlanRow[] {
     const fullModels = u && st.spentUntil === undefined ? u.models.filter((m) => m.percent >= 99.5).map((m) => m.label.replace(/^Weekly\s+/i, '')) : [];
     const win = (name: string, m?: UsageMeter) => `${name}: ${m ? `${Math.round(m.percent)}%${m.resetsAt ? `, resets ${localTime(m.resetsAt, now)}` : ''}` : 'unknown'}`;
     const title = [
+      ...(a.vaultEmail ? [a.vaultEmail] : []),
       a.label,
       ...(u ? [win('5-hour session', u.session), win('Weekly', u.weekly), ...u.models.map((m) => win(m.label, m))] : [a.usage ? `Usage unavailable${a.usage.why ? `: ${a.usage.why}` : ''}` : 'Usage not fetched yet']),
       st.spentUntil !== undefined ? `Spent${st.spentUntil ? ` until ${localTime(st.spentUntil, now)}` : ''}` : live ? `In use now: ${live} agent${live === 1 ? '' : 's'}` : 'Not in use',
-      ...a.where,
+      ...a.where.filter((w) => w !== a.vaultEmail),
       ...(a.pool ? [a.pool.text] : []),
     ].join('\n');
     const state = st.spentUntil !== undefined ? `spent${st.spentUntil ? ` until ${localTime(st.spentUntil, now)}` : ''}` : live ? 'in use' : 'free';
@@ -265,22 +270,31 @@ function PlanSummary({ rows, now }: { rows: PlanRow[]; now: number }) {
   const back = spent.map((r) => r.spentUntil!).filter(Boolean).sort((x, y) => Date.parse(x) - Date.parse(y))[0];
   return (
     <span className="plan-line" data-testid="plan-glance" title={rows.map((r) => r.line).join('\n')}>
-      Plans{' '}
-      {first ? (
+      {/* Three pieces that wrap whole, so a narrow footer breaks between them, never inside one. */}
+      <span className="nowrap">
+        Plans{' '}
+        {first ? (
+          <>
+            <span className="plan-name" title={first.name}>{first.name}</span> in use{using.length > 1 && <span className="plan-more"> +{using.length - 1}</span>}
+          </>
+        ) : (
+          'none in use'
+        )}
+        {' ·'}
+      </span>{' '}
+      {u && (
         <>
-          <span className="plan-name">{first.name}</span> in use{u ? <span className="nowrap"> · 5h <Pct m={u.session} /> · week <Pct m={u.weekly} /></span> : null}
-          {using.length > 1 && <span className="plan-more"> +{using.length - 1}</span>}
+          <span className="nowrap">
+            5h <Pct m={u.session} /> · week <Pct m={u.weekly} /> ·
+          </span>{' '}
         </>
-      ) : (
-        'none in use'
       )}
-      {' · '}
       {spent.length === rows.length ? (
         <b className="lvl-crit nowrap">all {rows.length} spent{back ? `, first back ${localTime(back, now)}` : ''}</b>
       ) : spent.length ? (
         <b className="lvl-crit nowrap">{spent.length} of {rows.length} spent</b>
       ) : (
-        'none spent'
+        <span className="nowrap">none spent</span>
       )}
     </span>
   );
@@ -536,7 +550,6 @@ function PlansTable({ rows, now }: { rows: PlanRow[]; now: number }) {
   return (
     <div className="meters mtable ptable" role="table" aria-label="Plan usage of every Claude account" data-testid="plans-table">
       <div className="mt-row pt-row mt-head" role="row">
-        <span />
         <span>Session</span>
         <span>Weekly</span>
       </div>
@@ -548,7 +561,7 @@ function PlansTable({ rows, now }: { rows: PlanRow[]; now: number }) {
         return (
           <div key={r.a.id} className="mt-row pt-row" role="row" data-testid={`account-${accountTag(r.a)}`} title={r.title}>
             <span className="pt-who">
-              <span className="mt-name">{r.name}</span>
+              <span className="mt-name" title={r.name}>{r.name}</span>
               <span className={`pt-state pt-${spent ? 'spent' : r.inUse ? 'use' : r.next ? 'next' : 'free'}`} data-testid="account-state">
                 {state}
               </span>
