@@ -48,7 +48,9 @@ const lastFour = (m: string) => m.slice(-4);
  */
 const MACHINE_TOKEN_ANYWHERE = /(ffm_[A-Za-z0-9.-]{1,64}_)[A-Za-z0-9_-]{32,}/g;
 const API_KEY_ANYWHERE = /sk-ant-api\d\d-[A-Za-z0-9_-]{40,}/g;
-const TAILSCALE_KEY_ANYWHERE = /tskey-[a-z]+-[A-Za-z0-9-]{16,}/g;
+/** The portal's own API key (Auth.createApiKey: ffsb_ and 43 base64url characters), for /mcp (w1415: fffctl apikey). */
+const PORTAL_KEY_ANYWHERE = /ffsb_[A-Za-z0-9_-]{40,}/g;
+const TAILSCALE_KEY_ANYWHERE =/tskey-[a-z]+-[A-Za-z0-9-]{16,}/g;
 const AGE_KEY_ANYWHERE = /AGE-SECRET-KEY-1[0-9A-Z]{50,}/g;
 const PRIVATE_KEY_BLOCK = /-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----[\s\S]*?-----END \1PRIVATE KEY-----/g;
 
@@ -74,7 +76,7 @@ export function addSecretValues(values: readonly string[]) {
 
 /** Whether `text` may hold a secret this module redacts (a cheap check before the regexes). */
 const maybeSecret = (text: string) =>
-  text.includes('sk-ant-oat01-') || text.includes('ffpv1_') || /ffm_|sk-ant-api|tskey-|AGE-SECRET-KEY-|PRIVATE KEY-----/.test(text) || /DISCORD|\.[A-Za-z0-9_-]{6}\.|gh[pousr]_|github_pat_/.test(text) || knownValues.some((v) => text.includes(v));
+  text.includes('sk-ant-oat01-') || text.includes('ffpv1_') || /ffm_|ffsb_|sk-ant-api|tskey-|AGE-SECRET-KEY-|PRIVATE KEY-----/.test(text) || /DISCORD|\.[A-Za-z0-9_-]{6}\.|gh[pousr]_|github_pat_/.test(text) || knownValues.some((v) => text.includes(v));
 
 /**
  * `text` with its secrets replaced: a Claude OAuth token by "sk-ant-oat01-[redacted …abcd]", a Discord bot token
@@ -88,7 +90,8 @@ export function redactSecrets(text: string): string {
     .replace(OAUTH_TOKEN_ANYWHERE, (m) => `sk-ant-oat01-[redacted …${lastFour(m)}]`)
     .replace(MACHINE_TOKEN_ANYWHERE, (m, prefix: string) => `${prefix}[redacted …${lastFour(m)}]`)
     .replace(API_KEY_ANYWHERE, (m) => `sk-ant-api-[redacted …${lastFour(m)}]`)
-    .replace(TAILSCALE_KEY_ANYWHERE, (m) => `tskey-[redacted …${lastFour(m)}]`)
+    .replace(PORTAL_KEY_ANYWHERE, (m) => `ffsb_[redacted …${lastFour(m)}]`)
+    .replace(TAILSCALE_KEY_ANYWHERE,(m) => `tskey-[redacted …${lastFour(m)}]`)
     .replace(AGE_KEY_ANYWHERE, () => 'AGE-SECRET-KEY-[redacted]')
     .replace(PRIVATE_KEY_BLOCK, (_m, kind: string) => `[redacted ${kind}private key]`)
     .replace(PROVIDER_TOKEN_ANYWHERE, (m) => `ffpv1_[redacted …${lastFour(m)}]`)

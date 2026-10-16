@@ -27,7 +27,9 @@ worker then runs on that person's Claude account when FF Factory holds one for t
 
 - `/mcp` API keys can be bound to a login: `node server/apikey.ts loth-laptop --user lothsahn`. Everything
   that key's tools start is requested by that person, and its `for_user` cannot name anyone else. A key
-  minted before this change, or without `--user`, acts for the owner.
+  minted before this change, or without `--user`, acts for the owner. A key for a member login, written straight into a
+  0600 file on a machine and never printed, is the orchestration worker's `fffctl apikey issue` (w1415,
+  [ops-worker.md](ops-worker.md#api-keys-for-a-member-login-w1415)); owner logins and Ben's and Lothsahn's stay `apikey.ts`.
 - `GET /api/me` returns the signed-in user's `userId`, `displayName` and `role`.
 
 ## Attribution

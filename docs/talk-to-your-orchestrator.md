@@ -21,6 +21,10 @@ node server/apikey.ts ben-m5 --user ben      # prints ffsb_…; --revoke ben-m5 
 The key's name labels your messages in the web chat ("via Claude Code or Desktop (ben-m5)"). A key made without `--user`
 acts for the owner in the older tools and is refused by these.
 
+A member login's key (a throwaway login for a check, say) can go straight from the portal VM into a 0600 file on the Mac,
+never printed: the orchestration worker's `fffctl apikey issue <key name> --user <login> [--create-member] --machine m3
+--path .ff-factory/<key name>.key`, and `fffctl apikey revoke <key name>` after (w1415,
+[ops-worker.md](ops-worker.md#api-keys-for-a-member-login-w1415)).
 **2. Claude Code** (one line, on the Mac; `-s user` makes it available in every project):
 
 ```

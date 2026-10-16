@@ -74,6 +74,11 @@
 #   fffctl machine-credential list | issue ID --out FILE | revoke ID
 #                                       a machine's own credential (its enrollment): issue writes it to FILE, never the
 #                                       screen; revoke cuts the machine off within 20 s (docs/vault.md, section 3)
+#   fffctl apikey list | issue NAME --user ID [--create-member [--display-name TEXT]] --out FILE | revoke NAME
+#                                       an API key for a member login (w1415; /mcp from a person's own Claude Code): issue writes
+#                                       it to FILE (0600), never the screen, and --create-member makes the login first (a member,
+#                                       a random password nobody sees). Never an owner's login, never ben's or lothsahn's, never a
+#                                       key that acts for the owner or has a scope (node server/apikey.ts; docs/ops-worker.md)
 #   fffctl migrate --key | --dry-run-copy | --rollback-dry-run | --cut-over [--ssh USER@HOST]
 #                                       move the portal from BEAST into this VM, pulling its config, data and conversations
 #                                       over ssh (deploy/vm/RUNBOOK.md "Dry run" and "Cut-over"; fffctl migrate --help)
@@ -439,7 +444,14 @@ vault_cli() {
   (cd "$CURRENT" && FFF_VAULT_KEY_FILE=$FFF_VAULT_KEY FFSB_CONFIG=$FFF_ROOT/config/config.json node server/vaultCli.ts "$@")
 }
 
-# vault_add_claude PERSON [NAME]: one Claude token into a person's pool (docs/vault.md, section 12). The pool's entries are named
+# API keys for member logins (w1415), through the portal's own code as the portal's account, so users.json and
+# api-keys.json stay its own. --out must be a file that account can write (fff-ops-priv gives it a folder of its own).
+apikey_cli() {
+  [ -e "$CURRENT/server/memberKeyCli.ts" ] || die "the current release has no server/memberKeyCli.ts (fffctl update first)"
+  as_fff_in "$CURRENT" env FFSB_CONFIG="$FFF_ROOT/config/config.json" node server/memberKeyCli.ts "$@"
+}
+
+# vault_add_claude PERSON [NAME]:one Claude token into a person's pool (docs/vault.md, section 12). The pool's entries are named
 # vault-<person>-<n> (w748), owned by the person, for their workers and standing agents on every machine: what the FFBox host's
 # 'fff-vm vault-sync' makes from people/<id>/claude-tokens/<n>. The token comes from a hidden prompt on a terminal, else from
 # stdin, never from the command line, and is never printed.
@@ -703,6 +715,7 @@ case "${1:-status}" in
   migrate) shift; exec "$FFF_LIB/fff-migrate" "$@" ;;
   vault) shift; cmd_vault "$@" ;;
   machine-credential) shift; vault_cli machine-credential "$@" ;;
+  apikey) shift; apikey_cli "$@" ;;
   -h | --help | help) sed -n '2,/^set -o/{/^#/p}' "$0" ;;
   *) die "unknown command $1 (fffctl help)" ;;
 esac
