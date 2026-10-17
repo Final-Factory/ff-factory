@@ -221,7 +221,10 @@ function Agents({ agents, me, now, sel, variant, open }: { agents: PlaceAgents; 
   );
 }
 
-/** The slot's call to the viewer (w1430): "Live view: go" opens the waiting worker's Live view, "Needs you" its chat. */
+/**
+ * The slot's call to the viewer (w1430): "Live view: go" opens the waiting worker's Live view, "Needs you" its chat. It is the
+ * first line under the slot's row, on the row's text edge, so the row keeps its name, branch and Unity mark where they were.
+ */
 function CallButton({ call, onGo }: { call: SlotCall; onGo: () => void }) {
   const what = call.session.waitingOn?.what;
   return (
@@ -274,47 +277,45 @@ function SandboxItem({ sb, me, call, now, sel, variant, go }: { sb: FleetSandbox
   const title = sb.id;
   const doing = sb.doing.length ? `${sb.doing[0]}${sb.doing.length > 1 ? ` (+${sb.doing.length - 1})` : ''}` : '';
   const head = (
-      <PlaceHead
-        glance={g}
-        title={title}
-        unused={sb.free}
-        free={sb.free}
-        unity={sb.status === 'ready' ? { tone: unityTone(sb.unity), label: unityLabel[sb.unity] } : undefined}
-        sub={
-          <>
-            {!sb.free && (
-              <>
-                <span className={`tone-${g.tone}`}>{g.label}</span>
-                {doing && (
-                  <>
-                    {' · '}
-                    <span className="fl-doing" data-testid="fl-doing" title={sb.doing.join('\n')}>
-                      {doing}
-                    </span>
-                  </>
-                )}
-                {' · '}
-              </>
-            )}
-            <span className="mono fl-branch">{sb.branch}</span>
-            {variant === 'board' && sb.status === 'ready' && !unityAbout && <span className={`tone-${unityTone(sb.unity)}`}> · {unityLabel[sb.unity]}</span>}
-          </>
-        }
-        active={sel.sandbox === sb.key && !sel.sessionId}
-        hint={`Slot ${sb.key} · ${sb.branch}${sb.status === 'ready' ? ` · ${unityLabel[sb.unity]}` : ''}${agentsHint(sb.agents)}`}
-        onClick={() => go(sandboxRoute(sb))}
-        testId="fl-sandbox-row"
-      />
+    <PlaceHead
+      glance={g}
+      title={title}
+      unused={sb.free && !call}
+      free={sb.free && !call}
+      unity={sb.status === 'ready' ? { tone: unityTone(sb.unity), label: unityLabel[sb.unity] } : undefined}
+      sub={
+        <>
+          {!sb.free && (
+            <>
+              <span className={`tone-${g.tone}`}>{g.label}</span>
+              {doing && (
+                <>
+                  {' · '}
+                  <span className="fl-doing" data-testid="fl-doing" title={sb.doing.join('\n')}>
+                    {doing}
+                  </span>
+                </>
+              )}
+              {' · '}
+            </>
+          )}
+          <span className="mono fl-branch">{sb.branch}</span>
+          {variant === 'board' && sb.status === 'ready' && !unityAbout && <span className={`tone-${unityTone(sb.unity)}`}> · {unityLabel[sb.unity]}</span>}
+        </>
+      }
+      active={sel.sandbox === sb.key && !sel.sessionId}
+      hint={`Slot ${sb.key} · ${sb.branch}${sb.status === 'ready' ? ` · ${unityLabel[sb.unity]}` : ''}${agentsHint(sb.agents)}${call && sb.free ? '\nIts worker is stopped while it waits on you: placement may give the sandbox other work meanwhile' : ''}`}
+      onClick={() => go(sandboxRoute(sb))}
+      testId="fl-sandbox-row"
+    />
   );
   return (
     <div className="fl-sb" data-testid={`fl-sandbox-${sb.key}`}>
-      {call ? (
-        <div className="fl-place-line">
-          {head}
+      {head}
+      {call && (
+        <div className="fl-call-line">
           <CallButton call={call} onGo={() => go(call.kind === 'live' ? { view: 'live', sessionId: call.session.id } : sandboxRoute(sb, call.session.id))} />
         </div>
-      ) : (
-        head
       )}
       <Agents agents={sb.agents} me={me} now={now} sel={sel} variant={variant} open={(s) => go(sandboxRoute(sb, s.id))} />
     </div>

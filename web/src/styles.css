@@ -5905,22 +5905,16 @@ body {
   color: var(--text-2);
 }
 
-/* A slot whose worker waits on the viewer (w1430): its row, then "Live view: go" or "Needs you" beside it. */
-.fl-place-line {
+/* A slot whose worker waits on the viewer (w1430): "Live view: go" or "Needs you" under its row, on the row's text edge
+   (the row's padding, its 16 px icon and the gap). The same pill on the Dispatcher's Waiting tab. */
+.fl-call-line {
   display: flex;
-  align-items: center;
-  gap: var(--s-1);
-}
-
-.fl-place-line > .row {
-  flex: 1;
-  min-width: 0;
+  padding: 0 var(--s-2) var(--s-1) calc(var(--s-3) * 2 + 16px);
 }
 
 .needs-you.fl-call {
   height: 26px;
   padding: 0 10px;
-  margin-right: var(--s-1);
   font-size: var(--fs-sm);
 }
 

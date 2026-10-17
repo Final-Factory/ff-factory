@@ -297,8 +297,8 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
           </div>
         )}
         {live && (
-          <button type="button" className="btn btn-outline btn-xs lv-open" title="Watch the game beside the worker's conversation and move the asset's knobs" data-testid={`wait-live-${w.id}`} onClick={() => navigate({ view: 'live', sessionId: live.sessionId })}>
-            <span className="lv-rec" /> Live view: go
+          <button type="button" className="needs-you fl-call" title="Watch the game beside the worker's conversation and move the asset's knobs" data-testid={`wait-live-${w.id}`} onClick={() => navigate({ view: 'live', sessionId: live.sessionId })}>
+            <span className="lv-rec" aria-hidden /> Live view: go
           </button>
         )}
         <div className="spacer" />

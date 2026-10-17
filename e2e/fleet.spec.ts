@@ -432,12 +432,17 @@ test('fleet: a slot lists the chats that matter now, folds the rest behind "+N o
   await expect(sb2.getByTestId('fl-agent')).toContainText(/w1325: Radiators.*needs you/);
   await expect(sb2.getByTestId('fl-older')).toHaveText('+3 older');
   await expect(sb2.getByTestId('fl-call')).toHaveText('Live view: go');
-  // The call sits on the slot's row, beside it, and moves nothing else: the row keeps its title and FREE.
+  // The call is the first line under the slot's row, on the row's text edge; the row keeps its name and branch whole, and
+  // no FREE chip says the slot is free while its work waits on you.
   await expect(sb2.getByTestId('fl-sandbox-row').locator('.row-title')).toHaveText('sb2');
+  await expect(sb2.locator('.fl-free')).toHaveCount(0);
   const row = (await sb2.getByTestId('fl-sandbox-row').boundingBox())!;
+  const name = (await sb2.getByTestId('fl-sandbox-row').locator('.row-title').boundingBox())!;
   const call = (await sb2.getByTestId('fl-call').boundingBox())!;
-  expect(call.x, 'the call is right of the row').toBeGreaterThanOrEqual(row.x + row.width - 1);
-  expect(Math.abs(call.y + call.height / 2 - (row.y + row.height / 2)), 'the call is centred on the row').toBeLessThan(3);
+  const first = (await sb2.getByTestId('fl-agent').first().boundingBox())!;
+  expect(call.y, 'the call is under the row').toBeGreaterThanOrEqual(row.y + row.height - 1);
+  expect(first.y, 'and above the chats').toBeGreaterThanOrEqual(call.y + call.height - 1);
+  expect(Math.abs(call.x - name.x), "the call starts on the row's text edge").toBeLessThan(1.5);
   if (!isMobile(page)) await proof(page, 'sidebar-slot-call');
   // "+3 older" opens them in place, the newest first, and folds them again.
   await sb2.getByTestId('fl-older').click();

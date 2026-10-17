@@ -4,7 +4,7 @@
   coming back to their sandbox, on an open request (its current worker, whatever its process does), or waiting on a
   person, that one first. Finished chats and those on closed requests fold behind "+N older" (was "+N stopped"), which
   opens them in place; nothing is deleted. A slot whose worker waits on you gets an amber "Live view: go" (it streams a
-  Live view) or "Needs you" (its chat) beside its row, one click away; the request's card on the Dispatcher's Waiting tab
-  gets "Live view: go" too. `node scripts/sidebar-chats.ts data --as Ben` counts each slot's chats before and after.
+  Live view) or "Needs you" (its chat) as the first line under its row, one click away, and no FREE chip while it waits;
+  the request's card on the Dispatcher's Waiting tab gets "Live view: go" too. `node scripts/sidebar-chats.ts data --as Ben` counts each slot's chats before and after.
   Web only: applies after a portal deploy. Docs: machines.md ("In the web UI"), live-view.md. Tests: `fleet.test.ts`,
   `e2e/fleet.spec.ts`.
