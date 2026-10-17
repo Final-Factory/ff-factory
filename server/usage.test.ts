@@ -875,9 +875,13 @@ test('accounts (w785): a vault token shows the account email a person recorded o
   // an email recorded: it is the subtext, as "m3 login" is for a Mac
   const withEmail = buildAccounts(entries, { ...base, vault: [{ key, label, email: 'ben@example.com' }] });
   assert.deepEqual(withEmail.map((a) => [a.label, a.where]), [[label, ['ben@example.com']]]);
+  // w1389: the sheet and the footer name the plan by it; a display field, apart from `email` (usage gates match that)
+  assert.equal(withEmail[0].vaultEmail, 'ben@example.com');
+  assert.equal(withEmail[0].email, undefined);
   // none recorded: nothing is shown and nothing is invented
   const without = buildAccounts(entries, { ...base, vault: [{ key, label }] });
   assert.deepEqual(without.map((a) => [a.label, a.where]), [[label, []]]);
+  assert.equal(without[0].vaultEmail, undefined);
   // set after the token was added: the same token, the next list carries it
   const later = buildAccounts(entries, { ...base, vault: [{ key, label, email: 'later@example.com' }] });
   assert.deepEqual(later[0].where, ['later@example.com']);
