@@ -36,15 +36,20 @@ and the Macs within reach of FFBox's `ffdev` containers (design 1.4, rule 1).
    policy before the change is kept as [`tailnet-policy-before-2026-10-05.hujson`](tailnet-policy-before-2026-10-05.hujson):
    paste it back into the JSON editor and Save to roll back.
 
-   **Funnel needs one more grant (found 2026-10-07, not made by any script here):** Funnel's servers (peers named
-   `funnel-ingress-node`, tag `tag:ingress`) deliver to the node's Tailscale peer API port, a random one, and the policy
-   above has no rule for that (tailscaled takes that traffic itself, before the kernel, so the VM's own firewall is not
-   involved: docs/portal-on-ffbox-host.md, 1.4), so the VM's packet filter logs `Drop: TCP{<funnel-ingress-node address>:... >
-   [fd7a:...:ac62]:59343} 80 no rules matched` and the portal is unreachable from outside while it works on the tailnet.
-   The fix is a tailnet admin's: `{ "src": ["tag:ingress"], "dst": ["tag:fff-portal"], "ip": ["*"] }` in `grants`
-   *(sourced: the diagnosis of 2026-10-07; check it with the policy's `tests`, and after saving `sudo fff-vm watch status`
-   on the FFBox host should show layers 7 and 9 passing within a few minutes)*. `fff-vm watch` finds this by itself
-   (layer 7) and puts it on the portal's banner.
+   **Funnel needs no grant of its own (w1420, 2026-10-17; this said the opposite from 2026-10-07).** Funnel's servers
+   (peers named `funnel-ingress-node`, tag `tag:ingress`) deliver to the node's Tailscale peer API port (59343 on the
+   VM's IPv6 address), and the VM's tailscaled logs every such SYN as `Drop: TCP{<funnel-ingress-node address>:... >
+   [fd7a:...:ac62]:59343} 80 no rules matched`. That line is not a drop: tailscaled's packet filter logs its verdict and the
+   tun layer then lets the SYN through, because peerapi checks the Funnel server's `cap/ingress` itself (tailscale source,
+   `net/tstun/wrap.go`, "Let peerapi through the filter; its ACLs are handled at L7"; Tailscale's engineer on
+   [tailscale/tailscale#21796](https://github.com/tailscale/tailscale/issues/21796), 2026-10-15: "The "Drop ... no rules
+   matched" line turns is misleading rather than a real drop ... this line is logged for every ingress connection,
+   including the ones that succeed"). Tailscale's Funnel requirements are MagicDNS, HTTPS certificates and the `funnel`
+   node attribute, nothing in `grants` ([kb/1223/funnel](https://tailscale.com/kb/1223/funnel)), and the portal answered
+   from outside from 2026-10-07 to 10-17 with no such grant while those lines were logged all along *(measured: the
+   portal's journal, `path health` lines)*. Do not add `tag:ingress` → `tag:fff-portal`. `fff-vm watch` layer 7 counts
+   those lines as Funnel hand-offs since w1420; the Funnel outages they were blamed for are in
+   [docs/portal-on-ffbox-host.md](../../docs/portal-on-ffbox-host.md), "Funnel outages (w1420)".
 
    **Adding a machine** (biscuit, an Ubuntu PC, 2026-10-07): its name and tailnet address in `hosts`, its name in the
    portal's `tcp:22` grant, and a line in the policy's `tests` (`"tag:fff-portal"` accepts `"biscuit:22"` and denies

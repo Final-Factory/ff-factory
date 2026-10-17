@@ -75,6 +75,12 @@ PW_FAILS_BEFORE_ALERT=2
 PW_TS_RESTART_MIN=30
 # No Funnel server has connected for this long, while the outside probe fails: Tailscale stopped sending traffic.
 PW_FUNNEL_STALE_MIN=30
+# The outside probe fails while every layer inside the VM passes (w1420, tailscale/tailscale#21114: Tailscale loses the
+# node's Funnel registration after a control-plane reconnect): after this many failing passes in a row the watch sends the
+# registration again (tailscale funnel reset, then the same serve config back), once per outage;
+PW_FUNNEL_REPUBLISH_AFTER=3
+# and after this many, with the outside probe still failing, it restarts tailscaled once (within PW_TS_RESTART_MIN's caps).
+PW_FUNNEL_RESTART_AFTER=10
 # The VM's disk: a warning below this much free (or 90% used), a failure below the second (or 97%).
 PW_DISK_WARN_MB=2048
 PW_DISK_FAIL_MB=512

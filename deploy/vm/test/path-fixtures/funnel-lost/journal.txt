@@ -1,0 +1,3 @@
+Oct 17 00:09:58 fff tailscaled[760119]: Received error: PollNetMap: read tcp 10.213.41.10:48312->192.200.0.103:443: read: connection reset by peer
+Oct 17 00:10:01 fff tailscaled[760119]: control: netmap: got new dial plan from control
+Oct 17 00:10:39 fff tailscaled[760119]: Drop: TCP{[fd7a:115c:a1e0:ab12:4843:cd96:6001:1001]:21980 > [fd7a:115c:a1e0::5a34:ac62]:59343} 80 no rules matched

@@ -48,6 +48,8 @@ export const LOG_SOURCES: Record<string, SourceDef> = {
   portal: { kind: 'journal', units: [JOURNAL_UNITS.portal], what: "the server's own journal (fff-portal.service): everything it prints" },
   updater: { kind: 'journal', units: [JOURNAL_UNITS.updater], what: 'the updater (fff-update.service): builds, the system setup, the switch, rollbacks' },
   health: { kind: 'journal', units: [JOURNAL_UNITS.health], what: 'the health check, update verification and the unit watchdog (fff-health.service)' },
+  // w1420: the Funnel outages of 2026-10-13..17 could not be traced because only a person could read this journal.
+  tailscaled: { kind: 'journal', units: ['tailscaled.service'], what: "the portal VM's Tailscale daemon (tailscaled.service): its control connection (PollNetMap, dial plan), link changes, DERP, Funnel hand-offs (peerapi, ingress) and the packet filter's Drop lines" },
   cleanup: { kind: 'cleanup', what: "a computer's clean-up passes as the portal keeps them (data/cleanup/<machine>/cleanup-log.jsonl; no machine: this host's own), one line per pass, per item removed, kept or planned" },
   update_result: { kind: 'doc', file: 'update.result.json', what: "data/update.result.json: how the last portal update ended (ok or the error, the commit before and after)" },
   update_verified: { kind: 'doc', file: 'update.verified.json', what: 'data/update.verified.json: the last update the VM verified healthy (its commit); the machines are updated after it' },
@@ -100,6 +102,8 @@ const REDACTIONS: [RegExp, (...m: string[]) => string][] = [
   [/\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, (_m, scheme) => `${scheme} ${MASK}`],
   // Cookie and Set-Cookie: the rest of the line
   [/\b((?:set-)?cookie)(["']?\s*[:=]\s*)[^\r\n]*/gi, (_m, k, sep) => `${k}${sep}${MASK}`],
+  // a Tailscale login link (tailscaled prints one when the node needs a login): whoever opens it first logs the node in
+  [/(https?:\/\/login\.tailscale\.com\/a\/)[A-Za-z0-9]+/gi, (_m, base) => `${base}${MASK}`],
   // scheme://user:password@host and scheme://<long token>@host
   [/(\b[a-z][a-z0-9+.-]*:\/\/)([^\s/:@"']*):([^\s/@"']+)@/gi, (_m, scheme, user) => `${scheme}${user}:${MASK}@`],
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[A-Za-z0-9._~-]{24,}@/gi, (_m, scheme) => `${scheme}${MASK}@`],

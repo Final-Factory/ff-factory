@@ -79,6 +79,12 @@ case "$url" in
     if [ -n "$resolve" ]; then
       ip=${resolve##*:443:}; ip=${ip#[}; ip=${ip%]}
       if [ -f "$L/server-$ip.rc" ]; then rc=$(cat "$L/server-$ip.rc"); else rc=$(cat "$L/server.rc"); fi
+      # tailscaled's peerapi_ingress counts every Funnel connection that reaches the node: a working server's, and with
+      # ingress-reaches a failing one's too (the node turns it away)
+      if [ "$rc" = 0 ] || [ -e "$L/ingress-reaches" ]; then
+        n=$(awk '$1 == "peerapi_ingress" { print $2 }' "$L/metrics.txt")
+        sed -i "s/^peerapi_ingress .*/peerapi_ingress $((n + 1))/" "$L/metrics.txt"
+      fi
       [ "$rc" = 0 ] && cat "$L/e2e.out.ok" 2>/dev/null || true
       exit "$rc"
     fi
@@ -129,6 +135,12 @@ case "$*" in
     done
     printf '%s\n' "$out" ;;
   "serve status --json") cat "$L/ts-serve.json" ;;
+  "debug metrics") cat "$L/metrics.txt" ;;
+  "funnel reset") echo '{}' >"$L/ts-serve.json" ;;
+  "serve set-raw")
+    cat >"$L/ts-serve.json"
+    # with FAKE_REPAIR_FIXES the registration sent again brings the outside path back
+    [ "${FAKE_REPAIR_FIXES:-0}" != 1 ] || cp "$FIX/healthy/e2e.out" "$FIX/healthy/e2e.rc" "$FIX/healthy/server.rc" "$L/" ;;
   "funnel --bg "*)
     [ "${FAKE_REPAIR_FIXES:-0}" != 1 ] || cp "$FIX/healthy/ts-serve.json" "$L/ts-serve.json"
     echo "Available on the internet:" ;;
@@ -268,7 +280,7 @@ backdate() { # KEY SECONDS: the state key's time that long ago
 banner() { jq -r "$1" "$HEALTH"; }
 # The status file for the portal's banner, against the recording server/pathHealth.test.ts also reads (its times and the host
 # name replaced so it does not change from run to run). UPDATE_FIXTURES=1 rewrites the recording.
-norm() { jq -S . "$HEALTH" | sed -E 's/"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z"/"2026-10-07T18:30:00Z"/g; s/"host": "[^"]*"/"host": "ffbox"/; s/from outside \([A-Za-z0-9_.-]*, through Funnel\)/from outside (ffbox, through Funnel)/'; }
+norm() { jq -S . "$HEALTH" | sed -E 's/"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z"/"2026-10-07T18:30:00Z"/g; s/"host": "[^"]*"/"host": "ffbox"/; s/from outside \([A-Za-z0-9_.-]*, through Funnel\)/from outside (ffbox, through Funnel)/; s/the VM'"'"'s clock is -?[0-9]+s off/the VM'"'"'s clock is 0s off/'; }
 check_recording() {
   if [ "${UPDATE_FIXTURES:-0}" = 1 ]; then norm >"$FIX/$1"; fi
   norm | diff -u "$FIX/$1" - >"$T/diff" || fail "the status file differs from its recording $1 (UPDATE_FIXTURES=1 rewrites it): $(head -30 "$T/diff")"
@@ -519,7 +531,27 @@ ok "firewall: sshd listening on 22 with no rule for it from the tailnet fails"
 ok "firewall: the rule scanner (port sets, ranges, no port, other protocols, other interfaces)"
 
 # ---------------------------------------------------------------- 7. the tailnet policy drops Funnel traffic
+# w1420: a Funnel server's SYN to the node's own peer API port is logged "Drop: ... no rules matched" and then accepted by
+# tailscaled (net/tstun/wrap.go), once per Funnel request. With the port known (Self.PeerAPIURL) those are hand-offs.
 scen policy-drop
+pass 2
+is 7 ok
+said "path L7 tailnet policy: ok: no Funnel server (tag:ingress) TCP traffic dropped by the packet filter in 15 min (4 Drop line(s) in all, 3 of them Funnel hand-offs to the peer API port (59343 59917), which tailscaled logs as Drop and then accepts)"
+ok "policy: Funnel servers' SYNs to the node's peer API port (logged as Drop, accepted by tailscaled) are hand-offs, not a policy problem"
+scen policy-drop e2e-timeout
+pass 3
+is 7 ok
+is 9 fail
+[ "$(banner '.problems | map(.id) | join(",")')" = "9" ] || fail "L7: hand-offs put layer 7 on the banner: $(banner '.problems | map(.id) | join(",")')"
+if matches -F 'Funnel is blocked by the tailnet policy' "$FAKE_DIR/alerts"; then fail "L7: the urgent policy alert for hand-offs while the outside probe fails"; fi
+ok "policy: with the outside probe failing, the hand-offs still do not blame the tailnet policy (the 2026-10-13..17 outages were each called a policy problem)"
+scen policy-drop-other-port e2e-timeout
+pass 2
+is 7 fail
+said "path L7 tailnet policy: fail: the tailnet policy drops Funnel traffic: a tailnet admin must grant tag:ingress (or *) → tag:fff-portal. 2 line(s) in 15 min, last: Oct 07 18:04:05 fff tailscaled[612]: Drop: TCP{100.100.3.13:50112 > 100.64.0.5:443} 60 no rules matched (to port(s) 443, not the peer API port 59343 59917 that Funnel's servers deliver to)"
+ok "policy: Funnel servers' TCP to another port than the peer API port is still judged"
+# Where tailscale status does not name the peer API port, the judgement is as before w1420.
+scen peerapi-unknown policy-drop
 pass 2
 # The first pass has no outside probe result yet: a failure, the chain stops. The second knows the probe passed: a warning.
 said "path L7 tailnet policy: fail: the tailnet policy drops Funnel traffic: a tailnet admin must grant tag:ingress (or *) → tag:fff-portal. 3 line(s) in 15 min, last: Oct 07 18:04:05 fff tailscaled[612]: Drop: TCP{100.100.3.13:50112 > 100.64.0.5:59917} 60 no rules matched"
@@ -530,7 +562,7 @@ is 8 ok
 only_reads_firewall
 [ "$(banner '.problems | length')" = 0 ] && [ "$(banner '.warnings | length')" -ge 1 ] && [ "$(alerts)" = 0 ] || fail "L7: with the outside probe passing it is a warning: no banner, no alert"
 ok "policy: Funnel servers' dropped TCP packets are matched to the tag:ingress peers by address (IPv6 and IPv4), logged with a sample line and the ports; no repair; a warning (not a failure) once the outside probe is known to pass"
-scen policy-drop e2e-timeout
+scen peerapi-unknown policy-drop e2e-timeout
 pass 2
 [ "$(banner .ok)" = false ] || fail "L7 with a failing outside probe: no banner"
 check_recording status-file.policy.json
@@ -542,12 +574,12 @@ alert_has "a tailnet admin must grant tag:ingress (or *) → tag:fff-portal"
 banner '.problems[0].line' | matches "Drop: TCP{" || fail "L7: the log line is not in the banner's data"
 [ "$(banner '.problems[0].since')" != null ] && [ "$(banner '.problems[0].name')" = "tailnet policy" ] || fail "L7: since/name"
 ok "policy: with the outside probe failing too: the banner names layer 7 (since when, the log line, who must act) and one urgent alert says what to grant"
-scen policy-other-drops
+scen peerapi-unknown policy-other-drops
 pass
 is 7 ok
 said "2 Drop line(s) in all"
 ok "policy: drops from sources that are not Funnel servers are not counted"
-scen policy-icmp-drops e2e-timeout
+scen peerapi-unknown policy-icmp-drops e2e-timeout
 pass 3
 is 7 ok
 said "3 Drop line(s) in all, 3 of them ICMPv4 ICMPv6 UDP from Funnel servers: pings and probes, not Funnel's requests"
@@ -592,17 +624,55 @@ scen e2e-timeout
 pass
 is 9 fail
 said "from outside failed (curl exit 28): curl: (28) Operation timed out after 10002 milliseconds"
-said "0 of 3 Funnel server address(es) from DNS answer, failing: 2001:db8:ffff::a 203.0.113.10 203.0.113.11"
+said "0 of 3 Funnel server address(es) from DNS answer, failing: 2001:db8:ffff::a (curl 28) 203.0.113.10 (curl 28) 203.0.113.11 (curl 28); peerapi_ingress 120→120 across 3 probe(s): the failing requests did not reach tailscaled (Tailscale's side: tailscale/tailscale#21114); 2 of 4 Funnel server peer(s) with a handshake in 5 min"
 [ "$(banner '.problems | length')" = 0 ] || fail "L9: banner at the first failing pass"
 pass
 [ "$(banner '.problems[0].id')" = 9 ] || fail "L9: want the banner after 2 passes"
-banner '.problems[0].who' | matches "every layer inside the VM passes but the outside path fails" || fail "L9: who"
+banner '.problems[0].who' | matches "did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after 3 failing passes" || fail "L9: who"
 no_vm_reset
 ok "end to end: a failing outside probe names every Funnel server address that fails; banner after two passes; never a VM reset"
 scen e2e-one-bad-server
 pass
-said "2 of 3 Funnel server address(es) from DNS answer, failing: 203.0.113.11"
+said "2 of 3 Funnel server address(es) from DNS answer, failing: 203.0.113.11 (curl 28); peerapi_ingress 120→122 across 3 probe(s): the failing requests did not reach tailscaled"
 ok "end to end: one bad Funnel server is told from all of them"
+scen e2e-timeout e2e-reached
+pass
+said "peerapi_ingress 120→123 across 3 probe(s): the failing requests reached tailscaled and failed there"
+ok "end to end: requests that reach tailscaled and fail there are told from requests that never arrive"
+scen funnel-lost
+pass
+said "curl exit 35"
+said "tailscaled in 15 min: 2 control/link/ingress line(s), last: Oct 17 00:10:01 fff tailscaled[760119]: control: netmap: got new dial plan from control"
+[ "$(calls 'tailscale funnel reset')" = 0 ] || fail "L9: re-published at the first failing pass"
+pass 2
+[ "$(calls 'tailscale funnel reset')" = 1 ] && [ "$(calls 'tailscale serve set-raw')" = 1 ] || fail "L9: the registration was not sent again at the third failing pass"
+said "path L9 repair: before: the outside probe failed 3 passes in a row"
+said "sent the Funnel registration again (tailscale funnel reset, serve set-raw), checking at the next pass"
+cmp -s "$FIX/healthy/ts-serve.json" "$FAKE_DIR/live/ts-serve.json" || fail "L9: the serve config differs after the registration was sent again"
+is 4 ok
+pass 6
+[ "$(calls 'tailscale funnel reset')" = 1 ] || fail "L9: the registration was sent again twice in one outage"
+[ "$(calls 'systemctl restart tailscaled')" = 0 ] || fail "L9: tailscaled restarted before 10 failing passes"
+pass
+[ "$(calls 'systemctl restart tailscaled')" = 1 ] || fail "L9: tailscaled not restarted at the tenth failing pass"
+said "path L9 repair: after: restarted tailscaled once"
+pass 3
+[ "$(calls 'systemctl restart tailscaled')" = 1 ] && [ "$(calls 'tailscale funnel reset')" = 1 ] || fail "L9: a repair repeated in one outage"
+no_vm_reset
+ok "end to end, Funnel lost on Tailscale's side (#21114): tailscaled's control lines in the evidence; the registration sent again once at the third failing pass (the serve config unchanged), tailscaled restarted once at the tenth, nothing repeated, never a VM reset"
+scen funnel-lost
+FAKE_REPAIR_FIXES=1
+pass 4
+is 9 ok
+[ "$(calls 'tailscale funnel reset')" = 1 ] && [ "$(calls 'systemctl restart tailscaled')" = 0 ] || fail "L9: repairs after the registration fixed it"
+[ -z "$(st L9_republished)" ] || fail "L9: the outage's repair flag outlived it"
+ok "end to end: sending the registration again that brings the path back ends the outage, and the next outage may repair again"
+scen funnel-lost
+rm -f "$FAKE_DIR/live/ts-serve.json"
+cp "$FIX/route-missing/ts-serve.json" "$FAKE_DIR/live/ts-serve.json"
+pass 3
+[ "$(calls 'tailscale funnel reset')" = 0 ] || fail "L9: re-published while layer 4 (the route) fails"
+ok "end to end: no registration repair while the route inside the VM is broken (layer 4 repairs that)"
 scen host-offline
 pass 3
 is 9 warn
@@ -749,7 +819,7 @@ pass
 ok "PW_CHECKS=off: no path checks"
 
 # ---------------------------------------------------------------- fff-vm watch status
-scen policy-drop e2e-timeout
+scen peerapi-unknown policy-drop e2e-timeout
 pass 2
 bash "$ROOT/deploy/vm/host/fff-vm" watch status >"$T/status" 2>&1 || fail "fff-vm watch status exited $?"
 for w in "Portal path" "tailnet policy" "Funnel servers" "end to end" "VM disk" "alert channel" "who: tailnet admin: grant tag:ingress"; do

@@ -24,6 +24,7 @@ portal_logs {source: "journal", grep: "fff-ops", offset: 200}     # the next pag
 |---|---|---|
 | `journal` | the server, the updater and the health check interleaved: what `fffctl logs` shows | `since` / `until`, default the last hour |
 | `portal`, `updater`, `health` | one of those units alone (`fff-portal`, `fff-update`, `fff-health`) | the same |
+| `tailscaled` | the VM's Tailscale daemon (`tailscaled.service`, w1420): its control connection (`PollNetMap`, `dial plan`), link changes, DERP, Funnel hand-offs and the packet filter's `Drop:` lines; a Tailscale login link in it is masked | the same |
 | `cleanup` | one computer's clean-up passes as the portal keeps them (`data/cleanup/<machine>/cleanup-log.jsonl` and its rotated `.1`; no `machine`: this host's own `data/cleanup-log.jsonl`): one line per pass, then one per item removed, would-remove or kept for a person, with size and why, each starting with the pass's time | `since` / `until` on the pass's time |
 | `update_result`, `update_verified`, `update_prepared`, `update_verifying`, `machine_rollout`, `unit_watchdog` | the JSON files of the same names (`update.result.json` …, `machine-rollout.json`, `unit-watchdog.json`), pretty-printed, in order | the file as it is; `since` and `until` do not apply |
 
