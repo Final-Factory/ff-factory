@@ -5937,6 +5937,12 @@ body {
   .fl-agent {
     min-height: 40px;
   }
+
+  /* A thumb's target (w1430). */
+  .needs-you.fl-call {
+    height: 38px;
+    padding: 0 14px;
+  }
 }
 
 /* The Overview board: one card per computer. */

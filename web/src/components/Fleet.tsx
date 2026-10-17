@@ -271,27 +271,32 @@ function PlaceHead({ glance: g, title, unused, free, unity, sub, active, hint, o
 }
 
 function SandboxItem({ sb, me, call, now, sel, variant, go }: { sb: FleetSandbox; me?: UserInfo; call?: SlotCall; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void }) {
-  const g = machineSandboxGlance(sb.machineSandbox!, sb.agents.live);
+  const placeGlance = machineSandboxGlance(sb.machineSandbox!, sb.agents.live);
+  // A worker here waits on you (w1430): the slot reads as one that needs you, as a permission wait does, unless something
+  // more urgent (a blocked editor, a failure) already speaks for it; what it is doing is that worker's title.
+  const g: Glance = call && placeGlance.tone !== 'red' && placeGlance.tone !== 'amber' ? { ...placeGlance, tone: 'amber', label: 'Needs you', attention: Math.max(placeGlance.attention, 1), progress: false } : placeGlance;
   const unityAbout = /^Unity/.test(g.label);
+  const free = sb.free && !call;
   // The label is the sandbox's name (w575); what it is doing is its live agents' titles, Working first.
   const title = sb.id;
-  const doing = sb.doing.length ? `${sb.doing[0]}${sb.doing.length > 1 ? ` (+${sb.doing.length - 1})` : ''}` : '';
+  const titles = call && !sb.doing.includes(call.session.title) ? [call.session.title, ...sb.doing] : sb.doing;
+  const doing = titles.length ? `${titles[0]}${titles.length > 1 ? ` (+${titles.length - 1})` : ''}` : '';
   const head = (
     <PlaceHead
       glance={g}
       title={title}
-      unused={sb.free && !call}
-      free={sb.free && !call}
+      unused={free}
+      free={free}
       unity={sb.status === 'ready' ? { tone: unityTone(sb.unity), label: unityLabel[sb.unity] } : undefined}
       sub={
         <>
-          {!sb.free && (
+          {!free && (
             <>
               <span className={`tone-${g.tone}`}>{g.label}</span>
               {doing && (
                 <>
                   {' · '}
-                  <span className="fl-doing" data-testid="fl-doing" title={sb.doing.join('\n')}>
+                  <span className="fl-doing" data-testid="fl-doing" title={titles.join('\n')}>
                     {doing}
                   </span>
                 </>

@@ -436,6 +436,11 @@ test('fleet: a slot lists the chats that matter now, folds the rest behind "+N o
   // no FREE chip says the slot is free while its work waits on you.
   await expect(sb2.getByTestId('fl-sandbox-row').locator('.row-title')).toHaveText('sb2');
   await expect(sb2.locator('.fl-free')).toHaveCount(0);
+  // It reads as a slot that needs you, as one with a permission wait does: amber "Needs you", the worker's title, a badge.
+  await expect(sb2.getByTestId('fl-sandbox-row').locator('.row-sub')).toContainText(/Needs you · w1325: Radiators/);
+  await expect(sb2.getByTestId('fl-sandbox-row').locator('.badge-amber')).toHaveText('1');
+  // A thumb's target on a phone.
+  if (isMobile(page)) expect((await sb2.getByTestId('fl-call').boundingBox())!.height).toBeGreaterThanOrEqual(36);
   const row = (await sb2.getByTestId('fl-sandbox-row').boundingBox())!;
   const name = (await sb2.getByTestId('fl-sandbox-row').locator('.row-title').boundingBox())!;
   const call = (await sb2.getByTestId('fl-call').boundingBox())!;
