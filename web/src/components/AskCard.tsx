@@ -1,8 +1,9 @@
 import { useContext, useState } from 'react';
-import { answerOf, CHAT_MORE_LABEL, type Ask } from '../../../shared/ask';
+import { answerOf, CHAT_MORE_LABEL, mediaMarkdown, splitMedia, type Ask } from '../../../shared/ask';
 import { HELD_MARK } from '../../../shared/conditional';
 import { api } from '../api';
 import { attempt, startReply, useStore } from '../store';
+import { Markdown } from './Markdown';
 import { ChatActionsContext } from './MessageActions';
 import { Icon } from './ui';
 
@@ -12,6 +13,11 @@ import { Icon } from './ui';
  * (POST /answer), and the buttons lock on the one picked, read back from the transcript so a reload, another tab and a
  * phone all show the same. "Chat more" sends nothing: it opens the reply box on the question. Typing an answer instead
  * works as ever and leaves the buttons as they are.
+ *
+ * Stills and clips the question or an option names as `![what it shows](<path>)` are shown (w1419, Ben: "I need to see
+ * screenshots of what you're talking about", then "i dont see any previews"): the question's under it, an option's under
+ * its button, never inside it (a click on a still opens it large; a click on the button answers). The words alone are the
+ * button's text and the quote's.
  */
 export function AskCard({ seq, ask, sessionId }: { seq: number; ask: Ask; sessionId: string }) {
   const chat = useContext(ChatActionsContext);
@@ -31,13 +37,21 @@ export function AskCard({ seq, ask, sessionId }: { seq: number; ask: Ask; sessio
     const ok = await attempt(api.answer(sessionId, seq, i));
     if (ok === undefined) setSending(-1);
   };
+  const q = splitMedia(ask.question);
   return (
-    <div className={`ask${locked ? ' ask-locked' : ''}`} data-seq={seq} data-testid="ask" role="group" aria-label={`Question: ${ask.question}`}>
-      <div className="ask-q">{ask.question}</div>
+    <div className={`ask${locked ? ' ask-locked' : ''}`} data-seq={seq} data-testid="ask" role="group" aria-label={`Question: ${q.text}`}>
+      <div className="ask-q">{q.text}</div>
+      {q.media.length > 0 && (
+        <div className="ask-media" data-testid="ask-media">
+          <Markdown text={mediaMarkdown(q.media)} />
+        </div>
+      )}
       <div className="ask-options">
-        {ask.options.map((o, i) => (
+        {ask.options.map((o, i) => {
+          const d = splitMedia(o.description);
+          return (
+          <div key={o.label} className="ask-opt-wrap">
           <button
-            key={o.label}
             type="button"
             className={`ask-opt${o.recommended ? ' ask-rec' : ''}${picked === i ? ' ask-picked' : ''}`}
             data-testid="ask-option"
@@ -54,9 +68,16 @@ export function AskCard({ seq, ask, sessionId }: { seq: number; ask: Ask; sessio
                 </span>
               )}
             </span>
-            {o.description && <span className="ask-opt-desc">{o.description}</span>}
+            {d.text && <span className="ask-opt-desc">{d.text}</span>}
           </button>
-        ))}
+          {d.media.length > 0 && (
+            <div className="ask-media ask-opt-media" data-testid="ask-option-media">
+              <Markdown text={mediaMarkdown(d.media)} />
+            </div>
+          )}
+          </div>
+          );
+        })}
         {!locked && (
           <button
             type="button"

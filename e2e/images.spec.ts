@@ -1,8 +1,9 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { RED_PNG } from './fakeAgent.ts';
 import type { Locator, Page } from '@playwright/test';
-import { ALPHA, BOX, GALLERY, appState, expect, machineSandbox, openSandbox, pastePng, sendMessage, startWorker, test, uniq } from './fixtures.ts';
+import { ALPHA, BOX, GALLERY, appState, expect, machineSandbox, openSandbox, pastePng, sendMessage, startWorker, test, uniq, useTool } from './fixtures.ts';
 
 /** The images are on screen and actually decoded (a broken link has no natural size). */
 async function expectLoaded(images: Locator) {
@@ -209,4 +210,79 @@ test('a mermaid block renders as a diagram, with its source a click away', async
   const broken = page.locator('.orch .msg-assistant', { hasText: bad }).locator('.md-mermaid');
   await expect(broken.locator('.md-mermaid-error')).toBeVisible({ timeout: 15_000 });
   await expect(broken.locator('pre code')).toContainText('flowchart LR');
+});
+
+test("w1419: an orchestrator's message shows review stills and clips written ![x](</srv/…>), on load and after a reload", async ({ authed: page, browserName }) => {
+  // Ben, 2026-10-16: "I need to see screenshots of what you're talking about", then "i dont see any previews". The review
+  // folder the e2e server seeds (e2e/server.ts, the default <sandbox root>/_review): a still, a clip, and the clip as .mp4.
+  const port = new URL(test.info().project.use.baseURL!).port;
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'sandboxes', '_review', 'w000-clips').replace(/\\/g, '/');
+  const still = `${review}/option-a-1280.png`;
+  const webm = `${review}/clip.webm`;
+  const mp4 = `${review}/clip.mp4`;
+  const tag = uniq('w1419');
+  const app = await appState(page.request);
+  // The fake orchestrator echoes the message: its reply carries the three, as Ben's orchestrator wrote them.
+  await sendMessage(page.request, app.orchestratorId!, `Option A ![Option A at 1280](<${still}>)\n\nThe clip ![clip](<${webm}>)\n\nAnd as mp4 ![clip mp4](<${mp4}>) ${tag}`);
+  const check = async () => {
+    const reply = page.locator('.orch .msg-assistant', { hasText: tag });
+    await onScreen(reply);
+    await expectLoaded(reply.locator('.md .md-img img'));
+    // The still did not fall back to its alt text as code (what a failed load shows).
+    await expect(reply.locator('.md code', { hasText: /^Option A at 1280$/ })).toHaveCount(0);
+    // Both clips are served to this chat, with ranges, in every browser.
+    for (const clip of [webm, mp4]) {
+      const r = await page.request.get(`/api/image?${new URLSearchParams({ session: app.orchestratorId!, path: clip })}`, { headers: { Range: 'bytes=0-99' } });
+      expect(r.status(), clip).toBe(206);
+    }
+    // Playwright's Chromium decodes the WebM fixture (its WebKit cannot, and shows the alt instead): both play, metadata first.
+    if (browserName === 'chromium') {
+      await expect(reply.locator('.md .md-video video')).toHaveCount(2);
+      await expect(reply.locator('.md code', { hasText: /^clip( mp4)?$/ })).toHaveCount(0);
+      const v = reply.locator('.md .md-video video').first();
+      await expect.poll(() => v.evaluate((e: HTMLVideoElement) => (e.readyState >= 1 ? Math.round(e.duration) : -1))).toBe(2);
+    }
+  };
+  await check();
+  // After a reload: the stored reply, with what the server kept of it (server/inlineImages.ts), shows them the same.
+  await page.reload();
+  await check();
+});
+
+test('w1419: a question with buttons (ask_person) shows the stills and clips its question and options name', async ({ authed: page, browserName }) => {
+  // Since w1397 every question to the person goes through ask_person ("Ask every question to Ben with ask_person"), and a
+  // [needs you] look-to-OK is asked with it: its media must show in the card, not as "![Option A at 1280](</srv/…>)" text.
+  const port = new URL(test.info().project.use.baseURL!).port;
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'sandboxes', '_review', 'w000-clips').replace(/\\/g, '/');
+  const tag = uniq('w1419ask');
+  const me = await appState(page.request);
+  const q = {
+    question: `Where should Save New Blueprint go (${tag})? ![Today](<${review}/option-a-1280.png>)`,
+    options: [
+      { label: `Option A, left of the item rows (${tag})`, description: `Left of the hotbar. ![Option A at 1280](<${review}/option-a-1280.png>)`, recommended: true },
+      { label: `Option B, above the hint (${tag})`, description: `Above the held-blueprint hint. ![Option B clip](<${review}/clip.webm>)` },
+    ],
+  };
+  expect(await useTool(page.request, me.orchestratorId, 'ask_person', q)).not.toMatch(/^ERROR/);
+  const card = page.getByTestId('ask').filter({ hasText: `Where should Save New Blueprint go (${tag})?` });
+  await expect(card).toBeVisible();
+  await card.scrollIntoViewIfNeeded();
+  // The question's still, and each option's, shown and decoded; no image syntax left as text.
+  await expectLoaded(card.locator('.md-img img'));
+  await expect(card.locator('.md-img img')).toHaveCount(2);
+  // The clip is a player in Chromium; WebKit cannot decode the WebM fixture and shows its alt, as it would any clip it cannot play.
+  await expect(card.locator(browserName === 'chromium' ? '.md-video video' : '.md-video video, .ask-media code')).toHaveCount(1);
+  await expect(card).not.toContainText('![');
+  await expect(card).not.toContainText('](<');
+  // The words stay: the option's text in its button, its media under it, outside the button (a click on a still opens it, not the answer).
+  const optionA = card.getByTestId('ask-option').filter({ hasText: `Option A, left of the item rows (${tag})` });
+  await expect(optionA).toContainText('Left of the hotbar.');
+  await expect(optionA.locator('img, video')).toHaveCount(0);
+  if (browserName === 'chromium') {
+    const v = card.locator('.md-video video').first();
+    await expect.poll(() => v.evaluate((e: HTMLVideoElement) => (e.readyState >= 1 ? Math.round(e.duration) : -1))).toBe(2);
+  }
+  // The answer is still one click, and its words are the label alone.
+  await optionA.click();
+  await expect(optionA).toContainText('Your answer');
 });

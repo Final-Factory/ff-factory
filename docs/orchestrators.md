@@ -1939,6 +1939,18 @@ orchestrator asks every question to its person with **`ask_person`**, one at a t
   writes its message, calls the tool and stops. The call stays in the transcript as a `tool_use`, and the page draws that event
   as the question (`web/src/components/AskCard.tsx`): the question, one button per option (the recommended one first, an amber
   "Recommended" chip) and a last, dashed "Chat more about this". It reuses what the chat has: the reply bar and `startReply` of w866 for "Chat more", the reply quote line for the answer, the `.chip` and the colour tokens (the same borders, accent and green as the rest of the page). The Intake tab's Approve and Decline (`DispatcherPanel.tsx`) are one-line `.btn` buttons in a table row, with no component to lift out, so the option buttons (`.ask-opt`) are two-line cards of the same radius and tokens.
+- **Stills and clips in the card** (w1419). Ben, 2026-10-16: "I need to see screenshots of what you're talking about", then
+  "i dont see any previews". Since w1397 a look to OK or a placement to pick is asked with `ask_person`, and the card printed
+  its question and descriptions as plain text: an `![Option A at 1280](</srv/fff/review/…png>)` in an option showed as those
+  characters, never the still, and a long path could be cut by the 220-character description limit. Now a question and each
+  option may carry its media as `![what it shows](<absolute path>)` (at most 4 each): `splitMedia` (`shared/ask.ts`) keeps
+  each whole and the limits (600 for the question, 220 for a description) count the words only (the tool takes up to
+  `MEDIA_CHARS` 1200 more for media). `AskCard` shows the question's media under it and an option's under its button,
+  never inside it (a click on a still opens it large; a click on the button answers), through the same `Markdown` images and
+  players as a message (`/api/image`, review files included). The quote of an answer (`askExcerpt`) has the words only.
+  `e2e/images.spec.ts` (w1419) asks with a review still and clip and checks they load, on desktop Chrome and the iPhone
+  project; the same file checks a plain message with a review PNG, WebM and MP4 in the `![x](</…>)` form, before and
+  after a reload.
 - **A click is the person's own message.** `POST /api/sessions/<id>/answer` with the question's seq and the option's index
   (`Orchestrators.answerWords`). The server reads the label and the question from the transcript, never from the page, and
   sends it as a reply (shared/replies.ts, "Replies and reactions"): the person's words are the label, then `REPLY_MARK` and
