@@ -186,6 +186,8 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
   const [answer, setAnswer] = useState('');
   const [sent, setSent] = useState(false);
   const workers = sessionsByIds(app.sessions, w.sessionIds);
+  // A worker of it streams its Live view (w1430): the wait is often "drag the knobs", so the card opens it in one click.
+  const live = app.config.live?.enabled ? app.live?.find((v) => v.state !== 'stopped' && w.sessionIds.includes(v.sessionId)) : undefined;
   const age = waitAge(since, now);
   const act = async (f: () => Promise<unknown>, done?: string) => {
     setBusy(true);
@@ -293,6 +295,11 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
               </>
             )}
           </div>
+        )}
+        {live && (
+          <button type="button" className="btn btn-outline btn-xs lv-open" title="Watch the game beside the worker's conversation and move the asset's knobs" data-testid={`wait-live-${w.id}`} onClick={() => navigate({ view: 'live', sessionId: live.sessionId })}>
+            <span className="lv-rec" /> Live view: go
+          </button>
         )}
         <div className="spacer" />
         <button className="link-btn small" onClick={() => navigate({ view: 'dispatcher', tab: w.id })}>

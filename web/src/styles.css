@@ -5891,6 +5891,43 @@ body {
   color: var(--text-3);
 }
 
+/* "+N older" (w1430): the folded chats open in place. */
+.fl-older {
+  align-self: flex-start;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+}
+
+.fl-older:hover {
+  background: var(--hover);
+  color: var(--text-2);
+}
+
+/* A slot whose worker waits on the viewer (w1430): its row, then "Live view: go" or "Needs you" beside it. */
+.fl-place-line {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.fl-place-line > .row {
+  flex: 1;
+  min-width: 0;
+}
+
+.needs-you.fl-call {
+  height: 26px;
+  padding: 0 10px;
+  margin-right: var(--s-1);
+  font-size: var(--fs-sm);
+}
+
+.needs-you.fl-call:hover {
+  background: rgba(255, 176, 32, 0.2);
+}
+
 .fl-add-machine {
   align-self: flex-start;
   margin: 2px var(--s-3) 0;

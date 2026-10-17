@@ -569,8 +569,28 @@ main clone's own branch switch) take one lock in the daemon.
 **In the web UI.** The sidebar groups everything by computer: this host (its own daemon's sandboxes, or "orchestrators only" when it has no
 daemon), then each machine, each a collapsible group
 whose header shows its load and `sandboxes/max_sandboxes · editors/max_unity`, then one row per sandbox (label, branch,
-editor, a **FREE** badge) with its live agents under it (no main-clone row: no agent works there, w536). The Overview
-page (`#/overview`) shows the same as one card per computer. A machine sandbox has its own page,
+editor, a **FREE** badge) with its agents under it (no main-clone row: no agent works there, w536). The Overview
+page (`#/overview`) shows the same as one card per computer.
+
+- **The chats that matter now, then "+N older"** (w1430, Ben: "there are so many inactive chats in every slot in fff. we
+  should clean them up so the UI isnt so cluttered and so i can find things easier"). Under a sandbox the sidebar lists a
+  chat when it is mid-turn, starting or asking for a permission; when its agent host failed; when it is between turns
+  with its own work going or stopped but coming back to its sandbox (`holdsSandbox`); when it is the current worker of an
+  open request (the latest of the request's workers that still holds it, `holdsOf`), whatever its process does; or when
+  it waits on a person. A worker that waits on a person comes first. The rest (finished: idle with nothing pending and no
+  open request; stopped or failed on a closed request) fold behind "+N older", the newest first, which opens them in
+  place. The chat you have open is always listed. Nothing is deleted. The rule is `chatMatters` and `chatLedger` in
+  `shared/fleet.ts`. On the portal VM, `node scripts/sidebar-chats.ts data --as Ben` prints each sandbox's
+  counts before and after it.
+- **"Live view: go" and "Needs you" beside a slot** (w1430, Ben: "if there is work waiting for live view workflow, it
+  should be obvious maybe as a go button next to the slot"). When a worker in the sandbox waits on you (its request is
+  Waiting on input for what the worker asked: its `waiting_on_person` declaration or its report, not a permission, an
+  intake approval or the dispatcher's question), the slot's row gets an amber button. It reads "Live view: go" and opens
+  `#/live/<session>` when that worker streams a Live view ([live-view.md](live-view.md)), and "Needs you" and opens its
+  chat otherwise. A Live view up while its worker is between turns calls the person who asked for that worker too,
+  declared or not. A wait on someone else shows on the chat's line ("waits on Lothsahn") and calls nobody. `slotCall` in
+  `shared/fleet.ts`. The FREE badge still says what placement sees: a stopped worker that waits on a person does not hold
+  its sandbox (`occupies`, `server/placeAgain.ts`). A machine sandbox has its own page,
 `#/machine/<machine>/sandbox/<id>`: its agents as tabs, its editor (start, stop, the log read through the daemon), its
 git state and a branch switch (`POST /api/machines/<machine>/sandboxes/<id>/unity`, `GET …/unity-log`,
 `POST …/switch-branch`). The machine's own page (from its Overview card) shows its daemon, folders and sandboxes, and
