@@ -1647,6 +1647,15 @@ there (a name cut off mid-word), a bare media name and a relative image target. 
 The words stay as written; media already shown is not repeated, so it is idempotent; web links and replies naming no media
 are left alone. The portal log says how many files it added (`review media: N file(s) put inline in a reply of …`).
 
+**An image of a review file that is not there** (w1419). Ben, 2026-10-16, on his orchestrator's message with
+`![Option A at 1280](</srv/fff/review/w1386-save-blueprint-options/…png>)` lines in its body: "i dont see any previews". A
+target that does not exist makes the page show the alt as code (`InlineImage`'s `onError`), which reads as no preview. The
+check now points such an image at the one file of its folder it was meant to be (`nearest`: the same name but for case,
+spaces, `_` or `-`, or another media extension), or, with none, writes its alt in words and puts the folder's stills and
+clips under the paragraph. What the page does with a file that is there was measured in Firefox, Chromium and WebKit
+(`e2e/images.spec.ts`, w1419, with the e2e review root outside the sandboxes as `/srv/fff/review` is on the portal, so a
+still is served by `/api/image` and not by a copy kept with the transcript): it loads, also six in one long message.
+
 **Why rewrite, not send it back.** Both were weighed:
 
 - Sending it back means refusing the reply and having the orchestrator write it again. That is unsafe for this case. The

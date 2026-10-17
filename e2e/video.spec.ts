@@ -7,7 +7,7 @@ test('video: a clip an agent mentions plays inline and seeks with HTTP ranges (a
   // The review folder the e2e server seeds (e2e/server.ts): the portal holds no sandboxes of its own (w510), and videos
   // from a machine are not shown yet (server/index.ts /api/image).
   const port = new URL(test.info().project.use.baseURL!).port;
-  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'sandboxes', '_review');
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review');
   const clip = path.join(review, 'w000-clips', 'clip.webm').replace(/\\/g, '/');
   const tag = uniq('vid');
   const s = await startWorker(page.request, `see ${clip} ${tag}`, { title: `Video ${tag}` });
@@ -44,13 +44,13 @@ test('video: a clip an agent mentions plays inline and seeks with HTTP ranges (a
   const whole = await page.request.get(src);
   expect(whole.status()).toBe(200);
   expect(whole.headers()['content-type']).toBe('video/webm');
-  const outside = `/api/image?${new URLSearchParams({ session: s.id, path: clip.replace('/_review/', '/elsewhere/') })}`;
+  const outside = `/api/image?${new URLSearchParams({ session: s.id, path: clip.replace('/review/', '/elsewhere/') })}`;
   expect((await page.request.get(outside)).status()).toBeGreaterThanOrEqual(400);
 });
 
 test('video: a clip written as a markdown image, in the <angle> path form, is a player and not an image (w1030)', async ({ authed: page, browserName }) => {
   const port = new URL(test.info().project.use.baseURL!).port;
-  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'sandboxes', '_review');
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review');
   const dir = path.join(review, 'w000-clips').replace(/\\/g, '/');
   const tag = uniq('mdvid');
   const s = await startWorker(page.request, `see ![md clip](<${dir}/clip.webm>) and ![md mp4](<${dir}/clip.mp4>) ${tag}`, { title: `Markdown video ${tag}` });
@@ -72,7 +72,7 @@ test('video: a clip written as a markdown image, in the <angle> path form, is a 
 
 test('video: ?preview=1 sends a review clip\'s web preview, with ranges; the original stays one link away (w1248)', async ({ authed: page }) => {
   const port = new URL(test.info().project.use.baseURL!).port;
-  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'sandboxes', '_review');
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review');
   const clip = path.join(review, 'w000-clips', 'previewed.mp4').replace(/\\/g, '/');
   const s = await startWorker(page.request, `preview ${uniq('pv')}`, { title: 'Preview' });
   const src = `/api/image?${new URLSearchParams({ session: s.id, path: clip })}`;

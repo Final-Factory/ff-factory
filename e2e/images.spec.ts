@@ -214,9 +214,9 @@ test('a mermaid block renders as a diagram, with its source a click away', async
 
 test("w1419: an orchestrator's message shows review stills and clips written ![x](</srv/…>), on load and after a reload", async ({ authed: page, browserName }) => {
   // Ben, 2026-10-16: "I need to see screenshots of what you're talking about", then "i dont see any previews". The review
-  // folder the e2e server seeds (e2e/server.ts, the default <sandbox root>/_review): a still, a clip, and the clip as .mp4.
+  // folder the e2e server seeds (e2e/server.ts, review.root outside the sandboxes, as on the portal): a still, a clip, and the clip as .mp4.
   const port = new URL(test.info().project.use.baseURL!).port;
-  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'sandboxes', '_review', 'w000-clips').replace(/\\/g, '/');
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-clips').replace(/\\/g, '/');
   const still = `${review}/option-a-1280.png`;
   const webm = `${review}/clip.webm`;
   const mp4 = `${review}/clip.mp4`;
@@ -253,7 +253,7 @@ test('w1419: a question with buttons (ask_person) shows the stills and clips its
   // Since w1397 every question to the person goes through ask_person ("Ask every question to Ben with ask_person"), and a
   // [needs you] look-to-OK is asked with it: its media must show in the card, not as "![Option A at 1280](</srv/…>)" text.
   const port = new URL(test.info().project.use.baseURL!).port;
-  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'sandboxes', '_review', 'w000-clips').replace(/\\/g, '/');
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-clips').replace(/\\/g, '/');
   const tag = uniq('w1419ask');
   const me = await appState(page.request);
   const q = {
@@ -285,4 +285,45 @@ test('w1419: a question with buttons (ask_person) shows the stills and clips its
   // The answer is still one click, and its words are the label alone.
   await optionA.click();
   await expect(optionA).toContainText('Your answer');
+});
+
+test('w1419: a long orchestrator message with six review stills between its paragraphs shows them all', async ({ authed: page }) => {
+  // The shape of Ben's orchestrator's message of 2026-10-16 23:23 UTC: a TL;DR, then each option's words and its stills
+  // as ![Option A at 1280](</srv/fff/review/…png>) lines, then the question. He saw none of them (Firefox).
+  const port = new URL(test.info().project.use.baseURL!).port;
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-options').replace(/\\/g, '/');
+  const tag = uniq('w1419long');
+  const app = await appState(page.request);
+  const names = ['1-option-A-left-of-item-rows-1920', '2-option-A-left-of-item-rows-1280', '3-option-B-above-hint-1920', '4-option-B-above-hint-1280', '5-tried-left-of-abilities-1920', '6-tried-left-of-abilities-1280'];
+  const body = [
+    `**TL;DR:** two places for Save New Blueprint; I recommend A. ${tag}`,
+    `**Option A**, left of the hotbar's item rows:\n\n![Option A at 1920](<${review}/${names[0]}.png>)\n\n![Option A at 1280](<${review}/${names[1]}.png>)`,
+    `**Option B**, above the held-blueprint hint:\n\n![Option B at 1920](<${review}/${names[2]}.png>)\n\n![Option B at 1280](<${review}/${names[3]}.png>)`,
+    `What I tried first, left of the abilities, overlaps the station controls:\n\n![Tried at 1920](<${review}/${names[4]}.png>) ![Tried at 1280](<${review}/${names[5]}.png>)`,
+    'Which one?',
+  ].join('\n\n');
+  await sendMessage(page.request, app.orchestratorId!, body);
+  const reply = page.locator('.orch .msg-assistant', { hasText: tag });
+  await onScreen(reply);
+  const imgs = reply.locator('.md .md-img img');
+  await expect(imgs).toHaveCount(6);
+  // Each one decoded once it is on screen, as its reader scrolls down the message.
+  for (let i = 0; i < 6; i++) {
+    await imgs.nth(i).scrollIntoViewIfNeeded();
+    await expect.poll(() => imgs.nth(i).evaluate((e: HTMLImageElement) => e.complete && e.naturalWidth > 0), { message: names[i] }).toBe(true);
+  }
+  await expect(reply.locator('.md code', { hasText: /^(Option [AB]|Tried) at \d+$/ })).toHaveCount(0);
+});
+
+test('w1419: an image of a review still written with a slightly wrong name still shows (the outgoing check points it at the file)', async ({ authed: page }) => {
+  const port = new URL(test.info().project.use.baseURL!).port;
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-options').replace(/\\/g, '/');
+  const tag = uniq('w1419near');
+  const app = await appState(page.request);
+  // "_1280" for "-1280" and a capital O: what an orchestrator writes from memory. The file is 2-option-A-left-of-item-rows-1280.png.
+  await sendMessage(page.request, app.orchestratorId!, `Option A ![Option A at 1280](<${review}/2-Option-A-left-of-item-rows_1280.png>) ${tag}`);
+  const reply = page.locator('.orch .msg-assistant', { hasText: tag });
+  await onScreen(reply);
+  await expectLoaded(reply.locator('.md .md-img img'));
+  await expect(reply.locator('.md code', { hasText: 'Option A at 1280' })).toHaveCount(0);
 });

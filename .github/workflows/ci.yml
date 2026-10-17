@@ -115,9 +115,11 @@ jobs:
           # Test time per leg, summed from run 38333790206's three shards: Chromium about 486 s (645 before mobile-chrome ran
           # only the phone specs, playwright.config.ts ANDROID), WebKit about 574 s.
           # ipad-chrome is in the WebKit leg: it is the iPad device with Chrome's user agent, so its engine is WebKit.
+          # desktop-firefox (w1419: Ben reads the portal in Firefox) runs only the chat's image, video and question specs, so it
+          # rides in this leg with its browser installed beside Chromium rather than taking a hosted job of its own.
           - engine: Chromium
-            browser: chromium
-            projects: desktop-chromium,mobile-chrome,provider-desktop,provider-mobile,intake-desktop
+            browser: chromium firefox
+            projects: desktop-chromium,mobile-chrome,provider-desktop,provider-mobile,intake-desktop,desktop-firefox
           - engine: WebKit
             browser: webkit
             projects: mobile-safari,ipad-safari,ipad-chrome,intake-mobile
@@ -169,7 +171,7 @@ jobs:
           fi
       - name: This job's browser and its system libraries (both when rendering baselines)
         if: steps.need.outputs.run == 'true'
-        run: npx playwright install --with-deps ${{ steps.snap.outputs.update == 'true' && 'chromium webkit' || matrix.browser }}
+        run: npx playwright install --with-deps ${{ steps.snap.outputs.update == 'true' && 'chromium webkit firefox' || matrix.browser }}
       - name: Build the web UI
         if: steps.need.outputs.run == 'true'
         run: npm --prefix web run build

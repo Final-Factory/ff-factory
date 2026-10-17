@@ -22,6 +22,8 @@ const IPAD = /ipad\.spec\.ts/;
 const PROVIDER = /provider\.spec\.ts/;
 // The intake (e2e/intake.spec.ts) likewise, with the Discord intake switched on (E2E_INTAKE=1).
 const INTAKE = /intake\.spec\.ts/;
+// What Firefox runs (w1419): how images and clips show in a chat.
+const FIREFOX = /(images|video|ask)\.spec\.ts/;
 // Chrome on an Android phone runs only what a phone does differently (w1191; Ben, 2026-10-13: "I approve everything"):
 // attachments (Android's file picker, w528), the chat and its composer, replies by tap, the chat keeping its place
 // (w1100, w1164), rotation, the phone layout and its screenshots. Every other spec runs on desktop Chromium (the engine)
@@ -38,6 +40,8 @@ const PROJECTS = [
 // ipad-chrome is the iPad device with Chrome's user agent (iOS Chrome is WebKit too), so ci.yml puts it in the WebKit leg.
   { name: 'ipad-safari', port: 8794, use: { ...devices['iPad Pro 11'] }, only: IPAD },
   { name: 'ipad-chrome', port: 8795, use: { ...devices['iPad Pro 11'], userAgent: CHROME_IPAD_UA }, only: IPAD },
+  // Firefox on a desktop (w1419: Ben reads the portal in Firefox, and its images were the ones that failed): the image specs.
+  { name: 'desktop-firefox', port: 8800, use: { ...devices['Desktop Firefox'], viewport: { width: 1440, height: 900 } }, only: FIREFOX },
   { name: 'provider-desktop', port: 8796, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } }, only: PROVIDER, env: { E2E_PROVIDER: '1' } },
   { name: 'provider-mobile', port: 8797, use: { ...devices['Pixel 5'] }, only: PROVIDER, env: { E2E_PROVIDER: '1' } },
   { name: 'intake-desktop', port: 8798, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } }, only: INTAKE, env: { E2E_INTAKE: '1' } },
