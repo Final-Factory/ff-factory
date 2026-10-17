@@ -1171,34 +1171,146 @@ select.input {
   color: var(--amber);
 }
 
-/* One Claude account: who, how many agents, where it is used. */
-.acct-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px var(--s-2);
-  font-size: var(--fs-sm);
+/* An account's windows two to a row: 5-hour session and weekly, then each model's weekly. */
+.plan-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-2);
 }
 
-.acct-label {
-  flex: 1;
+.plan-grid .meter-row {
+  gap: var(--s-1);
+}
+
+.plan-grid .meter-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-grid .meter-value {
+  white-space: nowrap;
+}
+
+.meter-note {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-family: var(--mono);
+}
+
+/* Every Claude account, one line each: "name - weekly 62%, session 38%", red when spent, yellow from 80%, blue otherwise. */
+.plan-list {
+  gap: var(--s-1);
+  container-type: inline-size;
+}
+
+.plan-rows {
+  display: grid;
+  gap: var(--s-1);
+}
+
+.plan-item {
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* The name gives way (an ellipsis, whole on its hover); the numbers never wrap. */
+.plan-item-name {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.plan-item-tail {
+  white-space: pre;
+}
+
+/* Narrow (the desktop sidebar): the name has the whole first line, the numbers the second, and the dash is not needed. */
+.plan-item-sep {
+  display: none;
+}
+
+/* Wide: name, then " - weekly 62%, session 38%" in a column of its own, so the dashes line up down the list. */
+@container (min-width: 261px) {
+  .plan-rows {
+    display: grid;
+    gap: var(--s-1);
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+
+  .plan-rows > .plan-item {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: subgrid;
+    align-items: baseline;
+  }
+
+  .plan-item-sep {
+    display: inline;
+  }
+}
+
+.pl-red { color: var(--red); }
+.pl-yellow { color: var(--amber); }
+.pl-blue { color: var(--blue); }
+
+.sys-detail > .plan-refresh:first-child {
+  padding-top: 0;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+/* The collapsed footer's plan line: which plan is in use and how many are spent, in words. */
+.plan-line {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--s-3);
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.plan-line > * {
+  white-space: nowrap;
+}
+
+.pf-lead {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.pf-label {
+  margin-right: 0.35em;
+}
+
+.plan-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--text);
   font-weight: 600;
 }
 
-.acct-agents {
-  color: var(--text-3);
-  font-size: var(--fs-xs);
+.pf-use {
+  flex: none;
+  margin-left: 0.35em;
 }
 
-.acct-where {
-  flex-basis: 100%;
-  color: var(--text-3);
-  font-size: var(--fs-xs);
+.pf-nums {
+  font-weight: 600;
+}
+
+.pf-spent {
+  font-weight: 600;
 }
 
 /* "Needs you" on a phone: the bell with a count, in the page's header. */

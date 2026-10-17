@@ -380,8 +380,8 @@ deploy), on every pass while free space is below the soft threshold, and on ever
 `Library`, `Assets`, `Inbox`, `.git`, saves, backups (`ff-local-backups`, `~/ff-backups`), people's own files. The
 clean-up's guard (`neverDelete`) applies to every entry, again right before it is removed. A request still open, or
 stalled (its person decides), keeps its output. Output it cannot attribute (a `Builds/perf` from nobody knows which
-request, a request the ledger does not know, a scratch clone) is **listed, never removed**: the dashboard's clean-up
-line counts it, its hover and `cleanup_log` name each with its size. These rules replace the older
+request, a request the ledger does not know, a scratch clone) is **listed, never removed**: `system_status`, a computer's row hover on the dashboard and
+`cleanup_log` count it, and `cleanup_log` names each with its size (the meters sheet has no clean-up lines since w1389: a disk under its soft threshold shows amber on its own bar). These rules replace the older
 `buildsOlderThanDays` rule for a sandbox's `Builds/` (any entry untouched for 7 days went, attributed or not); it
 applies again only with `mode` off. The daily turn is kept on disk (`cleanup-state.json` in the app's data folder or
 the daemon's folder), so a computer restarted or redeployed more often than daily still gets it.

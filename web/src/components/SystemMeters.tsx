@@ -76,7 +76,7 @@ export function describe(c: Computer): string {
     s.diskFreeBytes !== undefined ? `Disk ${fmtBytes(s.diskFreeBytes)} free` : '',
     // Its Unity editors and game players, each player with its owner and age; an orphan says so (w1196).
     s.unity ? `Unity ${unitySlotsLine(s.unity)}` : '',
-    c.cleanup ? `Last clean-up ${fmtClock(c.cleanup.at)}: ${fmtBytes(c.cleanup.freedBytes ?? 0)} freed (${c.cleanup.removed} item(s))` : '',
+    c.cleanup ? `Last clean-up ${fmtClock(c.cleanup.at)}: ${fmtBytes(c.cleanup.freedBytes ?? 0)} freed (${c.cleanup.removed} item(s))${c.cleanup.listed?.length ? `, ${c.cleanup.listed.length} stale-looking item(s) kept for a person` : ''}` : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -91,6 +91,17 @@ export const accountOf = (app: AppState, sessionId: string) => (app.accounts && 
 export function accountTag(a: AccountUsage): string {
   if (a.kind === 'token') return a.label.slice(a.label.indexOf('…'));
   return (a.email ?? a.label).split('@')[0].slice(0, 10);
+}
+
+/**
+ * Where an account stands now: spent until a reset (its weekly or 5-hour window is full and not yet reset), and whether
+ * agents run on it this minute. A window whose reset time passed is not spent.
+ */
+export function accountState(a: AccountUsage, now: number, live = 0): { spentUntil?: string; inUse: boolean } {
+  const u = a.usage?.available ? a.usage : undefined;
+  const full = [u?.weekly, u?.session].filter((m): m is UsageMeter => !!m && m.percent >= 99.5 && !(m.resetsAt && Date.parse(m.resetsAt) <= now));
+  const until = full.map((m) => m.resetsAt).filter((t): t is string => !!t).sort((x, y) => Date.parse(y) - Date.parse(x))[0];
+  return { spentUntil: full.length ? (until ?? '') : undefined, inUse: live > 0 };
 }
 
 const isLive = (s: SessionInfo | undefined) => !!s && s.status !== 'stopped' && s.status !== 'error';
@@ -144,14 +155,13 @@ export function SystemFooter({ app }: { app: AppState }) {
       )}
       {open && (
         <div className="sys-detail">
+          {hasPlan && <UsageRefresh />}
+          {app.accounts ? <PlanList rows={planRows(app, now)} /> : app.usage && <PlanMeters usage={app.usage} />}
           {many ? (
             <MachineTable computers={computers} providers={providers} health={app.host?.health} />
           ) : (
-            <Meters sys={sys} health={app.host?.health} />
+            <Meters sys={sys} health={app.host?.health} belowSoft={computers[0]?.cleanup?.belowSoft} />
           )}
-          <CleanupLines computers={computers} />
-          {hasPlan && <UsageRefresh />}
-          {app.accounts ? <AccountsMeters app={app} /> : app.usage && <PlanMeters usage={app.usage} />}
         </div>
       )}
       <button className="sys-toggle" onClick={toggle} aria-expanded={open} title={many ? 'Every computer and Claude account. Tap for the meters.' : `${sys.cpuModel} · ${sys.cpuCount} threads. Tap for the meters.`}>
@@ -173,7 +183,8 @@ export function SystemFooter({ app }: { app: AppState }) {
                 )}
               </>
             )}
-            {hasPlan && (
+            {hasPlan && app.accounts && app.accounts.length > 1 && <PlanSummary rows={planRows(app, now)} now={now} />}
+            {hasPlan && !(app.accounts && app.accounts.length > 1) && (
               <span title={plan.title} data-testid="plan-glance">
                 Plan{' '}
                 {plan.weekly ? (
@@ -197,6 +208,89 @@ export function SystemFooter({ app }: { app: AppState }) {
         <Icon name="chevron" size={12} />
       </button>
     </div>
+  );
+}
+
+/** One account as the sheet and the footer read it: a short name, where it stands, and the agents on it. */
+export interface PlanRow {
+  a: AccountUsage;
+  /** "ben-2" for the vault token vault-ben-2; a login's name before the @. */
+  name: string;
+  live: number;
+  inUse: boolean;
+  /** Spent: a window is full and not yet reset; the empty string when it gives no reset time. */
+  spentUntil?: string;
+  title: string;
+  /** One line for the footer's hover: "ben-2: in use, 5h 38%, weekly 62%". */
+  line: string;
+}
+
+/**
+ * What a plan is called: the account's email where a person recorded one on the vault entry (w785; a setup-token cannot say
+ * whose it is, docs/vault.md 12.0), else the vault name without "vault-" ("ben-2"); a login's name before the @.
+ */
+const accountName = (a: AccountUsage) => a.vaultEmail ?? (a.kind === 'token' ? a.label.split(' …')[0].replace(/^vault-/, '') : (a.email ?? a.label).split('@')[0]);
+
+export function planRows(app: AppState, now: number): PlanRow[] {
+  const sessions = sessionIndex(app.sessions);
+  return (app.accounts ?? []).map((a) => {
+    const live = a.sessionIds.filter((id) => isLive(sessions.get(id))).length;
+    const st = accountState(a, now, live);
+    const u = a.usage?.available ? a.usage : undefined;
+    const win = (name: string, m?: UsageMeter) => `${name}: ${m ? `${Math.round(m.percent)}%${m.resetsAt ? `, resets ${localTime(m.resetsAt, now)}` : ''}` : 'unknown'}`;
+    const title = [
+      ...(a.vaultEmail ? [a.vaultEmail] : []),
+      a.label,
+      ...(u ? [win('5-hour session', u.session), win('Weekly', u.weekly), ...u.models.map((m) => win(m.label, m))] : [a.usage ? `Usage unavailable${a.usage.why ? `: ${a.usage.why}` : ''}` : 'Usage not fetched yet']),
+      st.spentUntil !== undefined ? `Spent${st.spentUntil ? ` until ${localTime(st.spentUntil, now)}` : ''}` : live ? `In use now: ${live} agent${live === 1 ? '' : 's'}` : 'Not in use',
+      ...a.where.filter((w) => w !== a.vaultEmail),
+      ...(a.pool ? [a.pool.text] : []),
+    ].join('\n');
+    const state = st.spentUntil !== undefined ? `spent${st.spentUntil ? ` until ${localTime(st.spentUntil, now)}` : ''}` : live ? 'in use' : 'free';
+    const line = `${accountName(a)}: ${state}${u?.session ? `, 5h ${Math.round(u.session.percent)}%` : ''}${u?.weekly ? `, weekly ${Math.round(u.weekly.percent)}%` : ''}`;
+    return { a, name: accountName(a), line, live, inUse: live > 0, spentUntil: st.spentUntil, title };
+  });
+}
+
+/**
+ * The collapsed footer's plan cell with more than one account, in plain words: the plan agents run on now with its two
+ * windows, and how many are spent. Each account is in the open sheet.
+ */
+function PlanSummary({ rows, now }: { rows: PlanRow[]; now: number }) {
+  const using = rows.filter((r) => r.inUse).sort((x, y) => y.live - x.live);
+  const spent = rows.filter((r) => r.spentUntil !== undefined);
+  const first = using[0];
+  const u = first?.a.usage?.available ? first.a.usage : undefined;
+  const pct = (m?: UsageMeter) => (m ? `${Math.round(m.percent)}%` : '?');
+  const back = spent.map((r) => r.spentUntil!).filter(Boolean).sort((x, y) => Date.parse(x) - Date.parse(y))[0];
+  // Pieces that wrap whole, with a gap between and no separator character: a narrow footer breaks between them, never inside one
+  // and never leaves a dot at a line's end. The numbers read and colour as the open sheet's line does.
+  return (
+    <span className="plan-line" data-testid="plan-glance" title={rows.map((r) => r.line).join('\n')}>
+      <span className="pf-lead">
+        {first ? (
+          <>
+            <span className="pf-label">Plan in use:</span>{' '}
+            <span className="plan-name" title={first.name}>{first.name}</span>
+            {using.length > 1 && <span className="pf-use">{` +${using.length - 1}`}</span>}
+          </>
+        ) : (
+          <span className="pf-label">No plan in use</span>
+        )}
+      </span>{' '}
+      {first && u && (
+        <>
+          <span className={`pf-nums pl-${planTone(first)}`}>{`weekly ${pct(u.weekly)}, session ${pct(u.session)}`}</span>{' '}
+        </>
+      )}
+      {spent.length === rows.length ? (
+        <span className="lvl-crit pf-spent">all {rows.length} plans spent{back ? `, first back ${localTime(back, now)}` : ''}</span>
+      ) : spent.length ? (
+        <span className="lvl-crit pf-spent">{spent.length} of {rows.length} plans spent</span>
+      ) : (
+        <span className="pf-spent">none spent</span>
+      )}
+    </span>
   );
 }
 
@@ -258,7 +352,7 @@ function ProviderMiniBars({ l }: { l: ProviderLoad }) {
   );
 }
 
-function Meter({ label, pct, value, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; warn?: number; crit?: number; lvl?: Lvl }) {
+function Meter({ label, pct, value, note, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; note?: string; warn?: number; crit?: number; lvl?: Lvl }) {
   const p = Math.max(0, Math.min(100, pct));
   return (
     <div className={`meter meter-${lvl ?? level(p, warn, crit)}`}>
@@ -269,12 +363,13 @@ function Meter({ label, pct, value, warn = 75, crit = 90, lvl }: { label: string
       <div className="meter-bar">
         <i style={{ width: `${p}%` }} />
       </div>
+      {note && <div className="meter-note">{note}</div>}
     </div>
   );
 }
 
 /** The host alone (no machines): its meters, as before. */
-function Meters({ sys, health }: { sys: SystemStats; health?: HostHealth }) {
+function Meters({ sys, health, belowSoft }: { sys: SystemStats; health?: HostHealth; belowSoft?: boolean }) {
   const memUsed = memUsedOf(sys);
   return (
     <div className="meters">
@@ -291,12 +386,15 @@ function Meters({ sys, health }: { sys: SystemStats; health?: HostHealth }) {
           }
         />
       )}
-      <HostDisks sys={sys} health={health} />
+      <HostDisks sys={sys} health={health} belowSoft={belowSoft} />
     </div>
   );
 }
 
-function HostDisks({ sys, health }: { sys: HostStats; health?: HostHealth }) {
+/** A disk still under the clean-up's soft free-space threshold after its last pass is at least a warning (it was the orange clean-up line). */
+const lowLvl = (belowSoft?: boolean): Lvl => (belowSoft ? 'warn' : 'ok');
+
+function HostDisks({ sys, health, belowSoft }: { sys: HostStats; health?: HostHealth; belowSoft?: boolean }) {
   if (health?.disks.length) {
     // The host guard's volumes, coloured by its own levels (hostGuard.warnFreeGB / criticalFreeGB).
     return (
@@ -308,7 +406,7 @@ function HostDisks({ sys, health }: { sys: HostStats; health?: HostHealth }) {
               label={`Disk ${d.path.replace(/[\\/]+$/, '')}`}
               pct={((d.totalBytes - d.freeBytes) / d.totalBytes) * 100}
               value={`${fmtBytes(d.freeBytes)} free`}
-              lvl={d.level === 'critical' ? 'crit' : d.level}
+              lvl={worse(d.level === 'critical' ? 'crit' : d.level, lowLvl(belowSoft))}
             />
           ) : (
             <Meter key={d.path} label={`Disk ${d.path.replace(/[\\/]+$/, '')}`} pct={0} value="offline" lvl="crit" />
@@ -318,7 +416,8 @@ function HostDisks({ sys, health }: { sys: HostStats; health?: HostHealth }) {
     );
   }
   if (sys.diskTotalBytes === undefined || sys.diskFreeBytes === undefined) return null;
-  return <Meter label="Disk" pct={((sys.diskTotalBytes - sys.diskFreeBytes) / sys.diskTotalBytes) * 100} value={`${fmtBytes(sys.diskFreeBytes)} free`} warn={85} crit={95} />;
+  const used = ((sys.diskTotalBytes - sys.diskFreeBytes) / sys.diskTotalBytes) * 100;
+  return <Meter label="Disk" pct={used} value={`${fmtBytes(sys.diskFreeBytes)} free`} lvl={worse(level(used, 85, 95), lowLvl(belowSoft))} />;
 }
 
 /** Every computer, one compact row each: a bar and a number per resource. */
@@ -351,6 +450,7 @@ function MachineTable({ computers, providers = [], health }: { computers: Comput
           );
         const g = gpuPct(s);
         // The host's disks are the guard's volumes where it has them: the fullest one stands for them all.
+        const low = lowLvl(c.cleanup?.belowSoft);
         const disks = c.host && health?.disks.length ? health.disks.filter((d) => d.totalBytes && d.freeBytes !== undefined) : [];
         const disk = disks.length
           ? disks.map((d) => ({ used: ((d.totalBytes! - d.freeBytes!) / d.totalBytes!) * 100, free: d.freeBytes!, lvl: (d.level === 'critical' ? 'crit' : d.level) as Lvl })).sort((a, b) => b.used - a.used)[0]
@@ -363,7 +463,7 @@ function MachineTable({ computers, providers = [], health }: { computers: Comput
             <Cell pct={s.loadPct} text={`${Math.round(s.loadPct)}%`} />
             <Cell pct={ramPct(s)} lvl={ramLvl(s)} text={`${Math.round(ramPct(s))}%`} title={`${fmtBytes(memUsedOf(s))} of ${fmtBytes(s.memTotalBytes)}${s.memPressure ? `, pressure ${s.memPressure}` : ''}`} />
             {g === undefined ? <span className="mt-note">n/a</span> : <Cell pct={g} text={`${Math.round(g)}%`} title={s.gpu?.unified ? 'GPU busy (Apple Silicon shares the RAM)' : 'VRAM in use'} />}
-            {disk ? <Cell pct={disk.used} lvl={disk.lvl} text={fmtBytes(disk.free)} title={`${fmtBytes(disk.free)} free`} /> : <span className="mt-note">n/a</span>}
+            {disk ? <Cell pct={disk.used} lvl={worse(disk.lvl, low)} text={fmtBytes(disk.free)} title={`${fmtBytes(disk.free)} free${c.cleanup?.belowSoft ? `, below the clean-up's soft threshold of ${c.cleanup.softFreeGB} GB after its last pass` : ''}`} /> : <span className="mt-note">n/a</span>}
           </div>
         );
       })}
@@ -404,40 +504,6 @@ ${disksHint(m)}`} /> : <span className="mt-note">n/a</span>}
   );
 }
 
-/** A pass's hover: what it removed and why, what it would remove in dry-run mode, and what it kept for a person (w459). */
-function cleanupTitle(x: CleanupSummary): string {
-  const item = (t: { path: string; bytes: number; why?: string; rule?: string }) => `${t.path}: ${fmtBytes(t.bytes)}${t.why ? ` (${t.why})` : ''}`;
-  return [
-    ...(x.top ?? []).map(item),
-    ...(x.planned?.length ? ['Would remove (dry-run mode):', ...x.planned.slice(0, 10).map(item)] : []),
-    ...(x.listed?.length ? ['Kept, could not attribute (cleanup_log has them all):', ...x.listed.slice(0, 10).map(item)] : []),
-    // A temp folder apart from the disk (the VM's /tmp is a tmpfs: RAM), never counted as free disk (w566).
-    ...(x.temp?.length ? ['Temp, apart from the disk:', ...x.temp.map((t) => `${t.path}: ${fmtBytes(t.freeBytes ?? 0)} free of ${fmtBytes(t.totalBytes ?? 0)} (${t.ram ? 'RAM' : 'a disk of its own'})`)] : []),
-  ].join('\n');
-}
-
-/** Each computer's last clean-up pass: when, what it freed, and whether free space is still below its soft threshold. */
-function CleanupLines({ computers }: { computers: Computer[] }) {
-  const now = useNow(60_000);
-  const withCleanup = computers.filter((c) => c.cleanup);
-  if (!withCleanup.length) return null;
-  return (
-    <div className="meters cleanup-lines" data-testid="cleanup-lines">
-      {withCleanup.map((c) => {
-        const x = c.cleanup!;
-        return (
-          <div key={c.name} className={`plan-asof${x.belowSoft ? ' lvl-warn' : ''}`} title={cleanupTitle(x) || undefined}>
-            Clean-up {c.name}: {fmtRelative(x.at, now)}, {fmtBytes(x.freedBytes ?? 0)} freed
-            {x.belowSoft && x.freeBytes !== undefined ? ` · only ${fmtBytes(x.freeBytes)} free (soft ${x.softFreeGB} GB)` : ''}
-            {x.planned?.length ? ` · ${fmtBytes(x.plannedBytes ?? 0)} stale output in dry-run mode` : ''}
-            {x.listed?.length ? <span data-testid="cleanup-listed">{` · ${x.listed.length} stale-looking item(s) kept for a person`}</span> : null}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 /**
  * Poll every Claude account's usage now (they are polled every config usagePollMinutes, default 15): here and on each
  * connected machine. The numbers arrive by themselves; each account's "as of" says when.
@@ -460,43 +526,51 @@ function UsageRefresh() {
   );
 }
 
-/** Every Claude account in use: who it is, where it is used, which agents run on it, its limits. */
-function AccountsMeters({ app }: { app: AppState }) {
-  const sessions = sessionIndex(app.sessions);
+/** How worn an account is, as the list colours it: red when spent, yellow from 80% (either window), blue otherwise. */
+export type PlanTone = 'red' | 'yellow' | 'blue';
+export const planTone = (r: PlanRow): PlanTone => {
+  if (r.spentUntil !== undefined) return 'red';
+  const u = r.a.usage?.available ? r.a.usage : undefined;
+  return Math.max(u?.weekly?.percent ?? 0, u?.session?.percent ?? 0) >= 80 ? 'yellow' : 'blue';
+};
+
+/**
+ * Every Claude account in a plain list, in order (Ben, w1389: "just list them in squence with name - weekly %, session%
+ * thats it. make it red if its used up, yellow if its at 80+% and blue otherwise"). The resets, the agents on it and the
+ * rest are each line's hover.
+ */
+function PlanList({ rows }: { rows: PlanRow[] }) {
+  const asOf = rows.map((r) => r.a.usage?.asOf).filter((t): t is string => !!t).sort()[0];
   return (
-    <>
-      {app.accounts!.map((a) => {
-        const live = a.sessionIds.map((id) => sessions.get(id)).filter(isLive);
-        return (
-          <PlanMeters
-            key={a.id}
-            usage={a.usage}
-            head={
-              <div className="acct-head" data-testid={`account-${accountTag(a)}`}>
-                <span className="acct-label">{a.label}</span>
-                <span className="acct-agents">{live.length === 1 ? '1 agent' : `${live.length} agents`}</span>
-                {a.where.length > 0 && <div className="acct-where">{a.where.join(' · ')}</div>}
-                {a.pool && (
-                  <div className="acct-where" title={`${a.pool.person}'s Claude token pool: priority marks the token a new job gets now`} data-testid="account-pool">
-                    {a.pool.text}
-                  </div>
-                )}
-              </div>
-            }
-          />
-        );
-      })}
-    </>
+    <div className="meters plan-list" data-testid="plans-table">
+      <div className="plan-rows" role="list" aria-label="Plan usage of every Claude account">
+        {rows.map((r) => {
+          const u = r.a.usage?.available ? r.a.usage : undefined;
+          const pct = (m?: UsageMeter) => (m ? `${Math.round(m.percent)}%` : '?');
+          return (
+            <div key={r.a.id} className={`plan-item pl-${planTone(r)}`} role="listitem" data-testid={`account-${accountTag(r.a)}`} title={r.title}>
+              <span className="plan-item-name" title={r.name}>{r.name}</span>
+              <span className="plan-item-tail">
+                <span className="plan-item-sep">{' - '}</span>
+                {u ? `weekly ${pct(u.weekly)}, session ${pct(u.session)}` : r.a.usage ? 'usage unavailable' : 'not fetched yet'}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="plan-asof" title={rows.map((r) => (r.a.usage?.source ? `${r.name}: from ${r.a.usage.source}` : '')).filter(Boolean).join('\n') || undefined}>
+        {asOf ? `as of ${fmtClock(asOf)}` : 'not fetched yet'}
+      </div>
+    </div>
   );
 }
 
 /** One account's plan limits (server/usage.ts): weekly first, then the 5-hour session and per-model weekly windows. */
-function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode }) {
+function PlanMeters({ usage: u }: { usage?: PlanUsage }) {
   const now = useNow(60_000);
   if (!u) {
     return (
       <div className="meters plan-meters">
-        {head}
         <div className="plan-asof">not fetched yet</div>
       </div>
     );
@@ -505,7 +579,6 @@ function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode })
   if (!u.available) {
     return (
       <div className="meters plan-meters" title={u.why}>
-        {head}
         <div className="meter-row">
           <span className="meter-label">Claude plan</span>
           <span className="meter-value">unavailable</span>
@@ -521,13 +594,15 @@ function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode })
       </div>
     );
   }
-  const rows = [u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m);
+  // Session first, then weekly, then each model's weekly window, two to a row (a phone's width holds two).
+  const rows = [u.session, u.weekly, ...u.models].filter((m): m is UsageMeter => !!m);
   return (
     <div className="meters plan-meters" title={`Claude ${u.plan ?? ''} plan usage limits, from ${u.source ? `the API's ${u.source}` : 'the claude.ai usage endpoint'}`}>
-      {head}
-      {rows.map((m) => (
-        <Meter key={m.label} label={m.label} pct={m.percent} value={`${Math.round(m.percent)}%${m.resetsAt ? ` · ${resetLabel(m.resetsAt, now)}` : ''}`} />
-      ))}
+      <div className="plan-grid">
+        {rows.map((m) => (
+          <Meter key={m.label} label={m.label.replace(/^Session \(5 h\)$/i, 'Session 5h')} pct={m.percent} value={`${Math.round(m.percent)}%`} note={m.resetsAt ? (Date.parse(m.resetsAt) <= now ? 'resetting' : `resets ${localTime(m.resetsAt, now)}`) : undefined} />
+        ))}
+      </div>
       <div className="plan-asof">
         Claude {u.plan ?? 'plan'} · {asOf}
         {u.source ? ` · from ${u.source}` : ''}
@@ -536,13 +611,11 @@ function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode })
   );
 }
 
-function resetLabel(iso: string, now: number): string {
+/** A time in the viewer's own zone: "3:40 PM" today, "Thu 9:00 AM" on another day. */
+export function localTime(iso: string, now: number): string {
   const t = Date.parse(iso);
   if (isNaN(t)) return '';
-  const h = (t - now) / 3_600_000;
-  if (h <= 0) return 'resetting';
-  if (h < 1) return `resets in ${Math.max(1, Math.round(h * 60))}m`;
-  if (h < 24) return `resets in ${Math.round(h)}h`;
   const d = new Date(t);
-  return `resets ${d.toLocaleDateString([], { weekday: 'short' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return d.toDateString() === new Date(now).toDateString() ? time : `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
 }

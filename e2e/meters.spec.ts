@@ -1,5 +1,5 @@
-import type { Page } from '@playwright/test';
-import type { AccountUsage, AppState, Machine, MachineStats, ServerEvent, SystemStats } from '../shared/types.ts';
+import type { Locator, Page } from '@playwright/test';
+import type { AccountUsage, AppState, CleanupSummary, Machine, MachineStats, ServerEvent, SystemStats } from '../shared/types.ts';
 import { appState, expect, openSidebar, settle, signIn, test } from './fixtures.ts';
 
 // The sidebar footer: every computer's load and every Claude account's usage. The page's WebSocket is
@@ -84,7 +84,7 @@ const ACCOUNTS = (agentIds: string[]): AccountUsage[] => [
 type Shape = 'machines' | 'host-only' | 'old-server';
 
 /** Serve the page a fixed world: the orchestrator only, no sandboxes, and the machines and accounts of `shape`. */
-async function fixedWorld(page: Page, shape: Shape, extra: AccountUsage[] = []) {
+async function fixedWorld(page: Page, shape: Shape, extra: AccountUsage[] = [], m5Cleanup?: CleanupSummary) {
   await page.routeWebSocket('**/ws', (ws) => {
     const server = ws.connectToServer();
     let orchId = '';
@@ -102,7 +102,7 @@ async function fixedWorld(page: Page, shape: Shape, extra: AccountUsage[] = []) 
           providers: [],
           system: SYSTEM,
           host: { elevated: false },
-          machines: shape === 'machines' ? [machine('m5', true), machine('m3', false)] : [],
+          machines: shape === 'machines' ? [{ ...machine('m5', true), lastCleanup: m5Cleanup }, machine('m3', false)] : [],
           machineStats: shape === 'machines' ? { m5: M5 } : {},
           usage: ACCOUNTS([]).at(1)!.usage,
           accounts: shape === 'machines' ? [...ACCOUNTS([orchId, 'w-busy']), ...extra] : ACCOUNTS([orchId, 'w-busy']).slice(0, 1),
@@ -147,12 +147,13 @@ test('meters: every machine gets a cell with three bars, in the footprint of the
   // The numbers are one hover away (and read out to screen readers).
   await expect(foot.getByTestId('mcell-m5')).toHaveAttribute('title', /CPU 64%\nRAM 53% \(34\.0 GB of 64\.0 GB\), pressure normal\nGPU 71% busy/);
   await expect(foot.getByTestId('mcell-BEAST')).toHaveAttribute('aria-label', /VRAM 45%/);
-  // The plan cell: the account nearest its weekly limit, which one, and how many more.
-  await expect(foot.getByTestId('plan-glance')).toHaveText('Plan 98% …9AAA +1');
-  await expect(foot.getByTestId('plan-glance')).toHaveAttribute('title', 'host token …9AAA: weekly 98%\nowner@example.com: weekly 23%');
-  // The cells fit in two text lines, the footprint the host alone had with its editor and agent counts before w510
-  // (52 px measured at this size; those counts went with the portal's own pool).
-  expect((await foot.locator('.sys-toggle').boundingBox())!.height, 'no taller than two lines').toBeLessThanOrEqual(Math.max(hostOnly, 52) + 1);
+  // The plan cell (w1389): in words, the plan agents run on now with its two windows, and how many are spent.
+  await expect(foot.getByTestId('plan-glance')).toHaveText(footerLine('host token', '98%', '12%', 'none spent'), { useInnerText: true });
+  await expect(foot.getByTestId('plan-glance')).toHaveAttribute('title', 'host token: in use, 5h 12%, weekly 98%\nowner: free, weekly 23%');
+  // The computers fit one text line, as the host alone had with its editor and agent counts before w510 (52 px measured
+  // at this size with two lines). The plan line in words (w1389) takes up to three more at the sidebar's 280 px: 68 px
+  // measured on Windows, 84 px on CI's Linux fonts; a phone's wider sheet holds it in two.
+  expect((await foot.locator('.sys-toggle').boundingBox())!.height, 'no taller than four lines').toBeLessThanOrEqual(Math.max(hostOnly, 52) + 40);
   await expect(foot).toHaveScreenshot('meters-collapsed.png');
 });
 
@@ -167,15 +168,19 @@ test('meters: open, every computer is a row and every account its limits and age
   // No editor or agent limits of the portal's own (w510): each machine's are on its row.
   await expect(foot.locator('.limits')).toHaveCount(0);
 
+  // Plans first (w1389, Ben: "just list them in squence with name - weekly %, session% thats it"): one line each, red when spent, yellow from 80%, blue otherwise; the details are the hover.
+  const plans = foot.getByTestId('plans-table');
+  await expect(plans.locator('.plan-item')).toHaveCount(2);
   const token = foot.getByTestId('account-…9AAA');
-  await expect(token).toContainText('host token …9AAA');
-  await expect(token).toContainText('2 agents');
-  await expect(token).toContainText("the agents' token on BEAST, m5");
+  await expect(token).toHaveText(planLine('host token', '98%', '12%'), { useInnerText: true });
+  await expect(token).toHaveClass(/pl-yellow/);
+  await expect(token).toHaveAttribute('title', /host token …9AAA\n5-hour session: 12%, resets .*\nWeekly: 98%, resets .*\nWeekly Fable: 22%, resets .*\nIn use now: \d agents?\nthe agents' token on BEAST, m5/);
   const login = foot.getByTestId('account-owner');
-  await expect(login).toContainText('owner@example.com');
-  await expect(login).toContainText('BEAST login · m5 login');
-  await expect(foot.locator('.plan-meters')).toHaveCount(2);
-  await expect(foot.locator('.plan-meters').first()).toContainText('Weekly Fable');
+  await expect(login).toHaveText(planLine('owner', '23%', '?'), { useInnerText: true });
+  await expect(login).toHaveClass(/pl-blue/);
+  await expect(login).toHaveAttribute('title', /Not in use\nBEAST login\nm5 login/);
+  // The plans come before the computers.
+  expect((await plans.boundingBox())!.y).toBeLessThan((await foot.getByRole('table', { name: 'Load of every computer' }).boundingBox())!.y);
   await expect(foot.locator('.sys-detail')).toHaveScreenshot('meters-open.png');
 });
 
@@ -228,8 +233,9 @@ test('meters: the server lists its accounts: the vault tokens, never a login or 
 });
 
 /** A vault Claude token as the accounts list carries it (server/usage.ts buildAccounts, w777/w785): its vault name, no description. */
-const VAULT = (name: string, last4: string, weekly: number, where: string[], agentIds: string[] = []): AccountUsage => ({
+const VAULT = (name: string, last4: string, weekly: number, where: string[], agentIds: string[] = [], vaultEmail?: string): AccountUsage => ({
   id: `token:e2e-${name}`,
+  ...(vaultEmail ? { vaultEmail } : {}),
   kind: 'token',
   label: `${name} …${last4}`,
   sources: [`token:e2e-${name}`],
@@ -238,28 +244,102 @@ const VAULT = (name: string, last4: string, weekly: number, where: string[], age
   usage: { available: true, asOf: NOW.toISOString(), plan: 'max', source: 'rate limits', weekly: { label: 'Weekly', percent: weekly, resetsAt: at(70) }, session: { label: 'Session (5 h)', percent: 9, resetsAt: at(2) }, models: [] },
 });
 
+/** A plan's line: "name - weekly 62%, session 38%"; in a narrow list (the desktop sidebar) the numbers are a second line and the dash is dropped. */
+const planLine = (name: string, weekly: string, session: string) => {
+  const esc = (t: string) => t.replace(/[.+*?^$()[\]{}|\\]/g, '\\$&');
+  return new RegExp(`^${esc(name)}\\s+(-\\s+)?weekly ${esc(weekly)}, session ${esc(session)}$`);
+};
+
+/** The footer's plan line: "Plan in use: name  weekly 98%, session 12%  1 of 3 plans spent", its pieces on one line or several. */
+const footerLine = (name: string, weekly: string, session: string, spent: string) =>
+  new RegExp(`^Plan in use:\\s+${name}\\s+weekly ${weekly}, session ${session}\\s+${spent}$`);
+
+const plans = (foot: Locator) => foot.getByTestId('plans-table');
+
 test('meters (w785): a vault token is one row under its vault name, the Claude account email on its subtext; none recorded shows no subtext', async ({ page }) => {
   const foot = await fixedWorld(page, 'machines', [
-    VAULT('vault-ben-2', 'dAAA', 71, ['ben@example.com', "fff-portal's token file (the orchestrator)"], ['w-busy']),
-    VAULT('vault-lothsahn-1', 'EAAA', 95, ['lothsahn@example.com']),
+    VAULT('vault-ben-2', 'dAAA', 71, ['ben@example.com', "fff-portal's token file (the orchestrator)"], ['w-busy'], 'ben@example.com'),
+    VAULT('vault-lothsahn-1', 'EAAA', 95, ['lothsahn@example.com'], [], 'a.very.long.address.for.loth@finalfactory-example.test'),
     VAULT('vault-ben-1', 'cBBB', 12, []),
   ]);
   await foot.locator('.sys-toggle').click();
   await settle(page);
   const both = foot.getByTestId('account-…dAAA');
-  await expect(both.locator('.acct-label')).toHaveText('vault-ben-2 …dAAA');
-  await expect(both).toContainText("ben@example.com · fff-portal's token file (the orchestrator)");
+  // Named by the email a person recorded (w1389), not by the vault name; the vault name is on its hover; with none recorded the vault name stands (ben-1 below).
+  await expect(both).toHaveText(planLine('ben@example.com', '71%', '9%'), { useInnerText: true });
+  await expect(both).not.toContainText('ben-2');
+  await expect(both).toHaveAttribute('title', /^ben@example\.com\nvault-ben-2 …dAAA\n[\s\S]*fff-portal's token file \(the orchestrator\)/);
   await expect(both).not.toContainText('vault:');
-  await expect(foot.getByTestId('account-…EAAA')).toContainText('lothsahn@example.com');
-  const bare = foot.getByTestId('account-…cBBB');
-  await expect(bare.locator('.acct-label')).toHaveText('vault-ben-1 …cBBB');
-  await expect(bare.locator('.acct-where')).toHaveCount(0);
-  // one row each, never the token file's name for a vault token, and the usage line says "rate limits"
-  await expect(foot.locator('.plan-meters')).toHaveCount(5);
-  await expect(foot.locator('.plan-asof').filter({ hasText: 'from rate limits' }).first()).toBeVisible();
+  // A long address is cut with an ellipsis, never wrapped or clipped by the row, and whole on its hover.
+  // Every plan's first element is its name, so no line starts with the dash.
+  for (const item of await plans(foot).locator('.plan-item').all()) {
+    // One text line where the list is wide (a phone's sheet), the name over the numbers where it is narrow (the desktop sidebar).
+    const wide = (await plans(foot).evaluate((e) => e.clientWidth - 2 * parseFloat(getComputedStyle(e).paddingLeft))) > 261;
+    expect((await item.boundingBox())!.height, wide ? 'a plan is one line' : 'a plan is two lines at most').toBeLessThan(wide ? 26 : 50);
+    expect(await item.evaluate((e) => e.firstElementChild?.className)).toBe('plan-item-name');
+  }
+  const loth = foot.getByTestId('account-…EAAA');
+  await expect(loth).toContainText('a.very.long.address.for.loth@finalfactory-example.test');
+  await expect(loth.locator('.plan-item-name')).toHaveAttribute('title', 'a.very.long.address.for.loth@finalfactory-example.test');
+  await expect(loth).toHaveAttribute('title', /^a\.very\.long\.address\.for\.loth@finalfactory-example\.test\nvault-lothsahn-1 …EAAA/);
+  await expect(loth.locator('.plan-item-name')).toHaveCSS('text-overflow', 'ellipsis');
+  // The vault's own name without "vault-"; one row each, never the token file's name for a vault token, and the usage line says "rate limits" on hover.
+  await expect(foot.getByTestId('account-…cBBB')).toHaveText(planLine('ben-1', '12%', '9%'), { useInnerText: true });
+  await expect(plans(foot).locator('.plan-item')).toHaveCount(5);
+  await expect(foot.locator('.plan-asof').first()).toHaveAttribute('title', /from rate limits/);
   if (process.env.E2E_SHOT) {
     await page.setViewportSize({ width: 1440, height: 2200 });
     await settle(page);
     await foot.locator('.sys-detail').screenshot({ path: process.env.E2E_SHOT });
   }
+});
+
+test('meters (w1389): the footer says which plan is in use and how many are spent; the sheet shows each plan at a glance', async ({ page }) => {
+  const spent: AccountUsage = {
+    ...VAULT('vault-ben-1', 'cBBB', 100, ['ben@example.com']),
+    usage: { available: true, asOf: NOW.toISOString(), plan: 'max', weekly: { label: 'Weekly', percent: 100, resetsAt: at(70) }, session: { label: 'Session (5 h)', percent: 40, resetsAt: at(2) }, models: [{ label: 'Weekly Fable', percent: 61, resetsAt: at(70) }] },
+  };
+  const foot = await fixedWorld(page, 'machines', [spent]);
+  // Three plans, one in use (the host token has agents on it), one spent (weekly full).
+  await expect(foot.getByTestId('plan-glance')).toHaveText(footerLine('host token', '98%', '12%', '1 of 3 plans spent'), { useInnerText: true });
+  await expect(foot.getByTestId('plan-glance')).toHaveAttribute('title', /ben-1: spent until .*, 5h 40%, weekly 100%/);
+  // One text line for the plans, not a cell per account: the footer stays at its two lines.
+  await expect(foot.locator('.plan-chip, .plan-chips')).toHaveCount(0);
+  await foot.locator('.sys-toggle').click();
+  await settle(page);
+  const rows = foot.getByTestId('plans-table').locator('.plan-item');
+  await expect(rows).toHaveCount(3);
+  // name - weekly %, session %, nothing else on the line; the colour says how worn it is: red used up, yellow from 80%, blue otherwise.
+  const row = foot.getByTestId('account-…cBBB');
+  await expect(row).toHaveText(planLine('ben-1', '100%', '40%'), { useInnerText: true });
+  await expect(row).toHaveClass(/pl-red/);
+  await expect(foot.getByTestId('account-…9AAA')).toHaveClass(/pl-yellow/);
+  await expect(foot.getByTestId('account-owner')).toHaveClass(/pl-blue/);
+  const red = await row.evaluate((e) => getComputedStyle(e).color);
+  const yellow = await foot.getByTestId('account-…9AAA').evaluate((e) => getComputedStyle(e).color);
+  const blue = await foot.getByTestId('account-owner').evaluate((e) => getComputedStyle(e).color);
+  expect(new Set([red, yellow, blue]).size, 'three different colours').toBe(3);
+  // The hover has the windows with their resets, the per-model window and the state.
+  await expect(row).toHaveAttribute('title', /Weekly Fable: 61%, resets .*\nSpent until /);
+  // Nothing needs a scroll to read the plans: the whole list is inside the sheet's visible area.
+  const detail = (await foot.locator('.sys-detail').boundingBox())!;
+  const list = (await foot.getByTestId('plans-table').boundingBox())!;
+  expect(list.y + list.height, 'the plans end inside the sheet').toBeLessThanOrEqual(detail.y + detail.height + 1);
+});
+
+test('meters (w1389): the panel lists no clean-up lines; a disk still under its soft threshold is flagged on its own bar', async ({ page }) => {
+  const pass: CleanupSummary = { at: NOW.toISOString(), trigger: 'low-space', removed: 3, freedBytes: 4 * GB, softFreeGB: 80, freeBytes: 70 * GB, belowSoft: true, listed: [{ path: '/Users/dev/x', bytes: GB, why: 'unattributed' }] };
+  const foot = await fixedWorld(page, 'machines', [], pass);
+  await foot.locator('.sys-toggle').click();
+  await settle(page);
+  await expect(foot.getByTestId('cleanup-lines')).toHaveCount(0);
+  await expect(foot.locator('.sys-detail')).not.toContainText('Clean-up');
+  // m5's disk (900 GB free of 2 TB: 55% used) would be an ordinary blue bar; below its soft threshold it is amber, and its hover says why.
+  const disk = foot.getByTestId('mrow-m5').locator('.mt-cell').nth(3);
+  await expect(disk).toHaveClass(/meter-warn/);
+  await expect(disk).toHaveAttribute('title', /below the clean-up's soft threshold of 80 GB/);
+  // The data is still there: the row's hover has the last pass.
+  await expect(foot.getByTestId('mrow-m5')).toHaveAttribute('title', /Last clean-up .*: 4\.0 GB freed \(3 item\(s\)\)/);
+  // Another machine's disk, not below its threshold, stays as it was.
+  await expect(foot.getByTestId('mrow-BEAST').locator('.mt-cell').nth(3)).not.toHaveClass(/meter-warn|meter-crit/);
 });
