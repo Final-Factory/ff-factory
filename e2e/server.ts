@@ -10,7 +10,7 @@
  *                      the same fake agent; its clean-up never runs
  *   sandbox "pc/alpha"    ready, Unity stopped: tests start their own worker agents here
  *   sandbox "pc/gallery"  one idle worker with a seeded transcript, for visual snapshots; never changed
- *   review clip        <sandbox root>/_review/w000-clips/clip.webm, a short clip in the review folder (e2e/video.spec.ts;
+ *   review clip        <base>/review/w000-clips/clip.webm (config review.root, outside the sandboxes as on the portal), a short clip (e2e/video.spec.ts;
  *                      the portal holds no sandboxes of its own, w510, and videos from a machine are not shown yet)
  *   login              tester / e2e-password-123 (the owner)
  *   second login       teammate / e2e-teammate-456, "Team Mate", a member (e2e/identity.spec.ts), with an /mcp API
@@ -63,6 +63,9 @@ if (!fs.existsSync(path.join(ROOT, 'web', 'dist', 'index.html'))) {
 fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
 const dataDir = path.join(base, 'data');
 const sandboxRoot = path.join(base, 'sandboxes');
+// The review folder outside every folder an orchestrator oversees, as on the portal (/srv/fff/review, w1419): a still in a
+// message is then served by /api/image from the review root, not from a copy kept with the transcript.
+const reviewRoot = path.join(base, 'review');
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(sandboxRoot, { recursive: true });
 fs.writeFileSync(path.join(base, 'vault.key'), randomBytes(32).toString('base64'), { mode: 0o600 });
@@ -83,14 +86,19 @@ function repo(dir: string, branch: string) {
   git(dir, '-c', 'user.name=E2E', '-c', 'user.email=e2e@users.noreply.github.com', 'commit', '-q', '-m', 'Initial commit');
 }
 repo(path.join(base, 'base'), 'develop');
-// A short clip in the review folder (the default <sandbox root>/_review), where workers publish theirs (e2e/video.spec.ts).
-const clips = path.join(sandboxRoot, '_review', 'w000-clips');
+// A short clip in the review folder (review.root, outside the sandboxes), where workers publish theirs (e2e/video.spec.ts).
+const clips = path.join(reviewRoot, 'w000-clips');
 fs.mkdirSync(clips, { recursive: true });
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.webm'));
 // The same bytes named .mp4: Playwright's Chromium has no H.264, so this one only proves the page asks for it as a video.
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.mp4'));
 // A still, as a worker's publish_review leaves one (e2e/images.spec.ts, w1419).
 fs.writeFileSync(path.join(clips, 'option-a-1280.png'), Buffer.from(RED_PNG, 'base64'));
+// Six stills in a topic of their own, as a worker's mocks are published (e2e/images.spec.ts, w1419: a long message).
+const options = path.join(reviewRoot, 'w000-options');
+fs.mkdirSync(options, { recursive: true });
+for (const n of ['1-option-A-left-of-item-rows-1920', '2-option-A-left-of-item-rows-1280', '3-option-B-above-hint-1920', '4-option-B-above-hint-1280', '5-tried-left-of-abilities-1920', '6-tried-left-of-abilities-1280'])
+  fs.writeFileSync(path.join(options, `${n}.png`), Buffer.from(RED_PNG, 'base64'));
 // A clip whose web preview is already made (server/videoPreview.ts, w1248): 100 bytes of original, the fixture as its preview.
 fs.writeFileSync(path.join(clips, 'previewed.mp4'), Buffer.alloc(100, 1));
 fs.mkdirSync(path.join(clips, '.preview'), { recursive: true });
@@ -121,6 +129,7 @@ fs.writeFileSync(
       ledger: { cleanup: { repos: [] } },
       dataDir,
       sandboxRoot,
+      review: { root: reviewRoot },
       // The token vault (docs/vault.md, e2e/vault.spec.ts): its key outside data/, readable by its owner only.
       // Work nobody asked for by name (intake, FFBox, the nightly run) runs on the tester's tokens: the vault holds nobody else's here.
       vault: { keyFile: path.join(base, 'vault.key'), unattributed: { intake: USER, ffbox: USER, nightly: USER } },

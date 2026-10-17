@@ -22,6 +22,8 @@ const IPAD = /ipad\.spec\.ts/;
 const PROVIDER = /provider\.spec\.ts/;
 // The intake (e2e/intake.spec.ts) likewise, with the Discord intake switched on (E2E_INTAKE=1).
 const INTAKE = /intake\.spec\.ts/;
+// What Firefox runs (w1419): how images and clips show in a chat.
+const FIREFOX = /(images|video|ask)\.spec\.ts/;
 // Chrome on an Android phone runs only what a phone does differently (w1191; Ben, 2026-10-13: "I approve everything"):
 // attachments (Android's file picker, w528), the chat and its composer, replies by tap, the chat keeping its place
 // (w1100, w1164), rotation, the phone layout and its screenshots. Every other spec runs on desktop Chromium (the engine)
@@ -42,6 +44,10 @@ const PROJECTS = [
   { name: 'provider-mobile', port: 8797, use: { ...devices['Pixel 5'] }, only: PROVIDER, env: { E2E_PROVIDER: '1' } },
   { name: 'intake-desktop', port: 8798, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } }, only: INTAKE, env: { E2E_INTAKE: '1' } },
   { name: 'intake-mobile', port: 8799, use: { ...devices['iPhone 13'] }, only: INTAKE, env: { E2E_INTAKE: '1' } },
+  // Firefox on a desktop (w1419: Ben reads the portal in Firefox, and its stills were the ones that failed): the image, video
+  // and question specs. Opt-in (E2E_FIREFOX=1, its browser installed) until ci.yml's Chromium leg lists it: a ci.yml change
+  // needs a token with GitHub's workflow scope (scripts/e2e-legs.test.ts checks every project here is in a leg).
+  ...(process.env.E2E_FIREFOX === '1' ? [{ name: 'desktop-firefox', port: 8800, use: { ...devices['Desktop Firefox'], viewport: { width: 1440, height: 900 } }, only: FIREFOX }] : []),
 ] as { name: string; port: number; use: Record<string, unknown>; only?: RegExp; env?: Record<string, string> }[];
 
 // E2E_PROJECTS=a,b runs only those projects and starts only their servers (ci.yml runs one browser engine per job, w1191).
