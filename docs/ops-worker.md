@@ -63,6 +63,9 @@ fff-machine-ssh --check                         # the portal's ssh to each machi
 fff-machine-ssh --key                           # only the portal's authorized_keys line, for a new machine
 fff-machine-ssh --pin ben-ryding@biscuit SHA256:NrEQ...   # pin a new machine's host key (its own fingerprint)
 fffctl credential issue m5 --to m5              # a new credential for m5, written into ~/.ff-factory/ on m5
+fffctl apikey issue w1021-m3 --user w1021-test --create-member --machine m3 --path .ff-factory/w1021-m3.key
+                                                # a member login's /mcp key, written into ~/.ff-factory/ on m3 (w1415)
+fffctl apikey revoke w1021-m3                   # and gone again when the check is done
 ```
 
 To update a machine's worker install, it runs the update there (w613, [worker-install.md](worker-install.md),
@@ -162,6 +165,41 @@ What the worker may not do with these tools: pin a key it did not get from a per
 or remove a pin (a reinstalled machine's new key is a person's: `machines.ssh` and a deploy), run `--fix` or `--data`,
 add or remove a machine record, issue a credential for a machine that is not being (re)installed, or change any setting.
 
+## API keys for a member login (w1415)
+
+Ben, 2026-10-16, approving w1415 ("yes ... do this") after the worker could not do w1021's last step: w1021's live `/mcp`
+check needed a throwaway member login and an API key bound to it, in a 0600 file on the m3. The VM has no node for the
+worker, `/srv/fff` is the portal's alone, and `fffctl credential issue` only makes machine credentials.
+
+```bash
+fffctl apikey issue <key name> --user <login id> [--create-member [--display-name <text>]] --machine <ssh target> --path <file>
+fffctl apikey list                     # the member logins' keys: name, login, when made (never a value)
+fffctl apikey revoke <key name>        # a member login's key; the login stays
+```
+
+- `issue` runs like `credential issue`: as root, `fff-ops-priv` checks the words, checks that the machine answers ssh, then
+  `fffctl apikey issue ... --out FILE` runs the current release's `server/memberKeyCli.ts` **as the portal's account**
+  (`users.json` and `api-keys.json` stay `fff`'s) into a 0700 folder of its own; the key goes over the portal's ssh into
+  `<file>.tmp` on the machine under `umask 077`, `chmod 600`, then `mv` to `<file>` (Windows: written into the file under
+  the profile folder, whose ACL is the user's). The folder in the VM is removed when the command ends. A key that could not
+  be written there is revoked again.
+- `--path`: relative to the home folder there (`.ff-factory/w1021-m3.key`), or absolute (`/...`, Windows `C:/...`); plain
+  characters, no `..`. A quoted `'~/...'` means the same as a relative path. Unquoted, the worker's own shell turns `~` into
+  `/srv/fff-ops/home`: that is refused with the fix.
+- `--create-member` makes the login when it is missing: role member, a random 32-byte password that is never shown or
+  kept in clear (only its scrypt hash in `users.json`). The key is what the login is for. `--display-name` names a new
+  login (default its id).
+- The key is printed nowhere: not by `memberKeyCli.ts` (its last four characters only), not by `fff-ops-priv`, not in ssh's
+  command line (it goes on stdin). `redactSecrets` and `fff-ops-priv`'s `redact` also hide the `ffsb_...` shape, so a key
+  that reaches a transcript or a log anyway shows only `ffsb_[redacted …abcd]`. Never `cat` the file: pass its path.
+- Refused (`server/memberKeys.ts`, and the login part first in `fff-ops-priv`): an owner login (a login with no role reads
+  as owner), `ben` and `lothsahn` in any case whatever their role, a login id that differs from an existing one only in case,
+  a missing login without `--create-member`, a key name that the owner's key, a scoped key (`nightly`, `ffbox`) or another
+  login's key holds, an existing `--out` file, any option not listed (there is no `--role`). `revoke` refuses the same keys.
+  Those stay a person's: `node server/apikey.ts` in the release.
+- Re-issuing a name for the same login replaces its key (a rerun after a failed write). Removing the login itself is not
+  here: a member login with a password nobody knows and no key cannot be used.
+
 ## How it runs
 
 ```mermaid
@@ -217,6 +255,7 @@ process of the portal: it would get the portal's account and everything that acc
 | see the portal's ssh to the machines and its public key line (w676) | `fff-machine-ssh --check` and `--key` (its PATH's `fff-machine-ssh` is `sudo -n fff-ops-priv machine-ssh`): `fff-ops-priv` runs `/usr/local/lib/fff/fff-machine-ssh` as `fff` with the installed `machines.ssh`. It prints `id_ed25519.pub` and never reads the private key; CI looks for the private key in its output |
 | pin a new machine's host key (w676) | `fff-machine-ssh --pin USER@HOST FINGERPRINT`, the same way. As `fff`, it writes the key into the portal account's `~/.ssh/known_hosts` and `~/.ssh/fff-pins.ssh` (0600 `fff`, which `fff-ops` cannot read or write) and the alias into the managed block of `~/.ssh/config`, only when the key HOST shows over the tailnet now is FINGERPRINT and nothing pins HOST yet (`machines.ssh`, an earlier pin, `known_hosts` or `known_hosts2`). `fff-ops-priv` passes only `--check`, `--key` and `--pin` with exactly two words: never `--fix` or `--data` (a file of the worker's would be pinned) |
 | issue a machine credential | `fffctl credential issue ID --to TARGET`: as root, it checks that TARGET answers ssh first (an issued credential replaces the machine's old one) and that the portal has a record for ID (w676: `state.json`, read as root), issues to a root-only temp file, pipes it over ssh into `~/.ff-factory/machine-credential-ID` on the machine (Windows: `%USERPROFILE%\.ff-factory\`), and prints only that path and the last four characters. The token never passes through the worker, the transcript or chat |
+| mint, list and revoke an API key for a member login (w1415) | `fffctl apikey issue NAME --user ID [--create-member [--display-name TEXT]] --machine TARGET --path FILE`, `fffctl apikey list` and `fffctl apikey revoke NAME` (`fff-ops-priv apikey`; `FFFCTL_FORMS.apikey` in `server/opsWorker.ts`, whose `ops` forms the guard lets through). `fff-ops-priv` refuses `ben` and `lothsahn`, bad names and paths and any other option before anything runs, checks the machine answers ssh, and writes the key only into a 0600 file there; `server/memberKeys.ts` refuses owner logins and keys that act for the owner, have a scope or belong to another login. [API keys for a member login](#api-keys-for-a-member-login-w1415) |
 | write notes and scripts | its scratch folder `/srv/fff-ops/scratch` (the guard), on its own file system (the OS) |
 
 | It may not | Enforced by |
@@ -227,7 +266,7 @@ process of the portal: it would get the portal's account and everything that acc
 | restart the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own (w974) | `fff-ops-priv restart` runs only with the grant the portal writes into its data folder (`ops-restart.grant`, its own file: a deploy grant does not open it, nor it a deploy) on `ops_worker restart`, which the server allows only in the person's own turn. Same rules as the deploy's grant: 15 minutes, once, removed before the restart is asked for, owned by `fff`. It takes no option (`--no-drain` and a drain time are refused) and is refused unless `machines.keepAgentsOnRestart` is on, so it is always the soft restart that leaves the machines' workers running |
 | copy the portal's secrets or keys off the VM | scp and sftp run as `fff-ops`, which cannot read `/srv/fff` (0700 `fff`) or `/etc/fff/vault.key` (root's): CI copies each of them and gets "Permission denied". `fff-ops-ssh` runs as `fff` but never sees a local path: it only carries the stream. The guard refuses those paths in an scp or sftp command (relative ones too) |
 | git, downloads, package installs, builds, interpreters | The network: the unit allows only loopback, the VM's resolvers, Anthropic's API (`160.79.104.0/23`, `2607:6bc0::/48`, [Anthropic's published inbound ranges](https://platform.claude.com/docs/en/api/ip-addresses)) and the tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). The disk: everything it can write is on a 2 GiB `noexec` file system. sudo: no `apt`. The guard refuses `git`, `curl`, `wget`, `rsync`, `apt`, `npm`, `pip`, `python`, `node` and the like, so the worker learns why at once. scp and sftp reach only what ssh reaches: the machines whose host keys are pinned, over the tailnet. They add no address to the allowlist and no nft rule: the copy is the same ssh process, as `fff`, inside the same unit |
-| print a credential | The launcher keeps the Claude credential out of its environment (fd 3). The guard refuses `env`, `printenv`, `export -p` and `/proc/*/environ`. Transcripts and the audit log redact Claude, GitHub, FFBox, machine, Tailscale, API and private keys (`redactSecrets`) |
+| print a credential | The launcher keeps the Claude credential out of its environment (fd 3). The guard refuses `env`, `printenv`, `export -p` and `/proc/*/environ`. Transcripts and the audit log redact Claude, GitHub, FFBox, machine, Tailscale, API, the portal's own `ffsb_` API keys (w1415) and private keys (`redactSecrets`) |
 | be reached by anyone else | `SessionManager.send` refuses a session of kind `ops` unless the message comes through `OpsWorker` (Lothsahn's or Ben's own orchestrator) or is its own `wake_me`. That covers the dispatcher, people's chats (HTTP 403), workers, standing agents, the intake, FFBox, `/mcp` and every harness notice. `ops_worker` is in neither the dispatcher's belt nor `/mcp`'s |
 | Steam, spending money, publishing | It has no Steam login, GitHub token or Discord token in the VM, and the network fence blocks those services. On a machine, the prompt and the audit trail are the fence: see the threat notes |
 
@@ -235,7 +274,7 @@ The unit's sandbox (`fff-ops@.service`, written by `deploy/vm/guest/install.sh`)
 
 - `ProtectSystem=strict`, with `ReadWritePaths` limited to its scratch and to `/srv/fff`. `fff-ops` itself cannot
   enter `/srv/fff`. It stays writable only for what sudo runs as root there: issuing a credential writes the portal's
-  machine-token file.
+  machine-token file, and `fffctl apikey` its `users.json` and `api-keys.json` (w1415).
 - `ProtectHome=tmpfs`.
 - A private 64 MB `/tmp`, 16 MB `/var/tmp` and 16 MB `/dev/shm`.
 - `IPAddressDeny=any` with the allowlist above.
@@ -649,7 +688,7 @@ If a form could print a secret, or you are unsure, it is not read-only: leave it
 
 What to change, all in the one pull request:
 
-1. `FFFCTL_FORMS` in `server/opsWorker.ts`: the command with its `allowed` (read-only) and `changes` forms. `OPS_FFFCTL` follows from it. The server's shell guard checks the command word, and for `vault`, `machine-credential` and `migrate` the form word too.
+1. `FFFCTL_FORMS` in `server/opsWorker.ts`: the command with its `allowed` (read-only) and `changes` forms. `OPS_FFFCTL` follows from it. The server's shell guard checks the command word, and for `vault`, `machine-credential`, `migrate` and `apikey` the form word too. A form that changes state but is the worker's on a condition goes in `ops` as well, with the condition in `grant` (w1415: `apikey issue` and `revoke`).
 2. `deploy/vm/guest/fff-ops-priv`: a case with the exact arguments pinned (`exec "$FFFCTL" ...`), the header comment and the refusal text. Anything not pinned there is refused with exit 2 before `fffctl` runs.
 3. Tests: allowed and refused forms in `deploy/vm/test/fff-ops.test.sh` (against a fake `fffctl`) and in `server/opsWorker.test.ts`.
 4. This file: the "It may" table.
@@ -725,7 +764,13 @@ VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
   fd 3, refusals), the ssh wrapper against a fake ssh, real scp and sftp copies both ways through the wrappers to a fake
   machine running a real `sftp-server` (and the options, port, host and command they refuse), and the root wrapper's
   subcommands; as root (CI's lint), `fff-ops-priv machine-ssh` against a fake `fff-machine-ssh`: `--check`, `--key`
-  and `--pin` pass, `--fix`, `--data` and anything else do not, and `credential issue` needs the record (w676).
+  and `--pin` pass, `--fix`, `--data` and anything else do not, and `credential issue` needs the record (w676);
+  `apikey` (w1415) against a fake `fffctl` and a fake machine: every refusal reaches neither, the key lands only in a
+  0600 file on the machine and in no output, a key it could not write is revoked, and `list` and `revoke` pass their words.
+- `server/memberKeys.test.ts` (w1415): the member-key rules (owner logins, `ben` and `lothsahn` in any case, case twins,
+  other logins' and scoped key names, existing files) refuse before anything is written; a made login is a member with a
+  scrypt hash only; and `server/memberKeyCli.ts` run as a process prints the key on no path, success or refusal.
+  `deploy/vm/test/ci-vm-e2e.sh` runs the real `sudo fffctl apikey` chain in the VM and the worker's refusals.
 - `deploy/vm/test/fff-machine-ssh.test.sh` (run by `lint.sh`): `--key` prints the key line alone, and `--pin` pins a
   new machine only when the fingerprint and the tailnet agree, once, keeps it through `--check` and `--fix`, and refuses
   a wrong fingerprint, a host that does not answer, one already pinned in `machines.ssh` or `known_hosts2`, and bad

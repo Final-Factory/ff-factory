@@ -215,6 +215,21 @@ export function absoluteTargets(text: string, o: ReviewMediaOptions): { text: st
   return { text: out, fixed };
 }
 
+/** The one file in `full`'s folder that is `full` written loosely: the same name but for case, spaces, "_" or "-", or another media extension. */
+function nearest(full: string, root: string): string | undefined {
+  const dir = path.dirname(full);
+  if (dir === path.resolve(root) || !isDir(dir)) return undefined;
+  const loose = (n: string) => n.toLowerCase().replace(/[\s_]+/g, '-');
+  const stem = (n: string) => loose(n).replace(/\.[^.]+$/, '');
+  const files = mediaIn(dir, 1).filter((p) => path.dirname(p) === dir);
+  const want = path.basename(full);
+  for (const same of [(p: string) => loose(path.basename(p)) === loose(want), (p: string) => stem(path.basename(p)) === stem(want)]) {
+    const hits = files.filter(same);
+    if (hits.length === 1) return hits[0];
+  }
+  return undefined;
+}
+
 /**
  * A reply to a person with its review media inline (w1384, the outgoing check). The page already shows a bare absolute path
  * to a still or a clip as a thumbnail or a player under the message (shared/imagePaths.ts mentionedPaths, Images.tsx), so
@@ -222,10 +237,16 @@ export function absoluteTargets(text: string, o: ReviewMediaOptions): { text: st
  * a bare media name and a relative image target. Each gets its stills and clips as `![name](<absolute path>)` lines after
  * the paragraph (or code block) that names it, and a relative target becomes absolute. The words are left as written;
  * media already shown inline is not repeated. `added`: how many files.
+ *
+ * w1419: an image whose review file is not there (a name written from memory: the page shows its alt as text, and the
+ * person sees no still) points at the one file of that folder it was meant to be (`nearest`), or, with none, becomes its alt
+ * in words with the folder's stills and clips under the paragraph.
  */
 export function inlineReviewMedia(text: string, o: ReviewMediaOptions): { text: string; added: number } {
   if (!text || !isDir(o.root) || !/\.(?:mp4|webm|mov|png|jpe?g|gif|webp)\b|review/i.test(text)) return { text, added: 0 };
-  const { text: out, fixed } = absoluteTargets(text, o);
+  const abs = absoluteTargets(text, o);
+  let fixed = abs.fixed;
+  const out = abs.text;
   const folders = foldersNamed(out, o);
   const shown = new Set(embedsIn(out).map((e) => slash(onDisk(e.target, o.root) ?? e.target).toLowerCase()));
   const inEmbed = (at: number, spans: { start: number; end: number }[]) => spans.some((s) => at >= s.start && at < s.end);
@@ -233,17 +254,13 @@ export function inlineReviewMedia(text: string, o: ReviewMediaOptions): { text: 
   const blocks = out.split(/(\n```[\s\S]*?\n```[^\n]*|\n{2,})/);
   let added = 0;
   const result: string[] = [];
-  for (const block of blocks) {
-    result.push(block);
-    if (!block.trim() || /^\n{2,}$/.test(block)) continue;
-    const spans = embedsIn(block);
-    const refs = [...reviewRefsIn(block, o.root), ...namesIn(block)].filter((r) => !inEmbed(r.at, spans));
+  for (const raw of blocks) {
+    if (!raw.trim() || /^\n{2,}$/.test(raw) || raw.startsWith('\n```')) {
+      result.push(raw);
+      if (!raw.startsWith('\n```')) continue;
+    }
     const lines: string[] = [];
-    for (const { ref } of refs) {
-      const full = onDisk(ref, o.root);
-      // A file that is there, written whole: the page's strip shows it already.
-      if (full && MEDIA_FILE.test(full) && exists(full)) continue;
-      const files = full ? mediaFor(ref, o) : (() => { const hit = nameIn(ref, folders, o); return hit ? [hit] : []; })();
+    const queue = (files: readonly string[]) => {
       for (const f of files) {
         const key = slash(f).toLowerCase();
         if (shown.has(key) || added >= MEDIA_PER_TEXT) continue;
@@ -251,6 +268,32 @@ export function inlineReviewMedia(text: string, o: ReviewMediaOptions): { text: 
         lines.push(mediaLine(f));
         added++;
       }
+    };
+    let block = raw;
+    if (!raw.startsWith('\n```')) {
+      // An image of a review file that is not there: the file it was meant to be, or its alt and its folder's media.
+      block = raw.replace(/!\[([^\]]*)\]\((?:<([^>]*)>|([^)\s]*))\)/g, (all, alt: string, a?: string, b?: string) => {
+        const target = a ?? b ?? '';
+        const full = onDisk(target, o.root);
+        if (!full || !MEDIA_FILE.test(full) || exists(full)) return all;
+        fixed++;
+        const near = nearest(full, o.root);
+        if (near) {
+          shown.add(slash(near).toLowerCase());
+          return `![${alt}](<${near}>)`;
+        }
+        queue(mediaFor(target, o));
+        return alt ? `*${alt}*` : '';
+      });
+      result.push(block);
+    }
+    const spans = embedsIn(block);
+    const refs = [...reviewRefsIn(block, o.root), ...namesIn(block)].filter((r) => !inEmbed(r.at, spans));
+    for (const { ref } of refs) {
+      const full = onDisk(ref, o.root);
+      // A file that is there, written whole: the page's strip shows it already.
+      if (full && MEDIA_FILE.test(full) && exists(full)) continue;
+      queue(full ? mediaFor(ref, o) : (() => { const hit = nameIn(ref, folders, o); return hit ? [hit] : []; })());
     }
     if (lines.length) result.push(`\n\n${lines.join('\n\n')}`);
   }

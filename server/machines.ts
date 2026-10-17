@@ -692,7 +692,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1556,13 +1556,46 @@ export class MachineManager {
    * Tokens are 240+ random bits checked with one SHA-256, so the lockout is not what stops guessing.
    */
   upgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer, ip: string) {
+    const cred = this.admit(req, socket, ip);
+    if (!cred) return false;
+    const { id, hash, staged } = cred;
+    this.wss.handleUpgrade(req, socket, head, (ws) => {
+      this.attach(id, ws, hash);
+      // The token file is written (synchronously, fsynced) after this turn, so the daemon's 101 goes out first; the
+      // link keeps the hash it presented, which dropRevoked accepts while it is the staged one (w568).
+      setImmediate(() => this.settleCredential(id, staged));
+    });
+    return true;
+  }
+
+  /**
+   * A live view's frame socket from a daemon (w1398, docs/live-view.md): /machine/live/<liveId>, the same token and lockout
+   * as /machine, binary messages (each a JPEG), no compression. `onLiveFrames` takes it; false when refused (answered).
+   */
+  upgradeLive(req: http.IncomingMessage, socket: Duplex, head: Buffer, ip: string, liveId: string) {
+    const cred = this.admit(req, socket, ip);
+    if (!cred) return false;
+    this.liveWss.handleUpgrade(req, socket, head, (ws) => {
+      if (!this.onLiveFrames?.(cred.id, liveId, ws)) ws.close(4404, 'no such live view on this machine');
+    });
+    return true;
+  }
+
+  /** Takes a daemon's live frame socket (server/live.ts); false when the view is not this machine's. */
+  onLiveFrames?: (machineId: string, liveId: string, ws: WebSocket) => boolean;
+  /** A daemon's live view state (server/live.ts). */
+  onLiveState?: (machineId: string, msg: Extract<FromDaemon, { type: 'live_state' }>) => void;
+  private readonly liveWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
+
+  /** The token check of an upgrade from a daemon (lockout, dry run); the socket is answered when it fails. */
+  private admit(req: http.IncomingMessage, socket: Duplex, ip: string): { id: string; hash: string; staged: boolean } | undefined {
     // A dry run (server/dryRun.ts) links no daemon: a daemon that found it (relocated by mistake) keeps dialling and falls
     // back to its own portal (RELOCATE_FALLBACK_MINUTES).
     if (dryRun()) {
       console.warn(`machine: refused a daemon link from ${ip}: ${DRY_RUN_WHY}`);
       socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
       socket.destroy();
-      return false;
+      return undefined;
     }
     const now = Date.now();
     const recent = (this.failures.get(ip) ?? []).filter((t) => now - t < 15 * 60_000);
@@ -1577,17 +1610,10 @@ export class MachineManager {
       // CRLF as HTTP has it: a bare LF made the daemon's client fail to parse the refusal and log a parse error, not the 401.
       socket.write(`HTTP/1.1 ${locked ? '429 Too Many Requests' : '401 Unauthorized'}\r\nConnection: close\r\n\r\n`);
       socket.destroy();
-      return false;
+      return undefined;
     }
     this.failures.delete(ip);
-    const { hash, staged } = cred!;
-    this.wss.handleUpgrade(req, socket, head, (ws) => {
-      this.attach(id, ws, hash);
-      // The token file is written (synchronously, fsynced) after this turn, so the daemon's 101 goes out first; the
-      // link keeps the hash it presented, which dropRevoked accepts while it is the staged one (w568).
-      setImmediate(() => this.settleCredential(id, staged));
-    });
-    return true;
+    return { id, hash: cred!.hash, staged: cred!.staged };
   }
 
   /** The welcome a daemon gets on connecting, and again when its hello moved its pool (w513). */
@@ -1763,7 +1789,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}) });
         if (!msg.guard) delete m.guard;
         if (msg.voice && typeof msg.voice === 'object') this.voices.set(id, msg.voice);
         else this.voices.delete(id);
@@ -1941,6 +1967,18 @@ export class MachineManager {
         return;
       case 'host_health':
         if (msg.health && typeof msg.health === 'object') this.update(id, { guard: msg.health });
+        return;
+      case 'live_result': {
+        const p = this.liveCalls.get(msg.id);
+        if (!p) return;
+        this.liveCalls.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.ok) p.resolve(String(msg.text ?? ''));
+        else p.reject(new Error(String(msg.text || 'failed')));
+        return;
+      }
+      case 'live_state':
+        this.onLiveState?.(id, msg);
         return;
       case 'save_result': {
         const p = this.saveCalls.get(msg.id);
@@ -2230,6 +2268,33 @@ export class MachineManager {
       } catch (e) {
         clearTimeout(timer);
         this.switchCalls.delete(id);
+        reject(e as Error);
+      }
+    });
+  }
+
+  private readonly liveCalls = new Map<string, { resolve: (text: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+
+  /** Whether a machine's daemon is online and streams its sandboxes' games for a live view (w1398: its hello offered `liveView`). */
+  canLive(machineId: string): boolean {
+    return this.isOnline(machineId) && !!this.hellos.get(machineId)?.liveView;
+  }
+
+  /** A live view operation on a machine (w1398, docs/live-view.md): its answer text, or the daemon's reason as an error. */
+  live(machineId: string, op: Omit<Extract<ToDaemon, { type: 'live' }>, 'type' | 'id'>, timeoutMs = 90_000): Promise<string> {
+    if (!this.canLive(machineId)) return Promise.reject(new Error(`${machineId}'s daemon has no live view yet (it is offline, or needs a daemon update)`));
+    return new Promise<string>((resolve, reject) => {
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.liveCalls.delete(id);
+        reject(new Error(`machine ${machineId} did not answer the live view's ${op.op} in ${Math.round(timeoutMs / 1000)} s`));
+      }, timeoutMs);
+      this.liveCalls.set(id, { resolve, reject, timer });
+      try {
+        this.post(machineId, { type: 'live', id, ...op });
+      } catch (e) {
+        clearTimeout(timer);
+        this.liveCalls.delete(id);
         reject(e as Error);
       }
     });

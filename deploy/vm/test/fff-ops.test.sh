@@ -304,4 +304,80 @@ else
   if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'no restart was asked for'; then fail "priv: a restart grant worked twice (exit $rc): $out"; fi
   echo "ok: fff-ops-priv restart needs the restart grant (not a deploy's), uses it up once, takes no option, and runs fffctl restart --no-wait"
   echo "ok: fff-ops-priv passes vault list [--names], vault help, machine-credential list and migrate --help to fffctl, and refuses every other vault, machine-credential and migrate form"
+  # ---- apikey (w1415): a member login's API key. fffctl (a fake that logs its words and writes a key to --out) mints it;
+  # the machine (a fake ssh that runs the command in a home of its own) stores it. The key reaches that file and no output.
+  klib=$tmp/klib
+  remote=$tmp/remote-home
+  mkdir -p "$klib" "$remote"
+  cp "$plib/lib.sh" "$klib/lib.sh"
+  KEY=ffsb_$(printf 'Q%.0s' $(seq 43)) # a fake, made here (a literal would read as a leaked key)
+  printf '#!/bin/sh\necho "$*" >>%s/fffctl.log\nout=; prev=\nfor a in "$@"; do [ "$prev" = --out ] && out=$a; prev=$a; done\nif [ "$1 $2" = "apikey issue" ]; then\n  [ -z "${FAKE_ISSUE_FAIL:-}" ] || { echo "apikey: refused here" >&2; exit 2; }\n  echo %s >"$out"; echo "a key $3 for someone, ending …xyAB, in $out (0600)"\nfi\n' "$klib" "$KEY" >"$klib/fffctl"
+  printf '#!/bin/bash\necho "$*" >>%s/ssh.log\n[ "$2" != uname ] || { echo "${FAKE_UNAME:-Linux}"; exit 0; }\n[ -z "${FAKE_SSH_FAIL:-}" ] || { echo "no space left on device"; exit 1; }\nHOME=%s bash -c "$2"\n' "$klib" "$remote" >"$klib/fff-ops-ssh"
+  chmod +x "$klib/fffctl" "$klib/fff-ops-ssh"
+  kpriv() { FFFCTL=$klib/fffctl FFF_LIB=$klib bash $G/fff-ops-priv "$@" 2>&1; }
+  klogs() { cat "$klib/fffctl.log" "$klib/ssh.log" 2>/dev/null || true; }
+  clear_logs() { : >"$klib/fffctl.log"; : >"$klib/ssh.log"; }
+  ok_args='--machine m3 --path .ff-factory/k.key'
+  # Refused before fffctl or ssh runs: ben's and lothsahn's own logins in any case, bad names and paths, options twice,
+  # unknown options (no --role), --display-name without --create-member, and every word apikey does not have.
+  for bad in "apikey issue k1 --user ben $ok_args" "apikey issue k1 --user BEN $ok_args" "apikey issue k1 --user Lothsahn --create-member $ok_args" \
+    "apikey issue k1 --user lothsahn $ok_args" "apikey issue k;id --user w1021-test $ok_args" "apikey issue k1 --user a;id $ok_args" "apikey issue k1 --user w1021-test --role owner $ok_args" \
+    "apikey issue k1 --user w1021-test --user other $ok_args" "apikey issue k1 --user w1021-test --display-name x $ok_args" "apikey issue k1 --user w1021-test --machine m3" \
+    "apikey issue k1 --user w1021-test --path ~/k" "apikey issue k1 --user w1021-test --machine m3 --path ../k" "apikey issue k1 --user w1021-test --machine m3 --path ~/../k" \
+    "apikey issue k1 --user w1021-test --machine m3 --path -k" "apikey issue k1 --user w1021-test --machine m3 --path /srv/fff-ops/home/.ff-factory/k" "apikey issue k1 --user w1021-test --machine m3 --path ." "apikey issue k1 --user w1021-test --machine m3 --path ~/k;id" "apikey issue k1 --user w1021-test --machine m3 --path ~/dir/" \
+    "apikey issue k1 --user w1021-test --machine m3 --path ~/\$(id)" "apikey issue k1 --user w1021-test --machine m3 --path ~/k --path ~/j" "apikey issue k1 --user w1021-test --create-member --create-member $ok_args" \
+    'apikey' 'apikey issue' 'apikey export k1' 'apikey list extra' 'apikey revoke' 'apikey revoke a b' 'apikey revoke k;id' 'apikey rotate k1'; do
+    clear_logs
+    rc=0
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(kpriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    [ -z "$(klogs)" ] || fail "priv: '$bad' reached fffctl or ssh: $(klogs)"
+  done
+  # A Windows path for a Mac or Linux machine, and a / path for a Windows one: refused after ssh answered, before a key exists.
+  clear_logs
+  rc=0; out=$(kpriv apikey issue k1 --user w1021-test --machine m3 --path C:/Users/x/k.key) || rc=$?
+  if [ "$rc" -ne 2 ] || matches -F 'apikey issue' "$klib/fffctl.log"; then fail "priv: a C:/ path for a Mac minted a key (exit $rc): $out"; fi
+  clear_logs
+  rc=0; out=$(FAKE_UNAME=no kpriv apikey issue k1 --user w1021-test --machine beast --path /tmp/k.key) || rc=$?
+  if [ "$rc" -ne 2 ] || matches -F 'apikey issue' "$klib/fffctl.log"; then fail "priv: a / path for Windows minted a key (exit $rc): $out"; fi
+  # Issued: the key is in the file on the machine (0600) and in no output; fffctl got the words and a file of its own.
+  clear_logs
+  rc=0; out=$(kpriv apikey issue w1021-m3 --user w1021-test --create-member --display-name 'w1021 test' --machine m3 --path .ff-factory/w1021-m3.key) || rc=$?
+  [ "$rc" -eq 0 ] || fail "priv: apikey issue exited $rc: $out"
+  [ "$(cat "$remote/.ff-factory/w1021-m3.key")" = "$KEY" ] || fail "priv: the key is not in the file on the machine"
+  [ "$(stat -c %a "$remote/.ff-factory/w1021-m3.key")" = 600 ] || fail "priv: the key file is $(stat -c %a "$remote/.ff-factory/w1021-m3.key"), not 600"
+  [ "$(stat -c %a "$remote/.ff-factory")" = 700 ] || fail "priv: the key's folder is $(stat -c %a "$remote/.ff-factory"), not 700"
+  [ ! -e "$remote/.ff-factory/w1021-m3.key.tmp" ] || fail "priv: the temporary file was left on the machine"
+  if printf '%s' "$out" | matches -F "${KEY:5:30}"; then fail "priv: the key was printed: $out"; fi
+  printf '%s' "$out" | matches -x -F 'a key w1021-m3 for someone, ending …xyAB' || fail "priv: apikey issue did not say what was issued: $out"
+  printf '%s' "$out" | matches -F "on m3: stored $remote/.ff-factory/w1021-m3.key" || fail "priv: apikey issue did not say where it was stored: $out"
+  matches -E '^apikey issue w1021-m3 --user w1021-test --out /[^ ]+/key --create-member --display-name w1021 test$' "$klib/fffctl.log" || fail "priv: fffctl got: $(cat "$klib/fffctl.log")"
+  kfile=$(sed -nE 's/.* --out ([^ ]+) .*/\1/p' "$klib/fffctl.log")
+  [ ! -e "$kfile" ] || fail "priv: the key's file in the VM was left behind: $kfile"
+  if matches -F "${KEY:5:30}" "$klib/ssh.log"; then fail "priv: the key was in ssh's command line"; fi
+  # Not written on the machine: the key is revoked again and nothing prints it.
+  clear_logs
+  rc=0; out=$(FAKE_SSH_FAIL=1 kpriv apikey issue w1021-m3 --user w1021-test --machine m3 --path k2.key) || rc=$?
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'It was revoked again'; then fail "priv: a key not written was not refused (exit $rc): $out"; fi
+  matches -x 'apikey revoke w1021-m3' "$klib/fffctl.log" || fail "priv: a key not written was not revoked: $(cat "$klib/fffctl.log")"
+  if printf '%s' "$out" | matches -F "${KEY:5:30}"; then fail "priv: the key was printed: $out"; fi
+  # fffctl refuses (an owner login, say): nothing is written on the machine.
+  clear_logs
+  rc=0; out=$(FAKE_ISSUE_FAIL=1 kpriv apikey issue k3 --user owner1 --machine m3 --path k3.key) || rc=$?
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | matches 'apikey: refused here'; then fail "priv: fffctl's refusal did not come back (exit $rc): $out"; fi
+  [ "$(grep -vc ' uname -s$' "$klib/ssh.log")" = 0 ] || fail "priv: a refused key reached the machine: $(cat "$klib/ssh.log")"
+  # A quoted ~/ is the home folder too, and an absolute path is taken as it is.
+  clear_logs
+  # shellcheck disable=SC2088 # the machine's ~, on purpose
+  kpriv apikey issue k4 --user w1021-test --machine m3 --path '~/k4.key' >/dev/null || fail "priv: a quoted ~/ path was refused"
+  [ -s "$remote/k4.key" ] || fail "priv: a quoted ~/ path did not land in the home folder"
+  kpriv apikey issue k5 --user w1021-test --machine m3 --path "$tmp/abs/k5.key" >/dev/null || fail "priv: an absolute path was refused"
+  [ "$(stat -c %a "$tmp/abs/k5.key")" = 600 ] || fail "priv: an absolute path's key is not 600"
+  # list and revoke pass exactly their words.
+  clear_logs
+  kpriv apikey list >/dev/null || fail "priv: apikey list failed"
+  kpriv apikey revoke w1021-m3 >/dev/null || fail "priv: apikey revoke failed"
+  [ "$(cat "$klib/fffctl.log")" = "$(printf 'apikey list\napikey revoke w1021-m3')" ] || fail "priv: list and revoke: $(cat "$klib/fffctl.log")"
+  echo "ok: fff-ops-priv apikey refuses ben, lothsahn, bad names, paths and options before anything runs, writes the key only into a 0600 file on the machine, revokes a key it could not write, and never prints it"
 fi

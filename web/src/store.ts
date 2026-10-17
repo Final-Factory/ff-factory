@@ -258,6 +258,9 @@ function applyEvent(ev: ServerEvent) {
     case 'max':
       set((s) => (s.app ? { app: { ...s.app, max: ev.max } } : {}));
       return;
+    case 'live':
+      set((s) => (s.app ? { app: { ...s.app, live: ev.views } } : {}));
+      return;
     case 'machine_removed':
       set((s) => (s.app ? { app: { ...s.app, machines: s.app.machines.filter((x) => x.id !== ev.id) } } : {}));
       return;

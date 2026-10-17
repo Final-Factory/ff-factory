@@ -8,6 +8,7 @@ import type {
   DelegationRequest,
   GitStatus,
   ImageRef,
+  LiveViewInfo,
   Machine,
   MachineSandbox,
   MachineStats,
@@ -145,7 +146,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
     orchestratorId: 'orch',
     dispatcherId: 'dispatcher',
     me: { userId: 'ben', displayName: 'Ben', role: 'owner' },
-    config: { defaultModel: 'opus', models: ['opus', 'sonnet', 'haiku', 'fable'], defaultBase: 'origin/master', attachments: { maxBytes: 200 * 1024 * 1024, retentionDays: 30, maxPerMessage: 10 } },
+    config: { defaultModel: 'opus', models: ['opus', 'sonnet', 'haiku', 'fable'], defaultBase: 'origin/master', attachments: { maxBytes: 200 * 1024 * 1024, retentionDays: 30, maxPerMessage: 10 }, live: { enabled: true } },
     settings: { heartbeatMinutes: null, heartbeat: { ben: 15 } },
   };
 
@@ -210,6 +211,9 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
   const sandboxes: MachineSandbox[] = [
     sb('agent-mcp', 'Lighting pass: AAA space look', ['s-light-0', 's-light-1'], { state: 'running', pid: 22672, logPath: `${LOCAL_SANDBOX_ROOT}/agent-mcp/Logs/sandbox-editor.log` }, {
       git: git('feature/lighting-pass', { ahead: 3, dirty: 3, untracked: 1, head: { sha: 'b81c0e2', subject: 'Bloom threshold follows exposure; belts keep their colour', date: iso(22) }, pr: { number: 588, url: 'https://github.com/Final-Factory/FinalFactory/pull/588', title: 'Lighting pass: AAA space look', draft: true } }),
+    }),
+    sb('slot4', 'w1332: comet catch impact, live', ['s-live'], { state: 'running', pid: 25812 }, {
+      git: git('sandbox/slot4-w1332-live', { ahead: 4, dirty: 2, head: { sha: '7c1e9a2', subject: 'w1332: impact flash on the contact frame', date: iso(9) } }),
     }),
     sb('spec-074', 'Spec 074: honest three-peer co-op (BEAST client)', ['s-coop'], { state: 'running', pid: 18800 }, {
       git: git('develop', { ahead: 1, head: { sha: '9d02f7a', subject: 'Sitting 3 handoff: wave 4 cleared, no desyncs', date: iso(59) } }),
@@ -470,6 +474,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
     session('dispatcher', 'orchestrator', 'Dispatcher', { orchestratorRole: 'dispatcher', permissionMode: 'default', createdAt: iso(60 * 30), lastActivityAt: iso(21), turns: 41, costUsd: 11.3, model: 'claude-opus-5-5' }),
     session('s-light-0', 'worker', 'Restart & dialog fixer', { machineId: 'beast', machineSandbox: 'agent-mcp', status: 'idle', turns: 9, costUsd: 3.1, lastActivityAt: iso(60 * 5), createdAt: iso(60 * 7), lastResult: 'The watchdog now reloads clean scenes instead of reporting the dialog.' }),
     session('s-light-1', 'worker', 'Lighting pass (AAA space look)', { machineId: 'beast', machineSandbox: 'agent-mcp', status: 'running', effort: 'high', turns: 31, costUsd: 12.84, createdAt: iso(189), lastActivityAt: iso(1) }),
+    session('s-live', 'worker', 'Comet catch: impact', { machineId: 'beast', machineSandbox: 'slot4', status: 'idle', effort: 'high', model: 'opus', turns: 6, costUsd: 2.41, createdAt: iso(26), lastActivityAt: iso(0.4), requestedBy: { userId: 'ben', displayName: 'Ben' } }),
     session('s-coop', 'worker', 'Honest co-op client (BEAST)', { machineId: 'beast', machineSandbox: 'spec-074', status: 'waiting_permission', permissionMode: 'default', turns: 57, costUsd: 18.2, createdAt: iso(262), lastActivityAt: iso(58), pendingPermissions: [coopPerm] }),
     session('s-tut', 'worker', 'Tutorial playthrough bug hunt', { machineId: 'beast', machineSandbox: 'tutorial-bugs', status: 'idle', model: 'sonnet', turns: 4, costUsd: 0.62, createdAt: iso(98), lastActivityAt: iso(94), lastResult: 'Unity is stuck on the Safe Mode dialog; waiting for someone to press Ignore.' }),
     session('s-icon', 'worker', 'w1360: Circuits: pills → circuit icon button / back arrow', { machineId: 'beast', status: 'idle', turns: 12, costUsd: 3.4, createdAt: iso(140), lastActivityAt: iso(26), waitingOn: { who: 'Ben', what: "OK the w1360 circuit button look (white circuit icon on Main, back arrow on the Circuit view; new stills after w1349's status-line fix in /srv/fff/review/w1360-circuit-icon-button/w1360b-*.png) so PR #1799 can merge on green CI", at: iso(26), request: 'w18' }, lastResult: "New stills after w1349's status-line fix (Main with the white circuit icon, the Circuit view with its back arrow), 1920x1080 and 1280x800:\n\n![main](/srv/fff/review/w1360-circuit-icon-button/w1360b-main-1920.png)\n\nPR #1799 is green.\n\nw1360: still open: waiting on Ben to OK the circuit button look" }),
@@ -686,6 +691,26 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
     transcripts['s-light-1'] = t.events;
   }
 
+  // w1398: a session with a live view (the game's render beside the conversation, docs/live-view.md).
+  {
+    const t = new Tx(now);
+    const ben = { userId: 'ben', displayName: 'Ben' };
+    t.at(26, { kind: 'user', from: 'human', requestedBy: ben, text: 'Lets do the comet catch impact live. It should hit harder and start right on contact.' })
+      .tool(25.8, 'c1', 'mcp__sandboxes__live_view', { action: 'start', materials: ['VfxComet', 'CometCatcherMaterial'], fps: 15 }, 'Live view started (15 fps, 960 px, knobs on VfxComet, CometCatcherMaterial). People open it from your conversation\'s "Live view" button.')
+      .at(25.3, {
+        kind: 'assistant',
+        text: 'The view is up with the comet staged. The comet material has its own knobs: **Overall Intensity**, the **coma colours**, **coma radius** and **ion speed**. Drag them in the view; I see what you set.\n\nStarting the flash on the contact frame is a script change, so that one takes about a minute. The view says when it is back.',
+      })
+      .tool(25.1, 'c3', 'Edit', { file_path: 'Assets/Scripts/FFSystems/Presentation/CometVfxPresentationSystem.cs', old_string: 'track.BurstStart = Now;', new_string: 'track.BurstStart = Now - math.max(DeltaTime, 1e-3f);' }, 'The file has been updated.')
+      .at(23.9, { kind: 'assistant', text: 'Done: the flash now starts on the contact frame. Overall Intensity is at 1.0.' })
+      .done(23.9, 1.62, 4, 2 * 60_000 + 6_000)
+      .at(3.2, { kind: 'user', from: 'human', requestedBy: ben, text: 'more oomph, and the coma should be bigger' })
+      .tool(3.1, 'c5', 'mcp__sandboxes__live_view', { action: 'knobs' }, 'VfxComet: _Intensity 1.0, _ComaRadius 2.5 (CometCatcherMaterial: _EmissionAG [64, 0, 33.6, 1])')
+      .at(3.0, { kind: 'assistant', text: 'Overall Intensity **2.4** (was 1.0) and coma radius **4.0** (was 2.5). Both were knob edits, so the next catch in the view already has them.' })
+      .done(3.0, 0.21, 1, 9_000);
+    transcripts['s-live'] = t.events;
+  }
+
   {
     const t = new Tx(now);
     t.at(60 * 7, { kind: 'user', from: 'human', text: 'The watchdog reports "Scenes modified externally" dialogs forever. Make it reload when the scenes are clean.' })
@@ -794,11 +819,31 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
   }
 
   return {
-    state: { ...base, sessions, standingAgents, delegations, machines, work: ledger(now), machineStats: macStats(), accounts: accounts(sessions.map((s) => s.id)) },
+    state: { ...base, live: liveViews(now), sessions, standingAgents, delegations, machines, work: ledger(now), machineStats: macStats(), accounts: accounts(sessions.map((s) => s.id)) },
     transcripts,
     uploads,
     files,
   };
+}
+
+/** The one live view of the busy day (w1398): the comet catch session's, streaming from BEAST's slot4. */
+function liveViews(now: number): LiveViewInfo[] {
+  return [
+    {
+      liveId: 'live-slot4',
+      sessionId: 's-live',
+      machineId: 'beast',
+      sandbox: 'slot4',
+      state: 'live',
+      detail: '',
+      fps: 15,
+      width: 960,
+      materials: ['VfxComet', 'CometCatcherMaterial'],
+      startedAt: new Date(now - 24 * MIN).toISOString(),
+      updatedAt: new Date(now - 24 * MIN).toISOString(),
+      frames: 21_600,
+    },
+  ];
 }
 
 /** The work ledger of the busy day: requests from both people in every state (docs/orchestrators.md). */

@@ -1822,6 +1822,148 @@ button.react-chip:hover {
   background: rgba(255, 159, 28, 0.22);
 }
 
+/* A question with buttons (ask_person, w1397): one button per option, the recommended first, and "Chat more about this". */
+.ask {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  max-width: 560px;
+  min-width: 0;
+  padding: var(--s-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  background: var(--panel);
+  animation: rise 0.25s var(--ease);
+}
+
+/* Stills and clips a question or an option names (w1419): under the question, and under the option's button. */
+.ask-opt-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ask-media .md {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ask-media .md p {
+  margin: 0;
+}
+
+.ask-media .md-img img,
+.ask-media .md-video video {
+  max-width: min(100%, 520px);
+  max-height: 320px;
+}
+
+.ask-q {
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ask-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), opacity 0.15s;
+}
+
+.ask-opt:hover:not(:disabled) {
+  border-color: var(--text-3);
+  background: var(--hover);
+}
+
+.ask-opt:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.ask-opt:disabled {
+  cursor: default;
+}
+
+.ask-rec {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.ask-rec:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgba(255, 159, 28, 0.2);
+}
+
+.ask-opt-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ask-opt-label {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ask-opt-desc {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.ask-tag {
+  font-size: var(--fs-xs);
+  padding: 1px 7px;
+}
+
+.ask-more {
+  border-style: dashed;
+  color: var(--text-2);
+}
+
+.ask-chosen {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  color: var(--green);
+}
+
+/* Answered: the pick stays marked, the rest step back. */
+.ask-locked .ask-opt:not(.ask-picked) {
+  opacity: 0.45;
+}
+
+.ask-picked {
+  border-color: var(--green);
+  background: var(--green-soft);
+  opacity: 1;
+}
+
 /* What a reply answers: a line above the bubble that goes to the message when pressed. */
 .reply-quote {
   display: flex;
@@ -6168,4 +6310,511 @@ button.board-head-link:hover {
 .model-chip-configured {
   font-style: italic;
   opacity: 0.8;
+}
+
+/* ---------- live view (w1398, docs/live-view.md): the game's render of an asset, its knobs, and the agent's conversation ---------- */
+
+/* Wide: the view and knobs on the left, the conversation (a SessionView) on the right. */
+.main-live {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(400px, 1fr);
+}
+
+.main-live > .session-view {
+  border-left: 1px solid var(--border);
+}
+
+.lv {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.lv-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.lv-stage {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #000;
+  border: 1px solid var(--border-2);
+  box-shadow: var(--shadow);
+  flex: none;
+}
+
+.lv-frame {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.lv-busy .lv-frame,
+.lv-stopped .lv-frame {
+  filter: brightness(0.45) saturate(0.6);
+}
+
+.lv-stopped .lv-frame {
+  filter: brightness(0.35) grayscale(1);
+}
+
+.lv-ov {
+  position: absolute;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  max-width: calc(100% - 20px);
+}
+
+.lv-ov-tl { top: 10px; left: 10px; }
+.lv-ov-bl { bottom: 10px; left: 10px; }
+
+.lv-ov-tr {
+  top: 12px;
+  right: 12px;
+  font-size: var(--fs-xs);
+  color: rgba(219, 227, 236, 0.85);
+  background: rgba(10, 14, 19, 0.55);
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+
+.lv-chip {
+  background: rgba(10, 14, 19, 0.6) !important;
+  letter-spacing: 0.06em;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+
+.lv-chip.chip-amber {
+  color: var(--amber);
+}
+
+.lv-chip.chip-green {
+  color: var(--green);
+}
+
+.lv-rec {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  flex: none;
+}
+
+.lv-toast {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--green);
+  background: rgba(10, 14, 19, 0.78);
+  border: 1px solid rgba(60, 207, 138, 0.35);
+  padding: 5px 10px;
+  border-radius: 999px;
+  animation: fade 0.15s ease-out;
+}
+
+.lv-toast > .icon {
+  flex: none;
+}
+
+.lv-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-3);
+  font-size: var(--fs-md);
+}
+
+.lv-hold {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(440px, 84%);
+  padding: var(--s-4);
+  border-radius: var(--radius);
+  background: rgba(17, 24, 32, 0.92);
+  border: 1px solid rgba(255, 176, 32, 0.45);
+  display: grid;
+  gap: 6px;
+}
+
+.lv-stopped .lv-hold {
+  border-color: var(--border-2);
+}
+
+.lv-hold-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--amber);
+  font-weight: 600;
+  font-size: var(--fs-base);
+}
+
+.lv-stopped .lv-hold-title {
+  color: var(--text-2);
+}
+
+.lv-hold-note {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.lv-hold-compact {
+  padding: var(--s-3);
+  width: 90%;
+}
+
+.lv-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--s-3) var(--s-4);
+}
+
+.lv-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  margin-bottom: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.lv-card-title {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.lv-note {
+  font-size: var(--fs-md);
+  color: var(--text-3);
+  line-height: 1.45;
+  padding: var(--s-1) 0;
+}
+
+.lv-note.lv-err,
+.lv-knob-err {
+  color: var(--red);
+}
+
+/* One material: its name, its shader, Reset; then a row per knob. Several materials sit side by side while they fit. */
+.lv-mats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: var(--s-4) var(--s-5);
+  min-width: 0;
+}
+
+.lv-mat {
+  min-width: 0;
+}
+
+.lv-mat-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+  padding-bottom: var(--s-1);
+  margin-bottom: var(--s-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.lv-mat-name {
+  flex: none;
+  max-width: 70%;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.lv-mat-head .spacer {
+  flex: 1;
+}
+
+.lv-knob {
+  display: grid;
+  grid-template-columns: minmax(84px, 30%) minmax(0, 1fr) 76px;
+  align-items: center;
+  gap: 2px var(--s-3);
+  padding: 6px 0;
+}
+
+.lv-knob-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-md);
+  color: var(--text);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.lv-moved {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.lv-knob-ctl {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.lv-knob-val {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  text-align: right;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.lv-knob-color .lv-knob-val {
+  grid-column: 3;
+  font-size: var(--fs-xs);
+}
+
+.lv-knob-err {
+  grid-column: 1 / -1;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.lv-knob-vector .lv-knob-ctl {
+  grid-column: 2 / -1;
+}
+
+.lv-int-note {
+  white-space: nowrap;
+}
+
+.lv-num {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 3px 6px;
+  text-align: right;
+  font-size: var(--fs-sm);
+}
+
+.lv-vec {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  width: 100%;
+}
+
+.lv-color {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  min-width: 0;
+}
+
+.lv-swatch {
+  flex: none;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+
+.lv-swatch::-webkit-color-swatch-wrapper { padding: 2px; }
+.lv-swatch::-webkit-color-swatch { border: 0; border-radius: 4px; }
+.lv-swatch::-moz-color-swatch { border: 0; border-radius: 4px; }
+
+.lv-range {
+  --p: 0%;
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.lv-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent) var(--p), var(--panel-3) var(--p));
+}
+
+.lv-range::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--panel-3);
+}
+
+.lv-range::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.lv-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent-2);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.lv-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent-2);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.lv-range:focus-visible {
+  outline: none;
+}
+
+.lv-range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-line); }
+.lv-range:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px var(--accent-line); }
+
+/* "Live view" in a conversation's header. */
+.lv-open {
+  flex: none;
+  margin-left: var(--s-2);
+  gap: 6px;
+}
+
+/* In the header's second line it must not make the line taller than the state beside it. */
+.ph-sub .lv-open {
+  height: 20px;
+  margin-block: -3px;
+  padding: 0 8px;
+}
+
+/* Narrower than the split (phones included): the view on top, 16:9 and never scrolled away, a control row, the conversation. */
+.lv-stacked {
+  flex: 1;
+  height: 100%;
+}
+
+.lv-stacked > .lv-stage {
+  width: min(100%, calc(42dvh * 16 / 9));
+  align-self: center;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  box-shadow: none;
+}
+
+.lv-stacked .lv-toast {
+  font-size: var(--fs-xs);
+  padding: 4px 8px;
+}
+
+.lv-controls {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  min-width: 0;
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.lv-controls .btn.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.lv-stacked > .session-view {
+  flex: 1;
+  min-height: 0;
+}
+
+/* The knobs as a bottom sheet: the view above it stays in sight while a knob moves. */
+.lv-sheet {
+  position: fixed;
+  z-index: 61;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 58dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-bottom: none;
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
+  padding-bottom: env(safe-area-inset-bottom);
+  animation: sheet-up 0.2s var(--ease);
+}
+
+.lv-sheet-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 2px 6px 2px var(--s-4);
+  min-width: 0;
+}
+
+.lv-sheet-head .spacer {
+  flex: 1;
+}
+
+.lv-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--s-4) var(--s-4);
+}
+
+.lv-sheet .lv-mats {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.lv-sheet .lv-knob {
+  padding: 9px 0;
+}
+
+@media (max-width: 860px) {
+  .lv-knob {
+    grid-template-columns: minmax(80px, 28%) minmax(0, 1fr) 72px;
+  }
 }

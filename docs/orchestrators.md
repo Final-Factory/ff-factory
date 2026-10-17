@@ -90,7 +90,8 @@ that has to write it to the prompt cache pays the write price on all of it. So i
   text, `ffbox_activity`'s views, and for a person's orchestrator the `[via FFBox: …]` and `[from FFBox …]` messages),
   `intake` (the dispatcher's: sharing a worker, Lothsahn's desync PR policy, `ffbox-f/` branches, `send_to_ffbox`),
   `release` (the dispatcher's: done means landed and the notes posted), `machines` (main clones w936, installers w855,
-  daemon updates w605/w887, low disk w626/w896) and `reactions` (a person's: replies and reactions, w866, w1039). The
+  daemon updates w605/w887, low disk w626/w896), `reactions` (a person's: replies and reactions, w866, w1039) and `ui` (both:
+  before a UI still or mock reaches a person, look at it first and require its worker's critic report, w1399). The
   brief keeps one line per topic: the gist that must hold without reading it, the w-numbers, and when to read it. The
   topic's text binds like the brief.
 - **No duplication.** A rule lives in one place: the brief, or the description of the tool it is about.
@@ -1646,6 +1647,15 @@ there (a name cut off mid-word), a bare media name and a relative image target. 
 The words stay as written; media already shown is not repeated, so it is idempotent; web links and replies naming no media
 are left alone. The portal log says how many files it added (`review media: N file(s) put inline in a reply of …`).
 
+**An image of a review file that is not there** (w1419). Ben, 2026-10-16, on his orchestrator's message with
+`![Option A at 1280](</srv/fff/review/w1386-save-blueprint-options/…png>)` lines in its body: "i dont see any previews". A
+target that does not exist makes the page show the alt as code (`InlineImage`'s `onError`), which reads as no preview. The
+check now points such an image at the one file of its folder it was meant to be (`nearest`: the same name but for case,
+spaces, `_` or `-`, or another media extension), or, with none, writes its alt in words and puts the folder's stills and
+clips under the paragraph. What the page does with a file that is there was measured in Firefox, Chromium and WebKit
+(`e2e/images.spec.ts`, w1419, Firefox with `E2E_FIREFOX=1`; with the e2e review root outside the sandboxes as `/srv/fff/review` is on the portal, so a
+still is served by `/api/image` and not by a copy kept with the transcript): it loads, also six in one long message.
+
 **Why rewrite, not send it back.** Both were weighed:
 
 - Sending it back means refusing the reply and having the orchestrator write it again. That is unsafe for this case. The
@@ -1922,6 +1932,59 @@ person's own personal orchestrator takes them (a worker, a standing agent or the
   declining, a click on a message that proposed nothing, a decision for later and a close on a click, the text rules),
   `server/opsWorker.test.ts` (a click and a deploy or a job) and `e2e/replies.spec.ts` (desktop
   and both phones: the buttons, the composer bar, the quote, the chips, over a reload, the API's refusals).
+
+### Questions with buttons (w1397)
+
+Ben, 2026-10-16: "when you are asking me questions lets do it like claude code where you give whatever your recommended
+options are (saying which one you most prefer) and then a 'chat more about this' option. make a button for each to accept
+that answer then just use it instead of me having to type". It is Claude Code's AskUserQuestion, in the portal chat: the
+orchestrator asks every question to its person with **`ask_person`**, one at a time, and the person answers with one click.
+
+- **The tool** (`ask_person`, a person's orchestrator only, loaded in every call: `server/toolManifest.ts`): a `question`
+  (one sentence, its context goes in the message above), 2 to 4 `options`, each a `label` (the complete answer in the person's
+  voice, "Close w983 as handled", at most 90 characters) and a one-line `description`, and at most one marked `recommended`.
+  `shared/ask.ts` `checkAsk` refuses anything else (two picks, a duplicate label, the reserved "Chat more about this") and the
+  recommended option moves to the front. The tool answers "Shown to Ben as 3 buttons ... End your turn now": the orchestrator
+  writes its message, calls the tool and stops. The call stays in the transcript as a `tool_use`, and the page draws that event
+  as the question (`web/src/components/AskCard.tsx`): the question, one button per option (the recommended one first, an amber
+  "Recommended" chip) and a last, dashed "Chat more about this". It reuses what the chat has: the reply bar and `startReply` of w866 for "Chat more", the reply quote line for the answer, the `.chip` and the colour tokens (the same borders, accent and green as the rest of the page). The Intake tab's Approve and Decline (`DispatcherPanel.tsx`) are one-line `.btn` buttons in a table row, with no component to lift out, so the option buttons (`.ask-opt`) are two-line cards of the same radius and tokens.
+- **Stills and clips in the card** (w1419). Ben, 2026-10-16: "I need to see screenshots of what you're talking about", then
+  "i dont see any previews". Since w1397 a look to OK or a placement to pick is asked with `ask_person`, and the card printed
+  its question and descriptions as plain text: an `![Option A at 1280](</srv/fff/review/…png>)` in an option showed as those
+  characters, never the still, and a long path could be cut by the 220-character description limit. Now a question and each
+  option may carry its media as `![what it shows](<absolute path>)` (at most 4 each): `splitMedia` (`shared/ask.ts`) keeps
+  each whole and the limits (600 for the question, 220 for a description) count the words only (the tool takes up to
+  `MEDIA_CHARS` 1200 more for media). `AskCard` shows the question's media under it and an option's under its button,
+  never inside it (a click on a still opens it large; a click on the button answers), through the same `Markdown` images and
+  players as a message (`/api/image`, review files included). The quote of an answer (`askExcerpt`) has the words only.
+  `e2e/images.spec.ts` (w1419) asks with a review still and clip and checks they load, on desktop Chrome and the iPhone
+  project; the same file checks a plain message with a review PNG, WebM and MP4 in the `![x](</…>)` form, before and
+  after a reload.
+- **A click is the person's own message.** `POST /api/sessions/<id>/answer` with the question's seq and the option's index
+  (`Orchestrators.answerWords`). The server reads the label and the question from the transcript, never from the page, and
+  sends it as a reply (shared/replies.ts, "Replies and reactions"): the person's words are the label, then `REPLY_MARK` and
+  the question quoted with its numbered options. It is `from: 'human'` with `requestedBy` the person, in the person's own turn
+  (`turnFrom === 'human'`), so it approves, declines, closes, or answers a `[needs you]` with `update_work` exactly as the
+  same words typed would, with no reaction and no click-grant involved (w1039's rules are for the emoji). A held call
+  (w830) rides along as with any message. Only the quote is FF Factory's, so a label is the only thing of theirs that counts as
+  their words: it is why the tool tells the orchestrator to write labels as full answers, not "Yes".
+- **The buttons lock after one choice.** Whether a question is answered is read from the transcript (`answerOf`): a message
+  of the person's whose quote is that question and whose words are one of its labels. So it survives a reload, another tab
+  and the phone, and the server refuses a second click (409 `already answered: "<label>"`, the page shows the pick locked,
+  "Your answer", the rest dimmed). A click is shut in the page at once, before the message is in the transcript. Someone
+  else's chat shows the buttons shut.
+- **"Chat more about this" sends nothing.** The page adds it (the server and the tool never see it): it starts a reply to the
+  question in the composer ("Replying to Orchestrator: <question>"), which focuses the box. What the person types then goes
+  as an ordinary reply that quotes the question, and does NOT settle it: the buttons stay until one is clicked. A reply's quote
+  line shows the question alone (`questionOf`), not the options.
+- **Typing still works** as ever: a message of theirs is read by the orchestrator whether or not buttons were shown.
+- **With the rest.** A reaction (w1039) still answers a yes-or-no proposal; `ask_person` is for choosing, and the brief says
+  to propose one action per sentence when a 👍 should do. A `[needs you]` (w1378) is asked with `ask_person` too: the worker's
+  own options, or the orchestrator's, as the buttons with its recommendation first, and the answer (the clicked label or the
+  typed words) is the `update_work` note as before. One question at a time: with two, ask the one that unblocks the other.
+- **Tests:** `server/ask.test.ts` (the question's shape; a click is the person's message, attributed to them, in their own
+  turn, and approves what they clicked; the lock after one choice; "chat more" sends nothing and settles nothing; the brief),
+  `e2e/ask.spec.ts` (desktop and iPhone-sized: the card, the click and its lock over a reload, "chat more", the API's refusals).
 
 ### Calls a gate refused (w830)
 

@@ -359,6 +359,21 @@ test('masterBatch.enabled and .autoApprove (w1180): settable by anyone, checked,
   assert.ok(SETTABLE_KEYS.includes('masterBatch.enabled') && SETTABLE_KEYS.includes('masterBatch.autoApprove'));
 });
 
+test('live.enabled (w1417): an owner turns the live view on and off; checked, written, applied live, null back to off', (t) => {
+  const { file, cfg } = setup(t);
+  assert.ok(SETTABLE_KEYS.includes('live.enabled'));
+  assert.ok(OWNER_ONLY_KEYS.has('live.enabled'), 'it opens a new stream from the machines to the pages: the owner decides');
+  assert.deepEqual(setAppConfig(file, cfg, 'live.enabled', true), { before: undefined, after: true });
+  assert.equal(cfg.live?.enabled, true, 'the live view reads it at every use: no restart');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')).live, { enabled: true });
+  assert.deepEqual(setAppConfig(file, cfg, 'live.enabled', 'false'), { before: true, after: false });
+  assert.equal(cfg.live?.enabled, false);
+  setAppConfig(file, cfg, 'live.enabled', null);
+  assert.equal(cfg.live?.enabled, undefined, 'null is the default (off)');
+  assert.throws(() => normalizeSetting('live.enabled', 'yes'), /true or false/);
+  assert.throws(() => normalizeSetting('live.enabled', 1), /true or false/);
+});
+
 test('set_app_config: placement.hold (w1089) keeps a computer off for everything, with who holds it and why; null releases it and leaves the rest', (t) => {
   const { file, cfg } = setup(t);
   setAppConfig(file, cfg, 'placement.avoid', { beast: 'BEAST unstable' });

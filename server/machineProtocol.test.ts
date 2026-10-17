@@ -46,7 +46,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w1379 (no bump): `owners` on `welcome` and `resumable`, each session of the machine with a request not closed and its requests,
 // optional: an older daemon ignores it; an older portal never sends it, and the daemon's `ff-leftovers folders` then says it has no
 // owners and nothing is deletable.
-const DECIDED = { protocol: 9, fingerprint: '4a75dfe3bc09e464' };
+// w1398 (no bump): `liveView` in the hello (optional: an older portal ignores it), `live`, sent only to a daemon that offered it,
+// answered by `live_result`, and `live_state`, which an older portal's onMessage drops (no default case).
+const DECIDED = { protocol: 9, fingerprint: 'ef6584ff5e585abe' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

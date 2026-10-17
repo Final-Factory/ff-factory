@@ -10,6 +10,9 @@ import type {
   Machine,
   NotifyPrefs,
   IntakeGroups,
+  LiveKnob,
+  LiveKnobRequest,
+  LiveMaterialKnobs,
   MaxEvent,
   MaxInboundChannel,
   MaxInboundItem,
@@ -130,6 +133,8 @@ export const api = {
       { text, ...(images?.length ? { images } : {}), ...(attachments?.length ? { attachments } : {}), ...(replyTo !== undefined ? { replyTo } : {}), ...(clientId ? { clientId } : {}) },
       { keepalive: !images?.length && text.length < 20_000 },
     ),
+  /** Click option `choice` of a question with buttons (ask_person, w1397): sent as your own reply to it. Refused once it is answered. */
+  answer: (sessionId: string, seq: number, choice: number) => request<{ duplicate?: boolean }>('POST', `/api/sessions/${enc(sessionId)}/answer`, { seq, choice, clientId: crypto.randomUUID() }),
   /** React to a message of your orchestrator chat with an emoji (w866), or take the reaction back (on: false). */
   react: (sessionId: string, seq: number, emoji: string, on = true) => request<{ changed: boolean }>('POST', `/api/sessions/${enc(sessionId)}/react`, { seq, emoji, on }),
   /** Compact an orchestrator's conversation now (w518): what `/compact [focus]` typed in its chat does. */
@@ -225,6 +230,11 @@ export const api = {
     request<DelegationRequest>('POST', `/api/delegations/${enc(id)}/${approve ? 'approve' : 'reject'}`, { note }),
   /** "Start now" (w527): approves a pending one, and asks the dispatcher to start its ledger request ahead of the queue. */
   bumpDelegation: (id: string) => request<DelegationRequest>('POST', `/api/delegations/${enc(id)}/bump`, {}),
+  // The live view of a session's asset (docs/live-view.md): its materials' knobs, one knob move, a material's knobs put back.
+  liveKnobs: (sessionId: string) => request<LiveMaterialKnobs[]>('GET', `/api/live/${enc(sessionId)}/knobs`),
+  /** `knob`: the knob as the game now holds it, when the answer carries it. */
+  liveKnob: (sessionId: string, req: LiveKnobRequest) => request<{ ok?: boolean; knob?: LiveKnob }>('POST', `/api/live/${enc(sessionId)}/knob`, req),
+  liveReset: (sessionId: string, material?: string) => request<{ ok?: boolean }>('POST', `/api/live/${enc(sessionId)}/reset`, material ? { material } : {}),
 };
 
 export type WsStatus = 'connecting' | 'open' | 'closed';

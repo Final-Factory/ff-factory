@@ -39,6 +39,15 @@
 #                                      ID must have a machine record (adding one is a person's: add_machine, w676), and
 #                                      TARGET must answer ssh first; issuing replaces the machine's credential, so its
 #                                      running daemon is dropped within 20 s.
+#   fffctl apikey list                 the API keys that act for member logins: name, login, when made (never a value)
+#   fffctl apikey issue NAME --user ID [--create-member [--display-name TEXT]] --machine TARGET --path FILE
+#                                      an API key for /mcp bound to member login ID (w1415), written straight into FILE on
+#                                      TARGET (0600; a relative FILE is in the home folder there) over the portal's ssh. Never printed: only
+#                                      the remote path and its last four characters. --create-member makes the login first,
+#                                      a member with a random password nobody sees. Refused: an owner login, ben and
+#                                      lothsahn, a NAME held by another login's, the owner's or a scoped key. TARGET must
+#                                      answer ssh first; a key that cannot be written there is revoked again.
+#   fffctl apikey revoke NAME          revoke a key that acts for a member login (the login stays)
 #   fffctl update                      the portal deploy (fffctl update --no-wait: build origin/main beside, drain,
 #                                      restart, verify, roll back by itself), only with the grant the portal leaves in
 #                                      its data folder when Lothsahn or Ben asks for a deploy in a turn of their own
@@ -70,7 +79,7 @@ logger -t fff-ops-priv -- "fffctl $*" 2>/dev/null || true
 redact() {
   sed -E -e 's/sk-ant-oat01-[A-Za-z0-9_-]{40,}/sk-ant-oat01-[redacted]/g' -e 's/sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{40,}/sk-ant-api-[redacted]/g' \
     -e 's/(ffm_[A-Za-z0-9.-]{1,64}_)[A-Za-z0-9_-]{32,}/\1[redacted]/g' -e 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]{30,}/\1[redacted]/g' \
-    -e 's/ffpv1_[A-Za-z0-9_-]{10,}/ffpv1_[redacted]/g' -e 's/tskey-[a-z]+-[A-Za-z0-9-]{16,}/tskey-[redacted]/g'
+    -e 's/ffpv1_[A-Za-z0-9_-]{10,}/ffpv1_[redacted]/g' -e 's/ffsb_[A-Za-z0-9_-]{40,}/ffsb_[redacted]/g' -e 's/tskey-[a-z]+-[A-Za-z0-9-]{16,}/tskey-[redacted]/g'
 }
 
 ssh_as_fff() { runuser -u "$FFF_USER" -- "$FFF_LIB/fff-ops-ssh" "$@"; }
@@ -78,18 +87,24 @@ ssh_as_fff() { runuser -u "$FFF_USER" -- "$FFF_LIB/fff-ops-ssh" "$@"; }
 # the portal account's ~/.ssh; it prints the public key line, never the private key.
 machine_ssh() { runuser -u "$FFF_USER" -- env HOME="$FFF_ROOT/home" "$FFF_LIB/fff-machine-ssh" "$@"; }
 
+# machine_platform TARGET: posix or windows, or refused when TARGET does not answer ssh.
+machine_platform() {
+  local out
+  out=$(ssh_as_fff "$1" uname -s </dev/null 2>/dev/null || true)
+  case "$out" in
+    Darwin* | Linux*) echo posix ;;
+    *)
+      out=$(ssh_as_fff "$1" 'echo %OS%' </dev/null 2>&1) || refuse "$1 does not answer ssh: ${out:0:300}"
+      echo windows
+      ;;
+  esac
+}
+
 credential_issue() {
   local id=$1 target=$2 tmp platform remote enc ps out
   [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || refuse "not a machine id: '${id:0:80}'"
   # Reach it first: a credential issued for a machine we then cannot write to would only cut its daemon off.
-  out=$(ssh_as_fff "$target" uname -s </dev/null 2>/dev/null || true)
-  case "$out" in
-    Darwin* | Linux*) platform=posix ;;
-    *)
-      out=$(ssh_as_fff "$target" 'echo %OS%' </dev/null 2>&1) || refuse "$target does not answer ssh: ${out:0:300}"
-      platform=windows
-      ;;
-  esac
+  platform=$(machine_platform "$target") || exit $?
   # A record (w676): the installer's credential check (GET /machine/whoami) and the daemon's link need one, and
   # adding it is a person's. Without this, the credential would be issued for nothing.
   jq -e --arg id "${id,,}" 'any((.machines // [])[]; .id == $id)' "$DATA/state.json" >/dev/null 2>&1 ||
@@ -113,6 +128,74 @@ credential_issue() {
   fi
   redact <"$tmp/issued" | sed -E 's/ is in [^ ]+ \(0600\)/ was issued/; s/ Move it to the machine, then delete [^ ]+\.$//'
   echo "on $target: $(printf '%s' "$out" | tr -d '\r' | tail -n 1) (give it to the worker installer with --credential-file / -CredentialFile, then delete it there)"
+}
+
+# apikey_issue NAME --user ID [--create-member [--display-name TEXT]] --machine TARGET --path FILE (w1415): an API key for a
+# member login, minted by fffctl apikey (as the portal's account) into a folder of its own here and written straight into
+# FILE on TARGET (0600), over the portal's ssh. The key is in no argument, no output and no log: only its last four
+# characters. Each option once; the login rules (member only, never ben or lothsahn, never an owner) are checked here
+# first and again in server/memberKeys.ts.
+apikey_issue() {
+  local name=$1 user="" create=0 display="" have_display=0 target="" dest="" tmp platform out dir enc ps
+  shift
+  [[ $name =~ ^[A-Za-z0-9._-]{2,40}$ ]] || refuse "not a key name: '${name:0:60}' (2-40 letters, digits, . _ -)"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --user) [ -z "$user" ] && [ $# -ge 2 ] || refuse "apikey issue: --user ID, once"; user=$2; shift 2 ;;
+      --machine) [ -z "$target" ] && [ $# -ge 2 ] || refuse "apikey issue: --machine TARGET, once"; target=$2; shift 2 ;;
+      --path) [ -z "$dest" ] && [ $# -ge 2 ] || refuse "apikey issue: --path FILE, once"; dest=$2; shift 2 ;;
+      --display-name) [ "$have_display" = 0 ] && [ $# -ge 2 ] || refuse "apikey issue: --display-name TEXT, once"; display=$2; have_display=1; shift 2 ;;
+      --create-member) [ "$create" = 0 ] || refuse "apikey issue: --create-member once"; create=1; shift ;;
+      *) refuse "apikey issue NAME --user ID [--create-member [--display-name TEXT]] --machine TARGET --path FILE (not '${1:0:40}')" ;;
+    esac
+  done
+  [ -n "$user" ] && [ -n "$target" ] && [ -n "$dest" ] || refuse "apikey issue NAME --user ID [--create-member [--display-name TEXT]] --machine TARGET --path FILE"
+  [[ $user =~ ^[A-Za-z0-9._-]{2,32}$ ]] || refuse "not a login id: '${user:0:40}'"
+  case "${user,,}" in ben | lothsahn) refuse "'$user' is a person's own login (Ben's or Lothsahn's): a key for it is theirs to make, never yours" ;; esac
+  [ "$have_display" = 0 ] || [ "$create" = 1 ] || refuse "--display-name names a new login: only with --create-member"
+  # The file on the machine: relative to its home folder (a quoted ~/ means the same), or absolute, plain characters only
+  # (it reaches a remote shell). An unquoted ~ in the worker's own shell became the worker's home: refused with the fix.
+  case "$dest" in /srv/fff-ops/* | /srv/fff-ops) refuse "--path $dest is under your own home: your shell expanded ~. Give it relative to the machine's home folder (.ff-factory/<file>) or quote it ('~/.ff-factory/<file>')" ;; esac
+  dest=${dest#\~/}
+  local re='^(/|[A-Za-z]:/|[A-Za-z0-9._])[A-Za-z0-9._/-]*$'
+  [[ $dest =~ $re ]] && [[ ! $dest =~ (^|/)\.\.(/|$) ]] && [[ $dest != */ ]] && [[ $dest != . ]] ||
+    refuse "--path is <path> (in the home folder there), /<path> or C:/<path>, of letters, digits and . _ - /, with no '..' (not '${dest:0:80}')"
+  # Reach it first: a key minted for a machine we then cannot write to would be revoked again.
+  platform=$(machine_platform "$target") || exit $?
+  case "$platform:$dest" in
+    posix:[A-Za-z]:/*) refuse "$target is not Windows: --path <path in its home folder> or /<path>" ;;
+    windows:/*) refuse "$target is Windows: --path <path in its profile folder> or C:/<path>" ;;
+  esac
+  tmp=$(mktemp -d)
+  # shellcheck disable=SC2064 # expanded now, on purpose (a local, like credential_issue's: w734)
+  trap "rm -rf -- '$tmp'" EXIT
+  chown "$FFF_USER" "$tmp" # fffctl apikey runs as the portal's account and writes the key here
+  chmod 700 "$tmp"
+  local args=(apikey issue "$name" --user "$user" --out "$tmp/key")
+  [ "$create" = 0 ] || args+=(--create-member)
+  [ "$have_display" = 0 ] || args+=(--display-name "$display")
+  "$FFFCTL" "${args[@]}" >"$tmp/issued" 2>&1 || refuse "fffctl apikey issue $name failed: $(redact <"$tmp/issued" | tail -n 3)"
+  [ -s "$tmp/key" ] || refuse "fffctl apikey issue $name wrote no key"
+  if [ "$platform" = posix ]; then
+    # shellcheck disable=SC2088 # the machine's ~, expanded by its shell
+    case "$dest" in /*) ;; *) dest="~/$dest" ;; esac
+    dir=${dest%/*}
+    [ -n "$dir" ] || dir=/
+    out=$(ssh_as_fff "$target" "umask 077 && mkdir -p $dir && cat > $dest.tmp && chmod 600 $dest.tmp && mv -f $dest.tmp $dest && echo stored $dest" <"$tmp/key" 2>&1) || {
+      "$FFFCTL" apikey revoke "$name" >/dev/null 2>&1 || true
+      refuse "the key was issued but could not be written on $target: $(printf '%s' "$out" | redact | head -c 300). It was revoked again; run this again"
+    }
+  else
+    # A relative path is in the user's profile folder. Base64 UTF-16LE (-EncodedCommand) so cmd.exe or PowerShell pass it on unchanged.
+    ps="\$f = '$dest'; if (-not [IO.Path]::IsPathRooted(\$f)) { \$f = Join-Path \$env:USERPROFILE \$f }; \$f = [IO.Path]::GetFullPath(\$f); New-Item -ItemType Directory -Force -Path (Split-Path \$f) | Out-Null; [IO.File]::WriteAllText(\$f, [Console]::In.ReadToEnd().Trim()); 'stored ' + \$f"
+    enc=$(printf '%s' "$ps" | iconv -t UTF-16LE | base64 -w0)
+    out=$(ssh_as_fff "$target" "powershell -NoProfile -NonInteractive -EncodedCommand $enc" <"$tmp/key" 2>&1) || {
+      "$FFFCTL" apikey revoke "$name" >/dev/null 2>&1 || true
+      refuse "the key was issued but could not be written on $target: $(printf '%s' "$out" | redact | head -c 300). It was revoked again; run this again"
+    }
+  fi
+  redact <"$tmp/issued" | sed -E 's/, in [^ ]+ \(0600\)$//'
+  echo "on $target: $(printf '%s' "$out" | tr -d '\r' | redact | tail -n 1)"
 }
 
 # take_grant FILE WHAT ASKED_VIA: the one-use grant the portal leaves when Lothsahn or Ben asks for WHAT in a turn of their own
@@ -206,6 +289,20 @@ case "${1:-help}" in
       *) refuse "credential list | credential issue ID --to TARGET (revoking is a person's: sudo fffctl machine-credential revoke)" ;;
     esac
     ;;
+  apikey)
+    # w1415: keys for member logins only (fffctl apikey and server/memberKeys.ts refuse the rest). Issue writes the key on a
+    # machine, never here; list and revoke pass exactly their words.
+    case "${2:-}" in
+      list) [ $# -eq 2 ] || refuse "apikey list takes nothing more"; exec "$FFFCTL" apikey list ;;
+      issue) [ $# -ge 3 ] || refuse "apikey issue NAME --user ID [--create-member [--display-name TEXT]] --machine TARGET --path FILE"; shift 2; apikey_issue "$@" ;;
+      revoke)
+        [ $# -eq 3 ] || refuse "apikey revoke NAME"
+        [[ $3 =~ ^[A-Za-z0-9._-]{2,40}$ ]] || refuse "not a key name: '${3:0:60}'"
+        exec "$FFFCTL" apikey revoke "$3"
+        ;;
+      *) refuse "apikey list | apikey issue NAME --user ID [--create-member [--display-name TEXT]] --machine TARGET --path FILE | apikey revoke NAME (an owner's key, a scoped one or one for ben or lothsahn is a person's: node server/apikey.ts)" ;;
+    esac
+    ;;
   update)
     if [ $# -ne 1 ]; then refuse "update takes no options: it builds origin/$FFF_BRANCH"; fi
     take_grant "$DATA/ops-deploy.grant" deploy "ops_worker deploy"
@@ -230,5 +327,5 @@ case "${1:-help}" in
     echo "asked for: the portal asks its busy agents to commit, push and end their turn, restarts on the same release and resumes them. Your process ends with the old portal; FF Factory messages you when the new one is up."
     ;;
   help | -h | --help) awk 'NR > 5 && /^#$/ {exit} NR > 5' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) refuse "fffctl $1 is a person's (rollbacks, settings, the vault, migrations). You have: status, state, config [--check], units [--check], vault list [--names] / vault help, machine-credential list, migrate --help, logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, update with a deploy grant, and restart with a restart grant" ;;
+  *) refuse "fffctl $1 is a person's (rollbacks, settings, the vault, migrations). You have: status, state, config [--check], units [--check], vault list [--names] / vault help, machine-credential list, migrate --help, logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, apikey list / issue / revoke for a member login, update with a deploy grant, and restart with a restart grant" ;;
 esac

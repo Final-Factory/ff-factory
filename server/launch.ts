@@ -120,6 +120,12 @@ export const CATALOG = {
     action: z.enum(['status', 'start', 'stop', 'restart', 'clear_batch']),
     force: z.boolean().optional().describe('stop/restart: kill the editor at once instead of asking it to quit first (a frozen editor ignores that).'),
   },
+  live_view: {
+    action: z.enum(['start', 'stop', 'status', 'knobs']),
+    materials: z.array(z.string()).optional().describe('start: the materials whose shader properties are the knobs, as the game names them (e.g. ["VfxComet"]).'),
+    fps: z.number().optional().describe('start: frames a second, 1-30 (default 15).'),
+    width: z.number().optional().describe('start: frame width in px, 320-1920 (default 960).'),
+  },
   switch_branch: {
     branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),
     create_from: z.string().optional().describe('Base for a branch that exists neither here nor on origin. Default origin/master.'),

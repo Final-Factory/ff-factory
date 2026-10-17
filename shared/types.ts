@@ -2215,8 +2215,65 @@ export interface AppState {
   intake?: IntakeSummary;
   /** The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): its switches and its last run. */
   ledger?: LedgerCleanupState;
-  config: { defaultModel: string; models: string[]; defaultBase: string; attachments: AttachmentSettings };
+  config: { defaultModel: string; models: string[]; defaultBase: string; attachments: AttachmentSettings; live?: { enabled: boolean } };
   settings: AppSettings;
+  /** The live views this person may watch (w1398, docs/live-view.md); absent from a server older than the field. */
+  live?: LiveViewInfo[];
+}
+
+/**
+ * A live view (w1398, docs/live-view.md): the running game in a sandbox's Unity editor, streamed beside the asset
+ * agent's conversation. Frames come over the `/live/<sessionId>` WebSocket (binary JPEG messages); its knobs are the
+ * shader properties of `materials`, read and moved through `/api/live/<sessionId>/knobs` and `.../knob`.
+ */
+export interface LiveViewInfo {
+  liveId: string;
+  /** The agent's session: the view sits beside its conversation. */
+  sessionId: string;
+  machineId: string;
+  sandbox: string;
+  /** starting: asking the game; live: frames arrive; holding: the game is not streaming (detail says why); stopped. */
+  state: 'starting' | 'live' | 'holding' | 'stopped';
+  detail: string;
+  fps: number;
+  width: number;
+  /** The materials whose shader properties are the knobs, as the game names them (e.g. "VfxComet"). */
+  materials: string[];
+  startedAt: string;
+  updatedAt: string;
+  /** Frames the portal has passed on since the view started. */
+  frames: number;
+}
+
+/** One knob: a material's shader property (the game's look.material.list). */
+export interface LiveKnob {
+  name: string;
+  label: string;
+  type: 'float' | 'range' | 'int' | 'color' | 'vector';
+  /** A number, or [r, g, b, a] / [x, y, z, w]. */
+  value: number | number[];
+  min?: number;
+  max?: number;
+  /** A colour that may go above 1 (an emission). */
+  hdr?: boolean;
+  attributes?: string[];
+  /** Moved in this play session and not yet put back. */
+  moved?: boolean;
+}
+
+export interface LiveMaterialKnobs {
+  material: string;
+  shader?: string;
+  knobs: LiveKnob[];
+  /** Why the knobs could not be read (the game not in play mode, an unknown material). */
+  error?: string;
+}
+
+/** POST /api/live/<sessionId>/knob */
+export interface LiveKnobRequest {
+  material: string;
+  name: string;
+  value: number | number[];
 }
 
 /** An orchestrator's timer as its person sees it (server/timers.ts TimerView; docs/orchestrators.md "Timers"). */
@@ -2252,6 +2309,7 @@ export interface TimersAnswer {
 /** Pushed over the WebSocket at /ws. */
 export type ServerEvent =
   | { type: 'state'; state: AppState }
+  | { type: 'live'; views: LiveViewInfo[] }
   | { type: 'session'; session: SessionInfo }
   | { type: 'session_removed'; id: string }
   | { type: 'standing'; agent: StandingAgent }
@@ -2325,6 +2383,13 @@ export interface ReactRequest {
   seq: number;
   emoji: string;
   on?: boolean;
+}
+
+/** A click on a button of a question with buttons (ask_person, w1397): the question's transcript seq and the option's index. */
+export interface AnswerRequest {
+  seq: number;
+  choice: number;
+  clientId?: string;
 }
 
 export interface PermissionDecisionRequest {

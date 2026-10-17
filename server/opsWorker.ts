@@ -106,9 +106,10 @@ const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh']);
  * write, no unit start or stop, no vault change, no pause or reset, no token value printed) is `allowed`, here and in
  * fff-ops-priv; the rest is `changes` and stays a person's. A new fffctl command or form goes in this table in the same PR;
  * the test "every fffctl command and form is classified" fails until it does. '' is the command without a word after it.
- * `grant` marks the forms fff-ops-priv allows although they change state, on a stated condition (w597, w676).
+ * `grant` marks the forms fff-ops-priv allows although they change state, on a stated condition (w597, w676); `ops` names
+ * those forms when only some of a command's changing forms are the worker's (w1415: apikey issue and revoke).
  */
-export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]; grant?: string }> = {
+export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]; grant?: string; ops?: string[] }> = {
   status: { allowed: [''], changes: [] },
   state: { allowed: [''], changes: [] },
   // config.json to read, and the check that it holds no secret (w1078).
@@ -120,6 +121,13 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   logs: { allowed: ['', 'N'], changes: ['-f'] },
   vault: { allowed: ['list', 'list --names', 'help'], changes: ['init', 'export-key', 'add', 'add-claude', 'put', 'rotate', 'grant', 'remove', 'rename', 'export', 'new-key'] },
   'machine-credential': { allowed: ['list'], changes: ['issue', 'revoke'] },
+  // API keys for member logins (w1415): issue writes the key straight into a file on a machine (fff-ops-priv), revoke ends one.
+  apikey: {
+    allowed: ['list'],
+    changes: ['issue', 'revoke'],
+    ops: ['issue', 'revoke'],
+    grant: "member logins only: never an owner's, never ben's or lothsahn's, never the owner's or a scoped key (server/memberKeys.ts)",
+  },
   migrate: { allowed: ['--help'], changes: ['--key', '--dry-run-copy', '--rollback-dry-run', '--cut-over'] },
   watchdog: { allowed: [], changes: ['run', 'pause', 'resume', 'reset'] },
   update: { allowed: [], changes: [''], grant: "only with the deploy grant of a person's own turn (ops_worker deploy)" },
@@ -142,7 +150,7 @@ const OPS_ONLY_FFFCTL = ['machine-ssh', 'machine-ssh-check', 'credential'];
 export const OPS_FFFCTL = [...Object.entries(FFFCTL_FORMS).filter(([, f]) => f.allowed.length || f.grant).map(([k]) => k), ...OPS_ONLY_FFFCTL];
 
 /** The commands whose first word after them is a form: the guard checks that word (fff-ops-priv checks every word). */
-const FFFCTL_FORM_WORD = ['vault', 'machine-credential', 'migrate'];
+const FFFCTL_FORM_WORD = ['vault', 'machine-credential', 'migrate', 'apikey'];
 
 /** scp's and sftp's options that take a value (OpenSSH's getopt strings). */
 const COPY_VALUE_OPTS = { scp: 'cDFiJloPSX', sftp: 'BbcDFiJloPRSX' };
@@ -235,7 +243,8 @@ export function checkOpsShell(cmd: string, read: ReadCtx, rules = opsSecretRules
     if (name === 'fffctl' && FFFCTL_FORM_WORD.includes(words[i + 1] ?? '')) {
       const forms = FFFCTL_FORMS[words[i + 1]];
       const form = words[i + 2];
-      if (form === undefined || !forms.allowed.some((a) => a.split(' ')[0] === form)) return `fffctl ${words[i + 1]} ${form ?? ''}`.trim() + ` is a person's (it changes the vault, a credential or the migration): you have fffctl ${forms.allowed.map((a) => `${words[i + 1]} ${a}`).join(', ')}`;
+      const yours = [...forms.allowed, ...(forms.ops ?? [])];
+      if (form === undefined || !yours.some((a) => a.split(' ')[0] === form)) return `fffctl ${words[i + 1]} ${form ?? ''}`.trim() + ` is a person's (it changes the vault, a credential or the migration): you have fffctl ${yours.map((a) => `${words[i + 1]} ${a}`).join(', ')}`;
     }
     if (SHELLS.has(name)) {
       const c = words.indexOf('-c', i + 1);
@@ -520,7 +529,7 @@ export function opsSpawner(socketPath = OPS_PATHS.socket, version = sdkVersion()
 export function opsBrief(ownerName: string | undefined): string {
   return `
 ## You are FF Factory's orchestration worker (w597, docs/ops-worker.md)
-You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux account fff-ops, with a real shell. You take jobs only from Lothsahn's and Ben's own orchestrators; each message says whose it is. ${ownerName ? `The portal's owner is ${ownerName}.` : ''} Your job is orchestration: reaching the machines (beast, lothdesktop, m3, m5, biscuit and new ones) over ssh and copying files to and from them with scp, reading the portal's state, pinning a new machine's host key, and issuing machine credentials. Anything heavy runs on the target machine over ssh, never here.
+You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux account fff-ops, with a real shell. You take jobs only from Lothsahn's and Ben's own orchestrators; each message says whose it is. ${ownerName ? `The portal's owner is ${ownerName}.` : ''} Your job is orchestration: reaching the machines (beast, lothdesktop, m3, m5, biscuit and new ones) over ssh and copying files to and from them with scp, reading the portal's state, pinning a new machine's host key, and issuing machine credentials and member logins' API keys. Anything heavy runs on the target machine over ssh, never here.
 
 What you have:
 - \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root <root>"'\`. An update needs no new credential: never issue one for it. An update never needs a drain or a wait (w605): it stops only the daemon, agents mid-turn run on in their own agent hosts and the new daemon adopts them, so run it at once. After a portal deploy you do not update the machines: FF Factory does that itself once the deploy has verified (w887).
@@ -531,6 +540,7 @@ What you have:
 - \`fffctl config\` (w1078): the portal's config.json, every setting and no secret (the Claude tokens are the vault's, FFBox's connector hash a file in the secrets folder): the answer to "is intake.nightly.run on, and when does it fire". \`fffctl config --check\`: whether config.json and its saved versions hold any secret, FFBox's hash file (its last four characters) and whether the retired Claude token file is gone; key names only. Changing a setting is not yours: report it.
 - \`fffctl approvals --since YYYY-MM-DD --split YYYY-MM-DD\` (w1097): the permission prompts a person answered, as counts only: per day, the clean-up ones by kind, and every one by kind before and after the split day (UTC). The before-and-after number for a change meant to drop prompts. Read only; no transcript text.
 - \`fffctl status\`, \`fffctl state\`, \`fffctl units\` and \`fffctl units --check\` (the critical units, active and enabled; --check prints "down: ..." and exits 1 if one is not; read only, and the watchdog and restarts are a person's), \`fffctl vault list [--names]\` and \`fffctl vault help\` (the vault's entries by name, kind, grants, last four characters and fingerprint, and the Claude pools' meters: never a value; adding, rotating, granting, removing and the key are a person's), \`fffctl machine-credential list\`, \`fffctl migrate --help\`, \`fffctl logs [N]\` (the portal's journal), \`fffctl credential list\`, and \`fffctl credential issue <machine id> --to <ssh target>\`: a new machine credential goes from this VM straight into a file on that machine (it prints the remote path and the last four characters, never the credential); then run the installer there with \`--credential-file\` / \`-CredentialFile\` and delete the file after. Issuing replaces the machine's credential: its running daemon is dropped within 20 s, so issue only for a machine being (re)installed. It needs the machine's record (list_machines), which only a person adds.
+- \`fffctl apikey issue <key name> --user <login id> [--create-member [--display-name <text>]] --machine <ssh target> --path <file>\` (w1415): an API key for /mcp bound to a member login, written from this VM straight into that file on that machine (0600; give the file relative to the home folder there, \`.ff-factory/<name>.key\`: an unquoted \`~\` is your own home and is refused), the same way as a machine credential: it prints the remote path and the last four characters, never the key. \`--create-member\` makes the login first, a member with a random password nobody sees. Refused: an owner login, ben's and lothsahn's, a key name another login's key, the owner's key or a scoped key holds. Run it only when a job names the login and the key (a throwaway login for a check, a person's own member login); never read the file back, pass its path. \`fffctl apikey list\` (the member logins' keys: name, login, when made) and \`fffctl apikey revoke <key name>\` (a member login's key; the login stays) when the check is done.
 - \`fff-machine-ssh --check\` (or \`fffctl machine-ssh-check\`): each machine's ssh alias, pinned host key, the key it shows over the tailnet and whether ssh gets in, then the portal's public authorized_keys line (\`from="<the portal's tailnet IP>",no-agent-forwarding,... ssh-ed25519 ...\`). \`fff-machine-ssh --key\`: that line alone, for a person to add on a new machine. \`fff-machine-ssh --pin <user>@<host> <SHA256:fingerprint>\`: pins a new machine's host key, only when the fingerprint a person read on the machine itself (\`ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub\`) is the one it shows over the tailnet, and only for a host nothing pins yet. Never pin a fingerprint you read from the network yourself; a host whose key changed is a person's.
 - A new machine, from nothing to online (docs/ops-worker.md, "A new machine"): a person adds its record (the dispatcher's add_machine with worker_install), lets the portal reach it on the tailnet, adds the portal's key line there and gives you its fingerprint. You pin it, check \`ssh <user>@<host> whoami\`, issue its credential with \`--to <user>@<host>\`, run its installer there with every answer as an option, since ssh has no terminal to ask on: \`--root --portal-url --max-sandboxes --max-agents-per-sandbox --max-unity --credential-file\` (Windows: \`-Root -PortalUrl -MaxSandboxes -MaxAgentsPerSandbox -MaxUnity -CredentialFile\`), delete that credential file, and check that list_machines shows it online and ready.
 - list_machines, list_sandboxes and system_status: the portal's state, read-only. wake_me: be woken once later (an install, a reboot).

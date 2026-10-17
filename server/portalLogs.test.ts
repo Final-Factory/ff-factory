@@ -181,6 +181,31 @@ test('w920: the journal is paged, windowed and filtered', async (t) => {
   assert.match(await readPortalLogs(d, { source: 'portal', limit: -5, offset: -5 }), /1 line\(s\) of 50 matching, newest first, offset 0/);
 });
 
+test('w1420: the journal of tailscaled is a source of its own (Funnel, control reconnects, Drop lines), its login links masked', async (t) => {
+  const login = ['https://login.tailscale.com/a', 'a1b2c3d4e5f6'].join('/');
+  const lines = [
+    '2026-10-17T00:10:39+0000 fff tailscaled[760119]: Drop: TCP{[fd7a:115c:a1e0:ab12:4843:cd96:625f:d761]:21980 > [fd7a:115c:a1e0::5a34:ac62]:59343} 80 no rules matched',
+    '2026-10-17T00:10:01+0000 fff tailscaled[760119]: control: netmap: got new dial plan from control',
+    '2026-10-17T00:09:58+0000 fff tailscaled[760119]: Received error: PollNetMap: read tcp 10.213.41.10:48312->192.200.0.103:443: read: connection reset by peer',
+    `2026-10-17T00:09:00+0000 fff tailscaled[760119]: To authenticate, visit: ${login}`,
+  ];
+  let asked: Parameters<JournalReader>[0] | undefined;
+  const d = deps(tmpData(t), async (q) => {
+    asked = q;
+    return { lines };
+  });
+  const out = await readPortalLogs(d, { source: 'tailscaled', regex: 'PollNetMap|dial plan|visit' });
+  assert.deepEqual(asked?.units, ['tailscaled.service']);
+  assert.match(out, /tailscaled \(tailscaled\.service\)/);
+  assert.deepEqual(body(out).split('\n').map((l) => l.replace(/^.*\]: /, '')), [
+    'control: netmap: got new dial plan from control',
+    'Received error: PollNetMap: read tcp 10.213.41.10:48312->192.200.0.103:443: read: connection reset by peer',
+    'To authenticate, visit: https://login.tailscale.com/a/[redacted]',
+  ]);
+  assert.ok(!out.includes('a1b2c3d4e5f6'), 'a login link reached the answer');
+  assert.ok(LOG_SOURCES.tailscaled, 'tailscaled is listed');
+});
+
 test('w920: a page stops at its size cap, a window that holds more says so, and a journal that cannot be read says why', async (t) => {
   const fat = Array.from({ length: 200 }, (_, i) => `${i} ${'x'.repeat(990)}`);
   const d = deps(tmpData(t), journalOf(fat));

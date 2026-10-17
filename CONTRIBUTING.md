@@ -47,6 +47,11 @@ fails a Windows-only test left out, and a covered file missing from the paths. P
 platform in, or run the script under pwsh. `server/agentSession.test.ts` shows how to test session behaviour without Claude: it swaps
 the Agent SDK's `query()` for the scripted fake in `e2e/fakeAgent.ts` (`setQueryForTesting`).
 
+The portal VM's shell tests (`deploy/vm/test/*.test.sh`, which `lint.sh` runs in CI) need bash, jq, GNU coreutils and
+flock. On a Windows worker, run them in WSL (`wsl.exe -d Ubuntu -- bash <script>`, with `MSYS_NO_PATHCONV=1` from Git
+Bash), from a clone with `core.autocrlf false`: Git for Windows' default CRLF checkout breaks every script. A WSL without
+jq takes jq's release binary, checked against its `sha256sum.txt`, on `PATH` (w1420).
+
 Tests with a machine (`server/testMachine.ts`, a real daemon with git worktrees) share two rules (w759):
 
 - **A sandbox's git is what the daemon's git look reports**: set it with `TestMachine.gitLook(name, { branch, pr })` and
@@ -79,6 +84,16 @@ One from a process tree (w1196):
   reaper ended nothing on biscuit, where the daemon's parent IS that systemd (and on a Mac, launchd, pid 1). A test of
   anything that walks or spares process trees puts the daemon under the same parent its orphans are reparented to
   (`server/leftovers.test.ts` `machine()`), and runs once against the real process table before it is called done.
+
+Two from a feature that adds to a person's orchestrator (w1397):
+
+- **A new orchestrator tool or brief rule is measured against two budgets before it is written.** `server/coordinatorContext.test.ts`
+  fails a personal brief over 26,000 characters and always-loaded tools over 24,000: `ask_person` first came in at 1,200 and
+  1,350 characters over both, and was cut to a one-line brief rule and a shorter tool description, the long form living in
+  docs/orchestrators.md. Run that test after the first draft of a brief line or tool description, not at the end.
+- **An e2e test of a shared chat counts only what carries its own tag.** The desktop project's tests share one orchestrator
+  chat and run in parallel: "no new event after a click" as a transcript length failed once another spec wrote to it
+  (`e2e/ask.spec.ts`, "Chat more"). Filter the events by the test's unique tag (`uniq()`).
 
 Two from hangs (w906):
 

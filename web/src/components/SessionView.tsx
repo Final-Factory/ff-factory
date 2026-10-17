@@ -4,6 +4,7 @@ import { api } from '../api';
 import { attempt, openSession, useStore } from '../store';
 import { agentView, fmtCost, fmtRelative, navigate, PERMISSION_MODES, useNow } from '../util';
 import { Composer } from './Composer';
+import { LiveButton } from './LiveButton';
 import { Transcript } from './Transcript';
 import { Confirm, Dot, Icon, ModelChip, StateText } from './ui';
 import { AttentionStrip, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
@@ -42,7 +43,12 @@ export function SessionView({
             onBack={onBack}
             title={session.title}
             state={<StateText tone={agentView(session).tone} label={agentView(session).text} pulse={session.status === 'running'} />}
-            extra={<ModelChip session={session} />}
+            extra={
+              <>
+                <ModelChip session={session} />
+                <LiveButton sessionId={session.id} />
+              </>
+            }
             detailsOpen={details}
             onToggleDetails={() => setDetails(!details)}
           />

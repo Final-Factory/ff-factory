@@ -49,6 +49,7 @@ export const TOOL_MANIFEST = {
   // core
   read_rules: { group: 'core', kinds: [D, P, R], always: [D, P] },
   compact_conversation: { group: 'core', kinds: [D, P] },
+  ask_person: { group: 'core', kinds: [P], always: [P] },
   message_person: { group: 'core', kinds: [P], always: [P] },
   // ledger
   list_work: { group: 'ledger', kinds: [D, P, R], always: [D, P] },
@@ -72,6 +73,7 @@ export const TOOL_MANIFEST = {
   list_branches: { group: 'sandboxes', kinds: [D, P, R] },
   switch_branch: { group: 'sandboxes', kinds: [D, R, W], always: [D] },
   unity: { group: 'sandboxes', kinds: [D, R, W], always: [D] },
+  live_view: { group: 'sandboxes', kinds: [W] },
   // machines
   list_machines: { group: 'machines', kinds: [D, P, R, O], always: [D, P, O] },
   system_status: { group: 'machines', kinds: [D, P, R, O], always: [D, P, O] },

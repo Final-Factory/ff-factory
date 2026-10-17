@@ -117,3 +117,26 @@ test('the outgoing check: a reply that names a review folder, file or name bare 
   assert.ok(inlineReviewMedia('Stills: /srv/fff/review/w1241-super-enemies/glow_800_closeup.jp', o).text.endsWith(`![glow_800_closeup.jpg](<${r.glow.closeup}>)\n\n![glow_super-enemies_1920x1080.mp4](<${r.glow.clip}>)`));
   assert.equal(mediaLine('C:\\work\\shot.png'), '![shot.png](<C:\\work\\shot.png>)', 'either slash, on any OS');
 });
+
+test('w1419: an image of a review file that is not there points at the file it was meant to be, or shows its folder', (t) => {
+  const r = root(t);
+  const o = { root: r.dir };
+  const dir = path.join(r.dir, 'w1386-save-blueprint-options');
+  fs.mkdirSync(dir, { recursive: true });
+  const real = path.join(dir, '2-option-A-left-of-item-rows-1280.png');
+  const clip = path.join(dir, 'option-B-walkthrough.mp4');
+  for (const f of [real, clip]) fs.writeFileSync(f, 'x');
+  // A name written from memory: "_" for "-", other case. The page would show the alt as text; it points at the file now.
+  const loose = inlineReviewMedia('Option A: ![Option A at 1280](</srv/fff/review/w1386-save-blueprint-options/2-Option-A-left-of-item-rows_1280.png>)', o);
+  assert.equal(loose.text, `Option A: ![Option A at 1280](<${real}>)`);
+  // Another extension.
+  assert.equal(inlineReviewMedia('![B](</srv/fff/review/w1386-save-blueprint-options/option-B-walkthrough.webm>)', o).text, `![B](<${clip}>)`);
+  // Nothing like it: its alt in words, and the folder's stills and clips under the paragraph.
+  const none = inlineReviewMedia('Option C: ![Option C at 1280](</srv/fff/review/w1386-save-blueprint-options/9-option-C.png>)\n\nWhich one?', o);
+  assert.match(none.text, /^Option C: \*Option C at 1280\*\n\n/);
+  assert.ok(none.text.includes(`![2-option-A-left-of-item-rows-1280.png](<${real}>)`) && none.text.includes(`![option-B-walkthrough.mp4](<${clip}>)`), none.text);
+  assert.ok(none.text.endsWith('Which one?'));
+  // A file that is there is left as it is, and so is an image outside the review folder.
+  const ok = `![A](<${real}>) and ![x](<C:\\work\\shot.png>)`;
+  assert.deepEqual(inlineReviewMedia(ok, o), { text: ok, added: 0 });
+});
