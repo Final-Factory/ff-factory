@@ -629,8 +629,24 @@ curl-35 ones (2, 7 and 1 minutes before) and not before the two curl-28 ones:
 | 2026-10-17 00:11 | 10-16 18:11 | 35 | 4 of 4 | 00:15 |
 
 (2026-10-16 18:26 UTC was another kind: tailscaled itself in `NoState`, layer 2, for three minutes.) The watch blamed the
-tailnet policy (layer 7) for four of them; that was the Funnel hand-off lines above, logged all the time. What the
-curl-35 outages fit *(sourced; not yet measured on this VM, whose tailscaled journal nobody could read)*:
+tailnet policy (layer 7) for four of them; that was the Funnel hand-off lines above, logged all the time.
+
+**What tailscaled's journal showed** once it was readable (`portal_logs` source `tailscaled`, read 2026-10-17 after the
+deploy of PR #415) *(measured)*:
+
+- **The curl-28 outages were the portal, not Funnel.** In both, tailscaled logged `http: proxy error: context canceled`:
+  the requests reached the node and the portal behind it did not answer within the probe's 10 s. On 10-15 11:04 fff-health
+  had restarted the portal at 11:00:51 ("it runs (226 s) but has not answered /api/health for 4 checks", the w1377
+  incident); on 10-16 10:14 the portal logged `event loop: blocked for` 14 to 16 s once a minute, which went on from
+  about 02:00 to 12:00 UTC and stopped at the nightly restart. That the IPv6 server addresses were the ones failing was
+  only which probes landed in a block.
+- **Each curl-35 outage followed a Tailscale control reconnect.** tailscaled logged `control: netmap: got new dial plan
+  from control` at 10-13 17:38:52 (failing from 17:41), 10-15 20:53:49 (failing from 21:00) and 10-17 00:10:47 (failing
+  from 00:11, after `control: sleeping for server-requested 3.6s` at 00:09:21); FFBox's connector dropped between the two
+  at 17:39:14 and 00:10:35. Not every such line was followed by an outage (10-15 10:16, 10-16 10:21 and 16:26 were not).
+  No `ingress: denied` and no link change around any of them.
+
+What the curl-35 outages fit *(sourced; the trigger is measured, Tailscale's side of it is not)*:
 [tailscale/tailscale#21114](https://github.com/tailscale/tailscale/issues/21114), open, which Tailscale calls "an active,
 high-priority investigation" (2026-10-09): after a brief loss of the node's control connection, "the node's Funnel
 registration can be dropped on our side even though the node is back and healthy". The symptoms there are ours: TCP to a
@@ -638,11 +654,10 @@ Funnel server connects and TLS is cut (curl 35), some server addresses fail and 
 passes, and other reports there name the same two server addresses (199.38.181.54, 209.177.145.137, NetActuate). Tailscale's
 status page lists no incident from 10-10 to 10-17. Its workarounds there: send the registration again (`tailscale funnel
 reset` and the config back) or restart the client; layer 9 now does both, and says in its line whether the failing
-requests reached tailscaled (`peerapi_ingress`) and what tailscaled logged about its control connection. The two curl-28
-outages are not explained yet *(a guess between the host's IPv6 route to the IPv6 Funnel servers and those servers
-themselves)*: only the IPv6 servers timed out, IPv4 answered, and the connector (on IPv4) stayed up; the per-server curl
-code and `peerapi_ingress` in layer 9's line now tell those apart. To check an outage afterwards: `portal_logs` source
-`tailscaled` around its time, for `PollNetMap`, `dial plan` and `LinkChange` lines.
+requests reached tailscaled (`peerapi_ingress`) and what tailscaled logged about its control connection; it skips both
+repairs when the requests reached tailscaled, since then the portal is the slow one. To check an outage afterwards:
+`portal_logs` source `tailscaled` around its time (`dial plan`, `PollNetMap`, `LinkChange`, `proxy error`), and source
+`portal` for `event loop: blocked`.
 
 **Telling the portal and the people.** At the end of every pass the host puts the state, with no secret in it (auth keys,
 login links and node keys are removed from every line), in `/run/fff/path-health.json` in the VM (root-owned, `0644`,

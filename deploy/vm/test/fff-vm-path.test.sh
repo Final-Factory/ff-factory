@@ -638,7 +638,9 @@ ok "end to end: one bad Funnel server is told from all of them"
 scen e2e-timeout e2e-reached
 pass
 said "peerapi_ingress 120→123 across 3 probe(s): the failing requests reached tailscaled and failed there"
-ok "end to end: requests that reach tailscaled and fail there are told from requests that never arrive"
+pass 11
+[ "$(calls 'tailscale funnel reset')" = 0 ] && [ "$(calls 'systemctl restart tailscaled')" = 0 ] || fail "L9: a Funnel repair for requests that reached tailscaled (the portal is the slow one)"
+ok "end to end: requests that reach tailscaled and fail there are told from requests that never arrive, and get no Funnel repair"
 scen funnel-lost
 pass
 said "curl exit 35"
