@@ -28,7 +28,17 @@ const DIST = path.resolve(process.env.MOCK_DIST ?? path.join(path.dirname(fileUR
 const world = buildWorld(SCENARIO);
 scaleWorld(world);
 const state: AppState = world.state;
-if (process.env.MOCK_EXTRA) { const x = JSON.parse(fs.readFileSync(process.env.MOCK_EXTRA, 'utf8')); state.sessions.push(...x.sessions); state.work = x.work; state.room = x.room; }
+// MOCK_EXTRA=path: a JSON of more sessions, ledger items, machines, live views and machine
+// stats, added to the scenario (w1430's sidebar stills used one).
+if (process.env.MOCK_EXTRA) {
+  const x = JSON.parse(fs.readFileSync(process.env.MOCK_EXTRA, 'utf8'));
+  state.sessions.push(...(x.sessions ?? []));
+  if (x.work) state.work = [...(state.work ?? []), ...x.work];
+  if (x.room) state.room = x.room;
+  state.machines.push(...(x.machines ?? []));
+  if (x.live) state.live = [...(state.live ?? []), ...x.live];
+  if (x.machineStats) state.machineStats = { ...state.machineStats, ...x.machineStats };
+}
 const transcripts = world.transcripts;
 const seqs: Record<string, number> = {};
 for (const [id, evs] of Object.entries(transcripts)) seqs[id] = evs.at(-1)?.seq ?? 0;

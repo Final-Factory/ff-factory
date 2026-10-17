@@ -60,7 +60,10 @@ flowchart LR
 - **Where it lives:** `#/live/<sessionId>`. A wide screen shows the view and its knobs beside the session's
   conversation. A phone shows the view on top, then the controls, then the conversation, with the knobs in a bottom
   sheet.
-- **How you get there:** the session's header shows "Live view" while a view is running.
+- **How you get there:** the session's header shows "Live view" while a view is running. Since w1430 the sidebar shows
+  "Live view: go" on the slot's row when its worker waits on you, or is between turns with its view up and you asked for
+  it ([machines.md](machines.md), "In the web UI"), and the request's card on the Dispatcher's "Waiting on input" tab has
+  the same button.
 
 | Route | What it does |
 |---|---|

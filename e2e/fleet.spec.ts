@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import type { AppState, Machine, MachineSandbox, MachineStats, ServerEvent, SessionInfo, SystemStats } from '../shared/types.ts';
+import type { AppState, LiveViewInfo, Machine, MachineSandbox, MachineStats, ServerEvent, SessionInfo, SystemStats, WorkItem } from '../shared/types.ts';
 import { expect, isMobile, openSidebar, settle, signIn, test } from './fixtures.ts';
 
 // The sidebar's computers and the Overview board (web/src/components/Fleet.tsx, shared/fleet.ts): BEAST, then
@@ -87,6 +87,26 @@ const machine = (id: string, extra: Partial<Machine>): Machine => ({
   ...extra,
 });
 
+/** A request in the ledger (w1430: a chat on an open one is listed; one on a closed one folds behind "+N older"). */
+const request = (id: string, status: WorkItem['status'], sessionIds: string[], extra: Partial<WorkItem> = {}): WorkItem => ({
+  id,
+  title: id,
+  brief: '',
+  priority: 'normal',
+  keys: [],
+  requestedBy: { userId: 'lothsahn', displayName: 'Lothsahn' },
+  requesters: [{ userId: 'lothsahn', displayName: 'Lothsahn' }],
+  humanAsked: true,
+  status,
+  createdAt: min(600),
+  updatedAt: min(10),
+  sessionIds,
+  overlaps: [],
+  asks: 0,
+  log: [],
+  ...extra,
+});
+
 /**
  * The fleet as the machines report it, before BEAST's sandboxes are put on its own daemon (onBeastsDaemon): BEAST's two
  * workers name their sandbox only. LothDesktop with a sandbox pool, the M5 without one (so no workers, w536), an offline M3.
@@ -104,6 +124,8 @@ function fleetBase(s: AppState): AppState {
   return {
     ...s,
     sessions,
+    // The idle reviewer is on an open request, so it is listed (w1430).
+    work: [...(s.work ?? []), request('w900', 'active', ['l-review'])],
     standingAgents: [],
     delegations: [],
     providers: [],
@@ -173,7 +195,7 @@ async function fixedFleet(page: Page, hash = '#/', shape: (s: AppState) => AppSt
         return;
       }
       // What the live server says about sandboxes, machines and other tests' agents is not this fleet.
-      if (['system', 'host', 'usage', 'accounts', 'machine_stats', 'machine', 'machine_removed', 'sandbox', 'sandbox_removed', 'standing', 'delegation', 'provider'].includes(e.type)) return;
+      if (['system', 'host', 'usage', 'accounts', 'machine_stats', 'machine', 'machine_removed', 'sandbox', 'sandbox_removed', 'standing', 'delegation', 'provider', 'live'].includes(e.type)) return;
       if ((e.type === 'session' && e.session.id !== orchId) || e.type === 'session_removed') return;
       ws.send(raw);
     });
@@ -227,7 +249,7 @@ test('fleet: the sidebar groups every computer, with its sandboxes and their age
   const play = beast.getByTestId('fl-sandbox-beast/agent-a');
   await expect(play.getByTestId('fl-agent')).toHaveCount(1);
   await expect(play.getByTestId('fl-agent')).toContainText(/Honest co-op: BEAST client\s*busy\s*1m/);
-  await expect(play.locator('.fl-stopped')).toHaveText('+1 stopped');
+  await expect(play.getByTestId('fl-older')).toHaveText('+1 older');
   await expect(beast.getByTestId('fl-sandbox-beast/agent-b').locator('.fl-free')).toHaveText('FREE');
 
   const loth = sidebar.getByTestId('fl-group-lothdesktop');
@@ -366,4 +388,98 @@ test("fleet: BEAST's card says when its daemon is down, and opens the daemon's p
   await expect(card.locator('.board-head-link')).toHaveAttribute('title', "Open BEAST's daemon (beast)");
   await card.locator('.board-head-link').click();
   await expect(page).toHaveURL(/#\/machine\/beast$/);
+});
+
+/**
+ * w1430 (Ben: "there are so many inactive chats in every slot ... i also feel like if there is work waiting for live view
+ * workflow, it should be obvious maybe as a go button next to the slot"): LothDesktop's free sb2 holds a worker stopped
+ * while it waits on the viewer in its Live view, and three older chats. `live`: whether that worker streams one; `on`: whom
+ * it waits on.
+ */
+function waitingInSb2(opts: { live: boolean; on?: string }) {
+  return (s: AppState): AppState => {
+    const f = fleet(s);
+    const orch = f.sessions.find((x) => x.id === f.orchestratorId)!;
+    const me = opts.on ?? s.me!.displayName;
+    const sb2 = { machineId: 'lothdesktop', machineSandbox: 'sb2' };
+    const sessions = [
+      ...f.sessions,
+      worker(orch, 'l-knob', 'w1325: Radiators: slower, smaller panel fold', 'stopped', 9, { ...sb2, waitingOn: { who: me, what: "Drag the fin colour in sb2's Live view", at: min(9), request: 'w1325' } }),
+      worker(orch, 'l-done1', 'w1301: Belt splitter tooltip', 'stopped', 300, sb2),
+      worker(orch, 'l-done2', 'w1288: Deck research scroll', 'stopped', 500, sb2),
+      worker(orch, 'l-fin', 'w1428: Windows saves on the Mac', 'idle', 30, sb2),
+    ];
+    const view: LiveViewInfo = { liveId: 'live-sb2', sessionId: 'l-knob', machineId: 'lothdesktop', sandbox: 'sb2', state: 'live', detail: '', fps: 15, width: 960, materials: ['heatExchangerMaterial'], startedAt: min(12), updatedAt: min(0), frames: 100 };
+    return {
+      ...f,
+      sessions,
+      work: [...(f.work ?? []), request('w1325', 'active', ['l-knob']), request('w1428', 'done', ['l-fin'])],
+      config: { ...f.config, live: { enabled: true } },
+      live: opts.live ? [view] : [],
+      machines: f.machines.map((m) =>
+        m.id === 'lothdesktop' ? { ...m, sandboxes: m.sandboxes!.map((x) => (x.id === 'sb2' ? { ...x, sessionIds: ['l-done2', 'l-done1', 'l-fin', 'l-knob'] } : x)) } : m,
+      ),
+    };
+  };
+}
+
+test('fleet: a slot lists the chats that matter now, folds the rest behind "+N older", and calls you to its Live view (w1430)', async ({ page }) => {
+  await fixedFleet(page, '#/', waitingInSb2({ live: true }));
+  const sidebar = await openSidebar(page);
+  const sb2 = sidebar.getByTestId('fl-sandbox-lothdesktop/sb2');
+  // Only the worker that waits on you; the stopped and finished chats fold.
+  await expect(sb2.getByTestId('fl-agent')).toHaveCount(1);
+  await expect(sb2.getByTestId('fl-agent')).toContainText(/w1325: Radiators.*needs you/);
+  await expect(sb2.getByTestId('fl-older')).toHaveText('+3 older');
+  await expect(sb2.getByTestId('fl-call')).toHaveText('Live view: go');
+  // The call is the first line under the slot's row, on the row's text edge; the row keeps its name and branch whole, and
+  // no FREE chip says the slot is free while its work waits on you.
+  await expect(sb2.getByTestId('fl-sandbox-row').locator('.row-title')).toHaveText('sb2');
+  await expect(sb2.locator('.fl-free')).toHaveCount(0);
+  // It reads as a slot that needs you, as one with a permission wait does: amber "Needs you", the worker's title, a badge.
+  await expect(sb2.getByTestId('fl-sandbox-row').locator('.row-sub')).toContainText(/Needs you · w1325: Radiators/);
+  await expect(sb2.getByTestId('fl-sandbox-row').locator('.badge-amber')).toHaveText('1');
+  // A thumb's target on a phone.
+  if (isMobile(page)) expect((await sb2.getByTestId('fl-call').boundingBox())!.height).toBeGreaterThanOrEqual(36);
+  const row = (await sb2.getByTestId('fl-sandbox-row').boundingBox())!;
+  const name = (await sb2.getByTestId('fl-sandbox-row').locator('.row-title').boundingBox())!;
+  const call = (await sb2.getByTestId('fl-call').boundingBox())!;
+  const first = (await sb2.getByTestId('fl-agent').first().boundingBox())!;
+  expect(call.y, 'the call is under the row').toBeGreaterThanOrEqual(row.y + row.height - 1);
+  expect(first.y, 'and above the chats').toBeGreaterThanOrEqual(call.y + call.height - 1);
+  expect(Math.abs(call.x - name.x), "the call starts on the row's text edge").toBeLessThan(1.5);
+  if (!isMobile(page)) await proof(page, 'sidebar-slot-call');
+  // "+3 older" opens them in place, the newest first, and folds them again.
+  await sb2.getByTestId('fl-older').click();
+  await expect(sb2.getByTestId('fl-agent')).toHaveText([/w1325/, /w1428.*idle/, /w1301.*stopped/, /w1288.*stopped/]);
+  await expect(sb2.getByTestId('fl-older')).toHaveText('Hide 3 older');
+  await sb2.getByTestId('fl-older').click();
+  await expect(sb2.getByTestId('fl-agent')).toHaveCount(1);
+  // One click opens the waiting worker's Live view.
+  await sb2.getByTestId('fl-call').click();
+  await expect(page).toHaveURL(/#\/live\/l-knob$/);
+});
+
+test("fleet: the request's card on the Dispatcher's Waiting tab opens the waiting worker's Live view too (w1430)", async ({ page }) => {
+  await fixedFleet(page, '#/dispatcher/waiting', waitingInSb2({ live: true }));
+  const card = page.getByTestId('wait-w1325');
+  await expect(card.getByTestId('wait-live-w1325')).toHaveText('Live view: go');
+  await card.getByTestId('wait-live-w1325').click();
+  await expect(page).toHaveURL(/#\/live\/l-knob$/);
+});
+
+test('fleet: without a Live view the slot says "Needs you" and opens the waiting chat (w1430)', async ({ page }) => {
+  await fixedFleet(page, '#/', waitingInSb2({ live: false }));
+  const sb2 = (await openSidebar(page)).getByTestId('fl-sandbox-lothdesktop/sb2');
+  await expect(sb2.getByTestId('fl-call')).toHaveText('Needs you');
+  await sb2.getByTestId('fl-call').click();
+  await expect(page).toHaveURL(/#\/machine\/lothdesktop\/sandbox\/sb2\/l-knob$/);
+});
+
+test("fleet: a worker that waits on someone else is listed with whom, and the slot calls nobody (w1430)", async ({ page }) => {
+  // No Live view: one up for the person who asked for the worker would call them (slotCall).
+  await fixedFleet(page, '#/', waitingInSb2({ live: false, on: 'Somebody Else' }));
+  const sb2 = (await openSidebar(page)).getByTestId('fl-sandbox-lothdesktop/sb2');
+  await expect(sb2.getByTestId('fl-agent')).toContainText(/w1325.*waits on Somebody Else/);
+  await expect(sb2.getByTestId('fl-call')).toHaveCount(0);
 });
