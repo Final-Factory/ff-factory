@@ -1724,6 +1724,30 @@ button.react-chip:hover {
   animation: rise 0.25s var(--ease);
 }
 
+/* Stills and clips a question or an option names (w1419): under the question, and under the option's button. */
+.ask-opt-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ask-media .md {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ask-media .md p {
+  margin: 0;
+}
+
+.ask-media .md-img img,
+.ask-media .md-video video {
+  max-width: min(100%, 520px);
+  max-height: 320px;
+}
+
 .ask-q {
   font-size: var(--fs-base);
   font-weight: 600;

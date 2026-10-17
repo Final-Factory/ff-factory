@@ -59,7 +59,7 @@ import { FFBOX_CONVERSATION_DEFAULT_TURNS, FFBOX_REPORTS_DEFAULT, LIST_WORK_LOG_
 import { SpendStore, buildReport, costLine, renderReport, renderRequest, renderSession } from './spend.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, renderFootprint } from './dataGuard.ts';
 import { REACTION_MEANINGS, REPLY_MARK } from '../shared/replies.ts';
-import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, MAX_OPTIONS, MIN_OPTIONS, QUESTION_CHARS } from '../shared/ask.ts';
+import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS, QUESTION_CHARS } from '../shared/ask.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
 import { needsOf } from '../shared/capacity.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
@@ -3494,12 +3494,12 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ASK_TOOL,
         `Ask your person a question with one-click answers (w1397): their chat shows ${MIN_OPTIONS} to ${MAX_OPTIONS} buttons under your message, your recommended one first, and a last "${CHAT_MORE_LABEL}" that the page adds and that only opens their reply box. A click is their own message (their words are the label) in their own turn, so it approves, declines or answers a [needs you] (update_work note) as typed words would. Use it for EVERY question, one at a time, after saying it with its context in your message, then end your turn. Each label is the complete answer in their voice ("Close w983 as handled"), not "Yes". Free text stays a plain message.`,
         {
-          question: z.string().min(1).max(QUESTION_CHARS).describe('The question, in one sentence. Its context goes in your message above.'),
+          question: z.string().min(1).max(QUESTION_CHARS + MEDIA_CHARS).describe('The question, in one sentence; context in your message above. A still or clip: ![what](<absolute path>).'),
           options: z
             .array(
               z.object({
                 label: z.string().min(1).max(LABEL_CHARS).describe('The answer, as your person would say it; sent as their words when clicked.'),
-                description: z.string().max(DESCRIPTION_CHARS).describe('One line: what choosing it means or costs.'),
+                description: z.string().max(DESCRIPTION_CHARS + MEDIA_CHARS).describe('One line: what it means or costs. Its still or clip: ![what](<absolute path>).'),
                 recommended: z.boolean().optional().describe('true on the ONE option you most prefer.'),
               }),
             )

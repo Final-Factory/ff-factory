@@ -89,6 +89,8 @@ fs.mkdirSync(clips, { recursive: true });
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.webm'));
 // The same bytes named .mp4: Playwright's Chromium has no H.264, so this one only proves the page asks for it as a video.
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.mp4'));
+// A still, as a worker's publish_review leaves one (e2e/images.spec.ts, w1419).
+fs.writeFileSync(path.join(clips, 'option-a-1280.png'), Buffer.from(RED_PNG, 'base64'));
 // A clip whose web preview is already made (server/videoPreview.ts, w1248): 100 bytes of original, the fixture as its preview.
 fs.writeFileSync(path.join(clips, 'previewed.mp4'), Buffer.alloc(100, 1));
 fs.mkdirSync(path.join(clips, '.preview'), { recursive: true });

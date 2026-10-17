@@ -9,7 +9,7 @@ import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { HELD_MARK } from '../shared/conditional.ts';
-import { ASK_TOOL, CHAT_MORE_LABEL, answerOf, askExcerpt, checkAsk, isAskTool, questionOf } from '../shared/ask.ts';
+import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, QUESTION_CHARS, answerOf, askExcerpt, checkAsk, isAskTool, mediaMarkdown, questionOf, splitMedia } from '../shared/ask.ts';
 import { REPLY_MARK, replyText, splitReply } from '../shared/replies.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import type { Config } from './config.ts';
@@ -234,4 +234,28 @@ test('w1397: the brief tells the orchestrator to ask every question this way, an
   assert.match(prompt, /Ask every question to Ben with ask_person/);
   assert.match(prompt, /one recommended option/);
   assert.ok(prompt.includes("ask it with ask_person (the worker's options as buttons)"));
+});
+
+test('w1419: a question’s and an option’s stills and clips are kept whole, apart from the words the limits count', () => {
+  const still = '/srv/fff/review/w1386-save-blueprint-options/2-option-A-left-of-item-rows-1280.png';
+  const clip = '/srv/fff/review/w1386-save-blueprint-options/option-B.mp4';
+  assert.deepEqual(splitMedia(`Left of the hotbar. ![Option A at 1280](<${still}>) Recommended.`), {
+    text: 'Left of the hotbar. Recommended.',
+    media: [{ alt: 'Option A at 1280', url: still }],
+  });
+  assert.equal(mediaMarkdown([{ alt: 'a', url: still }, { alt: 'b', url: clip }]), `![a](<${still}>)\n\n![b](<${clip}>)`);
+  // The words are clipped to the limit; the media path is never cut (w1384's ".jp"), whatever its length.
+  const long = `${'x'.repeat(300)} ![Option A at 1280](<${still}>)`;
+  const r = checkAsk({ question: `Where should it go? ![Today](<${still}>)`, options: [{ label: 'A', description: long, recommended: true }, { label: 'B', description: `Above the hint ![B](<${clip}>)` }] });
+  assert.ok('ask' in r, JSON.stringify(r));
+  if (!('ask' in r)) return;
+  assert.equal(r.ask.options[0].description, `${'x'.repeat(DESCRIPTION_CHARS)} ![Option A at 1280](<${still}>)`);
+  assert.equal(r.ask.question, `Where should it go? ![Today](<${still}>)`);
+  // The words of a question count, not its media: 600 characters of words with a still is a question; 601 is not.
+  assert.ok('ask' in checkAsk({ question: `${'q'.repeat(QUESTION_CHARS)} ![x](<${still}>)`, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] }));
+  assert.ok('problem' in checkAsk({ question: `${'q'.repeat(QUESTION_CHARS + 1)}`, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] }));
+  assert.ok('problem' in checkAsk({ question: `![only a still](<${still}>)`, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] }), 'a question has words');
+  // The quote of an answer has the words only.
+  assert.equal(askExcerpt(r.ask).split('\n')[0], 'Where should it go?');
+  assert.doesNotMatch(askExcerpt(r.ask), /!\[|srv\/fff/);
 });
