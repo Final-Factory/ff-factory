@@ -47,6 +47,11 @@ fails a Windows-only test left out, and a covered file missing from the paths. P
 platform in, or run the script under pwsh. `server/agentSession.test.ts` shows how to test session behaviour without Claude: it swaps
 the Agent SDK's `query()` for the scripted fake in `e2e/fakeAgent.ts` (`setQueryForTesting`).
 
+The portal VM's shell tests (`deploy/vm/test/*.test.sh`, which `lint.sh` runs in CI) need bash, jq, GNU coreutils and
+flock. On a Windows worker, run them in WSL (`wsl.exe -d Ubuntu -- bash <script>`, with `MSYS_NO_PATHCONV=1` from Git
+Bash), from a clone with `core.autocrlf false`: Git for Windows' default CRLF checkout breaks every script. A WSL without
+jq takes jq's release binary, checked against its `sha256sum.txt`, on `PATH` (w1420).
+
 Tests with a machine (`server/testMachine.ts`, a real daemon with git worktrees) share two rules (w759):
 
 - **A sandbox's git is what the daemon's git look reports**: set it with `TestMachine.gitLook(name, { branch, pr })` and

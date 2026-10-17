@@ -69,7 +69,7 @@ pl_who() {
     6) echo "ops: re-run the guest install in the VM (sudo fffctl update): its firewall accepts TCP 22 and 443 from tailscale0 and nothing broader" ;;
     7) echo "tailnet admin: grant tag:ingress → tag:fff-portal in the tailnet policy" ;;
     8) echo "tailnet admin or ops: Tailscale sends no Funnel traffic to this node; the admin console shows the node's Funnel and health" ;;
-    9) echo "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after $PW_FUNNEL_REPUBLISH_AFTER failing passes and restarts tailscaled after $PW_FUNNEL_RESTART_AFTER. Still down, or the requests reached tailscaled: ops, sudo fff-vm ssh sudo journalctl -u tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times" ;;
+    9) echo "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after $PW_FUNNEL_REPUBLISH_AFTER failing passes and restarts tailscaled after $PW_FUNNEL_RESTART_AFTER. When they reached it: the portal answers too slowly (portal_logs: event loop: blocked, fff-health restarts). Still down: ops, portal_logs source tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times" ;;
     disk) echo "ops: free disk space in the VM (sudo fff-vm ssh df -h)" ;;
     clock) echo "ops: the VM's clock is off and its time sync did not fix it (sudo fff-vm ssh timedatectl)" ;;
     loop) echo "ops: sudo fff-vm ssh sudo fffctl logs; the last update may need sudo fffctl rollback" ;;
@@ -563,17 +563,20 @@ pl_ingress_count() {
 
 # pl_e2e_inside VM BEFORE AFTER GOOD BAD: the VM's side of a failing outside probe: INSIDE_A whether the requests reached
 # tailscaled, INSIDE_B the Funnel servers' handshakes and tailscaled's control, link and ingress lines.
-INSIDE_A="" INSIDE_B=""
+# INSIDE_REACHED: 1 when the failing requests reached tailscaled, 0 when they did not, empty when not known.
+INSIDE_A="" INSIDE_B="" INSIDE_REACHED=""
 pl_e2e_inside() {
   local vm=$1 before=$2 after=$3 good=$4 bad=$5 s peers fresh evs cnt last
-  INSIDE_A="" INSIDE_B=""
+  INSIDE_A="" INSIDE_B="" INSIDE_REACHED=""
   if [ "$vm" != 1 ]; then INSIDE_A="the VM's side is not known (ssh into it fails)"; return 0; fi
   if [ -n "$before" ] && [ -n "$after" ]; then
     s="peerapi_ingress $before→$after across $((good + bad)) probe(s)"
     if [ $((after - before)) -le "$good" ]; then
       s+=": the failing requests did not reach tailscaled (Tailscale's side: tailscale/tailscale#21114)"
+      INSIDE_REACHED=0
     else
-      s+=": the failing requests reached tailscaled and failed there (its journal: ingress: denied, TLS handshake error)"
+      s+=": the failing requests reached tailscaled and failed there (its journal: http: proxy error is the portal not answering in time; ingress: denied, TLS handshake error are tailscaled's)"
+      INSIDE_REACHED=1
     fi
   else
     s="peerapi_ingress not readable (tailscale debug metrics)"
@@ -625,6 +628,11 @@ pl_e2e_repair() {
   local fails=$1 dns=$2 out rc want="http://127.0.0.1:$PORTAL_PORT"
   E2E_REPAIRED=""
   [ "$(sget Lssh_verdict)" = ok ] && [ "$(sget L4_verdict)" = ok ] && [ "$(sget L5_verdict)" = ok ] || return 0
+  # Requests that reach tailscaled and fail there are not #21114: on 2026-10-15 and 10-16 they were the portal itself not
+  # answering within the probe's 10 s (a restart by fff-health; its event loop blocked 10 to 16 s a minute), and tailscaled
+  # logged "http: proxy error: context canceled". Neither repair helps that, and a tailscaled restart cuts every tailnet
+  # connection (w1420).
+  [ "$INSIDE_REACHED" != 1 ] || return 0
   if [ "$fails" -ge "$PW_FUNNEL_REPUBLISH_AFTER" ] && [ -z "$(sget L9_republished)" ] && [ $(($(now) - $(sget funnel_republish_at 0))) -ge 1800 ]; then
     state_set L9_republished 1
     state_set funnel_republish_at "$(now)"
