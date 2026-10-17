@@ -172,11 +172,11 @@ test('meters: open, every computer is a row and every account its limits and age
   const plans = foot.getByTestId('plans-table');
   await expect(plans.locator('.plan-item')).toHaveCount(2);
   const token = foot.getByTestId('account-…9AAA');
-  await expect(token).toHaveText('host token - weekly 98%, session 12%');
+  await expect(token).toHaveText(planLine('host token', '98%', '12%'), { useInnerText: true });
   await expect(token).toHaveClass(/pl-yellow/);
   await expect(token).toHaveAttribute('title', /host token …9AAA\n5-hour session: 12%, resets .*\nWeekly: 98%, resets .*\nWeekly Fable: 22%, resets .*\nIn use now: \d agents?\nthe agents' token on BEAST, m5/);
   const login = foot.getByTestId('account-owner');
-  await expect(login).toHaveText('owner - weekly 23%, session ?');
+  await expect(login).toHaveText(planLine('owner', '23%', '?'), { useInnerText: true });
   await expect(login).toHaveClass(/pl-blue/);
   await expect(login).toHaveAttribute('title', /Not in use\nBEAST login\nm5 login/);
   // The plans come before the computers.
@@ -244,6 +244,12 @@ const VAULT = (name: string, last4: string, weekly: number, where: string[], age
   usage: { available: true, asOf: NOW.toISOString(), plan: 'max', source: 'rate limits', weekly: { label: 'Weekly', percent: weekly, resetsAt: at(70) }, session: { label: 'Session (5 h)', percent: 9, resetsAt: at(2) }, models: [] },
 });
 
+/** A plan's line: "name - weekly 62%, session 38%", or "name - week 62%, 5h 38%" in a narrow list (the desktop sidebar). */
+const planLine = (name: string, weekly: string, session: string) => {
+  const esc = (t: string) => t.replace(/[.+*?^$()[\]{}|\\]/g, '\\$&');
+  return new RegExp(`^${esc(name)}\\s+-\\s+(weekly ${esc(weekly)}, session ${esc(session)}|week ${esc(weekly)}, 5h ${esc(session)})$`);
+};
+
 const plans = (foot: Locator) => foot.getByTestId('plans-table');
 
 test('meters (w785): a vault token is one row under its vault name, the Claude account email on its subtext; none recorded shows no subtext', async ({ page }) => {
@@ -256,18 +262,23 @@ test('meters (w785): a vault token is one row under its vault name, the Claude a
   await settle(page);
   const both = foot.getByTestId('account-…dAAA');
   // Named by the email a person recorded (w1389), not by the vault name; the vault name is on its hover; with none recorded the vault name stands (ben-1 below).
-  await expect(both).toHaveText('ben@example.com - weekly 71%, session 9%');
+  await expect(both).toHaveText(planLine('ben@example.com', '71%', '9%'), { useInnerText: true });
   await expect(both).not.toContainText('ben-2');
   await expect(both).toHaveAttribute('title', /^ben@example\.com\nvault-ben-2 …dAAA\n[\s\S]*fff-portal's token file \(the orchestrator\)/);
   await expect(both).not.toContainText('vault:');
   // A long address is cut with an ellipsis, never wrapped or clipped by the row, and whole on its hover.
+  // One line each at any width: every line is as tall as one text line, and none starts with the dash.
+  for (const item of await plans(foot).locator('.plan-item').all()) {
+    expect((await item.boundingBox())!.height, 'a plan is one line').toBeLessThan(26);
+    expect(await item.evaluate((e) => e.firstElementChild?.className)).toBe('plan-item-name');
+  }
   const loth = foot.getByTestId('account-…EAAA');
   await expect(loth).toContainText('a.very.long.address.for.loth@finalfactory-example.test');
   await expect(loth.locator('.plan-item-name')).toHaveAttribute('title', 'a.very.long.address.for.loth@finalfactory-example.test');
   await expect(loth).toHaveAttribute('title', /^a\.very\.long\.address\.for\.loth@finalfactory-example\.test\nvault-lothsahn-1 …EAAA/);
   await expect(loth.locator('.plan-item-name')).toHaveCSS('text-overflow', 'ellipsis');
   // The vault's own name without "vault-"; one row each, never the token file's name for a vault token, and the usage line says "rate limits" on hover.
-  await expect(foot.getByTestId('account-…cBBB')).toHaveText('ben-1 - weekly 12%, session 9%');
+  await expect(foot.getByTestId('account-…cBBB')).toHaveText(planLine('ben-1', '12%', '9%'), { useInnerText: true });
   await expect(plans(foot).locator('.plan-item')).toHaveCount(5);
   await expect(foot.locator('.plan-asof').first()).toHaveAttribute('title', /from rate limits/);
   if (process.env.E2E_SHOT) {
@@ -294,7 +305,7 @@ test('meters (w1389): the footer says which plan is in use and how many are spen
   await expect(rows).toHaveCount(3);
   // name - weekly %, session %, nothing else on the line; the colour says how worn it is: red used up, yellow from 80%, blue otherwise.
   const row = foot.getByTestId('account-…cBBB');
-  await expect(row).toHaveText('ben-1 - weekly 100%, session 40%');
+  await expect(row).toHaveText(planLine('ben-1', '100%', '40%'), { useInnerText: true });
   await expect(row).toHaveClass(/pl-red/);
   await expect(foot.getByTestId('account-…9AAA')).toHaveClass(/pl-yellow/);
   await expect(foot.getByTestId('account-owner')).toHaveClass(/pl-blue/);

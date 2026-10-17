@@ -550,8 +550,15 @@ function PlanList({ rows }: { rows: PlanRow[] }) {
         return (
           <div key={r.a.id} className={`plan-item pl-${planTone(r)}`} role="listitem" data-testid={`account-${accountTag(r.a)}`} title={r.title}>
             <span className="plan-item-name" title={r.name}>{r.name}</span>
-            {' '}
-            {u ? <span className="nowrap">- weekly {pct(u.weekly)}, session {pct(u.session)}</span> : <span className="nowrap">- {r.a.usage ? 'usage unavailable' : 'not fetched yet'}</span>}
+            <span className="plan-item-sep">{' - '}</span>
+            {u ? (
+              <span className="plan-item-nums">
+                <span className="pn-full">{`weekly ${pct(u.weekly)}, session ${pct(u.session)}`}</span>
+                <span className="pn-short" aria-hidden>{`week ${pct(u.weekly)}, 5h ${pct(u.session)}`}</span>
+              </span>
+            ) : (
+              <span className="plan-item-nums">{r.a.usage ? 'usage unavailable' : 'not fetched yet'}</span>
+            )}
           </div>
         );
       })}

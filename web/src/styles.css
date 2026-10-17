@@ -1205,18 +1205,49 @@ select.input {
 }
 
 .plan-item {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
   font-size: var(--fs-sm);
   font-weight: 600;
   line-height: 1.4;
+  white-space: nowrap;
 }
 
+/* One line each, whatever the width: the name gives way (an ellipsis, whole on its hover), the numbers never wrap. */
 .plan-item-name {
-  display: inline-block;
-  max-width: 100%;
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: bottom;
+}
+
+.plan-item-sep,
+.plan-item-nums {
+  flex: none;
+}
+
+.plan-item-sep {
+  white-space: pre;
+}
+
+.pn-short {
+  display: none;
+}
+
+/* In a narrow list (the desktop sidebar) the words are shorter, so the name keeps room: week 62%, 5h 38%. */
+.plan-list {
+  container-type: inline-size;
+}
+
+@container (max-width: 260px) {
+  .pn-full {
+    display: none;
+  }
+
+  .pn-short {
+    display: inline;
+  }
 }
 
 .pl-red { color: var(--red); }
