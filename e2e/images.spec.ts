@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { RED_PNG } from './fakeAgent.ts';
 import type { Locator, Page } from '@playwright/test';
 import { ALPHA, BOX, GALLERY, appState, expect, machineSandbox, openSandbox, pastePng, sendMessage, startWorker, test, uniq, useTool } from './fixtures.ts';
@@ -214,9 +215,9 @@ test('a mermaid block renders as a diagram, with its source a click away', async
 
 test("w1419: an orchestrator's message shows review stills and clips written ![x](</srv/…>), on load and after a reload", async ({ authed: page, browserName }) => {
   // Ben, 2026-10-16: "I need to see screenshots of what you're talking about", then "i dont see any previews". The review
-  // folder the e2e server seeds (e2e/server.ts, the default <sandbox root>/_review): a still, a clip, and the clip as .mp4.
+  // folder the e2e server seeds (e2e/server.ts, review.root outside the sandboxes, as on the portal): a still, a clip, and the clip as .mp4.
   const port = new URL(test.info().project.use.baseURL!).port;
-  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'sandboxes', '_review', 'w000-clips').replace(/\\/g, '/');
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-clips').replace(/\\/g, '/');
   const still = `${review}/option-a-1280.png`;
   const webm = `${review}/clip.webm`;
   const mp4 = `${review}/clip.mp4`;
@@ -253,7 +254,7 @@ test('w1419: a question with buttons (ask_person) shows the stills and clips its
   // Since w1397 every question to the person goes through ask_person ("Ask every question to Ben with ask_person"), and a
   // [needs you] look-to-OK is asked with it: its media must show in the card, not as "![Option A at 1280](</srv/…>)" text.
   const port = new URL(test.info().project.use.baseURL!).port;
-  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'sandboxes', '_review', 'w000-clips').replace(/\\/g, '/');
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-clips').replace(/\\/g, '/');
   const tag = uniq('w1419ask');
   const me = await appState(page.request);
   const q = {
@@ -285,4 +286,139 @@ test('w1419: a question with buttons (ask_person) shows the stills and clips its
   // The answer is still one click, and its words are the label alone.
   await optionA.click();
   await expect(optionA).toContainText('Your answer');
+});
+
+test('w1419: a long orchestrator message with six review stills between its paragraphs shows them all', async ({ authed: page }) => {
+  // The shape of Ben's orchestrator's message of 2026-10-16 23:23 UTC: a TL;DR, then each option's words and its stills
+  // as ![Option A at 1280](</srv/fff/review/…png>) lines, then the question. He saw none of them (Firefox).
+  const port = new URL(test.info().project.use.baseURL!).port;
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-options').replace(/\\/g, '/');
+  const tag = uniq('w1419long');
+  const app = await appState(page.request);
+  const names = ['1-option-A-left-of-item-rows-1920', '2-option-A-left-of-item-rows-1280', '3-option-B-above-hint-1920', '4-option-B-above-hint-1280', '5-tried-left-of-abilities-1920', '6-tried-left-of-abilities-1280'];
+  const body = [
+    `**TL;DR:** two places for Save New Blueprint; I recommend A. ${tag}`,
+    `**Option A**, left of the hotbar's item rows:\n\n![Option A at 1920](<${review}/${names[0]}.png>)\n\n![Option A at 1280](<${review}/${names[1]}.png>)`,
+    `**Option B**, above the held-blueprint hint:\n\n![Option B at 1920](<${review}/${names[2]}.png>)\n\n![Option B at 1280](<${review}/${names[3]}.png>)`,
+    `What I tried first, left of the abilities, overlaps the station controls:\n\n![Tried at 1920](<${review}/${names[4]}.png>) ![Tried at 1280](<${review}/${names[5]}.png>)`,
+    'Which one?',
+  ].join('\n\n');
+  await sendMessage(page.request, app.orchestratorId!, body);
+  const reply = page.locator('.orch .msg-assistant', { hasText: tag });
+  await onScreen(reply);
+  const imgs = reply.locator('.md .md-img img');
+  await expect(imgs).toHaveCount(6);
+  // Each one decoded once it is on screen, as its reader scrolls down the message.
+  for (let i = 0; i < 6; i++) {
+    await imgs.nth(i).scrollIntoViewIfNeeded();
+    await expect.poll(() => imgs.nth(i).evaluate((e: HTMLImageElement) => e.complete && e.naturalWidth > 0), { message: names[i] }).toBe(true);
+  }
+  await expect(reply.locator('.md code', { hasText: /^(Option [AB]|Tried) at \d+$/ })).toHaveCount(0);
+});
+
+test('w1419: an image of a review still written with a slightly wrong name still shows (the outgoing check points it at the file)', async ({ authed: page }) => {
+  const port = new URL(test.info().project.use.baseURL!).port;
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-options').replace(/\\/g, '/');
+  const tag = uniq('w1419near');
+  const app = await appState(page.request);
+  // "_1280" for "-1280" and a capital O: what an orchestrator writes from memory. The file is 2-option-A-left-of-item-rows-1280.png.
+  await sendMessage(page.request, app.orchestratorId!, `Option A ![Option A at 1280](<${review}/2-Option-A-left-of-item-rows_1280.png>) ${tag}`);
+  const reply = page.locator('.orch .msg-assistant', { hasText: tag });
+  await onScreen(reply);
+  await expectLoaded(reply.locator('.md .md-img img'));
+  await expect(reply.locator('.md code', { hasText: 'Option A at 1280' })).toHaveCount(0);
+});
+
+test("w1419: Ben's message of 19:53 UTC as it was written: stills on the line after a paragraph and inside list items", async ({ authed: page }) => {
+  // seq 34406 of Ben's orchestrator (2026-10-16 19:53 UTC), its image lines verbatim, each on the line after its text with a
+  // single newline; in the bullets the image is the line right after "- **…:** text". The files are the real names.
+  const port = new URL(test.info().project.use.baseURL!).port;
+  const dir = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w1386-save-blueprint-options');
+  fs.mkdirSync(dir, { recursive: true });
+  const names = ['2-option-A-left-of-item-rows-1280', '2-option-A-left-of-item-rows-1920', '2-option-A-left-of-item-rows-1920-nothing-selected', '3-option-B-above-the-hint-1280', '3-option-B-above-the-hint-1920', '4-tried-beside-quick-buttons-1920', '4-tried-on-the-hint-line-1280', '4-tried-left-of-abilities-1280'];
+  for (const n of names) fs.writeFileSync(path.join(dir, `${n}.png`), Buffer.from(RED_PNG, 'base64'));
+  const p = dir.replace(/\\/g, '/');
+  const tag = uniq('w1419exact');
+  const text = [
+    `**Thread 1085: where Save New Blueprint goes.** ${tag}`,
+    '',
+    'Option A puts it left of the hotbar\'s item rows (recommended):',
+    `![Option A, 1280x800](<${p}/${names[0]}.png>)`,
+    `![Option A, 1920x1080](<${p}/${names[1]}.png>)`,
+    `![Option A, 1920x1080, nothing selected](<${p}/${names[2]}.png>)`,
+    '',
+    'Option B puts it above the held-blueprint hint:',
+    `![Option B, 1280x800](<${p}/${names[3]}.png>)`,
+    `![Option B, 1920x1080](<${p}/${names[4]}.png>)`,
+    '',
+    'What it tried first:',
+    `- **Beside the Blueprints quick button:** crowds the quick buttons.`,
+    `![Beside the Blueprints quick button](<${p}/${names[5]}.png>)`,
+    `- **On the hint's line:** covers the hint.`,
+    `![On the hint's line](<${p}/${names[6]}.png>)`,
+    `- **Left of the abilities:** overlaps the station controls.`,
+    `![Left of the abilities](<${p}/${names[7]}.png>)`,
+    '',
+    'A or B?',
+  ].join('\n');
+  const app = await appState(page.request);
+  await sendMessage(page.request, app.orchestratorId!, text);
+  const reply = page.locator('.orch .msg-assistant', { hasText: tag });
+  await onScreen(reply);
+  const imgs = reply.locator('.md .md-img img');
+  await expect(imgs).toHaveCount(8);
+  for (let i = 0; i < 8; i++) {
+    await imgs.nth(i).scrollIntoViewIfNeeded();
+    await expect.poll(() => imgs.nth(i).evaluate((e: HTMLImageElement) => e.complete && e.naturalWidth > 0), { message: names[i] }).toBe(true);
+  }
+  await expect(reply.locator('.md code', { hasText: /^(Option [AB],|Beside|On the hint|Left of)/ })).toHaveCount(0);
+});
+
+/** A 1920x1080 PNG of noise (it does not compress): about 6 MB, the size of a real full-screen still. */
+function noisePng(w: number, h: number): Buffer {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (b: Buffer) => {
+    let c = 0xffffffff;
+    for (const x of b) c = crcTable[(c ^ x) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const c = Buffer.alloc(4);
+    c.writeUInt32BE(crc(td));
+    return Buffer.concat([len, td, c]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let i = 0; i < raw.length; i++) raw[i] = i % (w * 3 + 1) === 0 ? 0 : (Math.random() * 256) | 0;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+test('w1419: a full-size review still (1920x1080, about 6 MB) in an orchestrator message loads', async ({ authed: page }) => {
+  const port = new URL(test.info().project.use.baseURL!).port;
+  const dir = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-big');
+  fs.mkdirSync(dir, { recursive: true });
+  const files = ['a-1920.png'].map((n) => path.join(dir, n));
+  for (const f of files) if (!fs.existsSync(f)) fs.writeFileSync(f, noisePng(1920, 1080));
+  const tag = uniq('w1419big');
+  const app = await appState(page.request);
+  await sendMessage(page.request, app.orchestratorId!, `A full-size still: ${tag}\n${files.map((f, i) => `![Still ${i + 1}](<${f.replace(/\\/g, '/')}>)`).join('\n')}`);
+  const reply = page.locator('.orch .msg-assistant', { hasText: tag });
+  await onScreen(reply);
+  const imgs = reply.locator('.md .md-img img');
+  await expect(imgs).toHaveCount(1);
+  for (let i = 0; i < 1; i++) {
+    await imgs.nth(i).scrollIntoViewIfNeeded();
+    await expect.poll(() => imgs.nth(i).evaluate((e: HTMLImageElement) => e.complete && e.naturalWidth === 1920), { timeout: 20_000 }).toBe(true);
+  }
 });
