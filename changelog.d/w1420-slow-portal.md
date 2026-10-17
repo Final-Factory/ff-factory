@@ -1,0 +1,1 @@
+- **The path watch names a stalled portal instead of Funnel** (w1420): when the outside probe fails, layer 9 reads the portal's own `/api/health` (`loopLagMs`, its worst event-loop stall of the last minute); at 10 s or more its line says the portal answers too slowly, not Funnel, and no Funnel repair runs. The curl-28 outages of 2026-10-15, 10-16 and 10-17 were all the portal.
