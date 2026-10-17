@@ -151,6 +151,12 @@ run the CI workflow by hand with **update snapshots** ticked (Actions → CI →
 the `linux-snapshots` artifact, review the images and commit them. On Windows or macOS set
 `E2E_SNAPSHOTS=1` to compare against baselines of your own (those files are gitignored).
 
+Two things from w1389 (the usage sheet took four update runs): the update run renders a baseline only for a test that reaches
+its `toHaveScreenshot`, so a test that fails an earlier assertion (a height bound measured on Windows fonts: 68 px here, 84 px
+on CI's Linux fonts) leaves its old baseline in the artifact, and the PR's run fails on it again. Fix the assertion, then
+run update again. And the run re-renders every baseline: copy into the PR only the files your change touches (compare each
+artifact file with `cmp`, `git checkout` the rest), or unrelated baselines ride along.
+
 ### Performance
 
 ```bash
