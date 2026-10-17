@@ -280,7 +280,7 @@ backdate() { # KEY SECONDS: the state key's time that long ago
 banner() { jq -r "$1" "$HEALTH"; }
 # The status file for the portal's banner, against the recording server/pathHealth.test.ts also reads (its times and the host
 # name replaced so it does not change from run to run). UPDATE_FIXTURES=1 rewrites the recording.
-norm() { jq -S . "$HEALTH" | sed -E 's/"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z"/"2026-10-07T18:30:00Z"/g; s/"host": "[^"]*"/"host": "ffbox"/; s/from outside \([A-Za-z0-9_.-]*, through Funnel\)/from outside (ffbox, through Funnel)/'; }
+norm() { jq -S . "$HEALTH" | sed -E 's/"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z"/"2026-10-07T18:30:00Z"/g; s/"host": "[^"]*"/"host": "ffbox"/; s/from outside \([A-Za-z0-9_.-]*, through Funnel\)/from outside (ffbox, through Funnel)/; s/the VM'"'"'s clock is -?[0-9]+s off/the VM'"'"'s clock is 0s off/'; }
 check_recording() {
   if [ "${UPDATE_FIXTURES:-0}" = 1 ]; then norm >"$FIX/$1"; fi
   norm | diff -u "$FIX/$1" - >"$T/diff" || fail "the status file differs from its recording $1 (UPDATE_FIXTURES=1 rewrites it): $(head -30 "$T/diff")"
