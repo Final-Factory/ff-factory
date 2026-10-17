@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { capacityLine, fleetOf } from '../shared/fleet.ts';
-import type { Machine, MachineSandbox, SessionInfo, SessionStatus, SystemStats } from '../shared/types.ts';
+import { capacityLine, chatLedger, chatMatters, fleetOf, slotCall, type PersonWait } from '../shared/fleet.ts';
+import type { LiveViewInfo, Machine, MachineSandbox, SessionInfo, SessionStatus, SystemStats, WorkItem } from '../shared/types.ts';
 
 const T = '2026-09-29T10:00:00.000Z';
 
@@ -117,4 +117,148 @@ test('fleet: the portal with no daemon of its own and no stats is "This host", r
   const [host] = fleetOf({ sessions: [], machines: [] });
   assert.equal(host.name, 'This host');
   assert.equal(capacityLine(host), 'orchestrators only');
+});
+
+// ---------------------------------------------------------------- w1430: the chats that matter now, and the slot's call
+
+const NOW = Date.parse('2026-10-17T16:00:00.000Z');
+const ago = (m: number) => new Date(NOW - m * 60_000).toISOString();
+const BEN = { userId: 'ben', displayName: 'Ben' };
+const item = (id: string, status: WorkItem['status'], sessionIds: string[], extra: Partial<WorkItem> = {}): WorkItem => ({
+  id,
+  title: id,
+  brief: '',
+  priority: 'normal',
+  keys: [],
+  requestedBy: BEN,
+  requesters: [BEN],
+  humanAsked: true,
+  status,
+  createdAt: ago(600),
+  updatedAt: ago(10),
+  sessionIds,
+  overlaps: [],
+  asks: 0,
+  log: [],
+  ...extra,
+});
+const at = (sb: string) => ({ machineId: 'lothdesktop', machineSandbox: sb });
+const ledgerOf = (sessions: SessionInfo[], work: WorkItem[]) => chatLedger(work, new Map(sessions.map((s) => [s.id, s])), NOW);
+
+test('w1430: a chat matters now when it runs, has its own work going, holds its sandbox, or is the current worker of an open request', () => {
+  const sessions = [
+    session('busy', 'running', at('slot2')),
+    session('asks', 'waiting_permission', { ...at('slot2'), pendingPermissions: [{ requestId: 'r', toolName: 'Bash', input: {}, createdAt: ago(1) }] }),
+    session('ci', 'idle', { ...at('slot3'), backgroundJobs: [{ type: 'local_bash', description: 'CI on PR #1851' }] }),
+    session('checkin', 'stopped', { ...at('slot3'), wakeAt: ago(-20) }),
+    // Finished: idle with nothing pending, its request done.
+    session('finished', 'idle', at('slot2')),
+    // Stopped on a closed request, and stopped on none.
+    session('closed', 'stopped', at('slot1')),
+    session('loose', 'stopped', at('slot4')),
+    // w1325: 6e7c4ceb was replaced by fff83521, which waits on Ben, stopped.
+    session('6e7c4ceb', 'stopped', { machineId: 'beast', machineSandbox: 'slot4' }),
+    session('fff83521', 'stopped', { ...at('slot1'), waitingOn: { who: 'Ben', what: 'Drag the fin colour in the Live view', at: ago(9), request: 'w1325' } }),
+    // An open request whose worker stopped without saying anything: still on an open request.
+    session('quiet', 'stopped', at('slot3')),
+    // A stalled request is not open.
+    session('failed', 'error', at('slot4')),
+  ];
+  const work = [
+    item('w1', 'done', ['finished']),
+    item('w2', 'done', ['closed']),
+    item('w1325', 'active', ['6e7c4ceb', 'fff83521'], { links: { '6e7c4ceb': { at: ago(500), how: 'sent' }, fff83521: { at: ago(400), how: 'sent' } } }),
+    item('w3', 'active', ['quiet']),
+    item('w4', 'stalled', ['failed']),
+  ];
+  const ledger = ledgerOf(sessions, work);
+  const shown = sessions.filter((s) => chatMatters(s, ledger, NOW)).map((s) => s.id);
+  assert.deepEqual(shown, ['busy', 'asks', 'ci', 'checkin', 'fff83521', 'quiet']);
+  // The request's current worker is its latest that still holds it: not the one it moved from.
+  assert.deepEqual([...ledger.current.entries()].sort(), [['fff83521', ['w1325']], ['quiet', ['w3']]]);
+});
+
+test('w1430: a worker waits on a person when its request is Waiting on input for what it asked, not for a permission, an approval or the dispatcher', () => {
+  const sessions = [
+    session('knob', 'stopped', { ...at('slot1'), waitingOn: { who: 'Ben', what: 'Drag the knob', at: ago(9), request: 'w1325' } }),
+    session('report', 'idle', { ...at('slot2'), lastResult: 'Stills are up.\n\nw7: still open: waiting on Ben to OK the look' }),
+    session('perm', 'waiting_permission', { ...at('slot3'), pendingPermissions: [{ requestId: 'r', toolName: 'Bash', input: {}, createdAt: ago(1) }] }),
+    session('asked', 'idle', at('slot4')),
+  ];
+  const work = [
+    item('w1325', 'active', ['knob']),
+    item('w7', 'active', ['report']),
+    item('w8', 'active', ['perm']),
+    item('w9', 'question', ['asked'], { question: { text: 'Which one?', at: ago(5) } }),
+  ];
+  const waits = ledgerOf(sessions, work).waits;
+  assert.deepEqual(
+    [...waits.values()].map((w) => [w.session.id, w.request, w.on]),
+    [
+      ['knob', 'w1325', ['Ben']],
+      ['report', 'w7', ['Ben']],
+    ],
+  );
+});
+
+test('w1430: the slot calls the viewer to the Live view when the worker that waits on them streams one, else to its chat', () => {
+  const knob = session('knob', 'stopped', at('slot1'));
+  const wait = (on: string[]): PersonWait => ({ session: knob, request: 'w1325', on });
+  const place = (waits: PersonWait[]) => ({ shown: [knob], older: [], waits });
+  const view = (state: LiveViewInfo['state'], sessionId = 'knob'): LiveViewInfo => ({ liveId: 'l1', sessionId, machineId: 'lothdesktop', sandbox: 'slot1', state, detail: '', fps: 15, width: 960, materials: ['heatExchangerMaterial'], startedAt: ago(12), updatedAt: ago(0), frames: 100 });
+  const ben = { userId: 'ben', displayName: 'Ben' };
+  const call = slotCall(place([wait(['Ben'])]), [view('live')], ben);
+  assert.deepEqual(call && { ...call, session: call.session.id }, { kind: 'live', session: 'knob', request: 'w1325', label: 'Live view: go' });
+  // A view that is holding (the game reloading scripts) still opens it, whatever the name's case; a stopped one does not.
+  assert.equal(slotCall(place([wait(['Ben'])]), [view('holding')], { userId: 'BEN', displayName: 'ben' })?.label, 'Live view: go');
+  assert.equal(slotCall(place([wait(['Ben'])]), [view('stopped')], ben)?.label, 'Needs you');
+  assert.equal(slotCall(place([wait(['Ben'])]), undefined, ben)?.kind, 'chat');
+  // Someone else's wait, nobody signed in, or no wait and no view: no call.
+  assert.equal(slotCall(place([wait(['Lothsahn'])]), [view('live', 'other')], ben), undefined);
+  assert.equal(slotCall(place([wait(['Ben'])]), [view('live')], undefined), undefined);
+  assert.equal(slotCall(place([]), [], ben), undefined);
+});
+
+test('w1430: a Live view up while its worker is between turns calls the person who asked for that worker, declared or not', () => {
+  const view = (sessionId: string): LiveViewInfo => ({ liveId: 'l1', sessionId, machineId: 'lothdesktop', sandbox: 'slot4', state: 'live', detail: '', fps: 15, width: 960, materials: ['VfxComet'], startedAt: ago(12), updatedAt: ago(0), frames: 100 });
+  const comet = session('comet', 'idle', { ...at('slot4'), requestedBy: BEN });
+  const ben = { userId: 'ben', displayName: 'Ben' };
+  const call = slotCall({ shown: [comet], older: [], waits: [] }, [view('comet')], ben);
+  assert.deepEqual(call && { ...call, session: call.session.id }, { kind: 'live', session: 'comet', label: 'Live view: go' });
+  // Mid-turn, it is the worker's move; asked by someone else, it is theirs.
+  assert.equal(slotCall({ shown: [{ ...comet, status: 'running' }], older: [], waits: [] }, [view('comet')], ben), undefined);
+  assert.equal(slotCall({ shown: [comet], older: [], waits: [] }, [view('comet')], { userId: 'lothsahn', displayName: 'Lothsahn' }), undefined);
+  // Handed over (lastRequestedBy) counts as asked.
+  assert.equal(slotCall({ shown: [{ ...comet, requestedBy: undefined, lastRequestedBy: BEN }], older: [], waits: [] }, [view('comet')], ben)?.kind, 'live');
+});
+
+test('w1430: fleetOf lists the chats that matter now per slot, the person-waiting one first, and folds the rest, the newest first', () => {
+  const sessions = [
+    session('busy', 'running', { ...at('slot1'), lastActivityAt: ago(1) }),
+    session('knob', 'stopped', { ...at('slot1'), lastActivityAt: ago(30), waitingOn: { who: 'Ben', what: 'Drag the knob', at: ago(30), request: 'w1325' } }),
+    session('old1', 'stopped', { ...at('slot1'), lastActivityAt: ago(300) }),
+    session('old2', 'idle', { ...at('slot1'), lastActivityAt: ago(40) }),
+    session('old3', 'stopped', { ...at('slot2'), lastActivityAt: ago(100) }),
+  ];
+  const [, loth] = fleetOf(
+    {
+      system,
+      sessions,
+      work: [item('w1325', 'active', ['knob']), item('w2', 'done', ['old2'])],
+      machines: [machine('lothdesktop', { sandboxRoot: 'D:/work/ffsb', sessionIds: sessions.map((s) => s.id), sandboxes: [machineSandbox('slot1', 'slot1', ['old1', 'busy', 'knob', 'old2']), machineSandbox('slot2', 'slot2', ['old3'])] })],
+    },
+    undefined,
+    NOW,
+  );
+  const slot1 = loth.sandboxes.find((s) => s.id === 'slot1')!.agents;
+  assert.deepEqual(slot1.shown.map((s) => s.id), ['knob', 'busy']);
+  assert.deepEqual(slot1.older.map((s) => s.id), ['old2', 'old1']);
+  assert.deepEqual(slot1.waits.map((w) => [w.session.id, w.on]), [['knob', ['Ben']]]);
+  // What placement reads is unchanged: the idle one is still a live process, the stopped ones a count.
+  assert.deepEqual([slot1.live.map((s) => s.id), slot1.stopped], [['busy', 'old2'], 2]);
+  const slot2 = loth.sandboxes.find((s) => s.id === 'slot2')!;
+  assert.deepEqual([slot2.agents.shown.length, slot2.agents.older.length, slot2.free], [0, 1, true]);
+  // Without the ledger (a server-side caller), only the live and returning chats are listed.
+  const [, bare] = fleetOf({ system, sessions, machines: [machine('lothdesktop', { sandboxRoot: 'D:/work/ffsb', sandboxes: [machineSandbox('slot1', 'slot1', ['old1', 'busy', 'knob', 'old2'])] })] }, undefined, NOW);
+  assert.deepEqual(bare.sandboxes[0].agents.shown.map((s) => s.id), ['busy']);
 });

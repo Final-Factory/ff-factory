@@ -6003,6 +6003,37 @@ body {
   color: var(--text-3);
 }
 
+/* "+N older" (w1430): the folded chats open in place. */
+.fl-older {
+  align-self: flex-start;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+}
+
+.fl-older:hover {
+  background: var(--hover);
+  color: var(--text-2);
+}
+
+/* A slot whose worker waits on the viewer (w1430): "Live view: go" or "Needs you" under its row, on the row's text edge
+   (the row's padding, its 16 px icon and the gap). The same pill on the Dispatcher's Waiting tab. */
+.fl-call-line {
+  display: flex;
+  padding: 0 var(--s-2) var(--s-1) calc(var(--s-3) * 2 + 16px);
+}
+
+.needs-you.fl-call {
+  height: 26px;
+  padding: 0 10px;
+  font-size: var(--fs-sm);
+}
+
+.needs-you.fl-call:hover {
+  background: rgba(255, 176, 32, 0.2);
+}
+
 .fl-add-machine {
   align-self: flex-start;
   margin: 2px var(--s-3) 0;
@@ -6017,6 +6048,12 @@ body {
 @media (hover: none) {
   .fl-agent {
     min-height: 40px;
+  }
+
+  /* A thumb's target (w1430). */
+  .needs-you.fl-call {
+    height: 38px;
+    padding: 0 14px;
   }
 }
 

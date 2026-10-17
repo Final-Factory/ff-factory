@@ -2,9 +2,9 @@
 // sidebar, and as one card per computer on the Overview board. A group is its header (name, online, load,
 // sandbox and editor counts) and its sandboxes with their live agents (every worker runs in one, w536).
 import { useState, type ReactNode } from 'react';
-import type { AppState, HostHealth, Provider, SessionInfo } from '../../../shared/types';
+import type { AppState, HostHealth, Provider, SessionInfo, UserInfo } from '../../../shared/types';
 import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
-import { capacityLine, fleetOf, type FleetComputer, type FleetSandbox, type PlaceAgents } from '../../../shared/fleet';
+import { capacityLine, fleetOf, slotCall, type FleetComputer, type FleetSandbox, type PersonWait, type PlaceAgents, type SlotCall } from '../../../shared/fleet';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
 import { agentView, fmtBytes, fmtRelative, lsGet, lsSet, machineSandboxGlance, navigate, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
@@ -25,13 +25,20 @@ const osName = (p: string | undefined) => (!p ? '' : p.startsWith('win') ? 'Wind
 
 const ago = (iso: string, now: number) => fmtRelative(iso, now).replace(' ago', '').replace('just now', 'now');
 
-/** An agent in a few words: needs you, busy, starting, between turns (w475: working on a check-in or a task, or queued or blocked, w643), or idle. */
-function agentState(s: SessionInfo): { word: string; tone: Tone; detail?: string } {
+/**
+ * An agent in a few words: needs you, busy, starting, between turns (w475: working on a check-in or a task, or queued or
+ * blocked, w643), waiting on a person (w1430: "needs you" when that is the viewer, "waits on Ben" otherwise), or idle.
+ */
+function agentState(s: SessionInfo, wait?: PersonWait, me?: Pick<UserInfo, 'displayName'>): { word: string; tone: Tone; detail?: string } {
   if (s.pendingPermissions.length || s.status === 'waiting_permission') return { word: 'needs you', tone: 'amber' };
   // No agent host started for it (w691): blocked on its machine, whatever its status says.
   if (s.hostFailure) return { word: 'blocked', tone: 'violet', detail: agentView(s).waitsOn };
   if (s.status === 'running') return { word: 'busy', tone: 'blue' };
   if (s.status === 'starting') return { word: 'starting', tone: 'blue' };
+  if (wait) {
+    const mine = !!me && wait.on.some((n) => n.toLowerCase() === me.displayName.toLowerCase());
+    return { word: mine ? 'needs you' : `waits on ${wait.on.join(', ') || 'a person'}`, tone: 'amber', detail: s.waitingOn?.what };
+  }
   const v = agentView(s);
   if (v.waitsOn) return { word: v.label.toLowerCase(), tone: v.tone, detail: v.waitsOn };
   // Stopped, but its check-in or a queued message will resume it (w509): listed as Stopped.
@@ -159,8 +166,8 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
   );
 }
 
-function AgentLine({ s, now, active, variant, onOpen }: { s: SessionInfo; now: number; active: boolean; variant: Variant; onOpen: () => void }) {
-  const st = agentState(s);
+function AgentLine({ s, wait, me, now, active, variant, onOpen }: { s: SessionInfo; wait?: PersonWait; me?: UserInfo; now: number; active: boolean; variant: Variant; onOpen: () => void }) {
+  const st = agentState(s, wait, me);
   return (
     <button
       className={`fl-agent${active ? ' active' : ''}`}
@@ -182,19 +189,55 @@ function AgentLine({ s, now, active, variant, onOpen }: { s: SessionInfo; now: n
   );
 }
 
-function Agents({ agents, now, sel, variant, open }: { agents: PlaceAgents; now: number; sel: FleetSelection; variant: Variant; open: (s: SessionInfo) => void }) {
-  if (!agents.live.length && !agents.stopped) return null;
+/**
+ * A place's chats (w1430): those that matter now (shared/fleet.ts chatMatters), then "+N older" for the rest (finished, or on a
+ * closed request), which opens them in place. The open chat is always listed.
+ */
+function Agents({ agents, me, now, sel, variant, open }: { agents: PlaceAgents; me?: UserInfo; now: number; sel: FleetSelection; variant: Variant; open: (s: SessionInfo) => void }) {
+  const [unfolded, setUnfolded] = useState(false);
+  if (!agents.shown.length && !agents.older.length) return null;
+  const picked = agents.older.find((s) => s.id === sel.sessionId);
+  const list = unfolded ? [...agents.shown, ...agents.older] : picked ? [...agents.shown, picked] : agents.shown;
+  const folded = agents.older.length - (picked ? 1 : 0);
+  const waitOf = (s: SessionInfo) => agents.waits.find((x) => x.session.id === s.id);
   return (
     <div className="fl-agents">
-      {agents.live.map((s) => (
-        <AgentLine key={s.id} s={s} now={now} active={sel.sessionId === s.id} variant={variant} onOpen={() => open(s)} />
+      {list.map((s) => (
+        <AgentLine key={s.id} s={s} wait={waitOf(s)} me={me} now={now} active={sel.sessionId === s.id} variant={variant} onOpen={() => open(s)} />
       ))}
-      {agents.stopped > 0 && (
-        <span className="fl-stopped" title="Stopped or failed agents: open the place to see them">
-          +{agents.stopped} stopped
-        </span>
+      {(unfolded ? agents.older.length > 0 : folded > 0) && (
+        <button
+          type="button"
+          className="fl-stopped fl-older"
+          onClick={() => setUnfolded(!unfolded)}
+          aria-expanded={unfolded}
+          title={unfolded ? 'Fold the older chats again' : 'Finished chats, and chats on closed requests: nothing is deleted'}
+          data-testid="fl-older"
+        >
+          {unfolded ? `Hide ${agents.older.length} older` : `+${folded} older`}
+        </button>
       )}
     </div>
+  );
+}
+
+/**
+ * The slot's call to the viewer (w1430): "Live view: go" opens the waiting worker's Live view, "Needs you" its chat. It is the
+ * first line under the slot's row, on the row's text edge, so the row keeps its name, branch and Unity mark where they were.
+ */
+function CallButton({ call, onGo }: { call: SlotCall; onGo: () => void }) {
+  const what = call.session.waitingOn?.what;
+  return (
+    <button
+      type="button"
+      className="needs-you fl-call"
+      onClick={onGo}
+      title={`${call.request ? `${call.request}: ` : ''}${call.session.title} waits on you${what ? `: ${what}` : call.kind === 'live' ? ': its Live view is up for you to move the knobs' : ''}`}
+      data-testid="fl-call"
+    >
+      {call.kind === 'live' ? <span className="lv-rec" aria-hidden /> : <Icon name="bell" size={13} />}
+      {call.label}
+    </button>
   );
 }
 
@@ -227,58 +270,81 @@ function PlaceHead({ glance: g, title, unused, free, unity, sub, active, hint, o
   );
 }
 
-function SandboxItem({ sb, now, sel, variant, go }: { sb: FleetSandbox; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void }) {
-  const g = machineSandboxGlance(sb.machineSandbox!, sb.agents.live);
+function SandboxItem({ sb, me, call, now, sel, variant, go }: { sb: FleetSandbox; me?: UserInfo; call?: SlotCall; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void }) {
+  const placeGlance = machineSandboxGlance(sb.machineSandbox!, sb.agents.live);
+  // A worker here waits on you (w1430): the slot reads as one that needs you, as a permission wait does, unless something
+  // more urgent (a blocked editor, a failure) already speaks for it; what it is doing is that worker's title.
+  const g: Glance = call && placeGlance.tone !== 'red' && placeGlance.tone !== 'amber' ? { ...placeGlance, tone: 'amber', label: 'Needs you', attention: Math.max(placeGlance.attention, 1), progress: false } : placeGlance;
   const unityAbout = /^Unity/.test(g.label);
+  const free = sb.free && !call;
   // The label is the sandbox's name (w575); what it is doing is its live agents' titles, Working first.
   const title = sb.id;
-  const doing = sb.doing.length ? `${sb.doing[0]}${sb.doing.length > 1 ? ` (+${sb.doing.length - 1})` : ''}` : '';
+  const titles = call && !sb.doing.includes(call.session.title) ? [call.session.title, ...sb.doing] : sb.doing;
+  const doing = titles.length ? `${titles[0]}${titles.length > 1 ? ` (+${titles.length - 1})` : ''}` : '';
+  const head = (
+    <PlaceHead
+      glance={g}
+      title={title}
+      unused={free}
+      free={free}
+      unity={sb.status === 'ready' ? { tone: unityTone(sb.unity), label: unityLabel[sb.unity] } : undefined}
+      sub={
+        <>
+          {!free && (
+            <>
+              <span className={`tone-${g.tone}`}>{g.label}</span>
+              {doing && (
+                <>
+                  {' · '}
+                  <span className="fl-doing" data-testid="fl-doing" title={titles.join('\n')}>
+                    {doing}
+                  </span>
+                </>
+              )}
+              {' · '}
+            </>
+          )}
+          <span className="mono fl-branch">{sb.branch}</span>
+          {variant === 'board' && sb.status === 'ready' && !unityAbout && <span className={`tone-${unityTone(sb.unity)}`}> · {unityLabel[sb.unity]}</span>}
+        </>
+      }
+      active={sel.sandbox === sb.key && !sel.sessionId}
+      hint={`Slot ${sb.key} · ${sb.branch}${sb.status === 'ready' ? ` · ${unityLabel[sb.unity]}` : ''}${agentsHint(sb.agents)}${call && sb.free ? '\nIts worker is stopped while it waits on you: placement may give the sandbox other work meanwhile' : ''}`}
+      onClick={() => go(sandboxRoute(sb))}
+      testId="fl-sandbox-row"
+    />
+  );
   return (
     <div className="fl-sb" data-testid={`fl-sandbox-${sb.key}`}>
-      <PlaceHead
-        glance={g}
-        title={title}
-        unused={sb.free}
-        free={sb.free}
-        unity={sb.status === 'ready' ? { tone: unityTone(sb.unity), label: unityLabel[sb.unity] } : undefined}
-        sub={
-          <>
-            {!sb.free && (
-              <>
-                <span className={`tone-${g.tone}`}>{g.label}</span>
-                {doing && (
-                  <>
-                    {' · '}
-                    <span className="fl-doing" data-testid="fl-doing" title={sb.doing.join('\n')}>
-                      {doing}
-                    </span>
-                  </>
-                )}
-                {' · '}
-              </>
-            )}
-            <span className="mono fl-branch">{sb.branch}</span>
-            {variant === 'board' && sb.status === 'ready' && !unityAbout && <span className={`tone-${unityTone(sb.unity)}`}> · {unityLabel[sb.unity]}</span>}
-          </>
-        }
-        active={sel.sandbox === sb.key && !sel.sessionId}
-        hint={`Slot ${sb.key} · ${sb.branch}${sb.status === 'ready' ? ` · ${unityLabel[sb.unity]}` : ''}${agentsHint(sb.agents)}`}
-        onClick={() => go(sandboxRoute(sb))}
-        testId="fl-sandbox-row"
-      />
-      <Agents agents={sb.agents} now={now} sel={sel} variant={variant} open={(s) => go(sandboxRoute(sb, s.id))} />
+      {head}
+      {call && (
+        <div className="fl-call-line">
+          <CallButton call={call} onGo={() => go(call.kind === 'live' ? { view: 'live', sessionId: call.session.id } : sandboxRoute(sb, call.session.id))} />
+        </div>
+      )}
+      <Agents agents={sb.agents} me={me} now={now} sel={sel} variant={variant} open={(s) => go(sandboxRoute(sb, s.id))} />
     </div>
   );
 }
 
+/** Who is looking and the live views they may watch: what a slot's call (slotCall) is worked out from. */
+interface Viewer {
+  me?: UserInfo;
+  views?: AppState['live'];
+}
+
+const viewerOf = (app: AppState): Viewer => ({ me: app.me, views: app.config.live?.enabled ? app.live : undefined });
+
 /** A computer's places: its sandboxes (free ones last). On the board, free sandboxes are one line of chips. */
-function Places({ c, now, sel, variant, go, onNewSandbox }: { c: FleetComputer; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void; onNewSandbox?: () => void }) {
-  const free = variant === 'board' ? c.sandboxes.filter((s) => s.free) : [];
-  const shown = variant === 'board' ? c.sandboxes.filter((s) => !s.free) : c.sandboxes;
+function Places({ c, viewer, now, sel, variant, go, onNewSandbox }: { c: FleetComputer; viewer: Viewer; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void; onNewSandbox?: () => void }) {
+  // A free slot where a worker waits on the viewer stays a row, so its call shows (w1430).
+  const callOf = (sb: FleetSandbox) => slotCall(sb.agents, viewer.views, viewer.me);
+  const free = variant === 'board' ? c.sandboxes.filter((s) => s.free && !callOf(s)) : [];
+  const shown = variant === 'board' ? c.sandboxes.filter((s) => !free.includes(s)) : c.sandboxes;
   return (
     <div className="fl-places">
       {shown.map((sb) => (
-        <SandboxItem key={sb.key} sb={sb} now={now} sel={sel} variant={variant} go={go} />
+        <SandboxItem key={sb.key} sb={sb} me={viewer.me} call={callOf(sb)} now={now} sel={sel} variant={variant} go={go} />
       ))}
       {free.length > 0 && (
         <div className="fl-free-line" data-testid="fl-free-line">
@@ -316,7 +382,7 @@ let lastFleet: { key: unknown[]; fleet: FleetComputer[] } | undefined;
 
 /** fleetOf, computed once per change of what it reads (the page re-renders on every server event). */
 export function fleetFor(app: AppState): FleetComputer[] {
-  const key = [app.sessions, app.machines, app.system, app.machineStats];
+  const key = [app.sessions, app.machines, app.system, app.machineStats, app.work];
   if (!lastFleet || key.some((k, i) => k !== lastFleet!.key[i])) lastFleet = { key, fleet: fleetOf(app, sessionIndex(app.sessions)) };
   return lastFleet.fleet;
 }
@@ -326,6 +392,7 @@ export function fleetFor(app: AppState): FleetComputer[] {
 export function FleetGroups({ app, sel, go, onNewSandbox }: { app: AppState; sel: FleetSelection; go: (r: Route) => void; onNewSandbox: () => void }) {
   const now = useNow(15_000);
   const [collapsed, toggle] = useCollapsed();
+  const viewer = viewerOf(app);
   return (
     <>
       {/* Providers first: a short group with no sandboxes, so it stays in view above the machines' lists. */}
@@ -339,7 +406,7 @@ export function FleetGroups({ app, sel, go, onNewSandbox }: { app: AppState; sel
             <button className="fl-head" onClick={() => toggle(c.key)} aria-expanded={!closed} title={closed ? `Show ${c.name}'s sandboxes and agents` : `Hide ${c.name}'s sandboxes and agents`}>
               <Head c={c} health={c.host ? app.host?.health : undefined} now={now} fold />
             </button>
-            {!closed && <Places c={c} now={now} sel={sel} variant="side" go={go} onNewSandbox={c.host ? onNewSandbox : undefined} />}
+            {!closed && <Places c={c} viewer={viewer} now={now} sel={sel} variant="side" go={go} onNewSandbox={c.host ? onNewSandbox : undefined} />}
           </div>
         );
       })}
@@ -456,7 +523,7 @@ export function OverviewBoard({ app }: { app: AppState }) {
                 </div>
               )}
             </header>
-            <Places c={c} now={now} sel={{}} variant="board" go={go} />
+            <Places c={c} viewer={viewerOf(app)} now={now} sel={{}} variant="board" go={go} />
           </article>
         ))}
       </div>

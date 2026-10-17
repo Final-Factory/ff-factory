@@ -21,7 +21,8 @@ test('a worker\'s live view: frames beside its chat, a knob that reaches the gam
 
   // The conversation offers the view; the view shows frames, LIVE, and the knobs the game reports.
   await page.goto(`/#/session/${worker.id}`);
-  await page.getByRole('button', { name: /live view/i }).first().click();
+  // The conversation's own button: the sidebar's slot offers "Live view: go" too (w1430), in a drawer on a phone.
+  await page.getByTestId('live-open').first().click();
   await expect(page).toHaveURL(new RegExp(`#/live/${worker.id}$`));
   const stage = page.getByTestId('live-stage');
   await expect(stage).toHaveAttribute('data-state', 'live');
