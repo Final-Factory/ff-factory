@@ -268,28 +268,25 @@ function PlanSummary({ rows, now }: { rows: PlanRow[]; now: number }) {
   return (
     <span className="plan-line" data-testid="plan-glance" title={rows.map((r) => r.line).join('\n')}>
       <span className="pf-lead">
-        <span className="pf-label">Plans</span>{' '}
         {first ? (
           <>
+            <span className="pf-label">Plan in use:</span>{' '}
             <span className="plan-name" title={first.name}>{first.name}</span>
-            <span className="pf-use"> in use{using.length > 1 ? ` +${using.length - 1}` : ''}</span>
+            {using.length > 1 && <span className="pf-use">{` +${using.length - 1}`}</span>}
           </>
         ) : (
-          <span className="pf-use">none in use</span>
+          <span className="pf-label">No plan in use</span>
         )}
       </span>{' '}
       {first && u && (
         <>
-          <span className={`pf-nums pl-${planTone(first)}`}>
-            <span className="pn-full">{`weekly ${pct(u.weekly)}, session ${pct(u.session)}`}</span>
-            <span className="pn-short" aria-hidden>{`week ${pct(u.weekly)}, 5h ${pct(u.session)}`}</span>
-          </span>{' '}
+          <span className={`pf-nums pl-${planTone(first)}`}>{`weekly ${pct(u.weekly)}, session ${pct(u.session)}`}</span>{' '}
         </>
       )}
       {spent.length === rows.length ? (
-        <b className="lvl-crit pf-spent">all {rows.length} spent{back ? `, first back ${localTime(back, now)}` : ''}</b>
+        <span className="lvl-crit pf-spent">all {rows.length} plans spent{back ? `, first back ${localTime(back, now)}` : ''}</span>
       ) : spent.length ? (
-        <b className="lvl-crit pf-spent">{spent.length} of {rows.length} spent</b>
+        <span className="lvl-crit pf-spent">{spent.length} of {rows.length} plans spent</span>
       ) : (
         <span className="pf-spent">none spent</span>
       )}
@@ -545,25 +542,22 @@ export const planTone = (r: PlanRow): PlanTone => {
 function PlanList({ rows }: { rows: PlanRow[] }) {
   const asOf = rows.map((r) => r.a.usage?.asOf).filter((t): t is string => !!t).sort()[0];
   return (
-    <div className="meters plan-list" role="list" aria-label="Plan usage of every Claude account" data-testid="plans-table">
-      {rows.map((r) => {
-        const u = r.a.usage?.available ? r.a.usage : undefined;
-        const pct = (m?: UsageMeter) => (m ? `${Math.round(m.percent)}%` : '?');
-        return (
-          <div key={r.a.id} className={`plan-item pl-${planTone(r)}`} role="listitem" data-testid={`account-${accountTag(r.a)}`} title={r.title}>
-            <span className="plan-item-name" title={r.name}>{r.name}</span>
-            <span className="plan-item-sep">{' - '}</span>
-            {u ? (
-              <span className="plan-item-nums">
-                <span className="pn-full">{`weekly ${pct(u.weekly)}, session ${pct(u.session)}`}</span>
-                <span className="pn-short" aria-hidden>{`week ${pct(u.weekly)}, 5h ${pct(u.session)}`}</span>
+    <div className="meters plan-list" data-testid="plans-table">
+      <div className="plan-rows" role="list" aria-label="Plan usage of every Claude account">
+        {rows.map((r) => {
+          const u = r.a.usage?.available ? r.a.usage : undefined;
+          const pct = (m?: UsageMeter) => (m ? `${Math.round(m.percent)}%` : '?');
+          return (
+            <div key={r.a.id} className={`plan-item pl-${planTone(r)}`} role="listitem" data-testid={`account-${accountTag(r.a)}`} title={r.title}>
+              <span className="plan-item-name" title={r.name}>{r.name}</span>
+              <span className="plan-item-tail">
+                <span className="plan-item-sep">{' - '}</span>
+                {u ? `weekly ${pct(u.weekly)}, session ${pct(u.session)}` : r.a.usage ? 'usage unavailable' : 'not fetched yet'}
               </span>
-            ) : (
-              <span className="plan-item-nums">{r.a.usage ? 'usage unavailable' : 'not fetched yet'}</span>
-            )}
-          </div>
-        );
-      })}
+            </div>
+          );
+        })}
+      </div>
       <div className="plan-asof" title={rows.map((r) => (r.a.usage?.source ? `${r.name}: from ${r.a.usage.source}` : '')).filter(Boolean).join('\n') || undefined}>
         {asOf ? `as of ${fmtClock(asOf)}` : 'not fetched yet'}
       </div>

@@ -1202,50 +1202,55 @@ select.input {
 /* Every Claude account, one line each: "name - weekly 62%, session 38%", red when spent, yellow from 80%, blue otherwise. */
 .plan-list {
   gap: var(--s-1);
+  container-type: inline-size;
+}
+
+.plan-rows {
+  display: grid;
+  gap: var(--s-1);
 }
 
 .plan-item {
-  display: flex;
-  align-items: baseline;
   min-width: 0;
   font-size: var(--fs-sm);
   font-weight: 600;
   line-height: 1.4;
-  white-space: nowrap;
 }
 
-/* One line each, whatever the width: the name gives way (an ellipsis, whole on its hover), the numbers never wrap. */
+/* The name gives way (an ellipsis, whole on its hover); the numbers never wrap. */
 .plan-item-name {
-  flex: 0 1 auto;
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.plan-item-sep,
-.plan-item-nums {
-  flex: none;
-}
-
-.plan-item-sep {
+.plan-item-tail {
   white-space: pre;
 }
 
-.pn-short {
+/* Narrow (the desktop sidebar): the name has the whole first line, the numbers the second, and the dash is not needed. */
+.plan-item-sep {
   display: none;
 }
 
-/* In a narrow list (the desktop sidebar) the words are shorter, so the name keeps room: week 62%, 5h 38%. */
-.plan-list {
-  container-type: inline-size;
-}
-
-@container (max-width: 260px) {
-  .pn-full {
-    display: none;
+/* Wide: name, then " - weekly 62%, session 38%" in a column of its own, so the dashes line up down the list. */
+@container (min-width: 261px) {
+  .plan-rows {
+    display: grid;
+    gap: var(--s-1);
+    grid-template-columns: minmax(0, 1fr) max-content;
   }
 
-  .pn-short {
+  .plan-rows > .plan-item {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: subgrid;
+    align-items: baseline;
+  }
+
+  .plan-item-sep {
     display: inline;
   }
 }

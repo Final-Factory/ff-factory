@@ -244,15 +244,15 @@ const VAULT = (name: string, last4: string, weekly: number, where: string[], age
   usage: { available: true, asOf: NOW.toISOString(), plan: 'max', source: 'rate limits', weekly: { label: 'Weekly', percent: weekly, resetsAt: at(70) }, session: { label: 'Session (5 h)', percent: 9, resetsAt: at(2) }, models: [] },
 });
 
-/** A plan's line: "name - weekly 62%, session 38%", or "name - week 62%, 5h 38%" in a narrow list (the desktop sidebar). */
+/** A plan's line: "name - weekly 62%, session 38%"; in a narrow list (the desktop sidebar) the numbers are a second line and the dash is dropped. */
 const planLine = (name: string, weekly: string, session: string) => {
   const esc = (t: string) => t.replace(/[.+*?^$()[\]{}|\\]/g, '\\$&');
-  return new RegExp(`^${esc(name)}\\s+-\\s+(weekly ${esc(weekly)}, session ${esc(session)}|week ${esc(weekly)}, 5h ${esc(session)})$`);
+  return new RegExp(`^${esc(name)}\\s+(-\\s+)?weekly ${esc(weekly)}, session ${esc(session)}$`);
 };
 
-/** The footer's plan line: "Plans name in use  weekly 98%, session 12%  1 of 3 spent" (week/5h in a narrow footer), its pieces on one line or several. */
+/** The footer's plan line: "Plan in use: name  weekly 98%, session 12%  1 of 3 plans spent", its pieces on one line or several. */
 const footerLine = (name: string, weekly: string, session: string, spent: string) =>
-  new RegExp(`^Plans\\s+${name}\\s+in use\\s+(weekly ${weekly}, session ${session}|week ${weekly}, 5h ${session})\\s+${spent}$`);
+  new RegExp(`^Plan in use:\\s+${name}\\s+weekly ${weekly}, session ${session}\\s+${spent}$`);
 
 const plans = (foot: Locator) => foot.getByTestId('plans-table');
 
@@ -271,9 +271,11 @@ test('meters (w785): a vault token is one row under its vault name, the Claude a
   await expect(both).toHaveAttribute('title', /^ben@example\.com\nvault-ben-2 …dAAA\n[\s\S]*fff-portal's token file \(the orchestrator\)/);
   await expect(both).not.toContainText('vault:');
   // A long address is cut with an ellipsis, never wrapped or clipped by the row, and whole on its hover.
-  // One line each at any width: every line is as tall as one text line, and none starts with the dash.
+  // Every plan's first element is its name, so no line starts with the dash.
   for (const item of await plans(foot).locator('.plan-item').all()) {
-    expect((await item.boundingBox())!.height, 'a plan is one line').toBeLessThan(26);
+    // One text line where the list is wide (a phone's sheet), the name over the numbers where it is narrow (the desktop sidebar).
+    const wide = (await plans(foot).evaluate((e) => e.clientWidth - 2 * parseFloat(getComputedStyle(e).paddingLeft))) > 261;
+    expect((await item.boundingBox())!.height, wide ? 'a plan is one line' : 'a plan is two lines at most').toBeLessThan(wide ? 26 : 50);
     expect(await item.evaluate((e) => e.firstElementChild?.className)).toBe('plan-item-name');
   }
   const loth = foot.getByTestId('account-…EAAA');
@@ -299,7 +301,7 @@ test('meters (w1389): the footer says which plan is in use and how many are spen
   };
   const foot = await fixedWorld(page, 'machines', [spent]);
   // Three plans, one in use (the host token has agents on it), one spent (weekly full).
-  await expect(foot.getByTestId('plan-glance')).toHaveText(footerLine('host token', '98%', '12%', '1 of 3 spent'), { useInnerText: true });
+  await expect(foot.getByTestId('plan-glance')).toHaveText(footerLine('host token', '98%', '12%', '1 of 3 plans spent'), { useInnerText: true });
   await expect(foot.getByTestId('plan-glance')).toHaveAttribute('title', /ben-1: spent until .*, 5h 40%, weekly 100%/);
   // One text line for the plans, not a cell per account: the footer stays at its two lines.
   await expect(foot.locator('.plan-chip, .plan-chips')).toHaveCount(0);
