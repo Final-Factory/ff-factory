@@ -1,0 +1,1 @@
+- **CONTRIBUTING: what the update-snapshots run does and does not do** (w1389): it renders a baseline only for a test that reaches its `toHaveScreenshot`, so an earlier failing assertion keeps the old baseline; it re-renders every baseline, so commit only the files your change touches.
