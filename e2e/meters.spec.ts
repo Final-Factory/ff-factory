@@ -151,9 +151,9 @@ test('meters: every machine gets a cell with three bars, in the footprint of the
   await expect(foot.getByTestId('plan-glance')).toHaveText(footerLine('host token', '98%', '12%', 'none spent'), { useInnerText: true });
   await expect(foot.getByTestId('plan-glance')).toHaveAttribute('title', 'host token: in use, 5h 12%, weekly 98%\nowner: free, weekly 23%');
   // The computers fit one text line, as the host alone had with its editor and agent counts before w510 (52 px measured
-  // at this size with two lines), and the plan line in words takes at most two more here (w1389: 68 px measured at the
-  // sidebar's 280 px; a phone's 390 px holds it in one).
-  expect((await foot.locator('.sys-toggle').boundingBox())!.height, 'no taller than three lines').toBeLessThanOrEqual(Math.max(hostOnly, 52) + 20);
+  // at this size with two lines). The plan line in words (w1389) takes up to three more at the sidebar's 280 px: 68 px
+  // measured on Windows, 84 px on CI's Linux fonts; a phone's wider sheet holds it in two.
+  expect((await foot.locator('.sys-toggle').boundingBox())!.height, 'no taller than four lines').toBeLessThanOrEqual(Math.max(hostOnly, 52) + 40);
   await expect(foot).toHaveScreenshot('meters-collapsed.png');
 });
 
