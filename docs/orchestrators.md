@@ -1653,7 +1653,7 @@ target that does not exist makes the page show the alt as code (`InlineImage`'s 
 check now points such an image at the one file of its folder it was meant to be (`nearest`: the same name but for case,
 spaces, `_` or `-`, or another media extension), or, with none, writes its alt in words and puts the folder's stills and
 clips under the paragraph. What the page does with a file that is there was measured in Firefox, Chromium and WebKit
-(`e2e/images.spec.ts`, w1419, with the e2e review root outside the sandboxes as `/srv/fff/review` is on the portal, so a
+(`e2e/images.spec.ts`, w1419, Firefox with `E2E_FIREFOX=1`; with the e2e review root outside the sandboxes as `/srv/fff/review` is on the portal, so a
 still is served by `/api/image` and not by a copy kept with the transcript): it loads, also six in one long message.
 
 **Why rewrite, not send it back.** Both were weighed:
