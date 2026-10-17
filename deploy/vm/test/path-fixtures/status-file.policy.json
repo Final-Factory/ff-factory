@@ -95,12 +95,12 @@
     {
       "checkedAt": "2026-10-07T18:30:00Z",
       "id": "9",
-      "line": "https://fff.example-tailnet.ts.net/api/health from outside failed (curl exit 28): curl: (28) Operation timed out after 10002 milliseconds with 0 bytes received; 0 of 3 Funnel server address(es) from DNS answer, failing: 2001:db8:ffff::a 203.0.113.10 203.0.113.11",
+      "line": "https://fff.example-tailnet.ts.net/api/health from outside failed (curl exit 28): curl: (28) Operation timed out after 10002 milliseconds with 0 bytes received; 0 of 3 Funnel server address(es) from DNS answer, failing: 2001:db8:ffff::a (curl 28) 203.0.113.10 (curl 28) 203.0.113.11 (curl 28); peerapi_ingress 120→120 across 3 probe(s): the failing requests did not reach tailscaled (Tailscale's side: tailscale/tailscale#21114); 2 of 4 Funnel server peer(s) with a handshake in 5 min; tailscaled in 15 min: no control, link or ingress line",
       "name": "end to end",
       "repair": "",
       "since": "2026-10-07T18:30:00Z",
       "verdict": "fail",
-      "who": "ops: every layer inside the VM passes but the outside path fails; check Tailscale's status page and the Funnel name's DNS"
+      "who": "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after 3 failing passes and restarts tailscaled after 10. Still down, or the requests reached tailscaled: ops, sudo fff-vm ssh sudo journalctl -u tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times"
     },
     {
       "checkedAt": "2026-10-07T18:30:00Z",
@@ -168,12 +168,12 @@
     {
       "checkedAt": "2026-10-07T18:30:00Z",
       "id": "9",
-      "line": "https://fff.example-tailnet.ts.net/api/health from outside failed (curl exit 28): curl: (28) Operation timed out after 10002 milliseconds with 0 bytes received; 0 of 3 Funnel server address(es) from DNS answer, failing: 2001:db8:ffff::a 203.0.113.10 203.0.113.11",
+      "line": "https://fff.example-tailnet.ts.net/api/health from outside failed (curl exit 28): curl: (28) Operation timed out after 10002 milliseconds with 0 bytes received; 0 of 3 Funnel server address(es) from DNS answer, failing: 2001:db8:ffff::a (curl 28) 203.0.113.10 (curl 28) 203.0.113.11 (curl 28); peerapi_ingress 120→120 across 3 probe(s): the failing requests did not reach tailscaled (Tailscale's side: tailscale/tailscale#21114); 2 of 4 Funnel server peer(s) with a handshake in 5 min; tailscaled in 15 min: no control, link or ingress line",
       "name": "end to end",
       "repair": "",
       "since": "2026-10-07T18:30:00Z",
       "verdict": "fail",
-      "who": "ops: every layer inside the VM passes but the outside path fails; check Tailscale's status page and the Funnel name's DNS"
+      "who": "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after 3 failing passes and restarts tailscaled after 10. Still down, or the requests reached tailscaled: ops, sudo fff-vm ssh sudo journalctl -u tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times"
     }
   ],
   "schema": 1,

@@ -1,0 +1,6 @@
+# TYPE magicsock_send_udp counter
+magicsock_send_udp 48211
+# TYPE peerapi_ingress counter
+peerapi_ingress 120
+# TYPE peerapi_serve counter
+peerapi_serve 131

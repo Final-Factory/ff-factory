@@ -12,8 +12,11 @@
 #   5     the HTTPS certificate works (curl in the VM)                  repair: tailscale cert (not before ACME's retry time)
 #   6     the VM's firewall accepts the ports tailscaled listens on     (verified only: install.sh is the fix)
 #   7     the tailnet policy does not drop Funnel servers' traffic      (an admin's: logged, urgent alert)
+#         (their SYNs to the node's peer API port are logged "Drop" and then accepted by tailscaled: not counted, w1420)
 #   8     Funnel servers connect at all                                  repair: restart tailscaled, check again in 5 min
-#   9     the portal answers from outside, through Funnel (curl on this host): the final pass or fail, always run
+#   9     the portal answers from outside, through Funnel (curl on this host): the final pass or fail, always run;
+#         on a failure it says whether the requests reached tailscaled   repair: send the Funnel registration again
+#         (peerapi_ingress) and what tailscaled logged                   (3 passes), restart tailscaled (10 passes)
 #   disk  clock  loop  units  ntfy   other single points of failure: the VM's disk, its clock, the portal service restarting in a
 #                             loop, the critical units (fffctl units --check), and the alert channel itself
 # A layer is a problem after PW_FAILS_BEFORE_ALERT failing passes in a row; one alert an hour per problem (ntfy), and an
@@ -26,6 +29,7 @@
 : "${PW_CHECKS:=on}" "${PW_EXPECT_FUNNEL:=1}" "${PW_EXPECT_TAG:=tag:fff-portal}" "${PW_FAILS_BEFORE_ALERT:=2}"
 : "${PW_TS_RESTART_MIN:=30}" "${PW_FUNNEL_STALE_MIN:=30}" "${PW_DISK_WARN_MB:=2048}" "${PW_DISK_FAIL_MB:=512}"
 : "${PW_CLOCK_SKEW_SEC:=60}" "${PW_HEALTH_FILE:=/run/fff/path-health.json}"
+: "${PW_FUNNEL_REPUBLISH_AFTER:=3}" "${PW_FUNNEL_RESTART_AFTER:=10}"
 
 PL_IDS="ssh 1 2 3 4 5 6 7 8 9 disk clock loop units ntfy"
 PL_POLICY_MSG="the tailnet policy drops Funnel traffic: a tailnet admin must grant tag:ingress (or *) → tag:fff-portal"
@@ -65,7 +69,7 @@ pl_who() {
     6) echo "ops: re-run the guest install in the VM (sudo fffctl update): its firewall accepts TCP 22 and 443 from tailscale0 and nothing broader" ;;
     7) echo "tailnet admin: grant tag:ingress → tag:fff-portal in the tailnet policy" ;;
     8) echo "tailnet admin or ops: Tailscale sends no Funnel traffic to this node; the admin console shows the node's Funnel and health" ;;
-    9) echo "ops: every layer inside the VM passes but the outside path fails; check Tailscale's status page and the Funnel name's DNS" ;;
+    9) echo "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after $PW_FUNNEL_REPUBLISH_AFTER failing passes and restarts tailscaled after $PW_FUNNEL_RESTART_AFTER. Still down, or the requests reached tailscaled: ops, sudo fff-vm ssh sudo journalctl -u tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times" ;;
     disk) echo "ops: free disk space in the VM (sudo fff-vm ssh df -h)" ;;
     clock) echo "ops: the VM's clock is off and its time sync did not fix it (sudo fff-vm ssh timedatectl)" ;;
     loop) echo "ops: sudo fff-vm ssh sudo fffctl logs; the last update may need sudo fffctl rollback" ;;
@@ -81,17 +85,18 @@ sget() { local v; v=$(state_get "$1"); echo "${v:-${2:-}}"; }
 iso() { date -u -d "@${1:-0}" +%FT%TZ; }
 # shq STR: STR as one single-quoted word for a remote sh.
 shq() { local s=${1//\'/\'\\\'\'}; printf "'%s'" "$s"; }
-# pl_clean TEXT: one line, no secrets (auth keys, login links, node keys, key= values), at most 600 characters.
+# pl_clean TEXT [MAX]: one line, no secrets (auth keys, login links, node keys, key= values), at most MAX (600) characters.
+# The portal shows at most 700 of a line (server/pathHealth.ts).
 pl_clean() {
-  printf '%s' "$1" | tr '\n\r\t' '   ' | sed -E 's#tskey-[A-Za-z0-9_-]+#[auth key removed]#g; s#https?://login\.tailscale\.com/a/[A-Za-z0-9]+#[login link removed]#g; s#(nodekey|privkey|mkey|dmkey):[0-9a-f]+#\1:[removed]#g; s#((authkey|token|key|secret)=)[^ &"]+#\1[removed]#gI' | tr -s ' ' | cut -c1-600
+  printf '%s' "$1" | tr '\n\r\t' '   ' | sed -E 's#tskey-[A-Za-z0-9_-]+#[auth key removed]#g; s#https?://login\.tailscale\.com/a/[A-Za-z0-9]+#[login link removed]#g; s#(nodekey|privkey|mkey|dmkey):[0-9a-f]+#\1:[removed]#g; s#((authkey|token|key|secret)=)[^ &"]+#\1[removed]#gI' | tr -s ' ' | cut -c1-"${2:-600}"
 }
 # gx CMD: CMD (sh syntax) in the guest as root over ssh; stderr is the caller's to merge (2>&1 in CMD).
 gx() { ssh_guest "sudo -n timeout ${GX_TIMEOUT:-40} sh -c $(shq "$1")"; }
 
-# pl_set ID VERDICT EVIDENCE: record a layer's result (state + one journal line). Verdicts: ok warn fail skip.
+# pl_set ID VERDICT EVIDENCE [MAX]: record a layer's result (state + one journal line). Verdicts: ok warn fail skip.
 pl_set() {
   local id=$1 v=$2 ev t prev fails alerted
-  ev=$(pl_clean "$3")
+  ev=$(pl_clean "$3" "${4:-600}")
   t=$(now)
   prev=$(sget "L${id}_verdict" none)
   [ "$prev" = "$v" ] || state_set "L${id}_since" "$t"
@@ -198,7 +203,7 @@ pl_check_ssh() {
 # HARD=1: tailscaled does not answer, is not Running or is offline (a restart is the cure); 0: it runs and reports a health
 # warning (a restart would only cut its connections for a warning that may be harmless).
 TS="" EV="" HARD=0
-SELF4="" SELF6="" DNS=""
+SELF4="" SELF6="" DNS="" PEERAPI_PORTS=""
 pl_read_status() {
   local out rc active st on health ver
   HARD=1
@@ -214,6 +219,9 @@ pl_read_status() {
   [[ $DNS =~ ^[A-Za-z0-9.-]+$ ]] || DNS=""
   SELF4=$(jq -r '[.Self.TailscaleIPs[]? | select(test("^[0-9.]+$"))] | first // ""' <<<"$TS")
   SELF6=$(jq -r '[.Self.TailscaleIPs[]? | select(test(":"))] | first // ""' <<<"$TS")
+  # The node's own peer API ports ("http://100.64.0.5:59917", "http://[fd7a:...]:59343"): where Funnel's servers deliver.
+  PEERAPI_PORTS=$(jq -r '[.Self.PeerAPIURL[]? | capture(":(?<p>[0-9]+)/?$").p] | unique | join(" ")' <<<"$TS" 2>/dev/null || true)
+  [[ $PEERAPI_PORTS =~ ^[0-9\ ]*$ ]] || PEERAPI_PORTS=""
   [ -z "$DNS" ] || state_set path_dns "$DNS"
   st=$(jq -r '.BackendState // "?"' <<<"$TS")
   on=$(jq -r '.Self.Online // false' <<<"$TS")
@@ -409,8 +417,14 @@ path_l6() {
 # are pings and probes the grant was never meant to let through; they are counted and shown, not judged (w698). And while the
 # outside probe passed in the pass before (layer 9 runs after this one), Funnel works end to end, so what was dropped is stray
 # traffic to look at, a warning, not a failure that stops the chain: the grant covers the ports Funnel really uses.
+# A SYN to the node's own peer API port is not a drop at all (w1420): tailscaled's packet filter logs its verdict ("Drop:
+# ... no rules matched") and the tun layer then lets the SYN through, because peerapi does its own checks (tailscale
+# source, net/tstun/wrap.go: "Let peerapi through the filter; its ACLs are handled at L7"); Tailscale says the same of
+# exactly these lines on tailscale/tailscale#21796 and #21671. Every Funnel request logs one, so they are counted as
+# hand-offs that reached the node, never as a policy problem, and Funnel needs no grant for them (w1420: the watch
+# blamed the policy for every Funnel outage from 2026-10-13 to 10-17 while each cleared with no policy change).
 path_l7() {
-  local ingress out n=0 other=0 sample="" line src proto dport ports="" kinds="" total=0
+  local ingress out n=0 other=0 sample="" line src proto dport ports="" kinds="" total=0 handoffs=0
   # Drop: TCP{[fd7a:...]:41822 > [fd7a:...]:59343} 80 no rules matched: the protocol, the source, the destination port.
   local re='Drop: ([A-Za-z0-9]+)\{\[?([0-9a-fA-F:.]+)\]?:[0-9]+ > \[?([0-9a-fA-F:.]+)\]?:([0-9]+)\}'
   ingress=$(jq -r '[.Peer[]? | select(((.Tags // []) | index("tag:ingress")) != null) | .TailscaleIPs[]?] | .[]' <<<"$TS")
@@ -423,7 +437,9 @@ path_l7() {
       src=${BASH_REMATCH[2]}
       dport=${BASH_REMATCH[4]}
       grep -qxF "$src" <<<"$ingress" || continue
-      if [ "$proto" = TCP ]; then
+      if [ "$proto" = TCP ] && [[ " $PEERAPI_PORTS " == *" $dport "* ]]; then
+        handoffs=$((handoffs + 1))
+      elif [ "$proto" = TCP ]; then
         n=$((n + 1))
         sample=$line
         [[ " $ports " == *" $dport "* ]] || ports+="${ports:+ }$dport"
@@ -438,10 +454,13 @@ path_l7() {
       pl_set 7 warn "the tailnet policy dropped $n TCP packet(s) from Funnel servers (tag:ingress) in 15 min, to port(s) $ports, but the outside probe passes, so Funnel works: stray traffic, not Funnel's requests; check that the grant covers port(s) $ports if it should. Last: $sample"
       return 0
     fi
-    pl_set 7 fail "$PL_POLICY_MSG. $n line(s) in 15 min, last: $sample"
+    pl_set 7 fail "$PL_POLICY_MSG. $n line(s) in 15 min, last: $sample$([ -z "$PEERAPI_PORTS" ] || echo " (to port(s) $ports, not the peer API port $PEERAPI_PORTS that Funnel's servers deliver to)")"
     return 1
   fi
-  pl_set 7 ok "no Funnel server (tag:ingress) TCP traffic dropped by the packet filter in 15 min (${total} Drop line(s) in all$([ "$other" -gt 0 ] && echo ", $other of them $kinds from Funnel servers: pings and probes, not Funnel's requests" || true))"
+  local notes=""
+  [ "$handoffs" -le 0 ] || notes+=", $handoffs of them Funnel hand-offs to the peer API port ($PEERAPI_PORTS), which tailscaled logs as Drop and then accepts"
+  [ "$other" -le 0 ] || notes+=", $other of them $kinds from Funnel servers: pings and probes, not Funnel's requests"
+  pl_set 7 ok "no Funnel server (tag:ingress) TCP traffic dropped by the packet filter in 15 min (${total} Drop line(s) in all${notes})"
   return 0
 }
 
@@ -489,31 +508,149 @@ path_l8() {
 }
 
 # 9: from this host, which is not on the tailnet: out through the internet and back in through Funnel.
+# On a failure it also says, from inside the VM, whether the failing requests reached tailscaled (its peerapi_ingress
+# counter, which Tailscale's own diagnosis reads: tailscale/tailscale#21671), how many Funnel servers the node still has a
+# fresh handshake with, and what tailscaled logged about its control connection and links in the last 15 minutes: the
+# evidence that tells Tailscale's side (#21114: the node's Funnel registration lost after a control reconnect, nothing
+# arrives) from the node's (requests arrive and are turned away). w1420: five outages from 2026-10-13 to 10-17 left no
+# evidence but "curl exit 35" from here.
 pl_e2e() {
-  local dns url out rc ips ip good=0 bad="" n=0 res ev
+  local dns url out rc ips ip good=0 bad="" n=0 res ev pout prc vm=0 before="" after="" fails note=""
   dns=${DNS:-$(sget path_dns)}
   if [ -z "$dns" ]; then pl_set 9 skip "the node's Funnel name is not known yet (layer 2 never read it)"; return 0; fi
   url="https://$dns/api/health"
   out=$(curl -fsS -m 10 "$url" 2>&1) && rc=0 || rc=$?
   if [ "$rc" = 0 ] && grep -E '"ok" *: *true' >/dev/null <<<"$out"; then
+    state_set L9_republished ""
+    state_set L9_restarted ""
     pl_set 9 ok "$url answers ok:true from outside ($(hostname -s), through Funnel)"
     return 0
   fi
-  ev="$url from outside failed (curl exit $rc): ${out:0:200}"
+  ev="$url from outside failed (curl exit $rc): ${out:0:120}"
   if ! curl -sS -m 8 -o /dev/null https://login.tailscale.com/ >/dev/null 2>&1; then
     pl_set 9 warn "$ev; this host has no internet either (login.tailscale.com does not answer), so nothing can be said about Funnel"
     return 0
   fi
+  [ "$(sget Lssh_verdict)" != ok ] || vm=1
+  [ "$vm" = 0 ] || before=$(pl_ingress_count)
   ips=$(getent ahosts "$dns" 2>/dev/null | awk '{print $1}' | sort -u || true)
   while read -r ip; do
     [ -n "$ip" ] || continue
     n=$((n + 1))
     res="$ip"
     [[ $ip == *:* ]] && res="[$ip]"
-    if curl -fsS -m 10 --resolve "$dns:443:$res" "$url" 2>/dev/null | grep -E '"ok" *: *true' >/dev/null; then good=$((good + 1)); else bad+=" $ip"; fi
+    pout=$(curl -fsS -m 10 --resolve "$dns:443:$res" "$url" 2>/dev/null) && prc=0 || prc=$?
+    if [ "$prc" = 0 ] && grep -E '"ok" *: *true' >/dev/null <<<"$pout"; then good=$((good + 1)); else bad+=" $ip (curl $prc)"; fi
   done <<<"$ips"
-  pl_set 9 fail "$ev; $good of $n Funnel server address(es) from DNS answer$([ -n "$bad" ] && echo ", failing:${bad}")"
+  [ "$vm" = 0 ] || after=$(pl_ingress_count)
+  pl_e2e_inside "$vm" "$before" "$after" "$good" "$((n - good))"
+  log "path L9 evidence: $(pl_clean "$INSIDE_A${INSIDE_B:+; $INSIDE_B}" 2000)"
+  fails=$(($(sget L9_fails 0) + 1))
+  pl_e2e_repair "$fails" "$dns"
+  [ -z "$E2E_REPAIRED" ] || note="; $E2E_REPAIRED"
+  # The portal shows 700 characters: the decisive parts first, tailscaled's last line at the end (cut first).
+  pl_set 9 fail "$ev; $good of $n Funnel server address(es) from DNS answer$([ -n "$bad" ] && echo ", failing:${bad}"); $INSIDE_A$note${INSIDE_B:+; $INSIDE_B}" 700
   return 1
+}
+
+# pl_ingress_count: tailscaled's peerapi_ingress counter (one per Funnel connection that reaches the node), or nothing.
+pl_ingress_count() {
+  local v
+  v=$(gx "tailscale debug metrics 2>/dev/null | awk '\$1 == \"peerapi_ingress\" { print \$2; exit }'" 2>/dev/null || true)
+  if [[ ${v:-x} =~ ^[0-9]+$ ]]; then echo "$v"; fi
+  return 0
+}
+
+# pl_e2e_inside VM BEFORE AFTER GOOD BAD: the VM's side of a failing outside probe: INSIDE_A whether the requests reached
+# tailscaled, INSIDE_B the Funnel servers' handshakes and tailscaled's control, link and ingress lines.
+INSIDE_A="" INSIDE_B=""
+pl_e2e_inside() {
+  local vm=$1 before=$2 after=$3 good=$4 bad=$5 s peers fresh evs cnt last
+  INSIDE_A="" INSIDE_B=""
+  if [ "$vm" != 1 ]; then INSIDE_A="the VM's side is not known (ssh into it fails)"; return 0; fi
+  if [ -n "$before" ] && [ -n "$after" ]; then
+    s="peerapi_ingress $before→$after across $((good + bad)) probe(s)"
+    if [ $((after - before)) -le "$good" ]; then
+      s+=": the failing requests did not reach tailscaled (Tailscale's side: tailscale/tailscale#21114)"
+    else
+      s+=": the failing requests reached tailscaled and failed there (its journal: ingress: denied, TLS handshake error)"
+    fi
+  else
+    s="peerapi_ingress not readable (tailscale debug metrics)"
+  fi
+  INSIDE_A=$s
+  s=""
+  if [ -n "$TS" ]; then
+    read -r peers fresh < <(jq -r --argjson now "$(now)" '
+      def epoch: if (. == null) or startswith("0001") then 0 else (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) end;
+      [.Peer[]? | select(((.Tags // []) | index("tag:ingress")) != null)] as $p
+      | "\($p | length) \([$p[] | select(($now - (.LastHandshake | epoch)) < 300)] | length)"' <<<"$TS" 2>/dev/null || echo "? ?")
+    s="$fresh of $peers Funnel server peer(s) with a handshake in 5 min; "
+  fi
+  evs=$(gx "journalctl -u tailscaled --since -15min --no-pager 2>&1 | grep -E 'PollNetMap|controlhttp|dial plan|LinkChange|Rebind|ingress|TLS handshake error|home is now' | tail -n 50 || true" 2>/dev/null || true)
+  cnt=$(grep -c . <<<"$evs" || true)
+  if [ "${cnt:-0}" -gt 0 ]; then
+    last=$(tail -n 1 <<<"$evs")
+    s+="tailscaled in 15 min: $cnt control/link/ingress line(s), last: ${last:0:200}"
+  else
+    s+="tailscaled in 15 min: no control, link or ingress line"
+  fi
+  INSIDE_B=$s
+}
+
+# pl_route_ok DNS: tailscale serve routes https://DNS:443 / to the portal with Funnel on (ROUTE_EV says what it found).
+ROUTE_EV=""
+pl_route_ok() {
+  local out proxy fn key="$1:443"
+  out=$(gx 'tailscale serve status --json 2>&1') || true
+  proxy=$(jq -r --arg k "$key" '.Web[$k].Handlers["/"].Proxy // ""' 2>/dev/null <<<"$out" || true)
+  fn=$(jq -r --arg k "$key" '.AllowFunnel[$k] // false' 2>/dev/null <<<"$out" || echo false)
+  ROUTE_EV="$key / → ${proxy:-no route}, AllowFunnel=${fn:-false}"
+  [ "$proxy" = "http://127.0.0.1:$PORTAL_PORT" ] && [ "$fn" = true ]
+}
+
+# The repair's command in the VM: the serve config saved, Funnel reset, the same config back.
+# shellcheck disable=SC2016 # it expands in the VM
+PL_REPUBLISH_CMD='f=$(mktemp) || exit 3; if ! tailscale serve status --json >"$f" 2>/dev/null || ! grep -q AllowFunnel "$f"; then rm -f "$f"; echo "could not save the serve config"; exit 3; fi; tailscale funnel reset 2>&1 || { r=$?; rm -f "$f"; exit $r; }; sleep 5; tailscale serve set-raw <"$f" 2>&1; r=$?; rm -f "$f"; exit $r'
+
+# pl_e2e_repair FAILS DNS: the outside probe has failed FAILS passes in a row while the chain inside the VM passes up to the
+# certificate (layers 4 and 5 ok this pass). Tailscale's workaround for #21114 (its engineer's words there and on #21671):
+# sending the node's Funnel registration again restores it without a restart ("Toggling Funnel off and on does that;
+# re-applying an unchanged config does not"), and restarting the client does too. So, once per outage: after
+# PW_FUNNEL_REPUBLISH_AFTER passes, tailscale funnel reset and the same serve config back (serve set-raw; tailscale funnel
+# --bg as fffctl tailscale-join if that does not bring the route back); after PW_FUNNEL_RESTART_AFTER, a tailscaled
+# restart within pl_ts_restart_ok's caps. E2E_REPAIRED says what ran, for the layer's line.
+E2E_REPAIRED=""
+pl_e2e_repair() {
+  local fails=$1 dns=$2 out rc want="http://127.0.0.1:$PORTAL_PORT"
+  E2E_REPAIRED=""
+  [ "$(sget Lssh_verdict)" = ok ] && [ "$(sget L4_verdict)" = ok ] && [ "$(sget L5_verdict)" = ok ] || return 0
+  if [ "$fails" -ge "$PW_FUNNEL_REPUBLISH_AFTER" ] && [ -z "$(sget L9_republished)" ] && [ $(($(now) - $(sget funnel_republish_at 0))) -ge 1800 ]; then
+    state_set L9_republished 1
+    state_set funnel_republish_at "$(now)"
+    pl_repair_start 9 "tailscale funnel reset; tailscale serve set-raw (the same config)" "the outside probe failed $fails passes in a row; every layer inside the VM passes"
+    out=$(GX_TIMEOUT=60 gx "$PL_REPUBLISH_CMD") && rc=0 || rc=$?
+    if ! pl_route_ok "$dns"; then
+      out+=" (set-raw exit $rc; the route was not back, so tailscale funnel --bg $want)"
+      GX_TIMEOUT=60 gx "tailscale funnel --bg $(shq "$want") 2>&1" >/dev/null || true
+      pl_route_ok "$dns" || true
+    fi
+    out=$(pl_clean "sent the Funnel registration again (exit $rc${out:+: ${out:0:160}}); the route: $ROUTE_EV; the outside probe is looked at again in the next pass")
+    state_set L9_repair "$(iso "$(now)") tailscale funnel reset; serve set-raw: $out"
+    log "path L9 repair: after: $out"
+    E2E_REPAIRED="sent the Funnel registration again (tailscale funnel reset, serve set-raw), checking at the next pass"
+    return 0
+  fi
+  if [ "$fails" -ge "$PW_FUNNEL_RESTART_AFTER" ] && [ -z "$(sget L9_restarted)" ] && pl_ts_restart_ok; then
+    state_set L9_restarted 1
+    pl_repair_start 9 "systemctl restart tailscaled" "the outside probe failed $fails passes in a row, also after the Funnel registration was sent again"
+    pl_ts_restart_mark
+    gx 'systemctl restart tailscaled 2>&1' >/dev/null || true
+    state_set L9_repair "$(iso "$(now)") systemctl restart tailscaled: restarted, the outside probe is looked at again in the next pass"
+    log "path L9 repair: after: restarted tailscaled once; the outside probe is looked at again in the next pass"
+    E2E_REPAIRED="restarted tailscaled, checking at the next pass"
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------- other single points of failure
@@ -708,7 +845,7 @@ path_watch() {
   [ "$PW_CHECKS" = on ] || return 0
   exec 9>"$FFF_VM_RUN/path.lock"
   flock -n 9 || { log "path: another pass is running"; return 0; }
-  TS="" DNS="" SELF4="" SELF6="" PW_OFF=""
+  TS="" DNS="" SELF4="" SELF6="" PEERAPI_PORTS="" PW_OFF=""
   if [ "$portal" = yes ]; then
     pl_set 1 ok "http://$NET_VM_IP:$PORTAL_PORT/api/health answers"
   else

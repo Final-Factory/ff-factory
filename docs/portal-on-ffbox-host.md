@@ -598,9 +598,9 @@ when a repair did not fix it. Every repair is logged before and after.
 | 4 route | `tailscale serve status --json`: `Web["<dns>:443"]` `/` proxies `http://127.0.0.1:8790` and `AllowFunnel` is true | `tailscale funnel --bg http://127.0.0.1:8790` as `fffctl tailscale-join` does (10 min); never during a `fffctl migrate --dry-run-copy` (its Funnel is off on purpose: layers 4 to 9 are skipped) | ops |
 | 5 certificate | `curl --resolve <dns>:443:<100.x> https://<dns>/api/health` from inside the VM; also not expiring within 5 days | `tailscale cert <dns>` into a private temp folder, deleted after (30 min; not before the "retry after" time a Let's Encrypt rate limit gives; errors logged verbatim) | ops, or a tailnet admin (HTTPS certificates) |
 | 6 firewall | `nft list chain inet fff_guest input` accepts on `tailscale0` only TCP 22 and 443 (anything broader fails: a port outside those, no port, another protocol, such as the temporary 59343/59917 rule), and 22 is accepted while sshd listens on it (`ss -ltnp`). tailscaled's own listeners (peer API port, serve) are not checked: install.sh's reading of tailscaled's source says they never reach the kernel. That is not measured with Funnel traffic, so the counter of the drop rule is in the evidence, and a warning (w698) when it grew since the last pass while the outside probe fails | none: the watch only verifies; `install.sh` has the rules | ops: re-run the guest install (`fffctl update`) |
-| 7 policy | no **TCP** `Drop: ... no rules matched` line in `journalctl -u tailscaled --since -15min` whose source is a `tag:ingress` peer (Funnel is TCP; ICMP and UDP drops from those peers are counted and shown, never judged, w698). While the outside probe passed in the pass before, a TCP drop is a warning listing the ports, not a failure | none | tailnet admin: grant `tag:ingress` (or `*`) to `tag:fff-portal`; the alert is urgent and carries a sample line |
+| 7 policy | no **TCP** `Drop: ... no rules matched` line in `journalctl -u tailscaled --since -15min` whose source is a `tag:ingress` peer, to any port but the node's own peer API port (Funnel is TCP; ICMP and UDP drops from those peers are counted and shown, never judged, w698). A SYN to the peer API port (`Self.PeerAPIURL` in `tailscale status --json`) is a Funnel hand-off that tailscaled logs as Drop and then accepts (w1420, `net/tstun/wrap.go`): counted, never judged. While the outside probe passed in the pass before, a TCP drop is a warning listing the ports, not a failure | none | tailnet admin: grant `tag:ingress` (or `*`) to `tag:fff-portal` for those ports; the alert is urgent and carries a sample line |
 | 8 Funnel servers | a `tag:ingress` peer shows a handshake within `PW_FUNNEL_STALE_MIN` minutes, or the outside probe passed in the pass before | `systemctl restart tailscaled` once per incident, looked at again after 5 minutes | tailnet admin or ops |
-| 9 end to end | `curl https://<dns>/api/health` from the host (not on the tailnet: out and back through Funnel) says `ok:true`; on failure each Funnel server address from the name lookup is tried with `--resolve`, to tell one bad server from all | none | ops |
+| 9 end to end | `curl https://<dns>/api/health` from the host (not on the tailnet: out and back through Funnel) says `ok:true`; on failure each Funnel server address from the name lookup is tried with `--resolve` (its curl exit code in the line), to tell one bad server from all, and the VM's side goes in the line (w1420): tailscaled's `peerapi_ingress` counter before and after those probes (did the failing requests reach tailscaled at all), how many Funnel servers have a handshake within 5 minutes, and tailscaled's control, link and ingress lines of the last 15 minutes (`PollNetMap`, `dial plan`, `LinkChange`, `ingress`); the whole of it is also one `path L9 evidence:` line in the host's journal | after `PW_FUNNEL_REPUBLISH_AFTER` (3) failing passes, with layers 4 and 5 passing: the Funnel registration sent again (`tailscale funnel reset`, then the same serve config back with `tailscale serve set-raw`, and `tailscale funnel --bg` as `fffctl tailscale-join` if the route is not back); after `PW_FUNNEL_RESTART_AFTER` (10): `systemctl restart tailscaled` (within layer 2's caps); each once per outage | Tailscale, when the requests did not reach tailscaled ([tailscale/tailscale#21114](https://github.com/tailscale/tailscale/issues/21114)); ops otherwise |
 
 Other single points of failure it also checks, cheap and safe: the VM's **critical units** (`fffctl units --check` in the VM, 2.4a: two failing passes in a row are a banner and an alert naming the unit), the VM's **disk** (below 2 GB free or 90% used is a warning,
 below 512 MB or 97% a failure; repair: `journalctl --vacuum-size=200M` and `apt-get clean`, every 6 h), the VM's **clock**
@@ -613,13 +613,43 @@ tailnet with a new key (a person's secret), the host's own disk and memory (not 
 alerted above), the backups and the GitHub token (not on the path to the portal), and a second probe from another
 network (one vantage point, the host's, is what FFBox's connector sees too).
 
+#### Funnel outages (w1420)
+
+From 2026-10-13 to 10-17 the outside probe failed five times for 2 to 5 minutes and came back each time with nobody acting
+*(measured: the portal's journal, `path health` and `provider ffbox` lines, read with `portal_logs` on 2026-10-17)*.
+FFBox's connector, which reaches the portal through Funnel from the same host, dropped with code 1006 before the three
+curl-35 ones (2, 7 and 1 minutes before) and not before the two curl-28 ones:
+
+| Failing since (UTC) | Mountain Time | curl from the host | Funnel server addresses that failed | Back (UTC) |
+|---|---|---|---|---|
+| 2026-10-13 17:41 | 10-13 11:41 | 35 `SSL_ERROR_SYSCALL` | 3 of 4 (199.38.181.54 and both IPv6) | 17:45 |
+| 2026-10-15 11:04 | 10-15 05:04 | 28 timeout | 2 of 4 (both IPv6) | 11:06 |
+| 2026-10-15 21:00 | 10-15 15:00 | 35 | 3 of 4 (199.38.181.54 and both IPv6) | 21:03 |
+| 2026-10-16 10:14 | 10-16 04:14 | 28 | 2 of 4 (both IPv6) | 10:16 |
+| 2026-10-17 00:11 | 10-16 18:11 | 35 | 4 of 4 | 00:15 |
+
+(2026-10-16 18:26 UTC was another kind: tailscaled itself in `NoState`, layer 2, for three minutes.) The watch blamed the
+tailnet policy (layer 7) for four of them; that was the Funnel hand-off lines above, logged all the time. What the
+curl-35 outages fit *(sourced; not yet measured on this VM, whose tailscaled journal nobody could read)*:
+[tailscale/tailscale#21114](https://github.com/tailscale/tailscale/issues/21114), open, which Tailscale calls "an active,
+high-priority investigation" (2026-10-09): after a brief loss of the node's control connection, "the node's Funnel
+registration can be dropped on our side even though the node is back and healthy". The symptoms there are ours: TCP to a
+Funnel server connects and TLS is cut (curl 35), some server addresses fail and others not, everything inside the node
+passes, and other reports there name the same two server addresses (199.38.181.54, 209.177.145.137, NetActuate). Tailscale's
+status page lists no incident from 10-10 to 10-17. Its workarounds there: send the registration again (`tailscale funnel
+reset` and the config back) or restart the client; layer 9 now does both, and says in its line whether the failing
+requests reached tailscaled (`peerapi_ingress`) and what tailscaled logged about its control connection. The two curl-28
+outages are not explained yet *(a guess between the host's IPv6 route to the IPv6 Funnel servers and those servers
+themselves)*: only the IPv6 servers timed out, IPv4 answered, and the connector (on IPv4) stayed up; the per-server curl
+code and `peerapi_ingress` in layer 9's line now tell those apart. To check an outage afterwards: `portal_logs` source
+`tailscaled` around its time, for `PollNetMap`, `dial plan` and `LinkChange` lines.
+
 **Telling the portal and the people.** At the end of every pass the host puts the state, with no secret in it (auth keys,
 login links and node keys are removed from every line), in `/run/fff/path-health.json` in the VM (root-owned, `0644`,
 replaced whole, over the same ssh the checks use). The portal reads it every 15 seconds (`server/pathHealth.ts`):
 
 - **The banner** at the top of every page, which people on the tailnet see while Funnel is down: the layer, since when,
-  the evidence, the last repair and who must act (for example "tailnet admin: grant tag:ingress → tag:fff-portal in the
-  tailnet policy"). It cannot be dismissed and clears when the check passes. A watchdog silent for 30 minutes shows a
+  the evidence, the last repair and who must act (for example "ops: re-run the guest install in the VM"). It cannot be dismissed and clears when the check passes. A watchdog silent for 30 minutes shows a
   warning bar of its own, and its old problems are not shown as current.
 - **`system_status`** adds the same lines for the orchestrators, who tell their person; and a problem that appears or
   clears is pushed once to the host guard's channel (a notification and a message to the orchestrator). A standing
