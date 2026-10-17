@@ -69,7 +69,7 @@ pl_who() {
     6) echo "ops: re-run the guest install in the VM (sudo fffctl update): its firewall accepts TCP 22 and 443 from tailscale0 and nothing broader" ;;
     7) echo "tailnet admin: grant tag:ingress → tag:fff-portal in the tailnet policy" ;;
     8) echo "tailnet admin or ops: Tailscale sends no Funnel traffic to this node; the admin console shows the node's Funnel and health" ;;
-    9) echo "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after $PW_FUNNEL_REPUBLISH_AFTER failing passes and restarts tailscaled after $PW_FUNNEL_RESTART_AFTER. When they reached it: the portal answers too slowly (portal_logs: event loop: blocked, fff-health restarts). Still down: ops, portal_logs source tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times" ;;
+    9) echo "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after $PW_FUNNEL_REPUBLISH_AFTER failing passes and restarts tailscaled after $PW_FUNNEL_RESTART_AFTER. When the line says the portal answers too slowly, or the requests reached tailscaled: the portal's own stalls (portal_logs source portal: event loop: blocked), no Funnel repair runs. Still down: ops, portal_logs source tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times" ;;
     disk) echo "ops: free disk space in the VM (sudo fff-vm ssh df -h)" ;;
     clock) echo "ops: the VM's clock is off and its time sync did not fix it (sudo fff-vm ssh timedatectl)" ;;
     loop) echo "ops: sudo fff-vm ssh sudo fffctl logs; the last update may need sudo fffctl rollback" ;;
@@ -544,6 +544,8 @@ pl_e2e() {
   done <<<"$ips"
   [ "$vm" = 0 ] || after=$(pl_ingress_count)
   pl_e2e_inside "$vm" "$before" "$after" "$good" "$((n - good))"
+  pl_portal_lag
+  [ -z "$SLOW_LINE" ] || INSIDE_A="$SLOW_LINE; $INSIDE_A"
   log "path L9 evidence: $(pl_clean "$INSIDE_A${INSIDE_B:+; $INSIDE_B}" 2000)"
   fails=$(($(sget L9_fails 0) + 1))
   pl_e2e_repair "$fails" "$dns"
@@ -551,6 +553,25 @@ pl_e2e() {
   # The portal shows 700 characters: the decisive parts first, tailscaled's last line at the end (cut first).
   pl_set 9 fail "$ev; $good of $n Funnel server address(es) from DNS answer$([ -n "$bad" ] && echo ", failing:${bad}"); $INSIDE_A$note${INSIDE_B:+; $INSIDE_B}" 700
   return 1
+}
+
+# pl_portal_lag: the portal's own worst event-loop stall of the last minute (/api/health loopLagMs, w1377), read from this
+# host over the private network with time to spare. SLOW_PORTAL=1 and SLOW_LINE when it reaches the outside probe's 10 s:
+# then the portal, not Funnel, is why the probe timed out. w1420: on 2026-10-16 and 10-17 the portal's event loop stalled
+# 10 to 19 s once a minute for hours, and the probes that landed in a stall timed out (curl 28) through every Funnel server,
+# IPv4 and IPv6 alike (measured from a second network on 10-17 11:34Z); the watch had called it the outside path.
+SLOW_PORTAL="" SLOW_LINE=""
+pl_portal_lag() {
+  local out lag
+  SLOW_PORTAL="" SLOW_LINE=""
+  out=$(curl -fsS -m 30 "http://$NET_VM_IP:$PORTAL_PORT/api/health" 2>/dev/null) || return 0
+  lag=$(jq -r '.loopLagMs // empty' 2>/dev/null <<<"$out" || true)
+  [[ ${lag:-x} =~ ^[0-9]+$ ]] || return 0
+  if [ "$lag" -ge 10000 ]; then
+    SLOW_PORTAL=1
+    SLOW_LINE="the portal itself answers too slowly: its event loop stalled $((lag / 1000)) s in the last minute (loopLagMs $lag, portal_logs: event loop: blocked), longer than the probe's 10 s; not Funnel"
+  fi
+  return 0
 }
 
 # pl_ingress_count: tailscaled's peerapi_ingress counter (one per Funnel connection that reaches the node), or nothing.
@@ -633,6 +654,7 @@ pl_e2e_repair() {
   # logged "http: proxy error: context canceled". Neither repair helps that, and a tailscaled restart cuts every tailnet
   # connection (w1420).
   [ "$INSIDE_REACHED" != 1 ] || return 0
+  [ "$SLOW_PORTAL" != 1 ] || return 0
   if [ "$fails" -ge "$PW_FUNNEL_REPUBLISH_AFTER" ] && [ -z "$(sget L9_republished)" ] && [ $(($(now) - $(sget funnel_republish_at 0))) -ge 1800 ]; then
     state_set L9_republished 1
     state_set funnel_republish_at "$(now)"

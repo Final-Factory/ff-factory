@@ -655,7 +655,16 @@ passes, and other reports there name the same two server addresses (199.38.181.5
 status page lists no incident from 10-10 to 10-17. Its workarounds there: send the registration again (`tailscale funnel
 reset` and the config back) or restart the client; layer 9 now does both, and says in its line whether the failing
 requests reached tailscaled (`peerapi_ingress`) and what tailscaled logged about its control connection; it skips both
-repairs when the requests reached tailscaled, since then the portal is the slow one. To check an outage afterwards:
+repairs when the requests reached tailscaled, since then the portal is the slow one, and when the portal's own
+`/api/health` says its event loop stalled 10 s or more in the last minute (`loopLagMs`).
+
+**2026-10-17 11:30Z (05:30 MT), curl 28, the two IPv6 addresses failing:** the portal again *(measured)*. It logged
+`event loop: blocked for` 10 to 16 s about once a minute from 09:41Z, 15 to 19 s from 11:27Z; probes from beast, another
+network, at 11:34:37Z timed out through all four addresses, IPv4 and IPv6 alike, after TLS had completed in 0.3 s, and all
+four took 7 s at 11:35:40Z. Which addresses fail in the watch's line is only which of its sequential probes landed in a
+stall *(a guess at the mechanism; that IPv6 is not the cause is measured)*. The watch on the FFBox host still ran the
+pre-#415 script then (its line had no curl codes and no `peerapi_ingress`). The stalls themselves are the portal's to
+fix (a once-a-minute job, by their timing; not found yet). To check an outage afterwards:
 `portal_logs` source `tailscaled` around its time (`dial plan`, `PollNetMap`, `LinkChange`, `proxy error`), and source
 `portal` for `event loop: blocked`.
 

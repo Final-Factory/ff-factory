@@ -74,7 +74,7 @@ case "$url" in
     if [ -n "$data" ] || [ -n "$title" ]; then echo "$title|$prio|$data" >>"$D/alerts"; exit 0; fi
     reply ntfy-health ;;
   https://login.tailscale.com/) exit "$(cat "$L/login.rc")" ;;
-  http://10.213.41.10:8790/api/health) [ ! -e "$D/portal_down" ] || exit 7; echo '{"ok":true}' ;;
+  http://10.213.41.10:8790/api/health) [ ! -e "$D/portal_down" ] || exit 7; if [ -f "$L/portal-health.out" ]; then cat "$L/portal-health.out"; else echo '{"ok":true}'; fi ;;
   https://fff.example-tailnet.ts.net/api/health)
     if [ -n "$resolve" ]; then
       ip=${resolve##*:443:}; ip=${ip#[}; ip=${ip%]}
@@ -641,6 +641,19 @@ said "peerapi_ingress 120→123 across 3 probe(s): the failing requests reached 
 pass 11
 [ "$(calls 'tailscale funnel reset')" = 0 ] && [ "$(calls 'systemctl restart tailscaled')" = 0 ] || fail "L9: a Funnel repair for requests that reached tailscaled (the portal is the slow one)"
 ok "end to end: requests that reach tailscaled and fail there are told from requests that never arrive, and get no Funnel repair"
+scen e2e-timeout portal-slow
+pass 12
+said "the portal itself answers too slowly: its event loop stalled 16 s in the last minute (loopLagMs 16300"
+[ "$(calls 'tailscale funnel reset')" = 0 ] && [ "$(calls 'systemctl restart tailscaled')" = 0 ] || fail "L9: a Funnel repair while the portal itself stalls"
+is 1 ok
+no_vm_reset
+ok "end to end: a portal whose event loop stalls past the probe's 10 s (loopLagMs) is named as the cause, and gets no Funnel repair (w1420, 2026-10-17 11:30Z)"
+scen funnel-lost
+printf '{"ok":true,"loopLagMs":900}\n' >"$FAKE_DIR/live/portal-health.out"
+pass 3
+[ "$(calls 'tailscale funnel reset')" = 1 ] || fail "L9: a short stall held back the Funnel repair"
+never_said "the portal itself answers too slowly"
+ok "end to end: a short stall (under the probe's 10 s) does not hold back the Funnel repair"
 scen funnel-lost
 pass
 said "curl exit 35"

@@ -100,7 +100,7 @@
       "repair": "",
       "since": "2026-10-07T18:30:00Z",
       "verdict": "fail",
-      "who": "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after 3 failing passes and restarts tailscaled after 10. When they reached it: the portal answers too slowly (portal_logs: event loop: blocked, fff-health restarts). Still down: ops, portal_logs source tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times"
+      "who": "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after 3 failing passes and restarts tailscaled after 10. When the line says the portal answers too slowly, or the requests reached tailscaled: the portal's own stalls (portal_logs source portal: event loop: blocked), no Funnel repair runs. Still down: ops, portal_logs source tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times"
     },
     {
       "checkedAt": "2026-10-07T18:30:00Z",
@@ -173,7 +173,7 @@
       "repair": "",
       "since": "2026-10-07T18:30:00Z",
       "verdict": "fail",
-      "who": "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after 3 failing passes and restarts tailscaled after 10. When they reached it: the portal answers too slowly (portal_logs: event loop: blocked, fff-health restarts). Still down: ops, portal_logs source tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times"
+      "who": "Tailscale's side when the failing requests did not reach tailscaled (tailscale/tailscale#21114): the watch sends the Funnel registration again after 3 failing passes and restarts tailscaled after 10. When the line says the portal answers too slowly, or the requests reached tailscaled: the portal's own stalls (portal_logs source portal: event loop: blocked), no Funnel repair runs. Still down: ops, portal_logs source tailscaled, and for that issue sudo fff-vm ssh sudo tailscale bugreport with the times"
     }
   ],
   "schema": 1,
