@@ -1265,16 +1265,46 @@ select.input {
 /* The collapsed footer's plan line: which plan is in use and how many are spent, in words. */
 .plan-line {
   flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--s-3);
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.plan-line > * {
+  white-space: nowrap;
+}
+
+.pf-lead {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.pf-label {
+  margin-right: 0.35em;
 }
 
 .plan-name {
-  display: inline-block;
-  max-width: 11em;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: bottom;
   color: var(--text);
+  font-weight: 600;
+}
+
+.pf-use {
+  flex: none;
+  margin-left: 0.35em;
+}
+
+.pf-nums {
+  font-weight: 600;
+}
+
+.pf-spent {
   font-weight: 600;
 }
 

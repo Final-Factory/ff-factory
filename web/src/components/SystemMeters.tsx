@@ -261,35 +261,37 @@ function PlanSummary({ rows, now }: { rows: PlanRow[]; now: number }) {
   const spent = rows.filter((r) => r.spentUntil !== undefined);
   const first = using[0];
   const u = first?.a.usage?.available ? first.a.usage : undefined;
-  const Pct = ({ m }: { m?: UsageMeter }) => (m ? <b className={`lvl-${level(m.percent)}`}>{Math.round(m.percent)}%</b> : <b className="lvl-warn">?</b>);
+  const pct = (m?: UsageMeter) => (m ? `${Math.round(m.percent)}%` : '?');
   const back = spent.map((r) => r.spentUntil!).filter(Boolean).sort((x, y) => Date.parse(x) - Date.parse(y))[0];
+  // Pieces that wrap whole, with a gap between and no separator character: a narrow footer breaks between them, never inside one
+  // and never leaves a dot at a line's end. The numbers read and colour as the open sheet's line does.
   return (
     <span className="plan-line" data-testid="plan-glance" title={rows.map((r) => r.line).join('\n')}>
-      {/* Three pieces that wrap whole, so a narrow footer breaks between them, never inside one. */}
-      <span className="nowrap">
-        Plans{' '}
+      <span className="pf-lead">
+        <span className="pf-label">Plans</span>{' '}
         {first ? (
           <>
-            <span className="plan-name" title={first.name}>{first.name}</span> in use{using.length > 1 && <span className="plan-more"> +{using.length - 1}</span>}
+            <span className="plan-name" title={first.name}>{first.name}</span>
+            <span className="pf-use"> in use{using.length > 1 ? ` +${using.length - 1}` : ''}</span>
           </>
         ) : (
-          'none in use'
+          <span className="pf-use">none in use</span>
         )}
-        {' ·'}
       </span>{' '}
-      {u && (
+      {first && u && (
         <>
-          <span className="nowrap">
-            5h <Pct m={u.session} /> · week <Pct m={u.weekly} /> ·
+          <span className={`pf-nums pl-${planTone(first)}`}>
+            <span className="pn-full">{`weekly ${pct(u.weekly)}, session ${pct(u.session)}`}</span>
+            <span className="pn-short" aria-hidden>{`week ${pct(u.weekly)}, 5h ${pct(u.session)}`}</span>
           </span>{' '}
         </>
       )}
       {spent.length === rows.length ? (
-        <b className="lvl-crit nowrap">all {rows.length} spent{back ? `, first back ${localTime(back, now)}` : ''}</b>
+        <b className="lvl-crit pf-spent">all {rows.length} spent{back ? `, first back ${localTime(back, now)}` : ''}</b>
       ) : spent.length ? (
-        <b className="lvl-crit nowrap">{spent.length} of {rows.length} spent</b>
+        <b className="lvl-crit pf-spent">{spent.length} of {rows.length} spent</b>
       ) : (
-        <span className="nowrap">none spent</span>
+        <span className="pf-spent">none spent</span>
       )}
     </span>
   );

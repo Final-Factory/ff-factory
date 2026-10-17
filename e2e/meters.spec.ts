@@ -148,7 +148,7 @@ test('meters: every machine gets a cell with three bars, in the footprint of the
   await expect(foot.getByTestId('mcell-m5')).toHaveAttribute('title', /CPU 64%\nRAM 53% \(34\.0 GB of 64\.0 GB\), pressure normal\nGPU 71% busy/);
   await expect(foot.getByTestId('mcell-BEAST')).toHaveAttribute('aria-label', /VRAM 45%/);
   // The plan cell (w1389): in words, the plan agents run on now with its two windows, and how many are spent.
-  await expect(foot.getByTestId('plan-glance')).toHaveText('Plans host token in use · 5h 12% · week 98% · none spent');
+  await expect(foot.getByTestId('plan-glance')).toHaveText(footerLine('host token', '98%', '12%', 'none spent'), { useInnerText: true });
   await expect(foot.getByTestId('plan-glance')).toHaveAttribute('title', 'host token: in use, 5h 12%, weekly 98%\nowner: free, weekly 23%');
   // The computers fit one text line, as the host alone had with its editor and agent counts before w510 (52 px measured
   // at this size with two lines), and the plan line in words takes at most two more here (w1389: 68 px measured at the
@@ -250,6 +250,10 @@ const planLine = (name: string, weekly: string, session: string) => {
   return new RegExp(`^${esc(name)}\\s+-\\s+(weekly ${esc(weekly)}, session ${esc(session)}|week ${esc(weekly)}, 5h ${esc(session)})$`);
 };
 
+/** The footer's plan line: "Plans name in use  weekly 98%, session 12%  1 of 3 spent" (week/5h in a narrow footer), its pieces on one line or several. */
+const footerLine = (name: string, weekly: string, session: string, spent: string) =>
+  new RegExp(`^Plans\\s+${name}\\s+in use\\s+(weekly ${weekly}, session ${session}|week ${weekly}, 5h ${session})\\s+${spent}$`);
+
 const plans = (foot: Locator) => foot.getByTestId('plans-table');
 
 test('meters (w785): a vault token is one row under its vault name, the Claude account email on its subtext; none recorded shows no subtext', async ({ page }) => {
@@ -295,7 +299,7 @@ test('meters (w1389): the footer says which plan is in use and how many are spen
   };
   const foot = await fixedWorld(page, 'machines', [spent]);
   // Three plans, one in use (the host token has agents on it), one spent (weekly full).
-  await expect(foot.getByTestId('plan-glance')).toHaveText('Plans host token in use · 5h 12% · week 98% · 1 of 3 spent');
+  await expect(foot.getByTestId('plan-glance')).toHaveText(footerLine('host token', '98%', '12%', '1 of 3 spent'), { useInnerText: true });
   await expect(foot.getByTestId('plan-glance')).toHaveAttribute('title', /ben-1: spent until .*, 5h 40%, weekly 100%/);
   // One text line for the plans, not a cell per account: the footer stays at its two lines.
   await expect(foot.locator('.plan-chip, .plan-chips')).toHaveCount(0);
