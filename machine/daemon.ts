@@ -45,6 +45,7 @@ import { UnityReaper, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import type { SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
+import { installPrShim } from './prFlow.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
@@ -771,6 +772,8 @@ export class Daemon {
       this.slotBin = installShims(this.slots.dir);
       // ff-leftovers (w1197): a worker lists and ends what it started before DONE or a stop.
       installLeftoversShim(this.slotBin, undefined, undefined, undefined, cleanupFactsFile(appDirOfConfig(this.cfg)));
+      // ff-pr (w1478): a worker's push, PR, landed check and merge on green, one command each.
+      installPrShim(this.slotBin);
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
     }
