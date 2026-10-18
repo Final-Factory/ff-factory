@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
 import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, SessionInfo, StandingAgent, TranscriptEvent, WorkItem } from '../shared/types.ts';
+import { meterStates, type MeterStates } from './meterStates.ts';
 
 /** Everything the UI hears about goes through here and out the WebSocket. */
 export const bus = new EventEmitter<{ event: [ServerEvent] }>();
@@ -110,6 +111,8 @@ export class Store {
   private readonly workFile: SnapshotFile;
   private readonly transcriptDir: string;
   private readonly uploadDir: string;
+  /** The context meter's tally per conversation, for the next process of the portal's own sessions (w1484). */
+  readonly meters: MeterStates;
   private readonly seqs = new Map<string, number>();
   /** Transcripts whose last line this process has checked is complete (see appendLine). */
   private readonly tailChecked = new Set<string>();
@@ -119,6 +122,7 @@ export class Store {
     const workFile = path.join(dataDir, 'work.json');
     this.transcriptDir = path.join(dataDir, 'transcripts');
     this.uploadDir = path.join(dataDir, 'uploads');
+    this.meters = meterStates(path.join(dataDir, 'meters'));
     fs.mkdirSync(this.transcriptDir, { recursive: true });
     this.stateFile = new SnapshotFile(file, () => JSON.stringify(this.persisted(), null, 2), { ...STATE_SAVE, label: 'state' });
     this.workFile = new SnapshotFile(workFile, () => JSON.stringify({ seq: this.workSeq, items: [...this.work.values()] }, null, 2), { ...WORK_SAVE, label: 'work ledger' });
