@@ -27,6 +27,7 @@ import { agentState, holdsSandbox, HOLD_PLACE_MS, OVERDUE_MS, utcTime } from '..
 export { HOLD_PLACE_MS };
 import type { Machine, MachineSandbox, SessionInfo } from '../shared/types.ts';
 import type { SaveResult } from './saveWork.ts';
+import { unityInstanceName } from '../shared/unityInstance.ts';
 
 /**
  * A stopped worker's check-in further away than this releases its sandbox. Moving it costs a few minutes when it comes
@@ -277,7 +278,7 @@ export function movedNote(m: Pick<Machine, 'id'>, from: NonNullable<SessionInfo[
     const where = from.sandbox === to.id ? `You resume in it again, beside the agent that works there now` : `You resume in sandbox ${m.id}/${to.id} (\`${to.path}\`), beside the agent that works there`;
     return `[moved] While you were stopped your sandbox ${m.id}/${from.sandbox} went to other work (it was released because ${from.why}). Your work is not the game's, so it needs only an agent seat, not a free sandbox (w1098). ${where}. Its game tree is that agent's, on its own branch: do not edit, commit, stash, switch branches or start Unity there. Work in your own clone in your temp folder, as before; your game branch \`${branch}\` is untouched. Then carry on.`;
   }
-  return `[moved] While you were stopped your sandbox ${m.id}/${from.sandbox} went to other work (it was released because ${from.why}). You work in sandbox ${m.id}/${to.id} now: \`${to.path}\`, on your branch \`${branch}\`, checked out here with all its commits. Work only in this folder from now on; \`${from.path}\` is another worker's. Your Unity editor is this sandbox's (\`${to.id}@<hash>\`): read mcpforunity://instances and set_active_instance again before any Unity call; its first start here recompiles what differs. Then carry on.`;
+  return `[moved] While you were stopped your sandbox ${m.id}/${from.sandbox} went to other work (it was released because ${from.why}). You work in sandbox ${m.id}/${to.id} now: \`${to.path}\`, on your branch \`${branch}\`, checked out here with all its commits. Work only in this folder from now on; \`${from.path}\` is another worker's. Your Unity editor is this sandbox's (\`${unityInstanceName(to.path)}\`): set_active_instance again with that name before any Unity call; its first start here recompiles what differs. Then carry on.`;
 }
 
 export interface PlaceAgainDeps {

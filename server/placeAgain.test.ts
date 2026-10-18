@@ -174,7 +174,7 @@ test('place again (w640): waiting resumes claim the free sandboxes before new wo
   const note = movedNote({ id: 'pc' }, { sandbox: 'slot1', path: 'D:\\ffsb\\slot1', at: iso(NOW), why: 'its check-in is 9.0 h away', branch: 'feature/a1' }, { id: 'slot2', path: 'D:\\ffsb\\slot2' });
   assert.match(note, /^\[moved\] While you were stopped your sandbox pc\/slot1 went to other work/);
   assert.match(note, /You work in sandbox pc\/slot2 now: `D:\\ffsb\\slot2`, on your branch `feature\/a1`/);
-  assert.match(note, /set_active_instance again/);
+  assert.match(note, /`slot2@[0-9a-f]{8}`\): set_active_instance again with that name/);
   // A sandbox still on a released worker's branch must be switched before new work starts there.
   const left = sandbox('slot1', { sessionIds: ['a1'] }, { branch: 'feature/a1' });
   assert.equal(releasedOn(left, [w1], () => false)?.id, 'a1');

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { createSdkMcpServer, tool, tool as sdkTool, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { unityInstanceName } from '../shared/unityInstance.ts';
 import { FFBOX_LOGS, describeConfig, describeLogs, describeQuery, ffboxLogsArgs, type ProviderManager } from './providers.ts';
 import { describeReports, fetchFfboxReport, ffboxReportsArgs, type FetchedReport } from './ffboxReports.ts';
 import { describeThreadFiles, fetchThreadFiles, parseDiscordThread, type FetchedThreadFiles } from './ffboxThreadFiles.ts';
@@ -279,6 +280,19 @@ You run in bypass mode: a Bash or PowerShell command asks nobody, except when Cl
 - Put multi-step test logic (a function, a retry loop, several legs) in a script file in $TMPDIR, written with the Write tool, and run it: \`bash "$TMPDIR/leg.sh" 1920\`. It never asks, and you can run it again.
 - Back up and restore the game's settings and saves around a test with the game repo's \`python scripts/game_data.py\` (\`snapshot\`, \`restore\`, \`run --name <leg> -- <command>\`, then \`get <key> --name <leg> --after\`), not a \`cp\` loop into LocalLow. It writes only the game's two settings files and the saves you name, and keeps its copies in $TMPDIR. A branch older than it: \`git show origin/master:scripts/game_data.py > "$TMPDIR/game_data.py"\`.
 - Never delete in $TMPDIR to reuse a folder: a new \`$TMPDIR/<leg>-<timestamp>\` per leg (Disk space above). If a delete does end up in a longer command, the session answers it itself only when its every path is written out under $TMPDIR.`;
+
+/**
+ * Fewer model calls (w1478; lothsahn, 2026-10-18: "why are there 200 calls at all?"). Measured with
+ * scripts/worker-calls.ts on 81 beast worker sessions of 2026-10-15..18 (docs/spend.md, "Model calls per session"): 249
+ * main-thread calls a session at 345k context each, 9.9% of them with more than one tool, 11.8% in runs of five or more
+ * read-only calls, 7.7% waits or polls that came back in under 30 s, 83 sleeps Claude Code refused.
+ */
+export const FEWER_CALLS = `## Fewer model calls
+Every tool step is a model call that re-reads your whole context (w1478 measured 249 calls a worker session at about 345k tokens each), so each call saved is spend saved:
+- Independent reads, searches and commands go in one turn as parallel tool calls; a grep and the \`sed -n\` of the lines it finds are one shell command.
+- A search you expect to take five or more reads (where X is, how Y flows across files) goes to one \`Explore\` or \`ff-agents:scout\` subagent that answers with the conclusion (its calls carry about 105k context, not yours). Read yourself what you will change or must judge.
+- Wait in one call: \`until <done>; do sleep 20; done\` with a Bash timeout of up to 600000, or \`run_in_background\` and its notice; never a sleep-then-look call repeated (7.7% of calls came back in under 30 s), and never a leading \`sleep N; ...\`, which Claude Code refuses. Longer than 10 minutes: wake_me; CI: ff-pr and blocked_on.
+- \`get_test_job\` with \`wait_timeout\` 60, \`refresh_unity\` with \`compile: "request"\` (it waits for the editor by itself).`;
 
 /**
  * Every worker's evidence rule (docs/orchestrators.md, "Evidence and labels"; w208, 2026-10-02). It is the worker's
@@ -1764,7 +1778,7 @@ ${clone ? mainCloneGrantBrief(clone) : `- Protected: the machine's main clone \`
 - Tools: ${deferredToolsLine('worker', 'Your FF Factory tools (mcp__machine__*) are')}
 
 ## Unity
-Your sandbox has its own Unity editor, managed by the FF Factory daemon on this ${mac}. Use \`mcp__machine__unity\` to check its state, start, stop or restart it (force: true for a frozen one). Every Unity process on this ${mac} counts toward its limit of ${poolSettingsOf(m)?.maxUnity ?? 2} editors, whoever started it, and a start is refused while it is full or while launches wait ahead of yours (the refusal says who holds them; wake_me and try again). Run every other Unity launch (a -batchmode build or test run, a second editor for a peer run) under \`unity-slot run [--count N] [--label "<what>"] -- <command>\`: it waits its turn in this ${mac}'s queue, runs the command and frees the slot when it ends; a peer run asks for all its editors at once (\`--count 2\`). \`unity-slot status\` shows who holds and who waits. The game repo's own build and audit scripts take their slot themselves. Restart it whenever it is hung, crashed or misbehaving, without asking. Use the tool, never taskkill or kill: other sandboxes' editors share this ${mac}, so the harness refuses killing Unity by hand. A watch restarts a hung or crashed editor by itself and messages you. A \`-batchmode\` build that holds a slot long after its owner is gone, or without progress, is ended by the daemon by itself within minutes; if a start is refused for one, \`mcp__machine__unity\` action \`clear_batch\` asks for that check at once and names the build and why it stays when it is still healthy. The first boot of a fresh sandbox can take many minutes (asset import); its log is \`Logs/sandbox-editor.log\` in the worktree (or the newest \`Logs/sandbox-editor-<time>.log\`). Your editor's MCP instance is named \`${sb.id}@<hash>\`: before ANY Unity MCP call, read \`mcpforunity://instances\` and \`set_active_instance\` with that full Name@hash. The harness refuses Unity MCP calls until you pin, and refuses any other instance.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like D:\\... (forward slashes work in Bash and in git).' : ''}
+Your sandbox has its own Unity editor, managed by the FF Factory daemon on this ${mac}. Use \`mcp__machine__unity\` to check its state, start, stop or restart it (force: true for a frozen one). Every Unity process on this ${mac} counts toward its limit of ${poolSettingsOf(m)?.maxUnity ?? 2} editors, whoever started it, and a start is refused while it is full or while launches wait ahead of yours (the refusal says who holds them; wake_me and try again). Run every other Unity launch (a -batchmode build or test run, a second editor for a peer run) under \`unity-slot run [--count N] [--label "<what>"] -- <command>\`: it waits its turn in this ${mac}'s queue, runs the command and frees the slot when it ends; a peer run asks for all its editors at once (\`--count 2\`). \`unity-slot status\` shows who holds and who waits. The game repo's own build and audit scripts take their slot themselves. Restart it whenever it is hung, crashed or misbehaving, without asking. Use the tool, never taskkill or kill: other sandboxes' editors share this ${mac}, so the harness refuses killing Unity by hand. A watch restarts a hung or crashed editor by itself and messages you. A \`-batchmode\` build that holds a slot long after its owner is gone, or without progress, is ended by the daemon by itself within minutes; if a start is refused for one, \`mcp__machine__unity\` action \`clear_batch\` asks for that check at once and names the build and why it stays when it is still healthy. The first boot of a fresh sandbox can take many minutes (asset import); its log is \`Logs/sandbox-editor.log\` in the worktree (or the newest \`Logs/sandbox-editor-<time>.log\`). Your editor's MCP instance is \`${unityInstanceName(sb.path)}\`: before ANY Unity MCP call, \`set_active_instance\` with it, in one call (no \`mcpforunity://instances\` read needed; read it only if the pin is refused, and pin the \`${sb.id}@\` whose path is your worktree). The harness refuses Unity MCP calls until you pin, and refuses any other instance.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like D:\\... (forward slashes work in Bash and in git).' : ''}
 
 ## Waiting on a person
 When only a person can move you on (they must reboot or log in to a computer, decide, approve, hand over a secret), call \`mcp__machine__waiting_on_person\` with who and what, then end your turn with a report that names them and the action, and a \`wNNN: still open: waiting on <Name> to <do what>\` line. The ledger then shows your request Waiting on input (on that person). Never poll for a person with \`wake_me\`: a pending check-in shows the request as Working, and nobody is (w665 showed Working for 10 hours while it waited for a reboot). A check-in is for machines and jobs: CI, a build, an import. You may also set one as a fallback; the state stays Waiting on input. Your next message ends the declaration, so declare again if a person is still needed.
@@ -1799,6 +1813,8 @@ ${DISK_HYGIENE}
 ${PROCESS_HYGIENE}
 
 ${SHELL_STEPS}
+
+${FEWER_CALLS}
 
 ## Reporting
 End every turn with a short plain-language summary: what you did, what is left, and anything you need from the user. If you are blocked, say so plainly instead of guessing. ${REPORT_LABELS}
