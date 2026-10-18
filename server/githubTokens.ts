@@ -268,6 +268,17 @@ export class GithubTokens {
     return s.env.GH_TOKEN;
   }
 
+  /**
+   * The vault GitHub entry `person`'s runs on `machineId` would get, by name and last four ("vault-ben-github …abcd"), or
+   * undefined (the machine's own gh login): what placement and the worker's brief say of workflow pushes there (w1463).
+   * Never the token, and nothing is noted as a use.
+   */
+  entryFor(machineId: string, person: string | undefined): string | undefined {
+    if (!githubFromVault(this.o.cfg, machineId)) return undefined;
+    const g = this.o.vault()?.forRun({ machineId, role: 'workers', userId: person ?? this.o.payer?.() }, { claude: false, github: true, githubUsable: this.usable }).github;
+    return g ? `${g.name} …${g.last4}` : undefined;
+  }
+
   start() {
     void this.tick();
     this.timer = setInterval(() => void this.tick(), 5 * 60_000);

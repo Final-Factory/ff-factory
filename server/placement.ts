@@ -39,6 +39,14 @@ export interface Computer {
    * Factory, FFBox, the plugin) takes; undefined when unknown, which counts as a seat.
    */
   agentSeats?: number;
+  /**
+   * Whether work placed here may push a change to .github/workflows (w1463): its machine's gh login has the `workflow` scope
+   * (true), lacks it (false), or nobody knows (undefined: no report, or a fine-grained login). For one person's work, a vault
+   * GitHub token given there (machines.githubFromVault, docs/vault.md section 13) counts as true.
+   */
+  workflows?: boolean;
+  /** Its gh login as the notes name it ("bryding (gist, read:org, repo)"; shared/ghLogin.ts ghLoginLabel). */
+  gh?: string;
 }
 
 /** config placement (w428): computers to try first, in order, and computers to keep work off, with why. */
@@ -204,7 +212,17 @@ function spread(open: Computer[], last: string | undefined, kind: NeedKind): { p
  * (prefs.hold, w1089) is never picked. `kind`: game work needs a game sandbox and an editor's worth of RAM, other work
  * (w1098) only an agent slot; both go through hasRoomFor.
  */
-export function pickComputer(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, kind: NeedKind = 'game'): { pick: Computer; why: string } | undefined {
+export function pickComputer(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, kind: NeedKind = 'game', workflows = false): { pick: Computer; why: string } | undefined {
+  if (workflows) {
+    // Work that changes .github/workflows (w1463): first among the computers whose gh may push it, then as any other work.
+    const able = places.filter((p) => p.workflows === true);
+    const p = pickComputer(able, last, prefs, kind);
+    if (p) return { pick: p.pick, why: `its gh token may push .github/workflows (w1463); ${p.why}` };
+    const rest = pickComputer(places, last, prefs, kind);
+    if (!rest) return undefined;
+    const none = able.length ? `every computer whose gh may push .github/workflows (${able.map((x) => x.id).join(', ')}) is busy or held` : 'no computer reports a gh token with the workflow scope';
+    return { pick: rest.pick, why: `${none}, so its workflow push must go from elsewhere; ${rest.why}` };
+  }
   const hold = holdOf(prefs);
   const open = places.filter((p) => hasRoomFor(p, kind) && !hold.has(p.id));
   if (!open.length) return undefined;
@@ -260,6 +278,18 @@ export function nonGameLine(places: readonly Computer[], last?: string, prefs: P
   return `Next non-game work (needs only an agent slot, no editor, no free game sandbox): ${p.pick.id} (${p.why}).`;
 }
 
+/**
+ * Where the next piece of work that changes .github/workflows goes (w1463: four pushes of a workflow file were refused for a
+ * machine's gh token without the `workflow` scope), and each computer's gh login; undefined when no daemon reported one yet.
+ * Such work needs no editor, so it is placed by agent slot; a game request that also changes a workflow file is noted at start_agent.
+ */
+export function workflowLine(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
+  if (!places.some((p) => p.gh)) return undefined;
+  const p = pickComputer(places, last, prefs, 'agent', true);
+  const each = places.map((x) => `${x.id} ${x.gh ?? 'not reported'}: ${x.workflows === true ? 'yes' : x.workflows === false ? 'no' : 'unknown'}`).join('; ');
+  return `Next work that changes .github/workflows (its push needs a gh token with the workflow scope, w1463): ${p ? `${p.pick.id} (${p.why})` : 'no computer has an agent slot now'}. Each computer's gh login may push it: ${each}. A person's vault GitHub token, where machines.githubFromVault is on, takes the login's place for their work.`;
+}
+
 /** The capacity block list_sandboxes and system_status start with: one line per computer, then where the next goes. */
 export function capacityLines(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string[] {
   if (!places.length) return [];
@@ -276,7 +306,8 @@ export function capacityLines(places: readonly Computer[], last?: string, prefs:
   });
   const next = preferLine(places, last, prefs);
   const how = prefer.length || avoid.size || hold.size ? `placement.prefer first, avoided last${hold.size ? ', held never' : ''}, the rest spread by room` : 'game-repo work is spread by room';
-  return [`## Capacity (${how}; docs/machines.md, "Placing work")`, ...lines, ...(next ? [next] : []), nonGameLine(places, last, prefs)];
+  const wf = workflowLine(places, last, prefs);
+  return [`## Capacity (${how}; docs/machines.md, "Placing work")`, ...lines, ...(next ? [next] : []), nonGameLine(places, last, prefs), ...(wf ? [wf] : [])];
 }
 
 /**
@@ -291,10 +322,16 @@ export const pinnedWork = (reviewRoot?: string) =>
  * or undefined. A soft hint: the work may need this computer (pinnedWork), and a worker
  * going on in its own sandbox stays there.
  */
-export function placementHint(target: string, places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, reviewRoot?: string, kind: NeedKind = 'game'): string | undefined {
+export function placementHint(target: string, places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, reviewRoot?: string, kind: NeedKind = 'game', workflows = false): string | undefined {
   const here = places.find((p) => p.id === target);
   if (!here) return undefined;
-  const p = pickComputer(places, last, prefs, kind);
+  const p = pickComputer(places, last, prefs, kind, workflows);
+  // Work that changes .github/workflows on a computer whose gh may not push it (w1463): said even when nothing better has room.
+  if (workflows && here.workflows !== true) {
+    const lacks = here.workflows === false ? 'lacks the workflow scope, so GitHub will refuse its push of a workflow file' : 'may not be able to push a workflow file (its scopes are unknown)';
+    const better = p && p.pick.id !== target && p.pick.workflows === true ? `; ${p.pick.id}'s gh may push it (${p.pick.gh ?? '?'}; ${p.why}): put this work there unless it needs ${target}` : '; no computer whose gh may push it has room now: the worker pushes the rest and hands the workflow file on (its brief says so)';
+    return ` Note: this work changes .github/workflows, and ${target}'s gh token (${here.gh ?? 'not reported yet'}) ${lacks}${better}.`;
+  }
   if (!p || p.pick.id === target) return undefined;
   const avoided = avoidOf(prefs).get(target);
   const held = holdOf(prefs).get(target);

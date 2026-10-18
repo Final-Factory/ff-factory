@@ -22,6 +22,7 @@ import { ownersOf, resumableSessions, type SessionOwner } from './resumable.ts';
 import { movedNote, savedNote } from './placeAgain.ts';
 import { safeImage } from './images.ts';
 import { hostStartFailed } from '../shared/agentState.ts';
+import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
 import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
@@ -1980,6 +1981,15 @@ export class MachineManager {
       case 'live_state':
         this.onLiveState?.(id, msg);
         return;
+      case 'gh_login': {
+        // Names only (w1463): sanitizeGhLogin keeps an account, scope names and a source, so nothing else a daemon sends lands here.
+        const gh = sanitizeGhLogin(msg.gh);
+        if (!gh) return;
+        const was = m.gh ? ghLoginLabel(m.gh) : undefined;
+        this.update(id, { gh });
+        if (ghLoginLabel(gh) !== was) console.log(`machine ${id}: gh login ${ghLoginLabel(gh)}`);
+        return;
+      }
       case 'save_result': {
         const p = this.saveCalls.get(msg.id);
         if (!p) return;

@@ -6,6 +6,7 @@ import type { AccountIdentity } from './usage.ts';
 import type { StaleContext } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
+import type { GhLogin } from '../shared/ghLogin.ts';
 import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
@@ -33,6 +34,7 @@ import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, I
  * ignores, and `transcribe`/`voice_warm`, which the portal sends only to a daemon that offered it.
  * Also (w656, no bump): `saveWork` in the hello and `save_work`, sent only to a daemon that offered it, answered by
  * `save_result`, which an older portal never asks for and drops.
+ * Also (w1463, no bump): `gh_login`, the machine's gh account and scope names, which an older portal drops.
  */
 export const PROTOCOL_VERSION = 9;
 
@@ -272,5 +274,10 @@ export type FromDaemon =
   | { type: 'transcribe_result'; id: string; ok: boolean; error?: string; text?: string; audioSeconds?: number; seconds?: number; model?: string; device?: string; loadSeconds?: number }
   /** The answer to a `live` (w1398): the command's result text (JSON for look.material.list), or why not. */
   | { type: 'live_result'; id: string; ok: boolean; text: string }
+  /**
+   * The machine's own gh login (w1463, machine/ghLogin.ts): the account and its token's scope names, never the token. After
+   * each reading (at start, every 30 minutes, when gh's hosts file changes) and after each hello. An older portal drops it.
+   */
+  | { type: 'gh_login'; gh: GhLogin }
   /** A live view's state when it changes (w1398): live, holding (detail says why), stopped. An older portal drops it. */
   | { type: 'live_state'; liveId: string; state: 'starting' | 'live' | 'holding' | 'stopped'; detail: string; frames: number };

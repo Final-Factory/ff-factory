@@ -1050,7 +1050,10 @@ Nothing to install. The token reaches a worker in its launch spec (`spec.env.GH_
 `switch` or `save_work` message, over the authenticated daemon link, as Claude tokens do (section 3): never on disk, never
 in chat, redacted from transcripts and logs by pattern and by value (`addSecretValues`, the daemon learns a pushed one before
 use). A daemon from before w868 ignores `githubToken` and pushes on its own login; its workers get the token anyway (the
-spec is old). Keep each machine's own gh login: the fallback, and the daemon's own fetches (13.1).
+spec is old). Keep each machine's own gh login: the fallback, and the daemon's own fetches (13.1). Each daemon reports that
+login's account and scope names (w1463, never the token; docs/machines.md, "Work that changes `.github/workflows`"), so
+list_machines, the briefs and placement know which machines may push a workflow file; where this switch is on, a person's
+vault token counts in its place for their work.
 
 ### 13.6 The banner, the vault page and system_status
 
