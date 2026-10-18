@@ -211,6 +211,23 @@ instructions ≈ 7.7k, a prompt snapshot ≈ 6.5k, agent and deferred-tool lists
 
 A category's dollars are its share of the request's measured dollars: the split is an estimate, the sum is not.
 
+### The agent's own output read as base until w1469
+
+The meter takes each call's output tokens from the SDK's `assistant` messages. The CLI sends those as each content block ends,
+with **message_start's usage** (an output of about 1), and writes the real count into them only after the stream's
+`message_delta` (measured in the CLI binary of SDK 0.3.284: `case"message_delta":… for(let tc of pu){tc.message.usage=Da …}`), so
+its own transcript has the real count and the stream never did. The agent's output, thinking included, which every later call
+reads again, was explained by nothing and fell in `base`. Since w1469 `ContextMeter.output` takes the count from the
+`message_delta` stream event (server/sessions.ts, `stream_event`), and `ContextMeter.summary` gives a compaction's summary
+(`compact_boundary` `post_tokens`) its own category; it was base too, every call after a compaction.
+
+How big it was (measured, `scripts/spend-claude.ts` over beast's worker transcripts, 2026-10-15..18, 49 sessions, $1,159 at list prices):
+with the transcripts' real output counts base is 28% and the agent's output 36%; with every call's output set to 1, as the stream
+gave it, base is 60% and output does not appear, which is the portal's reading of the same days (base 59%, spend_report). The
+real base context, the first call of a session less its brief, read again by every call, is 56k tokens a call and 12.7% of
+those days' money (w1469's findings). Turns recorded before the fix keep their categories: their per-call usage is not in the
+portal's transcripts, so they cannot be split again. A window that ends after the deploy is right from the deploy on.
+
 ## Transcripts: how long they are kept
 
 **Seven days after the request closes**, a request that is open keeps them as long as it is open, a reopened request keeps them again.

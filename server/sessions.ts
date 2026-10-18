@@ -591,6 +591,7 @@ export class AgentSession implements SessionHandle {
           if (m.compact_result === 'failed') this.compactFailed(m.compact_error || 'Claude Code gave no reason');
         } else if (m.subtype === 'compact_boundary') {
           const meta = m.compact_metadata;
+          this.meter.summary(meta.post_tokens ?? 0);
           if (meta.trigger === 'manual' && this.compacting) {
             const c = this.compacting;
             this.compacting = undefined;
@@ -628,6 +629,8 @@ export class AgentSession implements SessionHandle {
           emit({ type: 'delta', sessionId: id, text: ev.delta.text });
           this.store.noteActivity?.(id);
         }
+        // The call's real output count: its assistant messages came with message_start's (w1469, ContextMeter.output).
+        else if (ev.type === 'message_delta') this.meter.output(ev.usage?.output_tokens ?? 0);
         return;
       }
       case 'assistant': {

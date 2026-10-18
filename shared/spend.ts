@@ -289,9 +289,29 @@ export class ContextMeter {
   /** The next call's unexplained cache read is a conversation resumed from before this process, not the base context (w1209). */
   private carriedNext = false;
 
+  /** A compaction's summary, in tokens (compact_boundary post_tokens): the call that shows the context shrunk writes it (w1469). */
+  private summaryNext = 0;
+
   /** This process resumed an earlier conversation: its first call reads a context the meter never saw built. */
   carry() {
     if (this.lastCtx === 0) this.carriedNext = true;
+  }
+
+  /**
+   * The current call's final output tokens (the stream's message_delta, w1469). The SDK sends a call's assistant messages as
+   * each content block ends, with message_start's usage (an output of about 1); the CLI puts the real count on them only
+   * afterwards, in its own transcript. Without this the agent's output, thinking included, read again by every later call,
+   * fell in `base`: replayed on beast's 3 days (2026-10-15..18), base read 60% with message_start's count and 28% with the real one.
+   */
+  output(tokens: number) {
+    if (!this.cur || !(tokens > this.cur.out)) return;
+    this.chargeOutput(tokens - this.cur.out, this.cur.model, true);
+    this.cur.out = tokens;
+  }
+
+  /** A compaction finished; its summary holds `tokens` (w1469: it was counted as base, every call after it). */
+  summary(tokens: number) {
+    if (tokens > 0) this.summaryNext = tokens;
   }
 
   /** Text that goes into the context from outside: a message to the agent. */
@@ -355,6 +375,9 @@ export class ContextMeter {
       for (const k of this.readSeen) this.readSeenBeforeCompact.add(k);
       this.readSeen.clear();
       this.held = new Map([['summary', 0]]);
+      // Its summary is new in this call's context (the rest of what it writes is the base, given again).
+      if (this.summaryNext) this.fresh.set('summary', (this.fresh.get('summary') ?? 0) + this.summaryNext * CHARS_PER_TOKEN);
+      this.summaryNext = 0;
     }
     this.lastCtx = ctx;
     const toks = (m: Map<string, number>) => [...m].map(([k, v]) => [k, v / CHARS_PER_TOKEN] as const);

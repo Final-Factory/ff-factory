@@ -930,6 +930,36 @@ test("audit: a coordinator whose session the store no longer holds is still a co
   assert.equal(w.spend.splitOf(w.spend.request('w1')!).coordination.usd, 3);
 });
 
+test("w1469: ContextMeter.output — a call's real output count, after its messages came with message_start's", () => {
+  const m = new ContextMeter();
+  m.call({ id: 'm1', model: 'claude-opus-5-5', in: 1, out: 1, cr: 0, cw: 40_000 });
+  m.call({ id: 'm1', model: 'claude-opus-5-5', in: 1, out: 1, cr: 0, cw: 40_000 });
+  m.output(5_000);
+  m.output(4_000); // never lowers it
+  m.call({ id: 'm2', model: 'claude-opus-5-5', in: 1, out: 1, cr: 40_001, cw: 5_000 });
+  m.output(0);
+  const t = m.drain();
+  assert.equal(t.calls, 2);
+  assert.equal(Math.round(t.cats.assistant.tok), 5_000 + 1 + 5_000, 'the output of both calls, and call 1\'s written into call 2');
+  assert.ok(t.cats.base.tok < 80_010, `base ${t.cats.base.tok}`);
+  m.output(9_999); // no call yet in this turn: nothing to raise
+  assert.deepEqual(m.drain().cats, {});
+});
+
+test('w1469: ContextMeter.summary — a compaction\'s summary is `summary`, not base, in the call after it and every later one', () => {
+  const m = new ContextMeter();
+  m.call({ id: 'm1', in: 1, out: 0, cr: 0, cw: 50_000 });
+  m.call({ id: 'm2', in: 1, out: 0, cr: 50_001, cw: 400_000 });
+  m.drain();
+  m.summary(12_000);
+  m.call({ id: 'm3', in: 1, out: 0, cr: 20_000, cw: 42_000 }); // the base again and the summary
+  m.call({ id: 'm4', in: 1, out: 0, cr: 62_001, cw: 500 });
+  const t = m.drain();
+  assert.equal(t.compacted, true);
+  assert.ok(Math.abs(t.cats.summary.tok - 24_000) < 50, `summary ${t.cats.summary.tok}: written once, read once`);
+  assert.ok(t.cats.base.tok < 100_600, `base ${t.cats.base.tok}`);
+});
+
 test("audit: ContextMeter — a resumed conversation's unexplained cache read is carried over, not base (w1209, w1163's measurement)", () => {
   const read = (resumed: boolean) => {
     const m = new ContextMeter();
