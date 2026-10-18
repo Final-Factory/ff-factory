@@ -305,6 +305,55 @@ compaction at 200k **-44%** of the workers' spend (-37% if what is read again af
 the one before waits alone -22%; both -46%. To check on the pilot: its sessions' cost per call against the rest's, and what they
 re-read after a compaction (`spend_report`, the `summary` and `reread` categories).
 
+## Model calls per session (w1478)
+
+lothsahn, 2026-10-18: "why are there 200 calls at all? Typically you ask a worker to do something and it responds back. Why is
+that not just one call?" Every tool step is a model call: the model has to see a step's result before it picks the next one, and
+each call reads the whole context again. `scripts/worker-calls.ts` counts them from the CLI's transcripts on the machine it runs
+on (main thread only, one call per assistant message id).
+
+**Baseline: beast, 82 worker sessions, 2026-10-15..18 (measured, before w1478's changes)**
+
+| What | Value |
+|---|---|
+| Calls a session | 249 (median 196); 46.3 a turn; 345k context a call |
+| Calls with more than one tool | 9.9% |
+| By kind | read 32.8%, other shell 24.1%, Unity 12.5%, waits 6.1%, mixed 6%, CI polls 3.8%, PR and git 3.6%, edits 3.3%, subagents 0.2% |
+| In runs of five or more read-only calls | 11.8% (299 runs, 8.1 calls each) |
+| Waits and polls back in under 30 s | 7.7%; 83 more were a leading `sleep` that Claude Code refused |
+| PR routine | 164 PRs at 10.1 calls each (merge of the base, push, the w907 landed check, CI polls, merge) |
+| Subagents | 2,353 calls at 105k context a call, against 345k in the main thread |
+| Long sessions | the 10 sessions of 500 calls or more: 34% of calls and 47% of context-weighted spend |
+
+Why not one call (measured by hand on 30 random pairs of back-to-back read-only calls): 25 of the 30 second reads used what the
+first one found, such as a grep's line numbers fed to `sed -n`. Only about 5 could have run in the same call, which is about 3% of
+all calls. Workers already chain independent reads inside one shell command; the repeats come from steps that depend on each other.
+
+**The levers and what each should save (estimated from the table)**
+
+| Lever | Where | Saving in main-thread calls |
+|---|---|---|
+| `ff-pr push` / `ff-pr merge` (machine/prFlow.ts) instead of about 10 git, gh and poll calls a PR | daemon shim, worker brief "Waiting on CI" | about 6 a PR × 2 PRs a session: **~5%** |
+| A search of five or more reads goes to an `Explore`/`scout` subagent | brief "Fewer model calls", ff-agents skills | half the runs at 8.1 calls, their subagent calls at 30% of the context: **~3.5%** of spend |
+| Wait in one blocking call, never a sleep-then-look call repeated or a refused leading sleep | brief "Fewer model calls" | half of the non-CI 3.9% short polls, plus 0.4% refused sleeps: **~2.5%** |
+| Independent reads in one turn | brief "Fewer model calls" | half of ~3%: **~1.5%** |
+| The Unity instance name in the brief (shared/unityInstance.ts), so a pin is one call | brief "Unity", the moved note | 339 `ReadMcpResourceTool` calls, 1.7% of calls: **~1.5%** |
+
+Together about **13%** fewer calls (estimated), and about the same share of spend, since these calls carry near-average
+context. The bigger lever the data shows is history, not call count: 47% of the spend is in the 10 longest sessions. That is
+w1469's compaction at 200k ("Workers compact" above; a 34% pilot), and widening the pilot is the next step on it.
+
+**Before and after.** On the same machine, once the portal deploy (the brief), the daemon update (the `ff-pr` shim) and the agent
+tools publish (the skills) are live, give it at least two days of new sessions, then compare:
+
+    node scripts/worker-calls.ts --until <deploy time, ISO>   # before (or --days 4 on a copy taken at the deploy)
+    node scripts/worker-calls.ts --since <deploy time, ISO>   # after
+
+Compare calls a turn rather than calls a session, since a session's length follows its task. Also compare PR-routine calls a PR
+(about 5 or fewer expected), waits back in under 30 s (under 4% expected), calls in read-only runs of five or more, and
+subagent calls. w1469's compaction changes context a call, not calls, so it does not move these counts. Run it on a Mac with
+`--root` and `--match` for its sandboxes as well.
+
 ## Transcripts: how long they are kept
 
 **Seven days after the request closes**, a request that is open keeps them as long as it is open, a reopened request keeps them again.
