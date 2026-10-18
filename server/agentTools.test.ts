@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { EXIT, checkoutProblem, formatVersions, installedVersions, marketplaceVersions, parseVersions, publishAgentTools, staleAfter, toolsCheckout, type Ran } from './agentTools.ts';
+import { EXIT, checkoutProblem, formatVersions, installedVersions, marketplaceVersions, parseVersions, prependPath, publishAgentTools, staleAfter, toolsCheckout, type Ran } from './agentTools.ts';
 
 /** The agent tools publish on a machine (w1476, server/agentTools.ts; docs/worker-install.md "The agent tools"). */
 
@@ -166,6 +166,17 @@ test("CLAUDE_CONFIG_DIR is where Claude Code's plugins are read, as the workers'
   assert.equal(await m.run(), EXIT.ok);
   assert.equal(m.installed()['ff-agents'], '1.29.20');
   assert.ok(m.lines.includes('Agent tools before: ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord not installed'));
+});
+
+test("daemon.json's claude goes first on the search path the environment already has (Windows: Path, one key)", () => {
+  // w1476: beast's first rollout set PATH beside a copied Path, and git was not found ("spawn git ENOENT").
+  const win: NodeJS.ProcessEnv = { Path: 'C:\\Program Files\\Git\\cmd;C:\\Windows', HOME: 'C:\\Users\\x' };
+  prependPath(win, 'C:\\Users\\x\\.local\\bin', 'win32');
+  assert.deepEqual(Object.keys(win).filter((k) => k.toUpperCase() === 'PATH'), ['Path']);
+  assert.equal(win.Path, 'C:\\Users\\x\\.local\\bin;C:\\Program Files\\Git\\cmd;C:\\Windows');
+  const unix: NodeJS.ProcessEnv = { PATH: '/usr/bin' };
+  prependPath(unix, '/home/x/.local/bin', 'linux');
+  assert.equal(unix.PATH, '/home/x/.local/bin:/usr/bin');
 });
 
 test('the version helpers', () => {
