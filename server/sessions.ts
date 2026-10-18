@@ -14,6 +14,7 @@ import { dryRun, dryRunStartRefusal } from './dryRun.ts';
 import { DANGEROUS_REMOVAL, tempDeletesWithin, tempOnlyDelete } from './tempDelete.ts';
 import { isRealModelId } from '../shared/models.ts';
 import { ContextMeter,IMAGE_CHARS, type Cumulative, type TurnUsage } from '../shared/spend.ts';
+import type { MeterStates } from './meterStates.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
 export const MID_TURN: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
@@ -146,7 +147,12 @@ export type OptionsFactory = (info: SessionInfo) => Options;
 
 /** Where an AgentSession records itself: the Store here, or the link back to the portal on a machine daemon. */
 /** Where a session records itself; `noteActivity` (the portal's Store) marks streamed output as activity. */
-export type SessionSink = Pick<Store, 'putSession' | 'append' | 'amend' | 'saveImage'> & { noteActivity?: (sessionId: string) => void; flush?: () => void };
+export type SessionSink = Pick<Store, 'putSession' | 'append' | 'amend' | 'saveImage'> & {
+  noteActivity?: (sessionId: string) => void;
+  flush?: () => void;
+  /** Where the context meter's tally of each conversation is kept for its next process (w1484, server/meterStates.ts). */
+  meters?: MeterStates;
+};
 
 /**
  * How long (ms) a session whose process ended by itself keeps its restart marks (turnOpenSince, backgroundTasks).
@@ -361,6 +367,8 @@ export class AgentSession implements SessionHandle {
   private readonly compactUuids = new Set<string>();
   /** Where this session's context tokens go (w859, shared/spend.ts): read per turn into the result event's usage. */
   private readonly meter = new ContextMeter();
+  /** The model call the meter's tally was last saved after (w1484): a call's later content blocks change nothing worth saving. */
+  private meterSavedAt?: string;
   private readonly store: SessionSink;
   private readonly makeOptions: OptionsFactory;
   private readonly events: EventEmitter;
@@ -530,7 +538,8 @@ export class AgentSession implements SessionHandle {
     };
     this.tempDir = typeof options.env?.TMPDIR === 'string' ? options.env.TMPDIR : undefined;
     this.costBase = this.info.costUsd;
-    if (this.info.sdkSessionId) this.meter.carry();
+    // The conversation goes on in a new process (w1484): its history stays in its categories when its tally was kept.
+    if (this.info.sdkSessionId) this.meter.resume(this.store.meters?.load(this.info.sdkSessionId));
     this.firstResult = true;
     // A new process: the last one's background tasks ended with it.
     this.backgroundTasks = 0;
@@ -559,6 +568,8 @@ export class AgentSession implements SessionHandle {
       if (this.q === q) this.update({ status: aborted ? 'stopped' : 'error', statusDetail: aborted ? undefined : clip(msg, 300) });
     } finally {
       if (this.q === q) {
+        // what came after its last call (tool results it had read) is in the conversation the next process resumes
+        this.saveMeter();
         this.q = undefined;
         this.input = undefined;
         this.denyAllPending('session ended');
@@ -645,7 +656,10 @@ export class AgentSession implements SessionHandle {
           // The model that answered (w1358), for the conversation header: not the configured one, which a switch leaves behind.
           if (isRealModelId(m.message.model) && m.message.model !== this.info.activeModel) this.update({ activeModel: m.message.model });
           const mid = (m.message as { id?: string }).id;
-          if (mid) this.meter.call({ id: mid, model: m.message.model, in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0, cw: u.cache_creation_input_tokens ?? 0, cw5: u.cache_creation?.ephemeral_5m_input_tokens ?? 0 });
+          if (mid) {
+            this.meter.call({ id: mid, model: m.message.model, in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0, cw: u.cache_creation_input_tokens ?? 0, cw5: u.cache_creation?.ephemeral_5m_input_tokens ?? 0 });
+            if (mid !== this.meterSavedAt) this.saveMeter(mid);
+          }
         }
         for (const b of m.message.content) {
           if (!sub) {
@@ -751,8 +765,23 @@ export class AgentSession implements SessionHandle {
     return {
       ...(Object.keys(cum).length ? { cum } : {}),
       ...(u ? { main: { in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0, cw: u.cache_creation_input_tokens ?? 0 } } : {}),
-      meter: this.meter.drain(),
+      meter: this.drainMeter(),
     };
+  }
+
+  /** The turn's context reading; what the meter holds then is saved for the next process (w1484). */
+  private drainMeter() {
+    const t = this.meter.drain();
+    this.saveMeter();
+    return t;
+  }
+
+  /** Save the meter's tally of this conversation (w1484): after each model call, each turn and the process's end. */
+  private saveMeter(call?: string) {
+    const c = this.info.sdkSessionId;
+    if (!c || !this.store.meters) return;
+    this.meterSavedAt = call ?? this.meterSavedAt;
+    this.store.meters.save(c, this.meter.snapshot());
   }
 
   /** The turn ended: 'turnEnd' with its text, and whose compaction it was when it was one (w535). */

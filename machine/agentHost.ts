@@ -29,6 +29,7 @@ import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHand
 import { SECRET_ENV, addSecretValues, redactValue } from '../server/secrets.ts';
 import type { FromDaemon, SignalName } from '../server/machineProtocol.ts';
 import type { DeliveredAttachment, ImageInput, PermissionMode, Requester, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import { meterStates } from '../server/meterStates.ts';
 import { HOST_WATCH, endHostTree, hostIdentity, pidAlive, realHostProcs, removeHostDir, type HostProcs } from './hostWatch.ts';
 
 export { pidAlive };
@@ -800,6 +801,8 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
       out({ op: 'image', id: imageId, mediaType, data });
       return imageId;
     },
+    // beside the hosts (<appDir>/meters), kept after this host's folder goes: the next host of the conversation reads it (w1484)
+    meters: meterStates(path.join(path.dirname(path.dirname(path.resolve(dir))), 'meters')),
   } as SessionSink;
   s = new AgentSession(start.info, sink, () => buildOptions(spec, handlers, process.env, spec.sandbox ? () => editorUp : undefined), events);
   const session = s;
