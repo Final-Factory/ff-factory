@@ -106,6 +106,8 @@ export const SETTABLE_KEYS = [
   'worker.compactAtTokens',
   'worker.compactBeforeWaitTokens',
   'worker.compactPilotPercent',
+  // The share of workers that write terse prose between tool calls (w1480, server/terseProse.ts).
+  'worker.terseProsePilotPercent',
   // The orchestrators' loop guards (w571, server/orchestrators.ts loopGuards): budgets a person's own message starts again.
   'orchestrator.filingsPerMessage',
   'orchestrator.followUpsPerMessage',
@@ -470,9 +472,10 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (!Number.isInteger(n) || (n !== 0 && (n < AUTO_COMPACT_LIMITS.minTokens || n > AUTO_COMPACT_LIMITS.maxTokens))) throw new Error(`${key} is 0 (off) or a whole number of tokens from ${AUTO_COMPACT_LIMITS.minTokens.toLocaleString('en-US')} to ${AUTO_COMPACT_LIMITS.maxTokens.toLocaleString('en-US')}`);
       return n;
     }
-    case 'worker.compactPilotPercent': {
+    case 'worker.compactPilotPercent':
+    case 'worker.terseProsePilotPercent': {
       const n = Number(value);
-      if (!Number.isInteger(n) || n < 0 || n > 100) throw new Error('worker.compactPilotPercent is a whole number from 0 to 100');
+      if (!Number.isInteger(n) || n < 0 || n > 100) throw new Error(`${key} is a whole number from 0 to 100`);
       return n;
     }
     case 'orchestrator.compactAtTurnUsd': {
@@ -807,7 +810,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'machines.cleanup.staleOutput') cfg.machines = { ...cfg.machines, cleanup: { ...cfg.machines?.cleanup, staleOutput: v as Partial<StaleOutputSettings> | undefined } };
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'orchestrator.compactAtTokens') cfg.orchestrator = { ...cfg.orchestrator, compactAtTokens: v as number | undefined };
-  else if (key === 'worker.compactAtTokens' || key === 'worker.compactBeforeWaitTokens' || key === 'worker.compactPilotPercent') cfg.worker = { ...cfg.worker, [key.slice('worker.'.length)]: v as number | undefined };
+  else if (key === 'worker.compactAtTokens' || key === 'worker.compactBeforeWaitTokens' || key === 'worker.compactPilotPercent' || key === 'worker.terseProsePilotPercent') cfg.worker = { ...cfg.worker, [key.slice('worker.'.length)]: v as number | undefined };
   else if (key === 'orchestrator.compactAtTurnUsd') cfg.orchestrator = { ...cfg.orchestrator, compactAtTurnUsd: v as number | undefined };
   else if (key === 'orchestrator.filingsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, filingsPerMessage: v as number | undefined };
   else if (key === 'orchestrator.followUpsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, followUpsPerMessage: v as number | undefined };
