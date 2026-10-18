@@ -350,7 +350,7 @@ export const requestLineRule = (w: Pick<WorkItem, 'id'>) =>
  * The status line otherwise (w631): `<id>: still open: <what>`, which the ledger records as the request's latest word.
  */
 export const doneRule = (w: Pick<WorkItem, 'id'>) =>
-  ` When every step of ${w.id} is finished, the steps after the merge included (a check, an audit, a release's notes), end your report with a line \`DONE: ${w.id}\` (one line per request, several allowed). The ledger closes it on that line, with your report as the note, and tells you what is missing instead while a PR of it is open or the report does not say how a step after the merge went. Never write it while something is left: end with a line \`${w.id}: still open: <what is left>\` instead. Your DONE report also carries a line \`Learned: <the file or PR where you wrote down what ${w.id} taught you>\` or \`Learned: nothing new\`: a person's correction or a reopen always gets the check that would have caught it, and so does a check that failed on you, a step you redid three times, a second fix of one kind, or a fact a future agent would need (a tool or test check first, then a checklist line, the task's skill, or the doc beside the code; \`/ff-agents:evidence-gate\`, lessons/lessons-belong-in-the-harness-repo.md). The ledger refuses a DONE without it, and \`nothing new\` on a request a person reopened. If your work also finishes another request that ${w.id} names or takes over (another person's included), add a \`DONE:\` line for that one too: the ledger accepts it because ${w.id} names it, and tells its people.`;
+  ` When every step of ${w.id} is finished, the steps after the merge included (a check, an audit, a release's notes), end your report with a line \`DONE: ${w.id}\` (one line per request, several allowed). The ledger closes it on that line, with your report as the note, and tells you what is missing instead while a PR of it is open or the report does not say how a step after the merge went. Never write it while something is left: end with a line \`${w.id}: still open: <what is left>\` instead. Your DONE report also carries a line \`Learned: <the file or PR where you wrote down what ${w.id} taught you>\` or \`Learned: nothing new\` (CLAUDE.md's "Before every DONE" says what needs one and where it goes); the ledger refuses a DONE without it, and \`nothing new\` on a request a person reopened. If your work also finishes another request that ${w.id} names or takes over (another person's included), add a \`DONE:\` line for that one too.`;
 
 /** The message the dispatcher gets for a new request. */
 export function requestNotice(w: WorkItem): string {
@@ -494,7 +494,7 @@ const LOGGED_NOTE = /^(\d\d:\d\d) ([^:]+): (?:.*; )?note: (.+?)(?:; answers the 
  * comes first and may summarise; this is the title, brief, constraints, related ids and every update_work note, so
  * nothing the person asked is lost. An intake request's own text is in workerRules; its notes come here.
  */
-export function requestAsFiled(w: Pick<WorkItem, 'id' | 'title' | 'brief' | 'constraints' | 'relatedIds' | 'notes' | 'log' | 'requesters' | 'source'> & { delegation?: WorkItem['delegation'] }): string {
+export function requestAsFiled(w: Pick<WorkItem, 'id' | 'title' | 'brief' | 'constraints' | 'relatedIds' | 'notes' | 'log' | 'requesters' | 'source'> & { delegation?: WorkItem['delegation'] }, sent = ''): string {
   const notes = w.notes?.length
     ? w.notes.map((n) => `- ${n.at.slice(0, 16).replace('T', ' ')} UTC, ${n.by}: ${n.text}`)
     : (w.log ?? []).map((l) => LOGGED_NOTE.exec(l)).filter((m): m is RegExpExecArray => !!m).map((m) => `- ${m[1]}, ${m[2]}: ${m[3]}`);
@@ -502,12 +502,28 @@ export function requestAsFiled(w: Pick<WorkItem, 'id' | 'title' | 'brief' | 'con
   const asked = w.delegation ? `the standing agent "${w.delegation.agentName}" asked, filed for ${names(w.requesters)}` : `${names(w.requesters)} asked`;
   const lines = [`\n\n---\nThe request as filed (${w.id}, added by the harness: the brief above is the dispatcher's; this is what ${asked}):`];
   if (!w.source) {
-    lines.push(`Title: ${w.title}`, '', w.brief.length > 8000 ? `${w.brief.slice(0, 8000)}… (${w.brief.length - 8000} more characters: list_work has it whole)` : w.brief);
-    if (w.constraints?.trim()) lines.push('', `Constraints: ${w.constraints.trim()}`);
-    if (w.relatedIds?.length) lines.push('', `Related: ${w.relatedIds.join(', ')}`);
+    // w1482: a brief that already quotes the filed text gets only what it leaves out (every call reads both copies again).
+    const brief = !quotes(sent, w.brief);
+    if (brief) lines.push(`Title: ${w.title}`, '', w.brief.length > 8000 ? `${w.brief.slice(0, 8000)}… (${w.brief.length - 8000} more characters: list_work has it whole)` : w.brief);
+    if (w.constraints?.trim() && !quotes(sent, w.constraints)) lines.push('', `Constraints: ${w.constraints.trim()}`);
+    if (w.relatedIds?.length && (brief || !w.relatedIds.every((id) => sent.includes(id)))) lines.push('', `Related: ${w.relatedIds.join(', ')}`);
+    if (lines.length === 1 && !notes.length) return '';
   } else if (!notes.length) return '';
   if (notes.length) lines.push('', `Notes since it was filed (${notes.length}):`, ...notes);
   return lines.join('\n');
+}
+
+/**
+ * Whether `text` already stands in `sent` (w1482): nine in ten of its sentences of 20 characters or more, compared with
+ * case, quote marks, Markdown emphasis and spacing set aside. A paraphrase is not a quote: the filed text then goes too.
+ */
+export function quotes(sent: string, text: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[“”‘’"'`*_]/g, '').replace(/\s+/g, ' ').trim();
+  const whole = norm(sent);
+  if (!whole) return false;
+  const parts = text.split(/\n+|(?<=[.!?;:])\s+/).map(norm).filter((p) => p.length >= 20);
+  if (!parts.length) return !!norm(text) && whole.includes(norm(text));
+  return parts.filter((p) => whole.includes(p)).length >= 0.9 * parts.length;
 }
 
 /** What a new worker session is told about the place it starts in and the requests around its own (see handoverNote). */

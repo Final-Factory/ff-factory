@@ -186,7 +186,49 @@ The rest of the base is irreducible on this design: Claude Code's prompt ~1.6k, 
 How it could be off: a per-section token figure uses its part's average characters a token (2.58 to 4.38); text heavy with code
 and paths takes more tokens. After a change ships, measure it the same way: the first call of two fresh workers in one sandbox.
 
-## The decisions (ranked by tokens saved per risk; none of them is built)
+## Built since (w1481, w1482)
+
+lothsahn on D2: "Do 1 for non-windows workers only." Nothing to build (w1481): off Windows Claude Code leaves PowerShell out by
+itself (D2 below). On D6 and D9: "Do 4. Do 10. Do what you think is best for 7-9." The orchestrator chose all of D4, D5 and D7.
+lothsahn on briefs: "They should only describe what the worker should do now and why, not the history of how the instructions
+have changed."
+
+- **D6** (w1482): workers have a `read_rules` tool (`mcp__machine__read_rules`, server/workerRules.ts) with three topics:
+  `cleanup` (a clean-up request: the ledger's DELETE rows, KEEP for a clone with work, measure-only outside the root), `saves`
+  (the saves folder per OS, the copy's name, `scripts/game_data.py`) and `unity` (unity-slot's queue, a batch build holding a slot
+  and `clear_batch`, the watch, the first boot's log). The prompt keeps a pointer line per topic. The ledger and portal-logs
+  sections are one line: the tools' own descriptions (loaded when used) carry the rest.
+- **D4** (w1482): `ReportFindings` is in `WORKER_UNUSED_TOOLS`.
+- **D5** (w1482): `Agent(Explore)`, `Agent(Plan)`, `Agent(claude)` and `Agent(statusline-setup)` deny rules take the four
+  built-in roles out of the listing (measured on a one-turn session: the listing lost exactly these; `general-purpose`, 7 spawns,
+  and every plugin role stay). `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS` would cover only two. FEWER_CALLS now names
+  `ff-agents:Explore`.
+- **D7** (w1482): the worker prompt points at CLAUDE.md's "Evidence before action", "Merge your own PR", "Discord: FFBox owns
+  #bug-reports", "`master` is the one trunk" and "Unfinished content goes behind a feature toggle" instead of restating them, and
+  the brief's DONE rule points at "Before every DONE". The game repo's `scripts/tests/test_claude_md_worker_rules.py` (in its
+  Test Runner's python job) fails when CLAUDE.md loses one of them; ff-factory's evidenceRules.test.ts pins the pointers.
+- **D9** (w1482): `requestAsFiled(w, sent)` leaves out the filed title and brief when the brief sent already quotes nine in ten
+  of its sentences (`quotes` in server/work.ts), and constraints and related ids the brief already carries. The DONE rule is 385
+  characters shorter.
+- **History** (w1482): the worker prompt, the worker tools' descriptions, the intake rules added to a brief and the GitHub line
+  carry no request ids as provenance, no quoted past corrections and no dates of rule changes; each rule keeps its reason
+  (evidenceRules.test.ts "a worker's brief speaks of now" fails on a new one). The dispatcher's and every orchestrator's
+  brief-writing rules carry `BRIEF_NOW_ONLY`.
+
+**Measured on beast (2026-10-18, one-turn Haiku sessions in the game repo with each commit's rendered worker prompt and launch
+options, first-call input + cache tokens, the same CLAUDE.md, no machine MCP server or brief):**
+
+| Commit | Worker prompt (chars) | First call (tokens) |
+|---|---|---|
+| ff-factory main (7a39d49) | 28,582 | 54,439 |
+| main + #430, #429, #431 | 29,057 | 54,595 |
+| + w1482 | 21,646 | 50,711 |
+
+So w1482 takes −3,884 tokens a call against main and −3,728 against the PRs it builds on (measured). The audit's estimate for
+D4–D7 was −3.6k. A brief also carries 385 characters less (about −150 tokens, estimated at 2.58 characters a token), and the
+filed text (848 characters for w1481's) when the brief quotes it. The worker's own `read_rules` adds one deferred tool name.
+
+## The decisions (ranked by tokens saved per risk; as audited)
 
 1. **D2, PowerShell off for workers** (−4.4k). `disallowedTools: [..., 'PowerShell']` in `machineSandboxSpec`, or
    `CLAUDE_CODE_USE_POWERSHELL_TOOL=0`. Risk: the 226 PowerShell calls a week become `powershell.exe -Command` through Bash; on

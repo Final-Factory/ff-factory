@@ -6,7 +6,7 @@ import path from 'node:path';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { Agents, EVIDENCE_RULES, MERGE_RULES, REPORT_LABELS, WORKER_UPDATE_RELAY } from './agents.ts';
+import { Agents, BRIEF_NOW_ONLY, EVIDENCE_RULES, MERGE_RULES, REPORT_LABELS, WORKER_UPDATE_RELAY } from './agents.ts';
 import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
@@ -60,30 +60,29 @@ function world(t: { after: (fn: () => void | Promise<void>) => void }) {
   return { agents, sessions, dir };
 }
 
+/**
+ * The rules a worker's prompt leaves to the game repo's CLAUDE.md (w1482: each said once; every worker runs in a game
+ * sandbox, so CLAUDE.md is in every worker's context). The prompt names each by its heading; the game repo's
+ * scripts/tests/test_claude_md_worker_rules.py checks that CLAUDE.md still holds them.
+ */
+const CLAUDE_MD_RULES = ['"Evidence before action"', '"Merge your own PR"', '"Discord: FFBox owns #bug-reports"', '"Before every DONE"', '"`master` is the one trunk"', '"Unfinished content goes behind a feature toggle"'];
+
 test('the evidence rule: the worker settles its own guesses; a person is asked for money, reserved actions and real forks', () => {
   assert.match(EVIDENCE_RULES, /^## Evidence before you act\n/);
   for (const part of [
-    'spends money, publishes or sends something outside, changes a live setting, releases, merges a simulation or player-visible change, or deletes',
-    'before you report a fix as done',
-    'what each rests on: measured (say how), sourced (the source, and why it fits this case), or a guess',
+    `CLAUDE.md's "Evidence before action" binds you`,
     'not from the topic',
-    "Settle your own guesses by research before you act: the tool's or platform's own docs and the value its own screen recommends first",
-    'Then carry on without asking',
-    'Ask the user only to confirm a money value (with the evidence beside it)',
-    'deleting, app settings and deploys, publishing in their name, releases',
-    'a real fork (give the options and your recommendation)',
-    'stop and diagnose before changing anything',
+    "settle your own guesses by research (the tool's or platform's own docs and the value its own screen recommends first",
+    'then carry on without asking',
+    'say how it could fail and look early',
     '`/ff-agents:evidence-gate`',
   ])
     assert.ok(EVIDENCE_RULES.includes(part), part);
-  // Merging is the worker's own step, not something reserved for the person (the owner, 2026-10-02).
+  // Merging is the worker's own step, not something reserved for the person.
   assert.ok(!/pre-approved/.test(EVIDENCE_RULES), 'no merge waits for an approval');
   assert.ok(EVIDENCE_RULES.endsWith(MERGE_RULES));
-  assert.ok(MERGE_RULES.startsWith('## Your pull requests\nMerge your own pull request once its verification is done and CI is green.'));
-  assert.match(MERGE_RULES, /Never stop at an open PR waiting for the user/);
-  assert.match(MERGE_RULES, /Hold one only for exceptional risk or a concrete timing reason, and say in your report which it is and when it will merge/);
-  assert.match(MERGE_RULES, /Verification still comes first/);
-  assert.match(MERGE_RULES, /master takes changes only through your pull request \(Git above\)/);
+  assert.ok(MERGE_RULES.startsWith(`## Your pull requests\nCLAUDE.md's "Merge your own PR" holds in every repo you work in`));
+  assert.match(MERGE_RULES, /merge your own once its verification is done and CI is green/);
   assert.match(REPORT_LABELS, /Label each number and recommendation as measured, sourced or a guess/);
   assert.match(REPORT_LABELS, /what you saw yourself rather than what a title, a measurement table or a tool verdict implies/);
   assert.match(REPORT_LABELS, /an orchestrator relays only the start of a long report/);
@@ -102,15 +101,31 @@ test("every worker's brief carries it: a sandbox on a machine (w510: the portal 
     assert.ok(brief.indexOf(EVIDENCE_RULES) < brief.indexOf('## Reporting'), `${name}: the rule comes before Reporting`);
     assert.equal(brief.split('## Evidence before you act').length, 2, `${name}: once`);
     assert.ok(brief.includes(MERGE_RULES), `${name}: merge your own pull request`);
-    // w1137: master is the game repo's one trunk, reached by a PR the worker merges; develop is retired.
-    assert.match(brief, /`master` is the game repo's one trunk \(develop is retired, w1137\)/, `${name}: master is the trunk`);
+    // The game repo's trunk: a PR into master the worker merges; the trunk rules themselves are CLAUDE.md's.
+    assert.match(brief, /ff-pr push --base master/, `${name}: ff-pr opens the PR into master`);
     assert.match(brief, /git fetch origin && git merge origin\/master/, `${name}: merge origin/master, never rebase a pushed branch`);
     assert.match(brief, /gh pr create --base master.*gh pr merge <n> --merge/, `${name}: open a PR into master, merge it`);
-    assert.match(brief, /master takes no direct push/, `${name}: master only through a PR (said once, in Git)`);
-    assert.match(brief, /a branch that started there merges origin\/master in like any other/, `${name}: a develop-based branch`);
-    assert.match(brief, /FeatureToggles\.cs/, `${name}: unfinished work goes behind a feature toggle`);
-    assert.match(brief, /Never push to or open PRs into develop/, `${name}: develop is off-limits`);
+    assert.match(brief, /Never force-push anywhere/, `${name}: never force-push`);
     assert.ok(!/origin\/develop|HEAD:develop|rebase origin/.test(brief), `${name}: no develop flow left`);
+    for (const rule of CLAUDE_MD_RULES.filter((r) => r !== '"Before every DONE"')) assert.ok(brief.includes(`CLAUDE.md's ${rule}`) || brief.includes(`and ${rule}`), `${name}: points at CLAUDE.md's ${rule}`);
+    // Said once: the rules CLAUDE.md holds are not restated here.
+    assert.ok(!/Hold one only for exceptional risk/.test(brief), `${name}: the hold rule is CLAUDE.md's`);
+    assert.ok(!/belong to FFBox: read their threads/.test(brief), `${name}: FFBox's channels are CLAUDE.md's`);
+    assert.ok(!/a person's correction or a reopen always gets the check/.test(brief), `${name}: what needs a Learned line is CLAUDE.md's`);
+  }
+});
+
+test("w1482: a worker's brief speaks of now: no request-id provenance, no quoted past corrections, no dates of rule changes", (t) => {
+  const { agents } = world(t);
+  const briefs = agents as unknown as { machineSandboxBrief: (m: unknown, sb: unknown) => string };
+  const sb = { id: 'alpha', path: '/sb/alpha', branch: 'fix-x', purpose: 'a fix', unity: { state: 'stopped' } };
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    const brief = briefs.machineSandboxBrief({ id: 'm5', repoPath: '/r', platform, sandboxRoot: '/s' }, sb);
+    // Ids left in are examples of a format ("w513: ...", "after w727's PR #1291 merges", "w293 (...)"), plus the w1480 pilot's heading.
+    const ids = (brief.match(/\bw\d{3,4}\b/g) ?? []).filter((id) => !['w513', 'w727', 'w293', 'w1480'].includes(id));
+    assert.deepEqual(ids, [], `${platform}: request ids as provenance`);
+    assert.ok(!/\b20\d\d-\d\d-\d\d\b/.test(brief.replace('UserData layout of 2026-10-11', '')), `${platform}: no dates of rule changes`);
+    assert.ok(!/\((?:Ben|lothsahn|Lothsahn), 20\d\d/.test(brief), `${platform}: no quoted corrections`);
   }
 });
 
@@ -172,8 +187,10 @@ test('w741: every DONE says what it taught, and the orchestrator counts its pers
   const { doneRule } = await import('./work.ts');
   const rule = doneRule({ id: 'w9' });
   assert.match(rule, /Your DONE report also carries a line `Learned: <the file or PR where you wrote down what w9 taught you>` or `Learned: nothing new`/);
-  assert.match(rule, /a person's correction or a reopen always gets the check that would have caught it/);
-  assert.match(rule, /The ledger refuses a DONE without it, and `nothing new` on a request a person reopened/);
+  // What needs a Learned line, and where it goes, is said once: in CLAUDE.md (w1482).
+  assert.match(rule, /CLAUDE\.md's "Before every DONE" says what needs one and where it goes/);
+  assert.ok(!/a person's correction or a reopen always gets the check/.test(rule), 'said once, in CLAUDE.md');
+  assert.match(rule, /the ledger refuses a DONE without it, and `nothing new` on a request a person reopened/);
   const { agents } = world(t);
   const personal = (agents.orchestratorOptions(agents.orchestrators.personalFor(BEN).info) as { systemPrompt: { append: string } }).systemPrompt.append;
   assert.match(personal, /Corrections teach the harness \(w741\): when Ben, in their own message, corrects a worker's work or reopens a request, save one line to your memory/);
@@ -185,7 +202,7 @@ test('w741: every DONE says what it taught, and the orchestrator counts its pers
 
 test('w1196, w1197: every worker hears to end what it started before DONE, how (ff-leftovers), and what FF Factory ends by itself', async () => {
   const { PROCESS_HYGIENE } = await import('./agents.ts');
-  assert.match(PROCESS_HYGIENE, /Ben, 2026-10-13, w1197: "please update the fff harness to ensure everything is properly cleaned up/);
+  assert.match(PROCESS_HYGIENE, /Nothing you start may outlive your work: a game player left running holds a machine's cores and fans for days/);
   assert.match(PROCESS_HYGIENE, /-ffSoloQuitAfterSeconds <n>/);
   assert.match(PROCESS_HYGIENE, /run `ff-leftovers list`, then `ff-leftovers end`/);
   assert.match(PROCESS_HYGIENE, /say in your report what it ended, or that nothing was left/);
@@ -194,59 +211,69 @@ test('w1196, w1197: every worker hears to end what it started before DONE, how (
 
 test("w913: workers are told to leave their temp files, not to clean up; the one delete left is approval-free and narrow", async () => {
   const { DISK_HYGIENE } = await import('./agents.ts');
-  assert.match(DISK_HYGIENE, /lothsahn, 2026-10-10, w913: "Random clean up commands take a lot of approvals"/);
-  assert.match(DISK_HYGIENE, /Leave it there: do not clean up after yourself/);
+  const { workerRuleText } = await import('./workerRules.ts');
+  assert.match(DISK_HYGIENE, /Leave it there: do not clean up after yourself, since a clean-up command waits for a person's approval/);
   assert.match(DISK_HYGIENE, /The harness removes it: your temp folder a few minutes after no request waits for you any more \(it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole\), your git clones six hours after that \(unless one holds work nothing else has\)/);
   assert.match(DISK_HYGIENE, /no clean-up step before DONE, no `player_slots\.py prune`/);
-  // w1379: a clean-up is judged by the ledger, not by a list in its brief.
-  assert.match(DISK_HYGIENE, /run `ff-leftovers folders` and delete only its DELETE rows/);
-  assert.match(DISK_HYGIENE, /open, stalled or paused are KEEP rows whether or not its process runs/);
-  // w1387: and by git: a clone with work on no remote keeps its folder, and the portal's clean-up log says so too.
-  assert.match(DISK_HYGIENE, /A folder holding a git clone with uncommitted changes, unpushed commits or a stash is KEEP too, whatever the ledger says/);
-  assert.match(DISK_HYGIENE, /check its git state .* or the portal's clean-up log \(`portal_logs` source cleanup: "kept for a person"\)/);
   assert.match(DISK_HYGIENE, /publish the proofs your report links .* before you end/);
   assert.match(DISK_HYGIENE, /a delete whose every path is written out under \$TMPDIR is answered by the session itself with no approval, alone or inside a longer command; anything else .* still asks a person/);
-  assert.match(DISK_HYGIENE, /name it with your temp folder's name in front/);
+  // w1482: a clean-up request's rules are read when one comes (read_rules cleanup), not on every call.
+  assert.match(DISK_HYGIENE, /A request of yours to clear space or measure the disk: `read_rules cleanup` before you delete anything/);
+  const cleanup = workerRuleText('cleanup');
+  // w1379: a clean-up is judged by the ledger, not by a list in its brief.
+  assert.match(cleanup, /run `ff-leftovers folders` and delete only its DELETE rows/);
+  assert.match(cleanup, /open, stalled or paused are KEEP rows whether or not its process runs/);
+  // w1387: and by git: a clone with work on no remote keeps its folder, and the portal's clean-up log says so too.
+  assert.match(cleanup, /A folder holding a git clone with uncommitted changes, unpushed commits or a stash is KEEP too, whatever the ledger says/);
+  assert.match(cleanup, /check its git state .* or the portal's clean-up log \(`portal_logs` source cleanup: "kept for a person"\)/);
+  // A save copy is named so the session can delete it alone (server/tempDelete.ts).
+  assert.match(workerRuleText('saves'), /under your temp folder's name \(`ffa-<session>-<id>-<name>\.zip`\)/);
   // The old instructions are gone.
-  assert.ok(!/Before you report a request done, clean up after yourself/.test(DISK_HYGIENE));
-  assert.ok(!/delete the player builds, Captures/.test(DISK_HYGIENE));
-  assert.ok(!/and you may remove them too, without asking/.test(DISK_HYGIENE));
+  for (const text of [DISK_HYGIENE, cleanup]) {
+    assert.ok(!/Before you report a request done, clean up after yourself/.test(text));
+    assert.ok(!/delete the player builds, Captures/.test(text));
+    assert.ok(!/and you may remove them too, without asking/.test(text));
+  }
 });
 
 test("w1097: every worker's brief says which shell step still waits for a person, and the routes that never do", async (t) => {
   const { DISK_HYGIENE, SHELL_STEPS } = await import('./agents.ts');
+  const { workerRuleText } = await import('./workerRules.ts');
   // Why w1079 deleted its own temp: to reuse a test's output folder. The brief says to make a new one.
   assert.match(DISK_HYGIENE, /never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, `\$TMPDIR\/<leg>-<timestamp>`/);
-  assert.match(DISK_HYGIENE, /lothsahn, 2026-10-12, w1097: "Can't we have the cleanup process when a worker is done do this for them so the worker doesn't have to worry about it\?"/);
   // w1479: said once, in Disk space; Shell steps points there.
   assert.match(SHELL_STEPS, /Deletes in \$TMPDIR: Disk space above/);
   assert.match(SHELL_STEPS, /^## Shell steps that never wait for a person\n/);
-  assert.match(SHELL_STEPS, /lothsahn, 2026-10-12, w1097: "Why did it do that, and how do we allow it to do what it just needed to do without a complex bash prompt\?"/);
   assert.match(SHELL_STEPS, /except when Claude Code's own dangerous-rm check flags a delete in it/);
   assert.match(SHELL_STEPS, /in a script file in \$TMPDIR, written with the Write tool, and run it: `bash "\$TMPDIR\/leg\.sh" 1920`/);
-  assert.match(SHELL_STEPS, /`python scripts\/game_data\.py` \(`snapshot`, `restore`, `run --name <leg> -- <command>`/);
-  assert.match(SHELL_STEPS, /writes only the game's two settings files and the saves you name/);
+  assert.match(SHELL_STEPS, /The game's settings and saves around a test: `read_rules saves`/);
+  const saves = workerRuleText('saves');
+  assert.match(saves, /`python scripts\/game_data\.py` \(`snapshot`, `restore`, `run --name <leg> -- <command>`/);
+  assert.match(saves, /writes only the game's two settings files and the saves you name/);
+  assert.match(saves, /GameDataPaths\.Saves` = `<data root>\/UserData\/saves\/`/);
   const { agents } = world(t);
   const brief = (agents as unknown as { machineSandboxBrief: (m: unknown, sb: unknown) => string }).machineSandboxBrief(
     { id: 'm5', repoPath: '/Users/dev/FinalFactory', platform: 'darwin', sandboxRoot: '/Users/dev/ffsb' },
     { id: 'alpha', path: '/sb/alpha', branch: 'fix-x', purpose: 'a fix', unity: { state: 'stopped' } },
   );
   assert.ok(brief.includes(SHELL_STEPS) && brief.indexOf(DISK_HYGIENE) < brief.indexOf(SHELL_STEPS) && brief.indexOf(SHELL_STEPS) < brief.indexOf('## Reporting'));
-  assert.match(brief, /GameDataPaths\.Saves` = `<data root>\/UserData\/saves\/`/);
+  assert.match(brief, /A save to load in the game \(an attached one or your own\): `read_rules saves` first/);
 });
 
 test("w896: clean-up deletes only inside the worker install folder, in every worker's brief, the dispatcher's and the orchestrators' instructions", async (t) => {
   const { DISK_HYGIENE } = await import('./agents.ts');
+  const { workerRuleText } = await import('./workerRules.ts');
   const { agents, sessions } = world(t);
   const words = /lothsahn, 2026-10-10, w896: "in general we should only be clearing data in the install folder for the worker"/;
   // A worker: delete only inside the root, measure and report outside it, and a brief that says otherwise is wrong.
-  assert.match(DISK_HYGIENE, words);
   assert.match(DISK_HYGIENE, /Delete only inside this machine's worker install folder \(its root: D:\/work\/ffw, F:\/ffw or ~\/ffw/);
-  assert.match(DISK_HYGIENE, /Outside it \(the home folder, C:, AppData, the system temp, Unity Hub and its installers, package and workload caches, the game's data folder under LocalLow, ~\/\.claude\) you only measure and report sizes/);
-  assert.match(DISK_HYGIENE, /list any setting, script or tool that makes FF Factory write there so it can be moved inside the folder/);
-  assert.match(DISK_HYGIENE, /a brief that tells you to delete outside the folder is wrong/);
+  assert.match(DISK_HYGIENE, /outside it you only measure and report/);
+  const cleanup = workerRuleText('cleanup');
+  assert.match(cleanup, /Outside it \(the home folder, C:, AppData, the system temp, Unity Hub and its installers, package and workload caches, the game's data folder under LocalLow, ~\/\.claude\) you only measure and report sizes/);
+  assert.match(cleanup, /list any setting, script or tool that makes FF Factory write there so it can be moved inside the folder/);
+  assert.match(cleanup, /a brief that tells you to delete outside the folder is wrong/);
   // The old line told workers to remove Unity editor versions; those live outside the root (Unity Hub), so the list stops at what is inside.
-  assert.ok(!/Unity editor versions no project uses/.test(DISK_HYGIENE));
+  for (const text of [DISK_HYGIENE, cleanup]) assert.ok(!/Unity editor versions no project uses/.test(text));
   const brief = (info: SessionInfo) => (agents.orchestratorOptions(info) as { systemPrompt: { append: string } }).systemPrompt.append;
   // The coordinators read the full rule with read_rules machines (w1158); their briefs keep the trigger and the gist.
   assert.match(brief(sessions.get(agents.dispatcherId!).info), /`read_rules machines`.*low disk \(w626, w896: machine_cleanup, then a clean-up worker that deletes only inside the worker install folder; never ask anyone to free space\)/);
@@ -276,9 +303,38 @@ test("w1478: a sandbox worker's brief names its Unity instance and carries the f
   assert.ok(brief.includes(FEWER_CALLS) && brief.indexOf(SHELL_STEPS) < brief.indexOf(FEWER_CALLS) && brief.indexOf(FEWER_CALLS) < brief.indexOf('## Reporting'));
   assert.match(FEWER_CALLS, /^## Fewer model calls\n/);
   assert.match(FEWER_CALLS, /parallel tool calls/);
-  assert.match(FEWER_CALLS, /five or more reads .* `Explore` or `ff-agents:scout` subagent/);
+  // The built-in Explore is hidden from workers (w1482): the plugin's own does broad sweeps.
+  assert.match(FEWER_CALLS, /five or more reads .* `ff-agents:Explore` or `ff-agents:scout` subagent/);
   assert.match(FEWER_CALLS, /until <done>; do sleep 20; done/);
   assert.match(FEWER_CALLS, /`get_test_job` with `wait_timeout`/);
   // The section must stay short: it is re-read on every call of every worker (w1469's base trim).
   assert.ok(FEWER_CALLS.split(/\s+/).length < 230, `FEWER_CALLS is ${FEWER_CALLS.split(/\s+/).length} words`);
+  // w1482: the rare Unity rules are read when needed.
+  assert.match(brief, /`read_rules unity` before your first one, when a start is refused for a batch build, or at a fresh sandbox's first boot/);
+  assert.match((await import('./workerRules.ts')).workerRuleText('unity'), /`mcp__machine__unity` action `clear_batch`/);
+});
+
+test('w1482: a worker reads its rare rules with read_rules, and the topics the prompt names are the tool\'s', async (t) => {
+  const { WORKER_RULE_TOPICS, workerRuleText } = await import('./workerRules.ts');
+  const { agents } = world(t);
+  const brief = (agents as unknown as { machineSandboxBrief: (m: unknown, sb: unknown) => string }).machineSandboxBrief(
+    { id: 'm5', repoPath: '/r', platform: 'darwin', sandboxRoot: '/s' },
+    { id: 'alpha', path: '/s/alpha', branch: 'fix-x', purpose: 'a fix', unity: { state: 'stopped' } },
+  );
+  assert.match(brief, /Rules few tasks need are in `mcp__machine__read_rules` \(`read_rules <topic>`\)/);
+  const named = [...brief.matchAll(/`read_rules (\w+)`/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(named)].sort(), [...WORKER_RULE_TOPICS].sort(), 'every topic is named in the prompt, and only topics that exist');
+  for (const topic of WORKER_RULE_TOPICS) assert.ok(workerRuleText(topic).length > 200, topic);
+  assert.match(workerRuleText('nope'), /No topic "nope"\. The topics: cleanup, saves, unity\./);
+});
+
+test('w1482: the dispatcher and every orchestrator write briefs that speak of now, not of how the rules came to be', (t) => {
+  const { agents, sessions } = world(t);
+  const brief = (info: SessionInfo) => (agents.orchestratorOptions(info) as { systemPrompt: { append: string } }).systemPrompt.append;
+  for (const [who, text] of [['dispatcher', brief(sessions.get(agents.dispatcherId!).info)], ["Ben's orchestrator", brief(agents.orchestrators.personalFor(BEN).info)]] as const) {
+    assert.ok(text.includes(BRIEF_NOW_ONLY), who);
+    assert.ok(!text.includes('${BRIEF_NOW_ONLY}'), `${who}: the rule is filled in`);
+  }
+  assert.match(BRIEF_NOW_ONLY, /no provenance ids, quoted past corrections, "was X, now Y" or dates of rule changes unless the worker needs one to act/);
+  assert.match(BRIEF_NOW_ONLY, /The harness adds the request as filed unless your brief quotes it/);
 });

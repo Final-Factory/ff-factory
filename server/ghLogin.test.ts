@@ -83,7 +83,7 @@ test('w1463: the worker brief line says whether this machine may push .github/wo
     "- GitHub token: this machine's gh token: bryding (gist, read:org, repo): it cannot push .github/workflows (GitHub refuses a workflow file without the `workflow` scope); such a change must be pushed from a machine that can (m3: list_machines shows each machine's gh); commit the rest, push without the workflow file, and hand that step to your orchestrator. Never print a token.",
   );
   assert.equal(ghBriefLine('m3', yes, undefined, ['m3']), "- GitHub token: this machine's gh token: bryding (repo, workflow): it can push changes to .github/workflows.");
-  assert.match(ghBriefLine('pc', undefined, undefined, []), /not reported yet \(a daemon from before w1463\): whether it can push \.github\/workflows is unknown/);
+  assert.match(ghBriefLine('pc', undefined, undefined, []), /not reported yet \(an older daemon\): whether it can push \.github\/workflows is unknown/);
   assert.match(ghBriefLine('beast', no, undefined, []), /none reports the workflow scope now/);
   // A vault GitHub token (w1031, docs/vault.md 13) takes the machine login's place: the line names it by name and last four.
   const vault = ghBriefLine('beast', no, 'vault-ben-github …abcd', ['m3']);

@@ -205,9 +205,10 @@ test('intake: #bug-reports is FFBox\'s: never polled or filed from, even when co
 test("every machine worker's brief: the same Discord rules in a machine sandbox", async (t) => {
   const { agents, machines } = await setupOnMachine(t);
   const brief = (agents as unknown as { machineSandboxBrief: (m: unknown, sb: unknown) => string }).machineSandboxBrief(machines.require('pc'), machines.requireSandbox('pc', 'alpha'));
-  assert.match(brief, /## Discord\n#bug-reports and dev_bug_reports belong to FFBox/);
+  // FFBox's channels and the no-"fixed"-post rule are CLAUDE.md's, said once (w1482); the brief points there.
+  assert.match(brief, /## Discord\nCLAUDE\.md's "Discord: FFBox owns #bug-reports" binds you: read and download there, never post, and no "fixed" post after an `ffbox\/\*` merge/);
   assert.ok(brief.includes('`Discord: https://discord.com/channels/<guild id>/<thread id>`'));
-  assert.match(brief, /never post a "fixed" or "merged" notice/);
+  assert.ok(brief.includes('`Report: <report id>`'));
 });
 
 test('intake: a new bug thread waits for a person; the dispatcher hears it only once approved, with the rules added to its worker', async (t) => {

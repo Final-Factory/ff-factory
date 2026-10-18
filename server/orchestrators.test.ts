@@ -1539,6 +1539,25 @@ test('w496: the request as filed: whole notes from WorkItem.notes, older ones fr
   assert.match(requestAsFiled({ ...base, source: { kind: 'discord-bug' } as never, notes: [{ at: '2026-10-06T02:30:00.000Z', by: 'Lothsahn', text: 'Yes, alternate evenly.' }] }), /Notes since it was filed \(1\):\n- .*Lothsahn: Yes, alternate evenly\.$/);
 });
 
+test('w1482: the request as filed goes only with a brief that does not already quote it', () => {
+  const brief = 'Turn the PowerShell tool off for workers on non-Windows machines.\n\nDone when:\n- The worker session builder omits PowerShell only on non-Windows machines, with a unit test pinning both branches.\n- PR merged on green CI.';
+  const w = { id: 'w9', title: 'PowerShell off off Windows', brief, constraints: 'Do not deploy the portal.', relatedIds: ['w1479'], requesters: [BEN], log: [] as string[] };
+  // A dispatcher that summarises: the filed text goes too, whole.
+  const summary = requestAsFiled(w, 'Build decision 1 of the audit for the Macs and Linux hosts. Done when it merges.');
+  assert.match(summary, /The request as filed \(w9[\s\S]*Title: PowerShell off off Windows[\s\S]*with a unit test pinning both branches[\s\S]*Constraints: Do not deploy the portal\.[\s\S]*Related: w1479/);
+  // A dispatcher that quotes it (Markdown, quote marks and line breaks aside) and names its constraints and related ids: nothing to add.
+  const quoted = `Brief:\n> Turn the "PowerShell" tool off for workers on non-Windows machines.\n> Done when: - The worker session builder omits PowerShell only on non-Windows machines, with a unit test pinning both branches.\n> - PR merged on **green** CI.\nConstraints: do not deploy the portal. Related: w1479.`;
+  assert.equal(requestAsFiled(w, quoted), '');
+  // Quoted, but a note came since: only the note.
+  const noted = requestAsFiled({ ...w, notes: [{ at: '2026-10-18T21:00:00.000Z', by: 'Ben', text: 'Also Linux.' }] }, quoted);
+  assert.ok(!/Title:/.test(noted) && /Notes since it was filed \(1\):\n- .*Ben: Also Linux\.$/.test(noted), noted);
+  // Quoted, but the constraints left out: they go alone.
+  const noConstraints = requestAsFiled(w, quoted.replace(/Constraints:.*/, 'Related: w1479.'));
+  assert.ok(!/Title:/.test(noConstraints) && /Constraints: Do not deploy the portal\./.test(noConstraints), noConstraints);
+  // Half a quote is not a quote.
+  assert.match(requestAsFiled(w, 'Turn the PowerShell tool off for workers on non-Windows machines.'), /Title: PowerShell off off Windows/);
+});
+
 // ---------------------------------------------------------------- w527: standing agents' delegations are ledger requests
 
 test("w527: a standing agent's delegation flows into the ledger and onto a worker with no clicks; queued, it waits for capacity", async (t) => {
@@ -1742,7 +1761,7 @@ test('w920: a worker has portal_logs on the machine tool belt and in its brief, 
   assert.match(tool.description, /read-only/);
   assert.match(tool.description, /never state\.json, the vault, logins, sessions, keys/);
   assert.match(spec.append, /mcp__machine__portal_logs/);
-  assert.match(spec.append, /Check what FF Factory itself did before you infer it/);
+  assert.match(spec.append, /Check what FF Factory itself did \(a deploy, a clean-up, a restart, a tool that behaved oddly\) with `mcp__machine__portal_logs` before you infer it/);
   const h = machines.hooks!.handlersFor(info, m);
   assert.equal(typeof h.portal_logs, 'function');
 
