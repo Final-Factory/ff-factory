@@ -33,7 +33,7 @@ import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
 import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, parseSandboxRef, poolSettingsOf, sameCommit } from './machines.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG } from './launch.ts';
-import { AutoCompactor } from './autoCompact.ts';
+import { AutoCompactor, LONG_WAIT_MS } from './autoCompact.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, holdReason, pinnedWork, placementHint, roomNow, voiceVram, type Computer, type NeedKind, type RoomNow } from './placement.ts';
@@ -408,7 +408,7 @@ export class Agents {
     this.waker = new Waker(sessions, store, path.join(cfg.dataDir, 'wakes.json'));
     // w1384: a person never gets a bare path to review media from their orchestrator: what a reply names is shown inline.
     store.assistantText = (id, text) => this.inlineForPerson(id, text);
-    this.autoCompact = new AutoCompactor(sessions, cfg, { settleMs: cfg.orchestrator?.compactSettleMs });
+    this.autoCompact = new AutoCompactor(sessions, cfg, { settleMs: cfg.orchestrator?.compactSettleMs, waitsLong: (i) => this.waitsLong(i) });
     // IDLE WORKERS (w384): what keeps one from being stopped to make room, and the reaper of finished ones.
     sessions.keepIdle = (s) => this.keepIdle(s);
     // One person's tokens per turn (w1076): a live worker whose requests changed person restarts on theirs first.
@@ -757,6 +757,17 @@ export class Agents {
       else return undefined;
     }
     return `it waits on ${parts.join('; ')}`;
+  }
+  /**
+   * Why this worker, at its turn's end, now waits long enough for its cache to go cold (w1469, the compaction before a
+   * wait): what waitOn says (a person, another request, a merge, a deploy; never CI, which comes back within the hour
+   * as a rule), or a check-in an hour or more away. Undefined: it goes on, or comes back soon.
+   */
+  waitsLong(i: SessionInfo, now = Date.now()): string | undefined {
+    if (i.kind !== 'worker') return undefined;
+    const wake = this.waker.pending(i.id);
+    if (wake && Date.parse(wake.at) - now >= LONG_WAIT_MS) return `a check-in in ${Math.round((Date.parse(wake.at) - now) / 60_000)} min`;
+    return this.waitOn(i);
   }
   /** Agents.workLive() for the release pass, kept a few seconds: it reads every request, and the pass asks once per worker. */
   private waitLive?: { at: number; live: Map<string, WorkLive> };

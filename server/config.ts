@@ -452,6 +452,12 @@ export interface Config {
      * between turns once its context reaches this many tokens. Default 200,000; 0 turns it off. Settable live.
      */
     compactAtTokens?: number;
+    /**
+     * Compact before a long wait (w1469): a turn that ends with the worker waiting on a person, on another request, a
+     * merge or a deploy, or on a check-in an hour or more away compacts it when its context is at least this many tokens,
+     * so the conversation is written again small, not whole, after the cache's hour runs out. Default 100,000; 0 off.
+     */
+    compactBeforeWaitTokens?: number;
     /** The share of worker sessions (by their id) that compact by themselves, 0-100 (w1469's pilot): default 34. */
     compactPilotPercent?: number;
   };

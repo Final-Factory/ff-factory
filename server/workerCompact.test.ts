@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { SessionManager, setQueryForTesting, type AutoCompaction, type SessionHandle, type TurnEndMeta } from './sessions.ts';
-import { AutoCompactor, WORKER_COMPACT_DEFAULTS, compactBlocker, inPilot, workerCompactSettings, workerCompactionDue } from './autoCompact.ts';
+import { AutoCompactor, WORKER_COMPACT_DEFAULTS, WORKER_FOCUS, compactBlocker, inPilot, workerCompactSettings, workerCompactionDue } from './autoCompact.ts';
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { SessionInfo } from '../shared/types.ts';
@@ -12,7 +12,8 @@ import { fakeQuery } from '../e2e/fakeAgent.ts';
 
 /**
  * w1469 (lothsahn: "Build 1, 2 and 4: compact at ~200k, compact before long waits, trim the base"): workers compact by
- * themselves, between turns, past worker.compactAtTokens; first a pilot share of worker sessions. Against the scripted fake SDK ("#ctx <tokens>"
+ * themselves, between turns, past worker.compactAtTokens, and right after a turn that ends in a long wait past
+ * worker.compactBeforeWaitTokens; first a pilot share of worker sessions. Against the scripted fake SDK ("#ctx <tokens>"
  * sets the context, "/compact" compacts to 18,000 tokens).
  */
 
@@ -20,16 +21,19 @@ setQueryForTesting(fakeQuery({ stepMs: 1, slowStepMs: 25 }) as never);
 
 const info = (p: Partial<SessionInfo>) => ({ contextTokens: 0, turns: 5, ...p }) as Pick<SessionInfo, 'contextTokens' | 'lastTurnCostUsd' | 'lastCompaction' | 'turns'>;
 
-test('workerCompactSettings: defaults 200,000 and a 34% pilot; config sets them; 0 is off', () => {
+test('workerCompactSettings: defaults 200,000, 100,000 before a wait, a 34% pilot; config sets them; 0 is off', () => {
   assert.deepEqual(workerCompactSettings({}), { ...WORKER_COMPACT_DEFAULTS });
-  assert.deepEqual(workerCompactSettings({ worker: { compactAtTokens: 0, compactPilotPercent: 250 } as Config['worker'] }), { atTokens: 0, pilotPercent: 100 });
+  assert.deepEqual(workerCompactSettings({ worker: { compactAtTokens: 0, compactBeforeWaitTokens: 150_000, compactPilotPercent: 250 } as Config['worker'] }), { atTokens: 0, beforeWaitTokens: 150_000, pilotPercent: 100 });
 });
 
-test('workerCompactionDue: past 200,000; never on a costly turn alone', () => {
+test('workerCompactionDue: before a long wait from 100,000; else past 200,000; never on a costly turn alone', () => {
   const s = workerCompactSettings({});
   assert.equal(workerCompactionDue(info({ contextTokens: 150_000, lastTurnCostUsd: 30 }), s), undefined, 'a long turn is a worker\'s nature');
+  assert.equal(workerCompactionDue(info({ contextTokens: 99_000 }), s, 'it waits on Ben'), undefined, 'too small to be worth it');
+  assert.deepEqual(workerCompactionDue(info({ contextTokens: 150_000 }), s, 'it waits on Ben: approve'), { trigger: 'wait', reason: 'it waits (it waits on Ben: approve) with the context at 150,000 tokens' });
   assert.deepEqual(workerCompactionDue(info({ contextTokens: 210_000 }), s), { trigger: 'tokens', reason: 'the context passed 200,000 tokens' });
   assert.equal(workerCompactionDue(info({ contextTokens: 210_000 }), { ...s, atTokens: 0 }), undefined);
+  assert.equal(workerCompactionDue(info({ contextTokens: 150_000 }), { ...s, beforeWaitTokens: 0 }, 'a person'), undefined);
 });
 
 test('inPilot: a stable share of session ids', () => {
@@ -46,12 +50,12 @@ test('compactBlocker: a worker whose daemon cannot compact is left alone', () =>
   assert.equal(compactBlocker(s, false), 'its daemon cannot compact');
 });
 
-function setup(t: { after: (fn: () => void | Promise<void>) => void }, worker: Partial<Config['worker']>) {
+function setup(t: { after: (fn: () => void | Promise<void>) => void }, worker: Partial<Config['worker']>, waits: { why?: string }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-workercompact-'));
   const store = new Store(dir);
   const cfg = { limits: { maxSessions: 6 }, orchestrator: { model: 'opus', effort: 'low' }, worker: { permissionMode: 'bypassPermissions', effort: 'high', ...worker } } as unknown as Config;
   const sessions = new SessionManager(cfg, store);
-  const auto = new AutoCompactor(sessions, cfg, { settleMs: 20 });
+  const auto = new AutoCompactor(sessions, cfg, { settleMs: 20, waitsLong: () => waits.why });
   t.after(async () => {
     auto.stop();
     sessions.stopAll();
@@ -80,12 +84,31 @@ async function until(pred: () => boolean, what: string, ms = 4000) {
   }
 }
 
+test('a worker in the pilot compacts after a turn that ends in a long wait, with the worker focus; its end is marked a compaction', async (t) => {
+  const waits: { why?: string } = {};
+  const { compactions, ends, w, say } = setup(t, { compactPilotPercent: 100 }, waits);
+  say('work #ctx 150000');
+  await until(() => w.info.status === 'idle' && w.info.turns === 1, 'the first turn');
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(compactions.length, 0, 'it goes on: 150,000 is under 200,000');
+  waits.why = 'it waits on Ben: approve the release';
+  say('then wait #ctx 160000');
+  await until(() => !!w.info.lastCompaction && w.info.status === 'idle', 'the compaction before the wait');
+  assert.equal(compactions.length, 1);
+  assert.equal(compactions[0].focus, WORKER_FOCUS);
+  assert.equal(compactions[0].auto?.trigger, 'wait');
+  assert.equal(w.info.lastCompaction?.trigger, 'wait');
+  assert.equal(w.info.contextTokens, 18_000);
+  assert.equal(w.info.lastResult, 'Echo: then wait #ctx 160000', 'the last report stays');
+  assert.deepEqual(ends.at(-1)?.meta, { compaction: 'wait' }, 'agents.ts reads no report from it');
+});
+
 test('past 200,000 a worker in the pilot compacts; one outside the pilot never does', async (t) => {
-  const inside = setup(t, { compactPilotPercent: 100 });
+  const inside = setup(t, { compactPilotPercent: 100 }, {});
   inside.say('big #ctx 210000');
   await until(() => !!inside.w.info.lastCompaction && inside.w.info.status === 'idle', 'the compaction');
   assert.equal(inside.compactions[0].auto?.trigger, 'tokens');
-  const outside = setup(t, { compactPilotPercent: 0 });
+  const outside = setup(t, { compactPilotPercent: 0 }, { why: 'a person' });
   outside.say('big #ctx 210000');
   await until(() => outside.w.info.status === 'idle' && outside.w.info.turns === 1, 'the turn');
   await new Promise((r) => setTimeout(r, 80));

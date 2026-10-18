@@ -40,6 +40,7 @@ const COMPACTED_BY: Record<CompactionTrigger, string> = {
   cost: 'automatically, after a costly turn',
   self: 'at its own request',
   claude: 'by Claude Code at its limit',
+  wait: 'automatically, before a long wait',
 };
 
 /**

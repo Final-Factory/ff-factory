@@ -320,7 +320,7 @@ export interface SessionInfo {
  * turn's cost passed its threshold (`tokens`, `cost`), the orchestrator itself (`self`, compact_conversation), or Claude
  * Code at its own hard limit (`claude`).
  */
-export type CompactionTrigger = 'person' | 'tokens' | 'cost' | 'self' | 'claude';
+export type CompactionTrigger = 'person' | 'tokens' | 'cost' | 'self' | 'claude' | 'wait';
 
 /** One finished compaction of a session's conversation (w535): when, why, and the context before and after. */
 export interface CompactionRecord {
