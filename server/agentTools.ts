@@ -145,6 +145,17 @@ async function shell(d: PublishDeps): Promise<string> {
 }
 
 /**
+ * Put `dir` first on the search path in `env`, in place. A copy of Windows' process.env keeps the name as it was
+ * (`Path`) and is no longer case-blind, so setting `PATH` beside it gave the child two, and git was not found
+ * (w1476: beast, whose daemon.json names claude, failed "spawn git ENOENT" in the first rollout). Exported for tests.
+ */
+export function prependPath(env: NodeJS.ProcessEnv, dir: string, platform: NodeJS.Platform): void {
+  const win = platform === 'win32';
+  const key = (win ? Object.keys(env).find((k) => k.toUpperCase() === 'PATH') : undefined) ?? 'PATH';
+  env[key] = `${dir}${win ? ';' : ':'}${env[key] ?? ''}`;
+}
+
+/**
  * Publish the latest agent tools on this machine. `root`: the worker root; `claude`: the daemon's Claude Code binary
  * (daemon.json `claude`), whose folder goes first on PATH. Returns the exit code (EXIT).
  */
@@ -155,8 +166,7 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
   d.say(`${LINE.before} ${formatVersions(before)}`);
 
   const env: NodeJS.ProcessEnv = { ...d.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
-  const sep = d.platform === 'win32' ? ';' : ':';
-  if (o.claude && path.isAbsolute(o.claude)) env.PATH = `${path.dirname(o.claude)}${sep}${env.PATH ?? ''}`;
+  if (o.claude && path.isAbsolute(o.claude)) prependPath(env, path.dirname(o.claude), d.platform);
   // final-factory-agents is public: no credential helper, no prompt (an ssh session reaches no keychain, w613).
   const anon = ['-c', 'credential.helper=', '-c', 'credential.interactive=never'];
   const git = (args: string[], cwd?: string) => d.exec('git', [...anon, ...args], { env, timeoutMs: 5 * 60_000, ...(cwd ? { cwd } : {}) });
