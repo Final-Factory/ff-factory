@@ -249,6 +249,7 @@ conversation, not its base, is most of the money. server/autoCompact.ts compacts
 | Trigger | When | Config (set_app_config) |
 |---|---|---|
 | `tokens` | the context passed 200,000 tokens (not again before it grew by half that past what the last compaction left, nor within 3 turns) | `worker.compactAtTokens` (0 off) |
+| `wait` | the turn ended in a long wait (a person, another request, a merge or a deploy, a check-in 55 minutes or more away; never CI, which comes back within the cache's hour as a rule) with the context at 100,000 tokens or more: compacted while its cache is warm, so after the wait the conversation is written again small, not whole | `worker.compactBeforeWaitTokens` (0 off) |
 | pilot | only this share of worker sessions, by a hash of the session id (the same session always answers the same): 34% at first | `worker.compactPilotPercent` (100 all) |
 
 A machine's worker is compacted through its daemon: `compact` (server/machineProtocol.ts), offered in the daemon's hello, carried to
@@ -259,7 +260,7 @@ never compacted on a message: `/compact` stays the orchestrators' chat command.
 What it should save, modelled call by call over beast's 3 days (w1469; `$TMPDIR` script levers.py: each call keeps its real
 output and growth, a compaction costs its read and a 12.5k summary, and the next call writes the compacted context again): the
 compaction at 200k **-44%** of the workers' spend (-37% if what is read again after a compaction is three times the 15k guessed);
-the one before long waits (w1469's lever 2, its own change) -22% alone, both -46%. To check on the pilot: its sessions' cost per call against the rest's, and what they
+the one before waits alone -22%; both -46%. To check on the pilot: its sessions' cost per call against the rest's, and what they
 re-read after a compaction (`spend_report`, the `summary` and `reread` categories).
 
 ## Transcripts: how long they are kept

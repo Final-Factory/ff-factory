@@ -8,9 +8,12 @@
 // orchestrator may also ask for it itself (compact_conversation), which runs after its turn the same way.
 //
 // Workers too (w1469, lothsahn: "Build 1, 2 and 4: compact at ~200k, compact before long waits, trim the base"): a worker
-// compacts between turns once its context passes worker.compactAtTokens (200,000). Measured on beast's workers
-// (2026-10-15..18, docs/spend.md "Workers compact"): calls averaged 357k tokens of context, and a compaction at 200k,
-// modelled call by call, cut their cost by about 44%. A machine's worker compacts through its daemon (`compact`, offered in its hello); one that did not offer it is
+// compacts between turns once its context passes worker.compactAtTokens (200,000), and right after a turn that ends in a
+// long wait (a person, another request, a merge, a deploy, a check-in an hour away) once it passes
+// worker.compactBeforeWaitTokens (100,000), while its cache is still warm: after the cache's hour the conversation is
+// written again small, not whole. Measured on beast's workers (2026-10-15..18, docs/spend.md "Workers compact"): calls
+// averaged 357k tokens of context, and a modelled compaction at 200k with the one before waits cut their cost by about
+// 45%. A machine's worker compacts through its daemon (`compact`, offered in its hello); one that did not offer it is
 // left alone. First a pilot: worker.compactPilotPercent (34) of worker sessions, by id.
 import type { Config } from './config.ts';
 import type { SessionInfo } from '../shared/types.ts';
@@ -45,19 +48,23 @@ export const PERSONAL_FOCUS =
 export const WORKER_FOCUS =
   "Automatic compaction by FF Factory. Keep, exactly: every request you are on (its wNNN id, title and person), its brief's goal, done-when and constraints, and every person's words quoted in it or since, word for word, with who said them; your branch, sandbox, commits pushed and PR numbers with their state; what is done and verified and how (the commands and their results), what is left, and what you wait on; the files and line numbers you are changing and why; corrections and decisions, each with who gave them; ids with what they are. Finished steps: one line each at most. The ledger (read_work) has the requests.";
 
-/** The defaults of a worker's compaction (w1469): its context, and the pilot's share in percent. */
-export const WORKER_COMPACT_DEFAULTS = { atTokens: 200_000, pilotPercent: 34 } as const;
+/** The defaults of a worker's compaction (w1469): its context, its context before a long wait, and the pilot's share in percent. */
+export const WORKER_COMPACT_DEFAULTS = { atTokens: 200_000, beforeWaitTokens: 100_000, pilotPercent: 34 } as const;
+
+/** A wait shorter than this keeps the cache warm (its entries live an hour): a check-in sooner is no long wait. */
+export const LONG_WAIT_MS = 55 * 60_000;
 
 export interface WorkerCompactSettings {
   atTokens: number;
+  beforeWaitTokens: number;
   pilotPercent: number;
 }
 
-/** The worker thresholds in force (config worker.compactAtTokens / compactPilotPercent; 0 is off). */
+/** The worker thresholds in force (config worker.compactAtTokens / compactBeforeWaitTokens / compactPilotPercent; 0 is off). */
 export function workerCompactSettings(cfg: Partial<Pick<Config, 'worker'>>): WorkerCompactSettings {
   const n = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d);
   const w = cfg.worker;
-  return { atTokens: n(w?.compactAtTokens, WORKER_COMPACT_DEFAULTS.atTokens), pilotPercent: Math.min(100, n(w?.compactPilotPercent, WORKER_COMPACT_DEFAULTS.pilotPercent)) };
+  return { atTokens: n(w?.compactAtTokens, WORKER_COMPACT_DEFAULTS.atTokens), beforeWaitTokens: n(w?.compactBeforeWaitTokens, WORKER_COMPACT_DEFAULTS.beforeWaitTokens), pilotPercent: Math.min(100, n(w?.compactPilotPercent, WORKER_COMPACT_DEFAULTS.pilotPercent)) };
 }
 
 /** Whether this worker session is in the pilot: a stable share of session ids (the same session always answers the same). */
@@ -70,10 +77,13 @@ export function inPilot(sessionId: string, percent: number): boolean {
 }
 
 /**
- * Whether this worker is due for an automatic compaction now (w1469): by its context as an orchestrator's (compactionDue),
- * with no cost trigger: a worker's turn is long by nature.
+ * Whether this worker is due for an automatic compaction now (w1469): before a long wait (`waiting`, why it waits) from
+ * beforeWaitTokens, else by its context as an orchestrator's (compactionDue, no cost trigger: a worker's turn is long by nature).
  */
-export function workerCompactionDue(info: Pick<SessionInfo, 'contextTokens' | 'lastTurnCostUsd' | 'lastCompaction' | 'turns'>, s: WorkerCompactSettings): AutoCompaction | undefined {
+export function workerCompactionDue(info: Pick<SessionInfo, 'contextTokens' | 'lastTurnCostUsd' | 'lastCompaction' | 'turns'>, s: WorkerCompactSettings, waiting?: string): AutoCompaction | undefined {
+  const ctx = info.contextTokens;
+  if (!ctx) return undefined;
+  if (waiting && s.beforeWaitTokens > 0 && ctx >= s.beforeWaitTokens) return { trigger: 'wait', reason: `it waits (${waiting.slice(0, 160)}) with the context at ${num(ctx)} tokens` };
   return compactionDue(info, { atTokens: s.atTokens, atTurnUsd: 0 });
 }
 
@@ -142,11 +152,14 @@ export class AutoCompactor {
   private readonly settleMs: number;
   private readonly sessions: SessionManager;
   private readonly cfg: Pick<Config, 'orchestrator'> & Partial<Pick<Config, 'worker'>>;
+  /** Why a worker now waits a long time (a person, another request, a merge, a deploy, a far check-in), or undefined (w1469). */
+  private readonly waitsLong: (i: SessionInfo) => string | undefined;
 
-  constructor(sessions: SessionManager, cfg: Pick<Config, 'orchestrator'> & Partial<Pick<Config, 'worker'>>, opts: { settleMs?: number } = {}) {
+  constructor(sessions: SessionManager, cfg: Pick<Config, 'orchestrator'> & Partial<Pick<Config, 'worker'>>, opts: { settleMs?: number; waitsLong?: (i: SessionInfo) => string | undefined } = {}) {
     this.sessions = sessions;
     this.cfg = cfg;
     this.settleMs = opts.settleMs ?? SETTLE_MS;
+    this.waitsLong = opts.waitsLong ?? (() => undefined);
     sessions.events.on('turnEnd', (s: SessionHandle, _text: string, meta?: TurnEndMeta) => {
       if ((s.info.kind !== 'orchestrator' && s.info.kind !== 'worker') || meta?.compaction) return;
       this.soon(s.info.id);
@@ -184,7 +197,7 @@ export class AutoCompactor {
       if (!inPilot(id, ws.pilotPercent)) return 'not in the pilot';
     }
     const asked = this.requested.get(id);
-    const due: AutoCompaction | undefined = asked !== undefined ? { trigger: 'self', reason: 'the orchestrator asked for it' } : ws ? workerCompactionDue(s.info, ws) : compactionDue(s.info, autoCompactSettings(this.cfg));
+    const due: AutoCompaction | undefined = asked !== undefined ? { trigger: 'self', reason: 'the orchestrator asked for it' } : ws ? workerCompactionDue(s.info, ws, this.waitsLong(s.info)) : compactionDue(s.info, autoCompactSettings(this.cfg));
     if (!due) return 'not due';
     const tried = this.attempts.get(id);
     const finished = tried !== undefined && s.info.lastCompaction && Date.parse(s.info.lastCompaction.at) >= tried;
