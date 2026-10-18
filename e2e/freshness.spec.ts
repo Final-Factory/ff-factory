@@ -190,6 +190,9 @@ test('an open ask_person question is still open, with its buttons, after the rel
   await expect(card).toBeVisible();
   await expect(card.getByTestId('ask-option').first()).toBeEnabled();
   await expect(card).not.toHaveClass(/ask-locked/);
+  // The server is shared by the other specs: answer, so the question does not stay in the orchestrator's chat.
+  await card.getByTestId('ask-option').filter({ hasText: 'Wait' }).click();
+  await expect(card.getByTestId('ask-option').filter({ hasText: 'Wait' })).toContainText('Your answer');
 });
 
 test('an approval being declined keeps its note over the reload', async ({ page }) => {
@@ -211,6 +214,9 @@ test('an approval being declined keeps its note over the reload', async ({ page 
   await expect.poll(() => oldPage(page), { timeout: 20_000 }).toBe(false);
   const again = page.locator('.sb-panel .perm-pending').getByPlaceholder('Tell the agent what to do instead');
   await expect(again).toHaveValue('use the trash folder instead');
+  // The sandbox is shared by the other specs: decide, so no approval stays waiting in it.
+  await page.locator('.sb-panel .perm-pending').getByRole('button', { name: 'Deny', exact: true }).click();
+  await expect(page.locator('.sb-panel .perm-pending')).toHaveCount(0);
 });
 
 test('a chat scrolled up is at the same message after the reload', async ({ page }) => {

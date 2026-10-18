@@ -140,6 +140,9 @@ for it). In a test that reads that chat: find your own lines by the unique tag o
 (`events.slice(before)`) or by a count of every user event; and press a hover-only button (`Reply`, `React`) with the
 hover and the click retried together (`press` in `e2e/replies.spec.ts`), because another test's answer scrolls the page
 and ends the hover. On a touch project the same button is shown by a tap on the message.
+A test that leaves something waiting on the server (an `ask_person` question, a permission prompt) must answer it before it ends:
+the next spec in the project finds it in the chat or in the sandbox's attention strip (w1489, which broke
+`scrollKeep.spec.ts` and `sandbox.spec.ts` on CI while they passed alone).
 
 A test that intercepts the page's requests (`page.route`) sets `test.use({ serviceWorkers: 'block' })`: the app registers a
 service worker, and WebKit does not route the requests of a page one controls (the route is never hit and the real server
