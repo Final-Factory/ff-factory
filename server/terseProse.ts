@@ -13,7 +13,7 @@ import { inPilot } from './autoCompact.ts';
 export const TERSE_PROSE_DEFAULT_PERCENT = 50;
 
 /** Appended to a pilot worker's system prompt, after its Reporting rules. Its first line marks a pilot session in a transcript. */
-export const TERSE_PROSE_RULE = `## Between tool calls (pilot, w1480)
+export const TERSE_PROSE_RULE = `## Between tool calls (pilot)
 Write nothing between routine tool calls. When something must be said, one short line: a finding, a change of plan, a warning. No recap of what a tool printed, no plan restated, no "Let me". Ids, paths, numbers and errors stay exact. This covers only text between tool calls: your end-of-turn report, PR descriptions, commit messages, DONE and still-open lines and anything else a person reads stay plain, full English under Reporting above.`;
 
 /** The pilot's share in force (config worker.terseProsePilotPercent, 0-100; 0 is off). */

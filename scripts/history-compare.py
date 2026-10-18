@@ -15,7 +15,7 @@ import argparse, glob, json, os, statistics
 ap = argparse.ArgumentParser()
 ap.add_argument('--root', default=os.path.expanduser('~/.claude/projects'))
 ap.add_argument('--since', default='', help='ISO time: only sessions whose first call is at or after it')
-ap.add_argument('--marker', default='## Between tool calls (pilot, w1480)')
+ap.add_argument('--marker', default='## Between tool calls (pilot)')
 ap.add_argument('--worker', default='# You are running inside an FF Sandbox', help="a worker's system prompt holds this; other sessions are left out")
 ap.add_argument('--reports', type=int, default=0)
 ap.add_argument('--min-calls', type=int, default=10, help='leave out sessions shorter than this')
