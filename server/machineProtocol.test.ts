@@ -53,7 +53,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w1469 (no bump): `compact` in the hello (optional: an older portal ignores it), `compact`, sent only to a daemon that offered
 // it (an older daemon's onMessage has no default and drops it, so its workers are simply not compacted), and `meta` on `signal`,
 // optional: an older portal emits the turn end without it, as before; an older daemon never sends it.
-const DECIDED = { protocol: 9, fingerprint: '25590d3baf3ccc7a' };
+// w1480 (no bump): `settings` on the launch spec (the session's Claude Code settings, here a plugin turned off), optional: an
+// older daemon ignores it and its workers start with the machine's plugins as before.
+const DECIDED = { protocol: 9, fingerprint: 'f7e198d5f98bf8a4' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

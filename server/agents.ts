@@ -279,6 +279,7 @@ Nothing you start may outlive your work (Ben, 2026-10-13, w1197: "please update 
 export const SHELL_STEPS = `## Shell steps that never wait for a person
 You run in bypass mode: a Bash or PowerShell command asks nobody, except when Claude Code's own dangerous-rm check flags a delete in it (an \`rm\` of a \`$VAR\` path with a glob or a brace list, \`$TMPDIR/*.log\` or \`$TMPDIR/{a,b}\`, or of a critical path); then a person must approve it and your work stops (lothsahn, 2026-10-12, w1097: "Why did it do that, and how do we allow it to do what it just needed to do without a complex bash prompt?"). A function, a loop, several lines, \`&&\`, a copy into the game's data folder and a script run never ask (measured, w1097). So:
 - Put multi-step test logic (a function, a retry loop, several legs) in a script file in $TMPDIR, written with the Write tool, and run it: \`bash "$TMPDIR/leg.sh" 1920\`. It never asks, and you can run it again.
+- Keep what a command prints small: every later call reads it again, and tool output is nearly half of a worker's history (w1480, measured). Find the lines first (\`grep -n\`), then read the range you need, not the whole file; cap a search (\`| head -40\`, \`grep -l\`, \`grep -c\`); print a build's, a test run's or a CI log's summary and its failures (\`| tail -40\`, \`gh run view <id> --log-failed | tail -80\`), not the whole log.
 - Back up and restore the game's settings and saves around a test with the game repo's \`python scripts/game_data.py\` (\`snapshot\`, \`restore\`, \`run --name <leg> -- <command>\`, then \`get <key> --name <leg> --after\`), not a \`cp\` loop into LocalLow. It writes only the game's two settings files and the saves you name, and keeps its copies in $TMPDIR. A branch older than it: \`git show origin/master:scripts/game_data.py > "$TMPDIR/game_data.py"\`.
 - Deletes in $TMPDIR: Disk space above (a new folder per leg, every path written out).`;
 
@@ -344,6 +345,16 @@ const IDLE_REAP_MS = 60 * 60_000;
  * watches a worker's terminal: it reports instead). PowerShell (172), ListAgents (23) and ReportFindings (code review) stay.
  */
 export const WORKER_UNUSED_TOOLS = ['Workflow', 'ScheduleWakeup', 'AskUserQuestion'] as const;
+
+/**
+ * Claude Code plugins a worker starts without, whatever its machine's user enabled (w1480, lothsahn: "pilot caveman and quieter
+ * tool output"). The C# language server cannot resolve the game's Unity assemblies in a sandbox, so the diagnostics it attaches
+ * after every edit are noise every later call reads again: on beast's workers (2026-10-15..18) 1,508 "errors" in 146 attachments
+ * over 28 sessions, nearly all unresolved names (CS0246, CS0103, CS0234: FFCore, Entity, float3), about 1.2% of what later calls
+ * re-read (estimated). The Unity editor is the compiler that counts. Set false in the process's own settings (--settings): measured
+ * on Claude Code 2026-10-18, the plugin and its LSP tool are gone from the session's init.
+ */
+export const WORKER_DISABLED_PLUGINS = ['csharp-lsp@claude-plugins-official'] as const;
 
 /** The gates a worker may give up its sandbox for (w890): not a time, a machine, a usage limit or a lock; CI has its own rule (w846). */
 const WAIT_RELEASE_KINDS: readonly string[] = ['deploy', 'request', 'pr'];
@@ -1854,6 +1865,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
       unityMcp: true,
       disallowedTools: ['mcp__ffsb', ...WORKER_UNUSED_TOOLS],
+      settings: { enabledPlugins: Object.fromEntries(WORKER_DISABLED_PLUGINS.map((p) => [p, false])) },
       mcp: {
         server: 'machine',
         tools: this.workerTools({
