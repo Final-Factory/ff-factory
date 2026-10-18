@@ -83,7 +83,7 @@ test('the evidence rule: the worker settles its own guesses; a person is asked f
   assert.match(MERGE_RULES, /Never stop at an open PR waiting for the user/);
   assert.match(MERGE_RULES, /Hold one only for exceptional risk or a concrete timing reason, and say in your report which it is and when it will merge/);
   assert.match(MERGE_RULES, /Verification still comes first/);
-  assert.match(MERGE_RULES, /master takes changes only through your pull request.*never a direct push/);
+  assert.match(MERGE_RULES, /master takes changes only through your pull request \(Git above\)/);
   assert.match(REPORT_LABELS, /Label each number and recommendation as measured, sourced or a guess/);
   assert.match(REPORT_LABELS, /what you saw yourself rather than what a title, a measurement table or a tool verdict implies/);
   assert.match(REPORT_LABELS, /an orchestrator relays only the start of a long report/);
@@ -106,7 +106,8 @@ test("every worker's brief carries it: a sandbox on a machine (w510: the portal 
     assert.match(brief, /`master` is the game repo's one trunk \(develop is retired, w1137\)/, `${name}: master is the trunk`);
     assert.match(brief, /git fetch origin && git merge origin\/master/, `${name}: merge origin/master, never rebase a pushed branch`);
     assert.match(brief, /gh pr create --base master.*gh pr merge <n> --merge/, `${name}: open a PR into master, merge it`);
-    assert.match(brief, /gh pr edit <n> --base master/, `${name}: retarget a develop-based PR`);
+    assert.match(brief, /master takes no direct push/, `${name}: master only through a PR (said once, in Git)`);
+    assert.match(brief, /a branch that started there merges origin\/master in like any other/, `${name}: a develop-based branch`);
     assert.match(brief, /FeatureToggles\.cs/, `${name}: unfinished work goes behind a feature toggle`);
     assert.match(brief, /Never push to or open PRs into develop/, `${name}: develop is off-limits`);
     assert.ok(!/origin\/develop|HEAD:develop|rebase origin/.test(brief), `${name}: no develop flow left`);
@@ -217,7 +218,8 @@ test("w1097: every worker's brief says which shell step still waits for a person
   // Why w1079 deleted its own temp: to reuse a test's output folder. The brief says to make a new one.
   assert.match(DISK_HYGIENE, /never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, `\$TMPDIR\/<leg>-<timestamp>`/);
   assert.match(DISK_HYGIENE, /lothsahn, 2026-10-12, w1097: "Can't we have the cleanup process when a worker is done do this for them so the worker doesn't have to worry about it\?"/);
-  assert.match(SHELL_STEPS, /Never delete in \$TMPDIR to reuse a folder: a new `\$TMPDIR\/<leg>-<timestamp>` per leg/);
+  // w1479: said once, in Disk space; Shell steps points there.
+  assert.match(SHELL_STEPS, /Deletes in \$TMPDIR: Disk space above/);
   assert.match(SHELL_STEPS, /^## Shell steps that never wait for a person\n/);
   assert.match(SHELL_STEPS, /lothsahn, 2026-10-12, w1097: "Why did it do that, and how do we allow it to do what it just needed to do without a complex bash prompt\?"/);
   assert.match(SHELL_STEPS, /except when Claude Code's own dangerous-rm check flags a delete in it/);
