@@ -3,7 +3,8 @@ import path from 'node:path';
 import type { Requester } from '../shared/types.ts';
 import { readJsonDurable, writeJsonDurable } from './durable.ts';
 import { daemonBehind } from './machines.ts';
-import { SAFE_ROOT, SAFE_TARGET, workerUpdateRemote } from './opsWorker.ts';
+import { SAFE_ROOT, SAFE_TARGET, workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
+import { AGENT_PLUGINS, EXIT, LINE, parseVersions, type Versions } from './agentTools.ts';
 
 /**
  * The machine rollout (w887, lothsahn 2026-10-10: "Update FFFactory so that after updating the portal and validating, it
@@ -21,6 +22,11 @@ import { SAFE_ROOT, SAFE_TARGET, workerUpdateRemote } from './opsWorker.ts';
  *   online; when a failed run leaves the machine offline, this reruns the installer at the commit it ran before.
  * - One report per deploy, to the orchestrator of whoever asked for it (the dispatcher for a deploy by hand), once
  *   every machine is settled or only the offline ones are left; a machine that finishes later gets a short follow-up.
+ * - Then the agent tools (w1476, lothsahn 2026-10-18: "Please create a new work item that deploying the latest tools is part
+ *   of every deploy operation"): on every worker root machine online after its daemon step, updated or already current, the
+ *   installer's tools form (workerToolsRemote, server/agentTools.ts) brings the final-factory-agents plugins to master. The
+ *   report gives each plugin's version before and after. A failure there is reported, changes nothing about the daemon and
+ *   rolls nothing back; the next machine carries on.
  */
 
 /** The marker fff-update writes when a deploy verified, and where the rollout keeps its state (both in the data folder). */
@@ -30,6 +36,8 @@ export const ROLLOUT_FILE = 'machine-rollout.json';
 export const ROLLOUT_LIMITS = {
   /** One installer run over ssh (npm ci on a slow machine included). */
   installMs: 15 * 60_000,
+  /** One agent tools run over ssh (the installer's clone, then registerAgents.sh: a marketplace pull and three plugin installs). */
+  toolsMs: 15 * 60_000,
   /** After a failed run, how long the machine gets to be seen online before it counts as left without a daemon. */
   settleMs: 90_000,
   /** The main report waits this long after the verification for machines that are only reconnecting to the new portal. */
@@ -71,6 +79,20 @@ export interface RolloutHost {
   requesterOf(verifiedAt: number): Requester | undefined;
 }
 
+/** The agent tools publish on one machine (w1476). */
+export interface ToolsOutcome {
+  status: 'publishing' | 'ok' | 'failed' | 'not-published' | 'skipped';
+  /** Each plugin's version (absent: not installed) before and after the run, and what final-factory-agents master publishes. */
+  before?: Versions;
+  after?: Versions;
+  latest?: Versions;
+  /** The final-factory-agents commit the run installed from. */
+  latestSha?: string;
+  note?: string;
+  summary?: string[];
+  at?: string;
+}
+
 export interface MachineOutcome {
   status: 'pending' | 'updating' | 'ok' | 'current' | 'failed' | 'skipped';
   /** Why it is pending, skipped or failed. */
@@ -92,6 +114,8 @@ export interface MachineOutcome {
   at?: string;
   /** The main report named it as it was; a later change is then reported as a follow-up. */
   told?: boolean;
+  /** The agent tools publish after the daemon step (w1476). */
+  tools?: ToolsOutcome;
 }
 
 export interface RolloutState {
@@ -99,6 +123,8 @@ export interface RolloutState {
   previous?: string;
   verifiedAt?: string;
   by?: Requester;
+  /** This rollout also publishes the agent tools (w1476): set when it starts, so a rollout from before never does. */
+  tools?: boolean;
   /** The main report went out. */
   reported?: boolean;
   machines: Record<string, MachineOutcome>;
@@ -110,6 +136,8 @@ export interface RolloutDeps {
   dataDir: string;
   /** Off in a dry run and with machines.autoUpdateAfterDeploy false. */
   enabled: () => boolean;
+  /** The agent tools publish (w1476); off with machines.publishAgentToolsAfterDeploy false. Default on. */
+  tools?: () => boolean;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   limits?: Partial<typeof ROLLOUT_LIMITS>;
@@ -159,7 +187,10 @@ export class MachineRollout {
     const saved = readJsonDurable<RolloutState>(this.file, { generations: 0 });
     if (saved && typeof saved === 'object' && saved.machines) this.state = saved;
     // A run the last portal was in the middle of is lost with it: the machine is looked at again (its daemon says where it is).
-    for (const o of Object.values(this.state.machines)) if (o.status === 'updating') Object.assign(o, { status: 'pending', note: 'the portal restarted during its update; looked at again' });
+    for (const o of Object.values(this.state.machines)) {
+      if (o.status === 'updating') Object.assign(o, { status: 'pending', note: 'the portal restarted during its update; looked at again' });
+      if (o.tools?.status === 'publishing') delete o.tools;
+    }
   }
 
   start() {
@@ -193,9 +224,10 @@ export class MachineRollout {
     const sha = v?.sha?.trim().toLowerCase();
     if (sha && SHA.test(sha) && sha !== this.state.sha && Number.isFinite(at) && this.now() - at <= this.lim.staleMarkerMs) {
       const by = this.d.host.requesterOf(at);
-      this.state = { sha, previous: v?.previous || undefined, verifiedAt: new Date(at).toISOString(), ...(by ? { by } : {}), machines: {} };
+      const tools = this.d.tools?.() !== false;
+      this.state = { sha, previous: v?.previous || undefined, verifiedAt: new Date(at).toISOString(), ...(by ? { by } : {}), ...(tools ? { tools } : {}), machines: {} };
       this.save();
-      console.log(`machine rollout: portal ${sha.slice(0, 9)} verified${by ? ` (deploy asked for by ${by.userId})` : ''}; updating the machines' daemons`);
+      console.log(`machine rollout: portal ${sha.slice(0, 9)} verified${by ? ` (deploy asked for by ${by.userId})` : ''}; updating the machines' daemons${tools ? ' and agent tools' : ''}`);
     }
     // Retired only after the state is saved: a crash in between takes the marker again.
     try {
@@ -218,7 +250,11 @@ export class MachineRollout {
       for (const id of Object.keys(this.state.machines)) if (!known.has(id)) delete this.state.machines[id];
       for (const m of this.d.host.machines()) {
         const o = (this.state.machines[m.id] ??= { status: 'pending' });
-        if (o.status !== 'pending') continue;
+        if (o.status !== 'pending') {
+          if (this.toolsDue(m, o)) await this.publishTools(m, o);
+          this.save();
+          continue;
+        }
         if (m.local) {
           Object.assign(o, { status: 'skipped', note: "the portal's own host: the portal runs its daemon itself" });
         } else if (!m.root) {
@@ -237,6 +273,8 @@ export class MachineRollout {
         } else {
           await this.updateOne(m, o, sha);
         }
+        this.save();
+        if (this.toolsDue(m, o)) await this.publishTools(m, o);
         this.save();
       }
       this.save();
@@ -317,6 +355,33 @@ export class MachineRollout {
     });
   }
 
+  /** A worker root machine whose daemon step is done and that is online now, not yet published to in this rollout. */
+  private toolsDue(m: RolloutMachine, o: MachineOutcome): boolean {
+    if (!this.state.tools || o.tools || !m.root || m.local) return false;
+    if (o.status !== 'ok' && o.status !== 'current' && o.status !== 'failed') return false;
+    if (!this.d.host.online(m.id)) {
+      // Its daemon failed and is offline: nothing to run the tools on, and the report already says it needs a person.
+      if (o.status === 'failed') o.tools = { status: 'skipped', note: 'the machine is offline after its failed daemon update' };
+      return false;
+    }
+    return true;
+  }
+
+  /** Publish the latest agent tools on one machine (w1476), never throwing: its outcome is recorded whatever happens. */
+  private async publishTools(m: RolloutMachine, o: MachineOutcome): Promise<void> {
+    const t: ToolsOutcome = (o.tools = { status: 'publishing' });
+    this.save();
+    console.log(`machine rollout: publishing the agent tools on ${m.id}`);
+    try {
+      const r = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }), this.lim.toolsMs);
+      Object.assign(t, toolsResult(r.code, `${r.stdout}\n${r.stderr}`));
+    } catch (e) {
+      Object.assign(t, { status: 'failed', note: (e as Error).message });
+    }
+    t.at = new Date(this.now()).toISOString();
+    console.log(`machine rollout: ${m.id}: agent tools ${t.status}${t.note ? ` (${t.note})` : ''}`);
+  }
+
   private async waitOnline(id: string): Promise<boolean> {
     const until = this.now() + this.lim.settleMs;
     for (;;) {
@@ -354,12 +419,15 @@ export class MachineRollout {
     const commits = o.before || o.after ? ` ${o.before?.slice(0, 9) ?? '?'} → ${o.after?.slice(0, 9) ?? '?'}.` : '';
     const head =
       o.status === 'ok' ? `updated.${commits}${limits}${agents}`
-      : o.status === 'current' ? `already on the deployed commit (${o.after?.slice(0, 9) ?? 'unknown'}); nothing to do.`
+      : o.status === 'current' ? `already on the deployed commit (${o.after?.slice(0, 9) ?? 'unknown'}); its daemon was left alone.`
       : o.status === 'failed' ? `FAILED: ${o.note}.${commits}${limits}${agents}${o.rollback ? ` Rollback: ${o.rollback}.` : ''}`
       : o.status === 'skipped' ? `skipped: ${o.note}.`
       : o.status === 'updating' ? 'updating now.'
       : `waiting: ${o.note ?? 'not online'}. It is updated when it next comes online.`;
-    return `- ${id}: ${head}${sums.length ? `\n${sums.join('\n')}` : ''}`;
+    const t = o.tools;
+    const toolSums = t && (t.status === 'failed' || t.status === 'not-published') ? (t.summary ?? []).map((l) => `    tools: ${l}`) : [];
+    const all = [...sums, ...toolSums];
+    return `- ${id}: ${head}${toolsLine(t)}${all.length ? `\n${all.join('\n')}` : ''}`;
   }
 
   /** The main report when every machine is settled (or only offline ones remain after the grace period), then follow-ups. */
@@ -367,14 +435,14 @@ export class MachineRollout {
     const s = this.state;
     if (!s.sha) return;
     const entries = Object.entries(s.machines);
-    const settled = (o: MachineOutcome) => o.status !== 'pending' && o.status !== 'updating';
+    const settled = (o: MachineOutcome) => o.status !== 'pending' && o.status !== 'updating' && o.tools?.status !== 'publishing';
     const open = entries.filter(([, o]) => !settled(o));
     const graceOver = this.now() - Date.parse(s.verifiedAt ?? '') >= this.lim.graceMs;
-    const tail = 'The deploy approval covers these updates; nothing is needed from anyone unless a line above says FAILED or OFFLINE. Tell the user in a line if it does.';
+    const tail = 'The deploy approval covers these updates; nothing is needed from anyone unless a line above says FAILED, NOT PUBLISHED or OFFLINE. Tell the user in a line if it does.';
     if (!s.reported) {
-      if (entries.some(([, o]) => o.status === 'updating')) return;
+      if (entries.some(([, o]) => o.status === 'updating' || o.tools?.status === 'publishing')) return;
       if (open.length && !graceOver) return;
-      const head = `[machine updates] Portal ${s.sha.slice(0, 9)}${s.previous ? ` (was ${s.previous.slice(0, 9)})` : ''} deployed and verified, so FF Factory updated the machines' daemons by itself (agents keep running through an update: no drain, no waiting).`;
+      const head = `[machine updates] Portal ${s.sha.slice(0, 9)}${s.previous ? ` (was ${s.previous.slice(0, 9)})` : ''} deployed and verified, so FF Factory updated the machines' daemons${s.tools ? ' and published the latest agent tools (final-factory-agents) on them' : ''} by itself (agents keep running through both: no drain, no waiting).`;
       const body = entries.map(([id, o]) => this.line(id, o)).join('\n');
       this.send(`${head}\n${body}\n${tail}`);
       s.reported = true;
@@ -395,5 +463,57 @@ export class MachineRollout {
     } catch (e) {
       console.warn('machine rollout: could not send its report:', (e as Error).message);
     }
+  }
+}
+
+/** The `worker.ts tools` lines worth reporting: what was not published or failed and why, a warning, the checkout marker. */
+function toolsSummary(lines: string[]): string[] {
+  const keep = lines.filter((l) => /^(NOT PUBLISHED|FAILED|WARNING|ERROR|Cloned|publish-skills')/.test(l));
+  return (keep.length ? keep : lines.slice(-4)).slice(-8).map((l) => clip(l, 240));
+}
+
+/** A tools run's outcome from its exit code and output (server/agentTools.ts EXIT and LINE). Exported for tests. */
+export function toolsResult(code: number, out: string): Omit<ToolsOutcome, 'at'> {
+  const lines = out.replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const last = (prefix: string) => [...lines].reverse().find((l) => l.startsWith(prefix));
+  const before = last(LINE.before);
+  const after = last(LINE.after);
+  // "Agent tools latest: final-factory-agents a8449abd8457: ff-agents 1.29.20, ..."
+  const latest = /^\S+ ([0-9a-f]{7,40}): (.*)$/i.exec(last(LINE.latest)?.slice(LINE.latest.length).trim() ?? '');
+  const why = lines.find((l) => /^(NOT PUBLISHED|FAILED|ERROR):/.test(l))?.replace(/^(NOT PUBLISHED|FAILED|ERROR):\s*/, '');
+  const failed = code !== EXIT.ok;
+  return {
+    status: !failed ? 'ok' : code === EXIT.notPublished ? 'not-published' : 'failed',
+    ...(before ? { before: parseVersions(before.slice(LINE.before.length)) } : {}),
+    ...(after ? { after: parseVersions(after.slice(LINE.after.length)) } : {}),
+    ...(latest ? { latest: parseVersions(latest[2]), latestSha: latest[1] } : {}),
+    ...(failed ? { note: clip(why ?? `the installer's tools run exited ${code}`, 300), summary: toolsSummary(lines) } : {}),
+  };
+}
+
+/** The agent tools part of a machine's report line: each plugin's version before → after. Exported for tests. */
+export function toolsLine(t: ToolsOutcome | undefined): string {
+  if (!t) return '';
+  const list =
+    t.before || t.after
+      ? AGENT_PLUGINS.map((p) => {
+          const b = t.before?.[p] ?? 'not installed';
+          const a = (t.after ?? t.before)?.[p] ?? 'not installed';
+          return b === a ? `${p} ${a}` : `${p} ${b} → ${a}`;
+        }).join(', ')
+      : 'plugin versions unknown';
+  const master = t.latestSha ? ` (final-factory-agents ${t.latestSha.slice(0, 9)})` : '';
+  const note = (t.note ?? '').replace(/\.+$/, '');
+  switch (t.status) {
+    case 'ok':
+      return ` Agent tools: ${list}${master}; every installed plugin on master.`;
+    case 'not-published':
+      return ` Agent tools NOT PUBLISHED: ${note}. ${list}.`;
+    case 'failed':
+      return ` Agent tools FAILED: ${note}. ${list}.`;
+    case 'skipped':
+      return ` Agent tools skipped: ${note}.`;
+    default:
+      return ' Agent tools: publishing now.';
   }
 }

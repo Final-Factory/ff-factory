@@ -593,6 +593,57 @@ deploy. A machine that is offline is updated when it comes back. No request, no 
   worker is told in its `[deploy]` messages that it does not update the machines.
 - **Not replaced:** a change of setting (a sandbox count, an editor limit) is still `ops_worker machine_update`.
 
+### The agent tools, in the same rollout (w1476)
+
+Lothsahn, 2026-10-18: "Please create a new work item that deploying the latest tools is part of every deploy operation".
+Before this, nothing in FF Factory ran final-factory-agents' `registerAgents.sh`: ff-agents 1.29.20 (w1469) merged and
+BEAST kept loading 1.29.19 until the ops worker ran it by hand.
+
+**TL;DR:** after each machine's daemon step, the rollout runs the installer's tools form there, which brings Claude Code's
+ff-agents, ff-speckit and ff-discord plugins to final-factory-agents master; the `[machine updates]` report gives each
+plugin's version before and after, per machine.
+
+- **Where it hooks in, and why there.** In `MachineRollout` (`server/machineRollout.ts` `publishTools`), after the daemon
+  step, not in the daemon's update (`worker.ts update`) nor the installer's first install. The rollout is the one path that
+  runs after every verified deploy, on every online worker-root machine, with a per-machine report and the offline ones
+  followed up; a daemon already on the deployed commit is not updated at all, so a hook in the update would skip it, and
+  the plugins move on their own repo's merges, not ff-factory's. The command is fixed by the server
+  (`workerToolsRemote`: `install.ps1 ... -Tools -Root <root>`, `install.sh ... -- --tools --root <root>`), names nothing
+  else, and stops nothing ([worker-install.md](worker-install.md#the-agent-tools-w1476) for what it does on the machine).
+- **Which machines.** Every worker-root machine whose daemon step ended `updated`, `already current`, or `failed` with the
+  old daemon still online; a machine that comes online later gets it after its own daemon step, in the follow-up. One left
+  offline by a failed update is listed "Agent tools skipped". The portal's own host and machines deployed over ssh are not
+  worker roots and get none.
+- **A person's checkout is never touched.** The run uses FF Factory's own `<root>/tools/final-factory-agents`; a person's
+  (`~/final-factory-agents` on BEAST, [worker-root.md](worker-root.md)) stays as it is, and so does publish-skills' marker
+  that names it. If FF Factory's own checkout has changes of its own, the line says `Agent tools NOT PUBLISHED: <why>` and
+  nothing in it is overwritten.
+- **A failure on one machine** (`Agent tools FAILED: <why>`, with the run's own lines under it as `tools: ...`) changes
+  nothing about its daemon, rolls nothing back, and the next machine carries on. The report's last line asks for a line to
+  the user when any machine says FAILED, NOT PUBLISHED or OFFLINE.
+- **Running agents keep running**: a plugin update leaves their cached copy on disk and they keep the version they
+  started with; new sessions load the new one. No drain, no wait.
+- **The report line**, for example: `- beast: updated. 494f867 → 30482ef. Limits unchanged. Agents: 2 of 2 adopted by the
+  new daemon, none ended. Agent tools: ff-agents 1.29.19 → 1.29.20, ff-speckit 1.0.2, ff-discord not installed
+  (final-factory-agents a8449abd8); every installed plugin on master.` ff-discord is installed only where a person asked
+  for it (`registerAgents.sh --plugin ff-discord`); "not installed" there is not a failure.
+- Off with config `machines.publishAgentToolsAfterDeploy: false` (the daemon updates go on); a rollout state written
+  before this change never publishes. Tests: `server/machineRollout.test.ts` (the `w1476:` cases) and
+  `server/agentTools.test.ts`.
+- **By hand**, between deploys (a plugin release the machines should load now): the same command over ssh is ops-worker
+  work, as for an update ([Updating and re-running a machine's installer](#updating-and-re-running-a-machines-installer-w855)):
+  `ssh <target> 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm
+  https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Tools -Root <root>"'`
+  on Windows, `ssh <target> 'bash -c "$(curl -fsSL
+  https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --tools --root <root>'`
+  elsewhere. FFBox needs none of this (below).
+- **FFBox's `/opt/final-factory-agents`** (read-only look, ffbox `scripts/update_ffbox.sh` and `systemd/ffbox-update.timer`):
+  FFBox is not a worker machine and updates itself. Its `ffbox-update.timer` runs every 3 minutes (`OnCalendar=*:0/3`);
+  each pass fetches that checkout and fast-forwards it when it is clean and not diverged (dirty, diverged or unreachable:
+  logged and left), and on new commits re-runs ffbox's `setup.sh`, whose stage 5 runs `registerAgents.sh` from it. FFBox's
+  updater report to the portal carries that checkout's state (`server/providers.ts`, the `updater` message's `checkouts`;
+  a diverged one shows as a warning, `server/providers.test.ts`). Nothing in FF Factory touches it.
+
 ## In the portal
 
 - `list_sandboxes` and `list_machines` end with a group of their own: "Orchestration worker (the portal VM; not game

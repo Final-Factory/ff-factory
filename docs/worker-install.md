@@ -132,7 +132,7 @@ today) shows "update available" and keeps taking, starting and resuming agents (
 "Versions"). The portal says once, in a `[machines]` line, that an update is available. Only a protocol out of range
 (outdated) stops new agents there until the install is updated.
 
-**The ops worker runs the update, and any installer rerun; a person never does** (lothsahn, 2026-10-10, w855: "don't ask ben to run installers.  Update your instructions.  Stop doing that.  When we say update the machines, do the update, including installers if necessary"). The commands below are what [the ops worker](ops-worker.md#updating-and-re-running-a-machines-installer-w855) types over ssh. A request that needs one (a daemon update, a sandbox count, an agent or editor limit, a reinstall) is sent to it by the requester's orchestrator, with `ops_worker machine_update` (`machine`, `max_sandboxes`, `max_agents_per_sandbox`, `max_unity`, and the `work_id` of the person's own open request that asks for it). The dispatcher and the orchestrators never ask a person to run these. **After a verified portal deploy the portal runs this update itself on every worker-root machine** (w887, [ops-worker.md](ops-worker.md#after-a-verified-deploy-w887)): no request, no `machine_update` call, no setting named, and the machines that were offline follow when they come back.
+**The ops worker runs the update, and any installer rerun; a person never does** (lothsahn, 2026-10-10, w855: "don't ask ben to run installers.  Update your instructions.  Stop doing that.  When we say update the machines, do the update, including installers if necessary"). The commands below are what [the ops worker](ops-worker.md#updating-and-re-running-a-machines-installer-w855) types over ssh. A request that needs one (a daemon update, a sandbox count, an agent or editor limit, a reinstall) is sent to it by the requester's orchestrator, with `ops_worker machine_update` (`machine`, `max_sandboxes`, `max_agents_per_sandbox`, `max_unity`, and the `work_id` of the person's own open request that asks for it). The dispatcher and the orchestrators never ask a person to run these. **After a verified portal deploy the portal runs this update itself on every worker-root machine** (w887, [ops-worker.md](ops-worker.md#after-a-verified-deploy-w887)): no request, no `machine_update` call, no setting named, and the machines that were offline follow when they come back. The same rollout then publishes the latest agent tools on each of them ([The agent tools](#the-agent-tools-w1476), w1476).
 
 **To update a worker, run its update** (w613). It is one command. It asks nothing, so it runs the same at the machine and
 over ssh (the orchestration worker's path, [ops-worker.md](ops-worker.md)). It is as safe to re-run as the install:
@@ -249,6 +249,58 @@ minutes pass (`HOLD_PLACE_MS`; a day until w656). After that the release pass re
 clean and places the agent again when it resumes (docs/machines.md, "Released sandboxes"). A dirty worktree keeps the
 sandbox held, and `list_sandboxes` says why. On LothDesktop at 08:29 UTC on 2026-10-07, the update stopped Ben's 77956901, which had no
 check-in, and slot2 showed FREE.
+
+### The agent tools (w1476)
+
+Lothsahn, 2026-10-18: "Please create a new work item that deploying the latest tools is part of every deploy operation".
+
+**TL;DR:** the installer's `-Tools` (`--tools`) form brings Claude Code's ff-agents, ff-speckit and ff-discord plugins on
+this machine to final-factory-agents master, from FF Factory's own checkout in `<root>/tools`, and changes nothing else.
+The portal runs it on every worker-root machine after every verified deploy ([ops-worker.md](ops-worker.md#after-a-verified-deploy-w887)).
+
+Before it, nothing in FF Factory ran `registerAgents.sh`: ff-agents 1.29.20 (final-factory-agents #243, w1469) merged at
+19:14 UTC on 2026-10-18 and BEAST still loaded 1.29.19 from a marketplace clone at 9039e82 (measured) until the ops worker
+ran it by hand.
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Tools -Root D:\ffw
+```
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --tools --root ~/ffw
+```
+
+What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
+
+1. Prints `Agent tools before:` with the versions in `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/installed_plugins.json`,
+   the folder the machine's workers read (BEAST's leave `CLAUDE_CONFIG_DIR` unset, [worker-root.md](worker-root.md)).
+2. Clones `https://github.com/Final-Factory/final-factory-agents.git` into `<root>/tools/final-factory-agents` the first
+   time (anonymously: the repo is public and an ssh session reaches no keychain), and after that fast-forwards it to
+   origin/master. **It never uses a person's checkout** (BEAST's `~/final-factory-agents`, on a branch of its own today):
+   Claude Code installs plugins from its managed marketplace clone (`~/.claude/plugins/marketplaces/final-factory-agents`),
+   which `registerAgents.sh` refreshes from GitHub, so any up-to-date copy of the script will do. If its own checkout has
+   uncommitted changes, is on another branch, has another origin or cannot fast-forward, it prints `NOT PUBLISHED: <why>;
+   nothing in it was overwritten`, exits 3 and leaves it: no reset, stash or branch switch.
+3. Prints `Agent tools latest:` with the commit and master's versions (its `.claude-plugin/marketplace.json`).
+4. Runs `sh registerAgents.sh --claude` there (Git Bash's `sh.exe` on Windows, found from `git --exec-path`), with the
+   daemon's Claude Code (`daemon.json` `claude`) first on PATH: the marketplace pulled, every plugin the machine remembers
+   updated. That is ff-agents and ff-speckit everywhere, and ff-discord only where a person ran `--plugin ff-discord`
+   (registerAgents.sh's `~/.claude/final-factory-agents-plugins`); a bare run never adds it. Codex is not touched.
+5. Puts back publish-skills' marker `~/.claude/final-factory-agents-checkout` if `registerAgents.sh` pointed it at the
+   tools checkout, so a person's skill edits keep going to their own checkout. With no marker before, the new one stays
+   and the output says so.
+6. In an elevated Windows session (an administrator's ssh, BEAST), gives the checkout and Claude Code's
+   final-factory-agents marketplace and cache folders to the daemon task's user (`icacls /setowner`), as the update does,
+   so the non-elevated git there does not refuse them.
+7. Prints `Agent tools after:` and exits 0 only when every installed plugin is on master's version and ff-agents and
+   ff-speckit are installed; else `FAILED: ...` and exit 1.
+
+Running agents keep the plugin version they started with (its cached copy stays on disk); new sessions load the new one.
+No agent is stopped or waited for.
+
+Tested: `server/agentTools.test.ts` (fake git and sh), and by hand on BEAST on 2026-10-18 with `HOME` and
+`CLAUDE_CONFIG_DIR` in a temp folder: a first run installed ff-agents 1.29.20 and ff-speckit 1.0.2 (exit 0), a second
+kept a person's marker, a record set back to 1.29.19 was updated to 1.29.20, a stray file in the checkout gave
+`NOT PUBLISHED ... (1 path)` and exit 3, and `install.ps1 -Tools -Root <fake root>` ran the same (exit 0).
 
 
 ### The Dev Drive (w900)

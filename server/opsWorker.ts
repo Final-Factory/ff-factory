@@ -628,9 +628,18 @@ export function workerUpdateFlags(
  * deploy (server/machineRollout.ts, which runs it over ssh itself).
  */
 export function workerUpdateRemote(m: { root: string; platform?: string }, extra = ''): string {
+  return installerRemote(m, m.platform === 'win32' ? '-Update' : '--update', extra);
+}
+
+/** The installer's agent tools form (w1476, server/agentTools.ts): the latest final-factory-agents plugins, nothing else changed. */
+export function workerToolsRemote(m: { root: string; platform?: string }): string {
+  return installerRemote(m, m.platform === 'win32' ? '-Tools' : '--tools');
+}
+
+function installerRemote(m: { root: string; platform?: string }, mode: string, extra = ''): string {
   return m.platform === 'win32'
-    ? `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root ${m.root}${extra ? ` ${extra}` : ''}"`
-    : `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root ${m.root}${extra ? ` ${extra}` : ''}`;
+    ? `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) ${mode} -Root ${m.root}${extra ? ` ${extra}` : ''}"`
+    : `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- ${mode} --root ${m.root}${extra ? ` ${extra}` : ''}`;
 }
 
 /** What the worker reports after a restart a person asked for (w974): the same lines in the instruction before and after it. */

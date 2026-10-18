@@ -12,6 +12,8 @@
 //               then unenroll from the portal, remove the service, stop what still runs from the root, remove the
 //               firewall rules and the slot config, delete the root, and check that nothing is left.
 //   check       list what of an install exists on this computer (the leaves-nothing-behind checklist reads it).
+//   tools       publish the latest agent tools (final-factory-agents' plugins) on this computer: FF Factory's own checkout in
+//               <root>/tools brought to origin/master, then its registerAgents.sh (w1476, server/agentTools.ts).
 //
 // The machine credential (the `ffm_<id>_…` token the portal issued for this machine) is read from stdin, kept only in
 // <root>/secrets/machine-token (owner-only) and never printed or put on a command line.
@@ -30,6 +32,7 @@ import { slotsPointer } from '../../machine/unitySlots.ts';
 import { carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, gbOf, hostDirOf, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
 import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
+import { publishAgentTools } from '../../server/agentTools.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
 export const LAYOUT_VERSION = 1;
@@ -2016,6 +2019,29 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   return ok;
 }
 
+/**
+ * Publish the latest agent tools on this machine (w1476, server/agentTools.ts). Run by the machine rollout after every
+ * verified portal deploy, through the installer's -Tools / --tools form; stops nothing, so running agents carry on.
+ */
+export async function tools(root: string, ownerFlag?: string): Promise<number> {
+  const given = path.resolve(root);
+  const moved = !fs.existsSync(path.join(given, 'root.json')) ? readMoved(given) : undefined;
+  const m = readManifest(moved ?? given);
+  if (!m) throw new Error(`no worker install at ${moved ?? given} (no root.json): install it first (docs/worker-install.md, "Install")`);
+  const l = layoutOf(moved ?? given, anchorOf(m));
+  let claude: string | undefined;
+  try {
+    const c = (JSON.parse(fs.readFileSync(path.join(l.daemon, 'daemon.json'), 'utf8')) as { claude?: unknown }).claude;
+    if (typeof c === 'string') claude = c;
+  } catch {
+    // no daemon.json: Claude Code from PATH
+  }
+  let owner = ownerFlag;
+  if (isWin && elevated() && !owner) owner = (await taskUser(m.service))?.owner;
+  say(`FF Factory agent tools on ${m.machineId} (${l.root})`);
+  return publishAgentTools(l.root, { exec, say, env: process.env, home: os.homedir(), platform: process.platform, ...(owner ? { giveTo: (paths: string[]) => giveTo(owner, paths) } : {}) }, { claude });
+}
+
 export const NIGHTLY_TASK = 'ff-nightly-e2e';
 
 /**
@@ -2426,7 +2452,7 @@ async function readCredential(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0].trim();
 }
 
-const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall|check> --root <folder> [options]
+const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall|check|tools> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
             [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
             [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
@@ -2453,6 +2479,10 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
              lab, tmp, scratch and the Library seed; deletes the rest, the old VHDX included)
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
+  tools     [--owner <user> (Windows, elevated: default the user the daemon's task runs as)]
+            (w1476: the latest ff-agents, ff-speckit and ff-discord plugins for Claude Code: <root>/tools/final-factory-agents
+             fast-forwarded to origin/master, then its registerAgents.sh; a person's checkout is never touched. Exit 0
+             published, 1 failed, 3 not published because that checkout has changes of its own)
   migrate   [--from <old daemon folder>] [--from-service <its task or label>] [--old-slots <dir>]
             [--nightly <dir;dir>] [--dry-run] | --rollback | --cleanup [--legacy]
             (today's layout into the root; the credential comes from the old daemon.json)
@@ -2575,6 +2605,9 @@ export async function main(argv = process.argv.slice(2)) {
           devDrive: 'off',
         },
       });
+  } else if (cmd === 'tools') {
+    if (!opts.root) throw new Error(USAGE);
+    process.exitCode = await tools(opts.root, opts.owner);
   } else if (cmd === 'check') {
     if (!opts.root) throw new Error(USAGE);
     const root = path.resolve(opts.root);
