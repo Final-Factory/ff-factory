@@ -177,4 +177,6 @@ test('machine unity mcp: the portal asks for it for sandbox agents on a machine;
   assert.equal(inSb.stdioMcp, undefined, "the portal never sends commands: they are the machine's");
   assert.equal(inSb.sandbox, 'sb1');
   assert.equal(inSb.guard.id, 'sb1');
+  // w1469: tools a worker never uses are not in its definitions (every call reads them)
+  assert.deepEqual(inSb.disallowedTools, ['mcp__ffsb', 'Workflow', 'ScheduleWakeup', 'AskUserQuestion']);
 });
