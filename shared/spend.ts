@@ -62,7 +62,35 @@ export interface MeterTurn {
   ctxEnd: number;
   /** A compaction (or /clear) shrank the context in this turn. */
   compacted?: boolean;
+  /**
+   * This process resumed a conversation (w1484): `kept` when the meter picked up its tally (the saved MeterState, or the one it
+   * held), with the base its first call measured and the one the process before measured, `by` the cache (its read covered the
+   * earlier base: the same tokens), by counting (its context less the history and what is new), or `history-shrank` (it counted
+   * less than the base before: the history lost tokens the stream does not show, and the base stays); `kept: false` when it had
+   * none and the history is `carried`.
+   */
+  resumed?: { kept: true; base: number; prevBase: number; by: 'cache' | 'count' | 'history-shrank' } | { kept: false };
 }
+
+/**
+ * What the meter knows of a conversation's context, saved after every call so that the next process of the same conversation
+ * picks it up (w1484, ContextMeter.snapshot and resume): the characters held by kind, what is new since the last call, the last
+ * call's context and the base its process measured, and the files read (hashed). Without it a resumed process's history was
+ * one lump of `carried`.
+ */
+export interface MeterState {
+  v: 1;
+  held: Record<string, number>;
+  fresh: Record<string, number>;
+  lastCtx: number;
+  base?: number;
+  summaryNext: number;
+  compacted: boolean;
+  readSeen: string[];
+  readSeenBeforeCompact: string[];
+}
+/** The newest files read a MeterState keeps (each a 14-character hash, readHash): enough to see a re-read, small enough to save after every call. */
+export const METER_READS_KEPT = 1500;
 
 /** What a result event carries (TranscriptEvent 'result' and 'system'): the SDK's cumulative totals, the main loop's own turn usage, the context reading. */
 export interface TurnUsage {
@@ -100,7 +128,7 @@ export type Category = (typeof CATEGORIES)[number];
 export const CATEGORY_LABEL: Record<string, string> = {
   base: 'Base context (system prompt, tool definitions, CLAUDE.md, skill and agent lists): measured by the first call of each process',
   summary: 'Summary left by a compaction',
-  carried: 'Context carried over from before this process started (a conversation resumed after a restart): not itemised, the base context included',
+  carried: "Context carried over from before this process started (a conversation resumed after a restart whose meter state was not kept: one from before w1484, or one moved to another machine): not itemised, the base context included",
   unitemised: "What the meter could not itemise: reminders and hook output Claude Code adds to the context (the stream never shows them), and the error of its characters' estimate",
   brief: 'Messages to the agent (briefs, follow-ups, harness notices)',
   assistant: "The agent's own text, thinking and tool calls (output tokens included)",
@@ -194,6 +222,18 @@ export function stripCd(cmd: string): string {
 
 const normPath = (p: string) => p.replace(/\\/g, '/').replace(/^["']|["']$/g, '').toLowerCase();
 
+/** A short stable hash of a read's key (two 32-bit FNV-1a, base 36): what the meter keeps of a file read, so its saved state stays small. */
+export function readHash(key: string): string {
+  let a = 0x811c9dc5;
+  let b = 0x01000193 ^ key.length;
+  for (let i = 0; i < key.length; i++) {
+    const c = key.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x01000193 + 2 * i + 1) >>> 0;
+  }
+  return a.toString(36).padStart(7, '0') + b.toString(36).padStart(7, '0');
+}
+
 /** The file a shell reader (sed -n 'a,bp' f, cat f, head -n 20 f, Get-Content f) reads, with its range. */
 function shellRead(c: string): string | undefined {
   const m = /^(sed|cat|head|tail|type|Get-Content|gc|bat|nl)\b(.*)$/s.exec(c);
@@ -275,6 +315,9 @@ export interface CallUsage {
  * (a cold cache rewrites them all); what is left either way is `unitemised` (reminders and hook output the stream never
  * shows, and the error of the characters' estimate), never the base. A context that suddenly shrinks (a compaction, a
  * /clear) starts a new epoch: the summary is `summary` and files read again after it are counted in `reread.afterCompact`.
+ * A conversation goes on across processes (a restart, a usage hold, a follow-up after the host closed): the session saves
+ * `snapshot()` after every call and the next process `resume()`s from it (w1484), so its history stays in its categories and
+ * its base is measured again; only a resume with no saved state falls back to `carried`.
  *
  * Characters are the estimate; the totals per call are exact. A result's real tokens cannot be told apart from another's by
  * Claude Code's numbers, so the split inside a call is proportional to characters (CHARS_PER_TOKEN only fixes the base).
@@ -296,12 +339,65 @@ export class ContextMeter {
 
   /** A compaction's summary, in tokens (compact_boundary post_tokens): the call that shows the context shrunk writes it (w1469). */
   private summaryNext = 0;
-  /** The base context in tokens, measured by this process's first call (0 on a resumed one: its carried context holds it). */
+  /** The base context in tokens, measured by this process's first call (0 on a carried one: its carried context holds it). */
   private base?: number;
+  /**
+   * A new process resumed the conversation with its tally kept (w1484): the next call measures this process's base. When its cache
+   * read covers the base the process before measured (`prevBase`), the prompt begins with exactly those tokens (a cache read is an
+   * exact prefix match), so the base is the same. Otherwise (a cold cache, a system prompt that changed: its git status, CLAUDE.md) it
+   * is the call's context less the history the last call read (`hist`, real tokens: its context less its base) and what is new since.
+   */
+  private rebaseNext?: { hist: number; prevBase: number };
 
   /** This process resumed an earlier conversation: its first call reads a context the meter never saw built. */
   carry() {
     if (this.lastCtx === 0) this.carriedNext = true;
+  }
+
+  /**
+   * A new process resumed the conversation (w1484). With the tally of the process before (`state`, saved by snapshot after its
+   * every call), or with what this meter already holds of it (the same AgentSession started the process again), the history
+   * stays in its categories and only the base is measured again, by the first call. With neither it is carried (carry).
+   * Returns whether the tally was kept.
+   */
+  resume(state?: MeterState): boolean {
+    if (this.lastCtx === 0 && state?.v === 1 && state.lastCtx > 0) this.restore(state);
+    if (this.lastCtx === 0) {
+      this.carry();
+      return false;
+    }
+    this.carriedNext = false;
+    this.rebaseNext = { hist: Math.max(0, this.lastCtx - (this.base ?? 0)), prevBase: this.base ?? 0 };
+    return true;
+  }
+
+  /** What the meter knows of the conversation now, to be saved for the next process (resume). */
+  snapshot(): MeterState {
+    const last = (s: Set<string>) => [...s].slice(-METER_READS_KEPT);
+    return {
+      v: 1,
+      held: Object.fromEntries(this.held),
+      fresh: Object.fromEntries(this.fresh),
+      lastCtx: this.lastCtx,
+      ...(this.base !== undefined ? { base: this.base } : {}),
+      summaryNext: this.summaryNext,
+      compacted: this.compactedOnce,
+      readSeen: last(this.readSeen),
+      readSeenBeforeCompact: last(this.readSeenBeforeCompact),
+    };
+  }
+
+  private restore(s: MeterState) {
+    const map = (r: Record<string, number> | undefined) => new Map(Object.entries(r ?? {}).filter(([, v]) => Number.isFinite(v) && v > 0));
+    this.held = map(s.held);
+    this.fresh = map(s.fresh);
+    this.lastCtx = s.lastCtx;
+    this.base = s.base;
+    this.summaryNext = s.summaryNext > 0 ? s.summaryNext : 0;
+    this.compactedOnce = !!s.compacted;
+    this.readSeen.clear();
+    for (const k of s.readSeen ?? []) this.readSeen.add(k);
+    this.readSeenBeforeCompact = new Set(s.readSeenBeforeCompact ?? []);
   }
 
   /**
@@ -340,9 +436,10 @@ export class ContextMeter {
     const n = chars + images * IMAGE_CHARS;
     let cat: string = kind.cat;
     if (kind.cat === 'file-read' && kind.readKey) {
-      const again = this.readSeen.has(kind.readKey);
+      const key = readHash(kind.readKey);
+      const again = this.readSeen.has(key);
       // read before the last compaction and not since: the summary did not keep it, so it is read again
-      const afterCompact = !again && this.readSeenBeforeCompact.has(kind.readKey);
+      const afterCompact = !again && this.readSeenBeforeCompact.has(key);
       if (again || afterCompact) {
         cat = 'reread';
         const r = (this.turn.reread ??= { n: 0, chars: 0, afterCompact: 0 });
@@ -350,7 +447,9 @@ export class ContextMeter {
         r.chars += n;
         if (afterCompact) r.afterCompact++;
       }
-      this.readSeen.add(kind.readKey);
+      // newest last (a Set keeps the order it was given): the state keeps the newest ones
+      this.readSeen.delete(key);
+      this.readSeen.add(key);
     }
     this.add(cat, n);
   }
@@ -382,6 +481,8 @@ export class ContextMeter {
       for (const k of this.readSeen) this.readSeenBeforeCompact.add(k);
       this.readSeen.clear();
       this.held = new Map();
+      // a resumed process's first call: no history but the summary is left beside its base
+      if (this.rebaseNext) this.rebaseNext.hist = 0;
       // Its summary is new in this call's context (the base is written again beside it).
       if (this.summaryNext) this.fresh.set('summary', (this.fresh.get('summary') ?? 0) + this.summaryNext * CHARS_PER_TOKEN);
       this.summaryNext = 0;
@@ -412,8 +513,22 @@ export class ContextMeter {
       this.held.set('carried', (this.held.get('carried') ?? 0) + carried * CHARS_PER_TOKEN);
       B = this.base = 0;
       this.carriedNext = false;
+      this.turn.resumed = { kept: false };
     } else {
-      // the first call of a process measures the base: its context less what the meter saw added (w1469)
+      // the first call of a process measures the base: its context less what the meter saw added (w1469), and on a resumed
+      // conversation whose tally was kept, less the history the last call before it read too (w1484)
+      const r0 = this.rebaseNext;
+      if (r0) {
+        const cached = r0.prevBase > 0 && u.cr >= r0.prevBase;
+        const counted = Math.max(0, ctx - r0.hist - Math.min(freshSum, newTok));
+        // Counted below the base before, the history lost what the stream never shows (w1484, replayed on beast's 3 days: Claude
+        // Code drops old thinking after a long idle, its thinking_drop, 11k to 57k tokens in 6 of 38 cold resumes): the base stays.
+        // Counted above it, the base grew (CLAUDE.md sent again, its `instructions`: +13.5k to +16k in 13).
+        const by = cached ? 'cache' : counted < r0.prevBase ? 'history-shrank' : 'count';
+        this.base = by === 'count' ? counted : r0.prevBase;
+        this.turn.resumed = { kept: true, base: this.base, prevBase: r0.prevBase, by };
+        this.rebaseNext = undefined;
+      }
       B = this.base ??= Math.max(0, ctx - Math.min(freshSum, newTok));
       // the read: the cached prefix holds the base, then the history
       baseR = Math.min(B, u.cr);

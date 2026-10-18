@@ -94,7 +94,41 @@ each session's turns were tied: `about`, `link`, `message`, `bucket`, `backfill`
 - **Where the tokens go: `carried`.** The context meter starts empty with each process. A conversation resumed after a restart reads a
   context it never saw built, and that read used to count as `base`. The first call of a resumed process now puts that unexplained cache read in
   `carried` (and later calls keep reading it as carried). Dollars and attribution are unaffected either way: it moves a share of a request's
-  dollars between two categories.
+  dollars between two categories. Since w1484 a resumed process picks up the meter's tally instead (below, "A conversation across
+  processes"), and `carried` is only what came before it.
+
+### A conversation across processes (w1484)
+
+Lothsahn: "Can we eliminate carried by accounting for it properly as each worker goes?" On 2026-10-16..18 `carried` was 13% of the
+workers' spend ($304) and 36% of w1386's. A worker's conversation runs in many processes: its agent host closes when the process
+ends (a far check-in, a usage hold, a daemon update, a stop) and the next message starts a new one that resumes it
+(machine/agentHost.ts), and the portal's own sessions start again after a restart. The meter lived in the process.
+
+Now `AgentSession` saves the meter's tally (`ContextMeter.snapshot()`, a `MeterState`: characters held by category, what is new since
+the last call, the last call's context, the base and the files read, hashed) after every model call, every turn and the process's
+end, one JSON file per Claude Code session id (server/meterStates.ts): `<appDir>/meters/` beside a machine's agent hosts, `<data>/meters/`
+for the portal's own sessions, removed 14 days after their last write. A process that resumes the conversation calls
+`ContextMeter.resume(state)`: the history stays in its categories and only the base is measured again, by its first call:
+
+- **by the cache** when that call's cache read covers the base the process before measured: a cache read is an exact prefix match, so
+  the prompt begins with the same tokens and the base is the same;
+- **by counting** otherwise (a cold cache, a system prompt that changed: its git status, CLAUDE.md): its context less the history the
+  last call read (its context less its base, real tokens) and what is new since (characters);
+- **`history-shrank`** when the count comes out below the base before: the history lost tokens the stream never shows, and the base
+  stays. Replayed on beast's 3 days (cut wherever a turn began after 30 minutes idle, 63 resumes in 24 transcripts): 6 of the 38 cold
+  resumes counted 11k to 57k tokens less, and each followed Claude Code's `thinking_drop` (old thinking dropped after a long idle); 13
+  counted 13.5k to 16k more, each after its `instructions` (CLAUDE.md sent again), which is base content.
+
+The turn's `MeterTurn.resumed` says which (`{ kept, base, prevBase, by }`, or `{ kept: false }`). With no saved state (a conversation
+that began before the deploy, one moved to another machine, a file older than 14 days) the history is `carried`, as before.
+
+Replayed the same way on beast's worker transcripts of 2026-10-16..18 (47 transcripts, the CLI's jsonl through the meter,
+`scripts/meter-resume-replay.ts`): cut at every turn (409 resumes), `carried` was 34.7% of the list-price dollars with the old meter
+and **0.000%** with the kept tally; cut at 30-minute gaps (63 resumes), 6.2% and **0.000%**. Every category stays within 1 point of
+the same transcripts replayed as one process (base 12.0% against 11.2%, unitemised 6.4% against 7.1%: the CLAUDE.md sent again is base
+when the base is counted). The cuts fall inside transcripts of real processes, so a cut's first call is what a resume with the same
+prompt would send; a real resume's prompt can differ too (its git status), which the counting covers. After the deploy the check is
+`carried`'s share, and `resumed.by`, on the first resumed workers' turns.
 
 ### Corrections to history (w1209)
 
@@ -233,7 +267,7 @@ process gives it (its context less what the meter saw added: the brief). Every l
 holds; its write is what is new, then the part of the base and the history the cache did not cover. What is left either way is
 `unitemised`: reminders and hook output Claude Code adds and the stream never shows (the `<total_tokens>` line on every call,
 `edited_text_file`, a CLAUDE.md read again after it changed on disk), and the error of the characters' estimate. A resumed process
-cannot measure the base; its carried context holds it, as before. Replayed on the same 3 days (`spend-claude.ts`): base **12%**
+measures its base again from the tally the process before kept (w1484, above); without one, its carried context holds it, as before. Replayed on the same 3 days (`spend-claude.ts`): base **12%**
 ($144, the same as the independent measure above), unitemised 8%, the agent's output 40%, file reads 16%.
 
 Turns recorded before the fix keep their categories: their per-call usage is not in the
