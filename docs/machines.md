@@ -732,7 +732,11 @@ LothDesktop and Beast, not just when BEAST is full").
     GitHub-shaped, so no token, path or gh text can reach a brief or a log through it. The token itself is never asked for
     (no `--show-token`) and no line of gh's output is logged or sent. *Measured on BEAST (2026-10-18, gh 2.102.0):* `bryding`,
     `gist, read:org, repo`, no `workflow`; w1452 found the m3's `bryding` login has it. A fine-grained token reports no scopes,
-    so its ability is "unknown".
+    so its ability is "unknown". *The first live reports* (the portal's journal after the deploy of 494f867, 2026-10-18
+    15:23-15:30Z): beast `bryding (gist, read:org, repo)`, lothdesktop `Lothsahn (gist, read:org, repo, workflow)`, biscuit
+    "named no github.com account". A gh before `--active` (2.40) answers "unknown flag: --active", so the text form is asked
+    again without it, and a reading it still cannot understand names gh's version and exit code (`readGhLogin`). Biscuit's
+    cause is a guess until its next reading says which gh it runs.
   - **Where it shows.** `list_machines`: "gh: bryding (gist, read:org, repo; cannot push .github/workflows (no workflow
     scope))", or "not reported yet" for a daemon from before w1463. Every worker's brief: a "GitHub token:" line saying
     whether this machine may push `.github/workflows` and, if not, the machines that can and to hand that push on
