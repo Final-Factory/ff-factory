@@ -50,7 +50,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // answered by `live_result`, and `live_state`, which an older portal's onMessage drops (no default case).
 // w1463 (no bump): `gh_login`, the machine's gh account and its token's scope names, which an older portal's onMessage drops
 // (no default case); an older daemon never sends it, and list_machines, the brief and placement then say "not reported yet".
-const DECIDED = { protocol: 9, fingerprint: '6b52b9825b2b50ea' };
+// w1469 (no bump): `compact` in the hello (optional: an older portal ignores it), `compact`, sent only to a daemon that offered
+// it (an older daemon's onMessage has no default and drops it, so its workers are simply not compacted), and `meta` on `signal`,
+// optional: an older portal emits the turn end without it, as before; an older daemon never sends it.
+const DECIDED = { protocol: 9, fingerprint: '25590d3baf3ccc7a' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

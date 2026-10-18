@@ -239,6 +239,29 @@ cannot measure the base; its carried context holds it, as before. Replayed on th
 Turns recorded before the fix keep their categories: their per-call usage is not in the
 portal's transcripts, so they cannot be split again. A window that ends after the deploy is right from the deploy on.
 
+## Workers compact (w1469)
+
+lothsahn, 2026-10-18: "Build 1, 2 and 4: compact at ~200k, compact before long waits, trim the base". A worker's calls averaged
+**357k tokens** of context on beast (2026-10-15..18, measured), and every call reads all of it again, so the length of a worker's
+conversation, not its base, is most of the money. server/autoCompact.ts compacts workers between turns, with Claude Code's own
+/compact and a focus that keeps the requests, the people's words, the branch, the PRs and what is verified and left (`WORKER_FOCUS`):
+
+| Trigger | When | Config (set_app_config) |
+|---|---|---|
+| `tokens` | the context passed 200,000 tokens (not again before it grew by half that past what the last compaction left, nor within 3 turns) | `worker.compactAtTokens` (0 off) |
+| pilot | only this share of worker sessions, by a hash of the session id (the same session always answers the same): 34% at first | `worker.compactPilotPercent` (100 all) |
+
+A machine's worker is compacted through its daemon: `compact` (server/machineProtocol.ts), offered in the daemon's hello, carried to
+its agent host (machine/agentHost.ts) and run as `AgentSession.compact`; a daemon that does not offer it is left alone. The compaction's
+turn end comes back marked (`signal` `meta`), so the ledger reads no report from it (agents.ts) and the last report stays. A worker is
+never compacted on a message: `/compact` stays the orchestrators' chat command.
+
+What it should save, modelled call by call over beast's 3 days (w1469; `$TMPDIR` script levers.py: each call keeps its real
+output and growth, a compaction costs its read and a 12.5k summary, and the next call writes the compacted context again): the
+compaction at 200k **-44%** of the workers' spend (-37% if what is read again after a compaction is three times the 15k guessed);
+the one before long waits (w1469's lever 2, its own change) -22% alone, both -46%. To check on the pilot: its sessions' cost per call against the rest's, and what they
+re-read after a compaction (`spend_report`, the `summary` and `reread` categories).
+
 ## Transcripts: how long they are kept
 
 **Seven days after the request closes**, a request that is open keeps them as long as it is open, a reopened request keeps them again.

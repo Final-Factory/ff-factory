@@ -38,7 +38,7 @@ import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, holdReason, pinnedWork, placementHint, roomNow, voiceVram, type Computer, type NeedKind, type RoomNow } from './placement.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
-import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
+import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
 import { WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
@@ -630,7 +630,8 @@ export class Agents {
         };
       },
     };
-    sessions.events.on('turnEnd', (s: SessionHandle, text: string) => this.onWorkerTurnEnd(s, text));
+    // A compaction's end (w1469: workers compact by themselves too) is no report: its text is the last one again.
+    sessions.events.on('turnEnd', (s: SessionHandle, text: string, meta?: TurnEndMeta) => !meta?.compaction && this.onWorkerTurnEnd(s, text));
     // A timer that fired while its orchestrator was mid-turn is delivered when that turn ends (server/timers.ts).
     sessions.events.on('turnEnd', (s: SessionHandle) => (s.info.kind === 'orchestrator' || s.info.kind === 'ops') && this.timers.turnEnded(s.info.id));
     // A worker of an open request failing (a sandbox that never came up, a crash) is news for the dispatcher.

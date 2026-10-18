@@ -1280,7 +1280,8 @@ export class SessionManager {
    */
   compact(id: string, instructions = '', by?: Requester, auto?: AutoCompaction): string {
     const s = this.get(id);
-    if (s.info.kind !== 'orchestrator') throw new Error('/compact is for the orchestrators\' chats');
+    // A worker compacts only by itself, FF Factory's automatic compaction (w1469): never on a message.
+    if (s.info.kind !== 'orchestrator' && !(s.info.kind === 'worker' && auto)) throw new Error('/compact is for the orchestrators\' chats');
     if (!s.compact) throw new Error('this session cannot be compacted from here');
     return s.compact(instructions, by, auto);
   }

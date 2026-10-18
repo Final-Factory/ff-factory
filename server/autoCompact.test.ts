@@ -102,7 +102,10 @@ test('compactBlocker: only between turns, with nothing waiting', () => {
   assert.match(compactBlocker(h({}), true)!, /send queue/);
   assert.match(compactBlocker(h({}, { live: false }), false)!, /process is not running/);
   assert.match(compactBlocker(h({}, { compactingNow: true }), false)!, /compacting already/);
-  assert.match(compactBlocker(h({ kind: 'worker' }), false)!, /not an orchestrator/);
+  // w1469: a worker too, when its daemon can compact it (its handle has compact); a standing agent never
+  assert.equal(compactBlocker(h({ kind: 'worker' }), false), undefined);
+  assert.match(compactBlocker(h({ kind: 'worker' }, { compact: undefined } as never), false)!, /daemon cannot compact/);
+  assert.match(compactBlocker(h({ kind: 'standing' }), false)!, /not an orchestrator/);
 });
 
 test('past the threshold, an orchestrator compacts by itself after its turn: one line "Compacted: N → M tokens", no notification, the last report stays', async (t) => {
