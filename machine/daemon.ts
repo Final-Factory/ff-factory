@@ -50,6 +50,7 @@ import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { attachmentLine } from '../shared/attachments.ts';
+import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { machinePlatformOf, type AttachmentRef, type HostHealth, type HostStats, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
@@ -222,12 +223,15 @@ export interface Probes {
   usage: (claude: string | undefined) => Promise<{ reply: UsageReply; account: AccountIdentity }>;
   /** Git Bash's /tmp, made when missing (Windows; server/gitBashTmp.ts). Tests leave it out: the host's is not theirs. */
   bashTmp?: () => Promise<{ dir?: string; made: boolean; error?: string }>;
+  /** gh, for the machine's gh login and its token's scopes (w1463, machine/ghLogin.ts). Tests leave it out: the host's gh is not theirs. */
+  gh?: GhLoginDeps['run'];
 }
 
 const REAL_PROBES: Probes = {
   stats: hostStats,
   usage: (claude) => fetchPlanUsage(usageEnv(process.env), { cwd: HOME, claudeExecutable: claude }),
   bashTmp: () => ensureGitBashTmp(),
+  gh: run,
 };
 
 /** Builds a session; the real one is an AgentSession, tests pass a fake. */
@@ -298,6 +302,8 @@ export class Daemon {
   readonly leftovers: LeftoverReaper;
   /** The pending wake_me check-ins of this machine's sessions (ms), as the portal last said (welcome, `resumable`; w1196). */
   private wakes = new Map<string, number>();
+  /** The machine's gh login and its token's scopes, names only (w1463, machine/ghLogin.ts); none when the probes have no gh. */
+  private ghLogin?: GhLoginWatch;
   /** The sessions the portal's last welcome listed for this machine: a process of one of them is this machine's. */
   private portalSessions = new Set<string>();
   /** The portal's welcome came since this daemon started: until then who is live or waited for is not known (w1196). */
@@ -745,6 +751,12 @@ export class Daemon {
     }
     this.startGuard();
     this.connect();
+    // The machine's gh login and its token's scopes (w1463): read now, every 30 minutes, and when gh's hosts file changes.
+    if (this.probes.gh) {
+      this.ghLogin = new GhLoginWatch({ run: this.probes.gh, look: () => lookHostsFile(), now: () => new Date(), send: (gh) => this.send({ type: 'gh_login', gh }), log: (line) => log(line) });
+      this.timers.push(setInterval(() => void this.ghLogin!.tick(), GH_LOOK_EVERY_MS));
+      void this.ghLogin.tick();
+    }
     // The GPU Whisper (w615): installs in the background if needed, then loads and stays loaded while VRAM allows.
     if (this.voice) {
       log(`voice: Whisper ${this.voice.v.model} on ${this.voice.v.device} for the portal's mic, tools in ${this.voice.v.toolsDir}`);
@@ -1045,6 +1057,8 @@ export class Daemon {
     for (const e of this.entries.values()) this.send({ type: 'session', info: e.s.info, live: e.s.live });
     this.reportSandboxes();
     void this.reportStats();
+    // The last gh login reading (w1463): a portal that restarted, or a new one, has it at once.
+    this.ghLogin?.resend();
     // The portal keeps the last report across a reconnect: a flapping link must not start a CLI each time.
     if (Date.now() - this.lastUsage > this.usageMs / 2) void this.reportUsage();
     else this.scheduleUsage();

@@ -719,6 +719,39 @@ LothDesktop and Beast, not just when BEAST is full").
     like game work (`Orchestrators.flagQueuedWithRoom`, same test via `roomNow`); `decide_work queue` is refused for it
     ("lothdesktop has an agent slot (it needs no editor and no game sandbox, w1098)"). A game request is not refused for
     want of an editor-free slot.
+- **Work that changes `.github/workflows` goes where its push is allowed** (w1463, Ben: "the harness, not memory, stops this
+  from happening a fifth time", after four pushes of a workflow file were refused for a machine's gh token without the
+  `workflow` scope, the latest w1459's on BEAST; final-factory-agents PR #241). GitHub refuses to create or change a file
+  under `.github/workflows/` with an OAuth or classic token that lacks the `workflow` scope; `repo` does not include it.
+  - **The facts.** Each daemon reads its machine's own gh login (`machine/ghLogin.ts`): `gh auth status --active --hostname
+    github.com --json hosts` (gh 2.71 and later; the text form for an older gh), at start, every 30 minutes, and within a
+    minute of gh's hosts file changing (gh writes it on `gh auth login`, `refresh` and `switch`: a guess, not measured; the 30-minute read covers a change that does not touch it:
+    `$GH_CONFIG_DIR`, `$XDG_CONFIG_HOME/gh`, `%AppData%\GitHub CLI` on Windows, else `~/.config/gh`). It sends the account,
+    the scope names and where gh found the token (`keyring`, `oauth_token`, `GH_TOKEN`) as `gh_login`; the portal keeps them
+    on the machine record (`Machine.gh`) after `sanitizeGhLogin` (`shared/ghLogin.ts`) has dropped anything that is not
+    GitHub-shaped, so no token, path or gh text can reach a brief or a log through it. The token itself is never asked for
+    (no `--show-token`) and no line of gh's output is logged or sent. *Measured on BEAST (2026-10-18, gh 2.102.0):* `bryding`,
+    `gist, read:org, repo`, no `workflow`; w1452 found the m3's `bryding` login has it. A fine-grained token reports no scopes,
+    so its ability is "unknown".
+  - **Where it shows.** `list_machines`: "gh: bryding (gist, read:org, repo; cannot push .github/workflows (no workflow
+    scope))", or "not reported yet" for a daemon from before w1463. Every worker's brief: a "GitHub token:" line saying
+    whether this machine may push `.github/workflows` and, if not, the machines that can and to hand that push on
+    (`ghBriefLine`). The Capacity block's last line: "Next work that changes .github/workflows …: m3 (…)" and each
+    computer's login (`workflowLine`, `server/placement.ts`).
+  - **Placement.** `pickComputer(…, workflows: true)` picks among the computers whose gh may push such a file first, by the
+    usual rules (prefer, avoid, hold, room), and only then any other, saying "its workflow push must go from elsewhere".
+    `start_agent` decides it from the request's title, brief and repo and the start prompt (`changesWorkflows`:
+    ".github/workflows", "workflow file/scope/permission", "change the CI workflow", "main.yml … job"), and its note says
+    when the sandbox's machine lacks the scope and which has it, even when that machine is otherwise the next one. It
+    never refuses or moves anything, like every placement note.
+  - **A person's vault GitHub token** (docs/vault.md section 13, w1031) takes the machine login's place for their work where
+    `machines.githubFromVault` is on: such a machine counts as able for them (`GithubTokens.entryFor`), and the brief names
+    the vault entry instead. Its Workflows permission (required of every vault token, 13.2) cannot be probed without
+    writing, so the brief says what to do if GitHub refuses the push anyway.
+  - **Fixing a machine:** on it, as its user, `gh auth refresh -h github.com -s workflow` (a browser sign-in); the daemon
+    sees the hosts file change within a minute. Tests: `server/ghLogin.test.ts`, and the w1463 case in
+    `server/orchestrators.test.ts` (a daemon with a stand-in gh whose output carries a token, through list_machines,
+    start_agent and the brief).
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
   computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it

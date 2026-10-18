@@ -3,6 +3,7 @@
 // can both load it.
 import type { TurnUsage } from './spend.ts';
 import type { GithubPermissionId } from './githubRequirements.ts';
+import type { GhLogin } from './ghLogin.ts';
 
 /** 'blocked': the editor is alive but stuck on a modal dialog, or silent for too long while starting (see unity.blocked). */
 /** A working tree's real state, read from git (docs: server/gitStatus.ts). */
@@ -596,6 +597,8 @@ export interface Machine {
   sessionIds: string[];
   /** Reported by the daemon. */
   info?: { hostname: string; os: string; node: string; claude?: string; daemon: string; platform?: MachinePlatform };
+  /** Its own gh login as its daemon last read it (w1463, shared/ghLogin.ts): the account and scope names, never the token. */
+  gh?: GhLogin;
   git?: GitStatus;
   /** The daemon's last clean-up pass (server/cleanup.ts). */
   lastCleanup?: CleanupSummary;

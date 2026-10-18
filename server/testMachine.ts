@@ -174,6 +174,8 @@ export interface TestMachineOptions {
   /** Temp folder prefix, and the folder it is made in (default the system temp folder). */
   prefix?: string;
   parent?: string;
+  /** A stand-in gh for the daemon's gh login watch (w1463, machine/ghLogin.ts); default none, so the watch does not run. */
+  gh?: Probes['gh'];
 }
 
 export interface TestMachine {
@@ -293,7 +295,7 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
       daemon = new Daemon(
         { portalUrl: url, id, token, agentHosts: false, repoPath: repos.main, appDir, tempDir: path.join(repos.root, 'tmp'), unitySlotsDir: path.join(repos.root, 'slots'), claude: 'no-such-claude', maxEventsFile: null, sandboxes: settings, sandboxIdleStopMinutes: 0, sandboxCacheTrim: o.cacheTrim ?? false, cleanup: NO_CLEANUP, unityMcpServer: { command: 'no-such-unity-mcp', args: [] } },
         o.makeSession,
-        FAKE_PROBES,
+        o.gh ? { ...FAKE_PROBES, gh: o.gh } : FAKE_PROBES,
         poolDeps,
         undefined,
         undefined,

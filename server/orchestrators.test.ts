@@ -3645,3 +3645,33 @@ test('w1129: a message to a worker while its Claude pool is held is queued, not 
     return tx.some((e) => e.kind === 'user' && e.text.includes('Fix the Test Runner failure on #1552.')) && tx.some((e) => e.kind === 'user' && e.text.includes('w1 is unblocked: CI cleared.'));
   });
 });
+
+test("w1463: a machine's gh login reaches list_machines, the Capacity block, start_agent's note and the worker's brief, as names only", async (t) => {
+  const token = 'gho_' + 'Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2';
+  const logs: string[] = [];
+  for (const k of ['log', 'warn', 'error'] as const) t.mock.method(console, k, (...a: unknown[]) => void logs.push(a.map(String).join(' ')));
+  // A gh without --json whose answer carries the token, as `gh auth status --show-token` would print it.
+  const gh = async (_cmd: string, args: string[]) =>
+    args.includes('--json')
+      ? { code: 1, stdout: '', stderr: `unknown flag: --json ${token}` }
+      : { code: 0, stdout: `github.com\n  ✓ Logged in to github.com account bryding (keyring)\n  - Active account: true\n  - Token: ${token}\n  - Token scopes: 'gist', 'read:org', 'repo'\n`, stderr: '' };
+  const { store, machines, dispatcher, chat, call } = await setupOnMachine(t, {}, { gh });
+  await until('the daemon reported its gh login', () => !!store.machines.get('pc')?.gh?.ok);
+  assert.deepEqual(store.machines.get('pc')!.gh!.scopes, ['gist', 'read:org', 'repo']);
+  const listed = (await call(dispatcher().info, 'list_machines', {})).text;
+  assert.match(listed, /gh: bryding \(gist, read:org, repo; cannot push \.github\/workflows \(no workflow scope\)\)/);
+  const capacity = (await call(dispatcher().info, 'list_sandboxes', {})).text;
+  assert.match(capacity, /Next work that changes \.github\/workflows \(its push needs a gh token with the workflow scope, w1463\): pc \(no computer reports a gh token with the workflow scope/);
+  await call(chat(BEN).info, 'request_work', { title: 'CI: run the hooks tests', brief: 'Add a step to .github/workflows/main.yml that runs the hooks tests.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Add the CI step.', title: 'Hooks CI step', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  assert.match(started.text, /Note: this work changes \.github\/workflows, and pc's gh token \(bryding \(gist, read:org, repo\)\) lacks the workflow scope, so GitHub will refuse its push of a workflow file; no computer whose gh may push it has room now/);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const spec = machines.hooks!.specFor(store.sessions.get(id)!, store.machines.get('pc')!);
+  assert.ok(spec.append.includes("- GitHub token: this machine's gh token: bryding (gist, read:org, repo): it cannot push .github/workflows"), 'the brief says it');
+  // No part of the token in anything FF Factory wrote: the record, the tools' answers, the brief, the logs.
+  for (const [what, text] of [['record', JSON.stringify(store.machines.get('pc'))], ['list_machines', listed], ['list_sandboxes', capacity], ['start_agent', started.text], ['brief', spec.append], ['logs', logs.join('\n')]] as const) {
+    assert.ok(!text.includes(token) && !text.includes(token.slice(4)) && !text.includes(token.slice(-12)), `${what} carries the token`);
+  }
+  assert.ok(logs.some((l) => l.includes('gh login: bryding (gist, read:org, repo)')), 'the daemon and the portal log the names');
+});

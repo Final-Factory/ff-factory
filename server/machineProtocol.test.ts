@@ -48,7 +48,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // owners and nothing is deletable.
 // w1398 (no bump): `liveView` in the hello (optional: an older portal ignores it), `live`, sent only to a daemon that offered it,
 // answered by `live_result`, and `live_state`, which an older portal's onMessage drops (no default case).
-const DECIDED = { protocol: 9, fingerprint: 'ef6584ff5e585abe' };
+// w1463 (no bump): `gh_login`, the machine's gh account and its token's scope names, which an older portal's onMessage drops
+// (no default case); an older daemon never sends it, and list_machines, the brief and placement then say "not reported yet".
+const DECIDED = { protocol: 9, fingerprint: '6b52b9825b2b50ea' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

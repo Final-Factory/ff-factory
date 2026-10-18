@@ -18,7 +18,7 @@ import { reportTail, type NeedsYouWait } from './needsYou.ts';
 import { inlineReviewMedia, reviewRootOf } from './reviewMedia.ts';
 import { BLOCKER_KIND_HELP, conflictText, gateSetter, gatesName, gatesOf, isWith, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork } from './vault.ts';
-import { githubTokens } from './githubTokens.ts';
+import { githubFromVault, githubTokens } from './githubTokens.ts';
 import { READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
 import { readPortalLogs, realJournal, type PortalLogsInput } from './portalLogs.ts';
 
@@ -62,6 +62,7 @@ import { REACTION_MEANINGS, REPLY_MARK } from '../shared/replies.ts';
 import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS, QUESTION_CHARS } from '../shared/ask.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
 import { needsOf } from '../shared/capacity.ts';
+import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -1718,7 +1719,7 @@ export class Agents {
     return granted.length ? { path: m.repoPath, requests: granted.map((w) => w.id), by: granted[0].mainCloneAccess!.by } : undefined;
   }
 
-  private machineSandboxBrief(m: Machine, sb: MachineSandbox, account = MACHINE_ACCOUNT, github?: string, clone?: { path: string; requests: string[]; by: string }) {
+  private machineSandboxBrief(m: Machine, sb: MachineSandbox, account = MACHINE_ACCOUNT, github?: string, clone?: { path: string; requests: string[]; by: string }, workflowMachines: readonly string[] = []) {
     const mac = platformNoun(m.platform);
     const branch = sb.git?.branch && sb.git.branch !== 'detached HEAD' ? sb.git.branch : sb.branch;
     const max = poolSettingsOf(m)?.maxAgentsPerSandbox ?? 2;
@@ -1734,7 +1735,8 @@ ${ownerLine(this.cfg)}
 - Sandbox: **${sb.id}** (\`${m.id}/${sb.id}\`; its label is its name and never changes)
 - Worktree: \`${sb.path}\` on branch \`${branch}\`, a git worktree of the machine's main clone. Work only inside this directory.
 - Title: the dashboard shows what this sandbox is doing by its agents' titles, yours among them: the request you are on and what it is ("w513: LothDesktop fresh install"). The dispatcher sets it whenever it hands you a request; you set no label.
-- Claude account: you run on ${account}, set by the portal for its agents only.${github ? `\n- GitHub: your gh and git push act as the token ${github} from the vault (GH_TOKEN), the GitHub account of the person this work is for (docs/vault.md section 13). Never print it; \`gh auth status\` shows whose it is. A fine-grained token cannot read check runs, so \`gh pr checks\` and \`--json statusCheckRollup\` answer "Resource not accessible by personal access token": read CI with \`gh run list --commit <head sha>\` and \`gh run view\`. FFBox takes a pull request comment or review from an FFBox operator's account (lothsahn's) as that operator's own instruction (#codereview, and any comment on its ffbox/ pull requests), billed to them: post none there unless the person asked for it.` : ''}
+- Claude account: you run on ${account}, set by the portal for its agents only.
+${ghBriefLine(m.id, m.gh, github, workflowMachines)}${github ? `\n- GitHub: your gh and git push act as the token ${github} from the vault (GH_TOKEN), the GitHub account of the person this work is for (docs/vault.md section 13). Never print it; \`gh auth status\` shows whose it is. A fine-grained token cannot read check runs, so \`gh pr checks\` and \`--json statusCheckRollup\` answer "Resource not accessible by personal access token": read CI with \`gh run list --commit <head sha>\` and \`gh run view\`. FFBox takes a pull request comment or review from an FFBox operator's account (lothsahn's) as that operator's own instruction (#codereview, and any comment on its ffbox/ pull requests), billed to them: post none there unless the person asked for it.` : ''}
 ${clone ? mainCloneGrantBrief(clone) : `- Protected: the machine's main clone \`${m.repoPath}\` (the user's own work) and the FF Factory daemon's folder. Never write there or run commands naming them; the harness blocks it.`}
 - Machine steps are yours, not a person's (Ben, 2026-10-10, w935: "Dude, why are you telling me to close Unity? You can close Unity."): an editor open on a project you must change, your sandbox's or a person's own project folder, you close cleanly (save its scenes, or back up unsaved edits), then you do the work, and reopen it if a person was using it. Closing or opening Unity, git commands, copying files and installers are never handed to a person ("what Ben needs to do" is a miss); a person is asked only for what the rules reserve to them: approvals, design decisions, spending, publishing, admin acts that need their own words. If the harness refuses a step (the main clone is protected above), name the tool and path it refused and hand that step to your orchestrator for the ops worker or ssh.
 - Tools: ${deferredToolsLine('worker', 'Your FF Factory tools (mcp__machine__*) are')}
@@ -1807,7 +1809,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       model: info.model,
       effort: info.effort ?? this.cfg.worker.effort,
       settingSources: ['user', 'project', 'local'],
-      append: this.machineSandboxBrief(m, sb, run.account, run.github, clone),
+      append: this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()),
       strictMcp: false,
       // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
       unityMcp: true,
@@ -2036,6 +2038,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ...(st?.unity ? { editorsDetail: unitySlotsLine(st.unity).replace(/^editors \d+ of \S+: /, '') } : {}),
         // Its GPU Whisper for the portal's mic, while loaded (w615): VRAM the editors share.
         ...voiceVram(this.machines.voiceMachines().find((v) => v.machine === m.id)?.status),
+        // Its own gh login (w1463): whether work here may push .github/workflows.
+        ...(m.gh ? { gh: ghLoginLabel(m.gh), ...(canPushWorkflows(m.gh) !== undefined ? { workflows: canPushWorkflows(m.gh) } : {}) } : {}),
       });
     }
     return out;
@@ -2063,9 +2067,26 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     return parts.length ? ` (now: ${parts.join('; ')})` : ' (none set now)';
   }
 
-  /** The placement note for new work about to go on `on` (w416), read before it is placed (it would count itself). */
-  private placeNote(on: string | undefined, kind: NeedKind = 'game'): string {
-    return on ? (placementHint(on, this.places(), this.lastPlaced, this.cfg.placement, this.review?.root, kind) ?? '') : '';
+  /**
+   * The placement note for new work about to go on `on` (w416), read before it is placed (it would count itself). `workflows`
+   * (w1463): the work changes .github/workflows, for `person`, whose vault GitHub token (where machines.githubFromVault is on)
+   * takes the place of each machine's own login.
+   */
+  private placeNote(on: string | undefined, kind: NeedKind = 'game', workflows?: { person: string | undefined }): string {
+    return on ? (placementHint(on, workflows ? this.placesFor(workflows.person) : this.places(), this.lastPlaced, this.cfg.placement, this.review?.root, kind, !!workflows) ?? '') : '';
+  }
+
+  /** places() for one person's work (w1463): a machine where their runs get a vault GitHub token counts as able to push workflow files. */
+  private placesFor(person: string | undefined): Computer[] {
+    return this.places().map((p) => {
+      const entry = githubTokens()?.entryFor(p.id, person);
+      return entry ? { ...p, workflows: true, gh: `${entry} from the vault for ${person ?? 'the system payer'} (the machine's own: ${p.gh ?? 'not reported'})` } : p;
+    });
+  }
+
+  /** The machines whose own gh login may push .github/workflows (w1463), for a worker's brief. */
+  private workflowMachines(): string[] {
+    return this.machines.list().filter((m) => poolSettingsOf(m) && canPushWorkflows(m.gh) === true).map((m) => m.id);
   }
 
   /** A place's sessions, for sorting places by their agents' state (w509). */
@@ -2264,7 +2285,12 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             const requestedBy = actor(a.for_user, a.work_id);
             const files = this.attachmentsFor(a.attachments, w);
             const newOn = this.newWorkOn(a.sandbox, a.machine);
-            const hint = this.placeNote(newOn, w?.needs ?? 'game');
+            // Work that changes .github/workflows goes where its push is allowed (w1463): said in the note, by request, brief or prompt.
+            const workflows = changesWorkflows(`${w ? `${w.title}
+${w.brief}
+${w.repo ?? ''}
+` : ''}${a.prompt}`) ? { person: w ? personForWork(this.cfg, w) : requestedBy.userId } : undefined;
+            const hint = this.placeNote(newOn, w?.needs ?? 'game', workflows);
             // A sandbox a waiting worker released on its own branch is switched to a fresh one first (w640).
             const handed = await this.prepareForNewWork(a.sandbox, a.machine, w?.id ?? nextId, w?.source);
             // An intake request always carries its rules (untrusted text, posting limits, the markers), whatever the brief says.
@@ -2782,7 +2808,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const standing = m.sessionIds.filter((id) => this.store.sessions.get(id)?.kind === 'standing');
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${platformNoun(m.platform)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
-      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
+      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
       ...(detail ? [`  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`] : []),
       sandboxes,
       // Its main clone's git, from a daemon before w536 only (a current one reports none).
