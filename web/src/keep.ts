@@ -37,7 +37,7 @@ export function useKeptState<T extends string | boolean | number>(key: string, i
   return [value, setValue];
 }
 
-/** Savers the page runs just before it reloads for a new version (and when it goes away: pagehide). */
+/** Savers the page runs just before it reloads for a new version. */
 const savers = new Set<() => void>();
 
 /** Register a function that writes the page's place somewhere a reload keeps. Returns its removal. */
@@ -56,15 +56,26 @@ export function savePage() {
   });
 }
 
-if (typeof window !== 'undefined') {
-  window.addEventListener('pagehide', savePage);
-  onPageSave(saveFocus);
-}
+if (typeof window !== 'undefined') onPageSave(saveFocus);
 
-/** A Map of places (a chat's scroll position, a list's), read from a reload's save and written back when the page goes. */
+/**
+ * A Map of places (a chat's scroll position, a list's) that a reload gives back: read from this tab's storage now, written
+ * soon after each change and in savePage. Not on `pagehide`: a listener there runs before the composer's own, and the
+ * microtasks between them let a message cut off by the reload put its text back into the box first (composerClears.spec.ts).
+ */
 export function keptMap<V>(name: string): Map<string, V> {
-  const map = new Map<string, V>(Object.entries(read<Record<string, V>>(name) ?? {}));
-  onPageSave(() => write(name, map.size ? Object.fromEntries(map) : undefined));
+  const flush = () => write(name, map.size ? Object.fromEntries(map) : undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  class Kept extends Map<string, V> {
+    override set(key: string, value: V) {
+      super.set(key, value);
+      clearTimeout(timer);
+      timer = setTimeout(flush, 300);
+      return this;
+    }
+  }
+  const map = new Kept(Object.entries(read<Record<string, V>>(name) ?? {}));
+  onPageSave(flush);
   return map;
 }
 
