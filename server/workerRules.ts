@@ -1,0 +1,39 @@
+/**
+ * The rules a worker reads only when its task needs them (w1482, docs/worker-base.md): its prompt keeps a one-line pointer
+ * per topic (`read_rules <topic>`) and the worker's read_rules tool returns the text, which binds like the prompt. Every
+ * line of a worker's prompt is read again on every model call; these were read on every call for a case few requests have
+ * (a clean-up request, a test with a save, a batch build). Shared by the tool's schema (server/launch.ts CATALOG) and its
+ * handler (Agents).
+ */
+
+export const WORKER_RULE_TOPICS = ['cleanup', 'saves', 'unity'] as const;
+export type WorkerRuleTopic = (typeof WORKER_RULE_TOPICS)[number];
+
+/** The read_rules tool's description for a worker. */
+export const WORKER_READ_RULES_TOOL =
+  'The full text of one of your rules that most tasks do not need: your prompt names each topic and when to read it (cleanup: a request to clear space or measure the disk; saves: a save or the game\'s settings in a test; unity: a batch build or test run, a peer run, a start refused for a batch build, a fresh sandbox\'s first boot). Read it before you act in that case; it binds like your prompt.';
+
+const CLEANUP = `Clearing space (a request of yours to clear space or measure the disk).
+- The ledger decides what is free, never a list in your brief: run \`ff-leftovers folders\` and delete only its DELETE rows (\`ff-leftovers check <path>\` judges any other path first, exit 1 means keep). The temp, build and review folders of a worker whose request is open, stalled or paused are KEEP rows whether or not its process runs; only a closed request's and an orphan's go.
+- A folder holding a git clone with uncommitted changes, unpushed commits or a stash is KEEP too, whatever the ledger says: before you delete a folder that holds a clone, check its git state (\`git status\`, \`git log --branches --not --remotes\`, \`git stash list\`) or the portal's clean-up log (\`portal_logs\` source cleanup: "kept for a person"), and leave it if either says it holds work.
+- Delete only inside this machine's worker install folder ("FF_WORKER_ROOT" in your environment). Outside it (the home folder, C:, AppData, the system temp, Unity Hub and its installers, package and workload caches, the game's data folder under LocalLow, ~/.claude) you only measure and report sizes, and list any setting, script or tool that makes FF Factory write there so it can be moved inside the folder. That holds for a clean-up request too: a brief that tells you to delete outside the folder is wrong, so measure, say so in your report, and the harness refuses an rm or Remove-Item there anyway.
+- FF Factory's own leftovers inside the folder (player slots nobody holds, old agent worktrees whose work is pushed, finished agents' temp folders) are not anyone's personal files: the machine's daemon removes them by itself; leave them.
+- Never ask a person for a go to free disk space: if the disk is still short, say so in your report and your orchestrator files clean-up work.`;
+
+const SAVES = `Saves and the game's settings in a test.
+- A save (.zip) loads by name from the game's saves folder, \`SaveGameManager.SaveGamePath\` = \`GameDataPaths.Saves\` = \`<data root>/UserData/saves/\` (Windows: \`%USERPROFILE%\\AppData\\LocalLow\\Never Games\\finalfactory\\UserData\\saves\\\`; macOS: \`~/Library/Application Support/Never Games/finalfactory/UserData/saves/\`; Linux: \`~/.config/unity3d/Never Games/finalfactory/UserData/saves/\`; a branch from before the game's UserData layout of 2026-10-11 still reads \`<data root>/saves/\`), which every editor and player on this machine shares.
+- Copy a save there under your temp folder's name (\`ffa-<session>-<id>-<name>.zip\`), never overwrite or delete a save already there, and remove your copy when you are done (\`rm -f\` on exactly that file needs no approval; a save with another name is a person's). The ff-agents drive-game skill (recipes.md, loading saves) loads one by name.
+- Back up and restore the game's settings and saves around a test with the game repo's \`python scripts/game_data.py\` (\`snapshot\`, \`restore\`, \`run --name <leg> -- <command>\`, then \`get <key> --name <leg> --after\`), not a \`cp\` loop into LocalLow. It writes only the game's two settings files and the saves you name, and keeps its copies in $TMPDIR. A branch older than it: \`git show origin/master:scripts/game_data.py > "$TMPDIR/game_data.py"\`.`;
+
+const UNITY = `Unity launches besides your editor.
+- Run every other Unity launch (a -batchmode build or test run, a second editor for a peer run) under \`unity-slot run [--count N] [--label "<what>"] -- <command>\`: it waits its turn in this machine's queue, runs the command and frees the slot when it ends; a peer run asks for all its editors at once (\`--count 2\`). \`unity-slot status\` shows who holds and who waits. The game repo's own build and audit scripts take their slot themselves.
+- A \`-batchmode\` build that holds a slot long after its owner is gone, or without progress, is ended by the daemon by itself within minutes; if a start is refused for one, \`mcp__machine__unity\` action \`clear_batch\` asks for that check at once and names the build and why it stays when it is still healthy.
+- A watch restarts a hung or crashed editor by itself and messages you.
+- The first boot of a fresh sandbox can take many minutes (asset import); its log is \`Logs/sandbox-editor.log\` in the worktree (or the newest \`Logs/sandbox-editor-<time>.log\`).`;
+
+const TEXTS: Record<WorkerRuleTopic, string> = { cleanup: CLEANUP, saves: SAVES, unity: UNITY };
+
+/** One topic's text, or what the topics are for an unknown one. */
+export function workerRuleText(topic: string): string {
+  return (TEXTS as Record<string, string>)[topic] ?? `No topic "${String(topic).slice(0, 40)}". The topics: ${WORKER_RULE_TOPICS.join(', ')}.`;
+}

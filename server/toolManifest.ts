@@ -47,7 +47,7 @@ const D = 'dispatcher', P = 'personal', R = 'remote', O = 'ops', W = 'worker', S
 
 export const TOOL_MANIFEST = {
   // core
-  read_rules: { group: 'core', kinds: [D, P, R], always: [D, P] },
+  read_rules: { group: 'core', kinds: [D, P, R, W], always: [D, P] },
   compact_conversation: { group: 'core', kinds: [D, P] },
   ask_person: { group: 'core', kinds: [P], always: [P] },
   message_person: { group: 'core', kinds: [P], always: [P] },

@@ -178,7 +178,9 @@ test('machine unity mcp: the portal asks for it for sandbox agents on a machine;
   assert.equal(inSb.sandbox, 'sb1');
   assert.equal(inSb.guard.id, 'sb1');
   // w1469: tools a worker never uses are not in its definitions (every call reads them)
-  assert.deepEqual(inSb.disallowedTools, ['mcp__ffsb', 'Workflow', 'ScheduleWakeup', 'AskUserQuestion']);
+  assert.deepEqual(inSb.disallowedTools, ['mcp__ffsb', 'Workflow', 'ScheduleWakeup', 'AskUserQuestion', 'ReportFindings', 'Agent(Explore)', 'Agent(Plan)', 'Agent(claude)', 'Agent(statusline-setup)']);
+  // w1482: the built-in roles go by deny rules; general-purpose (spawned) and every plugin role stay.
+  assert.ok(!inSb.disallowedTools!.some((t) => /general-purpose|ff-agents:/.test(t)));
   // w1480: the C# language server's diagnostics are noise in a sandbox; a worker starts with it off, and the SDK gets it as --settings
   assert.deepEqual(inSb.settings, { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false } });
   assert.deepEqual(buildOptions(inSb, {}).settings, { enabledPlugins: { 'csharp-lsp@claude-plugins-official': false } });

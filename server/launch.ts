@@ -10,6 +10,7 @@ import { usageEnv } from './usage.ts';
 import type { StandingToolGroup } from '../shared/types.ts';
 import { WORK_LIVE_STATES, type WorkLiveState } from '../shared/workState.ts';
 import type { SecretRules } from './secretGuard.ts';
+import { WORKER_RULE_TOPICS } from './workerRules.ts';
 
 /** A stdio MCP server the agent process starts (on a machine: the daemon's Unity MCP server, machine/unityMcp.ts). */
 export interface StdioServer {
@@ -170,6 +171,8 @@ export const CATALOG = {
     key: z.string().max(80).optional().describe('The dedupe key: a message with the same key in the same place is posted once, and a repeat answers the first one\'s link. Required for dev_patch_notes: the release\'s version, e.g. 0.50.0.94.'),
   },
   /** docs/orchestrators.md, "Workers read the ledger" (w642). Read-only: the portal answers from the ledger (server/workRead.ts). */
+  /** A worker's rules most tasks do not need (w1482, server/workerRules.ts). */
+  read_rules: { topic: z.enum(WORKER_RULE_TOPICS).describe('cleanup, saves or unity: the topic your prompt names.') },
   read_work: {
     id: z.string().max(16).optional().describe('One request in full, e.g. "w631": yours, one yours names, or (with a ledger-read grant) any open or stalled one.'),
     all: z.boolean().optional().describe("List the ledger's open and stalled requests, not only yours and the ones they name. Needs a ledger-read grant on one of your open requests."),

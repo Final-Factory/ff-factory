@@ -121,7 +121,7 @@ export function canPushWorkflows(gh: GhLogin | undefined): boolean | undefined {
 
 /** "bryding (gist, read:org, repo)", "bryding (no scopes reported: a fine-grained token?)", "not logged in (…)". */
 export function ghLoginLabel(gh: GhLogin | undefined): string {
-  if (!gh) return 'not reported yet (a daemon from before w1463)';
+  if (!gh) return 'not reported yet (an older daemon)';
   if (!gh.ok) return `${gh.account ? `${gh.account}, ` : ''}not usable (${gh.error ?? 'unknown'})`;
   return `${gh.account} (${gh.scopes?.length ? gh.scopes.join(', ') : 'no scopes reported: a fine-grained token, whose Workflows permission cannot be read'})`;
 }
