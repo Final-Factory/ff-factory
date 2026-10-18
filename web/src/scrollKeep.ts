@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
+import { keptMap } from './keep';
 
-const kept = new Map<string, number>();
+const kept = keptMap<number>('scroll.lists');
 /** How long a list that fills in late (rows fetched, a table drawn) is held at the remembered place, until the reader scrolls. */
 const HOLD_MS = 1500;
 

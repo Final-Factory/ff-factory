@@ -5,6 +5,8 @@ import { parseReaction, reactionsByMessage, splitReply, splitVia } from '../../.
 import { HELD_MARK } from '../../../shared/conditional';
 import { checkAsk, isAskTool, type Ask } from '../../../shared/ask';
 import { AskCard } from './AskCard';
+import { holdReload } from '../freshness';
+import { keptMap, useKeptState } from '../keep';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
 import { attempt, clearFocusEvent, focusEvent, focusPermission, sessionIndex, useStore } from '../store';
@@ -129,7 +131,7 @@ const seqsOf = (steps: Step[]) => steps.flatMap((s) => (s.kind === 'tool' ? [s.u
 type Place = 'bottom' | { top: number; seq?: number; off: number; latest?: number };
 type Held = Exclude<Place, 'bottom'>;
 /** Where each chat was scrolled to, so leaving and coming back keeps the place. */
-const scrollMemory = new Map<string, Place>();
+const scrollMemory = keptMap<Place>('scroll.chats');
 /** How long after a chat is drawn again its place is held against content that loads late (images, diagrams), until the reader moves. */
 const HOLD_MS = 4000;
 /** How long the place is held after the view is resized (a phone turned, a keyboard opened): the layout may still be settling, a frame at a time. */
@@ -943,10 +945,16 @@ export function PermissionCard({
   decidedBy?: string;
 }) {
   const [busy, setBusy] = useState(false);
-  const [denyOpen, setDenyOpen] = useState(false);
-  const [note, setNote] = useState('');
+  // An open "deny and say why" form and its note outlast a reload for a new version (web/src/keep.ts).
+  const [denyOpen, setDenyOpen] = useKeptState(`perm.deny.${requestId}`, false);
+  const [note, setNote] = useKeptState(`perm.note.${requestId}`, '');
   const [showInput, setShowInput] = useState(false);
   const summary = summarizeToolInput(toolName, input);
+  // The answer on its way is not cut off by the reload.
+  useEffect(() => {
+    holdReload(`perm:${requestId}`, busy);
+    return () => holdReload(`perm:${requestId}`, false);
+  }, [requestId, busy]);
 
   const decide = async (allow: boolean, message?: string) => {
     setBusy(true);
@@ -998,6 +1006,7 @@ export function PermissionCard({
       {denyOpen && (
         <form
           className="perm-deny"
+          data-kept
           onSubmit={(e) => {
             e.preventDefault();
             void decide(false, note.trim() || undefined);

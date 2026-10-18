@@ -1,7 +1,8 @@
-import { useContext, useState } from 'react';
+import { useContext, useEffect, useState } from 'react';
 import { answerOf, CHAT_MORE_LABEL, mediaMarkdown, splitMedia, type Ask } from '../../../shared/ask';
 import { HELD_MARK } from '../../../shared/conditional';
 import { api } from '../api';
+import { holdReload } from '../freshness';
 import { attempt, startReply, useStore } from '../store';
 import { Markdown } from './Markdown';
 import { ChatActionsContext } from './MessageActions';
@@ -28,6 +29,11 @@ export function AskCard({ seq, ask, sessionId }: { seq: number; ask: Ask; sessio
   });
   // The click in flight: the buttons are shut at once, before the transcript has the message.
   const [sending, setSending] = useState<number>(-1);
+  // The click on its way is not cut off by a reload for a new version.
+  useEffect(() => {
+    holdReload(`ask:${sessionId}:${seq}`, sending >= 0 && chosen < 0);
+    return () => holdReload(`ask:${sessionId}:${seq}`, false);
+  }, [sessionId, seq, sending >= 0 && chosen < 0]);
   const picked = chosen >= 0 ? chosen : sending;
   const locked = picked >= 0;
   const live = !!chat?.interactive && !locked;

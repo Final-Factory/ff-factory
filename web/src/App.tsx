@@ -154,8 +154,8 @@ function ConnectionBanner() {
 function NewVersionBanner() {
   if (!useNewVersion()) return null;
   return (
-    <Bar kind="warn" text="A new version of FF Factory is ready. Reload to use it: a typed message is kept, pictures and files not yet sent are not." action={{ label: 'Reload', onClick: reloadNow }}>
-      <b>A new version of FF Factory is ready.</b> Reload to use it: a typed message is kept, pictures and files not yet sent are not.
+    <Bar kind="warn" text="A new version of FF Factory is ready. This page reloads by itself once nothing here would be lost: pictures and files not yet sent, an open dialog, text in a box that keeps no draft. Reload now to use it at once." action={{ label: 'Reload', onClick: reloadNow }}>
+      <b>A new version of FF Factory is ready.</b> This page reloads by itself once nothing here would be lost: pictures and files not yet sent, an open dialog, text in a box that keeps no draft. Reload now to use it at once.
     </Bar>
   );
 }

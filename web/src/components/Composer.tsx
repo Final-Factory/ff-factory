@@ -2,6 +2,7 @@ import { memo, type ChangeEvent, useEffect, useLayoutEffect, useRef, useState } 
 import type { SessionInfo } from '../../../shared/types';
 import { api, ApiError, UnauthorizedError } from '../api';
 import { holdReload } from '../freshness';
+import { takeFocus } from '../keep';
 import type { ImageInput } from '../../../shared/types';
 import { attempt, clearReply, focusEvent, showLatest, startReply, toast, useStore } from '../store';
 import { clearPending, removePending, restorePending, startUpload, usePendingFiles, type PendingFile } from '../upload';
@@ -180,6 +181,14 @@ export const Composer = memo(function Composer({
     // As in a textarea whose value is set: the caret goes to the end.
     if (document.activeElement === el) setCaret(el, text.length);
   }, [text]);
+
+  // The page was replaced by a new version while the caret was in this box (web/src/freshness.ts): put it back.
+  useEffect(() => {
+    const el = ta.current;
+    if (!el || !takeFocus(key)) return;
+    el.focus({ preventScroll: true });
+    setCaret(el, shown.current?.length ?? 0);
+  }, [key]);
 
   useEffect(() => {
     if (prefill) {
@@ -419,6 +428,8 @@ ${cur}` : t));
         <DictationBar d={voice.d} />
         <div
           ref={ta}
+          data-kept
+          data-keep-focus={key}
           className="composer-input"
           contentEditable={EDITABLE_MODE}
           role="textbox"
