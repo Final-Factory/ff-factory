@@ -42,8 +42,14 @@ export async function readGhLogin(run: GhLoginDeps['run'], now: Date): Promise<G
   const fromJson = j.code === 0 ? parseGhStatusJson(j.stdout, now) : undefined;
   if (fromJson) return fromJson;
   // gh before --json (2.71): its text, which goes to stderr on some versions and stdout on others.
-  const t = await run('gh', ARGS, { timeoutMs: 30_000, env });
-  return parseGhStatusText(`${t.stdout}\n${t.stderr}`, now);
+  let t = await run('gh', ARGS, { timeoutMs: 30_000, env });
+  // A gh before --active (w1463, a guess from biscuit's first report, "named no github.com account"): the same without it.
+  if (/unknown flag:?\s*--active/i.test(`${t.stdout}\n${t.stderr}`)) t = await run('gh', ARGS.filter((a) => a !== '--active'), { timeoutMs: 30_000, env });
+  const gh = parseGhStatusText(`${t.stdout}\n${t.stderr}`, now);
+  if (gh.ok) return gh;
+  // Not understood: say which gh it was, so the next reading of list_machines says what to update (never gh's own text).
+  const v = /gh version (\d+\.\d+\.\d+)/.exec((await run('gh', ['--version'], { timeoutMs: 15_000, env })).stdout)?.[1];
+  return v ? { ...gh, error: `${gh.error} (gh ${v}, exit ${t.code})` } : gh;
 }
 
 /** The daemon's watch of its gh login: reads it when due, sends it when it changed, and gives the last one to each hello. */

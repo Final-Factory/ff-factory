@@ -1,0 +1,1 @@
+- A machine whose gh is older than `gh auth status --active` now reports its login too, and a gh login the daemon cannot understand names gh's version and exit code in list_machines (w1463, after biscuit's first report read "named no github.com account").

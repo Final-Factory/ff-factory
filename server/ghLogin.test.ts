@@ -197,6 +197,19 @@ test('w1463: readGhLogin says when gh is missing, and the hosts file follows gh\
   assert.deepEqual([missing.ok, missing.error], [false, "gh is not installed (or not on the daemon's PATH)"]);
   const json = await readGhLogin(async () => ({ code: 0, stdout: BEAST_JSON, stderr: '' }), NOW);
   assert.equal(json.account, 'bryding');
+  // A gh before --json and --active (biscuit's first report said "named no github.com account"): asked again without
+  // --active, in its old wording ("as", the hosts file as its source, no scopes line), and its version said when not understood.
+  const asked: string[][] = [];
+  const old = await readGhLogin(async (_c, args) => {
+    asked.push(args);
+    if (args[0] === '--version') return { code: 0, stdout: 'gh version 2.4.0 (2022-03-02)\n', stderr: '' };
+    if (args.includes('--json') || args.includes('--active')) return { code: 1, stdout: '', stderr: `unknown flag: ${args.includes('--json') ? '--json' : '--active'}\n` };
+    return { code: 0, stdout: '', stderr: `github.com\n  ✓ Logged in to github.com as bryding (/home/b/.config/gh/hosts.yml)\n  ✓ Git operations for github.com configured to use https protocol.\n  ✓ Token: *******************\n` };
+  }, NOW);
+  assert.deepEqual([old.ok, old.account, old.source, canPushWorkflows(old)], [true, 'bryding', undefined, undefined]);
+  assert.deepEqual(asked.at(-1), ['auth', 'status', '--hostname', 'github.com']);
+  const odd = await readGhLogin(async (_c, args) => (args[0] === '--version' ? { code: 0, stdout: 'gh version 2.45.0 (2024-03-04)\n', stderr: '' } : { code: 1, stdout: 'something new', stderr: '' }), NOW);
+  assert.equal(odd.error, 'gh auth status named no github.com account (gh 2.45.0, exit 1)');
   assert.equal(ghHostsFile({ GH_CONFIG_DIR: '/c/gh' }, 'linux', '/h'), path.join('/c/gh', 'hosts.yml'));
   assert.equal(ghHostsFile({ XDG_CONFIG_HOME: '/x' }, 'darwin', '/h'), path.join('/x', 'gh', 'hosts.yml'));
   assert.equal(ghHostsFile({ AppData: 'C:\\Users\\a\\AppData\\Roaming' }, 'win32', 'C:\\Users\\a'), path.join('C:\\Users\\a\\AppData\\Roaming', 'GitHub CLI', 'hosts.yml'));
