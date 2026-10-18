@@ -79,6 +79,7 @@ export const CATEGORIES = [
   'base',
   'summary',
   'carried',
+  'unitemised',
   'brief',
   'assistant',
   'file-read',
@@ -97,9 +98,10 @@ export const CATEGORIES = [
 ] as const;
 export type Category = (typeof CATEGORIES)[number];
 export const CATEGORY_LABEL: Record<string, string> = {
-  base: 'Base context (system prompt, tool definitions, CLAUDE.md, skill lists, reminders)',
+  base: 'Base context (system prompt, tool definitions, CLAUDE.md, skill and agent lists): measured by the first call of each process',
   summary: 'Summary left by a compaction',
   carried: 'Context carried over from before this process started (a conversation resumed after a restart): not itemised, the base context included',
+  unitemised: "What the meter could not itemise: reminders and hook output Claude Code adds to the context (the stream never shows them), and the error of its characters' estimate",
   brief: 'Messages to the agent (briefs, follow-ups, harness notices)',
   assistant: "The agent's own text, thinking and tool calls (output tokens included)",
   'file-read': 'File reads (Read, sed -n, cat, head, tail)',
@@ -267,9 +269,12 @@ export interface CallUsage {
  * assistant's content blocks, each tool call and its result, and each model call's usage. For every call it shares the call's real
  * token counts among the kinds of content the context holds, by characters: cache reads go to what was in the context
  * before the call, cache writes and uncached input to what is new since the previous call, and output tokens to the
- * agent's own text. What no content explains (the system prompt, tool definitions, CLAUDE.md, reminders) is `base`. A
- * context that suddenly shrinks (a compaction, a /clear) starts a new epoch: the summary is `summary` and files read
- * again after it are counted in `reread.afterCompact`.
+ * agent's own text. The `base` (the system prompt, tool definitions, CLAUDE.md, skill lists) is measured once, by the first
+ * call of the process: its context less what the meter saw added (w1469). After that a call's read is the base first,
+ * then what the context held; its write is what is new, then the part of the base and the history the cache did not cover
+ * (a cold cache rewrites them all); what is left either way is `unitemised` (reminders and hook output the stream never
+ * shows, and the error of the characters' estimate), never the base. A context that suddenly shrinks (a compaction, a
+ * /clear) starts a new epoch: the summary is `summary` and files read again after it are counted in `reread.afterCompact`.
  *
  * Characters are the estimate; the totals per call are exact. A result's real tokens cannot be told apart from another's by
  * Claude Code's numbers, so the split inside a call is proportional to characters (CHARS_PER_TOKEN only fixes the base).
@@ -289,9 +294,31 @@ export class ContextMeter {
   /** The next call's unexplained cache read is a conversation resumed from before this process, not the base context (w1209). */
   private carriedNext = false;
 
+  /** A compaction's summary, in tokens (compact_boundary post_tokens): the call that shows the context shrunk writes it (w1469). */
+  private summaryNext = 0;
+  /** The base context in tokens, measured by this process's first call (0 on a resumed one: its carried context holds it). */
+  private base?: number;
+
   /** This process resumed an earlier conversation: its first call reads a context the meter never saw built. */
   carry() {
     if (this.lastCtx === 0) this.carriedNext = true;
+  }
+
+  /**
+   * The current call's final output tokens (the stream's message_delta, w1469). The SDK sends a call's assistant messages as
+   * each content block ends, with message_start's usage (an output of about 1); the CLI puts the real count on them only
+   * afterwards, in its own transcript. Without this the agent's output, thinking included, read again by every later call,
+   * fell in `base`: replayed on beast's 3 days (2026-10-15..18), base read 60% with message_start's count and 28% with the real one.
+   */
+  output(tokens: number) {
+    if (!this.cur || !(tokens > this.cur.out)) return;
+    this.chargeOutput(tokens - this.cur.out, this.cur.model, true);
+    this.cur.out = tokens;
+  }
+
+  /** A compaction finished; its summary holds `tokens` (w1469: it was counted as base, every call after it). */
+  summary(tokens: number) {
+    if (tokens > 0) this.summaryNext = tokens;
   }
 
   /** Text that goes into the context from outside: a message to the agent. */
@@ -354,7 +381,10 @@ export class ContextMeter {
       this.compactedOnce = true;
       for (const k of this.readSeen) this.readSeenBeforeCompact.add(k);
       this.readSeen.clear();
-      this.held = new Map([['summary', 0]]);
+      this.held = new Map();
+      // Its summary is new in this call's context (the base is written again beside it).
+      if (this.summaryNext) this.fresh.set('summary', (this.fresh.get('summary') ?? 0) + this.summaryNext * CHARS_PER_TOKEN);
+      this.summaryNext = 0;
     }
     this.lastCtx = ctx;
     const toks = (m: Map<string, number>) => [...m].map(([k, v]) => [k, v / CHARS_PER_TOKEN] as const);
@@ -363,26 +393,50 @@ export class ContextMeter {
     const heldSum = heldEst.reduce((a, [, v]) => a + v, 0);
     const freshSum = freshEst.reduce((a, [, v]) => a + v, 0);
     const newTok = u.cw + u.in;
-    // New content: the call wrote cw and read in; if more is explained than was written, the estimate is scaled down;
-    // if less (the system prompt on the first call, reminders), the rest is base.
     const shares: Record<string, { r: number; w: number }> = {};
     const give = (cat: string, r: number, w: number) => {
+      if (r <= 0 && w <= 0) return;
       const s = (shares[cat] ??= { r: 0, w: 0 });
       s.r += r;
       s.w += w;
     };
-    const fscale = freshSum > newTok ? newTok / freshSum : 1;
+    let B: number;
+    let baseR = 0;
+    let hscale: number;
+    if (this.carriedNext) {
+      // a resumed conversation: what this process never saw built is carried (the base in it), and later calls read it as held
+      const carried = Math.max(0, u.cr - heldSum);
+      give('carried', carried, 0);
+      hscale = heldSum > u.cr ? u.cr / heldSum : 1;
+      for (const [k, v] of heldEst) give(k, v * hscale, 0);
+      this.held.set('carried', (this.held.get('carried') ?? 0) + carried * CHARS_PER_TOKEN);
+      B = this.base = 0;
+      this.carriedNext = false;
+    } else {
+      // the first call of a process measures the base: its context less what the meter saw added (w1469)
+      B = this.base ??= Math.max(0, ctx - Math.min(freshSum, newTok));
+      // the read: the cached prefix holds the base, then the history
+      baseR = Math.min(B, u.cr);
+      let r = u.cr - baseR;
+      hscale = heldSum > r ? r / heldSum : 1;
+      for (const [k, v] of heldEst) give(k, v * hscale, 0);
+      r -= heldSum * hscale;
+      give('base', baseR, 0);
+      give('unitemised', r, 0);
+    }
+    // the write: what is new, then the base and the history the cache did not cover (a cold cache writes them all again)
+    let w = newTok;
+    const fscale = freshSum > w ? w / freshSum : 1;
     for (const [k, v] of freshEst) give(k, 0, v * fscale);
-    give('base', 0, Math.max(0, newTok - freshSum * fscale));
-    const hscale = heldSum > u.cr ? u.cr / heldSum : 1;
-    for (const [k, v] of heldEst) give(k, v * hscale, 0);
-    const unexplained = Math.max(0, u.cr - heldSum * hscale);
-    if (this.carriedNext && unexplained > 0) {
-      // a resumed conversation: what this process never saw built is carried, not base; later calls read it as held
-      give('carried', unexplained, 0);
-      this.held.set('carried', (this.held.get('carried') ?? 0) + unexplained * CHARS_PER_TOKEN);
-    } else give('base', unexplained, 0);
-    this.carriedNext = false;
+    w -= freshSum * fscale;
+    const baseW = Math.max(0, Math.min(B - baseR, w));
+    give('base', 0, baseW);
+    w -= baseW;
+    const missing = heldSum * (1 - hscale);
+    const mscale = missing > 0 ? Math.min(w, missing) / missing : 0;
+    for (const [k, v] of heldEst) give(k, 0, v * (1 - hscale) * mscale);
+    w -= missing * mscale;
+    give('unitemised', 0, w);
     const p = priceOf(u.model);
     const cw5 = Math.min(u.cw, u.cw5 ?? 0);
     const wPrice = u.cw + u.in > 0 ? (u.in * p.in + (u.cw - cw5) * 2 * p.in + cw5 * 1.25 * p.in) / (u.cw + u.in) : p.in;
