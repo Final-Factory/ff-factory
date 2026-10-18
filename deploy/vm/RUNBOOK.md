@@ -331,6 +331,11 @@ missing package). If it fails, nothing restarts and the running version stays, a
 date" runs it too, for the running release. A rollback goes back to the older code and its scripts but keeps the newer
 system setup.
 
+Once the new release is verified, the portal itself updates every worker-root machine's daemon (w887) and then publishes
+the latest agent tools, final-factory-agents' plugins, on each of them (w1476), and sends one `[machine updates]` report
+with each machine's daemon commit and plugin versions before and after ([docs/ops-worker.md](../../docs/ops-worker.md#after-a-verified-deploy-w887)).
+Nothing to run for it; a rolled-back update does neither.
+
 ## 7. Changing the VM's size
 
 The size is `VM_VCPUS` and `VM_MEMORY_MB` in `/etc/fff-vm/fff-vm.conf` (4096 since 2026-10-06). Edit it; the nightly

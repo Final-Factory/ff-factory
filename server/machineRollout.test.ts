@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { MachineRollout, ROLLOUT_FILE, VERIFIED_FILE, changedSettings, installerSummary, type RolloutHost, type RolloutMachine } from './machineRollout.ts';
-import { workerUpdateRemote } from './opsWorker.ts';
+import { MachineRollout, ROLLOUT_FILE, VERIFIED_FILE, changedSettings, installerSummary, toolsLine, toolsResult, type RolloutHost, type RolloutMachine } from './machineRollout.ts';
+import { workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
 import type { Requester } from '../shared/types.ts';
 
 /** The rollout after a verified portal deploy (w887, docs/ops-worker.md "After a verified deploy"). */
@@ -21,7 +21,15 @@ interface FakeMachine extends RolloutMachine {
   agents: { id: string; title: string }[];
   /** What a run of the installer does: its exit code and output, and what the machine looks like afterwards. */
   run: (remote: string) => { code: number; out?: string; after?: { online: boolean; daemon?: string }; adopt?: string[] };
+  /** What a run of the installer's tools form does (w1476); default: published, ff-agents 1.29.19 -> 1.29.20. */
+  tools?: (remote: string) => { code: number; out?: string; throws?: string };
 }
+
+/** What `worker.ts tools` prints (server/agentTools.ts), shortened to the lines the rollout reads. */
+const toolsOut = (before = 'ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord not installed', after = 'ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord not installed', extra = '') =>
+  `Agent tools before: ${before}\nAgent tools latest: final-factory-agents a8449abd8457: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord 1.17.7\n` +
+  `  == Claude Code ==\n${extra}Agent tools after: ${after}\nAgent tools published: every installed plugin is on master.`;
+const isTools = (remote: string) => / -Tools -Root | -- --tools --root /.test(remote);
 
 const mac = (id: string, over: Partial<FakeMachine> = {}): FakeMachine => ({
   id,
@@ -35,10 +43,12 @@ const mac = (id: string, over: Partial<FakeMachine> = {}): FakeMachine => ({
   ...over,
 });
 
-function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: boolean } = {}) {
+function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: boolean; tools?: boolean } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollout-'));
   let clock = Date.parse('2026-10-10T18:00:00Z');
   const calls: { target: string; remote: string }[] = [];
+  /** The agent tools runs (w1476), apart from the daemon updates in calls. */
+  const toolCalls: { target: string; remote: string; at: number }[] = [];
   const told: { to: Requester | undefined; text: string }[] = [];
   let helloAt = 0;
   let adopted: Set<string> | undefined;
@@ -52,8 +62,14 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
     agents: (id) => find(id).agents,
     liveAtHello: (_id, since) => (helloAt >= since ? adopted : undefined),
     ssh: async (target, remote) => {
-      calls.push({ target, remote });
       const m = machines.find((x) => x.target === target)!;
+      if (isTools(remote)) {
+        toolCalls.push({ target, remote, at: calls.length });
+        const t = m.tools ? m.tools(remote) : { code: 0, out: toolsOut() };
+        if (t.throws) throw new Error(t.throws);
+        return { code: t.code, stdout: t.out ?? '', stderr: '' };
+      }
+      calls.push({ target, remote });
       const r = m.run(remote);
       if (r.after) Object.assign(m, r.after);
       if (r.adopt) {
@@ -66,9 +82,9 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
     requesterOf: () => o.requester,
   };
   const make = () =>
-    new MachineRollout({ host, dataDir: dir, enabled: () => o.enabled !== false, now: () => clock, sleep: async (ms) => void (clock += ms), limits: { settleMs: 10_000, graceMs: 10 * 60_000 } });
+    new MachineRollout({ host, dataDir: dir, enabled: () => o.enabled !== false, tools: () => o.tools !== false, now: () => clock, sleep: async (ms) => void (clock += ms), limits: { settleMs: 10_000, graceMs: 10 * 60_000 } });
   const verify = (sha = NEW, at = clock) => fs.writeFileSync(path.join(dir, VERIFIED_FILE), JSON.stringify({ sha, previous: OLD, at: new Date(at).toISOString() }));
-  return { dir, calls, told, make, verify, advance: (ms: number) => void (clock += ms), setHello: (ids: string[]) => ((adopted = new Set(ids)), (helloAt = clock + 1)), find };
+  return { dir, calls, toolCalls, told, make, verify, advance: (ms: number) => void (clock += ms), setHello: (ids: string[]) => ((adopted = new Set(ids)), (helloAt = clock + 1)), find };
 }
 
 test('a verified deploy updates every online machine with the installer, naming no setting, and reports once to whoever asked', async () => {
@@ -315,6 +331,110 @@ test('the installer summary keeps the lines that matter, and the settings it cha
   assert.deepEqual(installerSummary('a\nb\nc'), ['a', 'b', 'c']);
   assert.deepEqual(changedSettings('Settings changed:\n  ~ maxUnity: 2 -> 3\n'), ['~ maxUnity: 2 -> 3']);
   assert.deepEqual(changedSettings(out), []);
+});
+
+// ---------------------------------------------------------------- the agent tools (w1476)
+
+test('w1476: after its daemon step every worker root machine gets the latest agent tools, a current one too, and the report gives each plugin before and after', async () => {
+  const w = world([mac('beast', { platform: 'win32', root: 'C:\\ffw', target: 'rydin@beast' }), mac('m5', { daemon: NEW.slice(0, 9) })], { requester: LOTH });
+  const r = w.make();
+  w.verify();
+  await r.tick();
+  assert.deepEqual(w.calls.map((c) => c.target), ['rydin@beast'], 'm5 is current: no daemon update');
+  assert.deepEqual(w.toolCalls.map((c) => c.target), ['rydin@beast', 'ben@m5'], 'both get the tools');
+  assert.equal(w.toolCalls[0].at, 1, "beast's tools ran after its daemon update");
+  assert.equal(w.toolCalls[0].remote, workerToolsRemote({ root: 'C:\\ffw', platform: 'win32' }));
+  assert.match(w.toolCalls[0].remote, / -Tools -Root C:\\ffw"$/);
+  assert.match(w.toolCalls[1].remote, /-- --tools --root \/Users\/Shared\/ffw-m5$/);
+  assert.equal(w.told.length, 1, 'still one report');
+  const t = w.told[0].text;
+  assert.match(t, /updated the machines' daemons and published the latest agent tools \(final-factory-agents\) on them by itself/);
+  assert.match(t, /- beast: updated\. .*Agent tools: ff-agents 1\.29\.19 → 1\.29\.20, ff-speckit 1\.0\.2, ff-discord not installed \(final-factory-agents a8449abd8\); every installed plugin on master\./);
+  assert.match(t, /- m5: already on the deployed commit \(c5a93e060\); its daemon was left alone\. Agent tools: ff-agents 1\.29\.19 → 1\.29\.20/);
+  assert.equal(r.state.machines.beast.tools?.status, 'ok');
+  assert.equal(r.state.machines.beast.tools?.after?.['ff-agents'], '1.29.20');
+  await r.tick();
+  assert.equal(w.toolCalls.length, 2, 'once per rollout');
+});
+
+test('w1476: a tools failure on one machine is reported, the others carry on, and nothing is rolled back', async () => {
+  const w = world(
+    [
+      mac('beast', { tools: () => ({ code: 1, out: toolsOut(undefined, 'ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord not installed', 'FAILED: registerAgents.sh exited 1: claude CLI not on PATH\n') }) }),
+      mac('m3', { tools: () => ({ code: 3, out: 'Agent tools before: ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord 1.17.7\nNOT PUBLISHED: /ffw/tools/final-factory-agents has uncommitted changes (2 paths); nothing in it was overwritten.\nAgent tools after: ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord 1.17.7 (unchanged)' }) }),
+      mac('biscuit', { tools: () => ({ code: 0, out: '', throws: 'ssh: connect to host biscuit port 22: Connection timed out' }) }),
+      mac('m5'),
+    ],
+    { requester: LOTH },
+  );
+  const r = w.make();
+  w.verify();
+  await r.tick();
+  assert.equal(w.toolCalls.length, 4, 'every machine was tried');
+  assert.equal(w.calls.length, 4, 'one daemon update each: no rollback, no second run');
+  for (const id of ['beast', 'm3', 'biscuit', 'm5']) assert.equal(r.state.machines[id].status, 'ok', `${id}'s daemon outcome is its own`);
+  const t = w.told[0].text;
+  assert.match(t, /- beast: updated\..* Agent tools FAILED: registerAgents\.sh exited 1: claude CLI not on PATH\. ff-agents 1\.29\.19, ff-speckit/);
+  assert.match(t, /\n {4}tools: FAILED: registerAgents\.sh exited 1/);
+  assert.match(t, /- m3: updated\..* Agent tools NOT PUBLISHED: \/ffw\/tools\/final-factory-agents has uncommitted changes \(2 paths\); nothing in it was overwritten\. ff-agents 1\.29\.19, ff-speckit 1\.0\.2, ff-discord 1\.17\.7\./);
+  assert.match(t, /- biscuit: updated\..* Agent tools FAILED: ssh: connect to host biscuit port 22: Connection timed out\. plugin versions unknown\./);
+  assert.match(t, /- m5: updated\..* Agent tools: ff-agents 1\.29\.19 → 1\.29\.20/);
+  assert.match(t, /unless a line above says FAILED, NOT PUBLISHED or OFFLINE/);
+});
+
+test('w1476: machines that are skipped get no tools; an offline one gets them when it comes back, in its follow-up; one left offline by a failed update is skipped', async () => {
+  const w = world([mac('old', { root: undefined }), mac('portal', { local: true }), mac('biscuit', { online: false }), mac('m3', { run: () => ({ code: 1, out: 'FAILED', after: { online: false } }) }), mac('m5')], { requester: LOTH });
+  const r = w.make();
+  w.verify();
+  await r.tick();
+  assert.deepEqual(w.toolCalls.map((c) => c.target), ['ben@m5']);
+  assert.equal(r.state.machines.m3.tools?.status, 'skipped');
+  w.advance(11 * 60_000);
+  await r.tick();
+  assert.match(w.told[0].text, /- m3: FAILED: .*OFFLINE.* Agent tools skipped: the machine is offline after its failed daemon update\./);
+  assert.doesNotMatch(w.told[0].text, /- old: .*Agent tools/);
+  w.find('biscuit').online = true;
+  await r.tick();
+  assert.deepEqual(w.toolCalls.map((c) => c.target), ['ben@m5', 'ben@biscuit']);
+  assert.match(w.told[1].text, /- biscuit: updated\..* Agent tools: ff-agents 1\.29\.19 → 1\.29\.20/);
+});
+
+test('w1476: the switch: publishAgentToolsAfterDeploy false updates the daemons only', async () => {
+  const w = world([mac('m5')], { tools: false });
+  w.verify();
+  await w.make().tick();
+  assert.equal(w.calls.length, 1);
+  assert.equal(w.toolCalls.length, 0);
+  assert.doesNotMatch(w.told[0].text, /agent tools|Agent tools/);
+});
+
+test('w1476: a rollout from before never publishes; a publish cut off by a portal restart runs again', async () => {
+  const w = world([mac('m5', { daemon: NEW.slice(0, 7) })]);
+  fs.writeFileSync(path.join(w.dir, ROLLOUT_FILE), JSON.stringify({ sha: NEW, verifiedAt: '2026-10-10T18:00:00.000Z', reported: true, machines: { m5: { status: 'ok', told: true } } }));
+  await w.make().tick();
+  assert.equal(w.toolCalls.length, 0, 'its state has no tools flag');
+  fs.writeFileSync(path.join(w.dir, ROLLOUT_FILE), JSON.stringify({ sha: NEW, tools: true, verifiedAt: '2026-10-10T18:00:00.000Z', reported: true, machines: { m5: { status: 'ok', told: true, tools: { status: 'publishing' } } } }));
+  const r = w.make();
+  assert.equal(r.state.machines.m5.tools, undefined);
+  await r.tick();
+  assert.equal(w.toolCalls.length, 1);
+  assert.equal((r.state.machines.m5 as { tools?: { status: string } }).tools?.status, 'ok', 'published again');
+});
+
+test('w1476: the tools output is read into before, after and master versions; the line names each plugin', () => {
+  const ok = toolsResult(0, `noise\r\n${toolsOut()}\r\n`);
+  assert.equal(ok.status, 'ok');
+  assert.deepEqual(ok.before, { 'ff-agents': '1.29.19', 'ff-speckit': '1.0.2', 'ff-discord': undefined });
+  assert.deepEqual(ok.after, { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2', 'ff-discord': undefined });
+  assert.deepEqual(ok.latest, { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2', 'ff-discord': '1.17.7' });
+  assert.equal(ok.latestSha, 'a8449abd8457');
+  assert.equal(ok.note, undefined);
+  const no = toolsResult(2, '$ROOT holds no worker install (no root.json)');
+  assert.equal(no.status, 'failed');
+  assert.equal(no.note, "the installer's tools run exited 2");
+  assert.deepEqual(no.summary, ['$ROOT holds no worker install (no root.json)']);
+  assert.equal(toolsLine({ status: 'ok', before: { 'ff-discord': '1.17.6' }, after: { 'ff-agents': '1.29.20', 'ff-discord': '1.17.7' } }), ' Agent tools: ff-agents not installed → 1.29.20, ff-speckit not installed, ff-discord 1.17.6 → 1.17.7; every installed plugin on master.');
+  assert.equal(toolsLine(undefined), '');
 });
 
 test('the state survives a restart: a run cut off by it is looked at again', async () => {

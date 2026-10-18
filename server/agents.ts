@@ -538,10 +538,12 @@ export class Agents {
         return w.requesters.some((r) => r.userId.toLowerCase() === personId.toLowerCase()) ? undefined : `${id} is not one of their own requests`;
       },
     });
-    // After a verified portal deploy, every worker machine's daemon is updated by FF Factory itself (w887).
+    // After a verified portal deploy, every worker machine's daemon is updated by FF Factory itself (w887), and its agent tools (w1476).
     this.rollout = new MachineRollout({
       dataDir: cfg.dataDir,
       enabled: () => !dryRun() && cfg.machines?.autoUpdateAfterDeploy !== false,
+      // ...and publishes the latest agent tools on them (w1476).
+      tools: () => cfg.machines?.publishAgentToolsAfterDeploy !== false,
       host: {
         machines: () => machines.list().map((m) => ({ id: m.id, root: m.root, platform: m.platform, target: m.ssh ? `${m.ssh.user}@${m.ssh.host}` : m.host, local: m.local })),
         online: (id) => machines.isOnline(id),

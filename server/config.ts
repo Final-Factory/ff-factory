@@ -229,6 +229,11 @@ export interface Config {
      * on its commit.
      */
     autoUpdateAfterDeploy?: boolean;
+    /**
+     * The same rollout also publishes the latest agent tools (final-factory-agents' plugins, `registerAgents.sh`) on every
+     * worker root machine (server/agentTools.ts, w1476). On unless this is false.
+     */
+    publishAgentToolsAfterDeploy?: boolean;
   };
   /**
    * Which vault token THIS host's agents run on, per role (docs/accounts.md): the orchestrators on their person's pool

@@ -17,9 +17,11 @@
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root DIR
 # It asks nothing: every setting, the credential and the PATH come from the install. --max-sandboxes N,
 # --max-agents-per-sandbox N, --max-unity N change those; --daemon-ref REF (default: the commit the portal runs).
+# --tools instead of --update publishes the latest agent tools (final-factory-agents' plugins) for Claude Code here and
+# changes nothing else (w1476, docs/worker-install.md "The agent tools"); the portal runs it after every verified deploy.
 set -euo pipefail
 
-ROOT="" PORTAL="" MAXSB="" MAXAG="" MAXU="" SLOTS=8 SERVICE=com.fffactory.daemon SOURCE="" REF=main CREDFILE="" EXTRA="" REPO=https://github.com/Final-Factory/FinalFactory.git UPDATE=0 DREF=""
+ROOT="" PORTAL="" MAXSB="" MAXAG="" MAXU="" SLOTS=8 SERVICE=com.fffactory.daemon SOURCE="" REF=main CREDFILE="" EXTRA="" REPO=https://github.com/Final-Factory/FinalFactory.git UPDATE=0 TOOLS=0 DREF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) ROOT=$2; shift 2 ;;
@@ -39,6 +41,7 @@ while [ $# -gt 0 ]; do
     --voice-whisper) EXTRA="$EXTRA --voice-whisper $2"; VOICE=$2; shift 2 ;;
     --credential-file) CREDFILE=$2; shift 2 ;;
     --update) UPDATE=1; shift ;;
+    --tools) TOOLS=1; shift ;;
     --daemon-ref) DREF=$2; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -56,10 +59,10 @@ LINUX=0; [ "$(uname -s)" = Linux ] && LINUX=1
 export PATH
 [ "$(id -u)" = 0 ] && { echo "Run this as yourself, not with sudo." >&2; exit 2; }
 
-if [ "$UPDATE" = 1 ]; then
+if [ "$UPDATE" = 1 ] || [ "$TOOLS" = 1 ]; then
   # An update asks nothing (an ssh session has no terminal): the install that is there says everything else.
-  [ -n "$ROOT" ] || { echo "--update needs --root DIR (the root of the install to update)." >&2; exit 2; }
-  [ -f "$ROOT/root.json" ] || { echo "$ROOT holds no worker install (no root.json): install it first, without --update." >&2; exit 2; }
+  [ -n "$ROOT" ] || { echo "--update and --tools need --root DIR (the root of the install to update)." >&2; exit 2; }
+  [ -f "$ROOT/root.json" ] || { echo "$ROOT holds no worker install (no root.json): install it first, without --update or --tools." >&2; exit 2; }
 else
 echo "FF Factory worker install. Everything this machine's worker uses goes in one folder (the root)."
 [ -n "$ROOT" ] || ROOT=$(ask "Root folder (any empty or new folder with 200+ GB free, e.g. $([ "$LINUX" = 1 ] && echo "$HOME/ffw" || echo /Users/Shared/ffw))" "")
@@ -111,6 +114,11 @@ trap '[ -n "$TEMP" ] && rm -rf "$TEMP"' EXIT
 
 FLAGS=(--disable-warning=ExperimentalWarning)
 [ "$BEST" -ge 23006 ] || FLAGS=(--experimental-strip-types "${FLAGS[@]}")
+if [ "$TOOLS" = 1 ]; then
+  # The latest agent tools (final-factory-agents' plugins) for Claude Code on this machine (w1476): stops nothing.
+  "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" tools --root "$ROOT" </dev/null
+  exit $?
+fi
 if [ "$UPDATE" = 1 ]; then
   UARGS=(update --root "$ROOT")
   [ -z "$MAXSB" ] || UARGS+=(--max-sandboxes "$MAXSB")

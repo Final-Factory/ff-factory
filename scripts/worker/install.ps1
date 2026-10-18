@@ -25,6 +25,10 @@
   It asks nothing: every setting, the credential and the task's user come from the install. -MaxSandboxes,
   -MaxAgentsPerSandbox, -MaxUnity change those; -DaemonRef (default: the commit the portal runs).
 
+.PARAMETER Tools
+  Publish the latest agent tools (final-factory-agents' plugins) for Claude Code on this PC, and change nothing else
+  (w1476, docs/worker-install.md "The agent tools"): -Tools -Root D:\ffw. The portal runs it after every verified deploy.
+
 .PARAMETER Owner
   Elevated (an administrator's ssh session): the user what the install makes is given to. An update defaults to the
   user the daemon's task runs as.
@@ -74,6 +78,7 @@ param(
     [string]$SshHost = '',
     [switch]$NoSsh,
     [switch]$Update,
+    [switch]$Tools,
     [string]$DaemonRef = '',
     [string]$Owner = '',
     [string]$VoiceWhisper = '',
@@ -102,7 +107,7 @@ $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.
 # An elevated install would leave the root's files owned by Administrators, and the daemon's non-elevated git refuses
 # such a clone. An update (or -Owner) gives what it makes back to the task's user (icacls /setowner, as the portal's ssh
 # deploy does), so it may run elevated: an administrator's ssh session always is (BEAST, w613).
-if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -and -not $Update -and -not $Reinstall -and -not $Owner) {
+if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -and -not $Update -and -not $Tools -and -not $Reinstall -and -not $Owner) {
     Write-Host 'Run this from a normal PowerShell, not as administrator: the one step that needs admin rights (the firewall rules) asks for them itself.'
     exit 2
 }
@@ -110,9 +115,9 @@ if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) 
 if ($Reinstall) {
     if (-not $Root) { Write-Host '-Reinstall needs -Root (the root of the install to make again).'; exit 2 }
     if (-not (Test-Path -LiteralPath (Join-Path $Root 'root.json'))) { Write-Host "$Root holds no worker install to make again (no root.json)."; exit 2 }
-} elseif ($Update) {
+} elseif ($Update -or $Tools) {
     # Asks nothing (an ssh session has no console to answer in): the install that is there says everything else.
-    if (-not $Root) { Write-Host '-Update needs -Root (the root of the install to update).'; exit 2 }
+    if (-not $Root) { Write-Host '-Update and -Tools need -Root (the root of the install to update).'; exit 2 }
     # A root that moved onto its Dev Drive (w1070) left moved.json in the folder it was installed into, and a move stopped
     # part way its journal: worker.ts follows both.
     if (-not (Test-Path -LiteralPath (Join-Path $Root 'root.json')) -and -not (Test-Path -LiteralPath (Join-Path $Root 'moved.json')) -and -not (Test-Path -LiteralPath (Join-Path $Root 'root-move.json'))) { Write-Host "$Root holds no worker install (no root.json): install it first, without -Update."; exit 2 }
@@ -191,6 +196,18 @@ if ($Reinstall) {
     if ($Owner) { $argv += @('--owner', $Owner) }
     if ($DevDriveMaxGB) { $argv += @('--dev-drive-max-gb', $DevDriveMaxGB) }
     if ($DevDriveSkip) { $argv += @('--dev-drive-skip', $DevDriveSkip) }
+    try {
+        $null | & $node.Path @argv
+        $code = $LASTEXITCODE
+    } finally {
+        if ($temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    exit $code
+}
+if ($Tools) {
+    # The latest agent tools (final-factory-agents' plugins) for Claude Code on this PC (w1476): stops nothing.
+    $argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'tools', '--root', $Root)
+    if ($Owner) { $argv += @('--owner', $Owner) }
     try {
         $null | & $node.Path @argv
         $code = $LASTEXITCODE
