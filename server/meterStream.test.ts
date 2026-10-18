@@ -108,9 +108,10 @@ test("w1469: the meter takes a call's output from message_delta, so the agent's 
   assert.ok(m.cats.base.tok < 100_100, `base ${m.cats.base.tok}`);
 });
 
-test('w1469: without message_delta (as before the fix) the same output reads as base: what the fix moves', async (t) => {
+test('w1469: without message_delta (an older stream) the output is not explained: unitemised, still never base', async (t) => {
   withDelta = false;
   const m = await meterOfOneTurn(t);
   assert.ok(m.cats.assistant.tok < 10, `assistant ${m.cats.assistant.tok}`);
-  assert.ok(m.cats.base.tok > 101_500, `base ${m.cats.base.tok}`);
+  assert.ok(m.cats.unitemised.tok > 1_900, `unitemised ${m.cats.unitemised.tok}`);
+  assert.ok(m.cats.base.tok < 100_100, `base ${m.cats.base.tok}`);
 });

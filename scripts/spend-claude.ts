@@ -450,7 +450,7 @@ export function render(r: Result, days: number, top: number): string {
       '',
       `The base context, measured (w1469): a session's first model call less its first message, median ${q(0.5)} tokens (p10 ${q(0.1)}, p90 ${q(0.9)}, ${bs.length} sessions). ` +
         `Read again by every main-loop call: ${fmtUsd(r.extra.base.usd)} of ${fmtUsd(sum)} (${pct(r.extra.base.usd / sum)}), ${fmtTokens(r.extra.base.tok / Math.max(1, r.extra.base.calls))} a call over ${r.extra.base.calls} calls. ` +
-        "The meter's `base` above is larger: it also holds what it could not itemise (reminders, hook output, the characters' estimate).",
+        "The meter's `base` above should match it (the meter measures the base by each process's first call); what it cannot itemise is `unitemised`.",
     );
   }
   const trip: Record<string, { n: number; usd: number }> = {};
