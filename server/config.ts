@@ -465,6 +465,12 @@ export interface Config {
     compactBeforeWaitTokens?: number;
     /** The share of worker sessions (by their id) that compact by themselves, 0-100 (w1469's pilot): default 34. */
     compactPilotPercent?: number;
+    /**
+     * The share of worker sessions (by a hash of their id, apart from the compaction pilot's) that write terse prose between
+     * tool calls, 0-100 (w1480's pilot, server/terseProse.ts, docs/spend.md "Terse prose between tool calls"): default 50.
+     * It reaches a session when its process next starts.
+     */
+    terseProsePilotPercent?: number;
   };
   /**
    * The user id automatic work is attributed and billed to: scheduled standing-agent runs and, once FFBox takes
