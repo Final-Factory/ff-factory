@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { IMMUTABLE, REVALIDATE, serveStatic, webBuild, withBuildMeta } from './webStatic.ts';
-import { BUILD_META, freshnessAction } from '../shared/freshness.ts';
+import { BUILD_META } from '../shared/freshness.ts';
 
 const INDEX_V1 = '<!doctype html><html><head><script type="module" src="/assets/index-aaaa.js"></script></head><body></body></html>';
 const INDEX_V2 = '<!doctype html><html><head><script type="module" src="/assets/index-bbbb.js"></script></head><body></body></html>';
@@ -104,18 +104,4 @@ test('no web UI built: no build id', async () => {
 
 test('the build meta goes first in <head>', () => {
   assert.equal(withBuildMeta('<html><head><title>x</title></head></html>', 'abc'), `<html><head>\n    <meta name="${BUILD_META}" content="abc" /><title>x</title></head></html>`);
-});
-
-test('freshness: reload on a new build, a bar when that would lose something, never a reload loop', () => {
-  const base = { loaded: 'aaa', served: 'bbb', triedFor: null, busy: false };
-  assert.equal(freshnessAction(base), 'reload');
-  assert.equal(freshnessAction({ ...base, busy: true }), 'banner');
-  assert.equal(freshnessAction({ ...base, served: 'aaa' }), 'none');
-  // Reloaded once for bbb and still on aaa (a proxy's stale copy?): offer it, do not loop.
-  assert.equal(freshnessAction({ ...base, triedFor: 'bbb' }), 'banner');
-  // A later build is worth one more try.
-  assert.equal(freshnessAction({ ...base, triedFor: 'bbb', served: 'ccc' }), 'reload');
-  // An older server (no build), or a dev server's page (no meta): nothing to compare.
-  assert.equal(freshnessAction({ ...base, served: undefined }), 'none');
-  assert.equal(freshnessAction({ ...base, loaded: undefined }), 'none');
 });

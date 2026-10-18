@@ -143,7 +143,9 @@ and ends the hover. On a touch project the same button is shown by a tap on the 
 
 A test that intercepts the page's requests (`page.route`) sets `test.use({ serviceWorkers: 'block' })`: the app registers a
 service worker, and WebKit does not route the requests of a page one controls (the route is never hit and the real server
-answers; w893, `e2e/composerClears.spec.ts`).
+answers; w893, `e2e/composerClears.spec.ts`). A document answered through `route.fetch` (to change the page's HTML) gets its
+`/ws` refused by the server (measured on Chromium, w1489): pass the first load through with `route.continue()` and rewrite
+only after the change you are playing (`deployable` in `e2e/freshness.spec.ts`).
 
 Visual snapshots (`toHaveScreenshot`) are compared only on Linux, where CI renders them; the
 baselines are the `*-linux.png` files in `e2e/__screenshots__/`. When you change the UI on purpose,

@@ -4,6 +4,8 @@ import { waitAge, type WaitingAsk, type WaitingItem } from '../../../shared/wait
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
+import { holdReload } from '../freshness';
+import { useKeptState } from '../keep';
 import { attempt, focusWait, sessionsByIds, toast, useStore } from '../store';
 import { fmtClock, fmtRelative, navigate } from '../util';
 import { Markdown } from './Markdown';
@@ -181,10 +183,15 @@ function NeedsYouBlock({ app, w, r, mine }: { app: AppState; w: WorkItem; r: Wor
 function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: number }) {
   const { w, ask, mine, since } = item;
   const [busy, setBusy] = useState(false);
-  const [declining, setDeclining] = useState(false);
-  const [reason, setReason] = useState('');
-  const [answer, setAnswer] = useState('');
+  // A decline form and an answer being written outlast a reload for a new version (web/src/keep.ts).
+  const [declining, setDeclining] = useKeptState(`wait.declining.${w.id}`, false);
+  const [reason, setReason] = useKeptState(`wait.reason.${w.id}`, '');
+  const [answer, setAnswer] = useKeptState(`wait.answer.${w.id}`, '');
   const [sent, setSent] = useState(false);
+  useEffect(() => {
+    holdReload(`wait:${w.id}`, busy);
+    return () => holdReload(`wait:${w.id}`, false);
+  }, [w.id, busy]);
   const workers = sessionsByIds(app.sessions, w.sessionIds);
   // A worker of it streams its Live view (w1430): the wait is often "drag the knobs", so the card opens it in one click.
   const live = app.config.live?.enabled ? app.live?.find((v) => v.state !== 'stopped' && w.sessionIds.includes(v.sessionId)) : undefined;
@@ -257,6 +264,7 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
         {mine && ask === 'approve' && declining && (
           <>
             <input
+              data-kept
               className="input wait-reason"
               autoFocus
               placeholder="Why (kept on the request)"
@@ -282,6 +290,7 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
             ) : (
               <>
                 <textarea
+                  data-kept
                   className="input wait-answer-text"
                   rows={2}
                   placeholder="Your answer"
