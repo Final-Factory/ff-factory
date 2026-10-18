@@ -9,7 +9,7 @@ import http from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
-import { SessionManager, type SessionHandle } from './sessions.ts';
+import { SessionManager, type SessionHandle, type TurnEndMeta } from './sessions.ts';
 import { MachineManager, RESUME_DELAY_MS } from './machines.ts';
 import { LineTail, hostAlive, hostFiles, pidAlive } from '../machine/agentHost.ts';
 import type { Config } from './config.ts';
@@ -206,4 +206,26 @@ test('w605: LineTail reads whole lines only, any length, from an offset kept acr
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('w1469: the portal compacts an idle worker through its daemon and host; the compaction comes back marked as one, the last report kept', { timeout: 180_000 }, async (t) => {
+  const { sessions, mm, daemon, cleanup, logs } = await setup();
+  t.after(cleanup);
+  const ends: { text: string; meta?: TurnEndMeta }[] = [];
+  sessions.events.on('turnEnd', (_s: SessionHandle, text: string, meta?: TurnEndMeta) => ends.push({ text, meta }));
+  daemon();
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined, 60_000, logs);
+  assert.ok(mm.canCompact('mx'), 'its hello offers compact');
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  sessions.send(s.info.id, 'big #ctx 210000');
+  await until('the turn', () => ends.length === 1 && s.info.status === 'idle', 60_000, logs);
+  assert.equal(s.info.contextTokens, 210_000);
+  assert.ok(s.compact, 'a worker on a daemon that offers it can be compacted');
+  sessions.compact(s.info.id, 'keep the PR numbers', undefined, { trigger: 'tokens', reason: 'the context passed 200,000 tokens' });
+  await until('compacted', () => !!s.info.lastCompaction && s.info.status === 'idle', 60_000, logs);
+  assert.equal(s.info.lastCompaction?.trigger, 'tokens');
+  assert.equal(s.info.contextTokens, 18_000);
+  assert.deepEqual(ends.at(-1), { text: 'Echo: big #ctx 210000', meta: { compaction: 'tokens' } });
+  assert.equal(s.info.lastResult, 'Echo: big #ctx 210000');
+  assert.throws(() => sessions.compact(s.info.id, 'x'), /orchestrators/, 'a worker is never compacted on a message');
 });

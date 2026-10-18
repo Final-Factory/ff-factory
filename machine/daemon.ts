@@ -51,7 +51,7 @@ import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
-import { machinePlatformOf, type AttachmentRef, type HostHealth, type HostStats, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { machinePlatformOf, type AttachmentRef, type CompactionTrigger, type HostHealth, type HostStats, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /**
@@ -449,8 +449,8 @@ export class Daemon {
     }
     if (cfg.maxSessions !== undefined) log(`daemon.json maxSessions (${cfg.maxSessions}) is obsolete (w536): workers run in sandboxes only, and the portal sends this machine's agent cap`);
     for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'] as SignalName[]) {
-      this.events.on(name, (s: SessionHandle, arg?: unknown) => {
-        this.out({ type: 'signal', name, sessionId: s.info.id, arg: name === 'permission' ? undefined : arg });
+      this.events.on(name, (s: SessionHandle, arg?: unknown, meta?: { compaction?: CompactionTrigger }) => {
+        this.out({ type: 'signal', name, sessionId: s.info.id, arg: name === 'permission' ? undefined : arg, ...(meta?.compaction ? { meta: { compaction: meta.compaction } } : {}) });
         this.awake();
       });
     }
@@ -1038,6 +1038,8 @@ export class Daemon {
       saveWork: true,
       // It streams a sandbox's running game for a live view (w1398, docs/live-view.md).
       liveView: true,
+      // It compacts an idle agent on request and says a compaction's turn end (w1469, the workers' automatic compaction).
+      compact: true,
       // A worker root install (w513): its folders, for a record the portal never deployed.
       ...(this.cfg.root
         ? { layout: { root: this.cfg.root, appDir: appDirOfConfig(this.cfg), repoPath: this.cfg.repoPath, tempDir: this.cfg.tempDir, sandboxes: this.cfg.sandboxes ?? null } }
@@ -1867,6 +1869,17 @@ export class Daemon {
       case 'interrupt':
         void this.entries.get(msg.sessionId)?.s.interrupt();
         return;
+      case 'compact': {
+        // w1469: only a live agent between turns; anything else is left alone and the portal tries after a later turn.
+        const s = this.entries.get(msg.sessionId)?.s;
+        if (!s?.live || !s.compact) return;
+        try {
+          s.compact(msg.focus, undefined, msg.auto);
+        } catch (e) {
+          log(`compact ${msg.sessionId}: not now: ${(e as Error).message}`);
+        }
+        return;
+      }
       case 'stop':
         this.entries.get(msg.sessionId)?.s.stop();
         this.awake();

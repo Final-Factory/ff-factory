@@ -9,7 +9,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { WebSocketServer, type WebSocket } from 'ws';
 import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
-import { isMidTurn, type SessionHandle, type SessionManager } from './sessions.ts';
+import { COMPACTING, isMidTurn, type AutoCompaction, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
@@ -281,6 +281,23 @@ export class RemoteSession implements SessionHandle {
       this.link.touch(this);
     }
     return uuid;
+  }
+
+  /**
+   * Compact its conversation (w1469): only FF Factory's automatic compaction, and only on a daemon that offered it
+   * (undefined otherwise, so server/autoCompact.ts leaves it alone).
+   */
+  get compact(): ((instructions?: string, by?: Requester, auto?: AutoCompaction) => string) | undefined {
+    if (!this.info.machineId || !this.link.canCompact(this.info.machineId)) return undefined;
+    return (instructions = '', _by?: Requester, auto?: AutoCompaction) => {
+      if (!auto) throw new Error('a worker is compacted only by FF Factory itself');
+      return this.link.compactRemote(this, instructions, auto);
+    };
+  }
+
+  /** Its /compact is running (its daemon's record says so). */
+  get compactingNow() {
+    return this.info.statusDetail === COMPACTING;
   }
 
   async interrupt() {
@@ -693,7 +710,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; compact?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1790,7 +1807,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.compact ? { compact: true } : {}) });
         if (!msg.guard) delete m.guard;
         if (msg.voice && typeof msg.voice === 'object') this.voices.set(id, msg.voice);
         else this.voices.delete(id);
@@ -1878,7 +1895,8 @@ export class MachineManager {
         return;
       case 'signal': {
         const s = this.handle(msg.sessionId);
-        if (s && s.info.machineId === id) this.sessions.events.emit(msg.name, s, msg.arg);
+        // meta (w1469): a compaction's turn end says so, as an AgentSession's here does; an older daemon sends none.
+        if (s && s.info.machineId === id) this.sessions.events.emit(msg.name, s, msg.arg, ...(msg.meta ? [msg.meta] : []));
         return;
       }
       case 'failed': {
@@ -2311,6 +2329,18 @@ export class MachineManager {
   }
 
   private readonly saveCalls = new Map<string, { resolve: (r: SaveResult) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+
+  /** Whether a machine's daemon is online and compacts an idle agent's conversation (w1469: its hello offered `compact`). */
+  canCompact(machineId: string): boolean {
+    return this.isOnline(machineId) && !!this.hellos.get(machineId)?.compact;
+  }
+
+  /** Compact a live agent's conversation on its machine (w1469, the workers' automatic compaction): its daemon runs the /compact. */
+  compactRemote(s: RemoteSession, focus: string, auto: AutoCompaction): string {
+    if (!this.canCompact(s.info.machineId!)) throw new Error(`${s.info.machineId}'s daemon cannot compact a conversation yet`);
+    this.post(s.info.machineId!, { type: 'compact', sessionId: s.info.id, focus, auto }, false);
+    return 'Compacting the conversation on its machine.';
+  }
 
   /** Whether a machine's daemon is online and saves a sandbox's uncommitted work (w656: its hello offered `saveWork`). */
   canSaveWork(machineId: string): boolean {

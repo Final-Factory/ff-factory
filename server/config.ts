@@ -447,6 +447,13 @@ export interface Config {
   worker: {
     permissionMode: PermissionMode;
     effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+    /**
+     * Workers' automatic compaction (w1469, server/autoCompact.ts, docs/spend.md "Workers compact"): a worker compacts
+     * between turns once its context reaches this many tokens. Default 200,000; 0 turns it off. Settable live.
+     */
+    compactAtTokens?: number;
+    /** The share of worker sessions (by their id) that compact by themselves, 0-100 (w1469's pilot): default 34. */
+    compactPilotPercent?: number;
   };
   /**
    * The user id automatic work is attributed and billed to: scheduled standing-agent runs and, once FFBox takes

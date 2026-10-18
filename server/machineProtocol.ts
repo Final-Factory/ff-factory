@@ -7,7 +7,7 @@ import type { StaleContext } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import type { GhLogin } from '../shared/ghLogin.ts';
-import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
+import type { AttachmentRef, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
  * Bumped when what the portal and a daemon send each other changes (machineProtocol.test.ts fails until someone
@@ -130,6 +130,12 @@ export type ToDaemon =
   | { type: 'fs'; id: string; op: 'list'; dirs?: string[] }
   | { type: 'interrupt' | 'stop' | 'remove'; sessionId: string }
   /**
+   * Compact a live, idle agent's conversation (w1469, the workers' automatic compaction, server/autoCompact.ts): Claude
+   * Code's /compact with this focus. Sent only to a daemon whose hello offered `compact`; a session that is not live or is
+   * mid-turn is left alone (the portal tries again after a later turn).
+   */
+  | { type: 'compact'; sessionId: string; focus: string; auto: { trigger: Exclude<CompactionTrigger, 'person' | 'claude'>; reason: string } }
+  /**
    * Switch the clone's branch (server/switchBranch.ts); answered by switch_result. callerSessionId: the agent that called
    * switch_branch, mid-turn by definition, so not counted as busy (w422; older daemons ignore it and refuse their caller).
    * githubToken (w868, no bump): the GitHub token of the person the work is for, from the vault, for the switch's push and
@@ -219,6 +225,8 @@ export type FromDaemon =
       saveWork?: boolean;
       /** It streams a sandbox's running game for a live view (w1398, `live`). An older portal ignores it. */
       liveView?: boolean;
+      /** It compacts an idle agent's conversation on request (w1469, `compact`) and says a compaction's turn end in `signal` `meta`. An older portal ignores it. */
+      compact?: boolean;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */
       layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null };
     }
@@ -231,7 +239,7 @@ export type FromDaemon =
   | { type: 'event'; sessionId: string; event: TranscriptEvent }
   | { type: 'amend'; sessionId: string; seq: number; patch: Partial<TranscriptEvent> }
   | { type: 'delta'; sessionId: string; text: string }
-  | { type: 'signal'; name: SignalName; sessionId: string; arg?: unknown }
+  | { type: 'signal'; name: SignalName; sessionId: string; arg?: unknown; meta?: { compaction?: CompactionTrigger } }
   /** A send the daemon could not carry out (limit, bad spec). `host_start` (w691): no agent host could be started for it. */
   | { type: 'failed'; sessionId: string; error: string; reason?: 'host_start' }
   /** An MCP tool call to be answered by the portal. */

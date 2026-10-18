@@ -23,7 +23,7 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { AgentSession, setQueryForTesting, type SessionHandle, type SessionSink } from '../server/sessions.ts';
+import { AgentSession, setQueryForTesting, type AutoCompaction, type SessionHandle, type SessionSink, type TurnEndMeta } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { SECRET_ENV, addSecretValues, redactValue } from '../server/secrets.ts';
@@ -113,6 +113,8 @@ export function hostFiles(dir: string) {
 export type HostCommand = { n: number } & (
   | { op: 'send'; info: Pick<SessionInfo, 'title' | 'model' | 'permissionMode' | 'sdkSessionId'>; text: string; from: 'human' | 'orchestrator' | 'system'; uuid: string; images?: ImageInput[]; requestedBy?: Requester; attachments?: DeliveredAttachment[] }
   | { op: 'interrupt' }
+  /** w1469: FF Factory's automatic compaction of an idle agent (AgentSession.compact). */
+  | { op: 'compact'; focus: string; auto: AutoCompaction }
   | { op: 'stop'; onPurpose: boolean }
   | { op: 'mode'; mode: PermissionMode }
   | { op: 'decide'; requestId: string; allow: boolean; message?: string }
@@ -130,7 +132,7 @@ export type HostMessage =
   | { op: 'amend'; seq: number; patch: Partial<TranscriptEvent> }
   | { op: 'image'; id: string; mediaType: string; data: string }
   | { op: 'delta'; text: string }
-  | { op: 'signal'; name: SignalName; arg?: unknown }
+  | { op: 'signal'; name: SignalName; arg?: unknown; meta?: TurnEndMeta }
   | { op: 'rpc'; id: string; method: CatalogTool; args: Record<string, unknown> }
   | { op: 'failed'; error: string }
   /** The host is closing: its agent process ended. `consumed`: the last command it carried out. */
@@ -370,6 +372,14 @@ export class HostedSession implements SessionHandle {
     if (this.running) this.command({ op: 'interrupt' });
   }
 
+  /** Compact the agent's conversation (w1469): FF Factory's automatic compaction only, and only while its host runs. */
+  compact(instructions = '', _by?: Requester, auto?: AutoCompaction): string {
+    if (!auto) throw new Error('a hosted agent is compacted only by FF Factory itself');
+    if (!this.running) throw new Error('its host is not running');
+    this.command({ op: 'compact', focus: instructions, auto });
+    return 'Compacting the conversation.';
+  }
+
   async setMode(mode: PermissionMode) {
     this.info.permissionMode = mode;
     if (this.running) this.command({ op: 'mode', mode });
@@ -557,7 +567,7 @@ export class HostedSession implements SessionHandle {
         this.deps.out({ type: 'delta', sessionId: id, text: m.text });
         return;
       case 'signal':
-        this.deps.events.emit(m.name, this, m.arg);
+        this.deps.events.emit(m.name, this, m.arg, ...(m.meta ? [m.meta] : []));
         return;
       case 'failed':
         this.deps.out({ type: 'failed', sessionId: id, error: m.error });
@@ -816,8 +826,8 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
     }, CLOSE_GRACE_MS);
   };
   for (const name of SIGNALS) {
-    events.on(name, (_h: SessionHandle, arg?: unknown) => {
-      out({ op: 'signal', name, ...(name === 'permission' || arg === undefined ? {} : { arg }) });
+    events.on(name, (_h: SessionHandle, arg?: unknown, meta?: TurnEndMeta) => {
+      out({ op: 'signal', name, ...(name === 'permission' || arg === undefined ? {} : { arg }), ...(meta?.compaction ? { meta: { compaction: meta.compaction } } : {}) });
       if (name === 'ended') {
         state();
         close();
@@ -846,6 +856,14 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
         return;
       case 'interrupt':
         void session.interrupt();
+        return;
+      case 'compact':
+        try {
+          session.compact(c.focus, undefined, c.auto);
+        } catch (e) {
+          // mid-turn, compacting already, nothing to compact: the portal tries again after a later turn
+          console.log(new Date().toISOString(), `compact: not now: ${(e as Error).message}`);
+        }
         return;
       case 'stop':
         session.stop(c.onPurpose);
