@@ -5,7 +5,8 @@ lothsahn, 2026-10-18: "Parallel to that, can we analyze the base instructions to
 **TL;DR:** a fresh worker's first model call on beast is now **53.5k tokens** (measured), of which the brief is about 4.0k, so
 the base is about **49.5k** (it was 56.2k before w1469's trims). Five parts make up 89% of it: CLAUDE.md about 13.0k, the
 tool definitions 11.6k (PowerShell alone 4.3k), FF Factory's worker prompt 9.8k, the skill listing 7.3k and the agent listing
-2.6k. Real duplicates are few (the no-decision PRs below remove about 0.3k). Most of the size is rules every call carries for
+2.6k. Real duplicates within a part are few (the no-decision PRs below remove about 0.2k, and the ci-release guard they
+restore adds about 0.1k back). Most of the size is rules every call carries for
 rare cases, plus Claude Code features workers never use. The decision list at the end would take the base to about 32k
 (estimated, arithmetic below).
 
