@@ -322,6 +322,14 @@ const REAP_EVERY_MS = 5 * 60_000;
  */
 const IDLE_REAP_MS = 60 * 60_000;
 
+/**
+ * Claude Code tools a worker never needs, left out of its tool definitions, which every model call reads again (w1469,
+ * lothsahn: "trim the base"). Measured over beast's 185 worker sessions of 2026-10-11..18: Workflow 0 calls (it runs only on
+ * a person's own opt-in), ScheduleWakeup 2 (/loop pacing; a worker comes back with wake_me), AskUserQuestion 1 (nobody
+ * watches a worker's terminal: it reports instead). PowerShell (172), ListAgents (23) and ReportFindings (code review) stay.
+ */
+export const WORKER_UNUSED_TOOLS = ['Workflow', 'ScheduleWakeup', 'AskUserQuestion'] as const;
+
 /** The gates a worker may give up its sandbox for (w890): not a time, a machine, a usage limit or a lock; CI has its own rule (w846). */
 const WAIT_RELEASE_KINDS: readonly string[] = ['deploy', 'request', 'pr'];
 
@@ -1813,7 +1821,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       strictMcp: false,
       // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
       unityMcp: true,
-      disallowedTools: ['mcp__ffsb'],
+      disallowedTools: ['mcp__ffsb', ...WORKER_UNUSED_TOOLS],
       mcp: {
         server: 'machine',
         tools: this.workerTools({
