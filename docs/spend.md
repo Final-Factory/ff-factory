@@ -273,7 +273,7 @@ not vendor it: its rule file is about 4.7k characters, read again on every call,
 `server/terseProse.ts` appends a short rule (`TERSE_PROSE_RULE`, under 600 characters) to the system prompt of a share of worker
 sessions: nothing between routine tool calls, one short line when something must be said, ids and errors exact; reports, PR
 descriptions, commits, DONE and still-open lines and anything a person reads stay plain English. Its heading, `## Between tool calls
-(pilot, w1480)`, marks a pilot session in a transcript (the `prompt_snapshot` record). The share is `worker.terseProsePilotPercent`
+(pilot)`, marks a pilot session in a transcript (the `prompt_snapshot` record). The share is `worker.terseProsePilotPercent`
 (default 50, set_app_config; 0 off), by a hash of the session id drawn apart from the compaction pilot's, so the two can be read apart.
 It reaches a session when its process next starts. To check it: pilot against control on sessions started after the deploy, tokens
 per call, history growth per call, output and thinking tokens, and whether the requests finished and how their reports read:

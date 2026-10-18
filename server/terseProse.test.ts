@@ -37,7 +37,7 @@ test('withTerseProse: the rule follows the brief in a pilot session only, and le
   const outside = ids.find((id) => !inTerseProsePilot(id, {}))!;
   assert.equal(withTerseProse('BRIEF', outside, {}), 'BRIEF');
   assert.equal(withTerseProse('BRIEF', inside, {}), `BRIEF\n\n${TERSE_PROSE_RULE}`);
-  assert.match(TERSE_PROSE_RULE, /^## Between tool calls \(pilot, w1480\)\n/, 'its heading marks a pilot session in a transcript');
+  assert.match(TERSE_PROSE_RULE, /^## Between tool calls \(pilot\)\n/, 'its heading marks a pilot session in a transcript');
   assert.match(TERSE_PROSE_RULE, /only text between tool calls/);
   for (const kept of ['end-of-turn report', 'PR descriptions', 'commit messages', 'DONE and still-open lines', 'anything else a person reads']) assert.ok(TERSE_PROSE_RULE.includes(kept), kept);
   assert.ok(TERSE_PROSE_RULE.length < 600, `the rule is read on every call of a pilot session: ${TERSE_PROSE_RULE.length} characters`);
