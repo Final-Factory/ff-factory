@@ -276,7 +276,10 @@ descriptions, commits, DONE and still-open lines and anything a person reads sta
 (pilot, w1480)`, marks a pilot session in a transcript (the `prompt_snapshot` record). The share is `worker.terseProsePilotPercent`
 (default 50, set_app_config; 0 off), by a hash of the session id drawn apart from the compaction pilot's, so the two can be read apart.
 It reaches a session when its process next starts. To check it: pilot against control on sessions started after the deploy, tokens
-per call, history growth per call, output and thinking tokens, and whether the requests finished and how their reports read.
+per call, history growth per call, output and thinking tokens, and whether the requests finished and how their reports read:
+`python scripts/history-compare.py --since <deploy time> --reports 10` on each worker machine. Before the pilot (beast, 62 worker
+sessions of 2026-10-15..18, measured): 322k context a call, growth 1,510 tokens a call, output 587 a call (thinking 209), text between
+tool calls 30 characters a call (22% of calls write any), reports 1,877 characters.
 
 ## Workers compact (w1469)
 
