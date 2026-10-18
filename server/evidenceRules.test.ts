@@ -263,3 +263,22 @@ test("w896: clean-up deletes only inside the worker install folder, in every wor
   // w1379: the ledger, not a list in the brief, says which stopped workers' folders stay.
   for (const text of [dispatcher, personal]) assert.match(text, /Never write a list of live or "will resume" workers into a clean-up brief.*`ff-leftovers folders` and delete only its DELETE rows/);
 });
+
+test("w1478: a sandbox worker's brief names its Unity instance and carries the fewer-calls rules", async (t) => {
+  const { FEWER_CALLS, SHELL_STEPS } = await import('./agents.ts');
+  const { unityInstanceName } = await import('../shared/unityInstance.ts');
+  const { agents } = world(t);
+  const brief = (agents as unknown as { machineSandboxBrief: (m: unknown, sb: unknown) => string }).machineSandboxBrief(
+    { id: 'm5', repoPath: '/Users/dev/FinalFactory', platform: 'darwin', sandboxRoot: '/Users/dev/ffsb' },
+    { id: 'alpha', path: '/Users/dev/ffsb/alpha', branch: 'fix-x', purpose: 'a fix', unity: { state: 'stopped' } },
+  );
+  assert.ok(brief.includes(`Your editor's MCP instance is \`${unityInstanceName('/Users/dev/ffsb/alpha')}\``));
+  assert.ok(brief.includes(FEWER_CALLS) && brief.indexOf(SHELL_STEPS) < brief.indexOf(FEWER_CALLS) && brief.indexOf(FEWER_CALLS) < brief.indexOf('## Reporting'));
+  assert.match(FEWER_CALLS, /^## Fewer model calls\n/);
+  assert.match(FEWER_CALLS, /parallel tool calls/);
+  assert.match(FEWER_CALLS, /five or more reads .* `Explore` or `ff-agents:scout` subagent/);
+  assert.match(FEWER_CALLS, /until <done>; do sleep 20; done/);
+  assert.match(FEWER_CALLS, /`get_test_job` with `wait_timeout`/);
+  // The section must stay short: it is re-read on every call of every worker (w1469's base trim).
+  assert.ok(FEWER_CALLS.split(/\s+/).length < 230, `FEWER_CALLS is ${FEWER_CALLS.split(/\s+/).length} words`);
+});

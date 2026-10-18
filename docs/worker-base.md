@@ -190,7 +190,11 @@ and paths takes more tokens. After a change ships, measure it the same way: the 
 
 1. **D2, PowerShell off for workers** (−4.4k). `disallowedTools: [..., 'PowerShell']` in `machineSandboxSpec`, or
    `CLAUDE_CODE_USE_POWERSHELL_TOOL=0`. Risk: the 226 PowerShell calls a week become `powershell.exe -Command` through Bash; on
-   Windows the environment line says PowerShell is the primary shell, which goes with it.
+   Windows the environment line says PowerShell is the primary shell, which goes with it. **Only Windows workers carry it.**
+   Claude Code loads the tool off Windows only when `CLAUDE_CODE_USE_POWERSHELL_TOOL` is set true. Its gate, read from the SDK's
+   bundled CLI (0.3.284): `function qS(){let e=a.CLAUDE_CODE_USE_POWERSHELL_TOOL;if(O()!=="windows")return e===!0;...}`.
+   On Windows with the variable unset, a server-side flag decides (`tengu_cobalt_ridge`; on for beast's workers). FF Factory sets the variable nowhere (`git grep USE_POWERSHELL`: none). So a Mac
+   or Linux worker's base is already without these 4.3k, which fits m3's 54.8k median first call (w1474) against beast's 57–59k.
 2. **D1, a skills allowlist for workers** (−3.5k). The SDK's `skills` option ("only the listed skills ... unlisted skills are hidden
    from the model's listing and rejected by the Skill tool", `sdk.d.ts`): `ff-agents:*` (and ff-discord's where installed). It also
    builds lothsahn's "no ff-speckit for workers". Risk: a worker asked to `/code-review` cannot load the bundled skill.
