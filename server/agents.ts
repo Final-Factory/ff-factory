@@ -34,6 +34,7 @@ import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, parseSandboxRef, poolSettin
 import { searchTranscripts } from './search.ts';
 import { CATALOG } from './launch.ts';
 import { AutoCompactor, LONG_WAIT_MS } from './autoCompact.ts';
+import { withTerseProse } from './terseProse.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, holdReason, pinnedWork, placementHint, roomNow, voiceVram, type Computer, type NeedKind, type RoomNow } from './placement.ts';
@@ -1831,7 +1832,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       model: info.model,
       effort: info.effort ?? this.cfg.worker.effort,
       settingSources: ['user', 'project', 'local'],
-      append: this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()),
+      // w1480: a share of workers also get the terse-prose rule (server/terseProse.ts).
+      append: withTerseProse(this.machineSandboxBrief(m, sb, run.account, run.github, clone, this.workflowMachines()), info.id, this.cfg),
       strictMcp: false,
       // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
       unityMcp: true,

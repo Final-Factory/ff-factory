@@ -263,6 +263,45 @@ compaction at 200k **-44%** of the workers' spend (-37% if what is read again af
 the one before waits alone -22%; both -46%. To check on the pilot: its sessions' cost per call against the rest's, and what they
 re-read after a compaction (`spend_report`, the `summary` and `reread` categories).
 
+## What fills a worker's history (w1480)
+
+lothsahn, 2026-10-18: "How can we make it so the converaation history is more terse? Should we look at using caveman from Julius
+Brusse?", then "File it: measure the history, then pilot caveman and quieter tool output". Measured on beast's own transcripts
+(`~/.claude/projects/*/*.jsonl`, main loop, 52 sessions and 13,735 calls, 2026-10-15..18): a call read **363k** tokens on average,
+the history grew **1,413** tokens a call (median 906), and output was **35% thinking** (all three measured: usage). What later calls
+re-read, by content (each piece's tokens times the calls after it until a compaction; the totals are exact, the split by characters
+an estimate, tool results at 2.18 characters a token fitted to the measured growth):
+
+| What | Share of re-reads | Inside it |
+|---|---|---|
+| Tool results | **46%** | shell file reads (`sed -n`, `cat`) 14%; searches 7%; other shell 6%; MCP 5% (`get_test_job` 1.4%, `read_work` 1.3%); Read 5% (images 2.6%); git 2.5%; gh and CI polling 1.1%; builds and tests under 1% |
+| The agent's own output | **33%** | thinking 13%; tool-call input 18% (Bash commands and scripts 10.5%, Write bodies 4.4%, Unity `execute_code` 1.3%, Edit 0.8%); **text between tool calls 0.8%; end-of-turn reports 0.5%** |
+| The first call's content (CLAUDE.md, skill and agent lists) | 10% | |
+| Reminders Claude Code adds later | 8% | the `<total_tokens>` line on every call, LSP `diagnostics`, CLAUDE.md files of other folders, `edited_text_file` |
+| Messages to the agent | 2% | |
+
+Thinking stays in the context: in 688 pairs of calls where only a tool result under 600 characters came between, the context grew
+by at least 90% of the first call's whole output, thinking included, every time (measured). Of the output tokens, thinking is 35%,
+tool-call input about 59%, text between tool calls 2.8% and reports 3.5% (thinking measured, the rest split by characters).
+
+So prose is not where the history is. Caveman-style terse prose can only cut its 0.8%; the history is tool output and tool input.
+
+**Caveman** (github.com/JuliusBrussee/caveman, read at bad48a0 of 2026-10-17, Apache-2.0 since 3.0.0): a skill plus a plugin whose
+SessionStart and UserPromptSubmit hooks inject its rules again. Its own `docs/HONEST-NUMBERS.md`: output -3% at the median against a
+plain "Answer concisely." control (n=10, claude-opus-5-5); "Skill itself does not compress input, context, files, or model thinking
+tokens"; outside A/Bs -8.5% of output (JetBrains, 86 tasks) and -8% on top of a CLAUDE.md that already asks for terse replies. We do
+not vendor it: its rule file is about 4.7k characters, read again on every call, for a cut a few lines of our own make.
+
+### Terse prose between tool calls, a pilot
+
+`server/terseProse.ts` appends a short rule (`TERSE_PROSE_RULE`, under 600 characters) to the system prompt of a share of worker
+sessions: nothing between routine tool calls, one short line when something must be said, ids and errors exact; reports, PR
+descriptions, commits, DONE and still-open lines and anything a person reads stay plain English. Its heading, `## Between tool calls
+(pilot, w1480)`, marks a pilot session in a transcript (the `prompt_snapshot` record). The share is `worker.terseProsePilotPercent`
+(default 50, set_app_config; 0 off), by a hash of the session id drawn apart from the compaction pilot's, so the two can be read apart.
+It reaches a session when its process next starts. To check it: pilot against control on sessions started after the deploy, tokens
+per call, history growth per call, output and thinking tokens, and whether the requests finished and how their reports read.
+
 ## Transcripts: how long they are kept
 
 **Seven days after the request closes**, a request that is open keeps them as long as it is open, a reopened request keeps them again.
