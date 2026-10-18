@@ -35,6 +35,8 @@ export interface LaunchSpec {
   /** Restrict the built-in tools (undefined: all). */
   tools?: string[];
   disallowedTools?: string[];
+  /** Claude Code settings on top of the machine's own (the SDK's `settings`, the CLI's --settings): w1480's plugins a worker starts without. An older daemon ignores it. */
+  settings?: Record<string, unknown>;
   /** Only the MCP servers named here (plus `mcp`); false loads the user's own too. */
   strictMcp: boolean;
   /**
@@ -284,6 +286,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     systemPrompt: { type: 'preset', preset: 'claude_code', append: spec.append },
     ...(spec.tools ? { tools: spec.tools } : {}),
     ...(spec.disallowedTools ? { disallowedTools: spec.disallowedTools } : {}),
+    ...(spec.settings ? { settings: spec.settings } : {}),
     strictMcpConfig: spec.strictMcp,
     mcpServers,
     ...(spec.maxBudgetUsd !== undefined ? { maxBudgetUsd: spec.maxBudgetUsd } : {}),
