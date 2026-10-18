@@ -147,10 +147,17 @@ export interface Extra {
   sessionsOver: Record<string, number>;
   /** Dollars by UTC day and model. */
   byDay: Record<string, Record<string, number>>;
+  /**
+   * The base context, measured (w1469): each session's first model call less its first message (the system prompt, tool
+   * definitions, CLAUDE.md, skill and agent lists), and what reading it again on every main-loop call in the window cost.
+   */
+  base: { firsts: number[]; calls: number; tok: number; usd: number };
 }
 export const SIM_AT = [150_000, 200_000, 300_000];
 /** After a compaction the context is the base (the median first call, measured) plus a summary, and some files are read again. */
 const SIM_AFTER = 54_000 + 16_000 + 15_000;
+/** Characters per token of a worker's first message (a brief: prose, ids and paths), MEASURED (w1469): a first call's written tokens against the characters it carried, 58 sessions on beast, median 2.68. */
+const BRIEF_CHARS_PER_TOKEN = 2.7;
 const ctxBucket = (c: number) => (c <= 100_000 ? '0-100k' : c <= 200_000 ? '100-200k' : c <= 400_000 ? '200-400k' : c <= 700_000 ? '400-700k' : '700k+');
 const gapBucket = (ms: number) => (ms < 60_000 ? 'under 1 min' : ms < 300_000 ? '1-5 min' : ms < 3_600_000 ? '5-60 min' : 'over 1 hour');
 
@@ -165,7 +172,7 @@ export function analyze(root: string, sinceMs: number): Result {
   const total = { t: zeroTok() };
   const models: Record<string, Tok> = {};
   const check: Result['check'] = [];
-  const extra: Extra = { ctx: {}, sim: Object.fromEntries(SIM_AT.map((t) => [t, { real: 0, sim: 0, compactions: 0 }])), sonnet: { real: 0, asSonnet: 0, calls: 0 }, thinking: { think: 0, out: 0 }, cold: { n: 0, usd: 0, extra: 0 }, gaps: {}, sessionsOver: {}, byDay: {} };
+  const extra: Extra = { ctx: {}, sim: Object.fromEntries(SIM_AT.map((t) => [t, { real: 0, sim: 0, compactions: 0 }])), sonnet: { real: 0, asSonnet: 0, calls: 0 }, thinking: { think: 0, out: 0 }, cold: { n: 0, usd: 0, extra: 0 }, gaps: {}, sessionsOver: {}, byDay: {}, base: { firsts: [], calls: 0, tok: 0, usd: 0 } };
   let sessions = 0;
   let calls = 0;
   for (const [sid, paths] of files) {
@@ -210,6 +217,8 @@ export function analyze(root: string, sinceMs: number): Result {
     let any = false;
     let prevCtx = 0;
     let lastCtx = 0;
+    let firstChars = 0;
+    let baseTok = 0;
     const simCtx: Record<number, number> = {};
     // the final usage of each message id (blocks of one call repeat it; the output count grows)
     const usages = new Map<string, { model: string; u: Usage; at: string; side: boolean }>();
@@ -232,7 +241,10 @@ export function analyze(root: string, sinceMs: number): Result {
       const inWindow = Date.parse(at) >= sinceMs;
       if (d.type === 'cost-state' && d.totalCostUSD !== undefined) cli = Math.max(cli, d.totalCostUSD); // the CLI's running total only grows
       if (d.type === 'user' && d.message && typeof d.message.content === 'string') {
-        if (!firstSeen) bucket = bucketOf(d.message.content);
+        if (!firstSeen) {
+          bucket = bucketOf(d.message.content);
+          firstChars = d.message.content.length;
+        }
         // a worker's first message names its request in its opening; an orchestrator's or a chat's does not (what it names is the subject of one turn)
         const r = requestOf(d.message.content, !firstSeen && (bucket === '_worker-no-id' || bucket === '_delegation' || bucket === '_other'));
         firstSeen = true;
@@ -270,6 +282,11 @@ export function analyze(root: string, sinceMs: number): Result {
         if (!info) continue;
         const u = info.u;
         if (!d.isSidechain) {
+          if (!baseTok) {
+            const first = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+            baseTok = Math.max(1, first - firstChars / BRIEF_CHARS_PER_TOKEN);
+            extra.base.firsts.push(baseTok);
+          }
           if (lastCallId !== mid) {
             // the previous call's context reading belongs to the request it was made for
             if (lastCallId) flush(callReq, trigger);
@@ -329,6 +346,11 @@ export function analyze(root: string, sinceMs: number): Result {
           const cb = (extra.ctx[ctxBucket(ctx)] ??= { n: 0, usd: 0 });
           cb.n++;
           cb.usd += t.usd;
+          // the base: read from the cache, or written where the call wrote it (the first call, a cold cache)
+          const b = Math.min(baseTok, ctx);
+          extra.base.calls++;
+          extra.base.tok += b;
+          extra.base.usd += t.cr >= b ? listUsd(info.model, { cr: b }) : listUsd(info.model, { cr: t.cr, cw: b - t.cr });
           extra.thinking.think += u.output_tokens_details?.thinking_tokens ?? 0;
           extra.thinking.out += t.out;
           if (info.model.startsWith('claude-opus')) {
@@ -421,6 +443,16 @@ export function render(r: Result, days: number, top: number): string {
   const csum = Object.values(cats).reduce((a, c) => a + c.usd, 0);
   out.push('', `Where the money goes inside sessions (context shares by characters, applied to ${fmtUsd(csum)} of main-loop calls):`);
   for (const [k, v] of Object.entries(cats).sort((a, b) => b[1].usd - a[1].usd).slice(0, 12)) out.push(`- ${k}: ${pct(v.usd / csum)} (${fmtUsd((v.usd / csum) * sum)} of ${fmtUsd(sum)}) ${CATEGORY_LABEL[k] ?? ''}`);
+  const bs = [...r.extra.base.firsts].sort((a, b) => a - b);
+  if (bs.length) {
+    const q = (f: number) => fmtTokens(bs[Math.min(bs.length - 1, Math.floor(bs.length * f))]);
+    out.push(
+      '',
+      `The base context, measured (w1469): a session's first model call less its first message, median ${q(0.5)} tokens (p10 ${q(0.1)}, p90 ${q(0.9)}, ${bs.length} sessions). ` +
+        `Read again by every main-loop call: ${fmtUsd(r.extra.base.usd)} of ${fmtUsd(sum)} (${pct(r.extra.base.usd / sum)}), ${fmtTokens(r.extra.base.tok / Math.max(1, r.extra.base.calls))} a call over ${r.extra.base.calls} calls. ` +
+        "The meter's `base` above is larger: it also holds what it could not itemise (reminders, hook output, the characters' estimate).",
+    );
+  }
   const trip: Record<string, { n: number; usd: number }> = {};
   for (const q of ranked) for (const [k, v] of Object.entries(q.trips)) {
     const e = (trip[k] ??= { n: 0, usd: 0 });
