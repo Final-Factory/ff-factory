@@ -496,3 +496,15 @@ test('rate limit (w1186): a portal gh call that GitHub rate limits is neither a 
   await plain.runner('lothsahn', 'x')('gh', ['pr', 'view', '1']);
   assert.deepEqual(plain.banners(), []);
 });
+
+test('w1463: entryFor names the vault GitHub entry a person\'s runs on a machine would get (placement and the brief), never the token', (t) => {
+  const { vault } = setup(t);
+  assert.equal(tokens(vault, {}).entryFor('beast', 'ben'), undefined, 'machines.githubFromVault off: the machine\'s own login');
+  const on = tokens(vault, { githubFromVault: { beast: true } });
+  assert.equal(on.entryFor('beast', 'ben'), 'vault-ben-github …bbbb');
+  assert.equal(on.entryFor('beast', 'lothsahn'), 'vault-lothsahn-github …llll');
+  assert.equal(on.entryFor('m3', 'ben'), undefined, 'not switched on there');
+  assert.equal(on.entryFor('beast', 'sam'), undefined, 'nobody else\'s own token');
+  assert.equal(on.entryFor('beast', undefined), 'vault-ben-github …bbbb', 'no person: the system payer\'s');
+  for (const name of [on.entryFor('beast', 'ben')!, on.entryFor('beast', 'lothsahn')!]) assert.ok(!name.includes(BEN) && !name.includes(LOTH) && !name.includes('b'.repeat(5)));
+});
