@@ -16,7 +16,7 @@ import { daemonConfig } from './machineDeploy.ts';
 import { describeCleanupItems } from './cleanup.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { UnitySlots } from '../machine/unitySlots.ts';
-import { SandboxPool, type PoolOptions, deletable, idleSandboxEditors, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
+import { SandboxPool, type PoolOptions, deletable, idleSandboxEditors, lfsDedup, lfsDedupWords, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
@@ -1086,4 +1086,32 @@ test('w1576: a sandbox unused for days gets its Library cloned from the seed aga
   assert.ok(fs.existsSync(path.join(lib, 'Artifacts', 'seed.bin')) && !fs.existsSync(path.join(lib, 'Artifacts', 'own.bin')), "the seed's Library, not its own");
   assert.ok(statuses.includes('sb1:cleanup'), 'cleanup meanwhile: nobody is handed it half done');
   assert.ok(logs.some((l) => /^sandbox sb1: unused for 5 days: its Library \(0\.0 GB\) cloned from the seed again$/.test(l)), logs.join(' | '));
+});
+
+test('w1576: lfsDedup reads the bytes git lfs dedup shared, and never throws', async () => {
+  const said = (code: number, stdout: string, stderr = '') => async () => ({ code, stdout, stderr });
+  const ok = await lfsDedup(said(0, 'Success:\n  De-duplicated  size: 9103132700 bytes\n                count: 5026\n'), 'X');
+  assert.deepEqual(ok, { bytes: 9103132700 });
+  assert.equal(lfsDedupWords(ok), 'LFS files shared with the store: 8.5 GB');
+  assert.deepEqual(await lfsDedup(said(2, '', 'Working tree is dirty. Please commit or reset your change.'), 'X'), { skipped: 'Working tree is dirty. Please commit or reset your change.' });
+  assert.deepEqual(await lfsDedup(async () => Promise.reject(new Error('spawn git ENOENT')), 'X'), { skipped: 'spawn git ENOENT' });
+  let args: string[] = [];
+  await lfsDedup(async (a) => ((args = a), { code: 0, stdout: '', stderr: '' }), path.join('sb', 'x'));
+  assert.deepEqual(args, ['-C', path.join('sb', 'x'), 'lfs', 'dedup']);
+});
+
+test('w1576: the release trim runs git lfs dedup in the sandbox and logs what it did', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const logs: string[] = [];
+  let live = 1;
+  const { p } = pool(r, { liveAgents: () => live, log: (l) => logs.push(l) });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  assert.ok(logs.some((l) => /^sandbox sb1: LFS (files shared with the store|dedup skipped)/.test(l)), `provisioning ran it: ${logs.join(' | ')}`);
+  await p.tick();
+  live = 0;
+  await p.tick();
+  await until('the trim to end', () => p.list()[0].status === 'ready' && logs.some((l) => /Library cache trim/.test(l)));
+  assert.ok(logs.some((l) => /Library cache trim \(released\).*; LFS (files shared with the store|dedup skipped)/.test(l)), logs.join(' | '));
 });
