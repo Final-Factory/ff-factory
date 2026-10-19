@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PlaceAgain, RELEASE_AFTER_MS, farWhy, keptWhy, movedNote, placeFor, releaseStep, releaseWhy, releasedOn, savedNote, waitReleaseWhy, type PlaceFacts } from './placeAgain.ts';
+import { LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, farWhy, keptWhy, liveLostNote, movedNote, placeFor, releaseStep, releaseWhy, releasedOn, savedNote, waitReleaseWhy, type PlaceFacts } from './placeAgain.ts';
 import { agentStateText, holdsItsPlace, holdsSandbox } from '../shared/agentState.ts';
 import { isLiveAgent } from '../shared/fleet.ts';
 import type { Machine, MachineSandbox, SessionInfo } from '../shared/types.ts';
@@ -747,4 +747,54 @@ test('w1135: a released worker on work that is not the game\'s (b3327616, ff-fac
   const a6b = worker('a6b', { machineSandbox: 'slot6', status: 'running' });
   const full = new PlaceAgain({ ...d, sessions: () => [e, a5, a5b, a6, a6b], isLive: (id) => id !== 'e', agentOnly: () => true, seats: () => 2 });
   assert.match(full.answer(e) ?? '', /no agent seat is free on pc/);
+});
+
+// ---------------------------------------------------------------- w1582: a Live view keeps its worker staged while it waits on a person
+
+test('w1582: a worker whose Live view is up while it waits on Ben is neither stopped nor released; without the hold the w890 release goes ahead', () => {
+  const wait = WAITS.person;
+  const hold = 'its Live view is up while it waits on Ben (w1582: held for 12 h after its last activity)';
+  const sb = sandbox('slot1', { unity: { state: 'running' } });
+  // Live, 2026-10-19 (portal journal): c522aec6 (w1465) declared its wait on Ben at 19:29Z, was stopped at 19:35Z and its
+  // sandbox released at 19:39Z, with Ben's Live view on it. The same worker, idle, with and without the hold:
+  const idle = worker('w1', { status: 'idle', lastActivityAt: iso(NOW - 6 * MIN) });
+  assert.deepEqual(releaseStep(idle, sb, { ...facts([idle], { liveIds: ['w1'] }), waitOn: wait }), { do: 'stop', why: wait, due: true }, 'before w1582: stopped');
+  assert.equal(releaseStep(idle, sb, { ...facts([idle], { liveIds: ['w1'] }), waitOn: wait, liveHold: hold }), undefined, 'held: not stopped');
+  const stopped = worker('w1');
+  assert.deepEqual(releaseStep(stopped, sb, { ...facts([stopped]), waitOn: wait }), { do: 'release', why: wait, branch: 'feature/slot1' });
+  assert.equal(releaseStep(stopped, sb, { ...facts([stopped]), waitOn: wait, liveHold: hold }), undefined, 'held: not released');
+  // keptLine says why, for list_sandboxes.
+  assert.equal(new PlaceAgain(deps([stopped], sb, { waitOn: () => wait, liveHold: () => hold })).keptLine(stopped), `its sandbox stays held although ${wait}: ${hold}`);
+});
+
+test('w1582: the release pass ends the Live view of a released worker, and of a stopped one past the hold; a held one keeps it', () => {
+  const lost: string[] = [];
+  const liveLost = (s: SessionInfo, why: string) => void lost.push(`${s.id}: ${why}`);
+  // Released with its view still up (as the four were on 2026-10-19): the view ends, so it never shows the next worker's game.
+  const rel = worker('r1', { placeReleased: { at: iso(NOW - 20 * MIN), sandbox: 'slot1', branch: 'feature/slot1', why: WAITS.person } });
+  new PlaceAgain(deps([rel], sandbox('slot1'), { liveLost })).tick();
+  assert.deepEqual(lost, [`r1: ${WAITS.person}`]);
+  // Released by this pass: the view ends with the release.
+  lost.length = 0;
+  const w = worker('w1');
+  const p = new PlaceAgain(deps([w], sandbox('slot1', { sessionIds: ['w1'] }), { waitOn: () => WAITS.person, liveLost }));
+  assert.match(p.tick().join('\n'), /released pc\/slot1 of w1/);
+  assert.deepEqual(lost, [`w1: ${WAITS.person}`]);
+  // Stopped, its sandbox still its (unsaved work), nobody back within the hold: it ends, so the editor may idle-stop.
+  lost.length = 0;
+  const old = worker('o1', { lastActivityAt: iso(NOW - LIVE_HOLD_MS - MIN) });
+  new PlaceAgain(deps([old], sandbox('slot1', {}, { dirty: 1 }), { liveLost })).tick();
+  assert.deepEqual(lost, ['o1: nobody came back to it within 12 h']);
+  // Held: the view stays.
+  lost.length = 0;
+  const held = worker('h1', { lastActivityAt: iso(NOW - 2 * 3600_000) });
+  new PlaceAgain(deps([held], sandbox('slot1', { sessionIds: ['h1'] }), { waitOn: () => WAITS.person, liveHold: () => 'held', liveLost })).tick();
+  assert.deepEqual(lost, []);
+});
+
+test('w1582: the resumed worker is asked to stage its Live view again with the same knobs, fps and width', () => {
+  const text = liveLostNote({ at: iso(NOW - 3600_000), why: WAITS.person, materials: ['WardenMaterial'], fps: 30, width: 1920 });
+  assert.match(text, /^\[live view\] Your Live view ended while you were stopped \([^)]+\): your sandbox was released because it waits on w889: Ben to act/);
+  assert.match(text, /live_view start \(materials \["WardenMaterial"\], fps 30, width 1920\)/);
+  assert.match(text, /mcp__machine__unity start/);
 });

@@ -187,6 +187,24 @@ export class LiveHub {
     }
   }
 
+  /** The settings of the session's running view, or undefined when it has none (Agents.liveHold, w1582). */
+  running(sessionId: string): Pick<LiveViewInfo, 'materials' | 'fps' | 'width'> | undefined {
+    if (!this.deps.enabled()) return undefined;
+    const v = this.bySession(sessionId);
+    return v && v.info.state !== 'stopped' ? { materials: [...v.info.materials], fps: v.info.fps, width: v.info.width } : undefined;
+  }
+
+  /**
+   * Its sandbox was released (w1582): stop the session's view, which would show whatever that sandbox's editor shows next,
+   * and answer its settings so the worker can start it again when it resumes. Undefined when it had none.
+   */
+  async endFor(sessionId: string): Promise<Pick<LiveViewInfo, 'materials' | 'fps' | 'width'> | undefined> {
+    const v = this.bySession(sessionId);
+    if (!v) return undefined;
+    await this.stopView(v);
+    return { materials: [...v.info.materials], fps: v.info.fps, width: v.info.width };
+  }
+
   /** Every live view of a session that is gone (its worker ended). */
   async sessionGone(sessionId: string) {
     const v = this.bySession(sessionId);

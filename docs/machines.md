@@ -934,7 +934,12 @@ LothDesktop and Beast, not just when BEAST is full").
       with the worker Idle after it had declared it waited on lothsahn). Not a time, a machine, a usage limit or a lock (they clear by
       themselves or are about this machine), and not CI (its own, stricter rule above). Unlike CI, a running editor does not
       keep it (nothing is about to be read or fixed in it, and the placement that takes the sandbox stops the editor first,
-      as for every release). Never released (`waitReleaseWhy`, `keptWhy`): uncommitted or untracked work its daemon cannot
+      as for every release). **Except a Live view** (w1582, Ben on 2026-10-19: "The live views aren't working"): a worker
+      whose Live view is up while it waits on a **person** keeps its process, its sandbox and its editor for
+      `LIVE_HOLD_MS` (12 h) after its last activity (`Agents.liveHold`; the idle reaper's `keepIdle` too), so the person's
+      words reach it at once; past that, or when its sandbox is released any other way, the view ends with the release and
+      its next message asks it to stage the view again ([live-view.md](live-view.md), "While it waits on you"). Never
+      released (`waitReleaseWhy`, `keptWhy`): uncommitted or untracked work its daemon cannot
       save and push first, a branch with a commit its remote lacks, a Unity batch run of that sandbox in flight, another
       agent working there, a message queued for it, a worker mid-turn, with a permission open, or with a background job or
       unanswered message it needs (`keepLive`). Alive between turns it is stopped first (`releaseDue`), and the release pass
