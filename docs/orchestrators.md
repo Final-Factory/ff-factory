@@ -223,8 +223,23 @@ non-Unity repo needs only an agent slot (w1098; "Next non-game work" in the same
 `start_agent` refuses a request with a strong overlap still in flight (a commit only informs), or one that already has a
 live worker, unless `override_duplicate` says what is different. `work_id` is the dispatcher's alone. A worker started
 for a request runs for the person who filed it, on their account. The requester's orchestrator can add a note (which
-answers a question), change the priority, close the request, or reopen it within 7 days (`update_work`). Closing is the
-filer's: the others still on the request hear it. Someone whose request was merged into it only leaves it.
+answers a question), change the priority, close the request, or reopen it within 7 days (`update_work`).
+
+**A request has one state, the same for everyone on it** (w1511, Lothsahn: "If you close them they should close out for
+everybody ... It shouldn't be open for one person and closed for another"). A close, done or cancelled, by any requester
+closes it for all of them, and each of the others gets a `[dispatch]` line saying who closed it and why. A close never takes
+just the closer off a shared request: until w1511 it did for anyone but the filer ("Lothsahn is off w1505; it carries on
+for Ben", on a request Lothsahn had solved). That branch was meant for someone whose request was merged into another one;
+neither the code's comment nor its history named a further reason, so it is gone, from `update_work` and from a decision
+that waits for a fact alike (`Orchestrators.updateNow`, `closeByDecision`).
+
+**Handing a request on** is its own option, `update_work` with `assign_to: "<user id or name>"` (`Orchestrators.handOff`):
+"If I've solved my part of it, I should just assign it to Ben and then Ben can work on it and it's not assigned to me." The
+request stays open with its status unchanged; the sender is off it, the other person is on it (in the sender's place) and is
+told with a `[dispatch]` line and the sender's note, and the dispatcher hears of it. If the sender had filed it, the
+receiver becomes its filer, since its workers run for the filer's account. If the receiver is already on it, the sender
+just comes off. `assign_to` stands alone: with `close`, `reopen` or `priority` it is refused, and a person who is not on the
+request cannot hand it on. Tests: `server/orchestrators.test.ts` ("w1511").
 
 **Owners close each other's requests** (w402, Lothsahn: "ben and I can close each other's requests if we explicitly
 ask"; w677: "I don't want that guard between me and ben"). A person with the `owner` role (docs/identity.md; Ben and

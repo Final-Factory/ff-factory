@@ -610,23 +610,63 @@ test('overlaps reach every computer: a worker in a machine sandbox is found by t
   assert.equal(store.work.get('w1')!.overlaps[0].ref, 'mw1');
 });
 
-test("a merged-in requester leaves a request without closing it for the others; the filer's close tells them", async (t) => {
-  const { store, o, dispatcher, chat, call, heard } = setup(t);
-  const [ben, loth] = [chat(BEN).info, chat(LOTH).info];
+test("w1511: a request has one state for everyone on it: any requester's close closes it for all, and the others are told", async (t) => {
+  const { store, o, dispatcher, chat, call, heard } = setup(t, { people: OWNERS });
+  const [ben, loth, cara] = [chat(BEN).info, chat(LOTH).info, chat(CARA).info];
   await call(ben, 'request_work', { title: 'Fix belt desync (spec 098)', brief: 'x' });
   await call(loth, 'request_work', { title: 'Belt desync on load, spec 098', brief: 'y' });
   await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'merge', into: 'w1', note: 'same' });
+  assert.deepEqual(store.work.get('w1')!.requesters, [BEN, LOTH]);
+  // An owner who did not file it closes it outright (w1505: Lothsahn's close once only took Lothsahn off, and it stayed open for Ben).
   o.personWrote(loth.id);
-  assert.equal((await call(loth, 'update_work', { id: 'w1', close: 'cancelled' })).text, "Lothsahn is off w1; it carries on for Ben.");
-  assert.equal(store.work.get('w1')!.status, 'new');
+  const r = await call(loth, 'update_work', { id: 'w1', close: 'done', note: 'PR 438 merged.' });
+  assert.equal(r.text, 'w1 is done: note: PR 438 merged.; closed as done.');
+  assert.equal(store.work.get('w1')!.status, 'done');
+  assert.deepEqual(store.work.get('w1')!.requesters, [BEN, LOTH], 'nobody leaves by closing');
+  await until('Ben hears it closed, by whom and why', () => heard(ben.id, '[dispatch]').some((e) => e.text.includes('closed as done by Lothsahn') && e.text.includes('PR 438 merged.')));
+  // The same for a member who is one of several (it used to take only them off): the request ends for everyone.
+  await call(ben, 'request_work', { title: 'Docs pass', brief: 'z' });
+  store.work.get('w3')!.requesters.push(CARA, LOTH);
+  o.personWrote(cara.id);
+  assert.equal((await call(cara, 'update_work', { id: 'w3', close: 'cancelled', note: 'not needed' })).isError, false);
+  assert.equal(store.work.get('w3')!.status, 'cancelled');
+  assert.deepEqual(store.work.get('w3')!.requesters, [BEN, CARA, LOTH]);
+  await until('the other two hear it', () => [ben.id, loth.id].every((id) => heard(id, '[dispatch]').some((e) => e.text.includes('cancelled by Cara'))));
+  // An owner closes another owner's request they are not on (w677), as before.
+  await call(ben, 'request_work', { title: 'Save copy tidy', brief: 'q' });
+  o.personWrote(loth.id);
+  assert.equal((await call(loth, 'update_work', { id: 'w4', close: 'cancelled', note: 'Duplicate of w1.' })).isError, false);
+  assert.equal(store.work.get('w4')!.status, 'cancelled');
+});
+
+test('w1511: assign_to hands an open request to another person: it stays open, and the one handing it over is off it', async (t) => {
+  const { store, o, chat, call, heard } = setup(t, { people: OWNERS });
+  const [ben, loth] = [chat(BEN).info, chat(LOTH).info];
+  await call(loth, 'request_work', { title: 'Clean-up hook fix', brief: 'x' });
+  o.personWrote(loth.id);
+  const r = await call(loth, 'update_work', { id: 'w1', assign_to: 'ben', note: 'My part is done; the deploy is yours.' });
+  assert.equal(r.text, 'w1 is handed to Ben; it stays new and Lothsahn is off it.');
+  const w = store.work.get('w1')!;
+  assert.equal(w.status, 'new');
+  assert.deepEqual(w.requesters, [BEN]);
+  assert.equal(w.requestedBy.userId, 'ben', 'its workers run for the new person');
+  await until('Ben is told', () => heard(ben.id, '[dispatch]').some((e) => e.text.includes('handed to you by Lothsahn') && e.text.includes('the deploy is yours')));
+  // It is Ben's now: Lothsahn's note is an owner's note on another owner's request, not a hand-back.
+  assert.match((await call(loth, 'update_work', { id: 'w1', note: 'more' })).text, /^Noted on w1 \(Ben's request\)/);
   assert.deepEqual(store.work.get('w1')!.requesters, [BEN]);
-  // Ben filed it: his close is everyone's, and anyone still on it hears so.
-  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'later' });
-  store.work.get('w1')!.requesters.push(LOTH);
+  // Someone already on it: the hand-off just takes the sender off, and nobody is told twice.
+  await call(ben, 'request_work', { title: 'Docs pass', brief: 'z' });
+  store.work.get('w2')!.requesters.push(LOTH, CARA);
+  o.personWrote(loth.id);
+  assert.equal((await call(loth, 'update_work', { id: 'w2', assign_to: 'Cara' })).text, 'w2 is handed to Cara; it stays new and Lothsahn is off it.');
+  assert.deepEqual(store.work.get('w2')!.requesters, [BEN, CARA]);
+  // It is a hand-off, never a close in disguise: alone only, to a real person other than the sender.
   o.personWrote(ben.id);
-  await call(ben, 'update_work', { id: 'w1', close: 'cancelled', note: 'not needed' });
-  assert.equal(store.work.get('w1')!.status, 'cancelled');
-  await until('Lothsahn hears it closed', () => heard(loth.id, '[dispatch]').some((e) => e.text.includes('cancelled by Ben')));
+  assert.match((await call(ben, 'update_work', { id: 'w2', assign_to: 'cara', close: 'done' })).text, /^ERROR: assign_to stands alone/);
+  assert.match((await call(ben, 'update_work', { id: 'w2', assign_to: 'ben' })).text, /^ERROR: w2 is already Ben's/);
+  assert.match((await call(ben, 'update_work', { id: 'w2', assign_to: 'nobody' })).text, /^ERROR: no person "nobody"/);
+  assert.deepEqual(store.work.get('w2')!.requesters, [BEN, CARA]);
+  assert.equal(store.work.get('w2')!.status, 'new');
 });
 
 test('work_id is the dispatcher’s: an /mcp key cannot move a request, and linking refuses a closed one', async (t) => {
