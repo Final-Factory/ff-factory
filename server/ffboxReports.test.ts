@@ -225,7 +225,7 @@ test('no write path: the reports surface is two read-only queries and two inboun
     'no query names a change',
   );
   assert.ok(FROM_CONNECTOR_TYPES.includes('report_chunk') && FROM_CONNECTOR_TYPES.includes('report_end'));
-  assert.deepEqual(Object.keys(CATALOG.fetch_ffbox_report).sort(), ['file', 'id'], 'the worker tool takes an id and a file name, nothing else');
+  assert.deepEqual(Object.keys(CATALOG.fetch_ffbox_report).sort(), ['diagnosis', 'file', 'id', 'run'], 'the worker tool takes an id and file names (and a diagnosis run), nothing else');
   const src = fs.readFileSync(new URL('./ffboxReports.ts', import.meta.url), 'utf8');
   assert.ok(!/\.send\(/.test(src), 'it sends no frame of its own');
   assert.match(src, /queryTransfer\('report'/, 'the one thing it asks FFBox is the report query');
