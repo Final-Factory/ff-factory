@@ -78,9 +78,17 @@ test('w1398: live view: start, frames to a page, a knob in the next frames, stop
   assert.notDeepEqual(page.sent.at(-1), page.sent[0], 'the picture changed with the knob');
   await assert.rejects(hub.setKnob('w1', { material: 'Nope', name: '_Intensity', value: 1 }, { userId: 'kai', displayName: 'Kai' }), /not one of this view's materials/);
 
+  // w1582: a running view keeps its sandbox active, so the editor's idle stop leaves it while the person comes back to it.
+  const activity = (pc.daemon as unknown as { sandboxActivity(id: string): { lastActivityMs: number } }).sandboxActivity.bind(pc.daemon);
+  assert.ok(Date.now() - activity('alpha').lastActivityMs < 1000, 'a running view is activity now');
+
   assert.equal(await hub.tool(info, { action: 'stop' }), 'Live view stopped.');
   await until('the game stops streaming', () => game.commands.at(-1) === 'live.frames|off', 20_000);
   assert.equal(page.readyState, 3);
+  await new Promise((r) => setTimeout(r, 50));
+  const after = activity('alpha').lastActivityMs;
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(activity('alpha').lastActivityMs, after, 'a stopped view is no activity: the idle clock runs from its last knob or start');
 });
 
 test('w1509: a daemon restart (a machine rollout) leaves the view working: frames come back and a knob reaches the game', async (t) => {
