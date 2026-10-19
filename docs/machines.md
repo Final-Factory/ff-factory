@@ -490,18 +490,43 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   itself in the taskbar once, the first time (`NotifyIconSettings\…\IsPromoted`); the person's own choice after that stands.
   Its menu: the state and why, what happens next, the agents working here, Pause all work / Unpause, Work schedule…, Pause
   when someone uses this PC, Open FF Factory. `daemon.json` `"tray": false` turns it off; a daemon a test builds has none
-  unless asked.
+  unless asked. The schedule window is not modal (`Show()`, so the menu stays usable): a WinForms button's `DialogResult`
+  closes only a window shown with `ShowDialog()`, so its Cancel calls `Close()` itself (w1574, lothsahn: "The work schedule
+  dialogue box in The task tray cancel button does not work"). Cancel, Esc and the X close it unsaved; checked on beast by
+  window messages (BM_CLICK on Cancel, WM_SYSCOMMAND SC_CLOSE), where main's Cancel left it open.
 - **How the three combine** (`machine/pauseRules.ts`, `server/pauseRules.test.ts`). The latest event wins, and a person at
   the keyboard wins over both. The base state is the latest of a tray Pause or Unpause and the schedule's last edge (a
   window's start unpauses, its end pauses, as lothsahn asked). So a tray pause holds until the tray unpauses or the next
   window starts, and a tray unpause outside the window holds until the next edge; without a schedule the tray's last word
-  holds. A person's key or click pauses a machine that would run until 90 minutes pass without one, inside the window or
-  under a tray unpause, and holds across a window's start (someone is at the machine). A tray unpause clears it and ignores
-  input for 30 seconds. Changing the schedule never brings back a tray word the schedule had already replaced.
-- **The settings live on the machine** (`<app_dir>/pause.json`, `machine/pause.ts`). The schedule and the activity watch are
-  about the person at that PC, so they work while the portal is unreachable and survive a daemon restart or update (the
-  pause, the schedule and a person's 90 minutes are all kept there). The portal shows them read-only (`pause` in the hello and
-  in a `pause` message, kept on `Machine.pause`). Defaults: no schedule, the activity watch on, 90 minutes.
+  holds. Where the activity pause is on, a person's key or click pauses a machine that would run until its idle minutes
+  (default 90) pass without one, inside the window or under a tray unpause, and holds across a window's start (someone is at
+  the machine). A tray unpause clears it and ignores input for 30 seconds. Changing the schedule never brings back a tray word
+  the schedule had already replaced.
+- **The activity pause is off unless a machine turns it on** (w1574, lothsahn, 2026-10-19: "We want it off on all of the
+  workers currently so that they continue to work even if a user is at the station"; "I will be adding some new workers soon
+  that will want that on"). It is config `machines.activityPause` on the portal, per machine: `enabled` (default false) and
+  `idleMinutes` (default 90, 1 to 1440), each true/false or a number for every machine, or `{ "<machine id>": …, "*": … }`.
+  While it is off, the daemon does not even keep a person's input (`machine/pause.ts` `input`: logged once a minute as
+  "ignored: the activity pause is off on this machine"), so turning it on later never pauses for a key pressed before.
+  **To turn it on for a machine**, any one of:
+  - the settings tool: `set_app_config` key `machines.activityPause.enabled`, value `true`, `machine` `"<id>"` (and
+    `machines.activityPause.idleMinutes` with a number of minutes, the same way);
+  - the portal: the machine's panel (Machines, the machine), the "Input ignored" row's **Turn on** (and its minutes list);
+  - the tray on that PC: **Pause when someone uses this PC** (ticked is on). The daemon tells the portal (`activity_set`),
+    which writes that machine's config entry and sends it back.
+
+  The portal sends each daemon its setting at connect and whenever it changes (`activity_config`), and the daemon keeps it in
+  pause.json, so it holds while the portal is unreachable. A tray choice made while the portal is unreachable is told again
+  when the portal answers with the old one. A pause.json from before w1574 (no `"v": 2`) had the activity pause on by default:
+  the daemon's update turns it off once and logs "the activity pause is now off on this machine". A daemon from before
+  w1574 ignores `activity_config` and still pauses on input by itself; the portal then ignores its activity pause while the
+  machine's setting is off (`server/machines.ts` `takePause`: "input ignored: the activity pause is off for …"), so the
+  machine keeps its work. The journal's "machine <id>: activity pause off|on (N min idle) on the machine" lines are the
+  machine's own report of its setting (`portal_logs`, grep "activity pause").
+- **The settings live on the machine** (`<app_dir>/pause.json`, `machine/pause.ts`). The schedule is about the person at that
+  PC, so it works while the portal is unreachable and survives a daemon restart or update (the pause, the schedule and a
+  person's last input are all kept there). The portal shows the schedule read-only (`pause` in the hello and in a `pause`
+  message, kept on `Machine.pause`). Defaults: no schedule, the activity pause off, 90 minutes.
 - **A person's input, not a program's.** Low-level keyboard and mouse hooks count a key press or a mouse button press that
   carries neither `LLKHF_INJECTED`/`LLMHF_INJECTED` nor their lower-integrity forms. Measured on beast (2026-10-19, the real
   tray app): `SendInput`, `keybd_event` and `mouse_event` (what `scripts/agent/osdrive.py` and test tools use) all arrive

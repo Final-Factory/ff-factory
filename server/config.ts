@@ -224,6 +224,16 @@ export interface Config {
      */
     keepAgentsOnRestart?: boolean;
     /**
+     * The activity pause on a Windows machine (w1574, docs/machines.md "Pausing a machine"): a person's key or click pauses
+     * its work until `idleMinutes` (default 90) pass without one. Off unless turned on (lothsahn: "We want it off on all of
+     * the workers currently"). true, false, or per machine with "*" for the rest: { "*": false, "newpc": true }. The
+     * tray's "Pause when someone uses this PC" writes its machine's entry.
+     */
+    activityPause?: {
+      enabled?: boolean | Record<string, boolean>;
+      idleMinutes?: number | Record<string, number>;
+    };
+    /**
      * After a portal deploy has verified, FF Factory runs the worker installer's update on every worker root machine
      * itself (server/machineRollout.ts, w887). On unless this is false: the kill switch, for when a machine must stay
      * on its commit.
@@ -774,6 +784,16 @@ export const MACHINE_CLEANUP_DEFAULTS = { everyMinutes: 60, softFreeGB: 80 };
 
 /** A per-machine setting: a number for every machine, or { "<id>": n, "*": n } (the id wins, then "*"). */
 const perMachine = (v: number | Record<string, number> | undefined, id: string): number | undefined => (typeof v === 'number' ? v : v ? (v[id] ?? v['*']) : undefined);
+
+/** Machine `id`'s activity pause (config machines.activityPause, w1574): off and 90 minutes unless set. */
+export function machineActivityPause(cfg: Pick<Config, 'machines'>, id: string): { enabled: boolean; idleMinutes: number } {
+  const a = cfg.machines?.activityPause;
+  const e = a?.enabled;
+  const on = typeof e === 'boolean' ? e : e ? (e[id] ?? e['*']) : undefined;
+  return { enabled: on === true, idleMinutes: perMachine(a?.idleMinutes, id) ?? ACTIVITY_IDLE_MINUTES };
+}
+/** The activity pause's idle time when config sets none (machine/pauseRules.ts IDLE_MINUTES). */
+export const ACTIVITY_IDLE_MINUTES = 90;
 
 /** What machine `id`'s daemon runs its clean-up with (config machines.cleanup, else the defaults). */
 export function machineCleanupSettings(cfg: Pick<Config, 'machines'>, id: string): { everyMinutes: number; softFreeGB: number; staleOutput: StaleOutputSettings } {

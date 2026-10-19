@@ -22,7 +22,9 @@ export const SUPPRESS_SECONDS = 30;
 
 export const DEFAULT_PAUSE_SETTINGS: MachinePauseSettings = {
   schedule: { enabled: false, start: '22:00', end: '08:00', days: [0, 1, 2, 3, 4, 5, 6] },
-  activity: { enabled: true, idleMinutes: IDLE_MINUTES },
+  // Off unless a machine turns it on (w1574, lothsahn: "We want it off on all of the workers currently so that they continue
+  // to work even if a user is at the station"; config machines.activityPause.enabled, docs/machines.md).
+  activity: { enabled: false, idleMinutes: IDLE_MINUTES },
 };
 
 /** What the daemon keeps between events (in pause.json beside its settings). Times are epoch ms. */

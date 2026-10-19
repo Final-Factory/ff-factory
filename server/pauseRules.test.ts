@@ -10,11 +10,13 @@ import type { MachinePauseSettings } from '../shared/types.ts';
 
 const at = (d: number, h: number, m = 0, s = 0) => new Date(2026, 9, d, h, m, s).getTime(); // October 2026; the 19th is a Monday
 const MIN = 60_000;
-const night: MachinePauseSettings = { ...DEFAULT_PAUSE_SETTINGS, schedule: { enabled: true, start: '22:00', end: '08:00', days: [0, 1, 2, 3, 4, 5, 6] } };
+// The activity pause on, as a machine that turned it on has it (off by default since w1574).
+const watching: MachinePauseSettings = { ...DEFAULT_PAUSE_SETTINGS, activity: { enabled: true, idleMinutes: IDLE_MINUTES } };
+const night: MachinePauseSettings = { ...watching, schedule: { enabled: true, start: '22:00', end: '08:00', days: [0, 1, 2, 3, 4, 5, 6] } };
 const noActivity: MachinePauseSettings = { ...night, activity: { enabled: false, idleMinutes: IDLE_MINUTES } };
 
 test('w1532: no schedule and nobody at the machine: it runs; the tray pause holds until the tray unpauses', () => {
-  const s = DEFAULT_PAUSE_SETTINGS;
+  const s = watching;
   assert.equal(pauseState(s, {}, at(19, 12)).paused, false);
   const paused = trayCommand({}, true, at(19, 12));
   const p = pauseState(s, paused, at(25, 12));
@@ -69,7 +71,7 @@ test('w1532: the latest event wins: a tray pause inside the window holds until t
 });
 
 test('w1532: a person\'s key or click pauses a running machine until 90 minutes without one; more input keeps it paused', () => {
-  const s = DEFAULT_PAUSE_SETTINGS;
+  const s = watching;
   let mem: PauseMemory = personInput({}, at(19, 14));
   const p = pauseState(s, mem, at(19, 14, 0, 1));
   assert.deepEqual([p.paused, p.reason], [true, 'activity']);
@@ -83,7 +85,7 @@ test('w1532: a person\'s key or click pauses a running machine until 90 minutes 
 });
 
 test('w1532: a tray unpause ends a person\'s pause and ignores input for 30 seconds, then input pauses again', () => {
-  const s = DEFAULT_PAUSE_SETTINGS;
+  const s = watching;
   let mem = personInput({}, at(19, 14));
   mem = trayCommand(mem, false, at(19, 14, 5));
   assert.equal(pauseState(s, mem, at(19, 14, 5)).paused, false);
@@ -122,7 +124,8 @@ test('w1532: the tray menu says why and what comes next in short lines', () => {
   assert.deepEqual(trayView(s, pauseState(s, {}, now), now), { why: 'Outside the work schedule', next: 'Work starts at 22:00', tip: 'outside the schedule', schedule: '22:00 to 08:00, every day' });
   const manual = trayView(DEFAULT_PAUSE_SETTINGS, pauseState(DEFAULT_PAUSE_SETTINGS, trayCommand({}, true, at(19, 14, 2)), now), now);
   assert.deepEqual(manual, { why: 'Paused from the tray at 14:02', next: 'Until you unpause it here', tip: 'paused from the tray', schedule: 'none' });
-  assert.deepEqual(trayView(DEFAULT_PAUSE_SETTINGS, pauseState(DEFAULT_PAUSE_SETTINGS, {}, now), now), { why: 'No schedule: work runs any time', next: 'A key or click on this PC pauses work', schedule: 'none' });
+  assert.deepEqual(trayView(watching, pauseState(watching, {}, now), now), { why: 'No schedule: work runs any time', next: 'A key or click on this PC pauses work', schedule: 'none' });
+  assert.deepEqual(trayView(DEFAULT_PAUSE_SETTINGS, pauseState(DEFAULT_PAUSE_SETTINGS, {}, now), now), { why: 'No schedule: work runs any time', next: undefined, schedule: 'none' }, 'off by default (w1574): no line about input');
 });
 
 test('w1532: turning the schedule off never brings back a tray pause the schedule had already replaced (seen in the beast demo)', () => {
@@ -165,4 +168,74 @@ test('w1532: the daemon keeps a pause, the schedule and a person\'s 90 minutes i
   const c = keeper();
   assert.deepEqual([c.current().paused, c.current().reason], [true, 'activity'], 'a person\'s input before the restart still holds it');
   c.stop();
+});
+
+// w1574, lothsahn: "if the mouse and keyboard was being used the worker would go to sleep. That needs to be configurable. We
+// want it off on all of the workers currently so that they continue to work even if a user is at the station."
+test('w1574: the activity pause is off by default and on every machine from before; a key or click then never pauses', async (t) => {
+  const { PauseKeeper } = await import('../machine/pause.ts');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-pause-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'pause.json');
+  let now = at(19, 14);
+  const logs: string[] = [];
+  const keeper = () => new PauseKeeper({ file, now: () => now, log: (l) => void logs.push(l), changed: () => {} });
+
+  // A new machine: no pause.json, off.
+  const fresh = keeper();
+  assert.equal(fresh.currentSettings().activity.enabled, false);
+  fresh.input('click', now);
+  assert.equal(fresh.current().paused, false, 'a click on a new machine does not pause it');
+  fresh.stop();
+
+  // lothdesktop's case: w1532's pause.json with the activity pause on and a person's input a minute ago, paused for it.
+  fs.writeFileSync(file, JSON.stringify({ settings: { ...DEFAULT_PAUSE_SETTINGS, activity: { enabled: true, idleMinutes: 90 } }, memory: { inputAt: now - MIN } }));
+  const old = keeper();
+  assert.equal(old.current().paused, false, 'loaded off, so not paused for the input before the update');
+  old.start();
+  assert.ok(logs.some((l) => l.includes('the activity pause is now off on this machine')), logs.join('\n'));
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual([saved.v, saved.settings.activity.enabled, saved.memory.inputAt], [2, false, undefined], 'saved off, the old input dropped');
+  logs.length = 0;
+  now += MIN;
+  old.input('key', now);
+  now += 2 * MIN;
+  old.input('click', now);
+  assert.equal(old.current().paused, false, 'keys and clicks while it is off never pause');
+  assert.deepEqual(logs.filter((l) => l.includes('ignored: the activity pause is off')).length, 2, logs.join('\n'));
+  old.stop();
+
+  // Saved off (v 2) stays off; a machine that turned it on keeps it on across a restart.
+  const again = keeper();
+  assert.equal(again.currentSettings().activity.enabled, false);
+  again.setActivity({ enabled: true, idleMinutes: 30 });
+  assert.equal(again.current().paused, false, 'turning it on does not pause for input seen while it was off');
+  now += MIN;
+  again.input('key', now);
+  assert.deepEqual([again.current().paused, again.current().reason], [true, 'activity']);
+  assert.ok(again.current().detail.includes('30 min'), again.current().detail);
+  again.stop();
+  const on = keeper();
+  assert.deepEqual(on.currentSettings().activity, { enabled: true, idleMinutes: 30 }, 'on stays on across a restart');
+  on.setActivity({ enabled: false, idleMinutes: 30 });
+  assert.equal(on.current().paused, false, 'turned off while paused for input: work goes on at once');
+  on.stop();
+});
+
+test('w1574: the tray tells the daemon only an activity change to pass to the portal; the schedule stays on the machine', async (t) => {
+  const { PauseKeeper } = await import('../machine/pause.ts');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-pause-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const k = new PauseKeeper({ file: path.join(dir, 'pause.json'), now: () => at(19, 14), log: () => {}, changed: () => {} });
+  const s = k.currentSettings();
+  assert.equal(k.setSettings({ ...s, schedule: { ...s.schedule, enabled: true } }), undefined, 'a schedule change is the machine\'s own');
+  assert.deepEqual(k.setSettings({ ...k.currentSettings(), activity: { enabled: true, idleMinutes: 90 } }), { enabled: true, idleMinutes: 90 });
+  assert.equal(k.setSettings({ ...k.currentSettings() }), undefined, 'no change, nothing to tell');
+  k.stop();
 });

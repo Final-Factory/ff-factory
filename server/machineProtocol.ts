@@ -170,6 +170,8 @@ export type ToDaemon =
   | { type: 'outside_watch'; config: OutsideWatchConfig | null }
   /** The daemon's clean-up settings (server/cleanup.ts), at connect and when they change. Kept on the machine. */
   | { type: 'cleanup_config'; config: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown } }
+  /** This machine's activity pause (w1574, config machines.activityPause): at connect and when it changes. */
+  | { type: 'activity_config'; config: { enabled: boolean; idleMinutes: number } }
   /** The ledger's facts for the stale-output rules (w459): which requests are open and closed. At connect and every few minutes. */
   | { type: 'cleanup_context'; context: StaleContext }
   /**
@@ -261,6 +263,8 @@ export type FromDaemon =
   | { type: 'host_report'; title: string; body: string }
   /** Its pause changed (w1532): paused or running, why, until when. A paused machine is held and its workers hand back. */
   | { type: 'pause'; pause: MachinePause }
+  /** The tray turned the activity pause on or off (w1574): the portal keeps it as this machine's machines.activityPause. */
+  | { type: 'activity_set'; activity: { enabled: boolean; idleMinutes: number } }
   /** Its host guard's state, when it changes (protocol 8, w466). */
   | { type: 'host_health'; health: Pick<HostHealth, 'checkedAt' | 'sandboxRoot' | 'level' | 'detail' | 'blocked'> }
   /** The session's current record (the daemon's AgentSession changed it). */
