@@ -221,7 +221,7 @@ printf '%s
 g 'printf "BASE_REPO_URL=https://github.com/Final-Factory/ff-factory.git\nBASE_BRANCH=main\n" | sudo tee -a /etc/fff/fff.conf'
 if [ "$TIMING" = fast ]; then
   # A new release has 45 s to answer; a hung server is restarted after 2 failed checks 10 s apart, 20 s after its start,
-  # and killed 15 s after SIGTERM. The same code paths as the defaults (5 min, 4 x 30 s, 120 s, 75 s), sooner.
+  # and killed 15 s after SIGTERM. The same code paths as the defaults (5 min, 4 x 30 s, 300 s, 75 s), sooner.
   g 'printf "UPDATE_VERIFY_SEC=45\nHEALTH_FAILS_BEFORE_RESTART=2\nHEALTH_START_GRACE_SEC=20\n" | sudo tee -a /etc/fff/fff.conf'
   g 'sudo mkdir -p /etc/systemd/system/fff-health.timer.d /etc/systemd/system/fff-portal.service.d &&
      printf "[Timer]\nOnUnitActiveSec=10s\n" | sudo tee /etc/systemd/system/fff-health.timer.d/ci-fast.conf >/dev/null &&
