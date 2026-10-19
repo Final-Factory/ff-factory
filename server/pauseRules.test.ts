@@ -137,3 +137,32 @@ test('w1532: turning the schedule off never brings back a tray pause the schedul
   assert.deepEqual(settingsChanged(sched, fresh, at(19, 23, 31)), fresh, 'a pause after the last edge is the latest word: kept');
   assert.equal(pauseState(off, fresh, at(19, 23, 32)).reason, 'manual');
 });
+
+test('w1532: the daemon keeps a pause, the schedule and a person\'s 90 minutes in pause.json across a restart, and tells each change once', async (t) => {
+  const { PauseKeeper } = await import('../machine/pause.ts');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-pause-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'pause.json');
+  let now = at(19, 14);
+  const told: string[] = [];
+  const keeper = () => new PauseKeeper({ file, now: () => now, log: () => {}, changed: (p) => void told.push(`${p.paused ? 'paused' : 'running'}:${p.reason ?? '-'}`) });
+  const a = keeper();
+  a.command(true);
+  a.setSettings({ schedule: { enabled: true, start: '22:00', end: '08:00', days: [0, 1, 2, 3, 4, 5, 6] }, activity: { enabled: true, idleMinutes: 90 } });
+  a.stop();
+  assert.deepEqual(told, ['paused:manual', 'paused:manual'], 'the pause, then the settings change (sent again so the portal has the settings)');
+  now = at(19, 15);
+  const b = keeper();
+  assert.deepEqual([b.current().paused, b.current().reason], [true, 'manual'], 'a restarted daemon is still paused');
+  assert.equal(b.currentSettings().schedule.start, '22:00');
+  b.command(false);
+  now = at(19, 15, 0, 40);
+  b.input('key', now);
+  b.stop();
+  const c = keeper();
+  assert.deepEqual([c.current().paused, c.current().reason], [true, 'activity'], 'a person\'s input before the restart still holds it');
+  c.stop();
+});
