@@ -347,6 +347,8 @@ export class Daemon {
   readonly voice?: DaemonVoice;
   /** Its owner's pause (w1532, machine/pause.ts): the tray's, the schedule's and a person's input, kept in pause.json. */
   readonly pause: PauseKeeper;
+  /** The activity pause as the tray last set it, until the portal's machines.activityPause says the same (w1574). */
+  private trayActivity?: { enabled: boolean; idleMinutes: number };
   private tray?: TrayHost;
   /** Every message from the tray app, for a demo or a test that asks it something (menu_layout, counts). */
   readonly trayEvents = new EventEmitter();
@@ -1049,9 +1051,16 @@ export class Daemon {
       case 'injected':
         this.pause.injected(Number(m.keys) || 0, Number(m.clicks) || 0);
         return;
-      case 'settings':
-        this.pause.setSettings(m.settings);
+      case 'settings': {
+        // The tray's "Pause when someone uses this PC" is this machine's machines.activityPause on the portal (w1574): told
+        // there, and kept as this machine's own until the portal answers with it.
+        const a = this.pause.setSettings(m.settings);
+        if (a) {
+          this.trayActivity = a;
+          this.send({ type: 'activity_set', activity: a });
+        }
         return;
+      }
       case 'log':
         log(`tray: ${String(m.text ?? '').slice(0, 500)}`);
         return;
@@ -1808,6 +1817,17 @@ export class Daemon {
         } catch (e) {
           log(`outside watch: could not keep its config: ${(e as Error).message}`);
         }
+        return;
+      }
+      case 'activity_config': {
+        // This machine's machines.activityPause (w1574). A tray choice the portal has not taken yet wins: it is told again.
+        const t = this.trayActivity;
+        if (t && (t.enabled !== msg.config.enabled || t.idleMinutes !== msg.config.idleMinutes)) {
+          this.send({ type: 'activity_set', activity: t });
+          return;
+        }
+        this.trayActivity = undefined;
+        this.pause.setActivity(msg.config);
         return;
       }
       case 'cleanup_config': {

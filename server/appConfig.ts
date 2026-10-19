@@ -50,6 +50,10 @@ export const SETTABLE_KEYS = [
   // Whether a machine's runs (and, for the machine id "portal", the portal's own gh reads) use the run person's vault GitHub
   // token (docs/vault.md section 13, w868; optional `machine`). The owner's only.
   'machines.githubFromVault',
+  // The activity pause on Windows machines (w1574, docs/machines.md "Pausing a machine"; optional `machine`): on or off (default
+  // off), and the minutes without a key or click before work resumes (default 90).
+  'machines.activityPause.enabled',
+  'machines.activityPause.idleMinutes',
   // Whose Claude pool (and GitHub token) work nobody asked for by name runs on (w1289, docs/vault.md section 10): the intake's,
   // FFBox's without an operator, and the nightly run, review and regression sentry. Each a user id with a Claude pool in the
   // vault; null goes back to the default (lothsahn). The owner's only.
@@ -430,6 +434,16 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (!context.vault.hasClaudeFor(known)) throw new Error(`${key}: ${known} has no enabled Claude token in the vault that its key opens (fffctl vault list; docs/vault.md section 10): their runs would not start`);
       return known;
     }
+    case 'machines.activityPause.enabled': {
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      throw new Error("machines.activityPause.enabled is true (a person's key or click on that Windows machine pauses its work) or false (work goes on while someone uses it)");
+    }
+    case 'machines.activityPause.idleMinutes': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 1440) throw new Error(`${key} is a whole number of minutes from 1 to 1440: how long without a key or click before work resumes`);
+      return n;
+    }
     case 'machines.githubFromVault': {
       if (value === true || value === 'true') return true;
       if (value === false || value === 'false') return false;
@@ -745,8 +759,8 @@ export function nextPerMachine<T extends boolean | number>(cur: unknown, machine
  */
 export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { machine?: string; users?: readonly string[] } = {}): { before: unknown; after: unknown } {
   if (!SETTABLE_KEYS.includes(key)) throw new Error(`${key} cannot be changed by an agent; allowed: ${SETTABLE_KEYS.join(', ')}`);
-  const perMachine = key === 'machines.githubFromVault' || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
-  if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.githubFromVault and machines.cleanup.*, and is a machine id such as "m5"`);
+  const perMachine = key === 'machines.githubFromVault' || key.startsWith('machines.activityPause.') || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
+  if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.githubFromVault, machines.activityPause.* and machines.cleanup.*, and is a machine id such as "m5"`);
   const v = normalizeSetting(key, value, cfg, opts.users);
   const text = fs.readFileSync(file, 'utf8');
   const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
@@ -845,6 +859,10 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   // Live: the host guard reads its levels at every look (server/hostHealth.ts).
   else if (key === 'hostGuard.warnFreeGB') cfg.hostGuard.warnFreeGB = (v as number | undefined) ?? HOST_GUARD_DEFAULTS.warnFreeGB;
   else if (key === 'hostGuard.criticalFreeGB') cfg.hostGuard.criticalFreeGB = (v as number | undefined) ?? HOST_GUARD_DEFAULTS.criticalFreeGB;
+  else if (key === 'machines.activityPause.enabled' || key === 'machines.activityPause.idleMinutes') {
+    const field = key === 'machines.activityPause.enabled' ? 'enabled' : 'idleMinutes';
+    cfg.machines = { ...cfg.machines, activityPause: { ...cfg.machines?.activityPause, [field]: next as never } };
+  }
   else if (key === 'machines.cleanup.everyMinutes' || key === 'machines.cleanup.softFreeGB') {
     const field = key === 'machines.cleanup.everyMinutes' ? 'everyMinutes' : 'softFreeGB';
     cfg.machines = { ...cfg.machines, cleanup: { ...cfg.machines?.cleanup, [field]: next as number | Record<string, number> | undefined } };

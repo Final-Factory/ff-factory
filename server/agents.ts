@@ -2882,7 +2882,7 @@ ${w.repo ?? ''}
             // An object (intake.ffbox) is a loose object, unknown keys kept for normalizeSetting to name: z.record breaks the
             // MCP SDK's tools/list for the whole belt (w224).
             value: z.union([z.string(), z.number(), z.boolean(), z.array(z.string()), z.array(z.object({ path: z.string(), olderThanDays: z.number() })), z.looseObject({}), z.null()]),
-            machine: z.string().optional().describe('For machines.githubFromVault and machines.cleanup.* only: the machine id to set (e.g. "m5"; "portal" for machines.githubFromVault\'s portal reads); absent: every machine not named.'),
+            machine: z.string().optional().describe('For machines.githubFromVault, machines.activityPause.* and machines.cleanup.* only: the machine id to set (e.g. "m5"; "portal" for machines.githubFromVault\'s portal reads); absent: every machine not named.'),
             user_asked: z.literal(true).describe('Must be true: the user asked for this change.'),
           },
           wrap(async (a) => {
@@ -2908,6 +2908,7 @@ ${w.repo ?? ''}
             }
             if (key === 'publicUrl') this.machines.pushOutsideWatch(); // the outside watchdog watches this URL
             if (key.startsWith('machines.cleanup.')) this.machines.pushCleanupConfig();
+            if (key.startsWith('machines.activityPause.')) this.machines.pushActivityConfig(machine);
             if (key === 'usagePollMinutes') this.usagePollChanged?.();
             if (key === 'live.enabled') await this.liveHub?.switched(after === true);
             if (key.startsWith('providers.') || key.startsWith('intake.')) this.providers?.configChanged();

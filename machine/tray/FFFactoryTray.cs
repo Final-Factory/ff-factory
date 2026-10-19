@@ -384,7 +384,7 @@ namespace FFFactory
         {
             object a, e;
             var act = settings != null && settings.TryGetValue("activity", out a) ? a as Dictionary<string, object> : null;
-            return act == null || !act.TryGetValue("enabled", out e) || Equals(e, true);
+            return act != null && act.TryGetValue("enabled", out e) && Equals(e, true);
         }
 
         void ToggleActivity()
@@ -664,7 +664,10 @@ namespace FFFactory
             grid.Controls.Add(note);
 
             var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, Margin = new Padding(0, S(14), 0, 0) };
-            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(S(80), 0) };
+            // Shown with Show(), not ShowDialog(): a DialogResult button closes nothing there (w1574, lothsahn: "cancel button does not
+            // work"). Cancel, Esc and the X close it unsaved.
+            var cancel = new Button { Text = "Cancel", AutoSize = true, MinimumSize = new Size(S(80), 0) };
+            cancel.Click += delegate { Close(); };
             var save = new Button { Text = "Save", AutoSize = true, MinimumSize = new Size(S(80), 0) };
             save.Click += delegate { Save(); };
             buttons.Controls.Add(cancel);

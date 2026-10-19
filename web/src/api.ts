@@ -190,6 +190,9 @@ export const api = {
     request<Machine>('POST', '/api/machines', req),
   redeployMachine: (id: string, force = false) => request<Machine>('POST', `/api/machines/${enc(id)}/redeploy`, { force }),
   machineDaemon: (id: string, action: 'start' | 'stop' | 'restart', force = false) => request<{ note: string }>('POST', `/api/machines/${enc(id)}/daemon`, { action, force }),
+  /** The machine's activity pause (w1574, config machines.activityPause): on or off, and its idle minutes. */
+  setActivityPause: (id: string, body: { enabled?: boolean; idleMinutes?: number }) =>
+    request<{ enabled: boolean; idleMinutes: number }>('POST', `/api/machines/${enc(id)}/activity-pause`, body),
   labelMachine: (id: string, purpose: string) => request<Machine>('POST', `/api/machines/${enc(id)}/label`, { purpose }),
   removeMachine: (id: string) => request<{ note: string }>('DELETE', `/api/machines/${enc(id)}`),
   machineSandboxUnity: (machine: string, sandbox: string, action: 'start' | 'stop') =>
