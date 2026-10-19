@@ -625,7 +625,7 @@ export function retiredConfigKeys(raw: any): string[] {
   });
 }
 
-/** A copy of a raw config without the retired keys (what pruneRetiredKeys and the VM migration write back). */
+/** A copy of a raw config without the retired keys (what pruneRetiredConfig and the VM migration write back). */
 export function withoutRetiredKeys(raw: any): any {
   const out = { ...raw };
   for (const k of RETIRED_CONFIG_KEYS) {
@@ -640,20 +640,26 @@ export function withoutRetiredKeys(raw: any): any {
 }
 
 /**
- * Take the retired keys out of the config file itself (w852; Lothsahn: "Yes, remove unused config keys"), as
+ * Take the retired keys out of the config file itself (w852; Lothsahn: "Yes, remove unused config keys"), and turn a
+ * defaultBase naming a retired branch into the trunk (w1518; lothsahn: "Yes, set defaultBase to origin/master now"), as
  * set_app_config writes it: the file as it was kept as config.json.prev first, the new one written through a temp file.
- * Run once at start (server/index.ts), so the system_status line naming them goes with the next start. Only the keys in
- * RETIRED_CONFIG_KEYS, which nothing reads; every other key and its value stays as it was. Returns the keys it took
- * out ([] when there were none, and nothing is written).
+ * One write for both, so config.json.prev is the file as it was, not a half-changed one. Run once at start
+ * (server/index.ts), so the startup and system_status lines naming them go with the next start. Only the keys in
+ * RETIRED_CONFIG_KEYS, which nothing reads, and defaultBase's value (trunkBase); every other key and its value stays as
+ * it was. Returns the keys it took out and the base it changed (none, and nothing written, when there was nothing).
  */
-export function pruneRetiredKeys(file: string): string[] {
+export function pruneRetiredConfig(file: string): { keys: string[]; base?: { from: string; to: string } } {
   const text = fs.readFileSync(file, 'utf8');
   const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
   const keys = retiredConfigKeys(raw);
-  if (!keys.length) return [];
+  const from: unknown = raw?.defaultBase;
+  const base = typeof from === 'string' && trunkBase(from) !== from ? { from, to: trunkBase(from) } : undefined;
+  if (!keys.length && !base) return { keys: [] };
+  const out = withoutRetiredKeys(raw);
+  if (base) out.defaultBase = base.to;
   writeFileDurable(`${file}.prev`, text, { generations: 0 });
-  writeFileDurable(file, JSON.stringify(withoutRetiredKeys(raw), null, 2) + '\n');
-  return keys;
+  writeFileDurable(file, JSON.stringify(out, null, 2) + '\n');
+  return base ? { keys, base } : { keys };
 }
 
 /** The game repo's branches retired as a base (w1137: `develop`; `master` is the one trunk). */
