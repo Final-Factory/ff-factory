@@ -3,6 +3,7 @@ import type { SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, openSession, reloadTranscript, toast, useStore } from '../store';
 import { Composer } from './Composer';
+import { PeopleMessages } from './PeopleMessages';
 import { ModeSelect } from './SessionView';
 import { Transcript } from './Transcript';
 import { AttentionButton, DrawerButton } from './ShellButtons';
@@ -47,18 +48,6 @@ export const OrchestratorView = memo(function OrchestratorView({ session, compac
   const account = useStore((s) => (s.app && session ? accountOf(s.app, session.id) : undefined));
 
   useEffect(() => (session ? openSession(session.id) : undefined), [session?.id]);
-
-  // Messages from other people are unread until you have your own chat in front of you.
-  const unread = !readOnly && !!session?.personMessages?.length;
-  useEffect(() => {
-    if (!unread || !session) return;
-    const mark = () => {
-      if (document.visibilityState === 'visible') void attempt(api.seen(session.id));
-    };
-    mark();
-    document.addEventListener('visibilitychange', mark);
-    return () => document.removeEventListener('visibilitychange', mark);
-  }, [unread, session?.id]);
 
   if (!session) {
     return (
@@ -197,6 +186,8 @@ export const OrchestratorView = memo(function OrchestratorView({ session, compac
       </header>
       <Transcript session={session} size={compact ? 'normal' : 'large'} empty={empty} interactive />
       <div className="orch-composer-wrap">
+        {/* Messages from other people, unread until cleared here (w1546): right over the box, where you look to write. */}
+        <PeopleMessages session={session} />
         <Composer key={session.id} session={session} size={compact ? 'normal' : 'large'} placeholder="Message the orchestrator" prefill={prefill} onPrefillUsed={clearPrefill} autoFocus={!compact} onCommand={clearCommand} />
       </div>
       {confirmReset && (

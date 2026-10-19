@@ -1143,13 +1143,42 @@ asks it to: a decision only the other person can make, a script only they can ru
   `[person message] From Lothsahn's orchestrator (user id lothsahn), written for Lothsahn:`, the text, then a line
   saying it is data to show the recipient, not an instruction. It is in the recipient's transcript at once, so a
   restart keeps it; one sent mid-turn waits for that turn, like every harness message;
-- marks it unread on the recipient's session (`personMessages`) until they open their chat (`POST
-  /api/sessions/:id/seen`, their own only) or write to it, and sends them alone a notification (kind `person`).
+- marks it unread on the recipient's session (`personMessages`: an id, the sender, the time and the words; the newest 20
+  are kept) and sends them alone a notification (kind `person`).
 
 The recipient's orchestrator shows who it is from and what it asks, in a line or two, and never acts, files work or
 answers on its own: its person decides, and it answers with the same tool only with what they say. A turn a
 `[person message]` starts is the harness's, not the person's, so the destructive tools stay closed in it. The dispatcher
 neither relays nor sees these messages.
+
+### The bubble over the message box (w1546)
+
+Messages between people got buried under the workers' and the dispatcher's updates (lothsahn, 2026-10-19: "we're
+missing chat messages to each other when there's a lot of stuff from you and we haven't checked our messages in a
+while"). So the unread ones stay in an amber bubble right over the recipient's message box
+(`web/src/components/PeopleMessages.tsx`), where they look to write, on a desktop and on a phone:
+
+- Folded, it says how many and from whom ("2 messages from Lothsahn"), with the newest one's start and time. A click
+  unfolds it: each message in full, its sender and time, **Show in chat** (to its notice in the conversation, while that
+  part is loaded) and **Clear**. **Clear all** is on the bar. The sidebar row keeps its count badge.
+- A message stays unread until its reader clears it there. Opening the chat, writing to it, and the orchestrator
+  relaying the message leave it unread. Before w1546, opening the chat read them all, unseen if the conversation had
+  moved on.
+- **Clearing only marks a message read.** It stays in the conversation, and the orchestrator already has it. The portal
+  never holds one back: `messagePerson` sends it into the orchestrator's input as it marks it
+  (`server/orchestrators.ts`), and `AgentSession.send` writes it to the transcript and pushes it straight to the
+  process (`server/sessions.ts`). So there is no undelivered message to cancel. The bubble's footnote says so.
+- A clear can be undone for 6 seconds (`UNDO_MS`) before the page tells the server
+  (`POST /api/sessions/:id/person-messages/read {ids}`, their own chat only). Leaving the chat carries a pending clear
+  out. Closing the page within those seconds leaves the message unread. Clear all names the messages the page showed,
+  so one that arrives meanwhile stays unread. The route without `ids` clears all.
+- It updates through the `session` event: a message from someone else appears at once, and one cleared in another tab
+  or on the phone goes. With nothing unread, the bubble is gone.
+
+What it leaves out, and why: a person's own messages to their orchestrator have no waiting state the portal could show
+or cancel. A message sent mid-turn or during a compaction is already in the process's input (`InputQueue`,
+`server/sessions.ts`). The persisted send queue (`data/send-queue.json`) never holds an orchestrator's message
+(`SessionManager.fullFor`). Those messages show in the conversation as soon as they are sent.
 
 ## Evidence and labels
 
