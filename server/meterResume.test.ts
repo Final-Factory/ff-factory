@@ -157,7 +157,8 @@ test('w1484: a carried conversation stays carried across later processes, never 
   assert.equal(m.resume(viaDisk(a.snapshot())), true);
   m.call({ id: 'b1', in: 1, out: 0, cr: 201_001, cw: 500 });
   const t = m.drain();
-  near(t.cats.carried.tok, 200_000 * 1, 3, 'its carried part is read as carried');
+  // the 200,000 read from the cache and the 1,000 written that nothing explains: the history written again (w1556)
+  near(t.cats.carried.tok, 201_000, 3, 'its carried part is read as carried');
   assert.ok((t.cats.base?.tok ?? 0) < 600, `base ${t.cats.base?.tok}`);
 });
 

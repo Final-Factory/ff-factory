@@ -13,8 +13,9 @@ import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun, dryRunStartRefusal } from './dryRun.ts';
 import { DANGEROUS_REMOVAL, tempDeletesWithin, tempOnlyDelete } from './tempDelete.ts';
 import { isRealModelId } from '../shared/models.ts';
-import { ContextMeter,IMAGE_CHARS, type Cumulative, type TurnUsage } from '../shared/spend.ts';
+import { ContextMeter, IMAGE_CHARS, MIN_BASE, type Cumulative, type MeterState, type TurnUsage } from '../shared/spend.ts';
 import type { MeterStates } from './meterStates.ts';
+import { CliTranscriptTail, cliTranscriptPath, rebuildMeter } from './cliTranscript.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
 export const MID_TURN: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
@@ -369,6 +370,11 @@ export class AgentSession implements SessionHandle {
   private readonly meter = new ContextMeter();
   /** The model call the meter's tally was last saved after (w1484): a call's later content blocks change nothing worth saving. */
   private meterSavedAt?: string;
+  /**
+   * Claude Code's own transcript of this process's conversation, read before each model call for what the stream never shows
+   * (w1556, server/cliTranscript.ts). `tail` once the file is found; a new conversation's file appears with its first message.
+   */
+  private cli?: { cwd: string; env: NodeJS.ProcessEnv; fromStart: boolean; misses: number; tail?: CliTranscriptTail };
   private readonly store: SessionSink;
   private readonly makeOptions: OptionsFactory;
   private readonly events: EventEmitter;
@@ -538,8 +544,16 @@ export class AgentSession implements SessionHandle {
     };
     this.tempDir = typeof options.env?.TMPDIR === 'string' ? options.env.TMPDIR : undefined;
     this.costBase = this.info.costUsd;
-    // The conversation goes on in a new process (w1484): its history stays in its categories when its tally was kept.
-    if (this.info.sdkSessionId) this.meter.resume(this.store.meters?.load(this.info.sdkSessionId));
+    // The conversation goes on in a new process (w1484): its history stays in its categories when its tally was kept, or is rebuilt
+    // from Claude Code's transcript when it was not (w1556). From here on the transcript's new lines say what the stream does not.
+    const sid = this.info.sdkSessionId;
+    const cwd = typeof options.cwd === 'string' ? options.cwd : process.cwd();
+    this.cli = { cwd, env: options.env ?? process.env, fromStart: !sid, misses: 0 };
+    if (sid) {
+      const file = cliTranscriptPath(cwd, sid, this.cli.env);
+      if (file) this.cli.tail = new CliTranscriptTail(file, false);
+      this.meter.resume(this.resumeState(sid, file));
+    }
     this.firstResult = true;
     // A new process: the last one's background tasks ended with it.
     this.backgroundTasks = 0;
@@ -657,6 +671,7 @@ export class AgentSession implements SessionHandle {
           if (isRealModelId(m.message.model) && m.message.model !== this.info.activeModel) this.update({ activeModel: m.message.model });
           const mid = (m.message as { id?: string }).id;
           if (mid) {
+            this.feedCli();
             this.meter.call({ id: mid, model: m.message.model, in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0, cw: u.cache_creation_input_tokens ?? 0, cw5: u.cache_creation?.ephemeral_5m_input_tokens ?? 0 });
             if (mid !== this.meterSavedAt) this.saveMeter(mid);
           }
@@ -767,6 +782,36 @@ export class AgentSession implements SessionHandle {
       ...(u ? { main: { in: u.input_tokens ?? 0, out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0, cw: u.cache_creation_input_tokens ?? 0 } } : {}),
       meter: this.drainMeter(),
     };
+  }
+
+  /**
+   * The tally a new process resumes the conversation from: the one the process before saved (w1484), or, when there is none or its
+   * base was never measured (the carried resumes before w1556: w1510's base sat at 2% and its unitemised at 37%), the conversation
+   * rebuilt from Claude Code's transcript (w1556). A meter that already holds the conversation keeps its own (resume ignores it).
+   */
+  private resumeState(sid: string, file: string | undefined): MeterState | undefined {
+    if (this.meter.started) return undefined;
+    const saved = this.store.meters?.load(sid);
+    if (saved && !saved.baseCarried && (saved.base ?? 0) >= MIN_BASE) return saved;
+    return rebuildMeter(file) ?? saved;
+  }
+
+  /** What Claude Code appended to its transcript since the last call, to the meter (w1556): before each model call. */
+  private feedCli() {
+    const c = this.cli;
+    const sid = this.info.sdkSessionId;
+    if (!c || !sid) return;
+    if (!c.tail) {
+      // a new conversation's transcript is written with its first message; three calls without it: another layout, give up
+      if (c.misses >= 3) return;
+      const file = cliTranscriptPath(c.cwd, sid, c.env);
+      if (!file) {
+        c.misses++;
+        return;
+      }
+      c.tail = new CliTranscriptTail(file, c.fromStart);
+    }
+    c.tail.feed(this.meter);
   }
 
   /** The turn's context reading; what the meter holds then is saved for the next process (w1484). */

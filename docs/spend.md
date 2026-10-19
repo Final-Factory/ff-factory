@@ -130,6 +130,53 @@ when the base is counted). The cuts fall inside transcripts of real processes, s
 prompt would send; a real resume's prompt can differ too (its git status), which the counting covers. After the deploy the check is
 `carried`'s share, and `resumed.by`, on the first resumed workers' turns.
 
+### What unitemised was (w1556)
+
+lothsahn: "Why is over half the cost on w1510 unitemized?" w1510's worker (29bac897, lothdesktop) read 37% of its $118 as
+`unitemised` and 2% as `base`; w1544's (a3b0bf2c, 2 turns) 10% and 14%. Three holes, each closed:
+
+- **A carried conversation lost its base for good.** A process that resumes with no saved tally (one that began before w1484, as
+  29bac897 did: its process was restarted onto new code at 2026-10-19 01:31Z, portal journal) sets its base to 0, because the base
+  is inside the carried history. A compaction then drops `carried` (the portal asked 29bac897 to compact at 02:28Z with 568k in context,
+  and three more times by 11:09Z), and the base stayed 0: every later call read the real base, ~55k tokens, as `unitemised`, and each later
+  process "counted" a base of a few thousand tokens against it. And on a cold cache (a resume after an hour's CI wait) the carried
+  history is written again, not read: only the read part was `carried`; the rewritten part went to `unitemised` and every later
+  call read it there. Now the rewritten history is `carried` too, a carried base waits for the next compaction, whose first call
+  holds only the base, the summary and what is new, and measures it (`MeterTurn.resumed.by` is `carried` until then), and a saved
+  tally with a base under `MIN_BASE` (8k tokens; a real one is 34k at p10) is measured again the same way. Better still, a process
+  that finds no tally rebuilds it from Claude Code's own transcript (`rebuildMeter`), so the history is in its categories and
+  there is no `carried` at all.
+- **What Claude Code adds out of the stream's view.** The SDK stream never shows the CLI's attachments, and its transcript
+  (`~/.claude/projects/<cwd>/<session id>.jsonl`, on the machine the agent runs on) records each before the call that reads it:
+  `total_tokens_reminder` on every call, `edited_text_file`, `diagnostics`, `date`, `environment` and the like (`reminder`), hook
+  output (`hook_success`, `hook_additional_context`, …: `hook`), the CLAUDE.md, skill and agent lists a resumed process sends again
+  (`base`), the task notifications and cross-session messages the CLI writes itself (`brief`), and the files and tasks a
+  compaction attaches beside its summary (`compact-carry`). AgentSession tails that file and feeds the meter before each model call
+  (server/cliTranscript.ts, `ContextMeter.attachment`). Records the CLI never sends (`prompt_snapshot`, `deferred_tools_record`,
+  `thinking_drop`) are skipped; the base a process's first call sends, and the one a compaction sends again, is in the base the
+  meter measures.
+- **What a compaction carries over** beside its summary (the newest messages it keeps, which no attachment names) is what the call
+  after it holds beyond the base, the summary and what is new: `compact-carry`, held and read as such afterwards.
+
+Replayed (measured, `scripts/meter-unitemised.ts` and the step-by-step run behind it, over beast's 121 worker transcripts of
+2026-10-17..19, $1,333 at list prices), unitemised as a share of the list-price dollars:
+
+| | tally kept (w1484) | first resume carried (as 29bac897's was) |
+|---|---|---|
+| before w1556 | 6.61% | 18.77% (carried 7.6%) |
+| + a carried history written again is carried, the base measured by a compaction | 6.61% | 6.11% (carried 19.6%) |
+| + the base sent again (`base`) | 5.71% | 5.53% |
+| + reminders (`reminder`, 2.2% of the money) | 4.25% | 4.14% |
+| + hook output (`hook`, 0.3%) | 4.03% | 3.93% |
+| + notices the CLI writes (`brief`, +1.4 points) | 2.96% | 2.98% |
+| + compaction attachments and carry-over (`compact-carry`, 0.1%) | **2.87%** | **2.98%** |
+
+With the tally rebuilt from the transcript a carried resume reads like a kept one (the left column). What is left, under 3%, is
+the error of the characters' estimate (2.3 characters a token is a fit over all content; reminders, JSON and code differ) and
+attachments whose rendered text has wrappers their fields do not show (estimated, not measured). A process whose transcript it
+cannot read (another layout of the projects folder, a CLI that writes none) goes on as before w1556. Turns recorded before the
+deploy keep their categories; a request's breakdown is right from the deploy on.
+
 ### Corrections to history (w1209)
 
 Two rules changed in the a9d5eae restart (2026-10-13 01:52:30 -06:00, `RULES_FROM_MS`), and the turns recorded before it by the old ones were wrong:
@@ -228,7 +275,7 @@ Claude Code reports how big each model call's context was (input, cache read, ca
 `ContextMeter` (shared/spend.ts) shares each call's real token counts among the kinds of content the context holds, by characters:
 cache reads go to what was in the context before the call, cache writes and uncached input to what is new since the previous
 call, output tokens to the agent's own text. The agent's own output (thinking included) is carried in the next call's
-context exactly (the fit below: 1.01 tokens per output token), so it is counted by tokens, not characters. What no content explains is `base` (on a resumed conversation, `carried`: the context the process never saw built)
+context exactly (the fit below: 1.01 tokens per output token), so it is counted by tokens, not characters. What no content explains is `base` (on a resumed conversation, `carried`: the context the process never saw built; since w1556 the attachments Claude Code adds out of view come from its transcript: "What unitemised was")
 (the system prompt, tool definitions, CLAUDE.md, skill lists, reminders). Categories come from what the week's tool results held
 (`toolKind`): `file-read` (Read, `sed -n`, `cat`, `head`), `reread` (a range of a file already read in the session; `afterCompact`
 when the summary dropped it), `search`, `git`, `ci-poll` (`gh pr checks`, `gh run`, `sleep`/`until` loops, Monitor, wake_me),
