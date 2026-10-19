@@ -146,6 +146,25 @@ export function librarySource(
   return pick ? path.join(pick.path, 'Library') : undefined;
 }
 
+/** What `git lfs dedup` did in a worktree: the bytes it made clones of the LFS store, or why it did nothing. */
+export type LfsDedup = { bytes: number } | { skipped: string };
+
+/**
+ * Re-create a worktree's Git LFS files as copy-on-write clones of the clone's LFS store (`git lfs dedup`, w1576). A checkout
+ * smudges every LFS file into a full copy: 9.1 GB of each game worktree on lothdesktop, its proof videos, art and FMOD audio
+ * (5,026 files; the dedup took 9 s there, measured 2026-10-19). git-lfs does nothing where the file system cannot clone (NTFS,
+ * ext4) and refuses a worktree with any uncommitted or untracked change. Never throws.
+ */
+export async function lfsDedup(git: PoolDeps['git'], dir: string, signal?: AbortSignal): Promise<LfsDedup> {
+  const res = await git(['-C', dir, 'lfs', 'dedup'], { timeoutMs: 10 * 60_000, signal }).catch((e: Error) => ({ code: -1, stdout: '', stderr: e.message }));
+  if (res.code !== 0) return { skipped: tail(res.stderr || res.stdout) || `exit ${res.code}` };
+  const m = /De-duplicated\s+size:\s*(\d+)\s*bytes/i.exec(res.stdout + res.stderr);
+  return { bytes: m ? Number(m[1]) : 0 };
+}
+
+/** The log's words for an lfsDedup result. */
+export const lfsDedupWords = (r: LfsDedup) => ('bytes' in r ? `LFS files shared with the store: ${(r.bytes / 1024 ** 3).toFixed(1)} GB` : `LFS dedup skipped (${r.skipped})`);
+
 /** A Library folder with something in it (a clone that never opened Unity has none, or an empty one). */
 export function hasLibrary(dir: string): boolean {
   return nonEmpty(path.join(dir, 'Library'));
@@ -430,6 +449,8 @@ export class SandboxPool {
       step(`checking out ${r.branch}`);
       const co = await this.d.git(['-C', r.path, 'reset', '--hard', '--quiet'], { timeoutMs: 60 * 60_000, signal });
       if (co.code !== 0) throw new Error(`checkout failed (${co.code}): ${tail(co.stderr || co.stdout)}`);
+      step('sharing the LFS files with the clone (git lfs dedup)');
+      this.o.log?.(`sandbox ${r.id}: ${lfsDedupWords(await lfsDedup(this.d.git, r.path, signal))}`);
       if (seedLibrary && !fs.existsSync(path.join(r.path, 'Library'))) {
         const others = [...this.recs.values()].filter((x) => x.id !== r.id).map((x) => ({ path: x.path, status: x.status, editorUp: this.editorUp(x.id) }));
         const settings = this.need();
@@ -604,8 +625,11 @@ export class SandboxPool {
       try {
         res = await Promise.race([
           (async () => {
-            const t = await (this.o.trimmer ?? trimLibraryCaches)(r.path, policy, { signal: ac.signal });
-            if (t.skipped || t.stopped || ac.signal.aborted || !this.o.releaseSweep) return t;
+            let t = await (this.o.trimmer ?? trimLibraryCaches)(r.path, policy, { signal: ac.signal });
+            if (t.skipped || t.stopped || ac.signal.aborted) return t;
+            // The LFS files a branch switch or merge smudged into full copies since, shared again (w1576); a clean worktree only.
+            if (!projectOpen(r.path)) t = { ...t, lfs: await lfsDedup(this.d.git, r.path, ac.signal) };
+            if (ac.signal.aborted || !this.o.releaseSweep) return t;
             // The released sandbox's own build and capture output (w913); a failure here must not fail the trim.
             const swept = await this.o.releaseSweep(r.path).catch((e: Error) => {
               this.o.log?.(`sandbox ${id}: release sweep failed: ${e.message}`);
@@ -625,7 +649,7 @@ export class SandboxPool {
         if (this.recs.get(id) === r && r.status === 'cleanup') this.changed(r, { status: 'ready', statusDetail: undefined });
       }
       const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} GB`;
-      const line = `sandbox ${id}: Library cache trim (${why}): removed ${res.files} files, ${gb(res.removedBytes)}, kept ${gb(res.keptBytes)}${res.swept ? `; build and capture output: ${res.swept.files} entries, ${gb(res.swept.bytes)}` : ''}${res.stopped ? `; stopped early (${res.stopped}), handed back as it is` : ''}${res.skipped ? `; skipped (${res.skipped})` : ''}`;
+      const line = `sandbox ${id}: Library cache trim (${why}): removed ${res.files} files, ${gb(res.removedBytes)}, kept ${gb(res.keptBytes)}${res.lfs ? `; ${lfsDedupWords(res.lfs)}` : ''}${res.swept ? `; build and capture output: ${res.swept.files} entries, ${gb(res.swept.bytes)}` : ''}${res.stopped ? `; stopped early (${res.stopped}), handed back as it is` : ''}${res.skipped ? `; skipped (${res.skipped})` : ''}`;
       this.o.log?.(line);
       if (res.stopped) this.o.onEvent({ text: line, sandbox: id });
       return res;
