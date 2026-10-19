@@ -41,7 +41,9 @@
     "effort": "medium",
     "notifyOnWorkerEvents": true,
     "compactAtTokens": 200000,
-    "compactAtTurnUsd": 1
+    "compactAtTurnUsd": 1,
+    "compactIdleSeconds": 120,
+    "compactHardAtTokens": 100000
   },
   "worker": {
     "permissionMode": "bypassPermissions",
