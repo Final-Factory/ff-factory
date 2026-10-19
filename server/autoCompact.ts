@@ -7,6 +7,16 @@
 // context at 100,000 tokens or more, with Claude Code's own /compact and a focus that keeps what is still open. An
 // orchestrator may also ask for it itself (compact_conversation), which runs after its turn the same way.
 //
+// QUIET FIRST (w1538, lothsahn: "compact when it's above 80k and there have been no messages in 2 minutes? That way you're
+// less likely to compact when we're trying to send a message? You should compact at 100k no matter what."). Under
+// orchestrator.compactHardAtTokens (default 100,000) an orchestrator due by its context or a turn's cost compacts only
+// once its conversation has been quiet for orchestrator.compactIdleSeconds (default 120): no turn has ended, and none is
+// running or waiting, for that long. Every message, a person's or the harness's, opens a turn, so anything that arrives
+// starts the wait again from that turn's end. At the hard threshold it compacts at the turn's end, as before. A hard
+// threshold at or under compactAtTokens, or 0 seconds, compacts at once, as before w1538. The wait is this file's own
+// per-session timer, and its clock is the session's saved lastResultAt, so a portal restart loses nothing: the next turn's
+// end (a stopped orchestrator is never started just to compact) arms it again.
+//
 // Workers too (w1469, lothsahn: "Build 1, 2 and 4: compact at ~200k, compact before long waits, trim the base"): a worker
 // compacts between turns once its context passes worker.compactAtTokens (200,000), and right after a turn that ends in a
 // long wait (a person, another request, a merge, a deploy, a check-in an hour away) once it passes
@@ -23,7 +33,13 @@ import { COMPACT_FOCUS_CHARS, isMidTurn, type AutoCompaction, type SessionHandle
 export const AUTO_COMPACT_DEFAULTS = { atTokens: 200_000, atTurnUsd: 1 } as const;
 
 /** What set_app_config accepts for them, besides 0 (off). */
-export const AUTO_COMPACT_LIMITS = { minTokens: 50_000, maxTokens: 900_000, minTurnUsd: 0.05, maxTurnUsd: 50 } as const;
+export const AUTO_COMPACT_LIMITS = { minTokens: 50_000, maxTokens: 900_000, minTurnUsd: 0.05, maxTurnUsd: 50, maxIdleSeconds: 3600 } as const;
+
+/**
+ * The quiet wait's defaults (w1538): under hardAtTokens an orchestrator due for a compaction waits for idleSeconds without
+ * a turn first; at hardAtTokens or more it compacts at the turn's end.
+ */
+export const QUIET_COMPACT_DEFAULTS = { idleSeconds: 120, hardAtTokens: 100_000 } as const;
 
 /**
  * Below this context the cost trigger waits: a compaction cost about $0.17 at 276k tokens (measured, Lothsahn's /compact
@@ -94,12 +110,34 @@ export const DISPATCHER_FOCUS =
 export interface AutoCompactSettings {
   atTokens: number;
   atTurnUsd: number;
+  /** The quiet wait (w1538), seconds; 0 is none. Absent (a worker's): none. */
+  idleSeconds?: number;
+  /** From this context on, no quiet wait (w1538); at or under atTokens (or 0), never a quiet wait. */
+  hardAtTokens?: number;
 }
 
-/** The thresholds in force (config orchestrator.compactAtTokens / compactAtTurnUsd; 0 is off). */
+/** The thresholds in force (config orchestrator.compactAtTokens / compactAtTurnUsd / compactIdleSeconds / compactHardAtTokens; 0 is off). */
 export function autoCompactSettings(cfg: Pick<Config, 'orchestrator'>): AutoCompactSettings {
   const n = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d);
-  return { atTokens: n(cfg.orchestrator?.compactAtTokens, AUTO_COMPACT_DEFAULTS.atTokens), atTurnUsd: n(cfg.orchestrator?.compactAtTurnUsd, AUTO_COMPACT_DEFAULTS.atTurnUsd) };
+  const o = cfg.orchestrator;
+  return {
+    atTokens: n(o?.compactAtTokens, AUTO_COMPACT_DEFAULTS.atTokens),
+    atTurnUsd: n(o?.compactAtTurnUsd, AUTO_COMPACT_DEFAULTS.atTurnUsd),
+    idleSeconds: n(o?.compactIdleSeconds, QUIET_COMPACT_DEFAULTS.idleSeconds),
+    hardAtTokens: n(o?.compactHardAtTokens, QUIET_COMPACT_DEFAULTS.hardAtTokens),
+  };
+}
+
+/**
+ * How many ms more this orchestrator, due for an automatic compaction, waits for quiet (w1538); 0: compact now. No wait at
+ * hardAtTokens or more, nor when hardAtTokens is at or under atTokens or idleSeconds is 0 (as before w1538). `quietSince`:
+ * when its last turn ended (ms), undefined when unknown (no wait then: nothing says it was busy).
+ */
+export function quietWaitMs(info: Pick<SessionInfo, 'contextTokens'>, s: AutoCompactSettings, quietSince: number | undefined, now: number): number {
+  const idleMs = (s.idleSeconds ?? 0) * 1000;
+  const hard = s.hardAtTokens ?? 0;
+  if (idleMs <= 0 || hard <= s.atTokens || (info.contextTokens ?? 0) >= hard || quietSince === undefined || !Number.isFinite(quietSince)) return 0;
+  return Math.max(0, quietSince + idleMs - now);
 }
 
 const num = (n: number) => n.toLocaleString('en-US');
@@ -149,6 +187,8 @@ export class AutoCompactor {
   /** When each session's last automatic compaction started: one that did not finish holds the next for RETRY_AFTER_MS. */
   private readonly attempts = new Map<string, number>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
+  /** When each session's last turn ended, as seen here (w1538's quiet clock; after a restart, its saved lastResultAt). */
+  private readonly turnEnded = new Map<string, number>();
   private readonly settleMs: number;
   private readonly sessions: SessionManager;
   private readonly cfg: Pick<Config, 'orchestrator'> & Partial<Pick<Config, 'worker'>>;
@@ -161,13 +201,15 @@ export class AutoCompactor {
     this.settleMs = opts.settleMs ?? SETTLE_MS;
     this.waitsLong = opts.waitsLong ?? (() => undefined);
     sessions.events.on('turnEnd', (s: SessionHandle, _text: string, meta?: TurnEndMeta) => {
-      if ((s.info.kind !== 'orchestrator' && s.info.kind !== 'worker') || meta?.compaction) return;
+      if (s.info.kind !== 'orchestrator' && s.info.kind !== 'worker') return;
+      this.turnEnded.set(s.info.id, Date.now());
+      if (meta?.compaction) return;
       this.soon(s.info.id);
     });
   }
 
-  /** Check this session after SETTLE_MS (a later turn end moves it). */
-  private soon(id: string) {
+  /** Check this session after SETTLE_MS, or `ms` (a later turn end moves it: the quiet wait starts again, w1538). */
+  private soon(id: string, ms = this.settleMs) {
     clearTimeout(this.timers.get(id));
     const t = setTimeout(() => {
       this.timers.delete(id);
@@ -176,7 +218,7 @@ export class AutoCompactor {
       } catch (e) {
         console.warn(`auto-compact ${id}: ${(e as Error).message}`);
       }
-    }, this.settleMs);
+    }, ms);
     t.unref?.();
     this.timers.set(id, t);
   }
@@ -202,6 +244,16 @@ export class AutoCompactor {
     const tried = this.attempts.get(id);
     const finished = tried !== undefined && s.info.lastCompaction && Date.parse(s.info.lastCompaction.at) >= tried;
     if (due.trigger !== 'self' && tried !== undefined && !finished && now - tried < RETRY_AFTER_MS) return 'not now: the last automatic compaction did not finish; it is tried again later';
+    if (!worker && due.trigger !== 'self') {
+      // w1538: under the hard threshold, only after a quiet spell. A turn that ends meanwhile checks again and starts it over.
+      const s2 = autoCompactSettings(this.cfg);
+      const since = Math.max(this.turnEnded.get(id) ?? -Infinity, s.info.lastResultAt ? Date.parse(s.info.lastResultAt) || -Infinity : -Infinity);
+      const wait = quietWaitMs(s.info, s2, since, now);
+      if (wait > 0) {
+        this.soon(id, wait);
+        return `not yet: ${due.reason}; it compacts after ${s2.idleSeconds} s without a turn (${Math.ceil(wait / 1000)} s more), or at once from ${num(s2.hardAtTokens!)} tokens`;
+      }
+    }
     const dispatcher = s.info.orchestratorRole === 'dispatcher' || (!s.info.orchestratorRole && !s.info.requestedBy);
     const focus = asked || (worker ? WORKER_FOCUS : dispatcher ? DISPATCHER_FOCUS : PERSONAL_FOCUS);
     this.requested.delete(id);

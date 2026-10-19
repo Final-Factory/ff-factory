@@ -272,7 +272,8 @@ export interface Config {
      * The Claude token pool's limits (w739, docs/vault.md section 4), one system-wide set that anyone can change with
      * set_app_config: sessionHoldPercent (80), onePerWeeklyPercent (95), retireWeeklyPercent (99), reservePerDayPercent
      * (5: the dispatcher's token keeps this per day left until its weekly reset), reserveSessionPercent (20) and
-     * dispatcherStopPercent (95: either meter of the dispatcher's token at or above it stops its workers, w1109).
+     * dispatcherStopPercent (95: either meter of the dispatcher's token at or above it stops its workers, w1109),
+     * nearResetHours (12: the near-reset rule's window before a token's weekly reset, 0 off, w1539) and nearResetFloorTokens (1).
      */
     pool?: PoolConfig;
   };
@@ -430,6 +431,17 @@ export interface Config {
      * 100,000 tokens or more, compacts the conversation after it. Default 1; 0 turns this trigger off.
      */
     compactAtTurnUsd?: number;
+    /**
+     * The quiet wait (w1538, server/autoCompact.ts): under compactHardAtTokens, a compaction that is due waits until the
+     * conversation has had no turn for this many seconds; a message (a person's or the harness's) starts it again.
+     * Default 120; 0 compacts at once. Settable live (set_app_config).
+     */
+    compactIdleSeconds?: number;
+    /**
+     * From this context on (tokens) the compaction runs at the turn's end with no quiet wait (w1538). Default 100,000; at
+     * or under compactAtTokens, or 0, there is never a quiet wait. Settable live (set_app_config).
+     */
+    compactHardAtTokens?: number;
     /** Tests only (e2e/server.ts): how long after a turn's end the automatic compaction checks, ms (default 2,000, SETTLE_MS). */
     compactSettleMs?: number;
     /**

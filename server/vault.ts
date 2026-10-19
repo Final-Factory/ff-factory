@@ -4,7 +4,7 @@ import path from 'node:path';
 import { checkObject, readJsonDurable } from './durable.ts';
 import { withFileLock, writeJsonOwned } from './machineTokens.ts';
 import type { PlanUsage, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultStatus, WorkItem } from '../shared/types.ts';
-import { POOL_DEFAULTS, byScore, pickPool, judge, reserveOf, type PoolLimits, type PoolToken, type PoolView } from './tokenPool.ts';
+import { POOL_DEFAULTS, pickOrder, pickPool, reserveOf, type PoolLimits, type PoolToken, type PoolView } from './tokenPool.ts';
 
 /**
  * The token vault (docs/vault.md, w512): the secrets worker runs need, kept by the portal, encrypted value by value with a
@@ -740,10 +740,11 @@ export class Vault {
     const out = new Map<string, { entry: VaultEntryMeta; view: PoolView; live: number; priority: boolean }[]>();
     for (const [person, list] of tokens) {
       // `priority`: the token a new worker would get now (w979), at most one per pool; none when nothing may serve a worker.
-      const first = pickPool(list.map((x) => x.t), { orchestrator: false, limits, now }).token?.id;
-      // Listed in the order the picker uses: the best score first.
-      const order = byScore(now);
-      out.set(person, [...list].sort((a, b) => order(a.t, b.t)).map(({ e, t }) => ({ entry: this.meta(e), view: judge(t, limits, now), live: t.others, priority: t.id === first })));
+      const pick = pickPool(list.map((x) => x.t), { orchestrator: false, limits, now });
+      const first = pick.token?.id;
+      // Listed in the order the picker uses, with the states it read (the near-reset rule needs the whole pool, w1539).
+      const order = pickOrder(list.map((x) => x.t), pick.views, now);
+      out.set(person, [...list].sort((a, b) => order(a.t, b.t)).map(({ e, t }) => ({ entry: this.meta(e), view: pick.views.get(t.id)!, live: t.others, priority: t.id === first })));
     }
     return out;
   }

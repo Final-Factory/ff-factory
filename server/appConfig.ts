@@ -11,7 +11,7 @@ import { writeFileDurable } from './durable.ts';
 import { placeId } from './placement.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
-import { poolLimits } from './tokenPool.ts';
+import { poolLimits, poolSettingProblem, type PoolConfigKey } from './tokenPool.ts';
 import { AUTO_COMPACT_LIMITS } from './autoCompact.ts';
 
 /**
@@ -65,6 +65,9 @@ export const SETTABLE_KEYS = [
   'vault.pool.reserveSessionPercent',
   // The dispatcher token's stop line (w1109): its workers are asked to save and stop, and no new one starts on it.
   'vault.pool.dispatcherStopPercent',
+  // The near-reset rule (w1539): its window in hours before a token's weekly reset (0: off), and the burst floor in tokens.
+  'vault.pool.nearResetHours',
+  'vault.pool.nearResetFloorTokens',
   // Who automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to.
   'systemPayer',
   // Files people attach to messages (docs/attachments.md): the largest one, and how long one nobody sends on is kept.
@@ -102,6 +105,9 @@ export const SETTABLE_KEYS = [
   // tokens, and a turn's cost in USD. 0 turns either trigger off.
   'orchestrator.compactAtTokens',
   'orchestrator.compactAtTurnUsd',
+  // The quiet wait before a due compaction, in seconds, and the context from which there is none (w1538).
+  'orchestrator.compactIdleSeconds',
+  'orchestrator.compactHardAtTokens',
   // Workers' automatic compaction (w1469): the context in tokens, the context before a long wait, and the pilot's share.
   'worker.compactAtTokens',
   'worker.compactBeforeWaitTokens',
@@ -456,6 +462,14 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (key === 'vault.pool.retireWeeklyPercent' && n < now.onePerWeekly) throw new Error(`${key} (${n}) cannot be below vault.pool.onePerWeeklyPercent (${now.onePerWeekly}): one at a time starts before a token is retired`);
       return n;
     }
+    case 'vault.pool.nearResetHours':
+    case 'vault.pool.nearResetFloorTokens': {
+      // The near-reset rule (w1539): hours from 0 (off) to 168, and a whole number of tokens from 0 to 10.
+      const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+      const why = poolSettingProblem(key.slice('vault.pool.'.length) as PoolConfigKey, n);
+      if (why) throw new Error(why.replace('config vault.pool.', 'vault.pool.'));
+      return n as number;
+    }
     case 'attachments.maxMB': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 4096) throw new Error('attachments.maxMB is a whole number of megabytes from 1 to 4096');
@@ -466,6 +480,12 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (!Number.isInteger(n) || (n !== 0 && (n < AUTO_COMPACT_LIMITS.minTokens || n > AUTO_COMPACT_LIMITS.maxTokens))) throw new Error(`orchestrator.compactAtTokens is 0 (off) or a whole number of tokens from ${AUTO_COMPACT_LIMITS.minTokens.toLocaleString('en-US')} to ${AUTO_COMPACT_LIMITS.maxTokens.toLocaleString('en-US')}`);
       return n;
     }
+    case 'orchestrator.compactIdleSeconds': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 0 || n > AUTO_COMPACT_LIMITS.maxIdleSeconds) throw new Error(`orchestrator.compactIdleSeconds is 0 (compact at once) or a whole number of seconds up to ${AUTO_COMPACT_LIMITS.maxIdleSeconds.toLocaleString('en-US')}`);
+      return n;
+    }
+    case 'orchestrator.compactHardAtTokens':
     case 'worker.compactAtTokens':
     case 'worker.compactBeforeWaitTokens': {
       const n = Number(value);
@@ -812,6 +832,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'orchestrator.compactAtTokens') cfg.orchestrator = { ...cfg.orchestrator, compactAtTokens: v as number | undefined };
   else if (key === 'worker.compactAtTokens' || key === 'worker.compactBeforeWaitTokens' || key === 'worker.compactPilotPercent' || key === 'worker.terseProsePilotPercent') cfg.worker = { ...cfg.worker, [key.slice('worker.'.length)]: v as number | undefined };
   else if (key === 'orchestrator.compactAtTurnUsd') cfg.orchestrator = { ...cfg.orchestrator, compactAtTurnUsd: v as number | undefined };
+  // Live: the automatic compaction reads them at each check (autoCompactSettings).
+  else if (key === 'orchestrator.compactIdleSeconds' || key === 'orchestrator.compactHardAtTokens') cfg.orchestrator = { ...cfg.orchestrator, [key.slice('orchestrator.'.length)]: v as number | undefined };
   else if (key === 'orchestrator.filingsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, filingsPerMessage: v as number | undefined };
   else if (key === 'orchestrator.followUpsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, followUpsPerMessage: v as number | undefined };
   else if (key === 'orchestrator.messagesPerPerson') cfg.orchestrator = { ...cfg.orchestrator, messagesPerPerson: v as number | undefined };

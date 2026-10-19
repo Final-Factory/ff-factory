@@ -7,6 +7,7 @@ import { OWNER_ONLY_KEYS, SETTABLE_KEYS, checkReviewers, normalizeSetting, setAp
 import { githubFromVault } from './githubTokens.ts';
 import { FFBOX_HASH_FILE, ffboxTokenHash } from './configMigration.ts';
 import { tokenSha256 } from './providerProtocol.ts';
+import { autoCompactSettings } from './autoCompact.ts';
 import type { Config } from './config.ts';
 
 const setup = (t: { after: (fn: () => void) => void }) => {
@@ -118,6 +119,25 @@ test('app config: orchestrator.compactAtTokens and compactAtTurnUsd (w535), live
   for (const bad of ['0.01', '51', 'cheap']) assert.throws(() => setAppConfig(file, full, 'orchestrator.compactAtTurnUsd', bad), /0 \(off\) or a cost in USD from 0.05 to 50/, bad);
   setAppConfig(file, full, 'orchestrator.compactAtTurnUsd', null);
   assert.equal(full.orchestrator.compactAtTurnUsd, undefined, 'null: back to the default ($1)');
+});
+
+test('app config: orchestrator.compactIdleSeconds and compactHardAtTokens (w1538), live, bounded, null back to the default', (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg, orchestrator: { model: 'opus', effort: 'medium', notifyOnWorkerEvents: true, compactAtTokens: 80_000 } } as unknown as Config;
+  setAppConfig(file, full, 'orchestrator.compactIdleSeconds', '90');
+  setAppConfig(file, full, 'orchestrator.compactHardAtTokens', 150_000);
+  assert.deepEqual(full.orchestrator, { model: 'opus', effort: 'medium', notifyOnWorkerEvents: true, compactAtTokens: 80_000, compactIdleSeconds: 90, compactHardAtTokens: 150_000 }, 'applies at once, the rest kept');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).orchestrator, { compactIdleSeconds: 90, compactHardAtTokens: 150_000 });
+  assert.deepEqual(autoCompactSettings(full), { atTokens: 80_000, atTurnUsd: 1, idleSeconds: 90, hardAtTokens: 150_000 }, 'the compactor reads them at its next check');
+  setAppConfig(file, full, 'orchestrator.compactIdleSeconds', 0);
+  assert.equal(full.orchestrator.compactIdleSeconds, 0, '0: compact at once');
+  setAppConfig(file, full, 'orchestrator.compactHardAtTokens', 0);
+  assert.equal(full.orchestrator.compactHardAtTokens, 0, '0: never a quiet wait');
+  for (const bad of ['-1', '3601', '1.5', 'soon']) assert.throws(() => setAppConfig(file, full, 'orchestrator.compactIdleSeconds', bad), /0 \(compact at once\) or a whole number of seconds up to 3,600/, bad);
+  for (const bad of ['49999', '900001', '1.5', 'lots']) assert.throws(() => setAppConfig(file, full, 'orchestrator.compactHardAtTokens', bad), /orchestrator.compactHardAtTokens is 0 \(off\) or a whole number of tokens from 50,000 to 900,000/, bad);
+  setAppConfig(file, full, 'orchestrator.compactIdleSeconds', null);
+  setAppConfig(file, full, 'orchestrator.compactHardAtTokens', null);
+  assert.deepEqual(autoCompactSettings(full), { atTokens: 80_000, atTurnUsd: 1, idleSeconds: 120, hardAtTokens: 100_000 }, 'null: back to the defaults');
 });
 
 test('app config: the orchestrators’ loop guards (w571), live, 1 to 100', (t) => {
