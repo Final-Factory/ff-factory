@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { FFFCTL_FORMS, OPS_FFFCTL, OPS_PATHS, checkOpsShell } from './opsWorker.ts';
+import { FFFCTL_CONF_SECRET_NAME, FFFCTL_FORMS, OPS_FFFCTL, OPS_PATHS, checkOpsShell } from './opsWorker.ts';
 
 /**
  * The orchestration worker may run every read-only part of every fffctl command (Lothsahn, 2026-10-09, w745: "anytime a new
@@ -79,6 +79,16 @@ test("the server's guard lets through every allowed form and refuses every chang
       for (const c of f.changes.filter((x) => !(f.ops ?? []).includes(x))) assert.match(shell(`fffctl ${cmd} ${c}`) ?? '', /a person's/, `fffctl ${cmd} ${c}`);
     }
   }
+});
+
+test('fffctl conf (w1537): the guard and fffctl refuse the same secret names, and a setting passes the guard', () => {
+  const bash = /^CONF_SECRET_NAME='([^']+)'$/m.exec(fffctl);
+  assert.ok(bash, 'no CONF_SECRET_NAME in fffctl');
+  assert.equal(FFFCTL_CONF_SECRET_NAME.source, bash[1], 'FFFCTL_CONF_SECRET_NAME (server/opsWorker.ts) and fffctl CONF_SECRET_NAME differ');
+  for (const ok of ['fffctl conf', 'fffctl conf get', 'fffctl conf get HEALTH_START_GRACE_SEC', 'fffctl conf set HEALTH_START_GRACE_SEC 300', "fffctl conf set UPDATE_VERIFY_SEC ''"]) {
+    assert.equal(shell(ok), undefined, ok);
+  }
+  assert.ok(/^\s+conf\)$/m.test(priv), 'fff-ops-priv has no conf case');
 });
 
 test('fff-ops-priv has a case for exactly the commands the guard lets through, and refuses the rest', () => {

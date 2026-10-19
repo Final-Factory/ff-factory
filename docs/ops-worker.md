@@ -250,6 +250,7 @@ process of the portal: it would get the portal's account and everything that acc
 | read the portal's state | `fff-ops-priv` (`status`, `state`, `config [--check]`, `units [--check]`, `logs N` redacted, `machine-ssh --check`, `credential list`) and the read-only tools `list_machines`, `list_sandboxes` and `system_status` |
 | read the vault, machine credentials and the migration's usage (w745) | `fffctl vault list` (the entries: name, kind, env, last four characters, a 12-character fingerprint of the value's hash, grants and the Claude pools' meters), `fffctl vault list --names`, `fffctl vault help`, `fffctl machine-credential list` (the same as `credential list`) and `fffctl migrate --help`. `fff-ops-priv` passes exactly these forms. Never a value: `vault list` shows what `show` in `server/vaultCli.ts` shows anyone who runs it, and there is no `vault get`. Every other vault form (`init`, `export-key`, `add`, `add-claude`, `put`, `rotate`, `grant`, `remove`, `rename`, `new-key`, and `export`, the one that prints a value, root to root for the FFBox host's nightly copy: docs/vault.md section 12), `machine-credential issue` and `revoke`, and every `migrate` mode stay a person's |
 | read the portal's config and check it holds no secret (w1078) | `fffctl config` and `fffctl config --check` (`fff-ops-priv config`, `FFFCTL_FORMS` in `server/opsWorker.ts`; exactly these two forms, anything else is refused with exit 2). `fffctl config` prints config.json as `jq` (`cmd_config`, `deploy/vm/guest/fffctl`): every setting, a value that looks like a secret as "[not shown]", the retired keys left out, so even a config the new release has not started on shows none. `fffctl config --check` (`config_check`) says, by key names and last four characters only, whether config.json and each saved version beside it hold a secret, FFBox's connector hash file (its path, mode and owner, last four characters; missing or not `0600` counts as a failure), and whether the retired Claude token file is gone; it exits 1 while a file holds a secret or the hash file is wrong. Changing a setting is not the worker's: it reports it. The checklist for the w1078 deploy is [accounts.md](accounts.md), "After the w1078 deploy: the check" |
+| read and change the VM's own settings, `/etc/fff/fff.conf`, when a person asks (w1537) | `fffctl conf`, `fffctl conf get KEY` and `fffctl conf set KEY VALUE` (`fff-ops-priv conf`; `FFFCTL_FORMS.conf` in `server/opsWorker.ts`). [fff.conf settings](#fffconf-settings-w1537) below: what it refuses and why, what it prints, and when each setting takes effect |
 | count the permission prompts people answered (w1097) | `fffctl approvals [--since YYYY-MM-DD] [--split YYYY-MM-DD]` (`fff-ops-priv approvals`, `FFFCTL_FORMS` in `server/opsWorker.ts`; only those two options, each once, each with a date, anything else is refused with exit 2). `cmd_approvals` (`deploy/vm/guest/fffctl`) runs the current release's `scripts/cleanup-approvals.ts` over the portal's transcripts as the portal's account, so the worker reads no transcript and runs no `node` itself (its guard refuses both). It prints counts only: per day the prompts a person answered and the clean-up ones by kind, then every prompt by kind before and after the split day (UTC): Claude Code's reason when the transcript kept one (from w1097 on), the command's shape before; a reason is shown only as its leading plain words (`reasonWords`), never a command, a path or a value. The before-and-after number for a change meant to drop prompts (w913, w1097). Tests: `scripts/cleanup-approvals.test.ts` (nothing from a transcript is printed), `server/configAccess.test.ts`, `deploy/vm/test/fff-ops.test.sh` |
 | read the portal's critical units (w743) | `fffctl units` and `fffctl units --check` (its PATH's `fffctl` is `sudo -n fff-ops-priv`; the worker types no `sudo`, which its guard refuses). Both are `fffctl units` as root and read only: every critical unit's active and enabled state, the watchdog's verdict and its last restarts; `--check` prints `down: unit=state ...` and exits 1 when one is not active and enabled, else prints that every unit is and exits 0. `fff-ops-priv` passes exactly those two forms: `units --fix`, `units --check extra`, any other word and every `fffctl watchdog` form (run, pause, resume, reset) are refused with exit 2, and the unit restarts stay a person's. CI runs the allowed and refused forms against a fake `fffctl` (`deploy/vm/test/fff-ops.test.sh`) |
 | see the portal's ssh to the machines and its public key line (w676) | `fff-machine-ssh --check` and `--key` (its PATH's `fff-machine-ssh` is `sudo -n fff-ops-priv machine-ssh`): `fff-ops-priv` runs `/usr/local/lib/fff/fff-machine-ssh` as `fff` with the installed `machines.ssh`. It prints `id_ed25519.pub` and never reads the private key; CI looks for the private key in its output |
@@ -261,7 +262,7 @@ process of the portal: it would get the portal's account and everything that acc
 | It may not | Enforced by |
 |---|---|
 | read the portal's data, secrets or keys, or its config except through `fffctl config` (w1078) | Unix permissions: `/srv/fff` is 0700 `fff`, and `/etc/fff/vault.key` is root's. The guard also refuses these paths with a reason, and refuses `/proc/*/environ` |
-| roll back the portal; change settings; change the vault, tokens or migrations; backups or shutdown; pause, run or reset the watchdog | `fff-ops-priv` has none of those subcommands (it has `vault`, `machine-credential` and `migrate` only for their read-only forms, above), and sudoers allows nothing else as root. The guard refuses `fffctl rollback` and the like with a reason |
+| roll back the portal; change config.json settings, or the fff.conf settings `fffctl conf` refuses; change the vault, tokens or migrations; backups or shutdown; pause, run or reset the watchdog | `fff-ops-priv` has none of those subcommands (it has `vault`, `machine-credential` and `migrate` only for their read-only forms, above), and sudoers allows nothing else as root. The guard refuses `fffctl rollback` and the like with a reason |
 | deploy the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own | `fff-ops-priv update` runs only with the grant the portal writes into its data folder on `ops_worker deploy`, which the server allows only in the person's own turn. `fff-ops` cannot write that folder (0700 `fff`), so it cannot make a grant. The grant is good for 15 minutes and is removed before the update runs, so it works once |
 | restart the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own (w974) | `fff-ops-priv restart` runs only with the grant the portal writes into its data folder (`ops-restart.grant`, its own file: a deploy grant does not open it, nor it a deploy) on `ops_worker restart`, which the server allows only in the person's own turn. Same rules as the deploy's grant: 15 minutes, once, removed before the restart is asked for, owned by `fff`. It takes no option (`--no-drain` and a drain time are refused) and is refused unless `machines.keepAgentsOnRestart` is on, so it is always the soft restart that leaves the machines' workers running |
 | copy the portal's secrets or keys off the VM | scp and sftp run as `fff-ops`, which cannot read `/srv/fff` (0700 `fff`) or `/etc/fff/vault.key` (root's): CI copies each of them and gets "Permission denied". `fff-ops-ssh` runs as `fff` but never sees a local path: it only carries the stream. The guard refuses those paths in an scp or sftp command (relative ones too) |
@@ -725,6 +726,51 @@ Residual risks, and what bounds each:
 - **The network allowlist is by address.** If Anthropic's API moved off its published ranges, the worker would fail
   to start (visible, not silent), and `OPS_ALLOW_NETS` in `/etc/fff/fff.conf` would need widening, then `fffctl
   update` to rewrite the unit.
+
+## fff.conf settings (w1537)
+
+lothsahn, 2026-10-19: "It should be able to touch any settings that aren't credentials or keys or secrets", and "Make sure
+when it prints, it doesn't print any secrets. Just prints the settings that changed." The worker changes one only when
+Lothsahn or Ben asks for that change, and reports the line `set` printed.
+
+- `fffctl conf` (or `conf get`): every key `fff.conf.example` defines, one line each, `KEY=VALUE (set in /etc/fff/fff.conf)`
+  or `(default)`. A refused key prints `KEY=<redacted> (a person's: why)`, never its value; a value that looks like a token
+  or key (the `redactSecrets` patterns, or 32 or more token characters in a row) prints `<redacted>` under any key. Lines
+  in fff.conf for keys the example does not define are not printed.
+- `fffctl conf set KEY VALUE`: checks the key and the value, keeps the file before as `/etc/fff/fff.conf.prev`, replaces
+  the key's line (or appends one) and prints exactly one line, `KEY: old -> new (takes effect ...; the file before is
+  ...)`, or `KEY: no change (...)` and writes nothing. It restarts nothing. The change goes to the journal (tag `fffctl`)
+  with the same redaction; `fff-ops-priv` logs `conf set KEY (value not logged)`.
+- Fail closed (`cmd_conf` in `deploy/vm/guest/fffctl`): a key is settable only when it is in `CONF_CHECK`. Any key whose
+  name has `TOKEN`, `KEY`, `SECRET`, `PASS`, `CREDENTIAL`, `AUTH`, `PEM`, `CERT`, `PRIVATE`, `RECIPIENT`, `COOKIE` or
+  `SALT` in it is refused, and so is any key that is in neither list. The server's guard refuses the same names, and any
+  value that looks like a token, before sudo runs, so they reach no log (`FFFCTL_CONF_SECRET_NAME`, `server/opsWorker.ts`).
+- Values: a whole number in a range, `yes`/`no`, `HH:MM`, a branch name or a relative folder, as each setting needs; never
+  a quote, `$`, a space or a backslash (fff.conf is sourced by root's scripts, `lib.sh` `load_conf`).
+
+| Setting | Value | Takes effect |
+|---|---|---|
+| `HEALTH_START_GRACE_SEC` | 10-3600 | at the next health check, within 30 s: `fff-health` runs `load_conf` on every run (`deploy/vm/guest/fff-health`, `load_conf` at the top; `fff-health.timer` every 30 s). No restart |
+| `HEALTH_FAILS_BEFORE_RESTART`, `HEALTH_FAILS_MAX`, `HEALTH_BACKOFF_WINDOW_SEC` | 1-100, 1-1000, 0-86400 | the same |
+| `WATCHDOG_BACKOFF_SEC`, `WATCHDOG_BACKOFF_MAX_SEC`, `WATCHDOG_MAX_ATTEMPTS`, `WATCHDOG_HEALTHY_SEC` | 1-3600, 1-86400, 1-100, 1-86400 | the same (`fff-watchdog` runs from `fff-health`) |
+| `UPDATE_VERIFY_MIN`, `UPDATE_VERIFY_SEC` | 1-120; 10-7200 or empty | the next update's verify |
+| `RELEASES_KEEP_EXTRA` | 0-20 | the next update |
+| `NODE_MAJOR` | 20-99 | **only at the next `fffctl update`**: its `install.sh` installs that Node and the portal restarts on it then |
+| `BACKUP_TIME` | `HH:MM` (UTC) | **only at the next `fffctl update`**: its `install.sh` writes `fff-backup.timer` from it |
+| `BACKUP_KEEP`, `BACKUP_INCLUDE_REVIEW`, `BACKUP_REMOTE_DIR` | 1-365, yes/no, a relative folder | the next backup |
+| `BASE_BRANCH` | a branch name | the next base clone refresh |
+
+Refused, and why (`CONF_REFUSED`):
+
+| Settings | Why |
+|---|---|
+| `BACKUP_SSH_KEY`, `BACKUP_RECIPIENTS_FILE`, `BACKUP_SSH_TARGET` | a key, the keys the backups are encrypted to, and the account the backup key logs in to |
+| `FFF_REPO_URL`, `FFF_BRANCH`, `BASE_REPO_URL` | the code the deploy builds and runs as root (a deploy of another branch is a person's), and the repo orchestrators read as the game's |
+| `FFF_ROOT`, `FFF_USER`, `FFF_PORT`, `BASE_PATH` | the VM's layout: folders root writes and hands over, the portal's account, and values that must match config.json |
+| `OPS_USER`, `OPS_ROOT`, `OPS_IMAGE`, `OPS_DISK_MB`, `OPS_ALLOW_NETS`, `OPS_MEMORY_MAX`, `OPS_RUNTIME_MAX` | the worker's own fences: it does not widen its own sandbox |
+
+A new key in `fff.conf.example` goes into `CONF_CHECK` or `CONF_REFUSED` in the same pull request:
+`deploy/vm/test/fff-conf.test.sh` fails until it does.
 
 ## A new fffctl command
 

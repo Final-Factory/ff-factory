@@ -114,6 +114,13 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   state: { allowed: [''], changes: [] },
   // config.json to read, and the check that it holds no secret (w1078).
   config: { allowed: ['', '--check'], changes: [] },
+  // fff.conf's settings (w1537): get redacts what is a person's; set changes one, never a credential, key or secret (fffctl conf).
+  conf: {
+    allowed: ['', 'get'],
+    changes: ['set'],
+    ops: ['set'],
+    grant: "when a person asks; never a credential, key or secret, the deploy's code, the VM's layout or the worker's own fences (fffctl's CONF_REFUSED)",
+  },
   // The permission prompts people answered, as counts only (w1097): scripts/cleanup-approvals.ts as the portal's account.
   approvals: { allowed: ['', '--since', '--split'], changes: [] },
   help: { allowed: [''], changes: [] },
@@ -148,6 +155,20 @@ const OPS_ONLY_FFFCTL = ['machine-ssh', 'machine-ssh-check', 'credential'];
 
 /** The fffctl subcommands its fffctl wrapper (fff-ops-priv) runs: everything else is a person's. */
 export const OPS_FFFCTL = [...Object.entries(FFFCTL_FORMS).filter(([, f]) => f.allowed.length || f.grant).map(([k]) => k), ...OPS_ONLY_FFFCTL];
+
+/**
+ * `fffctl conf set` (w1537): a key whose name says it holds a secret, or a value that looks like one, is refused here, before
+ * sudo, so it reaches neither sudo's log nor fff-ops-priv's. The same words as CONF_SECRET_NAME in fffctl (a test compares
+ * them); fffctl refuses the rest of what is a person's (CONF_REFUSED) as root.
+ */
+export const FFFCTL_CONF_SECRET_NAME = /TOKEN|KEY|SECRET|PASS|CREDENTIAL|AUTH|PEM|CERT|PRIVATE|RECIPIENT|COOKIE|SALT/;
+
+/** Why `fffctl conf set KEY VALUE` is refused before it runs, or undefined. */
+function confSetProblem(key: string | undefined, value: string | undefined): string | undefined {
+  if (key !== undefined && FFFCTL_CONF_SECRET_NAME.test(key)) return `fffctl conf set ${key}: its name says it holds a credential, key or secret, which is a person's`;
+  if (value !== undefined && (redactSecrets(value) !== value || /[A-Za-z0-9_+/=-]{32,}/.test(value))) return `fffctl conf set ${key ?? ''}: that value looks like a token or key: never type one (a person sets it)`;
+  return undefined;
+}
 
 /** The commands whose first word after them is a form: the guard checks that word (fff-ops-priv checks every word). */
 const FFFCTL_FORM_WORD = ['vault', 'machine-credential', 'migrate', 'apikey'];
@@ -240,6 +261,10 @@ export function checkOpsShell(cmd: string, read: ReadCtx, rules = opsSecretRules
       if (why) return why;
     }
     if (name === 'fffctl' && words[i + 1] !== undefined && !OPS_FFFCTL.includes(words[i + 1])) return `fffctl ${words[i + 1]} is a person's (rollbacks, settings, the vault, migrations): you have fffctl ${OPS_FFFCTL.join(', ')}`;
+    if (name === 'fffctl' && words[i + 1] === 'conf' && words[i + 2] === 'set') {
+      const why = confSetProblem(words[i + 3], words[i + 4]);
+      if (why) return why;
+    }
     if (name === 'fffctl' && FFFCTL_FORM_WORD.includes(words[i + 1] ?? '')) {
       const forms = FFFCTL_FORMS[words[i + 1]];
       const form = words[i + 2];
@@ -538,6 +563,7 @@ What you have:
 - \`fffctl restart\` (w974): a plain, soft portal restart with no new code (only the portal process restarts; the machines' workers keep running), only after a [restart] message (Lothsahn or Ben asked for it in their own words: the portal leaves a grant good once for 15 minutes; without it the command is refused). It takes no option. Run it, end your turn at once, and report after the portal is back as that message says, with the before-and-after list of the live worker sessions. Follow that message's steps.
 - \`fffctl update\`: the portal deploy, only after a [deploy] message (Lothsahn or Ben asked for it in their own words: the portal leaves a grant good once for 15 minutes; without it the command is refused). Follow that message's steps.
 - \`fffctl config\` (w1078): the portal's config.json, every setting and no secret (the Claude tokens are the vault's, FFBox's connector hash a file in the secrets folder): the answer to "is intake.nightly.run on, and when does it fire". \`fffctl config --check\`: whether config.json and its saved versions hold any secret, FFBox's hash file (its last four characters) and whether the retired Claude token file is gone; key names only. Changing a setting is not yours: report it.
+- \`fffctl conf\`, \`fffctl conf get <KEY>\` and \`fffctl conf set <KEY> <VALUE>\` (w1537): the VM's own settings, /etc/fff/fff.conf (the health check's grace and failure counts, the watchdog's back-off, the update's verify time, backups, the base clone's branch; you cannot read /etc/fff yourself). get prints each with its value, or <redacted> for one that is a person's; set changes one, keeps the file before, prints only that setting, old -> new, and when it takes effect, and restarts nothing. Change a setting only when Lothsahn or Ben asks for that change; report the line set printed. Refused by fffctl as root, so report it instead: credentials, keys and secrets, the deploy's code (FFF_REPO_URL, FFF_BRANCH, BASE_REPO_URL), the VM's layout and your own fences (OPS_*). Never type a token or key as a value.
 - \`fffctl approvals --since YYYY-MM-DD --split YYYY-MM-DD\` (w1097): the permission prompts a person answered, as counts only: per day, the clean-up ones by kind, and every one by kind before and after the split day (UTC). The before-and-after number for a change meant to drop prompts. Read only; no transcript text.
 - \`fffctl status\`, \`fffctl state\`, \`fffctl units\` and \`fffctl units --check\` (the critical units, active and enabled; --check prints "down: ..." and exits 1 if one is not; read only, and the watchdog and restarts are a person's), \`fffctl vault list [--names]\` and \`fffctl vault help\` (the vault's entries by name, kind, grants, last four characters and fingerprint, and the Claude pools' meters: never a value; adding, rotating, granting, removing and the key are a person's), \`fffctl machine-credential list\`, \`fffctl migrate --help\`, \`fffctl logs [N]\` (the portal's journal), \`fffctl credential list\`, and \`fffctl credential issue <machine id> --to <ssh target>\`: a new machine credential goes from this VM straight into a file on that machine (it prints the remote path and the last four characters, never the credential); then run the installer there with \`--credential-file\` / \`-CredentialFile\` and delete the file after. Issuing replaces the machine's credential: its running daemon is dropped within 20 s, so issue only for a machine being (re)installed. It needs the machine's record (list_machines), which only a person adds.
 - \`fffctl apikey issue <key name> --user <login id> [--create-member [--display-name <text>]] --machine <ssh target> --path <file>\` (w1415): an API key for /mcp bound to a member login, written from this VM straight into that file on that machine (0600; give the file relative to the home folder there, \`.ff-factory/<name>.key\`: an unquoted \`~\` is your own home and is refused), the same way as a machine credential: it prints the remote path and the last four characters, never the key. \`--create-member\` makes the login first, a member with a random password nobody sees. Refused: an owner login, ben's and lothsahn's, a key name another login's key, the owner's key or a scoped key holds. Run it only when a job names the login and the key (a throwaway login for a check, a person's own member login); never read the file back, pass its path. \`fffctl apikey list\` (the member logins' keys: name, login, when made) and \`fffctl apikey revoke <key name>\` (a member login's key; the login stays) when the check is done.
