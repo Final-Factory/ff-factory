@@ -288,6 +288,10 @@ namespace FFFactory
             else if (type == "show_schedule") ShowSchedule();
             else if (type == "hide_schedule") { if (scheduleForm != null) scheduleForm.Close(); }
             else if (type == "counts") Send(new Dictionary<string, object> { { "type", "counts" }, { "personKeys", Interlocked.Read(ref personKeys) }, { "personClicks", Interlocked.Read(ref personClicks) }, { "injectedKeys", Interlocked.Read(ref allInjectedKeys) }, { "injectedClicks", Interlocked.Read(ref allInjectedClicks) }, { "repeats", Interlocked.Read(ref repeats) } });
+            else if (type == "menu_layout") SendLayout();
+            // A menu item's own click, for a demo where injected clicks cannot reach the desktop (w1532: an elevated window in
+            // front drops them, UIPI): "toggle" is Pause / Unpause, "schedule" opens the schedule window.
+            else if (type == "press") { string item = Str(m, "item"); if (item == "toggle") toggle.PerformClick(); else if (item == "schedule") schedule.PerformClick(); }
             else if (type == "quit") Quit();
         }
 
@@ -396,6 +400,23 @@ namespace FFFactory
                 ShowMenuAtCursor();
             }
             catch (Exception e) { Log("show_menu: " + e.Message); ShowMenuAtCursor(); }
+        }
+
+        // Where the open menu's items are on the screen, and the schedule window (a demo clicks them; a test reads them).
+        void SendLayout()
+        {
+            var items = new List<object>();
+            if (menu.Visible)
+                foreach (ToolStripItem it in menu.Items)
+                {
+                    if (!it.Visible) continue;
+                    Rectangle r = menu.RectangleToScreen(it.Bounds);
+                    items.Add(new Dictionary<string, object> { { "text", it.Text ?? "" }, { "x", r.X }, { "y", r.Y }, { "w", r.Width }, { "h", r.Height }, { "enabled", it.Enabled } });
+                }
+            var m = new Dictionary<string, object> { { "type", "menu_layout" }, { "open", menu.Visible }, { "items", items } };
+            if (menu.Visible) m["menu"] = new Dictionary<string, object> { { "x", menu.Bounds.X }, { "y", menu.Bounds.Y }, { "w", menu.Bounds.Width }, { "h", menu.Bounds.Height } };
+            if (scheduleForm != null && !scheduleForm.IsDisposed && scheduleForm.Visible) m["schedule"] = new Dictionary<string, object> { { "x", scheduleForm.Bounds.X }, { "y", scheduleForm.Bounds.Y }, { "w", scheduleForm.Bounds.Width }, { "h", scheduleForm.Bounds.Height } };
+            Send(m);
         }
 
         void ShowSchedule()

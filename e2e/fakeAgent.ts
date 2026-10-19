@@ -21,12 +21,16 @@
  *   "#ctx <tokens>"  sets the context to that many tokens before it answers; "#spend <usd>" makes the turn cost that
  *                  much more (w535: the automatic compaction's triggers). Every assistant message reports the context in
  *                  its usage, as the SDK does (cache reads).
+ *   "[FF Factory] PAUSE:"  the notice a worker on a paused machine gets (w1532, server/machinePause.ts): it commits what is
+ *                  in its folder, pushes its branch and ends with "<id>: handed back: branch <branch> pushed; …" for each
+ *                  request the notice names, as a real worker does
  *   "#tool <name> <json>"  (one per line) calls that tool of the session's in-process MCP server (an orchestrator's
  *                  belt) with those arguments, and says what it answered: "Called <name>: <answer>". Only in a
  *                  person's own message (the "[from <name>]" line), so a notice quoting the tag never sets it off.
  *   anything else  "Echo: <text>" (and how many images came with it)
  */
 import type { McpServerConfig, Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { execFileSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
@@ -218,6 +222,26 @@ export function fakeQuery(fake: FakeOptions = {}) {
           yield { type: 'system', subtype: 'background_tasks_changed', tasks: [{ id: `bg-${++msgId}`, ambient: false }], session_id: sessionId, uuid: `b${msgId}` } as never;
           yield text('Started the build in the background; it will wake me.');
           yield result(uuid, true, 'waiting on the background build');
+        } else if (/^\[FF Factory\] PAUSE:/m.test(words)) {
+          // A worker's hand-back (w1532): commit, push, then the hand-back line for each request.
+          const cwd = options?.cwd ?? process.cwd();
+          const git = (...a: string[]) => {
+            try {
+              return execFileSync('git', ['-C', cwd, '-c', 'user.name=Fake Worker', '-c', 'user.email=fake@example.invalid', ...a], { stdio: 'pipe', windowsHide: true }).toString().trim();
+            } catch (e) {
+              return `failed: ${String((e as { stderr?: Buffer }).stderr ?? (e as Error).message).trim().slice(0, 200)}`;
+            }
+          };
+          const ids = (/one line per request \(([^)]+)\)/.exec(words)?.[1] ?? 'wNNN').split(/,\s*/);
+          for (const [cmd, args] of [['git add -A', ['add', '-A']], ['git commit', ['commit', '-q', '-m', `WIP: ${ids.join(', ')} handed back at a machine pause`]], ['git push', ['push', '-q', '-u', 'origin', 'HEAD']]] as const) {
+            const toolId = `tool-${++msgId}`;
+            yield toolUse(toolId, 'Bash', { command: cmd, description: cmd });
+            yield toolResult(toolId, git(...args) || 'done');
+          }
+          const branch = git('rev-parse', '--abbrev-ref', 'HEAD');
+          const reply = `Committed and pushed my unfinished work.\n\n${ids.map((id) => `${id}: handed back: branch ${branch} pushed; stopped after the first step, the rest is left`).join('\n')}`;
+          yield text(reply);
+          yield result(uuid, true, reply);
         } else if (/#wait\s+\d+/i.test(words)) {
           const secs = Number(/#wait\s+(\d+)/i.exec(words)![1]);
           yield text(`Working for ${secs} s...`);

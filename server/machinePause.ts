@@ -20,6 +20,11 @@ import type { SaveResult } from './saveWork.ts';
 export const PAUSE_GRACE_MS = { value: 15 * 60_000 };
 /** After an interrupt, how long before the process is stopped outright. */
 export const PAUSE_STOP_AFTER_MS = { value: 2 * 60_000 };
+/**
+ * A told worker whose turn ended without a hand-back line: how long its queued notice gets to start the next turn (the notice
+ * reached a turn as it ended, so the CLI answers it as a turn of its own) before FF Factory hands its requests back itself.
+ */
+export const PAUSE_LINELESS_WAIT_MS = { value: 60_000 };
 
 /** "beast is paused (someone is using this PC)": why a paused machine is held, as placement.hold names it. */
 export const pauseWhy = (p: Pick<MachinePause, 'reason' | 'detail'>) => `paused from its tray app: ${p.reason === 'activity' ? 'someone is using it' : p.reason === 'schedule' ? 'outside its work schedule' : p.reason === 'manual' ? 'paused by hand' : 'paused'} (w1532)`;
@@ -103,7 +108,7 @@ export interface HandBack {
 
 export class MachinePauses {
   /** Workers told to hand back: when, on which machine, and whether their turn was interrupted. */
-  private readonly told = new Map<string, { at: number; machine: string; interruptedAt?: number }>();
+  private readonly told = new Map<string, { at: number; machine: string; interruptedAt?: number; lineless?: number }>();
   /** Workers being handed back right now (a save in flight): a second turn end or resume does not start another. */
   private readonly handing = new Set<string>();
   private readonly now: () => number;
@@ -148,14 +153,21 @@ export class MachinePauses {
     const p = this.paused(s.machineId);
     if (!p || !s.machineId) return;
     const live = this.d.isLive(s.id);
-    if (!live) return;
-    if (!this.d.isMidTurn(s)) {
-      // Between turns: not woken; its process stops, and a resume of it later hands its requests back (heldResume).
-      if (!this.handing.has(s.id)) this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p)}. Its requests move to another computer when it would resume.`);
-      return;
-    }
     const t = this.told.get(s.id);
     const now = this.now();
+    if (!live || !this.d.isMidTurn(s)) {
+      // Told, and its turn ended without a hand-back line: its notice may still start a turn of its own (PAUSE_LINELESS_WAIT_MS).
+      if (t?.lineless !== undefined) {
+        if (now - t.lineless < PAUSE_LINELESS_WAIT_MS.value && live) return;
+        this.d.log(`pause: worker ${s.id} ended its turn without a hand-back line and did not answer the notice within ${Math.round(PAUSE_LINELESS_WAIT_MS.value / 1000)} s: FF Factory hands its requests back`);
+        this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p)}.`);
+        void this.handBackAll(s, '', 'its worker ended its turn without a hand-back line', undefined, this.workingOn(s.id));
+        return;
+      }
+      // Between turns: not woken; its process stops, and a resume of it later hands its requests back (heldResume).
+      if (live && !this.handing.has(s.id)) this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p)}. Its requests move to another computer when it would resume.`);
+      return;
+    }
     if (!t) {
       const ids = this.d.openRequestsOf(s.id).map((w) => w.id);
       this.told.set(s.id, { at: now, machine: s.machineId });
@@ -186,11 +198,22 @@ export class MachinePauses {
     if (!p || s.kind !== 'worker') return false;
     const t = this.told.get(s.id);
     const lines = handedBackIn(text);
-    const how = lines.size ? 'by its worker' : t?.interruptedAt ? `forced: interrupted ${Math.round(PAUSE_GRACE_MS.value / 60_000)} min after the pause notice` : t ? 'its worker ended the turn without a hand-back line' : 'its turn ended after the pause';
-    const picks = this.d.openRequestsOf(s.id).filter((w) => lines.has(w.id) || w.status === 'active' || w.status === 'queued' || w.status === 'new');
+    // Told but no line: the notice may be queued behind the turn that just ended; the tick waits for it a while.
+    if (t && !lines.size && !t.interruptedAt && t.lineless === undefined) {
+      t.lineless = this.now();
+      this.d.log(`pause: worker ${s.id} ended a turn without a hand-back line; its notice may be queued behind it: waiting up to ${Math.round(PAUSE_LINELESS_WAIT_MS.value / 1000)} s`);
+      return true;
+    }
+    const how = lines.size ? 'by its worker' : t?.interruptedAt ? `forced: interrupted ${Math.round(PAUSE_GRACE_MS.value / 60_000)} min after the pause notice` : t ? 'its worker ended its turn without a hand-back line' : 'its turn ended after the pause';
+    const picks = this.workingOn(s.id, lines);
     this.d.stop(s.id, `Stopped by FF Factory: ${s.machineId} is ${pauseWhy(p)}.${picks.length ? ` ${picks.map((w) => w.id).join(', ')} handed back to the dispatcher for another computer.` : ''}`);
     void this.handBackAll(s, '', how, undefined, picks, lines);
     return true;
+  }
+
+  /** The requests a worker hands back at a turn end: those its lines name, and those it was working on (not waiting on a gate or a person). */
+  private workingOn(sessionId: string, lines: ReadonlyMap<string, unknown> = new Map()): WorkItem[] {
+    return this.d.openRequestsOf(sessionId).filter((w) => lines.has(w.id) || w.status === 'active' || w.status === 'queued' || w.status === 'new');
   }
 
   /**

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MachinePauses, PAUSE_GRACE_MS, PAUSE_STOP_AFTER_MS, handedBackIn, pauseHolds, pauseNotice, pauseWhy, type HandBack, type PauseDeps } from './machinePause.ts';
+import { MachinePauses, PAUSE_GRACE_MS, PAUSE_LINELESS_WAIT_MS, PAUSE_STOP_AFTER_MS, handedBackIn, pauseHolds, pauseNotice, pauseWhy, type HandBack, type PauseDeps } from './machinePause.ts';
 import { holdReason, pickComputer, roomNow, type Computer } from './placement.ts';
 import { handoverNote } from './work.ts';
 import type { Machine, MachinePause, SessionInfo, WorkItem } from '../shared/types.ts';
@@ -202,4 +202,33 @@ test('w1532: the next worker\'s handover names the hand-back, its branch, the no
   const note = handoverNote({ id: 'w3' }, { related: [], handedBack: { at: '2026-10-19T14:05:00.000Z', from: 'beast/slot5', session: 'gone1', branch: 'sandbox/slot5-w3', why: 'paused from its tray app: someone is using it (w1532)', note: 'its last report: w3: still open: CI', how: 'on a held resume', saved: 'its sandbox had no uncommitted work on sandbox/slot5-w3', message: '[ci] PR #12: every check passed' } });
   assert.match(note, /Handed back \(w1532\): w3 was taken off worker gone1 on beast\/slot5 at 2026-10-19 14:05 UTC, because that machine is paused from its tray app: someone is using it \(w1532\) \(on a held resume\)\. Continue from its branch sandbox\/slot5-w3/);
   assert.match(note, /The message that was waiting for it when it was handed back, now yours:\n~~~text\n\[ci\] PR #12: every check passed\n~~~/);
+});
+
+test('w1532: a told worker whose turn ends before it read the notice gets the queued turn to hand back; silent for a minute, FF Factory hands back', async () => {
+  // The notice reached the turn as it ended (measured in the beast demo: the step's result, then the notice as its own turn).
+  const t = world();
+  t.worker('mid1', { live: true, mid: true, requests: [['w1', 'active']] });
+  t.worker('mid2', { live: true, mid: true, requests: [['w2', 'active']] });
+  const p = new MachinePauses(t.d);
+  t.pause(PAUSED);
+  p.onPause('beast');
+  t.mid.delete('mid1');
+  t.mid.delete('mid2');
+  p.turnEnded(t.sessions.get('mid1')!, 'Waited 40 s.');
+  p.turnEnded(t.sessions.get('mid2')!, 'Waited 40 s.');
+  p.tick();
+  assert.deepEqual([t.stopped, t.handed], [[], []], 'not stopped, nothing handed back: the notice is still to come');
+  t.mid.add('mid1');
+  p.tick();
+  t.mid.delete('mid1');
+  p.turnEnded(t.sessions.get('mid1')!, 'Pushed.\nw1: handed back: branch sandbox/slot5-w1 pushed; half done');
+  await settle();
+  await settle();
+  assert.deepEqual(t.handed.map((x) => [x.w, x.h.how, x.h.branch]), [['w1', 'by its worker', 'sandbox/slot5-w1']]);
+  t.tick(PAUSE_LINELESS_WAIT_MS.value);
+  p.tick();
+  await settle();
+  await settle();
+  assert.deepEqual(t.handed.map((x) => [x.w, x.h.how]), [['w1', 'by its worker'], ['w2', 'its worker ended its turn without a hand-back line']], 'mid2 never answered: handed back by FF Factory');
+  assert.ok(t.stopped.includes('mid2'));
 });

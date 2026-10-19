@@ -1008,7 +1008,7 @@ export class Orchestrators {
     const where = room.length ? `${agent ? 'Agent slots' : 'Room'} now: ${room.join(', ')}.` : `No computer has ${agent ? 'an agent slot' : 'room'} now: it stays Queued, and the capacity ping names it when one frees.`;
     const how = agent
       ? `start_agent with work_id "${w.id}" in a FREE sandbox on another computer${h.branch ? `, and say in your text that it continues from the pushed branch ${h.branch} of its repository (in its own clone)` : ''}`
-      : `start_agent with work_id "${w.id}"${h.branch ? `, branch "${h.branch}"` : ''} and a FREE sandbox on another computer`;
+      : `${h.branch ? `switch_branch a FREE sandbox on another computer to "${h.branch}" (it fetches the pushed branch), then ` : ''}start_agent with work_id "${w.id}" in that sandbox`;
     this.toDispatcher(
       `[ledger] HANDED BACK (w1532): ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) was taken off worker ${s.id} on ${from}, because ${h.machine} is ${h.why} (${h.how}). ${h.branch ? `Its work is on the branch ${h.branch}` : 'Its branch is unknown'}${h.saved ? `; ${h.saved}` : ''}. Place it on a computer that is not paused: ${how}. The new worker's handover carries the branch, its note${h.message ? ' and the message that was waiting for it' : ''}. ${where} Its note: ${clip(h.note, 300)}`,
     );

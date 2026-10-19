@@ -348,6 +348,8 @@ export class Daemon {
   /** Its owner's pause (w1532, machine/pause.ts): the tray's, the schedule's and a person's input, kept in pause.json. */
   readonly pause: PauseKeeper;
   private tray?: TrayHost;
+  /** Every message from the tray app, for a demo or a test that asks it something (menu_layout, counts). */
+  readonly trayEvents = new EventEmitter();
 
   /** The host guard (cfg.hostGuard, Windows; tests give effects). */
   guard?: MachineGuard;
@@ -1032,6 +1034,7 @@ export class Daemon {
 
   /** A message from the tray app (w1532, machine/tray/FFFactoryTray.cs). */
   private onTray(m: Record<string, unknown>) {
+    this.trayEvents.emit('message', m);
     switch (m.type) {
       case 'hello':
         this.trayState();
@@ -1068,8 +1071,13 @@ export class Daemon {
   }
 
   /** For a still of the tray (w1532): open or close its menu or the schedule window. */
-  trayShow(what: 'show_menu' | 'hide_menu' | 'show_schedule' | 'hide_schedule') {
+  trayShow(what: 'show_menu' | 'hide_menu' | 'show_schedule' | 'hide_schedule' | 'menu_layout' | 'counts') {
     this.tray?.send({ type: what });
+  }
+
+  /** Press a tray menu item (its own click handler): "toggle" is Pause / Unpause. For a demo where injected clicks are dropped. */
+  trayPress(item: 'toggle' | 'schedule') {
+    this.tray?.send({ type: 'press', item });
   }
 
   private heartbeat() {
