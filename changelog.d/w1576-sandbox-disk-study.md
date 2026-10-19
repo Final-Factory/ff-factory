@@ -1,0 +1,1 @@
+- **Sandbox disk study** (w1576, asked by lothsahn): [docs/sandbox-disk.md](docs/sandbox-disk.md) measures where a game sandbox's 24 to 33 GB goes on LothDesktop (134 GB of the drive is byte-identical copies that are not block-shared, and the Libraries share nothing with the seed) and ranks the options to shrink it.
