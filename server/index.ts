@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { HOST_ROLES, configPath, loadConfig, machineCleanupSettings, pruneRetiredKeys, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
+import { HOST_ROLES, configPath, loadConfig, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus } from './store.ts';
 import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessions.ts';
@@ -99,13 +99,17 @@ const cfg = loadConfig();
 // Keys the portal's own sandbox pool, editors and standing agents had (w510), which nothing reads: taken out of config.json
 // at start (w852, Lothsahn: "Yes, remove unused config keys"; config.json.prev keeps the file as it was). A dry run's
 // config is not its own to change, and one that cannot be written keeps them: named once, here and in system_status.
-if (cfg.retiredKeys?.length && !dryRun()) {
+// A defaultBase naming the retired develop becomes origin/master in the file the same way, in the same write (w1518,
+// lothsahn: "Yes, set defaultBase to origin/master now"); loadConfig already read it as the trunk (w1517).
+if ((cfg.retiredKeys?.length || cfg.retiredBase) && !dryRun()) {
   try {
-    const removed = pruneRetiredKeys(configPath());
+    const { keys: removed, base } = pruneRetiredConfig(configPath());
     if (removed.length) console.warn(`config: took ${removed.join(', ')} out of config.json, which nothing reads any more (w852; the file as it was is config.json.prev)`);
-    cfg.retiredKeys = cfg.retiredKeys.filter((k) => !removed.includes(k));
+    if (base) console.warn(`config: changed config.json's "defaultBase" from "${base.from}", a retired branch, to "${base.to}" (w1518; the file as it was is config.json.prev)`);
+    cfg.retiredKeys = (cfg.retiredKeys ?? []).filter((k) => !removed.includes(k));
+    if (base) cfg.retiredBase = undefined;
   } catch (e) {
-    console.warn(`config: could not take the retired keys out of config.json: ${(e as Error).message}`);
+    console.warn(`config: could not take the retired keys or base out of config.json: ${(e as Error).message}`);
   }
 }
 const retiredKeys = retiredKeysLine(cfg.retiredKeys);

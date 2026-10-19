@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, pruneRetiredKeys, retiredBaseLine, retiredConfigKeys, retiredKeysLine, trunkBase, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
+import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, pruneRetiredConfig, retiredBaseLine, retiredConfigKeys, retiredKeysLine, trunkBase, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
 import { gitRemotes } from './guard.ts';
 import { appVersion, formatVersion, readSha, readVersion } from './version.ts';
 
@@ -101,7 +101,7 @@ test('loadConfig (w510): keys only the portal\'s own sandbox pool read still loa
   assert.deepEqual(retiredConfigKeys(withoutRetiredKeys(old)), [], 'withoutRetiredKeys leaves none');
 });
 
-test('pruneRetiredKeys (w852): the live config\'s two dead keys come out of the file, config.json.prev keeps it as it was, nothing else moves', (t) => {
+test('pruneRetiredConfig (w852): the live config\'s two dead keys come out of the file, config.json.prev keeps it as it was, nothing else moves', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   // What system_status named on the live portal: "config.json sets claudeAccounts.workers, hostGuard.compactWhenReclaimGB".
@@ -114,7 +114,7 @@ test('pruneRetiredKeys (w852): the live config\'s two dead keys come out of the 
   const file = path.join(dir, 'config.json');
   const text = JSON.stringify(live, null, 2) + '\n';
   fs.writeFileSync(file, text);
-  assert.deepEqual(pruneRetiredKeys(file), ['claudeAccounts.workers', 'hostGuard.compactWhenReclaimGB']);
+  assert.deepEqual(pruneRetiredConfig(file), { keys: ['claudeAccounts.workers', 'hostGuard.compactWhenReclaimGB'] });
   const after = JSON.parse(fs.readFileSync(file, 'utf8'));
   const { workers: _w, ...accounts } = live.claudeAccounts;
   const { compactWhenReclaimGB: _c, ...guard } = live.hostGuard;
@@ -126,8 +126,41 @@ test('pruneRetiredKeys (w852): the live config\'s two dead keys come out of the 
   assert.deepEqual(loadConfig().retiredKeys, []);
   // Nothing left to take out: nothing written.
   fs.writeFileSync(`${file}.prev`, 'untouched');
-  assert.deepEqual(pruneRetiredKeys(file), []);
+  assert.deepEqual(pruneRetiredConfig(file), { keys: [] });
   assert.equal(fs.readFileSync(`${file}.prev`, 'utf8'), 'untouched');
+});
+
+test('pruneRetiredConfig (w1518): the live config\'s origin/develop base becomes origin/master in the file, config.json.prev keeps it as it was, nothing else moves', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  // What /srv/fff/config/config.json said on 2026-10-18 (line 10): "defaultBase": "origin/develop", beside other keys.
+  const live = { ...minimal(dir), ownerName: 'Ben', defaultBase: 'origin/develop', limits: { minFreeRamGB: 4 } };
+  const file = path.join(dir, 'config.json');
+  const text = JSON.stringify(live, null, 2) + '\n';
+  fs.writeFileSync(file, text);
+  assert.deepEqual(pruneRetiredConfig(file), { keys: [], base: { from: 'origin/develop', to: 'origin/master' } });
+  const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual(after, { ...live, defaultBase: 'origin/master' }, 'only defaultBase changed');
+  assert.deepEqual(Object.keys(after), Object.keys(live), 'the keys keep their order');
+  assert.equal(fs.readFileSync(`${file}.prev`, 'utf8'), text, 'config.json.prev is the file as it was');
+  // Loaded now, the startup line is gone and the base is the trunk.
+  withConfig(t, after);
+  const cfg = loadConfig();
+  assert.deepEqual([cfg.defaultBase, cfg.retiredBase], ['origin/master', undefined]);
+  // Nothing left to change: nothing written, the .prev stays.
+  fs.writeFileSync(`${file}.prev`, 'untouched');
+  assert.deepEqual(pruneRetiredConfig(file), { keys: [] });
+  assert.equal(fs.readFileSync(`${file}.prev`, 'utf8'), 'untouched');
+  // A retired key and a retired base at once: one write, so config.json.prev is the file as it was, not a half-changed one.
+  const both = { ...live, hostGuard: { warnFreeGB: 90, compactWhenReclaimGB: 60 } };
+  const bothText = JSON.stringify(both, null, 2) + '\n';
+  fs.writeFileSync(file, bothText);
+  assert.deepEqual(pruneRetiredConfig(file), { keys: ['hostGuard.compactWhenReclaimGB'], base: { from: 'origin/develop', to: 'origin/master' } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { ...live, defaultBase: 'origin/master', hostGuard: { warnFreeGB: 90 } });
+  assert.equal(fs.readFileSync(`${file}.prev`, 'utf8'), bothText);
+  // Any other base is the person's choice and stays.
+  fs.writeFileSync(file, JSON.stringify({ ...live, defaultBase: 'origin/release/x' }));
+  assert.deepEqual(pruneRetiredConfig(file), { keys: [] });
 });
 
 test('loadConfig: a standingRoot inside the app folder is refused', (t) => {
