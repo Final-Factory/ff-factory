@@ -138,13 +138,23 @@ export const unityLabel: Record<UnityState, string> = {
 export function machineTone(m: Machine): Tone {
   if (m.status === 'deploying') return 'blue';
   if (m.status === 'error') return 'red';
+  // Paused from its tray app (w1532): online, but it takes no work.
+  if (m.online && m.pause?.paused) return 'amber';
   return m.online ? 'green' : 'grey';
 }
 
 export function machineLabel(m: Machine): string {
   if (m.status === 'deploying') return 'Setting up';
   if (m.status === 'error') return 'Error';
+  if (m.online && m.pause?.paused) return 'Paused';
   return m.online ? 'Online' : 'Offline';
+}
+
+/** Why a machine is paused (w1532, from its tray app, schedule or a person's input), in a few words; undefined while it runs. */
+export function pauseGlance(m: Pick<Machine, 'pause'> | undefined): string | undefined {
+  const p = m?.pause;
+  if (!p?.paused) return undefined;
+  return `paused: ${p.reason === 'activity' ? 'someone is using it' : p.reason === 'schedule' ? 'outside its schedule' : 'paused by hand'}`;
 }
 
 export function sandboxTone(s: SandboxStatus): Tone {

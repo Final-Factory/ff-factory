@@ -161,7 +161,10 @@ export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {})
  */
 export function holdReason(id: string, prefs: PlacementPrefs = {}): string | undefined {
   const why = holdOf(prefs).get(placeId(id));
-  return why === undefined ? undefined : `${id} is on hold (${why}): nothing resumes there until the hold is lifted (placement.hold)`;
+  if (why === undefined) return undefined;
+  // A machine paused from its tray app (w1532, server/machinePause.ts) is held the same way until it runs again.
+  if (why.startsWith('paused from its tray app')) return `${id} is ${why}: nothing resumes there until it runs again (its tray's Unpause, its schedule, or 90 minutes without input)`;
+  return `${id} is on hold (${why}): nothing resumes there until the hold is lifted (placement.hold)`;
 }
 
 /** "m5 has room but is held (Ben testing)": how a Queued reason says a computer with room is not usable. */

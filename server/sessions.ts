@@ -984,6 +984,11 @@ export class SessionManager {
    */
   machineHold?: (s: SessionHandle) => string | undefined;
   /**
+   * A message the hold of a PAUSED machine keeps from a worker there (w1532, server/machinePause.ts heldResume): true when
+   * its requests were handed back to another computer instead, the message going with them, so it is not queued. Set by Agents.
+   */
+  pauseHeld?: (s: SessionHandle, text: string) => boolean;
+  /**
    * Why a worker's live process must restart on the FF Factory code its machine runs now before its next turn (w1166: an
    * agent host keeps the guard and system prompt it started with across daemon updates), or undefined. Set by Agents.
    * Its messages wait meanwhile, as for an account move (moveFor).
@@ -1196,6 +1201,11 @@ export class SessionManager {
       // w1376: a held computer resumes nobody; checked before a restart (moveFor) or a slot, so nothing stops or starts there.
       const onHold = this.machineHold?.(s);
       const hold = onHold ?? (this.moveFor(s) || this.fullFor(s));
+      // w1532: a paused machine's worker hands its requests back instead of waiting for the unpause; the message goes with them.
+      if (onHold && this.pauseHeld?.(s, q.text)) {
+        drop();
+        continue;
+      }
       if (hold) {
         // w1135: what holds it NOW, not what held it when it was queued ("lothdesktop is offline" stayed on dd8193f8's line
         // after the daemon was back and it had been placed again): the session's line and the reply read this.
@@ -1264,6 +1274,8 @@ export class SessionManager {
     // ANOTHER PERSON'S ACCOUNT (w1076): its process restarts on its requests' person's tokens first; the message waits.
     // A computer on hold (w1376, config placement.hold) resumes nobody: the message waits for the hold to lift, Blocked on its machine.
     const onHold = this.machineHold?.(s);
+    // w1532: on a paused machine the worker's requests are handed back instead, the message going with them.
+    if (onHold && this.pauseHeld?.(s, text)) return '';
     if (onHold) return queue(onHold, 'machine');
     const move = this.moveFor(s);
     if (move) return queue(move, 'capacity', true);

@@ -534,6 +534,8 @@ export interface Handover {
   previous?: { id: string; title: string; requests: Pick<WorkItem, 'id' | 'title' | 'status'>[] };
   /** The requests the new one names (related ids) or builds on, with their pull requests. */
   related: Pick<WorkItem, 'id' | 'title' | 'status' | 'prs' | 'outcome'>[];
+  /** Its last hand-back from a paused machine (w1532): where its work is and where its worker stopped. */
+  handedBack?: WorkItem['handedBack'];
 }
 
 /**
@@ -547,6 +549,11 @@ export function handoverNote(w: Pick<WorkItem, 'id'>, h: Handover): string {
   if (h.previous) {
     const on = h.previous.requests.length ? h.previous.requests.map((r) => `${r.id} "${clip(r.title, 80)}" (${r.status})`).join(', ') : 'nothing open';
     lines.push(`The sandbox was last used by session ${h.previous.id} "${clip(h.previous.title, 80)}", on ${on}. That session keeps those requests; do not touch their branches or PRs unless ${w.id} says so.`);
+  }
+  if (h.handedBack) {
+    const b = h.handedBack;
+    lines.push(`Handed back (w1532): ${w.id} was taken off worker ${b.session} on ${b.from} at ${b.at.slice(0, 16).replace('T', ' ')} UTC, because that machine is ${b.why} (${b.how}). ${b.branch ? `Continue from its branch ${b.branch}: fetch it and check it out (in a game sandbox, start_agent already did) before you change anything.` : 'Its branch is unknown: find its pushed work by the request id (git branch -r, its PRs) before you start over.'} Its worker's note: ${b.note}${b.saved ? ` (${b.saved})` : ''}. Read its log with read_work ${w.id}.`);
+    if (b.message) lines.push(`The message that was waiting for it when it was handed back, now yours:\n~~~text\n${b.message}\n~~~`);
   }
   if (h.related.length) {
     lines.push(`Requests ${w.id} names or builds on (read each with read_work; their PRs are listed):`);
