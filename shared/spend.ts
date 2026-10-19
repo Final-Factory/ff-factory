@@ -66,10 +66,10 @@ export interface MeterTurn {
    * This process resumed a conversation (w1484): `kept` when the meter picked up its tally (the saved MeterState, or the one it
    * held), with the base its first call measured and the one the process before measured, `by` the cache (its read covered the
    * earlier base: the same tokens), by counting (its context less the history and what is new), or `history-shrank` (it counted
-   * less than the base before: the history lost tokens the stream does not show, and the base stays); `kept: false` when it had
-   * none and the history is `carried`.
+   * less than the base before: the history lost tokens the stream does not show, and the base stays), or `carried` (the base is still
+   * inside a carried history, w1556: a compaction measures it); `kept: false` when it had none and the history is `carried`.
    */
-  resumed?: { kept: true; base: number; prevBase: number; by: 'cache' | 'count' | 'history-shrank' } | { kept: false };
+  resumed?: { kept: true; base: number; prevBase: number; by: 'cache' | 'count' | 'history-shrank' | 'carried' } | { kept: false };
 }
 
 /**
@@ -84,11 +84,19 @@ export interface MeterState {
   fresh: Record<string, number>;
   lastCtx: number;
   base?: number;
+  /** The base is inside the carried history: the next compaction measures it (w1556). */
+  baseCarried?: boolean;
   summaryNext: number;
   compacted: boolean;
   readSeen: string[];
   readSeenBeforeCompact: string[];
 }
+/**
+ * The smallest base a conversation has (w1556): a base below it is inside a carried history, not measured. MEASURED: the first call of a
+ * worker reads a median 54k tokens of base (p10 34k, docs/spend.md "Calibration"); Claude Code's system prompt and tool definitions alone
+ * are over 20k. A tally saved with less (the carried resumes before w1556) has its base measured again by its next compaction.
+ */
+export const MIN_BASE = 8_000;
 /** The newest files read a MeterState keeps (each a 14-character hash, readHash): enough to see a re-read, small enough to save after every call. */
 export const METER_READS_KEPT = 1500;
 
@@ -107,6 +115,9 @@ export const CATEGORIES = [
   'base',
   'summary',
   'carried',
+  'compact-carry',
+  'reminder',
+  'hook',
   'unitemised',
   'brief',
   'assistant',
@@ -126,11 +137,14 @@ export const CATEGORIES = [
 ] as const;
 export type Category = (typeof CATEGORIES)[number];
 export const CATEGORY_LABEL: Record<string, string> = {
-  base: 'Base context (system prompt, tool definitions, CLAUDE.md, skill and agent lists): measured by the first call of each process',
+  base: 'Base context (system prompt, tool definitions, CLAUDE.md, skill and agent lists): measured by the first call of each process, and the CLAUDE.md and lists a resumed process sends again',
   summary: 'Summary left by a compaction',
   carried: "Context carried over from before this process started (a conversation resumed after a restart whose meter state was not kept: one from before w1484, or one moved to another machine): not itemised, the base context included",
-  unitemised: "What the meter could not itemise: reminders and hook output Claude Code adds to the context (the stream never shows them), and the error of its characters' estimate",
-  brief: 'Messages to the agent (briefs, follow-ups, harness notices)',
+  'compact-carry': 'What a compaction carried over beside its summary: the newest messages it kept, the files and tasks it attached again',
+  reminder: "Claude Code's own reminders in the context (the tokens left, edited files, diagnostics, the date and environment), read from its transcript",
+  hook: 'Hook output Claude Code added to the context (PreToolUse and Stop hooks), read from its transcript',
+  unitemised: "What the meter could not itemise: the error of its characters' estimate, and what Claude Code adds when its transcript cannot be read",
+  brief: 'Messages to the agent (briefs, follow-ups, harness notices, task notifications)',
   assistant: "The agent's own text, thinking and tool calls (output tokens included)",
   'file-read': 'File reads (Read, sed -n, cat, head, tail)',
   reread: 'Re-reads of a range of a file it already read',
@@ -288,6 +302,26 @@ export function toolKind(tool: string, input: unknown): ToolKind {
   return { cat: 'other' };
 }
 
+/** Attachments the CLI writes to its transcript as a record, never sent to the model. */
+const RECORD_ATTACHMENTS = new Set(['prompt_snapshot', 'deferred_tools_record', 'thinking_drop', 'atis-latch']);
+/** Attachments that carry the base context: the CLI's attachment pass sends them at a process's start and after a compaction. */
+export const BASE_ATTACHMENTS = new Set(['instructions', 'skill_listing', 'agent_listing_delta', 'deferred_tools_delta', 'mcp_instructions_delta', 'session_context', 'model', 'auto_mode', 'remote_session_change', 'command_permissions']);
+/** Attachments a compaction leaves beside its summary: the files and tasks it carries over. */
+const COMPACT_ATTACHMENTS = new Set(['file', 'compact_file_reference', 'task_status', 'plan_file_reference', 'todo', 'invoked_skills', 'nested_memory']);
+
+/**
+ * The category of an attachment the CLI added to the context out of the stream's view (w1556), or undefined when it is not sent to
+ * the model or the meter already counts it: the base attachments of a process's first call, and of the call after a compaction,
+ * are in the base the meter measures (that call's context less what it saw added).
+ */
+export function hiddenKind(type: string, at: { firstCall: boolean; afterCompact: boolean }): string | undefined {
+  if (RECORD_ATTACHMENTS.has(type)) return undefined;
+  if (BASE_ATTACHMENTS.has(type)) return at.firstCall || at.afterCompact ? undefined : 'base';
+  if (type.startsWith('hook_')) return 'hook';
+  if (at.afterCompact && COMPACT_ATTACHMENTS.has(type)) return 'compact-carry';
+  return 'reminder';
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // ContextMeter
 // ---------------------------------------------------------------------------------------------------------------------
@@ -342,6 +376,14 @@ export class ContextMeter {
   /** The base context in tokens, measured by this process's first call (0 on a carried one: its carried context holds it). */
   private base?: number;
   /**
+   * The base is inside the carried history (a resume with no tally, w1556): no call can tell it apart until a compaction leaves only
+   * the base and the summary, and that call measures it. Before w1556 it stayed 0 for good: after the compaction dropped `carried`,
+   * every call read the base as `unitemised` (w1510: 37% of its cost).
+   */
+  private baseCarried = false;
+  /** A compaction finished (compact_boundary): the attachments before the next call are the ones it sends with its summary. */
+  private compactNext = false;
+  /**
    * A new process resumed the conversation with its tally kept (w1484): the next call measures this process's base. When its cache
    * read covers the base the process before measured (`prevBase`), the prompt begins with exactly those tokens (a cache read is an
    * exact prefix match), so the base is the same. Otherwise (a cold cache, a system prompt that changed: its git status, CLAUDE.md) it
@@ -367,6 +409,8 @@ export class ContextMeter {
       return false;
     }
     this.carriedNext = false;
+    // A tally saved with a base no real base is that small (the carried history held it, before w1556) is healed the same way.
+    if (!this.baseCarried && (this.base ?? 0) < MIN_BASE) this.baseCarried = true;
     this.rebaseNext = { hist: Math.max(0, this.lastCtx - (this.base ?? 0)), prevBase: this.base ?? 0 };
     return true;
   }
@@ -380,6 +424,7 @@ export class ContextMeter {
       fresh: Object.fromEntries(this.fresh),
       lastCtx: this.lastCtx,
       ...(this.base !== undefined ? { base: this.base } : {}),
+      ...(this.baseCarried ? { baseCarried: true } : {}),
       summaryNext: this.summaryNext,
       compacted: this.compactedOnce,
       readSeen: last(this.readSeen),
@@ -393,6 +438,7 @@ export class ContextMeter {
     this.fresh = map(s.fresh);
     this.lastCtx = s.lastCtx;
     this.base = s.base;
+    this.baseCarried = !!s.baseCarried;
     this.summaryNext = s.summaryNext > 0 ? s.summaryNext : 0;
     this.compactedOnce = !!s.compacted;
     this.readSeen.clear();
@@ -415,6 +461,23 @@ export class ContextMeter {
   /** A compaction finished; its summary holds `tokens` (w1469: it was counted as base, every call after it). */
   summary(tokens: number) {
     if (tokens > 0) this.summaryNext = tokens;
+    this.compactNext = true;
+  }
+
+  /**
+   * An attachment Claude Code put in the context without the stream showing it (w1556), as its own transcript records it
+   * (server/cliTranscript.ts): `type` is the attachment's type, `chars` its text. A reminder, hook output, the base sent again by a
+   * resumed process, what a compaction carries over beside its summary; the base a process's first call sends is in the base it
+   * measures, and so is the base a compaction sends again (hiddenKind).
+   */
+  attachment(type: string, chars: number) {
+    const kind = hiddenKind(type, { firstCall: this.lastCtx === 0 && !this.carriedNext, afterCompact: this.compactNext });
+    if (kind) this.add(kind, chars);
+  }
+
+  /** Content of a known category that Claude Code added out of the stream's view: a task notification it wrote itself is `brief`. */
+  addHidden(cat: Category, chars: number) {
+    this.add(cat, chars);
   }
 
   /** Text that goes into the context from outside: a message to the agent. */
@@ -474,7 +537,15 @@ export class ContextMeter {
     this.turn.calls++;
     this.turn.ctxMax = Math.max(this.turn.ctxMax, ctx);
     this.turn.ctxEnd = ctx;
+    let compactCall = false;
     if (this.lastCtx > 0 && ctx < this.lastCtx * 0.6) {
+      compactCall = true;
+      // A base the carried history held: this call holds only the base, the summary and what is new, so it measures the base (w1556).
+      if (this.baseCarried) {
+        this.base = undefined;
+        this.baseCarried = false;
+        this.rebaseNext = undefined;
+      }
       // The context shrank: a compaction or a /clear. What was held is gone; what the summary holds is not known by content.
       this.turn.compacted = true;
       this.compactedOnce = true;
@@ -501,6 +572,12 @@ export class ContextMeter {
       s.r += r;
       s.w += w;
     };
+    // What no content explains: unitemised, except in the call after a compaction, where it is what the compaction carried over beside
+    // its summary (Claude Code keeps the newest messages and attaches the files and tasks it was working on, w1556), and in the first
+    // call of a carried conversation, where it is the history written again on a cold cache (w1556: before, only the part read from the
+    // cache was carried, and the rest was read as unitemised by every later call). Either is held as such.
+    const left = compactCall ? 'compact-carry' : this.carriedNext ? 'carried' : 'unitemised';
+    let leftR = 0;
     let B: number;
     let baseR = 0;
     let hscale: number;
@@ -512,13 +589,18 @@ export class ContextMeter {
       for (const [k, v] of heldEst) give(k, v * hscale, 0);
       this.held.set('carried', (this.held.get('carried') ?? 0) + carried * CHARS_PER_TOKEN);
       B = this.base = 0;
+      this.baseCarried = true;
       this.carriedNext = false;
       this.turn.resumed = { kept: false };
     } else {
       // the first call of a process measures the base: its context less what the meter saw added (w1469), and on a resumed
       // conversation whose tally was kept, less the history the last call before it read too (w1484)
       const r0 = this.rebaseNext;
-      if (r0) {
+      if (r0 && this.baseCarried) {
+        // the base is still in the carried history: nothing to measure it by until a compaction (w1556)
+        this.turn.resumed = { kept: true, base: this.base ?? 0, prevBase: r0.prevBase, by: 'carried' };
+        this.rebaseNext = undefined;
+      } else if (r0) {
         const cached = r0.prevBase > 0 && u.cr >= r0.prevBase;
         const counted = Math.max(0, ctx - r0.hist - Math.min(freshSum, newTok));
         // Counted below the base before, the history lost what the stream never shows (w1484, replayed on beast's 3 days: Claude
@@ -537,7 +619,8 @@ export class ContextMeter {
       for (const [k, v] of heldEst) give(k, v * hscale, 0);
       r -= heldSum * hscale;
       give('base', baseR, 0);
-      give('unitemised', r, 0);
+      give(left, r, 0);
+      leftR = r;
     }
     // the write: what is new, then the base and the history the cache did not cover (a cold cache writes them all again)
     let w = newTok;
@@ -551,7 +634,7 @@ export class ContextMeter {
     const mscale = missing > 0 ? Math.min(w, missing) / missing : 0;
     for (const [k, v] of heldEst) give(k, 0, v * (1 - hscale) * mscale);
     w -= missing * mscale;
-    give('unitemised', 0, w);
+    give(left, 0, w);
     const p = priceOf(u.model);
     const cw5 = Math.min(u.cw, u.cw5 ?? 0);
     const wPrice = u.cw + u.in > 0 ? (u.in * p.in + (u.cw - cw5) * 2 * p.in + cw5 * 1.25 * p.in) / (u.cw + u.in) : p.in;
@@ -562,7 +645,9 @@ export class ContextMeter {
     }
     // Everything this call read is in the context of the next one, and so is what it wrote (added by chargeOutput: first message of the call below).
     for (const [k, v] of this.fresh) this.held.set(k, (this.held.get(k) ?? 0) + v);
+    if (left !== 'unitemised' && leftR + w > 0) this.held.set(left, (this.held.get(left) ?? 0) + (leftR + w) * CHARS_PER_TOKEN);
     this.fresh = new Map();
+    this.compactNext = false;
     this.add('assistant', u.out * CHARS_PER_TOKEN);
   }
   /**
@@ -586,6 +671,10 @@ export class ContextMeter {
   }
   get compacted() {
     return this.compactedOnce;
+  }
+  /** The meter holds a conversation: it has seen a call, or picked up a tally (resume). */
+  get started() {
+    return this.lastCtx > 0;
   }
 }
 

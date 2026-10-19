@@ -17,6 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ContextMeter, CATEGORY_LABEL, addCats, fmtTokens, fmtUsd, listUsd, toolKind, zeroTok, addTok, type Cats, type Tok } from '../shared/spend.ts';
 import { kindOfWork } from '../server/spend.ts';
+import { attachmentChars } from '../server/cliTranscript.ts';
 
 interface Args {
   root: string;
@@ -258,6 +259,8 @@ export function analyze(root: string, sinceMs: number): Result {
       } else if (d.type === 'queue-operation' || d.type === 'attachment') {
         // queued messages reach the model as user text; the attachment copy of a queued command names the request too
         const prompt = d.type === 'attachment' && d.attachment?.type === 'queued_command' ? d.attachment.prompt : undefined;
+        // what else the CLI attached (reminders, hook output, the base a resumed process sends again) has its category (w1556)
+        if (d.type === 'attachment' && d.attachment?.type && !prompt && !d.isSidechain) meter.attachment(d.attachment.type, attachmentChars(d.attachment));
         if (prompt && /^\[(from the orchestrator|wake_me)/.test(prompt)) {
           const r = requestOf(prompt);
           if (r) {
