@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { asksAPerson, holdsOf, liveCounts, personWaitIn, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
+import { asksAPerson, holdsOf, liveCounts, personWaitIn, personWaitSettled, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
 import type { Requester, SessionInfo, WorkItem } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-05T06:00:00Z');
@@ -385,4 +385,74 @@ test('workState: only a Working request names machines; waiting, queued and bloc
   const l = one(w, [session('a', { status: 'idle', machineId: 'beast', machineSandbox: 'agent-a' })]);
   assert.equal(l?.state, 'waiting');
   assert.equal(l?.machines, undefined);
+});
+
+// ---- w1504: a person-wait counts until that person answers or a PR it names merges; Blocked wins over an older one ----
+
+/** w1243 as it was (2026-10-19 01:08): worker 26d27a69's old report, 0db9f8a2's later one, Ben's notes, then the block on w1438. */
+const W1243_OLD = 'Two-peer run needs Windows.\n\nw1243: still open: waiting on Ben to route the two-peer run for PR #1699 to a Windows machine; then merge';
+const W1243_NEW = 'w1243: still open: the big-save radius-3-versus-4 A/B in the overnight BEAST window (from 2026-10-18 04:00 UTC), then the doc PR with the results and a recommendation';
+const w1243 = (o: Partial<WorkItem> = {}) =>
+  item('w1243', {
+    ...BEN_ONLY,
+    sessionIds: ['26d27a69', '0db9f8a2'],
+    links: { '26d27a69': { at: ago(100), how: 'sent' }, '0db9f8a2': { at: ago(90), how: 'sent' } },
+    ...o,
+  });
+const w1243Workers = () => [
+  session('26d27a69', { status: 'stopped', lastResult: W1243_OLD, lastResultAt: ago(80), lastActivityAt: ago(3) }),
+  session('0db9f8a2', { status: 'stopped', lastResult: W1243_NEW, lastResultAt: ago(40), lastActivityAt: ago(3) }),
+];
+const BENS_NOTE = { at: ago(30), by: 'Ben', text: "Ben's answer, his words: \"Run it overnight on BEAST with nothing else running\"" };
+const ON_W1438 = { kind: 'request' as const, ref: 'w1438', what: "w1438's perf benches finishing", at: ago(2), by: 'dispatcher' };
+
+test('w1504: w1243 as it was: a waiting-on-Ben report, then Ben\'s note, then blocked on w1438 is Blocked, not Waiting on input', () => {
+  // The report alone: Waiting on input on Ben, its worker named (the slot's badge reads it).
+  const asked = one(w1243(), w1243Workers());
+  assert.deepEqual([asked?.state, asked?.waitsOn, asked?.worker], ['waiting', ['Ben'], '26d27a69']);
+  // Ben's note after it answers it: nothing waits on Ben any more.
+  assert.notEqual(one(w1243({ notes: [BENS_NOTE] }), w1243Workers())?.state, 'waiting');
+  // And blocked on w1438: Blocked, on w1438.
+  const blocked = one(w1243({ notes: [BENS_NOTE], status: 'blocked', blocked: ON_W1438 }), w1243Workers());
+  assert.equal(blocked?.state, 'blocked');
+  assert.match(blocked!.waitsOn!.join(' '), /w1438/);
+  assert.equal(blocked?.worker, undefined);
+  // A note from someone else, or one older than the report, answers nothing.
+  assert.equal(one(w1243({ notes: [{ ...BENS_NOTE, by: 'Lothsahn' }] }), w1243Workers())?.state, 'waiting');
+  assert.equal(one(w1243({ notes: [{ ...BENS_NOTE, at: ago(85) }] }), w1243Workers())?.state, 'waiting');
+  // A [needs you] answer by Ben after the report settles it too.
+  const needsYou = { key: 'report:26d27a69:x', kind: 'report' as const, question: 'route it', who: ['Ben'], to: ['ben'], at: ago(79), previews: [], prs: [], answered: { by: 'Ben', at: ago(20) } };
+  assert.notEqual(one(w1243({ needsYou }), w1243Workers())?.state, 'waiting');
+});
+
+test('w1504: a person-wait ends when a pull request its line names merges after it, not before, and not while it is open', () => {
+  const pr = (o: Partial<NonNullable<WorkItem['prs']>[number]>) => ({ repo: 'Final-Factory/FinalFactory', number: 1699, state: 'merged' as const, at: ago(70), ...o });
+  assert.notEqual(one(w1243({ prs: [pr({})] }), w1243Workers())?.state, 'waiting', 'PR #1699 merged after the report');
+  assert.equal(one(w1243({ prs: [pr({ at: ago(81) })] }), w1243Workers())?.state, 'waiting', 'merged before the report: the report still asks');
+  assert.equal(one(w1243({ prs: [pr({ state: 'open', at: undefined })] }), w1243Workers())?.state, 'waiting', 'still open');
+  assert.equal(one(w1243({ prs: [pr({ number: 1700 })] }), w1243Workers())?.state, 'waiting', 'another PR');
+  assert.equal(personWaitSettled({ prs: [pr({})] }, Date.parse(ago(80)), ['Ben'], 'waiting on Ben to OK https://github.com/Final-Factory/FinalFactory/pull/1699'), `PR #1699, which it names, merged at ${ago(70).slice(0, 16).replace('T', ' ')}`);
+  // Blocked on a request with the PR merged: Blocked.
+  assert.equal(one(w1243({ prs: [pr({})], status: 'blocked', blocked: ON_W1438 }), w1243Workers())?.state, 'blocked');
+});
+
+test('w1504: on a blocked request a person-wait newer than its gates still shows Waiting on input; an older unanswered one does not', () => {
+  const w = w1243({ status: 'blocked', blocked: ON_W1438 });
+  // 26d27a69's report is older than the gate and unanswered: the gate set after it is what the request waits on.
+  assert.equal(one(w, w1243Workers())?.state, 'blocked');
+  // A report written after the gate: Waiting on input.
+  const fresh = [w1243Workers()[0], session('0db9f8a2', { status: 'stopped', lastResult: 'w1243: still open: waiting on Ben to pick the save', lastResultAt: ago(1) })];
+  const l = one(w, fresh);
+  assert.deepEqual([l?.state, l?.worker], ['waiting', '0db9f8a2']);
+  // A declaration after the gate: Waiting on input; one before it: Blocked; one Ben answered: Blocked.
+  const declares = (at: string) => [w1243Workers()[0], session('0db9f8a2', { status: 'stopped', lastResult: W1243_NEW, lastResultAt: ago(40), waitingOn: { who: 'Ben', what: 'choose the save', at } })];
+  assert.equal(one(w, declares(ago(1)))?.state, 'waiting');
+  assert.equal(one(w, declares(ago(5)))?.state, 'blocked');
+  assert.equal(one(w1243({ status: 'blocked', blocked: { ...ON_W1438, at: ago(9) }, notes: [{ ...BENS_NOTE, at: ago(0.5) }] }), declares(ago(1)))?.state, 'blocked');
+});
+
+test('w1504: a session from before lastResultAt reads its report time from its last activity', () => {
+  const old = (activity: string) => [session('26d27a69', { status: 'stopped', lastResult: W1243_OLD, lastActivityAt: activity })];
+  assert.notEqual(one(w1243({ sessionIds: ['26d27a69'], notes: [BENS_NOTE] }), old(ago(80)))?.state, 'waiting');
+  assert.equal(one(w1243({ sessionIds: ['26d27a69'], notes: [BENS_NOTE] }), old(ago(10)))?.state, 'waiting');
 });

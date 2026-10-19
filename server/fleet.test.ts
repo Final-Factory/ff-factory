@@ -262,3 +262,27 @@ test('w1430: fleetOf lists the chats that matter now per slot, the person-waitin
   const [, bare] = fleetOf({ system, sessions, machines: [machine('lothdesktop', { sandboxRoot: 'D:/work/ffsb', sandboxes: [machineSandbox('slot1', 'slot1', ['old1', 'busy', 'knob', 'old2'])] })] }, undefined, NOW);
   assert.deepEqual(bare.sandboxes[0].agents.shown.map((s) => s.id), ['busy']);
 });
+
+test('w1504: the slot badge clears with the ledger: w1243 blocked on w1438 after Ben answered shows no "Needs you" on beast/slot1', () => {
+  const report = 'w1243: still open: waiting on Ben to route the two-peer run for PR #1699 to a Windows machine; then merge';
+  const sessions = [
+    session('26d27a69', 'stopped', { machineId: 'beast', machineSandbox: 'slot1', lastResult: report, lastResultAt: ago(3000), lastActivityAt: ago(30) }),
+    session('0db9f8a2', 'stopped', { machineId: 'beast', machineSandbox: 'slot1', lastResult: 'w1243: still open: the big-save A/B in the overnight BEAST window', lastResultAt: ago(2000) }),
+  ];
+  const links = { '26d27a69': { at: ago(4000), how: 'sent' as const }, '0db9f8a2': { at: ago(3500), how: 'sent' as const } };
+  const ben = { userId: 'ben', displayName: 'Ben' };
+  const callOf = (w: WorkItem) => {
+    const ledger = ledgerOf(sessions, [w]);
+    return slotCall({ shown: sessions, older: [], waits: [...ledger.waits.values()] }, [], ben);
+  };
+  // Before Ben answered: the slot calls him, to 26d27a69's chat.
+  const asked = callOf(item('w1243', 'active', ['26d27a69', '0db9f8a2'], { links }));
+  assert.deepEqual([asked?.label, asked?.session.id, asked?.request], ['Needs you', '26d27a69', 'w1243']);
+  // Ben's note, then the block on w1438: no call.
+  const notes = [{ at: ago(1000), by: 'Ben', text: 'Run it overnight on BEAST with nothing else running' }];
+  const blocked = { kind: 'request' as const, ref: 'w1438', what: "w1438's perf benches finishing", at: ago(60), by: 'dispatcher' };
+  assert.equal(callOf(item('w1243', 'blocked', ['26d27a69', '0db9f8a2'], { links, notes, blocked })), undefined);
+  // PR #1699 merged after the report, no note: no call either.
+  const prs = [{ repo: 'Final-Factory/FinalFactory', number: 1699, state: 'merged' as const, at: ago(2900) }];
+  assert.equal(callOf(item('w1243', 'active', ['26d27a69', '0db9f8a2'], { links, prs })), undefined);
+});

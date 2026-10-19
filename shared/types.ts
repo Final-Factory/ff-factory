@@ -209,6 +209,8 @@ export interface SessionInfo {
   pendingPermissions: PendingPermission[];
   /** Last assistant text of the most recent finished turn, trimmed; for cards and summaries. */
   lastResult?: string;
+  /** When that turn ended (w1504): a person-wait its report names is settled by a note or a merge after it. Absent on sessions older than this field and not backfilled (Store.backfillResultTimes). */
+  lastResultAt?: string;
   /**
    * The person this agent works for: who started it, or had the orchestrator start it (docs/identity.md). A
    * standing agent's is its current run's; a personal orchestrator's is its person. Absent on the dispatcher and on

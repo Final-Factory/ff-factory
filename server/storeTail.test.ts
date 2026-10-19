@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
-import type { TranscriptEvent } from '../shared/types.ts';
+import type { SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 // w1377: a limited transcript read takes the end of the file only. On 2026-10-15 every daemon connect asked lastSeq of each
 // of its machine's sessions, each ask read the whole transcript, and the reconnects of a blocked portal kept it blocked.
@@ -76,4 +76,28 @@ test('w1377: readTranscriptFrom and eventAt read back only as far as the seq ask
   assert.deepEqual(f.store.readTranscriptFrom('nobody', 1), []);
   assert.deepEqual(f.store.readTranscript('nobody', 3), []);
   assert.equal(f.store.lastSeq('nobody'), 0);
+});
+
+test('w1504: a worker of an open request saved without lastResultAt gets its transcript\'s last result time on load', (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-result-at-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const store = new Store(tmp);
+  const worker = (id: string): SessionInfo => ({ id, kind: 'worker', title: id, status: 'stopped', permissionMode: 'bypassPermissions', createdAt: '2026-10-15T20:00:00.000Z', lastActivityAt: '2026-10-18T22:42:00.000Z', turns: 2, costUsd: 1, pendingPermissions: [], lastResult: 'w1243: still open: waiting on Ben' });
+  store.putSession(worker('s1'));
+  store.putSession(worker('closed'));
+  const requester = { userId: 'ben', displayName: 'Ben' };
+  const work = (id: string, status: WorkItem['status'], sessionIds: string[]): WorkItem => ({ id, title: id, brief: '', priority: 'normal', keys: [], requestedBy: requester, requesters: [requester], humanAsked: true, status, createdAt: '2026-10-13T21:04:00.000Z', updatedAt: '2026-10-18T22:42:00.000Z', sessionIds, overlaps: [], asks: 0, log: [] });
+  store.putWork(work('w1243', 'blocked', ['s1']));
+  store.putWork(work('w1', 'done', ['closed']));
+  const lines = [
+    { seq: 1, t: '2026-10-15T20:10:00.000Z', kind: 'result', ok: true, text: 'first', costUsd: 0, turns: 1, durationMs: 1 },
+    { seq: 2, t: '2026-10-15T20:41:00.000Z', kind: 'result', ok: true, text: 'w1243: still open: waiting on Ben', costUsd: 0, turns: 1, durationMs: 1 },
+    { seq: 3, t: '2026-10-18T22:42:00.000Z', kind: 'system', text: 'check-in handed back' },
+  ];
+  for (const id of ['s1', 'closed']) fs.writeFileSync(path.join(tmp, 'transcripts', `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  store.flush();
+  const again = new Store(tmp);
+  assert.equal(again.sessions.get('s1')?.lastResultAt, '2026-10-15T20:41:00.000Z', 'the last result, not the last activity');
+  assert.equal(again.sessions.get('closed')?.lastResultAt, undefined, 'a closed request\'s worker is left alone');
+  assert.equal(again.backfillResultTimes(), 0, 'once');
 });
