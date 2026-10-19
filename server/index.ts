@@ -1217,11 +1217,18 @@ route('POST', '/api/sessions/([\\w-]+)/compact', async (req, [id]) => {
   return { note: compactNow(id, String(instructions ?? ''), requesterOf(req)) };
 });
 
-// A person opened their own chat: the messages other people sent them there are read (docs/orchestrators.md).
-route('POST', '/api/sessions/([\\w-]+)/seen', async (req, [id]) => {
+// A person cleared messages other people sent them, in the bubble over their own chat's message box (w1546,
+// docs/orchestrators.md "People to people"): `ids`, or all of them. Only their own chat (mayDrive).
+route('POST', '/api/sessions/([\\w-]+)/person-messages/read', async (req, [id]) => {
   const s = sessions.get(id);
   mayDrive(req, s.info);
-  agents.orchestrators.seen(id);
+  const { ids } = await readJson<{ ids?: unknown }>(req);
+  if (ids !== undefined && !(Array.isArray(ids) && ids.every((x) => typeof x === 'string'))) throw new HttpError(400, 'ids: a list of message ids, or none for all');
+  return { cleared: agents.orchestrators.readPersonMessages(id, ids as string[] | undefined) };
+});
+// Pages from before w1546 still say they were seen on opening the chat: that reads nothing now.
+route('POST', '/api/sessions/([\\w-]+)/seen', async (req, [id]) => {
+  mayDrive(req, sessions.get(id).info);
   return {};
 });
 

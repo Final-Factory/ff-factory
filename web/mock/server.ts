@@ -371,6 +371,14 @@ const server = http.createServer(async (req, res) => {
     turn?.resume?.(!!data.allow);
     return json(200, {});
   }
+  if ((r = m(/^\/api\/sessions\/([^/]+)\/person-messages\/read$/))) {
+    const s = find(r[1]);
+    const ids: string[] | undefined = data.ids;
+    const had = s?.personMessages ?? [];
+    const keep = had.filter((x) => ids && !ids.includes(x.id ?? x.at));
+    if (s) update(s, { personMessages: keep.length ? keep : undefined });
+    return json(200, { cleared: had.length - keep.length });
+  }
   if ((r = m(/^\/api\/sessions\/([^/]+)\/mode$/))) {
     const s = find(r[1]);
     if (s) update(s, { permissionMode: data.mode });

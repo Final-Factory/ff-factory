@@ -216,33 +216,74 @@ test('one person messages another: it waits unread in their own chat, opens ther
     const text = `Could you run the firewall script on BEAST once? ${tag}`;
     const sidebar = await openSidebar(matePage);
     const row = sidebar.getByRole('button', { name: /^Orchestrator/ });
-    // Other tests share this server, and a message the teammate writes to their own chat reads it (and lets the owner
-    // write again): send until the unread count is seen.
-    await expect(async () => {
-      await sendMessage(mateCtx.request, mateChat, `ready ${tag}`);
-      expect(await useTool(page.request, me.orchestratorId, 'message_person', { to: 'teammate', text })).toMatch(/^Sent to Team Mate's orchestrator/);
-      await expect(row.getByTestId('unread-people')).toHaveAttribute('title', 'Unread: 1 message from tester', { timeout: 3000 });
-    }).toPass({ timeout: 60_000 });
+    // The teammate writing to their own chat lets the owner write again (the count between them); a retry of this test
+    // starts with nothing unread.
+    await sendMessage(mateCtx.request, mateChat, `ready ${tag}`);
+    expect((await mateCtx.request.post(`/api/sessions/${mateChat}/person-messages/read`, { data: {} })).ok()).toBe(true);
+    expect(await useTool(page.request, me.orchestratorId, 'message_person', { to: 'teammate', text })).toMatch(/^Sent to Team Mate's orchestrator/);
+    await expect(row.getByTestId('unread-people')).toHaveAttribute('title', 'Unread: 1 message from tester');
     await expect(row.getByTestId('unread-people')).toHaveText('1');
     const [m] = await heard(mateCtx.request, mateChat, '[person message]', tag);
     expect(m).toMatch(/^\[person message\] From tester's orchestrator \(user id tester\), written for tester:/);
     // The notification is the teammate's alone.
     await expect.poll(() => theirs.filter((n) => n.tag === 'person-tester').map((n) => n.users)).toContainEqual(['teammate']);
 
-    // Opening the chat shows it, and reads it.
+    // Opening the chat shows it in the conversation and in the bubble over the message box, and leaves it unread (w1546).
     await row.click();
     const notice = matePage.locator('.orch .notice.notice-attn', { hasText: tag }).last();
     await expect(notice.locator('.notice-text')).toHaveText(`tester: ${text}`);
     await expect(notice.locator('.notice-body')).toHaveText(text);
-    await expect.poll(async () => (await appState(mateCtx.request)).sessions.find((s) => s.id === mateChat)?.personMessages).toBeUndefined();
-    // Nobody marks someone else's chat read.
-    expect((await page.request.post(`/api/sessions/${mateChat}/seen`, { data: {} })).status()).toBe(403);
+    const bubble = matePage.getByTestId('people-messages');
+    await expect(bubble.getByTestId('people-messages-count')).toHaveText('1 message from tester');
+    await expect(bubble.locator('.pmsg-preview')).toHaveText(text);
+    const unread = async () => (await appState(mateCtx.request)).sessions.find((s) => s.id === mateChat)?.personMessages?.map((x) => x.text);
+    // Writing to the chat about something else is not reading it either.
+    await sendMessage(mateCtx.request, mateChat, `something else ${tag}`);
+    expect(await unread()).toEqual([text]);
+    // Nobody clears someone else's.
+    expect((await page.request.post(`/api/sessions/${mateChat}/person-messages/read`, { data: {} })).status()).toBe(403);
+
+    // A second one shows up live; opening the bubble shows both in full.
+    const text2 = `And the second admin step, the scheduled task. ${tag}`;
+    expect(await useTool(page.request, me.orchestratorId, 'message_person', { to: 'teammate', text: text2 })).toMatch(/^Sent to/);
+    await expect(bubble.getByTestId('people-messages-count')).toHaveText('2 messages from tester');
+    await bubble.getByRole('button', { name: /2 messages from tester/ }).click();
+    await expect(bubble.getByTestId('people-message')).toHaveCount(2);
+    await expect(bubble.getByTestId('people-message').nth(1).locator('.pmsg-text')).toHaveText(text2);
+    // Clear one: it goes at once, with an undo; undone, it is back, and the server never heard.
+    await bubble.getByRole('button', { name: 'Clear the message from tester' }).first().click();
+    await expect(bubble.getByTestId('people-message')).toHaveCount(1);
+    await expect(bubble.getByTestId('people-messages-undo')).toContainText('Cleared 1 message');
+    await bubble.getByRole('button', { name: 'Undo' }).click();
+    await expect(bubble.getByTestId('people-message')).toHaveCount(2);
+    expect(await unread()).toEqual([text, text2]);
+    // Cleared for good: once the undo is over, only the second is unread.
+    await bubble.getByRole('button', { name: 'Clear the message from tester' }).first().click();
+    await expect.poll(unread, { timeout: 15_000 }).toEqual([text2]);
+    await expect(bubble.getByTestId('people-messages-undo')).toHaveCount(0);
+    await expect(bubble.getByTestId('people-messages-count')).toHaveText('1 message from tester');
+    // Clear all: the bubble keeps only its undo line, then goes; the messages stay in the conversation.
+    await bubble.getByRole('button', { name: 'Clear all' }).click();
+    await expect(bubble.getByTestId('people-message')).toHaveCount(0);
+    await expect(bubble.getByTestId('people-messages-undo')).toContainText('Cleared 1 message');
+    await expect(bubble).toHaveCount(0, { timeout: 15_000 });
+    expect(await unread()).toBeUndefined();
+    await expect(matePage.locator('.orch .notice.notice-attn', { hasText: text }).first().locator('.notice-body')).toHaveText(text);
+
+    // Cleared elsewhere (another tab, the phone): the bubble here goes by itself.
+    const text3 = `One more. ${tag}`;
+    expect(await useTool(page.request, me.orchestratorId, 'message_person', { to: 'teammate', text: text3 })).toMatch(/^Sent to/);
+    await expect(bubble.getByTestId('people-messages-count')).toHaveText('1 message from tester');
+    expect((await mateCtx.request.post(`/api/sessions/${mateChat}/person-messages/read`, { data: {} })).ok()).toBe(true);
+    await expect(bubble).toHaveCount(0);
 
     // The answer: the same tool, from the teammate's orchestrator to the owner's; the dispatcher sees neither.
     expect(await useTool(mateCtx.request, mateChat, 'message_person', { to: 'tester', text: `Done, it is allowed now. ${tag}` })).toMatch(/^Sent to tester's orchestrator/);
     await expect.poll(async () => (await heard(page.request, me.orchestratorId, '[person message]', tag)).length).toBe(1);
     expect((await heard(page.request, me.orchestratorId, '[person message]', tag))[0]).toMatch(/^\[person message\] From Team Mate's orchestrator \(user id teammate\)/);
     expect(await heard(page.request, me.dispatcherId!, '[person message]', tag)).toEqual([]);
+    // The answer is unread in the owner's chat until cleared, which other tests' stills of that chat must not show.
+    expect((await page.request.post(`/api/sessions/${me.orchestratorId}/person-messages/read`, { data: {} })).ok()).toBe(true);
   } finally {
     await mateCtx.close();
   }

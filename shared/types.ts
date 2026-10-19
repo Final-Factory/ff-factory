@@ -146,6 +146,16 @@ export interface PendingPermission {
   createdAt: string;
 }
 
+/** A message from another person, unread in its recipient's chat (SessionInfo.personMessages, w1546). */
+export interface PersonMessageMark {
+  /** Absent on marks saved before w1546, which `at` stands in for. */
+  id?: string;
+  from: Requester;
+  at: string;
+  /** The sender's words as their orchestrator wrote them (at most PERSON_MESSAGE_CHARS); absent before w1546. */
+  text?: string;
+}
+
 export interface SessionInfo {
   id: string;
   kind: SessionKind;
@@ -223,9 +233,10 @@ export interface SessionInfo {
   lastRequestedBy?: Requester;
   /**
    * A person's own orchestrator only: messages other people sent its person (message_person, docs/orchestrators.md)
-   * that they have not seen yet. Cleared when they open or write to their chat.
+   * that they have not read yet, oldest first. Shown in the bubble over the message box until they clear them there
+   * (w1546): opening or writing to the chat, and the orchestrator relaying one, leave them unread.
    */
-  personMessages?: { from: Requester; at: string }[];
+  personMessages?: PersonMessageMark[];
   /**
    * Restart bookkeeping (server/restart.ts), saved at once: since when its current turn has been open. Set by a
    * message, cleared when the turn ends or the session is stopped or interrupted on purpose, and kept when the

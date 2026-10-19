@@ -139,6 +139,10 @@ export function loopGuards(cfg: Pick<Config, 'orchestrator'>): { filings: number
 }
 /** The longest message_person text. */
 export const PERSON_MESSAGE_CHARS = 2000;
+/** Unread messages from people kept per chat (w1546): older ones are still in the transcript. */
+export const PERSON_MESSAGES_KEPT = 20;
+/** A mark's id; one saved before w1546 has none, and its time stands in. */
+export const personMessageId = (m: { id?: string; at: string }) => m.id ?? m.at;
 /** Notices to the dispatcher are gathered this long, so one burst of filings is one turn. */
 const GATHER_MS = 1500;
 /** Intake requests reach the dispatcher gathered this long, so a poll's reports arrive as one turn it can batch. */
@@ -614,7 +618,7 @@ export class Orchestrators {
   /**
    * A person wrote to this chat themselves: its budgets start again (loops need a person's message to go on), they may
    * message others again and others may message them again (w571: the sender's own words count, not only the
-   * recipient's answer), and the messages from people it showed them are read.
+   * recipient's answer). The messages from people stay unread (w1546): writing about something else is not reading them.
    */
   personWrote(sessionId: string) {
     this.filed.delete(sessionId);
@@ -622,15 +626,22 @@ export class Orchestrators {
     const owner = this.ownerOf(this.sessions.sessions.get(sessionId)?.info ?? { kind: 'worker' });
     const me = owner?.userId.toLowerCase();
     if (me) for (const m of [this.messaged, this.ownerLoop]) for (const k of [...m.keys()]) if (k.startsWith(`${me}:`) || k.endsWith(`:${me}`)) m.delete(k);
-    this.seen(sessionId);
   }
 
-  /** Its person saw their chat: the messages from other people in it are no longer unread. */
-  seen(sessionId: string) {
+  /**
+   * Its person cleared messages from other people in the bubble over their message box (w1546): those ids, or all of
+   * them. Only the unread mark goes: the message stays in the transcript, and the orchestrator has it or still gets it.
+   * Answers how many were cleared.
+   */
+  readPersonMessages(sessionId: string, ids?: readonly string[]): number {
     const h = this.sessions.sessions.get(sessionId);
-    if (!h?.info.personMessages?.length) return;
-    h.info.personMessages = undefined;
+    const list = h?.info.personMessages;
+    if (!h || !list?.length) return 0;
+    const keep = ids ? list.filter((m) => !ids.includes(personMessageId(m))) : [];
+    if (keep.length === list.length) return 0;
+    h.info.personMessages = keep.length ? keep : undefined;
     this.store.putSession(h.info);
+    return list.length - keep.length;
   }
 
   // ---------------------------------------------------------------- people to people (message_person)
@@ -670,7 +681,8 @@ export class Orchestrators {
     this.sessions.send(target.info.id, personMessage(owner, to, text), 'system', undefined, { requestedBy: asRequester(owner) });
     if (loop) this.ownerLoop.set(key, [...loop, now]);
     else if (!owners) this.messaged.set(key, n + 1);
-    target.info.personMessages = [...(target.info.personMessages ?? []), { from: asRequester(owner), at: this.now().toISOString() }].slice(-20);
+    const mark = { id: `pm-${this.now().getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, from: asRequester(owner), at: this.now().toISOString(), text };
+    target.info.personMessages = [...(target.info.personMessages ?? []), mark].slice(-PERSON_MESSAGES_KEPT);
     this.store.putSession(target.info);
     this.onPersonMessage?.(asRequester(owner), asRequester(to), text);
     return `Sent to ${to.displayName}'s orchestrator, which shows it to them; ${to.displayName} decides what to do with it. An answer comes back as a [person message].`;
