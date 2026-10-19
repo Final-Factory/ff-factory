@@ -199,9 +199,47 @@ nearly used-up one first (vault-ben-2 at 97% on 2026-10-11 04:32Z). Details *(gu
   The ledger cleanup decides whether to resume a worker a limit cut off from its person's pool too (`limitsClearFor` →
   `poolForRef`: some token of the pool is one a new worker would get), not from the meters of the one account that hit it. Without
   a pool for that person it reads that account's meters as before.
+**Near a weekly reset (w1539).** lothsahn, 2026-10-19: "Can we also make sure that sessions get used fully by updating the
+priority logic? ... subtract 12 hours from the time left so tokens about to expire get used up before moving on to the others,
+even if they're mostly used. Feel free to come up with a better scheme", and then: "We don't want it to always use the token
+about to expire first, though, as we want to be able to handle a sudden 5 hour burst of activity--and if all the tokens are used
+up except one, we'll only have 1 5 hour session to pull from." The rule (`judgePool` and `pickOrder`, `server/tokenPool.ts`):
+- Inside the last `vault.pool.nearResetHours` (12) before a token's weekly reset, its **one-at-a-time (95%) and retire (99%)
+  caps are lifted**: room left at the reset is lost, so it may take parallel work up to 100%. The 5-hour hold, the dispatcher's
+  reserve and its stop line (unchanged, so the dispatcher's own token keeps its buffer) and 100% still apply.
+- It **goes first** (the soonest reset first, ahead of the score) only for the room its share of the pool's pace would not use
+  before the reset: the pool's pace is each token's weekly % over the hours its week has run, averaged over the pool's tokens
+  (`poolPace`); the token goes first while its room is more than that pace times its hours to the reset (`roomLostAtReset`).
+  Once it is not, it is back in the score order, so it is not drained hours before its reset.
+- Both only while at least `vault.pool.nearResetFloorTokens` (1) **other** token of the pool can take a new process on its
+  own reading, so a burst always has more than one 5-hour window. A pool of one token never lifts its caps (its orchestrator
+  keeps the last part, as before). Far from a reset nothing changed: the same pick, states and order as w971.
+- The orchestrator's and the ops worker's rules are unchanged: they read the same states (a lifted token is `ok` to them too),
+  and `vault.pool.reservePerDayPercent` is not touched.
+
+*What it rests on* (w1539, `scripts/pool-replay.py`, run on the journal's `usage:` lines from 2026-10-06 to 2026-10-19 05:13Z;
+the portal keeps no other meter history: usage.json holds the latest reading only). Measured: at the five weekly resets of
+pooled tokens seen, the room left was ben-1 1%, ben-2 0%, ben-3 0%, lothsahn-1 2% and 3% (the dispatcher's token: its stop line
+holds workers off it from 95%). The waste was not left-over room but tokens used up early: ben-3 sat at 100% for 90 h before its
+reset, ben-2 for 56 h. Replayed (an estimate; Ben's three tokens, the measured week repeated and 30 shuffled quiet and busy
+weeks of the measured days, at 0.7, 0.85 and 1.0 of the measured demand): no pick order changes much how much room is lost,
+since in the long run that is capacity minus demand; the w971 score already uses the soonest-expiring room first. Per reset:
+| Scheme (shuffled weeks, demand x0.85 / x1.0) | room lost per reset | hours with <= 1 token ready | worst-case share of the busiest measured 5 h (29% of a token) the pool could absorb |
+|---|---|---|---|
+| today (w971) | 12.16 / 5.25 | 42 / 236 | 0.33 / 0.12 |
+| lothsahn's 12 h offset | 11.87 / 5.07 | 43 / 238 | 0.27 / 0.11 |
+| a 24 h offset | 11.78 / 5.05 | 52 / 244 | 0.20 / 0.07 |
+| near-reset first, plain (no share rule) | 12.04 / 4.76 | 40 / 218 | 0.33 / 0.11 |
+| **w1539: 12 h, share rule, floor 1** | **12.02 / 4.81** | **36 / 203** | **0.34 / 0.13** |
+
+The offsets cut a little more room but lower burst readiness below today's; the w1539 rule cuts a little and keeps it at or
+above today's everywhere. The defaults: 12 h (8 h caught less; 16 and 24 h used tokens up earlier; lothsahn's figure), floor 1
+(0 left more hours with one token ready, 2 lost most of the gain). The replay does not model processes running on past the
+99% cap (the measured resets show they do), so the gain from lifting it is smaller than replayed: up to about 1 point at a reset.
+
 The meters are the ones `UsageTracker` polls (section 4a).
 
-**The limits** (one system-wide set, config `vault.pool.*`, percent 0 to 100, defaults below; **anyone** may change them
+**The limits** (one system-wide set, config `vault.pool.*`, percent 0 to 100 unless the table says otherwise, defaults below; **anyone** may change them
 with `set_app_config`, not only an owner; the one-at-a-time limit may not be above the retire limit; each change is
 logged in the portal journal with who made it; they apply at the next process start, no restart):
 
@@ -210,6 +248,8 @@ logged in the portal journal with who made it; they apply at the next process st
 | `vault.pool.sessionHoldPercent` | 80 | its **5-hour** meter: no new process on it until that window resets |
 | `vault.pool.onePerWeeklyPercent` | 95 | its **weekly** meter: **one** live process at a time |
 | `vault.pool.retireWeeklyPercent` | 99 | its weekly meter: **retired**, handed to nobody until the weekly window resets |
+| `vault.pool.nearResetHours` | 12 | (hours, 0 to 168; 0 turns it off) inside these last hours before its **weekly reset**: its one-at-a-time and retire caps are lifted and its room that would be lost goes first ("Near a weekly reset" above, w1539) |
+| `vault.pool.nearResetFloorTokens` | 1 | (whole tokens, 0 to 10) the near-reset rule applies only while at least this many **other** tokens of the pool can take a new process |
 | `vault.pool.dispatcherStopPercent` | 95 | the **dispatcher's pinned token** only, either meter: its workers are asked to save and stop, and no new worker starts on it until that window resets ("The stop line" below, w1109) |
 | (at 100) | | either meter: **used up**, handed to nobody until it resets (a rejection by the API counts as 100) |
 
@@ -237,7 +277,7 @@ pool, <person>") and `fffctl vault list` show one label and the token's own mete
 "just say pool:ok (if it's not in one-at a time mode), pool:one-at-a-time (if it is in one at a time mode, even if nothing is
 using it), and the pool slot that is currently the one that will get picked for each pool should be marked "priority" on the same
 line ... Remove all the other calculations entirely"):
-- `pool:ok`: below the one-at-a-time limit (95%).
+- `pool:ok`: below the one-at-a-time limit (95%), or inside the last 12 h before its weekly reset with its caps lifted (w1539).
 - `pool:one-at-a-time`: from the one-at-a-time limit up to the retire limit, **whether its one slot is free or taken** (before
   w979 a free slot read `ok`). A new job still starts on it when the slot is free, and waits when it is taken; the queue's "held"
   reason says which ("... one job at a time; its slot is taken (1 running)").
