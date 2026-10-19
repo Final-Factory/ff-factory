@@ -12,7 +12,7 @@ import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeInfo } from '../server/unityHang.ts';
 import { copyTree, lowerPriority, removeTree, run, type RunResult } from '../server/proc.ts';
-import { LIBRARY_CACHES } from '../server/cleanup.ts';
+import { LIBRARY_CACHES, staleUnityLibraries } from '../server/cleanup.ts';
 import { TRIM_DEFAULTS, projectOpen, trimLibraryCaches, type TrimPolicy, type TrimResult } from '../server/cacheTrim.ts';
 import { checkArray, readJsonDurable, writeJsonDurable } from '../server/durable.ts';
 import { armScriptReimport } from './scriptReimport.ts';
@@ -22,6 +22,12 @@ import type { DiskLevel, GitStatus, MachineSandboxUnity, SandboxPoolSettings, Sa
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const GB = 1024 ** 3;
+/**
+ * A sandbox nobody has used for this many days gets its Library cloned from the seed again (w1576, docs/sandbox-disk.md option E):
+ * its own Library had grown to 17-21 GB on LothDesktop (measured 2026-10-19), a fresh clone of the seed costs the drive almost
+ * nothing, and the next editor start imports what changed since the seed.
+ */
+export const RESEED_IDLE_DAYS = 3;
 const ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
 
 /** A sandbox as sandboxes.json keeps it; the editor's state is found again at every look. */
@@ -95,6 +101,8 @@ export interface PoolOptions {
   startGate?: () => string | undefined;
   /** Room a warm Library copy needs, in GB, on top of the warning threshold (a clone on APFS costs far less up front). */
   librarySeedGB?: number;
+  /** Days a sandbox lies unused before its Library is cloned from the seed again (w1576, RESEED_IDLE_DAYS); 0: never. */
+  reseedIdleDays?: number;
   /**
    * Whether an editor of this sandbox may start now, by the machine's Unity slots (w469, machine/unitySlots.ts: every
    * Unity process on the machine counts, and waiting launches go first): undefined yes, else why not. Unset: only the
@@ -150,6 +158,8 @@ export function librarySource(
 export function hasLibrary(dir: string): boolean {
   return nonEmpty(path.join(dir, 'Library'));
 }
+
+const hasLibraryFiles = (dir: string) => nonEmpty(dir);
 
 function nonEmpty(dir: string): boolean {
   try {
@@ -257,6 +267,8 @@ export class SandboxPool {
   /** When each sandbox's editor was last stopped with the tool (its launches keep a holder's priority a while, w469). */
   private readonly stoppedAt = new Map<string, number>();
   private lastGitAt = 0;
+  private lastReseedLookAt = 0;
+  private reseeding = false;
   private ticking = false;
 
   constructor(o: PoolOptions, d: PoolDeps) {
@@ -590,7 +602,7 @@ export class SandboxPool {
     if (this.editorUp(id)) return none('its editor is up');
     if (projectOpen(r.path)) return none('an editor or build has the project open');
     const policy = { ...TRIM_DEFAULTS, ...(this.o.trim || {}) };
-    this.changed(r, { status: 'cleanup', statusDetail: `trimming the Burst and Build caches (${why})` });
+    this.changed(r, { status: 'cleanup', statusDetail: `trimming the Library caches (${why})` });
     const ac = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<TrimResult>((resolve) => {
@@ -632,6 +644,57 @@ export class SandboxPool {
     })();
     this.trimming.set(id, run);
     return run;
+  }
+
+  /**
+   * Clone the Library of a sandbox nobody has used for reseedIdleDays from the seed again (w1576), one at a time, every 10 minutes
+   * at most. Only where the copy is a block clone (the pool's librarySeedCopy 'clone', or a Mac's `cp -c`): a full copy would
+   * spend the space it frees. Unused means no live agent, no editor or build with the project open, no agent activity, and no
+   * change to Library's own entries, Temp, Logs or UserSettings (cleanup.ts staleUnityLibraries) for that many days. The sandbox is
+   * 'cleanup' meanwhile, so nobody is handed it half done.
+   */
+  private async reseedIdle() {
+    const days = this.o.reseedIdleDays ?? RESEED_IDLE_DAYS;
+    const s = this.settings;
+    const now = this.d.now();
+    if (days <= 0 || !s?.librarySeed || !(s.librarySeedCopy === 'clone' || process.platform === 'darwin')) return;
+    if (this.reseeding || now - this.lastReseedLookAt < 10 * 60_000) return;
+    this.lastReseedLookAt = now;
+    if (!hasLibraryFiles(s.librarySeed)) return;
+    for (const r of this.recs.values()) {
+      if (r.status !== 'ready' || this.busy.has(r.id) || this.trimming.has(r.id) || this.editorUp(r.id) || projectOpen(r.path)) continue;
+      if ((this.o.liveAgents?.(r.id) ?? 0) > 0) continue;
+      const a = this.o.activity(r.id);
+      if (a.busy || now - a.lastActivityMs < days * 86_400_000) continue;
+      const stale = await staleUnityLibraries([r.path], days, now, 0);
+      if (!stale.length) continue;
+      this.reseeding = true;
+      void this.reseed(r, s.librarySeed, s.librarySeedCopy, stale[0].days).finally(() => (this.reseeding = false));
+      return;
+    }
+  }
+
+  private async reseed(r: Rec, seed: string, mode: SandboxPoolSettings['librarySeedCopy'], idleDays: number) {
+    const lib = path.join(r.path, 'Library');
+    this.busy.add(r.id);
+    this.changed(r, { status: 'cleanup', statusDetail: `cloning the Library from the seed again (unused for ${idleDays} days)` });
+    let line: string;
+    try {
+      const before = await treeBytes(lib);
+      const res = await this.d.removeTree(lib);
+      if (fs.existsSync(lib)) throw new Error(`the old Library would not go (${res.code}): ${tail(res.stderr || res.stdout)}`);
+      await this.d.copyTree(seed, lib, undefined, mode);
+      const common = await this.d.git(['-C', r.path, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+      if (common.code === 0) armScriptReimport(r.path, common.stdout.trim());
+      line = `sandbox ${r.id}: unused for ${idleDays} days: its Library (${((before ?? 0) / GB).toFixed(1)} GB) cloned from the seed again`;
+    } catch (e) {
+      line = `sandbox ${r.id}: cloning the Library from the seed again failed: ${(e as Error).message}`;
+      this.o.onEvent({ text: line, sandbox: r.id });
+    } finally {
+      this.busy.delete(r.id);
+      if (r.status === 'cleanup') this.changed(r, { status: 'ready', statusDetail: undefined });
+    }
+    this.o.log?.(line);
   }
 
   /**
@@ -793,6 +856,7 @@ export class SandboxPool {
     try {
       await this.look();
       this.trimReleased();
+      await this.reseedIdle();
     } catch (e) {
       this.o.onEvent({ text: `sandbox pool look failed: ${(e as Error).message}` });
     } finally {

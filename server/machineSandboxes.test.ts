@@ -145,7 +145,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
   /** The status of each sandbox at every change the portal would be sent, consecutive repeats dropped (w898: the cleanup state's order). */
   const statuses: string[] = [];
@@ -168,6 +168,7 @@ function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined;
       ...(o.trimmer ? { trimmer: o.trimmer } : {}),
       ...(o.releaseSweep ? { releaseSweep: o.releaseSweep } : {}),
       ...(o.log ? { log: o.log } : {}),
+      ...(o.reseedIdleDays !== undefined ? { reseedIdleDays: o.reseedIdleDays } : {}),
       librarySeedGB: 1,
       ...(o.slots ? { editorSlot: (id: string) => o.slots!().startRefusal(`sandbox:${id}`), slotsStatus: async () => (await o.slots!().tick(), o.slots!().describe()) } : {}),
     },
@@ -1051,4 +1052,38 @@ test('w898: a daemon restart in the middle of a trim leaves nothing stuck: the p
   const { p: restarted } = pool(r, { liveAgents: () => 0 });
   assert.equal(restarted.list().find((s) => s.id === 'sb1')?.status, 'ready');
   await cut; // let the first pool's trim time out, so no timer outlives the test
+});
+
+test('w1576: a sandbox unused for days gets its Library cloned from the seed again; a recently used one keeps its own', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const seed = path.join(r.root, 'seed', 'Library');
+  fs.mkdirSync(path.join(seed, 'Artifacts'), { recursive: true });
+  fs.writeFileSync(path.join(seed, 'Artifacts', 'seed.bin'), 'seed');
+  let lastActivityMs = Date.now();
+  const logs: string[] = [];
+  const { p, statuses } = pool(r, {
+    settings: { librarySeed: seed, librarySeedCopy: 'clone' },
+    activity: () => ({ busy: false, lastActivityMs }),
+    liveAgents: () => 0,
+    log: (l) => logs.push(l),
+  });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const lib = path.join(r.sbRoot, 'sb1', 'Library');
+  fs.mkdirSync(path.join(lib, 'Artifacts'), { recursive: true });
+  fs.writeFileSync(path.join(lib, 'Artifacts', 'own.bin'), 'grown over days');
+  fs.mkdirSync(path.join(r.sbRoot, 'sb1', 'ProjectSettings'));
+  fs.writeFileSync(path.join(r.sbRoot, 'sb1', 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 6000.3.0f1');
+  const old = new Date(Date.now() - 5 * 86_400_000);
+  for (const d of [path.join(lib, 'Artifacts'), lib]) fs.utimesSync(d, old, old);
+  await p.tick();
+  assert.ok(fs.existsSync(path.join(lib, 'Artifacts', 'own.bin')), 'an agent was there a moment ago: kept');
+  lastActivityMs = Date.now() - 5 * 86_400_000;
+  (p as unknown as { lastReseedLookAt: number }).lastReseedLookAt = 0;
+  await p.tick();
+  await until('the reseed', () => logs.some((l) => /cloned from the seed again/.test(l)) && p.list()[0].status === 'ready');
+  assert.ok(fs.existsSync(path.join(lib, 'Artifacts', 'seed.bin')) && !fs.existsSync(path.join(lib, 'Artifacts', 'own.bin')), "the seed's Library, not its own");
+  assert.ok(statuses.includes('sb1:cleanup'), 'cleanup meanwhile: nobody is handed it half done');
+  assert.ok(logs.some((l) => /^sandbox sb1: unused for 5 days: its Library \(0\.0 GB\) cloned from the seed again$/.test(l)), logs.join(' | '));
 });
