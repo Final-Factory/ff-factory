@@ -758,6 +758,11 @@ export class Daemon {
         this.send({ type: 'host_health', health: { checkedAt: h.checkedAt, sandboxRoot: h.sandboxRoot, level: h.level, ...(h.detail ? { detail: h.detail } : {}), ...(h.blocked ? { blocked: h.blocked } : {}) } });
       },
       log: (line: string) => log(`host guard: ${line}`),
+      // The sandbox volume's floor is the pool's (w1581): what the portal's welcome last sent, else daemon.json's.
+      poolFloor: () => {
+        const p = this.currentPool();
+        return p ? { warnGB: p.diskWarnGB, criticalGB: p.diskCriticalGB } : undefined;
+      },
     };
     const go = (fx: MachineGuardEffects) => {
       if (this.stopped) return;
@@ -1333,8 +1338,10 @@ export class Daemon {
     const mine = [...this.entries.values()].filter((e) => e.spec?.sandbox === id);
     return {
       busy: mine.some((e) => e.s.live && BUSY.has(e.s.info.status)),
-      // A knob moved in a live view counts too (w1398): someone is tuning in this editor.
-      lastActivityMs: Math.max(this.liveTouched.get(id) ?? 0, ...mine.map((e) => Date.parse(e.s.info.lastActivityAt) || 0)),
+      // A knob moved in a live view counts too (w1398): someone is tuning in this editor. So does a view that runs (w1582):
+      // the person opens it to steer the art, often hours after the agent's turn ended; the portal ends the view when the
+      // agent's hold on its sandbox ends (server/placeAgain.ts LIVE_HOLD_MS), and the editor's idle clock starts then.
+      lastActivityMs: Math.max([...this.lives.values()].some((l) => l.sandbox === id) ? Date.now() : 0, this.liveTouched.get(id) ?? 0, ...mine.map((e) => Date.parse(e.s.info.lastActivityAt) || 0)),
     };
   }
 

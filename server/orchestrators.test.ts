@@ -20,6 +20,7 @@ import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
+import { LIVE_HOLD_MS } from './placeAgain.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
@@ -3769,4 +3770,34 @@ test("w1463: a machine's gh login reaches list_machines, the Capacity block, sta
     assert.ok(!text.includes(token) && !text.includes(token.slice(4)) && !text.includes(token.slice(-12)), `${what} carries the token`);
   }
   assert.ok(logs.some((l) => l.includes('gh login: bryding (gist, read:org, repo)')), 'the daemon and the portal log the names');
+});
+
+test('w1582: Agents.liveHold keeps a worker whose Live view is up while it waits on a person, never one waiting on a deploy, nor past the hold', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  const views = new Set<string>();
+  agents.liveHub = { running: (id: string) => (views.has(id) ? { materials: ['WardenMaterial'], fps: 15, width: 960 } : undefined) } as unknown as NonNullable<typeof agents.liveHub>;
+  const hold = (i: SessionInfo, now?: number) => {
+    (agents as unknown as { waitLive?: unknown }).waitLive = undefined;
+    return agents.liveHold(i, now);
+  };
+  const a = await startedFor(env, 'w1');
+  assert.match(String(await a.h.waiting_on_person!({ who: 'Ben', what: 'steer the Warden in the Live view' })), /^Recorded: your requests wait on Ben/);
+  assert.equal(hold(a.info), undefined, 'no view: no hold (the w890 release goes ahead)');
+  views.add(a.id);
+  assert.equal(hold(a.info), 'its Live view is up while it waits on Ben (w1582: held for 12 h after its last activity)');
+  assert.equal(agents.keepIdle(env.sessions.get(a.id), true, true), hold(a.info), 'the idle reaper keeps it too');
+  assert.equal(hold(a.info, Date.parse(a.info.lastActivityAt) + LIVE_HOLD_MS + 1), undefined, 'past the hold');
+  // A view up while it waits on a deploy: released as before (nobody is about to look).
+  const b = await startedFor(env, 'w2', { override_duplicate: 'another request' });
+  views.add(b.id);
+  assert.match(String(await b.h.blocked_on!({ deploys: ['portal'], what: 'the portal deploy' })), /^Recorded: w2 is Blocked/);
+  assert.equal(hold(b.info), undefined);
+  // Its work over ends the hold.
+  store.work.get('w1')!.status = 'done';
+  assert.equal(hold(a.info), undefined);
+  void dispatcher;
+  void call;
 });

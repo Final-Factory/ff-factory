@@ -583,7 +583,7 @@ change applies on the next reconnect; omitted on a redeploy: kept):
 | `max_agents_per_sandbox` | Agents that may be mid-turn at once in one sandbox; idle ones take no slot, and a message past it is queued | 2 |
 | `max_sandbox_agents` | The machine's agent cap: agents mid-turn at once on it, its sandboxes' and its standing agents together (w536) | `max_sandboxes` × `max_agents_per_sandbox` |
 | `max_unity` | Unity editors that may run at once on the machine: every top-level Unity process there counts, sandbox editors, the main clone's or its owner's own, `-batchmode` builds and test runs, peer-run editors, editors scripts start (w469, [unity-lifecycle.md](unity-lifecycle.md#unity-slots-every-editor-counts)); launches other than `unity start` wait in a queue for their slot (`unity-slot run`) | 2 |
-| `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors | 20 |
+| `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors, and on a machine whose daemon runs the host guard (a Dev Drive install: lothdesktop's V:, BEAST) no new agent processes either (w1581) | 20 |
 | `disk_critical_gb` | Below this: idle sandbox editors stop, and agents mid-turn in sandboxes are asked to commit, push and end their turn | 10 |
 
 **Why 20 / 10 GB** (w628, measured on BEAST 2026-10-07 in a sandbox with a warm Library): opening the editor and
@@ -593,6 +593,15 @@ sandbox's earlier day-long session (a develop merge, Burst recompiles, one build
 needs about 10 GB, so `disk_warn_gb` is that above the 10 GB floor where idle editors stop. A machine whose agents
 build several players before the 7-day clean-up removes them, or runs `max_unity` editors that all build, wants
 2.5 GB more per extra build in flight.
+
+**One floor per sandbox volume** (w1581, lothsahn, 2026-10-19: "Let's reduce the buffer on v: drives to 25GB"). A
+machine's host guard (`machine/hostGuard.ts`) judges the sandbox volume by these two settings too, as the portal's
+welcome last sent them, so `add_machine` with `disk_warn_gb` (and `disk_critical_gb`) changes the floor for new
+sandboxes, editors and agents there at once, with no installer run. Until w1581 the guard used daemon.json's
+`hostGuard.warnFreeGB` instead: the installer copies the pool's values into it at install (`devDriveGuard`,
+`scripts/worker/devdrive.ts`) and every update carries them, so lothdesktop's V: stayed at an old 50 GB that no tool
+could lower. `hostGuard.warnFreeGB` / `criticalFreeGB` in daemon.json now apply only to the guard's other volumes
+(`hostDiskPaths`, the VHDX's host when its maximum is not known). lothsahn wants Dev Drive (V:) volumes at 25 GB: `add_machine` with `disk_warn_gb: 25` on each.
 
 LothDesktop, for example: `sandbox_root: "D:\work\ffsb"`, `max_sandboxes: 3`, `max_agents_per_sandbox: 2` (six
 sandbox agents in all), `max_unity: 2`.
@@ -925,7 +934,12 @@ LothDesktop and Beast, not just when BEAST is full").
       with the worker Idle after it had declared it waited on lothsahn). Not a time, a machine, a usage limit or a lock (they clear by
       themselves or are about this machine), and not CI (its own, stricter rule above). Unlike CI, a running editor does not
       keep it (nothing is about to be read or fixed in it, and the placement that takes the sandbox stops the editor first,
-      as for every release). Never released (`waitReleaseWhy`, `keptWhy`): uncommitted or untracked work its daemon cannot
+      as for every release). **Except a Live view** (w1582, Ben on 2026-10-19: "The live views aren't working"): a worker
+      whose Live view is up while it waits on a **person** keeps its process, its sandbox and its editor for
+      `LIVE_HOLD_MS` (12 h) after its last activity (`Agents.liveHold`; the idle reaper's `keepIdle` too), so the person's
+      words reach it at once; past that, or when its sandbox is released any other way, the view ends with the release and
+      its next message asks it to stage the view again ([live-view.md](live-view.md), "While it waits on you"). Never
+      released (`waitReleaseWhy`, `keptWhy`): uncommitted or untracked work its daemon cannot
       save and push first, a branch with a commit its remote lacks, a Unity batch run of that sandbox in flight, another
       agent working there, a message queued for it, a worker mid-turn, with a permission open, or with a background job or
       unanswered message it needs (`keepLive`). Alive between turns it is stopped first (`releaseDue`), and the release pass

@@ -108,6 +108,12 @@ export interface HostDeps {
   reap?(maxAgeHours: number): Promise<string[]>;
   changed(h: HostHealth): void;
   /**
+   * The free-space levels of the sandbox drive's own volume, when they are not hostGuard's (w1581): a machine's daemon
+   * judges its sandbox volume by its pool's disk_warn_gb / disk_critical_gb (the portal's welcome), so one number per
+   * machine gates new sandboxes, editors and agents there. Other volumes keep warnFreeGB / criticalFreeGB.
+   */
+  sandboxFloor?(): { warnFreeGB: number; criticalFreeGB: number } | undefined;
+  /**
    * Whether this guard owns a sandbox drive (cfg.sandboxRoot) to watch and reattach (default yes: a machine's daemon,
    * machine/hostGuard.ts). The portal's own guard says no (w510): it holds no sandboxes, and watches its data volume.
    */
@@ -195,6 +201,12 @@ export class HostHealthMonitor {
     return this.d.cfg.hostGuard;
   }
 
+  /** The levels a volume is judged by: the sandbox drive's own floor on its volume (w1581), hostGuard's elsewhere. */
+  private floorOf(p: string) {
+    const f = this.ownsDrive() ? this.d.sandboxFloor?.() : undefined;
+    return f && volumeOf(p) === volumeOf(this.d.cfg.sandboxRoot) ? { ...this.g(), ...f } : this.g();
+  }
+
   /** One look: measure, decide, act. Never throws; overlapping calls are dropped. */
   async tick(): Promise<void> {
     if (this.ticking) return;
@@ -229,7 +241,7 @@ export class HostHealthMonitor {
       const hostOfVhdx = size !== undefined && volumeOf(p) === volumeOf(vhdx) && cfg.hostDiskPaths.some((h) => volumeOf(h) === volumeOf(p));
       const growth = hostOfVhdx ? Math.max(0, maxGB * GB - size!) : undefined;
       const prev = this.levels.get(p) ?? 'ok';
-      const level = growth !== undefined ? roomLevel(st ? st.free / GB : undefined, growth / GB, prev, this.g()) : diskLevel(st ? st.free / GB : undefined, prev, this.g());
+      const level = growth !== undefined ? roomLevel(st ? st.free / GB : undefined, growth / GB, prev, this.g()) : diskLevel(st ? st.free / GB : undefined, prev, this.floorOf(p));
       this.levels.set(p, level);
       disks.push({ path: p, freeBytes: st?.free, totalBytes: st?.total, level, ...(growth !== undefined ? { growthBytes: growth } : {}) });
     }
@@ -362,10 +374,13 @@ export class HostHealthMonitor {
     const lvl = this.health.level;
     const prev = this.criticalSince ? 'critical' : undefined;
     if (lvl !== 'ok' && this.lastReported !== lvl) {
-      const low = this.health.disks.filter((x) => x.level !== 'ok').map(diskWords).join(', ');
+      const lows = this.health.disks.filter((x) => x.level !== 'ok');
+      const low = lows.map(diskWords).join(', ');
+      // The floor of the volume that is low (w1581: the sandbox volume's is its pool's disk_warn_gb), not always hostGuard's.
+      const floor = (k: 'warnFreeGB' | 'criticalFreeGB') => [...new Set(lows.map((x) => this.floorOf(x.path)[k]))].join(' / ');
       this.d.report(
         lvl === 'critical' ? 'Disk space critical' : 'Disk space low',
-        `${low}. ${lvl === 'critical' ? `Below ${this.g().criticalFreeGB} GB: agents are asked to checkpoint, idle editors stop, known-safe junk is removed.` : `Below ${this.g().warnFreeGB} GB: no new editors or agent processes until space is freed.`}`,
+        `${low}. ${lvl === 'critical' ? `Below ${floor('criticalFreeGB')} GB: agents are asked to checkpoint, idle editors stop, known-safe junk is removed.` : `Below ${floor('warnFreeGB')} GB: no new editors or agent processes until space is freed.`}`,
       );
     }
     if (lvl === 'ok' && this.lastReported && this.lastReported !== 'ok') this.d.report('Disk space is fine again', this.health.disks.map((x) => `${x.path}: ${((x.freeBytes ?? 0) / GB).toFixed(0)} GB free`).join(', '));

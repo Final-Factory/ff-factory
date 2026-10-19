@@ -19,7 +19,7 @@ import { winDir } from './machineDeployWin.ts';
 import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
 import { ownersOf, resumableSessions, type SessionOwner } from './resumable.ts';
-import { movedNote, savedNote } from './placeAgain.ts';
+import { liveLostNote, movedNote, savedNote } from './placeAgain.ts';
 import { safeImage } from './images.ts';
 import { hostStartFailed } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
@@ -1581,11 +1581,14 @@ export class MachineManager {
     const moved = !s.live && s.info.movedFrom && sbId ? this.requireSandbox(m.id, sbId) : undefined;
     // Its uncommitted work was committed before its sandbox was released (w656): it hears so first.
     const saved = !s.live && s.info.savedWork ? savedNote(s.info.savedWork) : undefined;
-    const said = [updated, moved ? movedNote(m, s.info.movedFrom!, moved) : undefined, saved, text].filter(Boolean).join('\n\n');
+    // Its Live view ended with its sandbox's release (w1582): it stages the view again before it answers.
+    const lost = !s.live && s.info.liveLost ? liveLostNote(s.info.liveLost) : undefined;
+    const said = [updated, moved ? movedNote(m, s.info.movedFrom!, moved) : undefined, saved, lost, text].filter(Boolean).join('\n\n');
     this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), ...(files.length ? { attachments: files } : {}) });
-    if (moved || saved) {
+    if (moved || saved || lost) {
       delete s.info.movedFrom;
       delete s.info.savedWork;
+      delete s.info.liveLost;
       this.touch(s);
     }
   }
@@ -1942,7 +1945,7 @@ export class MachineManager {
         // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
         // The account its process started on (ranAs, ranFor) is the portal's too: the daemon keeps the copy of the session's
         // first start, which would put a restart on another person's tokens back on the first account (w1076).
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, ...run } = msg.info;
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, liveLost: _ll, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host

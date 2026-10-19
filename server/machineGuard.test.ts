@@ -278,3 +278,27 @@ test('the settings: the portal gives its own guard\'s to its own host\'s daemon 
   const ssh = convertMachineRecord(beast, 'ssh', { sshHost: 'beast', portalUrl: 'https://fff.example.ts.net', port: 8790, extras: deployed[0].extra });
   assert.deepEqual(ssh.daemonExtras?.hostGuard, SETTINGS, 'BEAST keeps its guard when the portal moves to the VM');
 });
+
+test('machine guard: the sandbox volume is judged by the pool\'s disk_warn_gb, not daemon.json\'s hostGuard.warnFreeGB (w1581)', async () => {
+  // lothdesktop, 2026-10-19: V:\ffw\sandboxes at 49.6 GB free, hostGuard.warnFreeGB 50 carried in daemon.json, and lothsahn's
+  // "Let's reduce the buffer on v: drives to 25GB" set on the pool (add_machine disk_warn_gb 25), which reached the pool only.
+  const run = async (floor: { warnGB: number; criticalGB: number } | undefined, freeV: number) => {
+    const { fx, ports } = world();
+    const g = new MachineGuard({ ...SETTINGS, warnFreeGB: 50, criticalFreeGB: 20, hostDiskPaths: ['D:/'] }, 'V:\\ffw\\sandboxes', { ...fx, exists: () => true, statfs: async (p) => ({ free: p.startsWith('V') ? freeV : 199 * GB, total: 1000 * GB }) }, { ...ports, ...(floor ? { poolFloor: () => floor } : {}) });
+    await g.tick();
+    return g;
+  };
+  const before = await run(undefined, 49.6 * GB);
+  assert.match(before.blockReason('agent') ?? '', /V:\\ffw\\sandboxes 50 GB free.*new agent processes wait/, 'without the pool floor: the 50 GB that blocked lothdesktop');
+  const after = await run({ warnGB: 25, criticalGB: 20 }, 49.6 * GB);
+  assert.equal(after.blockReason('agent'), undefined, 'at 25: agents start at 49.6 GB free');
+  assert.equal(after.health.disks.find((d) => d.path.startsWith('D'))?.level, 'ok');
+  const low = await run({ warnGB: 25, criticalGB: 20 }, 24 * GB);
+  assert.match(low.blockReason('agent') ?? '', /disk space is low \(V:\\ffw\\sandboxes 24 GB free\)/, 'below 25: still refused');
+  assert.match((await run({ warnGB: 25, criticalGB: 20 }, 19 * GB)).blockReason('agent') ?? '', /critically low/, 'below its disk_critical_gb: critical');
+  // Another volume keeps hostGuard's own levels: D: at 40 GB is under the guard's 50, whatever the pool says.
+  const { fx, ports } = world();
+  const d = new MachineGuard({ ...SETTINGS, warnFreeGB: 50, criticalFreeGB: 20, hostDiskPaths: ['D:/'] }, 'V:\\ffw\\sandboxes', { ...fx, exists: () => true, statfs: async (p) => ({ free: p.startsWith('V') ? 100 * GB : 40 * GB, total: 1000 * GB }) }, { ...ports, poolFloor: () => ({ warnGB: 25, criticalGB: 20 }) });
+  await d.tick();
+  assert.equal(d.health.disks.find((x) => x.path.startsWith('D'))?.level, 'warn');
+});

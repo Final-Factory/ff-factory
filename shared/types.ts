@@ -326,6 +326,11 @@ export interface SessionInfo {
   /** Placed again in another sandbox than the one it stopped in (w640): its next message says where, then this goes. */
   /** `shared` (w1135): work that is not the game's, resumed on an agent seat beside another agent; its game tree is that agent's. */
   movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string; shared?: true };
+  /**
+   * Its Live view ended because its sandbox was released while it waited (w1582, server/placeAgain.ts liveLostNote): its
+   * next message asks it to stage the view again with these settings, then this goes.
+   */
+  liveLost?: { at: string; why: string; materials: string[]; fps: number; width: number };
 }
 
 /**
