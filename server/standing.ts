@@ -49,6 +49,7 @@ import type {
 } from '../shared/types.ts';
 import { appDirOf } from '../shared/types.ts';
 import { agentCap } from './machines.ts';
+import { pauseWhy } from './machinePause.ts';
 
 /**
  * w510: standing agents run on a machine's daemon; the portal itself runs only the orchestrators and the dispatcher.
@@ -444,7 +445,8 @@ export class StandingAgents {
       liveAgents: m ? this.deps.machines!.liveCount(m.id) : 0,
       maxAgents: m ? agentCap(m) : 0,
       deadline: new Date(p.deadline),
-      unavailable: !online ? `machine ${a.machineId} is ${m ? 'offline' : 'gone'}` : undefined,
+      // w1532: a machine its owner paused from its tray app starts no standing run either; one already running finishes.
+      unavailable: !online ? `machine ${a.machineId} is ${m ? 'offline' : 'gone'}` : m?.pause?.paused ? `machine ${a.machineId} is ${pauseWhy(m.pause)}` : undefined,
     });
     if (verdict.action === 'wait') {
       a.state = 'waiting';

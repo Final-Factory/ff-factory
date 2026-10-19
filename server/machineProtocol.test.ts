@@ -60,7 +60,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // view it still has), and `materials` on a `live` start, optional: an older daemon ignores it and reports none.
 // w1519 (no bump): `ghApp` in the hello (optional: an older portal ignores it) and `gh_app_tokens`, GitHub App installation
 // tokens, sent only to a daemon that offered it (an older daemon never gets one; its runs keep the person's token everywhere).
-const DECIDED = { protocol: 9, fingerprint: '400ae83ccc6cc92e' };
+// w1532 (no bump): the machine's `pause` in the hello and its `pause` message, which an older portal's onMessage drops (no
+// default case); a daemon before it sends neither, and its machine is never paused.
+const DECIDED = { protocol: 9, fingerprint: '65be670d105f7538' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

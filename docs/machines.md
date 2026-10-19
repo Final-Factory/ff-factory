@@ -470,6 +470,75 @@ Host lothdesktop
 `ssh lothdesktop exit 0` must return at once. Then `add_machine` with `id: LothDesktop` and
 `ssh_host: lothdesktop` (or the Add button in the sidebar) does the rest; `list_machines` shows the progress.
 
+## Pausing a machine
+
+A Windows PC's owner pauses and unpauses all FF Factory work on it from a tray app the daemon installs (w1532, lothsahn,
+2026-10-19: "I would like the daemon to install a small taskbar app that you can right click to pause and unpause all work
+on that machine ... a schedule that you can configure ... If someone clicks the mouse or types a key, it should pause and only
+unpause after 90 minutes of inactivity. Unpausing via the taskbar should prevent any such pausing for 30 seconds after
+unpausing in the taskbar. When pausing, workers should be instructed to finish up their work, commit anything unfinished, and
+hand their jobs back to the dispatcher to be scheduled on other computers."). Windows only for now.
+
+- **The tray app** (`machine/tray/FFFactoryTray.cs`, `machine/tray.ts`). The daemon builds it with the C# compiler .NET
+  Framework 4 puts on every Windows 10 and 11 PC (`Framework64\v4.0.30319\csc.exe`: C# 5, no SDK, no binary in the
+  repository) into `<app_dir>/tray`, outside the `app` folder an update swaps, and builds it again whenever its sources
+  change, so a daemon update updates the tray. The daemon runs from its logon task in the user's interactive session
+  (`taskXml`, InteractiveToken), so the app it starts shows in that user's notification area and starts at logon with the
+  daemon. They talk over the app's stdin and stdout, one JSON object per line, in UTF-8; the app ends when its stdin closes,
+  so a daemon that stops takes its tray with it. Its icon is the portal's browser-tab favicon (`machine/tray/fff.ico`, drawn
+  from `web/index.html`'s SVG by `make-icons.py`), with a grey F and an orange pause sign while paused. On Windows 11 it shows
+  itself in the taskbar once, the first time (`NotifyIconSettings\…\IsPromoted`); the person's own choice after that stands.
+  Its menu: the state and why, what happens next, the agents working here, Pause all work / Unpause, Work schedule…, Pause
+  when someone uses this PC, Open FF Factory. `daemon.json` `"tray": false` turns it off; a daemon a test builds has none
+  unless asked.
+- **How the three combine** (`machine/pauseRules.ts`, `server/pauseRules.test.ts`). The latest event wins, and a person at
+  the keyboard wins over both. The base state is the latest of a tray Pause or Unpause and the schedule's last edge (a
+  window's start unpauses, its end pauses, as lothsahn asked). So a tray pause holds until the tray unpauses or the next
+  window starts, and a tray unpause outside the window holds until the next edge; without a schedule the tray's last word
+  holds. A person's key or click pauses a machine that would run until 90 minutes pass without one, inside the window or
+  under a tray unpause, and holds across a window's start (someone is at the machine). A tray unpause clears it and ignores
+  input for 30 seconds. Changing the schedule never brings back a tray word the schedule had already replaced.
+- **The settings live on the machine** (`<app_dir>/pause.json`, `machine/pause.ts`). The schedule and the activity watch are
+  about the person at that PC, so they work while the portal is unreachable and survive a daemon restart or update (the
+  pause, the schedule and a person's 90 minutes are all kept there). The portal shows them read-only (`pause` in the hello and
+  in a `pause` message, kept on `Machine.pause`). Defaults: no schedule, the activity watch on, 90 minutes.
+- **A person's input, not a program's.** Low-level keyboard and mouse hooks count a key press or a mouse button press that
+  carries neither `LLKHF_INJECTED`/`LLMHF_INJECTED` nor their lower-integrity forms. Measured on beast (2026-10-19, the real
+  tray app): `SendInput`, `keybd_event` and `mouse_event` (what `scripts/agent/osdrive.py` and test tools use) all arrive
+  flagged injected; `PostMessage` (`scripts/agent/post_key.py`) never reaches a hook; Unity MCP drives the game inside the
+  editor and sends no OS input. Moving the mouse does not count. **A held key's auto-repeat does not count either**, nor a key
+  already down when the hooks start: beast had its Left Ctrl held down (607 repeats in 20 s, no release, no mouse movement),
+  which would otherwise have paused it for good. Windows drops a low-level hook that answers slowly without saying so, so the
+  app installs both hooks again every 30 minutes.
+- **On the portal a paused machine is held** (`Agents.placement()`, `pauseHolds` in `server/machinePause.ts`): it joins
+  `placement.hold` with "paused from its tray app: someone is using it (w1532)", so no new work is placed there, the Capacity
+  block reads `ROOM n% but HELD (…)`, nothing resumes there (w1376), and it is no capacity ping's room. The machines view
+  shows it amber, "Paused", with why and until when.
+- **Its work is handed back** (`server/machinePause.ts`, `Orchestrators.handBack`, `server/machinePause.test.ts`):
+  - A worker **mid-turn** is told once ("[FF Factory] PAUSE: …"): finish the step it is on, commit and push everything
+    unfinished on its branch (a WIP commit is fine), release a Unity slot, a bench lock or a player it holds, and end with
+    `wNNN: handed back: branch <branch> pushed; <where it stopped>` for each request. When its turn ends, its process stops,
+    its sandbox's uncommitted work is saved on its branch and pushed (w656's `save_work`), and each request it was working on
+    is taken off it, set Queued with `WorkItem.handedBack` (branch, note, how), and the dispatcher is told at once to
+    `switch_branch` a FREE sandbox on a computer that is not paused to that branch, then `start_agent` with the work id. The
+    new worker's handover says where the work is and quotes the note (`handoverNote`).
+  - A worker whose turn ends without a hand-back line gets 60 seconds for its notice to start a turn of its own (the notice
+    reached the turn as it ended); then FF Factory hands back for it. Still mid-turn **15 minutes** after the notice, its turn
+    is interrupted, and stopped 2 minutes later if that does not end it; the save keeps its sandbox's uncommitted work either
+    way. A worker holding a lock gets no longer: a benchmark measured while a person uses the machine measures nothing, and the
+    notice asks it to release the lock first.
+  - A worker **between turns** is not woken for it: its process stops, and its requests stay with it until something would
+    resume it (its check-in, CI, a person's reply). The pause holds that message, so the requests are handed back then, the
+    message going to the next worker in its handover (`SessionManager.pauseHeld`).
+- **Standing agents** start no run on a paused machine (the run waits, as for an offline one); a run in progress finishes.
+  **The ops worker's machine updates do not pause**: an update takes a minute, keeps the fleet on one daemon commit and is what
+  updates the tray itself.
+- **Protocol**: `pause` in the hello and a `pause` message, no bump: an older portal's switch drops it, and a daemon before it
+  sends neither, so its machine is never paused (`server/machineProtocol.test.ts`).
+- **Found while testing on beast**: a Windows Security firewall prompt for `finalfactory.exe` (a player started outside the
+  slot pool) stood in front, and while an elevated window is in front Windows drops injected mouse input (UIPI) after the hooks
+  have seen it. An agent that drives the desktop with `mouse_event` gets nothing there until a person answers the prompt.
+
 ## Machine sandboxes
 
 A machine with a `sandbox_root` holds a pool of sandboxes (the portal's own computer included, through its own daemon): each a **git worktree of the

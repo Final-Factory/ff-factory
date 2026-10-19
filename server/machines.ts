@@ -25,7 +25,7 @@ import { hostStartFailed } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
@@ -574,6 +574,34 @@ export class MachineManager {
   private readonly cleanupCalls = new Map<string, { resolve: (s: CleanupSummary) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   /** A machine's clean-up could not get above its soft threshold (wired by index.ts: the orchestrator and a push). */
   cleanupNotice?: (machineId: string, text: string) => void;
+  /** A machine was paused or unpaused from its tray app, schedule or a person's input (w1532; wired by Agents: the hand-back). */
+  onPause?: (machineId: string, pause: MachinePause, was: MachinePause | undefined) => void;
+
+  /**
+   * A daemon's pause report (w1532, machine/pause.ts), in its hello or a `pause` message: kept on the machine record (the
+   * machines view shows it; Agents.placement() holds the machine while paused), and a change between paused and running
+   * goes to onPause.
+   */
+  private takePause(id: string, raw: unknown) {
+    const m = this.store.machines.get(id);
+    if (!m || !raw || typeof raw !== 'object') return;
+    const r = raw as Partial<MachinePause>;
+    if (typeof r.paused !== 'boolean') return;
+    const pause: MachinePause = {
+      paused: r.paused,
+      ...(r.reason === 'manual' || r.reason === 'schedule' || r.reason === 'activity' ? { reason: r.reason } : {}),
+      detail: String(r.detail ?? '').slice(0, 300),
+      ...(typeof r.since === 'string' ? { since: r.since } : {}),
+      ...(typeof r.until === 'string' ? { until: r.until } : {}),
+      ...(r.settings && typeof r.settings === 'object' ? { settings: r.settings } : {}),
+      ...(typeof r.tray === 'string' ? { tray: r.tray.slice(0, 200) } : {}),
+      at: new Date().toISOString(),
+    };
+    const was = m.pause;
+    this.update(id, { pause });
+    if (!!was?.paused !== pause.paused || (pause.paused && was?.reason !== pause.reason)) console.log(`machine ${id}: ${pause.paused ? `PAUSED (${pause.reason ?? '?'})` : 'running again'}: ${pause.detail}`);
+    if (!!was?.paused !== pause.paused) this.onPause?.(id, pause, was);
+  }
 
   /** Send every connected daemon its clean-up settings (after they changed). */
   pushCleanupConfig() {
@@ -1847,6 +1875,9 @@ export class MachineManager {
         const repool = msg.layout ? adoptLayout(m, msg.layout) : leaveRoot(m);
         this.store.putMachine(m);
         if (repool) this.links.get(id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
+        // Its owner's pause (w1532): a daemon before it sends none, and its machine is never paused.
+        if (msg.pause) this.takePause(id, msg.pause);
+        else if (m.pause) this.update(id, { pause: undefined });
         // Its live views (w1509): the portal's views of this machine started again where its daemon lost them, and the
         // daemon's views a restarted portal lost taken back.
         if (msg.liveView) this.onLiveHello?.(id, Array.isArray(msg.liveViews) ? msg.liveViews : undefined);
@@ -2005,6 +2036,9 @@ export class MachineManager {
       }
       case 'host_report':
         this.hostReport?.(id, String(msg.title ?? ''), String(msg.body ?? ''));
+        return;
+      case 'pause':
+        this.takePause(id, msg.pause);
         return;
       case 'host_health':
         if (msg.health && typeof msg.health === 'object') this.update(id, { guard: msg.health });

@@ -7,7 +7,7 @@ import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '
 import { capacityLine, fleetOf, slotCall, type FleetComputer, type FleetSandbox, type PersonWait, type PlaceAgents, type SlotCall } from '../../../shared/fleet';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
-import { agentView, fmtBytes, fmtRelative, lsGet, lsSet, machineSandboxGlance, navigate, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
+import { agentView, fmtBytes, fmtRelative, lsGet, lsSet, machineSandboxGlance, navigate, pauseGlance, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
 import { AttentionButton, DrawerButton } from './ShellButtons';
 import { describe, gpuPct, level, ramLvl, ramPct, type Lvl } from './SystemMeters';
 import { Dot, Icon } from './ui';
@@ -131,7 +131,9 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
       : c.machine.status === 'error'
         ? 'red'
         : c.online
-          ? 'green'
+          ? c.machine.pause?.paused
+            ? 'amber'
+            : 'green'
           : 'grey'
     : d && (!d.online || d.status === 'error')
       ? 'red'
@@ -145,7 +147,9 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
       <span className="fl-title">
         <Dot tone={tone} pulse={tone === 'blue'} title={c.host ? daemonState || (d ? 'host and its daemon online' : 'host') : state} />
         <span className="fl-name">{c.name}</span>
-        <span className="fl-os" data-testid="fl-os">{[osName(c.platform), c.host ? 'host' : state === 'online' ? '' : state, daemonState].filter(Boolean).join(' · ')}</span>
+        <span className="fl-os" data-testid="fl-os" title={c.machine?.pause?.paused ? c.machine.pause.detail : undefined}>
+          {[osName(c.platform), c.host ? 'host' : state === 'online' ? '' : state, daemonState, c.online ? pauseGlance(c.machine) : ''].filter(Boolean).join(' · ')}
+        </span>
         {c.live > 0 && (
           <span className="fl-agents-sum" data-testid="fl-agents-sum">
             {c.live} {c.live === 1 ? 'agent' : 'agents'}
