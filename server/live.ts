@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import type { LiveKnobRequest, LiveMaterialKnobs, LiveViewInfo, Requester, SessionInfo, UserRole } from '../shared/types.ts';
-import type { FromDaemon, ToDaemon } from './machineProtocol.ts';
+import type { DaemonLiveView, FromDaemon, ToDaemon } from './machineProtocol.ts';
 
 /** What a page may hold back before it misses frames (about a second of 960 px JPEGs). */
 const VIEWER_BACKLOG_BYTES = 1024 * 1024;
@@ -123,7 +123,7 @@ export class LiveHub {
     this.views.set(v.info.liveId, v);
     this.deps.changed();
     try {
-      const text = await this.deps.machines.live(machineId, { op: 'start', liveId: v.info.liveId, sessionId: info.id, sandbox, fps, width });
+      const text = await this.deps.machines.live(machineId, { op: 'start', liveId: v.info.liveId, sessionId: info.id, sandbox, fps, width, materials });
       return `Live view started (${fps} fps, ${width} px${materials.length ? `, knobs on ${materials.join(', ')}` : ', no knobs: pass materials'}): ${text}. People open it from your conversation's "Live view" button.`;
     } catch (e) {
       this.views.delete(v.info.liveId);
@@ -147,6 +147,44 @@ export class LiveHub {
   async switched(on: boolean) {
     if (!on) for (const v of [...this.views.values()]) await this.stopView(v);
     this.deps.switched?.();
+  }
+
+  /**
+   * A machine's daemon said hello (w1509). A daemon restarts on every machine rollout, and the views it ran went with it:
+   * the page kept showing them while every knob was refused ("this live view is not running on the machine") and the
+   * stream had stopped. So a view of this machine its daemon does not run is started again, with the same id, and the
+   * daemon's views this portal does not know (the portal restarted) are taken back while their session is still on that
+   * sandbox, else stopped. An older daemon reports none (`running` undefined): its views are asked to start again, which
+   * it answers "already running" for a view it still has.
+   */
+  async daemonHello(machineId: string, running: DaemonLiveView[] | undefined) {
+    if (!this.deps.enabled()) return;
+    const ids = new Set((running ?? []).map((r) => r.liveId));
+    for (const v of [...this.views.values()]) {
+      if (v.info.machineId !== machineId || ids.has(v.info.liveId)) continue;
+      const { liveId, sessionId, sandbox, fps, width, materials } = v.info;
+      if (running) this.touch(v, { state: 'starting', detail: "the machine's daemon restarted: starting the stream again" });
+      try {
+        await this.deps.machines.live(machineId, { op: 'start', liveId, sessionId, sandbox, fps, width, materials });
+      } catch (e) {
+        if (this.views.get(liveId) === v) this.touch(v, { state: 'holding', detail: `the machine's daemon restarted and the view did not start again: ${(e as Error).message}` });
+      }
+    }
+    for (const r of running ?? []) {
+      if (this.views.has(r.liveId)) continue;
+      const s = this.deps.session(r.sessionId);
+      if (!s || s.machineId !== machineId || s.machineSandbox !== r.sandbox || this.bySession(r.sessionId)) {
+        await this.deps.machines.live(machineId, { op: 'stop', liveId: r.liveId, sessionId: r.sessionId, sandbox: r.sandbox }).catch(() => undefined);
+        continue;
+      }
+      const at = iso(this.now());
+      const materials = (Array.isArray(r.materials) ? r.materials : []).map(String).filter((m) => NAME.test(m)).slice(0, 8);
+      this.views.set(r.liveId, {
+        info: { liveId: r.liveId, sessionId: r.sessionId, machineId, sandbox: r.sandbox, state: r.state, detail: String(r.detail ?? ''), fps: clamp(r.fps, 1, LIVE_FPS.max, LIVE_FPS.default), width: clamp(r.width, LIVE_WIDTH.min, LIVE_WIDTH.max, LIVE_WIDTH.default), materials, startedAt: at, updatedAt: at, frames: 0 },
+        viewers: new Set(),
+      });
+      this.deps.changed();
+    }
   }
 
   /** Every live view of a session that is gone (its worker ended). */

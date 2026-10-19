@@ -68,7 +68,8 @@ test('w1398: live view: start, frames to a page, a knob in the next frames, stop
 
   // The knobs, read from the game, and one moved: the next frames follow it.
   const knobs = await hub.knobs('w1');
-  assert.deepEqual(knobs[0].knobs.map((k) => k.name), ['_Intensity', '_ComaColor']);
+  assert.deepEqual(knobs[0].knobs.map((k) => k.name), ['_Intensity', '_ComaColor', '_Age']);
+  assert.match(knobs[0].knobs[2].driven ?? '', /MaterialPropertyBlock/, 'the game\'s reason a knob cannot move the picture reaches the page');
   const before = page.sent.length;
   const answer = await hub.setKnob('w1', { material: 'VfxComet', name: '_Intensity', value: 4 }, { userId: 'kai', displayName: 'Kai' });
   assert.equal((answer as { value: number }).value, 4);
@@ -80,4 +81,61 @@ test('w1398: live view: start, frames to a page, a knob in the next frames, stop
   assert.equal(await hub.tool(info, { action: 'stop' }), 'Live view stopped.');
   await until('the game stops streaming', () => game.commands.at(-1) === 'live.frames|off', 20_000);
   assert.equal(page.readyState, 3);
+});
+
+test('w1509: a daemon restart (a machine rollout) leaves the view working: frames come back and a knob reaches the game', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'live-restart-'));
+  const cfg = {
+    dataDir: dir,
+    port: 0,
+    limits: { maxSessions: 30, maxUnity: 2, maxSandboxes: 4, minFreeGB: 0, minFreeRamGB: 0 },
+    orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false },
+    worker: { permissionMode: 'bypassPermissions', effort: 'low' },
+    unity: {},
+    live: { enabled: true },
+  } as unknown as Config;
+  const game = fakeLiveGame({ width: 32, height: 18 });
+  const store = new Store(dir);
+  const first = await createTestMachine({ sandboxes: ['alpha'], liveDeps: () => game.deps });
+  store.putMachine(first.record({}));
+  const sessions = new SessionManager(cfg, store);
+  const machines = new MachineManager(cfg, store, sessions);
+  const info = { id: 'w1', kind: 'worker', title: 'Shield', machineId: 'pc', machineSandbox: 'alpha', requestedBy: { userId: 'ben', displayName: 'Ben' } } as unknown as SessionInfo;
+  const hub = new LiveHub({ enabled: () => true, machines, session: (id) => (id === 'w1' ? info : undefined), roleOf: () => 'member', changed: () => undefined });
+  machines.onLiveFrames = (m, id, ws) => hub.attachFrames(m, id, ws);
+  machines.onLiveState = (m, msg) => hub.onState(m, msg);
+  machines.onLiveHello = (m, running) => void hub.daemonHello(m, running);
+  let second: Awaited<ReturnType<typeof createTestMachine>> | undefined;
+  t.after(async () => {
+    game.stop();
+    await second?.stop();
+    await first.stop();
+    sessions.stopAll();
+    await new Promise((r) => setTimeout(r, 60));
+    store.flush();
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  });
+  await first.connect(machines);
+  await until('the daemon offers the live view', () => machines.canLive('pc'), 20_000);
+  await hub.tool(info, { action: 'start', materials: ['VfxComet'], fps: 20, width: 320 });
+  await until('the view says live', () => hub.viewsFor('ben')[0]?.state === 'live', 20_000);
+  const page = new EventEmitter() as EventEmitter & { OPEN: number; readyState: number; bufferedAmount: number; sent: Buffer[]; send(b: Buffer): void; close(): void };
+  Object.assign(page, { OPEN: 1, readyState: 1, bufferedAmount: 0, sent: [] as Buffer[] });
+  page.send = (b: Buffer) => void page.sent.push(b);
+  page.close = () => ((page.readyState = 3), page.emit('close'));
+  hub.addViewer('w1', page as unknown as WebSocket);
+  await until('the page gets frames', () => page.sent.length >= 2, 20_000);
+
+  // The machine's daemon restarts, as every rollout does: the process ends with its views, a new one connects.
+  first.daemon!.shutdown();
+  await until('the machine goes offline', () => !machines.isOnline('pc'), 10_000);
+  second = await createTestMachine({ id: 'pc', sandboxes: ['alpha'], liveDeps: () => game.deps });
+  await second.connect(machines);
+
+  const before = page.sent.length;
+  await until('frames reach the page again', () => page.sent.length >= before + 3, 20_000);
+  assert.equal(hub.viewsFor('ben').length, 1, 'still one view, the same page');
+  const answer = await hub.setKnob('w1', { material: 'VfxComet', name: '_Intensity', value: 3 }, { userId: 'ben', displayName: 'Ben' });
+  assert.equal((answer as { value: number }).value, 3, 'the knob reached the game after the restart');
+  assert.equal(game.knobs().VfxComet[0].value, 3);
 });

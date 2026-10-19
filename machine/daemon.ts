@@ -14,7 +14,7 @@ import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
-import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
+import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { HOST_PROTOCOL, HostedSession, hostFolders, hostLook, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
@@ -871,6 +871,14 @@ export class Daemon {
     }
     this.caffeinate?.kill();
     this.voice?.stop();
+    // Its live views end with it, as they do when the process exits (w1509): the portal starts them again on the next
+    // daemon's hello, and the game then streams to that daemon's port.
+    for (const l of this.lives.values()) {
+      clearTimeout(l.timer);
+      l.link?.close(1000, 'the daemon stopped');
+      void l.s.stop();
+    }
+    this.lives.clear();
     this.ws?.close();
   }
 
@@ -1039,8 +1047,9 @@ export class Daemon {
       ...(this.voice ? { voice: this.voice.status() } : {}),
       // It saves a sandbox's uncommitted work before the portal releases it (w656).
       saveWork: true,
-      // It streams a sandbox's running game for a live view (w1398, docs/live-view.md).
+      // It streams a sandbox's running game for a live view (w1398, docs/live-view.md), and says which views run (w1509).
       liveView: true,
+      liveViews: this.liveViews(),
       // It compacts an idle agent on request and says a compaction's turn end (w1469, the workers' automatic compaction).
       compact: true,
       // A worker root install (w513): its folders, for a record the portal never deployed.
@@ -1218,7 +1227,12 @@ export class Daemon {
 
   /** Tests' fake game for a live view (server/testLiveGame.ts); the real one is the sandbox editor's (machine/live.ts). */
   private readonly liveDeps?: (sandbox: string) => Partial<LiveSessionDeps>;
-  private readonly lives = new Map<string, { s: LiveSession; link?: WebSocket; latest?: Buffer; sandbox: string; sessionId: string; timer?: NodeJS.Timeout }>();
+  private readonly lives = new Map<string, { s: LiveSession; link?: WebSocket; latest?: Buffer; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout }>();
+
+  /** The live views it runs, for the hello (w1509): a portal that restarted takes them back. */
+  private liveViews(): DaemonLiveView[] {
+    return [...this.lives.entries()].map(([liveId, l]) => ({ liveId, sessionId: l.sessionId, sandbox: l.sandbox, fps: l.s.fps, width: l.s.width, materials: l.materials, ...l.s.state, frames: l.s.frames }));
+  }
   /** The last knob move per sandbox (ms): counted as activity, so its editor is not stopped as idle. */
   private readonly liveTouched = new Map<string, number>();
   /** Knob moves a session's agent has not heard of yet, newest per knob: they open its next message. */
@@ -1280,7 +1294,11 @@ export class Daemon {
     const old = this.lives.get(msg.liveId);
     if (old) return 'already running';
     const pidOf = () => this.pool.list().find((x) => x.id === msg.sandbox)?.unity?.pid;
-    const entry: { s: LiveSession; link?: WebSocket; latest?: Buffer; sandbox: string; sessionId: string; timer?: NodeJS.Timeout } = { sandbox: msg.sandbox, sessionId: msg.sessionId } as never;
+    const entry: { s: LiveSession; link?: WebSocket; latest?: Buffer; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout } = {
+      sandbox: msg.sandbox,
+      sessionId: msg.sessionId,
+      materials: Array.isArray(msg.materials) ? msg.materials.map(String).slice(0, 8) : [],
+    } as never;
     entry.s = new LiveSession(msg.fps ?? 15, msg.width ?? 960, {
       editorPid: pidOf,
       channel: (pid) => readGameChannel(pid),

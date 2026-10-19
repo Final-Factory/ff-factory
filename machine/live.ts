@@ -171,6 +171,11 @@ export class LiveSession {
     return this.port;
   }
 
+  /** The state it last reported, for the daemon's hello (w1509): a portal that restarted learns it there. */
+  get state(): { state: LiveState; detail: string } {
+    return { state: this.lastState ?? 'starting', detail: this.lastDetail };
+  }
+
   /** A game command (a knob) through the current channel. */
   async command(text: string): Promise<CommandReply> {
     const pid = this.deps.editorPid();

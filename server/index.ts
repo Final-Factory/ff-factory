@@ -359,6 +359,7 @@ const liveHub = new LiveHub({
 agents.liveHub = liveHub;
 machines.onLiveFrames = (machineId, liveId, ws) => liveHub.attachFrames(machineId, liveId, ws);
 machines.onLiveState = (machineId, msg) => liveHub.onState(machineId, msg);
+machines.onLiveHello = (machineId, running) => void liveHub.daemonHello(machineId, running);
 agents.attachments = attachments;
 agents.spend = spend;
 // Review media workers publish (docs/review.md): <sandboxRoot>/_review unless config review.root says otherwise.

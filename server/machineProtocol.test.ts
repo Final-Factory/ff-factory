@@ -55,7 +55,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // optional: an older portal emits the turn end without it, as before; an older daemon never sends it.
 // w1480 (no bump): `settings` on the launch spec (the session's Claude Code settings, here a plugin turned off), optional: an
 // older daemon ignores it and its workers start with the machine's plugins as before.
-const DECIDED = { protocol: 9, fingerprint: 'f7e198d5f98bf8a4' };
+// w1509 (no bump): `liveViews` in the hello, the views a daemon runs (optional: an older portal ignores it; from an older
+// daemon the portal gets none and asks each of its views to start again, which that daemon answers "already running" for a
+// view it still has), and `materials` on a `live` start, optional: an older daemon ignores it and reports none.
+const DECIDED = { protocol: 9, fingerprint: 'd958f487e77444ac' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

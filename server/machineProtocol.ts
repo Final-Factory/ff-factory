@@ -200,7 +200,20 @@ export type ToDaemon =
    * `note` (who moved which knob) written into the session's conversation, held for its next message and counted as
    * activity. Sent only to a daemon whose hello offered `liveView`, so an older daemon never gets one.
    */
-  | { type: 'live'; id: string; op: 'start' | 'stop' | 'command'; liveId: string; sessionId: string; sandbox: string; fps?: number; width?: number; command?: string; note?: string };
+  | { type: 'live'; id: string; op: 'start' | 'stop' | 'command'; liveId: string; sessionId: string; sandbox: string; fps?: number; width?: number; materials?: string[]; command?: string; note?: string };
+
+/** A live view a daemon runs (w1509), as its hello reports it. */
+export interface DaemonLiveView {
+  liveId: string;
+  sessionId: string;
+  sandbox: string;
+  fps: number;
+  width: number;
+  materials: string[];
+  state: 'starting' | 'live' | 'holding' | 'stopped';
+  detail: string;
+  frames: number;
+}
 
 export type FromDaemon =
   /**
@@ -225,6 +238,11 @@ export type FromDaemon =
       saveWork?: boolean;
       /** It streams a sandbox's running game for a live view (w1398, `live`). An older portal ignores it. */
       liveView?: boolean;
+      /**
+       * The live views it runs now (w1509): a portal that restarted takes them back, and one whose views are missing here
+       * (this daemon restarted) starts them again. An older daemon sends none; an older portal ignores it.
+       */
+      liveViews?: DaemonLiveView[];
       /** It compacts an idle agent's conversation on request (w1469, `compact`) and says a compaction's turn end in `signal` `meta`. An older portal ignores it. */
       compact?: boolean;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */

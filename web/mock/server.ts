@@ -85,6 +85,8 @@ addMaterial('VfxComet', 'FinalFactory/VfxComet', [
   { name: '_IonSpeed', label: 'Ion Speed', type: 'float', value: 1.2 },
   { name: '_Rings', label: 'Ring Count', type: 'int', value: 3 },
   { name: '_Flow', label: 'Flow Direction', type: 'vector', value: [0.2, -0.4, 0, 0] },
+  { name: '_Age', label: 'Comet age (s)', type: 'float', value: 0, driven: "a script sets it on 'Comet' per renderer (a MaterialPropertyBlock), which wins over the material; ask the agent to change it in that script" },
+  { name: '_Charge', label: 'Charge shown (0..1)', type: 'float', value: 1, driven: "something else sets it: it reads 1 after the knob set 3.798 (a script that writes the material, or the .mat edited and reloaded); ask the agent to change it at that source" },
 ]);
 addMaterial('CometCatcherMaterial', 'FinalFactory/CometCatcher', [{ name: '_EmissionAG', label: 'Emission AG', type: 'color', value: [64, 0, 33.6, 1], hdr: true }]);
 const liveKnobsOf = () => Object.entries(liveMaterials).map(([material, m]) => ({ material, shader: m.shader, knobs: m.knobs.map(({ original, ...k }) => ({ ...k, moved: JSON.stringify(k.value) !== JSON.stringify(original) || undefined })) }));
