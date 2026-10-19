@@ -7,6 +7,7 @@ import type { StaleContext } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import type { GhLogin } from '../shared/ghLogin.ts';
+import type { GhAppToken } from '../shared/githubAppRoute.ts';
 import type { AttachmentRef, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
@@ -35,6 +36,8 @@ import type { AttachmentRef, CompactionTrigger, CleanupSummary, HostHealth, Host
  * Also (w656, no bump): `saveWork` in the hello and `save_work`, sent only to a daemon that offered it, answered by
  * `save_result`, which an older portal never asks for and drops.
  * Also (w1463, no bump): `gh_login`, the machine's gh account and scope names, which an older portal drops.
+ * Also (w1519, no bump): `ghApp` in the hello and `gh_app_tokens`, GitHub App installation tokens, sent only to a daemon that
+ * offered it.
  */
 export const PROTOCOL_VERSION = 9;
 
@@ -194,6 +197,8 @@ export type ToDaemon =
    * `saveWork`, so an older daemon never gets one.
    */
   | { type: 'save_work'; id: string; sandbox: string; branch: string; message: string; githubToken?: string }
+  /** GitHub App installation tokens for this machine's runs (w1519, docs/github-apps.md): the whole set, each time it changes. */
+  | { type: 'gh_app_tokens'; tokens: GhAppToken[] }
   /**
    * A live view (w1398, docs/live-view.md), answered by `live_result`. start: stream the sandbox's running game to the
    * portal at /machine/live/<liveId>; stop; command: one of the game's live commands (look.material.list|set|reset), with
@@ -243,6 +248,8 @@ export type FromDaemon =
        * (this daemon restarted) starts them again. An older daemon sends none; an older portal ignores it.
        */
       liveViews?: DaemonLiveView[];
+      /** It keeps GitHub App installation tokens for its runs (w1519, `gh_app_tokens`). An older portal ignores it. */
+      ghApp?: boolean;
       /** It compacts an idle agent's conversation on request (w1469, `compact`) and says a compaction's turn end in `signal` `meta`. An older portal ignores it. */
       compact?: boolean;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */

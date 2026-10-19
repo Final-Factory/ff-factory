@@ -52,6 +52,7 @@ import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warnings
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, setGithubTokens } from './githubTokens.ts';
+import { GithubApps } from './githubApps.ts';
 import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.ts';
 import { GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
@@ -191,7 +192,10 @@ const credentialsDir = process.env.CREDENTIALS_DIRECTORY;
 delete process.env.CREDENTIALS_DIRECTORY;
 const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
 // The vault's GitHub tokens (w868, docs/vault.md section 13): the portal's gh reads per person, and each token's health.
-const github = new GithubTokens({ vault: () => vault, cfg, repos: () => cfg.vault?.githubRepos ?? GITHUB_REQUIRED_REPOS, payer: () => identity.systemPayer().userId, log: (line) => console.warn(line), report: (title, body) => hostNotice(title, body) });
+// The vault's GitHub Apps (w1519, docs/github-apps.md): installation tokens for the repositories an allowed account installed
+// them on (a modder's private repositories); started once the machines are there, which get the tokens.
+const githubApps = new GithubApps({ vault: () => vault, log: (line) => console.warn(line), report: (title, body) => hostNotice(title, body), secret: (v) => addSecretValues([v]), onTokens: () => machines.pushGhAppTokens() });
+const github = new GithubTokens({ vault: () => vault, cfg, repos: () => cfg.vault?.githubRepos ?? GITHUB_REQUIRED_REPOS, payer: () => identity.systemPayer().userId, apps: githubApps, log: (line) => console.warn(line), report: (title, body) => hostNotice(title, body) });
 setGithubTokens(github);
 github.start();
 // Transcripts written before redaction existed: no Claude OAuth or Discord token stays on disk (server/secrets.ts).
@@ -208,6 +212,9 @@ sessions.keepTranscript = (id) => {
   return until !== undefined && until > Date.now();
 };
 const machines = new MachineManager(cfg, store, sessions);
+// GitHub App tokens go to the machines whose runs use vault GitHub tokens (machines.githubFromVault), granted by the app's entry.
+machines.ghAppTokensFor = (id) => (githubFromVault(cfg, id) ? githubApps.forMachine(id) : []);
+githubApps.start();
 // The machines' host keys, pinned from their records (w568): a rebuilt or moved portal writes them again.
 if (!dryRun()) machines.pinHostKeys();
 // Files people attach to messages (docs/attachments.md): stored by SHA-256, never opened; old ones go by retention.
@@ -968,11 +975,14 @@ const vaultView = () => ({
   enrolled: enrolledMachines(cfg.dataDir),
   github: github.list(),
   githubPortal: githubFromVault(cfg, PORTAL_MACHINE),
+  githubApps: githubApps.list(),
 });
 const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map((x) => x.trim()).filter(Boolean) : undefined);
 const vaultChanged = () => {
   usage.poke();
   void github.tick();
+  // A grant may have changed which machines get an app: they get the new set either way.
+  void githubApps.tick().then(() => machines.pushGhAppTokens());
 };
 // Probe every GitHub token and the portal's login now (w904, the banner's and the vault page's "Re-check now"): anyone
 // signed in, as the banner is shown to a token's own person; GitHub reads only, at most every 30 seconds, never a value.
@@ -998,6 +1008,9 @@ route('POST', '/api/vault', async (req) => {
     share: (b.share as VaultShare | undefined) ?? undefined,
     roles: strings(b.roles) as VaultRole[] | undefined,
     machines: strings(b.machines),
+    // A GitHub App (w1519): its App ID and the accounts whose installations it uses.
+    ...(typeof b.appId === 'string' && b.appId.trim() ? { appId: b.appId.trim() } : {}),
+    ...(strings(b.appOwners) ? { appOwners: strings(b.appOwners) } : {}),
   });
   vaultChanged();
   return vaultView();

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { GithubTokenHealth, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultView } from '../../../shared/types';
+import type { GithubAppHealth, GithubTokenHealth, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultView } from '../../../shared/types';
 import { ApiError, api } from '../api';
 import { toast, toastError } from '../store';
 
@@ -43,7 +43,7 @@ export function VaultSettings() {
       {view.entries.length ? (
         <ul className="vault-list">
           {view.entries.map((e) => (
-            <VaultRow key={e.id} e={e} people={view.people} github={view.github?.find((g) => g.fingerprint === e.fingerprint)} onChange={act} />
+            <VaultRow key={e.id} e={e} people={view.people} github={view.github?.find((g) => g.fingerprint === e.fingerprint)} app={view.githubApps?.find((g) => g.name === e.name)} onChange={act} />
           ))}
         </ul>
       ) : (
@@ -87,7 +87,7 @@ export function VaultSettings() {
 type Act = (p: Promise<VaultView>, done: string) => Promise<void>;
 const list = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
 
-function VaultRow({ e, people, github, onChange }: { e: VaultEntryMeta; people: VaultView['people']; github?: GithubTokenHealth; onChange: Act }) {
+function VaultRow({ e, people, github, app, onChange }: { e: VaultEntryMeta; people: VaultView['people']; github?: GithubTokenHealth; app?: GithubAppHealth; onChange: Act }) {
   const [rotating, setRotating] = useState(false);
   const [value, setValue] = useState('');
   const [editing, setEditing] = useState(false);
@@ -117,6 +117,7 @@ function VaultRow({ e, people, github, onChange }: { e: VaultEntryMeta; people: 
         {e.disabled ? '; disabled' : ''}; {e.rotatedAt ? `rotated ${e.rotatedAt.slice(0, 10)}` : `added ${e.createdAt.slice(0, 10)}`}
       </div>
       {e.kind === 'github' && <GithubHealth h={github} name={e.name} />}
+      {e.kind === 'github-app' && <GithubAppLine h={app} e={e} />}
       {rotating && (
         <div className="field-row">
           <input className="input" type="password" autoComplete="off" placeholder="the new value" value={value} onChange={(x) => setValue(x.target.value)} />
@@ -177,6 +178,8 @@ function AddEntry({ view, onChange }: { view: VaultView; onChange: Act }) {
   const [roles, setRoles] = useState('workers, standing');
   const [machines, setMachines] = useState('*');
   const [email, setEmail] = useState('');
+  const [appId, setAppId] = useState('');
+  const [appOwners, setAppOwners] = useState('');
   const [value, setValue] = useState('');
   if (!open)
     return (
@@ -191,7 +194,7 @@ function AddEntry({ view, onChange }: { view: VaultView; onChange: Act }) {
         <select className="input" aria-label="kind" value={kind} onChange={(x) => setKind(x.target.value as VaultKind)}>
           {view.kinds.map((k) => (
             <option key={k} value={k}>
-              {k === 'claude' ? 'Claude token (setup-token)' : k === 'github' ? 'GitHub token' : 'another secret (env)'}
+              {k === 'claude' ? 'Claude token (setup-token)' : k === 'github' ? 'GitHub token' : k === 'github-app' ? 'GitHub App (private key)' : 'another secret (env)'}
             </option>
           ))}
         </select>
@@ -215,19 +218,25 @@ function AddEntry({ view, onChange }: { view: VaultView; onChange: Act }) {
         <input className="input" aria-label="roles" placeholder="roles: workers, standing" value={roles} onChange={(x) => setRoles(x.target.value)} />
         <input className="input" aria-label="machines" placeholder="machines: m3, m5 or *" value={machines} onChange={(x) => setMachines(x.target.value)} />
       </div>
+      {kind === 'github-app' && (
+        <div className="field-row">
+          <input className="input" aria-label="app id" placeholder="App ID (General settings of the app)" value={appId} onChange={(x) => setAppId(x.target.value)} />
+          <input className="input" aria-label="app owners" placeholder="accounts whose installations are used: Gherik1" value={appOwners} onChange={(x) => setAppOwners(x.target.value)} />
+        </div>
+      )}
       {kind === 'claude' && (
         <div className="field-row">
           <input className="input" type="email" aria-label="account email" placeholder="the Claude account's email (optional; shown on the accounts list)" value={email} onChange={(x) => setEmail(x.target.value)} />
         </div>
       )}
       <div className="field-row">
-        <input className="input" type="password" autoComplete="off" aria-label="value" placeholder="the token (never shown again)" value={value} onChange={(x) => setValue(x.target.value)} />
+        <input className="input" type="password" autoComplete="off" aria-label="value" placeholder={kind === 'github-app' ? "the .pem file's whole text (never shown again)" : 'the token (never shown again)'} value={value} onChange={(x) => setValue(x.target.value)} />
         <button
           className="btn btn-primary"
           disabled={!name.trim() || !value.trim()}
           onClick={async () => {
             await onChange(
-              api.vaultAdd({ name: name.trim(), kind, env: env.trim() || undefined, owner: owner || undefined, email: kind === 'claude' ? email.trim() || undefined : undefined, share, roles: list(roles) as VaultRole[], machines: list(machines), value: value.trim() }),
+              api.vaultAdd({ name: name.trim(), kind, env: env.trim() || undefined, owner: owner || undefined, email: kind === 'claude' ? email.trim() || undefined : undefined, share, roles: list(roles) as VaultRole[], machines: list(machines), value: value.trim(), ...(kind === 'github-app' ? { appId: appId.trim(), appOwners: list(appOwners) } : {}) }),
               `added ${name.trim()}`,
             );
             setValue('');
@@ -265,6 +274,26 @@ const minute = (iso: string) => `${iso.slice(0, 16).replace('T', ' ')}Z`;
  * A GitHub token's health (w868, server/githubTokens.ts): the account it acts as, its expiry, the reads it lacks per
  * repository (write permissions cannot be read without writing), its last use and its last error.
  */
+/** A GitHub App's health (w1519, docs/github-apps.md): its key, each allowed installation, the ignored ones. Never a value. */
+function GithubAppLine({ h, e }: { h?: GithubAppHealth; e: VaultEntryMeta }) {
+  const head = `App ID ${e.appId ?? '?'}; installations of ${(e.appOwners ?? []).join(', ')}${e.uninstallOthers ? ' (uninstalls the others)' : ''}`;
+  if (!h?.checkedAt) return <div className="small dim" data-testid={`vault-github-app-${e.name}`}>{head}; not read yet</div>;
+  const lacking = h.problems ?? [];
+  const allowed = (h.installations ?? []).filter((i) => i.allowed);
+  const ignored = (h.installations ?? []).filter((i) => !i.allowed);
+  return (
+    <div className={`small ${lacking.length ? 'tone-amber' : 'dim'}`} data-testid={`vault-github-app-${e.name}`}>
+      {head}
+      {h.bad ? `; NOT USED: ${h.bad}` : `; key valid${h.slug ? ` (${h.slug})` : ''}`}
+      {allowed.map((i) => `; ${i.account}: ${i.selection === 'all' ? 'every repository' : (i.repos ?? []).join(', ') || 'no repository'}${i.tokenExpiresAt ? `, token until ${minute(i.tokenExpiresAt)}` : ''}`).join('')}
+      {ignored.length ? `; ignored (not on the allowlist): ${ignored.map((i) => `${i.account}${i.uninstalledAt ? ' (uninstalled)' : ''}`).join(', ')}` : ''}
+      {lacking.length ? `; lacks: ${lacking.join('; ')}` : ''}; read {minute(h.checkedAt)}
+      {h.lastUse ? `; last used ${minute(h.lastUse.at)} (${h.lastUse.what})` : ''}
+      {h.lastError ? `; last error ${minute(h.lastError.at)}: ${h.lastError.what}` : ''}
+    </div>
+  );
+}
+
 function GithubHealth({ h, name }: { h?: GithubTokenHealth; name: string }) {
   if (!h?.checkedAt) return <div className="small dim" data-testid={`vault-github-${name}`}>GitHub: not probed yet{h?.lastUse ? `; last used ${minute(h.lastUse.at)} (${h.lastUse.what})` : ''}</div>;
   const days = h.expiresAt ? Math.floor((Date.parse(h.expiresAt) - Date.now()) / 86_400_000) : undefined;

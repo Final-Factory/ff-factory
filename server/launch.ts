@@ -222,12 +222,16 @@ function publicGitEnvFor(spec: LaunchSpec, baseEnv: NodeJS.ProcessEnv): Record<s
 export const GITHUB_HELPER = '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f';
 export function githubCredentialEnv(prior: Record<string, string | undefined>): Record<string, string> {
   const n = Number(prior.GIT_CONFIG_COUNT ?? 0) || 0;
+  // A run with GitHub Apps (w1519, machine/ghApp.ts): its daemon's helper, which answers by repository, so git must send the
+  // repository's path (useHttpPath); it answers GH_TOKEN for every repository no app covers.
+  const app = prior.FF_GH_APP_HELPER;
   return {
     [`GIT_CONFIG_KEY_${n}`]: 'credential.https://github.com.helper',
     [`GIT_CONFIG_VALUE_${n}`]: '',
     [`GIT_CONFIG_KEY_${n + 1}`]: 'credential.https://github.com.helper',
-    [`GIT_CONFIG_VALUE_${n + 1}`]: GITHUB_HELPER,
-    GIT_CONFIG_COUNT: String(n + 2),
+    [`GIT_CONFIG_VALUE_${n + 1}`]: app || GITHUB_HELPER,
+    ...(app ? { [`GIT_CONFIG_KEY_${n + 2}`]: 'credential.https://github.com.useHttpPath', [`GIT_CONFIG_VALUE_${n + 2}`]: 'true' } : {}),
+    GIT_CONFIG_COUNT: String(n + (app ? 3 : 2)),
   };
 }
 

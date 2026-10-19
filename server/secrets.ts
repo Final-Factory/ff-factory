@@ -269,6 +269,11 @@ export function machineRunEnv(
     ctx.onProblem?.(`no usable vault GitHub token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it uses the machine's own gh login`);
     ctx.onGithubMissing?.(person, refId(machine), `a ${run.role} run`);
   }
+  // GitHub Apps (w1519, docs/github-apps.md): the apps this run may use, by name. Its daemon keeps their installation tokens,
+  // and the run's git and gh take one for a repository an app is installed on. Only beside a vault GitHub token: the git
+  // credential helper that routes by repository replaces the machine's own helpers, so a run on the machine's login gets none.
+  const apps = s.github ? ctx.vault.githubAppsFor({ machineId: refId(machine), role: run.role, userId: person }).map((e) => e.name) : [];
+  if (apps.length) s.env.FF_GH_APP_NAMES = apps.join(',');
   if (s.claude) return { env: { ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person), ...github, ...(person ? { person } : {}) };
   // Every token of the person's is over its caps or used up: the run waits for the first to free up (w739).
   if (s.claudeHold) throw new PoolHeldError(`${person ?? 'this run'}'s Claude token pool is held: ${s.claudeHold.why}`, s.claudeHold.next);

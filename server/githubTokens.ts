@@ -13,6 +13,8 @@ import type { Vault, VaultEntryMeta } from './vault.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
 import type { GithubAccess, GithubRateLimit, GithubTokenHealth, WorkItem } from '../shared/types.ts';
 import { GITHUB_ORG, GITHUB_REQUIRED_PERMISSIONS, GITHUB_REQUIRED_REPOS, GITHUB_UNPROBED } from '../shared/githubRequirements.ts';
+import { ghRepoOf } from '../shared/githubAppRoute.ts';
+import type { GithubApps } from './githubApps.ts';
 
 /** The machine id machines.githubFromVault uses for the portal's own GitHub reads. */
 export const PORTAL_MACHINE = 'portal';
@@ -45,6 +47,8 @@ export type Runner = (cmd: string, args: string[], opts?: RunOptions) => Promise
 /** GitHub's "this token was refused" (401) and "this token lacks a permission" (403) as gh prints them. */
 const REFUSED = /HTTP 401|Bad credentials/i;
 const DENIED = /Resource not accessible by personal access token/i;
+/** A GitHub App installation token's refusal of a permission (w1519). */
+const APP_DENIED = /Resource not accessible by integration/i;
 /** No fine-grained token can read check runs (GitHub has no Checks permission for them): an expected refusal, not the token's fault. */
 const NO_CHECKS = /statusCheckRollup/;
 
@@ -120,6 +124,8 @@ export interface GithubTokensOptions {
   report?: (title: string, body: string) => void;
   /** The system payer (config systemPayer): whose token the portal's reads for no request use (docs/vault.md section 10). */
   payer?: () => string | undefined;
+  /** The vault's GitHub Apps (w1519, server/githubApps.ts): their tokens answer for the repositories they are installed on. */
+  apps?: GithubApps;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -219,6 +225,20 @@ export class GithubTokens {
     const run = this.o.run ?? runProc;
     return async (cmd, args, opts = {}) => {
       const plain = { ...(opts.env ?? process.env), GH_PROMPT_DISABLED: '1' };
+      // A repository a GitHub App is installed on (w1519): the app's token, where the portal's reads use the vault at all.
+      const app = githubFromVault(this.o.cfg, PORTAL_MACHINE) ? this.o.apps?.forPortal(person ?? this.o.payer?.(), ghRepoOf(args, plain)) : undefined;
+      if (app) {
+        const r = await run(cmd, args, { ...opts, env: { ...plain, GH_TOKEN: app.token } });
+        const said = `${r.stderr || r.stdout}`;
+        if (r.code === 0) {
+          this.o.apps!.noteUse(app.app, what);
+          return r;
+        }
+        if (isRateLimitText(said) || (!REFUSED.test(said) && !APP_DENIED.test(said))) return r;
+        // Refused (401: a token GitHub no longer takes, minted again at the next tick) or a permission the installation lacks:
+        // noted for the app's health line, and the call is made again the way it would be without the app.
+        this.o.apps!.noteError(app.app, `${what}: ${REFUSED.test(said) ? 'token refused (401)' : 'a permission is missing (403)'}: ${said.trim().split('\n')[0].slice(0, 160)}`, REFUSED.test(said));
+      }
       const t = this.tokenFor(person);
       if (!t) {
         // The portal's own login: its rate limit is noted and cleared the same way (a successful call is the first good one).
@@ -332,7 +352,7 @@ export class GithubTokens {
   async recheck(): Promise<boolean> {
     if (this.now() - this.lastForced < RECHECK_MIN_MS) return false;
     this.lastForced = this.now();
-    await this.tick(true);
+    await Promise.all([this.tick(true), this.o.apps?.tick(true)]);
     return true;
   }
 
@@ -446,7 +466,7 @@ export class GithubTokens {
   /** system_status lines, one per GitHub token and the portal login: WARNING when something required is missing. Never a value. */
   statusLines(): string[] {
     const on = githubFromVault(this.o.cfg, PORTAL_MACHINE);
-    return this.list().map((h) => `${h.problems?.length || h.rateLimit ? 'WARNING: ' : ''}${githubHealthLine(h, on, this.now())}`);
+    return [...this.list().map((h) => `${h.problems?.length || h.rateLimit ? 'WARNING: ' : ''}${githubHealthLine(h, on, this.now())}`), ...(this.o.apps?.statusLines() ?? [])];
   }
 
   /**
@@ -469,6 +489,8 @@ export class GithubTokens {
       const person = owners.size === 1 ? [...owners][0] : undefined;
       out.push({ id: `github-rate-limit:${key}`, kind: 'github-rate-limit', ...(person ? { person } : {}), text: githubRateLimitText(group, this.now()) });
     }
+    // The GitHub Apps (w1519): one banner per app that lacks something, like a token's.
+    out.push(...(this.o.apps?.banners() ?? []));
     return out;
   }
 }

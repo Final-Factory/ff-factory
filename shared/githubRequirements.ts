@@ -58,3 +58,38 @@ export const GITHUB_REQUIRED_PERMISSIONS: readonly GithubPermission[] = [
 export const GITHUB_UNPROBED = GITHUB_REQUIRED_PERMISSIONS.filter((p) => p.access === 'write' || !p.probe)
   .map((p) => `${p.label} ${p.probe ? 'write' : '(write only)'}`)
   .join(', ');
+
+// ---------------------------------------------------------------- GitHub Apps (w1519, docs/github-apps.md)
+
+/** A permission a GitHub App's installation grants, by the REST API's name for it (an installation's `permissions`). */
+export interface GithubAppPermission {
+  /** The key in an installation's `permissions` object. */
+  id: 'actions' | 'checks' | 'contents' | 'metadata' | 'pull_requests' | 'workflows';
+  /** GitHub's name for it on the app's Permissions page (Repository permissions). */
+  label: string;
+  /** What to pick: "Read and write" or "Read-only". */
+  access: 'write' | 'read';
+  /** Not needed by every repository: shown when missing, never a problem (Workflows: only to change .github/workflows). */
+  optional?: boolean;
+  /** What a worker does with it. */
+  why: string;
+}
+
+/**
+ * What an app's installation must grant for a worker to clone, push a branch, open a pull request and read its CI there
+ * (sourced: docs.github.com "Choosing permissions for a GitHub App": Git over HTTPS needs Contents, files in
+ * .github/workflows need Workflows; Metadata is given to every app). The health check compares each installation's granted
+ * permissions with this list, and docs/github-apps.md's table is checked against it (server/githubApps.test.ts).
+ */
+export const GITHUB_APP_PERMISSIONS: readonly GithubAppPermission[] = [
+  { id: 'actions', label: 'Actions', access: 'read', why: 'read CI runs (gh run list, ff-pr merging on green)' },
+  { id: 'checks', label: 'Checks', access: 'read', why: 'read check results (gh pr checks)' },
+  { id: 'contents', label: 'Contents', access: 'write', why: 'clone, fetch and push branches; merge a pull request' },
+  { id: 'metadata', label: 'Metadata', access: 'read', why: 'given to every app (mandatory)' },
+  { id: 'pull_requests', label: 'Pull requests', access: 'write', why: 'open, comment on and merge pull requests' },
+  { id: 'workflows', label: 'Workflows', access: 'write', optional: true, why: 'only to push changes to .github/workflows files' },
+];
+
+/** Whether a granted level ("read", "write", "admin", or nothing) covers what a permission needs. */
+export const appAccessCovers = (granted: string | undefined, need: 'read' | 'write') =>
+  granted === 'admin' || granted === 'write' || (need === 'read' && granted === 'read');
