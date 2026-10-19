@@ -1474,6 +1474,20 @@ compacts every orchestrator of this portal, the dispatcher included, by itself (
   and uncached, plus its output, from the SDK's own `usage` (`SessionInfo.contextTokens`); a turn's cost is the spend
   between the turn's first message and its result (`lastTurnCostUsd`). Claude Code's own compaction near its 1M limit
   still applies behind it.
+- **Quiet first, under the hard threshold** (w1538, lothsahn: "compact when it's above 80k and there have been no
+  messages in 2 minutes? That way you're less likely to compact when we're trying to send a message? You should compact
+  at 100k no matter what."). Below `orchestrator.compactHardAtTokens` (default 100,000), a compaction that is due waits
+  until the conversation has had no turn for `orchestrator.compactIdleSeconds` (default 120): no message from its person,
+  no harness message (a worker's report, a dispatch, a timer, a wake_me), and nothing mid-turn. Every message opens a
+  turn, so anything that arrives starts the wait again from that turn's end. From the hard threshold on, it compacts
+  after the turn as below, however busy the conversation is. A hard threshold at or under `compactAtTokens` (or 0), or
+  0 seconds, compacts at once, as before w1538: with this portal's `compactAtTokens` 80,000 the defaults give "after 2
+  quiet minutes from 80k, at once from 100k", and with the code's default 200,000 they change nothing. Both are set live
+  with `set_app_config` (seconds 0-3,600; tokens 0 or 50,000-900,000) and read at each check. The wait is the
+  compactor's own per-orchestrator timer (no polling), measured from the saved end of the last turn (`lastResultAt`),
+  so a portal restart loses nothing: an orchestrator's process does not outlive the restart, and the next turn's end
+  arms the timer again. The dispatcher is an orchestrator here and takes the same wait. Workers do not
+  (`worker.compactAtTokens`, below).
 - **Only between turns.** It runs 2 s after a turn ends, and only if the orchestrator is idle with its process up: not
   mid-turn, no permission prompt open, no message unanswered or waiting in the send queue (`compactBlocker`). A message
   that arrives in those 2 s goes first, and the check runs again after that turn. One that arrives while it compacts
