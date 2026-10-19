@@ -84,7 +84,7 @@ interface HeldCall {
   why: string;
 }
 /** update_work's input (Agents' tool). */
-type UpdateInput = { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; main_clone?: string | false; when?: ConditionInput; words?: string; expires_days?: number };
+type UpdateInput = { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean; main_clone?: string | false; when?: ConditionInput; words?: string; expires_days?: number; assign_to?: string };
 
 /** Held calls kept per chat at most, and for how long. */
 const HELD_MAX = 10;
@@ -1200,6 +1200,26 @@ export class Orchestrators {
     this.spend(chat.info.id, owner);
   }
 
+  /** A requester hands a request to another person (w1511): it stays open and the same for everyone; they come off it, the other person is on it. */
+  private handOff(w: WorkItem, from: Requester, toName: string, note: string | undefined): string {
+    const q = toName.trim().toLowerCase();
+    const people = this.d.identity.list();
+    const to = people.find((u) => u.userId.toLowerCase() === q) ?? people.find((u) => u.displayName.toLowerCase() === q);
+    if (!to) throw new Error(`no person "${toName}" to hand ${w.id} to; the people are ${people.map((u) => `${u.displayName} (${u.userId})`).join(', ')}`);
+    if (same(to.userId, from.userId)) throw new Error(`${w.id} is already ${from.displayName}'s: name the person it goes to`);
+    const target = asRequester(to);
+    const already = isFor(w, target.userId);
+    // They take the place of the one handing it over, so the order of the requesters is kept.
+    w.requesters = already ? w.requesters.filter((r) => !same(r.userId, from.userId)) : w.requesters.map((r) => (same(r.userId, from.userId) ? target : r));
+    // The filer's place goes with it: its workers run for the person who filed it.
+    if (same(w.requestedBy.userId, from.userId)) w.requestedBy = target;
+    this.stamp(w, `${from.displayName} handed it to ${target.displayName}${note ? `: ${note}` : ''}`);
+    this.store.putWork(w);
+    if (!already) this.toPeople([target], dispatchNotice(w, `handed to you by ${from.displayName}; it is yours now, ${from.displayName} is off it`, note));
+    this.gatherForDispatcher(from, updateNotice(w, from, `handed to ${target.displayName} by ${from.displayName}${note ? `: ${note}` : ''}. It is open, for ${names(w.requesters)}.`));
+    return `${w.id} is handed to ${target.displayName}; it stays ${w.status} and ${from.displayName} is off it.`;
+  }
+
   /** A requester's update (update_work): a note (an answer to a question reopens it), a priority, closing or reopening. */
   update(chat: SessionHandle, input: UpdateInput): string {
     try {
@@ -1254,16 +1274,16 @@ export class Orchestrators {
     }
     if (!isFor(w, owner.userId)) return this.closeForOther(chat, owner, w, input);
     const note = input.note?.trim();
-    if (!note && !input.priority && !input.close && !input.reopen) throw new Error('give a note, a priority, close or reopen');
+    if (!note && !input.priority && !input.close && !input.reopen && !input.assign_to) throw new Error('give a note, a priority, close, assign_to or reopen');
     const problem = updateProblem(w, input, this.now().getTime());
     if (problem) throw new Error(problem);
     this.spendUpdate(chat, owner, input);
-    // Someone whose request was merged into this one leaves it; it carries on for the others.
-    if (input.close && !same(w.requestedBy.userId, owner.userId)) {
-      w.requesters = w.requesters.filter((r) => !same(r.userId, owner.userId));
-      this.stamp(w, `${owner.displayName} left it (${input.close}${note ? `: ${note}` : ''})`);
-      this.store.putWork(w);
-      return `${owner.displayName} is off ${w.id}; it carries on for ${names(w.requesters)}.`;
+    // A HAND-OFF (w1511, Lothsahn: "If I've solved my part of it, I should just assign it to Ben ... it's not assigned to me"):
+    // the request stays open and has the same state for everyone; it moves to the other person and comes off this one.
+    // A close never does this: it closes the request for every requester (below).
+    if (input.assign_to) {
+      if (input.close || input.reopen || input.priority) throw new Error('assign_to stands alone (a note giving the reason is fine): a close ends the request for everyone on it, a hand-off keeps it open');
+      return this.handOff(w, owner, input.assign_to, note);
     }
     // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn.
     w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
@@ -1648,11 +1668,6 @@ export class Orchestrators {
     const close = d.action as 'done' | 'cancelled';
     const verb = close === 'done' ? 'closed as done' : 'cancelled';
     const own = isFor(w, d.by.userId);
-    // A co-requester leaves it; it carries on for the others (as update_work does).
-    if (own && !same(w.requestedBy.userId, d.by.userId)) {
-      w.requesters = w.requesters.filter((r) => !same(r.userId, d.by.userId));
-      return;
-    }
     settleByHand(w);
     w.status = close;
     if (d.note) w.outcome = clip(d.note, 300);
