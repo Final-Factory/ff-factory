@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { SessionManager, setQueryForTesting, type AutoCompaction, type SessionHandle, type TurnEndMeta } from './sessions.ts';
-import { AUTO_COMPACT_DEFAULTS, AutoCompactor, COST_TRIGGER_MIN_TOKENS, DISPATCHER_FOCUS, MIN_TURNS_BETWEEN, PERSONAL_FOCUS, RETRY_AFTER_MS, autoCompactSettings, compactBlocker, compactionDue } from './autoCompact.ts';
+import { AUTO_COMPACT_DEFAULTS, AutoCompactor, COST_TRIGGER_MIN_TOKENS, DISPATCHER_FOCUS, MIN_TURNS_BETWEEN, PERSONAL_FOCUS, QUIET_COMPACT_DEFAULTS, RETRY_AFTER_MS, autoCompactSettings, compactBlocker, compactionDue, quietWaitMs } from './autoCompact.ts';
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo } from '../shared/types.ts';
@@ -24,7 +24,8 @@ const LOTHSAHN: Requester = { userId: 'lothsahn', displayName: 'Lothsahn' };
 function setup(t: { after: (fn: () => void | Promise<void>) => void }, orchestrator: Partial<Config['orchestrator']> = { compactAtTokens: 50_000 }, settleMs = 20) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-autocompact-'));
   const store = new Store(dir);
-  const cfg = { limits: { maxSessions: 6 }, orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false, ...orchestrator } } as unknown as Config;
+  // No quiet wait (w1538) unless a test sets one: the tests from before it compact at the turn's end.
+  const cfg = { limits: { maxSessions: 6 }, orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false, compactIdleSeconds: 0, ...orchestrator } } as unknown as Config;
   const sessions = new SessionManager(cfg, store);
   const auto = new AutoCompactor(sessions, cfg, { settleMs });
   t.after(async () => {
@@ -86,10 +87,33 @@ test('compactionDue: never within a few turns of the last compaction, nor again 
   assert.equal(compactionDue(info({ contextTokens: 280_000, turns: 20, lastCompaction: big }), S)?.trigger, 'tokens');
 });
 
-test('autoCompactSettings: defaults 200,000 tokens and $1, as config sets them; 0 is off', () => {
-  assert.deepEqual(autoCompactSettings({ orchestrator: {} } as Config), { atTokens: AUTO_COMPACT_DEFAULTS.atTokens, atTurnUsd: AUTO_COMPACT_DEFAULTS.atTurnUsd });
+test('autoCompactSettings: defaults 200,000 tokens, $1, 120 s quiet and 100,000 hard, as config sets them; 0 is off', () => {
+  assert.deepEqual(autoCompactSettings({ orchestrator: {} } as Config), { atTokens: AUTO_COMPACT_DEFAULTS.atTokens, atTurnUsd: AUTO_COMPACT_DEFAULTS.atTurnUsd, idleSeconds: QUIET_COMPACT_DEFAULTS.idleSeconds, hardAtTokens: QUIET_COMPACT_DEFAULTS.hardAtTokens });
   assert.deepEqual(AUTO_COMPACT_DEFAULTS, { atTokens: 200_000, atTurnUsd: 1 });
-  assert.deepEqual(autoCompactSettings({ orchestrator: { compactAtTokens: 0, compactAtTurnUsd: 2.5 } } as Config), { atTokens: 0, atTurnUsd: 2.5 });
+  assert.deepEqual(QUIET_COMPACT_DEFAULTS, { idleSeconds: 120, hardAtTokens: 100_000 });
+  assert.deepEqual(autoCompactSettings({ orchestrator: { compactAtTokens: 0, compactAtTurnUsd: 2.5, compactIdleSeconds: 0, compactHardAtTokens: 300_000 } } as Config), { atTokens: 0, atTurnUsd: 2.5, idleSeconds: 0, hardAtTokens: 300_000 });
+});
+
+test('quietWaitMs (w1538): above the soft threshold it waits for 120 s without a turn; at the hard one, or with hard at or under soft, never', () => {
+  const live = { atTokens: 80_000, atTurnUsd: 1, idleSeconds: 120, hardAtTokens: 100_000 };
+  const end = Date.parse('2026-10-19T12:00:00Z');
+  // Below the soft threshold nothing is due, so nothing waits either.
+  assert.equal(compactionDue(info({ contextTokens: 79_999 }), live), undefined);
+  // Above it: 2 minutes of quiet after the last turn's end compacts; a turn that ended 30 s ago waits 90 s more.
+  assert.equal(compactionDue(info({ contextTokens: 85_000 }), live)?.trigger, 'tokens');
+  assert.equal(quietWaitMs({ contextTokens: 85_000 }, live, end, end + 120_000), 0);
+  assert.equal(quietWaitMs({ contextTokens: 85_000 }, live, end, end + 30_000), 90_000);
+  // A message answered at +100 s starts the clock again from that turn's end.
+  assert.equal(quietWaitMs({ contextTokens: 85_000 }, live, end + 100_000, end + 120_000), 100_000);
+  // At the hard threshold: at once, whatever just happened.
+  assert.equal(quietWaitMs({ contextTokens: 100_000 }, live, end, end + 1), 0);
+  // Hard at or under soft, or 0 s: as before w1538, at once.
+  assert.equal(quietWaitMs({ contextTokens: 85_000 }, { ...live, hardAtTokens: 80_000 }, end, end + 1), 0);
+  assert.equal(quietWaitMs({ contextTokens: 85_000 }, { ...live, hardAtTokens: 0 }, end, end + 1), 0);
+  assert.equal(quietWaitMs({ contextTokens: 85_000 }, { ...live, idleSeconds: 0 }, end, end + 1), 0);
+  // No turn known to have ended (nothing says it was busy): at once. A worker's settings carry no wait.
+  assert.equal(quietWaitMs({ contextTokens: 85_000 }, live, undefined, end), 0);
+  assert.equal(quietWaitMs({ contextTokens: 85_000 }, { atTokens: 80_000, atTurnUsd: 0 }, end, end + 1), 0);
 });
 
 test('compactBlocker: only between turns, with nothing waiting', () => {
@@ -234,4 +258,106 @@ test('a person\'s /compact (w518) still says so at once and when done, and count
   assert.match(systemLines(store, o.info.id).find((l) => l.startsWith('Compacting'))!, /asked by Lothsahn/);
   assert.match(compacted(store, o.info.id)[0], /^Compacted: the context went from 25,000 tokens to 18,000 tokens/);
   assert.deepEqual(ends.at(-1)?.meta, { compaction: 'person' });
+});
+
+/** w1538's live cases: a short quiet wait (fractional seconds; set_app_config takes whole ones), and when each turn ended. */
+function quietSetup(t: Parameters<typeof setup>[0], idleSeconds: number) {
+  const env = setup(t, { compactAtTokens: 50_000, compactHardAtTokens: 100_000, compactIdleSeconds: idleSeconds });
+  const turnEnds: number[] = [];
+  const compactedAt: number[] = [];
+  env.sessions.events.on('turnEnd', (_h: SessionHandle, _text: string, meta?: TurnEndMeta) => {
+    if (!meta?.compaction) turnEnds.push(Date.now());
+  });
+  const real = env.sessions.compact;
+  env.sessions.compact = (...args) => {
+    compactedAt.push(Date.now());
+    return real(...args);
+  };
+  return { ...env, turnEnds, compactedAt };
+}
+
+test('w1538: above the soft threshold, after the quiet wait with no message, it compacts by itself', async (t) => {
+  const { store, auto, compactions, turnEnds, compactedAt, make, say } = quietSetup(t, 0.4);
+  const o = make();
+  say(o.info.id, 'big #ctx 60000');
+  await until(() => o.info.status === 'idle' && turnEnds.length === 1, 'the turn');
+  await sleep(100);
+  assert.equal(compactions.length, 0, 'not at the turn end: under 100,000 tokens it waits for quiet');
+  assert.match(auto.check(o.info.id), /^not yet: the context passed 50,000 tokens; it compacts after 0.4 s without a turn/);
+  await until(() => compacted(store, o.info.id).length === 1, 'the compaction after the quiet wait');
+  assert.equal(compactions.length, 1);
+  assert.deepEqual(compactions[0].auto, { trigger: 'tokens', reason: 'the context passed 50,000 tokens' });
+  assert.ok(compactedAt[0] - turnEnds[0] >= 390, `it waited the quiet spell (${compactedAt[0] - turnEnds[0]} ms)`);
+});
+
+test('w1538: above the soft threshold, a message inside the wait holds it off and starts the clock again from that turn', async (t) => {
+  const { store, compactions, turnEnds, compactedAt, make, say } = quietSetup(t, 0.6);
+  const o = make();
+  say(o.info.id, 'big #ctx 60000');
+  await until(() => o.info.status === 'idle' && turnEnds.length === 1, 'the first turn');
+  await sleep(350);
+  // The person writes inside the 0.6 s: a turn, and the wait starts over from its end.
+  say(o.info.id, 'one more thing #ctx 62000');
+  await until(() => o.info.status === 'idle' && turnEnds.length === 2, 'the second turn');
+  await sleep(400);
+  assert.equal(compactions.length, 0, `${Date.now() - turnEnds[0]} ms after the first turn, but only ${Date.now() - turnEnds[1]} ms after the second`);
+  await until(() => compacted(store, o.info.id).length === 1, 'the compaction after the second quiet wait');
+  assert.equal(compactions.length, 1, 'once, not once per turn');
+  assert.ok(compactedAt[0] - turnEnds[1] >= 590, `measured from the second turn's end (${compactedAt[0] - turnEnds[1]} ms)`);
+  assert.equal(o.info.lastResult, 'Echo: one more thing #ctx 62000');
+});
+
+test('w1538: at the hard threshold it compacts at the turn end, however busy the conversation is', async (t) => {
+  const { store, compactions, turnEnds, compactedAt, make, say } = quietSetup(t, 60);
+  const o = make();
+  say(o.info.id, 'big #ctx 60000');
+  await until(() => o.info.status === 'idle' && turnEnds.length === 1, 'the first turn');
+  // A message right after: under the hard threshold this would wait a minute; past it, it does not.
+  say(o.info.id, 'bigger #ctx 120000');
+  await until(() => compacted(store, o.info.id).length === 1, 'the compaction at the turn end');
+  assert.equal(compactions.length, 1);
+  assert.deepEqual(compactions[0].auto, { trigger: 'tokens', reason: 'the context passed 50,000 tokens' });
+  assert.ok(compactedAt[0] - turnEnds[1] < 2000, `at the turn end (${compactedAt[0] - turnEnds[1]} ms), not after a minute`);
+});
+
+test('w1538: below the soft threshold, quiet changes nothing', async (t) => {
+  const { auto, compactions, make, say } = quietSetup(t, 0.2);
+  const o = make();
+  say(o.info.id, 'small talk');
+  await until(() => o.info.status === 'idle', 'the turn');
+  await sleep(500);
+  assert.equal(o.info.contextTokens, 25_000);
+  assert.equal(compactions.length, 0);
+  assert.equal(auto.check(o.info.id), 'not due');
+});
+
+test('w1538: the quiet clock survives a portal restart: a new compactor reads the saved end of the last turn', async (t) => {
+  const { sessions, cfg, compactions, make, say } = quietSetup(t, 60);
+  const o = make();
+  say(o.info.id, 'big #ctx 60000');
+  await until(() => o.info.status === 'idle' && !!o.info.lastResultAt, 'the turn');
+  const ended = Date.parse(o.info.lastResultAt!);
+  const after = new AutoCompactor(sessions, cfg, { settleMs: 20 });
+  t.after(() => after.stop());
+  assert.match(after.check(o.info.id, ended + 30_000), /^not yet: .*\(30 s more\)/, 'it knows nothing of the turn but its saved end');
+  assert.equal(compactions.length, 0);
+  assert.match(after.check(o.info.id, ended + 60_000), /^compacting: the context passed 50,000 tokens/);
+});
+
+test('w1538: a message that arrives while a quiet-wait compaction runs waits behind it and is answered after it', async (t) => {
+  const { store, sessions, make, say } = quietSetup(t, 0.2);
+  const o = make();
+  const compact = sessions.compact;
+  sessions.compact = (...args) => {
+    const note = compact(...args);
+    assert.equal(o.info.statusDetail, 'compacting the conversation');
+    say(o.info.id, 'are you there?');
+    return note;
+  };
+  say(o.info.id, 'big #ctx 60000');
+  await until(() => o.info.lastResult === 'Echo: are you there?' && o.info.status === 'idle', 'the answer');
+  const all = store.readTranscript(o.info.id).map((e) => ('text' in e ? e.text : ''));
+  const done = all.findIndex((l) => l.startsWith('Compacted'));
+  assert.ok(done >= 0 && done < all.indexOf('Echo: are you there?'), 'the compaction first, then the answer');
+  assert.equal(o.info.turns, 2);
 });
