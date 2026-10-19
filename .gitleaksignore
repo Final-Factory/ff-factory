@@ -13,3 +13,7 @@ a060765e066b7201e68c747c278bb988aec58262:docs/worker-root.md:generic-api-key:156
 deploy/vm/guest/units/fff-portal.service:generic-api-key:40
 # A fake private-key block in a redaction test (w920); the next commit builds it from pieces.
 4d37c413988e450efa953adaacc23dd15f89c194:server/portalLogs.test.ts:generic-api-key:80
+# A held-tokens list named TOKENS before a repository name in the GitHub App routing test (w1519); renamed HELD next commit.
+fc18f2d37ad0b8bf5d4d5f8b6b9e1e127d9b294f:server/githubApps.test.ts:generic-api-key:282
+fc18f2d37ad0b8bf5d4d5f8b6b9e1e127d9b294f:server/githubApps.test.ts:generic-api-key:285
+fc18f2d37ad0b8bf5d4d5f8b6b9e1e127d9b294f:server/githubApps.test.ts:generic-api-key:286

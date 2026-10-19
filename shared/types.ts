@@ -2410,7 +2410,7 @@ export interface PermissionDecisionRequest {
 
 // ---------------------------------------------------------------- the token vault (docs/vault.md, w512)
 
-export type VaultKind = 'claude' | 'github' | 'env';
+export type VaultKind = 'claude' | 'github' | 'env' | 'github-app';
 /** The roles a machine run has (config claudeAccounts' names): sandbox workers, standing agents. */
 export type VaultRole = 'workers' | 'standing';
 /** owner: only work the entry's owner asked for. anyone: any run it is granted to. */
@@ -2435,6 +2435,17 @@ export interface VaultEntryMeta {
   roles: VaultRole[];
   /** Machine ids, or ["*"] for every machine. */
   machines: string[];
+  /** kind github-app (w1519, docs/github-apps.md): the app's App ID or Client ID, the JWT's issuer. Not a secret. */
+  appId?: string;
+  /**
+   * kind github-app: the accounts whose installations are used ("Gherik1"), the allowlist. A public app can be installed by
+   * anyone; an installation on any other account is ignored and shown on the health line, never used.
+   */
+  appOwners?: string[];
+  /** kind github-app: only these installation ids (optional; within appOwners). */
+  installations?: number[];
+  /** kind github-app: uninstall the app from accounts not in appOwners (DELETE /app/installations/{id}); default off. */
+  uninstallOthers?: boolean;
   disabled?: boolean;
   /** The first 12 hex characters of the value's SHA-256 (for a Claude token, the usage meters' key without "token:"). */
   fingerprint: string;
@@ -2491,6 +2502,45 @@ export interface GithubTokenHealth {
   lastError?: { at: string; what: string };
 }
 
+/**
+ * A vault GitHub App's health (w1519, server/githubApps.ts): whether GitHub takes its key, where it is installed, what each
+ * installation grants and covers, and its token's expiry. Never the key or a token.
+ */
+export interface GithubAppHealth {
+  fingerprint: string;
+  name: string;
+  last4: string;
+  owner?: string;
+  disabled?: boolean;
+  appId?: string;
+  /** GET /app: its slug ("ff-factory-mods") and owner account, when the key works. */
+  slug?: string;
+  appOwner?: string;
+  checkedAt?: string;
+  /** Why it is not used now (GitHub refused the key: 401); cleared by a read that passes. */
+  bad?: string;
+  installations?: {
+    id: number;
+    account: string;
+    /** On the allowlist (appOwners, installations): used. Off it: ignored (or uninstalled with uninstallOthers). */
+    allowed: boolean;
+    selection?: 'all' | 'selected';
+    /** "owner/name", as GitHub lists them for the installation (allowed installations only). */
+    repos?: string[];
+    /** The installation's granted permissions ("contents": "write", …). */
+    permissions?: Record<string, string>;
+    suspended?: boolean;
+    /** The current token's expiry (ISO), allowed installations only. */
+    tokenExpiresAt?: string;
+    /** Set when it was uninstalled for being off the allowlist. */
+    uninstalledAt?: string;
+  }[];
+  /** What it lacks, as a person fixes it; empty when nothing. */
+  problems?: string[];
+  lastUse?: { at: string; what: string };
+  lastError?: { at: string; what: string };
+}
+
 /** One rate-limit refusal GitHub gave a credential (w1186, server/githubTokens.ts rateLimitOf). */
 export interface GithubRateLimit {
   at: string;
@@ -2519,4 +2569,6 @@ export interface VaultView {
   /** The GitHub tokens' health (w868), and whether the portal's own reads use them (machines.githubFromVault "portal"). */
   github?: GithubTokenHealth[];
   githubPortal?: boolean;
+  /** The GitHub Apps' health (w1519). */
+  githubApps?: GithubAppHealth[];
 }
