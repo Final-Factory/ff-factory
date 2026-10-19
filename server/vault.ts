@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createPrivateKey, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { checkObject, readJsonDurable } from './durable.ts';
@@ -13,7 +13,7 @@ import { POOL_DEFAULTS, byScore, pickPool, judge, reserveOf, type PoolLimits, ty
  */
 
 export type { VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultStatus } from '../shared/types.ts';
-export const VAULT_KINDS: readonly VaultKind[] = ['claude', 'github', 'env'];
+export const VAULT_KINDS: readonly VaultKind[] = ['claude', 'github', 'env', 'github-app'];
 export const VAULT_ROLES: readonly VaultRole[] = ['workers', 'standing'];
 
 interface Sealed {
@@ -50,9 +50,43 @@ const PENDING_MS = 20_000;
 export const fingerprintOf = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 12);
 const keyIdOf = (key: Buffer) => createHash('sha256').update(key).digest('hex').slice(0, 8);
 
+/** A GitHub App's App ID (digits) or Client ID ("Iv23li…"): the JWT's issuer (w1519). */
+const APP_ID = /^(?:\d{1,12}|Iv[A-Za-z0-9.]{4,40})$/;
+/** A GitHub account name. */
+const GITHUB_ACCOUNT = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+const PEM = /^-----BEGIN ((?:RSA )?PRIVATE KEY)-----([A-Za-z0-9+/=\s]+)-----END \1-----$/;
+
+/**
+ * A GitHub App's private key (w1519) as one canonical PEM: the header, the base64 in lines of 64, the footer. A key pasted
+ * into a one-line field (its line breaks dropped or turned into spaces) comes out the same as the downloaded file, so its
+ * fingerprint is the same. Undefined when it is not a PEM private key.
+ */
+export function canonicalPem(value: string): string | undefined {
+  const m = PEM.exec(value.replace(/^﻿/, '').trim());
+  if (!m) return undefined;
+  const body = m[2].replace(/\s+/g, '');
+  if (!body) return undefined;
+  return `-----BEGIN ${m[1]}-----\n${body.match(/.{1,64}/g)!.join('\n')}\n-----END ${m[1]}-----\n`;
+}
+
+/** The value as the vault keeps it: a GitHub App key in its canonical PEM form, anything else as given. */
+export const vaultValue = (kind: VaultKind, value: string) => (kind === 'github-app' ? (canonicalPem(value) ?? value) : value);
+
+/** The last four characters shown for a value: of a GitHub App key, its base64 body's (its footer is the same for every key). */
+export const lastFourOf = (kind: VaultKind, value: string) => (kind === 'github-app' ? value.replace(/-----[A-Z ]+-----/g, '').replace(/\s+/g, '').slice(-4) : value.slice(-4));
+
 /** Why `value` cannot be an entry of `kind` (never quoting it), or undefined. */
 export function valueProblem(kind: VaultKind, value: string): string | undefined {
   if (!value) return 'the value is empty';
+  if (kind === 'github-app') {
+    if (!canonicalPem(value)) return "not a GitHub App private key (the .pem file GitHub's \"Generate a private key\" downloads)";
+    try {
+      if (createPrivateKey(value).asymmetricKeyType !== 'rsa') return 'not an RSA private key (GitHub App keys are RSA)';
+    } catch {
+      return 'the private key does not parse (a truncated or damaged .pem file)';
+    }
+    return undefined;
+  }
   if (/\s/.test(value)) return 'the value holds whitespace (put it alone in the file, on one line)';
   if (kind === 'claude' && !OAUTH.test(value)) return 'not a Claude OAuth token (one sk-ant-oat01-… token from `claude setup-token`)';
   if (kind === 'github' && !GITHUB.test(value)) return 'not a GitHub token (ghp_, gho_, ghu_, ghs_, ghr_ or github_pat_…)';
@@ -310,9 +344,27 @@ export interface AddInput {
   share?: VaultShare;
   roles?: VaultRole[];
   machines?: string[];
+  /** kind github-app (w1519): its App ID or Client ID, and the accounts whose installations are used (the allowlist). */
+  appId?: string;
+  appOwners?: string[];
+  installations?: number[];
+  uninstallOthers?: boolean;
 }
 
-export type UpdateInput = Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'roles' | 'machines' | 'disabled' | 'email'>>;
+export type UpdateInput = Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'roles' | 'machines' | 'disabled' | 'email' | 'appId' | 'appOwners' | 'installations' | 'uninstallOthers'>>;
+
+/** Why a GitHub App's settings cannot be kept (w1519), or undefined; a kind other than github-app may set none of them. */
+function appProblem(kind: VaultKind, i: UpdateInput, adding: boolean, name?: string): string | undefined {
+  const any = i.appId !== undefined || i.appOwners !== undefined || i.installations !== undefined || i.uninstallOthers !== undefined;
+  if (kind !== 'github-app') return any ? 'an App ID, owners, installations and uninstall-others are only for kind github-app' : undefined;
+  if (adding && /^(?:vault|host)-/.test(name ?? ''))
+    return "a GitHub App's name may not start with vault- or host-: the FFBox host's vault-sync removes such entries it has no file for (docs/vault.md section 12); call it app-<name>";
+  if ((adding || i.appId !== undefined) && !APP_ID.test(i.appId ?? '')) return "a GitHub App needs its App ID (digits) or Client ID (Iv…), from the app's General settings";
+  if ((adding || i.appOwners !== undefined) && (!i.appOwners?.length || i.appOwners.some((o) => !GITHUB_ACCOUNT.test(o))))
+    return 'a GitHub App needs the GitHub accounts whose installations it uses (e.g. Gherik1): a public app can be installed by anyone, and only these are used';
+  if (i.installations !== undefined && i.installations.some((n) => !Number.isSafeInteger(n) || n <= 0)) return 'installations are installation ids (positive numbers)';
+  return undefined;
+}
 
 /** What a run gets from the vault: one Claude token (with its entry) and the other granted secrets, as environment. */
 export interface RunSecrets {
@@ -441,7 +493,9 @@ export class Vault {
     });
   }
 
-  private checkGrant(i: UpdateInput & { kind: VaultKind }) {
+  private checkGrant(i: UpdateInput & { kind: VaultKind }, adding = false, name?: string) {
+    const app = appProblem(i.kind, i, adding, name);
+    if (app) throw new Error(app);
     if (i.email !== undefined && i.email !== '') {
       if (i.kind !== 'claude') throw new Error('an email is only for a Claude token (the account it belongs to)');
       const why = emailProblem(i.email);
@@ -453,9 +507,10 @@ export class Vault {
     if (i.owner !== undefined && i.owner !== '' && !/^[A-Za-z0-9._-]{1,64}$/.test(i.owner)) throw new Error('owner is a portal user id');
   }
 
-  add(i: AddInput): VaultEntryMeta {
-    if (!NAME.test(i.name)) throw new Error('a name is lower-case letters, digits, ".", "_" and "-", up to 40, e.g. ben-max');
-    if (!VAULT_KINDS.includes(i.kind)) throw new Error(`kind is one of ${VAULT_KINDS.join(', ')}`);
+  add(input: AddInput): VaultEntryMeta {
+    if (!NAME.test(input.name)) throw new Error('a name is lower-case letters, digits, ".", "_" and "-", up to 40, e.g. ben-max');
+    if (!VAULT_KINDS.includes(input.kind)) throw new Error(`kind is one of ${VAULT_KINDS.join(', ')}`);
+    const i = { ...input, value: vaultValue(input.kind, input.value) };
     const bad = valueProblem(i.kind, i.value);
     if (bad) throw new Error(bad);
     if (i.kind === 'env') {
@@ -463,8 +518,14 @@ export class Vault {
       if (why) throw new Error(why);
     } else if (i.env) throw new Error('env is only for kind env');
     const share = i.share ?? 'owner';
-    const grant = { kind: i.kind, share, owner: i.owner, ...(i.email ? { email: i.email.trim() } : {}), roles: i.roles ?? ['workers', 'standing'], machines: (i.machines ?? ['*']).map((m) => m.toLowerCase()) };
-    this.checkGrant(grant);
+    const app = {
+      ...(i.appId !== undefined ? { appId: i.appId.trim() } : {}),
+      ...(i.appOwners !== undefined ? { appOwners: i.appOwners.map((o) => o.trim()) } : {}),
+      ...(i.installations?.length ? { installations: i.installations } : {}),
+      ...(i.uninstallOthers ? { uninstallOthers: true } : {}),
+    };
+    const grant = { kind: i.kind, share, owner: i.owner, ...(i.email ? { email: i.email.trim() } : {}), roles: i.roles ?? ['workers', 'standing'], machines: (i.machines ?? ['*']).map((m) => m.toLowerCase()), ...app };
+    this.checkGrant(grant, true, i.name);
     if (share === 'owner' && !i.owner) throw new Error('an entry for its owner\'s own work needs --owner (a portal user id), or share it with "anyone"');
     return this.change((key) => {
       if (this.data.entries.some((e) => e.name === i.name)) throw new Error(`a vault entry named ${i.name} exists; rotate it instead`);
@@ -472,22 +533,23 @@ export class Vault {
       const dup = this.data.entries.find((e) => e.fingerprint === fp);
       if (dup) throw new Error(`that value is already in the vault as ${dup.name}`);
       const at = this.now();
-      const meta: VaultEntryMeta = { id: randomBytes(4).toString('hex'), name: i.name, kind: i.kind, ...(i.env ? { env: i.env } : {}), ...(i.owner ? { owner: i.owner } : {}), ...(grant.email ? { email: grant.email } : {}), share, roles: grant.roles, machines: grant.machines, fingerprint: fp, last4: i.value.slice(-4), createdAt: at, updatedAt: at };
+      const meta: VaultEntryMeta = { id: randomBytes(4).toString('hex'), name: i.name, kind: i.kind, ...(i.env ? { env: i.env } : {}), ...(i.owner ? { owner: i.owner } : {}), ...(grant.email ? { email: grant.email } : {}), share, roles: grant.roles, machines: grant.machines, ...app, fingerprint: fp, last4: lastFourOf(i.kind, i.value), createdAt: at, updatedAt: at };
       this.data.entries.push({ ...meta, sealed: seal(key!, meta, i.value), keyId: keyIdOf(key!) });
       return meta;
     }, true);
   }
 
-  rotate(name: string, value: string): VaultEntryMeta {
+  rotate(name: string, raw: string): VaultEntryMeta {
     return this.change((key) => {
       const e = this.find(name);
+      const value = vaultValue(e.kind, raw);
       const bad = valueProblem(e.kind, value);
       if (bad) throw new Error(bad);
       const fp = fingerprintOf(value);
       const dup = this.data.entries.find((x) => x.fingerprint === fp && x.id !== e.id);
       if (dup) throw new Error(`that value is already in the vault as ${dup.name}`);
       const at = this.now();
-      Object.assign(e, { fingerprint: fp, last4: value.slice(-4), rotatedAt: at, updatedAt: at, sealed: seal(key!, e, value), keyId: keyIdOf(key!) });
+      Object.assign(e, { fingerprint: fp, last4: lastFourOf(e.kind, value), rotatedAt: at, updatedAt: at, sealed: seal(key!, e, value), keyId: keyIdOf(key!) });
       return this.meta(e);
     }, true);
   }
@@ -506,6 +568,8 @@ export class Vault {
       if (!next.owner) delete e.owner;
       if (!next.email) delete e.email;
       if (!next.disabled) delete e.disabled;
+      if (!next.installations?.length) delete e.installations;
+      if (!next.uninstallOthers) delete e.uninstallOthers;
       return this.meta(e);
     }, false);
   }
@@ -619,6 +683,26 @@ export class Vault {
     return this.githubTokens()
       .filter((x) => eligible(x.entry, run) && usable(x.entry.fingerprint))
       .sort((a, b) => order(a.entry).localeCompare(order(b.entry)))[0];
+  }
+
+  /** Every enabled GitHub App the key opens, with its private key: what server/githubApps.ts signs with (w1519). */
+  githubApps(): { entry: VaultEntryMeta; key: string }[] {
+    this.reload();
+    const { key } = this.key();
+    if (!key) return [];
+    return this.data.entries
+      .filter((e) => e.kind === 'github-app' && !e.disabled)
+      .map((e) => ({ entry: this.meta(e), key: this.open(key, e) }))
+      .filter((x): x is { entry: VaultEntryMeta; key: string } => !!x.key);
+  }
+
+  /**
+   * The GitHub Apps a run may use (w1519): granted to its role and machine, and its owner's work or shared with anyone,
+   * like any entry. Never a key: the run gets installation tokens, by name (FF_GH_APP_NAMES).
+   */
+  githubAppsFor(run: VaultRun): VaultEntryMeta[] {
+    this.reload();
+    return this.data.entries.filter((e) => e.kind === 'github-app' && eligible(e, run)).map((e) => this.meta(e));
   }
 
   /** The pick's view of one Claude entry: its meters, and the processes live on it other than `except`'s. */

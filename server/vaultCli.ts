@@ -5,6 +5,8 @@
 //   node server/vaultCli.ts list
 //   node server/vaultCli.ts add --name NAME --kind claude|github|env [--env VAR] [--owner USER] [--share owner|anyone]
 //                               [--roles workers,standing] [--machines m3,m5|*] (--file FILE | --stdin)
+//   node server/vaultCli.ts add --name NAME --kind github-app --app-id ID --app-owners Gherik1[,…] [--installations N,…]
+//                               [--uninstall-others] [the grants above] --file KEY.pem    a GitHub App (w1519, docs/github-apps.md)
 //   node server/vaultCli.ts put --name NAME --kind ... [the add options] (--file FILE | --stdin)
 //                               add, or bring an entry to this value and these grants (the FFBox host's fff-vm vault-sync)
 //   node server/vaultCli.ts list --names                  the entries' names only, one per line
@@ -14,6 +16,7 @@
 //   node server/vaultCli.ts export NAME                   ONE VALUE to stdout, root only, never to a terminal: the host's copy of an entry
 //                                                         that exists only here. Not read-only; the ops worker is refused it
 //   node server/vaultCli.ts grant NAME [--email ADDRESS | --email ''] [--owner USER] [--share owner|anyone] [--roles …] [--machines …] [--enable | --disable]
+//                               a GitHub App also: [--app-id ID] [--app-owners A,B] [--installations N,… | --installations ''] [--uninstall-others | --keep-others]
 //   node server/vaultCli.ts remove NAME
 //   node server/vaultCli.ts new-key FILE [--force]        a new key file (0600); --force replaces one (entries then need rotating)
 //   node server/vaultCli.ts machine-credential list
@@ -51,6 +54,12 @@ const { values: o, positionals: args } = parseArgs({
     force: { type: 'boolean' },
     enable: { type: 'boolean' },
     disable: { type: 'boolean' },
+    // A GitHub App (w1519).
+    'app-id': { type: 'string' },
+    'app-owners': { type: 'string' },
+    installations: { type: 'string' },
+    'uninstall-others': { type: 'boolean' },
+    'keep-others': { type: 'boolean' },
   },
 });
 
@@ -60,6 +69,15 @@ const die = (msg: string): never => {
 };
 const list = (v: string | undefined) => v?.split(',').map((x) => x.trim()).filter(Boolean);
 const isRoot = () => process.getuid?.() === 0;
+/** --installations "123,456" as numbers ("" clears them). */
+const ids = (v: string | undefined) => list(v)?.map((x) => (/^\d+$/.test(x) ? Number(x) : die(`--installations takes installation ids (numbers), not ${x}`)));
+/** A GitHub App's settings from the options (w1519); only the ones given. */
+const appOptions = () => ({
+  ...(o['app-id'] !== undefined ? { appId: o['app-id'] } : {}),
+  ...(o['app-owners'] !== undefined ? { appOwners: list(o['app-owners']) ?? [] } : {}),
+  ...(o.installations !== undefined ? { installations: ids(o.installations) ?? [] } : {}),
+  ...(o['uninstall-others'] ? { uninstallOthers: true } : o['keep-others'] ? { uninstallOthers: false } : {}),
+});
 
 /** The value, from --file or stdin: one line, never echoed. */
 function readValue(): string {
@@ -74,12 +92,13 @@ function readValue(): string {
   } else if (o.stdin) text = fs.readFileSync(0, 'utf8');
   else return die('the value comes from --file FILE or --stdin, never the command line');
   const value = text.replace(/^﻿/, '').trim();
-  if (value.includes('\n')) die('the file holds more than one line; put the value alone in it');
+  // A GitHub App's private key is a PEM block of many lines (w1519): the vault keeps it whole.
+  if (value.includes('\n') && !/^-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value)) die('the file holds more than one line; put the value alone in it');
   return value;
 }
 
 const show = (e: VaultEntryMeta) =>
-  `${e.name.padEnd(20)} ${e.kind.padEnd(6)} ${(e.env ?? '').padEnd(20)} …${e.last4}  ${e.fingerprint}  ${e.email ? `${e.email}  ` : ''}${e.share === 'owner' ? `owner ${e.owner}` : `anyone${e.owner ? ` (owner ${e.owner})` : ''}`}; ${e.roles.join(',')} on ${e.machines.join(',')}${e.disabled ? ' (DISABLED)' : ''}`;
+  `${e.name.padEnd(20)} ${e.kind.padEnd(6)} ${(e.env ?? '').padEnd(20)} …${e.last4}  ${e.fingerprint}  ${e.email ? `${e.email}  ` : ''}${e.share === 'owner' ? `owner ${e.owner}` : `anyone${e.owner ? ` (owner ${e.owner})` : ''}`}; ${e.roles.join(',')} on ${e.machines.join(',')}${e.kind === 'github-app' ? `; App ID ${e.appId}, installations of ${(e.appOwners ?? []).join(',')}${e.installations?.length ? ` (only ${e.installations.join(',')})` : ''}${e.uninstallOthers ? ', uninstalls the others' : ''}` : ''}${e.disabled ? ' (DISABLED)' : ''}`;
 
 const cfg = loadConfig();
 const cmd = args[0];
@@ -188,6 +207,7 @@ try {
         share: o.share as VaultShare | undefined,
         roles: list(o.roles) as VaultRole[] | undefined,
         machines: list(o.machines),
+        ...appOptions(),
       });
       console.log(`added: ${show(e)}${o.file ? `\nDelete ${o.file} now (shred -u).` : ''}`);
       break;
@@ -236,7 +256,9 @@ try {
       // asks over its ssh into the VM; stdout must be a pipe or a file, so a person cannot spill a value onto a screen.
       if (o.manifest) {
         const field = (x: string | undefined) => (x === undefined || x === '' ? '-' : x);
-        for (const e of vault.list()) console.log([e.name, e.kind, field(e.env), field(e.owner), e.share, e.roles.join(','), e.machines.join(','), e.fingerprint, e.last4, e.disabled ? '1' : '0'].join('\t'));
+        // A GitHub App's key is not copied to the FFBox host (its nightly copy knows tokens only): GitHub makes a new key at any
+        // time, so a lost one is replaced, not restored (docs/github-apps.md).
+        for (const e of vault.list().filter((x) => x.kind !== 'github-app')) console.log([e.name, e.kind, field(e.env), field(e.owner), e.share, e.roles.join(','), e.machines.join(','), e.fingerprint, e.last4, e.disabled ? '1' : '0'].join('\t'));
         break;
       }
       if (!isRoot() && process.env.FFF_TEST_NOROOT !== '1') die('export is root only (sudo fffctl vault export NAME)');
@@ -259,6 +281,7 @@ try {
         ...(o.roles !== undefined ? { roles: (list(o.roles) ?? []) as VaultRole[] } : {}),
         ...(o.machines !== undefined ? { machines: list(o.machines) ?? [] } : {}),
         ...(o.enable ? { disabled: false } : o.disable ? { disabled: true } : {}),
+        ...appOptions(),
       });
       console.log(`changed: ${show(e)}`);
       break;

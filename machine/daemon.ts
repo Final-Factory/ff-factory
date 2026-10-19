@@ -46,6 +46,7 @@ import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import type { SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { installPrShim } from './prFlow.ts';
+import { ghAppPaths, ghAppRunEnv, installGhAppShims, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
@@ -311,6 +312,8 @@ export class Daemon {
   private welcomed = false;
   /** Where the `unity-slot` commands are, once written (first on agents' PATH). */
   private slotBin?: string;
+  /** The GitHub App shims and tokens' file (w1519, machine/ghApp.ts), once written. */
+  private ghApp?: GhAppSetup;
   private lastSlotTick = 0;
   private lastStats?: { stats: HostStats; at: number };
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
@@ -777,6 +780,13 @@ export class Daemon {
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
     }
+    // GitHub Apps (w1519): the gh shim and git helper a run the portal named apps for gets (machine/ghApp.ts).
+    try {
+      const p = ghAppPaths(appDirOfConfig(this.cfg));
+      this.ghApp = { bin: p.bin, file: p.file, helper: installGhAppShims(p.bin) };
+    } catch (e) {
+      log(`github apps: could not write the gh shim: ${(e as Error).message}`);
+    }
     this.timers.push(setInterval(() => void this.slotTick(), 5_000));
     void this.slotTick();
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
@@ -1047,6 +1057,8 @@ export class Daemon {
       ...(this.voice ? { voice: this.voice.status() } : {}),
       // It saves a sandbox's uncommitted work before the portal releases it (w656).
       saveWork: true,
+      // It keeps GitHub App installation tokens for its runs (w1519, gh_app_tokens).
+      ...(this.ghApp ? { ghApp: true } : {}),
       // It streams a sandbox's running game for a live view (w1398, docs/live-view.md), and says which views run (w1509).
       liveView: true,
       liveViews: this.liveViews(),
@@ -1469,7 +1481,11 @@ export class Daemon {
    */
   private runSpec(info: Pick<SessionInfo, 'id'>, spec: LaunchSpec): LaunchSpec {
     const maxFile = this.maxEventsFile;
-    return { ...spec, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...this.slotEnv(spec) } };
+    const slot = this.slotEnv(spec);
+    // GitHub Apps (w1519): the gh shim's folder goes before the unity-slot one, on the same PATH key.
+    const pathKey = Object.keys(slot).find((k) => k.toUpperCase() === 'PATH') ?? Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+    const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey]);
+    return { ...spec, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app } };
   }
 
   /**
@@ -1826,6 +1842,17 @@ export class Daemon {
           (err) => this.send({ type: 'switch_result', id: msg.id, ok: false, error: (err as Error).message }),
         );
         return;
+      }
+      case 'gh_app_tokens': {
+        // GitHub App installation tokens (w1519): learnt by redaction first, then the file the runs' helper and gh shim read.
+        if (!this.ghApp || !Array.isArray(msg.tokens)) break;
+        addSecretValues(msg.tokens.map((t) => t.token));
+        try {
+          writeGhAppTokens(this.ghApp.file, msg.tokens);
+        } catch (e) {
+          log(`github apps: could not write the tokens' file: ${(e as Error).message}`);
+        }
+        break;
       }
       case 'save_work': {
         // Nothing may write there while it is committed: refused while an agent of that sandbox has a process (w656).

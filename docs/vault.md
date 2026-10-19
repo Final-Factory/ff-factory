@@ -103,6 +103,7 @@ orchestrators get no vault tool; `system_status` gets one summary line.
 | `claude` | one `sk-ant-oat01-…` token | `CLAUDE_CODE_OAUTH_TOKEN`, one per run, chosen by section 4 |
 | `github` | a GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`) | `GH_TOKEN`, and a git credential helper for `https://github.com` that reads it, on machines `machines.githubFromVault` names (section 13) |
 | `env` | any value of 8 to 4096 characters, no whitespace | the entry's variable, which must end `_TOKEN`, `_KEY`, `_SECRET` or `_PASSWORD` and may not start `CLAUDE_`, `ANTHROPIC_`, `GH_`, `GITHUB_` or `GIT_` |
+| `github-app` (w1519) | a GitHub App's private key (the `.pem` file), with its App ID and the accounts whose installations are used; added on the vault page with the `.pem` file chosen in the browser (or `--app-id`, `--app-owners`) | never to a run: the portal mints the app's installation tokens and a run's git and gh use them for the repositories it is installed on ([github-apps.md](github-apps.md)); the name may not start `vault-` or `host-` |
 
 **Grants.** Each entry names the roles it serves (`workers`, `standing`), the machines (`*` or ids), an owner (a portal
 user id) and who may use it: `share: owner` (only work its owner asked for, the default) or `share: anyone`.
@@ -863,6 +864,9 @@ lost. No VM reboot; the next nightly runs the copy.
 lothsahn (2026-10-10): "I would like you to enhance the portal vault to take GitHub fine grained access tokens as well. I'd
 like the right token to get used based on whether a request is Ben or lothsahn. Let's setup the framework for that similar to
 Claude tokens and I can get them installed for a switchover."
+
+A fine-grained token reaches only Final-Factory's repositories. Another account's private repositories (a modder's) are
+reached through a GitHub App that account installs, kind `github-app`: [github-apps.md](github-apps.md) (w1519).
 
 - **Code:** `server/githubTokens.ts` (the switch `githubFromVault`, the portal's runner `ghRunner`, the daemon's token
   `forMachine`, the probe and the health lines), `Vault.githubFor` / `Vault.githubTokens` and the `github` option of

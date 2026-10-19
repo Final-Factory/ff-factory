@@ -32,6 +32,7 @@ import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts'
 import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
 import { writeKnownHosts, type MachineSsh } from './machineSsh.ts';
 import { beatWasLate } from './loopWatch.ts';
+import type { GhAppToken } from '../shared/githubAppRoute.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -710,7 +711,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; compact?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; compact?: boolean; ghApp?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1555,6 +1556,20 @@ export class MachineManager {
   }
 
   /** Send to a machine's daemon. Throws when it is offline unless `must` is false (then a no-op). */
+  /**
+   * The GitHub App installation tokens a machine's runs may use (w1519, server/githubApps.ts forMachine), set by
+   * server/index.ts; undefined or empty: none.
+   */
+  ghAppTokensFor?: (machineId: string) => GhAppToken[];
+
+  /** Send the current GitHub App tokens to `machineId`, or to every connected daemon that keeps them (on each new token). */
+  pushGhAppTokens(machineId?: string) {
+    for (const id of machineId ? [machineId] : [...this.links.keys()]) {
+      if (!this.hellos.get(id)?.ghApp) continue;
+      this.post(id, { type: 'gh_app_tokens', tokens: this.ghAppTokensFor?.(id) ?? [] }, false);
+    }
+  }
+
   post(machineId: string, msg: ToDaemon, must = true) {
     const link = this.links.get(machineId);
     if (!link) {
@@ -1809,7 +1824,9 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.compact ? { compact: true } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}) });
+        // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
+        if (msg.ghApp) this.pushGhAppTokens(id);
         if (!msg.guard) delete m.guard;
         if (msg.voice && typeof msg.voice === 'object') this.voices.set(id, msg.voice);
         else this.voices.delete(id);

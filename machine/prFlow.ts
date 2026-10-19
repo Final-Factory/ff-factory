@@ -15,6 +15,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { ghEnvFor, readGhAppTokens, remotesOf } from './ghApp.ts';
 
 export interface Ran {
   code: number;
@@ -308,7 +309,10 @@ export function prMain(argv: string[], d: PrDeps): number {
 
 export const realPrDeps: PrDeps = {
   run: (cmd, args) => {
-    const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 10 * 60_000 });
+    // gh on a repository a GitHub App is installed on (w1519): the app's token. Node finds gh.exe itself on Windows, past the
+    // gh shim (a .cmd), so ff-pr asks machine/ghApp.ts directly; elsewhere the shim would do the same.
+    const env = cmd === 'gh' && process.env.FF_GH_APP_NAMES ? (ghEnvFor(args, process.env, readGhAppTokens(process.env.FF_GH_APP_FILE), remotesOf(process.cwd()), Date.now()) as NodeJS.ProcessEnv) : undefined;
+    const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 10 * 60_000, ...(env ? { env } : {}) });
     return { code: r.status ?? (r.error ? 127 : 1), out: r.stdout ?? '', err: r.stderr ?? (r.error ? r.error.message : '') };
   },
   write: (s) => void process.stdout.write(s),
