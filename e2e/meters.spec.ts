@@ -174,11 +174,11 @@ test('meters: open, every computer is a row and every account its limits and age
   const token = foot.getByTestId('account-…9AAA');
   await expect(token).toHaveText(planLine('host token', '98%', '12%'), { useInnerText: true });
   await expect(token).toHaveClass(/pl-yellow/);
-  await expect(token).toHaveAttribute('title', /host token …9AAA\n5-hour session: 12%, resets .*\nWeekly: 98%, resets .*\nWeekly Fable: 22%, resets .*\nIn use now: \d agents?\nthe agents' token on BEAST, m5/);
+  await expect(token).toHaveAttribute('data-tip', /host token …9AAA\n5-hour session: 12%\. Resets Thu 15:00 UTC \(in 3 h\)\nWeekly: 98%\. Resets Sun 00:00 UTC \(in 2 d 12 h\)\nWeekly Fable: 22%\. Resets Sun 00:00 UTC \(in 2 d 12 h\)\nIn use now: \d agents?\nthe agents' token on BEAST, m5/);
   const login = foot.getByTestId('account-owner');
   await expect(login).toHaveText(planLine('owner', '23%', '?'), { useInnerText: true });
   await expect(login).toHaveClass(/pl-blue/);
-  await expect(login).toHaveAttribute('title', /Not in use\nBEAST login\nm5 login/);
+  await expect(login).toHaveAttribute('data-tip', /Not in use\nBEAST login\nm5 login/);
   // The plans come before the computers.
   expect((await plans.boundingBox())!.y).toBeLessThan((await foot.getByRole('table', { name: 'Load of every computer' }).boundingBox())!.y);
   await expect(foot.locator('.sys-detail')).toHaveScreenshot('meters-open.png');
@@ -268,7 +268,7 @@ test('meters (w785): a vault token is one row under its vault name, the Claude a
   // Named by the email a person recorded (w1389), not by the vault name; the vault name is on its hover; with none recorded the vault name stands (ben-1 below).
   await expect(both).toHaveText(planLine('ben@example.com', '71%', '9%'), { useInnerText: true });
   await expect(both).not.toContainText('ben-2');
-  await expect(both).toHaveAttribute('title', /^ben@example\.com\nvault-ben-2 …dAAA\n[\s\S]*fff-portal's token file \(the orchestrator\)/);
+  await expect(both).toHaveAttribute('data-tip', /^ben@example\.com\nvault-ben-2 …dAAA\n[\s\S]*fff-portal's token file \(the orchestrator\)/);
   await expect(both).not.toContainText('vault:');
   // A long address is cut with an ellipsis, never wrapped or clipped by the row, and whole on its hover.
   // Every plan's first element is its name, so no line starts with the dash.
@@ -280,8 +280,11 @@ test('meters (w785): a vault token is one row under its vault name, the Claude a
   }
   const loth = foot.getByTestId('account-…EAAA');
   await expect(loth).toContainText('a.very.long.address.for.loth@finalfactory-example.test');
-  await expect(loth.locator('.plan-item-name')).toHaveAttribute('title', 'a.very.long.address.for.loth@finalfactory-example.test');
-  await expect(loth).toHaveAttribute('title', /^a\.very\.long\.address\.for\.loth@finalfactory-example\.test\nvault-lothsahn-1 …EAAA/);
+  // The cut-off name has no title of its own (w1528): its hover is the row's card, which opens with the whole address.
+  await expect(loth.locator('.plan-item-name')).not.toHaveAttribute('title', /.+/);
+  await loth.locator('.plan-item-name').hover();
+  await expect(page.getByTestId('plan-tip')).toContainText('a.very.long.address.for.loth@finalfactory-example.test\nvault-lothsahn-1');
+  await expect(loth).toHaveAttribute('data-tip', /^a\.very\.long\.address\.for\.loth@finalfactory-example\.test\nvault-lothsahn-1 …EAAA/);
   await expect(loth.locator('.plan-item-name')).toHaveCSS('text-overflow', 'ellipsis');
   // The vault's own name without "vault-"; one row each, never the token file's name for a vault token, and the usage line says "rate limits" on hover.
   await expect(foot.getByTestId('account-…cBBB')).toHaveText(planLine('ben-1', '12%', '9%'), { useInnerText: true });
@@ -320,7 +323,9 @@ test('meters (w1389): the footer says which plan is in use and how many are spen
   const blue = await foot.getByTestId('account-owner').evaluate((e) => getComputedStyle(e).color);
   expect(new Set([red, yellow, blue]).size, 'three different colours').toBe(3);
   // The hover has the windows with their resets, the per-model window and the state.
-  await expect(row).toHaveAttribute('title', /Weekly Fable: 61%, resets .*\nSpent until /);
+  await expect(row).toHaveAttribute('data-tip', /Weekly Fable: 61%\. Resets Sun 10:00 UTC \(in 2 d 22 h\)\nSpent until Sun 10:00 UTC \(in 2 d 22 h\)/);
+  // w1528: each limit has its own reset, day and time with the zone, and the time left.
+  await expect(row).toHaveAttribute('data-tip', /5-hour session: 40%\. Resets Thu 14:00 UTC \(in 2 h\)\nWeekly: 100%\. Resets Sun 10:00 UTC \(in 2 d 22 h\)/);
   // Nothing needs a scroll to read the plans: the whole list is inside the sheet's visible area.
   const detail = (await foot.locator('.sys-detail').boundingBox())!;
   const list = (await foot.getByTestId('plans-table').boundingBox())!;
@@ -342,4 +347,42 @@ test('meters (w1389): the panel lists no clean-up lines; a disk still under its 
   await expect(foot.getByTestId('mrow-m5')).toHaveAttribute('title', /Last clean-up .*: 4\.0 GB freed \(3 item\(s\)\)/);
   // Another machine's disk, not below its threshold, stays as it was.
   await expect(foot.getByTestId('mrow-BEAST').locator('.mt-cell').nth(3)).not.toHaveClass(/meter-warn|meter-crit/);
+});
+
+test.describe('plan reset hover (w1528)', () => {
+  test.use({ timezoneId: 'America/Denver' });
+  test('hovering a plan shows each limit reset day, time and zone, and says so when one is unknown', async ({ page }) => {
+    const spent: AccountUsage = {
+      ...VAULT('vault-ben-1', 'cBBB', 100, ['ben@example.com']),
+      usage: { available: true, asOf: NOW.toISOString(), plan: 'max', weekly: { label: 'Weekly', percent: 100, resetsAt: at(70) }, session: { label: 'Session (5 h)', percent: 40, resetsAt: at(2) }, models: [{ label: 'Weekly Fable', percent: 61 }] },
+    };
+    const foot = await fixedWorld(page, 'machines', [spent]);
+    await foot.locator('.sys-toggle').click();
+    await settle(page);
+    const tip = page.getByTestId('plan-tip');
+    await expect(tip).toHaveCount(0);
+    // The viewer's zone (Denver, MDT in September), not UTC: 14:00 UTC is 08:00 MDT.
+    const row = foot.getByTestId('account-…cBBB');
+    const card = [
+      'vault-ben-1 …cBBB',
+      '5-hour session: 40%. Resets Thu 08:00 MDT (in 2 h)',
+      'Weekly: 100%. Resets Sun 04:00 MDT (in 2 d 22 h)',
+      'Weekly Fable: 61%. Reset time unknown',
+      'Spent until Sun 04:00 MDT (in 2 d 22 h)',
+      'ben@example.com',
+    ].join('\n');
+    // Hovering the name (lothsahn: "hovering the email of the plan should also give the popup with the usage summary") and
+    // hovering the usage line open the same card.
+    for (const [part, shot] of [['.plan-item-name', process.env.E2E_SHOT_TIP], ['.plan-item-tail', process.env.E2E_SHOT_TIP2]] as const) {
+      await row.locator(part).hover();
+      await expect(tip).toHaveText(card, { useInnerText: true });
+      if (shot) {
+        const box = (await row.boundingBox())!;
+        const top = Math.max(0, box.y - 330);
+        await page.screenshot({ path: shot, clip: { x: 0, y: top, width: 420, height: Math.min(page.viewportSize()!.height, box.y + 280) - top } });
+      }
+      await page.mouse.move(900, 300);
+      await expect(tip).toHaveCount(0);
+    }
+  });
 });

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import type { AccountUsage, AppState, CleanupSummary, HostHealth, HostStats, PlanUsage, Provider, ProviderMetrics, SessionInfo, SystemStats, UnitySlotsReport, UsageMeter } from '../../../shared/types';
+import { resetText, resetWhen } from '../../../shared/resetText';
 import { unitySlotsLine } from '../../../shared/fleet';
 import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
 import { memUsed as memUsedOf } from '../../../shared/stats';
@@ -237,16 +238,16 @@ export function planRows(app: AppState, now: number): PlanRow[] {
     const live = a.sessionIds.filter((id) => isLive(sessions.get(id))).length;
     const st = accountState(a, now, live);
     const u = a.usage?.available ? a.usage : undefined;
-    const win = (name: string, m?: UsageMeter) => `${name}: ${m ? `${Math.round(m.percent)}%${m.resetsAt ? `, resets ${localTime(m.resetsAt, now)}` : ''}` : 'unknown'}`;
+    const win = (name: string, m?: UsageMeter) => `${name}: ${m ? `${Math.round(m.percent)}%. ${resetText(m.resetsAt, now)}` : 'unknown'}`;
     const title = [
       ...(a.vaultEmail ? [a.vaultEmail] : []),
       a.label,
       ...(u ? [win('5-hour session', u.session), win('Weekly', u.weekly), ...u.models.map((m) => win(m.label, m))] : [a.usage ? `Usage unavailable${a.usage.why ? `: ${a.usage.why}` : ''}` : 'Usage not fetched yet']),
-      st.spentUntil !== undefined ? `Spent${st.spentUntil ? ` until ${localTime(st.spentUntil, now)}` : ''}` : live ? `In use now: ${live} agent${live === 1 ? '' : 's'}` : 'Not in use',
+      st.spentUntil !== undefined ? `Spent${st.spentUntil ? ` until ${resetWhen(st.spentUntil, now)}` : ''}` : live ? `In use now: ${live} agent${live === 1 ? '' : 's'}` : 'Not in use',
       ...a.where.filter((w) => w !== a.vaultEmail),
       ...(a.pool ? [a.pool.text] : []),
     ].join('\n');
-    const state = st.spentUntil !== undefined ? `spent${st.spentUntil ? ` until ${localTime(st.spentUntil, now)}` : ''}` : live ? 'in use' : 'free';
+    const state = st.spentUntil !== undefined ? `spent${st.spentUntil ? ` until ${resetWhen(st.spentUntil, now)}` : ''}` : live ? 'in use' : 'free';
     const line = `${accountName(a)}: ${state}${u?.session ? `, 5h ${Math.round(u.session.percent)}%` : ''}${u?.weekly ? `, weekly ${Math.round(u.weekly.percent)}%` : ''}`;
     return { a, name: accountName(a), line, live, inUse: live > 0, spentUntil: st.spentUntil, title };
   });
@@ -352,10 +353,10 @@ function ProviderMiniBars({ l }: { l: ProviderLoad }) {
   );
 }
 
-function Meter({ label, pct, value, note, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; note?: string; warn?: number; crit?: number; lvl?: Lvl }) {
+function Meter({ label, pct, value, note, title, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; note?: string; title?: string; warn?: number; crit?: number; lvl?: Lvl }) {
   const p = Math.max(0, Math.min(100, pct));
   return (
-    <div className={`meter meter-${lvl ?? level(p, warn, crit)}`}>
+    <div className={`meter meter-${lvl ?? level(p, warn, crit)}`} title={title}>
       <div className="meter-row">
         <span className="meter-label">{label}</span>
         <span className="meter-value">{value}</span>
@@ -540,6 +541,14 @@ export const planTone = (r: PlanRow): PlanTone => {
  * rest are each line's hover.
  */
 function PlanList({ rows }: { rows: PlanRow[] }) {
+  const [tip, setTip] = useState<{ text: string; left: number; top: number; above: boolean } | null>(null);
+  // The hover is a card of its own, placed at the row (the sheet scrolls and clips, so it is fixed to the window): a browser's
+  // own title tooltip lists the resets too late and cannot be seen on a phone or in a screenshot.
+  const show = (e: { currentTarget: HTMLElement }, text: string) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const above = r.bottom + 200 > window.innerHeight;
+    setTip({ text, left: Math.max(8, Math.min(r.left, window.innerWidth - 328)), top: above ? window.innerHeight - r.top + 4 : r.bottom + 4, above });
+  };
   const asOf = rows.map((r) => r.a.usage?.asOf).filter((t): t is string => !!t).sort()[0];
   return (
     <div className="meters plan-list" data-testid="plans-table">
@@ -548,8 +557,8 @@ function PlanList({ rows }: { rows: PlanRow[] }) {
           const u = r.a.usage?.available ? r.a.usage : undefined;
           const pct = (m?: UsageMeter) => (m ? `${Math.round(m.percent)}%` : '?');
           return (
-            <div key={r.a.id} className={`plan-item pl-${planTone(r)}`} role="listitem" data-testid={`account-${accountTag(r.a)}`} title={r.title}>
-              <span className="plan-item-name" title={r.name}>{r.name}</span>
+            <div key={r.a.id} className={`plan-item pl-${planTone(r)}`} role="listitem" tabIndex={0} data-testid={`account-${accountTag(r.a)}`} data-tip={r.title} aria-label={r.title.replace(/\n/g, '. ')} onMouseEnter={(e) => show(e, r.title)} onMouseLeave={() => setTip(null)} onFocus={(e) => show(e, r.title)} onBlur={() => setTip(null)}>
+              <span className="plan-item-name">{r.name}</span>
               <span className="plan-item-tail">
                 <span className="plan-item-sep">{' - '}</span>
                 {u ? `weekly ${pct(u.weekly)}, session ${pct(u.session)}` : r.a.usage ? 'usage unavailable' : 'not fetched yet'}
@@ -561,6 +570,11 @@ function PlanList({ rows }: { rows: PlanRow[] }) {
       <div className="plan-asof" title={rows.map((r) => (r.a.usage?.source ? `${r.name}: from ${r.a.usage.source}` : '')).filter(Boolean).join('\n') || undefined}>
         {asOf ? `as of ${fmtClock(asOf)}` : 'not fetched yet'}
       </div>
+      {tip && (
+        <div className="plan-tip" role="tooltip" data-testid="plan-tip" style={{ left: tip.left, ...(tip.above ? { bottom: tip.top } : { top: tip.top }) }}>
+          {tip.text}
+        </div>
+      )}
     </div>
   );
 }
@@ -600,7 +614,7 @@ function PlanMeters({ usage: u }: { usage?: PlanUsage }) {
     <div className="meters plan-meters" title={`Claude ${u.plan ?? ''} plan usage limits, from ${u.source ? `the API's ${u.source}` : 'the claude.ai usage endpoint'}`}>
       <div className="plan-grid">
         {rows.map((m) => (
-          <Meter key={m.label} label={m.label.replace(/^Session \(5 h\)$/i, 'Session 5h')} pct={m.percent} value={`${Math.round(m.percent)}%`} note={m.resetsAt ? (Date.parse(m.resetsAt) <= now ? 'resetting' : `resets ${localTime(m.resetsAt, now)}`) : undefined} />
+          <Meter key={m.label} label={m.label.replace(/^Session \(5 h\)$/i, 'Session 5h')} pct={m.percent} value={`${Math.round(m.percent)}%`} title={`${m.label}: ${Math.round(m.percent)}%. ${resetText(m.resetsAt, now)}`} note={m.resetsAt ? (Date.parse(m.resetsAt) <= now ? 'resetting' : `resets ${localTime(m.resetsAt, now)}`) : undefined} />
         ))}
       </div>
       <div className="plan-asof">

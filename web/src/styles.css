@@ -1255,6 +1255,31 @@ select.input {
   }
 }
 
+/* The plan row's hover (w1528): every limit with its reset day, time and zone. Fixed to the window so the sheet's scroll never clips it. */
+.plan-tip {
+  position: fixed;
+  z-index: 60;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  background: var(--panel-3);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.plan-item:focus-visible {
+  outline: 1px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
 .pl-red { color: var(--red); }
 .pl-yellow { color: var(--amber); }
 .pl-blue { color: var(--blue); }
