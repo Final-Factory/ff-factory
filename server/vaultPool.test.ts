@@ -417,7 +417,7 @@ test('set_app_config: the pool limits are anyone\'s, checked, applied live and c
   assert.equal(normalizeSetting('claudeAccounts.dispatcher', 'vault'), undefined, 'the account setting is the owner\'s only (w1078)');
   assert.equal(OWNER_ONLY_KEYS.has('claudeAccounts.dispatcher'), true);
   // Not owner-only keys: the pool limits are one system-wide set that any person's orchestrator may change.
-  for (const k of ['vault.pool.sessionHoldPercent', 'vault.pool.onePerWeeklyPercent', 'vault.pool.retireWeeklyPercent', 'vault.pool.reservePerDayPercent', 'vault.pool.reserveSessionPercent', 'vault.pool.dispatcherStopPercent'] as const) {
+  for (const k of ['vault.pool.sessionHoldPercent', 'vault.pool.onePerWeeklyPercent', 'vault.pool.retireWeeklyPercent', 'vault.pool.reservePerDayPercent', 'vault.pool.reserveSessionPercent', 'vault.pool.dispatcherStopPercent', 'vault.pool.nearResetHours', 'vault.pool.nearResetFloorTokens'] as const) {
     assert.equal(OWNER_ONLY_KEYS.has(k), false, k);
   }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pool-cfg-'));
@@ -443,6 +443,13 @@ test('set_app_config: the pool limits are anyone\'s, checked, applied live and c
   setAppConfig(file, cfg, 'vault.pool.sessionHoldPercent', null);
   assert.equal(poolLimits(cfg).sessionHold, 80);
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).vault.pool.sessionHoldPercent, undefined);
+  // The near-reset rule's two settings (w1539): hours from 0 (off) to 168, a whole number of tokens from 0 to 10.
+  setAppConfig(file, cfg, 'vault.pool.nearResetHours', '8');
+  assert.equal(poolLimits(cfg).nearResetHours, 8);
+  setAppConfig(file, cfg, 'vault.pool.nearResetFloorTokens', 2);
+  assert.equal(poolLimits(cfg).nearResetFloor, 2);
+  for (const bad of [169, -1, 'soon', '']) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.nearResetHours', bad as never), /nearResetHours is a number of hours from 0 \(off\) to 168/, String(bad));
+  for (const bad of [1.5, 11, -1]) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.nearResetFloorTokens', bad as never), /nearResetFloorTokens is a whole number of tokens from 0 to 10/, String(bad));
 });
 
 // ---------------------------------------------------------------- w971: the reserve is enforced, the score orders
@@ -508,4 +515,33 @@ test('w979: the pool listing orders by the picker, labels each token, and marks 
   const held = labels({ ...m, [fp(B2)]: usage(85, 27, { weeklyDays: 4, sessionHours: 2 }) });
   assert.deepEqual(held.ben, ['ben-c pool:ok priority', 'ben-b pool:held', 'ben-a pool:reserved']);
   assert.ok(!r.ben.concat(r.loth).join(' ').match(/score|%\/day|left over/));
+});
+
+test('w1539: a near-reset token takes priority in the listing, on exactly one token per pool, and its caps read as lifted', (t) => {
+  const { make } = setup(t);
+  const v = make();
+  v.add({ name: 'ben-a', kind: 'claude', value: B1, owner: 'ben', share: 'owner' });
+  v.add({ name: 'ben-b', kind: 'claude', value: B2, owner: 'ben', share: 'owner' });
+  v.add({ name: 'ben-c', kind: 'claude', value: SHARED, owner: 'ben', share: 'owner' });
+  v.add({ name: 'loth-a', kind: 'claude', value: L1, owner: 'lothsahn', share: 'owner' });
+  const H = 1 / 24;
+  const labels = (m: Record<string, PlanUsage | undefined>, live: Record<string, number> = {}, cfg?: object) => {
+    const pools = v.pools({ ...world(m, live), limits: () => poolLimits(cfg as never) });
+    const one = (p: string) => pools.get(p)!.map((x) => `${x.entry.name} ${poolLabel(x.view, x.priority)}`);
+    return { ben: one('ben'), loth: one('lothsahn'), priorities: [...pools.values()].map((list) => list.filter((x) => x.priority).length) };
+  };
+  // ben-a: 93% used, resets in 11 h; ben-b fresh (6 days); ben-c 60% (3 days). lothsahn's one token far from its reset.
+  const m = { [fp(B1)]: usage(0, 93, { weeklyDays: 11 * H }), [fp(B2)]: usage(0, 1, { weeklyDays: 6 }), [fp(SHARED)]: usage(0, 60, { weeklyDays: 3 }), [fp(L1)]: usage(0, 40, { weeklyDays: 4 }) };
+  const r = labels(m);
+  assert.deepEqual(r.ben, ['ben-a pool:ok priority', 'ben-b pool:ok', 'ben-c pool:ok'], 'the near-reset token first, the rest by score');
+  assert.deepEqual(r.loth, ['loth-a pool:ok priority']);
+  assert.deepEqual(r.priorities, [1, 1], 'exactly one priority per pool');
+  // The rule off: the score order of w971, priority on the fresh token.
+  const off = labels(m, {}, { vault: { pool: { nearResetHours: 0 } } });
+  assert.deepEqual(off.ben, ['ben-b pool:ok priority', 'ben-a pool:ok', 'ben-c pool:ok']);
+  // At 97% with a job on it, inside the window: its one-at-a-time cap is lifted (pool:ok, not one-at-a-time); its last 3% is
+  // what the pool's pace uses before the reset, so priority goes back to the score order, still on exactly one token.
+  const late = labels({ ...m, [fp(B1)]: usage(0, 97, { weeklyDays: 11 * H }) }, { [fp(B1)]: 1 });
+  assert.deepEqual(late.ben, ['ben-b pool:ok priority', 'ben-c pool:ok', 'ben-a pool:ok']);
+  assert.deepEqual(late.priorities, [1, 1]);
 });

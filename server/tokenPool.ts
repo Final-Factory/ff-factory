@@ -24,6 +24,11 @@
 // shrinks as its weekly window runs out, for the dispatcher alone. At `dispatcherStop` (95) on either of its meters the
 // token is inside that reserve whatever the buffer says (w1109): no new worker starts on it, and the workers already on it
 // are asked to stop (server/dispatcherStop.ts).
+//
+// The near-reset rule (w1539, judgePool and pickOrder): inside the last `nearResetHours` (12) before a token's weekly reset, room
+// left at the reset is lost, so that token's one-at-a-time and retire caps are lifted (it may be used up to 100) and it goes
+// first for the room the pool's pace would not use before the reset (poolPace); both only while at least `nearResetFloor` (1)
+// other token of the pool can take a new process, so a sudden 5-hour burst always has more than one window to draw on.
 
 import type { PlanUsage } from '../shared/types.ts';
 
@@ -41,9 +46,18 @@ export interface PoolLimits {
   reserveSession: number;
   /** Either meter of the dispatcher's token at or above: its workers are asked to stop, and no new one starts on it (w1109). */
   dispatcherStop: number;
+  /** Hours before a token's weekly reset inside which the near-reset rule applies (w1539); 0 turns it off. */
+  nearResetHours: number;
+  /** The near-reset rule applies only while at least this many OTHER tokens of the pool can take a new process (w1539). */
+  nearResetFloor: number;
 }
 
-export const POOL_DEFAULTS: Readonly<PoolLimits> = { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20, dispatcherStop: 95 };
+/**
+ * nearResetHours 12 and nearResetFloor 1 (w1539): in the replay of the pools' measured meters (2026-10-12..19, PR of w1539)
+ * they kept burst readiness at or above today's; 8 h caught less, 16-24 h used tokens up earlier, floor 0 left more hours
+ * with one token ready, floor 2 lost most of the gain. lothsahn's own figure was 12 h.
+ */
+export const POOL_DEFAULTS: Readonly<PoolLimits> = { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20, dispatcherStop: 95, nearResetHours: 12, nearResetFloor: 1 };
 
 /** Config vault.pool: the same, with the unit in the name. Anything unset is the default. */
 export interface PoolConfig {
@@ -53,11 +67,33 @@ export interface PoolConfig {
   reservePerDayPercent?: number;
   reserveSessionPercent?: number;
   dispatcherStopPercent?: number;
+  nearResetHours?: number;
+  nearResetFloorTokens?: number;
 }
 
-export const POOL_CONFIG_KEYS = ['sessionHoldPercent', 'onePerWeeklyPercent', 'retireWeeklyPercent', 'reservePerDayPercent', 'reserveSessionPercent', 'dispatcherStopPercent'] as const;
+export const POOL_CONFIG_KEYS = ['sessionHoldPercent', 'onePerWeeklyPercent', 'retireWeeklyPercent', 'reservePerDayPercent', 'reserveSessionPercent', 'dispatcherStopPercent', 'nearResetHours', 'nearResetFloorTokens'] as const;
+export type PoolConfigKey = (typeof POOL_CONFIG_KEYS)[number];
 
-const pct = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100 ? v : d);
+/** Each setting's range: the percents 0 to 100, the near-reset window in hours (a week at most), the floor a whole number of tokens. */
+const RANGE: Record<PoolConfigKey, { hi: number; int?: boolean; what: string }> = {
+  sessionHoldPercent: { hi: 100, what: 'a percent from 0 to 100' },
+  onePerWeeklyPercent: { hi: 100, what: 'a percent from 0 to 100' },
+  retireWeeklyPercent: { hi: 100, what: 'a percent from 0 to 100' },
+  reservePerDayPercent: { hi: 100, what: 'a percent from 0 to 100' },
+  reserveSessionPercent: { hi: 100, what: 'a percent from 0 to 100' },
+  dispatcherStopPercent: { hi: 100, what: 'a percent from 0 to 100' },
+  nearResetHours: { hi: 168, what: 'a number of hours from 0 (off) to 168' },
+  nearResetFloorTokens: { hi: 10, int: true, what: 'a whole number of tokens from 0 to 10' },
+};
+
+/** Why `v` is not a value of vault.pool.<k>, or undefined. */
+export function poolSettingProblem(k: PoolConfigKey, v: unknown): string | undefined {
+  const r = RANGE[k];
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= r.hi && (!r.int || Number.isInteger(v)) ? undefined : `config vault.pool.${k} is ${r.what}`;
+}
+
+const val = (k: PoolConfigKey, v: unknown, d: number) => (poolSettingProblem(k, v) ? d : (v as number));
+const pct = (v: unknown, d: number) => val('sessionHoldPercent', v, d);
 
 /** The limits in effect, read at every pick: a change applies to the next process, with no restart. */
 export function poolLimits(cfg: { vault?: { pool?: PoolConfig } } | undefined): PoolLimits {
@@ -69,6 +105,8 @@ export function poolLimits(cfg: { vault?: { pool?: PoolConfig } } | undefined): 
     reservePerDay: pct(p?.reservePerDayPercent, POOL_DEFAULTS.reservePerDay),
     reserveSession: pct(p?.reserveSessionPercent, POOL_DEFAULTS.reserveSession),
     dispatcherStop: pct(p?.dispatcherStopPercent, POOL_DEFAULTS.dispatcherStop),
+    nearResetHours: val('nearResetHours', p?.nearResetHours, POOL_DEFAULTS.nearResetHours),
+    nearResetFloor: val('nearResetFloorTokens', p?.nearResetFloorTokens, POOL_DEFAULTS.nearResetFloor),
   };
   // A hand-edited config.json that breaks the order is read as the retire limit for both (checkPoolConfig refuses it at load).
   if (out.onePerWeekly > out.retireWeekly) out.onePerWeekly = out.retireWeekly;
@@ -82,8 +120,8 @@ export function checkPoolConfig(p: unknown): string | undefined {
   const o = p as Record<string, unknown>;
   for (const k of Object.keys(o)) if (!(POOL_CONFIG_KEYS as readonly string[]).includes(k)) return `config vault.pool.${k} is not a setting (${POOL_CONFIG_KEYS.join(', ')})`;
   for (const k of POOL_CONFIG_KEYS) {
-    const v = o[k];
-    if (v !== undefined && !(typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100)) return `config vault.pool.${k} is a percent from 0 to 100`;
+    const why = o[k] === undefined ? undefined : poolSettingProblem(k, o[k]);
+    if (why) return why;
   }
   const one = (o.onePerWeeklyPercent as number | undefined) ?? POOL_DEFAULTS.onePerWeekly;
   const retire = (o.retireWeeklyPercent as number | undefined) ?? POOL_DEFAULTS.retireWeekly;
@@ -129,6 +167,8 @@ export interface PoolView {
   slotTaken?: boolean;
   /** What the dashboard, system_status and `fffctl vault list` show beside the label (w979): the two meters for `ok` and `one-at-a-time`, else `why`. */
   shown: string;
+  /** The near-reset rule applies to the token (w1539, judgePool): its one-at-a-time and retire caps are lifted until its weekly reset. */
+  nearReset?: boolean;
 }
 
 /** Whether a new job may start on a token in this view: `ok`, or `one-at-a-time` with its slot free. */
@@ -177,8 +217,11 @@ export function scoreOf(t: PoolToken, now: number): { perDay?: number } {
   return { perDay };
 }
 
-/** The state of a token under the limits, for a worker or a standing agent (the strictest reading). */
-export function judge(t: PoolToken, limits: PoolLimits, now: number = Date.now()): PoolView {
+/**
+ * The state of a token under the limits, for a worker or a standing agent (the strictest reading). `nearReset`: the pool lets the
+ * token use its last room before its weekly reset (judgePool, w1539), so the one-at-a-time and retire caps do not apply to it.
+ */
+export function judge(t: PoolToken, limits: PoolLimits, now: number = Date.now(), nearReset = false): PoolView {
   const m = metersOf(t.usage);
   const base = { session: m.session, weekly: m.weekly, known: m.known, sessionResetsAt: m.sessionResetsAt, weeklyResetsAt: m.weeklyResetsAt };
   // A reading this portal did not just take (the latest poll failed, or none has answered since it started) says so (w1041).
@@ -189,7 +232,7 @@ export function judge(t: PoolToken, limits: PoolLimits, now: number = Date.now()
     const why = `${numbers}: used up until ${clock(until)}`;
     return { ...base, state: 'exhausted', why, shown: why, ...(until ? { until } : {}) };
   }
-  if (m.weekly >= limits.retireWeekly) {
+  if (m.weekly >= limits.retireWeekly && !nearReset) {
     const why = `weekly ${pc(m.weekly)}% (>= ${limits.retireWeekly}): retired until ${clock(m.weeklyResetsAt)}`;
     return { ...base, state: 'retired', why, shown: why, ...(m.weeklyResetsAt ? { until: m.weeklyResetsAt } : {}) };
   }
@@ -204,6 +247,10 @@ export function judge(t: PoolToken, limits: PoolLimits, now: number = Date.now()
   }
   // From onePerWeekly up to retireWeekly a token still works, one job at a time. Its state is `one-at-a-time` whether or not its
   // slot is taken (w979, lothsahn: calling it ok was misleading); `slotTaken` says whether a new job can start on it.
+  if (nearReset) {
+    const why = `${numbers}; its weekly window resets ${resetIn(m.weeklyResetsAt, now)}, inside the last ${limits.nearResetHours} h, so its ${limits.onePerWeekly}% and ${limits.retireWeekly}% caps are lifted until then`;
+    return { ...base, state: 'ok', why, shown: meters, nearReset: true };
+  }
   if (m.weekly >= limits.onePerWeekly) {
     const slotTaken = t.others >= 1;
     return { ...base, state: 'one-at-a-time', slotTaken, why: `weekly ${pc(m.weekly)}%, one job at a time${slotTaken ? `; its slot is taken (${t.others} running)` : ''}`, shown: meters };
@@ -262,6 +309,75 @@ export const byScore = (now: number) => (a: PoolToken, b: PoolToken): number => 
   return bySoonestReset({ ...a, name: '' }, { ...b, name: '' }) || a.others - b.others || a.name.localeCompare(b.name);
 };
 
+const WEEK_HOURS = 168;
+
+/** Hours to a token's weekly reset (never below 0), or undefined without a reading or a reset time. */
+function hoursToReset(t: PoolToken, now: number): number | undefined {
+  const m = metersOf(t.usage);
+  const reset = ms(m.weeklyResetsAt);
+  return m.known && Number.isFinite(reset) ? Math.max(0, (reset - now) / 3_600_000) : undefined;
+}
+
+/**
+ * Every token's state in a pool (w1539): judge's, except that a token inside the last `nearResetHours` before its weekly reset
+ * has its one-at-a-time and retire caps lifted (room left at the reset is lost), while at least `nearResetFloor` other tokens
+ * of the pool can take a new process on their own reading. The floor keeps a sudden 5-hour burst more than one window
+ * (lothsahn, 2026-10-19: "if all the tokens are used up except one, we'll only have 1 5 hour session to pull from"); a pool of
+ * one token never lifts its caps with the default floor of 1. The 5-hour hold, the dispatcher's reserve and 100% still apply.
+ */
+export function judgePool(tokens: readonly PoolToken[], limits: PoolLimits, now: number): Map<string, PoolView> {
+  const plain = new Map(tokens.map((t) => [t.id, judge(t, limits, now)] as const));
+  if (!(limits.nearResetHours > 0)) return plain;
+  const out = new Map(plain);
+  for (const t of tokens) {
+    const h = hoursToReset(t, now);
+    if (h === undefined || h > limits.nearResetHours) continue;
+    const others = tokens.filter((o) => o.id !== t.id && usable(plain.get(o.id)!)).length;
+    if (others >= limits.nearResetFloor) out.set(t.id, judge(t, limits, now, true));
+  }
+  return out;
+}
+
+/**
+ * The pool's pace (w1539): the weekly percent a token of it uses an hour, averaged over its tokens with a reading, each its
+ * weekly meter over the hours its week has run (168 minus the hours to its reset, at least 1). Undefined with no reading.
+ */
+export function poolPace(tokens: readonly PoolToken[], now: number): number | undefined {
+  const rates = tokens.flatMap((t) => {
+    const h = hoursToReset(t, now);
+    return h === undefined ? [] : [metersOf(t.usage).weekly / Math.max(1, WEEK_HOURS - h)];
+  });
+  return rates.length ? rates.reduce((a, b) => a + b, 0) / rates.length : undefined;
+}
+
+/**
+ * The weekly room a token would still have at its reset if it only took its even share of the pool's pace until then
+ * (w1539): its room minus pace x hours to the reset. Above 0 is room that would be lost.
+ */
+export function roomLostAtReset(t: PoolToken, pace: number, now: number): number {
+  const h = hoursToReset(t, now);
+  return h === undefined ? 0 : 100 - metersOf(t.usage).weekly - pace * h;
+}
+
+/**
+ * The pick order over a judged pool (w1539): first the tokens the near-reset rule applies to (judgePool) whose room would
+ * otherwise be lost at their reset (roomLostAtReset > 0), the soonest reset first; then everything else by byScore (w971).
+ * Only that share goes first: once the room left is what the pool's pace uses before the reset, the token is back in the
+ * score order, so it is not drained hours early and the pool keeps its burst windows (the plain "near-reset first" rule used
+ * tokens up 30-84 token-hours early in the replay and cut the worst-case burst below today's).
+ */
+export function pickOrder(tokens: readonly PoolToken[], views: ReadonlyMap<string, PoolView>, now: number): (a: PoolToken, b: PoolToken) => number {
+  const pace = poolPace(tokens, now) ?? 0;
+  const first = new Set(tokens.filter((t) => views.get(t.id)?.nearReset && roomLostAtReset(t, pace, now) > 0).map((t) => t.id));
+  const score = byScore(now);
+  return (a, b) => {
+    const x = first.has(a.id);
+    const y = first.has(b.id);
+    if (x !== y) return x ? -1 : 1;
+    return (x && bySoonestReset({ ...a, name: '' }, { ...b, name: '' })) || score(a, b);
+  };
+}
+
 /** Room left on the fuller meter (100 minus it), for the over-cap order. */
 const room = (t: PoolToken) => {
   const m = metersOf(t.usage);
@@ -285,7 +401,7 @@ export interface PoolPick {
  * either. `sticky`: the id the session ran on last, kept while it still passes. `now`: the clock the scores read (default
  * the current time). No tokens at all is the caller's business (the transition: today's account), not a hold.
  *
- * The order is the highest score first (scoreOf, w971). A token inside the dispatcher's reserve (state `reserved`) is
+ * The order is pickOrder's: a near-reset token's room that would be lost first (w1539), then the highest score (scoreOf, w971). A token inside the dispatcher's reserve (state `reserved`) is
  * handed to nothing while another token has room; when none has, the person's orchestrator takes it (it uses the pool
  * up), a worker waits (held), so the dispatcher keeps its buffer. The ops worker, when no token has room, takes the
  * person's token past its caps with the most room, and the dispatcher's reserved token only when it is the last one not used
@@ -293,10 +409,10 @@ export interface PoolPick {
  */
 export function pickPool(tokens: readonly PoolToken[], o: { orchestrator: boolean; ops?: boolean; limits: PoolLimits; sticky?: string; now?: number }): PoolPick {
   const now = o.now ?? Date.now();
-  const views = new Map(tokens.map((t) => [t.id, judge(t, o.limits, now)] as const));
+  const views = judgePool(tokens, o.limits, now);
   const state = (t: PoolToken) => views.get(t.id)!.state;
   const ok = (t: PoolToken) => usable(views.get(t.id)!);
-  const order = byScore(now);
+  const order = pickOrder(tokens, views, now);
   const kept = o.sticky ? tokens.find((t) => t.id === o.sticky && ok(t)) : undefined;
   const best = kept ?? [...tokens].filter(ok).sort(order)[0];
   if (best) return { token: best, how: 'normal', views };
