@@ -28,6 +28,8 @@ export interface TrimResult {
   files: number;
   removedBytes: number;
   keptBytes: number;
+  /** What `git lfs dedup` did in the released sandbox (w1576, machine/sandboxes.ts lfsDedup). */
+  lfs?: { bytes: number } | { skipped: string };
   /** The build and capture output of the released sandbox taken with it (w913): entries and bytes. */
   swept?: { files: number; bytes: number };
 }
