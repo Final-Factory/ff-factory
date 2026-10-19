@@ -3741,7 +3741,8 @@ ${w.repo ?? ''}
       }
       const workers = [...w.sessionIds].reverse().map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => s?.kind === 'worker');
       if (workers.some((s) => s.status === 'waiting_permission')) continue;
-      const mine = workers.filter((s) => !only || s.id === only.worker);
+      // w1504: the worker whose wait the ledger shows, when it says, so a settled wait of another worker is not sent again.
+      const mine = workers.filter((s) => (only ? s.id === only.worker : !l.worker || s.id === l.worker));
       const report = (s: SessionInfo) => (only && s.id === only.worker ? only.report : s.lastResult);
       const declared = mine.find((s) => s.waitingOn && (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === w.id));
       if (declared) {

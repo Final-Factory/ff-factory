@@ -13,6 +13,11 @@
 // says only a person can move it on is Waiting on input, check-in or not. Its own declaration (the waiting_on_person
 // tool, SessionInfo.waitingOn) comes first; the "still open:" line of its report is read as a backstop (personWaitIn).
 // And a worker whose agent host never started (SessionInfo.hostFailure) is Blocked on its machine, not mid-turn.
+//
+// w1504 (w1243 showed Waiting on input on Ben, and its slot "Needs you", for days after Ben had answered and the PR the
+// report named had merged; Ben: "i dont know what it needs me to do for this slot"): a person-wait counts only until that
+// person answers the request (a note, or a [needs you] answer) or a pull request it names merges, whichever comes first
+// (personWaitSettled), and a request Blocked on a thing shows Blocked unless the person-wait is newer than its gates.
 import type { SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
@@ -41,6 +46,8 @@ export interface WorkLive {
    * what it really waits for). Names the computers.
    */
   roomOn?: string[];
+  /** Waiting on input for something a worker asked (its permission, declaration or report; w1504): that worker's session id. */
+  worker?: string;
   /** Working (w1104): the machines its working workers run on, each once, in the workers' order ("lothdesktop", "beast"); absent when none is known. */
   machines?: string[];
 }
@@ -208,6 +215,34 @@ const ago = (iso: string | undefined, now: number) => {
   return m < 60 ? `${m} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
 };
 
+/** When a worker wrote its last report (w1504): lastResultAt, else (a session older than that field) its last activity. */
+export const reportAt = (s: Pick<SessionInfo, 'lastResultAt' | 'lastActivityAt'>) => Date.parse(s.lastResultAt ?? s.lastActivityAt) || 0;
+
+/** The pull request numbers a line names: "PR #1699", "FinalFactory#1699", ".../pull/1699". */
+const prsNamedIn = (line: string) => new Set([...line.matchAll(/(?:#|\/pull\/)(\d+)\b/g)].map((m) => Number(m[1])));
+/** "Ben", "Ben (or his orchestrator)", "Ben Ryding": the first word, lower case, as a report names a person. */
+const personKey = (name: string) => name.trim().toLowerCase().split(/[\s(,]/)[0];
+const minute = (iso: string) => iso.slice(0, 16).replace('T', ' ');
+
+/**
+ * Whether a wait on a person, said at `at`, is settled since (w1504): one of `who` (display names, as WorkLive.waitsOn
+ * says them) added a note to the request or answered its [needs you] after it, or a pull request of the request that
+ * `line` names merged after it. Why, or undefined while the wait stands. A pull request not linked to the request is not
+ * read: its state is not known here.
+ */
+export function personWaitSettled(w: Pick<WorkItem, 'notes' | 'needsYou' | 'prs'>, at: number, who: readonly string[], line: string): string | undefined {
+  const people = new Set(who.map(personKey));
+  const after = (iso: string | undefined) => (Date.parse(iso ?? '') || 0) > at;
+  const note = [...(w.notes ?? [])].reverse().find((n) => after(n.at) && people.has(personKey(n.by)));
+  if (note) return `${note.by} answered it with a note at ${minute(note.at)}`;
+  const a = w.needsYou?.answered;
+  if (a && after(a.at) && people.has(personKey(a.by))) return `${a.by} answered it at ${minute(a.at)}`;
+  const named = prsNamedIn(line);
+  const pr = (w.prs ?? []).find((p) => p.state === 'merged' && named.has(p.number) && after(p.at));
+  if (pr) return `PR #${pr.number}, which it names, merged at ${minute(pr.at!)}`;
+  return undefined;
+}
+
 /** Blocked on a thing (w643): the gates it records, each named, with what the first waits for and who set it. */
 function blockedLive(gates: readonly NonNullable<WorkItem['blocked']>[], now: number): WorkLive {
   const first = gates[0];
@@ -250,7 +285,7 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   const asking = mine.find((s) => s.status === 'waiting_permission');
   if (asking) {
     const p = asking.pendingPermissions[0];
-    return { state: 'waiting', why: `${asking.id} waits for permission${p ? ` to use ${p.toolName}` : ''}`, waitsOn: names(asking.requestedBy ? [asking.requestedBy] : w.requesters) };
+    return { state: 'waiting', why: `${asking.id} waits for permission${p ? ` to use ${p.toolName}` : ''}`, waitsOn: names(asking.requestedBy ? [asking.requestedBy] : w.requesters), worker: asking.id };
   }
 
   // Blocked on its machine (w691): a worker's message found no agent host to run in. Nothing runs for it, whatever its
@@ -258,13 +293,22 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   const dead = mine.find((s) => s.hostFailure);
   if (dead) return { state: 'blocked', why: `${dead.id}: ${hostFailureText(dead)} (${dead.hostFailure!.error.slice(0, 120)}; ${ago(dead.hostFailure!.at, f.now)})`, waitsOn: [dead.machineId ?? 'its machine'] };
 
+  // A person-wait stands until that person answers the request or a pull request it names merges (w1504), and, on a
+  // request Blocked on a thing, only while it is newer than the newest gate: a gate set after it is what it waits on now.
+  const gates = gatesOf(w);
+  const gatedAt = w.status === 'blocked' && gates.length ? Math.max(...gates.map((g) => Date.parse(g.at) || 0)) : undefined;
+  const stands = (at: number, who: readonly string[], line: string) => (gatedAt === undefined || at > gatedAt) && !personWaitSettled(w, at, who, line);
+
   // Waiting on a person, declared (w691): the worker says only a person can move it on, and who. A check-in it set as
   // well does not make it Working: no wake-up moves a person.
-  const declared = mine.find((s) => s.waitingOn && (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === w.id.toLowerCase()));
+  const whoOf = (d: NonNullable<SessionInfo['waitingOn']>) => {
+    const who = d.who.split(/\s*(?:,|&|\band\b)\s*/i).map((x) => x.trim()).filter(Boolean);
+    return who.length ? who : names(w.requesters);
+  };
+  const declared = mine.find((s) => s.waitingOn && (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === w.id.toLowerCase()) && stands(Date.parse(s.waitingOn.at) || 0, whoOf(s.waitingOn), s.waitingOn.what));
   if (declared) {
     const d = declared.waitingOn!;
-    const who = d.who.split(/\s*(?:,|&|\band\b)\s*/i).map((x) => x.trim()).filter(Boolean);
-    return { state: 'waiting', why: `${declared.id} waits on ${d.who}: ${d.what} (since ${ago(d.at, f.now)})`, waitsOn: who.length ? who : names(w.requesters) };
+    return { state: 'waiting', why: `${declared.id} waits on ${d.who}: ${d.what} (since ${ago(d.at, f.now)})`, waitsOn: whoOf(d), worker: declared.id };
   }
 
   // Working, between turns (w475, w643): a worker on it has its own work still going (a background job such as CI or a
@@ -274,19 +318,20 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   // Its last report says a person must act (w691, the backstop): the check-in it set does not make it Working. A job
   // still running (CI, a build) does: work goes on meanwhile.
   const people = [...new Set([w.requestedBy, ...w.requesters].map((r) => r.displayName))];
-  const said = mine.map((s) => ({ s, p: personWaitIn(s.lastResult, w.id, people) })).find((x) => x.p);
-  if (said && !(coming && coming.a.kind === 'job')) return { state: 'waiting', why: `${said.s.id}'s report says a person must act: "${said.p!.line.slice(0, 160)}"`, waitsOn: said.p!.who ? [said.p!.who] : names(w.requesters) };
+  const said = mine
+    .map((s) => ({ s, p: personWaitIn(s.lastResult, w.id, people) }))
+    .find((x) => x.p && stands(reportAt(x.s), x.p.who ? [x.p.who] : names(w.requesters), x.p.line));
+  if (said && !(coming && coming.a.kind === 'job')) return { state: 'waiting', why: `${said.s.id}'s report says a person must act: "${said.p!.line.slice(0, 160)}"`, waitsOn: said.p!.who ? [said.p!.who] : names(w.requesters), worker: said.s.id };
 
   // Blocked on its gates (w754): a request that waits on other requests or pull requests is Blocked, whatever check-ins its
   // worker left behind (w750 showed "Working" for an hour while its worker polled gh every 20 minutes). Nothing a worker
   // polls moves a gate. A job it runs meanwhile (CI, a build) is still work.
-  const gates = gatesOf(w);
   if (w.status === 'blocked' && gates.length && !(coming && coming.a.kind === 'job')) return blockedLive(gates, f.now);
 
   if (coming) return withMachines({ state: 'working', why: `${coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}`}${sharedWith([coming.s])}` }, [coming.s]);
 
-  const decide = serving.find((s) => asksAPerson(s.lastResult));
-  if (decide) return { state: 'waiting', why: `${decide.id} stopped asking for a decision`, waitsOn: names(w.requesters) };
+  const decide = serving.find((s) => asksAPerson(s.lastResult) && stands(reportAt(s), names(w.requesters), (s.lastResult ?? '').trim().slice(-600)));
+  if (decide) return { state: 'waiting', why: `${decide.id} stopped asking for a decision`, waitsOn: names(w.requesters), worker: decide.id };
 
   // A message to one of its workers waits in the send queue: for a free slot (Queued) or for its machine (Blocked).
   const held = serving.map((s) => ({ s, why: f.queuedSend?.(s.id) ?? s.queuedSend, on: s.queuedOn })).find((x) => x.why);

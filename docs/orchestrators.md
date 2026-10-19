@@ -318,7 +318,7 @@ workers are working on vs which are waiting on input"). It is derived live from 
 | **Working** | a worker that holds it (below) is `running` or `starting` (in a long command too) and has an agent host (`hostFailure`, below), or FFBox runs it (`ffbox` sent or accepted) | which worker, and the tool it has been in since when |
 | **Waiting on input** | a PERSON must act: an intake approval is pending, the dispatcher's question or a design question is open, a worker it serves waits for a permission | what, and on whom: "a reviewer", the requester, the design question's people, the worker's person |
 | **Blocked** | a worker it serves has no agent host: its message found none to run in (`hostFailure`, w691) | on that machine; goes when its host's first event arrives |
-| **Waiting on input** | a worker it serves declared it waits on a person (`waiting_on_person`, w691), or its report's `wNNN: still open:` line says one must act (the backstop) | on the person named, or its requesters |
+| **Waiting on input** | a worker it serves declared it waits on a person (`waiting_on_person`, w691), or its report's `wNNN: still open:` line says one must act (the backstop), and that person has not answered since nor has a PR it names merged (w1504); on a Blocked request only a wait newer than its gates | on the person named, or its requesters |
 | **Working** (between turns) | a worker that holds it is between turns with its own work still going: a background job (CI it watches, a build, a test run) or a check-in it set with `wake_me` (w475's Waiting, renamed by w643), also while it is stopped until that check-in | "ab12cd34 between turns: CI on PR #1098 · check-in 06:10 UTC" |
 | **Waiting on input** | a worker it serves stopped asking for a decision (its last report ends asking a person to decide, or with a question) | on its requesters |
 | **Blocked** | a message to a worker it serves waits in the send queue for its machine (offline, its daemon outdated, the host guard) | on that machine |
@@ -616,6 +616,19 @@ days; a deploy is a person's call, and a week without one is worth their look.
      not declare (a daemon without the tool, an old brief), and is tested as a backstop (`server/workState.test.ts`).
   A declared worker is still an idle worker to the placement code: its sandbox is released by the usual rules, and a
   message (the person's answer) places it again.
+
+  **Either signal counts only until it is settled** (w1504; w1243 showed Waiting on input on Ben, and beast/slot1 "Needs
+  you", for days after Ben had answered twice and the PR the report named had merged; Ben: "i dont know what it needs me
+  to do for this slot, as you can see the session is not even active"). `personWaitSettled` drops a wait once, after it was
+  said (the declaration's `at`; a report's `SessionInfo.lastResultAt`, else its last activity on a session older than that
+  field), the person it names adds a note to the request (`notes[].by`) or answers its `[needs you]` (`needsYou.answered`),
+  or a pull request of the request that its line names (`#1699`, `/pull/1699`) merges, whichever comes first. A worker
+  whose resume waits behind a gate (w1243's 26d27a69) keeps its old report and declaration, so this is read from the
+  request, not from the worker's next turn. And on a request Blocked on a thing, a wait counts only when it is newer than
+  the newest gate: the gate set after it is what the request waits on now, so it shows **Blocked**. The slot's "Needs you"
+  (`chatLedger`, `slotCall`) and the `[needs you]` sends (`Agents.personWaits`) read the same live state, and its
+  `worker`: the session whose wait it is. The store fills `lastResultAt` in once from each open request's workers'
+  transcripts when it loads (`Store.backfillResultTimes`).
 - **A dead agent host is Blocked on its machine** (w691; w665 again: the m3 answered "could not start its agent host: the
   agent host did not start" and the ledger kept showing the worker mid-turn). The daemon marked such a session running even
   though no host had started (`HostedSession.send`), and its next report put that back on the portal after the portal had

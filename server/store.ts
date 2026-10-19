@@ -143,6 +143,32 @@ export class Store {
       const restored = dataRecoveries.some((r) => r.file === workFile && r.from);
       this.workSeq = (w.seq ?? 0) + (restored ? 100 : 0);
     }
+    this.backfillResultTimes();
+  }
+
+  /**
+   * Workers from before w1504 have a lastResult without lastResultAt: take it from their transcript's last result, for the
+   * workers of open requests only (a person-wait their report names counts until a note or a merge after it,
+   * shared/workState.ts personWaitSettled). Once: the field is saved with the session. How many it filled in.
+   */
+  backfillResultTimes(): number {
+    const open = new Set<WorkItem['status']>(['new', 'question', 'queued', 'blocked', 'active', 'stalled']);
+    const ids = new Set([...this.work.values()].filter((w) => open.has(w.status)).flatMap((w) => w.sessionIds));
+    let n = 0;
+    for (const id of ids) {
+      const s = this.sessions.get(id);
+      if (!s?.lastResult || s.lastResultAt) continue;
+      try {
+        const t = this.readTranscript(id, 2000).findLast((e) => e.kind === 'result')?.t;
+        if (!t) continue;
+        s.lastResultAt = t;
+        n++;
+      } catch (e) {
+        console.warn(`store: no result time for ${id}: ${(e as Error).message}`);
+      }
+    }
+    if (n) this.save();
+    return n;
   }
 
   putSession(s: SessionInfo) {

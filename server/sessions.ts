@@ -735,7 +735,7 @@ export class AgentSession implements SessionHandle {
         });
         this.lastTurnText = text;
         const spent = this.costBase + total;
-        this.update({ turns: this.info.turns + 1, costUsd: spent, sdkCostUsd: total, lastResult: reportClip(text), lastTurnCostUsd: Math.max(0, spent - this.costAtTurnOpen) });
+        this.update({ turns: this.info.turns + 1, costUsd: spent, sdkCostUsd: total, lastResult: reportClip(text), lastResultAt: new Date().toISOString(), lastTurnCostUsd: Math.max(0, spent - this.costAtTurnOpen) });
         this.events.emit('result', this, m.subtype);
         if (!this.stateEvents) {
           // Older CLI without state events: best effort from the result itself.

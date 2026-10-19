@@ -65,9 +65,10 @@ export function chatLedger(work: readonly WorkItem[] | undefined, byId: Map<stri
   for (const w of open) {
     const l = live.get(w.id);
     if (l?.state !== 'waiting' || w.approval?.state === 'pending' || w.question || w.flag) continue;
-    // The worker that declared it (waiting_on_person), else the request's current worker.
+    // The worker whose wait it is (w1504: the ledger says, so a settled wait of another worker is not it), else the one that
+    // declared it (waiting_on_person), else the request's current worker.
     const declared = w.sessionIds.map((id) => byId.get(id)).find((s) => s?.waitingOn && (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === w.id.toLowerCase()));
-    const s = declared ?? byId.get(holders.get(w.id) ?? '');
+    const s = byId.get(l.worker ?? '') ?? declared ?? byId.get(holders.get(w.id) ?? '');
     if (!s || s.status === 'waiting_permission' || s.pendingPermissions.length || waits.has(s.id)) continue;
     waits.set(s.id, { session: s, request: w.id, on: l.waitsOn ?? [] });
   }
