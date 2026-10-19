@@ -1483,7 +1483,9 @@ compacts every orchestrator of this portal, the dispatcher included, by itself (
   after the turn as below, however busy the conversation is. A hard threshold at or under `compactAtTokens` (or 0), or
   0 seconds, compacts at once, as before w1538: with this portal's `compactAtTokens` 80,000 the defaults give "after 2
   quiet minutes from 80k, at once from 100k", and with the code's default 200,000 they change nothing. Both are set live
-  with `set_app_config` (seconds 0-3,600; tokens 0 or 50,000-900,000) and read at each check. The wait is the
+  with `set_app_config` (seconds 0-3,600; tokens 0 or 50,000-900,000) and read at each check. On the portal VM,
+  `fffctl conf get|set` reaches both too, the orchestration worker's included, through the same check; such a change
+  takes effect at the portal's next start (docs/ops-worker.md, "The portal's own settings (w1538)"). The wait is the
   compactor's own per-orchestrator timer (no polling), measured from the saved end of the last turn (`lastResultAt`),
   so a portal restart loses nothing: an orchestrator's process does not outlive the restart, and the next turn's end
   arms the timer again. The dispatcher is an orchestrator here and takes the same wait. Workers do not
