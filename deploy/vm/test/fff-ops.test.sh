@@ -251,6 +251,19 @@ else
     [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
     if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
   done
+  # conf (w1537): fff.conf's settings; fffctl conf refuses the secrets and checks values as root, the wrapper the shape.
+  [ "$(upriv conf)" = "FFFCTL [conf]" ] || fail "priv: conf: $(upriv conf)"
+  [ "$(upriv conf get)" = "FFFCTL [conf] [get]" ] || fail "priv: conf get: $(upriv conf get)"
+  [ "$(upriv conf get HEALTH_START_GRACE_SEC)" = "FFFCTL [conf] [get] [HEALTH_START_GRACE_SEC]" ] || fail "priv: conf get KEY"
+  [ "$(upriv conf set HEALTH_START_GRACE_SEC 300)" = "FFFCTL [conf] [set] [HEALTH_START_GRACE_SEC] [300]" ] || fail "priv: conf set: $(upriv conf set HEALTH_START_GRACE_SEC 300)"
+  [ "$(upriv conf set UPDATE_VERIFY_SEC '')" = "FFFCTL [conf] [set] [UPDATE_VERIFY_SEC] []" ] || fail "priv: conf set to empty"
+  for bad in 'conf extra' 'conf get lower' 'conf get A B' 'conf set A' 'conf set A 1 2' 'conf set a 1' 'conf set A 1;id' 'conf set A $(id)' 'conf rm A'; do
+    rc=0
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(upriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
+  done
   # restart (w974): only with the restart grant the portal leaves in a person's own turn, once; a deploy grant is not one, and
   # a restart takes no option (no --no-drain, no other drain time).
   rg=$tmp/fffroot/data/ops-restart.grant

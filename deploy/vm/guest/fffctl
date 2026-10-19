@@ -47,6 +47,11 @@
 #                                       "[not shown]"). --check: whether config.json and its saved versions hold any secret,
 #                                       the FFBox connector hash file (its last four characters), and whether the retired
 #                                       Claude token file is gone, by key names only; exit 1 while one still holds a secret
+#   fffctl conf [get [KEY]] | conf set KEY VALUE
+#                                       fff.conf's settings (w1537): get prints each with its value, or <redacted> for a
+#                                       credential, key, secret or another setting that is a person's; set changes one, keeps
+#                                       the file before as fff.conf.prev, and prints only that setting, old -> new, and when it
+#                                       takes effect. It restarts nothing (docs/ops-worker.md, "fff.conf settings (w1537)")
 #   fffctl approvals [--since DATE] [--split DATE]
 #                                       the permission prompts a person answered, as counts only (w1097): per day, the clean-up
 #                                       ones by kind, and every one by kind, before and after DATE (YYYY-MM-DD, UTC), read from
@@ -602,6 +607,143 @@ CONFIG_SECRETLIKE='def secretlike: type == "string" and (test("sk-ant-|ffpv1_|ff
 # shellcheck disable=SC2016 # jq's $p, not the shell's
 CONFIG_SECRET_PATHS="$CONFIG_SECRETLIKE"'[(["claudeEnv"], ["userClaudeEnv"], ["claudeTokenFile"], ["providers", "ffbox", "tokenSha256"]) as $p | select(getpath($p) != null) | $p | join(".")] + [paths(secretlike) | map(tostring) | join(".")] | unique | .[]'
 
+# ---------------------------------------------------------------- fffctl conf (w1537)
+# fff.conf's settings to read and change, the orchestration worker's too (fff-ops-priv): lothsahn, "It should be able to
+# touch any settings that aren't credentials or keys or secrets", and "Make sure when it prints, it doesn't print any
+# secrets. Just prints the settings that changed." Every key fff.conf.example defines is in CONF_CHECK (settable, with
+# its value check) or CONF_REFUSED (with why); any other key, and any key whose name looks like a secret's, is refused
+# (fail closed). A refused key's value is never printed: get shows it as <redacted>. The value checks allow no quote,
+# $, backtick, backslash or space, so a value is written bare and lib.sh's `. "$FFF_CONF"` (as root) reads it as data.
+CONF_SECRET_NAME='TOKEN|KEY|SECRET|PASS|CREDENTIAL|AUTH|PEM|CERT|PRIVATE|RECIPIENT|COOKIE|SALT'
+declare -A CONF_CHECK=(
+  [HEALTH_FAILS_BEFORE_RESTART]=int:1:100 [HEALTH_START_GRACE_SEC]=int:10:3600 [HEALTH_BACKOFF_WINDOW_SEC]=int:0:86400
+  [HEALTH_FAILS_MAX]=int:1:1000 [WATCHDOG_BACKOFF_SEC]=int:1:3600 [WATCHDOG_BACKOFF_MAX_SEC]=int:1:86400
+  [WATCHDOG_MAX_ATTEMPTS]=int:1:100 [WATCHDOG_HEALTHY_SEC]=int:1:86400 [UPDATE_VERIFY_MIN]=int:1:120
+  [UPDATE_VERIFY_SEC]=int-or-empty:10:7200 [RELEASES_KEEP_EXTRA]=int:0:20 [NODE_MAJOR]=int:20:99 [BASE_BRANCH]=ref
+  [BACKUP_REMOTE_DIR]=relpath [BACKUP_KEEP]=int:1:365 [BACKUP_INCLUDE_REVIEW]=yesno [BACKUP_TIME]=hhmm
+)
+# When a change takes effect. Nothing here restarts anything.
+conf_when() {
+  case $1 in
+    HEALTH_* | WATCHDOG_*) echo "at the next health check, within 30 s (fff-health reads fff.conf on every run); nothing restarts" ;;
+    UPDATE_VERIFY_*) echo "at the next update's verify" ;;
+    RELEASES_KEEP_EXTRA) echo "at the next update" ;;
+    NODE_MAJOR) echo "only at the next fffctl update (its install.sh installs that Node; the portal restarts on it then)" ;;
+    BASE_BRANCH) echo "at the next base clone refresh (fff-base-refresh)" ;;
+    BACKUP_TIME) echo "only at the next fffctl update (its install.sh writes fff-backup.timer from it)" ;;
+    BACKUP_*) echo "at the next backup" ;;
+  esac
+}
+declare -A CONF_REFUSED=(
+  [BACKUP_SSH_KEY]="a key"
+  [BACKUP_RECIPIENTS_FILE]="the keys the backups are encrypted to"
+  [BACKUP_SSH_TARGET]="where the backups go: the account the backup key logs in to"
+  [FFF_REPO_URL]="the code the deploy builds and runs as root"
+  [FFF_BRANCH]="the code the deploy builds and runs as root (a deploy of another branch is a person's)"
+  [BASE_REPO_URL]="the repo the orchestrators read as the game's"
+  [FFF_ROOT]="the VM's layout: the folders root writes and hands to the portal's account"
+  [FFF_USER]="the VM's layout: the portal's account"
+  [FFF_PORT]="the VM's layout: must match config.json's port"
+  [BASE_PATH]="the VM's layout: must match config.json's repo.basePath"
+  [OPS_USER]="the orchestration worker's own fence: its account"
+  [OPS_ROOT]="the orchestration worker's own fence: its file system"
+  [OPS_IMAGE]="the orchestration worker's own fence: its file system"
+  [OPS_DISK_MB]="the orchestration worker's own fence: its disk cap"
+  [OPS_ALLOW_NETS]="the orchestration worker's own fence: where it may connect"
+  [OPS_MEMORY_MAX]="the orchestration worker's own fence: its memory cap"
+  [OPS_RUNTIME_MAX]="the orchestration worker's own fence: its lifetime"
+)
+# conf_refused KEY: why KEY may not be read or set here, or nothing when it may.
+conf_refused() {
+  local k=$1
+  if ! [[ $k =~ ^[A-Z][A-Z0-9_]{0,63}$ ]]; then echo "not a setting name (capitals, digits and _)"; return; fi
+  if [[ $k =~ $CONF_SECRET_NAME ]]; then echo "its name says it holds a credential, key or secret"; return; fi
+  if [ -n "${CONF_REFUSED[$k]:-}" ]; then echo "${CONF_REFUSED[$k]}"; return; fi
+  [ -n "${CONF_CHECK[$k]:-}" ] || echo "not a setting fff.conf.example lists as one this command may change"
+}
+# A value that looks like a token or a key is never printed, whatever its key (the patterns of redactSecrets,
+# server/secrets.ts, and any run of 32 or more token characters).
+conf_show() {
+  local v=$1
+  if [[ $v =~ (sk-ant-|gh[pousr]_|github_pat_|ffpv1_|ffsb_|ffm_|tskey-|AGE-SECRET-KEY|PRIVATE) ]] || [[ $v =~ [A-Za-z0-9_+/=-]{32,} ]]; then
+    echo '<redacted>'
+  else
+    echo "${v:-(empty)}"
+  fi
+}
+# conf_valid KEY VALUE: what VALUE should be when KEY does not take it, or nothing when it does.
+conf_valid() {
+  local v=$2 kind lo hi
+  IFS=: read -r kind lo hi <<<"${CONF_CHECK[$1]}"
+  case $kind in
+    int | int-or-empty)
+      if [ "$kind" = int-or-empty ] && [ -z "$v" ]; then return; fi
+      if ! [[ $v =~ ^[0-9]{1,7}$ ]] || [ $((10#$v)) -lt "$lo" ] || [ $((10#$v)) -gt "$hi" ]; then
+        echo "a whole number from $lo to $hi$([ "$kind" = int ] || echo ', or empty')"
+      fi
+      ;;
+    yesno) [[ $v =~ ^(yes|no)$ ]] || echo "yes or no" ;;
+    hhmm) [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || echo "a UTC time, HH:MM" ;;
+    ref) if ! [[ $v =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || [[ $v == *..* ]]; then echo "a branch name (letters, digits, . _ / -)"; fi ;;
+    relpath) if ! [[ $v =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]] || [[ $v == *..* ]]; then echo "a folder relative to the backup account's home (letters, digits, . _ / -)"; fi ;;
+  esac
+}
+# conf_has KEY: whether fff.conf has a line for KEY.
+conf_has() { grep -qE "^[[:space:]]*(export[[:space:]]+)?$1=" "$FFF_CONF" 2>/dev/null; }
+conf_get_one() {
+  local k=$1 why src=default
+  why=$(conf_refused "$k")
+  if [ -n "$why" ]; then echo "$k=<redacted> (a person's: $why)"; return; fi
+  if conf_has "$k"; then src="set in $FFF_CONF"; fi
+  echo "$k=$(conf_show "${!k:-}") ($src)"
+}
+
+cmd_conf() {
+  local what=${1:-get} k v why old tmp
+  case $what in
+    get)
+      [ $# -le 2 ] || die "conf get [KEY]"
+      if [ $# -eq 2 ]; then
+        [[ $2 =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || die "conf get: not a setting name (capitals, digits and _)"
+        grep -qE "^$2=" "$FFF_LIB/fff.conf.example" || die "conf get $2: not a setting fff.conf.example lists"
+        conf_get_one "$2"
+        return
+      fi
+      for k in $(grep -oE '^[A-Z][A-Z0-9_]*=' "$FFF_LIB/fff.conf.example" | tr -d =); do conf_get_one "$k"; done
+      ;;
+    set)
+      [ $# -eq 3 ] || die "conf set KEY VALUE (one setting; an empty VALUE as '')"
+      k=$2 v=$3
+      why=$(conf_refused "$k")
+      [ -z "$why" ] || die "conf set $k refused: $why. A person changes it at a root shell"
+      why=$(conf_valid "$k" "$v")
+      [ -z "$why" ] || die "conf set $k: the value is not $why (nothing changed)"
+      old=${!k:-}
+      if [ "$old" = "$v" ]; then
+        echo "$k: no change ($(conf_show "$v")$(conf_has "$k" || echo ', the default'))"
+        return
+      fi
+      install -d -m 0755 "$(dirname "$FFF_CONF")"
+      tmp=$(mktemp "$FFF_CONF.XXXXXX")
+      if [ -f "$FFF_CONF" ]; then
+        cp -p "$FFF_CONF" "$FFF_CONF.prev"
+        # The first line for KEY becomes KEY=VALUE, later ones go; none: appended.
+        awk -v k="$k" -v v="$v" '
+          $0 ~ "^[[:space:]]*(export[[:space:]]+)?" k "=" { if (!done) print k "=" v; done = 1; next }
+          { print }
+          END { if (!done) print k "=" v }' "$FFF_CONF" >"$tmp"
+      else
+        printf '# Settings for the FF Factory portal in this VM. Defaults and what each means: %s/fff.conf.example.\n%s=%s\n' "$FFF_LIB" "$k" "$v" >"$tmp"
+      fi
+      chmod 0644 "$tmp"
+      mv -f "$tmp" "$FFF_CONF"
+      echo "$k: $(conf_show "$old") -> $(conf_show "$v") (takes effect $(conf_when "$k"); the file before is $FFF_CONF.prev)"
+      logger -t fffctl -- "conf set $k: $(conf_show "$old") -> $(conf_show "$v")" 2>/dev/null || true
+      ;;
+    *) die "conf [get [KEY]] | conf set KEY VALUE" ;;
+  esac
+}
+
 # config.json to read (w1078; the orchestration worker's too, through fff-ops-priv): every setting and no secret. What
 # still looks like one is "[not shown]", and the keys the portal's start moves out are left out, so even a config the new
 # release has not started on yet shows none.
@@ -710,6 +852,7 @@ case "${1:-status}" in
   backup-config) shift; cmd_backup_config "$@" ;;
   configure) shift; cmd_configure "$@" ;;
   config) shift; cmd_config "$@" ;;
+  conf) shift; cmd_conf "$@" ;;
   approvals) shift; cmd_approvals "$@" ;;
   state) cmd_state ;;
   migrate) shift; exec "$FFF_LIB/fff-migrate" "$@" ;;
