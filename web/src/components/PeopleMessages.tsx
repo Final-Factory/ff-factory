@@ -33,6 +33,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
   const undoRef = useRef(undo);
   undoRef.current = undo;
   const now = useNow(60_000);
+  const toggle = useRef<HTMLButtonElement>(null);
   // A message's own notice in the transcript, for "Show in chat" (only while that part of the transcript is loaded),
   // looked up only while the bubble is open: the store changes with every streamed word.
   const seqOf = useStore((s) => {
@@ -75,6 +76,8 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
     if (!undo) return;
     clearTimeout(undo.timer);
     setUndo(null);
+    // Not left on Clear all, which comes back where Undo was.
+    requestAnimationFrame(() => toggle.current?.focus({ preventScroll: true }));
   };
 
   const list = all.filter((m) => !undo?.ids.includes(idOf(m)));
@@ -97,7 +100,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
       <section className={`pmsg${open ? ' open' : ''}`} data-testid="people-messages" aria-label="Messages from people">
         {latest && (
           <div className="pmsg-bar">
-            <button type="button" className="pmsg-toggle" aria-expanded={open} onClick={() => setOpen((o) => !o)} title={open ? 'Fold the messages' : 'Read the messages'}>
+            <button ref={toggle} type="button" className="pmsg-toggle" aria-expanded={open} onClick={() => setOpen((o) => !o)} title={open ? 'Fold the messages' : 'Read the messages'}>
               <span className="pmsg-icon" aria-hidden>
                 <Icon name="chat" size={15} />
               </span>
