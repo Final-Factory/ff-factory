@@ -432,7 +432,7 @@ The guest install masks `tmp.mount`, systemd's documented way back to the disk; 
 | Unit | Does | Replaces on BEAST |
 |---|---|---|
 | `fff-portal.service` | `node server/index.ts` in `app/current` as `fff`, with `FFSB_SUPERVISOR=systemd` and `FFSB_CONFIG`. `Restart=always` every 3 s, `StartLimitIntervalSec=0`. `KillMode=mixed`: SIGTERM to the server only, which records what to resume and stops its agents itself; whatever is left after 75 s is killed. `ExecStartPre=+fff-update activate` switches to a prepared release. `ExecCondition` keeps it stopped while `/run/fff/portal.hold` exists. Hardened: `NoNewPrivileges`, `ProtectSystem=full` | the `ffsb-server` task and `supervise.ps1` |
-| `fff-health.timer` (30 s) | the unit watchdog (2.4a): restarts any critical unit that is failed or stopped; then `/api/health` from inside, 4 failures in a row after a 2-minute start grace restart the portal, a further restart within the hour after twice the failures of the one before (8, 16, then 32 at most, w1377), each with a line of what the portal's processes were doing; verifies a fresh update (3) | the restart half of `supervise.ps1`, plus a hung-server check BEAST does not have |
+| `fff-health.timer` (30 s) | the unit watchdog (2.4a): restarts any critical unit that is failed or stopped; then `/api/health` from inside, 4 failures in a row after a 5-minute start grace restart the portal, a further restart within the hour after twice the failures of the one before (8, 16, then 32 at most, w1377), each with a line of what the portal's processes were doing; verifies a fresh update (3) | the restart half of `supervise.ps1`, plus a hung-server check BEAST does not have |
 | `fff-update.path` → `.service` | starts the updater when `data/update.wanted` appears | `supervise.ps1`'s update step |
 | `fff-backup.timer` (11:15 UTC) | the encrypted backup (2.2) | none (new) |
 | `fff-base-refresh.timer` (15 min) | fetches the base clone and moves its detached HEAD to `origin/master` when nothing there is modified | change 11, on the VM's side |
@@ -1254,7 +1254,7 @@ summary:
 The jobs run the fast timing: the test's own settings make the health checks every 10 s (2 failures), the update
 verify window 45 s, the portal's stop timeout 15 s and the host watch every 10 s (2 failures), so the scenarios that
 wait on those timers take seconds. The same code runs; only the shipped defaults' numbers differ, and the nightly
-production-timing job runs with those defaults (5 min verify, 4 checks 30 s apart, 120 s start grace, 75 s stop
+production-timing job runs with those defaults (5 min verify, 4 checks 30 s apart, 300 s start grace, 75 s stop
 timeout, the watch every 60 s with a 300 s boot grace). The boot grace stays 90 s in the fast timing: a first boot takes
 about 70 s, and a shorter grace would reset it.
 

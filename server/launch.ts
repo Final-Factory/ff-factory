@@ -154,6 +154,32 @@ export const CATALOG = {
   fetch_ffbox_report: {
     id: z.string().max(64).describe('The FFBox report id, e.g. "20261003T101500Z-desync-3a9f01c2d4".'),
     file: z.string().max(260).optional().describe('One file inside the zip, exactly as the report lists it (e.g. "logs/Player.log"). Default: the whole zip.'),
+    diagnosis: z.string().max(120).optional().describe('Instead of the zip: one file FFBox\'s diagnosis of the report kept, by its name (e.g. "summary.md"); list_ffbox_files what "diagnosis" lists them.'),
+    run: z.number().int().min(1).optional().describe('With diagnosis: which diagnosis run (default the newest that kept the file).'),
+  },
+  /** docs/ffbox.md, "Release symbols and diagnosis files" (w1542). The portal asks FFBox; nothing on the machine is read. */
+  list_ffbox_files: {
+    what: z.enum(['symbols', 'reports', 'diagnosis']).describe('symbols: the release symbol store (every version, or with version its files). reports: players\' crash and desync reports. diagnosis (needs id): the files FFBox\'s diagnosis of one report kept.'),
+    version: z.string().max(64).optional().describe('symbols: one release\'s files, e.g. "1.0.0.0". reports: that game version exactly.'),
+    commit: z.string().max(40).optional().describe('symbols: the builds made from this commit (7 to 40 hex digits).'),
+    name: z.string().max(128).optional().describe('symbols: files whose name holds this, any case (e.g. "burst"); searches every version without version.'),
+    platform: z.string().max(64).optional().describe('symbols: WindowsPlayer, OSXPlayer or LinuxPlayer. reports: the platform, any case.'),
+    app: z.string().max(16).optional().describe('symbols: main or demo.'),
+    id: z.string().max(64).optional().describe('reports: only this report. diagnosis, required: the report id, e.g. 20261003T101500Z-crash-3a9f01c2d4.'),
+    kind: z.enum(['any', 'crash', 'desync']).optional().describe('reports only (default any).'),
+    since: z.string().max(40).optional().describe('reports only: received from this ISO time with a zone.'),
+    until: z.string().max(40).optional().describe('reports only: received up to this ISO time with a zone.'),
+    limit: z.number().int().min(1).max(500).optional().describe('How many (symbols default 200, reports default 20); a page also stops at about 40 KB.'),
+    offset: z.number().int().min(0).max(100000).optional().describe('Skip this many, for the next page (the answer says it).'),
+  },
+  /** docs/ffbox.md, "Release symbols and diagnosis files" (w1542). The portal fetches the parts from FFBox; the daemon the file. */
+  fetch_ffbox_symbols: {
+    file: z.string().max(128).describe('The symbol file\'s name as list_ffbox_files lists it, e.g. "lib_burst_generated.pdb", "UnityPlayer_Win64_x64_mono.pdb", "lib_burst_generated.sym", "UnityPlayer.dll".'),
+    version: z.string().max(32).optional().describe('The release, e.g. "1.0.0.0". Give this or commit.'),
+    commit: z.string().max(40).optional().describe('The build commit instead of the version (7 to 40 hex digits).'),
+    platform: z.string().max(16).optional().describe('WindowsPlayer, OSXPlayer or LinuxPlayer, when the name is in more than one build.'),
+    app: z.string().max(16).optional().describe('main or demo, when the name is in both.'),
+    id: z.string().max(48).optional().describe('The debug id or code id, as list_ffbox_files lists it, when the name is in more than one build.'),
   },
   /** docs/ffbox.md, "Bug threads' files". On a machine the portal fetches the files from FFBox and the daemon puts them in the Inbox. */
   fetch_discord_thread_files: {

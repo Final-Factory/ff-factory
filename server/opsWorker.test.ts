@@ -114,6 +114,12 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     ['fffctl apikey export w1021-m3', /a person's/],
     ['fffctl migrate --cut-over', /a person's/],
     ['fffctl migrate --key', /a person's/],
+    // w1537: a secret's key or a token as a value never reaches sudo's log.
+    ['fffctl conf set BACKUP_SSH_KEY /etc/fff/x', /credential, key or secret/],
+    ['fffctl conf set MY_API_TOKEN x', /credential, key or secret/],
+    ['fffctl conf set DB_PASSWORD x', /credential, key or secret/],
+    [`fffctl conf set BASE_BRANCH ghp_${'b'.repeat(36)}`, /looks like a token or key/],
+    [`fffctl conf set BASE_BRANCH ${'x'.repeat(40)}`, /looks like a token or key/],
     ['systemctl restart fff-portal', /services are a person's/],
     ['cat /srv/fff/config/config.json', /not yours to read/],
     ['ls /etc/fff', /not yours to read/],
