@@ -201,7 +201,7 @@ test('w1430: a worker waits on a person when its request is Waiting on input for
   );
 });
 
-test('w1430: the slot calls the viewer to the Live view when the worker that waits on them streams one, else to its chat', () => {
+test('w1430: the slot calls the viewer to the Live view when the worker that waits on them streams one, else only says it asked (w1521)', () => {
   const knob = session('knob', 'stopped', at('slot1'));
   const wait = (on: string[]): PersonWait => ({ session: knob, request: 'w1325', on });
   const place = (waits: PersonWait[]) => ({ shown: [knob], older: [], waits });
@@ -211,8 +211,8 @@ test('w1430: the slot calls the viewer to the Live view when the worker that wai
   assert.deepEqual(call && { ...call, session: call.session.id }, { kind: 'live', session: 'knob', request: 'w1325', label: 'Live view: go' });
   // A view that is holding (the game reloading scripts) still opens it, whatever the name's case; a stopped one does not.
   assert.equal(slotCall(place([wait(['Ben'])]), [view('holding')], { userId: 'BEN', displayName: 'ben' })?.label, 'Live view: go');
-  assert.equal(slotCall(place([wait(['Ben'])]), [view('stopped')], ben)?.label, 'Needs you');
-  assert.equal(slotCall(place([wait(['Ben'])]), undefined, ben)?.kind, 'chat');
+  assert.equal(slotCall(place([wait(['Ben'])]), [view('stopped')], ben)?.label, 'Asked you');
+  assert.equal(slotCall(place([wait(['Ben'])]), undefined, ben)?.kind, 'asked');
   // Someone else's wait, nobody signed in, or no wait and no view: no call.
   assert.equal(slotCall(place([wait(['Lothsahn'])]), [view('live', 'other')], ben), undefined);
   assert.equal(slotCall(place([wait(['Ben'])]), [view('live')], undefined), undefined);
@@ -263,7 +263,7 @@ test('w1430: fleetOf lists the chats that matter now per slot, the person-waitin
   assert.deepEqual(bare.sandboxes[0].agents.shown.map((s) => s.id), ['busy']);
 });
 
-test('w1504: the slot badge clears with the ledger: w1243 blocked on w1438 after Ben answered shows no "Needs you" on beast/slot1', () => {
+test('w1504: the slot badge clears with the ledger: w1243 blocked on w1438 after Ben answered shows no "Asked you" on beast/slot1', () => {
   const report = 'w1243: still open: waiting on Ben to route the two-peer run for PR #1699 to a Windows machine; then merge';
   const sessions = [
     session('26d27a69', 'stopped', { machineId: 'beast', machineSandbox: 'slot1', lastResult: report, lastResultAt: ago(3000), lastActivityAt: ago(30) }),
@@ -275,9 +275,9 @@ test('w1504: the slot badge clears with the ledger: w1243 blocked on w1438 after
     const ledger = ledgerOf(sessions, [w]);
     return slotCall({ shown: sessions, older: [], waits: [...ledger.waits.values()] }, [], ben);
   };
-  // Before Ben answered: the slot calls him, to 26d27a69's chat.
+  // Before Ben answered: the slot says 26d27a69 asked him.
   const asked = callOf(item('w1243', 'active', ['26d27a69', '0db9f8a2'], { links }));
-  assert.deepEqual([asked?.label, asked?.session.id, asked?.request], ['Needs you', '26d27a69', 'w1243']);
+  assert.deepEqual([asked?.label, asked?.session.id, asked?.request], ['Asked you', '26d27a69', 'w1243']);
   // Ben's note, then the block on w1438: no call.
   const notes = [{ at: ago(1000), by: 'Ben', text: 'Run it overnight on BEAST with nothing else running' }];
   const blocked = { kind: 'request' as const, ref: 'w1438', what: "w1438's perf benches finishing", at: ago(60), by: 'dispatcher' };

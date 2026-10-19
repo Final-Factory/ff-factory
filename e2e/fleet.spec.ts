@@ -429,16 +429,16 @@ test('fleet: a slot lists the chats that matter now, folds the rest behind "+N o
   const sb2 = sidebar.getByTestId('fl-sandbox-lothdesktop/sb2');
   // Only the worker that waits on you; the stopped and finished chats fold.
   await expect(sb2.getByTestId('fl-agent')).toHaveCount(1);
-  await expect(sb2.getByTestId('fl-agent')).toContainText(/w1325: Radiators.*needs you/);
+  await expect(sb2.getByTestId('fl-agent')).toContainText(/w1325: Radiators.*asked you/);
   await expect(sb2.getByTestId('fl-older')).toHaveText('+3 older');
   await expect(sb2.getByTestId('fl-call')).toHaveText('Live view: go');
   // The call is the first line under the slot's row, on the row's text edge; the row keeps its name and branch whole, and
   // no FREE chip says the slot is free while its work waits on you.
   await expect(sb2.getByTestId('fl-sandbox-row').locator('.row-title')).toHaveText('sb2');
   await expect(sb2.locator('.fl-free')).toHaveCount(0);
-  // It reads as a slot that needs you, as one with a permission wait does: amber "Needs you", the worker's title, a badge.
-  await expect(sb2.getByTestId('fl-sandbox-row').locator('.row-sub')).toContainText(/Needs you · w1325: Radiators/);
-  await expect(sb2.getByTestId('fl-sandbox-row').locator('.badge-amber')).toHaveText('1');
+  // It says the worker asked you, quietly (w1521): "Needs you" and its badge are a permission's.
+  await expect(sb2.getByTestId('fl-sandbox-row').locator('.row-sub')).toContainText(/Asked you · w1325: Radiators/);
+  await expect(sb2.getByTestId('fl-sandbox-row').locator('.badge-amber')).toHaveCount(0);
   // A thumb's target on a phone.
   if (isMobile(page)) expect((await sb2.getByTestId('fl-call').boundingBox())!.height).toBeGreaterThanOrEqual(36);
   const row = (await sb2.getByTestId('fl-sandbox-row').boundingBox())!;
@@ -468,12 +468,32 @@ test("fleet: the request's card on the Dispatcher's Waiting tab opens the waitin
   await expect(page).toHaveURL(/#\/live\/l-knob$/);
 });
 
-test('fleet: without a Live view the slot says "Needs you" and opens the waiting chat (w1430)', async ({ page }) => {
-  await fixedFleet(page, '#/', waitingInSb2({ live: false }));
-  const sb2 = (await openSidebar(page)).getByTestId('fl-sandbox-lothdesktop/sb2');
-  await expect(sb2.getByTestId('fl-call')).toHaveText('Needs you');
-  await sb2.getByTestId('fl-call').click();
-  await expect(page).toHaveURL(/#\/machine\/lothdesktop\/sandbox\/sb2\/l-knob$/);
+test('fleet: a worker\'s question to you shows "Asked you" with no Needs-you badge or button; a pending permission keeps both (w1521)', async ({ page }) => {
+  // Ben: "needs you should just be approving/denying coommands, if they have questions for me they should pipe it through you
+  // and then i answer you". sb2's worker asked the viewer a question (no Live view); sb1's worker waits on a permission.
+  const permission = (s: AppState): AppState => ({
+    ...s,
+    sessions: s.sessions.map((x) =>
+      x.machineSandbox === 'sb1' && x.status === 'running'
+        ? { ...x, status: 'waiting_permission', pendingPermissions: [{ requestId: 'p1', toolName: 'Bash', input: { command: 'git push origin w1521' }, createdAt: min(1) }] }
+        : x,
+    ),
+  });
+  await fixedFleet(page, '#/', (s) => permission(waitingInSb2({ live: false })(s)));
+  const sidebar = await openSidebar(page);
+  const sb2 = sidebar.getByTestId('fl-sandbox-lothdesktop/sb2');
+  await expect(sb2.getByTestId('fl-sandbox-row').locator('.row-sub')).toContainText(/Asked you · w1325: Radiators/);
+  await expect(sb2.getByTestId('fl-agent')).toContainText(/w1325: Radiators.*asked you/);
+  await expect(sb2.getByTestId('fl-call')).toHaveCount(0);
+  await expect(sb2.locator('.badge-amber')).toHaveCount(0);
+  await expect(sb2).not.toContainText(/needs you/i);
+  // The question is in the row's hint, with where to answer it.
+  await expect(sb2.getByTestId('fl-sandbox-row')).toHaveAttribute('title', /Asked you: Drag the fin colour in sb2's Live view \(answer it in your orchestrator chat\)/);
+  const sb1 = sidebar.getByTestId('fl-sandbox-lothdesktop/sb1');
+  await expect(sb1.getByTestId('fl-sandbox-row').locator('.row-sub')).toContainText(/^Needs you/);
+  await expect(sb1.getByTestId('fl-sandbox-row').locator('.badge-amber')).toHaveText('1');
+  await expect(sb1.getByTestId('fl-agent').first()).toContainText(/needs you/);
+  if (!isMobile(page)) await proof(page, 'sidebar-asked-after');
 });
 
 test("fleet: a worker that waits on someone else is listed with whom, and the slot calls nobody (w1430)", async ({ page }) => {
