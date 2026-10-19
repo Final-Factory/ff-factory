@@ -254,8 +254,12 @@ test('one person messages another: it waits unread in their own chat, opens ther
     await bubble.getByRole('button', { name: 'Clear the message from tester' }).first().click();
     await expect(bubble.getByTestId('people-message')).toHaveCount(1);
     await expect(bubble.getByTestId('people-messages-undo')).toContainText('Cleared 1 message');
+    // The sidebar's count follows the bubble through the undo window (on a desktop, where the sidebar shows).
+    const badge = row.getByTestId('unread-people');
+    if (await row.isVisible()) await expect(badge).toHaveText('1');
     await bubble.getByRole('button', { name: 'Undo' }).click();
     await expect(bubble.getByTestId('people-message')).toHaveCount(2);
+    if (await row.isVisible()) await expect(badge).toHaveText('2');
     expect(await unread()).toEqual([text, text2]);
     // Cleared for good: once the undo is over, only the second is unread.
     await bubble.getByRole('button', { name: 'Clear the message from tester' }).first().click();

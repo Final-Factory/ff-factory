@@ -354,7 +354,7 @@ export function ModelChip({ session, className = '', who }: { session: Pick<Sess
       data-source={g.configured ? 'configured' : 'reply'}
     >
       {g.name}
-      {g.configured && ' (configured)'}
+      {g.configured && <span className="model-chip-mark"> (configured)</span>}
     </span>
   );
 }

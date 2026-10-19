@@ -1160,7 +1160,10 @@ while"). So the unread ones stay in an amber bubble right over the recipient's m
 
 - Folded, it says how many and from whom ("2 messages from Lothsahn"), with the newest one's start and time. A click
   unfolds it: each message in full, its sender and time, **Show in chat** (to its notice in the conversation, while that
-  part is loaded) and **Clear**. **Clear all** is on the bar. The sidebar row keeps its count badge.
+  part is loaded) and **Clear**. **Clear all** is on the folded bar, and in the foot while it is open (so it never slides
+  under the pointer as rows go). Many messages scroll inside it (at most 45% of the screen's height, 420 px), and the
+  message box stays where it is. The sidebar row keeps its count badge, which counts what the bubble shows, the undo
+  window included (`hidePersonMessages` in `web/src/store.ts`).
 - A message stays unread until its reader clears it there. Opening the chat, writing to it, and the orchestrator
   relaying the message leave it unread. Before w1546, opening the chat read them all, unseen if the conversation had
   moved on.
@@ -1170,7 +1173,9 @@ while"). So the unread ones stay in an amber bubble right over the recipient's m
   process (`server/sessions.ts`). So there is no undelivered message to cancel. The bubble's footnote says so.
 - A clear can be undone for 6 seconds (`UNDO_MS`) before the page tells the server
   (`POST /api/sessions/:id/person-messages/read {ids}`, their own chat only). Leaving the chat carries a pending clear
-  out. Closing the page within those seconds leaves the message unread. Clear all names the messages the page showed,
+  out. Closing the page within those seconds leaves the message unread. After **Undo**, Clear all comes back where Undo
+  was: it shows no hover until the pointer leaves it, and ignores a click for 0.7 s, so a double tap on Undo clears
+  nothing. Clear all names the messages the page showed,
   so one that arrives meanwhile stays unread. The route without `ids` clears all.
 - It updates through the `session` event: a message from someone else appears at once, and one cleared in another tab
   or on the phone goes. With nothing unread, the bubble is gone.

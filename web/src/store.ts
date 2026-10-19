@@ -33,6 +33,8 @@ export interface StoreState {
   replying: Record<string, ReplyTarget>;
   /** Bumped when this page's composer sent a message to the chat: its transcript scrolls to the end (w866). */
   showLatest: Record<string, number>;
+  /** The messages from people this page's bubble cleared (w1546), by session id: hidden until the server drops them. */
+  clearing: Record<string, string[]>;
 }
 
 /** A message being replied to: its seq (the server quotes it from the transcript), and how the page labels it. */
@@ -73,6 +75,7 @@ let state: StoreState = {
   drawer: false,
   replying: {},
   showLatest: {},
+  clearing: {},
 };
 
 const listeners = new Set<() => void>();
@@ -462,6 +465,15 @@ export function startReply(sessionId: string, target: Omit<ReplyTarget, 'n'>) {
 /** The composer sent a message: the chat shows its end. */
 export function showLatest(sessionId: string) {
   set((s) => ({ showLatest: { ...s.showLatest, [sessionId]: (s.showLatest[sessionId] ?? 0) + 1 } }));
+}
+
+/** Hides (or shows again) messages from people the bubble cleared, there and in the sidebar's count alike (w1546). */
+export function hidePersonMessages(sessionId: string, ids: string[], hidden: boolean) {
+  set((s) => {
+    const was = s.clearing[sessionId] ?? [];
+    const now = hidden ? [...new Set([...was, ...ids])] : was.filter((id) => !ids.includes(id));
+    return { clearing: { ...s.clearing, [sessionId]: now } };
+  });
 }
 
 export function clearReply(sessionId: string) {

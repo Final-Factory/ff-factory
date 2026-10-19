@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import type { PersonMessageMark, SessionInfo } from '../../../shared/types';
 import { api } from '../api';
-import { attempt, focusEvent, useStore } from '../store';
+import { attempt, focusEvent, hidePersonMessages, useStore } from '../store';
 import { fmtClock, fmtRelative, useNow } from '../util';
 import { Markdown } from './Markdown';
 import { Icon } from './ui';
@@ -10,6 +10,14 @@ import { Icon } from './ui';
 export const UNDO_MS = 6000;
 
 const idOf = (m: PersonMessageMark) => m.id ?? m.at;
+
+/** The messages still unread here: those the bubble cleared and can still undo are left out (the sidebar's count too). */
+export function unreadHere(list: readonly PersonMessageMark[] | undefined, clearing: readonly string[] | undefined): PersonMessageMark[] {
+  return (list ?? []).filter((m) => !clearing?.includes(idOf(m)));
+}
+
+/** After Undo, Clear all comes back where Undo was: a second tap there in this time does nothing. */
+const UNDO_SETTLE_MS = 700;
 
 /** "Ben", "Ben and Cara", "Ben, Cara and Dee": who the unread messages are from, in the order they came. */
 export function senders(list: readonly PersonMessageMark[]): string {
@@ -34,6 +42,9 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
   undoRef.current = undo;
   const now = useNow(60_000);
   const toggle = useRef<HTMLButtonElement>(null);
+  // After Undo, Clear all shows no hover under the still pointer (it would look chosen) until the pointer leaves it.
+  const [calm, setCalm] = useState(false);
+  const undoneAt = useRef(0);
   // A message's own notice in the transcript, for "Show in chat" (only while that part of the transcript is loaded),
   // looked up only while the bubble is open: the store changes with every streamed word.
   const seqOf = useStore((s) => {
@@ -49,7 +60,10 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
   });
   const seqs = (seqOf ? JSON.parse(seqOf) : {}) as Record<string, number>;
 
-  const send = (ids: string[]) => void attempt(api.readPersonMessages(session.id, ids));
+  // Cleared here, in the undo window or sent: hidden in the bubble and the sidebar's count alike. A sent one stays hidden
+  // until the server's update drops it (no flash back); a refused clear shows it again.
+  const hidden = useStore((s) => s.clearing[session.id]);
+  const send = (ids: string[]) => void attempt(api.readPersonMessages(session.id, ids)).then((ok) => ok === undefined && hidePersonMessages(session.id, ids, false));
   // Leaving the chat with a clear pending carries it out: the person asked for it.
   useEffect(
     () => () => {
@@ -71,16 +85,20 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
       send(both);
     }, UNDO_MS);
     setUndo({ ids: both, timer });
+    hidePersonMessages(session.id, ids, true);
   };
   const takeBack = () => {
     if (!undo) return;
     clearTimeout(undo.timer);
     setUndo(null);
+    hidePersonMessages(session.id, undo.ids, false);
+    undoneAt.current = Date.now();
+    setCalm(true);
     // Not left on Clear all, which comes back where Undo was.
     requestAnimationFrame(() => toggle.current?.focus({ preventScroll: true }));
   };
 
-  const list = all.filter((m) => !undo?.ids.includes(idOf(m)));
+  const list = unreadHere(all, hidden);
   // Gone by itself once nothing is unread here (cleared in another tab or on the phone too).
   useEffect(() => {
     if (!list.length) setOpen(false);
@@ -90,7 +108,12 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
 
   const latest = list.at(-1);
   const clearAll = (
-    <button type="button" className="btn btn-ghost btn-sm pmsg-clear-all" onClick={() => clear(list.map(idOf))} title="Mark them all read: they stay in the chat, and your orchestrator has them">
+    <button
+      type="button"
+      className={`btn btn-ghost btn-sm pmsg-clear-all${calm ? ' pmsg-calm' : ''}`}
+      onPointerLeave={() => setCalm(false)}
+      onClick={() => Date.now() - undoneAt.current > UNDO_SETTLE_MS && clear(list.map(idOf))}
+      title="Mark them all read: they stay in the chat, and your orchestrator has them">
       <Icon name="check" size={14} /> Clear all
     </button>
   );
