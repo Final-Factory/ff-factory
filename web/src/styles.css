@@ -1255,6 +1255,81 @@ select.input {
   }
 }
 
+/*
+ * The plan row's hover (w1528): the account's block as the main tab drew it before the list was condensed (w1389), a bar per limit
+ * with its reset day, time and zone under it. Fixed to the window, placed by PlanCard inside the open sheet.
+ */
+.plan-tip {
+  position: fixed;
+  z-index: 60;
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  background: var(--panel-2);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  color: var(--text);
+  font-weight: 400;
+  pointer-events: none;
+}
+
+.plan-tip .meter-note {
+  font-family: inherit;
+  overflow-wrap: anywhere;
+}
+
+/* The bar's empty part, as light as a border so a part-filled bar shows where it ends on the card's darker ground. */
+.plan-tip .meter-bar {
+  background: var(--border-2);
+}
+
+.plan-tip .acct-label {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+/* One Claude account: who, how many agents, where it is used. */
+.acct-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+.acct-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.acct-agents {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.acct-where {
+  flex-basis: 100%;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.acct-spent {
+  color: var(--red);
+}
+
+.plan-item:focus-visible {
+  outline: 1px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
 .pl-red { color: var(--red); }
 .pl-yellow { color: var(--amber); }
 .pl-blue { color: var(--blue); }
