@@ -144,7 +144,9 @@ BEAST's sandbox drive run in that daemon (`machine/hostGuard.ts`, decided as D11
   started again, and the agents that were mid-turn in sandboxes are told to resume.
 - **Gating:** while the drive is gone or disk space is low, the daemon refuses new sandbox agents and editors with the
   reason.
-- **The disk levels** over the sandbox root and `hostDiskPaths`, and **the headless-browser reaper**.
+- **The disk levels** over the sandbox root and `hostDiskPaths`, and **the headless-browser reaper**. The sandbox root's
+  volume is judged by the pool's `disk_warn_gb` / `disk_critical_gb` (the portal's welcome; w1581, docs/machines.md
+  "One floor per sandbox volume"), the other volumes by `hostGuard.warnFreeGB` / `criticalFreeGB`.
 - **Its reports** reach the portal (`host_report`, queued while the link is down) and go to the dispatcher and the
   push notifications as `[host beast] …`. Its state is on the machine's record (`host_health`).
 

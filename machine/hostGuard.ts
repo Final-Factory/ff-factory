@@ -10,7 +10,7 @@ import type { Config, HostGuardConfig } from '../server/config.ts';
 import { DEFAULT_CLEANUP } from '../server/config.ts';
 import { HostHealthMonitor } from '../server/hostHealth.ts';
 import type { HelperAction, HelperResult } from '../server/privileged.ts';
-import type { HostHealth, MachineGuardSettings, Sandbox, SessionInfo } from '../shared/types.ts';
+import { DISK_CRITICAL_GB_DEFAULT, type HostHealth, type MachineGuardSettings, type Sandbox, type SessionInfo } from '../shared/types.ts';
 
 export type { MachineGuardSettings };
 
@@ -41,6 +41,12 @@ export interface MachineGuardPorts {
   report(title: string, body: string): void;
   changed(h: HostHealth): void;
   log(line: string): void;
+  /**
+   * The pool's disk guard (disk_warn_gb / disk_critical_gb, the portal's welcome) the sandbox volume is judged by (w1581,
+   * lothsahn: "Let's reduce the buffer on v: drives to 25GB"): daemon.json's hostGuard.warnFreeGB, which an install
+   * wrote from the pool's values and every update carried, then held a Dev Drive at a floor nobody could change.
+   */
+  poolFloor?(): { warnGB: number; criticalGB: number } | undefined;
 }
 
 /**
@@ -92,6 +98,14 @@ export class MachineGuard {
       cleanup: { pass: async () => EMPTY_RUN, consumers: async () => [], log: () => undefined, diskPaths: () => [] },
       ...(fx.reap ? { reap: (h: number) => fx.reap!(h) } : {}),
       changed: (h) => ports.changed(h),
+      ...(ports.poolFloor
+        ? {
+            sandboxFloor: () => {
+              const f = ports.poolFloor!();
+              return f && f.warnGB > 0 ? { warnFreeGB: f.warnGB, criticalFreeGB: Math.min(f.criticalGB > 0 ? f.criticalGB : DISK_CRITICAL_GB_DEFAULT, f.warnGB) } : undefined;
+            },
+          }
+        : {}),
       ...(fx.now ? { now: () => fx.now!() } : {}),
       log: (line) => ports.log(line),
     });
