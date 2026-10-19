@@ -84,6 +84,29 @@ flowchart LR
 4. The knob value itself is not kept. Keeping a value is the agent's edit of the `.mat`, committed like any other
    change.
 
+**Knobs the game sets itself (w1509).** When the game can see that something else sets a property, it says why in the
+knob's `driven` field, and the page folds that knob away under "N more the game sets itself", with the reason in
+place of a control. The game sees three kinds:
+- a value written back after the knob set it;
+- a MaterialPropertyBlock on a Renderer;
+- Entities Graphics reading the property per entity.
+
+The game's `LiveLook.WhyNotLive` and `Documentation/Live-View-Knobs.md` describe them. The panel reads the knobs again
+1.5 s after the last answer, so it catches a written-back value.
+
+The game cannot see a MaterialPropertyBlock that a system passes to `Graphics.RenderMesh`. The station shield's charge
+and clock are set that way. Its shader marks such properties `[PerRendererData]`, which keeps them off the knobs.
+
+**Restarts (w1509).** A daemon restarts on every machine rollout, and its views end with it. Its hello lists the views
+it runs (`liveViews`), and the portal acts on the hello:
+- **A view of that machine the daemon no longer runs:** the portal starts it again with the same id, materials and
+  settings, so the page's frames and knobs come back by themselves.
+- **A view this portal no longer knows (the portal restarted):** the portal takes it back while its session is still
+  on that sandbox, and stops it otherwise.
+
+Before this, the page kept showing the view as live with the last frame. Every knob was then refused with "this live
+view is not running on the machine".
+
 ## Measured, w1393 and w1398 (beast)
 
 - **Edit to frame:** a material property edit shows in the next rendered frame (17.5 ms). A knob sent through the

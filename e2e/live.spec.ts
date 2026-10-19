@@ -35,6 +35,14 @@ test('a worker\'s live view: frames beside its chat, a knob that reaches the gam
   const intensity = page.locator('[data-testid="live-knob"][data-knob="_Intensity"]');
   await expect(intensity).toBeVisible();
   await expect(page.locator('[data-testid="live-knob"][data-knob="_ComaColor"]')).toBeVisible();
+  // A knob the game says it cannot move (w1509) has no control among them: it sits folded apart, with the game's reason.
+  await expect(page.locator('[data-testid="live-knob"][data-knob="_Age"]')).toHaveCount(0);
+  const driven = page.getByTestId('live-driven');
+  await expect(driven).toContainText('1 more the game sets itself');
+  await driven.locator('summary').click();
+  const age = driven.locator('[data-testid="live-knob-driven"][data-knob="_Age"]');
+  await expect(age).toContainText('MaterialPropertyBlock');
+  await expect(age.locator('input')).toHaveCount(0);
 
   // Move the knob: the game takes it, the picture follows, and the conversation says who set what.
   const before = await stage.locator('canvas').evaluate((c: HTMLCanvasElement) => c.toDataURL());

@@ -12,7 +12,7 @@ import { emit, type Store } from './store.ts';
 import { COMPACTING, isMidTurn, type AutoCompaction, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
-import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -1603,6 +1603,8 @@ export class MachineManager {
   onLiveFrames?: (machineId: string, liveId: string, ws: WebSocket) => boolean;
   /** A daemon's live view state (server/live.ts). */
   onLiveState?: (machineId: string, msg: Extract<FromDaemon, { type: 'live_state' }>) => void;
+  /** A daemon that streams live views said hello (w1509): the views it runs now, or undefined from an older one. */
+  onLiveHello?: (machineId: string, running: DaemonLiveView[] | undefined) => void;
   private readonly liveWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
 
   /** The token check of an upgrade from a daemon (lockout, dry run); the socket is answered when it fails. */
@@ -1828,6 +1830,9 @@ export class MachineManager {
         const repool = msg.layout ? adoptLayout(m, msg.layout) : leaveRoot(m);
         this.store.putMachine(m);
         if (repool) this.links.get(id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
+        // Its live views (w1509): the portal's views of this machine started again where its daemon lost them, and the
+        // daemon's views a restarted portal lost taken back.
+        if (msg.liveView) this.onLiveHello?.(id, Array.isArray(msg.liveViews) ? msg.liveViews : undefined);
         const live = new Set(msg.live);
         this.helloLive.set(id, { at: Date.now(), live });
         for (const sid of m.sessionIds) {

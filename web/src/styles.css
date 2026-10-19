@@ -6634,6 +6634,22 @@ button.board-head-link:hover {
   font-size: var(--fs-xs);
 }
 
+/* Knobs the game sets itself (w1509): folded under one line, each with the game's reason instead of a control. */
+.lv-driven {
+  padding: var(--s-1) 0;
+}
+
+.lv-driven > summary {
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.lv-knob-driven .lv-driven-why {
+  grid-column: 2 / -1;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .lv-knob-err {
   grid-column: 1 / -1;
   font-size: var(--fs-sm);

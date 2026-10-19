@@ -2264,6 +2264,11 @@ export interface LiveKnob {
   attributes?: string[];
   /** Moved in this play session and not yet put back. */
   moved?: boolean;
+  /**
+   * Why moving it cannot change the picture (w1509), from the game: something else sets this property (a script every
+   * frame, a MaterialPropertyBlock, Entities Graphics per entity). The page shows such a knob apart, with this reason.
+   */
+  driven?: string;
 }
 
 export interface LiveMaterialKnobs {

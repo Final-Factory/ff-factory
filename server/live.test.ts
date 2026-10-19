@@ -150,3 +150,47 @@ test('live: frames go to every page, newest first, and a page that is behind ski
   await h.sessionGone('s1');
   assert.equal(page.readyState, 3, 'the page is told the view stopped');
 });
+
+test('w1509: a daemon that restarted gets its views started again, with the same id, materials and settings', async () => {
+  const { h, calls } = hub();
+  await h.tool(session, { action: 'start', materials: ['StationShieldMaterial'], fps: 12, width: 640 });
+  const view = h.viewsFor('kai')[0];
+  assert.deepEqual(calls[0], { op: 'start', liveId: view.liveId, sessionId: 's1', sandbox: 'slot1', fps: 12, width: 640, materials: ['StationShieldMaterial'] });
+  const running = { liveId: view.liveId, sessionId: 's1', sandbox: 'slot1', fps: 12, width: 640, materials: ['StationShieldMaterial'], state: 'live' as const, detail: '', frames: 9 };
+
+  // A reconnect of a daemon that still runs it: nothing to do.
+  await h.daemonHello('beast', [running]);
+  assert.equal(calls.length, 1);
+  // Another machine's hello: not this view's.
+  await h.daemonHello('m5', []);
+  assert.equal(calls.length, 1);
+
+  // The daemon restarted (a machine rollout): it runs nothing, so the view starts again and says why meanwhile.
+  await h.daemonHello('beast', []);
+  assert.deepEqual(calls[1], { op: 'start', liveId: view.liveId, sessionId: 's1', sandbox: 'slot1', fps: 12, width: 640, materials: ['StationShieldMaterial'] });
+  assert.equal(h.viewsFor('kai')[0].state, 'starting');
+  assert.match(h.viewsFor('kai')[0].detail, /daemon restarted/);
+
+  // An older daemon reports no views: asked to start again, which it answers "already running" when it has it.
+  await h.daemonHello('beast', undefined);
+  assert.equal(calls[2].op, 'start');
+  assert.equal(calls[2].liveId, view.liveId);
+});
+
+test('w1509: a restarted portal takes back the views a daemon still runs, and stops the ones whose session left', async () => {
+  const { h, calls } = hub();
+  const kept = { liveId: 'lv-1', sessionId: 's1', sandbox: 'slot1', fps: 15, width: 960, materials: ['StationShieldMaterial', 'bad name!'], state: 'live' as const, detail: '15 fps at 960 px', frames: 120 };
+  const orphan = { ...kept, liveId: 'lv-2', sessionId: 'gone' };
+  await h.daemonHello('beast', [kept, orphan]);
+  const views = h.viewsFor('kai');
+  assert.equal(views.length, 1);
+  assert.equal(views[0].liveId, 'lv-1');
+  assert.equal(views[0].state, 'live');
+  assert.deepEqual(views[0].materials, ['StationShieldMaterial'], 'only names a material can have');
+  assert.deepEqual(calls, [{ op: 'stop', liveId: 'lv-2', sessionId: 'gone', sandbox: 'slot1' }]);
+  // Its knobs work again: a knob names one of the view's materials.
+  await h.setKnob('s1', { material: 'StationShieldMaterial', name: '_Concept', value: 2 }, BEN);
+  assert.equal((calls.at(-1) as { command?: string } | undefined)?.command, 'look.material.set|StationShieldMaterial|_Concept|2');
+  // And its frame socket is accepted again.
+  assert.equal(h.attachFrames('beast', 'lv-1', fakeSocket() as unknown as WebSocket), true);
+});

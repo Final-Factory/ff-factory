@@ -7,6 +7,7 @@ type Value = number | number[];
 
 const THROTTLE_MS = 100;
 const REREAD_MS = 5000;
+const RECHECK_MS = 1500;
 const keyOf = (material: string, name: string) => `${material}\u0000${name}`;
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 const same = (a: Value, b: Value) => (Array.isArray(a) && Array.isArray(b) ? a.length === b.length && a.every((x, i) => x === b[i]) : a === b);
@@ -197,6 +198,29 @@ function KnobRow({ knob, value, error, onMove, onCommit }: { knob: LiveKnob; val
   );
 }
 
+/**
+ * The knobs the game says cannot move the picture (w1509: on Ben's station shield view they looked dead): something else
+ * sets the property. No control, so nothing looks like it works; each says why, folded away under one line.
+ */
+function DrivenKnobs({ knobs }: { knobs: LiveKnob[] }) {
+  if (!knobs.length) return null;
+  return (
+    <details className="lv-driven" data-testid="live-driven">
+      <summary className="dim small">
+        {knobs.length === 1 ? '1 more the game sets itself' : `${knobs.length} more the game sets itself`}: moving {knobs.length === 1 ? 'it' : 'them'} here would change nothing
+      </summary>
+      {knobs.map((k) => (
+        <div className="lv-knob lv-knob-driven" key={k.name} data-testid="live-knob-driven" data-knob={k.name}>
+          <span className="lv-knob-name" title={k.name}>
+            {k.label || k.name}
+          </span>
+          <span className="lv-driven-why dim small">{k.driven}</span>
+        </div>
+      ))}
+    </details>
+  );
+}
+
 interface Lane {
   /** The value the knob had when this drag or edit started: the toast's "from", until an answer settles it. */
   origin?: Value;
@@ -249,7 +273,21 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
     void load();
   }, [sessionId, liveNow, load]);
 
-  useEffect(() => () => lanes.current.forEach((l) => clearTimeout(l.timer)), []);
+  // A while after the last answer the knobs are read again (w1509): a value something else wrote back after the knob set
+  // it shows only then, and the game then says why the knob cannot move the picture.
+  const recheckTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const recheck = () => {
+    clearTimeout(recheckTimer.current);
+    recheckTimer.current = setTimeout(() => void load(), RECHECK_MS);
+  };
+
+  useEffect(
+    () => () => {
+      lanes.current.forEach((l) => clearTimeout(l.timer));
+      clearTimeout(recheckTimer.current);
+    },
+    [],
+  );
 
   // A material the game cannot read yet (it loads when first drawn) is read again until it answers.
   const unreadable = !!mats?.some((m) => m.error);
@@ -276,7 +314,8 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
       .liveKnob(sessionId, { material, name, value: sent })
       .then((r) => {
         lane.inflight = false;
-        const next: LiveKnob | undefined = before ? { ...before, ...(r.knob ?? {}), value: r.knob?.value ?? sent, moved: true } : r.knob;
+        // The game's answer says whether it can move the picture (driven, w1509): an answer without one clears it.
+        const next: LiveKnob | undefined = before ? { ...before, ...(r.knob ?? {}), value: r.knob?.value ?? sent, moved: true, ...(r.knob ? { driven: r.knob.driven } : {}) } : r.knob;
         if (next) setMats((ms) => ms?.map((m) => (m.material === material ? { ...m, knobs: m.knobs.map((k) => (k.name === name ? next : k)) } : m)) ?? ms);
         if (lane.latest === undefined) setDraft((d) => (key in d ? Object.fromEntries(Object.entries(d).filter(([k]) => k !== key)) : d));
         else schedule(material, name);
@@ -284,6 +323,7 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
         const answered = r.knob?.value ?? sent;
         if (before && lane.origin !== undefined && !same(lane.origin, answered)) onMovedRef.current?.(`${before.label || before.name} ${sayValue(before, lane.origin)} → ${sayValue(before, answered)}`);
         if (lane.latest === undefined && !lane.timer && !lane.held) lane.origin = undefined;
+        recheck();
       })
       .catch((e: unknown) => {
         // Snap back to what the game last answered, and say why.
@@ -393,10 +433,15 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
             ) : m.knobs.length === 0 ? (
               <div className="lv-note">No knobs: its shader has no properties to move.</div>
             ) : (
-              m.knobs.map((k) => {
-                const key = keyOf(m.material, k.name);
-                return <KnobRow key={k.name} knob={k} value={draft[key] ?? k.value} error={errors[key]} onMove={(v) => move(m.material, k.name, v)} onCommit={() => commit(m.material, k.name)} />;
-              })
+              <>
+                {m.knobs
+                  .filter((k) => !k.driven)
+                  .map((k) => {
+                    const key = keyOf(m.material, k.name);
+                    return <KnobRow key={k.name} knob={k} value={draft[key] ?? k.value} error={errors[key]} onMove={(v) => move(m.material, k.name, v)} onCommit={() => commit(m.material, k.name)} />;
+                  })}
+                <DrivenKnobs knobs={m.knobs.filter((k) => k.driven)} />
+              </>
             )}
           </section>
         );
