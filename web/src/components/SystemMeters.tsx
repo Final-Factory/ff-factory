@@ -353,7 +353,7 @@ function ProviderMiniBars({ l }: { l: ProviderLoad }) {
   );
 }
 
-function Meter({ label, pct, value, note, title, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; note?: string; title?: string; warn?: number; crit?: number; lvl?: Lvl }) {
+function Meter({ label, pct, value, note, title, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; note?: ReactNode; title?: string; warn?: number; crit?: number; lvl?: Lvl }) {
   const p = Math.max(0, Math.min(100, pct));
   return (
     <div className={`meter meter-${lvl ?? level(p, warn, crit)}`} title={title}>
@@ -366,6 +366,17 @@ function Meter({ label, pct, value, note, title, warn = 75, crit = 90, lvl }: { 
       </div>
       {note && <div className="meter-note">{note}</div>}
     </div>
+  );
+}
+
+/** "Resets Sun 04:00 MDT (in 2 d 22 h)": a line that has to wrap breaks before the countdown, never inside it. */
+function ResetNote({ text }: { text: string }) {
+  const i = text.indexOf(" (in ");
+  if (i < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, i)} <span className="nowrap">{text.slice(i + 1)}</span>
+    </>
   );
 }
 
@@ -614,7 +625,7 @@ function PlanCard({ row: r, at, list, sheet, now }: { row: PlanRow; at: DOMRect;
         {a.pool && <div className="acct-where">{a.pool.text}</div>}
       </div>
       {u ? (
-        limits.map(({ label, m }, i) => <Meter key={`${label}-${i}`} label={label} pct={m?.percent ?? 0} value={m ? `${Math.round(m.percent)}%` : 'unknown'} note={m ? resetText(m.resetsAt, now) : undefined} />)
+        limits.map(({ label, m }, i) => <Meter key={`${label}-${i}`} label={label} pct={m?.percent ?? 0} value={m ? `${Math.round(m.percent)}%` : 'unknown'} note={m ? <ResetNote text={resetText(m.resetsAt, now)} /> : undefined} />)
       ) : (
         <div className="plan-asof">{a.usage ? `Usage unavailable${a.usage.why ? `: ${a.usage.why}` : ''}` : 'Usage not fetched yet'}</div>
       )}

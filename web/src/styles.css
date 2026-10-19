@@ -1276,6 +1276,7 @@ select.input {
 }
 
 .plan-tip .meter-note {
+  font-family: inherit;
   overflow-wrap: anywhere;
 }
 

@@ -372,6 +372,8 @@ test.describe('plan reset hover (w1528)', () => {
     const tip = page.getByTestId('plan-tip');
     await expect(tip).toHaveCount(0);
     if (process.env.E2E_SHOT_BEFORE) {
+      // The click left the pointer on the footer's toggle, which shades it; the stills compare the sheet with the pointer elsewhere.
+      await page.mouse.move(900, 300);
       const sheet = (await foot.boundingBox())!;
       await page.screenshot({ path: process.env.E2E_SHOT_BEFORE, clip: sheet });
     }
@@ -397,6 +399,8 @@ test.describe('plan reset hover (w1528)', () => {
         await expect(m.locator('.meter-label')).toHaveText(label);
         await expect(m.locator('.meter-value')).toHaveText(value);
         await expect(m.locator('.meter-note')).toHaveText(note);
+        // One line at the desktop sidebar's width too: a countdown is never cut across two lines (the orchestrator, for lothsahn: a lone "h)" on its own line).
+        expect(await m.locator('.meter-note').evaluate((e) => e.getClientRects()[0].height <= parseFloat(getComputedStyle(e).fontSize) * 1.6), `${label} reset note on one line`).toBe(true);
         expect(await m.locator('.meter-bar i').evaluate((e) => (e as HTMLElement).style.width)).toBe(width);
       }
       await inside(page, tip, foot);
