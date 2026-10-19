@@ -537,7 +537,8 @@ export const SAFE_MODE_STALL_MS = 90_000;
  * ("Application.AssetDatabase Initial Refresh Start"), compiles, and on a compile error ("## Script Compilation
  * Error for:") shows the prompt right after "AssetDatabase: script compilation time:", with nothing after it but
  * the cache summary until someone answers. "Ignore" goes on to load the domain ("Begin MonoManager ReloadAssembly"),
- * "Enter Safe Mode" to "Loading Safe Mode Domain". Measured on 6000.3.19f1, Windows (lothdesktop/slot1, 2026-10-18).
+ * "Enter Safe Mode" to "Loading Safe Mode Domain". Measured on 6000.3.19f1, Windows (lothdesktop/slot1, 2026-10-18),
+ * and the same ending on macOS (m5/slot2, 2026-10-19, w1501).
  */
 export function safeModePromptErrors(log: string): string[] | undefined {
   const start = log.lastIndexOf('Application.AssetDatabase Initial Refresh Start');
