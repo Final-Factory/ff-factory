@@ -758,6 +758,11 @@ export class Daemon {
         this.send({ type: 'host_health', health: { checkedAt: h.checkedAt, sandboxRoot: h.sandboxRoot, level: h.level, ...(h.detail ? { detail: h.detail } : {}), ...(h.blocked ? { blocked: h.blocked } : {}) } });
       },
       log: (line: string) => log(`host guard: ${line}`),
+      // The sandbox volume's floor is the pool's (w1581): what the portal's welcome last sent, else daemon.json's.
+      poolFloor: () => {
+        const p = this.currentPool();
+        return p ? { warnGB: p.diskWarnGB, criticalGB: p.diskCriticalGB } : undefined;
+      },
     };
     const go = (fx: MachineGuardEffects) => {
       if (this.stopped) return;
