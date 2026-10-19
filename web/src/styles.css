@@ -1564,6 +1564,12 @@ select.input {
   flex: none;
 }
 
+/* Just after Undo, under the pointer that pressed it: no hover fill, so it does not look chosen (w1546). */
+.pmsg-calm:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text-2);
+}
+
 .pmsg-list {
   margin: 0;
   padding: 0 var(--s-3);
@@ -5383,6 +5389,26 @@ button.react-chip:hover {
 
   .orch-state {
     font-size: var(--fs-sm);
+  }
+
+  .orch-name {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* The model chip gives way first, cut with an ellipsis, so it is never drawn over the title (w1546). Italics alone mark
+     a configured model here. */
+  .model-chip {
+    display: block;
+    flex: 0 100 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .model-chip-mark {
+    display: none;
   }
 
   .menu-pop {

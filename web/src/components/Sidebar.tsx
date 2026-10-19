@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import type { AppState, SessionInfo } from '../../../shared/types';
 import type { FleetComputer } from '../../../shared/fleet';
-import { sessionIndex } from '../store';
+import { sessionIndex, useStore } from '../store';
 import { useAttention, type AttentionItem } from '../attention';
 import {
   contextGlance,
@@ -22,6 +22,7 @@ import {
 } from '../util';
 import { Dot, Icon, type IconName } from './ui';
 import { usePush } from '../notify';
+import { unreadHere } from './PeopleMessages';
 import { SettingsModal } from './Settings';
 import { SystemFooter } from './SystemMeters';
 import { ExternalStrip } from './External';
@@ -48,6 +49,9 @@ export function Sidebar({
   const attention = useAttention(app);
   const sessionsById = sessionIndex(app.sessions);
   const orch = sessionsById.get(app.orchestratorId);
+  // Messages from people still unread in your chat: those its bubble cleared and can still undo are not counted (w1546).
+  const clearing = useStore((s) => s.clearing[app.orchestratorId]);
+  const unread = unreadHere(orch?.personMessages, clearing);
   // The other people's own orchestrators (read only here), and the dispatcher with its open requests (docs/orchestrators.md).
   const others = app.sessions.filter((s) => s.id !== app.orchestratorId && chatOwner(s)).sort((a, b) => a.title.localeCompare(b.title));
   const dispatcher = app.dispatcherId ? sessionsById.get(app.dispatcherId) : undefined;
@@ -98,7 +102,7 @@ export function Sidebar({
             title="Orchestrator"
             sub={<span className={`tone-${agentView(orch).tone}`}>{agentView(orch).text}</span>}
             hint={ctxHint('Your own orchestrator', orch)}
-            badge={orch.personMessages?.length ? { count: orch.personMessages.length, hint: `Unread: ${peopleMessagesHint(orch.personMessages)}` } : undefined}
+            badge={unread.length ? { count: unread.length, hint: `Unread: ${peopleMessagesHint(unread)}` } : undefined}
             onClick={() => go({ view: 'home' })}
           />
         )}
@@ -367,13 +371,13 @@ function AttentionList({ items, onPick }: { items: AttentionItem[]; onPick: () =
   );
 }
 
-/** "2 from Lothsahn, 1 from Ben": whose messages wait in your chat. */
 /** A row's hint with the orchestrator's context and last compaction under it (w535). */
 function ctxHint(what: string, s: SessionInfo): string {
   const c = contextGlance(s, Date.now());
   return c ? `${what}\n${c.line}` : what;
 }
 
+/** "2 from Lothsahn, 1 from Ben": whose messages wait in your chat. */
 function peopleMessagesHint(list: NonNullable<SessionInfo['personMessages']>): string {
   const by = new Map<string, number>();
   for (const m of list) by.set(m.from.displayName, (by.get(m.from.displayName) ?? 0) + 1);
