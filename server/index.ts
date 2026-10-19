@@ -1011,6 +1011,7 @@ route('POST', '/api/vault', async (req) => {
     // A GitHub App (w1519): its App ID and the accounts whose installations it uses.
     ...(typeof b.appId === 'string' && b.appId.trim() ? { appId: b.appId.trim() } : {}),
     ...(strings(b.appOwners) ? { appOwners: strings(b.appOwners) } : {}),
+    ...(b.uninstallOthers === true ? { uninstallOthers: true } : {}),
   });
   vaultChanged();
   return vaultView();
@@ -1032,6 +1033,10 @@ route('PATCH', '/api/vault/([a-z0-9._-]{1,40})', async (req, [name]) => {
     ...(b.roles !== undefined ? { roles: (strings(b.roles) ?? []) as VaultRole[] } : {}),
     ...(b.machines !== undefined ? { machines: strings(b.machines) ?? [] } : {}),
     ...(typeof b.disabled === 'boolean' ? { disabled: b.disabled } : {}),
+    // A GitHub App's settings (w1519), changed on the vault page without its key; the vault refuses them on other kinds.
+    ...(typeof b.appId === 'string' ? { appId: b.appId.trim() } : {}),
+    ...(b.appOwners !== undefined ? { appOwners: strings(b.appOwners) ?? [] } : {}),
+    ...(typeof b.uninstallOthers === 'boolean' ? { uninstallOthers: b.uninstallOthers } : {}),
   });
   vaultChanged();
   return vaultView();

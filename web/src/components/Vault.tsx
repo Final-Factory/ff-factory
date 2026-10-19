@@ -24,8 +24,10 @@ export function VaultSettings() {
     try {
       setView(await p);
       toast(done);
+      return true;
     } catch (e) {
       toastError(e);
+      return false;
     }
   };
   const s = view.status;
@@ -84,7 +86,8 @@ export function VaultSettings() {
   );
 }
 
-type Act = (p: Promise<VaultView>, done: string) => Promise<void>;
+/** Resolves false when the server refused (its reason is toasted): a form then stays open with what was entered. */
+type Act = (p: Promise<VaultView>, done: string) => Promise<boolean>;
 const list = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
 
 function VaultRow({ e, people, github, app, onChange }: { e: VaultEntryMeta; people: VaultView['people']; github?: GithubTokenHealth; app?: GithubAppHealth; onChange: Act }) {
@@ -94,6 +97,9 @@ function VaultRow({ e, people, github, app, onChange }: { e: VaultEntryMeta; peo
   const [machines, setMachines] = useState(e.machines.join(', '));
   const [roles, setRoles] = useState(e.roles.join(', '));
   const [email, setEmail] = useState(e.email ?? '');
+  const [appId, setAppId] = useState(e.appId ?? '');
+  const [appOwners, setAppOwners] = useState((e.appOwners ?? []).join(', '));
+  const [uninstallOthers, setUninstallOthers] = useState(!!e.uninstallOthers);
   const [sure, setSure] = useState(false);
   const owner = people.find((p) => p.userId.toLowerCase() === e.owner?.toLowerCase())?.displayName ?? e.owner;
   return (
@@ -120,12 +126,13 @@ function VaultRow({ e, people, github, app, onChange }: { e: VaultEntryMeta; peo
       {e.kind === 'github-app' && <GithubAppLine h={app} e={e} />}
       {rotating && (
         <div className="field-row">
-          <input className="input" type="password" autoComplete="off" placeholder="the new value" value={value} onChange={(x) => setValue(x.target.value)} />
+          {e.kind === 'github-app' && <PemFile onText={setValue} />}
+          <input className="input" type="password" autoComplete="off" aria-label="new value" placeholder={e.kind === 'github-app' ? "or paste the new .pem file's whole text" : 'the new value'} value={value} onChange={(x) => setValue(x.target.value)} />
           <button
             className="btn btn-primary"
             disabled={!value.trim()}
             onClick={async () => {
-              await onChange(api.vaultRotate(e.name, value.trim()), `rotated ${e.name}`);
+              if (!(await onChange(api.vaultRotate(e.name, value.trim()), `rotated ${e.name}`))) return;
               setValue('');
               setRotating(false);
             }}
@@ -139,10 +146,18 @@ function VaultRow({ e, people, github, app, onChange }: { e: VaultEntryMeta; peo
           <input className="input" aria-label="machines" placeholder="machines: m3, m5 or *" value={machines} onChange={(x) => setMachines(x.target.value)} />
           <input className="input" aria-label="roles" placeholder="roles: workers, standing" value={roles} onChange={(x) => setRoles(x.target.value)} />
           {e.kind === 'claude' && <input className="input" type="email" aria-label="account email" placeholder="Claude account email (optional)" value={email} onChange={(x) => setEmail(x.target.value)} />}
+          {e.kind === 'github-app' && (
+            <>
+              <input className="input" aria-label="app id" placeholder="App ID" value={appId} onChange={(x) => setAppId(x.target.value)} />
+              <input className="input" aria-label="app owners" placeholder="accounts whose installations are used: Gherik1" value={appOwners} onChange={(x) => setAppOwners(x.target.value)} />
+              <UninstallOthers checked={uninstallOthers} onChange={setUninstallOthers} />
+            </>
+          )}
           <button
             className="btn btn-primary"
             onClick={async () => {
-              await onChange(api.vaultUpdate(e.name, { machines: list(machines), roles: list(roles) as VaultRole[], ...(e.kind === 'claude' ? { email: email.trim() } : {}) }), `changed ${e.name}`);
+              const app = e.kind === 'github-app' ? { appId: appId.trim(), appOwners: list(appOwners), uninstallOthers } : {};
+              await onChange(api.vaultUpdate(e.name, { machines: list(machines), roles: list(roles) as VaultRole[], ...(e.kind === 'claude' ? { email: email.trim() } : {}), ...app }), `changed ${e.name}`);
               setEditing(false);
             }}
           >
@@ -180,11 +195,12 @@ function AddEntry({ view, onChange }: { view: VaultView; onChange: Act }) {
   const [email, setEmail] = useState('');
   const [appId, setAppId] = useState('');
   const [appOwners, setAppOwners] = useState('');
+  const [uninstallOthers, setUninstallOthers] = useState(false);
   const [value, setValue] = useState('');
   if (!open)
     return (
       <button className="btn btn-outline btn-sm" onClick={() => setOpen(true)}>
-        Add a token
+        Add a token or GitHub App
       </button>
     );
   return (
@@ -222,6 +238,7 @@ function AddEntry({ view, onChange }: { view: VaultView; onChange: Act }) {
         <div className="field-row">
           <input className="input" aria-label="app id" placeholder="App ID (General settings of the app)" value={appId} onChange={(x) => setAppId(x.target.value)} />
           <input className="input" aria-label="app owners" placeholder="accounts whose installations are used: Gherik1" value={appOwners} onChange={(x) => setAppOwners(x.target.value)} />
+          <UninstallOthers checked={uninstallOthers} onChange={setUninstallOthers} />
         </div>
       )}
       {kind === 'claude' && (
@@ -230,15 +247,17 @@ function AddEntry({ view, onChange }: { view: VaultView; onChange: Act }) {
         </div>
       )}
       <div className="field-row">
-        <input className="input" type="password" autoComplete="off" aria-label="value" placeholder={kind === 'github-app' ? "the .pem file's whole text (never shown again)" : 'the token (never shown again)'} value={value} onChange={(x) => setValue(x.target.value)} />
+        {kind === 'github-app' && <PemFile onText={setValue} />}
+        <input className="input" type="password" autoComplete="off" aria-label="value" placeholder={kind === 'github-app' ? "or paste the .pem file's whole text (never shown again)" : 'the token (never shown again)'} value={value} onChange={(x) => setValue(x.target.value)} />
         <button
           className="btn btn-primary"
           disabled={!name.trim() || !value.trim()}
           onClick={async () => {
-            await onChange(
-              api.vaultAdd({ name: name.trim(), kind, env: env.trim() || undefined, owner: owner || undefined, email: kind === 'claude' ? email.trim() || undefined : undefined, share, roles: list(roles) as VaultRole[], machines: list(machines), value: value.trim(), ...(kind === 'github-app' ? { appId: appId.trim(), appOwners: list(appOwners) } : {}) }),
+            const ok = await onChange(
+              api.vaultAdd({ name: name.trim(), kind, env: env.trim() || undefined, owner: owner || undefined, email: kind === 'claude' ? email.trim() || undefined : undefined, share, roles: list(roles) as VaultRole[], machines: list(machines), value: value.trim(), ...(kind === 'github-app' ? { appId: appId.trim(), appOwners: list(appOwners), ...(uninstallOthers ? { uninstallOthers } : {}) } : {}) }),
               `added ${name.trim()}`,
             );
+            if (!ok) return;
             setValue('');
             setEmail('');
             setOpen(false);
@@ -274,6 +293,43 @@ const minute = (iso: string) => `${iso.slice(0, 16).replace('T', ' ')}Z`;
  * A GitHub token's health (w868, server/githubTokens.ts): the account it acts as, its expiry, the reads it lacks per
  * repository (write permissions cannot be read without writing), its last use and its last error.
  */
+/**
+ * A GitHub App's .pem file, read in the browser into the value it sends (w1519): nobody copies the key into the VM or runs
+ * a command. The key is never shown, only the file's name.
+ */
+function PemFile({ onText }: { onText: (text: string) => void }) {
+  const [file, setFile] = useState('');
+  return (
+    <label className="btn btn-outline btn-sm" title="the .pem file the app's Generate a private key downloaded">
+      {file ? `${file} loaded` : 'Choose the .pem file'}
+      <input
+        type="file"
+        accept=".pem"
+        hidden
+        aria-label="pem file"
+        onChange={async (x) => {
+          const f = x.target.files?.[0];
+          x.target.value = '';
+          if (!f) return;
+          if (f.size > 16 * 1024) return toastError(new Error(`${f.name} is ${f.size} bytes: a GitHub App key is about 1.7 KB`));
+          onText(await f.text());
+          setFile(f.name);
+        }}
+      />
+    </label>
+  );
+}
+
+/** Off by default: an installation off the allowlist is only ignored (docs/github-apps.md, the allowlist). */
+function UninstallOthers({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="check small" title="a typo in the accounts would uninstall the app from the right one too">
+      <input type="checkbox" aria-label="uninstall others" checked={checked} onChange={(x) => onChange(x.target.checked)} />
+      <span>uninstall it from other accounts</span>
+    </label>
+  );
+}
+
 /** A GitHub App's health (w1519, docs/github-apps.md): its key, each allowed installation, the ignored ones. Never a value. */
 function GithubAppLine({ h, e }: { h?: GithubAppHealth; e: VaultEntryMeta }) {
   const head = `App ID ${e.appId ?? '?'}; installations of ${(e.appOwners ?? []).join(', ')}${e.uninstallOthers ? ' (uninstalls the others)' : ''}`;

@@ -112,28 +112,44 @@ for more permissions, the app's change waits there until Gherik accepts it (**Re
 of each installation "will be prompted to approve the new permissions". Until then the health line names what is not
 accepted yet.
 
-## Putting the app in the vault (lothsahn, in the VM)
+## Putting the app in the vault (lothsahn, in the portal)
 
-Copy the `.pem` file into the VM (for example with `scp`) and run, on the VM as root:
+Nobody runs a command or copies the key anywhere: the portal's vault page takes the `.pem` file from the browser. The vault
+page is an owner's only.
 
-```sh
-sudo fffctl vault add --name app-gherik --kind github-app --app-id <App ID> --app-owners Gherik1 \
-  --owner lothsahn --share anyone --file /tmp/<slug>.private-key.pem
-shred -u /tmp/<slug>.private-key.pem
-```
+1. In the portal, open the sidebar → **Settings** → the **Token vault** section → **Add a token or GitHub App**.
+2. **name**: `app-gherik`. The name may not start with `vault-` or `host-`: the FFBox host's `fff-vm vault-sync` removes
+   entries with those names that it has no file for (docs/vault.md section 12), so the vault refuses such a name for an app.
+3. **kind**: **GitHub App (private key)**. The App ID, accounts and uninstall fields appear.
+4. **owner**: lothsahn. **share**: **any run** lets anyone's work in Gherik's repositories use it (the app reaches only the
+   repositories Gherik picked); **the owner's own work only** keeps it to lothsahn's requests.
+5. **roles** and **machines**: leave `workers, standing` and `*`, or list machines (`m3, lothdesktop`).
+6. **App ID**: the number from the app's General page (step 12 above).
+7. **accounts whose installations are used**: `Gherik1`. Leave **uninstall it from other accounts** unticked (the allowlist,
+   above).
+8. **Choose the .pem file** → the file the browser downloaded in step 13 (`<slug>.<date>.private-key.pem`). The button then
+   reads "… loaded". Pasting the file's whole text into the field beside it works too: line breaks lost in the paste do not
+   matter.
+9. **Add**. The entry shows the key's last four characters, never the key. A refusal (not a key, no App ID, a `vault-`
+   name) shows its reason and leaves the form as it was.
+10. Delete the downloaded `.pem` file from your computer: the vault keeps the only copy needed, and GitHub makes a new key at
+    any time.
 
-- **The name may not start with `vault-` or `host-`.** The FFBox host's `fff-vm vault-sync` removes entries with those names
-  that it has no file for (docs/vault.md section 12), and the vault refuses such a name for an app.
-- `--share anyone` lets anyone's work in Gherik's repositories use it. The app reaches only the repositories Gherik picked.
-  `--share owner` keeps it to lothsahn's own requests.
-- `--machines m3,lothdesktop` (default `*`) and `--roles` grant it like any entry.
-- `--installations <id>` pins one installation id. `--uninstall-others` is described above.
-- Change it later with `sudo fffctl vault grant app-gherik --app-owners Gherik1,Other` (or `--app-id`, `--installations`,
-  `--uninstall-others`, `--keep-others`). A new key: `sudo fffctl vault rotate app-gherik --file new.pem`, then delete the
-  old key on the app's page.
-- Or, in the browser: Settings → Token vault → **Add a token** → kind **GitHub App (private key)**, with the App ID, the
-  accounts, and the `.pem` file's whole text pasted into the value field. Line breaks may be lost in the paste: the vault puts
-  the key back into its PEM form either way.
+Within a minute the entry's line on the vault page shows the app read: **key valid** and **Gherik1 (installation N): 2
+repositories** (Health, below). **Re-check now** at the bottom of the GitHub section reads it again at once.
+
+Later changes, on the same page:
+
+- **Grant** on the entry: the App ID, the accounts, uninstall-others, machines and roles. The key is untouched, and a
+  changed allowlist is read again at once (an account taken off loses its token on the next read, not an hour later).
+- **Rotate** → **Choose the .pem file** with a new key (Generate a private key again on the app's page), **Save**, then
+  delete the old key on the app's page.
+- **Disable** or **Remove**: no run gets the app's tokens from then on.
+
+On the VM, `sudo fffctl vault add --name app-gherik --kind github-app --app-id <App ID> --app-owners Gherik1 --owner
+lothsahn --share anyone --file <the .pem>` does the same (`grant` takes `--app-id`, `--app-owners`, `--installations`,
+`--uninstall-others`, `--keep-others`; `rotate app-gherik --file new.pem`), for whoever already works there. Pinning
+installation ids (`--installations`) is the one setting only the command line has; it is never needed for Gherik's case.
 
 The key is not copied to the FFBox host at night (`export --manifest` leaves apps out): GitHub makes a new key at any
 time, so a lost VM is fixed with a new key, not a restored one.
@@ -159,7 +175,8 @@ account names only. Each new token is added to redaction (`server/secrets.ts`) b
 1. Merge this change, then a **portal deploy** (the portal mints and routes).
 2. **Update the machines' daemons** where workers should reach the app's repositories. A daemon from before this change
    ignores the tokens: its runs keep the person's token for every repository, which fails there.
-3. lothsahn creates the app, Gherik installs it, lothsahn adds it to the vault (above).
+3. lothsahn creates the app, Gherik installs it, lothsahn adds it on the portal's vault page (above).
 4. `machines.githubFromVault` must be on for those machines (it already is where vault GitHub tokens are used), and on for
-   `"portal"` for the portal's own reads.
-5. Check system_status for the app's line: key valid, Gherik1's installation with both repositories, no WARNING.
+   `"portal"` for the portal's own reads. An orchestrator sets it (`set_app_config`), no person.
+5. The vault page and system_status show the app's line: key valid, Gherik1's installation with both repositories, no
+   WARNING.

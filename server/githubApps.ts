@@ -23,6 +23,9 @@ export const REFRESH_BEFORE_MS = 15 * 60_000;
 export const APP_READ_EVERY_MS = 60 * 60_000;
 export const APP_TICK_MS = 5 * 60_000;
 
+/** What an app's installations depend on: its key, App ID, allowlist, pinned installations and uninstall-others (w1519). */
+const readKey = (e: VaultEntryMeta) => JSON.stringify([e.fingerprint, e.appId, e.appOwners, e.installations, !!e.uninstallOthers]);
+
 type Fetch = (url: string, init: { method?: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<{ status: number; json(): Promise<unknown> }>;
 
 const b64url = (b: Buffer | string) => Buffer.from(b).toString('base64url');
@@ -55,7 +58,7 @@ interface Install {
 
 interface AppState {
   health: GithubAppHealth;
-  /** The key's fingerprint the installations were read with: a rotated key reads again at once. */
+  /** The key and settings the installations were read with (readKey): a rotated key or a changed allowlist reads again at once. */
   readWith?: string;
   readAt?: number;
   /** The app's own permissions (GET /app): what an installation is asked to accept. */
@@ -139,7 +142,7 @@ export class GithubApps {
     for (const { entry, key } of apps) {
       const s = this.of(entry);
       try {
-        if (force || s.readWith !== entry.fingerprint || !s.readAt || this.now() - s.readAt >= APP_READ_EVERY_MS) changed = (await this.read(s, entry, key)) || changed;
+        if (force || s.readWith !== readKey(entry) || !s.readAt || this.now() - s.readAt >= APP_READ_EVERY_MS) changed = (await this.read(s, entry, key)) || changed;
         if (!s.health.bad) changed = (await this.mint(s, entry, key)) || changed;
       } catch (e) {
         s.health.lastError = { at: this.at(), what: `read failed: ${(e as Error).message.slice(0, 160)}` };
@@ -181,7 +184,7 @@ export class GithubApps {
       this.o.log?.(`github app ${e.name} …${e.last4}: ${h.bad}`);
       const dropped = s.installs.some((i) => i.token);
       s.installs = [];
-      s.readWith = e.fingerprint;
+      s.readWith = readKey(e);
       s.readAt = this.now();
       return dropped;
     }
@@ -231,7 +234,7 @@ export class GithubApps {
     }
     const dropped = s.installs.some((i) => i.token && !next.some((n) => n.id === i.id && n.token));
     s.installs = next;
-    s.readWith = e.fingerprint;
+    s.readWith = readKey(e);
     s.readAt = this.now();
     return dropped;
   }

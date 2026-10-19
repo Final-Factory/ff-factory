@@ -137,6 +137,24 @@ test('GithubApps: reads the app, mints a token per allowed installation with its
   assert.deepEqual(a.banners(), []);
 });
 
+test('GithubApps: a changed allowlist (the vault page\'s Grant) is read again on the next tick, not an hour later', async (t) => {
+  const { vault } = setup(t);
+  const gh = fakeGithub();
+  const clock = { now: NOW };
+  const { a } = apps(vault, gh, clock);
+  await a.tick();
+  assert.equal(a.forMachine('m3').length, 1);
+  vault.update('app-gherik', { appOwners: ['SomeoneElse'] });
+  clock.now += 60_000;
+  await a.tick();
+  assert.deepEqual(a.forMachine('m3'), [], 'Gherik1 off the list: his token is dropped at once');
+  assert.deepEqual(a.list()[0].installations?.map((i) => [i.account, i.allowed]), [['Gherik1', false], ['stranger', false]]);
+  vault.update('app-gherik', { appOwners: ['Gherik1'] });
+  clock.now += 60_000;
+  await a.tick();
+  assert.deepEqual(a.forMachine('m3').map((x) => x.repos), [['gherik1/itemcannon', 'gherik1/playerupgrades']]);
+});
+
 test('GithubApps: the token is cached, minted again 15 minutes before its end, and the installations are read again hourly', async (t) => {
   const { vault } = setup(t);
   const gh = fakeGithub();
@@ -257,7 +275,7 @@ test('machineRunEnv: a run with a vault GitHub token gets the names of the apps 
   assert.equal(off.env.FF_GH_APP_NAMES, undefined, 'no vault GitHub token on the machine: no app (the helper would replace its own login)');
 });
 
-const TOKENS: GhAppToken[] = [
+const HELD: GhAppToken[] = [
   { app: 'app-gherik', repos: ['gherik1/itemcannon', 'gherik1/playerupgrades'], owners: [], token: ghs('a'), expiresAt: iso(NOW + 3_600_000) },
   { app: 'other-app', repos: [], owners: ['someone'], token: ghs('o'), expiresAt: iso(NOW + 3_600_000) },
 ];
@@ -279,16 +297,16 @@ test('routing: the repository of a gh command line, a URL and a folder\'s remote
   assert.equal(gitRemoteRepo('remote.origin.url https://github.com/me/fork.git\nremote.upstream.url https://github.com/Gherik1/ItemCannon.git\n'), 'gherik1/itemcannon');
   assert.equal(gitRemoteRepo('remote.origin.url git@github.com:Gherik1/ItemCannon.git'), 'gherik1/itemcannon');
   assert.equal(gitRemoteRepo(''), undefined);
-  assert.equal(appTokenFor(TOKENS, 'gherik1/itemcannon', ['app-gherik'], NOW)?.token, ghs('a'));
-  assert.equal(appTokenFor(TOKENS, 'gherik1/otherrepo', ['app-gherik'], NOW), undefined, 'a repository Gherik1 did not select: the person\'s token');
-  assert.equal(appTokenFor(TOKENS, 'someone/anything', ['other-app'], NOW)?.token, ghs('o'), 'an installation on all repositories covers the account');
-  assert.equal(appTokenFor(TOKENS, 'gherik1/itemcannon', [], NOW), undefined, 'a run named no app');
-  assert.equal(appTokenFor(TOKENS, 'gherik1/itemcannon', ['app-gherik'], NOW + 3_600_000 - 30_000), undefined, 'not in its last minute');
+  assert.equal(appTokenFor(HELD, 'gherik1/itemcannon', ['app-gherik'], NOW)?.token, ghs('a'));
+  assert.equal(appTokenFor(HELD, 'gherik1/otherrepo', ['app-gherik'], NOW), undefined, 'a repository Gherik1 did not select: the person\'s token');
+  assert.equal(appTokenFor(HELD, 'someone/anything', ['other-app'], NOW)?.token, ghs('o'), 'an installation on all repositories covers the account');
+  assert.equal(appTokenFor(HELD, 'gherik1/itemcannon', [], NOW), undefined, 'a run named no app');
+  assert.equal(appTokenFor(HELD, 'gherik1/itemcannon', ['app-gherik'], NOW + 3_600_000 - 30_000), undefined, 'not in its last minute');
 });
 
 test('the git credential helper: the app token for its repositories, the run\'s GH_TOKEN for the rest, nothing elsewhere', () => {
   const env = { FF_GH_APP_NAMES: 'app-gherik', GH_TOKEN: LOTH };
-  const ask = (input: string, op = 'get', e: Record<string, string> = env) => credentialAnswer(op, input, e, TOKENS, NOW);
+  const ask = (input: string, op = 'get', e: Record<string, string> = env) => credentialAnswer(op, input, e, HELD, NOW);
   assert.equal(ask('protocol=https\nhost=github.com\npath=Gherik1/ItemCannon.git\n'), `username=x-access-token\npassword=${ghs('a')}\n`);
   assert.equal(ask('protocol=https\nhost=github.com\npath=Final-Factory/FinalFactory.git\n'), `username=x-access-token\npassword=${LOTH}\n`);
   assert.equal(ask('protocol=https\nhost=github.com\n'), `username=x-access-token\npassword=${LOTH}\n`, 'no path (useHttpPath off): the run\'s token');
@@ -299,12 +317,12 @@ test('the git credential helper: the app token for its repositories, the run\'s 
 
 test('gh: GH_TOKEN becomes the app token for its repositories (args, then the folder\'s remotes), else the environment is unchanged', () => {
   const env = { FF_GH_APP_NAMES: 'app-gherik', GH_TOKEN: LOTH, GITHUB_TOKEN: 'x' };
-  assert.equal(ghEnvFor(['pr', 'create', '-R', 'Gherik1/ItemCannon'], env, TOKENS, () => '', NOW).GH_TOKEN, ghs('a'));
-  assert.equal(ghEnvFor(['pr', 'create', '-R', 'Gherik1/ItemCannon'], env, TOKENS, () => '', NOW).GITHUB_TOKEN, undefined);
-  assert.equal(ghEnvFor(['pr', 'create'], env, TOKENS, () => 'remote.origin.url https://github.com/Gherik1/PlayerUpgrades.git', NOW).GH_TOKEN, ghs('a'));
-  assert.equal(ghEnvFor(['pr', 'create'], env, TOKENS, () => 'remote.origin.url https://github.com/Final-Factory/FinalFactory.git', NOW), env);
+  assert.equal(ghEnvFor(['pr', 'create', '-R', 'Gherik1/ItemCannon'], env, HELD, () => '', NOW).GH_TOKEN, ghs('a'));
+  assert.equal(ghEnvFor(['pr', 'create', '-R', 'Gherik1/ItemCannon'], env, HELD, () => '', NOW).GITHUB_TOKEN, undefined);
+  assert.equal(ghEnvFor(['pr', 'create'], env, HELD, () => 'remote.origin.url https://github.com/Gherik1/PlayerUpgrades.git', NOW).GH_TOKEN, ghs('a'));
+  assert.equal(ghEnvFor(['pr', 'create'], env, HELD, () => 'remote.origin.url https://github.com/Final-Factory/FinalFactory.git', NOW), env);
   let looked = false;
-  assert.equal(ghEnvFor(['pr', 'create'], { GH_TOKEN: LOTH }, TOKENS, () => ((looked = true), ''), NOW).GH_TOKEN, LOTH);
+  assert.equal(ghEnvFor(['pr', 'create'], { GH_TOKEN: LOTH }, HELD, () => ((looked = true), ''), NOW).GH_TOKEN, LOTH);
   assert.equal(looked, false, 'a run with no app does not even read the remotes');
 });
 
@@ -312,8 +330,8 @@ test('the daemon side: the tokens file round trip (0600), the run environment on
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ghapp-m-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'gh-app', 'tokens.json');
-  writeGhAppTokens(file, TOKENS);
-  assert.deepEqual(readGhAppTokens(file), TOKENS);
+  writeGhAppTokens(file, HELD);
+  assert.deepEqual(readGhAppTokens(file), HELD);
   if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.deepEqual(readGhAppTokens(path.join(dir, 'none.json')), []);
   const setup = { bin: path.join(dir, 'gh-app', 'bin'), file, helper: '!helper credential' };
@@ -348,7 +366,7 @@ test('real git: `git credential fill` through the installed helper answers the a
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ghapp-git-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'tokens.json');
-  writeGhAppTokens(file, [{ ...TOKENS[0], expiresAt: iso(Date.now() + 3_600_000) }]);
+  writeGhAppTokens(file, [{ ...HELD[0], expiresAt: iso(Date.now() + 3_600_000) }]);
   const helper = installGhAppShims(path.join(dir, 'bin'));
   const env = { ...process.env, ...githubCredentialEnv({ FF_GH_APP_HELPER: helper }), FF_GH_APP_FILE: file, FF_GH_APP_NAMES: 'app-gherik', GH_TOKEN: LOTH, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', HOME: dir, XDG_CONFIG_HOME: dir, GIT_CONFIG_NOSYSTEM: '1' };
   const fill = (url: string) => spawnSync('git', ['credential', 'fill'], { input: `url=${url}\n\n`, env, encoding: 'utf8', timeout: 60_000 });

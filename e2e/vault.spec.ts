@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { request as pwRequest } from '@playwright/test';
 import { expect, openSidebar, test, uniq } from './fixtures.ts';
 import type { VaultView } from '../shared/types.ts';
@@ -88,6 +88,52 @@ test('vault (w785): a Claude token takes the account email at add time; it can b
   const bad = await page.request.patch(`/api/vault/${name}`, { data: { email: 'not an address' } });
   expect(bad.status()).toBe(400);
   expect(await (await page.request.get('/api/vault')).text()).not.toContain(value);
+  await row.getByRole('button', { name: 'Remove' }).click();
+  await row.getByRole('button', { name: 'Really remove?' }).click();
+  await expect(row).toHaveCount(0);
+});
+
+test('vault (w1519): a GitHub App goes in from the page, its .pem chosen as a file; the key never comes back, and its allowlist changes without it', async ({ authed: page }) => {
+  const name = `app-e2e-${uniq('a').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8)}`;
+  const pem = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
+  const body = pem.replace(/-----[A-Z ]+-----/g, '').replace(/\s+/g, '');
+  const sidebar = await openSidebar(page);
+  await sidebar.getByRole('button', { name: 'Settings' }).click();
+  const vault = page.locator('.modal').getByTestId('vault');
+  await vault.getByRole('button', { name: 'Add a token or GitHub App' }).click();
+  await vault.getByLabel('name').fill(name);
+  await vault.getByLabel('kind').selectOption('github-app');
+  await vault.getByLabel('share').selectOption('anyone');
+  await vault.getByLabel('app id').fill('123456');
+  await vault.getByLabel('app owners').fill('Gherik1');
+  // A file that is no key: the label names it, the server refuses it and says why, without quoting it.
+  await vault.getByLabel('pem file').setInputFiles({ name: 'notes.pem', mimeType: 'application/x-pem-file', buffer: Buffer.from('not a key at all') });
+  await expect(vault.getByText('notes.pem loaded')).toBeVisible();
+  const refused = page.waitForResponse((r) => r.url().endsWith('/api/vault') && r.request().method() === 'POST');
+  await vault.getByRole('button', { name: 'Add', exact: true }).click();
+  const bad = await refused;
+  expect(bad.status()).toBe(400);
+  expect(await bad.text()).toContain('not a GitHub App private key');
+  // The real key, as GitHub's "Generate a private key" downloads it.
+  await vault.getByLabel('pem file').setInputFiles({ name: 'final-factory-mods.private-key.pem', mimeType: 'application/x-pem-file', buffer: Buffer.from(pem) });
+  await expect(vault.getByText('final-factory-mods.private-key.pem loaded')).toBeVisible();
+  const added = page.waitForResponse((r) => r.url().endsWith('/api/vault') && r.request().method() === 'POST');
+  await vault.getByRole('button', { name: 'Add', exact: true }).click();
+  const res = await added;
+  expect(res.ok(), await res.text()).toBeTruthy();
+  const row = vault.getByTestId(`vault-${name}`);
+  await expect(row).toContainText(`…${body.slice(-4)}`);
+  await expect(row.getByTestId(`vault-github-app-${name}`)).toContainText('App ID 123456; installations of Gherik1');
+  await expect(vault.getByLabel('value')).toHaveCount(0);
+  for (const text of [await page.content(), await (await page.request.get('/api/vault')).text()]) expect(text).not.toContain(body.slice(64, 128));
+  // Grant: the allowlist and uninstall-others change on the page, the key untouched.
+  await row.getByRole('button', { name: 'Grant' }).click();
+  await row.getByLabel('app owners').fill('Gherik1, Other-Modder');
+  await row.getByLabel('uninstall others').check();
+  await row.getByRole('button', { name: 'Save' }).click();
+  await expect(row.getByTestId(`vault-github-app-${name}`)).toContainText('installations of Gherik1, Other-Modder (uninstalls the others)');
+  await expect(row).toContainText(`…${body.slice(-4)}`);
+
   await row.getByRole('button', { name: 'Remove' }).click();
   await row.getByRole('button', { name: 'Really remove?' }).click();
   await expect(row).toHaveCount(0);
