@@ -43,8 +43,8 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     checkout/switch, ff-only merge, reopen Unity), see server/mainCloneGuard.ts. Write and Edit stay refused.
  *   - disk: on a machine with a worker install (opts.workerRoot), no rm / rmdir / del / rd / Remove-Item / find -delete that
  *     names a path outside the install folder (server/rootFence.ts; w896, lothsahn: "in general we should only be clearing
- *     data in the install folder for the worker"). Inside it, the worker's own temp and a save copy in the game's saves
- *     folder stay allowed.
+ *     data in the install folder for the worker"). Inside it, the worker's own temp and its own save copy in the game's saves
+ *     folder (`<TMPDIR's name>-<name>`, w1505) stay allowed.
  *   - Unity MCP: refused until the session pins its own editor ("<id>@<hash>"), and never another.
  *   - public repos (config publicGitIdentity, default this app's own repo, and any other GitHub repo that
  *     GitHub reports as public, server/publicGit.ts): a push is refused when a commit it would publish has
@@ -92,6 +92,9 @@ export function sandboxGuard(opts: {
   const cloneSpellings = cloneGrant ? pathSpellings(normPath(cloneGrant.path), home) : [];
   const cloneNames = cloneGrant ? spellingsRegex(cloneSpellings) : undefined;
   const unityPrefix = `${opts.sandboxId.toLowerCase()}@`;
+  // w1505: the session's save copies are named after its own temp folder (`ffa-<session>`, TMPDIR of its shell).
+  const tmpName = path.basename((opts.env?.TMPDIR ?? '').replace(/\\/g, '/').replace(/\/+$/, ''));
+  const saveTag = /^ffa-./i.test(tmpName) ? tmpName : undefined;
   let pinned = false;
 
   const deny = (reason: string) => ({
@@ -112,7 +115,7 @@ export function sandboxGuard(opts: {
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, prBase: opts.prBase ?? ghPrBase, publicIdentity: opts.publicIdentity, env: opts.env }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
-        (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
+        (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined);
       if (reason) return deny(reason);
       let flat = flatten(cmd);
       if (cloneGrant && cloneNames) {

@@ -804,8 +804,12 @@ value, a path on a mount it cannot map. It is a seatbelt like the rest of `serve
 the guard catches the plain commands. It judges sandbox workers only (`workerRoot` is in their launch spec). It applies to
 every request, not only a clean-up one: a session's guard is fixed when it starts and a request can be handed to it later,
 and no ledger field says which requests are clean-ups, so "during a clean-up request" cannot be told apart. A worker has
-no other reason to delete outside its folder; the one it does have, the save copy it put in the game's saves folder (one
-entry, never `saves/*`), is allowed.
+no other reason to delete outside its folder; the one it does have, the save copy it put in the game's saves folder, is
+allowed: one entry named after its own temp folder (`ffa-<session>-<name>`, the tag read from its shell's TMPDIR), never
+`saves/*`, another session's copy, a person's save or a path written with `..`, in the saves folder of Windows
+(`AppData/LocalLow`), Linux (`~/.config/unity3d`) or macOS (`Library/Application Support`). Its words are read as the shell
+reads them: `~/.config/unity3d/"Never Games"/...` and `Never\ Games` are one path (w1505: worker c1687d63 was refused its own
+copy twice because the fence cut the path at the space); an unquoted space is two paths, so that form stays refused.
 
 **What a clean-up worker reports for what is outside the root**, each with a size (`du`, `Get-ChildItem | Measure-Object`):
 Unity Hub's editors and installers; `%LOCALAPPDATA%\Unity` (logs, package cache, licences); `LocalLow\Unity\Caches\GiCache`;
