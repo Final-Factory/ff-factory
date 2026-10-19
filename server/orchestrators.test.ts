@@ -837,9 +837,45 @@ test("message_person: one person's orchestrator reaches another's chat as a tagg
   const again = new Store(dir);
   assert.equal(again.readTranscript(ben.id).filter((e) => e.kind === 'user' && e.text.startsWith('[person message]')).length, 1);
   assert.equal(again.sessions.get(ben.id)?.personMessages?.length, 1);
-  // Opening his chat reads it.
-  o.seen(ben.id);
+  // The mark carries the words and an id, for the bubble over his message box (w1546).
+  const [mark] = again.sessions.get(ben.id)!.personMessages!;
+  assert.equal(mark.text, 'Could you run the firewall script on BEAST once? It needs an admin.');
+  assert.match(mark.id ?? '', /^pm-/);
+  // His orchestrator relaying it, and Ben writing to his chat about something else, leave it unread (w1546).
+  o.personWrote(ben.id);
+  assert.equal(store.sessions.get(ben.id)?.personMessages?.length, 1, 'writing to his chat is not reading it');
+  // Clearing it in the bubble reads it; it stays in the transcript.
+  assert.equal(o.readPersonMessages(ben.id, [mark.id!]), 1);
   assert.equal(store.sessions.get(ben.id)?.personMessages, undefined);
+  assert.equal(heard(ben.id, '[person message]').length, 1, 'still in his conversation');
+});
+
+test('message_person: the bubble clears one message, or all it names, and never one it did not name (w1546)', async (t) => {
+  const { store, o, chat, call } = setup(t, { people: WITH_CARA });
+  const loth = chat(LOTH).info;
+  const cara = chat(CARA).info;
+  for (const text of ['first', 'second']) assert.equal((await call(loth, 'message_person', { to: 'ben', text })).isError, false);
+  assert.equal((await call(cara, 'message_person', { to: 'ben', text: 'third' })).isError, false);
+  const ben = o.personalOf('ben')!.info;
+  const marks = () => store.sessions.get(ben.id)?.personMessages ?? [];
+  assert.deepEqual(marks().map((m) => [m.from.displayName, m.text]), [['Lothsahn', 'first'], ['Lothsahn', 'second'], ['Cara', 'third']]);
+  assert.equal(new Set(marks().map((m) => m.id)).size, 3, 'each has its own id');
+  // Clear one: only that one goes.
+  assert.equal(o.readPersonMessages(ben.id, [marks()[1].id!]), 1);
+  assert.deepEqual(marks().map((m) => m.text), ['first', 'third']);
+  // An id it does not have clears nothing.
+  assert.equal(o.readPersonMessages(ben.id, ['pm-gone']), 0);
+  // "Clear all" names what the page showed: a message that came meanwhile stays unread.
+  const shown = marks().map((m) => m.id!);
+  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'fourth, just now' })).isError, false);
+  assert.equal(o.readPersonMessages(ben.id, shown), 2);
+  assert.deepEqual(marks().map((m) => m.text), ['fourth, just now']);
+  // With no ids, all of them.
+  assert.equal(o.readPersonMessages(ben.id), 1);
+  assert.equal(store.sessions.get(ben.id)?.personMessages, undefined);
+  // A mark saved before w1546 has no id: its time stands in.
+  ben.personMessages = [{ from: LOTH, at: '2026-10-01T10:00:00.000Z' }];
+  assert.equal(o.readPersonMessages(ben.id, ['2026-10-01T10:00:00.000Z']), 1);
 });
 
 test('message_person: only a person’s own orchestrator sends, to someone else who exists, briefly', async (t) => {
@@ -867,7 +903,7 @@ test('message_person: anyone but the two owners sends a few times until either w
   o.personWrote(cara.id);
   assert.equal((await call(cara, 'message_person', { to: 'ben', text: 'ping again' })).isError, false);
   o.personWrote(ben.id);
-  assert.equal(o.personalOf('ben')!.info.personMessages, undefined, 'writing to his chat reads it');
+  assert.equal(o.personalOf('ben')!.info.personMessages?.length, MESSAGES_PER_PERSON + 1, 'writing to his chat leaves them unread (w1546)');
   assert.equal((await call(cara, 'message_person', { to: 'ben', text: 'and again' })).isError, false);
   assert.equal(heard(ben.id, '[person message]').length, MESSAGES_PER_PERSON + 2);
   // A person's own turn is no exemption for her: the count holds in every turn.
