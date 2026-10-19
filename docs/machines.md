@@ -592,7 +592,11 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   Waiting on input for what the worker asked: its `waiting_on_person` declaration or its report, not a permission, an
   intake approval or the dispatcher's question), the first line under the slot's row is an amber button on the row's
   text edge. It reads "Live view: go" and opens `#/live/<session>` when that worker streams a Live view
-  ([live-view.md](live-view.md)), and "Needs you" and opens its chat otherwise. A Live view up while its worker is
+  ([live-view.md](live-view.md)). Otherwise there is no button and no badge: the slot's state reads "Asked you", in grey,
+  the question is in the row's tooltip, and the chat's line says "asked you" (w1521, Ben: "needs you should just be
+  approving/denying coommands, if they have questions for me they should pipe it through you and then i answer you. i want
+  to stay in this chat to the extent possible"). The question is answered in the person's orchestrator chat (its
+  `[needs you]` message and buttons); "Needs you", amber with its badge, is a pending permission's alone. A Live view up while its worker is
   between turns calls the person who asked for that worker too, declared or not. A wait on someone else shows on the
   chat's line ("waits on Lothsahn") and calls nobody. `slotCall` in `shared/fleet.ts`. The slot drops its FREE chip
   while it calls you. Placement still counts it free: a stopped worker that waits on a person does not hold its sandbox

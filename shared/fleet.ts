@@ -20,7 +20,7 @@ export interface PlaceAgents {
   shown: SessionInfo[];
   /** The rest, the most recent first: folded behind "+N older" (w1430). Nothing is deleted. */
   older: SessionInfo[];
-  /** Workers here that wait on a person (w1430): the slot's "Needs you" or "Live view: go" button (slotCall). */
+  /** Workers here that wait on a person (w1430): the slot's "Live view: go" button or its quiet "Asked you" (slotCall). */
   waits: PersonWait[];
 }
 
@@ -157,12 +157,15 @@ function agentsIn(ids: string[], byId: Map<string, SessionInfo>, ledger: ChatLed
 /**
  * The slot's call to a person (w1430, Ben: "if there is work waiting for live view workflow, it should be obvious maybe as a
  * go button next to the slot"): a worker here waits on the viewer. "Live view: go" opens its Live view when it has one
- * running (docs/live-view.md: `views` are the ones this person may watch); otherwise "Needs you" opens its chat. A Live view
- * running while its worker is between turns is a wait on the person who asked for that worker as well, said or not: the
+ * running (docs/live-view.md: `views` are the ones this person may watch); otherwise the slot only says "Asked you", with no
+ * button and no badge (w1521, Ben: "needs you should just be approving/denying coommands, if they have questions for me they
+ * should pipe it through you and then i answer you. i want to stay in this chat to the extent possible"): the question is
+ * answered in the person's orchestrator chat ([needs you] and its buttons), and "Needs you" is a permission's alone. A Live
+ * view running while its worker is between turns is a wait on the person who asked for that worker as well, said or not: the
  * knobs are theirs to move (docs/live-view.md). Undefined when nothing here waits on the viewer.
  */
 export interface SlotCall {
-  kind: 'live' | 'chat';
+  kind: 'live' | 'asked';
   session: SessionInfo;
   /** The request it waits on, when the ledger says ("w1325"). */
   request?: string;
@@ -180,7 +183,7 @@ export function slotCall(
   const mine = agents.waits.filter((x) => x.on.some((n) => n.toLowerCase() === name));
   const live = mine.find((x) => streams(x.session));
   if (live) return { kind: 'live', session: live.session, request: live.request, label: 'Live view: go' };
-  if (mine[0]) return { kind: 'chat', session: mine[0].session, request: mine[0].request, label: 'Needs you' };
+  if (mine[0]) return { kind: 'asked', session: mine[0].session, request: mine[0].request, label: 'Asked you' };
   const asked = (s: SessionInfo) => [s.requestedBy, s.lastRequestedBy].some((r) => r?.userId.toLowerCase() === me.userId.toLowerCase());
   const idle = [...agents.shown, ...agents.older].find((s) => s.status !== 'running' && s.status !== 'starting' && streams(s) && asked(s));
   return idle && { kind: 'live', session: idle, label: 'Live view: go' };
