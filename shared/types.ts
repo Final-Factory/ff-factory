@@ -504,6 +504,31 @@ export const machinePlatformOf = (p: string): MachinePlatform => (p === 'win32' 
 /** A machine's daemon folder: its app_dir, else <home>/.ff-factory. */
 export const appDirOf = (m: Pick<Machine, 'appDir' | 'home'>) => m.appDir || `${m.home}/.ff-factory`;
 
+/** A machine's pause settings (w1532), kept by its daemon in pause.json and changed from its tray app. Times are its local time. */
+export interface MachinePauseSettings {
+  /** Work runs only inside the window: it unpauses at `start` and pauses at `end` ("HH:MM"; an end not after the start is the next day). `days`: 0 Sunday to 6 Saturday, the day a window starts. */
+  schedule: { enabled: boolean; start: string; end: string; days: number[] };
+  /** A key or click no program injected pauses it until `idleMinutes` pass without one. */
+  activity: { enabled: boolean; idleMinutes: number };
+}
+
+/** A machine's pause state as its daemon reports it (w1532, machine/pauseRules.ts). */
+export interface MachinePause {
+  paused: boolean;
+  /** Why: the tray (manual), the schedule, or a person's input (activity). Running without a reason: no schedule set. */
+  reason?: 'manual' | 'schedule' | 'activity';
+  /** One line for people: "someone is using this PC: work resumes 90 min after the last key or click (at 15:40 …)". */
+  detail: string;
+  /** When this state began, and when it changes by itself next (ISO). */
+  since?: string;
+  until?: string;
+  settings?: MachinePauseSettings;
+  /** The tray app: "running" in the logged-on session, or why it is not. */
+  tray?: string;
+  /** When the daemon reported it. */
+  at?: string;
+}
+
 export interface Machine {
   /** Short name, e.g. "m5"; also the MCP/label id. Lower-case (MACHINE_ID). */
   id: string;
@@ -527,6 +552,12 @@ export interface Machine {
   platform?: MachinePlatform;
   /** The daemon was stopped on purpose (machine_daemon stop): not redeployed while offline until started again. */
   daemonStopped?: boolean;
+  /**
+   * Its owner paused FF Factory work on it (w1532, docs/machines.md "Pausing a machine"): from its tray app, its schedule or
+   * a person's input there, as its daemon last reported. While `paused`, it counts as held (placement.hold) and its workers
+   * hand their requests back. Absent: a daemon before w1532 (never paused).
+   */
+  pause?: MachinePause;
   /**
    * daemon.json settings its redeploys over ssh write, kept from when it was the portal's own host (convert_machine,
    * w466): the MCP-for-Unity server and the idle-editor stop it had from the portal's config.
@@ -1664,6 +1695,12 @@ export interface WorkItem {
   conditional?: ConditionalDecision[];
   /** The computers the dispatcher said can take it when it queued it for capacity (decide_work queue `needs`, w643). */
   queuedFor?: { at: string; needs?: string[] };
+  /**
+   * Its last hand-back (w1532, server/machinePause.ts): its worker's machine was paused, so it was taken off that worker and
+   * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it
+   * stopped) and the `message` that would have resumed it, in its handover.
+   */
+  handedBack?: { at: string; from: string; session: string; branch?: string; why: string; note: string; how: string; saved?: string; message?: string };
   /**
    * The repository the work is in, "owner/name" (w1098; request_work `repo`). Placement reads `needs`, which is derived
    * from it when the request is filed, never guessed later from the brief.

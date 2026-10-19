@@ -1,0 +1,1 @@
+- The portal_logs docs and tool text say what "the portal is unreachable right now" means (the daemon's websocket to the portal is down, so the portal or its VM is down or blocked) and which journal lines show it, and give the daemon log's real place, `<app_dir>/logs/daemon.log`, often a folder a worker cannot read (w1536).

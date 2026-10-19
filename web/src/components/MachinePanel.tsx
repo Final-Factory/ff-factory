@@ -145,6 +145,16 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
               {m.statusDetail && m.status === 'ready' ? ` · ${m.statusDetail}` : ''}
             </span>
           </div>
+          {/* Its owner's pause (w1532): from its tray app, its schedule or a person's input; a paused machine takes no work. */}
+          {m.pause && (
+            <div className="unity-bar" data-testid="machine-pause">
+              <Chip tone={m.pause.paused ? 'amber' : 'green'}>{m.pause.paused ? 'Paused' : 'Taking work'}</Chip>
+              <span className="dim small ellipsis" title={m.pause.tray ? `tray app: ${m.pause.tray}` : undefined}>
+                {m.pause.detail}
+                {m.pause.paused ? ': no new work goes there, and its workers hand their requests back' : ''}
+              </span>
+            </div>
+          )}
         </DetailsSection>
         {(m.sandboxes?.length ?? 0) > 0 && (
           <DetailsSection title="Sandboxes">
