@@ -138,13 +138,23 @@ export const unityLabel: Record<UnityState, string> = {
 export function machineTone(m: Machine): Tone {
   if (m.status === 'deploying') return 'blue';
   if (m.status === 'error') return 'red';
+  // Paused from its tray app (w1532): online, but it takes no work.
+  if (m.online && m.pause?.paused) return 'amber';
   return m.online ? 'green' : 'grey';
 }
 
 export function machineLabel(m: Machine): string {
   if (m.status === 'deploying') return 'Setting up';
   if (m.status === 'error') return 'Error';
+  if (m.online && m.pause?.paused) return 'Paused';
   return m.online ? 'Online' : 'Offline';
+}
+
+/** Why a machine is paused (w1532: its tray app, its schedule or a person in use), in two words; undefined while it runs. */
+export function pauseGlance(m: Pick<Machine, 'pause'> | undefined): string | undefined {
+  const p = m?.pause;
+  if (!p?.paused) return undefined;
+  return `paused (${p.reason === 'activity' ? 'in use' : p.reason === 'schedule' ? 'schedule' : 'by hand'})`;
 }
 
 export function sandboxTone(s: SandboxStatus): Tone {
@@ -390,6 +400,8 @@ export function machineGlance(m: Machine, sessions: SessionInfo[], now: number):
   if (m.status === 'deploying') return { tone: 'blue', label: 'Setting up', detail: m.statusDetail, attention, progress: true };
   if (m.status === 'error') return { tone: 'red', label: 'Error', detail: firstLine(m.statusDetail), attention };
   if (!m.online) return { tone: 'grey', label: 'Offline', detail: m.lastSeen ? `seen ${fmtRelative(m.lastSeen, now)}` : 'never connected', attention };
+  // Paused from its tray app (w1532): it takes no work until it runs again; the detail says why and until when.
+  if (m.pause?.paused) return { tone: 'amber', label: 'Paused', detail: m.pause.detail, attention };
   const g = agentsGlance(displayName(m), sessions, attention, undefined, false);
   return g.label === 'Idle' || g.label === 'No agents' ? { ...g, tone: 'green', label: 'Online' } : g;
 }

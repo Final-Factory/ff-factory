@@ -7,7 +7,7 @@
 #
 # windows.yml runs when a pull request touches a test or a covered file here (its paths list, checked against this file
 # by scripts/windows-tests.test.ts). A test skipped everywhere but Windows must be listed here, or it would never run.
-server/machineDeployWin.test.ts | server/machineDeployWin.ts, server/machineDeploy.ts, machine/** | Windows PowerShell 5.1 for real: the stop with Win32_Process and scheduled tasks, the probe, every script parsing in 5.1, the bootstrap under cmd.exe and PowerShell, install, the daemon saying hello as win32, uninstall
+server/machineDeployWin.test.ts | server/machineDeployWin.ts, server/machineDeploy.ts, machine/** | Windows PowerShell 5.1 for real: the stop with Win32_Process and scheduled tasks, the probe, every script parsing in 5.1, the bootstrap under cmd.exe and PowerShell, install, the daemon saying hello as win32, uninstall; the tray app built with the in-box csc, its low-level input hooks and a SendInput key seen as injected (w1532)
 server/machineDialogs.test.ts | server/watchdog.ts, scripts/unity-windows.ps1 | real WinForms windows listed and closed
 server/republish.test.ts | scripts/republish-public.ps1, scripts/common.ps1 | Windows PowerShell 5.1 with Win32_Process (Get-Supervisor) and .cmd shims
 server/updateSteps.test.ts | scripts/update-steps.ps1 | the portal host's updater under Windows PowerShell 5.1 with the real npm.cmd (Linux runs it under pwsh 7)

@@ -48,6 +48,7 @@ import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, pausedIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
 import { asksAPerson, holdsOf, servedBy } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, resolveNeeds } from '../shared/capacity.ts';
+import type { HandBack } from './machinePause.ts';
 import { heldText, roomIds, type RoomNow } from './placement.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
@@ -984,6 +985,33 @@ export class Orchestrators {
     }
     this.stamp(w, `taken off worker ${sessionId}: ${why}`);
     this.store.putWork(w);
+  }
+
+  /**
+   * A request handed back from a paused machine (w1532, server/machinePause.ts): taken off its worker, Queued for another
+   * computer with the branch and the note its next worker's handover carries (WorkItem.handedBack), and the dispatcher told
+   * at once how to place it. The paused machine is held (placement.hold), so placement never picks it.
+   */
+  handBack(w: WorkItem, s: Pick<SessionInfo, 'id' | 'title'>, h: HandBack) {
+    if (!isOpen(w)) return;
+    const from = `${h.machine}${h.sandbox ? `/${h.sandbox}` : ''}`;
+    const now = this.now().toISOString();
+    w.handedBack = { at: now, from, session: s.id, ...(h.branch ? { branch: h.branch } : {}), why: h.why, note: clip(h.note, 600), how: h.how, ...(h.saved ? { saved: h.saved } : {}), ...(h.message ? { message: clip(h.message, 2000) } : {}) };
+    this.moveOff(w, s.id, `handed back: ${h.machine} is ${h.why} (${h.how})`);
+    w.status = 'queued';
+    w.queuedFor = { at: now };
+    this.stamp(w, `handed back from ${from}: queued for another computer, from branch ${h.branch ?? 'unknown'}; note: ${clip(h.note, 200)}${h.saved ? `; ${h.saved}` : ''}`);
+    this.store.putWork(w);
+    const agent = needsOf(w) === 'agent';
+    const facts = this.roomNow();
+    const room = roomIds(facts, needsOf(w));
+    const where = room.length ? `${agent ? 'Agent slots' : 'Room'} now: ${room.join(', ')}.` : `No computer has ${agent ? 'an agent slot' : 'room'} now: it stays Queued, and the capacity ping names it when one frees.`;
+    const how = agent
+      ? `start_agent with work_id "${w.id}" in a FREE sandbox on another computer${h.branch ? `, and say in your text that it continues from the pushed branch ${h.branch} of its repository (in its own clone)` : ''}`
+      : `${h.branch ? `switch_branch a FREE sandbox on another computer to "${h.branch}" (it fetches the pushed branch), then ` : ''}start_agent with work_id "${w.id}" in that sandbox`;
+    this.toDispatcher(
+      `[ledger] HANDED BACK (w1532): ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) was taken off worker ${s.id} on ${from}, because ${h.machine} is ${h.why} (${h.how}). ${h.branch ? `Its work is on the branch ${h.branch}` : 'Its branch is unknown'}${h.saved ? `; ${h.saved}` : ''}. Place it on a computer that is not paused: ${how}. The new worker's handover carries the branch, its note${h.message ? ' and the message that was waiting for it' : ''}. ${where} Its note: ${clip(h.note, 300)}`,
+    );
   }
 
   /**

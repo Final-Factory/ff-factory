@@ -52,6 +52,9 @@ import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { attachmentLine } from '../shared/attachments.ts';
+import { PauseKeeper, pauseFile } from './pause.ts';
+import { trayView } from './pauseRules.ts';
+import { TrayHost, trayInstance } from './tray.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { machinePlatformOf, type AttachmentRef, type CompactionTrigger, type HostHealth, type HostStats, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
@@ -92,6 +95,11 @@ export interface DaemonConfig {
   unityEditorRoot?: string;
   /** The Unity editor executable itself. */
   unityPath?: string;
+  /**
+   * The tray app (w1532, machine/tray.ts): on a Windows PC the daemon builds it and starts it in the logged-on session, with
+   * the pause, the schedule and the activity watch. The entry point turns it on; a daemon a test builds has none unless asked.
+   */
+  tray?: boolean;
   /** Scratch folder for agents: their TMP, TEMP and TMPDIR. */
   tempDir?: string;
   /** The Max events file agents here append to (docs/max.md); default ~/.config/ff-factory/max-events.jsonl, null: none. */
@@ -337,6 +345,11 @@ export class Daemon {
 
   /** The GPU Whisper for the portal's mic (cfg.voice, w615), when it is on. */
   readonly voice?: DaemonVoice;
+  /** Its owner's pause (w1532, machine/pause.ts): the tray's, the schedule's and a person's input, kept in pause.json. */
+  readonly pause: PauseKeeper;
+  private tray?: TrayHost;
+  /** Every message from the tray app, for a demo or a test that asks it something (menu_layout, counts). */
+  readonly trayEvents = new EventEmitter();
 
   /** The host guard (cfg.hostGuard, Windows; tests give effects). */
   guard?: MachineGuard;
@@ -352,6 +365,14 @@ export class Daemon {
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
     const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line));
     this.procs = () => pd.procs();
+    this.pause = new PauseKeeper({
+      file: pauseFile(appDirOfConfig(cfg)),
+      log: (line) => log(line),
+      changed: (p) => {
+        this.send({ type: 'pause', pause: p });
+        this.trayState();
+      },
+    });
     this.slots = new UnitySlots({
       dir: cfg.unitySlotsDir ?? path.join(appDirOfConfig(cfg), 'unity-slots'),
       platform,
@@ -755,6 +776,20 @@ export class Daemon {
     }
     this.startGuard();
     this.connect();
+    // The pause (w1532): its schedule and a person's 90 minutes run here; the tray app shows it and feeds it on a Windows PC.
+    this.pause.start();
+    if (this.cfg.tray && process.platform === 'win32') {
+      const appDir = appDirOfConfig(this.cfg);
+      this.tray = new TrayHost({
+        appDir,
+        instance: trayInstance(appDir),
+        log: (line) => log(line),
+        status: (st) => this.pause.setTray(st),
+        message: (m) => this.onTray(m),
+      });
+      void this.tray.start();
+      this.timers.push(setInterval(() => this.trayState(), 30_000));
+    } else this.pause.setTray(process.platform === 'win32' ? 'off (daemon.json tray)' : 'none (Windows only)');
     // The machine's gh login and its token's scopes (w1463): read now, every 30 minutes, and when gh's hosts file changes.
     if (this.probes.gh) {
       this.ghLogin = new GhLoginWatch({ run: this.probes.gh, look: () => lookHostsFile(), now: () => new Date(), send: (gh) => this.send({ type: 'gh_login', gh }), log: (line) => log(line) });
@@ -868,6 +903,8 @@ export class Daemon {
 
   shutdown() {
     this.stopped = true;
+    this.tray?.stop();
+    this.pause.stop();
     this.guard?.stop();
     clearTimeout(this.usageTimer);
     for (const t of this.timers) clearInterval(t);
@@ -995,6 +1032,61 @@ export class Daemon {
     });
   }
 
+  /** A message from the tray app (w1532, machine/tray/FFFactoryTray.cs). */
+  private onTray(m: Record<string, unknown>) {
+    this.trayEvents.emit('message', m);
+    switch (m.type) {
+      case 'hello':
+        this.trayState();
+        return;
+      case 'pause':
+      case 'unpause':
+        this.pause.command(m.type === 'pause');
+        return;
+      case 'input':
+        this.pause.input(String(m.kind ?? 'input'), Number(m.at));
+        return;
+      case 'injected':
+        this.pause.injected(Number(m.keys) || 0, Number(m.clicks) || 0);
+        return;
+      case 'settings':
+        this.pause.setSettings(m.settings);
+        return;
+      case 'log':
+        log(`tray: ${String(m.text ?? '').slice(0, 500)}`);
+        return;
+    }
+  }
+
+  /** What the tray shows: the state, why and what comes next, the agents here and the portal link. */
+  private trayState() {
+    if (!this.tray) return;
+    const p = this.pause.current();
+    const settings = this.pause.currentSettings();
+    const v = trayView(settings, p, Date.now());
+    const working = [...this.entries.values()].filter((e) => e.s.live && isMidTurn(e.s.info)).length;
+    const connected = this.ws?.readyState === WebSocket.OPEN && this.welcomed;
+    // Paused, an agent still at work is finishing its step to hand back (w1532 critic: "1 agent working" under Paused read as a failed pause).
+    const agents = working === 0 ? 'No agents working here' : `${working} agent${working === 1 ? '' : 's'} ${p.paused ? 'finishing a step' : 'working here'}`;
+    const work = `${agents} · portal ${connected ? 'connected' : 'not connected'}`;
+    this.tray.send({ type: 'state', paused: p.paused, reason: p.reason ?? null, why: v.why, next: v.next ?? null, tip: v.tip ?? null, schedule: v.schedule, work, settings, machine: this.cfg.id, portalUrl: this.cfg.portalUrl });
+  }
+
+  /** For a still of the tray (w1532): open or close its menu or the schedule window. */
+  trayShow(what: 'show_menu' | 'hide_menu' | 'show_schedule' | 'hide_schedule' | 'menu_layout' | 'counts') {
+    this.tray?.send({ type: what });
+  }
+
+  /** Press a tray menu item (its own click handler): "toggle" is Pause / Unpause. For a demo where injected clicks are dropped. */
+  trayPress(item: 'toggle' | 'schedule') {
+    this.tray?.send({ type: 'press', item });
+  }
+
+  /** Have the tray draw its menu or schedule window into a PNG at `file` (a still for a review, w1532). */
+  trayRender(what: 'menu' | 'schedule', file: string) {
+    this.tray?.send({ type: 'render', what, path: file });
+  }
+
   private heartbeat() {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -1064,6 +1156,8 @@ export class Daemon {
       liveViews: this.liveViews(),
       // It compacts an idle agent on request and says a compaction's turn end (w1469, the workers' automatic compaction).
       compact: true,
+      // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
+      pause: this.pause.current(),
       // A worker root install (w513): its folders, for a record the portal never deployed.
       ...(this.cfg.root
         ? { layout: { root: this.cfg.root, appDir: appDirOfConfig(this.cfg), repoPath: this.cfg.repoPath, tempDir: this.cfg.tempDir, sandboxes: this.cfg.sandboxes ?? null } }
@@ -2066,6 +2160,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   process.env.FF_APP_DIR = appDirOfConfig(cfg);
   // The real daemon answers the machine's own Unity slots mailbox, where scripts look (a worker root keeps its own).
   cfg.unitySlotsDir ??= slotsDir();
+  // The tray app (w1532): on unless daemon.json says "tray": false.
+  cfg.tray ??= true;
   const d = new Daemon(cfg);
   d.start();
   log(`FF Factory daemon for machine ${cfg.id}, repo ${cfg.repoPath}, portal ${cfg.portalUrl}`);
