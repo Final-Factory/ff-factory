@@ -147,7 +147,7 @@ namespace FFFactory
             // The check mark and the state dot at this PC's scale (WinForms draws them at 16 px otherwise).
             menu.ImageScalingSize = SystemInformation.SmallIconSize;
             // Flat, as Windows 11's own menus are: one background, a light hover, thin separators (not WinForms' gradient margin).
-            menu.Renderer = new ToolStripProfessionalRenderer(new FlatColours()) { RoundedEdges = false };
+            menu.Renderer = new FlatRenderer();
             menu.Padding = new Padding(2, 4, 2, 4);
             foreach (ToolStripItem it in new ToolStripItem[] { toggle, schedule, activity, portal }) it.Padding = new Padding(0, 3, 0, 3);
             menu.Items.AddRange(new ToolStripItem[] { title, stateLine, whyLine, nextLine, workLine, new ToolStripSeparator(), toggle, new ToolStripSeparator(), scheduleLine, schedule, activity, new ToolStripSeparator(), portal });
@@ -432,6 +432,8 @@ namespace FFFactory
                 if (what == "menu") { if (!menu.Visible) ShowMenuAtIcon(); c = menu; }
                 else if (what == "schedule") { ShowSchedule(); c = scheduleForm; }
                 if (c == null || string.IsNullOrEmpty(path)) return;
+                // Painted before it is drawn into the still (a window just opened has not painted yet).
+                c.Refresh();
                 Application.DoEvents();
                 Native.RECT r;
                 Native.GetWindowRect(c.Handle, out r);
@@ -533,6 +535,29 @@ namespace FFFactory
                 single.ReleaseMutex();
             }
             return 0;
+        }
+    }
+
+    // Windows draws a menu's check mark at 100% size whatever the scale (the w1532 critic saw a 7 px tick beside 15 px capitals):
+    // this one is drawn to fit the item's image box, which ImageScalingSize scales.
+    class FlatRenderer : ToolStripProfessionalRenderer
+    {
+        public FlatRenderer() : base(new FlatColours()) { RoundedEdges = false; }
+
+        protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+        {
+            Rectangle r = e.ImageRectangle;
+            float w = r.Width, h = r.Height;
+            var g = e.Graphics;
+            var old = g.SmoothingMode;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var pen = new Pen(Color.FromArgb(0x1F, 0x23, 0x28), Math.Max(1.5f, w / 10f)))
+            {
+                pen.StartCap = pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
+                g.DrawLines(pen, new[] { new PointF(r.X + w * 0.22f, r.Y + h * 0.52f), new PointF(r.X + w * 0.42f, r.Y + h * 0.72f), new PointF(r.X + w * 0.80f, r.Y + h * 0.30f) });
+            }
+            g.SmoothingMode = old;
         }
     }
 
