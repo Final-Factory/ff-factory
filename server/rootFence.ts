@@ -26,6 +26,11 @@ export interface RootFenceContext {
   allow?: string[];
   /** The user's home folder (`~`, `$HOME`, `%USERPROFILE%`, AppData). Default: os.homedir(). */
   home?: string;
+  /**
+   * The session's own temp folder name (`ffa-<session>`): a saves folder entry named `<saveTag>-<name>` is its save copy and
+   * may go (w1505). Absent: no save entry may go.
+   */
+  saveTag?: string;
 }
 
 const DELETE_VERBS = new Set(['rm', 'rmdir', 'unlink', 'rd', 'del', 'erase', 'remove-item', 'ri']);
@@ -43,12 +48,57 @@ const VALUE_FLAGS = new Set(['-erroraction', '-ea', '-include', '-exclude', '-fi
 const PATH_FLAGS = new Set(['-path', '-literalpath', '-lp']);
 
 const TMP_VAR = /^(?:\$env:(?:tmp|temp)|\$\{?(?:tmp|temp|tmpdir)\}?|%(?:tmp|temp)%)(?=$|[\\/])/i;
-const SAVES = /\/never games\/finalfactory[^/]*\/saves\/[^/*?]+/i;
+/**
+ * One entry of the game's saves folder (GameDataPaths.Saves: `<persistentDataPath>/UserData/saves`, `saves` before the
+ * UserData layout), on Windows (AppData/LocalLow), Linux (~/.config/unity3d) and macOS (Library/Application Support).
+ */
+const SAVES = /\/(?:appdata\/locallow|\.config\/unity3d|library\/application support)\/never games\/finalfactory[^/]*\/(?:userdata\/)?saves\/([^/*?[\]{}]+)$/i;
 
-const unquote = (w: string) => w.replace(/^["']|["']$/g, '');
+/**
+ * Whether a backslash at `i` escapes the whitespace or quote after it (Bash's `Never\ Games`). In a Windows path a backslash
+ * is a separator: once the word has used one so (`D:\work\ffw\ -Recurse`), a backslash before a space ends the word.
+ */
+const escapes = (s: string, i: number, word: string) => s[i] === '\\' && i + 1 < s.length && /[\s"']/.test(s[i + 1]) && !/\\(?![\s"'])/.test(word);
 
-/** The words of a statement, quoted ones kept whole. */
-const words = (s: string) => s.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+/** A word with its shell quoting removed: quoted parts joined to the rest (`~/"Never Games"/x`), `\ ` as a space. */
+function unquote(w: string): string {
+  let out = '';
+  let q = '';
+  for (let i = 0; i < w.length; i++) {
+    const c = w[i];
+    if (q) {
+      if (c === q) q = '';
+      else out += c;
+    } else if (c === '"' || c === "'") q = c;
+    else if (escapes(w, i, w.slice(0, i))) out += w[++i];
+    else out += c;
+  }
+  return out;
+}
+
+/** The words of a statement, as written: a quoted part or an escaped space belongs to its word (w1505). */
+function words(s: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let q = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) {
+      cur += c;
+      if (c === q) q = '';
+    } else if (c === '"' || c === "'") {
+      q = c;
+      cur += c;
+    } else if (escapes(s, i, cur)) {
+      cur += c + s[++i];
+    } else if (/\s/.test(c)) {
+      if (cur) out.push(cur);
+      cur = '';
+    } else cur += c;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
 
 /** The program a word names, lower case, without a directory or `.exe`. */
 const verbOf = (w: string) => unquote(w).replace(/\\/g, '/').split('/').pop()!.replace(/\.exe$/i, '').toLowerCase();
@@ -175,12 +225,19 @@ export function checkOutsideRootDelete(cmd: string, ctx: RootFenceContext): stri
   const root = norm(ctx.root);
   const allowed = [root, ...(ctx.allow ?? []).map(norm)];
   let dir: string | undefined = ctx.cwd ? norm(ctx.cwd) : undefined;
+  const tag = ctx.saveTag?.toLowerCase();
+
+  /** A save copy of this session: one entry `<tag>-<name>` of the game's saves folder, written without a `..`. */
+  const ownSave = (raw: string, n: string): boolean => {
+    const m = SAVES.exec(n);
+    return !!tag && !!m && m[1].startsWith(`${tag}-`) && m[1].length > tag.length + 1 && !unquote(raw).replace(/\\/g, '/').split('/').includes('..');
+  };
 
   const judge = (raw: string): string | undefined => {
     const n = resolvePath(raw, { home, cwd: dir, win });
     if (n === undefined || n === 'ok') return undefined;
     if (allowed.some((a) => strictlyInside(n, a))) return undefined;
-    if (SAVES.test(n)) return undefined;
+    if (ownSave(raw, n)) return undefined;
     const why = allowed.includes(n) ? `${unquote(raw)} is the install folder itself` : `${unquote(raw)} is outside this machine's worker install folder (${ctx.root})`;
     return (
       `Refused: ${why}. Disk clean-up deletes only inside the worker install folder (lothsahn, 2026-10-10, w896: "in general we should only be ` +

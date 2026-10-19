@@ -114,6 +114,21 @@ test('w913: a save copy named with the session\'s own tag may go; any other save
   refused(`rm -f "/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory/UserData/settings/settings.json"`);
 });
 
+test("w1505: the saves folder on Linux and macOS too, its path quoted, escaped or with a quoted part", () => {
+  const lin = '/home/u/.config/unity3d/Never Games/finalfactory/UserData/saves';
+  ok(`rm -f "${lin}/ffa-ee5b82dc-w1487-life.zip"`, posix);
+  ok(`rm -f '${lin}/ffa-ee5b82dc-w1487-life.zip'`, posix);
+  ok('rm -f ~/.config/unity3d/"Never Games"/finalfactory/UserData/saves/ffa-ee5b82dc-w1487-life.zip', posix);
+  ok('rm -f /home/u/.config/unity3d/Never\\ Games/finalfactory/UserData/saves/ffa-ee5b82dc-w1487-life.zip', posix);
+  ok('rm -f "/Users/u/Library/Application Support/Never Games/finalfactory/UserData/saves/ffa-ee5b82dc-a.zip"', posix);
+  ok('rm -f /c/Users/rydin/AppData/LocalLow/Never\\ Games/finalfactory/UserData/saves/ffa-ee5b82dc-a.zip');
+  refused(`rm -f "${lin}/ffa-0000aaaa-w1487-life.zip"`, posix);
+  refused(`rm -f "${lin}/My Base.zip"`, posix);
+  refused(`rm -f "${lin}/ffa-ee5b82dc-x/../../settings/settings.json"`, posix);
+  refused('rm -f /home/u/.config/unity3d/Never Games/finalfactory/UserData/saves/ffa-ee5b82dc-w1487-life.zip', posix);
+  refused('rm -f "/home/u/Documents/Never Games/finalfactory/saves/ffa-ee5b82dc-a.zip"', posix);
+});
+
 /**
  * w1097 (lothsahn, 2026-10-12: "Why did it do that, and how do we allow it to do what it just needed to do without a
  * complex bash prompt?"): w1079's test leg, a shell function with a retry loop that restores the game's settings, runs the

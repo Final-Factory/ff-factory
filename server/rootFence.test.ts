@@ -12,6 +12,10 @@ import { sandboxGuard } from './guard.ts';
 
 const WIN: RootFenceContext = { root: 'D:\\work\\ffw', cwd: 'D:\\work\\ffw\\sandboxes\\slot5', allow: ['D:\\work\\ffw\\sandboxes\\slot5'], home: 'C:\\Users\\loth' };
 const MAC: RootFenceContext = { root: '/Users/Shared/ffw', cwd: '/Users/Shared/ffw/sandboxes/slot1', home: '/Users/loth' };
+/** With the session's save tag: the guard takes it from the shell's TMPDIR (`ffa-<session>`). */
+const WIN_TAG: RootFenceContext = { ...WIN, saveTag: 'ffa-1' };
+const MAC_TAG: RootFenceContext = { ...MAC, saveTag: 'ffa-2' };
+const LINUX: RootFenceContext = { root: '/home/ben-ryding/ffw', cwd: '/home/ben-ryding/ffw/sandboxes/slot1', allow: ['/home/ben-ryding/ffw/sandboxes/slot1'], home: '/home/ben-ryding', saveTag: 'ffa-c1687d63' };
 const refused = (cmd: string, ctx = WIN) => checkOutsideRootDelete(cmd, ctx);
 const fine = (cmd: string, ctx = WIN) => assert.equal(checkOutsideRootDelete(cmd, ctx), undefined, cmd);
 const no = (cmd: string, ctx = WIN) => assert.match(checkOutsideRootDelete(cmd, ctx) ?? '', /^Refused: .* (?:is outside this machine's worker install folder|is the install folder itself)/, cmd);
@@ -69,10 +73,10 @@ test("inside the install folder, the worker's own temp, its sandbox and a save c
   fine('rm -f /tmp/note.txt');
   fine('cd D:\\work\\ffw\\tmp && rm -rf scratch');
   fine('cd .. && rm -rf slot4-copy');
-  fine('rm -f "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory/saves/w512-copy.zip"');
-  fine('Remove-Item "$env:USERPROFILE\\AppData\\LocalLow\\Never Games\\finalfactory\\saves\\w512-copy.zip"');
+  fine('rm -f "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory/saves/ffa-1-w512-copy.zip"', WIN_TAG);
+  fine('Remove-Item "$env:USERPROFILE\\AppData\\LocalLow\\Never Games\\finalfactory\\UserData\\saves\\ffa-1-w512-copy.zip"', WIN_TAG);
   fine('rm -rf /Users/Shared/ffw/tmp/ffa-2', MAC);
-  fine('rm -rf "/Users/loth/Library/Application Support/Never Games/finalfactory/saves/w512-copy.zip"', MAC);
+  fine('rm -rf "/Users/loth/Library/Application Support/Never Games/finalfactory/saves/ffa-2-w512-copy.zip"', MAC_TAG);
   // Not judged: what the text does not say.
   fine('rm $F');
   fine('rm -rf $(ls -d /c/Users/loth/x*)');
@@ -88,9 +92,71 @@ test("inside the install folder, the worker's own temp, its sandbox and a save c
 });
 
 test('the saves allowance covers one entry, never the whole folder or a wildcard of it', () => {
-  no('rm -rf "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory/saves"');
-  no('rm -f "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory/saves/*"');
-  no('rm -rf "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory"');
+  no('rm -rf "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory/saves"', WIN_TAG);
+  no('rm -f "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory/saves/*"', WIN_TAG);
+  no('rm -f "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory/saves/ffa-1-*"', WIN_TAG);
+  no('rm -rf "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory"', WIN_TAG);
+  no('rm -rf "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory/UserData/saves/ffa-1-dir/inner"', WIN_TAG);
+});
+
+/**
+ * w1505: worker c1687d63 (w1487, biscuit) was refused twice deleting its own save copy, because the fence cut the path at
+ * the space in "Never Games" (its transcript: `Refused: ~/.config/unity3d/"Never is outside ...` and `Refused:
+ * /home/ben-ryding/.config/unity3d/Never\ is outside ...`), and its saves pattern did not know Linux's folder.
+ */
+test("a worker's own save copy goes on Linux, Windows and macOS, its path quoted or escaped", () => {
+  const linux = (cmd: string) => fine(cmd, LINUX);
+  // The two commands worker c1687d63 ran, word for word.
+  linux('cd /home/ben-ryding/ffw/sandboxes/slot1; rm -f ~/.config/unity3d/"Never Games"/finalfactory/UserData/saves/ffa-c1687d63-w1487-life.zip; git fetch -q origin');
+  linux('rm -f /home/ben-ryding/.config/unity3d/Never\\ Games/finalfactory/UserData/saves/ffa-c1687d63-w1487-life.zip; ls /home/ben-ryding/.config/unity3d/Never\\ Games/finalfactory/UserData/saves/ | grep -c ffa-c1687d63');
+  linux('rm -f "/home/ben-ryding/.config/unity3d/Never Games/finalfactory/UserData/saves/ffa-c1687d63-w1487-life.zip"');
+  linux("rm -f '/home/ben-ryding/.config/unity3d/Never Games/finalfactory/UserData/saves/ffa-c1687d63-w1487-life.zip'");
+  linux('rm -f "$HOME/.config/unity3d/Never Games/finalfactory/UserData/saves/ffa-c1687d63-w1487-life.zip"');
+  linux('rm -f ~/.config/unity3d/Never\\ Games/finalfactory/UserData/saves/ffa-c1687d63-w1487-life.zip');
+  // Windows: PowerShell, Git Bash and cmd spellings.
+  const win = (cmd: string) => fine(cmd, WIN_TAG);
+  win('Remove-Item "C:\\Users\\loth\\AppData\\LocalLow\\Never Games\\finalfactory\\UserData\\saves\\ffa-1-w512-copy.zip"');
+  win("Remove-Item -LiteralPath 'C:\\Users\\loth\\AppData\\LocalLow\\Never Games\\finalfactory\\UserData\\saves\\ffa-1-w512-copy.zip' -Force");
+  win('rm -f /c/Users/loth/AppData/LocalLow/Never\\ Games/finalfactory/UserData/saves/ffa-1-w512-copy.zip');
+  win('rm -f ~/AppData/LocalLow/"Never Games"/finalfactory/UserData/saves/ffa-1-w512-copy.zip');
+  win('del /f "%USERPROFILE%\\AppData\\LocalLow\\Never Games\\finalfactory\\UserData\\saves\\ffa-1-w512-copy.zip"');
+  // macOS.
+  const mac = (cmd: string) => fine(cmd, MAC_TAG);
+  mac('rm -f "/Users/loth/Library/Application Support/Never Games/finalfactory/UserData/saves/ffa-2-life.zip"');
+  mac('rm -f ~/Library/Application\\ Support/Never\\ Games/finalfactory/UserData/saves/ffa-2-life.zip');
+  mac("rm -f ~/'Library/Application Support/Never Games'/finalfactory/UserData/saves/ffa-2-life.zip");
+});
+
+test('a path with a space left unquoted is two paths to the shell, and the first is outside', () => {
+  // Bash and PowerShell both pass `.../Never` and `Games/...` (relative) as two arguments: never the save.
+  const msg = refused('rm -f /home/ben-ryding/.config/unity3d/Never Games/finalfactory/UserData/saves/ffa-c1687d63-w1487-life.zip', LINUX);
+  assert.match(msg ?? '', /^Refused: \/home\/ben-ryding\/\.config\/unity3d\/Never is outside/);
+  no('Remove-Item C:\\Users\\loth\\AppData\\LocalLow\\Never Games\\finalfactory\\UserData\\saves\\ffa-1-x.zip', WIN_TAG);
+});
+
+test("another session's save, a person's save, a path escaping with .. and other folders under Never Games stay refused", () => {
+  const S = '/home/ben-ryding/.config/unity3d/Never Games/finalfactory/UserData/saves';
+  no(`rm -f "${S}/ffa-deadbeef-w1487-life.zip"`, LINUX);
+  no(`rm -f "${S}/ffa-c1687d630-life.zip"`, LINUX);
+  no(`rm -f "${S}/ffa-c1687d63"`, LINUX);
+  no(`rm -f "${S}/autosave.zip"`, LINUX);
+  no(`rm -f "${S}/My Base.zip"`, LINUX);
+  no(`rm -f "${S}/ffa-c1687d63-x/../../../../.ssh/id_ed25519"`, LINUX);
+  no(`rm -f "${S}/../saves/ffa-deadbeef-x.zip"`, LINUX);
+  no(`rm -f "${S}/ffa-c1687d63-x/../ffa-deadbeef-y.zip"`, LINUX);
+  no(`rm -rf "${S}/../../LocalSettings"`, LINUX);
+  no('rm -rf ~/.config/unity3d/"Never Games"/finalfactory/Player.log', LINUX);
+  no('rm -rf ~/.config/unity3d/Never\\ Games/finalfactory/UserData', LINUX);
+  // A folder named like the saves folder somewhere else is not the game's.
+  no('rm -f "/home/ben-ryding/Documents/Never Games/finalfactory/saves/ffa-c1687d63-x.zip"', LINUX);
+  no('rm -f "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory/saves/ffa-2-x.zip"', WIN_TAG);
+  no('rm -f "C:/Users/loth/AppData/LocalLow/Never Games/finalfactory/saves/w512-copy.zip"', WIN_TAG);
+  no('rm -f "/Users/loth/Library/Application Support/Never Games/finalfactory/saves/ffa-1-x.zip"', MAC_TAG);
+  // Without a tag (no TMPDIR of ours) no save goes.
+  no(`rm -f "${S}/ffa-c1687d63-w1487-life.zip"`, { ...LINUX, saveTag: undefined });
+  // An escaped space does not join a Windows path with the next word: `D:\work\ffw\ -Recurse` is the install folder itself.
+  no('Remove-Item D:\\work\\ffw\\ -Recurse', WIN_TAG);
+  no('Remove-Item D:\\work\\ffw\\ tmp -Recurse', WIN_TAG);
 });
 
 test('the message says the rule, what to do instead and who said it', () => {
@@ -118,4 +184,10 @@ test('the sandbox guard applies it when the spec carries a worker root, and not 
   assert.equal((await run(without, cmd))?.permissionDecision, undefined);
   assert.equal((await run(withRoot, 'rm -rf Builds/old'))?.permissionDecision, undefined);
   assert.equal((await run(withRoot, 'rm -rf /d/work/ffw/tmp/ffa-1/clone'))?.permissionDecision, undefined);
+  // w1505: the save tag comes from the shell's TMPDIR.
+  const tagged = sandboxGuard({ sandboxId: 'slot5', sandboxPath: 'D:/work/ffw/sandboxes/slot5', protectedPaths: ['D:/work/mainrepo'], workerRoot: 'D:\\work\\ffw', env: { TMPDIR: 'D:\\work\\ffw\\tmp\\ffa-c1687d63' } });
+  const save = (name: string) => `rm -f C:/Users/loth/AppData/LocalLow/"Never Games"/finalfactory/UserData/saves/${name}`;
+  assert.equal((await run(tagged, save('ffa-c1687d63-w1487-life.zip')))?.permissionDecision, undefined);
+  assert.equal((await run(tagged, save('ffa-deadbeef-w1487-life.zip')))?.permissionDecision, 'deny');
+  assert.equal((await run(withRoot, save('ffa-c1687d63-w1487-life.zip')))?.permissionDecision, 'deny');
 });

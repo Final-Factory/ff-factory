@@ -41,8 +41,11 @@ const PS_PATH = new Set(['-path', '-literalpath']);
 
 const TMP_VAR = /^(?:\$env:(?:tmp|temp|tmpdir)|\$\{(?:tmp|temp|tmpdir)\}|\$(?:tmp|temp|tmpdir)|%(?:tmp|temp)%)(?=$|[\\/])/i;
 const HOME_VAR = /^(?:~|\$home|\$\{home\}|\$userprofile|\$\{userprofile\}|\$env:userprofile|\$env:home|%userprofile%)(?=$|[\\/])/i;
-/** The game's saves folder: `UserData/saves` since the game's UserData layout (GameDataPaths.Saves), `saves` before it. */
-const SAVES_DIR = /\/appdata\/locallow\/never games\/finalfactory[^/]*\/(?:userdata\/)?saves\/([^/*?]+)$/i;
+/**
+ * The game's saves folder: `UserData/saves` since the game's UserData layout (GameDataPaths.Saves), `saves` before it, on
+ * Windows (AppData/LocalLow), Linux (~/.config/unity3d) and macOS (Library/Application Support) (w1505).
+ */
+const SAVES_DIR = /\/(?:appdata\/locallow|\.config\/unity3d|library\/application support)\/never games\/finalfactory[^/]*\/(?:userdata\/)?saves\/([^/*?]+)$/i;
 
 interface Word {
   text: string;
@@ -71,6 +74,10 @@ function words(stmt: string): Word[] | undefined {
       q = c;
       has = true;
       if (c === '"') lit = false;
+    } else if (c === '\\' && /[\s"']/.test(stmt[i + 1] ?? '') && !cur.includes('\\')) {
+      // Bash's `Never\ Games`; in a Windows path (`D:\work\ffw\ -Recurse`) a backslash is a separator and the space ends the word.
+      cur += stmt[++i];
+      has = true;
     } else if (/\s/.test(c)) {
       if (has) out.push({ text: cur, literal: lit });
       cur = '';
