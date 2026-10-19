@@ -107,6 +107,30 @@ it runs (`liveViews`), and the portal acts on the hello:
 Before this, the page kept showing the view as live with the last frame. Every knob was then refused with "this live
 view is not running on the machine".
 
+## While it waits on you (w1582)
+
+Ben steers the art in the view by talking to the agent, often hours after its turn ended. Ben, 2026-10-19: "The live
+views aren't working". Four art workers (w1465, w1466, w1468, w1475) had each ended a turn waiting on him with a view
+up, and the w890 release (machines.md, "Placing work") stopped each about 6 minutes later and released its sandbox 4
+minutes after that. The portal journal shows it for w1465's c522aec6 on 2026-10-19: wait declared 19:29Z, stopped
+19:35Z, released 19:39Z, and the same at 20:00Z/20:01Z and 20:38Z/20:39Z after each check-in. His words then went to
+a stopped agent, which had to start again (on lothdesktop it could not: the disk floor), and the sandbox's editor went
+to other work or stopped idle two hours later, so the view held its last frame or showed the next worker's game.
+
+Now:
+- **Held.** A worker whose view runs while it waits on a person (its `waiting_on_person`, or a request of it Waiting
+  on input) is neither stopped nor released for `LIVE_HOLD_MS` (12 hours) after its last activity:
+  `Agents.liveHold`, `releaseStep` in `server/placeAgain.ts`, and the idle reaper's `keepIdle`. list_sandboxes says
+  "its Live view is up while it waits on Ben". A wait on a deploy, a request or CI is no hold: nobody is about to look.
+- **The editor stays up.** The daemon counts a running view as activity in its sandbox (`sandboxActivity`,
+  `machine/daemon.ts`), so the 120-minute idle stop leaves its editor alone while the view runs.
+- **Ended, then staged again.** When the hold is over, or the sandbox is released any other way, the release pass stops
+  the view (`PlaceAgainDeps.liveLost`, `LiveHub.endFor`), so it never shows another worker's game, and records it on the
+  session (`SessionInfo.liveLost`). The worker's next message, a person's or its check-in, starts with a `[live view]`
+  line (`liveLostNote`): start the editor, stage the scene, and `live_view start` with the same materials, fps and width
+  before answering. A stopped worker whose sandbox stays its (unsaved work) past the hold has its view ended the same
+  way, so its editor can idle-stop.
+
 ## Measured, w1393 and w1398 (beast)
 
 - **Edit to frame:** a material property edit shows in the next rendered frame (17.5 ms). A knob sent through the

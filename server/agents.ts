@@ -14,7 +14,7 @@ import { eventsFileOf, maxEnv } from './maxEvents.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
-import { HOLD_PLACE_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
+import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, liveCounts, personWaitIn, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { reportTail, type NeedsYouWait } from './needsYou.ts';
 import { inlineReviewMedia, reviewRootOf } from './reviewMedia.ts';
@@ -544,6 +544,17 @@ export class Agents {
       order: (a, b) => this.resumeOrder(a, b),
       ciWait: (info) => this.ciWait(info),
       waitOn: (info) => this.waitOn(info),
+      liveHold: (info) => this.liveHold(info),
+      liveLost: (info, why) => {
+        void this.liveHub?.endFor(info.id).then((was) => {
+          if (!was) return;
+          const s = store.sessions.get(info.id) ?? info;
+          s.liveLost = { at: new Date().toISOString(), why, ...was };
+          store.putSession(s);
+          store.append(info.id, { kind: 'system', text: `Its Live view was stopped: its sandbox was released (${why}), so the view could no longer show its game. Its next message asks it to stage the view again (w1582).` });
+          console.log(`place again: stopped the Live view of ${info.id}: its sandbox was released (${why})`);
+        });
+      },
       // w1135: a worker whose open requests are all not the game's (w1098) resumes on an agent seat, not a game sandbox.
       agentOnly: (info) => {
         const open = this.workIdsOf(info).map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
@@ -795,6 +806,8 @@ export class Agents {
     if (snap.unanswered.length || snap.turnOpen || (snap.backgroundTasks ?? 0) > 0) return 'it has unanswered messages or background tasks';
     if (i.pendingPermissions.length) return 'it waits for a permission answer';
     if (!ignoreWake && this.waker.pending(i.id)) return 'its wake_me is pending';
+    const hold = this.liveHold(i);
+    if (hold) return hold;
     if (this.sessions.queued().some((q) => q.id === i.id)) return 'a message to it is queued';
     const git = i.machineId && i.machineSandbox ? this.store.machines.get(i.machineId)?.sandboxes?.find((x) => x.id === i.machineSandbox)?.git : undefined;
     if (git && git.dirty > 0 && !ignoreDirty) return `its sandbox has ${git.dirty} uncommitted change(s)`;
@@ -870,6 +883,31 @@ export class Agents {
     }
     return `it waits on ${parts.join('; ')}`;
   }
+  /**
+   * Why a worker keeps its process and its sandbox for its Live view (w1582), or undefined: a view of it runs, it waits on a
+   * person (its waiting_on_person, or a request of it Waiting on input), its work is not over, and it worked within
+   * LIVE_HOLD_MS. Ben steers the art in the view by talking to the agent: the w890 release stopped it minutes after its turn
+   * ended and gave its sandbox, and the editor behind the view, to other work (server/placeAgain.ts LIVE_HOLD_MS).
+   */
+  liveHold(i: SessionInfo, now = Date.now()): string | undefined {
+    if (i.kind !== 'worker' || !this.liveHub?.running(i.id)) return undefined;
+    if (!(now - Date.parse(i.lastActivityAt) < LIVE_HOLD_MS) || this.workOver(i)) return undefined;
+    const who = i.waitingOn?.who ?? this.personWait(i);
+    return who ? `its Live view is up while it waits on ${who} (w1582: held for ${LIVE_HOLD_MS / 3_600_000} h after its last activity)` : undefined;
+  }
+
+  /** Who a worker's requests wait on, when one of them is Waiting on input (the ledger's live state), else undefined. */
+  private personWait(i: SessionInfo): string | undefined {
+    const now = Date.now();
+    if (!this.waitLive || now - this.waitLive.at > 5000) this.waitLive = { at: now, live: this.workLive() };
+    for (const w of this.store.work.values()) {
+      if (!isWith(w, i.id) || !WORK_OPEN.includes(w.status)) continue;
+      const l = this.waitLive.live.get(w.id);
+      if (l?.state === 'waiting') return l.waitsOn?.length ? l.waitsOn.join(' and ') : 'a person';
+    }
+    return undefined;
+  }
+
   /**
    * Why this worker, at its turn's end, now waits long enough for its cache to go cold (w1469, the compaction before a
    * wait): what waitOn says (a person, another request, a merge, a deploy; never CI, which comes back within the hour

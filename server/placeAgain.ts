@@ -37,6 +37,16 @@ import { unityInstanceName } from '../shared/unityInstance.ts';
  */
 export const RELEASE_AFTER_MS = 30 * 60_000;
 
+/**
+ * How long a worker whose Live view is up keeps its process, its sandbox and its editor while it waits on a person (w1582):
+ * after its last activity, a working day and a half. Ben, on four art requests that waited on him in the Live view: "The
+ * live views aren't working". The release pass had stopped each about 6 minutes after its turn ended (w890) and released
+ * its sandbox 4 minutes later, so his words reached no agent and the editor behind the view went to other work. Past this
+ * the release goes ahead as before, and the view ends with it (liveLost): its next message asks it to stage the view again.
+ * The length is a guess: long enough for a wait overnight, short enough that a forgotten view frees its editor in a day.
+ */
+export const LIVE_HOLD_MS = 12 * 60 * 60_000;
+
 /** A sandbox a placement failed in is not tried again for this long (another is tried first). */
 export const RETRY_FAILED_MS = 10 * 60_000;
 
@@ -173,8 +183,11 @@ export function waitReleaseWhy(sb: MachineSandbox, waitOn: string | undefined): 
   return waitOn;
 }
 
-export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string; ciWait?: string; waitOn?: string }): ReleaseStep {
+export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string; ciWait?: string; waitOn?: string; liveHold?: string }): ReleaseStep {
   if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || !sb) return undefined;
+  // Its Live view is up while it waits on a person (w1582, LIVE_HOLD_MS): neither stopped nor released, so the person's
+  // words reach it at once and the editor behind the view stays its. Its work being over ends the hold (Agents.liveHold).
+  if (f.liveHold && !s.placeReleased) return undefined;
   const live = f.live(s.id);
   const far = farWhy(s, f.now, f.workOver);
   // Waiting on CI (w846), else on a deploy, a person or another request (w890): its sandbox may go at once.
@@ -270,6 +283,15 @@ export function savedNote(w: NonNullable<SessionInfo['savedWork']>): string {
   return `[saved] While you were stopped, FF Factory committed your uncommitted work (${w.files} file(s), new ones included) on your branch \`${w.branch}\` as ${w.sha}, ${w.pushed ? 'and pushed it' : 'not pushed yet (the next switch away pushes it)'}, so your sandbox could take other work. \`git reset HEAD~1\` gives it back uncommitted if that commit is still on top; or keep it and go on.`;
 }
 
+/**
+ * The line that tells a worker its Live view ended while it was stopped (w1582), put before the message that resumes it:
+ * the person may be opening the view to steer the art, and only the agent can stage it again.
+ */
+export function liveLostNote(l: NonNullable<SessionInfo['liveLost']>): string {
+  const knobs = l.materials.length ? `materials ${JSON.stringify(l.materials)}, ` : '';
+  return `[live view] Your Live view ended while you were stopped (${utcTime(l.at)}): your sandbox was released because ${l.why}, so the view could no longer show your game. The person may be opening it now to steer the art by talking to you. Before you answer, stage it again: your sandbox's editor up (mcp__machine__unity start), the scene and the asset on screen in play mode, the HUD hidden, the camera where they should look; then live_view start (${knobs}fps ${l.fps}, width ${l.width}) and say in your reply that it is streaming again.`;
+}
+
 /** The line that tells a moved worker where it is now, put before the message that resumes it. */
 export function movedNote(m: Pick<Machine, 'id'>, from: NonNullable<SessionInfo['movedFrom']>, to: Pick<MachineSandbox, 'id' | 'path'>): string {
   const branch = from.branch;
@@ -310,6 +332,14 @@ export interface PlaceAgainDeps {
   soon?: () => void;
   /** Why a live idle worker must keep its process, its check-in aside (Agents.keepIdle without the wake), or undefined. */
   keepLive: (id: string) => string | undefined;
+  /** Why it keeps its process and sandbox for its Live view while it waits on a person (Agents.liveHold, w1582), or undefined. */
+  liveHold?: (s: SessionInfo) => string | undefined;
+  /**
+   * Its sandbox was released (or it is released) while a Live view of it runs (w1582): stop the view, which would otherwise
+   * show whatever that sandbox's editor shows next, another worker's game included, and record it so its next message asks
+   * it to stage the view again (SessionInfo.liveLost). Nothing when it has no view.
+   */
+  liveLost?: (s: SessionInfo, why: string) => void;
   /** Whether a message to it waits in the send queue. */
   queued: (id: string) => boolean;
   stopLive: (id: string, why: string) => void;
@@ -417,7 +447,7 @@ export class PlaceAgain {
     if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || s.placeReleased || s.status !== 'stopped' || this.d.isLive(s.id)) return undefined;
     const sb = this.d.machine(s.machineId)?.sandboxes?.find((x) => x.id === s.machineSandbox);
     const why = sb && (ciReleaseWhy(sb, this.d.ciWait?.(s)) ?? waitReleaseWhy(sb, this.d.waitOn?.(s)) ?? releaseWhy(s, this.now(), this.d.workOver(s)));
-    const kept = why && keptWhy(s, sb, this.facts(s.machineId));
+    const kept = why && (this.d.liveHold?.(s) ?? keptWhy(s, sb, this.facts(s.machineId)));
     return kept ? `its sandbox stays held although ${why}: ${kept}` : undefined;
   }
 
@@ -439,7 +469,12 @@ export class PlaceAgain {
       let f = byMachine.get(m.id);
       if (!f) byMachine.set(m.id, (f = this.facts(m.id)));
       const live = this.d.isLive(s.id);
-      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined });
+      // Released with a view still up (released before w1582, or the portal took the view back from its daemon): it ends.
+      // Stopped past its hold (LIVE_HOLD_MS) with its sandbox still its (unsaved work keeps it): it ends too, so a view nobody
+      // came back to does not keep the sandbox's editor from its idle stop (the daemon counts a running view as activity).
+      if (!live && s.placeReleased) this.d.liveLost?.(s, s.placeReleased.why);
+      else if (!live && s.status === 'stopped' && !(this.now() - Date.parse(s.lastActivityAt) < LIVE_HOLD_MS)) this.d.liveLost?.(s, `nobody came back to it within ${LIVE_HOLD_MS / 3_600_000} h`);
+      const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined });
       if (!step) continue;
       if (step.do === 'stop') {
         // Stopped while Idle: its sandbox stays its until the next pass releases it, its worktree clean (w656).
@@ -466,6 +501,7 @@ export class PlaceAgain {
         delete s.heldSince;
         this.d.save(s);
         this.d.note(s.id, `Its sandbox ${m.id}/${sb.id} is released for other work while it waits: ${step.why}, and its worktree is clean (branch ${step.branch}). When it resumes it is placed again, back here if this sandbox is still free.`);
+        this.d.liveLost?.(s, step.why);
         did.push(`released ${m.id}/${sb.id} of ${s.id} (${step.why})`);
         freed.add(`${m.id}/${sb.id}`);
       } else {
@@ -506,6 +542,7 @@ export class PlaceAgain {
         delete o.heldSince;
         this.d.save(o);
         this.d.note(o.id, `Its uncommitted work in ${key} was saved (${res.notes.join('; ')}) and the sandbox is released for other work while it waits: ${why}. When it resumes it is placed again on its branch ${step.branch}, back here if this sandbox is still free.`);
+        this.d.liveLost?.(o, why);
       }
       console.log(`place again: saved and released ${key} of ${group.map((o) => o.id).join(', ')} (${res.notes.join('; ')})`);
       // The save took a moment: an agent may have been started or resumed in the sandbox meanwhile (w1089).
