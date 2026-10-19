@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AppState, WorkItem, WorkNeedsYou } from '../../../shared/types';
-import { waitAge, type WaitingAsk, type WaitingItem } from '../../../shared/waiting';
+import { groupByPerson, waitAge, waitOnLabel, type WaitingAsk, type WaitingItem } from '../../../shared/waiting';
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
@@ -58,9 +58,17 @@ export function WaitingTab({ app, items, now }: { app: AppState; items: WaitingI
       {others.length > 0 && (
         <>
           <h3 className="intake-h">Waiting on someone else · {others.length}</h3>
+          {/* Under the person each waits on, not the one who filed it (w1559). */}
           <div className="wait-list" data-testid="waiting-others">
-            {others.map((i) => (
-              <WaitCard key={i.w.id} app={app} item={i} now={now} />
+            {groupByPerson(others).map((g) => (
+              <section key={g.who} className="wait-group" data-testid={`waiting-on-${g.who}`}>
+                <h4 className="wait-group-h">
+                  {g.who} · {g.items.length}
+                </h4>
+                {g.items.map((i) => (
+                  <WaitCard key={i.w.id} app={app} item={i} now={now} />
+                ))}
+              </section>
             ))}
           </div>
         </>
@@ -219,6 +227,11 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
         <Dot tone={mine ? 'amber' : 'grey'} />
         <span className="wait-title">{w.title}</span>
         <span className="mono dim">{w.id}</span>
+        {!mine && item.requesters.length > 0 && (
+          <span className="dim small wait-for" data-testid={`wait-for-${w.id}`}>
+            · asked by {item.requesters.join(', ')}
+          </span>
+        )}
         <span className="spacer" />
         <span className={`wait-age tone-${AGE_TONE[age]}`} title={new Date(since).toLocaleString()} data-testid={`wait-age-${w.id}`}>
           {age === 'stale' ? 'stale · ' : ''}
@@ -226,7 +239,7 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
         </span>
       </header>
       <p className="small wait-ask" data-testid={`wait-ask-${w.id}`}>
-        <strong>{mine ? ASK_LABEL[ask] : `Waits on ${item.on.join(', ') || 'someone else'}`}:</strong>{' '}
+        <strong>{mine ? ASK_LABEL[ask] : `Waits on ${waitOnLabel(item)}`}:</strong>{' '}
         {/* A worker's question is shown whole below (w1378); this line says only whose it is. */}
         {ask === 'check' && w.needsYou && !w.needsYou.answered && w.needsYou.kind !== 'question'
           ? `worker ${w.needsYou.worker ?? ''} waits on ${w.needsYou.who.join(', ')} (since ${fmtRelative(w.needsYou.at, now)}): its question is below.`

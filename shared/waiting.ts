@@ -13,8 +13,10 @@ export interface WaitingItem {
   ask: WaitingAsk;
   /** It is the viewer's move (a reviewer's approval, their own question, a design question for them, a person named as them). */
   mine: boolean;
-  /** Who it waits on, in words ("a reviewer", "Ben"). */
+  /** Who it waits on, in words ("a reviewer", "Ben"): the person the live state names, never the requester (w1559). */
   on: string[];
+  /** Who filed it (display names): secondary to `on`, since the request may wait on someone else (w1559). */
+  requesters: string[];
   /** When it began to wait (ISO); the request's last change when nothing says better. */
   since: string;
   /** What is asked, in one plain sentence. */
@@ -86,9 +88,27 @@ export function waitingItems(work: readonly WorkItem[], live: ReadonlyMap<string
     // which workLive checks first, but the sidebar's Needs you counts the question, and its click has to find it here.
     if (!l || (l.state !== 'waiting' && !isDecision(w))) continue;
     const d = describe(w, l);
-    out.push({ w, live: l, ...d, mine: isMyMove(w, l, d.ask, me), on: l.waitsOn ?? [] });
+    out.push({ w, live: l, ...d, mine: isMyMove(w, l, d.ask, me), on: l.waitsOn ?? [], requesters: w.requesters.map((r) => r.displayName) });
   }
   return out.sort((a, b) => Number(b.mine) - Number(a.mine) || a.since.localeCompare(b.since));
+}
+
+/** The label of a wait's person: the people it waits on, or "someone else" when the live state names none. */
+export const waitOnLabel = (i: Pick<WaitingItem, 'on'>) => i.on.join(', ') || 'someone else';
+
+/**
+ * The items in groups by the person they wait on (w1559, lothsahn: "they should show the name of the person they're waiting on"),
+ * in order of first appearance, so a request lothsahn filed and Ben must answer is listed under Ben, not under lothsahn.
+ */
+export function groupByPerson(items: readonly WaitingItem[]): { who: string; items: WaitingItem[] }[] {
+  const out: { who: string; items: WaitingItem[] }[] = [];
+  for (const i of items) {
+    const who = waitOnLabel(i);
+    const g = out.find((x) => x.who.toLowerCase() === who.toLowerCase());
+    if (g) g.items.push(i);
+    else out.push({ who, items: [i] });
+  }
+  return out;
 }
 
 /** How stale a wait is: past a day it is "old", past three days "stale". */

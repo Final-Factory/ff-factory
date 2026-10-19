@@ -1,0 +1,1 @@
+- The Dispatcher's "Waiting on input" tab lists what waits on someone else under the person it waits on (a request lothsahn filed and Ben must answer is under Ben), with "asked by" as the secondary note; Fleet's board and the request rows say "for <requester>" after the person the wait names (w1559).

@@ -173,6 +173,7 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
 
 function AgentLine({ s, wait, me, now, active, variant, onOpen }: { s: SessionInfo; wait?: PersonWait; me?: UserInfo; now: number; active: boolean; variant: Variant; onOpen: () => void }) {
   const st = agentState(s, wait, me);
+  const waitsOther = !!wait && st.word !== 'asked you';
   return (
     <button
       className={`fl-agent${active ? ' active' : ''}`}
@@ -182,8 +183,10 @@ function AgentLine({ s, wait, me, now, active, variant, onOpen }: { s: SessionIn
     >
       <Dot tone={st.tone} pulse={s.status === 'running'} />
       <span className="fl-agent-title">{s.title}</span>
-      {variant === 'board' && s.requestedBy && <span className="fl-agent-for">{s.requestedBy.displayName}</span>}
+      {/* A worker waiting on someone else says whom in its state ("waits on Ben"); the requester follows as "for lothsahn" (w1559). */}
+      {variant === 'board' && s.requestedBy && !waitsOther && <span className="fl-agent-for">{s.requestedBy.displayName}</span>}
       <span className={`fl-agent-state tone-${st.tone}`}>{st.word}</span>
+      {variant === 'board' && s.requestedBy && waitsOther && <span className="fl-agent-for">for {s.requestedBy.displayName}</span>}
       {variant === 'board' && st.detail && (
         <span className="fl-agent-why" data-testid="fl-agent-why">
           {st.detail}

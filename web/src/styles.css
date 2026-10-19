@@ -6549,6 +6549,15 @@ button.board-head-link:hover {
   overflow-wrap: anywhere;
 }
 
+.wait-group-h {
+  margin: var(--s-2) 0 var(--s-1);
+  font-size: var(--fs-sm);
+}
+
+.wait-for {
+  white-space: nowrap;
+}
+
 .wait-age {
   white-space: nowrap;
   font-size: var(--fs-sm);

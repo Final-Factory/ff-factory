@@ -597,7 +597,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
                 {live.machines.join(', ')}
               </span>
             ) : null}{' '}
-            · {s ? sourceLabel(s) : names(w)}
+            · {s ? sourceLabel(s) : live?.state === 'waiting' && live.waitsOn?.length ? `for ${names(w)}` : names(w)}
             {w.delegation ? (
               <span data-testid={`work-delegation-${w.id}`}>
                 {' '}

@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkItem } from '../shared/types.ts';
-import { decisionsOn, decisionsOnMe, intakeRecommendation, waitAge, waitingItems } from '../shared/waiting.ts';
+import { decisionsOn, decisionsOnMe, groupByPerson, intakeRecommendation, waitAge, waitingItems, waitOnLabel } from '../shared/waiting.ts';
 import type { WorkLive } from '../shared/workState.ts';
 
 const BEN = { userId: 'ben', displayName: 'Ben' };
@@ -71,4 +71,30 @@ test('a decision the sidebar counts is in the tab even while a worker is mid-tur
   assert.deepEqual(decisionsOn(work, me).map((d) => d.text), ['Approve or decline w1', 'Answer w2: Which?', 'Answer w3: d']);
   // A closed request has no live state and stays out.
   assert.deepEqual(waitingItems(work, new Map(), me), []);
+});
+
+test('a request filed by one person and waiting on another is listed under the person it waits on (w1559)', () => {
+  // w1544: lothsahn's request, its worker called waiting_on_person with who "Ben".
+  const w = item('w1544', { requestedBy: LOTH, requesters: [LOTH] });
+  const other = item('w1600', { requestedBy: LOTH, requesters: [LOTH] });
+  const live = new Map([
+    ['w1544', waiting('a3b0bf2c waits on Ben: review PR #1969', ['Ben'])],
+    ['w1600', waiting('a1 waits on Lothsahn: log in', ['Lothsahn'])],
+  ]);
+  const asLoth = waitingItems([w, other], live, { ...LOTH, reviewer: false });
+  const [forBen] = asLoth.filter((i) => i.w.id === 'w1544');
+  assert.deepEqual([forBen.mine, forBen.on, forBen.requesters], [false, ['Ben'], ['Lothsahn']]);
+  assert.equal(waitOnLabel(forBen), 'Ben');
+  // The panel's groups carry the waited-on person, not the requester.
+  assert.deepEqual(groupByPerson(asLoth.filter((i) => !i.mine)).map((g) => [g.who, g.items.map((i) => i.w.id)]), [['Ben', ['w1544']]]);
+  // Ben sees it as his own move, with lothsahn kept as the requester.
+  const [asBen] = waitingItems([w], live, { ...BEN, reviewer: false });
+  assert.deepEqual([asBen.mine, asBen.requesters], [true, ['Lothsahn']]);
+  // Several people, and none named: grouped in order of first appearance.
+  const many = [
+    { ...forBen, w: { ...forBen.w, id: 'a' }, on: ['Ben'] },
+    { ...forBen, w: { ...forBen.w, id: 'b' }, on: [] },
+    { ...forBen, w: { ...forBen.w, id: 'c' }, on: ['ben'] },
+  ];
+  assert.deepEqual(groupByPerson(many).map((g) => [g.who, g.items.map((i) => i.w.id)]), [['Ben', ['a', 'c']], ['someone else', ['b']]]);
 });
