@@ -1067,7 +1067,7 @@ export class Daemon {
     const working = [...this.entries.values()].filter((e) => e.s.live && isMidTurn(e.s.info)).length;
     const connected = this.ws?.readyState === WebSocket.OPEN && this.welcomed;
     // Paused, an agent still at work is finishing its step to hand back (w1532 critic: "1 agent working" under Paused read as a failed pause).
-    const agents = working === 0 ? (p.paused ? 'No agents working' : 'No agents working here') : p.paused ? `${working} agent${working === 1 ? '' : 's'} finishing up to hand back` : `${working} agent${working === 1 ? '' : 's'} working here`;
+    const agents = working === 0 ? 'No agents working here' : `${working} agent${working === 1 ? '' : 's'} ${p.paused ? 'finishing a step' : 'working here'}`;
     const work = `${agents} · portal ${connected ? 'connected' : 'not connected'}`;
     this.tray.send({ type: 'state', paused: p.paused, reason: p.reason ?? null, why: v.why, next: v.next ?? null, tip: v.tip ?? null, schedule: v.schedule, work, settings, machine: this.cfg.id, portalUrl: this.cfg.portalUrl });
   }

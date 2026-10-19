@@ -635,10 +635,10 @@ namespace FFFactory
             }
             from.Value = Parse(sched, "start", "22:00");
             to.Value = Parse(sched, "end", "08:00");
-            fromLabel = new Label { Text = "From", AutoSize = true, Margin = new Padding(0, S(5), S(6), 0) };
+            fromLabel = new Label { Text = "From", AutoSize = true, Margin = new Padding(0, S(3), S(6), 0) };
             hours.Controls.Add(fromLabel);
             hours.Controls.Add(from);
-            toLabel = new Label { Text = "to", AutoSize = true, Margin = new Padding(S(10), S(5), S(6), 0) };
+            toLabel = new Label { Text = "to", AutoSize = true, Margin = new Padding(S(10), S(3), S(6), 0) };
             hours.Controls.Add(toLabel);
             hours.Controls.Add(to);
             grid.Controls.Add(hours);
