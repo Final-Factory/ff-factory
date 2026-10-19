@@ -343,6 +343,8 @@ export interface Config {
   standingRoot: string;
   /** Config keys this file still sets that nothing reads any more (w510), named once at startup: retiredConfigKeys. */
   retiredKeys?: string[];
+  /** The startup line for a defaultBase naming a retired branch, read as the trunk (w1517): retiredBaseLine. */
+  retiredBase?: string;
   repo: {
     /** Clone URL for the base repository. */
     url: string;
@@ -654,6 +656,31 @@ export function pruneRetiredKeys(file: string): string[] {
   return keys;
 }
 
+/** The game repo's branches retired as a base (w1137: `develop`; `master` is the one trunk). */
+export const RETIRED_BASES = ['develop'];
+
+/**
+ * A base naming a retired branch read as the trunk beside it ("origin/develop" is "origin/master"), any other as it is
+ * (w1517). THE NEW DEFAULT ALONE CHANGED NOTHING ON THE PORTAL: w1137 made the default origin/master, but the VM's
+ * config.json still said "defaultBase": "origin/develop", so for six days the base clone was moved back to develop's
+ * last commit (f946154b3, 2026-10-12) every 15 minutes, the release lookup (intake releaseBumps) read develop's bumps
+ * only, and w1516's "already fixed by PR #1597" reached FFBox as `develop@ffa7fc5` with no version, though 0.50.0.102
+ * had carried it since 2026-10-13. FFBox maps its own config the same way (ffwatch retire_config_bases).
+ */
+export function trunkBase(base: string): string {
+  const slash = base.indexOf('/');
+  const branch = slash > 0 ? base.slice(slash + 1) : base;
+  if (!RETIRED_BASES.includes(branch)) return base;
+  return slash > 0 ? `${base.slice(0, slash)}/master` : 'master';
+}
+
+/** The startup line for a config.json defaultBase that names a retired branch, or undefined. */
+export function retiredBaseLine(raw: any): string | undefined {
+  const base: unknown = raw?.defaultBase;
+  if (typeof base !== 'string' || trunkBase(base) === base) return undefined;
+  return `config.json sets "defaultBase": "${base}", a retired branch (w1137: master is the one trunk); read as "${trunkBase(base)}". Change it to "${trunkBase(base)}" (w1517).`;
+}
+
 /** The startup line for retired keys, or undefined. */
 export function retiredKeysLine(keys: string[] | undefined): string | undefined {
   return keys?.length ? `config.json sets ${keys.join(', ')}, which nothing reads any more (w510: the portal runs no sandboxes, editors, workers or standing agents of its own; w1078: every Claude process runs on a vault token). Ignored; remove them (config.example.json shows what is left).` : undefined;
@@ -800,6 +827,7 @@ export function withDefaults(raw: any): Config {
   return {
     ...DEFAULTS,
     ...kept,
+    defaultBase: trunkBase(typeof kept.defaultBase === 'string' && kept.defaultBase ? kept.defaultBase : DEFAULTS.defaultBase),
     limits: { ...DEFAULTS.limits, ...kept.limits },
     orchestrator: { ...DEFAULTS.orchestrator, ...kept.orchestrator },
     worker: { ...DEFAULTS.worker, ...kept.worker },
@@ -818,6 +846,7 @@ export function loadConfig(): Config {
   }
   const cfg = withDefaults(raw);
   cfg.retiredKeys = retiredConfigKeys(raw);
+  cfg.retiredBase = retiredBaseLine(raw);
   // The portal keeps no sandboxes (w510): only the base clone the orchestrators read is required.
   if (!cfg.repo) throw new Error('config.json is missing "repo"');
   const windowsOnly = windowsPathsOffWindows(cfg);

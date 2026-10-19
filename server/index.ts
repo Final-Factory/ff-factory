@@ -110,6 +110,7 @@ if (cfg.retiredKeys?.length && !dryRun()) {
 }
 const retiredKeys = retiredKeysLine(cfg.retiredKeys);
 if (retiredKeys) console.warn(`config: ${retiredKeys}`);
+if (cfg.retiredBase) console.warn(`config: ${cfg.retiredBase}`);
 fs.mkdirSync(cfg.dataDir, { recursive: true });
 // The dry run (server/dryRun.ts, change 17): this portal runs on a copy of another's data and acts on nothing outside.
 const isDryRun = dryRun();

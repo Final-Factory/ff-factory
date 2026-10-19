@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, pruneRetiredKeys, retiredConfigKeys, retiredKeysLine, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
+import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, pruneRetiredKeys, retiredBaseLine, retiredConfigKeys, retiredKeysLine, trunkBase, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
 import { gitRemotes } from './guard.ts';
 import { appVersion, formatVersion, readSha, readVersion } from './version.ts';
 
@@ -46,6 +46,21 @@ test('loadConfig: defaults fill what the file leaves out, nested objects merge',
   assert.equal(cfg.voice.toolsDir, path.join(dir, 'data', 'tools', 'whisper'));
   assert.equal(cfg.standingRoot, path.join(path.resolve(dir, 'sb'), '_agents'));
   assert.equal(cfg.orchestrator.notifyOnWorkerEvents, true);
+});
+
+test('loadConfig (w1517): a defaultBase naming the retired develop is read as master, and named once at startup', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  withConfig(t, { ...minimal(dir), defaultBase: 'origin/develop' });
+  const cfg = loadConfig();
+  assert.equal(cfg.defaultBase, 'origin/master', 'the base clone, the release lookup and mergedIn read the trunk');
+  assert.match(cfg.retiredBase ?? '', /"defaultBase": "origin\/develop", a retired branch .*read as "origin\/master"/);
+  assert.deepEqual([trunkBase('develop'), trunkBase('origin/master'), trunkBase('upstream/develop'), trunkBase('origin/release/x')], ['master', 'origin/master', 'upstream/master', 'origin/release/x']);
+  assert.equal(retiredBaseLine({ defaultBase: 'origin/master' }), undefined);
+  assert.equal(retiredBaseLine({}), undefined);
+  withConfig(t, minimal(dir));
+  const plain = loadConfig();
+  assert.deepEqual([plain.defaultBase, plain.retiredBase], ['origin/master', undefined]);
 });
 
 test('loadConfig (w510): only the base clone is required; sandboxRoot defaults under the data folder', (t) => {

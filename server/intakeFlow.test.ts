@@ -19,7 +19,7 @@ import { ESCALATION } from './escalationRules.test.ts';
 import { DIAGNOSIS } from './diagnosisRules.test.ts';
 import type { Diagnosis } from './diagnosisRules.ts';
 import { run } from './proc.ts';
-import type { Config } from './config.ts';
+import { trunkBase, type Config } from './config.ts';
 import type { ProviderConversation, Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { BlockerWatch } from './blockerWatch.ts';
@@ -1113,6 +1113,50 @@ test('w480: closed "already fixed by #1076": the PR is looked up, its release fo
   other.outcome = 'Not reproducible on 0.50.0.78.';
   assert.equal(intake.recheckBoards(), 1, 'nothing to learn: done goes at once');
   assert.deepEqual([pushed.at(-1)![0], pushed.at(-1)![1].matches[0].watch], ['conv-413', undefined]);
+});
+
+test('w1517: a fix merged on master after develop stopped is found in its master release only through the trunk base', async (t) => {
+  // w1516: PR #1597 merged on master on 2026-10-12, after develop's last commit; 0.50.0.102 on master carried it. The
+  // portal's config still said origin/develop, so the look found no release and FFBox heard develop@ffa7fc5 with none.
+  const build = (t2: typeof t, base: string) => {
+    const s = setup(t2, { ffbox: { enabled: true, escalations: true, repo: REPO } }, { defaultBase: base });
+    const repo = path.join(s.dir, 'base');
+    fs.mkdirSync(path.join(repo, 'ProjectSettings'), { recursive: true });
+    const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@users.noreply.github.com', ...a], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_COMMITTER_DATE: new Date(Date.now() - 3 * 3_600_000).toISOString() } }).trim();
+    const version = (v: string) => fs.writeFileSync(path.join(repo, 'ProjectSettings', 'ProjectSettings.asset'), `PlayerSettings:\n  bundleVersion: ${v}\n`);
+    git('init', '-q', '-b', 'master');
+    version('0.50.0.101');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'v101');
+    git('branch', 'develop');
+    fs.writeFileSync(path.join(repo, 'bots.txt'), 'all five join the fleet');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'Merge pull request #1597');
+    const fix = git('rev-parse', 'HEAD');
+    version('0.50.0.102');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'Merge pull request #1623 from Final-Factory/release/0.50.0.102');
+    const pushed: Pushed[] = [];
+    pushTo(s.intake, pushed);
+    depsOf(s.intake).prInfo = async (n) => (n === 1597 ? { sha: fix, at: new Date().toISOString(), number: 1597, head: 'sandbox/slot1-w1168', text: 'bots' } : undefined);
+    depsOf(s.intake).mergedPrs = async () => [];
+    const w = s.o.requireWork((s.intake.onEscalation(ESCALATION) as { workId: string }).workId);
+    s.intake.onBoardCheck(askAbout());
+    w.status = 'done';
+    w.outcome = 'already fixed by PR #1597 (w1168), shipped in 0.50.0.102; the report is from 0.50.0.99';
+    return { ...s, w, fix, pushed };
+  };
+  const stale = build(t, 'develop');
+  await stale.intake.resolveFixes();
+  assert.deepEqual([stale.w.delivery?.fixPr, stale.w.delivery?.releasedIn], [1597, undefined], 'the retired base: no release (the bug)');
+
+  const live = build(t, trunkBase('develop'));
+  assert.deepEqual(await live.intake.resolveFixes(), [live.w.id]);
+  assert.equal(live.w.delivery?.releasedIn, '0.50.0.102');
+  assert.match(live.w.log.at(-1)!, /already fixed by PR #1597 .*shipped in 0\.50\.0\.102/);
+  assert.equal(live.intake.recheckBoards(), 1);
+  const m = live.pushed.at(-1)![1].matches[0];
+  assert.deepEqual([m.version, m.mergedIn, m.watch?.pr, m.watch?.target], ['0.50.0.102', `master@${live.fix}`, 1597, 'master']);
 });
 
 test('w1143: an FFBox dev request closed "already fixed by PR #N" learns that fix and its release; older ones wait', async (t) => {
