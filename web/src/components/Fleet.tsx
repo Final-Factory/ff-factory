@@ -26,8 +26,9 @@ const osName = (p: string | undefined) => (!p ? '' : p.startsWith('win') ? 'Wind
 const ago = (iso: string, now: number) => fmtRelative(iso, now).replace(' ago', '').replace('just now', 'now');
 
 /**
- * An agent in a few words: needs you, busy, starting, between turns (w475: working on a check-in or a task, or queued or
- * blocked, w643), waiting on a person (w1430: "needs you" when that is the viewer, "waits on Ben" otherwise), or idle.
+ * An agent in a few words: needs you (a permission), busy, starting, between turns (w475: working on a check-in or a task, or
+ * queued or blocked, w643), waiting on a person (w1430; w1521: "asked you" when that is the viewer, "waits on Ben" otherwise,
+ * in grey: it is answered in the orchestrator chat, not here), or idle.
  */
 function agentState(s: SessionInfo, wait?: PersonWait, me?: Pick<UserInfo, 'displayName'>): { word: string; tone: Tone; detail?: string } {
   if (s.pendingPermissions.length || s.status === 'waiting_permission') return { word: 'needs you', tone: 'amber' };
@@ -37,7 +38,7 @@ function agentState(s: SessionInfo, wait?: PersonWait, me?: Pick<UserInfo, 'disp
   if (s.status === 'starting') return { word: 'starting', tone: 'blue' };
   if (wait) {
     const mine = !!me && wait.on.some((n) => n.toLowerCase() === me.displayName.toLowerCase());
-    return { word: mine ? 'needs you' : `waits on ${wait.on.join(', ') || 'a person'}`, tone: 'amber', detail: s.waitingOn?.what };
+    return { word: mine ? 'asked you' : `waits on ${wait.on.join(', ') || 'a person'}`, tone: 'grey', detail: s.waitingOn?.what };
   }
   const v = agentView(s);
   if (v.waitsOn) return { word: v.label.toLowerCase(), tone: v.tone, detail: v.waitsOn };
@@ -222,8 +223,9 @@ function Agents({ agents, me, now, sel, variant, open }: { agents: PlaceAgents; 
 }
 
 /**
- * The slot's call to the viewer (w1430): "Live view: go" opens the waiting worker's Live view, "Needs you" its chat. It is the
- * first line under the slot's row, on the row's text edge, so the row keeps its name, branch and Unity mark where they were.
+ * The slot's call to the viewer (w1430): "Live view: go" opens the waiting worker's Live view. It is the first line under the
+ * slot's row, on the row's text edge, so the row keeps its name, branch and Unity mark where they were. A question has no
+ * button (w1521): it is answered in the orchestrator chat.
  */
 function CallButton({ call, onGo }: { call: SlotCall; onGo: () => void }) {
   const what = call.session.waitingOn?.what;
@@ -232,10 +234,10 @@ function CallButton({ call, onGo }: { call: SlotCall; onGo: () => void }) {
       type="button"
       className="needs-you fl-call"
       onClick={onGo}
-      title={`${call.request ? `${call.request}: ` : ''}${call.session.title} waits on you${what ? `: ${what}` : call.kind === 'live' ? ': its Live view is up for you to move the knobs' : ''}`}
+      title={`${call.request ? `${call.request}: ` : ''}${call.session.title} waits on you${what ? `: ${what}` : ': its Live view is up for you to move the knobs'}`}
       data-testid="fl-call"
     >
-      {call.kind === 'live' ? <span className="lv-rec" aria-hidden /> : <Icon name="bell" size={13} />}
+      <span className="lv-rec" aria-hidden />
       {call.label}
     </button>
   );
@@ -272,9 +274,10 @@ function PlaceHead({ glance: g, title, unused, free, unity, sub, active, hint, o
 
 function SandboxItem({ sb, me, call, now, sel, variant, go }: { sb: FleetSandbox; me?: UserInfo; call?: SlotCall; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void }) {
   const placeGlance = machineSandboxGlance(sb.machineSandbox!, sb.agents.live);
-  // A worker here waits on you (w1430): the slot reads as one that needs you, as a permission wait does, unless something
-  // more urgent (a blocked editor, a failure) already speaks for it; what it is doing is that worker's title.
-  const g: Glance = call && placeGlance.tone !== 'red' && placeGlance.tone !== 'amber' ? { ...placeGlance, tone: 'amber', label: 'Needs you', attention: Math.max(placeGlance.attention, 1), progress: false } : placeGlance;
+  // A worker here waits on you (w1430): the slot says "Asked you", quietly, with no badge (w1521: "Needs you" and its badge are a
+  // permission's, which placeGlance already says), unless something more urgent (a permission, a blocked editor, a failure)
+  // already speaks for it; what it is doing is that worker's title.
+  const g: Glance = call && placeGlance.tone !== 'red' && placeGlance.tone !== 'amber' ? { ...placeGlance, tone: 'grey', label: 'Asked you', progress: false } : placeGlance;
   const unityAbout = /^Unity/.test(g.label);
   const free = sb.free && !call;
   // The label is the sandbox's name (w575); what it is doing is its live agents' titles, Working first.
@@ -309,7 +312,7 @@ function SandboxItem({ sb, me, call, now, sel, variant, go }: { sb: FleetSandbox
         </>
       }
       active={sel.sandbox === sb.key && !sel.sessionId}
-      hint={`Slot ${sb.key} · ${sb.branch}${sb.status === 'ready' ? ` · ${unityLabel[sb.unity]}` : ''}${agentsHint(sb.agents)}${call && sb.free ? '\nIts worker is stopped while it waits on you: placement may give the sandbox other work meanwhile' : ''}`}
+      hint={`Slot ${sb.key} · ${sb.branch}${sb.status === 'ready' ? ` · ${unityLabel[sb.unity]}` : ''}${agentsHint(sb.agents)}${call?.kind === 'asked' ? `\nAsked you${call.session.waitingOn?.what ? `: ${call.session.waitingOn.what}` : ''} (answer it in your orchestrator chat)` : ''}${call && sb.free ? '\nIts worker is stopped while it waits on you: placement may give the sandbox other work meanwhile' : ''}`}
       onClick={() => go(sandboxRoute(sb))}
       testId="fl-sandbox-row"
     />
@@ -317,9 +320,9 @@ function SandboxItem({ sb, me, call, now, sel, variant, go }: { sb: FleetSandbox
   return (
     <div className="fl-sb" data-testid={`fl-sandbox-${sb.key}`}>
       {head}
-      {call && (
+      {call?.kind === 'live' && (
         <div className="fl-call-line">
-          <CallButton call={call} onGo={() => go(call.kind === 'live' ? { view: 'live', sessionId: call.session.id } : sandboxRoute(sb, call.session.id))} />
+          <CallButton call={call} onGo={() => go({ view: 'live', sessionId: call.session.id })} />
         </div>
       )}
       <Agents agents={sb.agents} me={me} now={now} sel={sel} variant={variant} open={(s) => go(sandboxRoute(sb, s.id))} />

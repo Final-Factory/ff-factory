@@ -640,8 +640,8 @@ days; a deploy is a person's call, and a week without one is worth their look.
   or a pull request of the request that its line names (`#1699`, `/pull/1699`) merges, whichever comes first. A worker
   whose resume waits behind a gate (w1243's 26d27a69) keeps its old report and declaration, so this is read from the
   request, not from the worker's next turn. And on a request Blocked on a thing, a wait counts only when it is newer than
-  the newest gate: the gate set after it is what the request waits on now, so it shows **Blocked**. The slot's "Needs you"
-  (`chatLedger`, `slotCall`) and the `[needs you]` sends (`Agents.personWaits`) read the same live state, and its
+  the newest gate: the gate set after it is what the request waits on now, so it shows **Blocked**. The slot's "Asked you"
+  (`chatLedger`, `slotCall`; "Needs you" until w1521) and the `[needs you]` sends (`Agents.personWaits`) read the same live state, and its
   `worker`: the session whose wait it is. The store fills `lastResultAt` in once from each open request's workers'
   transcripts when it loads (`Store.backfillResultTimes`).
 - **A dead agent host is Blocked on its machine** (w691; w665 again: the m3 answered "could not start its agent host: the
