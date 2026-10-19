@@ -114,6 +114,16 @@ ambiguous is "notify": it is reported to the orchestrator, which restarts the ed
   lines to the sandbox's workers and shows them in `unity status`. It does not restart it: it would stop at the same
   prompt until the code compiles. Measured end to end with the watch's dialog listing blinded: the dialog at
   20:27:49, the editor closed with the error reported at 20:29:37.
+
+  On a Mac (w1501, m5/slot2, 6000.3.19f1, 2026-10-19, daemon 0b07d0c) the log ends the same way: `script compilation
+  time:`, the two `Total cache size` lines, then nothing. The deployed daemon closed an editor started with
+  `mcp__machine__unity start` 113 to 165 s after its log went silent and reported its `error CS0029`; the probe's
+  blinded watch closed its own editor at +123 s. The daemon's reason was "the dialog watch did not see it", not
+  "paused": the screen was unlocked (right after the run `sessionState()` gave
+  `{"locked":false,"onConsole":true,"displayAsleep":false}` and `axTrusted()` gave true). So on that Mac nothing
+  pressed "Ignore", and the editor ended up closed, not open with its errors. Still open: either `listMacDialogs`
+  misses Unity's Safe Mode alert, or the `/Enter Safe Mode/i` title test in `closeAtSafeMode` and the auto-Ignore rule
+  miss it (an NSAlert usually has no window title). Results: [PR #436's Mac comment](https://github.com/Final-Factory/ff-factory/pull/436#issuecomment-6257994520).
 - **API Updater**: `-accept-apiupdate` is documented for batch mode only, and it would rewrite code
   unasked. Not used.
 - **Package Manager**: `-noUpm` is documented, but it disables the Package Manager, and with it the
