@@ -283,7 +283,7 @@ test('meters (w785): a vault token is one row under its vault name, the Claude a
   // The cut-off name has no title of its own (w1528): its hover is the row's card, which opens with the whole address.
   await expect(loth.locator('.plan-item-name')).not.toHaveAttribute('title', /.+/);
   await loth.locator('.plan-item-name').hover();
-  await expect(page.getByTestId('plan-tip')).toContainText('a.very.long.address.for.loth@finalfactory-example.test\nvault-lothsahn-1');
+  await expect(page.getByTestId('plan-tip').locator('.acct-label')).toHaveText('a.very.long.address.for.loth@finalfactory-example.test');
   await expect(loth).toHaveAttribute('data-tip', /^a\.very\.long\.address\.for\.loth@finalfactory-example\.test\nvault-lothsahn-1 …EAAA/);
   await expect(loth.locator('.plan-item-name')).toHaveCSS('text-overflow', 'ellipsis');
   // The vault's own name without "vault-"; one row each, never the token file's name for a vault token, and the usage line says "rate limits" on hover.
@@ -350,39 +350,85 @@ test('meters (w1389): the panel lists no clean-up lines; a disk still under its 
 });
 
 test.describe('plan reset hover (w1528)', () => {
-  test.use({ timezoneId: 'America/Denver' });
-  test('hovering a plan shows each limit reset day, time and zone, and says so when one is unknown', async ({ page }) => {
-    const spent: AccountUsage = {
-      ...VAULT('vault-ben-1', 'cBBB', 100, ['ben@example.com']),
-      usage: { available: true, asOf: NOW.toISOString(), plan: 'max', weekly: { label: 'Weekly', percent: 100, resetsAt: at(70) }, session: { label: 'Session (5 h)', percent: 40, resetsAt: at(2) }, models: [{ label: 'Weekly Fable', percent: 61 }] },
-    };
-    const foot = await fixedWorld(page, 'machines', [spent]);
+  test.use({ timezoneId: 'America/Denver', deviceScaleFactor: 2 });
+  const spent = (): AccountUsage => ({
+    ...VAULT('vault-ben-1', 'cBBB', 100, ['ben@example.com']),
+    usage: { available: true, asOf: NOW.toISOString(), plan: 'max', weekly: { label: 'Weekly', percent: 100, resetsAt: at(70) }, session: { label: 'Session (5 h)', percent: 40, resetsAt: at(2) }, models: [{ label: 'Weekly Fable', percent: 61 }] },
+  });
+  const inside = async (page: Page, tip: Locator, foot: Locator) => {
+    const t = (await tip.boundingBox())!;
+    const sheet = (await foot.boundingBox())!;
+    const win = page.viewportSize()!;
+    expect(t.x, 'card inside the sheet, left').toBeGreaterThanOrEqual(sheet.x - 0.5);
+    expect(t.x + t.width, 'card inside the sheet, right').toBeLessThanOrEqual(sheet.x + sheet.width + 0.5);
+    expect(t.y, 'card inside the sheet and window, top').toBeGreaterThanOrEqual(Math.max(sheet.y, 0) - 0.5);
+    expect(t.y + t.height, 'card inside the sheet and window, bottom').toBeLessThanOrEqual(Math.min(sheet.y + sheet.height, win.height) + 0.5);
+  };
+
+  test('hovering a plan name or its usage line opens the account card: a bar per limit with its reset day, time and zone', async ({ page }) => {
+    const foot = await fixedWorld(page, 'machines', [spent()]);
     await foot.locator('.sys-toggle').click();
     await settle(page);
     const tip = page.getByTestId('plan-tip');
     await expect(tip).toHaveCount(0);
-    // The viewer's zone (Denver, MDT in September), not UTC: 14:00 UTC is 08:00 MDT.
+    if (process.env.E2E_SHOT_BEFORE) {
+      const sheet = (await foot.boundingBox())!;
+      await page.screenshot({ path: process.env.E2E_SHOT_BEFORE, clip: sheet });
+    }
     const row = foot.getByTestId('account-…cBBB');
-    const card = [
-      'vault-ben-1 …cBBB',
-      '5-hour session: 40%. Resets Thu 08:00 MDT (in 2 h)',
-      'Weekly: 100%. Resets Sun 04:00 MDT (in 2 d 22 h)',
-      'Weekly Fable: 61%. Reset time unknown',
-      'Spent until Sun 04:00 MDT (in 2 d 22 h)',
-      'ben@example.com',
-    ].join('\n');
     // Hovering the name (lothsahn: "hovering the email of the plan should also give the popup with the usage summary") and
-    // hovering the usage line open the same card.
+    // hovering the usage line open the same card. The viewer's zone (Denver, MDT in September), not UTC: 14:00 UTC is 08:00 MDT.
     for (const [part, shot] of [['.plan-item-name', process.env.E2E_SHOT_TIP], ['.plan-item-tail', process.env.E2E_SHOT_TIP2]] as const) {
       await row.locator(part).hover();
-      await expect(tip).toHaveText(card, { useInnerText: true });
+      await expect(tip).toBeVisible();
+      await expect(tip.locator('.acct-label')).toHaveText('vault-ben-1 …cBBB');
+      await expect(tip.locator('.acct-agents')).toHaveText('Spent until Sun 04:00 MDT');
+      await expect(tip.locator('.acct-where')).toHaveText('ben@example.com');
+      // One bar per limit, the weekly first as the main tab drew them; each says when it resets, or that it is unknown.
+      const meters = tip.locator('.meter');
+      await expect(meters).toHaveCount(3);
+      const want = [
+        ['Weekly', '100%', 'Resets Sun 04:00 MDT (in 2 d 22 h)', '100%'],
+        ['Session (5 h)', '40%', 'Resets Thu 08:00 MDT (in 2 h)', '40%'],
+        ['Weekly Fable', '61%', 'Reset time unknown', '61%'],
+      ];
+      for (const [i, [label, value, note, width]] of want.entries()) {
+        const m = meters.nth(i);
+        await expect(m.locator('.meter-label')).toHaveText(label);
+        await expect(m.locator('.meter-value')).toHaveText(value);
+        await expect(m.locator('.meter-note')).toHaveText(note);
+        expect(await m.locator('.meter-bar i').evaluate((e) => (e as HTMLElement).style.width)).toBe(width);
+      }
+      await inside(page, tip, foot);
       if (shot) {
-        const box = (await row.boundingBox())!;
-        const top = Math.max(0, box.y - 330);
-        await page.screenshot({ path: shot, clip: { x: 0, y: top, width: 420, height: Math.min(page.viewportSize()!.height, box.y + 280) - top } });
+        // The whole sheet, the frame the before has; the part under the pointer is underlined (a screenshot has no pointer).
+        await row.locator(part).evaluate((e) => ((e as HTMLElement).style.textDecoration = 'underline dashed #dbe3ec'));
+        await page.screenshot({ path: shot, clip: (await foot.boundingBox())! });
+        await row.locator(part).evaluate((e) => ((e as HTMLElement).style.textDecoration = ''));
       }
       await page.mouse.move(900, 300);
       await expect(tip).toHaveCount(0);
+    }
+  });
+
+  test('the card stays inside the open sheet and the window: on the last plan row and on a short window', async ({ page }) => {
+    const foot = await fixedWorld(page, 'machines', [spent()]);
+    await foot.locator('.sys-toggle').click();
+    await settle(page);
+    const tip = page.getByTestId('plan-tip');
+    const rows = foot.getByTestId('plans-table').locator('.plan-item');
+    const last = rows.nth((await rows.count()) - 1);
+    for (const height of [900, 520, 420]) {
+      await page.setViewportSize({ width: 1440, height });
+      await settle(page);
+      for (const r of [rows.first(), last]) {
+        await r.scrollIntoViewIfNeeded();
+        await r.hover();
+        await expect(tip).toBeVisible();
+        await inside(page, tip, foot);
+        await page.mouse.move(900, 300);
+        await expect(tip).toHaveCount(0);
+      }
     }
   });
 });
