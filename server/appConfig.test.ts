@@ -8,7 +8,7 @@ import { githubFromVault } from './githubTokens.ts';
 import { FFBOX_HASH_FILE, ffboxTokenHash } from './configMigration.ts';
 import { tokenSha256 } from './providerProtocol.ts';
 import { autoCompactSettings } from './autoCompact.ts';
-import type { Config } from './config.ts';
+import { machineActivityPause, type Config } from './config.ts';
 
 const setup = (t: { after: (fn: () => void) => void }) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcfg-'));
@@ -405,4 +405,21 @@ test('set_app_config: placement.hold (w1089) keeps a computer off for everything
   setAppConfig(file, cfg, 'placement.hold', null);
   assert.deepEqual(cfg.placement, { avoid: { beast: 'BEAST unstable' } });
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement, { avoid: { beast: 'BEAST unstable' } });
+});
+
+// w1574, lothsahn: "We want it off on all of the workers currently ... However, I will be adding some new workers soon that
+// will want that on."
+test('set_app_config: machines.activityPause is off for every machine unless set, per machine, with its idle minutes (w1574)', (t) => {
+  const { file, cfg } = setup(t);
+  const of = (id: string) => machineActivityPause(cfg, id);
+  assert.deepEqual([of('beast'), of('lothdesktop'), of('newpc')], [{ enabled: false, idleMinutes: 90 }, { enabled: false, idleMinutes: 90 }, { enabled: false, idleMinutes: 90 }], 'off and 90 min by default, a new machine included');
+  setAppConfig(file, cfg, 'machines.activityPause.enabled', true, { machine: 'newpc' });
+  setAppConfig(file, cfg, 'machines.activityPause.idleMinutes', 45, { machine: 'newpc' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).machines.activityPause, { enabled: { newpc: true }, idleMinutes: { newpc: 45 } });
+  assert.deepEqual([of('newpc'), of('beast')], [{ enabled: true, idleMinutes: 45 }, { enabled: false, idleMinutes: 90 }], 'one machine on, the rest off');
+  setAppConfig(file, cfg, 'machines.activityPause.enabled', false, { machine: 'newpc' });
+  assert.equal(of('newpc').enabled, false);
+  assert.equal(normalizeSetting('machines.activityPause.enabled', 'true'), true);
+  assert.throws(() => setAppConfig(file, cfg, 'machines.activityPause.enabled', 'maybe', { machine: 'm5' }), /machines\.activityPause\.enabled is true/);
+  assert.throws(() => setAppConfig(file, cfg, 'machines.activityPause.idleMinutes', 0, { machine: 'm5' }), /from 1 to 1440/);
 });

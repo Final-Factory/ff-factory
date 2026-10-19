@@ -155,6 +155,8 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
               </span>
             </div>
           )}
+          {/* The activity pause (w1574): as the machine itself reports it; the switch sets its config machines.activityPause. */}
+          {m.pause?.settings && <ActivityPause m={m} />}
         </DetailsSection>
         {(m.sandboxes?.length ?? 0) > 0 && (
           <DetailsSection title="Sandboxes">
@@ -364,5 +366,40 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
         <button type="submit" hidden />
       </form>
     </Modal>
+  );
+}
+
+const IDLE_CHOICES = [15, 30, 60, 90, 120, 240];
+
+/** "Pause on a person's input": off by default (w1574, lothsahn); on, a key or click pauses its work until N idle minutes. */
+function ActivityPause({ m }: { m: Machine }) {
+  const a = m.pause!.settings!.activity;
+  const [busy, setBusy] = useState(false);
+  const set = async (body: { enabled?: boolean; idleMinutes?: number }) => {
+    setBusy(true);
+    const r = await attempt(api.setActivityPause(m.id, body));
+    setBusy(false);
+    if (r) toast(`${m.id}: the activity pause is ${r.enabled ? `on (${r.idleMinutes} min idle)` : 'off'}`);
+  };
+  const idles = IDLE_CHOICES.includes(a.idleMinutes) ? IDLE_CHOICES : [...IDLE_CHOICES, a.idleMinutes].sort((x, y) => x - y);
+  return (
+    <div className="unity-bar" data-testid="machine-activity-pause">
+      <Chip tone={a.enabled ? 'amber' : 'grey'}>{a.enabled ? 'Pauses on input' : 'Input ignored'}</Chip>
+      <span className="dim small ellipsis">
+        {a.enabled ? `A key or click on ${m.id} pauses its work until no one has used it for` : `Work goes on while someone uses ${m.id}`}
+      </span>
+      {a.enabled && (
+        <select className="input input-sm" value={a.idleMinutes} disabled={busy} aria-label="Idle minutes before work resumes" onChange={(e) => void set({ idleMinutes: Number(e.target.value) })}>
+          {idles.map((n) => (
+            <option key={n} value={n}>
+              {n} min
+            </option>
+          ))}
+        </select>
+      )}
+      <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void set({ enabled: !a.enabled })} title="Config machines.activityPause.enabled for this machine">
+        {a.enabled ? 'Turn off' : 'Turn on'}
+      </button>
+    </div>
   );
 }

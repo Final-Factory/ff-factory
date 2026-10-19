@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { HOST_ROLES, configPath, loadConfig, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
+import { HOST_ROLES, configPath, loadConfig, machineActivityPause, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus } from './store.ts';
 import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessions.ts';
@@ -16,7 +16,7 @@ import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationV
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
-import { toggleNightly } from './appConfig.ts';
+import { setAppConfig, toggleNightly } from './appConfig.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
 import { BlockerWatch, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
@@ -308,6 +308,27 @@ machines.offlineAlert = (machineId, title, text) => {
   machines.report?.(text);
 };
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
+// The activity pause (w1574, docs/machines.md "Pausing a machine"): config machines.activityPause, per machine, off by default.
+machines.activityFor = (id) => machineActivityPause(cfg, id);
+/** Set machine `id`'s activity pause in config (its own entry) and log who did; the caller pushes it to the daemon. */
+function setActivityPause(id: string, a: { enabled?: boolean; idleMinutes?: number }, by: string) {
+  const was = machineActivityPause(cfg, id);
+  if (a.enabled !== undefined && a.enabled !== was.enabled) setAppConfig(configPath(), cfg, 'machines.activityPause.enabled', a.enabled, { machine: id });
+  if (a.idleMinutes !== undefined && a.idleMinutes !== was.idleMinutes) setAppConfig(configPath(), cfg, 'machines.activityPause.idleMinutes', a.idleMinutes, { machine: id });
+  const now = machineActivityPause(cfg, id);
+  const text = (x: typeof now) => (x.enabled ? `on (${x.idleMinutes} min idle)` : 'off');
+  console.log(`app config: machines.activityPause (${id}) ${text(was)} -> ${text(now)}, set by ${by}`);
+  return now;
+}
+machines.onActivitySet = (id, a) => {
+  try {
+    setActivityPause(id, a, `the tray on ${id}`);
+    return true;
+  } catch (e) {
+    console.warn(`machine ${id}: the tray's activity pause was not kept: ${(e as Error).message}`);
+    return false;
+  }
+};
 // The stale-output rules (w459) attribute build and run output to the ledger's requests: each daemon gets its facts
 // at connect and every 10 minutes, and its every pass is kept here too (data/cleanup/<machine>/cleanup-log.jsonl).
 machines.cleanupContext = () => staleContextOf(store.work.values());
@@ -1659,6 +1680,19 @@ route('POST', '/api/machines/([\\w-]+)/daemon', async (req, [id]) => {
   const b = await readJson<{ action?: string; force?: boolean }>(req);
   if (b.action !== 'start' && b.action !== 'stop' && b.action !== 'restart') throw new HttpError(400, 'action must be start, stop or restart');
   return { note: await machines.controlDaemon(id, b.action, !!b.force) };
+});
+
+// The machine panel's activity pause switch (w1574): this machine's config machines.activityPause, told to its daemon.
+route('POST', '/api/machines/([\\w-]+)/activity-pause', async (req, [id]) => {
+  const b = await readJson<{ enabled?: unknown; idleMinutes?: unknown }>(req);
+  if (!store.machines.has(id)) throw new HttpError(404, `no machine "${id}"`);
+  if (b.enabled !== undefined && typeof b.enabled !== 'boolean') throw new HttpError(400, 'enabled is true or false');
+  const idle = b.idleMinutes;
+  if (idle !== undefined && (typeof idle !== 'number' || !Number.isInteger(idle) || idle < 1 || idle > 1440)) throw new HttpError(400, 'idleMinutes is a whole number from 1 to 1440');
+  const r = requesterOf(req);
+  const now = setActivityPause(id, { enabled: b.enabled as boolean | undefined, idleMinutes: idle as number | undefined }, r ? `${r.displayName} (${r.userId}), machine panel` : 'the machine panel');
+  machines.pushActivityConfig(id);
+  return now;
 });
 
 route('POST', '/api/machines/([\\w-]+)/label', async (req, [id]) => {

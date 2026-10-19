@@ -576,6 +576,10 @@ export class MachineManager {
   cleanupNotice?: (machineId: string, text: string) => void;
   /** A machine was paused or unpaused from its tray app, schedule or a person's input (w1532; wired by Agents: the hand-back). */
   onPause?: (machineId: string, pause: MachinePause, was: MachinePause | undefined) => void;
+  /** Machine `id`'s activity pause (config machines.activityPause, w1574): sent at connect and when it changes. */
+  activityFor?: (machineId: string) => { enabled: boolean; idleMinutes: number };
+  /** Its tray turned the activity pause on or off (w1574): kept as its machines.activityPause; true when kept. */
+  onActivitySet?: (machineId: string, activity: { enabled: boolean; idleMinutes: number }) => boolean;
 
   /**
    * A daemon's pause report (w1532, machine/pause.ts), in its hello or a `pause` message: kept on the machine record (the
@@ -597,10 +601,33 @@ export class MachineManager {
       ...(typeof r.tray === 'string' ? { tray: r.tray.slice(0, 200) } : {}),
       at: new Date().toISOString(),
     };
+    // An activity pause on a machine whose machines.activityPause is off (w1574): its daemon is from before the setting (it
+    // pauses on input by itself); the portal does not hold it or take its work, and says why.
+    if (pause.paused && pause.reason === 'activity' && this.activityFor && !this.activityFor(id).enabled) {
+      Object.assign(pause, { paused: false, detail: `input ignored: the activity pause is off for ${id} (config machines.activityPause.enabled); its daemon (${pause.detail}) is from before that setting` });
+      delete pause.reason;
+      delete pause.until;
+    }
     const was = m.pause;
     this.update(id, { pause });
+    // What the machine itself has (its pause.json, as its daemon reports it): the read-back for the setting (w1574).
+    const act = (s?: MachinePause['settings']) => (s?.activity ? (s.activity.enabled ? `on (${s.activity.idleMinutes} min idle)` : 'off') : undefined);
+    if (act(pause.settings) !== act(was?.settings) && act(pause.settings)) console.log(`machine ${id}: activity pause ${act(pause.settings)} on the machine`);
     if (!!was?.paused !== pause.paused || (pause.paused && was?.reason !== pause.reason)) console.log(`machine ${id}: ${pause.paused ? `PAUSED (${pause.reason ?? '?'})` : 'running again'}: ${pause.detail}`);
     if (!!was?.paused !== pause.paused) this.onPause?.(id, pause, was);
+  }
+
+  /** Send every connected daemon (or the one named) its activity pause (w1574, after machines.activityPause changed). */
+  pushActivityConfig(only?: string) {
+    // A machine paused for activity whose setting is now off takes work again at once, whatever its daemon's version.
+    for (const m of this.store.machines.values()) {
+      if ((!only || m.id === only) && m.pause?.paused && m.pause.reason === 'activity') this.takePause(m.id, m.pause);
+    }
+    for (const id of this.links.keys()) {
+      if (only && id !== only) continue;
+      const c = this.activityFor?.(id);
+      if (c) this.post(id, { type: 'activity_config', config: c }, false);
+    }
   }
 
   /** Send every connected daemon its clean-up settings (after they changed). */
@@ -1764,6 +1791,8 @@ export class MachineManager {
     if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
     const cleanup = this.cleanupFor?.(id);
     if (cleanup) ws.send(JSON.stringify({ type: 'cleanup_config', config: cleanup } satisfies ToDaemon));
+    const activity = this.activityFor?.(id);
+    if (activity) ws.send(JSON.stringify({ type: 'activity_config', config: activity } satisfies ToDaemon));
     const ctx = m.local ? undefined : this.cleanupContext?.();
     if (ctx) ws.send(JSON.stringify({ type: 'cleanup_context', context: ctx } satisfies ToDaemon));
     ws.send(JSON.stringify({ type: 'usage_config', config: { everyMinutes: this.cfg.usagePollMinutes ?? DEFAULT_USAGE_POLL_MINUTES } } satisfies ToDaemon));
@@ -2037,6 +2066,12 @@ export class MachineManager {
       case 'host_report':
         this.hostReport?.(id, String(msg.title ?? ''), String(msg.body ?? ''));
         return;
+      case 'activity_set': {
+        const a = msg.activity;
+        if (!a || typeof a.enabled !== 'boolean' || !Number.isInteger(a.idleMinutes) || a.idleMinutes < 1 || a.idleMinutes > 1440) return;
+        if (this.onActivitySet?.(id, { enabled: a.enabled, idleMinutes: a.idleMinutes })) this.pushActivityConfig(id);
+        return;
+      }
       case 'pause':
         this.takePause(id, msg.pause);
         return;
