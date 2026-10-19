@@ -6,6 +6,7 @@ import path from 'node:path';
 import { cleanupPass, type StaleContext } from './staleOutput.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { descendants, installLeftoverSettings, mergePlans, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
+import { runCleanup, touchedWhy } from './cleanup.ts';
 
 /**
  * w899: what the daemon's clean-up now takes of the leftovers w876 removed by hand on LothDesktop on 2026-10-10, laid out
@@ -126,15 +127,106 @@ test('nothing outside the install folder, and nothing at all without one', async
   assert.ok(!p.items.some((i) => i.path.startsWith(outside)));
 });
 
-test("a stopped session's folder holding a clone with unpushed work stays, listed", async (t) => {
+test("w1575: a stopped session's clone with unpushed work stays, listed; the rest of its folder goes", async (t) => {
   const root = materialize(t);
   const clone = path.join(root, 'tmp', 'ffa-cb4b501c', 'clone');
   fs.mkdirSync(path.join(clone, '.git'), { recursive: true });
   for (const p of [path.join(clone, '.git'), clone, path.dirname(clone)]) fs.utimesSync(p, 1, 1);
   fs.utimesSync(path.join(clone, '..', 'x'), 1, 1);
+  const p = await plan(root, { localWork: async (d) => d === clone });
+  assert.ok(!p.items.some((i) => i.path.endsWith('ffa-cb4b501c') || i.path.startsWith(clone)), 'neither the folder nor the clone goes');
+  assert.ok(p.listed.some((l) => l.path === clone && /unpushed/.test(l.why)), 'the clone is listed for a person');
+  assert.ok(p.items.some((i) => i.path === path.join(root, 'tmp', 'ffa-cb4b501c', 'x')), 'what else the folder holds goes');
+});
+
+test('w1575: an entry taken alone never takes a repo with work nested deeper inside it', async (t) => {
+  const root = materialize(t);
+  const tmp = path.join(root, 'tmp');
+  lay(tmp, ['ffa-c2829305/clone/.git/HEAD', 'ffa-c2829305/demo-222946/portal/base/.git/HEAD', 'ffa-c2829305/demo-222946/run.log', 'ffa-c2829305/scratch/a.txt'], 30);
+  const work = new Set([path.join(tmp, 'ffa-c2829305', 'clone'), path.join(tmp, 'ffa-c2829305', 'demo-222946', 'portal', 'base')]);
+  const p = await plan(root, { localWork: async (d) => work.has(d) });
+  const taken = new Set(p.items.map((i) => rel(root, i.path)));
+  assert.ok(taken.has('tmp/ffa-c2829305/scratch'), 'an entry with no repo goes');
+  assert.ok(taken.has('tmp/ffa-c2829305/demo-222946/run.log'), 'beside the deep repo, its log goes');
+  for (const x of taken) assert.ok(!/demo-222946\/portal|ffa-c2829305\/clone|^tmp\/ffa-c2829305$|demo-222946$/.test(x), `${x} holds a repo with work`);
+  const listedRel = p.listed.map((l) => rel(root, l.path));
+  assert.ok(listedRel.includes('tmp/ffa-c2829305/clone') && listedRel.includes('tmp/ffa-c2829305/demo-222946/portal/base'), JSON.stringify(listedRel));
+});
+
+/** A folder tree under `base`: each path (a trailing / makes a folder) made, then aged `ageH` hours, leaves first. */
+function lay(base: string, paths: string[], ageH: number) {
+  const at = (NOW - ageH * HOUR) / 1000;
+  for (const rel of paths) {
+    const p = path.join(base, ...rel.split('/').filter(Boolean));
+    if (rel.endsWith('/')) fs.mkdirSync(p, { recursive: true });
+    else (fs.mkdirSync(path.dirname(p), { recursive: true }), fs.writeFileSync(p, 'x'));
+  }
+  for (const rel of paths) for (let p = path.join(base, ...rel.split('/').filter(Boolean)); p.length > base.length; p = path.dirname(p)) fs.utimesSync(p, at, at);
+}
+
+test("w1575: a stopped session's folder changed lately is taken apart: what changed stays, its older entries go", async (t) => {
+  const root = materialize(t);
+  const dir = path.join(root, 'tmp', 'ffa-60244336');
+  lay(dir, ['ff/a.txt', 'ff2/a.txt', 'ff3/a.txt'], 30);
+  lay(dir, ['live-run/log.txt'], 0.5);
+  fs.utimesSync(dir, (NOW - 0.5 * HOUR) / 1000, (NOW - 0.5 * HOUR) / 1000);
+  const p = await plan(root);
+  const taken = new Set(p.items.map((i) => rel(root, i.path)));
+  assert.ok(!taken.has('tmp/ffa-60244336'), 'the folder changed lately: not whole');
+  for (const x of ['ff', 'ff2', 'ff3']) assert.ok(taken.has(`tmp/ffa-60244336/${x}`), x);
+  assert.ok(!taken.has('tmp/ffa-60244336/live-run'), 'what changed lately stays');
+});
+
+test('w1575: touchedWhy tells too many entries to judge from a change, so a person sees the folder', async (t) => {
+  const root = materialize(t);
+  const dir = path.join(root, 'tmp', 'ffa-big');
+  lay(path.join(root, 'tmp'), ['ffa-big/a/1', 'ffa-big/a/2', 'ffa-big/b/3'], 30);
+  assert.equal(await touchedWhy(dir, NOW - HOUR, 3), 'too-big');
+  assert.equal(await touchedWhy(dir, NOW - HOUR), undefined);
+  assert.equal(await touchedWhy(dir, NOW - 40 * HOUR), 'changed');
+});
+
+test('w1575: a fixture repo of a test (ffsb-e2e-<port>/base, a half-deleted build-player-restore-*) holds nothing back', async (t) => {
+  const root = materialize(t);
+  lay(path.join(root, 'tmp'), ['ffa-d0008818/ffsb-e2e-8791/base/.git/HEAD', 'ffa-d0008818/build-player-restore-0iti1_sb/.git/HEAD', 'ffa-d0008818/w1372-lostlines-abc/.git/HEAD'], 30);
   const p = await plan(root, { localWork: async () => true });
-  assert.ok(!p.items.some((i) => i.path.endsWith('ffa-cb4b501c')));
-  assert.ok(p.listed.some((l) => l.path.endsWith('ffa-cb4b501c') && /unpushed/.test(l.why)));
+  assert.ok(p.items.some((i) => rel(root, i.path) === 'tmp/ffa-d0008818'), 'the folder goes whole');
+});
+
+test('w1575: a session keeps its newest player builds, live or not; an older idle one goes, one a player runs from stays', async (t) => {
+  const root = materialize(t);
+  const live = path.join(root, 'tmp', `ffa-${listing.live[0]}`);
+  const build = (name: string, ageH: number) => lay(live, [`${name}/UnityPlayer.dll`, `${name}/FinalFactory.exe`, `${name}/FinalFactory_Data/data.unity3d`], ageH);
+  build('builds/aaa111', 72);
+  build('builds/bbb222', 48);
+  build('builds/ccc333', 30);
+  build('builds/ddd444', 4);
+  build('w1468-verify/eee555', 1);
+  lay(live, ['builds/not-a-build/readme.txt'], 72);
+  const mac = path.join(root, 'tmp', 'ffa-macsess');
+  for (const [n, h] of [['a', 50], ['b', 40], ['c', 30]] as const) lay(mac, [`out/${n}/FinalFactory.app/Contents/Frameworks/UnityPlayer.dylib`], h);
+  const runs = path.join(live, 'builds', 'bbb222', 'FinalFactory.exe');
+  const p = await planInstallLeftovers({
+    root,
+    sandboxes: [],
+    tempRoots: [path.join(root, 'tmp')],
+    guard: { keep: [], inUse: [live], resumable: [mac], home: path.join(root, 'home') },
+    procs: [{ pid: 7, ppid: 1, cmd: `"${runs}" -batchmode` }],
+    settings,
+    now: NOW,
+  });
+  const old = p.items.filter((i) => i.rule === 'session-old-build').map((i) => rel(root, i.path)).sort();
+  const id = listing.live[0];
+  assert.deepEqual(old, [`tmp/ffa-${id}/builds/aaa111`, `tmp/ffa-${id}/builds/ccc333`, 'tmp/ffa-macsess/out/a/FinalFactory.app'], 'the newest two of each session stay, and the one a player runs from');
+  assert.ok(!p.items.some((i) => i.path === live || i.path === mac), "a live or resumed session's folder never goes");
+  assert.ok(!p.items.some((i) => i.path.includes('not-a-build')));
+  // The clean-up's last check lets an old build through, inside the live folder, and still refuses the folder itself.
+  const guard = { keep: [], inUse: [live], resumable: [mac], home: path.join(root, 'home') };
+  const r = await runCleanup([...p.items.filter((i) => i.rule === 'session-old-build'), { path: live, why: 'test', rule: 'x' }], guard);
+  assert.ok(!fs.existsSync(path.join(live, 'builds', 'aaa111')), 'the old build is removed');
+  assert.ok(fs.existsSync(path.join(live, 'w1468-verify', 'eee555', 'UnityPlayer.dll')) && fs.existsSync(path.join(live, 'builds', 'ddd444')), 'the newest two are kept');
+  assert.ok(fs.existsSync(runs), 'the build a player runs from is kept');
+  assert.ok(r.failed.some((f) => f.path === live && /in use/.test(f.why)), 'the live folder itself is refused');
 });
 
 test('descendants walks a process tree', () => {

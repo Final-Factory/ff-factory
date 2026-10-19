@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { hasLocalWork, neverDelete, norm, touchedSince, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
+import { hasLocalWork, neverDelete, norm, sessionRelaxed, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
 import { CONTEXT_MAX_AGE_HOURS, requestIdsIn, type StaleContext, type StalePlan } from './staleOutput.ts';
 import { mentions } from './ownLeftovers.ts';
 
@@ -14,6 +14,10 @@ import { mentions } from './ownLeftovers.ts';
  * - the nightly lab's (`<install>/nightly`, and `<install>/nightly-history` since w1099) builds beyond the newest few, runs,
  *   rehearsals and logs past their age;
  * - folders of sessions that stopped: `<install>/tmp/ffa-<session>` (also those holding fixture repos) and stale `scratch/`;
+ *   one that cannot go whole (a clone with work on no remote, something changed lately, too many entries to judge) is taken
+ *   entry by entry instead, so only that clone or entry stays (w1575: one 1-commit clone kept 48.7 GB on beast);
+ * - per-commit player builds in every session's folder, live and resumed ones too, beyond the newest few (w1575: 24 builds,
+ *   about 46 GB, in the folders of LothDesktop's open requests on 2026-10-19);
  * - a Claude task `.output` file past a cap (a runaway writer reached 99.6 GB; the space came back only when its
  *   process ended): the file goes and, when its session has stopped, so does the process still writing it.
  *
@@ -107,8 +111,23 @@ const DAY = 24 * HOUR;
 const GB = 1024 ** 3;
 /** Names that are never looked into, under any place. */
 const NEVER_SEGMENT = /^(library|assets|projectsettings|packages|usersettings|inbox|\.git|\.claude|node_modules)$/i;
-/** Fixture repos of the app's own tests (ffbox-test-*): scratch though they hold commits by design. */
-const FIXTURE_REPO = /^ffbox-test-/i;
+/**
+ * Fixture repos of tests (ffbox-test-*; ff-factory's e2e/server.ts ffsb-e2e-<port>/base; the game repo's scripts/tests
+ * mkdtemp repos, which Windows leaves half deleted since rmtree(ignore_errors=True) skips git's read-only objects): scratch
+ * though they hold commits by design. Any folder on the way to the repo may carry the name.
+ */
+const FIXTURE_REPO = /^(ffbox-test-|ffsb-e2e-|build-player-restore-|w\d+-lostlines-|w\d+-lines-)/i;
+/** How deep a stopped session's folder is taken apart when it cannot go whole. */
+const SPLIT_DEPTH = 3;
+/** How deep a session's folder is searched for player builds. */
+const BUILD_DEPTH = 5;
+/**
+ * How far below an item its git repos are looked for (w1575): a worker's legs nest clones deeper than one level
+ * (`demo-222946/portal/base`), and an entry taken alone must not take a repo with work inside it.
+ */
+const REPO_DEPTH = 4;
+/** Not looked into for repos: a repo's own insides, dependencies, Unity's caches. */
+const NO_REPO_LOOK = /^(\.git|node_modules|library)$/i;
 
 async function children(dir: string): Promise<fs.Dirent[]> {
   return fs.promises.readdir(dir, { withFileTypes: true }).catch(() => [] as fs.Dirent[]);
@@ -186,21 +205,27 @@ export async function planInstallLeftovers(o: {
   const relaxed = (base: string): CleanupGuard => ({ ...o.guard, keep: o.guard.keep.filter((k) => !(norm(base) === norm(k) || norm(base).startsWith(norm(k) + '/'))) });
   const live = (p: string) => o.guard.inUse.some((k) => k && (within(p, k) || within(k, p)));
 
-  /** Why `p` must stay, or undefined; `list`: worth showing a person. */
-  const blocked = async (p: string, base: string, untouchedMs: number | undefined): Promise<{ why: string; list: boolean } | undefined> => {
+  /** Why `p` must stay, or undefined; `list`: worth showing a person; `split`: the rest of what is in it may still go. */
+  const blocked = async (p: string, base: string, untouchedMs: number | undefined): Promise<{ why: string; list: boolean; split?: boolean } | undefined> => {
     if (!within(p, root)) return { why: 'outside the install folder', list: false };
     if (norm(p) === norm(root) || norm(p) === norm(base)) return { why: 'the install folder or a place itself', list: false };
     const rel = norm(p).slice(norm(base).length).split('/').filter(Boolean);
     if (rel.some((seg) => NEVER_SEGMENT.test(seg))) return { why: 'a Library, Assets, .git or similar folder', list: false };
     const no = neverDelete(p, relaxed(base));
     if (no) return { why: no, list: false };
-    if (untouchedMs !== undefined && (await touchedSince(p, now - untouchedMs))) return { why: 'changed recently', list: false };
+    const touched = untouchedMs === undefined ? undefined : await touchedWhy(p, now - untouchedMs);
+    if (touched === 'changed') return { why: 'changed recently', list: false, split: true };
+    if (touched === 'too-big') return { why: 'too many entries to judge its age (over 200,000)', list: true, split: true };
     const repos: string[] = [];
-    if (fs.existsSync(path.join(p, '.git'))) repos.push(p);
-    for (const e of await children(p)) if (e.isDirectory() && fs.existsSync(path.join(p, e.name, '.git'))) repos.push(path.join(p, e.name));
+    const down = async (d: string, depth: number) => {
+      if (fs.existsSync(path.join(d, '.git'))) return void repos.push(d); // its nested repos are submodules: its status covers them
+      if (depth >= REPO_DEPTH) return;
+      for (const e of await children(d)) if (e.isDirectory() && !NO_REPO_LOOK.test(e.name)) await down(path.join(d, e.name), depth + 1);
+    };
+    await down(p, 0);
     for (const r of repos) {
-      if (FIXTURE_REPO.test(path.basename(r))) continue;
-      if (await localWork(r)) return { why: `holds a git repo with uncommitted or unpushed work (${r})`, list: true };
+      if (norm(r).slice(norm(base).length).split('/').some((seg) => FIXTURE_REPO.test(seg))) continue;
+      if (await localWork(r)) return { why: `holds a git repo with uncommitted or unpushed work (${r})`, list: true, split: true };
     }
     return undefined;
   };
@@ -209,6 +234,51 @@ export async function planInstallLeftovers(o: {
     const b = await blocked(p, base, untouchedMs);
     if (!b) items.set(p, { path: p, rule, why, base });
     else if (b.list) listed.set(p, b.why);
+  };
+  /**
+   * A stopped session's folder, or (when it cannot go whole) its entries one by one, down to SPLIT_DEPTH (w1575): a clone with
+   * work on no remote stays and is listed, what changed lately stays, the rest goes. A repo is never taken apart.
+   */
+  const takeApart = async (p: string, base: string, why: string, untouchedMs: number, depth: number): Promise<void> => {
+    if (items.has(p)) return;
+    const b = await blocked(p, base, untouchedMs);
+    if (!b) return void items.set(p, { path: p, rule: 'stopped-session-temp', why, base });
+    const st = await fs.promises.lstat(p).catch(() => undefined);
+    if (!b.split || depth >= SPLIT_DEPTH || !st?.isDirectory() || fs.existsSync(path.join(p, '.git'))) {
+      if (b.list) listed.set(p, b.why);
+      return;
+    }
+    for (const e of await children(p)) await takeApart(path.join(p, e.name), base, why, untouchedMs, depth + 1);
+  };
+  /** The player builds under `dir`: a folder holding UnityPlayer.dll or .so, or an .app holding UnityPlayer.dylib. */
+  const buildsIn = async (dir: string, depth: number, out: string[]): Promise<string[]> => {
+    for (const e of await children(dir)) {
+      if (!e.isDirectory() || NEVER_SEGMENT.test(e.name) || /^claude/i.test(e.name)) continue;
+      const p = path.join(dir, e.name);
+      if (fs.existsSync(path.join(p, 'UnityPlayer.dll')) || fs.existsSync(path.join(p, 'UnityPlayer.so')) || (/\.app$/i.test(e.name) && fs.existsSync(path.join(p, 'Contents', 'Frameworks', 'UnityPlayer.dylib')))) out.push(p);
+      else if (depth < BUILD_DEPTH && !fs.existsSync(path.join(p, '.git'))) await buildsIn(p, depth + 1, out);
+    }
+    return out;
+  };
+  /** A build's last activity: the folder and the folders at its top (its _Data folder). */
+  const buildAt = async (b: string) => Math.max(await mtimeOf(b), ...(await Promise.all((await children(b)).filter((e) => e.isDirectory()).map((e) => mtimeOf(path.join(b, e.name))))));
+  /**
+   * Old player builds of one session's folder, live or not (w1575: every worker builds a ~2 GB player per commit into its
+   * temp folder, and nothing removed the older ones while its request stayed open): the newest keepBuilds stay; the others
+   * go once untouched for buildUntouchedHours and while no process names them (a player still running from one keeps it).
+   */
+  const oldBuilds = async (session: string, t: string) => {
+    const builds = await buildsIn(session, 1, []);
+    if (builds.length <= s.keepBuilds) return;
+    const dated = await Promise.all(builds.map(async (b) => ({ b, at: await buildAt(b) })));
+    dated.sort((a, b) => b.at - a.at);
+    for (const { b } of dated.slice(s.keepBuilds)) {
+      if (items.has(b) || !within(b, root)) continue;
+      if (neverDelete(b, sessionRelaxed(session, relaxed(t)))) continue;
+      if ((o.procs ?? []).some((p) => mentions(p.cmd, b))) continue;
+      if (await touchedSince(b, now - s.buildUntouchedHours * HOUR)) continue;
+      items.set(b, { path: b, rule: 'session-old-build', why: `a player build beyond its session's newest ${s.keepBuilds}, untouched for ${s.buildUntouchedHours} h (rebuildable)`, base: t, inSession: session });
+    }
   };
   /** The entries of `dir`, newest first (by last activity). */
   const newestFirst = async (dir: string, only?: (e: fs.Dirent) => boolean) => {
@@ -272,6 +342,7 @@ export async function planInstallLeftovers(o: {
       if (!e.isDirectory() || !/^ffa-/i.test(e.name)) continue;
       const dir = path.join(t, e.name);
       const big = await oversizeOutputs(dir, cap);
+      await oldBuilds(dir, t);
       if (live(dir)) {
         for (const b of big) listed.set(b.file, `a task output of a LIVE session past ${s.outputCapGB} GB (${(b.bytes / GB).toFixed(1)} GB): kept, someone should look`);
         continue;
@@ -286,11 +357,13 @@ export async function planInstallLeftovers(o: {
         for (const p of all.values()) if (!plan.strays.some((x) => x.pid === p.pid)) plan.strays.push({ pid: p.pid, cmd: p.cmd.slice(0, 300), dir, why: `holds ${b.file} (${(b.bytes / GB).toFixed(1)} GB)` });
         if (!all.size) listed.set(`${b.file} (writer unknown)`, 'no process names this stopped session; if space does not come back, its writer still runs');
       }
-      await take(dir, t, 'stopped-session-temp', `the temp folder of a session that stopped, untouched for ${s.sessionTempHours} h`, s.sessionTempHours * HOUR);
+      await takeApart(dir, t, `the temp folder of a session that stopped, untouched for ${s.sessionTempHours} h`, s.sessionTempHours * HOUR, 0);
     }
   }
 
   for (const p of items.keys()) for (const l of [...listed.keys()]) if (within(l, p)) listed.delete(l);
+  // An old build inside a folder that goes whole goes with it.
+  for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
   plan.items = [...items.values()];
   plan.listed = [...listed].map(([p, why]) => ({ path: p, why }));
   return plan;

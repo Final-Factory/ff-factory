@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LEFTOVER, LeftoverReaper, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, readEnvs, readLeases, realInspect, sessionVerdict, slotOf, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
+import { LEFTOVER, LeftoverReaper, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, readEnvs, readLeases, realInspect, sessionVerdict, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
 import { realDeps as realUnityDeps, type Proc, type UnityPlatform } from '../machine/unity.ts';
 import { playerText, unitySlotsLine } from '../shared/fleet.ts';
 
@@ -213,6 +213,31 @@ test('a player whose lease names its session (Windows, a Mac without ps -E) foll
   assert.deepEqual(ended.map((e) => e.session).sort(), ['beef5678', 'cafe1234']);
 });
 
+test('w1575, Windows: a Git Bash tail naming a stopped worker\'s temp folder ends once its starter is gone; one a live shell runs stays; an import worker whose editor is gone ends', async () => {
+  // As on beast and LothDesktop, 2026-10-19: tails of 10-15 whose shells were gone held stopped workers' folders, and import
+  // workers of slot2 ran a day after its editor stopped. Git Bash programs show no environment on Windows (measured).
+  const tail = (s: string) => `"C:\\Program Files\\Git\\usr\\bin\\tail.exe" -n +1 -f ${TMP}/ffa-${s}/run.log`;
+  const unity = '"C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.0f1\\Editor\\Unity.exe"';
+  const m = machine(
+    [
+      { pid: 90, ppid: 49932, cmd: tail('824be148'), name: 'tail.exe' },
+      { pid: 91, ppid: 92, cmd: tail('824be148'), name: 'tail.exe' },
+      { pid: 92, ppid: 7, cmd: '"C:\\Program Files\\Git\\usr\\bin\\bash.exe"', name: 'bash.exe' },
+      { pid: 93, ppid: 33000, cmd: `${unity} -adb2 -batchMode -noUpm -name AssetImportWorker0 -projectPath F:/ffw/sandboxes/slot2 -logFile ${TMP}/ffa-29bac897/import.log`, name: 'Unity.exe' },
+      { pid: 94, ppid: 95, cmd: `${unity} -adb2 -batchMode -noUpm -name AssetImportWorker1 -projectPath F:/ffw/sandboxes/slot1`, name: 'Unity.exe' },
+      { pid: 95, ppid: 7, cmd: `${unity} -projectPath F:/ffw/sandboxes/slot1`, name: 'Unity.exe' },
+    ],
+    { platform: 'win32', sessions: { '824be148': {} } },
+  );
+  await m.look(0);
+  const ended = [];
+  for (let i = 0; i < 12; i++) ended.push(...(await m.look(1)));
+  assert.deepEqual(ended.flatMap((e) => e.pids).sort((a, b) => a - b), [90, 93], 'the orphan tail and the orphan import worker');
+  assert.ok(ended.some((e) => e.session === '824be148' && e.pids.includes(90)), "the tail is the stopped worker's");
+  assert.ok(m.alive(91) && m.alive(92), 'a tail a live shell runs stays, whatever folder it reads');
+  assert.ok(m.alive(94) && m.alive(95), "a running editor and its import worker are never touched");
+});
+
 // ---------------------------------------------------------------- 3. what is never ended
 
 test('a live worker\'s player and Xvfb are never ended, however long they run', async () => {
@@ -315,6 +340,14 @@ test('kinds, slots, temp paths and environments as each platform writes them', (
   assert.equal(tempSessionOf(xvfb('a33e1437', 101), TMP, 'linux'), 'a33e1437');
   assert.equal(tempSessionOf(`/usr/bin/Xvfb ${TMP}/ffa-a33e1437/x`, TMP, 'linux'), undefined, 'only the program\'s own path counts');
   assert.equal(tempSessionOf('"F:\\ffw\\tmp\\ffa-9abc\\tools\\ffmpeg.exe" -i x', 'F:\\ffw\\tmp', 'win32'), '9abc');
+  // w1575: Git Bash programs on Windows show no environment; the temp folder they name is the owner (beast, 2026-10-19).
+  const tail = '"C:\\Program Files\\Git\\usr\\bin\\tail.exe" -n +1 -f /f/ffw/tmp/ffa-824be148/before1-155347/runner.log';
+  assert.equal(tempSessionInArgs(tail, 'F:\\ffw\\tmp', 'win32'), '824be148');
+  assert.equal(tempSessionInArgs('tail.exe -f F:\\ffw\\tmp\\ffa-0a5ecf34\\mpaudit\\audit.log', 'F:\\ffw\\tmp', 'win32'), '0a5ecf34');
+  assert.equal(tempSessionInArgs('x.exe --log=/f/ffw/tmp/ffa-aa11/x.log', 'F:/ffw/tmp', 'win32'), 'aa11');
+  assert.equal(tempSessionInArgs('diff /f/ffw/tmp/ffa-aa11/a /f/ffw/tmp/ffa-bb22/b', 'F:/ffw/tmp', 'win32'), undefined, 'two sessions named: nobody');
+  assert.equal(tempSessionInArgs('tail -f /g/ffw/tmp/ffa-aa11/a /x/f/ffw/tmp/ffa-cc33/b', 'F:/ffw/tmp', 'win32'), undefined, 'another drive, or the path inside another');
+  assert.equal(tempSessionInArgs(tail, 'F:\\ffw\\tmp', 'linux'), undefined, 'Windows only: elsewhere the environment says');
   assert.deepEqual(envFrom(['PATH=/bin', 'FF_SESSION_ID=eb0f39d4', 'FF_SANDBOX_ID=slot2', 'FF_MACHINE_ID=biscuit']), { session: 'eb0f39d4', sandbox: 'slot2', machine: 'biscuit' });
   assert.deepEqual(macEnvLine('  812 /Users/b/ffw/players/slot0/player/finalfactory.app/Contents/MacOS/finalfactory -batchmode TERM=xterm FF_SESSION_ID=abcd1234 FF_SANDBOX_ID=slot1 FF_MACHINE_ID=m5 HOME=/Users/b'), { pid: 812, env: { session: 'abcd1234', sandbox: 'slot1', machine: 'm5' } });
   assert.deepEqual(macEnvLine('  9 /bin/echo FF_SESSION_ID=fake PATH=/bin FF_SESSION_ID=real'), { pid: 9, env: { session: 'real' } });

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { normalizeSetting } from './appConfig.ts';
-import { CleanupRunner, runCleanup, staleAtFile, type CleanupGuard, type CleanupRun, type PassOptions } from './cleanup.ts';
+import { CleanupRunner, runCleanup, staleDue, staleAtFile, type CleanupGuard, type CleanupRun, type PassOptions } from './cleanup.ts';
 import { STALE_OUTPUT_DEFAULTS, cleanupPass, defaultNightlyRoots, planStaleOutput, requestIdsIn, staleContextOf, staleOutputSettings, type StaleContext, type StalePlace } from './staleOutput.ts';
 
 /**
@@ -234,6 +234,17 @@ test('stale output: removal checks the guard again, logs why, and leaves nothing
   assert.match(late.failed[0].why, /refused: in use by a running agent/);
 });
 
+test('w1575: the daily stale pass moves to the night and stays there; never later than a day', () => {
+  const at = (d: number, h: number) => new Date(2026, 9, d, h, 0, 0).getTime(); // local time, as the daemon's clock
+  assert.equal(staleDue(at(19, 15), at(19, 3), 24), false, 'midday, 12 h on: not yet');
+  assert.equal(staleDue(at(20, 2), at(19, 15), 24), false, 'the night after an afternoon pass: 11 h on is not enough');
+  assert.equal(staleDue(at(20, 3), at(19, 15), 24), true, 'the night, 12 h on: its turn');
+  assert.equal(staleDue(at(20, 3), at(20, 2), 24), false, 'not twice a night');
+  assert.equal(staleDue(at(21, 3), at(20, 3), 24), true, 'then every night');
+  assert.equal(staleDue(at(20, 15), at(19, 15), 24), true, 'a machine off at night: a day on, as before');
+  assert.equal(staleDue(at(20, 3), at(20, 0), 6), false, 'only a daily pass moves to the night');
+});
+
 test('stale output: its own daily turn (never right at start), sooner when space is low, and every dry run', async () => {
   let now = NOW;
   const calls: PassOptions[] = [];
@@ -250,6 +261,7 @@ test('stale output: its own daily turn (never right at start), sooner when space
     log: () => {},
     done: () => {},
     now: () => now,
+    localHour: () => 12, // the day clock alone: the night rule has its own test (w1575)
   });
   now += 61 * 60_000;
   await r.tick();
@@ -288,6 +300,7 @@ test('stale output: the daily turn survives restarts (kept on disk), and the fir
       done: () => {},
       staleAt: file,
       now: () => now,
+      localHour: () => 12, // the day clock alone: the night rule has its own test (w1575)
     });
   runner();
   assert.equal(file.load(), NOW, 'the first start is recorded');

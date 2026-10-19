@@ -461,6 +461,24 @@ What clean-up cannot fix is reported, not removed: user data (OneDrive, Videos, 
 artifacts, and on BEAST the Dev Drive VHDX, which grows but never shrinks by itself (634 GB for 334 GB used
 on 2026-09-28): compact it by hand (section 3).
 
+### When a worker is done: the reopen window (w1575)
+
+lothsahn (2026-10-19): "clean up at end if the worker is done. In the past we've had cleanups delete workspaces a worker
+came back to and had to do more work in." A worker's folder is swept (the session sweep, `server/sessionSweep.ts`, 10 min
+and 6 h after; the nightly pass below for what it missed) only once no request can bring its worker back:
+
+- a request it is with that is open or stalled keeps it, as since w1097: a turn end, a wait for CI, a person or a pause
+  never empties the folder;
+- a request it is with that closed (done, rejected, cancelled) keeps it **7 days** after it closed (`updatedAt`): the
+  reopen window of `server/work.ts` `updateProblem` (`KEEP_CLOSED_MS`), in which a person may reopen it and the dispatcher
+  usually resumes the same session (`message_agent`), into the same folder. w1575 itself closed and was reopened at
+  21:48 the same minute and went back to its worker. Before, the sweep emptied such a folder 10 minutes after the close.
+
+`server/resumable.ts` `resumableSessions` holds the rule; the portal sends it to each daemon on every heartbeat
+(`pushResumable`), so a window that runs out is noticed without a ledger change, and `ff-leftovers folders` keeps the same
+folders ("closed within the last 7 days and may be reopened"). Old player builds inside such a folder still go beyond its
+newest 2 (below): a resumed worker needs at most its newest builds.
+
 ### Install-folder leftovers (w899)
 
 On 2026-10-10 LothDesktop's D: fell from 104 GB to 60 GB free while the clean-up kept most of the cause as "not
@@ -470,7 +488,10 @@ interactive console and looped on `WinError 123`; deleting the file freed nothin
 (2026-10-10): "in general we should only be clearing data in the install folder for the worker". The rules in
 `server/installLeftovers.ts` (wired as the daemon's stale-output plan, merged with `planStaleOutput`'s in
 `machine/daemon.ts`) take these, only inside the worker root (`cfg.root`; a machine without one takes nothing), on the
-stale-output schedule (daily, and in every pass while free space is low, asked for, or a dry run):
+stale-output schedule (daily, and in every pass while free space is low, asked for, or a dry run). Since w1575 the daily
+pass is a nightly one: due a day after the last as before, or already between 01:00 and 05:59 of the daemon machine's
+local time once 12 h have passed, so it moves to the night and stays there (`staleDue`, `NIGHT_HOURS`; lothsahn: "have
+the daemon do a nightly cleanup for anything the worker missed"):
 
 | What | Where | Goes when |
 |---|---|---|
@@ -478,7 +499,8 @@ stale-output schedule (daily, and in every pass while free space is low, asked f
 | benchmark builds, captures | `Builds/bench*`; `.nightly-builds/clips`, `shots` | untouched 2 / 3 days |
 | the nightly lab | `<root>/nightly`: `builds/*` beyond the newest 2, `runs/*` but the newest, `rehearsals/*`, `logs/*` | idle 6 h / 3 days / 2 days / 3 days |
 | stale scratch | `<root>/scratch/*` | untouched 3 days and no open request (ledger context) named in it |
-| stopped sessions' temp | `<temp root>/ffa-<session>` | the session is not live (the guard's inUse), untouched 2 h; a clone inside with unpushed work is listed, kept (the app's own `ffbox-test-*` fixture repos do not hold it) |
+| stopped sessions' temp | `<temp root>/ffa-<session>` | the session is not live (the guard's inUse) nor resumable (which since w1575 includes a request closed less than 7 days ago: see below), untouched 2 h. One that cannot go whole is taken entry by entry, three levels down, never inside a repo (w1575): a clone with unpushed work stays and is listed, what changed in the last 2 h stays, the rest goes; a folder of more than 200,000 entries is judged by its entries (beast's 139 GB folder of 12 game clones answered "changed recently" and was kept, unlisted, for days). Test fixture repos do not hold anything back: `ffbox-test-*`, `ffsb-e2e-*` (`e2e/server.ts`), the game repo's `build-player-restore-*`, `w<N>-lostlines-*`, `w<N>-lines-*` (Windows leaves those half deleted: `rmtree(ignore_errors=True)` skips git's read-only objects) |
+| old player builds | any folder under `<temp root>/ffa-<session>`, five levels down, holding `UnityPlayer.dll`/`.so` (or an `.app` with `UnityPlayer.dylib`), **live and resumed sessions too** | beyond that session's newest 2, untouched 6 h, and no process names it (w1575: 24 builds of about 2 GB in LothDesktop's open requests' folders). The item carries `inSession`, so the last check before removal lifts that one folder's inUse/resumable guard for it alone |
 | runaway task output | `<ffa>/claude…/<project>/<session>/tasks/*.output` past 2 GB | a stopped session's: the file goes **and the processes naming that session's folder (and their children) are ended first**, `taskkill /T /F` or SIGKILL (`machine/hostWatch.ts` `killTree`), logged. A live session's is only **listed** |
 
 `StalePlan.strays` carries the processes; `cleanupPass` ends them just before the items go, never in a dry run, and the
@@ -565,6 +587,12 @@ process's environment block (its PEB, through Windows PowerShell 5.1) on Windows
 detached player has left both) and not a job object (it would need a native helper holding a handle across daemon
 restarts). Two fallbacks: a player started through the player slots names its session in its lease (`player_slots.py`,
 `session`), and a program run from a worker's temp folder (`<install>/tmp/ffa-<session>/...`) names it in its path.
+A third on Windows (w1575): a Git Bash program a worker's shell started (`tail`, `sleep`, a script's `bash`) shows no
+environment there (measured on beast 2026-10-19: the shell's block holds `FF_SESSION_ID`, its msys children's do not),
+so one that names exactly one worker's temp folder among its arguments, in Windows or Git Bash form
+(`tail -f /f/ffw/tmp/ffa-<session>/run.log`), is that worker's, and ends only once its own starter is gone too (another
+worker's live shell may be reading that folder). Sixteen such tails, started 10-15 to 10-18 by shells long gone, held
+stopped workers' folders on LothDesktop.
 
 **When it ends** (looked at once a minute; a process must have been seen by two looks):
 
@@ -575,6 +603,7 @@ restarts). Two fallbacks: a player started through the player slots names its se
 | stopped, a request still waits for it (CI, a person, a pause) | 10 min after it stopped |
 | stopped with a pending wake_me check-in | not before the check-in is due plus 10 min |
 | none named: a game player under a player slot whose starter is gone, whose slot no other lease holds and whose sandbox has no live worker | 10 min after it was first seen so |
+| none named: a Unity an editor started (an AssetImportWorker) whose editor is gone (w1575: two of slot2's ran a day after its editor stopped) | 10 min after it was first seen so; under a running editor it is spared with that editor's tree |
 
 SIGTERM first, SIGKILL for what still runs 5 s later, children before parents; a stopped batch Unity's stale
 `Temp/UnityLockfile` goes when no Unity has the project open. Each end is logged (`leftovers: ended N process(es) left by
