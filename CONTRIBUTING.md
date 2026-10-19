@@ -24,6 +24,12 @@ prepush identity test): compare a failure with `main` before you chase it; CI on
 sandbox, the sandbox's guard refuses `git checkout -b` while its Unity editor runs: make the branch with `git branch <name>` and
 `git symbolic-ref HEAD refs/heads/<name>` (same commit), or `git worktree add <dir> -b <name> origin/main`.
 
+**A worker runs the tests with its GitHub token unset: `env -u GH_TOKEN -u GITHUB_TOKEN npm test`** (w1519). A worker's
+environment holds its person's vault token as `GH_TOKEN`. A test whose code under test reads `process.env` (the gh runners do)
+puts that value in the arguments, and a failing assertion prints them: w1519's first run printed a real token into the worker's
+transcript this way. Tests also pass `env: {}`, or their own fake values, to code that would otherwise read `process.env`. On
+Windows, the 11 tests that fail on a clean `main` (measured 2026-10-19, beast) are the same with or without the variable.
+
 ## Tests
 
 CI runs everything below on every pull request to `main`; a push to `main` runs only the secret scan and the identity
