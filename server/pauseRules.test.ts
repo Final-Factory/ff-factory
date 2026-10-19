@@ -117,7 +117,7 @@ test('w1532: the tray menu says why and what comes next in short lines', () => {
   const now = at(19, 14, 10);
   const s = night;
   const act = trayView(s, pauseState(s, personInput({}, at(19, 22, 30)), at(19, 22, 31)), at(19, 22, 31));
-  assert.deepEqual(act, { why: 'Someone is using this PC', next: 'Work resumes at Tue 00:00, after 90 minutes with no key or click', tip: 'someone is using this PC', schedule: '22:00 to 08:00, every day' });
+  assert.deepEqual(act, { why: 'Someone is using this PC', next: 'Resumes at Tue 00:00 after 90 min idle', tip: 'someone is using this PC', schedule: '22:00 to 08:00, every day' });
   assert.equal(trayView(s, pauseState(s, {}, at(20, 23, 0)), at(20, 23, 0)).next, 'Work pauses at Wed 08:00, or when someone uses this PC');
   assert.deepEqual(trayView(s, pauseState(s, {}, now), now), { why: 'Outside the work schedule', next: 'Work starts at 22:00', tip: 'outside the schedule', schedule: '22:00 to 08:00, every day' });
   const manual = trayView(DEFAULT_PAUSE_SETTINGS, pauseState(DEFAULT_PAUSE_SETTINGS, trayCommand({}, true, at(19, 14, 2)), now), now);

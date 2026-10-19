@@ -33,9 +33,13 @@ def draw(size, paused):
     stroke(d, [(8, 23), (8, 9), (21, 9)], 3.4, f, k)
     stroke(d, [(8, 16), (17, 16)], 3.4, f, k)
     if paused:
-        # Two bars where the dot was (cx 24, cy 22, r 3), a little larger so they read at 16 px.
-        for x0 in (20.6, 25.0):
-            d.rounded_rectangle((x0 * k, 17.6 * k, (x0 + 2.8) * k, 26.4 * k), radius=round(0.7 * k), fill=ORANGE)
+        # Two bars where the dot was (cx 24, cy 22, r 3), a little larger so they read. At 16 px each bar and the gap
+        # between them is one whole pixel (x 22-24 and 26-28 in favicon units): drawn between pixels they blur into one
+        # block (the w1532 UI critic).
+        bars = {16: [(22.0, 24.0), (26.0, 28.0)], 20: [(22.4, 24.0), (25.6, 27.2)], 24: [(20.0, 22.67), (25.33, 28.0)]}.get(size, [(20.6, 23.4), (25.0, 27.8)])
+        top, bottom = (18.0, 26.0) if size <= 16 else (17.6, 26.4)
+        for x0, x1 in bars:
+            d.rounded_rectangle((x0 * k, top * k, x1 * k, bottom * k), radius=0 if size <= 24 else round(0.7 * k), fill=ORANGE)
     else:
         d.ellipse(((24 - 3) * k, (22 - 3) * k, (24 + 3) * k, (22 + 3) * k), fill=ORANGE)
     return img.resize((size, size), Image.Resampling.BOX)

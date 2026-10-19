@@ -194,7 +194,7 @@ export function trayView(settings: MachinePauseSettings, p: Pick<MachinePause, '
   const watch = settings.activity.enabled;
   const idle = settings.activity.idleMinutes;
   if (p.paused) {
-    if (p.reason === 'activity') return { why: 'Someone is using this PC', next: `Work resumes at ${at(p.until)}, after ${idle} minutes with no key or click`, tip: 'someone is using this PC', schedule: sched };
+    if (p.reason === 'activity') return { why: 'Someone is using this PC', next: `Resumes at ${at(p.until)} after ${idle} min idle`, tip: 'someone is using this PC', schedule: sched };
     if (p.reason === 'manual') return { why: `Paused from the tray at ${at(p.since)}`, next: p.until ? `The schedule starts work again at ${at(p.until)}` : 'Until you unpause it here', tip: 'paused from the tray', schedule: sched };
     return { why: 'Outside the work schedule', next: p.until ? `Work starts at ${at(p.until)}` : undefined, tip: 'outside the schedule', schedule: sched };
   }

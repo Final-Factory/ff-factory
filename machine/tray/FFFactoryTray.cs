@@ -71,6 +71,7 @@ namespace FFFactory
     class TrayApp : ApplicationContext
     {
         const int INPUT_EVERY_MS = 5000;
+        static readonly string Ellipsis = ((char)0x2026).ToString();
         static readonly Color Ink = Color.FromArgb(0x1F, 0x23, 0x28);
         static readonly Color Muted = Color.FromArgb(0x57, 0x60, 0x6A);
         static readonly Color RunColour = Color.FromArgb(0x1A, 0x7F, 0x37);
@@ -84,6 +85,7 @@ namespace FFFactory
         readonly ToolStripLabel whyLine = new ToolStripLabel();
         readonly ToolStripLabel nextLine = new ToolStripLabel();
         readonly ToolStripLabel workLine = new ToolStripLabel();
+        readonly ToolStripLabel scheduleLine = new ToolStripLabel();
         readonly ToolStripMenuItem toggle = new ToolStripMenuItem();
         readonly ToolStripMenuItem schedule = new ToolStripMenuItem();
         readonly ToolStripMenuItem activity = new ToolStripMenuItem();
@@ -131,7 +133,8 @@ namespace FFFactory
             whyLine.ForeColor = Ink;
             nextLine.ForeColor = Muted;
             workLine.ForeColor = Muted;
-            foreach (ToolStripLabel l in new[] { title, stateLine, whyLine, nextLine, workLine }) l.Padding = new Padding(0, 1, 0, 1);
+            scheduleLine.ForeColor = Muted;
+            foreach (ToolStripLabel l in new[] { title, stateLine, whyLine, nextLine, workLine, scheduleLine }) l.Padding = new Padding(0, 1, 0, 1);
             toggle.Font = new Font(menu.Font, FontStyle.Bold);
             toggle.Click += delegate { Send(new Dictionary<string, object> { { "type", paused ? "unpause" : "pause" } }); };
             schedule.Click += delegate { ShowSchedule(); };
@@ -141,11 +144,13 @@ namespace FFFactory
             portal.Click += delegate { if (!string.IsNullOrEmpty(portalUrl)) try { Process.Start(portalUrl); } catch (Exception e) { Log("could not open the portal: " + e.Message); } };
 
             menu.ShowImageMargin = true;
+            // The check mark and the state dot at this PC's scale (WinForms draws them at 16 px otherwise).
+            menu.ImageScalingSize = SystemInformation.SmallIconSize;
             // Flat, as Windows 11's own menus are: one background, a light hover, thin separators (not WinForms' gradient margin).
             menu.Renderer = new ToolStripProfessionalRenderer(new FlatColours()) { RoundedEdges = false };
             menu.Padding = new Padding(2, 4, 2, 4);
             foreach (ToolStripItem it in new ToolStripItem[] { toggle, schedule, activity, portal }) it.Padding = new Padding(0, 3, 0, 3);
-            menu.Items.AddRange(new ToolStripItem[] { title, stateLine, whyLine, nextLine, workLine, new ToolStripSeparator(), toggle, new ToolStripSeparator(), schedule, activity, new ToolStripSeparator(), portal });
+            menu.Items.AddRange(new ToolStripItem[] { title, stateLine, whyLine, nextLine, workLine, new ToolStripSeparator(), toggle, new ToolStripSeparator(), scheduleLine, schedule, activity, new ToolStripSeparator(), portal });
             icon.ContextMenuStrip = menu;
             icon.MouseUp += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) ShowMenuAtCursor(); };
             Render(null);
@@ -337,12 +342,13 @@ namespace FFFactory
             title.Text = string.IsNullOrEmpty(machine) ? "FF Factory" : "FF Factory on " + machine;
             if (!haveState)
             {
-                stateLine.Text = "Connecting to the daemon…";
+                stateLine.Text = "Connecting to the daemon" + Ellipsis;
                 stateLine.Image = null;
                 whyLine.Visible = nextLine.Visible = workLine.Visible = false;
                 toggle.Enabled = schedule.Enabled = activity.Enabled = portal.Enabled = false;
                 toggle.Text = "Pause all work on this PC";
-                schedule.Text = "Work schedule…";
+                schedule.Text = "Edit work schedule" + Ellipsis;
+                scheduleLine.Visible = false;
                 icon.Icon = runIcon;
                 icon.Text = "FF Factory";
                 return;
@@ -353,9 +359,10 @@ namespace FFFactory
             SetLine(whyLine, Str(m, "why"));
             SetLine(nextLine, Str(m, "next"));
             SetLine(workLine, Str(m, "work"));
-            toggle.Text = paused ? "Unpause: start work again" : "Pause all work on this PC";
+            toggle.Text = paused ? "Unpause all work on this PC" : "Pause all work on this PC";
             toggle.Enabled = schedule.Enabled = activity.Enabled = true;
-            schedule.Text = "Work schedule: " + (Str(m, "schedule") ?? "none") + "…";
+            schedule.Text = "Edit work schedule" + Ellipsis;
+            SetLine(scheduleLine, "Schedule: " + (Str(m, "schedule") ?? "none"));
             object s;
             settings = m.TryGetValue("settings", out s) ? s as Dictionary<string, object> : null;
             activity.Checked = ActivityOn();
@@ -557,6 +564,7 @@ namespace FFFactory
         readonly DateTimePicker from = new DateTimePicker(), to = new DateTimePicker();
         readonly CheckBox[] days = new CheckBox[7];
         readonly Label note = new Label();
+        Label fromLabel, toLabel;
         static readonly string[] DayNames = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
         static readonly int[] DayNumbers = { 1, 2, 3, 4, 5, 6, 0 };
 
@@ -591,7 +599,8 @@ namespace FFFactory
             enabled.CheckedChanged += delegate { Sync(); };
             grid.Controls.Add(enabled);
 
-            var hours = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(S(18), S(8), 0, 0) };
+            // A label draws its text a few pixels in from its edge, a check box its box at the edge: the rows line up on the box.
+            var hours = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(S(18) - S(4), S(8), 0, 0) };
             foreach (var p in new[] { from, to })
             {
                 p.Format = DateTimePickerFormat.Custom;
@@ -601,9 +610,11 @@ namespace FFFactory
             }
             from.Value = Parse(sched, "start", "22:00");
             to.Value = Parse(sched, "end", "08:00");
-            hours.Controls.Add(new Label { Text = "From", AutoSize = true, Margin = new Padding(0, S(5), S(6), 0) });
+            fromLabel = new Label { Text = "From", AutoSize = true, Margin = new Padding(0, S(5), S(6), 0) };
+            hours.Controls.Add(fromLabel);
             hours.Controls.Add(from);
-            hours.Controls.Add(new Label { Text = "to", AutoSize = true, Margin = new Padding(S(10), S(5), S(6), 0) });
+            toLabel = new Label { Text = "to", AutoSize = true, Margin = new Padding(S(10), S(5), S(6), 0) };
+            hours.Controls.Add(toLabel);
             hours.Controls.Add(to);
             grid.Controls.Add(hours);
 
@@ -619,9 +630,9 @@ namespace FFFactory
             }
             grid.Controls.Add(dayRow);
 
-            note.Text = "Outside these hours FF Factory pauses work on this PC, and its jobs move to other computers. An end before the start runs overnight. Times are this PC's local time.";
-            // As wide as the first line, so the hint wraps to the dialog's own width.
-            note.MaximumSize = new Size(TextRenderer.MeasureText(enabled.Text, Font).Width + S(24), 0);
+            note.Text = "Outside these hours FF Factory pauses work on this PC, and its jobs move to other computers. If the end is before the start, the hours run overnight. Times are this PC's local time.";
+            // As wide as the day row (or the first line), so the hint wraps at the controls' own right edge.
+            note.MaximumSize = new Size(Math.Max(dayRow.PreferredSize.Width + S(18), TextRenderer.MeasureText(enabled.Text, Font).Width + S(24)), 0);
             note.AutoSize = true;
             note.ForeColor = Color.FromArgb(0x57, 0x60, 0x6A);
             note.Margin = new Padding(0, S(12), 0, 0);
@@ -656,7 +667,7 @@ namespace FFFactory
 
         void Sync()
         {
-            from.Enabled = to.Enabled = enabled.Checked;
+            from.Enabled = to.Enabled = fromLabel.Enabled = toLabel.Enabled = enabled.Checked;
             foreach (var d in days) d.Enabled = enabled.Checked;
         }
 
