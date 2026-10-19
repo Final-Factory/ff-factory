@@ -135,6 +135,8 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
     ops: ['issue', 'revoke'],
     grant: "member logins only: never an owner's, never ben's or lothsahn's, never the owner's or a scoped key (server/memberKeys.ts)",
   },
+  // Secrets already on disk (w1584): the dry run counts them, paths and counts only; the scrub rewrites files (a person's).
+  'scrub-secrets': { allowed: ['--dry-run'], changes: [''] },
   migrate: { allowed: ['--help'], changes: ['--key', '--dry-run-copy', '--rollback-dry-run', '--cut-over'] },
   watchdog: { allowed: [], changes: ['run', 'pause', 'resume', 'reset'] },
   update: { allowed: [], changes: [''], grant: "only with the deploy grant of a person's own turn (ops_worker deploy)" },
@@ -171,7 +173,7 @@ function confSetProblem(key: string | undefined, value: string | undefined): str
 }
 
 /** The commands whose first word after them is a form: the guard checks that word (fff-ops-priv checks every word). */
-const FFFCTL_FORM_WORD = ['vault', 'machine-credential', 'migrate', 'apikey'];
+const FFFCTL_FORM_WORD = ['vault', 'machine-credential', 'migrate', 'apikey', 'scrub-secrets'];
 
 /** scp's and sftp's options that take a value (OpenSSH's getopt strings). */
 const COPY_VALUE_OPTS = { scp: 'cDFiJloPSX', sftp: 'BbcDFiJloPRSX' };

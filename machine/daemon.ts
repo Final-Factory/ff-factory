@@ -23,7 +23,7 @@ import type { TrimPolicy } from '../server/cacheTrim.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
 import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
-import { SECRET_ENV, addSecretValues, redactSecrets } from '../server/secrets.ts';
+import { SECRET_ENV, addSecretValues, redactSecrets, redactValue } from '../server/secrets.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
@@ -260,7 +260,7 @@ const STATS_MS = 15_000;
 /** How often this Mac's own login's usage is polled until the portal says (usage_config: config usagePollMinutes). */
 const USAGE_DEFAULT_MINUTES = 15;
 // Never a Claude OAuth token in the daemon log (the launch spec carries the host's, server/secrets.ts).
-const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a.map((x) => (typeof x === 'string' ? redactSecrets(x) : x)));
+const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a.map((x) => (typeof x === 'string' ? redactSecrets(x) : redactValue(x))));
 
 /** The portal's pending check-ins by session (ISO times) as ms; an unreadable one is left out. */
 function wakesOf(w: Record<string, string>): Map<string, number> {

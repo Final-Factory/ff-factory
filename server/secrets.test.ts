@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { maskSecret, redactSecrets, redactValue, scrubTranscripts } from './secrets.ts';
+import { maskSecret, redactSecrets, redactValue } from './secrets.ts';
+import { scrubTree } from './scrubSecrets.ts';
 import { setAppConfig } from './appConfig.ts';
 import { tokenSha256 } from './providerProtocol.ts';
 import { Store, bus } from './store.ts';
@@ -54,9 +55,9 @@ test('secrets: transcripts never keep the token: new events, amended ones, old f
   assert.ok(!sent.join('\n').includes(TOKEN), 'not sent to the UI');
   // An old transcript written before redaction: scrubbed at start.
   fs.writeFileSync(path.join(dir, 'transcripts', 'old.jsonl'), JSON.stringify({ seq: 1, kind: 'user', text: TOKEN }) + '\n');
-  assert.equal(scrubTranscripts(path.join(dir, 'transcripts')), 1);
+  assert.equal(scrubTree([path.join(dir, 'transcripts')]).files.length, 1);
   assert.ok(!fs.readFileSync(path.join(dir, 'transcripts', 'old.jsonl'), 'utf8').includes(TOKEN));
-  assert.equal(scrubTranscripts(path.join(dir, 'transcripts')), 0, 'nothing left');
+  assert.equal(scrubTree([path.join(dir, 'transcripts')]).total, 0, 'nothing left');
   store.flush();
 });
 
@@ -91,7 +92,7 @@ test('secrets: Discord bot tokens and DISCORD_TOKEN / FFDISCORD_APP_TOKEN values
   assert.ok(!fs.readdirSync(tdir).map((f) => fs.readFileSync(path.join(tdir, f), 'utf8')).join('').includes(DISCORD));
   assert.ok(!sent.join('').includes(DISCORD));
   fs.writeFileSync(path.join(tdir, 'pasted.jsonl'), JSON.stringify({ seq: 1, kind: 'user', text: `token ${DISCORD}` }) + '\n');
-  assert.equal(scrubTranscripts(tdir), 1);
+  assert.equal(scrubTree([tdir]).files.length, 1);
   assert.ok(!fs.readFileSync(path.join(tdir, 'pasted.jsonl'), 'utf8').includes(DISCORD));
   store.flush();
 });

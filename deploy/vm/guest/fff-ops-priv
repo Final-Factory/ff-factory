@@ -22,6 +22,8 @@
 #   fffctl machine-credential list     the same as `credential list`, under fffctl's own name (w745)
 #   fffctl migrate --help              migrate's usage (w745); `--key` (it trusts a new host key), `--dry-run-copy`,
 #                                      `--rollback-dry-run` and `--cut-over` change state: a person's
+#   fffctl scrub-secrets --dry-run     how many vault values and token shapes are still on disk (w1584): paths and counts,
+#                                      never a value, then "remaining: N". The scrub itself (no --dry-run) is a person's
 #   fffctl logs [N]                    the portal's last N journal lines (default 200, at most 2000), secrets redacted
 #   fffctl machine-ssh --check         the portal's ssh to each machine, then its authorized_keys line (fff-machine-ssh
 #                                      --check, read only; machine-ssh-check is the same). Its PATH's fff-machine-ssh
@@ -276,6 +278,7 @@ case "${1:-help}" in
     [ $# -eq 2 ] && [ "$2" = --help ] || refuse "migrate --help (the migration itself, and migrate --key, which trusts a new host key, are a person's)"
     exec "$FFFCTL" migrate --help
     ;;
+  scrub-secrets) [ "${2:-}" = --dry-run ] && [ $# -eq 2 ] || refuse "scrub-secrets --dry-run (counts only); the scrub itself is a person's"; exec "$FFFCTL" scrub-secrets --dry-run ;;
   logs)
     n=${2:-200}
     if ! [[ $n =~ ^[0-9]{1,4}$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt 2000 ]; then refuse "logs [N]: N from 1 to 2000"; fi

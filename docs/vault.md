@@ -1331,3 +1331,41 @@ from then get it.
 
 **Cut a machine off:** `sudo fffctl machine-credential revoke <id>` (or ✕ beside it in the dialog). Its link drops
 within 20 s; its sandboxes and sessions stay for when it is enrolled again.
+
+## 14. Secrets in what the portal keeps, and the scrub (w1584)
+
+A worker's failing test printed its vault GitHub token (`GH_TOKEN`, ff-factory PR #445, w1519). The value reached two places:
+the model (the tool result) and Claude Code's own transcript on the worker's machine
+(`~/.claude/projects/<cwd>/<session>.jsonl`), which nothing of FF Factory writes. Since then:
+
+- **Tests never see a credential.** `npm test` and `npm run test:coverage` load `scripts/testEnv.ts` first (`node --import`),
+  which deletes every variable named like one (`shared/secretShapes.ts` `SECRET_ENV`: `*_TOKEN`, `*_KEY`, `*_SECRET`,
+  `*_PASSWORD`, `*_PAT`; a vault env-kind entry must have such a name, `envNameProblem`) or holding a token-shaped value.
+  `scripts/testEnv.test.ts` plants fake tokens in the parent environment and checks no test process (or a process it
+  starts) sees one.
+- **Every store masks before it writes or sends.** Transcript events (`server/store.ts`), and now also session records and
+  standing agents and delegations (`state.json`), work items (`work.json`: the log, DONE reports, `[needs you]` text, notes),
+  every event a page hears (`emit`), push notifications, the daemon log, and text attachments on arrival (`.log`, `.txt`,
+  `.json`, `.jsonl`, `.md`, `.csv`, `.yaml` up to 64 MB, kept under the SHA-256 of the masked copy). Search reads the
+  transcripts, so it never had its own copy. Masking (`redactSecrets`, `redactValue` string by string): every value the vault
+  holds, and the shapes `ghp_` `gho_` `ghs_` `ghu_` `ghr_` `github_pat_`, `sk-ant-…`, PEM private keys (whole or cut off),
+  `ffm_`, `ffsb_`, `ffpv1_`, `tskey-`, age keys and Discord tokens, each to its last four characters
+  (`github_pat_[redacted …yVC9]`). The GitHub shapes had a look-behind that let a token through after a JSON `\n` or a
+  terminal colour code; that is gone.
+- **The scrub** (`server/scrubSecrets.ts`) masks what is already on disk. The portal runs it over its data folder at start,
+  once per `SCRUB_VERSION` (`<dataDir>/secret-scrub.json` records it), logging paths and counts. By hand:
+
+  ```sh
+  sudo fffctl scrub-secrets --dry-run   # counts only; the ops worker may run this one
+  sudo fffctl scrub-secrets             # masks in place: the data folder and the portal account's ~/.claude/projects
+  ```
+
+  It prints one line per file that held secrets (`<path>: redacted N`, never a value), a total, and last `remaining: N`.
+  `remaining: 0` means nothing is left. It never rewrites the vault, keys, logins, `vapid.json`, `config.json`, the
+  attachment and upload stores, or the live `state.json` and `work.json` (the portal masks those itself at start), and leaves
+  a file changed in the last two minutes (named; run it again). On a worker machine, with the release's checkout:
+  `node server/scrubSecretsCli.ts --no-data --claude-projects ~/.claude/projects [--dry-run]`.
+
+What masking cannot reach: what the model already read, and Claude Code's transcript on the worker's machine while it is being
+written. A run's `GH_TOKEN` is in its environment by design (`gh` and the git credential helper read it), so `env` in a
+worker's shell still shows it to the model; only keeping it out of the environment would change that.

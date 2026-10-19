@@ -6,6 +6,7 @@ import type { SessionHandle, SessionManager, TurnEndMeta } from './sessions.ts';
 import type { DelegationRequest, NotifyKind, NotifyPrefs, Requester, ServerEvent, SessionInfo, StandingAgent, StandingRun, WorkItem } from '../shared/types.ts';
 import { checkArray, isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
 import { dryRun } from './dryRun.ts';
+import { redactValue } from './secrets.ts';
 
 /** A browser's push subscription, as PushSubscription.toJSON() gives it, plus that device's choices. */
 export interface PushSub {
@@ -210,6 +211,8 @@ export class Notifier {
   /** `users`: who it is for, by user id (the login a subscription belongs to); undefined: everyone; []: nobody. */
   private fire(n: Notice, users?: string[]) {
     if (users && !users.length) return;
+    // A result's first line can quote a token: never in a push to a phone (w1584).
+    n = redactValue(n);
     const only = users ? new Set(users.map((u) => u.toLowerCase())) : undefined;
     // Open pages without push show it themselves (in-page Notification) if their own settings say so.
     emit({ type: 'notify', notice: n, ...(users ? { users } : {}) });
