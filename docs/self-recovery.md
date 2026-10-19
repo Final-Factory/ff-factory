@@ -250,6 +250,28 @@ within a day, so look there as well as in the folder above it.
 - `sysctl kern.boottime` gives the boot itself, and the portal journal (`portal_logs`, grep `machine <id>`) gives when
   the portal lost and regained it.
 
+**Asleep, not crashed** (w1547). A MacBook that sleeps with its lid closed looks like a run of outages: the portal logs
+"machine <id> connected", then "no answer for ~55 s, dropping the connection" a minute later, then "offline for 30
+min", and `placeAgain` words the held sandbox as "its daemon restarted at <time>" (`server/placeAgain.ts` `releaseWhy`)
+though nothing restarted. Each "connected" is a DarkWake (a few seconds to 45 s awake for maintenance), and workers
+placed then never get a turn. Tell it apart, read-only:
+
+- `uptime` / `sysctl kern.boottime` (no reboot), `sysctl kern.sleeptime kern.waketime`, and the daemon's own `ps -o
+  etime` (one process since the last deploy means it never died).
+- `pmset -g log`: `Entering Sleep state due to 'Clamshell Sleep'` is the lid; `Maintenance Sleep` and `DarkWake from
+  Deep Idle ... rtc/Maintenance 45 secs` are the hourly wakes; each portal "connected" line falls within ~5 s of one
+  (the log is in the Mac's local time, the portal journal in the portal's). The `Using AC|Batt (Charge:N%)` field on
+  every line gives the power history: print each change of it.
+- `pmset -g ps` and `ioreg -r -k AppleClamshellState -d 1` (lid closed, battery, charge) while it is briefly up; your
+  own ssh attempts wake it for a moment (`E_TKO_UNEXPECT_TCP_FLAG`), so pull everything in one parallel burst.
+
+`caffeinate -i` (the daemon's keep-awake) and `sleep 0` stop only idle sleep. Closing the lid sleeps a Mac unless it is
+on AC power with an external display (closed-display mode), so a charger that drops out ends it. On the m5 on
+2026-10-19 the battery fell from 99% to 19% on battery (20:44 to 21:45 EDT) and on to 2% on AC (21:45 to 23:38: the
+charger did not keep up with the load, and the source flapped AC/battery), and at 02:20 EDT the source went to battery with the lid closed:
+`Clamshell Sleep ... Using AC (Charge:17%)` then `Using Batt`. It slept for the next six hours at 14 to 17% with seven
+apparent drops. The fix was a charger, not code.
+
 On the m3 from 2026-10-07 to 10-13 there were 7 outages, and each was a game client that workers had started there and
 that hit w665's GPU page fault. The game repo's `player_slots.py` now refuses a multiplayer client on a Mac
 (`FF_MAC_GPU_HANG_OK`), and `watchOffline` reports a machine that has been offline 30 min with work stranded on it
