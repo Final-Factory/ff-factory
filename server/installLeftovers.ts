@@ -121,6 +121,13 @@ const FIXTURE_REPO = /^(ffbox-test-|ffsb-e2e-|build-player-restore-|w\d+-lostlin
 const SPLIT_DEPTH = 3;
 /** How deep a session's folder is searched for player builds. */
 const BUILD_DEPTH = 5;
+/**
+ * How far below an item its git repos are looked for (w1575): a worker's legs nest clones deeper than one level
+ * (`demo-222946/portal/base`), and an entry taken alone must not take a repo with work inside it.
+ */
+const REPO_DEPTH = 4;
+/** Not looked into for repos: a repo's own insides, dependencies, Unity's caches. */
+const NO_REPO_LOOK = /^(\.git|node_modules|library)$/i;
 
 async function children(dir: string): Promise<fs.Dirent[]> {
   return fs.promises.readdir(dir, { withFileTypes: true }).catch(() => [] as fs.Dirent[]);
@@ -213,8 +220,12 @@ export async function planInstallLeftovers(o: {
     if (touched === 'changed') return { why: 'changed recently', list: false, split: true };
     if (touched === 'too-big') return { why: 'too many entries to judge its age (over 200,000)', list: true, split: true };
     const repos: string[] = [];
-    if (fs.existsSync(path.join(p, '.git'))) repos.push(p);
-    for (const e of await children(p)) if (e.isDirectory() && fs.existsSync(path.join(p, e.name, '.git'))) repos.push(path.join(p, e.name));
+    const down = async (d: string, depth: number) => {
+      if (fs.existsSync(path.join(d, '.git'))) return void repos.push(d); // its nested repos are submodules: its status covers them
+      if (depth >= REPO_DEPTH) return;
+      for (const e of await children(d)) if (e.isDirectory() && !NO_REPO_LOOK.test(e.name)) await down(path.join(d, e.name), depth + 1);
+    };
+    await down(p, 0);
     for (const r of repos) {
       if (norm(r).slice(norm(base).length).split('/').some((seg) => FIXTURE_REPO.test(seg))) continue;
       if (await localWork(r)) return { why: `holds a git repo with uncommitted or unpushed work (${r})`, list: true, split: true };

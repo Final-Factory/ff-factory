@@ -139,6 +139,20 @@ test("w1575: a stopped session's clone with unpushed work stays, listed; the res
   assert.ok(p.items.some((i) => i.path === path.join(root, 'tmp', 'ffa-cb4b501c', 'x')), 'what else the folder holds goes');
 });
 
+test('w1575: an entry taken alone never takes a repo with work nested deeper inside it', async (t) => {
+  const root = materialize(t);
+  const tmp = path.join(root, 'tmp');
+  lay(tmp, ['ffa-c2829305/clone/.git/HEAD', 'ffa-c2829305/demo-222946/portal/base/.git/HEAD', 'ffa-c2829305/demo-222946/run.log', 'ffa-c2829305/scratch/a.txt'], 30);
+  const work = new Set([path.join(tmp, 'ffa-c2829305', 'clone'), path.join(tmp, 'ffa-c2829305', 'demo-222946', 'portal', 'base')]);
+  const p = await plan(root, { localWork: async (d) => work.has(d) });
+  const taken = new Set(p.items.map((i) => rel(root, i.path)));
+  assert.ok(taken.has('tmp/ffa-c2829305/scratch'), 'an entry with no repo goes');
+  assert.ok(taken.has('tmp/ffa-c2829305/demo-222946/run.log'), 'beside the deep repo, its log goes');
+  for (const x of taken) assert.ok(!/demo-222946\/portal|ffa-c2829305\/clone|^tmp\/ffa-c2829305$|demo-222946$/.test(x), `${x} holds a repo with work`);
+  const listedRel = p.listed.map((l) => rel(root, l.path));
+  assert.ok(listedRel.includes('tmp/ffa-c2829305/clone') && listedRel.includes('tmp/ffa-c2829305/demo-222946/portal/base'), JSON.stringify(listedRel));
+});
+
 /** A folder tree under `base`: each path (a trailing / makes a folder) made, then aged `ageH` hours, leaves first. */
 function lay(base: string, paths: string[], ageH: number) {
   const at = (NOW - ageH * HOUR) / 1000;
