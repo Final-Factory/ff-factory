@@ -281,12 +281,6 @@ export async function cleanupPass(o: {
   mode: StaleOutputSettings['mode'];
   regular: () => Promise<CleanupItem[]>;
   stale: () => Promise<StalePlan>;
-  /**
-   * The agent temp roots' part of the stale plan (stopped sessions' folders, old player builds, runaway task output): on a
-   * pass without the stale plan, which runs once a day while space is fine (w1575: a stopped worker's 68 GB folder waited up
-   * to a day; beast's log showed the last of them removed at 06:03Z).
-   */
-  sessions?: () => Promise<StalePlan>;
   /** FF Factory's own leftovers (server/ownLeftovers.ts, w626): the caller passes them only while free space is low. */
   own?: { plan(): Promise<OwnLeftoverPlan>; run(plan: OwnLeftoverPlan): Promise<CleanupRun> };
   /** Ends the plan's strays, before its items go (a deleted file's space comes back only when its writer ends); not in a dry run. */
@@ -308,8 +302,7 @@ export async function cleanupPass(o: {
     return f.inside;
   };
   const regular = fence(await o.regular());
-  const none0: StalePlan = { items: [], listed: [] };
-  const planned = o.mode === 'off' ? none0 : o.opts.stale ? await o.stale() : o.sessions ? await o.sessions().catch(() => none0) : none0;
+  const planned = o.opts.stale && o.mode !== 'off' ? await o.stale() : { items: [], listed: [] };
   const plan = { ...planned, items: fence(planned.items) };
   const none: OwnLeftoverPlan = { items: [], listed: [] };
   // A failure there must not cost the regular pass: nothing of it is removed then.

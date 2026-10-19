@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { resumableSessions } from './resumable.ts';
-import { neverDelete, sessionTempDir } from './cleanup.ts';
+import { neverDelete, runCleanup, sessionTempDir } from './cleanup.ts';
 import { SessionSweeper } from './sessionSweep.ts';
 import { planInstallLeftovers } from './installLeftovers.ts';
 import type { WorkItem } from '../shared/types.ts';
@@ -83,6 +83,66 @@ test('w1097: the sweep leaves a stopped worker its folder while its request wait
   now += 2 * 60_000;
   await sw.tick();
   assert.ok(!fs.existsSync(dir), 'then it goes');
+});
+
+const DAY = 86_400_000;
+
+test('w1575: a closed request keeps its worker resumable while it may be reopened (7 days), then not', () => {
+  const now = Date.parse('2026-10-19T21:48:00Z');
+  const at = (ms: number) => new Date(now - ms).toISOString();
+  const work = [
+    item('w1', 'done', ['aaaa0001'], { updatedAt: at(3 * DAY) }),
+    item('w2', 'done', ['bbbb0002'], { updatedAt: at(7 * DAY + 60_000) }),
+    item('w3', 'cancelled', ['cccc0003'], { updatedAt: at(DAY) }),
+    item('w4', 'rejected', ['dddd0004'], { updatedAt: at(DAY) }),
+    item('w5', 'merged', ['eeee0005'], { updatedAt: at(DAY) }),
+    item('w6', 'done', ['ffff0006', 'gggg0007'], { updatedAt: at(DAY) }),
+  ];
+  assert.deepEqual(resumableSessions(['aaaa0001', 'bbbb0002', 'cccc0003', 'dddd0004', 'eeee0005', 'ffff0006', 'gggg0007'], work, now), ['aaaa0001', 'cccc0003', 'dddd0004', 'gggg0007']);
+});
+
+test('w1575: a worker that comes back finds its folder intact: after a turn end, and after its request closed and was reopened', async (t) => {
+  const { root, temp, session, guard } = world(t);
+  const waits = session('aaaa0001'); // its turn ended: blocked on CI
+  const closed = session('bbbb0002'); // its request closed; lothsahn reopens it 3 days later
+  const old = session('cccc0003'); // closed 8 days ago: nobody can reopen it
+  const start = Date.now();
+  let now = start;
+  const work = [
+    item('w1', 'blocked', ['aaaa0001'], { updatedAt: new Date(start).toISOString() }),
+    item('w2', 'done', ['bbbb0002'], { updatedAt: new Date(start).toISOString() }),
+    item('w3', 'done', ['cccc0003'], { updatedAt: new Date(start - 8 * DAY).toISOString() }),
+  ];
+  const live = new Set<string>();
+  const ids = ['aaaa0001', 'bbbb0002', 'cccc0003'];
+  const res = () => resumableSessions(ids, work, now);
+  const g = () => ({ ...guard, inUse: [...live].map((id) => sessionTempDir(temp, id)), resumable: res().map((id) => sessionTempDir(temp, id)) });
+  const sw = new SessionSweeper({
+    root,
+    tempRoot: () => temp,
+    sessions: () => ids.map((id) => ({ id, live: live.has(id), resumable: res().includes(id) })),
+    dirOf: (id) => sessionTempDir(temp, id),
+    guard: g,
+    localWork: async () => false,
+    now: () => now,
+  });
+  // Three days of sweeps and nightly passes while both are stopped.
+  for (let h = 0; h < 72; h++) {
+    now += 3_600_000;
+    await sw.tick();
+    if (h % 24 === 23) {
+      const nightly = await planInstallLeftovers({ root, sandboxes: [], tempRoots: [temp], guard: g(), now });
+      await runCleanup(nightly.items, g());
+    }
+  }
+  for (const d of [waits, closed]) assert.ok(fs.existsSync(path.join(d, 'f1920', 'before.mp4')) && fs.existsSync(path.join(d, 'player-build.log')), `${d} intact`);
+  assert.ok(!fs.existsSync(path.join(old, 'f1920')), 'a session past the reopen window is swept');
+  // CI comes back and lothsahn reopens w2: each worker is resumed into its own folder, as it left it.
+  work[1] = { ...work[1], status: 'new', updatedAt: new Date(now).toISOString() };
+  live.add('aaaa0001');
+  live.add('bbbb0002');
+  await sw.tick();
+  for (const d of [waits, closed]) assert.equal(fs.readFileSync(path.join(d, 'f1920', 'before.mp4'), 'utf8'), 'clip');
 });
 
 test("w1097: the daily pass's stopped-session rule leaves a resumable session's folder", async (t) => {

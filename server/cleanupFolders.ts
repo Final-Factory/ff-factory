@@ -84,7 +84,7 @@ export function judgeSession(sid: string, f: CleanupFacts): Pick<FolderRow, 'ver
     if (withIt.length) return { verdict: 'keep', why: `stopped worker ${sid} is still on ${list(withIt)}, which has not closed: it resumes there and needs its files` };
     return { verdict: 'keep', why: `worker ${sid} was on ${list(open)}, which has not closed (it moved on to another worker; the daemon sweeps these itself, w1097)` };
   }
-  if (f.resumable.includes(sid)) return { verdict: 'keep', why: `a request still waits for worker ${sid}` };
+  if (f.resumable.includes(sid)) return { verdict: 'keep', why: `a request still waits for worker ${sid}, or closed within the last 7 days and may be reopened to it (w1575)` };
   return { verdict: 'delete', why: `no open, stalled or paused request names worker ${sid}: its requests are closed, or it belongs to no request (an orphan)` };
 }
 

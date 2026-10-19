@@ -414,6 +414,20 @@ export function superseded(names: string[]): string[] {
   });
 }
 
+/** Local hours (from, to) in which a daily stale pass prefers to run: the nightly sweep (w1575). */
+export const NIGHT_HOURS = [1, 6] as const;
+
+/**
+ * Whether the stale pass is due: `everyHours` after the last one, as before, or for a daily one (everyHours 24 or more)
+ * already at night (NIGHT_HOURS, the daemon machine's local time) once half that has passed, so it moves to the night and
+ * stays there (lothsahn, w1575: "have the daemon do a nightly cleanup for anything the worker missed").
+ */
+export function staleDue(now: number, last: number, everyHours: number, hour = new Date(now).getHours()): boolean {
+  const since = now - last;
+  if (since >= everyHours * 3_600_000) return true;
+  return everyHours >= 24 && since >= (everyHours / 2) * 3_600_000 && hour >= NIGHT_HOURS[0] && hour < NIGHT_HOURS[1];
+}
+
 /** The guard for an item inside session folder `dir` (CleanupItem.inSession): that folder's inUse and resumable entries do not cover it. */
 export function sessionRelaxed(dir: string, g: CleanupGuard): CleanupGuard {
   const other = (k: string) => norm(k) !== norm(dir);
@@ -749,6 +763,8 @@ export interface CleanupRunnerDeps {
    * daemon restarts more often than once a day still gets its daily turn. Absent: in memory only.
    */
   staleAt?: { load(): number | undefined; save(at: number): void };
+  /** The hour of day (0-23) at `ms` on this machine, for the nightly stale pass (tests pin it). Default: local time. */
+  localHour?: (ms: number) => number;
   /** Unity Libraries worth reporting (staleUnityLibraries past the report age). */
   stale?(): Promise<{ path: string; days: number }[]>;
   /** The pass's full record, for the log file. */
@@ -837,7 +853,7 @@ export class CleanupRunner {
       const before = await this.minFree();
       const low = trigger === 'critical' || trigger === 'asked' || (before !== undefined && before < s.softFreeGB * GB);
       const st = s.staleOutput;
-      const withStale = !!st && st.mode !== 'off' && (dryRun || low || this.now() - this.lastStaleAt >= st.everyHours * 3_600_000);
+      const withStale = !!st && st.mode !== 'off' && (dryRun || low || staleDue(this.now(), this.lastStaleAt, st.everyHours, this.d.localHour?.(this.now())));
       if (!dryRun) {
         this.lastPassAt = this.now();
         if (withStale) {

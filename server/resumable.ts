@@ -1,5 +1,9 @@
 import { isWith } from '../shared/blockers.ts';
 import { WORK_OPEN, type WorkItem } from '../shared/types.ts';
+import { KEEP_CLOSED_MS } from './work.ts';
+
+/** Closed requests a person may still reopen (server/work.ts updateProblem: done, rejected or cancelled, within KEEP_CLOSED_MS). */
+const REOPENABLE: readonly WorkItem['status'][] = ['done', 'rejected', 'cancelled'];
 
 /**
  * The sessions whose temp folder must survive while they are stopped (w1097): a worker that a request it is on still
@@ -9,9 +13,18 @@ import { WORK_OPEN, type WorkItem } from '../shared/types.ts';
  * rule, server/agents.ts), not when its process ends: a wait for CI, a person or a pause (LothDesktop's V: grow,
  * 2026-10-12) ends the process too, and the sweep of w913 emptied those folders (dcf976fc on w1086 lost its "before"
  * clips and a player build in progress). A stalled request counts as open here: the ledger's follow-ups resume it.
+ *
+ * A closed request counts too while its person may still reopen it (w1575, lothsahn, 2026-10-19: "clean up at end if the
+ * worker is done. In the past we've had cleanups delete workspaces a worker came back to and had to do more work in"): a
+ * done, rejected or cancelled request can be reopened for KEEP_CLOSED_MS (7 days) after it closed (server/work.ts
+ * updateProblem, measured by `updatedAt` as there), and the dispatcher then usually resumes the worker that had it
+ * (message_agent: the same session, so the same folder). w1575 itself was closed and reopened at 21:48 the same minute,
+ * and went back to its worker. Before, the session sweep emptied a closed request's worker 10 minutes after its process
+ * ended, inside that window.
  */
-export function resumableSessions(sessionIds: Iterable<string>, work: Iterable<WorkItem>): string[] {
-  const items = [...work].filter((w) => w.status !== 'merged' && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
+export function resumableSessions(sessionIds: Iterable<string>, work: Iterable<WorkItem>, now = Date.now()): string[] {
+  const reopenable = (w: WorkItem) => REOPENABLE.includes(w.status) && now - (Date.parse(w.updatedAt) || 0) < KEEP_CLOSED_MS;
+  const items = [...work].filter((w) => w.status !== 'merged' && (WORK_OPEN.includes(w.status) || w.status === 'stalled' || reopenable(w)));
   return [...sessionIds].filter((sid) => items.some((w) => w.sessionIds.includes(sid) && isWith(w, sid))).sort();
 }
 

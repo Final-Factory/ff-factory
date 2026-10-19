@@ -214,14 +214,12 @@ test('w1575: a session keeps its newest player builds, live or not; an older idl
     procs: [{ pid: 7, ppid: 1, cmd: `"${runs}" -batchmode` }],
     settings,
     now: NOW,
-    scope: 'sessions',
   });
   const old = p.items.filter((i) => i.rule === 'session-old-build').map((i) => rel(root, i.path)).sort();
   const id = listing.live[0];
   assert.deepEqual(old, [`tmp/ffa-${id}/builds/aaa111`, `tmp/ffa-${id}/builds/ccc333`, 'tmp/ffa-macsess/out/a/FinalFactory.app'], 'the newest two of each session stay, and the one a player runs from');
   assert.ok(!p.items.some((i) => i.path === live || i.path === mac), "a live or resumed session's folder never goes");
   assert.ok(!p.items.some((i) => i.path.includes('not-a-build')));
-  assert.ok(!p.items.some((i) => i.path.includes(`${path.sep}sandboxes${path.sep}`)), "'sessions' takes nothing of the sandboxes");
   // The clean-up's last check lets an old build through, inside the live folder, and still refuses the folder itself.
   const guard = { keep: [], inUse: [live], resumable: [mac], home: path.join(root, 'home') };
   const r = await runCleanup([...p.items.filter((i) => i.rule === 'session-old-build'), { path: live, why: 'test', rule: 'x' }], guard);

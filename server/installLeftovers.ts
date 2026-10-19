@@ -189,11 +189,8 @@ export async function planInstallLeftovers(o: {
   /** Pids never named a stray (this daemon and its parents). */
   self?: number[];
   localWork?: (dir: string) => Promise<boolean>;
-  /**
-   * 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). 'sessions': only the
-   * agent temp roots (stopped sessions' folders, old player builds, runaway task output), for every pass (w1575).
-   */
-  scope?: 'all' | 'sandboxes' | 'sessions';
+  /** 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). */
+  scope?: 'all' | 'sandboxes';
 }): Promise<InstallPlan> {
   const plan: InstallPlan = { items: [], listed: [], strays: [] };
   if (!o.root) return plan; // not a worker-root install: nothing here is the install folder
@@ -297,7 +294,7 @@ export async function planInstallLeftovers(o: {
   };
 
   // ---- each sandbox: per-commit builds, bench builds, capture output
-  for (const sb of o.scope === 'sessions' ? [] : o.sandboxes) {
+  for (const sb of o.sandboxes) {
     await keepNewest(path.join(sb, '.nightly-builds', 'cache'), sb, 'build-cache', 'a cached player build');
     await keepNewest(path.join(sb, 'Builds', 'cache'), sb, 'build-cache', 'a cached build');
     for (const e of await children(path.join(sb, 'Builds'))) {
@@ -316,7 +313,7 @@ export async function planInstallLeftovers(o: {
 
   // ---- the nightly lab inside the install folder, and since w1099 the history a sandbox night keeps (nightly-history:
   // state, logs, runs, reports, fixtures; no builds). Its state, reports and fixtures (a player's save) are never looked at.
-  for (const nightly of o.scope === 'sessions' ? [] : [path.join(root, 'nightly'), path.join(root, 'nightly-history')]) {
+  for (const nightly of [path.join(root, 'nightly'), path.join(root, 'nightly-history')]) {
     await keepNewest(path.join(nightly, 'builds'), nightly, 'nightly-build', 'a nightly player build');
     const runs = await newestFirst(path.join(nightly, 'runs'));
     for (const e of runs.slice(1)) await take(path.join(nightly, 'runs', e.name), nightly, 'nightly-run', `a nightly run (not the newest) untouched for ${s.nightlyRunDays} days`, s.nightlyRunDays * DAY);
@@ -328,7 +325,7 @@ export async function planInstallLeftovers(o: {
 
   // ---- stale scratch: named after an open request it stays; the rest goes by age
   const scratch = path.join(root, 'scratch');
-  for (const e of o.scope === 'sessions' ? [] : await children(scratch)) {
+  for (const e of await children(scratch)) {
     const p = path.join(scratch, e.name);
     const ids = requestIdsIn(e.name);
     if (ids.some((id) => open.has(id))) continue;

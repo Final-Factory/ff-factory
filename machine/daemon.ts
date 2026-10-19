@@ -522,17 +522,6 @@ export class Daemon {
           mode: settings.mode,
           regular: () => planCleanup({ rules, guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
           // Plus the install folder's own leftovers (w899): build caches, the nightly lab, stopped sessions' temp, runaway task output.
-          // Stopped sessions' folders and old player builds: every pass (w1575), the rest of the install folder's leftovers once a day.
-          sessions: async () =>
-            planInstallLeftovers({
-              root: this.cfg.root,
-              sandboxes: [],
-              tempRoots: [agentTempRoot(this.cfg.tempDir)],
-              guard,
-              procs: await this.procs().catch(() => undefined),
-              self: [process.pid, process.ppid],
-              scope: 'sessions',
-            }),
           stale: async () =>
             mergePlans(
               await planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(this.cfg.root), ctx: this.staleCtx, settings, guard }),
