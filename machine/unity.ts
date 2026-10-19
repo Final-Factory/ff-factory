@@ -518,10 +518,45 @@ export interface WatchDeps {
   tccEntry?(): Promise<'on' | 'off' | 'missing' | undefined>;
   /** Show macOS's own Accessibility prompt on the Mac's screen. */
   axPrompt?(): Promise<void>;
+  /** The end of the editor log, at most maxBytes (the Safe Mode prompt check reads back to the start of the boot's refresh). */
+  logRead?(maxBytes: number): string;
 }
 
 /** What Unity writes to its log when it crashes (macOS: signals and the native crash reporter; Windows: its stack trace dump). */
 export const CRASH_MARKERS = /Crash!!!|Received signal SIG(SEGV|BUS|ABRT|ILL|FPE)|Native Crash Reporting|Obtained \d+ stack frames|=+ OUTPUTTING STACK TRACE =+/;
+
+/**
+ * How long an editor may sit, log silent, at Unity's "Enter Safe Mode?" prompt before the watch closes it (w1495).
+ * The dialog watch presses "Ignore" on its first look (every 30 s), so this is three looks it could not answer.
+ */
+export const SAFE_MODE_STALL_MS = 90_000;
+
+/**
+ * The compile errors of an editor waiting at Unity's "Enter Safe Mode?" prompt, read from its log, or undefined
+ * when the log does not show that state (w1495, docs/unity-dialogs.md). At launch Unity runs the boot's refresh
+ * ("Application.AssetDatabase Initial Refresh Start"), compiles, and on a compile error ("## Script Compilation
+ * Error for:") shows the prompt right after "AssetDatabase: script compilation time:", with nothing after it but
+ * the cache summary until someone answers. "Ignore" goes on to load the domain ("Begin MonoManager ReloadAssembly"),
+ * "Enter Safe Mode" to "Loading Safe Mode Domain". Measured on 6000.3.19f1, Windows (lothdesktop/slot1, 2026-10-18).
+ */
+export function safeModePromptErrors(log: string): string[] | undefined {
+  const start = log.lastIndexOf('Application.AssetDatabase Initial Refresh Start');
+  if (start < 0) return undefined;
+  const boot = log.slice(start);
+  if (/Begin MonoManager ReloadAssembly|Loading Safe Mode Domain/.test(boot)) return undefined;
+  const compiled = boot.lastIndexOf('AssetDatabase: script compilation time:');
+  if (compiled < 0 || !boot.includes('## Script Compilation Error for:')) return undefined;
+  const after = boot.slice(compiled).split(/\r?\n/).slice(1).filter((l) => l.trim());
+  if (after.length > 6) return undefined; // it went on: not waiting at the prompt
+  return [...new Set(boot.match(/^.*\(\d+,\d+\): error [A-Z]+\d+: .*$/gm) ?? [])].map((l) => l.trim());
+}
+
+/** The compile errors for a report: the first few, and how many more the editor log holds. */
+export function safeModeErrorList(errors: string[], max = 10): string {
+  if (!errors.length) return 'the compile errors in the editor log (## Script Compilation Error)';
+  const more = errors.length > max ? `; and ${errors.length - max} more in the editor log` : '';
+  return `these compile errors (${errors.length}): ${errors.slice(0, max).join('; ')}${more}`;
+}
 
 export const MAC_EDITOR_LOG = path.join(os.homedir(), 'Library', 'Logs', 'Unity', 'Editor.log');
 
@@ -581,6 +616,8 @@ export class MacUnityWatch {
   private failStreak?: { first: number; count: number };
   /** A dialog rule asked for a fresh editor (decide's `restart`, e.g. the licensing "Connection Lost" coming back). */
   private dialogRestart?: string;
+  /** The watch closed the editor at an unanswered Safe Mode prompt (w1495): when, why, and the compile errors. */
+  private safeModeClosed?: { at: number; why: string; errors: string[] };
 
   constructor(u: MacUnity, report: (text: string, restarted: boolean) => void, deps: Partial<WatchDeps> = {}, opts: Partial<{ max: number; windowMinutes: number; hang: HangThresholds }> = {}) {
     this.u = u;
@@ -598,12 +635,13 @@ export class MacUnityWatch {
           return undefined;
         }
       },
-      logTail: () => {
+      logTail: () => this.d.logRead!(16 * 1024),
+      logRead: (maxBytes) => {
         try {
           const fd = fs.openSync(log, 'r');
           try {
             const size = fs.fstatSync(fd).size;
-            const n = Math.min(size, 16 * 1024);
+            const n = Math.min(size, maxBytes);
             const buf = Buffer.alloc(n);
             fs.readSync(fd, buf, 0, n, size - n);
             return buf.toString('utf8');
@@ -648,7 +686,7 @@ export class MacUnityWatch {
   }
 
   /** One look. Returns what it did (for tests); never throws. */
-  async tick(): Promise<'ok' | 'restarted' | 'gave-up' | 'skipped'> {
+  async tick(): Promise<'ok' | 'restarted' | 'gave-up' | 'closed' | 'skipped'> {
     if (this.busy) return 'skipped';
     this.busy = true;
     try {
@@ -661,7 +699,7 @@ export class MacUnityWatch {
     }
   }
 
-  private async look(): Promise<'ok' | 'restarted' | 'gave-up'> {
+  private async look(): Promise<'ok' | 'restarted' | 'gave-up' | 'closed'> {
     const now = this.d.now();
     const procs = await this.u.procsNow();
     const eds = this.u.editors(procs);
@@ -686,12 +724,17 @@ export class MacUnityWatch {
       this.bridgeUp = false;
       this.bridgeFailingSince = undefined;
       this.logGrewAt = Math.max(this.logGrewAt, now);
+      this.safeModeClosed = undefined;
     }
     const dialogOpen = await this.dialogs(pid, now);
     if (this.dialogRestart) {
       const why = this.dialogRestart;
       this.dialogRestart = undefined;
       return this.restart(`the editor keeps showing a dialog: ${why}`, now);
+    }
+    if (!this.bridgeUp && now - this.logGrewAt >= SAFE_MODE_STALL_MS && this.d.logTail().includes('AssetDatabase: script compilation time:')) {
+      const errors = safeModePromptErrors(this.d.logRead ? this.d.logRead(16 * 1024 * 1024) : this.d.logTail());
+      if (errors) return this.closeAtSafeMode(errors, now);
     }
     const b = this.d.bridge();
     // A quick ping first; when it fails, one long one (60 s): a throttled or idle editor gets to it, a frozen
@@ -873,11 +916,52 @@ export class MacUnityWatch {
     const now = this.d.now();
     const lines: string[] = [];
     for (const o of this.open) lines.push(`${o.state === 'blocked' ? 'blocked on a dialog' : 'dialog (checking)'}: ${describeDialog(o.d)} [${o.d.buttons.join(' / ')}], for ${Math.round((now - o.since) / 60_000)} min${o.why ? `; ${o.why}` : ''}`);
+    const c = this.safeModeClosed;
+    if (c) lines.push(`closed at Unity's "Enter Safe Mode?" prompt ${Math.round((now - c.at) / 60_000)} min ago (${c.why}): fix ${safeModeErrorList(c.errors, 5)}, then start it again`);
     if (this.paused) lines.push(`dialog watch paused: ${this.paused}`);
     else if (this.permission) lines.push(`dialog watch off: ${this.permission}`);
     const recent = this.dismissed.filter((x) => now - Date.parse(x.at) < 3_600_000).slice(-5);
     if (recent.length) lines.push(`auto-answered in the last hour: ${recent.map((x) => `"${x.title.slice(0, 60)}" -> ${x.button} (${Math.round((now - Date.parse(x.at)) / 60_000)} min ago)`).join('; ')}`);
     return lines.join('\n');
+  }
+
+  /**
+   * The editor sits at Unity's "Enter Safe Mode?" prompt and nothing answered it (w1495): the dialog watch is
+   * paused (a Mac's locked screen or sleeping display), cannot see windows (no Accessibility permission), does not
+   * exist (Linux), or its "Ignore" did not take. Its MCP bridge cannot come up there, so it is closed and its
+   * workers get the compile errors instead of an editor that never answers. Not restarted: it would only stop
+   * at the same prompt until the code compiles.
+   */
+  private async closeAtSafeMode(errors: string[], now: number): Promise<'closed'> {
+    const shown = this.open.some((o) => /Enter Safe Mode/i.test(o.d.title));
+    const why = this.paused
+      ? `the dialog watch is paused (${this.paused})`
+      : this.permission
+        ? `the dialog watch cannot see the editor's windows (${this.permission})`
+        : this.u.platform === 'linux'
+          ? 'there is no dialog watch on Linux'
+          : shown
+            ? 'pressing "Ignore" did not close it'
+            : 'the dialog watch did not see it';
+    this.expectExit();
+    let stopped: string;
+    try {
+      stopped = await this.u.stop({ force: true });
+    } catch (e) {
+      stopped = `closing it failed: ${(e as Error).message}`;
+    }
+    this.pid = 0;
+    this.bridgeUp = false;
+    this.launchedByUs = false;
+    this.bridgeFailingSince = undefined;
+    this.open = [];
+    this.safeModeClosed = { at: now, why, errors };
+    this.report(
+      `Unity stopped at its "Enter Safe Mode?" prompt: the project does not compile, and nothing answered the prompt within ${SAFE_MODE_STALL_MS / 1000} s (${why}). ` +
+        `The watch closed the editor so it does not sit there (${stopped}). Fix ${safeModeErrorList(errors)}, then start the editor again.`,
+      false,
+    );
+    return 'closed';
   }
 
   private async restart(why: string, now: number): Promise<'restarted' | 'gave-up'> {
