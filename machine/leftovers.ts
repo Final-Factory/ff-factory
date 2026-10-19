@@ -12,7 +12,13 @@
 // process's own environment block), not from its parent or its process group, which a detached player has left, and not
 // from a job object, which only a native helper holding a handle across daemon restarts could keep. A game player started
 // through the player slots (players/slotK-P) also names its session in its lease (player_slots.py, w1196); a program run
-// from a worker's temp folder (<install>/tmp/ffa-<session>/...) names it in its path.
+// from a worker's temp folder (<install>/tmp/ffa-<session>/...) names it in its path. On Windows a Git Bash program a
+// worker's shell started (tail, sleep, a script's bash) shows no environment to the reader (measured on beast, w1575:
+// the shell itself does, its msys children do not), so there one that names a single worker's temp folder among its
+// arguments, in Windows or Git Bash form (`tail -f /f/ffw/tmp/ffa-<session>/run.log`), is that worker's, and ends only
+// once its starter is gone too: 16 such tails held stopped workers' folders on LothDesktop for up to four days.
+// A Unity AssetImportWorker whose editor is gone is an orphan like a slot-less player (two of slot2's ran a day on
+// LothDesktop after its editor stopped, w1575); one under a running editor is spared with that editor's tree.
 //
 // When its owner is gone (the session's agent process is not running here), the daemon ends what it left, a grace after:
 //   - DONE_GRACE_MS after the process stopped when no request waits for the session (its work is over);
@@ -67,7 +73,7 @@ export const LEFTOVER = {
 } as const;
 
 /** What a process is, for what may end it. */
-export type LeftoverKind = 'player' | 'display' | 'unity-batch' | 'editor' | 'server' | 'process';
+export type LeftoverKind = 'player' | 'display' | 'unity-batch' | 'unity-worker' | 'editor' | 'server' | 'process';
 
 /** The FF Factory variables of a process's environment that say who started it. */
 export interface ProcEnv {
@@ -185,6 +191,25 @@ export function tempSessionOf(cmd: string, tempRoot: string | undefined, platfor
   return /^([\w-]+)\//.exec(prog.slice(k.length))?.[1];
 }
 
+/**
+ * The session whose temp folder a Windows command line names among its arguments (`<tempRoot>/ffa-<session>/...`, or Git
+ * Bash's `/f/ffw/tmp/ffa-<session>/...`), when it names exactly one; undefined elsewhere. For the Git Bash programs whose
+ * environment Windows does not show (the module header, w1575).
+ */
+export function tempSessionInArgs(cmd: string, tempRoot: string | undefined, platform: UnityPlatform): string | undefined {
+  if (!tempRoot || platform !== 'win32') return undefined;
+  const k = key(tempRoot, platform);
+  const drive = /^([a-z]):\//.exec(k);
+  const forms = [k, ...(drive ? [`/${drive[1]}/${k.slice(3)}`, `/cygdrive/${drive[1]}/${k.slice(3)}`] : [])];
+  const c = posix(cmd).toLowerCase();
+  const found = new Set<string>();
+  for (const f of forms) {
+    const esc = f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const m of c.matchAll(new RegExp(`(?:^|[\\s"'=:])${esc}/ffa-([\\w-]+)(?=[/\\s"']|$)`, 'g'))) found.add(m[1]!);
+  }
+  return found.size === 1 ? [...found][0] : undefined;
+}
+
 /** The sandbox of a player slot: "slot3-1" -> "slot3" (the sandbox-pairs layout, w576); a pool slot has none. */
 export const slotSandbox = (slot: string | undefined) => /^(slot\d+)-[01]$/i.exec(slot ?? '')?.[1];
 
@@ -282,7 +307,7 @@ interface Candidate {
   kind: LeftoverKind;
   session?: string;
   sandbox?: string;
-  via?: 'env' | 'lease' | 'path';
+  via?: 'env' | 'lease' | 'path' | 'arg';
   slot?: string;
 }
 
@@ -332,6 +357,7 @@ export class LeftoverReaper {
     const roots = d.slotRoots();
     const top = unityProcesses(procs, d.platform);
     const topBatch = new Set(top.filter((u) => u.kind === 'batch').map((u) => u.pid));
+    const topPids = new Set(top.map((u) => u.pid));
     // Interactive editors (and what they started) and processes that name a protected folder are spared, trees and all.
     const spared = new Set<number>();
     const spare = (pid: number) => {
@@ -359,8 +385,13 @@ export class LeftoverReaper {
     const cands: Candidate[] = [];
     for (const p of procs) {
       if (spared.has(p.pid) || p.pid <= 0) continue;
-      const kind = kindOf(p, d.platform, topBatch);
-      if (kind === 'editor') continue;
+      let kind = kindOf(p, d.platform, topBatch);
+      if (kind === 'editor') {
+        // A top-level editor is never ours; a Unity an editor started (an AssetImportWorker) is judged as an orphan: kept
+        // while its starter runs (a running editor's are spared with its tree above), ended once that is gone (w1575).
+        if (topPids.has(p.pid)) continue;
+        kind = 'unity-worker';
+      }
       const e = env.get(p.pid);
       const slot = kind === 'player' ? slotOf(p.cmd, roots, d.platform) : undefined;
       let c: Candidate | undefined;
@@ -372,8 +403,11 @@ export class LeftoverReaper {
       } else {
         const lease = slot ? leases.find((l) => l.slot === slot && Number(l.pid) === p.pid && String(l.host ?? '').toLowerCase() === d.host.toLowerCase()) : undefined;
         const fromPath = tempSessionOf(p.cmd, d.tempRoot(), d.platform);
+        const fromArg = fromPath || kind === 'unity-worker' ? undefined : tempSessionInArgs(p.cmd, d.tempRoot(), d.platform);
         if (lease?.session) c = { p, kind, session: lease.session, sandbox: leaseSandbox(lease.sandbox) ?? slotSandbox(slot), via: 'lease', slot };
         else if (fromPath) c = { p, kind, session: fromPath, via: 'path', slot };
+        else if (fromArg) c = { p, kind, session: fromArg, via: 'arg', slot };
+        else if (kind === 'unity-worker') c = { p, kind };
         else if (kind === 'player' && slot) c = { p, kind, slot, sandbox: leaseSandbox(lease?.sandbox) ?? slotSandbox(slot) };
       }
       if (c) cands.push(c);
@@ -406,6 +440,9 @@ export class LeftoverReaper {
       if (c.session) {
         v = sessionVerdict({ live: d.sessionLive(c.session), resumable: d.resumable(c.session), wakeAt: d.wakeAt(c.session), stoppedSince: this.stopped.get(c.session) ?? now, now });
         owner = d.sessionLive(c.session) ? 'live' : 'stopped';
+        // Named by an argument only: another worker's shell may be reading that folder, so it ends once its starter is gone too.
+        const starter = c.via === 'arg' && v.end ? liveParent(c.p, procs, facts, d.platform) : undefined;
+        if (starter) v = { end: false, why: `it names the temp folder of ${c.session}, but its starter ${starter} still runs` };
       } else {
         // A remote run's lease (lab.py acquires a peer's slot over ssh, the player has none of its own here). A local lease
         // of another pid is another player's: runs of one build share a slot, so it says nothing about this one.
@@ -475,7 +512,7 @@ export class LeftoverReaper {
         if (d.exists(lock)) d.remove(lock);
       }
     }
-    const what = (c: Candidate) => `${c.kind === 'player' ? `game player${c.slot ? ` ${c.slot}` : ''}` : c.kind === 'display' ? programOf(c.p, d.platform) : c.kind === 'unity-batch' ? 'batch Unity' : programOf(c.p, d.platform) || 'process'} pid ${c.p.pid}`;
+    const what = (c: Candidate) => `${c.kind === 'player' ? `game player${c.slot ? ` ${c.slot}` : ''}` : c.kind === 'display' ? programOf(c.p, d.platform) : c.kind === 'unity-batch' ? 'batch Unity' : c.kind === 'unity-worker' ? 'Unity import worker' : programOf(c.p, d.platform) || 'process'} pid ${c.p.pid}`;
     const first = order[0].c;
     const whose = first.session ? `worker ${first.session}${first.sandbox ? ` (sandbox ${first.sandbox})` : ''}` : 'no worker';
     const list = order.map(({ c }) => what(c));

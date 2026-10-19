@@ -93,6 +93,11 @@ export interface CleanupItem {
   rule: string;
   /** Set for an insideKept rule: its folder, whose enclosing keeps do not apply. */
   base?: string;
+  /**
+   * A rebuildable item inside a live or resumed session's temp folder (an old player build, w1575): the guard's inUse and
+   * resumable entries for that folder cover the folder itself and what holds it, not this item inside it.
+   */
+  inSession?: string;
 }
 
 export interface CleanupRun {
@@ -346,6 +351,15 @@ async function reposIn(dir: string): Promise<string[]> {
  * followed. Past `budget` entries it answers yes (unknown: keep).
  */
 export async function touchedSince(p: string, cutoffMs: number, budget = 200_000): Promise<boolean> {
+  return (await touchedWhy(p, cutoffMs, budget)) !== undefined;
+}
+
+/**
+ * touchedSince with its reason: 'changed' (something changed after the cutoff, or is unreadable), 'too-big' (more than
+ * `budget` entries and none of those changed: unknown), or undefined (nothing changed). w1575: a stopped session's folder of
+ * 12 game clones (about 630,000 entries, 139 GB on beast) answered "changed recently" this way and was kept, unlisted, for good.
+ */
+export async function touchedWhy(p: string, cutoffMs: number, budget = 200_000): Promise<'changed' | 'too-big' | undefined> {
   const stack = [p];
   let seen = 0;
   while (stack.length) {
@@ -356,15 +370,16 @@ export async function touchedSince(p: string, cutoffMs: number, budget = 200_000
     } catch {
       continue;
     }
-    if (st.mtimeMs > cutoffMs || ++seen > budget) return true;
+    if (st.mtimeMs > cutoffMs) return 'changed';
+    if (++seen > budget) return 'too-big';
     if (!st.isDirectory()) continue;
     try {
       for (const n of await fs.promises.readdir(cur)) stack.push(path.join(cur, n));
     } catch {
-      return true; // unreadable inside: not ours to judge
+      return 'changed'; // unreadable inside: not ours to judge
     }
   }
-  return false;
+  return undefined;
 }
 
 /** Bytes at or under `p` (symlinks not followed), up to `budget` entries. */
@@ -397,6 +412,12 @@ export function superseded(names: string[]): string[] {
     const m = parse(n);
     return !!m && Number(m[2]) < newest.get(m[1])!;
   });
+}
+
+/** The guard for an item inside session folder `dir` (CleanupItem.inSession): that folder's inUse and resumable entries do not cover it. */
+export function sessionRelaxed(dir: string, g: CleanupGuard): CleanupGuard {
+  const other = (k: string) => norm(k) !== norm(dir);
+  return { ...g, inUse: g.inUse.filter(other), ...(g.resumable ? { resumable: g.resumable.filter(other) } : {}) };
 }
 
 /** The guard for a rule inside a kept folder: the keeps holding `dir` (the sandbox root) do not cover its entries. */
@@ -536,7 +557,8 @@ export async function planCleanup(opts: {
 export async function runCleanup(items: CleanupItem[], guard: CleanupGuard): Promise<CleanupRun> {
   const out: CleanupRun = { removed: [], failed: [], bytes: 0 };
   for (const it of items) {
-    const no = it.rule === 'leftover' ? undefined : neverDelete(it.path, it.base ? relaxFor(it.base, guard) : guard);
+    const g = it.base ? relaxFor(it.base, guard) : guard;
+    const no = it.rule === 'leftover' ? undefined : neverDelete(it.path, it.inSession ? sessionRelaxed(it.inSession, g) : g);
     if (no) {
       out.failed.push({ path: it.path, why: `refused: ${no}` });
       continue;
