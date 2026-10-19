@@ -222,7 +222,8 @@ test('w1469: the portal compacts an idle worker through its daemon and host; the
   assert.equal(s.info.contextTokens, 210_000);
   assert.ok(s.compact, 'a worker on a daemon that offers it can be compacted');
   sessions.compact(s.info.id, 'keep the PR numbers', undefined, { trigger: 'tokens', reason: 'the context passed 200,000 tokens' });
-  await until('compacted', () => !!s.info.lastCompaction && s.info.status === 'idle', 60_000, logs);
+  // lastCompaction is set at the compact boundary, before the result that ends the turn: wait for that turn's end too.
+  await until('compacted', () => !!s.info.lastCompaction && s.info.status === 'idle' && ends.length >= 2, 60_000, logs);
   assert.equal(s.info.lastCompaction?.trigger, 'tokens');
   assert.equal(s.info.contextTokens, 18_000);
   assert.deepEqual(ends.at(-1), { text: 'Echo: big #ctx 210000', meta: { compaction: 'tokens' } });
