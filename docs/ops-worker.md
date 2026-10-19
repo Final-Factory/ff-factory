@@ -772,6 +772,29 @@ Refused, and why (`CONF_REFUSED`):
 A new key in `fff.conf.example` goes into `CONF_CHECK` or `CONF_REFUSED` in the same pull request:
 `deploy/vm/test/fff-conf.test.sh` fails until it does.
 
+### The portal's own settings (w1538)
+
+lothsahn, 2026-10-19: "Those two new settings should be something the new setting tool can change". `fffctl conf get KEY`
+and `fffctl conf set KEY VALUE` also take two of the portal's config.json keys, the orchestrators' quiet compaction
+(docs/orchestrators.md, "Automatic compaction"):
+
+| Setting | Value | Default | Takes effect |
+|---|---|---|---|
+| `orchestrator.compactIdleSeconds` | 0-3600 | 120 | at the portal's next start (a deploy, or `fffctl restart`); nothing restarts |
+| `orchestrator.compactHardAtTokens` | 0 or 50000-900000 | 100000 | the same |
+
+- They are config.json keys, which only the portal reads, so they stay there and are not copied into fff.conf; there is
+  one source. `cmd_conf` hands them to the current release's `server/appConfigCli.ts`, run as the portal's account. That
+  script checks and writes them with set_app_config's own `setAppConfig`, keeps `config.json.prev`, and prints one line:
+  `KEY: old -> new (takes effect ...; the file before is ...config.json.prev)`, or `KEY: no change (...)`. `''` or
+  `default` puts the default back.
+- Fail closed: only the keys in its `CONF_PORTAL_KEYS` (fffctl's `CONF_PORTAL_KEYS` and fff-ops-priv's `CONF_PORTAL` name
+  the same two; `server/appConfigCli.test.ts` compares them). Any other key is refused, and no refused value is echoed.
+  Both are whole numbers, so neither holds a secret.
+- The running portal does not re-read config.json. To change one at once, a person asks the orchestrator, whose
+  `set_app_config` applies it live.
+- `conf get` without a KEY lists fff.conf's settings only.
+
 ## A new fffctl command
 
 **The rule** (Lothsahn, 2026-10-09, w745): "anytime a new fffctl command is provided, all read only parts of it should be allowed by the orchestrator worker". When a pull request adds an `fffctl` command or a form of one, it also allows that command's read-only parts to the worker, in the same pull request. A form is read-only when it:

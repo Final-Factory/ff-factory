@@ -51,7 +51,10 @@
 #                                       fff.conf's settings (w1537): get prints each with its value, or <redacted> for a
 #                                       credential, key, secret or another setting that is a person's; set changes one, keeps
 #                                       the file before as fff.conf.prev, and prints only that setting, old -> new, and when it
-#                                       takes effect. It restarts nothing (docs/ops-worker.md, "fff.conf settings (w1537)")
+#                                       takes effect. It restarts nothing (docs/ops-worker.md, "fff.conf settings (w1537)").
+#                                       Also the portal's own orchestrator.compactIdleSeconds and orchestrator.compactHardAtTokens
+#                                       (w1538): config.json keys, read and changed through the portal's set_app_config check,
+#                                       in effect from the portal's next start (conf get KEY, conf set KEY VALUE)
 #   fffctl approvals [--since DATE] [--split DATE]
 #                                       the permission prompts a person answered, as counts only (w1097): per day, the clean-up
 #                                       ones by kind, and every one by kind, before and after DATE (YYYY-MM-DD, UTC), read from
@@ -698,8 +701,36 @@ conf_get_one() {
   echo "$k=$(conf_show "${!k:-}") ($src)"
 }
 
+# The portal's own settings fffctl conf reaches (w1538, lothsahn: "Those two new settings should be something the new
+# setting tool can change"): config.json keys, not fff.conf's. The current release's server/appConfigCli.ts reads and
+# changes them as the portal's account, through set_app_config's own check (setAppConfig), keeps config.json.prev, prints
+# only the setting that changed and refuses any key not in its list (its CONF_PORTAL_KEYS) with no value echoed. Each is
+# a number, so none is a secret. The portal reads config.json at its start.
+CONF_PORTAL_KEYS='orchestrator.compactIdleSeconds orchestrator.compactHardAtTokens'
+conf_is_portal() { [[ " $CONF_PORTAL_KEYS " == *" $1 "* ]]; }
+conf_portal() {
+  local cfg=$FFF_ROOT/config/config.json
+  [ -f "$cfg" ] || die "no $cfg: run deploy/vm/guest/install.sh first"
+  if [ "${FFF_TEST_NOROOT:-}" = 1 ]; then
+    (cd "$CURRENT" && FFSB_CONFIG=$cfg node server/appConfigCli.ts "$@")
+  else
+    as_fff_in "$CURRENT" env FFSB_CONFIG="$cfg" node server/appConfigCli.ts "$@"
+  fi
+}
+
 cmd_conf() {
   local what=${1:-get} k v why old tmp
+  if [ $# -ge 2 ] && conf_is_portal "$2"; then
+    case $what in
+      get) [ $# -eq 2 ] || die "conf get [KEY]"; conf_portal get "$2"; return ;;
+      set)
+        [ $# -eq 3 ] || die "conf set KEY VALUE (one setting; '' or default: back to the default)"
+        conf_portal set "$2" "$3" || exit 1
+        logger -t fffctl -- "conf set $2: $3" 2>/dev/null || true
+        return
+        ;;
+    esac
+  fi
   case $what in
     get)
       [ $# -le 2 ] || die "conf get [KEY]"

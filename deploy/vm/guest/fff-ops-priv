@@ -318,17 +318,20 @@ case "${1:-help}" in
     # fff.conf's settings (w1537; lothsahn: "any settings that aren't credentials or keys or secrets"): fffctl conf, as root,
     # refuses the credentials, keys and secrets and the settings that stay a person's (CONF_REFUSED, its secret-name rule)
     # and checks each value. Here only the shape: a setting name, and one value of letters, digits and . _ / : - (no quote,
-    # $, space or backslash). A refused value is not echoed back.
+    # $, space or backslash). A refused value is not echoed back. A KEY is fff.conf's (capitals) or one of the portal's own
+    # settings fffctl conf reaches in config.json (w1538; fffctl's CONF_PORTAL_KEYS, checked there as root).
+    CONF_PORTAL='orchestrator.compactIdleSeconds orchestrator.compactHardAtTokens'
+    CONF_KEY='^([A-Z][A-Z0-9_]{0,63}|orchestrator\.compactIdleSeconds|orchestrator\.compactHardAtTokens)$'
     case "${2:-}" in
       "") [ $# -eq 1 ] || refuse "conf | conf get [KEY] | conf set KEY VALUE"; exec "$FFFCTL" conf ;;
       get)
         if [ $# -eq 2 ]; then exec "$FFFCTL" conf get; fi
-        { [ $# -eq 3 ] && [[ $3 =~ ^[A-Z][A-Z0-9_]{0,63}$ ]]; } || refuse "conf get [KEY] (KEY: capitals, digits and _)"
+        { [ $# -eq 3 ] && [[ $3 =~ $CONF_KEY ]]; } || refuse "conf get [KEY] (KEY: capitals, digits and _, or a portal setting: $CONF_PORTAL)"
         exec "$FFFCTL" conf get "$3"
         ;;
       set)
         [ $# -eq 4 ] || refuse "conf set KEY VALUE (one setting; an empty VALUE as '')"
-        [[ $3 =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || refuse "conf set: KEY takes capitals, digits and _"
+        [[ $3 =~ $CONF_KEY ]] || refuse "conf set: KEY takes capitals, digits and _, or is a portal setting: $CONF_PORTAL"
         [[ $4 =~ ^[A-Za-z0-9._/:-]{0,200}$ ]] || refuse "conf set $3: a value takes letters, digits and . _ / : - only (nothing changed)"
         exec "$FFFCTL" conf set "$3" "$4"
         ;;

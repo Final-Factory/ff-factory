@@ -257,6 +257,17 @@ else
   [ "$(upriv conf get HEALTH_START_GRACE_SEC)" = "FFFCTL [conf] [get] [HEALTH_START_GRACE_SEC]" ] || fail "priv: conf get KEY"
   [ "$(upriv conf set HEALTH_START_GRACE_SEC 300)" = "FFFCTL [conf] [set] [HEALTH_START_GRACE_SEC] [300]" ] || fail "priv: conf set: $(upriv conf set HEALTH_START_GRACE_SEC 300)"
   [ "$(upriv conf set UPDATE_VERIFY_SEC '')" = "FFFCTL [conf] [set] [UPDATE_VERIFY_SEC] []" ] || fail "priv: conf set to empty"
+  # w1538: the portal's two quiet-compaction settings (config.json, through fffctl's CONF_PORTAL_KEYS), and no other dotted key.
+  [ "$(upriv conf get orchestrator.compactIdleSeconds)" = "FFFCTL [conf] [get] [orchestrator.compactIdleSeconds]" ] || fail "priv: conf get a portal key"
+  [ "$(upriv conf set orchestrator.compactIdleSeconds 90)" = "FFFCTL [conf] [set] [orchestrator.compactIdleSeconds] [90]" ] || fail "priv: conf set a portal key"
+  [ "$(upriv conf set orchestrator.compactHardAtTokens 150000)" = "FFFCTL [conf] [set] [orchestrator.compactHardAtTokens] [150000]" ] || fail "priv: conf set the hard threshold"
+  for bad in 'conf set providers.ffbox.token x' 'conf set orchestrator.compactAtTokens 90000' 'conf get ownerName' 'conf set orchestrator.compactIdleSecondsX 1'; do
+    rc=0
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(upriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
+  done
   for bad in 'conf extra' 'conf get lower' 'conf get A B' 'conf set A' 'conf set A 1 2' 'conf set a 1' 'conf set A 1;id' 'conf set A $(id)' 'conf rm A'; do
     rc=0
     # shellcheck disable=SC2086 # the words are the arguments

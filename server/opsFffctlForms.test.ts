@@ -85,7 +85,7 @@ test('fffctl conf (w1537): the guard and fffctl refuse the same secret names, an
   const bash = /^CONF_SECRET_NAME='([^']+)'$/m.exec(fffctl);
   assert.ok(bash, 'no CONF_SECRET_NAME in fffctl');
   assert.equal(FFFCTL_CONF_SECRET_NAME.source, bash[1], 'FFFCTL_CONF_SECRET_NAME (server/opsWorker.ts) and fffctl CONF_SECRET_NAME differ');
-  for (const ok of ['fffctl conf', 'fffctl conf get', 'fffctl conf get HEALTH_START_GRACE_SEC', 'fffctl conf set HEALTH_START_GRACE_SEC 300', "fffctl conf set UPDATE_VERIFY_SEC ''"]) {
+  for (const ok of ['fffctl conf', 'fffctl conf get', 'fffctl conf get HEALTH_START_GRACE_SEC', 'fffctl conf set HEALTH_START_GRACE_SEC 300', "fffctl conf set UPDATE_VERIFY_SEC ''", 'fffctl conf get orchestrator.compactIdleSeconds', 'fffctl conf set orchestrator.compactIdleSeconds 90', 'fffctl conf set orchestrator.compactHardAtTokens 150000']) {
     assert.equal(shell(ok), undefined, ok);
   }
   assert.ok(/^\s+conf\)$/m.test(priv), 'fff-ops-priv has no conf case');
