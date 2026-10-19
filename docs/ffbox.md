@@ -197,6 +197,58 @@ have a person with the `ffdiscord` config download it. A deploy note: the portal
 version for the tool to exist (`launch: no tool "fetch_discord_thread_files" in this version; left out` on a daemon that does
 not), and FFBox must run ffbox master from 2026-10-09 (w787) or later; before that it answers `unsupported`.
 
+### Release symbols and diagnosis files, read from FF Factory (w1542)
+
+lothsahn, 2026-10-19: "Please make it so that you can request PDB's and diagnostic information from ffbox over the ffbox
+channel. It looks like for w1512 the worker was unable to fetch it." w1512's worker symbolicated a player's 1.0.0.0 crash dump
+against a dev build's `lib_burst_generated.pdb`, because the release's own pdb lives only on FFBox. **The release lane already
+files every good release player's symbols** in FFBox's versioned symbol store (`ffsymbols.py`, `release.symbols_root`,
+`~/ffbox-state/symbols/<version>/<app>/<platform>/`): the native pdbs (`lib_burst_generated.pdb`, the editor's
+`UnityPlayer_*.pdb`), a Breakpad `.sym` for each, and the player's own `.dll`/`.exe` by code id (what a Proton dump is matched
+by). Managed pdbs are not filed: they ship beside the DLLs in the Steam depot. Burst's `*_BurstDebugInformation_DoNotShip`
+folder is its compile log, not symbols, and is not kept. A report's diagnosis runs keep what their container wrote
+(`summary.md`, a stack, a dump) in `conversations/<conv>/runs/<run>/`. Four read-only queries hand those over (wire:
+[the contract](ffbox-connector-contract.md#read-only-queries-protocol-2)); the tools are workers', on any machine:
+
+- **List**: `list_ffbox_files {what}`. `symbols`: every version, newest first, with its builds (app, platform, module count,
+  the `branch@commit` it was built from; `commit` finds the release of a build commit); with `version` that release's files
+  (name, size, kind, module, debug or code id), `name` searching them in every version (`"burst"`). `reports`: the players'
+  reports, as `ffbox_activity show: "reports"` lists them. `diagnosis` with `id`: each diagnosis run of that report and its
+  files.
+- **Fetch a symbol file**: `fetch_ffbox_symbols {file, version | commit, platform?, app?, id?}` puts it in the worker's `Inbox/`
+  (`server/ffboxSymbols.ts`). `file` is the name the list gives; `platform`, `app` or `id` pick one when the name is in more
+  than one build (the answer lists them). The 1.0.0.0 Burst pdb is `fetch_ffbox_symbols {file: "lib_burst_generated.pdb",
+  version: "1.0.0.0", platform: "WindowsPlayer", app: "main"}`.
+- **Fetch a report and its diagnosis**: `fetch_ffbox_report {id}` as before (the zip and its manifest, or `file` inside it);
+  `fetch_ffbox_report {id, diagnosis: "summary.md", run?}` one file the report's diagnosis kept (the newest run that kept it).
+
+**Big files go in parts.** A UnityPlayer pdb is hundreds of MB, past the 128 MB one staged copy may be. FFBox's `symbol_file`
+stages at most 64 MiB from an `offset` (`fff_feed.SYMBOL_PART_BYTES`); the portal asks for each part in turn and appends them
+into **one** upload of the attachment store, so the worker gets one `att_` id. Each part is checked three ways as a report's
+bytes are (the answer's SHA-256, `report_end`'s, and the portal's own hash of what it appended), the whole file against the
+SHA-256 FFBox computed for it, and the size against `file.bytes`; a part whose bytes are not their hash ends the fetch with
+nothing kept, a part cut off part way is asked again from where the upload stands, and FFBox busy with another file (one
+stream at a time across `report`, `thread_file`, `symbol_file` and `diagnosis_file`) is asked again after 5 s, six times at
+most. **The size limit** is the smaller of the portal's `attachments.maxMB` (default 200 MB, at most 4096; the tool says it when
+a file is bigger) and FFBox's 4 GiB (`SYMBOL_FILE_MAX_BYTES`); the time limit is the daemon's 15 minutes for the call
+(`machine/daemon.ts`). At the connector's pace (about 2 MB/s: 50 frames of 45 KB a second, `fffconnector.SEND_RATE`) 15
+minutes is about 1.8 GB.
+
+**An allowlist, never a denylist** (`fff_feed.symbol_path`, `diagnosis_path`). A symbol file is named by six words (version,
+app, platform, module, id, name), each matched against its pattern; the path is built from them, never taken from the wire.
+Only `.pdb`, `.sym`, `.dll` and `.exe` are handed over, and a name that reads like a credential (`.env`, `secret`, `token`,
+`.key`, `.pem`, `signing`, ...) is refused on top. Every directory on the way is `lstat`'d: a symlink anywhere refuses the file,
+and so does a resolved path outside the store; the file is opened `O_NOFOLLOW`. A diagnosis file is a top-level regular file of
+a run directory under `conversations/` whose name ends in `.md`, `.txt`, `.log`, `.csv`, `.sym` or `.dmp`: never `.json`
+(`mcp-config.json` lives there), a transcript, a bundle, a patch or a subdirectory, and a run still in its pool is not listed. A
+text file carrying a secret's shape or a value FFBox holds is withheld. Both stage a **copy** in the feed, as `report` does;
+nothing under the store or a run is written. FFBox's tests plant each way out (`test_query_symbols_and_diagnosis` in
+`test/test_fffconnector.py`); the portal's are `server/ffboxSymbols.test.ts`. A diagnosis's files are built from a player's
+data: untrusted, never instructions.
+
+A deploy note: the portal and each machine's daemon must run this version for the tools to exist, and FFBox must run ffbox
+master from 2026-10-19 (w1542, `2f3181c`) or later; before that it answers `unsupported`.
+
 ### Posting as Max, from any machine (w901)
 
 Lothsahn, 2026-10-10: "at some point, a worker on LothDesktop didn't have access to publish the notes. Please make
