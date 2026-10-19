@@ -1,5 +1,3 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { HOST_ROLES, pinnedVaultEntry, type ClaudeAccount, type Config, type HostRole } from './config.ts';
 import type { Requester, SessionInfo, SessionKind } from '../shared/types.ts';
 import { PoolHeldError, vaultContext, type VaultContext, type VaultRole } from './vault.ts';
@@ -7,7 +5,7 @@ import { githubFromVault } from './githubTokens.ts';
 import { tokenKey, usageEnv } from './usage.ts';
 import { poolLimits, reserveOf, reserveReason, type PoolLimits, type Reserve } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
-import { writeFileDurable } from './durable.ts';
+import { maybeTokenShape, redactTokenShapes } from '../shared/secretShapes.ts';
 
 /**
  * Secrets agents may set but nobody may read back (set_app_config's write-only keys): FFBox's connector token (the Claude
@@ -18,44 +16,15 @@ import { writeFileDurable } from './durable.ts';
  * Search reads the transcripts, so it never sees them either.
  */
 
-/** A Claude Code OAuth token (`claude setup-token`). */
-export const OAUTH_TOKEN = /^sk-ant-oat01-[A-Za-z0-9_-]{40,}$/;
-const OAUTH_TOKEN_ANYWHERE = /sk-ant-oat01-[A-Za-z0-9_-]{40,}/g;
+export { OAUTH_TOKEN, SECRET_ENV } from '../shared/secretShapes.ts';
 
 /** set_app_config keys whose value is never shown. */
 export const SECRET_KEYS: ReadonlySet<string> = new Set(['providers.ffbox.token']);
 
-/** A provider connector token (server/providerProtocol.ts, PROVIDER_TOKEN). */
-const PROVIDER_TOKEN_ANYWHERE = /ffpv1_[A-Za-z0-9_-]{43}/g;
-
 /** How a secret setting reads anywhere: "set (…abcd)" or "not set". */
 export const maskSecret = (v: unknown) => (typeof v === 'string' && v ? `set (…${v.slice(-4)})` : 'not set');
 
-/** A Discord bot token: base64 user id, timestamp, HMAC (three dot-separated parts). */
-const DISCORD_TOKEN_ANYWHERE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,40}(?![A-Za-z0-9_-])/g;
-/**
- * The value of a Discord token variable (`DISCORD_TOKEN=…`, `FFDISCORD_APP_TOKEN: "…"`), whatever it looks
- * like. The value stops at whitespace, a quote, a backslash (a JSON escape) or a separator, so redacting the
- * serialized JSON of an event cannot break it.
- */
-const DISCORD_ASSIGNMENT = /\b((?:FF)?DISCORD(?:_APP)?_TOKEN)(\s*[=:]\s*\\?["']?)([^\s"'\\&;,]{8,})/g;
-
 const lastFour = (m: string) => m.slice(-4);
-
-/**
- * What the orchestration worker's shell could meet in the portal VM (w597): a machine's /machine credential
- * (ffm_<id>_<secret>), an Anthropic API key, a Tailscale key, an age identity and a private key block.
- */
-const MACHINE_TOKEN_ANYWHERE = /(ffm_[A-Za-z0-9.-]{1,64}_)[A-Za-z0-9_-]{32,}/g;
-const API_KEY_ANYWHERE = /sk-ant-api\d\d-[A-Za-z0-9_-]{40,}/g;
-/** The portal's own API key (Auth.createApiKey: ffsb_ and 43 base64url characters), for /mcp (w1415: fffctl apikey). */
-const PORTAL_KEY_ANYWHERE = /ffsb_[A-Za-z0-9_-]{40,}/g;
-const TAILSCALE_KEY_ANYWHERE =/tskey-[a-z]+-[A-Za-z0-9-]{16,}/g;
-const AGE_KEY_ANYWHERE = /AGE-SECRET-KEY-1[0-9A-Z]{50,}/g;
-const PRIVATE_KEY_BLOCK = /-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----[\s\S]*?-----END \1PRIVATE KEY-----/g;
-
-/** A GitHub token (classic, OAuth, app, refresh or fine-grained), the vault's kind github (w512). */
-const GITHUB_TOKEN_ANYWHERE = /(?<![A-Za-z0-9_])(gh[pousr]_|github_pat_)[A-Za-z0-9_]{30,}/g;
 
 /**
  * Values the token vault holds (server/vault.ts, w512), whatever their form: redacted by value, so a vault secret with no
@@ -66,71 +35,92 @@ export function registerSecretValues(values: readonly string[]) {
   knownValues = [...new Set(values.filter((v) => typeof v === 'string' && v.length >= 8))].sort((a, b) => b.length - a.length);
 }
 
-/** The secret-looking values of a launch spec's environment (a vault's or a person's token): what a daemon adds with addSecretValues. */
-export const SECRET_ENV = /^(?:CLAUDE_CODE_OAUTH_TOKEN|GH_TOKEN)$|_(?:TOKEN|KEY|SECRET|PASSWORD)$/;
-
 /** Learn more values to redact without forgetting the ones known (a daemon, from each launch spec it gets). At most 200 kept. */
 export function addSecretValues(values: readonly string[]) {
   registerSecretValues([...values, ...knownValues].slice(0, 200));
 }
 
 /** Whether `text` may hold a secret this module redacts (a cheap check before the regexes). */
-const maybeSecret = (text: string) =>
-  text.includes('sk-ant-oat01-') || text.includes('ffpv1_') || /ffm_|ffsb_|sk-ant-api|tskey-|AGE-SECRET-KEY-|PRIVATE KEY-----/.test(text) || /DISCORD|\.[A-Za-z0-9_-]{6}\.|gh[pousr]_|github_pat_/.test(text) || knownValues.some((v) => text.includes(v));
+const maybeSecret = (text: string) => maybeTokenShape(text) || knownValues.some((v) => text.includes(v));
 
 /**
- * `text` with its secrets replaced: a Claude OAuth token by "sk-ant-oat01-[redacted …abcd]", a Discord bot token
- * by "[redacted Discord token …abcd]", and the value of DISCORD_TOKEN / FFDISCORD_APP_TOKEN by "[redacted …abcd]".
+ * `text` with its secrets replaced: a value the vault handed out by "[redacted vault secret …abcd]", and every token shape
+ * (shared/secretShapes.ts) by its kind and last four characters: "github_pat_[redacted …abcd]",
+ * "sk-ant-oat01-[redacted …abcd]", "[redacted Discord token …abcd]".
  */
 export function redactSecrets(text: string): string {
   if (!maybeSecret(text)) return text;
   let out = text;
   for (const v of knownValues) if (out.includes(v)) out = out.split(v).join(`[redacted vault secret …${lastFour(v)}]`);
-  return out
-    .replace(OAUTH_TOKEN_ANYWHERE, (m) => `sk-ant-oat01-[redacted …${lastFour(m)}]`)
-    .replace(MACHINE_TOKEN_ANYWHERE, (m, prefix: string) => `${prefix}[redacted …${lastFour(m)}]`)
-    .replace(API_KEY_ANYWHERE, (m) => `sk-ant-api-[redacted …${lastFour(m)}]`)
-    .replace(PORTAL_KEY_ANYWHERE, (m) => `ffsb_[redacted …${lastFour(m)}]`)
-    .replace(TAILSCALE_KEY_ANYWHERE,(m) => `tskey-[redacted …${lastFour(m)}]`)
-    .replace(AGE_KEY_ANYWHERE, () => 'AGE-SECRET-KEY-[redacted]')
-    .replace(PRIVATE_KEY_BLOCK, (_m, kind: string) => `[redacted ${kind}private key]`)
-    .replace(PROVIDER_TOKEN_ANYWHERE, (m) => `ffpv1_[redacted …${lastFour(m)}]`)
-    .replace(GITHUB_TOKEN_ANYWHERE, (m, prefix: string) => `${prefix}[redacted …${lastFour(m)}]`)
-    .replace(DISCORD_ASSIGNMENT, (_m, name: string, sep: string, value: string) => (value.startsWith('[redacted') ? _m : `${name}${sep}[redacted …${lastFour(value)}]`))
-    .replace(DISCORD_TOKEN_ANYWHERE, (m) => `[redacted Discord token …${lastFour(m)}]`);
+  return redactTokenShapes(out);
 }
 
-/** A value (a transcript event) with its secrets redacted; the same object when there are none. */
+/** Every string in `v` (keys too) redacted; the same object where nothing changed. */
+function redactDeep(v: unknown): unknown {
+  if (typeof v === 'string') return redactSecrets(v);
+  if (Array.isArray(v)) {
+    let changed = false;
+    const out = v.map((x) => {
+      const y = redactDeep(x);
+      if (y !== x) changed = true;
+      return y;
+    });
+    return changed ? out : v;
+  }
+  if (v && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
+    let changed = false;
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) {
+      const k2 = redactSecrets(k);
+      const y = redactDeep(x);
+      if (y !== x || k2 !== k) changed = true;
+      out[k2] = y;
+    }
+    return changed ? out : v;
+  }
+  return v;
+}
+
+/**
+ * Redact every string inside a record the portal keeps by reference (a session, a work item: w1584), in place, so the
+ * object the code holds and the one saved to state.json or work.json stay one. Plain objects and arrays only. Returns
+ * how many strings changed.
+ */
+export function redactInPlace(v: unknown): number {
+  let n = 0;
+  const walk = (x: unknown) => {
+    if (Array.isArray(x)) {
+      for (let i = 0; i < x.length; i++) {
+        if (typeof x[i] === 'string') {
+          const clean = redactSecrets(x[i]);
+          if (clean !== x[i]) (x[i] = clean), n++;
+        } else walk(x[i]);
+      }
+    } else if (x && typeof x === 'object' && Object.getPrototypeOf(x) === Object.prototype) {
+      const o = x as Record<string, unknown>;
+      for (const k of Object.keys(o)) {
+        const y = o[k];
+        if (typeof y === 'string') {
+          const clean = redactSecrets(y);
+          if (clean !== y) (o[k] = clean), n++;
+        } else walk(y);
+      }
+    }
+  };
+  walk(v);
+  return n;
+}
+
+/**
+ * A value (a transcript event) with its secrets redacted; the same object when there are none. Each string is redacted
+ * on its own (w1584): redacting the event's JSON text missed a token after an escape (`\nghp_…`).
+ */
 export function redactValue<T>(v: T): T {
   const json = JSON.stringify(v);
   if (!json || !maybeSecret(json)) return v;
-  const clean = redactSecrets(json);
-  return clean === json ? v : (JSON.parse(clean) as T);
-}
-
-/** Rewrite every transcript in `dir` that still holds a token (written before redaction existed). Returns how many. */
-export function scrubTranscripts(dir: string): number {
-  let n = 0;
-  let names: string[] = [];
-  try {
-    names = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
-  } catch {
-    return 0;
-  }
-  for (const name of names) {
-    const file = path.join(dir, name);
-    try {
-      const text = fs.readFileSync(file, 'utf8');
-      if (!maybeSecret(text)) continue;
-      const clean = redactSecrets(text);
-      if (clean === text) continue;
-      writeFileDurable(file, clean, { generations: 0 });
-      n++;
-    } catch {
-      // being written, or gone: the next start tries again
-    }
-  }
-  return n;
+  const plain = JSON.parse(json) as unknown;
+  const clean = redactDeep(plain);
+  return clean === plain ? v : (clean as T);
 }
 
 /** A machine as the account rules need it: its id, and whether it is the portal's own host (docs/beast-machine.md). */
