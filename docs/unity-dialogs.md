@@ -55,7 +55,7 @@ ambiguous is "notify": it is reported to the orchestrator, which restarts the ed
 |---|---|---|---|
 | "Unity is running as administrator." | "I wish to continue at my own risk" / "Restart Unity as a standard user" | **Avoid**; notify a **person** if seen | No daemon starts Unity elevated (its own `LeastPrivilege` task). "Continue" is the risky choice. "Restart as a standard user" relaunches Unity through the shell under a pid the app does not track. |
 | "Repair FMOD Libraries": "The following FMOD libraries contain incorrect line endings…" (`Assets/Plugins/FMOD/src/Editor/EditorUtils.cs` `CheckMacLibraries`, runs at every editor start) | "Repair" / "Ignore" | **Auto: Ignore** | the user's rule: anything about line endings gets Ignore, never a convert or repair button. Ignore leaves the files alone. Matched on the title or any text mentioning "line endings"; with no Ignore button it is reported instead. |
-| "Enter Safe Mode?": "The project you are opening contains compilation errors…" | "Enter Safe Mode" / "Ignore" | **Auto: Ignore** | Ignore opens the editor normally, errors and all, so the MCP bridge loads and an agent can fix the code. Safe Mode would keep the bridge from loading. Nothing on disk changes. |
+| "Enter Safe Mode?": "The project you are opening contains compilation errors…" | "Enter Safe Mode" / "Ignore" | **Auto: Ignore** | Ignore opens the editor normally, errors and all, so the MCP bridge loads and an agent can fix the code. Safe Mode would keep the bridge from loading. Nothing on disk changes. If nothing presses it within 90 s (a locked Mac, Linux), the watch closes the editor and reports the compile errors from its log ([below](#decisions), w1495). |
 | "Addressables Build Report": "There's a new Addressables Build Report you can check out after your content build. However, this requires that 'Debug Build Layout' is turned on… Would you like to turn it on?" (com.unity.addressables 2.9.1 `BuildScriptBase.NotifyUserAboutBuildReport`, on a content or player build, not in batch mode) | "Yes" / "No" | **Auto: No** (always-rule) | the user's rule. Yes would turn on Debug Build Layout, which makes every content build slower. There is no EditorPrefs key or project setting to suppress it: the "already asked" flag (`userHasBeenInformedAboutBuildReportSettingPreBuild`) lives in the project's `Library/AddressablesConfig.dat` (`ProjectConfigData`, a BinaryFormatter file) and either answer sets it, so after the first No it does not come back for that sandbox until its Library is rebuilt. The app does not pre-write that file: its binary format belongs to the package, and one press per Library is cheap. |
 | "Font Coverage": "No coverage errors. See the Console for the full report." / "Atlases rebuilt. No coverage errors." (the game's `Assets/Editor/FontCoverage.cs`, menu Tools > Localization > Validate Font Coverage / Rebuild Font Atlases) | "OK" | **Auto: OK, only when it reports no problem** | An informational summary from a project tool: OK only closes it. The rule for such dialogs (`singleButton`, `problem`): pressed only when OK is its one button, and reported instead when its text mentions an error, a failure or something missing once "No coverage errors" is taken out, e.g. "3 coverage error(s)" or "…coverage error(s) remain". Agents should not need the dialog at all: `Editor.FontCoverage.ValidateFontCoverageOrThrow()` (through `execute_code`) validates, writes `Localization/FontCoverageReport.txt` and throws on errors, and `Editor.FontCoverage.RebuildFontAtlases()` rebuilds; both are dialog-free and are what the build scripts call (`BuildCommand2.cs`, `ReleaseBuild.cs`). |
 | "Connection Lost": "The connection with the Unity Licensing Client has been lost." | "Retry" | **Auto: Retry** (always-rule); **a fresh editor** when it is back 3 times in 10 minutes | Seen live on this sandbox's editor (agent-mcp, 2026-09-23). Retry only reconnects. When it comes back for the 4th time within 10 minutes (`restartAfter`), pressing is not helping: the editor is force-restarted, since a fresh editor starts a fresh licensing client. That counts toward the automatic restart limit (docs/unity-lifecycle.md). On every machine. |
@@ -91,11 +91,29 @@ ambiguous is "notify": it is reported to the orchestrator, which restarts the ed
 
 - **Administrator**: avoided by never running elevated (above). This is the one that stalled
   blackhole-master.
-- **Safe Mode**: `-ignorecompilererrors` is documented ("Unity continues to start your application
-  even if there are compilation errors"). It is not added by default: the docs do not say whether it
-  also suppresses the interactive Safe Mode prompt, and pressing "Ignore" has the same effect. The knob to try it was
-  `unity.extraArgs` (retired with the portal's editors, w510); a daemon builds its own command line
-  (`machine/unity.ts`: `-projectPath` and `-logFile`).
+- **Safe Mode** (w1495, measured on 6000.3.19f1, lothdesktop/slot1, 2026-10-18, with a deliberate `error CS0103` in a
+  test file): no launch argument or setting skips the prompt into a normal editor.
+  - `-ignoreCompilerErrors` does not: the [Safe Mode manual](https://docs.unity3d.com/6000.3/Documentation/Manual/SafeMode.html)
+    gives it for batch mode only ("In Batch Mode, Unity automatically quits if there are compilation errors … unless
+    you use the -ignoreCompilerErrors command line argument"), and an interactive editor launched with it still showed
+    "Enter Safe Mode?" 40 s after launch.
+  - The preference Edit > Preferences > Asset Pipeline > "Show Enter Safe Mode Dialog" (the EditorPrefs bool
+    `EnterSafeModeDialog`, in `UnityEditor.dll`) only drops the question: off, Unity "automatically enters Safe Mode",
+    where "Safe Mode never allows managed code to run from your project, or its packages", so the MCP bridge never
+    loads. It is also a per-user EditorPrefs value, shared with a person's own editors. Not used.
+  - No project code can answer it: before the prompt only Unity's own precompiled assemblies are loaded (the log's first
+    `Begin MonoManager ReloadAssembly` registers only `Data/PlaybackEngines` modules).
+
+  So the watch presses "Ignore" (the table above; measured: shown at 19:54:05, pressed and gone 7 s later, the bridge
+  up and `read_console` returning the error). When nothing can press it, a Mac's watch paused by a locked screen or a
+  sleeping display, a Mac without Accessibility, Linux with no watch at all, the watch reads the state from the log
+  instead (`safeModePromptErrors`, `machine/unity.ts`): at the prompt the log stands still on `AssetDatabase: script
+  compilation time:` after a `## Script Compilation Error for:` block, with no `Begin MonoManager ReloadAssembly` since
+  `Application.AssetDatabase Initial Refresh Start` (measured: the log did not grow by a byte while the dialog was
+  open). After 90 s of that (`SAFE_MODE_STALL_MS`, three looks) the watch closes the editor, reports the `error CS`
+  lines to the sandbox's workers and shows them in `unity status`. It does not restart it: it would stop at the same
+  prompt until the code compiles. Measured end to end with the watch's dialog listing blinded: the dialog at
+  20:27:49, the editor closed with the error reported at 20:29:37.
 - **API Updater**: `-accept-apiupdate` is documented for batch mode only, and it would rewrite code
   unasked. Not used.
 - **Package Manager**: `-noUpm` is documented, but it disables the Package Manager, and with it the
