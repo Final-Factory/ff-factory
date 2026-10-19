@@ -1479,7 +1479,7 @@ select.input {
 
 /* Messages from other people over the message box (w1546), in the amber of a notice that needs you (.notice-attn). */
 .pmsg-wrap {
-  padding: var(--s-2) var(--s-6) 0;
+  padding: var(--s-2) var(--s-6) 6px;
 }
 
 .orch-compact .pmsg-wrap {
@@ -1491,7 +1491,8 @@ select.input {
   margin: 0 auto;
   border: 1px solid var(--amber);
   border-radius: var(--radius-lg);
-  background: linear-gradient(var(--amber-soft), var(--amber-soft)), var(--panel-2);
+  /* The notices' amber tint on the page's ground; the full amber edge is what makes it hard to miss. */
+  background: linear-gradient(var(--amber-soft), var(--amber-soft)), var(--bg);
   overflow: hidden;
 }
 
@@ -1619,9 +1620,17 @@ select.input {
 }
 
 .pmsg-foot {
-  margin: 0;
-  padding: 6px var(--s-3) var(--s-2);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 4px var(--s-1) 4px var(--s-3);
   border-top: 1px solid var(--border);
+}
+
+.pmsg-foot p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
   color: var(--text-3);
   font-size: var(--fs-xs);
 }

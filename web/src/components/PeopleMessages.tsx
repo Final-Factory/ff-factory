@@ -86,6 +86,11 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
   if (!list.length && !cleared) return null;
 
   const latest = list.at(-1);
+  const clearAll = (
+    <button type="button" className="btn btn-ghost btn-sm pmsg-clear-all" onClick={() => clear(list.map(idOf))} title="Mark them all read: they stay in the chat, and your orchestrator has them">
+      <Icon name="check" size={14} /> Clear all
+    </button>
+  );
   const count = `${list.length} ${list.length === 1 ? 'message' : 'messages'} from ${senders(list)}`;
   return (
     <div className="pmsg-wrap">
@@ -99,7 +104,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
               <span className="pmsg-count" data-testid="people-messages-count">
                 {count}
               </span>
-              {!open && <span className="pmsg-preview">{latest.text ? latest.text.replace(/\s+/g, ' ') : 'Open to read'}</span>}
+              {!open && <span className="pmsg-preview hide-phone">{latest.text ? latest.text.replace(/\s+/g, ' ') : 'Open to read'}</span>}
               {!open && (
                 <time className="hide-phone" dateTime={latest.at} title={fmtClock(latest.at)}>
                   {fmtRelative(latest.at, now)}
@@ -109,9 +114,8 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
                 <Icon name="chevron" size={14} />
               </span>
             </button>
-            <button type="button" className="btn btn-ghost btn-sm pmsg-clear-all" onClick={() => clear(list.map(idOf))} title="Mark them all read: they stay in the chat, and your orchestrator has them">
-              <Icon name="check" size={14} /> Clear all
-            </button>
+            {/* Open, Clear all moves to the foot: a row's Clear never lands on it as the list shrinks under the pointer. */}
+            {!open && clearAll}
           </div>
         )}
         {open && list.length > 0 && (
@@ -141,7 +145,10 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
                 );
               })}
             </ol>
-            <p className="pmsg-foot">Clearing marks a message read. It stays in the conversation, and your orchestrator already has it.</p>
+            <div className="pmsg-foot">
+              <p>Clearing marks a message read. It stays in the conversation, and your orchestrator already has it.</p>
+              {clearAll}
+            </div>
           </>
         )}
         {cleared > 0 && (
