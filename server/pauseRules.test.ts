@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_PAUSE_SETTINGS, IDLE_MINUTES, SUPPRESS_SECONDS, cleanSettings, nextChangeAt, pauseState, personInput, scheduleAt, scheduleText, trayCommand, trayView, type PauseMemory } from '../machine/pauseRules.ts';
+import { DEFAULT_PAUSE_SETTINGS, IDLE_MINUTES, SUPPRESS_SECONDS, cleanSettings, nextChangeAt, pauseState, personInput, scheduleAt, scheduleText, settingsChanged, trayCommand, trayView, type PauseMemory } from '../machine/pauseRules.ts';
 import type { MachinePauseSettings } from '../shared/types.ts';
 
 // w1532 (lothsahn, 2026-10-19): "It'll unpause when the schedule begins and pause when the schedule ends ... If someone clicks
@@ -123,4 +123,17 @@ test('w1532: the tray menu says why and what comes next in short lines', () => {
   const manual = trayView(DEFAULT_PAUSE_SETTINGS, pauseState(DEFAULT_PAUSE_SETTINGS, trayCommand({}, true, at(19, 14, 2)), now), now);
   assert.deepEqual(manual, { why: 'Paused from the tray at 14:02', next: 'Until you unpause it here', tip: 'paused from the tray', schedule: 'none' });
   assert.deepEqual(trayView(DEFAULT_PAUSE_SETTINGS, pauseState(DEFAULT_PAUSE_SETTINGS, {}, now), now), { why: 'No schedule: work runs any time', next: 'A key or click on this PC pauses work', schedule: 'none' });
+});
+
+test('w1532: turning the schedule off never brings back a tray pause the schedule had already replaced (seen in the beast demo)', () => {
+  const sched: MachinePauseSettings = { ...noActivity, schedule: { enabled: true, start: '22:58', end: '22:59', days: [0, 1, 2, 3, 4, 5, 6] } };
+  const off: MachinePauseSettings = { ...sched, schedule: { ...sched.schedule, enabled: false } };
+  const mem = trayCommand({}, true, at(19, 22, 56));
+  assert.equal(pauseState(sched, mem, at(19, 22, 59, 1)).reason, 'schedule', 'the window ended at 22:59; the schedule holds');
+  const kept = settingsChanged(sched, mem, at(19, 22, 59, 1));
+  assert.equal(kept.manual, undefined, 'the 22:56 pause was overtaken by the 22:58 edge: dropped');
+  assert.equal(pauseState(off, kept, at(19, 22, 59, 2)).paused, false, 'no schedule now: it runs');
+  const fresh = trayCommand({}, true, at(19, 23, 30));
+  assert.deepEqual(settingsChanged(sched, fresh, at(19, 23, 31)), fresh, 'a pause after the last edge is the latest word: kept');
+  assert.equal(pauseState(off, fresh, at(19, 23, 32)).reason, 'manual');
 });

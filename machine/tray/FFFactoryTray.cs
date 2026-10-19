@@ -20,6 +20,7 @@ using System.Drawing;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -61,6 +62,10 @@ namespace FFFactory
         public struct NOTIFYICONIDENTIFIER { public uint cbSize; public IntPtr hWnd; public uint uID; public Guid guidItem; }
         [DllImport("shell32.dll")]
         public static extern int Shell_NotifyIconGetRect(ref NOTIFYICONIDENTIFIER identifier, out RECT iconLocation);
+        [DllImport("user32.dll")]
+        public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+        [DllImport("user32.dll")]
+        public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
     }
 
     class TrayApp : ApplicationContext
@@ -86,6 +91,9 @@ namespace FFFactory
         readonly Icon runIcon, pausedIcon;
         readonly Image runDot, pausedDot;
         readonly object outLock = new object();
+        // UTF-8 both ways (the daemon is node): the console's own code page would garble a middle dot or an accented name.
+        readonly TextReader stdin = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
+        readonly TextWriter stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
         readonly JavaScriptSerializer json = new JavaScriptSerializer();
         readonly System.Windows.Forms.Timer tick = new System.Windows.Forms.Timer();
         // A window made at start, for the stdin reader to hand messages to the UI thread (the menu has none until it opens).
@@ -133,6 +141,10 @@ namespace FFFactory
             portal.Click += delegate { if (!string.IsNullOrEmpty(portalUrl)) try { Process.Start(portalUrl); } catch (Exception e) { Log("could not open the portal: " + e.Message); } };
 
             menu.ShowImageMargin = true;
+            // Flat, as Windows 11's own menus are: one background, a light hover, thin separators (not WinForms' gradient margin).
+            menu.Renderer = new ToolStripProfessionalRenderer(new FlatColours()) { RoundedEdges = false };
+            menu.Padding = new Padding(2, 4, 2, 4);
+            foreach (ToolStripItem it in new ToolStripItem[] { toggle, schedule, activity, portal }) it.Padding = new Padding(0, 3, 0, 3);
             menu.Items.AddRange(new ToolStripItem[] { title, stateLine, whyLine, nextLine, workLine, new ToolStripSeparator(), toggle, new ToolStripSeparator(), schedule, activity, new ToolStripSeparator(), portal });
             icon.ContextMenuStrip = menu;
             icon.MouseUp += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) ShowMenuAtCursor(); };
@@ -265,7 +277,7 @@ namespace FFFactory
             try
             {
                 string line;
-                while ((line = Console.In.ReadLine()) != null)
+                while ((line = stdin.ReadLine()) != null)
                 {
                     Dictionary<string, object> msg;
                     try { msg = json.Deserialize<Dictionary<string, object>>(line); }
@@ -289,6 +301,8 @@ namespace FFFactory
             else if (type == "hide_schedule") { if (scheduleForm != null) scheduleForm.Close(); }
             else if (type == "counts") Send(new Dictionary<string, object> { { "type", "counts" }, { "personKeys", Interlocked.Read(ref personKeys) }, { "personClicks", Interlocked.Read(ref personClicks) }, { "injectedKeys", Interlocked.Read(ref allInjectedKeys) }, { "injectedClicks", Interlocked.Read(ref allInjectedClicks) }, { "repeats", Interlocked.Read(ref repeats) } });
             else if (type == "menu_layout") SendLayout();
+            // A still of the menu or the schedule window drawn by the window itself (what it looks like whatever covers the screen).
+            else if (type == "render") Render(Str(m, "what"), Str(m, "path"));
             // A menu item's own click, for a demo where injected clicks cannot reach the desktop (w1532: an elevated window in
             // front drops them, UIPI): "toggle" is Pause / Unpause, "schedule" opens the schedule window.
             else if (type == "press") { string item = Str(m, "item"); if (item == "toggle") toggle.PerformClick(); else if (item == "schedule") schedule.PerformClick(); }
@@ -300,7 +314,7 @@ namespace FFFactory
             string line = json.Serialize(m);
             lock (outLock)
             {
-                try { Console.Out.WriteLine(line); Console.Out.Flush(); }
+                try { stdout.WriteLine(line); }
                 catch { /* the daemon is gone; ReadLoop ends the app */ }
             }
         }
@@ -323,12 +337,12 @@ namespace FFFactory
             title.Text = string.IsNullOrEmpty(machine) ? "FF Factory" : "FF Factory on " + machine;
             if (!haveState)
             {
-                stateLine.Text = "Connecting to the daemon...";
+                stateLine.Text = "Connecting to the daemon…";
                 stateLine.Image = null;
                 whyLine.Visible = nextLine.Visible = workLine.Visible = false;
                 toggle.Enabled = schedule.Enabled = activity.Enabled = portal.Enabled = false;
                 toggle.Text = "Pause all work on this PC";
-                schedule.Text = "Work schedule...";
+                schedule.Text = "Work schedule…";
                 icon.Icon = runIcon;
                 icon.Text = "FF Factory";
                 return;
@@ -341,7 +355,7 @@ namespace FFFactory
             SetLine(workLine, Str(m, "work"));
             toggle.Text = paused ? "Unpause: start work again" : "Pause all work on this PC";
             toggle.Enabled = schedule.Enabled = activity.Enabled = true;
-            schedule.Text = "Work schedule: " + (Str(m, "schedule") ?? "none") + "...";
+            schedule.Text = "Work schedule: " + (Str(m, "schedule") ?? "none") + "…";
             object s;
             settings = m.TryGetValue("settings", out s) ? s as Dictionary<string, object> : null;
             activity.Checked = ActivityOn();
@@ -349,7 +363,7 @@ namespace FFFactory
             portal.Enabled = !string.IsNullOrEmpty(portalUrl);
             icon.Icon = paused ? pausedIcon : runIcon;
             string tip = "FF Factory: " + (paused ? "paused" : "running") + (Str(m, "tip") != null ? " (" + Str(m, "tip") + ")" : "");
-            icon.Text = tip.Length > 63 ? tip.Substring(0, 62) + "…" : tip;
+            icon.Text = tip.Length > 63 ? tip.Substring(0, 62) + "2026" : tip;
             if (scheduleForm != null && !scheduleForm.IsDisposed) scheduleForm.Machine = machine;
         }
 
@@ -402,6 +416,36 @@ namespace FFFactory
             catch (Exception e) { Log("show_menu: " + e.Message); ShowMenuAtCursor(); }
         }
 
+        // A still of the menu or the schedule window, drawn by Windows from the window itself (PrintWindow, full content).
+        void Render(string what, string path)
+        {
+            try
+            {
+                Control c = null;
+                if (what == "menu") { if (!menu.Visible) ShowMenuAtIcon(); c = menu; }
+                else if (what == "schedule") { ShowSchedule(); c = scheduleForm; }
+                if (c == null || string.IsNullOrEmpty(path)) return;
+                Application.DoEvents();
+                Native.RECT r;
+                Native.GetWindowRect(c.Handle, out r);
+                using (var b = new Bitmap(r.Right - r.Left, r.Bottom - r.Top))
+                {
+                    // The menu is a layered window, which PrintWindow draws black: it draws itself (WM_PRINT) instead.
+                    if (what == "menu") c.DrawToBitmap(b, new Rectangle(0, 0, b.Width, b.Height));
+                    else
+                        using (var g = Graphics.FromImage(b))
+                        {
+                            IntPtr dc = g.GetHdc();
+                            Native.PrintWindow(c.Handle, dc, 2);
+                            g.ReleaseHdc(dc);
+                        }
+                    b.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                Send(new Dictionary<string, object> { { "type", "rendered" }, { "what", what }, { "path", path } });
+            }
+            catch (Exception e) { Log("render " + what + ": " + e.Message); }
+        }
+
         // Where the open menu's items are on the screen, and the schedule window (a demo clicks them; a test reads them).
         void SendLayout()
         {
@@ -423,7 +467,7 @@ namespace FFFactory
         {
             if (settings == null) return;
             if (scheduleForm != null && !scheduleForm.IsDisposed) { scheduleForm.Activate(); return; }
-            scheduleForm = new ScheduleForm(settings, runIcon, title.Text.Replace("FF Factory on ", ""));
+            scheduleForm = new ScheduleForm(settings, Icon.ExtractAssociatedIcon(Application.ExecutablePath), title.Text.Replace("FF Factory on ", ""));
             scheduleForm.Saved += delegate(Dictionary<string, object> s) { Send(new Dictionary<string, object> { { "type", "settings" }, { "settings", s } }); };
             scheduleForm.Show();
             scheduleForm.Activate();
@@ -485,6 +529,26 @@ namespace FFFactory
         }
     }
 
+    class FlatColours : ProfessionalColorTable
+    {
+        static readonly Color Back = Color.FromArgb(0xF9, 0xF9, 0xF9), Hover = Color.FromArgb(0xE8, 0xE8, 0xE8), Line = Color.FromArgb(0xE0, 0xE0, 0xE0);
+        public override Color ToolStripDropDownBackground { get { return Back; } }
+        public override Color ImageMarginGradientBegin { get { return Back; } }
+        public override Color ImageMarginGradientMiddle { get { return Back; } }
+        public override Color ImageMarginGradientEnd { get { return Back; } }
+        public override Color MenuBorder { get { return Color.FromArgb(0xC8, 0xC8, 0xC8); } }
+        public override Color MenuItemBorder { get { return Hover; } }
+        public override Color MenuItemSelected { get { return Hover; } }
+        public override Color MenuItemSelectedGradientBegin { get { return Hover; } }
+        public override Color MenuItemSelectedGradientEnd { get { return Hover; } }
+        public override Color SeparatorDark { get { return Line; } }
+        public override Color SeparatorLight { get { return Back; } }
+        public override Color CheckBackground { get { return Back; } }
+        public override Color CheckSelectedBackground { get { return Hover; } }
+        public override Color CheckPressedBackground { get { return Hover; } }
+        public override Color ButtonSelectedBorder { get { return Hover; } }
+    }
+
     class ScheduleForm : Form
     {
         public event Action<Dictionary<string, object>> Saved;
@@ -506,13 +570,18 @@ namespace FFFactory
             Machine = machine;
             Icon = icon;
             Font = new Font("Segoe UI", 9f);
+            // Sizes below are at 100% scale, multiplied by this PC's (the font is measured at it already).
+            float k;
+            using (var g = CreateGraphics()) k = g.DpiX / 96f;
+            Func<int, int> S = delegate(int px) { return (int)Math.Round(px * k); };
             AutoScaleMode = AutoScaleMode.Font;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = MinimizeBox = false;
-            StartPosition = FormStartPosition.CenterScreen;
+            // Beside the tray, where it was asked for (a window in the middle of the screen sits under whatever is there).
+            StartPosition = FormStartPosition.Manual;
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            Padding = new Padding(14);
+            Padding = new Padding(S(14));
             ShowInTaskbar = true;
 
             var grid = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, Dock = DockStyle.Fill };
@@ -522,44 +591,45 @@ namespace FFFactory
             enabled.CheckedChanged += delegate { Sync(); };
             grid.Controls.Add(enabled);
 
-            var hours = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(18, 8, 0, 0) };
+            var hours = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(S(18), S(8), 0, 0) };
             foreach (var p in new[] { from, to })
             {
                 p.Format = DateTimePickerFormat.Custom;
                 p.CustomFormat = "HH:mm";
                 p.ShowUpDown = true;
-                p.Width = 70;
+                p.Width = TextRenderer.MeasureText("00:00", Font).Width + S(40);
             }
             from.Value = Parse(sched, "start", "22:00");
             to.Value = Parse(sched, "end", "08:00");
-            hours.Controls.Add(new Label { Text = "From", AutoSize = true, Margin = new Padding(0, 6, 6, 0) });
+            hours.Controls.Add(new Label { Text = "From", AutoSize = true, Margin = new Padding(0, S(5), S(6), 0) });
             hours.Controls.Add(from);
-            hours.Controls.Add(new Label { Text = "to", AutoSize = true, Margin = new Padding(10, 6, 6, 0) });
+            hours.Controls.Add(new Label { Text = "to", AutoSize = true, Margin = new Padding(S(10), S(5), S(6), 0) });
             hours.Controls.Add(to);
             grid.Controls.Add(hours);
 
-            var dayRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(18, 8, 0, 0) };
+            var dayRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(S(18), S(8), 0, 0) };
             var on = new HashSet<int>();
             object list;
             if (sched != null && sched.TryGetValue("days", out list) && list is System.Collections.IEnumerable) foreach (object d in (System.Collections.IEnumerable)list) on.Add(Convert.ToInt32(d));
             else for (int i = 0; i < 7; i++) on.Add(i);
             for (int i = 0; i < 7; i++)
             {
-                days[i] = new CheckBox { Text = DayNames[i], AutoSize = true, Checked = on.Contains(DayNumbers[i]), Margin = new Padding(0, 0, 8, 0) };
+                days[i] = new CheckBox { Text = DayNames[i], AutoSize = true, Checked = on.Contains(DayNumbers[i]), Margin = new Padding(0, 0, S(8), 0) };
                 dayRow.Controls.Add(days[i]);
             }
             grid.Controls.Add(dayRow);
 
             note.Text = "Outside these hours FF Factory pauses work on this PC, and its jobs move to other computers. An end before the start runs overnight. Times are this PC's local time.";
-            note.MaximumSize = new Size(380, 0);
+            // As wide as the first line, so the hint wraps to the dialog's own width.
+            note.MaximumSize = new Size(TextRenderer.MeasureText(enabled.Text, Font).Width + S(24), 0);
             note.AutoSize = true;
             note.ForeColor = Color.FromArgb(0x57, 0x60, 0x6A);
-            note.Margin = new Padding(0, 12, 0, 0);
+            note.Margin = new Padding(0, S(12), 0, 0);
             grid.Controls.Add(note);
 
-            var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, Margin = new Padding(0, 14, 0, 0) };
-            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(80, 0) };
-            var save = new Button { Text = "Save", AutoSize = true, MinimumSize = new Size(80, 0) };
+            var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, Margin = new Padding(0, S(14), 0, 0) };
+            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(S(80), 0) };
+            var save = new Button { Text = "Save", AutoSize = true, MinimumSize = new Size(S(80), 0) };
             save.Click += delegate { Save(); };
             buttons.Controls.Add(cancel);
             buttons.Controls.Add(save);
@@ -568,6 +638,11 @@ namespace FFFactory
             AcceptButton = save;
             CancelButton = cancel;
             Sync();
+            Load += delegate
+            {
+                Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+                Location = new Point(wa.Right - Width - 16, wa.Bottom - Height - 16);
+            };
         }
 
         static DateTime Parse(Dictionary<string, object> s, string k, string fallback)

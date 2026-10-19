@@ -203,3 +203,14 @@ export function trayView(settings: MachinePauseSettings, p: Pick<MachinePause, '
   if (p.reason === 'schedule') return { why: 'Inside the work schedule', next: `Work pauses at ${at(p.until)}${orInput}`, schedule: sched };
   return { why: 'No schedule: work runs any time', next: watch ? 'A key or click on this PC pauses work' : undefined, schedule: sched };
 }
+
+/**
+ * New settings: a tray pause or unpause the old schedule had already overtaken (a window's edge came after it) is dropped, so
+ * turning the schedule off or changing it never brings back a word the schedule had replaced.
+ */
+export function settingsChanged(old: MachinePauseSettings, mem: PauseMemory, now: number): PauseMemory {
+  const edge = scheduleAt(old.schedule, now)?.lastEdge;
+  if (!mem.manual || edge === undefined || mem.manual.at >= edge) return mem;
+  const { manual: _gone, ...rest } = mem;
+  return rest;
+}

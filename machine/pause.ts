@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { writeFileDurable } from '../server/durable.ts';
-import { DEFAULT_PAUSE_SETTINGS, SUPPRESS_SECONDS, cleanSettings, nextChangeAt, pauseState, personInput, trayCommand, type PauseMemory } from './pauseRules.ts';
+import { DEFAULT_PAUSE_SETTINGS, SUPPRESS_SECONDS, cleanSettings, nextChangeAt, pauseState, personInput, settingsChanged, trayCommand, type PauseMemory } from './pauseRules.ts';
 import type { MachinePause, MachinePauseSettings } from '../shared/types.ts';
 
 export const pauseFile = (appDir: string) => path.join(appDir, 'pause.json');
@@ -115,6 +115,7 @@ export class PauseKeeper {
   setSettings(raw: unknown) {
     const next = cleanSettings(raw);
     if (JSON.stringify(next) === JSON.stringify(this.settings)) return;
+    this.mem = settingsChanged(this.settings, this.mem, this.now());
     this.settings = next;
     this.d.log(`pause: settings changed from the tray: ${JSON.stringify(next)}`);
     this.save();

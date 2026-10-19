@@ -1080,6 +1080,11 @@ export class Daemon {
     this.tray?.send({ type: 'press', item });
   }
 
+  /** Have the tray draw its menu or schedule window into a PNG at `file` (a still for a review, w1532). */
+  trayRender(what: 'menu' | 'schedule', file: string) {
+    this.tray?.send({ type: 'render', what, path: file });
+  }
+
   private heartbeat() {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
