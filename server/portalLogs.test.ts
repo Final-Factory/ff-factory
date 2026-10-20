@@ -142,7 +142,7 @@ test('w920: only the listed sources are read: another name, a path or a link is 
   const list = await readPortalLogs(d, {});
   for (const name of LOG_SOURCE_NAMES) assert.ok(list.includes(`- ${name}:`), name);
   assert.doesNotMatch(list, /state\.json|send-queue|vault\.|uploads|sessions\.json/);
-  assert.deepEqual(Object.values(LOG_SOURCES).filter((s) => s.kind === 'doc').map((s) => (s as { file: string }).file).sort(), ['machine-rollout.json', 'unit-watchdog.json', 'update.prepared.json', 'update.result.json', 'update.verified.json', 'update.verifying.json']);
+  assert.deepEqual(Object.values(LOG_SOURCES).filter((s) => s.kind === 'doc').map((s) => (s as { file: string }).file).sort(), ['auto-deploy.json', 'machine-rollout.json', 'unit-watchdog.json', 'update.prepared.json', 'update.result.json', 'update.verified.json', 'update.verifying.json']);
 });
 
 test('w920: the journal is paged, windowed and filtered', async (t) => {
