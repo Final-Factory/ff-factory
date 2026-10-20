@@ -12,6 +12,7 @@ import { beltFor, PERSONAL_TOOLS } from './belts.ts';
 import { redactSecrets } from './secrets.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import type { Config } from './config.ts';
+import type { LinkUpdateReport } from './machineProtocol.ts';
 import type { SessionInfo } from '../shared/types.ts';
 
 /** The orchestration worker (w597, docs/ops-worker.md): who reaches it, its guard, its socket, its one session. */
@@ -913,6 +914,47 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.ok(mv.text.includes(`-Update -Root C:\\ffw -MoveToDevDrive"'`), mv.text);
   assert.match(mv.text, /refuses, naming them, while an agent is in a sandbox/);
   assert.match(mv.text, /free space on the root's drive before and after/);
+  ops.close();
+});
+
+test('w1596: machine_update of a machine whose daemon updates over its own link: the portal runs it, no ssh and no worker job; the report goes to the caller', async () => {
+  setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-link-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  const told: string[] = [];
+  const asked: { id: string; flags: unknown }[] = [];
+  let outcome: Promise<LinkUpdateReport> = Promise.resolve({ id: 'j', form: 'update', commit: 'c'.repeat(40), ok: true, exit: 0, before: '1111111', after: 'c5a93e0', log: 'Before: daemon 1111111\nAfter: daemon c5a93e0 (was 1111111).\n  ~ sandboxes.maxUnity: 2 -> 3\n', at: '' });
+  const ops = new OpsWorker({
+    sessions,
+    store,
+    options: () => ({}),
+    tellOrchestrator: (_p, text) => void told.push(text),
+    personTurn: () => false,
+    file: path.join(dir, 'ops-worker.json'),
+    workProblem: () => undefined,
+    // No ssh target it could use: the link is the way in.
+    machine: (id) => (id === 'coosego' ? { id, root: 'D:\\ffw', platform: 'win32', target: 'not an ssh target' } : undefined),
+    ownRequestProblem: () => undefined,
+    linkUpdate: (id, flags) => {
+      asked.push({ id, flags });
+      return outcome;
+    },
+  });
+  const ben = orch('be', BEN);
+  assert.match(ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', maxUnity: 3 }), /over its daemon's own link \(w1596; no ssh, no worker job\) with maxUnity 3/);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(asked, [{ id: 'coosego', flags: { maxUnity: 3 } }], 'only the settings named');
+  assert.equal(store.readTranscript(OPS_ID, 20).filter((e) => e.kind === 'user').length, 0, 'the ops worker was not given a job');
+  assert.match(told[0], /^\[machine update for w847\] coosego updated over its daemon's link\. 1111111 → c5a93e0\./);
+  assert.match(told[0], /~ sandboxes\.maxUnity: 2 -> 3/);
+  assert.match(told[0], /close w847 with update_work/);
+
+  outcome = Promise.reject(new Error('coosego refused it: an update job of this machine is still running'));
+  outcome.catch(() => undefined);
+  ops.machineInstall(ben, { machine: 'coosego', workId: 'w847' });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.match(told[1], /did not run: coosego refused it: an update job of this machine is still running/);
   ops.close();
 });
 

@@ -1,6 +1,10 @@
 import type http from 'node:http';
 import { defaultLimits, joinRefusal, parseFacts, WORKER_TAG, type JoinCodes, type JoinLimits, type JoinRecords, type TailnetDevice } from './machineJoin.ts';
 import { clientAddress, tailnetOnly } from './remoteChat.ts';
+import type { MachinePlatform } from '../shared/types.ts';
+
+/** The bootstrap's `os` fact as the record's platform (w1603: the record says what the PC is from its redeem on). */
+const PLATFORM_OF_OS: Record<string, MachinePlatform> = { windows: 'win32', macos: 'darwin', linux: 'linux' };
 
 /**
  * The join bootstrap's two routes (w1592, server/machineJoin.ts), both tailnet-only (a Funnel request is refused):
@@ -22,7 +26,7 @@ export interface MachineJoinDeps {
   /** `tailscale whois` of a tailnet address, or undefined when the portal cannot tell (no tailscale, a timeout). */
   whois(addr: string): Promise<TailnetDevice | undefined>;
   /** Make the machine's worker_install record (or update the waiting one) and issue its credential, returned once. */
-  enrol(o: { machineId: string; tailnetName: string; limits: Required<JoinLimits>; portalUrl: string; by: string }): string;
+  enrol(o: { machineId: string; tailnetName: string; limits: Required<JoinLimits>; portalUrl: string; by: string; platform?: MachinePlatform }): string;
   /** The URL the PC reached this portal at (originOf), for the record and the bootstrap. */
   portalUrl(req: http.IncomingMessage): string;
   /** A bootstrap's text (join.ps1, join.sh, join.cmd), or undefined when this portal's checkout lacks it. */
@@ -77,7 +81,7 @@ a{color:#7cc4ff}code{background:#262a33;padding:.1rem .3rem;border-radius:4px;us
 <li>Get a join code from an owner: the dashboard's <b>Add a machine</b> (it can hand you this installer with the code already in it), or their orchestrator. A code works once, for one hour, on this PC only.</li>
 <li><b>Windows:</b> <a class="btn" href="${u}/join/windows.cmd" download="${WINDOWS_INSTALLER_NAME}">Download the installer</a><br>
 Double-click it and type the code. Windows warns about a downloaded file first: choose <i>More info</i> and <i>Run anyway</i> (or <i>Run</i>).
-Or paste this into a normal PowerShell window (not as administrator): <code>irm ${u}/join/windows.ps1 | iex</code></li>
+Or paste this into a PowerShell window: <code>irm ${u}/join/windows.ps1 | iex</code></li>
 <li><b>Mac or Linux:</b> in a terminal: <code>bash -c "$(curl -fsSL ${u}/join/unix.sh)"</code></li>
 </ol>
 <p>It checks the code first, installs what is missing (Node, Git, Git LFS, Claude Code), sets the PC up, and ends with a summary. No password or credential is shown.</p>
@@ -190,7 +194,7 @@ export function machineJoinHttp(d: MachineJoinDeps) {
     // made leaves the code as it was, for a second try.
     let credential: string;
     try {
-      credential = d.enrol({ machineId: j.machineId, tailnetName: device.name, limits, portalUrl: d.portalUrl(req), by: j.by });
+      credential = d.enrol({ machineId: j.machineId, tailnetName: device.name, limits, portalUrl: d.portalUrl(req), by: j.by, ...(facts.os ? { platform: PLATFORM_OF_OS[facts.os] } : {}) });
     } catch (e) {
       return send(res, 409, { error: `the record could not be made: ${(e as Error).message}` });
     }

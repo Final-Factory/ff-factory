@@ -12,6 +12,8 @@ import { readProblem, realReadFs, type ReadCtx, type SecretRules } from './secre
 import { scanShell } from './standingGuard.ts';
 import { redactSecrets } from './secrets.ts';
 import type { TimerAuthority } from './timers.ts';
+import type { LinkUpdateFlags, LinkUpdateReport } from './machineProtocol.ts';
+import { installerSummary } from './machineRollout.ts';
 
 /**
  * The orchestration worker (w597, docs/ops-worker.md): ONE Claude Code session with a real shell, for Lothsahn's and
@@ -605,6 +607,11 @@ export interface OpsDeps {
   machine?: (id: string) => { id: string; root?: string; platform?: string; target: string; local?: boolean } | undefined;
   /** Why a request is not one of this person's own open ones (w855), or undefined when it is. Unset: none is. */
   ownRequestProblem?: (id: string, personId: string) => string | undefined;
+  /**
+   * The update over the machine's own daemon link (w1596, server/machines.ts linkUpdate), or undefined when its daemon does
+   * not take one (then the worker runs the installer over ssh, as before).
+   */
+  linkUpdate?: (machineId: string, flags: LinkUpdateFlags) => Promise<LinkUpdateReport> | undefined;
   /** Its turn of a job sent for requests ended: the ledger reads its DONE and still-open lines; answers what it did (w631). */
   workTurnEnded?: (info: SessionInfo, text: string, job: { workIds: readonly string[]; by: Requester }) => string[];
   now?: () => number;
@@ -626,6 +633,16 @@ export const opsWorkRule = (ids: readonly string[]) =>
 /** An ssh target and a root folder that may be put into a shell command (no spaces, no quotes). */
 export const SAFE_TARGET = /^[\w@.\-]+$/;
 export const SAFE_ROOT = /^[\w:\\/. \-]+$/;
+
+/** The [machine update] message an update over the daemon's link ends with (w1596): what its job did, the installer's lines. Exported for tests. */
+export function linkUpdateMessage(machine: string, workId: string, r: LinkUpdateReport): string {
+  const lines = installerSummary(r.log).map((l) => `    ${l}`);
+  const commits = r.before || r.after ? ` ${r.before?.slice(0, 9) ?? '?'} → ${r.after?.slice(0, 9) ?? '?'}.` : '';
+  const head = r.ok
+    ? `${machine} updated over its daemon's link.${commits}`
+    : `${machine}'s update over its daemon's link FAILED: ${r.note ?? `its job exited ${r.exit}`}.${commits}${r.rollback ? ` Put back: ${r.rollback}.` : ''}`;
+  return `[machine update for ${workId}] ${head}${lines.length ? `\n${lines.join('\n')}` : ''}\nCheck with list_machines that ${machine} shows what was asked, tell the person, and close ${workId} with update_work once it is done.${r.rollback === 'failed' ? ' Its daemon needs a person (its daemon log): say so first.' : ''}`;
+}
 
 /** The settings an installer update may change (w855), as its command-line flags: only those named, whole numbers. */
 export function workerUpdateFlags(
@@ -890,6 +907,18 @@ export class OpsWorker {
     const dev = { devDrive: o.devDrive, moveToDevDrive: o.moveToDevDrive, devDriveMaxGB: o.devDriveMaxGB };
     if ((dev.devDrive || dev.moveToDevDrive || dev.devDriveMaxGB !== undefined) && m.platform !== 'win32') throw new Error(`dev_drive, move_to_dev_drive and dev_drive_max_gb: a Dev Drive is a Windows feature, and ${m.id} is not a Windows PC`);
     if (dev.devDriveMaxGB !== undefined && (!Number.isInteger(dev.devDriveMaxGB) || dev.devDriveMaxGB < 50 || dev.devDriveMaxGB > 65536)) throw new Error('dev_drive_max_gb: a whole number of GB from 50 (Windows\' own minimum for a Dev Drive) to 65536');
+    // Over the machine's own daemon link (w1596) when it takes one: the portal runs it, no ssh and no worker job.
+    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev }).filter(([, v]) => v !== undefined && v !== false));
+    const viaLink = this.d.linkUpdate?.(m.id, flags);
+    if (viaLink) {
+      const named = Object.entries(flags).map(([k, v]) => `${k} ${v}`).join(', ');
+      console.log(`ops-worker: ${person.userId} asked for a machine update of ${m.id} for ${id}; over its daemon's link${named ? ` (${named})` : ''}`);
+      void viaLink.then(
+        (r) => this.d.tellOrchestrator(person, linkUpdateMessage(m.id, id, r)),
+        (e) => this.d.tellOrchestrator(person, `[machine update for ${id}] ${m.id}'s update over its daemon's link did not run: ${(e as Error).message}. Nothing was changed unless the line says it was; ask again once that is fixed (a daemon offline is updated when it is back, by the next machine_update).`),
+      );
+      return `Updating ${m.id}'s worker install over its daemon's own link (w1596; no ssh, no worker job)${named ? ` with ${named}` : ' with no setting changed'}. The portal sends its update job's report to you as a [machine update] message when it ends (a few minutes; the new daemon takes the agents back, and a daemon that does not come back is put back by the job itself). It does not close ${id}: tell ${person.displayName} what it says, and close the request with update_work once it is done.`;
+    }
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
     const extra = workerUpdateFlags(m.platform, nums, dev).join(' ');
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, extra)}'`;

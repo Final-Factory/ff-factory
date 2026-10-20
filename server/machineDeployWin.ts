@@ -489,6 +489,106 @@ export function taskXml(sid: string, home: string, appDir?: string): string {
 `;
 }
 
+/**
+ * The one-shot task a worker install's update job runs in (w1596, machine/osJob.ts): its own task, so the daemon's restart
+ * (Stop-FFDaemon ends the daemon's task and everything the daemon started) does not end it. As the daemon's task: this
+ * user, their interactive session, not elevated, headless. At logon too, so a job a reboot cut off finishes or puts the old
+ * code back (scripts/worker/linkJob.ts does nothing for a job that ended). Four hours at most. `<SID>` is filled in by
+ * jobScript, on the PC.
+ */
+export function jobTaskXml(o: { node: string; args: string[]; cwd: string }): string {
+  const arg = (a: string) => (/^[\w.:\\/=-]+$/.test(a) ? a : `"${a.replace(/"/g, '')}"`);
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>FF Factory: a worker install update job the portal asked for over the daemon's link (docs/worker-install.md, "Updates over the daemon's link"). It ends by itself.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>&lt;SID&gt;</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>&lt;SID&gt;</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT4H</ExecutionTimeLimit>
+    <Priority>5</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>conhost.exe</Command>
+      <Arguments>${xml(['--headless', arg(winDir(o.node)), ...o.args.map(arg)].join(' '))}</Arguments>
+      <WorkingDirectory>${xml(winDir(o.cwd))}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+`;
+}
+
+/** Register the job's task (jobTaskXml) for this user and start it. Prints `job=started`. */
+export function jobScript(task: string, xmlText: string): string {
+  const name = taskName({ task });
+  return `$ErrorActionPreference = 'Stop'
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$xml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(xmlText, 'utf8')}')).Replace('&lt;SID&gt;', $sid)
+$null = Register-ScheduledTask -TaskName '${name}' -Xml $xml -Force
+Start-ScheduledTask -TaskName '${name}'
+'job=started'
+`;
+}
+
+/** Remove a job's task once it has ended (never one still running). Prints `job=removed`, `job=running` or `job=none`. */
+export function jobRemoveScript(task: string): string {
+  const name = taskName({ task });
+  return `$ErrorActionPreference = 'Stop'
+$t = Get-ScheduledTask -TaskName '${name}' -ErrorAction SilentlyContinue
+if (-not $t) { 'job=none' } elseif ($t.State -eq 'Running') { 'job=running' } else { Unregister-ScheduledTask -TaskName '${name}' -Confirm:$false; 'job=removed' }
+`;
+}
+
+/**
+ * Put the code that ran before back (w1596, scripts/worker/linkJob.ts): stop the daemon (its agent hosts run on), app ->
+ * app.failed, app.old -> app, start it. Only folders in the daemon's own folder move; an earlier app.failed is removed
+ * first. Prints `started=True|False`.
+ */
+export function rollbackScript(appDir: string, service?: WinService): string {
+  return `${head({ appDir, service })}
+$app = Join-Path $F 'app'; $old = Join-Path $F 'app.old'; $failed = Join-Path $F 'app.failed'
+if (-not (Test-Path -LiteralPath $old)) { throw 'there is no app.old to put back' }
+$null = Stop-FFDaemon
+function Move-Retry($from, $to) {
+  for ($i = 0; ; $i++) {
+    try { Move-Item -LiteralPath $from -Destination $to -Force; return } catch { if ($i -ge 10) { throw "could not move $from to $($to): $($_.Exception.Message) (a process still has a file open there)" }; Start-Sleep 1 }
+  }
+}
+if (Test-Path -LiteralPath $failed) { Remove-Item -LiteralPath $failed -Recurse -Force }
+if (Test-Path -LiteralPath $app) { Move-Retry $app $failed }
+Move-Retry $old $app
+if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }
+`;
+}
+
 const b64 = (s: string, enc: 'utf8' | 'utf8bom') => (enc === 'utf8bom' ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(s, 'utf8')]) : Buffer.from(s, 'utf8')).toString('base64');
 
 /**

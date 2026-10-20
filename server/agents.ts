@@ -81,7 +81,7 @@ import type { HostHealth } from '../shared/types.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
-import { EFFORT_LEVELS, appDirOf, benchLockIn, platformNoun, type EffortLevel, type Machine, type MachineSandbox } from '../shared/types.ts';
+import { EFFORT_LEVELS, appDirOf, benchLockIn, machineKind, platformNoun, type EffortLevel, type Machine, type MachineSandbox } from '../shared/types.ts';
 import { describeTrigger } from './schedule.ts';
 import { describeGit } from './gitStatus.ts';
 import { displayName } from '../shared/labels.ts';
@@ -651,6 +651,8 @@ export class Agents {
         if (!(isOpen(w) || w.status === 'stalled')) return `${id} is ${w.status}`;
         return w.requesters.some((r) => r.userId.toLowerCase() === personId.toLowerCase()) ? undefined : `${id} is not one of their own requests`;
       },
+      // w1596: a machine whose daemon updates over its own link is updated by the portal itself, not over ssh.
+      linkUpdate: (id, flags) => (machines.canLink(id) ? machines.linkUpdate(id, { flags }) : undefined),
     });
     // After a verified portal deploy, every worker machine's daemon is updated by FF Factory itself (w887), and its agent tools (w1476).
     this.rollout = new MachineRollout({
@@ -667,6 +669,8 @@ export class Agents {
         agents: (id) => [...sessions.sessions.values()].filter((x) => x.info.machineId === id && x.live).map((x) => ({ id: x.info.id, title: x.info.title })),
         liveAtHello: (id, since) => machines.liveAtHello(id, since),
         ssh: (target, remote, timeoutMs) => run('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', target, remote], { timeoutMs }),
+        link: (id) => machines.canLink(id),
+        linkUpdate: (id, form, commit) => machines.linkUpdate(id, { form, commit }),
         tell: (person, text) => {
           const to = person ? this.orchestrators.personalFor(person).info.id : store.orchestratorId;
           if (to) void sessions.send(to, text, 'system', undefined, person ? { requestedBy: person } : undefined);
@@ -3178,7 +3182,7 @@ ${w.repo ?? ''}
     // Its standing agents here; a sandbox's are under list_sandboxes.
     const standing = m.sessionIds.filter((id) => this.store.sessions.get(id)?.kind === 'standing');
     return [
-      `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${platformNoun(m.platform)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
+      `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${machineKind(m)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
       `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
       ...(detail ? [`  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`] : []),
       sandboxes,
@@ -3358,7 +3362,7 @@ ${w.repo ?? ''}
             return [
               `Join code for ${m.id}: ${j.code}`,
               `It works once, until ${j.expiresAt}, and only from the tailnet device "${tailnet}". Limits: ${given.length ? given.join(', ') : "the PC's own, from its RAM and CPUs"} (overridable at the PC).`,
-              `On that PC, connected to Tailscale: open ${m.portalUrl}/join in its browser and download the Windows installer (double-click it), or, in a normal PowerShell (not as administrator): irm ${m.portalUrl}/join/windows.ps1 | iex`,
+              `On that PC, connected to Tailscale: open ${m.portalUrl}/join in its browser and download the Windows installer (double-click it), or, in a PowerShell window: irm ${m.portalUrl}/join/windows.ps1 | iex`,
               `A Mac or Linux PC, in a terminal: bash -c "$(curl -fsSL ${m.portalUrl}/join/unix.sh)"`,
               'It asks for the code, then installs and enrols the machine by itself; list_machines shows it online when it is done. Relay the code and the command to the person who asked, as they are.',
             ].join('\n');
