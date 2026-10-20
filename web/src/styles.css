@@ -4327,26 +4327,9 @@ button.react-chip:hover {
   font-weight: 600;
 }
 
-.intake-pending {
-  display: grid;
-  gap: 0;
-}
-
 /* A long intake page scrolls: nothing in it shrinks to fit (a run-list hides its overflow, so it would vanish). */
 .intake-tab > * {
   flex-shrink: 0;
-}
-
-.intake-pending + .intake-pending {
-  border-top: 1px solid var(--border);
-}
-
-.intake-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s-2);
-  padding: var(--s-1) 14px var(--s-2);
 }
 
 .intake-brief {
@@ -6521,39 +6504,6 @@ button.board-head-link:hover {
   gap: var(--s-2);
 }
 
-.wait-card {
-  display: grid;
-  gap: var(--s-1);
-  padding: var(--s-2) 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.wait-card.mine {
-  border-color: var(--amber, var(--border));
-}
-
-.wait-card p {
-  margin: 0;
-}
-
-.wait-head {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  min-width: 0;
-}
-
-.wait-title {
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.wait-age {
-  white-space: nowrap;
-  font-size: var(--fs-sm);
-}
-
 .wait-brief {
   max-height: 9em;
   overflow: auto;
@@ -6563,26 +6513,6 @@ button.board-head-link:hover {
   max-height: none;
 }
 
-/* The question in full with its files, PRs and report (w1378): what the person answers, above the request's brief. */
-.wait-needs-you {
-  display: grid;
-  gap: var(--s-1);
-  padding: var(--s-1) var(--s-2);
-  border-left: 3px solid var(--amber, var(--border));
-  background: var(--bg-2, transparent);
-  border-radius: var(--radius);
-}
-
-.wait-question,
-.wait-previews {
-  overflow-wrap: anywhere;
-}
-
-.wait-previews img,
-.wait-previews video {
-  max-width: min(100%, 520px);
-}
-
 .wait-report > summary {
   cursor: pointer;
 }
@@ -6590,31 +6520,6 @@ button.board-head-link:hover {
 .wait-report {
   max-height: 22em;
   overflow: auto;
-}
-
-.wait-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s-2);
-}
-
-.wait-reason {
-  flex: 1 1 14em;
-  min-width: 0;
-}
-
-.wait-answer {
-  display: flex;
-  flex: 1 1 100%;
-  align-items: flex-end;
-  gap: var(--s-2);
-}
-
-.wait-answer-text {
-  flex: 1;
-  min-width: 0;
-  resize: vertical;
 }
 
 .wait-banner {
@@ -7153,4 +7058,327 @@ button.board-head-link:hover {
   .lv-knob {
     grid-template-columns: minmax(80px, 28%) minmax(0, 1fr) 72px;
   }
+}
+
+/* ---------- question cards (w1597): the Waiting on input and Intake tabs ask one question at a time ---------- */
+.qc {
+  display: grid;
+  gap: var(--s-2);
+  min-width: 0;
+  padding: var(--s-3) 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.qc.mine {
+  border-color: var(--accent-line);
+}
+
+.qc p {
+  margin: 0;
+}
+
+.qc-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.qc-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.qc-q {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.qc-q-legacy {
+  font-size: var(--fs-base);
+  font-weight: 500;
+}
+
+.qc-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.qc-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.qc-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border-2);
+}
+
+.qc-dot.done {
+  background: var(--green);
+}
+
+.qc-dot.now {
+  background: var(--accent);
+}
+
+.qc-media {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.qc-thumb {
+  position: relative;
+  display: block;
+  padding: 0;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-2);
+  cursor: zoom-in;
+}
+
+.qc-thumb:hover {
+  border-color: var(--text-3);
+}
+
+.qc-thumb img,
+.qc-thumb video {
+  display: block;
+  width: 128px;
+  height: 80px;
+  object-fit: cover;
+}
+
+.qc-play {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 20px;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+}
+
+.qc-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qc-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+
+.qc-opt:hover:not(:disabled) {
+  border-color: var(--text-3);
+  background: var(--hover);
+}
+
+.qc-opt:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.qc-opt:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.qc-rec {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.qc-rec:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgba(255, 159, 28, 0.2);
+}
+
+.qc-picked {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+.qc-opt-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.qc-opt-label {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.qc-opt-desc {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.qc-tag {
+  font-size: var(--fs-xs);
+  padding: 1px 7px;
+}
+
+.qc-opt > .qc-tag {
+  order: -1;
+  margin-bottom: 2px;
+}
+
+.qc-note {
+  margin-top: -4px !important;
+}
+
+.qc-free {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-2);
+}
+
+.qc-free-text {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+}
+
+.qc-live {
+  justify-self: start;
+}
+
+.qc-details > summary {
+  cursor: pointer;
+  width: max-content;
+}
+
+.qc-details-body {
+  display: grid;
+  gap: var(--s-1);
+  margin-top: var(--s-1);
+  padding: var(--s-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  overflow-wrap: anywhere;
+}
+
+.qc-details-body .md p {
+  margin: 0 0 4px;
+}
+
+/* The request's brief in Details: whole, at Details' size (the card's own max-height would cut it mid-line). */
+.qc-details-body .wait-brief {
+  max-height: none;
+  font-size: var(--fs-sm);
+}
+
+/* B: compact. The question beside small thumbnails, the answers as a row of pills, Details at the title's end. */
+.qc-b .qc-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+}
+
+.qc-b .qc-row .qc-q {
+  flex: 1;
+  min-width: 0;
+}
+
+.qc-b .qc-row .qc-media {
+  flex: 0 0 auto;
+  max-width: 45%;
+  justify-content: flex-end;
+}
+
+.qc-b .qc-thumb img,
+.qc-b .qc-thumb video {
+  width: 72px;
+  height: 46px;
+}
+
+.qc-options-b {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.qc-options-b .qc-opt {
+  width: auto;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 6px 12px;
+}
+
+
+/* C: the still first, large; the answers as tiles two to a row. */
+.qc-media-big {
+  display: grid;
+  gap: var(--s-2);
+  margin: calc(-1 * var(--s-3)) -14px 0;
+}
+
+.qc-media-big .qc-hero {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.qc-media-big .qc-hero img,
+.qc-media-big .qc-hero video {
+  width: 100%;
+  height: auto;
+  max-height: 340px;
+}
+
+.qc-media-row {
+  display: flex;
+  gap: var(--s-2);
+  padding: 0 14px;
+}
+
+.qc-media-row .qc-thumb img,
+.qc-media-row .qc-thumb video {
+  width: 72px;
+  height: 46px;
+}
+
+.qc-options-c {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.qc-options-c .qc-opt {
+  min-height: 56px;
+  justify-content: flex-start;
+}
+
+/* An odd last tile takes the whole row instead of leaving a half-empty one. */
+.qc-options-c .qc-opt:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
 }

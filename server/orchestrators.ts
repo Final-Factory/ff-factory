@@ -1905,7 +1905,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; override_gate?: string }): string {
+  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; override_gate?: string; asks?: Ask[] }): string {
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
     const into = input.into ? this.requireWork(input.into) : undefined;
@@ -1949,7 +1949,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       what = `linked to ${ids.map((sid) => this.workerLine(sid)).join(', ')}, already on it`;
     } else if (input.action === 'ask') {
       w.asks++;
-      w.question = { text: clip(note, 1000), at: this.now().toISOString() };
+      w.question = { text: clip(note, 1000), at: this.now().toISOString(), ...(input.asks?.length ? { asks: input.asks } : {}) };
       what = 'a question';
     } else if (input.action === 'queue') {
       // A gated request is not waiting for capacity (w754): queueing it would drop the gates.
@@ -4342,7 +4342,17 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     // A gate that died is the person's to rule on (w754): none of its gates is kept through that question.
     w.blocked = undefined;
     w.alsoBlocked = undefined;
-    w.question = { text, at: this.now().toISOString() };
+    // The card's question and answers (w1597): the gate's detail stays in `text`, behind Details.
+    const asks: Ask[] = [
+      {
+        question: `What it waited for ended without delivering. Is "${clip(w.title, 120)}" still needed?`,
+        options: [
+          { label: 'Yes, keep it open and start it now', description: 'The dispatcher starts it, or asks what it should wait for instead.' },
+          { label: 'No, close it: it is not needed any more', description: 'The request closes; nothing more is worked on it.' },
+        ],
+      },
+    ];
+    w.question = { text, at: this.now().toISOString(), asks };
     this.stamp(w, `blocker closed without delivering: ${why}; asked ${w.requestedBy.displayName}`);
     this.store.putWork(w);
     this.askPerson(w);

@@ -66,23 +66,24 @@ test('Discord reports and trusted requests land in the Intake tab, wait for a pe
   expect([req.approval?.state, req.triage?.class, req.source?.untrusted, req.requestedBy.userId]).toEqual(['pending', 'person', false, 'tester']);
   expect((await appState(page.request)).work?.some((w) => w.brief.includes('delete every sandbox'))).toBe(false);
 
-  // The pending report: players' text shown as text, never as HTML or Markdown.
-  const row = tab.getByTestId(`work-${bug.id}`);
-  await expect(row).toContainText('Needs a human');
-  await expect(row).toContainText('Discord bug');
-  await row.getByRole('button', { name: new RegExp(title) }).click();
-  await expect(row.locator('pre.intake-brief')).toContainText('<img src=x onerror=');
-  await expect(row).toContainText('players’ text, untrusted');
-  await expect(row.getByTestId('triage')).toContainText('Triage: needs a human: no clear defect');
+  // The pending report is a question card (w1597): its title, the question and Approve / Decline; the player's text, in its
+  // Details, shown as text, never as HTML or Markdown.
+  const card = tab.getByTestId(`intake-${bug.id}`);
+  await expect(card).toContainText(`Discord bug: ${title}`);
+  await expect(card.getByTestId('qc-question')).toHaveText('Should FF Factory work on this player’s bug report?');
+  await card.getByTestId('qc-details').locator('summary').first().click();
+  await expect(card.locator('pre.intake-brief')).toContainText('<img src=x onerror=');
+  await expect(card).toContainText('players’ text, untrusted');
+  await expect(card.getByTestId('triage')).toContainText('Triage: needs a human: no clear defect');
   expect(await page.title()).not.toBe('pwned');
-  await expect(row.locator('img')).toHaveCount(0);
+  await expect(card.locator('img')).toHaveCount(0);
 
   // Approve the report, decline the request.
-  await tab.getByRole('button', { name: `Approve ${bug.id}` }).click();
+  await card.getByRole('button', { name: /^Approve it/ }).click();
   await expect.poll(async () => (await find((w) => w.id === bug.id))?.approval?.state).toBe('approved');
   expect(((await find((w) => w.id === bug.id))!.approval?.by as { userId: string }).userId).toBe('tester');
-  await expect(tab.getByRole('button', { name: `Approve ${bug.id}` })).toHaveCount(0);
-  await tab.getByTestId(`work-${req.id}`).locator('xpath=..').getByRole('button', { name: 'Decline' }).click();
+  await expect(tab.getByTestId(`intake-${bug.id}`)).toHaveCount(0);
+  await tab.getByTestId(`intake-${req.id}`).getByRole('button', { name: /^Decline it/ }).click();
   await expect.poll(async () => (await find((w) => w.id === req.id))?.status).toBe('rejected');
   await expect(tab.getByText('Nothing needs a human.')).toBeVisible();
 
@@ -90,6 +91,7 @@ test('Discord reports and trusted requests land in the Intake tab, wait for a pe
   const approvedRow = tab.getByTestId(`work-${bug.id}`);
   await expect(approvedRow.locator('.work-sub')).toContainText('Approved by tester');
   await expect(approvedRow.locator('.work-sub')).not.toContainText(/needs a human/i);
+  await approvedRow.getByRole('button', { name: new RegExp(title) }).click();
   await expect(approvedRow.getByTestId('decision')).toContainText(/^Approved by tester \d{4}-\d\d-\d\d \d\d:\d\d UTC$/);
   await expect(approvedRow.getByTestId('triage')).toContainText('Triage at filing: needs a human: no clear defect');
   const declinedRow = tab.getByTestId(`work-${req.id}`);
@@ -135,7 +137,7 @@ test('a request whose linked request is done closes by itself and shows under Cl
     )
     .toBe(true);
   const bug = (await find((w) => w.title.includes(tag) && w.source?.kind === 'discord-bug'))!;
-  await expect(tab.getByRole('button', { name: `Approve ${bug.id}` })).toBeVisible();
+  await expect(tab.getByTestId(`intake-${bug.id}`).getByRole('button', { name: /^Approve it/ })).toBeVisible();
 
   // The person's own request covers it and is closed as done.
   const me = await appState(page.request);
@@ -163,7 +165,7 @@ test('a request whose linked request is done closes by itself and shows under Cl
   await expect(row).toContainText('Auto-closed');
   await row.getByRole('button', { name: new RegExp(tag) }).click();
   await expect(row.getByTestId(`auto-closed-${bug.id}`)).toContainText(`covered by ${covering}`);
-  await expect(tab.getByTestId(`work-${bug.id}`).locator('xpath=..').getByRole('button', { name: `Approve ${bug.id}` })).toHaveCount(0);
+  await expect(tab.getByTestId(`intake-${bug.id}`)).toHaveCount(0);
 });
 
 test('the intake summary is served with the state, and a person can only approve what is pending', async ({ authed: page }) => {
@@ -273,38 +275,55 @@ test('the Waiting on input tab clears a request each way: approve, decline with 
   const tab = page.getByTestId('waiting-tab');
   await expect(tab.getByTestId('waiting-summary')).toContainText('3 requests wait on input: 3 on you, 0 on someone else');
 
-  // Each card says what it is, what is asked and its evidence; the player's words stay text.
+  // Each card is its title, one question and its answers (w1597); the evidence is in its Details, the player's words as text.
   const bugCard = tab.getByTestId(`wait-${bug.id}`);
-  await expect(bugCard.getByTestId(`wait-ask-${bug.id}`)).toContainText('Approve or decline');
+  await expect(bugCard.getByTestId('qc-question')).toHaveText('Should FF Factory work on this player’s bug report?');
   await expect(bugCard.getByTestId(`wait-evidence-${bug.id}`)).toContainText('Drills stop when the sun sets.');
   await expect(bugCard.getByTestId(`wait-evidence-${bug.id}`)).toContainText('version 0.50.0.47');
-  await expect(tab.getByTestId(`wait-ask-${ask.id}`)).toContainText('The dispatcher asks: Should the save menu keep its old order');
+  await expect(bugCard.getByTestId(`wait-evidence-${bug.id}`)).toBeHidden();
+  await expect(tab.getByTestId(`wait-${ask.id}`).getByTestId('qc-question')).toContainText('Should the save menu keep its old order');
 
   // Approve in one click.
-  await bugCard.getByRole('button', { name: `Approve ${bug.id}` }).click();
+  await bugCard.getByRole('button', { name: /^Approve it/ }).click();
   await expect.poll(async () => (await find((w) => w.id === bug.id))?.approval?.state).toBe('approved');
   await expect(tab.getByTestId(`wait-${bug.id}`)).toHaveCount(0);
 
-  // Decline with a reason: two clicks and the reason.
+  // Decline with a reason: the reason in the card's own box.
   const declineCard = tab.getByTestId(`wait-${decline.id}`);
-  await declineCard.getByRole('button', { name: 'Decline…' }).click();
-  await declineCard.getByLabel(`Reason to decline ${decline.id}`).fill(`not a bug ${tag}`);
-  await declineCard.getByRole('button', { name: `Decline ${decline.id}` }).click();
+  await declineCard.getByLabel('Or decline with a reason').fill(`not a bug ${tag}`);
+  await declineCard.getByTestId('qc-send').click();
   await expect.poll(async () => (await find((w) => w.id === decline.id))?.status).toBe('rejected');
   expect(((await find((w) => w.id === decline.id))!.log ?? []).join('\n')).toContain(`not a bug ${tag}`);
 
   // Answer: the answer goes to the person's own orchestrator, where the dispatcher's question is answered.
   const askCard = tab.getByTestId(`wait-${ask.id}`);
   const orchestrator = (await appState(page.request)).orchestratorId;
-  await askCard.getByLabel(`Answer on ${ask.id}`).fill(`Keep it ${tag}`);
-  await askCard.getByRole('button', { name: 'Send answer' }).click();
+  await askCard.getByLabel('Your answer').fill(`Keep it ${tag}`);
+  await askCard.getByTestId('qc-send').click();
   await expect(askCard).toContainText('Sent to your orchestrator');
-  await expect
-    .poll(async () => {
-      const events = (await (await page.request.get(`/api/sessions/${orchestrator}/events?limit=200`)).json()) as { kind: string; text?: string }[];
-      return events.some((e) => e.kind === 'user' && e.text?.includes(`Answer on ${ask.id}`) && e.text.includes(`Keep it ${tag}`));
-    })
-    .toBe(true);
+  const sent = async (id: string) =>
+    ((await (await page.request.get(`/api/sessions/${orchestrator}/events?limit=400`)).json()) as { kind: string; text?: string }[]).filter((e) => e.kind === 'user' && e.text?.startsWith(`Answer on ${id} `)).map((e) => e.text!);
+  await expect.poll(async () => (await sent(ask.id)).some((t) => t.includes(`Keep it ${tag}`))).toBe(true);
+
+  // w1597: a click on an answer sends exactly what typing that answer sends (then the orchestrator records it with update_work,
+  // and FF Factory resumes the waiting worker: server/orchestrators.test.ts, "w1597"). Two requests ask the same question, one
+  // answered by a click, the other by typing the same words.
+  const asks = [{ question: `Which save comes first ${tag}?`, options: [{ label: `Newest save first ${tag}`, description: 'Like the load menu.', recommended: true }, { label: `Keep the old order ${tag}`, description: '' }] }];
+  const at = new Date().toISOString();
+  for (const id of [bug.id, decline.id]) await patchWork(page.request, id, { approval: { state: 'approved', by: 'auto' }, status: 'question', question: { text: 'Which save comes first?', at, asks } });
+  const clicked = tab.getByTestId(`wait-${bug.id}`);
+  await expect(clicked.getByTestId('qc-option').first()).toContainText('Recommended');
+  await clicked.getByRole('button', { name: new RegExp(`^Newest save first ${tag}`) }).click();
+  await expect(clicked).toContainText('Sent to your orchestrator');
+  const typed = tab.getByTestId(`wait-${decline.id}`);
+  await typed.getByLabel('Or type your own answer').fill(`Newest save first ${tag}`);
+  await typed.getByTestId('qc-send').click();
+  await expect(typed).toContainText('Sent to your orchestrator');
+  const [one, two] = [bug, decline].map((w) => (x: string) => x.replaceAll(`${w.id} (${w.title})`, 'REQ').replaceAll(w.id, 'REQ'));
+  await expect.poll(async () => [(await sent(bug.id)).map(one), (await sent(decline.id)).map(two)]).toEqual([
+    [`Answer on REQ. It asked: “Which save comes first ${tag}?”\n\nNewest save first ${tag}\n\nPlease put this on REQ as my answer (update_work note).`],
+    [`Answer on REQ. It asked: “Which save comes first ${tag}?”\n\nNewest save first ${tag}\n\nPlease put this on REQ as my answer (update_work note).`],
+  ]);
 });
 
 test('the Waiting on input tab with seven requests: the screenshot of the flow (w1228, test data)', async ({ page }) => {
@@ -324,18 +343,17 @@ test('the Waiting on input tab with seven requests: the screenshot of the flow (
   const tab = page.getByTestId('waiting-tab');
   await expect(tab.getByTestId('waiting-summary')).toContainText('7 requests wait on input: 6 on you, 1 on someone else');
   // Oldest first among the viewer's; a stale one stands out.
-  await expect(tab.getByTestId('waiting-mine').locator('.wait-card').first()).toHaveAttribute('data-testid', 'wait-w9101');
+  await expect(tab.getByTestId('waiting-mine').locator('.qc').first()).toHaveAttribute('data-testid', 'wait-w9101');
   await expect(tab.getByTestId('wait-age-w9101')).toContainText('stale');
-  await expect(tab.getByTestId('wait-recommendation-w9104')).toContainText('Check first: it may repeat w9100');
-  await expect(tab.getByTestId('waiting-others')).toContainText('Waits on Lothsahn');
-  await expect(tab.getByTestId('wait-w9107').getByRole('button', { name: /Approve|Send answer/ })).toHaveCount(0);
+  await expect(tab.getByTestId('wait-w9104').getByTestId('qc-note')).toContainText('It may repeat “Belts stop after loading”');
+  await expect(tab.getByTestId('waiting-others')).toContainText('Lothsahn answers this');
+  await expect(tab.getByTestId('wait-w9107').getByRole('button', { name: /Approve|Send/ })).toHaveCount(0);
   await settle(page);
   const file = test.info().outputPath('waiting-on-input.png');
   await page.screenshot({ path: file, fullPage: isMobile(page) });
   await test.info().attach('waiting-on-input', { path: file, contentType: 'image/png' });
   // Declining takes a reason.
-  await tab.getByTestId('wait-w9101').getByRole('button', { name: 'Decline…' }).click();
-  await tab.getByTestId('wait-w9101').getByLabel('Reason to decline w9101').fill('Cannot reproduce on 0.50.0.47');
+  await tab.getByTestId('wait-w9101').getByLabel('Or decline with a reason').fill('Cannot reproduce on 0.50.0.47');
   const file2 = test.info().outputPath('waiting-on-input-decline.png');
   await page.screenshot(isMobile(page) ? { path: file2 } : { path: file2, clip: { x: 880, y: 0, width: 560, height: 700 } });
   await test.info().attach('waiting-on-input-decline', { path: file2, contentType: 'image/png' });
@@ -431,17 +449,17 @@ test('each kind of Needs you item opens the panel with its Allow, Approve, Decli
   const card = (id: string) => page.getByTestId(`wait-${id}`);
   await clickItem(`Approve or decline w${tag}1`);
   await expect(page).toHaveURL(/#\/dispatcher\/waiting/);
-  await expect(card(`w${tag}1`).getByRole('button', { name: `Approve w${tag}1` })).toBeInViewport({ ratio: 1 });
-  await expect(card(`w${tag}1`).getByRole('button', { name: 'Decline…' })).toBeInViewport({ ratio: 1 });
+  await expect(card(`w${tag}1`).getByRole('button', { name: /^Approve it/ })).toBeInViewport({ ratio: 1 });
+  await expect(card(`w${tag}1`).getByRole('button', { name: /^Decline it/ })).toBeInViewport({ ratio: 1 });
   await shot('intake-approval');
 
   await clickItem(`Answer w${tag}2`);
-  await expect(card(`w${tag}2`).getByLabel(`Answer on w${tag}2`)).toBeInViewport({ ratio: 1 });
-  await expect(card(`w${tag}2`).getByRole('button', { name: 'Send answer' })).toBeInViewport({ ratio: 1 });
+  await expect(card(`w${tag}2`).getByLabel('Your answer')).toBeInViewport({ ratio: 1 });
+  await expect(card(`w${tag}2`).getByTestId('qc-send')).toBeInViewport({ ratio: 1 });
   await shot('dispatcher-question');
 
   await clickItem(`Answer w${tag}3`);
-  await expect(card(`w${tag}3`).getByLabel(`Answer on w${tag}3`)).toBeInViewport({ ratio: 1 });
+  await expect(card(`w${tag}3`).getByLabel('Your answer')).toBeInViewport({ ratio: 1 });
   await shot('design-question');
 });
 

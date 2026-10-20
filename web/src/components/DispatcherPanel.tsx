@@ -17,7 +17,7 @@ import { PermissionCard } from './Transcript';
 import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu, ModelChip, ToggleChip } from './ui';
 import { TimersButton } from './Timers';
-import { WaitingTab } from './WaitingTab';
+import { IntakeApproveCard, WaitingTab } from './WaitingTab';
 import { waitingItems } from '../../../shared/waiting';
 import { useKeepScroll } from '../scrollKeep';
 
@@ -494,27 +494,9 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
         Player reports that are not obvious bugs, design questions and FFBox work wait here. Nothing is worked until {s.reviewers.join(' or ') || 'a reviewer'} approves it (then the dispatcher decides it like any request) or declines it.
       </p>
       {pending.length ? (
-        <div className="run-list">
+        <div className="wait-list intake-cards">
           {pending.map((w) => (
-            <div key={w.id} className="intake-pending">
-              {row(w)}
-              <div className="intake-actions">
-                <span className="dim small">{w.approval?.why}</span>
-                <div className="spacer" />
-                {reviewer ? (
-                  <>
-                    <button className="btn btn-sm btn-primary" disabled={busy === w.id} onClick={() => void act(w.id, () => api.approveWork(w.id))}>
-                      Approve {w.id}
-                    </button>
-                    <button className="btn btn-sm btn-ghost" disabled={busy === w.id} onClick={() => void act(w.id, () => api.declineWork(w.id))}>
-                      Decline
-                    </button>
-                  </>
-                ) : (
-                  <span className="dim small">{s.reviewers.join(' or ')} decides</span>
-                )}
-              </div>
-            </div>
+            <IntakeApproveCard key={w.id} app={app} w={w} reviewer={reviewer} now={now} />
           ))}
         </div>
       ) : (
