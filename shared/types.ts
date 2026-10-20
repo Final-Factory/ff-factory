@@ -502,6 +502,17 @@ export interface MachineStats extends HostStats {
   at: string;
   /** Its Unity editors against max_unity (w469); absent from a daemon before it. */
   unity?: UnitySlotsReport;
+  /** Its bench lock while a timed run holds it (w1600, machine/benchLock.ts); absent: free, or a daemon before it. */
+  benchLock?: BenchLock;
+}
+
+/**
+ * A machine's bench lock as its daemon reads it (w1600, machine/benchLock.ts): the owner line the game repo's
+ * scripts/bench/quiet_gate.sh wrote (`<host> pid <pid> <user> <time> <what> (<dir>)`), and since when (the lock's mtime).
+ */
+export interface BenchLock {
+  owner: string;
+  since: string;
 }
 
 // ---- machines (docs/machines.md) ----
@@ -1722,7 +1733,7 @@ export interface WorkItem {
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it
    * stopped) and the `message` that would have resumed it, in its handover.
    */
-  handedBack?: { at: string; from: string; session: string; branch?: string; why: string; note: string; how: string; saved?: string; message?: string };
+  handedBack?: { at: string; from: string; session: string; branch?: string; why: string; note: string; how: string; saved?: string; message?: string; to?: string };
   /**
    * The repository the work is in, "owner/name" (w1098; request_work `repo`). Placement reads `needs`, which is derived
    * from it when the request is filed, never guessed later from the brief.
@@ -1734,6 +1745,11 @@ export interface WorkItem {
    * agent slot (FF Factory, FFBox, the ff-agents plugin, any non-Unity repo). Absent on requests filed before it: game.
    */
   needs?: 'game' | 'agent';
+  /**
+   * A worker on it started a Live view (w1600, docs/live-view.md): it needs one from then on, so it is placed on
+   * placement.live first (BEAST), and a move of it says to stage the view again. The first start, kept.
+   */
+  liveView?: { at: string; session: string; machine: string };
   /** The cleanup's last "Is it done?" to a worker about this merged request (w419): at most one a day. */
   followUp?: { at: string; sessionId: string };
   /** Workers the cleanup already resumed once after they were cut off, by session id: never a second time. */
