@@ -218,7 +218,7 @@ export function QuestionCard(p: QuestionCardProps) {
           onChange={(e) => setTyped(e.target.value)}
         />
       )}
-      <button type="button" className={`btn btn-sm ${options.length ? 'btn-outline' : 'btn-primary'}`} disabled={!live || !typed.trim()} onClick={() => void give(typed)} data-testid="qc-send">
+      <button type="button" className={`btn btn-sm ${typed.trim() ? 'btn-primary' : 'btn-outline'}`} disabled={!live || !typed.trim()} onClick={() => void give(typed)} data-testid="qc-send">
         {n > 1 && step < n - 1 ? 'Next' : 'Send'}
       </button>
     </div>
@@ -241,11 +241,11 @@ export function QuestionCard(p: QuestionCardProps) {
       {progress}
       {layout === 'b' ? (
         <div className="qc-row">
-          <QuestionText q={q} legacy={!ask?.options.length} />
+          <QuestionText q={q} legacy={!ask} />
           <Previews media={media} session={p.mediaSession} />
         </div>
       ) : (
-        <QuestionText q={q} legacy={!ask?.options.length} />
+        <QuestionText q={q} legacy={!ask} />
       )}
       {p.note && (
         <p className="small dim qc-note" data-testid="qc-note">
