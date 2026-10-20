@@ -7,13 +7,6 @@ import { useKeptState } from '../keep';
 import { openLightbox } from '../store';
 import { previewSrc } from './Images';
 
-/** The card layouts Ben chooses between (w1597); `ff.cardLayout` in the browser's storage picks one until he has. */
-export type CardLayout = 'a' | 'b' | 'c';
-export const cardLayout = (): CardLayout => {
-  const v = typeof localStorage !== 'undefined' ? localStorage.getItem('ff.cardLayout') : null;
-  return v === 'b' || v === 'c' ? v : 'a';
-};
-
 /** A still or a clip a card previews: an absolute path (the review folder's, or the asking worker's own). */
 export interface CardMedia {
   url: string;
@@ -24,14 +17,13 @@ export interface CardMedia {
 const mediaSrc = (path: string, session?: string) => `/api/image?${new URLSearchParams({ ...(session ? { session } : {}), path })}`;
 
 /** The stills and clips as thumbnails; a click opens them full size (a clip plays there). */
-export function Previews({ media, session, big }: { media: CardMedia[]; session?: string; big?: boolean }) {
+export function Previews({ media, session }: { media: CardMedia[]; session?: string }) {
   const [broken, setBroken] = useState<Set<string>>(new Set());
   const shown = media.filter((m) => !broken.has(m.url));
   if (!shown.length) return null;
   const items = shown.map((m) => ({ src: mediaSrc(m.url, session), name: m.alt || m.url.split(/[\\/]/).pop() || 'still', video: isVideoPath(m.url) }));
-  const [first, ...rest] = shown;
-  const thumb = (m: CardMedia, i: number, hero = false) => (
-    <button key={m.url} type="button" className={`qc-thumb${hero ? ' qc-hero' : ''}`} title={`${m.alt || items[i].name}: open full size`} aria-label={`Open ${m.alt || items[i].name} full size`} onClick={() => openLightbox(items, i)}>
+  const thumb = (m: CardMedia, i: number) => (
+    <button key={m.url} type="button" className="qc-thumb" title={`${m.alt || items[i].name}: open full size`} aria-label={`Open ${m.alt || items[i].name} full size`} onClick={() => openLightbox(items, i)}>
       {items[i].video ? (
         <>
           <video src={`${previewSrc(items[i].src)}#t=0.1`} muted playsInline preload="metadata" onError={() => setBroken(new Set([...broken, m.url]))} />
@@ -45,15 +37,8 @@ export function Previews({ media, session, big }: { media: CardMedia[]; session?
     </button>
   );
   return (
-    <div className={`qc-media${big ? ' qc-media-big' : ''}`} data-testid="qc-media">
-      {big ? (
-        <>
-          {thumb(first, 0, true)}
-          {rest.length > 0 && <div className="qc-media-row">{rest.map((m, i) => thumb(m, i + 1))}</div>}
-        </>
-      ) : (
-        shown.map((m, i) => thumb(m, i))
-      )}
+    <div className="qc-media" data-testid="qc-media">
+      {shown.map((m, i) => thumb(m, i))}
     </div>
   );
 }
@@ -100,7 +85,6 @@ export interface QuestionCardProps {
  * the last, and Back goes to the one before.
  */
 export function QuestionCard(p: QuestionCardProps) {
-  const layout = cardLayout();
   const n = p.asks.length;
   // The answers given so far, kept across a reload for a new version (web/src/keep.ts).
   const [kept, setKept] = useKeptState(`qc.answers.${p.id}`, '[]');
@@ -161,7 +145,7 @@ export function QuestionCard(p: QuestionCardProps) {
     </div>
   );
   const optionButtons = options.length > 0 && (
-    <div className={`qc-options qc-options-${layout}`} role="group" aria-label={`Answers to: ${q}`}>
+    <div className="qc-options" role="group" aria-label={`Answers to: ${q}`}>
       {options.map((o) => {
         const d = splitMedia(o.description ?? '');
         return (
@@ -171,20 +155,14 @@ export function QuestionCard(p: QuestionCardProps) {
             className={`qc-opt${o.recommended ? ' qc-rec' : ''}${pickedHere === o.label ? ' qc-picked' : ''}`}
             data-testid="qc-option"
             disabled={!live}
-            title={layout === 'b' && d.text ? d.text : undefined}
             onClick={() => void give(o.label)}
           >
             <span className="qc-opt-head">
               <span className="qc-opt-label">{o.label}</span>
-              {o.recommended && layout === 'b' && (
-                <span className="chip chip-amber qc-tag" data-testid="qc-recommended">
-                  Recommended
-                </span>
-              )}
             </span>
-            {layout !== 'b' && d.text && <span className="qc-opt-desc">{d.text}</span>}
-            {/* Recommended sits in one place: above the answer (CSS order; the label stays first for a screen reader), beside it in B. */}
-            {o.recommended && layout !== 'b' && (
+            {d.text && <span className="qc-opt-desc">{d.text}</span>}
+            {/* Recommended sits in one place: above the answer (CSS order; the label stays first for a screen reader). */}
+            {o.recommended && (
               <span className="chip chip-amber qc-tag" data-testid="qc-recommended">
                 Recommended
               </span>
@@ -196,28 +174,16 @@ export function QuestionCard(p: QuestionCardProps) {
   );
   const freePrompt = p.freeLabel ?? (options.length ? 'Or type your own answer' : 'Your answer');
   const free = p.mine && p.onAnswer && !p.done && (
-    <div className={`qc-free qc-free-${layout}`}>
-      {layout === 'b' ? (
-        <input
-          data-kept
-          className="input qc-free-text"
-          placeholder={freePrompt}
-          aria-label={freePrompt}
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && void give(typed)}
-        />
-      ) : (
-        <textarea
-          data-kept
-          className="input qc-free-text"
-          rows={options.length ? 1 : 2}
-          placeholder={freePrompt}
-          aria-label={freePrompt}
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-        />
-      )}
+    <div className="qc-free">
+      <textarea
+        data-kept
+        className="input qc-free-text"
+        rows={options.length ? 1 : 2}
+        placeholder={freePrompt}
+        aria-label={freePrompt}
+        value={typed}
+        onChange={(e) => setTyped(e.target.value)}
+      />
       <button type="button" className={`btn btn-sm ${typed.trim() ? 'btn-primary' : 'btn-outline'}`} disabled={!live || !typed.trim()} onClick={() => void give(typed)} data-testid="qc-send">
         {n > 1 && step < n - 1 ? 'Next' : 'Send'}
       </button>
@@ -233,26 +199,18 @@ export function QuestionCard(p: QuestionCardProps) {
   // Structured questions bring their own media; the review files a wait names are shown with a free-text question only (Details has them otherwise).
   const media = cardMedia(ask, ask ? [] : p.previews);
   return (
-    <article className={`qc qc-${layout}${p.mine ? ' mine' : ''}`} data-testid={p.testId} data-layout={layout}>
-      {layout === 'c' && <Previews media={media} session={p.mediaSession} big />}
+    <article className={`qc${p.mine ? ' mine' : ''}`} data-testid={p.testId}>
       <header className="qc-head">
         <span className="qc-title">{p.title}</span>
       </header>
       {progress}
-      {layout === 'b' ? (
-        <div className="qc-row">
-          <QuestionText q={q} legacy={!ask} />
-          <Previews media={media} session={p.mediaSession} />
-        </div>
-      ) : (
-        <QuestionText q={q} legacy={!ask} />
-      )}
+      <QuestionText q={q} legacy={!ask} />
       {p.note && (
         <p className="small dim qc-note" data-testid="qc-note">
           {p.note}
         </p>
       )}
-      {layout === 'a' && <Previews media={media} session={p.mediaSession} />}
+      <Previews media={media} session={p.mediaSession} />
       {p.look}
       {p.done ?? (
         <>

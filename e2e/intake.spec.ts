@@ -324,6 +324,8 @@ test('the Waiting on input tab clears a request each way: approve, decline with 
     [`Answer on REQ. It asked: “Which save comes first ${tag}?”\n\nNewest save first ${tag}\n\nPlease put this on REQ as my answer (update_work note).`],
     [`Answer on REQ. It asked: “Which save comes first ${tag}?”\n\nNewest save first ${tag}\n\nPlease put this on REQ as my answer (update_work note).`],
   ]);
+  // No orchestrator records these answers here: close the three so no later test finds them waiting on the tester.
+  for (const id of [bug.id, decline.id, ask.id]) await patchWork(page.request, id, { status: 'rejected' });
 });
 
 test('the Waiting on input tab with seven requests: the screenshot of the flow (w1228, test data)', async ({ page }) => {
