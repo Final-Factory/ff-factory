@@ -4,6 +4,7 @@
 import type { TurnUsage } from './spend.ts';
 import type { GithubPermissionId } from './githubRequirements.ts';
 import type { GhLogin } from './ghLogin.ts';
+import type { Ask } from './ask.ts';
 
 /** 'blocked': the editor is alive but stuck on a modal dialog, or silent for too long while starting (see unity.blocked). */
 /** A working tree's real state, read from git (docs: server/gitStatus.ts). */
@@ -268,7 +269,7 @@ export interface SessionInfo {
    * as Needs you. Kept by the portal, never by the daemon; gone with its next message (a new turn: it declares again if
    * it still waits). `request` limits it to one request when the worker serves several.
    */
-  waitingOn?: { who: string; what: string; at: string; request?: string };
+  waitingOn?: { who: string; what: string; at: string; request?: string; asks?: Ask[] };
   /**
    * Machine sessions (w691): a message to it found no agent host to run in ("could not start its agent host: …"). Nothing
    * runs for it whatever its status says (an older daemon went on reporting it mid-turn): the ledger shows its request
@@ -502,6 +503,35 @@ export interface MachineStats extends HostStats {
   at: string;
   /** Its Unity editors against max_unity (w469); absent from a daemon before it. */
   unity?: UnitySlotsReport;
+  /** Its bench lock while a timed run holds it (w1600, machine/benchLock.ts); absent: free, or a daemon before it. */
+  benchLock?: BenchLock;
+}
+
+/**
+ * A machine's bench lock as its daemon reads it (w1600, machine/benchLock.ts): the owner line the game repo's
+ * scripts/bench/quiet_gate.sh wrote (`<host> pid <pid> <user> <time> <what> (<dir>)`), and since when (the lock's mtime).
+ */
+export interface BenchLock {
+  owner: string;
+  since: string;
+}
+
+/**
+ * Whether the run holding `lock` runs in the folder `dir` or below it (w1607): the owner line ends with the run's folder,
+ * `($PWD)`, which Git Bash writes as /f/ffw/... for F:\ffw\.... Compared without case and slash differences.
+ */
+export function benchLockIn(lock: BenchLock | undefined, dir: string): boolean {
+  const ran = /\(([^()]+)\)\s*$/.exec(lock?.owner ?? '')?.[1];
+  if (!ran) return false;
+  const key = (p: string) =>
+    p
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^\/([a-z])\//i, '$1:/')
+      .replace(/\/+$/, '')
+      .toLowerCase();
+  const [a, b] = [key(ran), key(dir)];
+  return !!b && (a === b || a.startsWith(`${b}/`));
 }
 
 // ---- machines (docs/machines.md) ----
@@ -513,6 +543,12 @@ export type MachinePlatform = 'darwin' | 'win32' | 'linux';
 
 /** "Mac", "Windows PC" or "Linux PC", for sentences about a machine (a record from before platforms is a Mac). */
 export const platformNoun = (p: MachinePlatform | undefined) => (p === 'win32' ? 'Windows PC' : p === 'linux' ? 'Linux PC' : 'Mac');
+
+/**
+ * A machine's kind, for people. A record waiting for its install (a join code, add_machine worker_install) has no platform
+ * until its PC tells the portal, so it is not called a Mac (w1603: desktop-coosego, a Windows PC, showed as a Mac).
+ */
+export const machineKind = (m: { platform?: MachinePlatform; awaitingInstall?: string }) => (!m.platform && m.awaitingInstall ? 'new machine, its system not known until it joins' : platformNoun(m.platform));
 
 /** A Node `process.platform` as a machine platform (anything that is neither Windows nor Linux is taken for a Mac). */
 export const machinePlatformOf = (p: string): MachinePlatform => (p === 'win32' ? 'win32' : p === 'linux' ? 'linux' : 'darwin');
@@ -1644,9 +1680,10 @@ export interface WorkItem {
   mainCloneAccess?: { machine: string; by: string; at: string };
   /**
    * The question it waits on, from the dispatcher (decide_work ask) to its requester, until a note answers it (w278:
-   * FFBox posts it in the requester's thread). A design question is `flag` instead.
+   * FFBox posts it in the requester's thread). A design question is `flag` instead. `asks` (w1597): the questions as the
+   * card asks them, each with its 2-4 answers (shared/questionCard.ts).
    */
-  question?: { text: string; at: string };
+  question?: { text: string; at: string; asks?: Ask[] };
   /**
    * The newest wait on a person that went to their own orchestrators as a `[needs you]` message (w1378, Ben: "Those should
    * just be surfaced to you the orchestrator and then I'll answer you and you send the response back"): the question in
@@ -1716,7 +1753,7 @@ export interface WorkItem {
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it
    * stopped) and the `message` that would have resumed it, in its handover.
    */
-  handedBack?: { at: string; from: string; session: string; branch?: string; why: string; note: string; how: string; saved?: string; message?: string };
+  handedBack?: { at: string; from: string; session: string; branch?: string; why: string; note: string; how: string; saved?: string; message?: string; to?: string };
   /**
    * The repository the work is in, "owner/name" (w1098; request_work `repo`). Placement reads `needs`, which is derived
    * from it when the request is filed, never guessed later from the brief.
@@ -1728,6 +1765,16 @@ export interface WorkItem {
    * agent slot (FF Factory, FFBox, the ff-agents plugin, any non-Unity repo). Absent on requests filed before it: game.
    */
   needs?: 'game' | 'agent';
+  /**
+   * A worker on it started a Live view (w1600, docs/live-view.md): it needs one from then on, so it is placed on
+   * placement.live first (BEAST), and a move of it says to stage the view again. The first start, kept.
+   */
+  liveView?: { at: string; session: string; machine: string };
+  /**
+   * A worker on it declared a build coming (w1606, the build_plan tool): it builds a player from then on, so it is placed
+   * on placement.build first (BEAST). The first declaration, kept.
+   */
+  build?: { at: string; session: string; machine: string };
   /** The cleanup's last "Is it done?" to a worker about this merged request (w419): at most one a day. */
   followUp?: { at: string; sessionId: string };
   /** Workers the cleanup already resumed once after they were cut off, by session id: never a second time. */
@@ -1781,6 +1828,12 @@ export interface WorkNeedsYou {
   previews: string[];
   /** Pull requests it names ("Final-Factory/FinalFactory#1799"). */
   prs: string[];
+  /**
+   * The questions as the card asks them, one at a time, each with its 2-4 answers, the recommended one first (w1597: the
+   * worker's waiting_on_person questions, or the dispatcher's decide_work ask). Absent on a free-text question: the card shows
+   * it cleaned with a free answer box (shared/questionCard.ts).
+   */
+  asks?: Ask[];
   /** Sent in the one-off digest of waits already open when w1378 shipped, or after a restart. */
   digest?: boolean;
   /** A person answered it with a note in their own turn: who and when. */

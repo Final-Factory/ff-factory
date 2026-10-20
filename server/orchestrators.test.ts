@@ -13,13 +13,14 @@ import { OPS_ID } from './opsWorker.ts';
 import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
-import { requestAsFiled } from './work.ts';
+import { handoverNote, requestAsFiled } from './work.ts';
 import { BlockerWatch } from './blockerWatch.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import type { PrHealth } from '../shared/blockers.ts';
-import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
+import { answersText } from '../shared/questionCard.ts';
+import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS } from './placeAgain.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
@@ -570,7 +571,7 @@ test('requests: a question goes to its filer, whose answer brings it back; closi
   const { store, dispatcher, chat, call, heard } = setup(t, { gatherMs: 1500 });
   const loth = chat(LOTH).info;
   await call(loth, 'request_work', { title: 'Playtest the new tutorial', brief: 'Look for soft locks.' });
-  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Single-player or co-op?' });
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Single-player or co-op?', questions: [{ question: 'Which one?', options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] });
   assert.equal(store.work.get('w1')!.status, 'question');
   // w1378: a question for a person comes as [needs you], in full, with how to answer it.
   await until('Lothsahn hears the question', () => heard(loth.id, '[needs you]').length === 1);
@@ -2121,7 +2122,7 @@ test('w1378: a worker waiting on a person reaches that person’s orchestrator o
   sessions.events.emit('turnEnd', handle, report);
   // (decide_work ask is for a request that is not active: one put back to new, as a hold would.)
   Object.assign(store.work.get('w1')!, { status: 'new' });
-  const asked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben, is the look OK?' });
+  const asked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben, is the look OK?', questions: [{ question: 'Is the circuit button look OK?', options: [{ label: 'Yes, merge it', recommended: true }, { label: 'No, change it first' }] }] });
   assert.match(asked.text, /Ben's orchestrator already has this wait as \[needs you\] .*no second message/);
   assert.equal(agents.orchestrators.needsYouDigest(agents.personWaits()), 0);
   await new Promise((r) => setTimeout(r, 300));
@@ -2149,6 +2150,49 @@ test('w1378: a worker waiting on a person reaches that person’s orchestrator o
   await until('the second question', () => heard(ben.id, '[needs you]').length === 2);
   assert.match(heard(ben.id, '[needs you]')[1].text, /Question \(its worker \w+ ended its turn saying it needs Ben\):\n\nw1: still open: waiting on Ben to pick A or B for the hover colour/);
   assert.equal(store.work.get('w1')!.needsYou!.kind, 'report');
+});
+
+test('w1597: a worker asks with questions: refused with a path, a PR list or no answers; kept on the wait and the record, listed in [needs you]; the answer a click sends, recorded, resumes the worker', async (t) => {
+  const { store, machines, agents, sessions, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Pre-1.0 release picks', brief: 'Which fixes go in.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: Pre-1.0 release picks', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  const what = 'Decide the go-live moment and the vision speed-up from /srv/fff/review/w1/REPORT.md';
+  // Ben, w1597: "I'm never going to look at files at the /srv/ path ... theres so much information like pull request that i dont care about".
+  await assert.rejects(h.waiting_on_person!({ who: 'Ben', what, questions: [{ question: 'Decide from /srv/fff/review/w1/REPORT.md', options: [{ label: 'A' }, { label: 'B' }] }] }), /no file paths in the words/);
+  await assert.rejects(h.waiting_on_person!({ who: 'Ben', what, questions: [{ question: 'Include #1873, #1880 and #1909?', options: [{ label: 'Yes' }, { label: 'No' }] }] }), /no lists of pull requests/);
+  await assert.rejects(h.waiting_on_person!({ who: 'Ben', what, questions: [{ question: 'Go live now?', options: [{ label: 'Yes' }] }] }), /options: 2 to 4/);
+  assert.equal(info.waitingOn, undefined, 'nothing recorded by a refused call');
+  const questions = [
+    { question: 'When should the update go live? ![the release notes draft](</srv/fff/review/w1/notes.png>)', options: [{ label: 'Hold it: I pick the day' }, { label: 'As soon as it is built, with a Steam event', description: 'Ten builds reach players at once.', recommended: true }] },
+    { question: 'Should the vision speed-up go in?', options: [{ label: 'Put it in', recommended: true }, { label: 'Leave it out' }] },
+  ];
+  assert.match(String(await h.waiting_on_person!({ who: 'Ben', what, questions, request: 'w1' })), /with 2 questions as buttons on Ben's card/);
+  // The recommended answer first (shared/ask.ts checkAsk), on the declaration.
+  assert.deepEqual(info.waitingOn!.asks!.map((a) => a.options[0].label), ['As soon as it is built, with a Steam event', 'Put it in']);
+  sessions.events.emit('turnEnd', sessions.get(id), `w1: still open: waiting on Ben to ${what}`);
+  await until('Ben’s orchestrator hears it', () => heard(ben.id, '[needs you]').length === 1);
+  const r = store.work.get('w1')!.needsYou!;
+  assert.equal(r.asks?.length, 2, 'the record carries the questions for the card');
+  assert.ok(r.previews.includes('/srv/fff/review/w1/notes.png'), "a question's still is among the previews");
+  const msg = heard(ben.id, '[needs you]')[0].text;
+  assert.match(msg, /Ask these 2 one at a time with ask_person[\s\S]*Q1\. When should the update go live\?\n1\. As soon as it is built, with a Steam event \(Recommended\) - Ten builds reach players at once\.\n2\. Hold it: I pick the day\n\nQ2\. Should the vision speed-up go in\?\n1\. Put it in \(Recommended\)/);
+  // A click on the card sends the answer as typed words would (shared/questionCard.ts answerMessage); the orchestrator records
+  // it with update_work in Ben's turn, and the worker resumes with it.
+  const answer = answersText(r.asks!, ['As soon as it is built, with a Steam event', 'Put it in']);
+  // (The [needs you] message opened a turn of its own in Ben's chat: his answer comes in his next one.)
+  await until('that turn ends', () => chat(BEN).info.status === 'idle');
+  await new Promise((r) => setTimeout(r, 300));
+  chat(BEN).lastFrom = 'human';
+  const done = await call(ben, 'update_work', { id: 'w1', note: answer });
+  assert.match(done.text, new RegExp(`answers the \\[needs you\\] question: sent to its worker ${id}, which resumes with it`));
+  const pending = (agents as unknown as { waker: { pending(id: string): { note: string } | undefined } }).waker.pending(id);
+  assert.match(pending!.note, /^\[answer\] Ben answered on w1 "Pre-1\.0 release picks", in their own words: 1\. When should the update go live\?\n   As soon as it is built, with a Steam event\n2\. Should the vision speed-up go in\?\n   Put it in\n/);
+  assert.equal(store.work.get('w1')!.needsYou!.answered!.by, 'Ben');
 });
 
 test('w1378: waits on a person already open when it ships go once, as one [needs you] digest per person', async (t) => {
@@ -2188,7 +2232,7 @@ test('w1384: review media reaches the person inline: a [needs you] for a folder 
   fs.utimesSync(still, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
   const ben = chat(BEN).info;
   await call(ben, 'request_work', { title: 'Fog of war', brief: 'Explored stays explored.' });
-  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben: does fog preview v4 at /srv/fff/review/w1-fog-look-v4/ look right?' });
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben: does fog preview v4 at /srv/fff/review/w1-fog-look-v4/ look right?', questions: [{ question: 'Which one?', options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] });
   await until('Ben hears it', () => heard(ben.id, '[needs you]').length === 1);
   const msg = heard(ben.id, '[needs you]')[0].text;
   assert.ok(msg.includes(`- ![fog-v4-1920.mp4](<${clip}>)\n- ![sheet.png](<${still}>)`), msg);
@@ -2641,7 +2685,7 @@ test('w754: w750 as it happened: block on A, a hold, the hold lifted with A stil
   assert.equal((await decide('w3', { action: 'block', blocker: { kind: 'request', ref: 'w1', what: 'the Deck screens merged' } })).isError, false);
   assert.equal(store.work.get('w3')!.status, 'blocked');
   // 07:19 a hold (ask), which used to drop the gate: it stays.
-  assert.equal((await decide('w3', { action: 'ask', note: 'Held on lothsahn: a potential bug.' })).isError, false);
+  assert.equal((await decide('w3', { action: 'ask', note: 'Held on lothsahn: a potential bug.', questions: [{ question: 'Which one?', options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] })).isError, false);
   assert.equal(store.work.get('w3')!.status, 'question');
   assert.equal(store.work.get('w3')!.blocked?.ref, 'w1', 'the hold did not drop the gate');
   // 07:27 "You can unblock the release": the hold is lifted and w1 is still open: it goes back to Blocked, not to the dispatcher.
@@ -3283,7 +3327,8 @@ test("w1089: start_agent refuses a request's worker into a sandbox another reque
   shortSlowTurns(t);
   const { store, sessions, agents, dispatcher, call } = await setupOnMachine(t, {}, { maxAgentsPerSandbox: 2 });
   agentsRoom(agents, ['pc']);
-  putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }, { id: 'w4' }]);
+  // w2 and w3 need only an agent slot: game work never goes beside a mid-turn worker (w1607).
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', needs: 'agent' }, { id: 'w3', needs: 'agent' }, { id: 'w4' }]);
   const start = (wid: string, extra: Record<string, unknown> = {}) => call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: `#slow ${wid}`, title: `${wid}: job`, work_id: wid, ...extra });
   const first = await start('w1');
   assert.equal(first.isError, false, first.text);
@@ -3306,6 +3351,90 @@ test("w1089: start_agent refuses a request's worker into a sandbox another reque
   assert.match(full.text, /sandbox pc\/alpha is full: .*2 agents mid-turn there \(max_agents_per_sandbox 2\), so a worker started there would only wait in the send queue/);
   assert.equal(store.work.get('w3')!.status, 'new');
   assert.equal([...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').length, 2);
+});
+
+/**
+ * w1607 as it happened (2026-10-20 04:35 UTC, beast/slot1): w1440's worker 9c38a500 was between turns with a Unity batch
+ * build running in the sandbox, on sandbox/slot1-w1440, the branch an earlier w1440 session (80b00fed) had released. The
+ * dispatcher started w1602, an FF Factory change, beside it with extra_agent, and the start's hand-over saw 80b00fed's
+ * branch and switched the worktree under the build. Here: worker A on w1 builds in pc/alpha, released worker R had A's
+ * branch, and B (w2, another repo) and C (w3, game work) arrive.
+ */
+async function busySandbox(t: Parameters<typeof setupOnMachine>[0]) {
+  const env = await setupOnMachine(t, {}, { maxAgentsPerSandbox: 2 });
+  const { store, sessions, machines, agents, dispatcher, call, pc } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', needs: 'agent', repo: 'Final-Factory/ff-factory' }, { id: 'w3' }]);
+  const start = (wid: string, extra: Record<string, unknown> = {}) => call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: `${wid} work`, title: `${wid}: job`, work_id: wid, ...extra });
+  const first = await start('w1');
+  assert.equal(first.isError, false, first.text);
+  const a = sessions.get(/Started agent (\w+)/.exec(first.text)![1]);
+  await until('A is between turns', () => a.live && a.info.status === 'idle');
+  // Its batch build runs in the background: "Working: Unity batch build bench-sl1, between turns".
+  Object.assign(a.info, { backgroundTasks: 1, backgroundJobs: [{ type: 'local_bash', description: 'Unity batch build bench-sl1' }] });
+  const sb = () => machines.requireSandbox('pc', 'alpha');
+  const branch = sb().git?.branch ?? sb().branch;
+  sb().git = { branch, dirty: 0, untracked: 0, at: new Date().toISOString() };
+  // The earlier session of the same work released the sandbox on that branch (80b00fed).
+  const r: SessionInfo = { id: 'r80b00fe', kind: 'worker', title: 'w1: earlier session', status: 'stopped', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 4, costUsd: 1, pendingPermissions: [], sdkSessionId: 'fake-r', machineId: 'pc', machineSandbox: 'alpha', placeReleased: { at: T0, sandbox: 'alpha', branch, why: 'it waits on CI' } };
+  store.putSession(r);
+  sb().sessionIds = [...sb().sessionIds, r.id];
+  const switches: string[] = [];
+  machines.switchBranch = (async (_m: string, to: string) => {
+    switches.push(to);
+    throw new Error(`switched pc/alpha to ${to}`);
+  }) as typeof machines.switchBranch;
+  return { ...env, a, branch, start, switches, alpha: pc.path('alpha') };
+}
+
+test('w1607: a request that needs only an agent slot, started with extra_agent beside a worker with a background build, sits beside it and never switches the sandbox branch', async (t) => {
+  const { agents, start, switches, branch, sessions, store } = await busySandbox(t);
+  const b = await start('w2', { extra_agent: true });
+  assert.equal(b.isError, false, b.text);
+  assert.match(b.text, new RegExp(`Not handed over: pc/alpha stays on the branch ${branch}, which worker r80b00fe released; this worker needs only an agent seat and works in its own clone, so the sandbox's branch was not switched\\.`));
+  assert.deepEqual(switches, [], 'the worktree under the build was not switched');
+  const bs = sessions.get(/Started agent (\w+)/.exec(b.text)![1]);
+  assert.equal(bs.info.machineSandbox, 'alpha', 'B sits beside A');
+  assert.equal(store.work.get('w2')!.sessionIds.includes(bs.info.id), true);
+  // The same request in a FREE sandbox on a released worker's branch is not switched either (needs: agent alone).
+  const prep = await agents.prepareForNewWork('pc/alpha', undefined, 'w2', undefined, true);
+  assert.equal(prep.branch, undefined);
+  assert.deepEqual(switches, []);
+});
+
+test('w1607: game work is refused beside a worker with a background build, extra_agent or not, and the hand-over never switches a sandbox a live worker is in', async (t) => {
+  const { agents, machines, start, switches, a, store, alpha } = await busySandbox(t);
+  const plain = await start('w3');
+  assert.equal(plain.isError, true);
+  assert.match(plain.text, /sandbox pc\/alpha is not free: \w+ "w1: job" \(Working: Unity batch build bench-sl1\)/);
+  const extra = await start('w3', { extra_agent: true });
+  assert.equal(extra.isError, true);
+  assert.match(extra.text, /sandbox pc\/alpha is busy: \w+ "w1: job" is between turns with Unity batch build bench-sl1 running\. Game work never goes beside a busy worker, extra_agent or not/);
+  assert.equal(store.work.get('w3')!.status, 'new', 'nothing was started or linked');
+  // Any other way in (a fresh session, the page's own start): the released worker's branch is A's now, so no switch.
+  const prep = await agents.prepareForNewWork('pc/alpha', undefined, 'w3');
+  assert.equal(prep.branch, undefined);
+  assert.match(prep.note, /Not handed over: pc\/alpha stays on the branch .*, but \w+ "w1: job" is between turns with Unity batch build bench-sl1 running, so it was not switched under them\./);
+  assert.deepEqual(switches, []);
+  // A's build ends; a timed run from the sandbox's folder still holds the machine's bench lock: busy all the same.
+  Object.assign(a.info, { backgroundTasks: 0, backgroundJobs: [] });
+  const stats = machines.statsOf.bind(machines);
+  const lock = { owner: `pc pid 4242 ben 22:34:00 bench-sl1 (${alpha})`, since: new Date().toISOString() };
+  machines.statsOf = ((id: string) => ({ ...(stats(id) ?? {}), benchLock: lock })) as typeof machines.statsOf;
+  const locked = await start('w3', { extra_agent: true });
+  assert.equal(locked.isError, true);
+  assert.match(locked.text, /sandbox pc\/alpha is busy: a timed run there holds pc's bench lock \(pc pid 4242/);
+  assert.deepEqual(switches, []);
+});
+
+test("w1607: a bench lock belongs to the sandbox its run's folder is in, Git Bash's /f/... spelling included", () => {
+  const lock = (dir: string) => ({ owner: `beast pid 812 ben 22:34:00 bench-sl1 (${dir})`, since: T0 });
+  assert.equal(benchLockIn(lock('/f/ffw/sandboxes/slot1'), 'F:\\ffw\\sandboxes\\slot1'), true);
+  assert.equal(benchLockIn(lock('/f/ffw/sandboxes/slot1/scripts/bench'), 'F:/ffw/sandboxes/slot1/'), true);
+  assert.equal(benchLockIn(lock('/f/ffw/sandboxes/slot10'), 'F:\\ffw\\sandboxes\\slot1'), false);
+  assert.equal(benchLockIn(lock('/Users/ben/ffw/sandboxes/slot2'), '/Users/ben/ffw/sandboxes/slot2'), true);
+  assert.equal(benchLockIn({ owner: 'its owner line is not written yet', since: T0 }, '/Users/ben/ffw/sandboxes/slot2'), false);
+  assert.equal(benchLockIn(undefined, '/Users/ben/ffw/sandboxes/slot2'), false);
 });
 
 test('w1099: the capacity ping and the queued-with-room flag list queued requests by priority, then oldest', async (t) => {
@@ -3800,4 +3929,108 @@ test('w1582: Agents.liveHold keeps a worker whose Live view is up while it waits
   assert.equal(hold(a.info), undefined);
   void dispatcher;
   void call;
+});
+
+test('w1600: a Live view marks its request; a bench lock holds its editor; stop_agent move_to moves the waiting worker to beast, refused mid-turn, held or full', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, machines, dispatcher, call, heard, cfg } = env;
+  const beast = await startTestMachine(machines, { id: 'beast', sandboxes: ['slot1'] });
+  env.closers.push(() => beast.stop());
+  agentsRoom(agents, ['pc', 'beast']);
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }]);
+  const ended: string[] = [];
+  agents.liveHub = {
+    tool: async () => 'Live view started (15 fps, 960 px, knobs on Ballista): streaming',
+    endFor: async (id: string) => (ended.push(id), { materials: ['Ballista'], fps: 15, width: 960 }),
+  } as unknown as NonNullable<typeof agents.liveHub>;
+  const a = await startedFor(env, 'w1');
+
+  // Its worker starts a Live view: the request needs one from now on.
+  assert.match(String(await a.h.live_view!({ action: 'start', materials: ['Ballista'] })), /^Live view started/);
+  assert.equal(store.work.get('w1')!.liveView?.machine, 'pc');
+  assert.match(store.work.get('w1')!.log.join('\n'), /its worker \w+ started a Live view on pc: it needs one from now on, so it is placed on beast first \(w1600\)/);
+  const listed = await call(dispatcher().info, 'list_sandboxes', {});
+  assert.match(listed.text, /^Next Live view work \(game work whose worker streams a Live view, w1600\): beast \(Live view work goes to the first with room in placement\.live \(beast;/m);
+
+  // A timed run holds pc's bench lock: its Live view editor and view wait; other actions go through.
+  const stats = machines.statsOf.bind(machines);
+  const lock = { owner: 'pc pid 4121 ben 21:04:10 probe A round 2 (/tmp/x)', since: new Date().toISOString() };
+  machines.statsOf = (id: string) => (id === 'pc' ? { ...(stats(id) ?? ({} as NonNullable<ReturnType<typeof stats>>)), benchLock: lock } : stats(id));
+  assert.match(String(await a.h.unity!({ action: 'start' })), /^Not now \(w1600\): on pc, its bench lock is held since \d\d:\d\dZ \(pc pid 4121 .*\): a timed run, and a Live view editor beside it would spoil that run's numbers\. .*wake_me in 10 minutes and start its editor again/);
+  assert.match(String(await a.h.live_view!({ action: 'start' })), /^Not now \(w1600\)/);
+  machines.statsOf = stats;
+
+  // Refused: mid-turn, beast held, beast full. The worker stays where it is each time.
+  const move = (extra: Record<string, unknown> = {}) => call(dispatcher().info, 'stop_agent', { session_id: a.id, move_to: 'BEAST', why: 'its Live view streams faster on beast (w1600)', ...extra });
+  const was = a.info.status;
+  a.info.status = 'running';
+  assert.match((await move()).text, /is mid-turn: move it once its turn ends/);
+  a.info.status = was;
+  cfg.placement = { hold: { beast: 'Ben testing' } };
+  assert.match((await move()).text, /beast is on hold \(Ben testing\).*stays on pc\/alpha/);
+  cfg.placement = {};
+  const places = agents.places.bind(agents);
+  agents.places = () => places().map((p) => (p.id === 'beast' ? { ...p, live: p.maxAgents } : p));
+  assert.match((await move()).text, /beast has no room for game work now \(\d+ live agents of \d+\): \w+ stays on pc\/alpha/);
+  agents.places = places;
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.deepEqual(ended, []);
+
+  // Moved: its view ends, it is taken off the worker and Queued for beast with its branch and the view's settings.
+  const moved = await move();
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(moved.text, /^Moved w1 off \w+ on pc\/alpha, for beast: its process stopped, its Live view ended, its sandbox (had no uncommitted work|'s uncommitted work)/);
+  assert.match(moved.text, /switch_branch a FREE beast sandbox to "sandbox\/alpha", then start_agent with its work_id in that sandbox/);
+  assert.deepEqual(ended, [a.id]);
+  const w = store.work.get('w1')!;
+  assert.equal(w.status, 'queued');
+  assert.ok(!w.sessionIds.includes(a.id), 'taken off the old worker');
+  assert.deepEqual(w.queuedFor?.needs, ['beast']);
+  assert.equal(w.handedBack?.to, 'beast');
+  assert.equal(w.handedBack?.branch, 'sandbox/alpha');
+  assert.match(w.handedBack!.note, /^Its Live view ran on pc\/alpha \(materials \["Ballista"\], fps 15, width 960\): stage it again/);
+  assert.match(w.log.join('\n'), /moved from pc\/alpha: queued for beast, from branch sandbox\/alpha/);
+  await until('the dispatcher is told', () => heard(dispatcher().info.id, '[ledger] MOVED (w1600)').length > 0);
+  assert.match(heard(dispatcher().info.id, '[ledger] MOVED (w1600)')[0].text, /w1 "Request w1" .*because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. .*Place it on beast: switch_branch a FREE sandbox on beast to "sandbox\/alpha"/);
+  // The new worker's handover says where it came from and what to stage.
+  const note = handoverNote(w, { related: [], handedBack: w.handedBack });
+  assert.match(note, /Moved \(w1600\): w1 was taken off worker \w+ on pc\/alpha at .* UTC, because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. Continue from its branch sandbox\/alpha/);
+});
+
+test('w1606: a worker declares its build: the build computer is held, a worker that cannot move is paused, its resume waits for the build and goes when it is done', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, machines, dispatcher, call, heard, cfg } = env;
+  const beast = await startTestMachine(machines, { id: 'beast', sandboxes: ['slot1'] });
+  env.closers.push(() => beast.stop());
+  agentsRoom(agents, ['pc', 'beast']);
+  // pc is the build computer here (placement.build), and beast is full: the other worker there cannot move, so it is paused.
+  cfg.placement = { build: ['pc'] };
+  const places = agents.places.bind(agents);
+  agents.places = () => places().map((p) => (p.id === 'beast' ? { ...p, live: p.maxAgents } : p));
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }, { id: 'w2', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  const turnsBefore = b.info.turns;
+
+  const declared = String(await a.h.build_plan!({ action: 'coming', minutes: 0, what: 'a Windows player for the w1 clip' }));
+  assert.match(declared, /^Declared \(w1606\): a Windows player for the w1 clip on pc at \d\d:\d\dZ\. No new work goes there from now\. FF Factory clears it now/);
+  assert.equal(store.work.get('w1')!.build?.machine, 'pc', 'its request builds a player: placed on placement.build first from now on');
+  await until('pc is cleared', () => !!agents.builds.plan('pc')?.clearedAt && agents.builds.plan('pc')!.paused.includes(b.id));
+  assert.deepEqual(agents.builds.plan('pc')!.moved, [], 'beast is full: nothing could move');
+  await until('the dispatcher is told', () => heard(dispatcher().info.id, '[ledger] BUILD COMING (w1606)').length > 0);
+  const listed = await call(dispatcher().info, 'list_sandboxes', {});
+  assert.match(listed.text, /^- pc \[held: cleared for a build since \d\d:\d\dZ \(a Windows player for the w1 clip, worker \w+ for w1; w1606\): no new work until it is done\]/m);
+
+  // The paused worker's next message waits for the build (Blocked on its machine), the builder's own does not.
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: b.id, text: 'CI is green: merge it', work_id: 'w2' });
+  assert.match(sent.text, /Queued, not refused: pc is cleared for a build since \d\d:\d\dZ .*: this worker was paused for it and resumes when it is done \(w1606\)/);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(b.info.turns, turnsBefore, 'not resumed during the build');
+  assert.match(String(await a.h.build_plan!({ action: 'start' })), /^Go \(w1606\): pc is cleared for a Windows player for the w1 clip \(0 moved: none; 1 paused\)/);
+
+  // Done: the hold lifts and the held message goes.
+  assert.match(String(await a.h.build_plan!({ action: 'done' })), /^Done \(w1606\): pc takes work again; the build took \d+ min\./);
+  assert.equal(agents.builds.plan('pc'), undefined);
+  await until('the paused worker resumes with its message', () => b.info.turns > turnsBefore);
+  assert.match(heard(dispatcher().info.id, '[ledger] BUILD DONE (w1606)')[0]?.text ?? '', /pc takes new work again/);
 });

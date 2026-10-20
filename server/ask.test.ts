@@ -86,7 +86,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     const r = await tool.handler(args);
     return { text: r.content.map((c) => c.text).join('\n'), isError: !!r.isError };
   };
-  return { store, o, agents, sessions, call };
+  return { dir, store, o, agents, sessions, call };
 }
 
 const QUESTION = {
@@ -233,7 +233,7 @@ test('w1397: the brief tells the orchestrator to ask every question this way, an
   const prompt = (env.agents.orchestratorOptions(ben.info) as { systemPrompt: { append: string } }).systemPrompt.append;
   assert.match(prompt, /Ask every question to Ben with ask_person/);
   assert.match(prompt, /one recommended option/);
-  assert.ok(prompt.includes("ask it with ask_person (the worker's options as buttons)"));
+  assert.ok(prompt.includes('Ask it with ask_person, one question at a time, its answers as buttons'));
 });
 
 test('w1419: a question’s and an option’s stills and clips are kept whole, apart from the words the limits count', () => {
@@ -258,4 +258,72 @@ test('w1419: a question’s and an option’s stills and clips are kept whole, a
   // The quote of an answer has the words only.
   assert.equal(askExcerpt(r.ask).split('\n')[0], 'Where should it go?');
   assert.doesNotMatch(askExcerpt(r.ask), /!\[|srv\/fff/);
+});
+
+// ---------------------------------------------------------------- previews in the card (w1602)
+
+/** A review folder of a request in the test's review root, files oldest first (their mtimes differ). */
+function reviewFolder(env: ReturnType<typeof setup>, topic: string, names: string[]) {
+  const dir = path.join(env.dir, '_review', topic);
+  fs.mkdirSync(dir, { recursive: true });
+  names.forEach((n, i) => {
+    const f = path.join(dir, n);
+    fs.writeFileSync(f, 'x');
+    const at = new Date(Date.now() - (names.length - i) * 60_000);
+    fs.utimesSync(f, at, at);
+  });
+  return dir.replace(/\\/g, '/');
+}
+
+const WARDEN = {
+  question: 'Is the Warden halo right as it is?',
+  options: [
+    { label: 'OK as is', description: 'Ship the halo from w77 unchanged.', recommended: true },
+    { label: 'Add beads to the halo', description: 'Re-record w77 with beads.' },
+  ],
+};
+
+test("w1602: a question that names a request with review media and carries none is refused, listing the newest files; the same call again goes through", async (t) => {
+  const env = setup(t);
+  const dir = reviewFolder(env, 'w77-warden', ['old.mp4', 'mid.png', 'new.mp4']);
+  reviewFolder(env, 'w78-other', ['unrelated.png']);
+  const ben = env.o.personalFor(BEN);
+  const first = await env.call(ben.info, ASK_TOOL, WARDEN);
+  assert.equal(first.isError, true);
+  assert.match(first.text, /Not shown yet: your question names w77/);
+  assert.match(first.text, /in the card/);
+  assert.ok(first.text.includes(`![new.mp4](<${dir}/new.mp4>)`), first.text);
+  assert.ok(first.text.indexOf('new.mp4') < first.text.indexOf('mid.png') && first.text.indexOf('mid.png') < first.text.indexOf('old.mp4'), 'newest first');
+  assert.doesNotMatch(first.text, /unrelated/);
+  // Nothing was shown, and the same call again (the media is not for this question) is shown as it is.
+  const again = await env.call(ben.info, ASK_TOOL, WARDEN);
+  assert.equal(again.isError, false, again.text);
+  assert.match(again.text, /Shown to Ben as 2 buttons/);
+});
+
+test('w1602: media in the question or in any option lets the call through at once; so does a request without review media', async (t) => {
+  const env = setup(t);
+  const dir = reviewFolder(env, 'w77', ['clip.mp4']);
+  const ben = env.o.personalFor(BEN);
+  const inQuestion = await env.call(ben.info, ASK_TOOL, { ...WARDEN, question: `Is the Warden halo of w77 right? ![clip](<${dir}/clip.mp4>)` });
+  assert.equal(inQuestion.isError, false, inQuestion.text);
+  const inOption = await env.call(ben.info, ASK_TOOL, { question: 'Is the halo of w77 right?', options: [{ label: 'OK as is', description: `Ship it. ![clip](<${dir}/clip.mp4>)` }, { label: 'Re-record', description: 'Beads.' }] });
+  assert.equal(inOption.isError, false, inOption.text);
+  const noFolder = await env.call(ben.info, ASK_TOOL, { question: 'Merge w999?', options: [{ label: 'Merge w999', description: 'Now.' }, { label: 'Hold w999', description: 'Later.' }] });
+  assert.equal(noFolder.isError, false, noFolder.text);
+  // A question that names no request is no business of the review folders.
+  assert.equal((await env.call(ben.info, ASK_TOOL, QUESTION)).isError, false);
+});
+
+test('w1602: the brief tells the orchestrator a visual question carries its previews in the card', async (t) => {
+  const env = setup(t);
+  const ben = env.o.personalFor(BEN);
+  const prompt = (env.agents.orchestratorOptions(ben.info) as { systemPrompt: { append: string } }).systemPrompt.append;
+  assert.match(prompt, /A visual question carries its stills and clips in the question field/);
+});
+
+test('w1602: a refused call is no question: its click is refused too, whatever its card shows', async (t) => {
+  const env = await asked(t);
+  env.store.append(env.id, { kind: 'tool_result', toolUseId: 'tu-ask', isError: true, text: 'Not shown yet: …' });
+  assert.throws(() => env.o.answerWords(env.id, env.ask.seq, 0), /refused when it was asked/);
 });

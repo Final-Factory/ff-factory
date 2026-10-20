@@ -126,6 +126,33 @@ function nameIn(name: string, folders: readonly string[], o: ReviewMediaOptions)
   return undefined;
 }
 
+/**
+ * The stills and clips of each request id's review folder (`root/w1465` or a topic `root/w1465-warden`), newest first (at
+ * most MEDIA_PER_FOLDER), for the ids that have any. What a question about a request's visual work should carry
+ * (ask_person, w1602).
+ */
+export function previewsOf(ids: readonly string[], o: ReviewMediaOptions): { id: string; files: string[] }[] {
+  if (!isDir(o.root)) return [];
+  const root = path.resolve(o.root);
+  let topics: string[];
+  try {
+    topics = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => e.name);
+  } catch {
+    return [];
+  }
+  const out: { id: string; files: string[] }[] = [];
+  for (const id of ids) {
+    const key = id.toLowerCase();
+    const files = topics
+      .filter((t) => t.toLowerCase() === key || t.toLowerCase().startsWith(`${key}-`))
+      .flatMap((t) => mediaIn(path.join(root, t)))
+      .sort((a, b) => mtime(b) - mtime(a) || b.localeCompare(a))
+      .slice(0, MEDIA_PER_FOLDER);
+    if (files.length) out.push({ id: key, files });
+  }
+  return out;
+}
+
 /** A still or a clip as the page shows it inline. */
 export const mediaLine = (p: string) => `![${p.split(/[\\/]/).pop() ?? p}](<${p}>)`;
 

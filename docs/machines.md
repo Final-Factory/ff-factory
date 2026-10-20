@@ -755,6 +755,13 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   chat's line ("waits on Lothsahn") and calls nobody. `slotCall` in `shared/fleet.ts`. The slot drops its FREE chip
   while it calls you. Placement still counts it free: a stopped worker that waits on a person does not hold its sandbox
   (`occupies`, `server/placeAgain.ts`), and the row's tooltip says so.
+  **Who sees the button** (w1599, lothsahn: "Give everyone a button to go to the live view even if it's not theirs"): whenever a
+  worker in the slot streams a Live view, everyone who may watch it sees "Live view: go" on the slot's row: the session's
+  requester (`requestedBy`, `lastRequestedBy`) and the owners, the live-view access rule (`LiveHub.canWatch`). Only the person
+  the view waits on gets the amber pill above, with the FREE chip dropped; for everyone else it is `kind: 'watch'`, the board's
+  outlined chip (`fl-chip fl-call-quiet`), at the same size and on the same text edge, which calls nobody: the row keeps its
+  state and FREE chip and shows no "Asked you". A member who did not ask for the worker sees no button. A person asked a
+  question by another worker in the same slot (no view) sees "Asked you" and no button.
 
 ![The sidebar grouped by computer](images/fleet-sidebar-desktop-chromium.png)
 ![The Overview board](images/fleet-overview-desktop-chromium.png)
@@ -857,7 +864,7 @@ LothDesktop and Beast, not just when BEAST is full").
   the editor and RAM-for-Unity limits (the 85% `RAM_BUSY_PCT` line is the game's, an editor's 8-12 GB). What still applies: the
   computer's agent cap (the agents mid-turn, what start_agent's queue counts: `machines.ts` `capFull`), a seat in some
   sandbox (`max_agents_per_sandbox` less the agents mid-turn there, or room to make a sandbox; a second agent in a busy
-  sandbox is fine when the dispatcher says so (`start_agent` `extra_agent: true`; w1089): it works in its own clone in its temp folder, not in the sandbox's game tree), the person's own Claude
+  sandbox is fine when the dispatcher says so (`start_agent` `extra_agent: true`; w1089): it works in its own clone in its temp folder, not in the sandbox's game tree, and its start never switches the sandbox's branch, w1607), the person's own Claude
   pool (a held pool queues the worker's first prompt, docs/vault.md), `placement.hold` (a held computer gets nothing) and
   `placement.avoid` (last). The test is `hasAgentRoom` / `agentBusyReasons` (`server/placement.ts`), side by side with the
   game test `hasRoom`; `roomNow` returns both, and `pickComputer(…, 'agent')` picks the computer (the most agent room,
@@ -914,11 +921,55 @@ LothDesktop and Beast, not just when BEAST is full").
     sees the hosts file change within a minute. Tests: `server/ghLogin.test.ts`, and the w1463 case in
     `server/orchestrators.test.ts` (a daemon with a stand-in gh whose output carries a token, through list_machines,
     start_agent and the brief).
+- **Work that needs a Live view goes to BEAST first** (w1600, Ben, 2026-10-19: "can you prioritize beast for stuff that
+  needs live view? live view is often too slow"; the w1466 Siege Carapace view had run at about 3 fps on lothdesktop). A
+  Live view streams the sandbox editor's game to a person ([live-view.md](live-view.md)), so the editor's machine sets its
+  frame rate.
+  - **Which work.** Game work (never work that needs only an agent slot) whose worker started a Live view, or whose title,
+    brief or people's notes ask for one (`needsLive`, `shared/capacity.ts`). A worker's first `live_view start` records it
+    on the request (`WorkItem.liveView`, logged "it needs one from now on"): Ben asks for a view mid-request ("i want live
+    view", w1468), so a field at filing would miss most of them. `list_work` says "Needs a Live view" on such a request.
+  - **Where.** `config placement.live`, machine ids in order (`set_app_config placement.live`; unset: `beast`,
+    `DEFAULT_LIVE` in `server/placement.ts`): the first with room for game work that is not held or avoided; else the
+    general placement (placement.prefer, then by room), and the line says why. The Capacity block reads "Next Live view
+    work (game work whose worker streams a Live view, w1600): beast (…)" beside "Next new game-repo work", and `start_agent`
+    or `create_sandbox` placing Live view work elsewhere add the note. All other game work keeps `placement.prefer`.
+  - **Moving one already elsewhere** (`stop_agent` `move_to`, `Agents.moveWorker`). A worker between turns (never mid-turn)
+    is moved to a computer with room that is not held: its process stops, its view ends, its sandbox's uncommitted work
+    is saved and pushed on its branch (w656), and each open request it serves is handed back by the w1532 route
+    (`Orchestrators.handBack` with `to`): taken off it, Queued for that computer (`queuedFor.needs`), with the branch and a
+    note carrying the view's materials, fps and width. The dispatcher hears "[ledger] MOVED (w1600)" with the steps
+    (`switch_branch` a free sandbox there to the branch, then `start_agent` with the work_id), and the new worker's
+    handover says "Moved (w1600)" and what to stage. A conversation does not cross computers (Claude Code keeps its
+    transcript on the old one's disk), so the request goes on in a new session; `PlaceAgain` still places a resumed worker
+    only on its own machine.
+  - **BEAST's bench lock.** Timed runs there hold `$FF_WORKER_ROOT/tmp/bench.lock` for their whole length (the game repo's
+    `scripts/bench/quiet_gate.sh`, w1438). The daemon reads it with its stats (`machine/benchLock.ts`; one older than 40
+    minutes is a killed run's and does not count) and the Capacity line shows "its bench lock is held since HH:MMZ (owner):
+    a timed run". While it is held, a worker on Live view work there is refused `unity start`/`restart` and `live_view
+    start` with "Not now (w1600)" and waits (wake_me) for the lock: a Live view editor in play mode takes CPU and GPU the
+    run measures, and a lower process priority would still share the GPU, so it waits rather than run lower. Other editors
+    are the bench's own quiet gate's business.
+  - Tests: `server/placement.test.ts`, `server/benchLock.test.ts`, the w1600 case in `server/orchestrators.test.ts`.
+- **Builds run on BEAST first, and a coming build clears it** (w1606, Ben, 2026-10-20: "when you know builds are coming
+  up, we also prioritize using beast for builds because its faster. so when it's coming time, move work off beast, or
+  when apropriate, pause work and finish the build, then resume. make this a rule of FFF").
+  - Which work: game work that builds a player, once its worker declares a build (`build_plan coming`,
+    `WorkItem.build`) or when its title, brief or notes name one (`needsBuild`, `shared/capacity.ts`: "player build",
+    "release build", "build a player"...; a bare "build" is not one).
+  - Where: the Capacity block's "Next build work (game work that builds a player, w1606): beast (…)", from `config
+    placement.build` (unset: `beast`, `DEFAULT_BUILD`), else the general placement.
+  - A build declared coming holds its computer for new work at once (`Agents.placement()` adds `BuildPlans.holds()`),
+    and when due moves its workers between turns elsewhere, pauses the ones that cannot move and asks the ones mid-turn
+    to pause at a safe point; `build_plan start` waits for the bench lock and (up to 20 minutes) for those turns; `done`
+    resumes them. The paused workers' resumes are held by `machineHold` (`BuildPlans.resumeHold`), not by the computer's
+    hold, so the builder and a running Live view go on. Details: [orchestrators.md](orchestrators.md), "Builds clear BEAST".
+  - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators.test.ts`.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
   computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it
   (FF Factory's own repo and its deploys are no longer such a pin: that work goes by agent slot, above). A worker going on in its own sandbox stays
-  there, and running workers are never moved.
+  there, and running workers are never moved; one between turns on Live view work moves with `stop_agent` `move_to` (above), and a build declared coming moves or pauses the workers on its computer (above).
 - **Released sandboxes** (w640, Lothsahn on 2026-10-07: "Can we not reserve slots for workers that resume a long time
   from now?"; `server/placeAgain.ts`). That afternoon LothDesktop's slot1 counted as taken with no live agent, only two
   stopped workers whose check-ins were the next day, and five more sandboxes on BEAST and LothDesktop were held the same
@@ -1064,7 +1115,14 @@ LothDesktop and Beast, not just when BEAST is full").
     fresh branch, `sandbox/<slot>-<request id>` (`ffbox-f/…` for FFBox work) from origin/master, so the new worker
     never commits on the other's branch. That switch pushes any commits of the old branch no remote has first
     (`switch_branch`'s rule), and it frees the branch for checkout elsewhere (git allows a branch in one worktree only).
-    The tool's answer says it was handed over.
+    The tool's answer says it was handed over. **Never under another worker** (w1607, `Agents.prepareForNewWork`;
+    2026-10-20 04:35 UTC, beast/slot1: w1602's start switched the worktree under w1440's Unity batch build, because an
+    earlier w1440 session had released that same branch): no switch while a worker that has not released the sandbox
+    is there (the branch is its now), while the sandbox is busy (a worker there mid-turn, between turns with a
+    background job such as a build, a test or a bench, or a timed run from its folder holding the machine's bench lock:
+    `Agents.busyIn`), or for work that needs only an agent seat (`extra_agent`, or a request on another repo: it works
+    in its own clone). The answer then says "Not handed over" and why. Game work never starts beside a busy worker,
+    `extra_agent` or not: `start_agent` refuses it ("sandbox … is busy"), so it goes to a FREE sandbox or is queued.
   - **When it resumes** (its check-in, or anyone's message), it is placed again like new work: its own sandbox if that
     is still free (switched back to its branch if someone switched it), else a free sandbox on the same machine whose
     editor is not running first, stopped and switched to its branch (`switch_branch`, so a sandbox with uncommitted

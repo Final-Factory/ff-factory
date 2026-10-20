@@ -123,7 +123,8 @@ stop with a design question. The classification and its reason are on the reques
   input** tab (`#/dispatcher/waiting`, `web/src/components/WaitingTab.tsx`, the list from `shared/waiting.ts`) lists every
   open request whose live state is Waiting on input: "Waiting on you" first (a reviewer's approvals, the dispatcher's
   question to you, a design question for you, a worker's wait that names you), then "Waiting on someone else". Oldest
-  first; a wait past a day is amber and past three days "stale". Each card says what is asked, FF Factory's recommendation
+  first; a wait past a day is amber and past three days "stale". Since w1597 each card is a question card (one question, its
+  answers as buttons, previews; the rest behind Details: orchestrators.md, "The question card"). Before it, each card said what is asked, FF Factory's recommendation
   where its triage gives one (a possible repeat first, else an obvious bug, a trusted person's request, a regression or an
   FFBox desync PR; a needs-human report gets none, it is the reviewer's call), the evidence (source, reporter, version, the
   players' words as text, the triage, repeats) and the buttons: Approve, Decline with a reason (`POST

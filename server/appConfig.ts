@@ -105,6 +105,10 @@ export const SETTABLE_KEYS = [
   'placement.avoid',
   // Computers that take no new work at all, with who holds them and why (w1089): the m5 held for Ben's testing.
   'placement.hold',
+  // Where work that needs a Live view goes first (w1600, docs/machines.md "Placing work"); unset: beast.
+  'placement.live',
+  // Where builds run first, and which computers a build declared coming clears (w1606, docs/orchestrators.md); unset: beast.
+  'placement.build',
   // When the orchestrators compact their conversations by themselves (w535, server/autoCompact.ts): the context in
   // tokens, and a turn's cost in USD. 0 turns either trigger off.
   'orchestrator.compactAtTokens',
@@ -608,13 +612,16 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return checkDevRequests(value);
     case 'intake.reviewers':
       return checkReviewers(value, users ?? []);
-    case 'placement.prefer': {
+    case 'placement.prefer':
+    case 'placement.live':
+    case 'placement.build': {
+      const name = key;
       const list = typeof value === 'string' ? value.split(',') : value;
-      if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) throw new Error('placement.prefer is a list of computers, first choice first: machine ids such as "lothdesktop" (or one comma-separated string)');
+      if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) throw new Error(`${name} is a list of computers, first choice first: machine ids such as "lothdesktop" (or one comma-separated string)`);
       const ids = [...new Set(list.map((x) => placeId(x as string)).filter(Boolean))];
       const bad = ids.find((x) => !MACHINE_KEY.test(x) || x === 'host');
-      if (bad) throw new Error(`placement.prefer: "${bad.slice(0, 40)}" is not a machine id (letters, digits, dashes)${NO_HOST}`);
-      if (ids.length > 12) throw new Error('placement.prefer names at most 12 computers');
+      if (bad) throw new Error(`${name}: "${bad.slice(0, 40)}" is not a machine id (letters, digits, dashes)${NO_HOST}`);
+      if (ids.length > 12) throw new Error(`${name} names at most 12 computers`);
       return ids.length ? ids : undefined;
     }
     case 'placement.avoid':
@@ -833,9 +840,9 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   }
   // Live: the live view reads cfg.live.enabled at every use (server/live.ts); null is the default, off.
   else if (key === 'live.enabled') cfg.live = v === undefined ? undefined : { ...cfg.live, enabled: v as boolean };
-  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold') {
+  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build') {
     const p = { ...cfg.placement };
-    const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : 'hold';
+    const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : 'hold';
     if (v === undefined) delete p[field];
     else (p as Record<string, unknown>)[field] = v;
     cfg.placement = p;

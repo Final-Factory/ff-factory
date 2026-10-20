@@ -52,11 +52,11 @@ import type { HandBack } from './machinePause.ts';
 import { heldText, roomIds, type RoomNow } from './placement.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
-import { askExcerpt, answerOf, checkAsk, isAskTool, type Ask } from '../shared/ask.ts';
+import { askExcerpt, answerOf, checkAsk, isAskTool, splitMedia, type Ask } from '../shared/ask.ts';
 import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
-import { reviewRootOf } from './reviewMedia.ts';
+import { mediaLine, previewsOf, reviewRootOf } from './reviewMedia.ts';
 import { alreadySent, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
@@ -1008,21 +1008,26 @@ export class Orchestrators {
     if (!isOpen(w)) return;
     const from = `${h.machine}${h.sandbox ? `/${h.sandbox}` : ''}`;
     const now = this.now().toISOString();
-    w.handedBack = { at: now, from, session: s.id, ...(h.branch ? { branch: h.branch } : {}), why: h.why, note: clip(h.note, 600), how: h.how, ...(h.saved ? { saved: h.saved } : {}), ...(h.message ? { message: clip(h.message, 2000) } : {}) };
-    this.moveOff(w, s.id, `handed back: ${h.machine} is ${h.why} (${h.how})`);
+    w.handedBack = { at: now, from, session: s.id, ...(h.branch ? { branch: h.branch } : {}), why: h.why, note: clip(h.note, 600), how: h.how, ...(h.saved ? { saved: h.saved } : {}), ...(h.message ? { message: clip(h.message, 2000) } : {}), ...(h.to ? { to: h.to } : {}) };
+    // A move (w1600, stop_agent move_to) names the computer it goes to and says its own reason; a pause says the machine's.
+    const because = h.to ? `it moves to ${h.to}: ${h.why}` : `${h.machine} is ${h.why}`;
+    this.moveOff(w, s.id, `${h.to ? 'moved' : 'handed back'}: ${because} (${h.how})`);
     w.status = 'queued';
-    w.queuedFor = { at: now };
-    this.stamp(w, `handed back from ${from}: queued for another computer, from branch ${h.branch ?? 'unknown'}; note: ${clip(h.note, 200)}${h.saved ? `; ${h.saved}` : ''}`);
+    w.queuedFor = { at: now, ...(h.to ? { needs: [h.to] } : {}) };
+    this.stamp(w, `${h.to ? 'moved' : 'handed back'} from ${from}: queued for ${h.to ?? 'another computer'}, from branch ${h.branch ?? 'unknown'}; note: ${clip(h.note, 200)}${h.saved ? `; ${h.saved}` : ''}`);
     this.store.putWork(w);
     const agent = needsOf(w) === 'agent';
     const facts = this.roomNow();
     const room = roomIds(facts, needsOf(w));
     const where = room.length ? `${agent ? 'Agent slots' : 'Room'} now: ${room.join(', ')}.` : `No computer has ${agent ? 'an agent slot' : 'room'} now: it stays Queued, and the capacity ping names it when one frees.`;
+    const on = h.to ? `on ${h.to}` : 'on another computer';
     const how = agent
-      ? `start_agent with work_id "${w.id}" in a FREE sandbox on another computer${h.branch ? `, and say in your text that it continues from the pushed branch ${h.branch} of its repository (in its own clone)` : ''}`
-      : `${h.branch ? `switch_branch a FREE sandbox on another computer to "${h.branch}" (it fetches the pushed branch), then ` : ''}start_agent with work_id "${w.id}" in that sandbox`;
+      ? `start_agent with work_id "${w.id}" in a FREE sandbox ${on}${h.branch ? `, and say in your text that it continues from the pushed branch ${h.branch} of its repository (in its own clone)` : ''}`
+      : `${h.branch ? `switch_branch a FREE sandbox ${on} to "${h.branch}" (it fetches the pushed branch), then ` : ''}start_agent with work_id "${w.id}" in that sandbox`;
+    const head = h.to ? `[ledger] MOVED (w1600): ${w.id}` : `[ledger] HANDED BACK (w1532): ${w.id}`;
+    const place = h.to ? `Place it on ${h.to}` : 'Place it on a computer that is not paused';
     this.toDispatcher(
-      `[ledger] HANDED BACK (w1532): ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) was taken off worker ${s.id} on ${from}, because ${h.machine} is ${h.why} (${h.how}). ${h.branch ? `Its work is on the branch ${h.branch}` : 'Its branch is unknown'}${h.saved ? `; ${h.saved}` : ''}. Place it on a computer that is not paused: ${how}. The new worker's handover carries the branch, its note${h.message ? ' and the message that was waiting for it' : ''}. ${where} Its note: ${clip(h.note, 300)}`,
+      `${head} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) was taken off worker ${s.id} on ${from}, because ${because} (${h.how}). ${h.branch ? `Its work is on the branch ${h.branch}` : 'Its branch is unknown'}${h.saved ? `; ${h.saved}` : ''}. ${place}: ${how}. The new worker's handover carries the branch, its note${h.message ? ' and the message that was waiting for it' : ''}. ${where} Its note: ${clip(h.note, 300)}`,
     );
   }
 
@@ -1429,8 +1434,37 @@ export class Orchestrators {
     if (!owner) throw new Error('only a person’s own orchestrator asks with buttons');
     const checked = checkAsk(input);
     if ('problem' in checked) throw new Error(checked.problem);
+    const missing = this.previewsMissing(chat.info.id, checked.ask, owner.displayName);
+    if (missing) throw new Error(missing);
     const pick = checked.ask.options[0].recommended ? `, ${checked.ask.options[0].label} recommended` : '';
     return `Shown to ${owner.displayName} as ${checked.ask.options.length} buttons${pick}, and a last "Chat more about this" that only opens their reply box. End your turn now. Their click arrives as their own message (their words are the label, your question quoted under the reply mark), in their own turn; they may also just type. Do not ask it again in text.`;
+  }
+
+  /** Questions refused once for their missing previews (w1602), by chat and question: the same call again goes through. */
+  private readonly askNoPreviews = new Set<string>();
+
+  /**
+   * w1602 (Ben, 2026-10-19, after a question about the Warden whose clips sat in the message above the card: "when you ask
+   * me about visual things you have to include the previews"): a question or option that names a request whose review
+   * folder holds stills or clips, while the question and every option carry none, is refused with the newest files as
+   * ready-to-paste lines. Refused rather than attached: a folder holds every iteration, and only the orchestrator knows which
+   * stills belong to which option. A repeat of the same call goes through (the question may not be about the folder's media).
+   */
+  private previewsMissing(sessionId: string, ask: Ask, person: string): string | undefined {
+    const parts = [ask.question, ...ask.options.flatMap((o) => [o.label, o.description])];
+    if (parts.some((p) => splitMedia(p).media.length)) return undefined;
+    const ids = [...new Set(parts.flatMap((p) => [...splitMedia(p).text.matchAll(/\bw\d+\b/gi)].map((m) => m[0].toLowerCase())))];
+    const found = previewsOf(ids, { root: reviewRootOf(this.d.cfg) });
+    if (!found.length) return undefined;
+    const key = `${sessionId}\n${JSON.stringify([ask.question, ask.options.map((o) => [o.label, o.description])])}`;
+    if (this.askNoPreviews.has(key)) return undefined;
+    this.askNoPreviews.add(key);
+    const lines = found.map((f) => `${f.id} (newest first):\n${f.files.slice(0, 6).map(mediaLine).join('\n')}`).join('\n');
+    return (
+      `Not shown yet: your question names ${found.map((f) => f.id).join(', ')}, whose review folder holds stills or clips, but neither the question nor any option carries one, and ${person} sees only what is IN the card (the message above it does not stand in). ` +
+      'A question about visual work carries its previews in the card: put each still or clip as ![what it shows](<absolute path>) in `question` (up to 4) and in the `description` of the option it belongs to (up to 4 each). Pick the ones that show what is asked; these are the newest:\n' +
+      `${lines}\nIf none of them is relevant to this question, call ask_person again with the same question and options and it is shown as it is.`
+    );
   }
 
   /** The ask_person call at `seq` of a chat and its person's answer to it, if any (a click on an option; typing leaves it open). */
@@ -1441,6 +1475,7 @@ export class Orchestrators {
     const later = this.store.readTranscriptFrom(sessionId, seq);
     const ev = later.find((e) => e.seq === seq);
     if (!ev || ev.kind !== 'tool_use' || !isAskTool(ev.name)) throw new Error(`#${seq} is not a question with buttons`);
+    if (later.some((e) => e.kind === 'tool_result' && e.toolUseId === ev.toolUseId && e.isError)) throw new Error(`#${seq} was refused when it was asked, so it was never shown`);
     const checked = checkAsk(ev.input);
     if ('problem' in checked) throw new Error(checked.problem);
     const humans = later.filter((e): e is Extract<typeof e, { kind: 'user' }> => e.kind === 'user' && e.from === 'human');
@@ -1905,7 +1940,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; override_gate?: string }): string {
+  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; override_gate?: string; asks?: Ask[] }): string {
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
     const into = input.into ? this.requireWork(input.into) : undefined;
@@ -1949,7 +1984,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       what = `linked to ${ids.map((sid) => this.workerLine(sid)).join(', ')}, already on it`;
     } else if (input.action === 'ask') {
       w.asks++;
-      w.question = { text: clip(note, 1000), at: this.now().toISOString() };
+      w.question = { text: clip(note, 1000), at: this.now().toISOString(), ...(input.asks?.length ? { asks: input.asks } : {}) };
       what = 'a question';
     } else if (input.action === 'queue') {
       // A gated request is not waiting for capacity (w754): queueing it would drop the gates.
@@ -4342,7 +4377,17 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     // A gate that died is the person's to rule on (w754): none of its gates is kept through that question.
     w.blocked = undefined;
     w.alsoBlocked = undefined;
-    w.question = { text, at: this.now().toISOString() };
+    // The card's question and answers (w1597): the gate's detail stays in `text`, behind Details.
+    const asks: Ask[] = [
+      {
+        question: `What it waited for ended without delivering. Is "${clip(w.title, 120)}" still needed?`,
+        options: [
+          { label: 'Yes, keep it open and start it now', description: 'The dispatcher starts it, or asks what it should wait for instead.' },
+          { label: 'No, close it: it is not needed any more', description: 'The request closes; nothing more is worked on it.' },
+        ],
+      },
+    ];
+    w.question = { text, at: this.now().toISOString(), asks };
     this.stamp(w, `blocker closed without delivering: ${why}; asked ${w.requestedBy.displayName}`);
     this.store.putWork(w);
     this.askPerson(w);

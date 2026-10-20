@@ -16,7 +16,7 @@ const CMD = fs.readFileSync(new URL('../scripts/worker/join.cmd', import.meta.ur
 async function serve(over: Partial<MachineJoinDeps> = {}, device: TailnetDevice | null = { name: 'desktop-coosego', tags: [] }) {
   const codes = new JoinCodes(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoinhttp-')), 'machine-joins.json'));
   const records = new Map<string, { root?: string; awaitingInstall?: string }>();
-  const enrolled: { machineId: string; tailnetName: string; limits: Required<JoinLimits>; portalUrl: string; by: string }[] = [];
+  const enrolled: { machineId: string; tailnetName: string; limits: Required<JoinLimits>; portalUrl: string; by: string; platform?: string }[] = [];
   const reports: string[] = [];
   const d: MachineJoinDeps = {
     codes,
@@ -89,7 +89,7 @@ test('join http: a check changes nothing; the redeem makes the record and answer
   assert.equal(r.status, 200);
   assert.equal(r.body.credential, FAKE_CRED);
   assert.equal(r.body.last4, FAKE_CRED.slice(-4));
-  assert.deepEqual(s.enrolled, [{ machineId: 'coosego', tailnetName: 'desktop-coosego', limits: { maxSandboxes: 4, maxAgentsPerSandbox: 2, maxUnity: 1 }, portalUrl: 'https://fff.tail1234.ts.net', by: 'Lothsahn' }]);
+  assert.deepEqual(s.enrolled, [{ machineId: 'coosego', tailnetName: 'desktop-coosego', limits: { maxSandboxes: 4, maxAgentsPerSandbox: 2, maxUnity: 1 }, portalUrl: 'https://fff.tail1234.ts.net', by: 'Lothsahn', platform: 'win32' }], "w1603: the record says it is a Windows PC from the redeem on, not a Mac");
   assert.equal(s.reports.length, 1);
   assert.ok(s.reports[0].includes(`...${last4}`) && !s.reports[0].includes(FAKE_CRED), 'the report names the code by its last four, never the credential');
 
@@ -163,7 +163,10 @@ test('join http: /join is a page for the new PC with the download; the installer
   assert.equal(r.headers.get('content-disposition'), 'attachment; filename="ff-factory-join.cmd"');
   const cmd = await r.text();
   assert.ok(!/[^\r]\n/.test(cmd), 'CRLF line endings only (cmd.exe misreads LF-only batch files)');
-  assert.ok(cmd.includes(`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://fff.tail1234.ts.net/join/windows.ps1' | iex"`), cmd);
+  // w1603: downloaded to a file and run with -File, never `-Command "irm ... | iex"` (Defender's "Access is denied.").
+  assert.ok(cmd.includes(`curl.exe -fsS --connect-timeout 20 --retry 2 -o "%FF_JOIN_PS1%" "https://fff.tail1234.ts.net/join/windows.ps1"`), cmd);
+  assert.ok(cmd.includes(`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%FF_JOIN_PS1%"`), cmd);
+  assert.doesNotMatch(cmd, /-Command/);
   assert.ok(cmd.includes('set "FF_JOIN_CODE="\r\n'), 'no code in the download anyone on the tailnet may take: the bootstrap asks');
   assert.ok(!cmd.includes('__FF_'), 'every mark filled');
 });

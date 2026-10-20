@@ -460,10 +460,45 @@ test('fleet: a slot lists the chats that matter now, folds the rest behind "+N o
   await expect(page).toHaveURL(/#\/live\/l-knob$/);
 });
 
+test("fleet: an owner sees a quiet \"Live view: go\" on a slot whose view is for someone else's request, beside the amber call (w1599)", async ({ page }) => {
+  // lothsahn: "Give everyone a button to go to the live view even if it's not theirs". sb2's worker waits on the viewer (amber);
+  // sb1's idle reviewer was asked for by Lothsahn and streams a view the viewer, an owner, may watch (quiet, outlined chip).
+  const both = (s: AppState): AppState => {
+    const f = waitingInSb2({ live: true })(s);
+    const view: LiveViewInfo = { liveId: 'live-sb1', sessionId: 'l-review', machineId: 'lothdesktop', sandbox: 'sb1', state: 'live', detail: '', fps: 15, width: 960, materials: ['VfxComet'], startedAt: min(8), updatedAt: min(0), frames: 100 };
+    // A worker copies its orchestrator's lastRequestedBy, which an earlier test of the shared server may have set to the viewer.
+    const lothsahn = { userId: 'lothsahn', displayName: 'Lothsahn' };
+    const sessions = f.sessions.map((x) => (x.id === 'l-review' ? { ...x, requestedBy: lothsahn, lastRequestedBy: lothsahn } : x));
+    return { ...f, sessions, live: [...(f.live ?? []), view] };
+  };
+  await fixedFleet(page, '#/', both);
+  const sidebar = await openSidebar(page);
+  const sb2 = sidebar.getByTestId('fl-sandbox-lothdesktop/sb2');
+  const sb1 = sidebar.getByTestId('fl-sandbox-lothdesktop/sb1');
+  await expect(sb2.getByTestId('fl-call')).toHaveClass(/needs-you/);
+  await expect(sb1.getByTestId('fl-call')).toHaveText('Live view: go');
+  await expect(sb1.getByTestId('fl-call')).toHaveClass(/fl-call-quiet/);
+  await expect(sb1.getByTestId('fl-call')).not.toHaveClass(/needs-you/);
+  // It calls nobody: the row keeps its state (no "Asked you"), no amber badge.
+  await expect(sb1.getByTestId('fl-sandbox-row').locator('.row-sub')).not.toContainText(/Asked you/);
+  await expect(sb1.getByTestId('fl-sandbox-row').locator('.badge-amber')).toHaveCount(0);
+  // The quiet one is as tall as the amber one and on the same text edge.
+  const quiet = (await sb1.getByTestId('fl-call').boundingBox())!;
+  const amber = (await sb2.getByTestId('fl-call').boundingBox())!;
+  const name = (await sb1.getByTestId('fl-sandbox-row').locator('.row-title').boundingBox())!;
+  expect(Math.abs(quiet.height - amber.height)).toBeLessThan(1.5);
+  expect(Math.abs(quiet.x - name.x), "the button starts on the row's text edge").toBeLessThan(1.5);
+  if (isMobile(page)) expect(quiet.height).toBeGreaterThanOrEqual(36);
+  await sb1.evaluate((el) => el.scrollIntoView({ block: 'start' })); // both slots in the shot, on a phone too
+  await proof(page, 'sidebar-slot-call-quiet');
+  await sb1.getByTestId('fl-call').click();
+  await expect(page).toHaveURL(/#\/live\/l-review$/);
+});
+
 test("fleet: the request's card on the Dispatcher's Waiting tab opens the waiting worker's Live view too (w1430)", async ({ page }) => {
   await fixedFleet(page, '#/dispatcher/waiting', waitingInSb2({ live: true }));
   const card = page.getByTestId('wait-w1325');
-  await expect(card.getByTestId('wait-live-w1325')).toHaveText('Live view: go');
+  await expect(card.getByTestId('wait-live-w1325')).toHaveText('Watch it in the Live view');
   await card.getByTestId('wait-live-w1325').click();
   await expect(page).toHaveURL(/#\/live\/l-knob$/);
 });

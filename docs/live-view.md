@@ -87,7 +87,9 @@ frames that pile up in socket buffers on a link slower than the stream.
 - **How you get there:** the session's header shows "Live view" while a view is running. Since w1430 the sidebar shows
   "Live view: go" on the slot's row when its worker waits on you, or is between turns with its view up and you asked for
   it ([machines.md](machines.md), "In the web UI"), and the request's card on the Dispatcher's "Waiting on input" tab has
-  the same button.
+  the same button. Since w1599 every person who may watch a running view (the requester and the owners, below) sees the
+  button on the slot's row whenever the view is up, quiet and outlined when it is not waiting on them; the amber one stays
+  for the person it waits on. Anyone else sees none.
 
 | Route | What it does |
 |---|---|
@@ -154,6 +156,26 @@ Now:
   line (`liveLostNote`): start the editor, stage the scene, and `live_view start` with the same materials, fps and width
   before answering. A stopped worker whose sandbox stays its (unsaved work) past the hold has its view ended the same
   way, so its editor can idle-stop.
+
+## On BEAST first (w1600)
+
+A build declared coming on BEAST (w1606, docs/orchestrators.md "Builds clear BEAST") leaves a worker whose Live view
+runs alone: a view a person may be steering comes before a build, and the build runs beside it.
+
+Ben, 2026-10-19: "can you prioritize beast for stuff that needs live view? live view is often too slow". The view's frame
+rate is the sandbox editor's, so the machine matters:
+
+- **Placed there.** A request needs a Live view once its worker runs `live_view start` (`WorkItem.liveView`) or its words
+  ask for one, and it goes where the Capacity block's "Next Live view work" says: `placement.live`, BEAST unless set, else
+  the general placement ([machines.md](machines.md), "Placing work").
+- **Moved there.** A worker that waits on a person with its view up elsewhere is moved by the dispatcher with `stop_agent`
+  `move_to: "beast"`: its view ends, and its request goes to a new session on BEAST, whose handover carries the view's
+  materials, fps and width to stage again. A conversation does not move between computers.
+- **Never beside a timed run.** While BEAST's bench lock is held (`machine/benchLock.ts`), a worker on Live view work there
+  is refused its editor start and `live_view start` and waits for the lock.
+- **The numbers so far.** BEAST: 23.2 fps received at 30 asked, 960 px (w1398, below). lothdesktop: about 3 fps for the
+  w1466 view (the w1600 request), then 15 fps stream (its asked rate) at about 30 fps in game on 2026-10-20 03:36Z (its
+  worker's own report). The default 15 fps hides the difference on a light scene; heavy scenes and 30 fps show it.
 
 ## Measured, w1393 and w1398 (beast)
 

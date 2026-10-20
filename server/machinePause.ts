@@ -104,6 +104,11 @@ export interface HandBack {
   saved?: string;
   /** The message that would have resumed it (a held resume), for the next worker. */
   message?: string;
+  /**
+   * A move, not a pause (w1600, stop_agent move_to): the computer it goes to. `why` is then the move's reason, said as is
+   * ("its Live view goes to beast"), not the machine's pause.
+   */
+  to?: string;
 }
 
 export class MachinePauses {

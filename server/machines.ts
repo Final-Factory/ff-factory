@@ -13,7 +13,8 @@ import { emit, type Store } from './store.ts';
 import { COMPACTING, isMidTurn, type AutoCompaction, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
-import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type LinkUpdateFlags, type LinkUpdateReport, type ToDaemon } from './machineProtocol.ts';
+import { PendingCalls, UpdateBundles } from './machineLink.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -373,6 +374,7 @@ export class MachineManager {
     sessions.placeFull = (s) => this.placeFull(s);
     this.tokensFile = machineTokensFile(cfg.dataDir);
     this.joins = new JoinCodes(machineJoinsFile(cfg.dataDir));
+    this.bundles = new UpdateBundles({ dataDir: cfg.dataDir, root: ROOT });
     // A deploy runs in this process: one still marked at boot was cut short by a restart. Left 'deploying', the
     // offline watch (redeployDue) would never redeploy it; its daemon's hello clears the error if it did start.
     for (const m of store.machines.values()) {
@@ -795,7 +797,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; compact?: boolean; ghApp?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -905,6 +907,50 @@ export class MachineManager {
   /** Whether a connected daemon runs its agents in agent hosts that outlive it (w605): its hello said so. */
   agentHostsOf(id: string): boolean {
     return this.isOnline(id) && !!this.hellos.get(id)?.agentHosts;
+  }
+
+  /**
+   * Whether the portal updates, restarts and unloads this machine over its daemon's own link (w1596): a worker root install
+   * whose connected daemon offered `selfUpdate` in its hello. Otherwise those go over ssh, as before.
+   */
+  canLink(id: string): boolean {
+    return this.isOnline(id) && (this.hellos.get(id)?.selfUpdate ?? 0) >= 1 && !!this.store.machines.get(id)?.root;
+  }
+
+  /**
+   * Update a worker root machine over its daemon's link (w1596, server/machineLink.ts): the portal's own code, as a bundle the
+   * daemon checks, run by its update job, which puts the old code back when the new daemon does not come back. Resolves with
+   * the job's report (sent by the daemon that runs afterwards); rejects when the daemon refuses or nothing comes in time.
+   */
+  async linkUpdate(id: string, o: { form?: 'update' | 'tools'; flags?: LinkUpdateFlags; commit?: string; timeoutMs?: number } = {}): Promise<LinkUpdateReport> {
+    refuseInDryRun(`an update of ${id} over its link`);
+    if (!this.canLink(id)) throw new Error(`${id}'s daemon does not update over its link (offline, not a worker root install, or a daemon from before w1596)`);
+    const b = await this.bundles.prepare(o.commit);
+    this.bundles.offer(id, b);
+    const callId = randomUUID();
+    const form = o.form ?? 'update';
+    const report = this.linkReports.wait(callId, id, o.timeoutMs ?? (o.flags?.moveToDevDrive ? 4 * 3_600_000 : 25 * 60_000), `its ${form} job`);
+    report.catch(() => undefined);
+    const ack = this.linkAcks.wait(callId, id, 5 * 60_000, `the ${form} over its link`);
+    this.post(id, { type: 'self_update', id: callId, form, commit: b.commit, bundle: { sha256: b.sha256, size: b.size }, ...(o.flags && Object.keys(o.flags).length ? { flags: o.flags } : {}) });
+    console.log(`machine ${id}: ${form} over its link to ${b.commit.slice(0, 12)} (bundle ${b.size} bytes, sha256 ${b.sha256.slice(0, 12)}…), job ${callId.slice(0, 8)}`);
+    try {
+      await ack;
+    } catch (e) {
+      this.linkReports.settle(callId, e as Error);
+      throw e;
+    }
+    return report;
+  }
+
+  /** Restart a machine's daemon over its link (its agents run on), or unload it as removeMachine does over ssh (w1596). */
+  async linkControl(id: string, action: 'restart' | 'uninstall'): Promise<void> {
+    refuseInDryRun(`a daemon ${action} of ${id} over its link`);
+    if (!this.canLink(id)) throw new Error(`${id}'s daemon does not take a ${action} over its link`);
+    const callId = randomUUID();
+    const done = this.linkControls.wait(callId, id, 60_000, `the ${action}`);
+    this.post(id, { type: 'daemon_control', id: callId, action });
+    await done;
   }
 
   /** The protocol a connected daemon said hello with, or undefined. */
@@ -1476,7 +1522,9 @@ export class MachineManager {
     const { undeploy } = await import('./machineDeploy.ts');
     let note = '';
     try {
-      await undeploy(m.host, m.platform, m.appDir, !!m.local);
+      // Over the daemon's own link when it takes it (w1596): its unload job stops and unregisters it, as ssh would.
+      if (!m.local && this.canLink(m.id)) await this.linkControl(m.id, 'uninstall');
+      else await undeploy(m.host, m.platform, m.appDir, !!m.local);
     } catch (e) {
       note = ` (could not unload the daemon: ${(e as Error).message})`;
     }
@@ -1508,6 +1556,12 @@ export class MachineManager {
     if (action !== 'start' && live > 0 && !force && !keeps) throw new Error(`${m.id} has ${live} agent(s) running; a daemon ${action} stops them. Stop them first or pass force.`);
     // A stop is on purpose: its agents stay stopped. A restart resumes the ones it cut off mid-turn.
     if (action !== 'start') this.expectDrop(m.id, action === 'stop' ? false : 'was restarted (machine_daemon restart)');
+    // A restart goes over the daemon's own link when it takes one (w1596): it exits and its supervisor starts it again.
+    if (action === 'restart' && this.canLink(m.id)) {
+      await this.linkControl(m.id, 'restart');
+      this.update(m.id, { daemonStopped: undefined });
+      return `${m.id}: restarted over its daemon's link (its supervisor starts it again${keeps ? '; its agents run on and the new daemon takes them back' : ''}).`;
+    }
     const { controlDaemon } = await import('./machineDeploy.ts');
     const done = await controlDaemon(m.host, m.platform, action, m.appDir, !!m.local);
     this.update(m.id, { daemonStopped: action === 'stop' ? true : undefined });
@@ -1914,7 +1968,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         if (!msg.guard) delete m.guard;
@@ -2132,6 +2186,19 @@ export class MachineManager {
         if (ghLoginLabel(gh) !== was) console.log(`machine ${id}: gh login ${ghLoginLabel(gh)}`);
         return;
       }
+      case 'self_update_ack':
+        this.linkAcks.settle(msg.id, msg.ok ? true : new Error(`${id} refused it: ${msg.error ?? 'no reason given'}`));
+        return;
+      case 'self_update_report': {
+        const r = msg.report;
+        if (!r || typeof r.id !== 'string') return;
+        console.log(`machine ${id}: its ${r.form} job ${r.id.slice(0, 8)} ${r.ok ? 'finished' : 'FAILED'}${r.rollback ? ` (put back: ${r.rollback})` : ''}${r.note ? `: ${r.note}` : ''}`);
+        this.linkReports.settle(r.id, r);
+        return;
+      }
+      case 'daemon_control_result':
+        this.linkControls.settle(msg.id, msg.ok ? true : new Error(`${id} refused it: ${msg.error ?? 'no reason given'}`));
+        return;
       case 'save_result': {
         const p = this.saveCalls.get(msg.id);
         if (!p) return;
@@ -2160,7 +2227,7 @@ export class MachineManager {
         return;
       }
       case 'stats': {
-        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), at: new Date().toISOString() };
+        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), at: new Date().toISOString() };
         this.stats.set(id, stats);
         emit({ type: 'machine_stats', id, stats });
         return;
@@ -2453,6 +2520,11 @@ export class MachineManager {
   }
 
   private readonly saveCalls = new Map<string, { resolve: (r: SaveResult) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  /** Updates over the daemons' links (w1596, server/machineLink.ts): the portal's code as bundles, and the calls waiting. */
+  bundles: UpdateBundles;
+  private readonly linkAcks = new PendingCalls<true>();
+  private readonly linkReports = new PendingCalls<LinkUpdateReport>();
+  private readonly linkControls = new PendingCalls<true>();
 
   /** Whether a machine's daemon is online and compacts an idle agent's conversation (w1469: its hello offered `compact`). */
   canCompact(machineId: string): boolean {
