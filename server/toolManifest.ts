@@ -109,7 +109,7 @@ export const TOOL_MANIFEST = {
   fetch_ffbox_symbols: { group: 'ffbox', kinds: [W] },
   // max
   max_activity: { group: 'max', kinds: [D, P, R], always: [P] },
-  post_as_max: { group: 'max', kinds: [W] },
+  post_as_max: { group: 'max', kinds: [W, P] },
   // spend
   spend_report: { group: 'spend', kinds: [D, P, R] },
   // admin

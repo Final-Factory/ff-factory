@@ -4,7 +4,8 @@
 It turns Discord posts, operator prompts, GitHub PR comments and players' crash and desync uploads
 into throwaway Claude Code containers. The host, never the container, pushes `ffbox/*` branches and
 opens PRs on FinalFactory; nothing merges by itself. It also runs the game's CI runners and the
-release lane. It owns #bug-reports and dev_bug_reports on Discord. FF Factory talks to it through
+release lane. It owns #bug-reports and dev_bug_reports on Discord, and posts there by itself only a player's answer and
+a merged fix's notice; FF Factory's agents post anything else through it (w1640). FF Factory talks to it through
 the connector. Workers may change the ffbox repo, and a push to its master goes live on the box
 within about five minutes.
 
@@ -256,8 +257,10 @@ sure that workers can request FFBox send a discord message and has what they nee
 machine with the ffdiscord config (the bot token), and only LothDesktop had it. FFBox holds the bot, so now a worker on
 any machine (beast, biscuit, m3, m5, LothDesktop) posts with the machine tool **`post_as_max`**:
 
-- `channel`: `dev_patch_notes` (a release's notes), `dev_chat` or `agent_testing` (a test channel). Nothing else, and
-  never `bug_reports` or `dev_bug_reports` (FFBox's own).
+- `channel`: `dev_patch_notes` (a release's notes), `dev_chat` or `agent_testing` (a test channel), or `conversation`:
+  a conversation FFBox holds (w1640), named by `conversation` (FFBox's id) or `thread` (its Discord thread, an id or a
+  URL), #bug-reports and dev_bug_reports threads included, and an #ask-assistant conversation (FFBox replies to its
+  anchor message). Never `bug_reports` or `dev_bug_reports` as a channel: a post there goes in one of their threads.
 - `text` (at most 2000 characters, Discord's limit for one message) **or** `file` (a file in the worker's working
   folder or its temp folder, at most 16 KB; the daemon reads it, `skip_lines` leaves out its first lines: a
   release-notes file is `file: "cicd/release-notes/<version>.md", skip_lines: 2`), `thread` (a thread of that
@@ -308,12 +311,20 @@ the tool to exist, and FFBox must run ffbox master with `post_message` (connecto
 
 ## Discord
 
-FFBox posts as **Max**. It **owns #bug-reports and dev_bug_reports**: it answers their threads and
-posts "fix merged / fixed in <version>" on the thread when a fix merges. FF Factory's agents read
-those threads and download their files (on a computer without the ffdiscord config, with `fetch_discord_thread_files`, [above](#bug-threads-files-read-from-ff-factory-w787)), and never post, reply, react, rename or close there
-(`ffdiscord` refuses them; `server/agents.ts`, `DISCORD_RULES`). A fix PR from an FF Factory worker
-carries one `Discord: <thread url>` line per thread, so FFBox can report it. Nobody else posts that
-something is fixed.
+FFBox posts as **Max**. It **owns #bug-reports and dev_bug_reports**. **It posts by itself in two cases only**
+(w1640; lothsahn, 2026-10-20: "I think FFBox should handle all messaging in two cases: 1). The user is a player and it's
+going to the ffagent sandbox. 2) it's a pr that's been merged. Then it can provide the fix version by looking it up. In
+all other cases, you or workers should be able to post direct to discord by asking ffbox to do it on your behalf
+through the tunnel, and it will post what you say. Workers and you should avoid duplicate messages with 2."): a
+player's message answered in an ffagent container, and "fix merged / fixed in <version>" on the thread when a PR with
+its `Discord:` line merges. Everything else FF Factory's agents say there goes through FFBox on purpose: an
+orchestrator's `reply_to_ffbox` in a conversation linked to its person's request, and `post_as_max` with channel
+`conversation` from an orchestrator or a worker, e.g. asking a reporter for their save. Both keep FFBox's secret scan and
+its ban on mentions. They read those threads and download their files (on a computer without the ffdiscord config,
+with `fetch_discord_thread_files`, [above](#bug-threads-files-read-from-ff-factory-w787)), and never react, rename or
+close there, never post with `ffdiscord` (it refuses them; `server/agents.ts`, `DISCORD_RULES`), and never post that
+something is fixed or merged: a fix PR from an FF Factory worker carries one `Discord: <thread url>` line per thread, so
+FFBox reports it, and FFBox refuses a "fixed" or "merged" post in a thread it already told.
 
 ## Touchpoints with FF Factory
 
@@ -408,7 +419,7 @@ is checked three ways:
    (its title's, its `subjects`; a brief's mentions are references, w343). A window
    needs a bound, so no request covers a whole channel forever.
 
-| what matched | outcome | `dev_filed` text (FF Factory's views; FFBox posts "Already fixed" as written and, for every other outcome, "Queued as <workId>", w417) |
+| what matched | outcome | `dev_filed` text (FF Factory's views; FFBox posts "Already fixed" as written and nothing for any other outcome, w1640) |
 |---|---|---|
 | a high-band open request, or an open request whose scope covers it | `covered`: it joins that request (a log line with the conversation and the operator, the thread added to its keys and, on an intake request, to its threads, the person added to its people, the files added, and a busy worker gets the note and a copy of each file in its Inbox) | "Covered by w38 (in progress)." |
 | a high-band request that is done | `fixed`: nothing filed; the link is recorded on the done one | "Already fixed in 0.50.0.69 (PR #412)." |
@@ -419,23 +430,19 @@ A request filed from the same FFBox conversation (its `source.conversation`, or 
 open is left out of the matching (w1637): FFBox hands a conversation over again once its linked request is closed, and
 the next question there is not "already fixed" by the question before it. An open one still joins it.
 
-**What the thread hears, start to end (w417; Lothsahn, 2026-10-05).** FFBox puts 👀 on the operator's message and hands
-it over. When FF Factory answers `filed`, `covered` or `linked`, FFBox replies "Queued as w123" (the joined request's id
-for `covered`, which is the `workId` FF Factory already sends) and then takes the 👀 off, the removal held behind the
-line, once per hand-over across FFBox restarts. When the fix's PR is ready, the thread hears "PR is up for the fix #N"
-(the number only), and when it merges, the merge notice ("Fixed in PR #N, coming in version <build> and later."). Nothing
-else is said in the thread between them: questions and `reply_to_ffbox` answers go to the operator by DM from Max (below).
-**Except an operator's own question in a chat channel (w649).** When the operator opened the conversation in a
-watch channel of kind `ask` (#ask-assistant), `reply_to_ffbox` answers, "already fixed" and the request's result
-("Done: ...", declined, cancelled) are posted there, in reply to the message that asked Max; questions still go by
-DM. A done with no merge right after a `reply_to_ffbox` answer posts nothing more: the answer was the post (FFBox
-w1637). Every line FFBox posts in a channel conversation replies to the newest message of the hand-over turn that
-spoke to Max (an @-mention or a reply to Max), not to the turn's last message: on 2026-10-07 "Queued as w648"
-answered the chat line after lothsahn's question.
-"Already fixed" at filing is posted as FF Factory wrote it. Where FFBox can say no "Queued as" (a review on GitHub, a shell
-or ffweb prompt), the 👀 stays until an outcome arrives (w415): the PR up, the request done, declined or cancelled, or its
-fix merged. FF Factory's side needs nothing new for this: `dev_filed` already carries `workId` and `dev_update` the `pr`
-number.
+**What the thread hears, start to end (w1640; lothsahn, 2026-10-20).** FFBox puts 👀 on the operator's message and hands
+it over. Nothing is posted when FF Factory files it ("Queued as w123", w417, is gone), when the fix's PR is up ("PR is up
+for the fix #N" is gone) or when the request ends with nothing merged ("Done: ...", declined, cancelled are gone): FFBox
+records each. The thread hears what the orchestrator answers with `reply_to_ffbox` (posted in the conversation, a report
+thread included, no longer by Max DM) and, when the fix merges, the merge notice ("Fixed in PR #N, coming in version
+<build> and later."). So **an orchestrator answers the conversation with `reply_to_ffbox` before it closes the request**:
+the close says nothing there. "Already fixed" at filing is still posted as FF Factory wrote it, and a developer's
+question to the operator still goes by Max DM. The 👀 stays until an outcome arrives (w415): the PR up, the request done,
+declined or cancelled, or its fix merged, or the orchestrator's reply. In a chat channel conversation (#ask-assistant)
+every line FFBox posts replies to the newest message of the hand-over turn that spoke to Max (an @-mention or a reply to
+Max), not to the turn's last message (w649: on 2026-10-07 "Queued as w648" answered the chat line after lothsahn's
+question). An update or reply that reaches FFBox before it has read the filing waits for it (FFBox w1640: at 19:49:37 on
+2026-10-20 w1636's first update was refused for conversation 1162 four seconds after the hand-over).
 
 `force` (`!fff new` on FFBox) files it whatever matched, naming what did (`linked`). The person's own orchestrator gets
 one line per outcome, labelled `[from FFBox, <operator>]`, with the conversation's link and the files' ids (and the
@@ -451,9 +458,10 @@ from Discord, GitHub, FFBox's shell or ffweb, matched by FFBox to them, are a tu
 Factory; everything else in the turn is relayed as the harness's message ([below](#operators-own-words-w831)).
 The orchestrator answers with
 **`reply_to_ffbox`** `{ request?, conversation?, text }` (a person's own orchestrator only, for that person's own
-linked conversations), which sends a `dev_reply` FFBox gives the operator by DM from Max (w417; in the thread when it has nobody
-to DM, or when the operator asked there in a chat channel, w649). The DM leads with the text and names the
-request and thread after it; it errors plainly, "FFBox's connector is offline; nothing was sent", while the link is down.
+linked conversations), which sends a `dev_reply` FFBox posts in that conversation, a report thread included (w1640;
+by Max DM from w417 until then). It errors plainly, "FFBox's connector is offline; nothing was sent", while the link is
+down. For a conversation that is not linked to one of the person's requests (a reporter's thread a worker needs a save
+from), `post_as_max` with channel `conversation` posts there ([above](#posting-as-max-from-any-machine-w901)).
 
 ### Operators' own words (w831)
 
@@ -521,59 +529,54 @@ login does not carry too, so it stays unlocked (Lothsahn: "always trusted"). It 
 
 **Following it to the result (w272).** Lothsahn: "when that branch closes out, FFBox will close the associated
 discord thread and reply to the user", and "we should not reply on discord with where things are going--just
-results". So the thread hears no routing ("Filed as", "Covered by", "may repeat", "w123 is done"; since w417 the one
-exception is FFBox's own "Queued as w123" at filing, which Lothsahn asked for): those lines stay in
+results". So the thread hears no routing ("Filed as", "Covered by", "may repeat", "w123 is done"; FFBox's own
+"Queued as w123" at filing, w417, is gone since w1640): those lines stay in
 FF Factory (`show: "dev_requests"`, the orchestrator's `[from FFBox, …]` lines). Instead FF Factory sends a
 `dev_update` with facts whenever they change, from the same facts a board answer carries (`Orchestrators.boardFacts`):
 `open` with `watch` (repo, branch, PR, target) once the worker's PR exists, then `done` with `mergedIn` and, once a
 release carries it, `version`; or `declined` / `cancelled`. Work events send it, and a check every minute catches a
 PR opening (which changes no work item). FFBox follows the PR like its own branches, posts its usual merge notice
 ("Fixed in PR #N, coming in <version> and later.", the PR as a link) replying to the reporter, files the thread away by
-its usual rules, and says a declined or cancelled one's result where results go (below). Only the newest update per
+its usual rules, and posts nothing for a declined or cancelled one, or a done one with nothing merged (w1640, below). Only the newest update per
 conversation waits, resent on every reconnect until FFBox confirms it.
 
-**What a public thread hears, and where the rest goes (w351).** Lothsahn: "Please don't ping public discord chats outside
-the following things: PR is up for the fix; PR merged (which is posted by FFBox)", and "These messages can go direct to
-me via DM's, but not to users in a thread." A conversation is public unless its channel's FFBox watch entry says
-`venue: private`, and a channel nobody classified is public (`venue_for`). Lothsahn's private developer channels are
-`dev_bug_reports`, `dev_chat` and `agent_testing`; `bug_reports`, feedback and the general chats are public. The box's
-own `watch` block decides (`ffbox_activity show config` shows it). In a public thread FFBox posts only:
-- **"Queued as w123"** at filing (w417, above);
-- **the fix is up on a PR:** "PR is up for the fix #N" in a dev request's thread (w417), from `pr`; FFBox keeps the
-  `summary` in its record. A thread FF Factory linked from FFBox's own report or escalation still hears the summary.
-  `summary` and `pr` come once the worker's PR is ready for review (not a draft; read with
-  `gh pr view` at most once a minute): the PR's TL;DR or first paragraph, the first line of its evidence or test section,
-  "Waiting on review." or "Merging when CI is green." (auto-merge set), and "PR #N." by number only; at most 1000
-  characters, with work ids, sandbox branches and session ids taken out (`prSummary`, `publicText`), and GitHub links,
-  repo names and ffbox branches too (`withoutRepo`, w352; Lothsahn: a link "exposes which github we use. I would like that
-  to remain private."). The `pr` field still carries the URL, for FFBox to follow the PR; FFBox's sender takes any link
-  out of a public post as well (ffbox `public_text`);
-- **the merge notice** ("Fixed in PR #N, coming in <version>…", no link) and the thread filed away after it. A fix
-  the ledger already knows shipped (its `version` is a release that carries it) reads "Fixed in PR #N, in build X and
-  later." (w1143). **A request closed as already fixed** reaches its thread only when the ledger learns that fix:
-  `resolveFixes` (server/intake.ts) reads the PR from the close (`fixedByPr`: write `RESOLVED: already fixed by PR #N`;
-  text in parentheses is an aside) and the release from the version bumps, for escalated threads, report claimants and,
-  since w1143, FFBox dev-request threads; the done `dev_update` then carries `mergedIn`, `version` and `pr`. Without
-  them FFBox sends the result to the operator by DM and the thread hears nothing (w1088's thread, 2026-10-12). FFBox's
-  startup line `w1143: N thread(s) closed as already fixed ... with no fixed notice` lists the threads that missed one;
-  a back-fill is ffwatch `FIXED_ASKED`, each PR's release measured (its merge inside that release's bump commit).
+**What FFBox posts by itself, and what FF Factory posts through it (w1640).** lothsahn, 2026-10-20: "I think FFBox
+should handle all messaging in two cases: 1). The user is a player and it's going to the ffagent sandbox. 2) it's a pr
+that's been merged. Then it can provide the fix version by looking it up. In all other cases, you or workers should be
+able to post direct to discord by asking ffbox to do it on your behalf through the tunnel, and it will post what you
+say. Workers and you should avoid duplicate messages with 2." So from a `dev_update` FFBox posts only:
+- **the merge notice** ("Fixed in PR #N, coming in <version>…", no link), its release line ("It's in <version> now.")
+  and the thread filed away after it. A fix the ledger already knows shipped (its `version` is a release that carries
+  it) reads "Fixed in PR #N, in build X and later." (w1143). **A request closed as already fixed** reaches its thread
+  only when the ledger learns that fix: `resolveFixes` (server/intake.ts) reads the PR from the close (`fixedByPr`:
+  write `RESOLVED: already fixed by PR #N`; text in parentheses is an aside) and the release from the version bumps,
+  for escalated threads, report claimants and, since w1143, FFBox dev-request threads; the done `dev_update` then
+  carries `mergedIn`, `version` and `pr`. FFBox's startup line `w1143: N thread(s) closed as already fixed ... with no
+  fixed notice` lists the threads that missed one; a back-fill is ffwatch `FIXED_ASKED`, each PR's release measured (its
+  merge inside that release's bump commit). "Already fixed in <version> (PR #N)" at filing names a merged fix too, and
+  is still posted.
+- **a question** (`question`, while the request is `question`: a worker's DESIGN-QUESTION or the dispatcher's
+  `decide_work` ask) to the operator who filed the request, as a DM from Max in a developer's words. The operator
+  answers by replying to that DM; FFBox sends the reply as a `dev_message` on the request, naming the thread's
+  conversation, and it answers the request (`Orchestrators.answerFromFfbox`: a note, the request open again, the
+  dispatcher told to resume it). A thread no operator filed (a request from FFBox's own report or escalation) has
+  nobody to DM: its update carries `held` instead of the question, and the question stays with the request's people in
+  FF Factory (the `[intake question]` the design reviewers are sent).
 
-Nothing else, and no "Waiting on input from a developer." anywhere on Discord, public or private (w352; Lothsahn: "Let's
-stop max from saying 'Waiting on input from a developer.' in discord"): a request held in the intake (`held`, w299) or
-asking a question is recorded by FFBox and silent in the thread.
+FFBox records, and no longer posts or DMs, "Queued as w123", "PR is up for the fix #N", the PR summary, and a result
+with nothing merged ("Done: …", declined, cancelled with the reason). `summary` and `pr` still come once the worker's
+PR is ready for review (not a draft; read with `gh pr view` at most once a minute), with work ids, sandbox branches,
+session ids, GitHub links, repo names and ffbox branches taken out (`prSummary`, `publicText`, `withoutRepo`, w352),
+for FFBox's record and its merge watcher. No "Waiting on input from a developer." anywhere on Discord (w352).
 
-Everything else goes to the operator who filed the request, as a DM from Max in a developer's words (internal ids, files
-and PRs kept): a **question** (`question`, while the request is `question`: a worker's DESIGN-QUESTION or the
-dispatcher's `decide_work` ask), an orchestrator's `reply_to_ffbox` ("PR #1013 is green: merge now, or test first?"), and
-a **result** (declined or cancelled with the reason, done with nothing merged and its outcome, "Already fixed" at filing).
-The operator answers by replying to that DM; FFBox sends the reply as a `dev_message` on the request, naming the thread's
-conversation, and it answers the request (`Orchestrators.answerFromFfbox`: a note, the request open again, the
-dispatcher told to resume it). A thread no operator filed (a request from FFBox's own report or escalation) has nobody
-to DM: its update carries `held` instead of the question, and the question stays with the request's people in FF Factory
-(the `[intake question]` the design reviewers are sent). In a private channel a dev request's question and replies go
-to the operator by DM too (w417), and its result lines stay in the thread; with nobody to DM, all of it is posted in the
-thread, as before. A can't-fix leaves the thread open (Lothsahn, w278: "For can't fix, don't archive the conversation or close
-the thread"); only a merged fix is archived.
+Everything else a thread hears is FF Factory's own words, posted by FFBox as given: the orchestrator's `reply_to_ffbox`
+in the conversation it is about (a report thread included), and `post_as_max` channel `conversation` from any worker or
+orchestrator, into any conversation FFBox holds, #bug-reports and dev_bug_reports threads included (asking a reporter
+for a save). FFBox keeps its guards on both: no mention, the secret scan, links, repo names and branches out of a public
+post (`public_text`), the length and the rate; and it refuses a "fixed" or "merged" text in a thread that already has
+its merge notice, so the merge is said once, by FFBox. Never post a fixed or merged notice yourself. A can't-fix leaves
+the thread open (Lothsahn, w278: "For can't fix, don't archive the conversation or close the thread"); only a merged
+fix is archived.
 
 **A broad request speaks for no thread (w317).** A request whose scope is a window, a source or a channel, or names
 more than one thread (`isBroad`; a request whose scope is the one thread its brief named is that thread's own), sends
