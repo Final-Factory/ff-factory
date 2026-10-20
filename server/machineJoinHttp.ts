@@ -7,6 +7,10 @@ import { clientAddress, tailnetOnly } from './remoteChat.ts';
  *
  * - GET /join/windows.ps1, GET /join/unix.sh: the bootstrap itself (scripts/worker/join.ps1, join.sh) with this portal's
  *   tailnet URL written in, so `irm https://<portal>/join/windows.ps1 | iex` is the whole command at the PC.
+ * - GET /join/windows.cmd: the Windows installer to download and double-click (scripts/worker/join.cmd): it runs that
+ *   bootstrap, which asks for the code. The dashboard's Add a machine hands out the same file with the code written in
+ *   (windowsInstaller), so nothing is typed at the PC.
+ * - GET /join: a page for the new PC's browser with that download and the commands.
  * - POST /machine/join {code, facts, check}: the PC proves it may join. The code must be live, and the request must come
  *   from the tailnet device the code was made for (`tailscale whois` of its address). With check, nothing changes: the
  *   answer says which machine and limits the code gives and whether the device carries the worker tag. Without it the
@@ -21,8 +25,8 @@ export interface MachineJoinDeps {
   enrol(o: { machineId: string; tailnetName: string; limits: Required<JoinLimits>; portalUrl: string; by: string }): string;
   /** The URL the PC reached this portal at (originOf), for the record and the bootstrap. */
   portalUrl(req: http.IncomingMessage): string;
-  /** A bootstrap's text, or undefined when this portal's checkout lacks it. */
-  script(kind: 'windows' | 'unix'): string | undefined;
+  /** A bootstrap's text (join.ps1, join.sh, join.cmd), or undefined when this portal's checkout lacks it. */
+  script(kind: JoinScript): string | undefined;
   /** Why it acts on nothing (a dry-run portal), or undefined. */
   refused?(): string | undefined;
   /** A line for the owners' [machines] report. */
@@ -36,6 +40,50 @@ const MAX_FAILS = 10;
 const FAIL_WINDOW_MS = 15 * 60_000;
 /** The placeholder a bootstrap carries for this portal's URL. */
 export const PORTAL_URL_MARK = '__FF_PORTAL_URL__';
+/** The placeholder join.cmd carries for the join code ('' in the download any PC may take: the bootstrap asks). */
+export const JOIN_CODE_MARK = '__FF_JOIN_CODE__';
+export type JoinScript = 'windows' | 'unix' | 'cmd';
+/** The download's file name. */
+export const WINDOWS_INSTALLER_NAME = 'ff-factory-join.cmd';
+
+const SCRIPTS: Record<string, JoinScript> = { '/join/windows.ps1': 'windows', '/join/unix.sh': 'unix', '/join/windows.cmd': 'cmd' };
+/** The paths this handler answers (index.ts routes them here). */
+export const JOIN_PATHS = new Set(['/machine/join', '/join', ...Object.keys(SCRIPTS)]);
+
+/**
+ * join.cmd for `portalUrl`, with `code` written in (or none: the bootstrap then asks for it), in CRLF line endings, which
+ * cmd.exe needs. The URL is checked here too, since it goes into a command line: an origin with no quote or space.
+ */
+export function windowsInstaller(template: string, portalUrl: string, code = ''): string {
+  if (!/^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(portalUrl)) throw new Error(`not a portal URL: ${portalUrl}`);
+  if (!/^[0-9A-Z-]*$/.test(code)) throw new Error('a join code is digits, capital letters and dashes');
+  return template.split(PORTAL_URL_MARK).join(portalUrl).split(JOIN_CODE_MARK).join(code).replace(/\r?\n/g, '\r\n');
+}
+
+const esc = (t: string) => t.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** The /join page: what a person at the new PC does, with the download. */
+export function joinPage(portalUrl: string): string {
+  const u = esc(portalUrl);
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add this PC to FF Factory</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 1rem;color:#ddd;background:#16181d}
+a{color:#7cc4ff}code{background:#262a33;padding:.1rem .3rem;border-radius:4px;user-select:all}.btn{display:inline-block;margin:.5rem 0;padding:.6rem 1rem;background:#2d6cdf;color:#fff;border-radius:6px;text-decoration:none}</style>
+</head><body>
+<h1>Add this PC to FF Factory</h1>
+<ol>
+<li>Keep this PC connected to Tailscale.</li>
+<li>Get a join code from an owner: the dashboard's <b>Add a machine</b> (it can hand you this installer with the code already in it), or their orchestrator. A code works once, for one hour, on this PC only.</li>
+<li><b>Windows:</b> <a class="btn" href="${u}/join/windows.cmd" download="${WINDOWS_INSTALLER_NAME}">Download the installer</a><br>
+Double-click it and type the code. Windows warns about a downloaded file first: choose <i>More info</i> and <i>Run anyway</i> (or <i>Run</i>).
+Or paste this into a normal PowerShell window (not as administrator): <code>irm ${u}/join/windows.ps1 | iex</code></li>
+<li><b>Mac or Linux:</b> in a terminal: <code>bash -c "$(curl -fsSL ${u}/join/unix.sh)"</code></li>
+</ol>
+<p>It checks the code first, installs what is missing (Node, Git, Git LFS, Claude Code), sets the PC up, and ends with a summary. No password or credential is shown.</p>
+</body></html>
+`;
+}
 
 function send(res: http.ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(body));
@@ -63,11 +111,26 @@ export function machineJoinHttp(d: MachineJoinDeps) {
     const off = tailnetOnly(req, 'joining a machine');
     if (off) return send(res, 403, { error: off });
 
-    const kind = pathname === '/join/windows.ps1' ? 'windows' : pathname === '/join/unix.sh' ? 'unix' : undefined;
+    if (pathname === '/join') {
+      if (req.method !== 'GET') return send(res, 405, { error: 'GET /join' });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(joinPage(d.portalUrl(req)));
+      return;
+    }
+    const kind = SCRIPTS[pathname];
     if (kind) {
       if (req.method !== 'GET') return send(res, 405, { error: `GET ${pathname}` });
       const text = d.script(kind);
       if (!text) return send(res, 404, { error: `this portal has no ${kind} bootstrap` });
+      if (kind === 'cmd') {
+        let out: string;
+        try {
+          out = windowsInstaller(text, d.portalUrl(req));
+        } catch (e) {
+          return send(res, 400, { error: (e as Error).message });
+        }
+        res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': `attachment; filename="${WINDOWS_INSTALLER_NAME}"`, 'cache-control': 'no-store' }).end(out);
+        return;
+      }
       const out = text.split(PORTAL_URL_MARK).join(d.portalUrl(req));
       res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }).end(out);
       return;

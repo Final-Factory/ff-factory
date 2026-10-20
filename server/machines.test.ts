@@ -1434,3 +1434,23 @@ test('w1377: a heartbeat that runs late (the event loop was blocked) drops no li
   inside.heartbeat(now + 20_000);
   assert.equal(mm.isOnline('mx'), false, 'an on-time beat drops a link silent for over 45 s');
 });
+
+test('machine: createJoin makes the waiting record and a code for its tailnet device; an installed or ssh machine and a bad limit are refused (w1592)', async (t) => {
+  const { store, mm, cleanup } = await setup();
+  t.after(cleanup);
+  (mm as unknown as { runDeploy: () => Promise<void> }).runDeploy = async () => assert.fail('a join record is never deployed over ssh');
+  const made = mm.createJoin({ id: 'Coosego', tailnetName: 'Desktop-Coosego', portalUrl: 'https://fff.example.ts.net', limits: { maxUnity: 2 }, by: 'Lothsahn' });
+  assert.deepEqual([made.machine.id, made.machine.host, made.tailnetName, made.limits], ['coosego', 'desktop-coosego', 'desktop-coosego', { maxUnity: 2 }]);
+  assert.ok(store.machines.get('coosego')!.awaitingInstall);
+  assert.match(made.machine.statusDetail ?? '', new RegExp(`waiting for its join bootstrap on tailnet device desktop-coosego \\(code \\.\\.\\.${made.join.last4}`));
+  const j = mm.joins.find(made.join.code)!;
+  assert.deepEqual([j.machineId, j.tailnetName, j.by], ['coosego', 'desktop-coosego', 'Lothsahn']);
+  assert.ok(!fs.readFileSync((mm.joins as unknown as { file: string }).file, 'utf8').includes(made.join.code.replace(/-/g, '')), 'only its hash is kept');
+  // Again for the waiting record: a new code replaces the old one; the tailnet name defaults to the id.
+  const again = mm.createJoin({ id: 'coosego', portalUrl: 'https://fff.example.ts.net', limits: {}, by: 'Lothsahn' });
+  assert.equal(again.tailnetName, 'coosego');
+  assert.equal(mm.joins.find(made.join.code), undefined, 'one code per machine');
+  assert.throws(() => mm.createJoin({ id: 'mx', limits: {}, by: 'Lothsahn' }), /already has a record .*migrate/);
+  assert.throws(() => mm.createJoin({ id: 'nb', portalUrl: 'https://fff.example.ts.net', limits: { maxSandboxes: 9 }, by: 'Lothsahn' }), /maxSandboxes must be a whole number from 1 to 8/);
+  assert.equal(store.machines.get('nb'), undefined, 'a refused join makes no record');
+});

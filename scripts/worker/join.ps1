@@ -83,6 +83,15 @@ function Invoke-Portal([string]$method, [string]$path, $body = $null, [string]$t
         $status = 0
         if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
         $msg = "$($_.ErrorDetails.Message)"
+        # Windows PowerShell 5.1 can leave ErrorDetails empty; its HttpWebResponse still holds the portal's answer.
+        $resp = $_.Exception.Response
+        if (-not $msg -and $resp -and $resp.PSObject.Methods['GetResponseStream']) {
+            try {
+                $s = $resp.GetResponseStream()
+                if ($s.CanSeek) { $s.Position = 0 }
+                $msg = (New-Object IO.StreamReader($s)).ReadToEnd()
+            } catch { }
+        }
         $err = $null
         if ($msg) { try { $err = ($msg | ConvertFrom-Json).error } catch { $err = $msg } }
         if (-not $err) { $err = $_.Exception.Message }
@@ -208,10 +217,8 @@ function Install-Tools {
         $missing | ForEach-Object { if ($_.Winget) { Say "  winget install --id $($_.Winget) -e" } else { Say '  irm https://claude.ai/install.ps1 | iex' } }
         return $false
     }
-    if (-not (Confirm-Step 'Install them now (winget; Claude Code with its own installer)?' $true)) {
-        Say 'Nothing installed. Install them, then run this again.'
-        return $false
-    }
+    # No second question: the one before it ("Go on: install what is missing...") covers this (w1592: the installer
+    # sets the PC up without asking again).
     foreach ($m in $missing) {
         if ($m.Winget) {
             Say "Installing $($m.Name) (winget $($m.Winget))..."
@@ -349,7 +356,9 @@ function Invoke-Installer([string[]]$arguments, [string]$work) {
 
 function Invoke-FFJoin {
     Say 'FF Factory: join this PC (one step). Nothing secret is shown on screen.'
-    if ($script:OnWindows) {
+    # install.ps1 refuses an elevated new install (its files would belong to Administrators), so this refuses first; a
+    # test's own -Installer makes no files, which lets the tests run on CI's elevated Windows runner.
+    if ($script:OnWindows -and -not $Installer) {
         $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
         if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
             Say 'Run this from a normal PowerShell, not as administrator: the steps that need admin rights ask for them.'

@@ -90,6 +90,20 @@ const enc = encodeURIComponent;
 
 /** One of a machine's sandboxes (the portal holds none itself, w510; a machine alone, its main clone, is refused, w536). */
 export type BranchTarget = { machine: string; sandbox?: string };
+/** A join code for a new PC (w1592, server/index.ts POST /api/machines/join): shown once, with the installer that carries it. */
+export interface JoinAnswer {
+  machine: Machine;
+  code: string;
+  last4: string;
+  expiresAt: string;
+  tailnetName: string;
+  limits: { maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number };
+  portalUrl: string;
+  page: string;
+  windowsCommand: string;
+  unixCommand: string;
+  installer?: { name: string; text: string };
+}
 
 export const api = {
   login: (username: string, password: string) => request<{ username: string }>('POST', '/api/login', { username, password }),
@@ -188,6 +202,9 @@ export const api = {
   createSandbox: (req: CreateSandboxRequest) => request<{ machine: string; id: string; note: string }>('POST', '/api/sandboxes', req),
   addMachine: (req: { id: string; host?: string; portalUrl?: string; repoPath?: string; appDir?: string; unityEditorRoot?: string; unityPath?: string; tempDir?: string }) =>
     request<Machine>('POST', '/api/machines', req),
+  /** The tailnet device this browser is on (w1592), to name a PC added from its own browser. */
+  joinDevice: () => request<{ name?: string; machine?: string }>('GET', '/api/machines/join/device'),
+  createJoin: (req: { id: string; tailnetName?: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number }) => request<JoinAnswer>('POST', '/api/machines/join', req),
   redeployMachine: (id: string, force = false) => request<Machine>('POST', `/api/machines/${enc(id)}/redeploy`, { force }),
   machineDaemon: (id: string, action: 'start' | 'stop' | 'restart', force = false) => request<{ note: string }>('POST', `/api/machines/${enc(id)}/daemon`, { action, force }),
   /** The machine's activity pause (w1574, config machines.activityPause): on or off, and its idle minutes. */

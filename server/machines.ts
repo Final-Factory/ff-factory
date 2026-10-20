@@ -1,5 +1,5 @@
 import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
-import { JoinCodes, machineJoinsFile } from './machineJoin.ts';
+import { JoinCodes, checkJoinLimits, joinRefusal, machineJoinsFile, type JoinLimits } from './machineJoin.ts';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import type { SaveResult } from './saveWork.ts';
@@ -443,6 +443,24 @@ export class MachineManager {
     const m = this.require(id);
     if (!m.ssh) return { host: m.host, reachable: false, detail: 'no ssh registered yet: its installer registers it' };
     return { host: m.host, ...(await this.sshCheck(m.host)) };
+  }
+
+  /**
+   * A new PC that joins by itself (w1592, docs/worker-install.md "Adding a machine with a join code"): its worker_install
+   * record, waiting, and a one-use code redeemable only from the tailnet device `tailnetName` (default: the id).
+   * add_machine's join_code and the dashboard's Add a machine both come here. Throws the refusal (an installed id, a
+   * limit out of range); the code is in the answer only, never stored.
+   */
+  createJoin(o: { id: string; tailnetName?: string; host?: string; portalUrl?: string; limits: JoinLimits; by: string }) {
+    const id = o.id.trim().toLowerCase();
+    const refusal = joinRefusal({ get: (x) => this.store.machines.get(x) }, id);
+    if (refusal) throw new Error(refusal);
+    const limits = checkJoinLimits(o.limits);
+    const tailnetName = (o.tailnetName?.trim() || id).toLowerCase();
+    const m = this.deployMachine({ id, workerInstall: true, host: o.host || tailnetName, portalUrl: o.portalUrl, ...limits });
+    const join = this.joins.create({ machineId: m.id, tailnetName, limits, by: o.by });
+    this.update(m.id, { statusDetail: `waiting for its join bootstrap on tailnet device ${tailnetName} (code ...${join.last4}, until ${join.expiresAt}): no daemon yet` });
+    return { machine: this.require(m.id), join, limits, tailnetName };
   }
 
   list() {

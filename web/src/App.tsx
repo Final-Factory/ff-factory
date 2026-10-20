@@ -86,7 +86,7 @@ function Shell({ app }: { app: AppState }) {
 
       {newSandbox && <NewSandboxModal app={app} onClose={() => setNewSandbox(false)} />}
       {newStanding && <StandingAgentModal app={app} onClose={() => setNewStanding(false)} />}
-      {newMachine && <AddMachineModal onClose={() => setNewMachine(false)} />}
+      {newMachine && <AddMachineModal app={app} onClose={() => setNewMachine(false)} />}
       <Lightbox />
       <Toasts />
     </div>

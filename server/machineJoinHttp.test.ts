@@ -8,9 +8,10 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { JoinCodes, type JoinLimits, type TailnetDevice } from './machineJoin.ts';
-import { machineJoinHttp, type MachineJoinDeps } from './machineJoinHttp.ts';
+import { joinPage, machineJoinHttp, windowsInstaller, type MachineJoinDeps } from './machineJoinHttp.ts';
 
 const FAKE_CRED = `ffm_coosego_${'FAKE'.repeat(11)}`;
+const CMD = fs.readFileSync(new URL('../scripts/worker/join.cmd', import.meta.url), 'utf8');
 
 async function serve(over: Partial<MachineJoinDeps> = {}, device: TailnetDevice | null = { name: 'desktop-coosego', tags: [] }) {
   const codes = new JoinCodes(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoinhttp-')), 'machine-joins.json'));
@@ -27,7 +28,7 @@ async function serve(over: Partial<MachineJoinDeps> = {}, device: TailnetDevice 
       return FAKE_CRED;
     },
     portalUrl: () => 'https://fff.tail1234.ts.net',
-    script: (kind) => (kind === 'windows' ? "$PortalUrl = '__FF_PORTAL_URL__'\n" : undefined),
+    script: (kind) => (kind === 'windows' ? "$PortalUrl = '__FF_PORTAL_URL__'\n" : kind === 'cmd' ? CMD : undefined),
     report: (t) => reports.push(t),
     ...over,
   };
@@ -145,4 +146,34 @@ test('join http: no whois, an installed machine, a dry-run portal and a failed r
   assert.match(String(r.body.error), /disk full/);
   assert.ok(broken.codes.find(e.code), 'a second try may use it');
   assert.equal((await broken.join('not an object')).status, 403);
+});
+
+test('join http: /join is a page for the new PC with the download; the installer is the bootstrap in a double-click, CRLF, the code asked for', async (t) => {
+  const s = await serve();
+  t.after(s.close);
+  const page = await fetch(`${s.base}/join`);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get('content-type') ?? '', /text\/html/);
+  const html = await page.text();
+  assert.ok(html.includes('href="https://fff.tail1234.ts.net/join/windows.cmd"') && html.includes('irm https://fff.tail1234.ts.net/join/windows.ps1 | iex'), html);
+  assert.equal((await fetch(`${s.base}/join`, { headers: { 'tailscale-funnel-request': '?1' } })).status, 403, 'tailnet-only, as the rest');
+
+  const r = await fetch(`${s.base}/join/windows.cmd`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-disposition'), 'attachment; filename="ff-factory-join.cmd"');
+  const cmd = await r.text();
+  assert.ok(!/[^\r]\n/.test(cmd), 'CRLF line endings only (cmd.exe misreads LF-only batch files)');
+  assert.ok(cmd.includes(`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://fff.tail1234.ts.net/join/windows.ps1' | iex"`), cmd);
+  assert.ok(cmd.includes('set "FF_JOIN_CODE="\r\n'), 'no code in the download anyone on the tailnet may take: the bootstrap asks');
+  assert.ok(!cmd.includes('__FF_'), 'every mark filled');
+});
+
+test('join http: the dashboard\'s installer carries its code; a URL or code that could break out of the command line is refused', () => {
+  const code = 'ABCDE-FGHJK-MNPQR-STVWX';
+  const cmd = windowsInstaller(CMD, 'https://fff.tail1234.ts.net', code);
+  assert.ok(cmd.includes(`set "FF_JOIN_CODE=${code}"\r\n`));
+  assert.equal(cmd.split(code).length, 2, 'once, and only in the variable the bootstrap reads');
+  assert.throws(() => windowsInstaller(CMD, "https://x' ; calc ; '"), /not a portal URL/);
+  assert.throws(() => windowsInstaller(CMD, 'https://fff.tail1234.ts.net', 'A" & calc & "'), /digits, capital letters and dashes/);
+  assert.ok(!joinPage('https://x"><script>alert(1)</script>').includes('<script>'), 'the page escapes what it writes in');
 });
