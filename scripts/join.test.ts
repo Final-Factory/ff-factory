@@ -124,7 +124,7 @@ test('join.ps1: a dry run changes nothing; the join hands the installer a privat
   fs.writeFileSync(script, await (await fetch(`${portal.base}/join/windows.ps1`)).text());
   const root = path.join(tmp, 'root');
   const log = path.join(tmp, 'logs', 'join.log');
-  const env = { FF_JOIN_CODE: code, FF_JOIN_LOG: log, FF_JOIN_RUN: 'run1', TMPDIR: tmp, TEMP: tmp, PATH: `${path.dirname(powershell!)}${path.delimiter}${process.env.PATH}` };
+  const env = { FF_JOIN_CODE: code, FF_JOIN_LOG: log, FF_JOIN_STARTED: path.join(tmp, 'started.txt'), TMPDIR: tmp, TEMP: tmp, PATH: `${path.dirname(powershell!)}${path.delimiter}${process.env.PATH}` };
   const common = ['-Root', root, '-Tailscale', f.tailscale, '-Installer', f.installer, '-SkipMachineSetup', '-Yes'];
 
   const dry = await run(powershell!, psArgs(script, ...common, '-DryRun'), env);
@@ -159,7 +159,8 @@ test('join.ps1: a dry run changes nothing; the join hands the installer a privat
   // w1603: the run's log, named on screen, holds what the screen showed and the installer's own lines, never a secret.
   const text = fs.readFileSync(log, 'utf8');
   assert.match(r.out, new RegExp(`This run's log \\(no secrets in it\\): ${log.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}`));
-  assert.match(text, /join\.ps1 started run1/);
+  assert.match(text, /join\.ps1 started/);
+  assert.equal(fs.readFileSync(path.join(tmp, 'started.txt'), 'utf8').trim(), 'started', 'it tells ff-factory-join.cmd it ran');
   assert.match(text, /== Enrolling/);
   assert.match(text, /fake installer: done/, "the installer's output is logged too");
   assert.ok(!text.includes(cred) && !text.includes(cred.slice(4, -4)) && !text.includes(code), 'no credential or code in the log');
@@ -290,7 +291,7 @@ test('join.cmd: double-clicked (cmd.exe), the download runs the portal\'s bootst
   let exit: number | 'blocked' = 0;
   const server = http.createServer((req, res) => {
     if (req.url !== '/join/windows.ps1') return void res.writeHead(404).end();
-    const started = exit === 'blocked' ? '' : `Add-Content -LiteralPath $env:FF_JOIN_LOG -Value "join.ps1 started $env:FF_JOIN_RUN"\n`;
+    const started = exit === 'blocked' ? '' : `Set-Content -LiteralPath $env:FF_JOIN_STARTED -Value 'started'\n`;
     res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }).end(`${started}Add-Content -LiteralPath '${seen}' -Value ("code=$env:FF_JOIN_CODE edition=$($PSVersionTable.PSEdition)")\nexit ${exit === 'blocked' ? 1 : exit}\n`);
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));

@@ -316,7 +316,9 @@ function Get-ElevatedOwner {
 
 function Invoke-FFJoin {
     Write-Log ''
-    Write-Log "$(Get-Date -Format o) join.ps1 started $env:FF_JOIN_RUN (Windows PowerShell $($PSVersionTable.PSVersion), as $([Environment]::UserName))"
+    # ff-factory-join.cmd tells from this file that PowerShell ran this script (w1603: Defender had stopped it from starting).
+    if ($env:FF_JOIN_STARTED) { try { [IO.File]::WriteAllText($env:FF_JOIN_STARTED, "started`r`n") } catch { } }
+    Write-Log "$(Get-Date -Format o) join.ps1 started (PowerShell $($PSVersionTable.PSVersion), as $([Environment]::UserName))"
     Say 'FF Factory: join this PC (one step). Nothing secret is shown on screen.'
     Say "This run's log (no secrets in it): $($script:Log)"
     $script:Owner = ''

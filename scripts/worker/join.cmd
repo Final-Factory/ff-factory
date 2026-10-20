@@ -10,7 +10,8 @@ set "FF_JOIN_CODE=__FF_JOIN_CODE__"
 set "FF_JOIN_DIR=%LOCALAPPDATA%\FFFactory\join"
 set "FF_JOIN_LOG=%LOCALAPPDATA%\FFFactory\join\join.log"
 set "FF_JOIN_PS1=%LOCALAPPDATA%\FFFactory\join\join.ps1"
-set "FF_JOIN_RUN=%RANDOM%%RANDOM%%RANDOM%"
+rem join.ps1 writes "started" into this file first thing: still "waiting" afterwards means PowerShell never ran it.
+set "FF_JOIN_STARTED=%LOCALAPPDATA%\FFFactory\join\started.txt"
 echo FF Factory: adding this PC to __FF_PORTAL_URL__.
 echo This run's log (no secrets in it): %FF_JOIN_LOG%
 if not exist "%FF_JOIN_DIR%\" mkdir "%FF_JOIN_DIR%"
@@ -20,7 +21,7 @@ if not exist "%FF_JOIN_DIR%\" (
   goto done
 )
 >>"%FF_JOIN_LOG%" echo.
->>"%FF_JOIN_LOG%" echo %DATE% %TIME% ff-factory-join.cmd run %FF_JOIN_RUN% as %USERNAME% in %CD%
+>>"%FF_JOIN_LOG%" echo %DATE% %TIME% ff-factory-join.cmd as %USERNAME% in %CD%
 
 echo.
 echo == Step 1 of 2: downloading the join script (__FF_PORTAL_URL__/join/windows.ps1)
@@ -47,10 +48,11 @@ if not "%FF_RC%"=="0" (
 
 echo.
 echo == Step 2 of 2: running it in Windows PowerShell
+>"%FF_JOIN_STARTED%" echo waiting
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%FF_JOIN_PS1%"
 set "FF_RC=%ERRORLEVEL%"
 >>"%FF_JOIN_LOG%" echo step 2: join.ps1 exit %FF_RC%
-findstr /c:"join.ps1 started %FF_JOIN_RUN%" "%FF_JOIN_LOG%" >nul 2>&1
+findstr /c:"started" "%FF_JOIN_STARTED%" >nul 2>&1
 if errorlevel 1 (
   >>"%FF_JOIN_LOG%" echo step 2 FAILED: PowerShell did not start join.ps1
   echo.

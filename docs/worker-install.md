@@ -262,8 +262,12 @@ command line in `join.cmd`, `join.ps1` or `install.ps1`; join.ps1's Claude Code 
 too, named on screen at the start and the end; the code and the credential are never printed, so never logged. The .cmd
 names its own two steps (the download, PowerShell), and join.ps1 names the step it stopped at with the error. The
 "is this PC connected to Tailscale" hint shows only when the portal cannot be reached: the download failed to connect, or
-join.ps1 exited 3 (Tailscale not connected, or `/api/health` unanswered). When PowerShell never started join.ps1 (it marks
-its start in the log), the .cmd says Windows blocked it and to look in Windows Security's Protection history. A `.cmd` rather than an `.exe`: it needs no build or compiler on the portal, a person can read it before running it,
+join.ps1 exited 3 (Tailscale not connected, or `/api/health` unanswered). When PowerShell never started join.ps1 (the .cmd
+writes "waiting" to `started.txt` beside the log and join.ps1 overwrites it first thing; a run id would not do, since two
+cmd.exe started in the same second get the same `%RANDOM%`), the .cmd says Windows blocked it and to look in Windows
+Security's Protection history.
+
+A `.cmd` rather than an `.exe`: it needs no build or compiler on the portal, a person can read it before running it,
 the dashboard writes the code into it in the browser (`windowsInstaller`, server/machineJoinHttp.ts), and an unsigned
 `.exe` meets the same warnings below. A file a browser downloads carries the Mark of the Web, and Windows then does this:
 
