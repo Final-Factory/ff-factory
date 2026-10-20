@@ -179,7 +179,7 @@ test('an open ask_person question is still open, with its buttons, after the rel
   await page.goto('/');
   const me = await appState(page.request);
   const question = `Merge the belt fix ${uniq('q')} now?`;
-  await useTool(page.request, me.orchestratorId, 'ask_person', { question, options: [{ label: 'Merge it' }, { label: 'Wait' }] });
+  await useTool(page.request, me.orchestratorId, 'ask_person', { question, options: [{ label: 'Merge it', description: 'Ship it.' }, { label: 'Wait', description: 'Hold it.' }] });
   const card = page.getByTestId('ask').filter({ hasText: question });
   await expect(card).toBeVisible();
   await handOff(page);
