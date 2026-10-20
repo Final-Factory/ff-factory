@@ -67,8 +67,10 @@ git(P, 'commit', '-qm', 'link-e2e: B');
 const B = git(P, 'rev-parse', 'HEAD');
 
 // Claude Code is a prerequisite the install checks, never used here (as update-e2e.ts).
+// On Windows in the native install's folder (~\.local\bin): the update job runs as a scheduled task, without this
+// process's PATH, and finds Claude Code where withStandardPaths looks (the CI runner has none; w1596's first Windows run).
 if (isWin && spawnSync('where', ['claude'], { stdio: 'ignore', windowsHide: true }).status !== 0) {
-  const bin = path.join(scratch, 'bin');
+  const bin = path.join(os.homedir(), '.local', 'bin');
   fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(path.join(bin, 'claude.cmd'), '@echo 0.0.0 (Claude Code stand-in, link-e2e)\r\n');
   process.env.PATH = `${bin};${process.env.PATH}`;
@@ -170,6 +172,13 @@ try {
   check(fs.existsSync(path.join(l.daemon, 'app', 'machine', 'daemon.ts')) && fs.existsSync(l.token), 'its files are kept (the code, the credential)');
   check(await waitFor("the unload job's registration to go", async () => !jobRegistered(), 60_000), `the unload job removed its own ${isWin ? 'task' : 'LaunchAgent'}`);
 } finally {
+  // A failure's evidence, before the uninstall removes the root: the job's log and the daemon's.
+  if (failed) {
+    for (const f of ['update-job.log', 'daemon.log', 'daemon.err.log', 'supervisor.log']) {
+      const file = path.join(l.daemon, 'logs', f);
+      console.log(`\n== ${f} (the end)\n${fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split(/\r?\n/).slice(-60).join('\n') : '(none)'}`);
+    }
+  }
   const un = spawnSync(node[0], [...node.slice(1), path.join(SRC, 'scripts', 'worker', 'worker.ts'), 'uninstall', '--root', root, '--yes', '--force'], { encoding: 'utf8' });
   console.log(`(uninstall of the test root: exit ${un.status})`);
   portal.kill();

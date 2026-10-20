@@ -311,8 +311,9 @@ const joinHttp = machineJoinHttp({
   codes: machines.joins,
   records: { get: (id) => store.machines.get(id) },
   whois: joinWhois,
-  enrol: ({ machineId, tailnetName, limits, portalUrl }) => {
+  enrol: ({ machineId, tailnetName, limits, portalUrl, platform }) => {
     machines.deployMachine({ id: machineId, workerInstall: true, host: tailnetName, portalUrl, ...limits });
+    if (platform) machines.update(machineId, { platform });
     return issueMachineToken(cfg.dataDir, machineId);
   },
   portalUrl: (req) => originOf(req) || (cfg.publicUrl ?? '').replace(/\/+$/, ''),

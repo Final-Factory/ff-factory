@@ -123,7 +123,8 @@ test('join.ps1: a dry run changes nothing; the join hands the installer a privat
   const script = path.join(tmp, 'join.ps1');
   fs.writeFileSync(script, await (await fetch(`${portal.base}/join/windows.ps1`)).text());
   const root = path.join(tmp, 'root');
-  const env = { FF_JOIN_CODE: code, TMPDIR: tmp, TEMP: tmp, PATH: `${path.dirname(powershell!)}${path.delimiter}${process.env.PATH}` };
+  const log = path.join(tmp, 'logs', 'join.log');
+  const env = { FF_JOIN_CODE: code, FF_JOIN_LOG: log, FF_JOIN_RUN: 'run1', TMPDIR: tmp, TEMP: tmp, PATH: `${path.dirname(powershell!)}${path.delimiter}${process.env.PATH}` };
   const common = ['-Root', root, '-Tailscale', f.tailscale, '-Installer', f.installer, '-SkipMachineSetup', '-Yes'];
 
   const dry = await run(powershell!, psArgs(script, ...common, '-DryRun'), env);
@@ -155,10 +156,58 @@ test('join.ps1: a dry run changes nothing; the join hands the installer a privat
   assert.match(r.out, /no ssh, firewall rule or tailnet tag is needed/);
   assert.doesNotMatch(r.out, /OpenSSH|tag:fff-worker|port 22/);
   assert.equal(portal.codes.find(code), undefined, 'the code is spent');
+  // w1603: the run's log, named on screen, holds what the screen showed and the installer's own lines, never a secret.
+  const text = fs.readFileSync(log, 'utf8');
+  assert.match(r.out, new RegExp(`This run's log \\(no secrets in it\\): ${log.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}`));
+  assert.match(text, /join\.ps1 started run1/);
+  assert.match(text, /== Enrolling/);
+  assert.match(text, /fake installer: done/, "the installer's output is logged too");
+  assert.ok(!text.includes(cred) && !text.includes(cred.slice(4, -4)) && !text.includes(code), 'no credential or code in the log');
 
   const again = await run(powershell!, psArgs(script, '-Root', path.join(tmp, 'root2'), '-Tailscale', f.tailscale, '-Installer', f.installer, '-SkipMachineSetup', '-Yes'), env);
   assert.equal(again.code, 2);
   assert.match(again.out, /The portal refused the code: that join code is wrong, used or expired/);
+  assert.match(again.out, /It stopped \(exit 2\) at 'Tailscale and the portal': the reason is the line above\. Everything this run printed is in /);
+});
+
+test('join.ps1: a portal it cannot reach exits 3 (the one failure the Tailscale hint is for), names the step, and logs it (w1603)', { skip: !powershell && 'no PowerShell here (pwsh not on PATH)' }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-ps3-'));
+  const f = fakes(tmp, 'ps');
+  const log = path.join(tmp, 'join.log');
+  const closed = http.createServer();
+  await new Promise<void>((r) => closed.listen(0, '127.0.0.1', r));
+  const dead = `http://127.0.0.1:${(closed.address() as AddressInfo).port}`;
+  await new Promise<void>((r) => closed.close(() => r()));
+  const env = { FF_JOIN_LOG: log, TMPDIR: tmp, TEMP: tmp, PATH: `${path.dirname(powershell!)}${path.delimiter}${process.env.PATH}` };
+  const r = await run(powershell!, psArgs(path.join(ROOT, 'scripts', 'worker', 'join.ps1'), '-PortalUrl', dead, '-Root', path.join(tmp, 'root'), '-Tailscale', f.tailscale, '-Installer', f.installer, '-SkipMachineSetup', '-Yes'), env);
+  assert.equal(r.code, 3, r.out);
+  assert.match(r.out, new RegExp(`The portal at ${dead.replace(/[.]/g, '\\.')} does not answer: \\S`));
+  assert.match(r.out, /It stopped \(exit 3\) at 'Tailscale and the portal'/);
+  assert.match(fs.readFileSync(log, 'utf8'), /does not answer/);
+});
+
+test('join.ps1: an elevated window of the signed-in person installs for that person (-Owner), not refused (w1603)', { skip: !isWin && 'Windows elevation' }, async () => {
+  const probe = `$env:FF_JOIN_NO_MAIN = '1'; $env:FF_JOIN_LOG = Join-Path ([IO.Path]::GetTempPath()) 'ffjoin-owner.log'; . '${path.join(ROOT, 'scripts', 'worker', 'join.ps1').replace(/'/g, "''")}'
+$elevated = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$o = Get-ElevatedOwner
+"elevated=$elevated owner=[$o] me=[$([Security.Principal.WindowsIdentity]::GetCurrent().Name)]"`;
+  const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', probe], {});
+  const m = /elevated=(\w+) owner=\[(.*?)\] me=\[(.*?)\]/.exec(r.out);
+  assert.ok(m, r.out);
+  // CI's runner is elevated as the account that runs it: the owner is that account. A normal window has none ('').
+  assert.equal(m[2], m[1] === 'True' ? m[3] : '', r.out);
+});
+
+test('no installer starts PowerShell with a command line that downloads and runs a script: Defender blocks it as "Access is denied." (w1603)', () => {
+  // desktop-coosego: ff-factory-join.cmd's `powershell.exe -Command "irm <url> | iex"` printed only "Access is denied."
+  // (Defender's Trojan:Win32/Commando.A!ml on that command line, https://github.com/Thurbeen/fleet/pull/139). A line a person
+  // types into their own PowerShell is not that, so the hints may still show one.
+  const bad = /(-Command|-c)\s+["'][^"'\r\n]*\b(irm|iwr|Invoke-RestMethod|Invoke-WebRequest|DownloadString)\b[^\r\n]*\|\s*(iex|Invoke-Expression)\b/i;
+  for (const name of ['join.cmd', 'join.ps1', 'install.ps1']) {
+    const lines = fs.readFileSync(path.join(ROOT, 'scripts', 'worker', name), 'utf8').split(/\r?\n/).filter((l) => !/^\s*(rem |#)/i.test(l));
+    assert.deepEqual(lines.filter((l) => bad.test(l)), [], `${name} starts PowerShell with a download-and-run command line`);
+  }
+  assert.ok(bad.test(`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://p/join/windows.ps1' | iex"`), 'the check sees the shape that failed');
 });
 
 test('join.ps1: run again on an installed PC, it updates the install with no code, keeping its ssh; a new join asks for no ssh or tailnet tag (w1596)', { skip: !powershell && 'no PowerShell here (pwsh not on PATH)' }, async (t) => {
@@ -236,10 +285,13 @@ test('join.sh: a dry run changes nothing; the join hands install.sh a 0600 crede
 test('join.cmd: double-clicked (cmd.exe), the download runs the portal\'s bootstrap in Windows PowerShell with its code; an unreachable portal says what to check', { skip: !isWin && 'cmd.exe: Windows' }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-cmd-'));
   const seen = path.join(dir, 'seen.txt');
-  // A portal whose bootstrap only records what it was given: the wrapper is what is tested here.
+  // A portal whose bootstrap only records what it was given, marks its start as join.ps1 does, and exits `exit`: the
+  // wrapper is what is tested here. 'blocked' never starts (as when Windows refuses to start PowerShell).
+  let exit: number | 'blocked' = 0;
   const server = http.createServer((req, res) => {
     if (req.url !== '/join/windows.ps1') return void res.writeHead(404).end();
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }).end(`Add-Content -LiteralPath '${seen}' -Value ("code=$env:FF_JOIN_CODE edition=$($PSVersionTable.PSEdition)")\n`);
+    const started = exit === 'blocked' ? '' : `Add-Content -LiteralPath $env:FF_JOIN_LOG -Value "join.ps1 started $env:FF_JOIN_RUN"\n`;
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }).end(`${started}Add-Content -LiteralPath '${seen}' -Value ("code=$env:FF_JOIN_CODE edition=$($PSVersionTable.PSEdition)")\nexit ${exit === 'blocked' ? 1 : exit}\n`);
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => server.close());
@@ -248,16 +300,41 @@ test('join.cmd: double-clicked (cmd.exe), the download runs the portal\'s bootst
   const code = 'ABCDE-FGHJK-MNPQR-STVWX';
   const withCode = path.join(dir, 'ff-factory-join.cmd');
   fs.writeFileSync(withCode, windowsInstaller(template, base, code));
-  const a = await run('cmd.exe', ['/d', '/c', withCode], { FF_JOIN_CODE: '' });
+  // Its log goes to %LOCALAPPDATA%\FFFactory\join\join.log, named on screen (w1603).
+  const local = path.join(dir, 'local');
+  fs.mkdirSync(local);
+  const log = path.join(local, 'FFFactory', 'join', 'join.log');
+  const a = await run('cmd.exe', ['/d', '/c', withCode], { FF_JOIN_CODE: '', LOCALAPPDATA: local });
   assert.equal(a.code, 0, a.out);
+  assert.ok(a.out.includes(`This run's log (no secrets in it): ${log}`), a.out);
+  assert.doesNotMatch(a.out, /FAILED|Tailscale/, a.out);
   const generic = path.join(dir, 'generic', 'ff-factory-join.cmd');
   fs.mkdirSync(path.dirname(generic));
   fs.writeFileSync(generic, windowsInstaller(template, base));
-  const b = await run('cmd.exe', ['/d', '/c', generic], { FF_JOIN_CODE: 'left-over' });
+  const b = await run('cmd.exe', ['/d', '/c', generic], { FF_JOIN_CODE: 'left-over', LOCALAPPDATA: local });
   assert.equal(b.code, 0, b.out);
   assert.deepEqual(fs.readFileSync(seen, 'utf8').trim().split(/\r?\n/), [`code=${code} edition=Desktop`, 'code= edition=Desktop'], 'Windows PowerShell 5.1, with the code written in, or none (the bootstrap asks)');
+  assert.ok(!fs.readFileSync(log, 'utf8').includes(code), 'the code is not in the log');
+
+  // A step of the bootstrap that stops it: named above by the bootstrap; the Tailscale hint is not shown.
+  exit = 2;
+  const stopped = await run('cmd.exe', ['/d', '/c', withCode], { LOCALAPPDATA: local });
+  assert.match(stopped.out, /It stopped at the step named above \(exit 2\)/, stopped.out);
+  assert.doesNotMatch(stopped.out, /Tailscale/, stopped.out);
+  // The bootstrap could not reach the portal (exit 3): the hint.
+  exit = 3;
+  const unreachable = await run('cmd.exe', ['/d', '/c', withCode], { LOCALAPPDATA: local });
+  assert.match(unreachable.out, /It could not reach the portal: is this PC connected to Tailscale/, unreachable.out);
+  // Windows did not let PowerShell start the bootstrap (desktop-coosego's "Access is denied."): said so, and where to look.
+  exit = 'blocked';
+  const blocked = await run('cmd.exe', ['/d', '/c', withCode], { LOCALAPPDATA: local });
+  assert.match(blocked.out, /FAILED at step 2 of 2: Windows did not let PowerShell run the join script/, blocked.out);
+  assert.match(blocked.out, /Protection history/);
+  assert.doesNotMatch(blocked.out, /Tailscale/, blocked.out);
 
   server.close();
-  const off = await run('cmd.exe', ['/d', '/c', withCode], {});
-  assert.match(off.out, /It stopped before the end: read the lines above\. Is this PC connected to Tailscale/, off.out);
+  const off = await run('cmd.exe', ['/d', '/c', withCode], { LOCALAPPDATA: local });
+  assert.match(off.out, /FAILED at step 1 of 2: this PC could not reach the portal \(curl exit \d+/, off.out);
+  assert.match(off.out, /Is this PC connected to Tailscale/, off.out);
+  assert.match(fs.readFileSync(log, 'utf8'), /step 1 FAILED: curl exit \d+/);
 });

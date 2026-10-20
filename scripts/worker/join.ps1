@@ -3,10 +3,13 @@
   Join this Windows PC to FF Factory in one step (w1592, docs/worker-install.md "Adding a machine with a join code").
 
 .DESCRIPTION
-  Run it on a PC that is connected to Tailscale, from a normal PowerShell (not "Run as administrator"), with the join
-  code an owner got from add_machine join_code:
+  Run it on a PC that is connected to Tailscale, with the join code an owner got from add_machine join_code: the
+  dashboard's ff-factory-join.cmd downloads it and runs it with -File, or type this in a PowerShell:
     irm https://<the portal>/join/windows.ps1 | iex
-  The portal serves this file with its own address written in. It:
+  Elevated or not: an administrator window of the person signed in installs for that person (install.ps1 -Owner).
+  Everything it prints goes to a log, %LOCALAPPDATA%\FFFactory\join\join.log, which it names on screen; the code and the
+  credential are never printed, so never logged. Exit 3: Tailscale or the portal cannot be reached; 2 or 1: another step
+  stopped it, named on screen. The portal serves this file with its own address written in. It:
   1. finds the portal over the tailnet and checks the code with it (the code works only from the tailnet device it was
      made for, once, within its hour);
   2. checks node 22.6+, git 2.48+, git-lfs and Claude Code, and installs the missing ones with winget (or Claude Code's
@@ -47,8 +50,20 @@ $ErrorActionPreference = 'Stop'
 $script:InstallUrl = 'https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1'
 $script:OnWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or $IsWindows
 
-function Say([string]$text) { Write-Host $text }
-function Step([string]$text) { Write-Host ''; Write-Host "== $text" }
+# The run's log (w1603): every line this script and the installer print, never the code or the credential (neither is
+# ever printed). ff-factory-join.cmd names it in FF_JOIN_LOG; the PowerShell line gets the same place.
+$script:Log = $(if ($env:FF_JOIN_LOG) { $env:FF_JOIN_LOG } elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'FFFactory\join\join.log' } else { Join-Path ([IO.Path]::GetTempPath()) 'ff-factory-join.log' })
+$script:CurrentStep = 'Starting'
+
+function Write-Log([string]$text) {
+    try {
+        $dir = Split-Path -Parent $script:Log
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [IO.File]::AppendAllText($script:Log, "$text`r`n", (New-Object Text.UTF8Encoding $false))
+    } catch { }
+}
+function Say([string]$text) { Write-Host $text; Write-Log $text }
+function Step([string]$text) { $script:CurrentStep = $text; Write-Host ''; Write-Host "== $text"; Write-Log ''; Write-Log "== $text" }
 
 function Ask([string]$question, [string]$default) {
     if ($Yes) { return $default }
@@ -216,10 +231,14 @@ function Install-Tools {
     foreach ($m in $missing) {
         if ($m.Winget) {
             Say "Installing $($m.Name) (winget $($m.Winget))..."
-            & $winget.Source install --id $m.Winget -e --silent --accept-source-agreements --accept-package-agreements | Out-Host
+            & $winget.Source install --id $m.Winget -e --silent --accept-source-agreements --accept-package-agreements | ForEach-Object { Write-Log ([string]$_); $_ } | Out-Host
         } else {
             Say 'Installing Claude Code (https://claude.ai/install.ps1)...'
-            & powershell -NoProfile -ExecutionPolicy Bypass -Command 'irm https://claude.ai/install.ps1 | iex' | Out-Host
+            # Downloaded to a file and run with -File: Defender blocks a PowerShell whose command line downloads and runs a
+            # script (`-Command "irm ... | iex"`), and the person sees only "Access is denied." (w1603).
+            $file = Join-Path ([IO.Path]::GetTempPath()) "ff-claude-install-$PID.ps1"
+            Invoke-WebRequest -UseBasicParsing -Uri 'https://claude.ai/install.ps1' -OutFile $file
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $file | ForEach-Object { Write-Log ([string]$_); $_ } | Out-Host
         }
     }
     Update-SessionPath
@@ -269,22 +288,43 @@ function Invoke-Installer([string[]]$arguments, [string]$work) {
         Invoke-WebRequest -UseBasicParsing -Uri $script:InstallUrl -OutFile $file
     }
     $shell = $(if ($script:OnWindows -and $PSVersionTable.PSEdition -eq 'Desktop') { 'powershell' } elseif (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' })
-    & $shell -NoProfile -ExecutionPolicy Bypass -File $file @arguments | Out-Host
+    & $shell -NoProfile -ExecutionPolicy Bypass -File $file @arguments | ForEach-Object { Write-Log ([string]$_); $_ } | Out-Host
     return $LASTEXITCODE
 }
 
 # ---------------------------------------------------------------- the whole join
 
-function Invoke-FFJoin {
-    Say 'FF Factory: join this PC (one step). Nothing secret is shown on screen.'
-    # install.ps1 refuses an elevated new install (its files would belong to Administrators), so this refuses first; a
-    # test's own -Installer makes no files, which lets the tests run on CI's elevated Windows runner.
-    if ($script:OnWindows -and -not $Installer) {
-        $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-        if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-            Say 'Run this from a normal PowerShell, not as administrator: the steps that need admin rights ask for them.'
-            return 2
+# An elevated window (an administrator Command Prompt, w1603: desktop-coosego) of the person signed in: install.ps1 gives
+# what it makes to them (-Owner), and their daemon runs as them, not elevated. Another account's elevated window (Windows'
+# Administrator protection runs it as a separate admin account, or Run as a different user) would install for that account,
+# so it is refused. Returns the owner, '' when not elevated, or $null for a refusal.
+function Get-ElevatedOwner {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if (-not (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { return '' }
+    $console = ''
+    try { $console = [string](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName } catch { }
+    if ($console) {
+        $sid = ''
+        try { $sid = (New-Object Security.Principal.NTAccount($console)).Translate([Security.Principal.SecurityIdentifier]).Value } catch { }
+        if ($sid -and $sid -ne $id.User.Value) {
+            Say "This window runs as administrator account '$($id.Name)', not as '$console', who is signed in: the install would belong to the wrong account. Double-click ff-factory-join.cmd instead (or run it from a Command Prompt that is not 'as administrator')."
+            return $null
         }
+    }
+    return $id.Name
+}
+
+function Invoke-FFJoin {
+    Write-Log ''
+    Write-Log "$(Get-Date -Format o) join.ps1 started $env:FF_JOIN_RUN (Windows PowerShell $($PSVersionTable.PSVersion), as $([Environment]::UserName))"
+    Say 'FF Factory: join this PC (one step). Nothing secret is shown on screen.'
+    Say "This run's log (no secrets in it): $($script:Log)"
+    $script:Owner = ''
+    # A test's own -Installer makes no files, which lets the tests run on CI's elevated Windows runner.
+    if ($script:OnWindows -and -not $Installer) {
+        $script:Owner = Get-ElevatedOwner
+        if ($null -eq $script:Owner) { return 2 }
+        if ($script:Owner) { Say "This window is elevated: the install is made for $($script:Owner), and its daemon runs as $($script:Owner), not elevated." }
     }
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
     if (-not $PortalUrl -or $PortalUrl -like '__FF_*') { $PortalUrl = Ask 'Portal URL (https://<portal>.<tailnet>.ts.net)' '' }
@@ -295,11 +335,11 @@ function Invoke-FFJoin {
     $self = Get-TailnetSelf $tsExe
     if (-not $self -or -not $self.Running) {
         Say 'Tailscale is not connected on this PC. Install it (https://tailscale.com/download), sign in, then run this again.'
-        return 2
+        return 3
     }
     Say "This PC is '$($self.Name)' on the tailnet$(if ($self.Tags.Count) { " (tags: $($self.Tags -join ', '))" } else { ' (no tags)' })."
     $h = Invoke-Portal 'GET' '/api/health'
-    if (-not $h.Ok) { Say "The portal at $($script:Portal) does not answer: $($h.Error)"; return 2 }
+    if (-not $h.Ok) { Say "The portal at $($script:Portal) does not answer: $($h.Error)"; return 3 }
     Say "The portal at $($script:Portal) answers."
 
     $work = New-PrivateFolder
@@ -378,6 +418,7 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
 
     Step 'Installing (install.ps1)'
     $a = @('-Root', $root, '-PortalUrl', $script:Portal, '-MaxSandboxes', $limits.maxSandboxes, '-MaxAgentsPerSandbox', $limits.maxAgentsPerSandbox, '-MaxUnity', $limits.maxUnity, '-CredentialFile', $credFile, '-NoSsh')
+    if ($script:Owner) { $a += @('-Owner', $script:Owner) }
     try {
         $exit = Invoke-Installer $a $work
     } finally {
@@ -401,7 +442,14 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
 }
 
 if (-not $env:FF_JOIN_NO_MAIN) {
-    $rc = Invoke-FFJoin
+    # Any error no step caught: the step it stopped at and the error itself, on screen and in the log (w1603).
+    $rc = try { Invoke-FFJoin } catch {
+        Say ''
+        Say "FAILED at the step '$($script:CurrentStep)': $($_.Exception.Message)"
+        Write-Log "$($_.InvocationInfo.PositionMessage)"
+        1
+    }
+    if ($rc -ne 0) { Say "It stopped (exit $rc) at '$($script:CurrentStep)': the reason is the line above. Everything this run printed is in $($script:Log)." }
     # Run as a file (tests, -File), end with the code; through `irm | iex` an exit would close the person's window.
     if ($MyInvocation.MyCommand.Path) { exit $rc }
 }

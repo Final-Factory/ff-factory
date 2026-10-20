@@ -159,7 +159,7 @@ restarts onto the daemon link; drop the SSH need", so the bootstrap no longer se
 2. **At the PC**, connected to Tailscale: double-click the downloaded installer (Windows warns about a downloaded file
    first: [The download and Windows' warnings](#the-download-and-windows-warnings-w1592)). Without one, open
    `https://<the portal>.<tailnet>.ts.net/join` in its browser (a tailnet-only page with the installer that asks for the
-   code, `GET /join/windows.cmd`, and the commands), or paste this into a normal PowerShell (not "Run as administrator"):
+   code, `GET /join/windows.cmd`, and the commands), or paste this into a PowerShell window (as administrator or not, w1603):
 
    ```powershell
    irm https://<the portal>.<tailnet>.ts.net/join/windows.ps1 | iex
@@ -241,9 +241,29 @@ Windows-only steps (winget, the Dev Drive) and the Mark-of-the-Web warnings run 
 
 #### The download and Windows' warnings (w1592)
 
-The installer is `ff-factory-join.cmd` (`scripts/worker/join.cmd`): a batch file of a few lines that runs the bootstrap
-above in Windows PowerShell (`irm <portal>/join/windows.ps1 | iex`, with `FF_JOIN_CODE` set when the dashboard wrote it
-in). A `.cmd` rather than an `.exe`: it needs no build or compiler on the portal, a person can read it before running it,
+The installer is `ff-factory-join.cmd` (`scripts/worker/join.cmd`): a batch file that downloads the bootstrap above with
+`curl.exe` to `%LOCALAPPDATA%\FFFactory\join\join.ps1` and runs that file in Windows PowerShell (`-File`, with
+`FF_JOIN_CODE` set when the dashboard wrote it in). Double-clicked, or run from a Command Prompt or PowerShell, elevated or
+not: an administrator window of the person signed in installs for that person (`install.ps1 -Owner`, so the files and the
+daemon's task are theirs and the daemon runs unelevated); another account's administrator window is refused, since the
+install would belong to that account.
+
+**Never `powershell -Command "irm <url> | iex"` on a command line** (w1603). The first installer did that, and on
+desktop-coosego (Windows 11, run from an administrator Command Prompt in Downloads) it printed only `Access is denied.`,
+the very first line, before any line of join.ps1. That is cmd's message when Windows refuses to start a process, and the
+`powershell.exe` line was the only command in the file that starts one. Microsoft Defender blocks a child PowerShell whose
+command line downloads and runs a script, as `Trojan:Win32/Commando.A!ml`, and the caller sees `Access is denied`
+([a Windows 11 report of exactly this](https://github.com/Thurbeen/fleet/pull/139); sourced, not reproduced here: CI's
+Windows runners do not run Defender's real-time protection). The same line typed into a person's own PowerShell is not a
+child's command line, so the dashboard's PowerShell line stays. `scripts/join.test.ts` fails on a download-and-run
+command line in `join.cmd`, `join.ps1` or `install.ps1`; join.ps1's Claude Code step downloads `install.ps1` to a file too.
+
+**What a failure says** (w1603): every line join.ps1 and the installer print goes to `%LOCALAPPDATA%\FFFactory\join\join.log`
+too, named on screen at the start and the end; the code and the credential are never printed, so never logged. The .cmd
+names its own two steps (the download, PowerShell), and join.ps1 names the step it stopped at with the error. The
+"is this PC connected to Tailscale" hint shows only when the portal cannot be reached: the download failed to connect, or
+join.ps1 exited 3 (Tailscale not connected, or `/api/health` unanswered). When PowerShell never started join.ps1 (it marks
+its start in the log), the .cmd says Windows blocked it and to look in Windows Security's Protection history. A `.cmd` rather than an `.exe`: it needs no build or compiler on the portal, a person can read it before running it,
 the dashboard writes the code into it in the browser (`windowsInstaller`, server/machineJoinHttp.ts), and an unsigned
 `.exe` meets the same warnings below. A file a browser downloads carries the Mark of the Web, and Windows then does this:
 

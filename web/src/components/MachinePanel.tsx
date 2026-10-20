@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { platformNoun, type AppState, type Machine } from '../../../shared/types';
+import { machineKind, type AppState, type Machine } from '../../../shared/types';
 import { api, type JoinAnswer } from '../api';
 import { attempt, sessionsByIds, toast, upsertMachine } from '../store';
 import { displayName, fmtRelative, isUnused, machineGlance, machineLabel, machineTone, navigate, useNow } from '../util';
@@ -104,7 +104,7 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
         >
           <div className="details-row dim small">
             <span>
-              Machine <span className="mono">{m.name ?? m.id}</span> · {platformNoun(m.platform)}
+              Machine <span className="mono">{m.name ?? m.id}</span> · {machineKind(m)}
             </span>
             <span>{m.info?.hostname ?? `ssh ${m.host}`}</span>
           </div>
@@ -385,7 +385,7 @@ function JoinMachineModal({ app, onClose, onSsh }: { app: AppState; onClose: () 
           )}
           <p className="dim small">Or, on that PC, type the code into one of these:</p>
           <p className="small">
-            PowerShell (not as administrator): <code className="mono">{made.windowsCommand}</code> <CopyButton text={made.windowsCommand} />
+            PowerShell: <code className="mono">{made.windowsCommand}</code> <CopyButton text={made.windowsCommand} />
           </p>
           <p className="small">
             Mac or Linux terminal: <code className="mono">{made.unixCommand}</code> <CopyButton text={made.unixCommand} />
