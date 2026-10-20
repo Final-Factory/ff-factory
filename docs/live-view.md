@@ -63,7 +63,9 @@ flowchart LR
 - **How you get there:** the session's header shows "Live view" while a view is running. Since w1430 the sidebar shows
   "Live view: go" on the slot's row when its worker waits on you, or is between turns with its view up and you asked for
   it ([machines.md](machines.md), "In the web UI"), and the request's card on the Dispatcher's "Waiting on input" tab has
-  the same button.
+  the same button. Since w1599 every person who may watch a running view (the requester and the owners, below) sees the
+  button on the slot's row whenever the view is up, quiet and outlined when it is not waiting on them; the amber one stays
+  for the person it waits on. Anyone else sees none.
 
 | Route | What it does |
 |---|---|
