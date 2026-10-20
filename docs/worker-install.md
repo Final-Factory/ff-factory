@@ -129,27 +129,44 @@ installer asks for no other secret. A migration needs none: it keeps the token t
 
 ### Adding a machine with a join code (w1592)
 
-**TL;DR:** an owner asks for a join code; at the new PC, connected to Tailscale, a person runs one line and types the code.
-The PC checks its tools and installs the missing ones, turns on OpenSSH Server, enrols itself with the portal, runs this
-installer with the right answers and shows what the portal sees. No credential passes through chat or the screen.
+**TL;DR:** an owner clicks **Add a machine** in the dashboard (or asks their orchestrator) and gets a join code and a
+Windows installer that carries it; at the new PC, connected to Tailscale, a person double-clicks the installer (or runs one
+line and types the code). The PC checks its tools and installs the missing ones, turns on OpenSSH Server, enrols itself
+with the portal, runs this installer with the right answers and shows what the portal sees. No credential passes through
+chat or the screen.
 
 lothsahn asked for it on 2026-10-20 (w1592): "Can you make an installer I can run so this is easier in the future? I can
 connect to tailscale and then it should contact the portal to set itself up with an installer." The manual route below
 and in [ops-worker.md](ops-worker.md#a-new-machine) still works; this one replaces its steps 1, 3 and 4 and the ops
-worker's whole job.
+worker's whole job. Then, the same day: "Can it be an installer I download from the website instead of opening a ssh
+tunnel?" (relayed by his orchestrator), so the dashboard hands out a download too.
 
-1. **An owner asks for the code**, in their own words, from their orchestrator or the dispatcher's chat: "add desktop-coosego
-   with a join code". The dispatcher runs `add_machine` with `join_code` (and `tailnet_name` when the PC's tailnet name
-   differs from the id; limits if the owner gives any). It makes the record ("Setting up", waiting for its join bootstrap)
-   and answers the code, valid for an hour, and the command to run.
-2. **At the PC**, in a normal PowerShell (not "Run as administrator"):
+1. **An owner makes the code**, one of two ways:
+   - **In the dashboard**: Computers > **Add a machine** (owners only). Id, the PC's tailnet device name (filled in when
+     the dashboard is opened on that PC itself: `GET /api/machines/join/device` runs `tailscale whois` on the browser's
+     address), and limits if any (blank: the PC's own). **Make the installer** (`POST /api/machines/join`) makes the
+     record and shows the code once, with **Download the Windows installer**: `ff-factory-join.cmd` with the code
+     written in, made in the browser from the answer, so the code never sits in a URL or a server log. Opened on the new
+     PC, that is the whole job there: download, double-click. Opened elsewhere, take the file (or the code) to the PC.
+   - **From an orchestrator** or the dispatcher's chat, in the owner's own words: "add desktop-coosego with a join code".
+     The dispatcher runs `add_machine` with `join_code` (and `tailnet_name` when the PC's tailnet name differs from the id;
+     limits if the owner gives any) and answers the code, valid for an hour, and where to run it.
+
+   Both go through `MachineManager.createJoin` (server/machines.ts): the record ("Setting up", waiting for its join
+   bootstrap) and the code.
+2. **At the PC**, connected to Tailscale: double-click the downloaded installer (Windows warns about a downloaded file
+   first: [The download and Windows' warnings](#the-download-and-windows-warnings-w1592)). Without one, open
+   `https://<the portal>.<tailnet>.ts.net/join` in its browser (a tailnet-only page with the installer that asks for the
+   code, `GET /join/windows.cmd`, and the commands), or paste this into a normal PowerShell (not "Run as administrator"):
 
    ```powershell
    irm https://<the portal>.<tailnet>.ts.net/join/windows.ps1 | iex
    ```
 
    A Mac or a Linux PC, in a terminal: `bash -c "$(curl -fsSL https://<the portal>.<tailnet>.ts.net/join/unix.sh)"`.
-   It asks for the code, shows the machine id and the limits it will use, and asks once before it changes anything.
+   It asks for the code (the dashboard's download has it already), shows the machine id and the limits it will use, and
+   asks once before it changes anything; after that yes it installs the tools and sets up OpenSSH Server without another
+   question (Windows itself asks for administrator rights for OpenSSH Server and the Dev Drive).
    Options: `-Root D:\ffw`, `-MaxSandboxes N`, `-MaxAgentsPerSandbox N`, `-MaxUnity N`, `-DryRun` (checks everything, changes
    nothing, leaves the code unused), `-Yes` (asks nothing but the code), `-Tag` and `-NoTag` (the tailnet tag, below). To
    pass them: `& ([scriptblock]::Create((irm https://<the portal>/join/windows.ps1))) -DryRun`.
@@ -163,7 +180,7 @@ What the Windows bootstrap (`scripts/worker/join.ps1`) does, in order:
    script checks `/api/health`. It reads this PC's tailnet name and tags from `tailscale status --json`.
 2. Checks the code with the portal (`POST /machine/join` with `check`: nothing changes, the code stays unused) and shows
    the machine id and the limits.
-3. **The tools**: node 22.6+, git 2.48+, git-lfs and Claude Code. On a yes it installs the missing ones with winget
+3. **The tools**: node 22.6+, git 2.48+, git-lfs and Claude Code. After the one yes it installs the missing ones with winget
    (`OpenJS.NodeJS.LTS`, `Git.Git`, `GitHub.GitLFS`) and Claude Code with its own installer (`irm https://claude.ai/install.ps1 | iex`,
    which updates itself, as [Claude Code's setup page](https://code.claude.com/docs/en/setup) recommends). No winget: it
    says to install App Installer from the Microsoft Store, and lists the commands. **Unity Hub and its editors are
@@ -205,8 +222,10 @@ replaces the old one, and the portal updates the same record, never a second one
 | Rerun | An installed PC updates with no code; a waiting record is reused; an installed id refuses a code ("run the bootstrap on it again"); an ssh-deployed id refuses one too (migrate it) | One record and one credential per machine; a code for an installed machine would only cut its daemon off |
 
 **What it never does**: print or log a credential (the portal logs the code's and the credential's last four only), put the
-code on a command line (it is typed at a prompt, which PowerShell keeps out of its history), install a Unity editor, change
-the tailnet policy, make an ssh key, or delete anything but the folder it made. OpenSSH Server and the `FFFactory-sshd-tailnet`
+code on a command line (it is typed at a prompt, which PowerShell keeps out of its history, or set as `FF_JOIN_CODE` inside
+the downloaded `.cmd`, which only that window sees), install a Unity editor, change the tailnet policy, make an ssh key, or
+delete anything but the folder it made. The downloaded `.cmd` stays in the Downloads folder (deleting it would be a delete
+outside the worker install folder); the code in it is spent at the join and lapses within the hour anyway. OpenSSH Server and the `FFFactory-sshd-tailnet`
 rule stay after an uninstall: a Windows feature the person may use; remove them by hand if not wanted.
 
 **Tests**: `server/machineJoin.test.ts` (codes, hashes, expiry, defaults, whois), `server/machineJoinHttp.test.ts` (tailnet
@@ -214,8 +233,60 @@ only, device binding, check versus redeem, one use, throttle, dry-run portal), a
 against a test enrolment: both bootstraps against a local portal running the real join routes, with a fake tailscale and a
 fake installer. A `-DryRun` leaves the code unused; a join hands the installer a private credential file that is gone
 afterwards, the credential and the code never reach the output, and the code then fails; a second run on an installed PC
-updates it with no code. The Windows-only steps (winget, the OpenSSH Server prompt, the Dev Drive) run for the first time
-on a real PC.
+updates it with no code. On the Windows job (.github/windows-tests.txt) the same file also runs join.ps1 under Windows
+PowerShell 5.1 and the downloaded installer under cmd.exe, as a double-click runs it: CRLF, the quoting, `irm | iex` with
+its code, and the message when the portal cannot be reached. `server/machines.test.ts` covers `createJoin`. The
+Windows-only steps (winget, the OpenSSH Server prompt, the Dev Drive) and the Mark-of-the-Web warnings run for the first
+time on a real PC.
+
+#### The download and Windows' warnings (w1592)
+
+The installer is `ff-factory-join.cmd` (`scripts/worker/join.cmd`): a batch file of a few lines that runs the bootstrap
+above in Windows PowerShell (`irm <portal>/join/windows.ps1 | iex`, with `FF_JOIN_CODE` set when the dashboard wrote it
+in). A `.cmd` rather than an `.exe`: it needs no build or compiler on the portal, a person can read it before running it,
+the dashboard writes the code into it in the browser (`windowsInstaller`, server/machineJoinHttp.ts), and an unsigned
+`.exe` meets the same warnings below. A file a browser downloads carries the Mark of the Web, and Windows then does this:
+
+| On the PC | Unsigned `.exe` | This `.cmd` | The PowerShell line |
+|---|---|---|---|
+| SmartScreen (the usual setting) | "Windows protected your PC": More info, Run anyway | a warning to click through, Run [guess: to be seen on desktop-coosego] | no file, no warning |
+| Smart App Control on | blocked, no override | blocked, no override | runs [guess] |
+
+Sources: Microsoft's [Smart App Control has blocked an app with a dangerous file extension](https://support.microsoft.com/en-us/topic/smart-app-control-has-blocked-an-app-with-a-dangerous-file-extension-60343058-66f2-4548-b978-e484e13abe89)
+lists `.bat`, `.cmd` and `.ps1` among the downloaded files it blocks; its [What is Smart App Control](https://support.microsoft.com/en-us/topic/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003)
+says an app the cloud cannot vouch for runs only with a valid signature and has no per-app override; Eric Lawrence's
+[Smart App Control](https://textslashplain.com/2026/04/28/smart-app-control/) says it starts in evaluation mode on a new
+install, its block "does not offer an override", it turns SmartScreen's app reputation off while on, and a signature must
+chain to Microsoft's Trusted Root program. So on a PC with Smart App Control on (Windows Security > App & browser control >
+Smart App Control) the download cannot run: use the PowerShell line, which the dashboard shows beside the download.
+
+**Code signing** (a person's decision: it costs money; nothing is bought here). A valid signature lets the installer past
+Smart App Control; SmartScreen still warns about a newly signed file until it has a download history, and since 2024 an EV
+certificate no longer skips that ([Microsoft: code signing options](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options):
+Artifact Signing "works like OV certificates"). A `.cmd` cannot carry a signature (Authenticode covers `.exe`, `.msi` and
+`.ps1`, not batch files), so signing means an `.exe` installer, signed once in CI, that reads its code from its own file
+name (`ff-factory-join-<code>.exe`), since writing the code into the file would break the signature. The cheapest route is
+Microsoft's Artifact Signing (formerly Trusted Signing), about $9.99 a month per that page: organisations, and individuals
+in the USA and Canada only, after an identity check of a few business days (a third-party post says individual onboarding
+was paused in March 2026; Microsoft's page does not say so). Without it, the `.cmd` and the line cover every PC: one warning
+click with Smart App Control off, the line with it on.
+
+#### Why the portal still reaches a machine over ssh (w1592)
+
+lothsahn's question also asked whether a machine needs inbound ssh at all. The daemon's own link is outbound (a WebSocket
+to the portal, `machine/daemon.ts` `new WebSocket(...)`), but the portal's messages on it (`ToDaemon`,
+server/machineProtocol.ts) carry no update or restart. Over ssh go: the installer reruns that update a machine after a
+deploy (server/machineRollout.ts) and the ops worker's `machine_update` (server/opsWorker.ts), start, stop and restart
+(`controlDaemon`, server/machineDeploy.ts), uninstall (`undeploy`), and the ops worker's diagnosis and copies.
+
+Doing without it would take an `update` message on that link; the daemon starting the installer detached, so it outlives
+the daemon's own restart (Task Scheduler ends a task's processes, launchd its process group, systemd its cgroup), with a
+watchdog that puts the old commit back when the new daemon does not connect; the rollout and `machine_update` choosing the
+link for a machine without ssh; and start and stop through the supervisor. What it cannot remove: a daemon that does not
+come back (a crash at start, a bad update the watchdog misses, a stopped task) leaves the portal no way in, and a person
+goes to the PC, where today the rollout reruns the installer at the old commit over ssh. It is not done here (a follow-up
+request if wanted); the bootstrap sets ssh up itself, with Windows' one administrator prompt and no question of its own, so
+the tailnet's port 22 from the portal ([The tailnet](#the-tailnet-w1592)) is the only step left to a person.
 
 ### The tailnet (w1592)
 

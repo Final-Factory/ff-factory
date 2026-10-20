@@ -4,7 +4,8 @@
 // installer that records what it was given. Proves: a dry run changes nothing and leaves the code unused; a join writes
 // the credential into a private file for the installer, never onto the screen, and deletes it; the code then works no
 // more; a second run on an installed PC updates it with no code. The machine setup (winget, OpenSSH Server) is Windows
-// and is left out here (-SkipMachineSetup).
+// and is left out here (-SkipMachineSetup). On Windows, the downloaded installer (join.cmd) runs under cmd.exe as a
+// double-click runs it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -14,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { JoinCodes } from '../server/machineJoin.ts';
-import { machineJoinHttp } from '../server/machineJoinHttp.ts';
+import { machineJoinHttp, windowsInstaller } from '../server/machineJoinHttp.ts';
 import { powershell } from '../server/testPowershell.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
@@ -226,4 +227,33 @@ test('join.sh: a dry run changes nothing; the join hands install.sh a 0600 crede
   assert.equal(up.code, 0, up.out);
   assert.match(up.out, /Already installed at .*: updating it \(no join code needed\)/);
   assert.deepEqual(JSON.parse(fs.readFileSync(f.record, 'utf8')).args, ['--update', '--root', root]);
+});
+
+test('join.cmd: double-clicked (cmd.exe), the download runs the portal\'s bootstrap in Windows PowerShell with its code; an unreachable portal says what to check', { skip: !isWin && 'cmd.exe: Windows' }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-cmd-'));
+  const seen = path.join(dir, 'seen.txt');
+  // A portal whose bootstrap only records what it was given: the wrapper is what is tested here.
+  const server = http.createServer((req, res) => {
+    if (req.url !== '/join/windows.ps1') return void res.writeHead(404).end();
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }).end(`Add-Content -LiteralPath '${seen}' -Value ("code=$env:FF_JOIN_CODE edition=$($PSVersionTable.PSEdition)")\n`);
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const template = fs.readFileSync(path.join(ROOT, 'scripts', 'worker', 'join.cmd'), 'utf8');
+  const code = 'ABCDE-FGHJK-MNPQR-STVWX';
+  const withCode = path.join(dir, 'ff-factory-join.cmd');
+  fs.writeFileSync(withCode, windowsInstaller(template, base, code));
+  const a = await run('cmd.exe', ['/d', '/c', withCode], { FF_JOIN_CODE: '' });
+  assert.equal(a.code, 0, a.out);
+  const generic = path.join(dir, 'generic', 'ff-factory-join.cmd');
+  fs.mkdirSync(path.dirname(generic));
+  fs.writeFileSync(generic, windowsInstaller(template, base));
+  const b = await run('cmd.exe', ['/d', '/c', generic], { FF_JOIN_CODE: 'left-over' });
+  assert.equal(b.code, 0, b.out);
+  assert.deepEqual(fs.readFileSync(seen, 'utf8').trim().split(/\r?\n/), [`code=${code} edition=Desktop`, 'code= edition=Desktop'], 'Windows PowerShell 5.1, with the code written in, or none (the bootstrap asks)');
+
+  server.close();
+  const off = await run('cmd.exe', ['/d', '/c', withCode], {});
+  assert.match(off.out, /It stopped before the end: read the lines above\. Is this PC connected to Tailscale/, off.out);
 });

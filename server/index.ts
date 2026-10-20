@@ -71,9 +71,9 @@ import { DRY_RUN_BANNER, DRY_RUN_WHY, dryRun } from './dryRun.ts';
 import { portalPublicKey, tailnetAddress } from './machineSsh.ts';
 import { machineSshHttp } from './machineSshHttp.ts';
 import { tailscaleWhois } from './machineJoin.ts';
-import { machineJoinHttp } from './machineJoinHttp.ts';
+import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller } from './machineJoinHttp.ts';
 import { issueMachineToken } from './machineTokens.ts';
-import { originOf } from './remoteChat.ts';
+import { clientAddress, originOf, tailnetOnly } from './remoteChat.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -297,22 +297,25 @@ machines.sandboxEvent = (machineId, text, e) => {
 };
 // A new PC joining with an owner's join code (w1592, server/machineJoinHttp.ts): tailnet-only; the code, and the device
 // `tailscale whois` names, decide. The credential goes back to the bootstrap once, which writes it into a file.
+const JOIN_FILES = { windows: 'join.ps1', unix: 'join.sh', cmd: 'join.cmd' } as const;
+function joinHttpScript(kind: keyof typeof JOIN_FILES): string | undefined {
+  try {
+    return fs.readFileSync(path.join(ROOT, 'scripts', 'worker', JOIN_FILES[kind]), 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+const joinWhois = async (addr: string) => tailscaleWhois((await import('./proc.ts')).run, addr);
 const joinHttp = machineJoinHttp({
   codes: machines.joins,
   records: { get: (id) => store.machines.get(id) },
-  whois: async (addr) => tailscaleWhois((await import('./proc.ts')).run, addr),
+  whois: joinWhois,
   enrol: ({ machineId, tailnetName, limits, portalUrl }) => {
     machines.deployMachine({ id: machineId, workerInstall: true, host: tailnetName, portalUrl, ...limits });
     return issueMachineToken(cfg.dataDir, machineId);
   },
   portalUrl: (req) => originOf(req) || (cfg.publicUrl ?? '').replace(/\/+$/, ''),
-  script: (kind) => {
-    try {
-      return fs.readFileSync(path.join(ROOT, 'scripts', 'worker', kind === 'windows' ? 'join.ps1' : 'join.sh'), 'utf8');
-    } catch {
-      return undefined;
-    }
-  },
+  script: (kind) => joinHttpScript(kind),
   refused: () => (dryRun() ? DRY_RUN_WHY : undefined),
   report: (text) => machines.report?.(text),
 });
@@ -1699,6 +1702,52 @@ route('POST', '/api/machines', async (req) => {
   });
 });
 
+// The dashboard's Add a machine with a join code (w1592, server/machineJoinHttp.ts): owners only. The answer carries the code
+// once, and the Windows installer with it written in, for the person to take to the PC; the credential never comes here.
+const requireJoinOwner = (req: http.IncomingMessage) => {
+  if (auth.userInfo(auth.user(req))?.role !== 'owner') throw new HttpError(403, 'only an owner adds a machine');
+};
+// The tailnet device this browser is on, to name the PC when the owner adds it from its own browser (undefined off the tailnet).
+route('GET', '/api/machines/join/device', async (req) => {
+  requireJoinOwner(req);
+  const device = tailnetOnly(req) ? await joinWhois(clientAddress(req)) : undefined;
+  const name = device?.name;
+  const machine = name ? machines.list().find((m) => m.host.toLowerCase() === name || m.id === name)?.id : undefined;
+  return { name, machine };
+});
+route('POST', '/api/machines/join', async (req) => {
+  requireJoinOwner(req);
+  const b = await readJson<{ id?: string; tailnetName?: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number }>(req);
+  const portalUrl = originOf(req) || (cfg.publicUrl ?? '').replace(/\/+$/, '');
+  let made: ReturnType<typeof machines.createJoin>;
+  try {
+    made = machines.createJoin({
+      id: need(b.id, 'id'),
+      tailnetName: b.tailnetName,
+      portalUrl: portalUrl || undefined,
+      limits: { maxSandboxes: b.maxSandboxes, maxAgentsPerSandbox: b.maxAgentsPerSandbox, maxUnity: b.maxUnity },
+      by: requesterOf(req).displayName,
+    });
+  } catch (e) {
+    throw new HttpError(409, (e as Error).message);
+  }
+  const { machine, join, limits, tailnetName } = made;
+  const template = joinHttpScript('cmd');
+  console.log(`machine ${machine.id}: join code ...${join.last4} made in the dashboard by ${requesterOf(req).displayName}, for tailnet device ${tailnetName}`);
+  return {
+    machine,
+    code: join.code,
+    last4: join.last4,
+    expiresAt: join.expiresAt,
+    tailnetName,
+    limits,
+    portalUrl,
+    page: `${portalUrl}/join`,
+    windowsCommand: `irm ${portalUrl}/join/windows.ps1 | iex`,
+    unixCommand: `bash -c "$(curl -fsSL ${portalUrl}/join/unix.sh)"`,
+    installer: template ? { name: WINDOWS_INSTALLER_NAME, text: windowsInstaller(template, portalUrl, join.code) } : undefined,
+  };
+});
 route('POST', '/api/machines/([\\w-]+)/redeploy', async (req, [id]) => {
   const b = await readJson<{ force?: boolean }>(req);
   return machines.deployMachine({ id, force: !!b.force });
@@ -1856,7 +1905,7 @@ const server = http.createServer(async (req, res) => {
       const machineId = machines.authenticate(req.headers.authorization);
       return await reviewHttp(review, machineId && store.machines.has(machineId) ? machineId : undefined, req, res, reviewUpload[1], Number(url.searchParams.get('offset') ?? 0));
     }
-    if (url.pathname === '/machine/join' || url.pathname === '/join/windows.ps1' || url.pathname === '/join/unix.sh') {
+    if (JOIN_PATHS.has(url.pathname)) {
       return await joinHttp(req, res, url.pathname);
     }
     // A worker install setting up the portal's ssh (w568, server/machineSshHttp.ts): its own token, nothing else.

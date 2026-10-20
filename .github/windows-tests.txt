@@ -24,3 +24,4 @@ server/cleanup.test.ts | server/cleanup.ts | path rules on a real Windows host, 
 server/ownLeftovers.test.ts | server/ownLeftovers.ts | the clean-up plan on a real Windows file system
 server/machineUnityMcp.test.ts | machine/sandboxes.ts | the real sandbox pool's Windows commands (realPoolDeps('win32'))
 scripts/test-watchdog.test.ts | scripts/test-watchdog.ts, scripts/test-inflight-reporter.ts | the process list from CIM and taskkill /T when a run hangs
+scripts/join.test.ts | scripts/worker/join.cmd, scripts/worker/join.ps1, server/machineJoinHttp.ts | the join installer double-clicked as cmd.exe runs it (CRLF, quoting, irm | iex in Windows PowerShell 5.1 with its code), and the join bootstrap under Windows PowerShell 5.1 (w1592)

@@ -33,7 +33,7 @@ import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
 import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, parseSandboxRef, poolSettingsOf, sameCommit } from './machines.ts';
-import { JOIN_TTL_MINUTES, checkJoinLimits, joinRefusal } from './machineJoin.ts';
+import { JOIN_TTL_MINUTES } from './machineJoin.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG } from './launch.ts';
 import { AutoCompactor, LONG_WAIT_MS } from './autoCompact.ts';
@@ -3188,22 +3188,22 @@ ${w.repo ?? ''}
           if (a.join_code) {
             const problem = this.ownerOnlyProblem('join_code', ctx, (a as { work_id?: unknown }).work_id);
             if (problem) throw new Error(problem);
-            const id = a.id.trim().toLowerCase();
-            const refusal = joinRefusal({ get: (x) => this.store.machines.get(x) }, id);
-            if (refusal) throw new Error(refusal);
-            const limits = checkJoinLimits({ maxSandboxes: a.max_sandboxes, maxAgentsPerSandbox: a.max_agents_per_sandbox, maxUnity: a.max_unity });
-            const tailnet = (a.tailnet_name ?? id).trim().toLowerCase();
             const workId = (a as { work_id?: unknown }).work_id;
             const w = typeof workId === 'string' ? this.store.work.get(workId.trim().toLowerCase()) : undefined;
             const by = (w?.requestedBy ?? this.identity.owner()).displayName;
-            const m = mm.deployMachine({ id: a.id, workerInstall: true, host: a.ssh_host ?? tailnet, portalUrl: a.portal_url, ...limits });
-            const j = mm.joins.create({ machineId: m.id, tailnetName: tailnet, limits, by });
-            mm.update(m.id, { statusDetail: `waiting for its join bootstrap on tailnet device ${tailnet} (code ...${j.last4}, until ${j.expiresAt}): no daemon yet` });
+            const { machine: m, join: j, limits, tailnetName: tailnet } = mm.createJoin({
+              id: a.id,
+              tailnetName: a.tailnet_name,
+              host: a.ssh_host,
+              portalUrl: a.portal_url,
+              limits: { maxSandboxes: a.max_sandboxes, maxAgentsPerSandbox: a.max_agents_per_sandbox, maxUnity: a.max_unity },
+              by,
+            });
             const given = Object.entries(limits).map(([k, v]) => `${k} ${v}`);
             return [
               `Join code for ${m.id}: ${j.code}`,
               `It works once, until ${j.expiresAt}, and only from the tailnet device "${tailnet}". Limits: ${given.length ? given.join(', ') : "the PC's own, from its RAM and CPUs"} (overridable at the PC).`,
-              `On that PC, connected to Tailscale, in a normal PowerShell (not as administrator): irm ${m.portalUrl}/join/windows.ps1 | iex`,
+              `On that PC, connected to Tailscale: open ${m.portalUrl}/join in its browser and download the Windows installer (double-click it), or, in a normal PowerShell (not as administrator): irm ${m.portalUrl}/join/windows.ps1 | iex`,
               `A Mac or Linux PC, in a terminal: bash -c "$(curl -fsSL ${m.portalUrl}/join/unix.sh)"`,
               'It asks for the code, then installs and enrols the machine by itself; list_machines shows it online when it is done. Relay the code and the command to the person who asked, as they are.',
             ].join('\n');

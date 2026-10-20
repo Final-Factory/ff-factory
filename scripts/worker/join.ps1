@@ -208,10 +208,8 @@ function Install-Tools {
         $missing | ForEach-Object { if ($_.Winget) { Say "  winget install --id $($_.Winget) -e" } else { Say '  irm https://claude.ai/install.ps1 | iex' } }
         return $false
     }
-    if (-not (Confirm-Step 'Install them now (winget; Claude Code with its own installer)?' $true)) {
-        Say 'Nothing installed. Install them, then run this again.'
-        return $false
-    }
+    # No second question: the one before it ("Go on: install what is missing...") covers this (w1592: the installer
+    # sets the PC up without asking again).
     foreach ($m in $missing) {
         if ($m.Winget) {
             Say "Installing $($m.Name) (winget $($m.Winget))..."

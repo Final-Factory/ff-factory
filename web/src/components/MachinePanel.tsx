@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { platformNoun, type AppState, type Machine } from '../../../shared/types';
-import { api } from '../api';
+import { api, type JoinAnswer } from '../api';
 import { attempt, sessionsByIds, toast, upsertMachine } from '../store';
 import { displayName, fmtRelative, isUnused, machineGlance, machineLabel, machineTone, navigate, useNow } from '../util';
 import { GitFacts } from './Git';
@@ -271,8 +271,195 @@ function LabelModal({ machine, onClose }: { machine: Machine; onClose: () => voi
   );
 }
 
+/** Add a machine: by default a join code and an installer the person runs on the new PC (w1592); or over ssh from this host. */
+export function AddMachineModal({ app, onClose }: { app: AppState; onClose: () => void }) {
+  const [mode, setMode] = useState<'join' | 'ssh'>('join');
+  return mode === 'join' ? <JoinMachineModal app={app} onClose={onClose} onSsh={() => setMode('ssh')} /> : <SshMachineModal onClose={onClose} onJoin={() => setMode('join')} />;
+}
+
+/** Blank (its own) or 0..8; the server (checkJoinLimits) says which of those each limit takes. */
+const LIMIT = /^[0-8]?$/;
+const limitOf = (t: string) => (t.trim() ? Number(t.trim()) : undefined);
+
+/** Saves `text` as a download named `name`, made here, so the code never sits in a URL or a server log. */
+function download(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/**
+ * A join code for a new PC (w1592, docs/worker-install.md "Adding a machine with a join code"): one use, one hour, only on
+ * the tailnet device named. The answer is the code, once, and a Windows installer with the code written in.
+ */
+function JoinMachineModal({ app, onClose, onSsh }: { app: AppState; onClose: () => void; onSsh: () => void }) {
+  const [id, setId] = useState('');
+  const [tailnet, setTailnet] = useState('');
+  const [sandboxes, setSandboxes] = useState('');
+  const [agents, setAgents] = useState('');
+  const [unity, setUnity] = useState('');
+  const [device, setDevice] = useState<{ name?: string; machine?: string }>({});
+  const [busy, setBusy] = useState(false);
+  const [made, setMade] = useState<JoinAnswer>();
+  const owner = app.me?.role === 'owner';
+  useEffect(() => {
+    if (!owner) return;
+    let live = true;
+    api
+      .joinDevice()
+      .then((d) => {
+        if (!live) return;
+        setDevice(d);
+        // Opened on the new PC itself: name it after its tailnet device.
+        if (d.name && !d.machine) {
+          setId((v) => v || d.name!.slice(0, 24).replace(/-+$/, ''));
+          setTailnet((v) => v || d.name!);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [owner]);
+  const slug = id.trim().toLowerCase();
+  const valid = owner && /^[a-z0-9][a-z0-9-]{0,23}$/.test(slug) && (!tailnet.trim() || /^[a-z0-9][a-z0-9-]*$/i.test(tailnet.trim())) && [sandboxes, agents, unity].every((t) => LIMIT.test(t.trim()));
+  const submit = async () => {
+    if (!valid || busy) return;
+    setBusy(true);
+    const r = await attempt(
+      api.createJoin({
+        id: slug,
+        tailnetName: tailnet.trim() || undefined,
+        maxSandboxes: limitOf(sandboxes),
+        maxAgentsPerSandbox: limitOf(agents),
+        maxUnity: limitOf(unity),
+      }),
+    );
+    setBusy(false);
+    if (r) {
+      upsertMachine(r.machine);
+      setMade(r);
+    }
+  };
+  if (made) {
+    const until = new Date(made.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return (
+      <Modal
+        title={`Add ${made.machine.id}`}
+        onClose={onClose}
+        footer={
+          <button
+            className="btn btn-primary"
+            onClick={() => {
+              navigate({ view: 'machine', machineId: made.machine.id });
+              onClose();
+            }}
+          >
+            Done
+          </button>
+        }
+      >
+        <div className="form" data-testid="join-made">
+          <p>
+            Join code <b className="mono">{made.code}</b> <CopyButton text={made.code} label="Copy the code" />
+          </p>
+          <p className="dim small">
+            It works once, until {until}, and only on the tailnet device <span className="mono">{made.tailnetName}</span>. This is the only time it is shown.
+          </p>
+          {made.installer && (
+            <p>
+              <button className="btn btn-primary" onClick={() => download(made.installer!.name, made.installer!.text)}>
+                Download the Windows installer
+              </button>
+              <br />
+              <small className="dim">
+                The code is in it. On {made.tailnetName}, connected to Tailscale, double-click it (Windows warns about a downloaded file first: More info, then Run anyway). It
+                installs what is missing, sets the PC up and ends with a summary; the machine shows up here when its daemon connects.
+              </small>
+            </p>
+          )}
+          <p className="dim small">Or, on that PC, type the code into one of these:</p>
+          <p className="small">
+            PowerShell (not as administrator): <code className="mono">{made.windowsCommand}</code> <CopyButton text={made.windowsCommand} />
+          </p>
+          <p className="small">
+            Mac or Linux terminal: <code className="mono">{made.unixCommand}</code> <CopyButton text={made.unixCommand} />
+          </p>
+          <p className="dim small">
+            Or open <span className="mono">{made.page}</span> in that PC's browser.
+          </p>
+        </div>
+      </Modal>
+    );
+  }
+  return (
+    <Modal
+      title="Add a machine"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn btn-ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" disabled={!valid || busy} onClick={submit}>
+            {busy ? 'Making…' : 'Make the installer'}
+          </button>
+        </>
+      }
+    >
+      <form
+        className="form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
+        <p className="dim small">
+          A Windows PC, Mac or Linux PC on the tailnet joins by itself: you get a one-use join code and a Windows installer that carries it, to run on that PC. It installs
+          Node, Git, Git LFS and Claude Code if missing, sets up the worker and connects back; no ssh set-up from here.{' '}
+          <button type="button" className="link-btn" onClick={onSsh}>
+            Set one up over ssh from this host instead
+          </button>
+        </p>
+        {!owner && <p className="small">Only an owner can add a machine.</p>}
+        <div className="field-row">
+          <label className="field">
+            <span>Id</span>
+            <input className="input mono" value={id} onChange={(e) => setId(e.target.value)} placeholder="desktop-1" autoFocus />
+          </label>
+          <label className="field">
+            <span>Its tailnet device name</span>
+            <input className="input mono" value={tailnet} onChange={(e) => setTailnet(e.target.value)} placeholder={slug || 'same as the id'} />
+          </label>
+        </div>
+        {device.name && !device.machine && <small className="dim">This browser is on the tailnet device {device.name}.</small>}
+        <div className="field-row">
+          <label className="field">
+            <span>Sandboxes</span>
+            <input className="input mono" inputMode="numeric" value={sandboxes} onChange={(e) => setSandboxes(e.target.value)} placeholder="from its RAM and disk" />
+          </label>
+          <label className="field">
+            <span>Agents per sandbox</span>
+            <input className="input mono" inputMode="numeric" value={agents} onChange={(e) => setAgents(e.target.value)} placeholder="2" />
+          </label>
+          <label className="field">
+            <span>Unity editors at once</span>
+            <input className="input mono" inputMode="numeric" value={unity} onChange={(e) => setUnity(e.target.value)} placeholder="from its RAM and CPUs" />
+          </label>
+        </div>
+        <button type="submit" hidden />
+      </form>
+    </Modal>
+  );
+}
+
 /** Set up a Mac or a Windows PC over ssh from the portal host. */
-export function AddMachineModal({ onClose }: { onClose: () => void }) {
+function SshMachineModal({ onClose, onJoin }: { onClose: () => void; onJoin: () => void }) {
   const [id, setId] = useState('');
   const [host, setHost] = useState('');
   const [portalUrl, setPortalUrl] = useState(location.origin);
@@ -329,7 +516,10 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
       >
         <p className="dim small">
           Installs the FF Factory daemon on a Mac or Windows PC over ssh from this host (a LaunchAgent on a Mac, a scheduled task at logon on Windows) that runs agents
-          there and connects back. The OS is found over ssh. Needs ssh key access, Node 22.6+ and git there; see docs/machines.md for a Windows PC's setup.
+          there and connects back. The OS is found over ssh. Needs ssh key access, Node 22.6+ and git there; see docs/machines.md for a Windows PC's setup.{' '}
+          <button type="button" className="link-btn" onClick={onJoin}>
+            Add it with an installer run on the PC instead
+          </button>
         </p>
         <div className="field-row">
           <label className="field">

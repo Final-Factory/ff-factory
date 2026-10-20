@@ -120,9 +120,11 @@ Its `ssh`, `scp`, `sftp`, `fffctl` and `fff-machine-ssh` are wrappers on its PAT
 ## A new machine
 
 **The short way since w1592: a join code, and no job for this worker.** lothsahn: "I can connect to tailscale and then it
-should contact the portal to set itself up with an installer." An owner asks their orchestrator or the dispatcher for a
-code ("add desktop-coosego with a join code": `add_machine` `join_code`, owners only, in their own words); a person at the
-PC, connected to Tailscale, runs `irm https://<the portal>/join/windows.ps1 | iex` (a Mac or Linux PC:
+should contact the portal to set itself up with an installer." An owner clicks **Add a machine** in the dashboard, which
+gives the code and a Windows installer that carries it (`ff-factory-join.cmd`, to double-click at the PC), or asks their
+orchestrator or the dispatcher for a code ("add desktop-coosego with a join code": `add_machine` `join_code`, owners only,
+in their own words); a person at the PC, connected to Tailscale, double-clicks the installer, or opens
+`https://<the portal>/join`, or runs `irm https://<the portal>/join/windows.ps1 | iex` (a Mac or Linux PC:
 `bash -c "$(curl -fsSL https://<the portal>/join/unix.sh)"`) and types the code. The bootstrap installs the missing tools,
 turns on OpenSSH Server with a tailnet-only firewall rule, enrols the PC (the portal answers its credential once, into a
 private file on the PC), runs the installer below with the right answers (which puts the portal's key in place and pins the
