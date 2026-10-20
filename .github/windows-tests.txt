@@ -17,6 +17,7 @@ server/hostWatch.test.ts | machine/hostWatch.ts | taskkill /T /F, and Windows lo
 server/unityReaper.test.ts | machine/unityReaper.ts | the process list from CIM
 server/leftovers.test.ts | machine/leftovers.ts | another process's environment block read through Windows PowerShell 5.1 (Add-Type, the PEB): whose worker started it; the ff-leftovers shim under Git Bash, whose fork+exec breaks the Windows parent chain (w1222)
 server/sandboxes.test.ts | server/sandboxes.ts | a file held without delete sharing gives EPERM
+server/firefox.test.ts | machine/firefox.ts | real windows closed one at a time by WM_CLOSE (one that refuses stops it), the process list from CIM, a process ending on its own (w1593)
 server/elevation.test.ts | server/elevation.ts | the real signed-in-desktop check through CIM
 server/opsWorker.test.ts | server/opsWorker.ts | named pipes, as on the Windows portal host
 server/orchestratorMemory.test.ts | server/orchestratorMemory.ts | the memory guard's Windows path rules on a real NTFS file system
