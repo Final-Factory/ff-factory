@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
+import { benchLockPath, benchTicketFor, heldTicket, HELD_WAIT_CAP_MS, type BenchMode, type BenchTicket } from './benchQueue.ts';
 import type { UnitySlotsReport } from '../shared/types.ts';
 
 /**
@@ -845,8 +846,9 @@ export async function acquire(
 
 const USAGE = `unity-slot: take Unity slots on this machine before launching Unity (docs/unity-lifecycle.md, "Unity slots")
 
-  unity-slot run [--count N] [--label TEXT] [--project PATH]... [--timeout MIN] -- <command> [args...]
-      wait for N slots (default 1), run the command, release when it ends (its exit code is returned)
+  unity-slot run [--count N] [--label TEXT] [--project PATH]... [--timeout MIN] [--bench shared|exclusive] -- <command> [args...]
+      wait for N slots (default 1), then for a ticket in the machine's bench queue (w1615: shared, the default, for a
+      build or batch compile; exclusive for a timed run), run the command, release both when it ends
   unity-slot acquire [--count N] [--label TEXT] [--project PATH]... [--ttl MIN] [--timeout MIN]
       wait for N slots and hold them in the background (prints the slot id) until release or the ttl (default 120)
   unity-slot release <id>
@@ -866,6 +868,7 @@ interface CliOpts {
   limit?: number;
   dir?: string;
   forMs?: number;
+  bench?: BenchMode;
   rest: string[];
 }
 
@@ -895,6 +898,11 @@ export function parseCli(argv: string[]): { cmd: string; o: CliOpts } {
     else if (a === '--limit') o.limit = num(val());
     else if (a === '--dir') o.dir = val();
     else if (a === '--for') o.forMs = num(val()) * 60_000;
+    else if (a === '--bench') {
+      const v = val();
+      if (v !== 'shared' && v !== 'exclusive') throw new Error(`--bench takes shared or exclusive, not "${v}"`);
+      o.bench = v;
+    }
     else o.rest.push(a);
   }
   return { cmd, o };
@@ -912,12 +920,39 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
   if (cmd === 'run') {
     if (!o.rest.length) throw new Error('run needs a command after --');
     let h: Held | undefined;
+    // w1615: no long wait under the bench lock. A run made by a process that holds it waits for a slot at most
+    // HELD_WAIT_CAP_MS: an editor holding the last slot may belong to a worker that waits for that very lock.
+    const lock = benchLockPath(undefined, env);
+    const inside = heldTicket(lock, env, isAlive);
+    let timeoutMs = o.timeoutMs;
+    if (inside && held < o.count) {
+      timeoutMs = Math.min(timeoutMs ?? Infinity, HELD_WAIT_CAP_MS);
+      d.say(`this process holds the bench lock (${inside.ticket} ${inside.mode}): a Unity slot is waited for at most ${HELD_WAIT_CAP_MS / 1000} s under it (w1615). Take the slot before bench_lock instead.`);
+    }
     if (held >= o.count) d.say(`inside a run that holds ${held} slot(s): no new slot`);
-    else h = await acquire(d, { count: o.count, label: labelOf(o), holder, projects: o.projects, timeoutMs: o.timeoutMs });
+    else h = await acquire(d, { count: o.count, label: labelOf(o), holder, projects: o.projects, timeoutMs });
+    // Then the bench ticket (slot first, ticket second: the queue's deadlock rule). A nested run reuses its parent's.
+    let ticket: BenchTicket | undefined;
+    let ticketName = inside?.ticket;
+    if (!inside && held < o.count && env.FF_BENCH_TICKETS !== 'off') {
+      const projectArg = o.rest.findIndex((a) => /^-projectpath$/i.test(a));
+      const t = benchTicketFor({ mode: o.bench ?? (env.FF_UNITY_SLOT_BENCH === 'exclusive' ? 'exclusive' : 'shared'), what: `unity: ${labelOf(o)}`, checkouts: [...o.projects, projectArg >= 0 ? o.rest[projectArg + 1] : undefined, env.FF_SANDBOX_PATH, process.cwd()], env });
+      if (t.why) d.say(`no bench ticket: ${t.why}`);
+      else {
+        ticket = t.ticket;
+        const s = await ticket!.wait(Infinity, (line) => d.say(`bench queue: ${line}`), d.sleep);
+        if (s.kind === 'granted') ticketName = s.ticket;
+        else {
+          d.say(`no bench ticket (${s.line}); running without one`);
+          ticket!.release();
+          ticket = undefined;
+        }
+      }
+    }
     const child = spawn(o.rest[0], o.rest.slice(1), {
       stdio: 'inherit',
       shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(o.rest[0]),
-      env: { ...env, FF_UNITY_SLOT_HELD: String(Math.max(held, o.count)), ...(h?.id ? { FF_UNITY_SLOT_ID: h.id } : {}) },
+      env: { ...env, FF_UNITY_SLOT_HELD: String(Math.max(held, o.count)), ...(h?.id ? { FF_UNITY_SLOT_ID: h.id } : {}), ...(ticketName ? { FF_BENCH_TICKET: ticketName } : {}) },
     });
     const forward = (sig: NodeJS.Signals) => () => child.kill(sig);
     process.on('SIGINT', forward('SIGINT'));
@@ -926,10 +961,12 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
       child.on('error', (e) => {
         d.say(`could not start ${o.rest[0]}: ${e.message}`);
         h?.stop();
+        ticket?.release();
         resolve(127);
       });
       child.on('exit', (code, sig) => {
         h?.stop();
+        ticket?.release();
         resolve(code ?? (sig ? 128 : 1));
       });
     });

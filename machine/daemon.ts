@@ -54,6 +54,7 @@ import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { readBenchLock } from './benchLock.ts';
+import { benchTicketFor } from './benchQueue.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import { PauseKeeper, pauseFile } from './pause.ts';
 import { trayView } from './pauseRules.ts';
@@ -493,6 +494,8 @@ export class Daemon {
         },
         editorSlot: (id) => this.slots.startRefusal(`sandbox:${id}`),
         slotsStatus: () => this.slotsNow(),
+        // w1615: an editor boot takes a shared ticket in the machine's bench queue (the game repo's bench_queue.py).
+        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `editor boot ${sb.id}`, checkouts: [sb.path], root: cfg.root, maxMin: 30 }),
       },
       pd,
     );

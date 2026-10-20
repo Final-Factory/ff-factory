@@ -2060,7 +2060,7 @@ export class Agents {
     const lock = this.machines.statsOf(machineId)?.benchLock;
     if (!lock) return undefined;
     if (!always && !this.openWorkOf(info).some((w) => needsLive(w))) return undefined;
-    return `Not now (w1600): on ${machineId}, ${benchText(lock)}, and a Live view editor beside it would spoil that run's numbers. Do what needs no editor meanwhile, then wake_me in 10 minutes and ${what} again (a run holds the lock under 15 minutes; one older than 40 minutes is a killed run's and no longer counts).`;
+    return `Not now (w1600): on ${machineId}, ${benchText(lock)}, and a Live view editor beside it would spoil that run's numbers. Do what needs no editor meanwhile, then wake_me in 10 minutes and ${what} again (a leg holds the lock under 15 minutes and gives it back between legs; a holder that dies frees it at once, w1615).`;
   }
 
   /** A worker started a Live view (w1600): each open game request it serves needs one from now on (WorkItem.liveView). */
