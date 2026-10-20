@@ -4,7 +4,7 @@ import { NOTICE_TAG, parseNotice, type Notice, type NoticeKind } from '../../../
 import { parseReaction, reactionsByMessage, splitReply, splitVia } from '../../../shared/replies';
 import { HELD_MARK } from '../../../shared/conditional';
 import { checkAsk, isAskTool, type Ask } from '../../../shared/ask';
-import { AskCard } from './AskCard';
+import { AskCard, markJump } from './AskCard';
 import { holdReload } from '../freshness';
 import { keptMap, useKeptState } from '../keep';
 import { api } from '../api';
@@ -41,8 +41,12 @@ type Item =
   | { type: 'assistant'; key: string; ev: AssistantEv; end?: ResultEv }
   | { type: 'activity'; key: string; steps: Step[] }
   | { type: 'event'; key: string; ev: TranscriptEvent }
-  /** A question the orchestrator asked with buttons (ask_person, w1397): its tool call, drawn as the question. */
-  | { type: 'ask'; key: string; seq: number; ask: Ask };
+  /**
+   * A question the orchestrator asked with buttons (ask_person, w1397): its tool call, drawn as the question. `answer`: the
+   * seq of the first message the orchestrator wrote in that turn before it (since the turn began or its person last wrote),
+   * which the chat brings into view with the card (w1632).
+   */
+  | { type: 'ask'; key: string; seq: number; ask: Ask; answer?: number };
 
 const GAP_MS = 15 * 60_000;
 
@@ -62,6 +66,8 @@ function buildItems(events: TranscriptEvent[], now: number): Item[] {
   let lastT: number | undefined;
   /** The reply a finished turn's time and cost belong to: the last one since the last message in. */
   let replyIdx = -1;
+  /** The first message the orchestrator wrote since the turn began or its person last wrote: what a question card follows. */
+  let answerSeq: number | undefined;
   const flush = () => {
     if (group?.length) items.push({ type: 'activity', key: groupKey, steps: group });
     group = null;
@@ -84,7 +90,7 @@ function buildItems(events: TranscriptEvent[], now: number): Item[] {
       if ('ask' in checked) {
         flush();
         divide(e);
-        items.push({ type: 'ask', key: `q${e.seq}`, seq: e.seq, ask: checked.ask });
+        items.push({ type: 'ask', key: `q${e.seq}`, seq: e.seq, ask: checked.ask, ...(answerSeq !== undefined ? { answer: answerSeq } : {}) });
         continue;
       }
     }
@@ -107,15 +113,18 @@ function buildItems(events: TranscriptEvent[], now: number): Item[] {
         if (reply.type === 'assistant') items[replyIdx] = { ...reply, end: e };
       } else if (!e.ok) items.push({ type: 'event', key: `e${e.seq}`, ev: e });
       replyIdx = -1;
+      answerSeq = undefined;
       continue;
     }
     divide(e);
     if (e.kind === 'user') {
       items.push({ type: e.from === 'system' ? 'notice' : 'user', key: `u${e.seq}`, ev: e });
       replyIdx = -1;
+      if (e.from === 'human') answerSeq = undefined;
     } else if (e.kind === 'assistant') {
       items.push({ type: 'assistant', key: `m${e.seq}`, ev: e });
       replyIdx = items.length - 1;
+      answerSeq ??= e.seq;
     } else items.push({ type: 'event', key: `e${e.seq}`, ev: e });
   }
   flush();
@@ -135,6 +144,12 @@ type Held = Exclude<Place, 'bottom'>;
 const scrollMemory = keptMap<Place>('scroll.chats');
 /** How long after a chat is drawn again its place is held against content that loads late (images, diagrams), until the reader moves. */
 const HOLD_MS = 4000;
+/** Question cards whose answer the chat has brought into view once (w1632), by chat and seq: after that it follows the end as ever. */
+const broughtUp = new Set<string>();
+/** How far below the top edge the answer above a question card starts, px. */
+const ANSWER_MARGIN = 8;
+// The room the jump pill takes at the chat's bottom edge (.jump-pill: 36 px tall, 12 px up, and its shadow).
+const PILL_ZONE = 56;
 /** How long the place is held after the view is resized (a phone turned, a keyboard opened): the layout may still be settling, a frame at a time. */
 const RESIZE_HOLD_MS = 1500;
 
@@ -285,6 +300,59 @@ export const Transcript = memo(function Transcript({
     hold.current = null;
   };
 
+  // The question card the chat ends on (ask_person), with the answer the orchestrator wrote before it in that turn, if any.
+  const endAsk = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it.type === 'ask') return { seq: it.seq, answer: it.answer };
+      if (it.type !== 'notice' && it.type !== 'divider' && it.type !== 'activity' && it.type !== 'event') return undefined;
+    }
+    return undefined;
+  }, [items]);
+
+  /**
+   * Follow the chat's end. A turn that answers and then asks with buttons (w1632, lothsahn: "you didn't answer my question
+   * in our chat ... And instead you posted a question for me"): on a phone the card fills the screen, so the bottom showed
+   * the card and the answer sat above the top edge. When the answer and the card do not fit together, the view starts at
+   * the answer instead, the card below it and the "New messages" pill pointing down; once per card, so scrolling down to
+   * the card is not undone. The pill goes there too: a tap on it while reading lands on the new answer, not past it on the
+   * card, and a tap on an answer button just after (one that slid under the finger) is not taken as a choice (`markJump`).
+   */
+  const followEnd = (smooth = false) => {
+    const el = scroller.current;
+    const a = endAsk;
+    const key = a && `${session.id}:${a.seq}`;
+    if (el && a && a.answer !== undefined && key && !broughtUp.has(key)) {
+      const row = Array.from(el.firstElementChild?.children ?? []).find((c) => c.getAttribute('data-seq') === String(a.answer));
+      if (row) {
+        broughtUp.add(key);
+        const box = el.getBoundingClientRect().top - el.scrollTop;
+        const rowTop = row.getBoundingClientRect().top - box;
+        let top = rowTop - ANSWER_MARGIN;
+        if (top < el.scrollHeight - el.clientHeight - 1) {
+          // The pill must not sit on the question's first line: the question shows clear above the pill (scrolled down, if
+          // the answer's first line stays on screen), else the card starts below the screen, the pill pointing down to it.
+          const card = el.querySelector(`.ask[data-seq="${a.seq}"]`);
+          const q = card?.querySelector('.ask-q') ?? card;
+          const h = el.clientHeight;
+          if (card && q) {
+            const cardTop = card.getBoundingClientRect().top - box;
+            const qBottom = Math.min(q.getBoundingClientRect().bottom - box, cardTop + 2 * PILL_ZONE);
+            if (cardTop < top + h && qBottom > top + h - PILL_ZONE) {
+              const down = qBottom + PILL_ZONE - h;
+              top = down <= rowTop ? down : Math.max(0, cardTop - h - ANSWER_MARGIN);
+            }
+          }
+          atBottom.current = false;
+          pending.current = { top, seq: a.answer, off: rowTop - top, latest: a.answer };
+          restore();
+          return;
+        }
+      }
+    }
+    scrollToBottom(smooth);
+  };
+
   const scrollToBottom = (smooth = false) => {
     const el = scroller.current;
     if (!el) return;
@@ -338,7 +406,7 @@ export const Transcript = memo(function Transcript({
       restore();
     } else {
       atBottom.current = true;
-      scrollToBottom();
+      followEnd();
     }
   }, [session.id]);
 
@@ -346,7 +414,7 @@ export const Transcript = memo(function Transcript({
     const fresh = latestSeq.current > seenLatest.current;
     seenLatest.current = latestSeq.current;
     if (pending.current) restore();
-    else if (atBottom.current) scrollToBottom();
+    else if (atBottom.current) followEnd();
     else if (fresh || streaming || orphanPending.length) setJump('new');
   }, [items.length, streaming, orphanPending.length, loaded]);
 
@@ -444,8 +512,11 @@ export const Transcript = memo(function Transcript({
         </div>
       </div>
       {jump !== 'none' && (
-        <button className={`jump-pill${jump === 'new' ? ' has-new' : ''}`} onClick={() => scrollToBottom(true)} aria-label="Jump to latest" title="Jump to the latest message">
-          {jump === 'new' && <span>New messages</span>}
+        <button className={`jump-pill${jump === 'new' ? ' has-new' : ''}`} onClick={() => {
+            markJump();
+            followEnd(true);
+          }} aria-label="Jump to latest" title="Jump to the latest message">
+          {jump === 'new' && <span>{endAsk && !streaming ? 'Question below' : 'New messages'}</span>}
           <Icon name="arrowDown" size={16} />
         </button>
       )}

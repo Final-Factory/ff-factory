@@ -27,6 +27,8 @@
  *   "#tool <name> <json>"  (one per line) calls that tool of the session's in-process MCP server (an orchestrator's
  *                  belt) with those arguments, and says what it answered: "Called <name>: <answer>". Only in a
  *                  person's own message (the "[from <name>]" line), so a notice quoting the tag never sets it off.
+ *                  With it, "#say <text>" lines (⏎ for a newline) are said first, as messages of their own, and the
+ *                  turn ends on the last call with no "Called" line (w1632: an answer, then ask_person).
  *   anything else  "Echo: <text>" (and how many images came with it)
  */
 import type { McpServerConfig, Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -155,6 +157,10 @@ export function fakeQuery(fake: FakeOptions = {}) {
         const byPerson = /^\[from (?!the orchestrator)[^\]\n]*\]\n/.test(said);
         const calls = byPerson ? [...words.matchAll(/^#tool\s+([\w-]+)\s+(\{.*\})\s*$/gm)] : [];
         if (calls.length) {
+          // "#say <text>" lines: what the orchestrator writes before its calls (w1632: an answer, then ask_person). The turn
+          // then ends on the last call, as a real one that asks with buttons does, with no "Called" line after it.
+          const says = [...words.matchAll(/^#say\s+(.+)$/gm)];
+          for (const [, said] of says) yield text(said.replaceAll('⏎', '\n'));
           const answers: string[] = [];
           for (const [, name, json] of calls) {
             const toolId = `tool-${++msgId}`;
@@ -170,8 +176,8 @@ export function fakeQuery(fake: FakeOptions = {}) {
             yield toolResult(toolId, r.text, r.isError);
             answers.push(`Called ${name}: ${r.text}`);
           }
-          yield text(answers.join('\n\n'));
-          yield result(uuid, true, answers.join('\n\n'));
+          if (!says.length) yield text(answers.join('\n\n'));
+          yield result(uuid, true, says.length ? '' : answers.join('\n\n'));
         } else if (/#permcmd\b/i.test(words)) {
           const toolId = `tool-${++msgId}`;
           // `#permcmd [why: <Claude Code's reason>] <command>`, a ⏎ in the command standing for a newline (w1097).
