@@ -102,9 +102,11 @@ Within one part, removed by the no-decision PRs (each rule stays, said once):
   "Nothing sets `pre-release` or the default branch") (final-factory-agents #244).
 
 Across parts (each worker reads both; removing one copy is a decision, D7 and D9):
-- **Discord.** Worker prompt: "#bug-reports and dev_bug_reports belong to FFBox: read their threads and download their files freely,
-  but never post, reply, react, rename or close there (`ffdiscord` refuses)." CLAUDE.md: "Agents outside an FFBox turn read their
-  threads and download files, and never post, reply, react, rename or close there (`ffdiscord` refuses them". Worker: "When you merge
+- **Discord.** Worker prompt (w1640): "#bug-reports and dev_bug_reports belong to FFBox: read their threads and download their
+  files freely; never react, rename or close there or post with `ffdiscord`. When your work calls for a word to a reporter
+  (asking for their save), post it through FFBox with `post_as_max` channel `conversation`." CLAUDE.md: "Agents outside an
+  FFBox turn read their threads and download files, and never post, reply, react, rename or close there (`ffdiscord` refuses
+  them" (the game repo's copy follows w1640 in its own PR). Worker: "When you merge
   or land an `ffbox/*` branch or PR (a `review/*` rebase included), never post a "fixed" or "merged" notice to the reporter, in any
   channel or as Max: FFBox sees the merge and posts it itself." CLAUDE.md: "Merging or landing an `ffbox/*` branch or PR (a
   `review/*` rebase included) is never followed by a "fixed" or "merged" post, in any channel FFBox watches or as Max: FFBox sees the

@@ -7,7 +7,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ProviderManager } from './providers.ts';
 import { PROVIDER_QUERIES, QUERY_LIMITS, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
-import { POST_CHANNELS, postArgs, postAsMax } from './ffboxPost.ts';
+import { POST_CHANNELS, POST_TARGETS, postArgs, postAsMax } from './ffboxPost.ts';
 import { CATALOG } from './launch.ts';
 import { MockConnector } from '../e2e/mockConnector.ts';
 import { CliEventSchema } from './maxEvents.ts';
@@ -58,12 +58,12 @@ test('post_message is a query the portal asks, waits 20 s for, and never keeps a
   assert.equal(QUERY_LIMITS.timeoutMsByQuery.post_message, 20_000);
 });
 
-test('the worker tool takes a channel of the allowlist, text or a file, a thread and a key, and no bug channel', () => {
-  assert.deepEqual(Object.keys(CATALOG.post_as_max).sort(), ['channel', 'file', 'key', 'skip_lines', 'text', 'thread']);
+test('the worker tool takes a channel of the allowlist, text or a file, a thread, a conversation and a key, and no bug channel', () => {
+  assert.deepEqual(Object.keys(CATALOG.post_as_max).sort(), ['channel', 'conversation', 'file', 'key', 'skip_lines', 'text', 'thread']);
   assert.deepEqual([...POST_CHANNELS], ['dev_patch_notes', 'dev_chat', 'agent_testing']);
   for (const bug of ['bug_reports', 'dev_bug_reports']) {
     assert.ok(!CATALOG.post_as_max.channel.safeParse(bug).success, `${bug} is not a channel this tool posts into`);
-    assert.match(String((postArgs({ channel: bug, text: 'x' }) as { error: string }).error), /belong to FFBox/);
+    assert.match(String((postArgs({ channel: bug, text: 'x' }) as { error: string }).error), /use channel "conversation" with its thread/);
   }
 });
 
@@ -146,4 +146,62 @@ test('the answer to a post is never kept as a last known one', async (t) => {
   const after = await pm.query('post_message', { channel: 'agent_testing', text: 'two' });
   assert.equal(after.live, false);
   assert.equal(after.data, undefined, 'no earlier post\'s link stands in for this one');
+});
+
+const THREAD = '1562003559732486144';
+
+test('w1640: channel conversation takes the conversation id, and sends it as a string with the text', () => {
+  assert.deepEqual(postArgs({ channel: 'conversation', conversation: '1163', text: 'Please attach the save.', key: 'c-1', by: 'w1640' }), {
+    args: { channel: 'conversation', conversation: '1163', text: 'Please attach the save.', key: 'c-1', by: 'w1640' },
+  });
+  assert.deepEqual(POST_TARGETS, [...POST_CHANNELS, 'conversation']);
+  assert.ok(CATALOG.post_as_max.channel.safeParse('conversation').success);
+  assert.ok(Object.keys(CATALOG.post_as_max).includes('conversation'));
+});
+
+test('w1640: the thread of a conversation is an id, a thread link or a message link in it, and arrives as the thread id', () => {
+  const thread = (t: string) => (postArgs({ channel: 'conversation', thread: t, text: 'hi' }) as { args: Record<string, string> }).args;
+  assert.deepEqual(thread(THREAD), { channel: 'conversation', thread: THREAD, text: 'hi' });
+  assert.equal(thread(`https://discord.com/channels/${GUILD}/${THREAD}`).thread, THREAD);
+  assert.equal(thread(`https://discord.com/channels/${GUILD}/${THREAD}/1558176042089447001`).thread, THREAD, 'a message link names its thread (the second id)');
+  assert.equal(thread(` https://discord.com/channels/${GUILD}/${THREAD} `).thread, THREAD);
+  assert.match((postArgs({ channel: 'conversation', thread: 'https://example.com/channels/1/2', text: 'hi' }) as { error: string }).error, /thread:/);
+  // Other channels keep the snowflake-only check: a link is no thread id there.
+  assert.match((postArgs({ channel: 'dev_chat', thread: `https://discord.com/channels/${GUILD}/${THREAD}`, text: 'hi' }) as { error: string }).error, /thread:/);
+  const both = postArgs({ channel: 'conversation', conversation: '7', thread: THREAD, text: 'hi' }) as { args: Record<string, string> };
+  assert.equal(both.args.conversation, '7');
+  assert.equal(both.args.thread, THREAD);
+});
+
+test('w1640: channel conversation needs the conversation or the thread, and the conversation id is digits', () => {
+  assert.equal((postArgs({ channel: 'conversation', text: 'hi' }) as { error: string }).error, 'conversation: give the FFBox conversation id or the Discord thread (its id or URL)');
+  assert.match((postArgs({ channel: 'conversation', conversation: 'abc', text: 'hi' }) as { error: string }).error, /^conversation:/);
+  assert.match((postArgs({ channel: 'conversation', conversation: '1234567890123', text: 'hi' }) as { error: string }).error, /^conversation:/, 'at most 12 digits');
+  assert.match((postArgs({ channel: 'conversation', conversation: 'abc', thread: THREAD, text: 'hi' }) as { error: string }).error, /^conversation:/);
+});
+
+test('w1640: the bug channels are still no channel, and the refusal says to use conversation with its thread', () => {
+  for (const bug of ['bug_reports', 'dev_bug_reports']) {
+    const e = (postArgs({ channel: bug, text: 'x' }) as { error: string }).error;
+    assert.ok(e.startsWith(`channel: one of dev_patch_notes, dev_chat, agent_testing, conversation (got "${bug}").`), e);
+    assert.ok(e.endsWith('To post in a thread of #bug-reports or dev_bug_reports, use channel "conversation" with its thread.'), e);
+    assert.ok(!CATALOG.post_as_max.channel.safeParse(bug).success);
+  }
+  assert.ok(!/bug-reports/.test((postArgs({ channel: 'nowhere', text: 'x' }) as { error: string }).error), 'the hint is for the bug channels only');
+});
+
+test('w1640: a conversation post goes out with its args and the answer names FFBox\'s conversation, not a channel', async (t) => {
+  const { pm, c } = await setup(t);
+  const seen: Q[] = [];
+  t.after(
+    onQuery(c, (q) => {
+      seen.push(q);
+      c.send(posted(q.id, { channel: 'conversation 1163', thread: THREAD, channel_id: THREAD }));
+    }),
+  );
+  const r = await postAsMax(pm, { channel: 'conversation', conversation: '1163', thread: `https://discord.com/channels/${GUILD}/${THREAD}`, text: 'Could you attach the save?', by: 'orchestrator: ben' }, 'sess1');
+  assert.deepEqual(seen[0].args, { channel: 'conversation', conversation: '1163', thread: THREAD, text: 'Could you attach the save?', by: 'orchestrator: ben' });
+  assert.match(r.text, /\(FFBox conversation 1163, thread 1562003559732486144, /);
+  assert.ok(!/#conversation/.test(r.text));
+  assert.equal(CliEventSchema.parse(r.event).channel, 'conversation 1163');
 });

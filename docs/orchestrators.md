@@ -51,7 +51,9 @@ Ben). It hears work requests, updates to them, capacity news and the host's noti
 the ledger.
 
 Both briefs describe the same world (`worldBrief` in `server/agents.ts`). Its FFBox line keeps FFBox's hard rules (it
-owns #bug-reports and dev_bug_reports, nobody announces a merged fix, no agent changes a Steam branch) and says when to
+owns #bug-reports and dev_bug_reports and posts there by itself only a player's answer and a merged fix's notice, agents
+post anything else through it with `reply_to_ffbox` or `post_as_max` channel `conversation` (w1640), nobody announces a
+merged fix, no agent changes a Steam branch) and says when to
 read `read_rules ffbox`, which returns Lothsahn's text verbatim (`FFBOX_BRIEF`): what FFBox is, and that the ffbox repo can
 be changed through workers, who push straight to its master one change at a time because a push goes live on the box
 within about five minutes. The longer version is [ffbox.md](ffbox.md). After it, the topic names `ffbox_activity`'s
