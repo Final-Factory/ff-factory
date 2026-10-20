@@ -1752,6 +1752,11 @@ export interface WorkItem {
    * placement.live first (BEAST), and a move of it says to stage the view again. The first start, kept.
    */
   liveView?: { at: string; session: string; machine: string };
+  /**
+   * A worker on it declared a build coming (w1606, the build_plan tool): it builds a player from then on, so it is placed
+   * on placement.build first (BEAST). The first declaration, kept.
+   */
+  build?: { at: string; session: string; machine: string };
   /** The cleanup's last "Is it done?" to a worker about this merged request (w419): at most one a day. */
   followUp?: { at: string; sessionId: string };
   /** Workers the cleanup already resumed once after they were cut off, by session id: never a second time. */

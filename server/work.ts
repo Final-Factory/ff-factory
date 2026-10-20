@@ -5,7 +5,7 @@ import { WORK_LIVE_LABEL, type WorkLive } from '../shared/workState.ts';
 import { sourceTag } from './intakeRules.ts';
 import { WORK_OPEN, type AttachmentRef, type Requester, type WorkItem, type WorkOverlap, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { fmtBytes } from '../shared/attachments.ts';
-import { needsLive } from '../shared/capacity.ts';
+import { needsBuild, needsLive } from '../shared/capacity.ts';
 
 /** An overlap at or above this is strong: the dispatcher must give a reason to start work on the request anyway. */
 export const STRONG = 0.8;
@@ -336,7 +336,7 @@ export function describeItem(w: WorkItem, workerLine: (id: string) => string, no
   const state = now ? ` ${liveLine(now)}:` : '';
   const runs = w.runsFor ? ` Runs for ${w.runsFor.displayName} (${clip(oneLine(w.runsFor.why), 120)}): their Claude pool and GitHub token.` : '';
   // w1600: placed by the Capacity block's "Next Live view work" line (BEAST first), not the general one.
-  const live = needsLive(w) ? ` Needs a Live view${w.liveView ? ` (its worker started one on ${w.liveView.machine})` : ''}: place it by "Next Live view work".` : '';
+  const live = needsLive(w) ? ` Needs a Live view${w.liveView ? ` (its worker started one on ${w.liveView.machine})` : ''}: place it by "Next Live view work".` : needsBuild(w) ? ` Needs a build${w.build ? ` (its worker declared one on ${w.build.machine})` : ''}: place it by "Next build work" (w1606).` : '';
   return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${runs}${live}${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
 }
 

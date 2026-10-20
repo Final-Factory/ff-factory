@@ -74,6 +74,11 @@ export interface PlacementPrefs {
    * Those without room, held or avoided are skipped, and the rest of the work's placement is the general one.
    */
   live?: string[];
+  /**
+   * Where game builds run first (w1606), machine ids in order: config placement.build, else DEFAULT_BUILD. Work that builds
+   * a player goes there first like Live view work, and a build declared coming there clears it (server/buildPlans.ts).
+   */
+  build?: string[];
 }
 
 /**
@@ -84,6 +89,23 @@ export const DEFAULT_LIVE = ['beast'];
 
 /** The computers Live view work tries first, in order (placement.live, else DEFAULT_LIVE). */
 export const liveOf = (prefs: PlacementPrefs): string[] => (prefs.live?.length ? prefs.live : DEFAULT_LIVE).map(placeId);
+
+/**
+ * Where builds run when config placement.build is not set (w1606). Ben, 2026-10-20: "when you know builds are coming up, we
+ * also prioritize using beast for builds because its faster".
+ */
+export const DEFAULT_BUILD = ['beast'];
+
+/** The computers builds try first, in order (placement.build, else DEFAULT_BUILD). */
+export const buildOf = (prefs: PlacementPrefs): string[] => (prefs.build?.length ? prefs.build : DEFAULT_BUILD).map(placeId);
+
+/** Work placed on a first list before the general placement: a Live view (w1600) or a build (w1606). */
+export type FirstKind = 'live' | 'build';
+
+const FIRST: Record<FirstKind, { of: (p: PlacementPrefs) => string[]; key: string; label: string; why: string }> = {
+  live: { of: liveOf, key: 'placement.live', label: 'Live view work', why: 'w1600: Live views stream fastest there' },
+  build: { of: buildOf, key: 'placement.build', label: 'Build work', why: 'w1606: builds run fastest there' },
+};
 
 /**
  * RAM in use at which a computer counts as busy. A judgment set from w416's numbers: BEAST at 55 of 64 GB (86%) with 7
@@ -237,10 +259,12 @@ function spread(open: Computer[], last: string | undefined, kind: NeedKind): { p
  * (prefs.hold, w1089) is never picked. `kind`: game work needs a game sandbox and an editor's worth of RAM, other work
  * (w1098) only an agent slot; both go through hasRoomFor.
  */
-export function pickComputer(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, kind: NeedKind = 'game', workflows = false, live = false): { pick: Computer; why: string } | undefined {
-  if (live && kind === 'game') {
-    // Work that needs a Live view (w1600): the first computer in placement.live with room, else the general placement.
-    const first = liveOf(prefs);
+export function pickComputer(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, kind: NeedKind = 'game', workflows = false, live: boolean | FirstKind = false): { pick: Computer; why: string } | undefined {
+  const firstKind: FirstKind | undefined = live === true ? 'live' : live || undefined;
+  if (firstKind && kind === 'game') {
+    // Work that needs a Live view (w1600) or builds a player (w1606): the first computer in its list with room, else the general placement.
+    const f = FIRST[firstKind];
+    const first = f.of(prefs);
     const hold = holdOf(prefs);
     const avoid = avoidOf(prefs);
     const skipped: string[] = [];
@@ -250,10 +274,10 @@ export function pickComputer(places: readonly Computer[], last?: string, prefs: 
       else if (hold.has(id)) skipped.push(`${id} is held (${hold.get(id)})`);
       else if (avoid.has(id)) skipped.push(`${id} is avoided (${avoid.get(id)})`);
       else if (!hasRoom(p)) skipped.push(`${id} is busy (${busyReasons(p).join('; ')})`);
-      else return { pick: p, why: `Live view work goes to the first with room in placement.live (${first.join(' > ')}; w1600: Live views stream fastest there)${p.benchLock ? `; ${benchText(p.benchLock)}: its worker waits for it before it starts its editor` : ''}` };
+      else return { pick: p, why: `${f.label} goes to the first with room in ${f.key} (${first.join(' > ')}; ${f.why})${p.benchLock ? `; ${benchText(p.benchLock)}: its worker waits for it before it starts its ${firstKind === 'live' ? 'editor' : 'build'}` : ''}` };
     }
     const rest = pickComputer(places, last, prefs, kind, workflows);
-    return rest && { pick: rest.pick, why: `Live view work, but ${skipped.join(', ')}; so the general placement: ${rest.why}` };
+    return rest && { pick: rest.pick, why: `${f.label}, but ${skipped.join(', ')}; so the general placement: ${rest.why}` };
   }
   if (workflows) {
     // Work that changes .github/workflows (w1463): first among the computers whose gh may push it, then as any other work.
@@ -336,6 +360,17 @@ export function liveLine(places: readonly Computer[], last?: string, prefs: Plac
 }
 
 /**
+ * Where the next piece of work that builds a player goes (w1606): first on placement.build (DEFAULT_BUILD), else as other
+ * game work. Undefined with fewer than two computers, like preferLine.
+ */
+export function buildLine(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
+  if (places.length < 2) return undefined;
+  const p = pickComputer(places, last, prefs, 'game', false, 'build');
+  if (!p) return `No computer has room for build work now${heldNote(places, prefs, 'game')}.`;
+  return `Next build work (game work that builds a player, w1606): ${p.pick.id} (${p.why}).`;
+}
+
+/**
  * Where the next piece of work that changes .github/workflows goes (w1463: four pushes of a workflow file were refused for a
  * machine's gh token without the `workflow` scope), and each computer's gh login; undefined when no daemon reported one yet.
  * Such work needs no editor, so it is placed by agent slot; a game request that also changes a workflow file is noted at start_agent.
@@ -365,7 +400,8 @@ export function capacityLines(places: readonly Computer[], last?: string, prefs:
   const how = prefer.length || avoid.size || hold.size ? `placement.prefer first, avoided last${hold.size ? ', held never' : ''}, the rest spread by room` : 'game-repo work is spread by room';
   const wf = workflowLine(places, last, prefs);
   const live = liveLine(places, last, prefs);
-  return [`## Capacity (${how}; docs/machines.md, "Placing work")`, ...lines, ...(next ? [next] : []), ...(live ? [live] : []), nonGameLine(places, last, prefs), ...(wf ? [wf] : [])];
+  const build = buildLine(places, last, prefs);
+  return [`## Capacity (${how}; docs/machines.md, "Placing work")`, ...lines, ...(next ? [next] : []), ...(live ? [live] : []), ...(build ? [build] : []), nonGameLine(places, last, prefs), ...(wf ? [wf] : [])];
 }
 
 /**
@@ -380,7 +416,7 @@ export const pinnedWork = (reviewRoot?: string) =>
  * or undefined. A soft hint: the work may need this computer (pinnedWork), and a worker
  * going on in its own sandbox stays there.
  */
-export function placementHint(target: string, places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, reviewRoot?: string, kind: NeedKind = 'game', workflows = false, live = false): string | undefined {
+export function placementHint(target: string, places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, reviewRoot?: string, kind: NeedKind = 'game', workflows = false, live: boolean | FirstKind = false): string | undefined {
   const here = places.find((p) => p.id === target);
   if (!here) return undefined;
   const p = pickComputer(places, last, prefs, kind, workflows, live);
@@ -395,7 +431,7 @@ export function placementHint(target: string, places: readonly Computer[], last?
   const held = holdOf(prefs).get(target);
   const busy = (kind === 'game' ? busyReasons(here) : agentBusyReasons(here)).filter((w) => w !== 'offline');
   const state = held ? `${target} is held (${held})` : avoided ? `${target} is avoided (${avoided})` : busy.length ? `${target} is busy (${busy.join('; ')})` : `${target} has ${pctOf(roomFor(here, kind))} room`;
-  return ` Note: ${state}; the next new ${live && kind === 'game' ? 'Live view' : kind === 'game' ? 'game-repo' : 'non-game'} work goes to ${p.pick.id} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, or a worker going on in its own sandbox), put it there.`;
+  return ` Note: ${state}; the next new ${live && kind === 'game' ? (live === 'build' ? 'build' : 'Live view') : kind === 'game' ? 'game-repo' : 'non-game'} work goes to ${p.pick.id} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, or a worker going on in its own sandbox), put it there.`;
 }
 
 /** The computers with room for `kind` of work in a RoomNow: the one place the two kinds are told apart. */
