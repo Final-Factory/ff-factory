@@ -3692,8 +3692,14 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     // Both texts: the title alone (a long brief dilutes it), and the title with the start of the brief.
     const byTitle = this.rankBoard({ keys, title }, f.lookbackDays, t);
     const byBrief = this.rankBoard({ keys: [], title, summary: cleanBlock(f.brief, 1500) }, f.lookbackDays, t);
+    // THE CONVERSATION'S OWN FINISHED REQUEST IS NOT ITS NEXT ASK (w1637). FFBox hands a conversation over again once the
+    // request it was linked to is closed (done, declined or cancelled), and every request filed from it carries its
+    // `ffbox:<id>` key: matched on that key, lothsahn's next question in #ask-assistant conversation 1163 would have been
+    // answered "already fixed" from w1635, the question before it. An open one still joins (an escalated thread).
+    const ownClosed = (w: WorkItem) => !isOpen(w) && (w.source?.conversation === c.id || w.keys.includes(`ffbox:${c.id}`));
     const best = new Map<string, (typeof byTitle)[number]>();
     for (const x of [...byTitle, ...byBrief]) {
+      if (ownClosed(x.w)) continue;
       const was = best.get(x.w.id);
       if (!was || x.score > was.score || (x.score === was.score && x.band === 'high')) best.set(x.w.id, x);
     }

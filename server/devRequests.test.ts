@@ -535,6 +535,26 @@ test('dedup: already fixed is answered with the release and PR; force files it a
   assert.ok(store.work.get(String(forced.workId))!.log.some((l) => l.includes('Possibly the same as w90')));
 });
 
+test("w1637: the conversation's own finished request does not answer its next hand-over; an open one still joins it", async (t) => {
+  const { connect, store } = await setup(t);
+  // #ask-assistant conversation 1163: no thread, so the conversation's own `ffbox:` key is all the two asks share.
+  const conv = { id: '1163', threadId: undefined, url: undefined, channel: 'ask_claude' };
+  seed(store, { id: 'w1635', title: 'What version added the multiplayer flag to mods?', status: 'done', keys: ['ffbox:1163'], source: { kind: 'ffbox-dev', untrusted: false, conversation: '1163' } });
+  const c = await connect();
+  c.send(devRequest('dev-1163-1341', { conversation: conv, keys: [], title: 'What version added the multiplayer flag to mods?', brief: 'And which version is live now?' }));
+  await c.next('dev_ack');
+  const filed = await c.next('dev_filed');
+  assert.equal(filed.outcome, 'filed', JSON.stringify(filed));
+  assert.notEqual(filed.workId, 'w1635');
+  assert.equal(store.work.size, 2, 'filed as a request of its own');
+  // Its own request, still open: joined, as an escalated thread's operator turn is (w266).
+  const open = String(filed.workId);
+  c.send(devRequest('dev-1163-1342', { conversation: conv, keys: [], title: 'Something else entirely', brief: 'About the belts.' }));
+  await c.next('dev_ack');
+  const joined = await c.next('dev_filed');
+  assert.deepEqual([joined.outcome, joined.workId], ['covered', open]);
+});
+
 test("an operator's follow-up reaches their own orchestrator and the busy worker, as their words relayed; another operator's is refused", async (t) => {
   const { connect, store, chat, heard, call, dispatcher } = await setupOnMachine(t);
   const c = await connect();

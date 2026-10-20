@@ -415,6 +415,10 @@ is checked three ways:
 | medium-band candidates | `linked`: filed, the candidates named in its log for the dispatcher and the person to merge | "Filed as w124; it may repeat w38, w40." |
 | nothing | `filed` | "Filed as w123." |
 
+A request filed from the same FFBox conversation (its `source.conversation`, or its `ffbox:<id>` key) that is no longer
+open is left out of the matching (w1637): FFBox hands a conversation over again once its linked request is closed, and
+the next question there is not "already fixed" by the question before it. An open one still joins it.
+
 **What the thread hears, start to end (w417; Lothsahn, 2026-10-05).** FFBox puts 👀 on the operator's message and hands
 it over. When FF Factory answers `filed`, `covered` or `linked`, FFBox replies "Queued as w123" (the joined request's id
 for `covered`, which is the `workId` FF Factory already sends) and then takes the 👀 off, the removal held behind the
@@ -424,7 +428,8 @@ else is said in the thread between them: questions and `reply_to_ffbox` answers 
 **Except an operator's own question in a chat channel (w649).** When the operator opened the conversation in a
 watch channel of kind `ask` (#ask-assistant), `reply_to_ffbox` answers, "already fixed" and the request's result
 ("Done: ...", declined, cancelled) are posted there, in reply to the message that asked Max; questions still go by
-DM. Every line FFBox posts in a channel conversation replies to the newest message of the hand-over turn that
+DM. A done with no merge right after a `reply_to_ffbox` answer posts nothing more: the answer was the post (FFBox
+w1637). Every line FFBox posts in a channel conversation replies to the newest message of the hand-over turn that
 spoke to Max (an @-mention or a reply to Max), not to the turn's last message: on 2026-10-07 "Queued as w648"
 answered the chat line after lothsahn's question.
 "Already fixed" at filing is posted as FF Factory wrote it. Where FFBox can say no "Queued as" (a review on GitHub, a shell
