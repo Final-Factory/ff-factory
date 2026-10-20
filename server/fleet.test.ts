@@ -225,11 +225,37 @@ test('w1430: a Live view up while its worker is between turns calls the person w
   const ben = { userId: 'ben', displayName: 'Ben' };
   const call = slotCall({ shown: [comet], older: [], waits: [] }, [view('comet')], ben);
   assert.deepEqual(call && { ...call, session: call.session.id }, { kind: 'live', session: 'comet', label: 'Live view: go' });
-  // Mid-turn, it is the worker's move; asked by someone else, it is theirs.
-  assert.equal(slotCall({ shown: [{ ...comet, status: 'running' }], older: [], waits: [] }, [view('comet')], ben), undefined);
+  // Mid-turn, it is the worker's move: no amber call, only the quiet button (w1599); asked by someone else, it is theirs.
+  assert.equal(slotCall({ shown: [{ ...comet, status: 'running' }], older: [], waits: [] }, [view('comet')], ben)?.kind, 'watch');
   assert.equal(slotCall({ shown: [comet], older: [], waits: [] }, [view('comet')], { userId: 'lothsahn', displayName: 'Lothsahn' }), undefined);
   // Handed over (lastRequestedBy) counts as asked.
   assert.equal(slotCall({ shown: [{ ...comet, requestedBy: undefined, lastRequestedBy: BEN }], older: [], waits: [] }, [view('comet')], ben)?.kind, 'live');
+});
+
+test("w1599: a Live view up shows everyone who may watch it a quiet button; only the person it waits on gets the amber call", () => {
+  const view = (sessionId: string, state: LiveViewInfo['state'] = 'live'): LiveViewInfo => ({ liveId: 'l1', sessionId, machineId: 'lothdesktop', sandbox: 'slot4', state, detail: '', fps: 15, width: 960, materials: ['VfxComet'], startedAt: ago(12), updatedAt: ago(0), frames: 100 });
+  const comet = session('comet', 'idle', { ...at('slot4'), requestedBy: BEN });
+  const place = (shown = [comet]) => ({ shown, older: [], waits: [] });
+  const lothsahn = { userId: 'lothsahn', displayName: 'Lothsahn', role: 'owner' as const };
+  const ben = { userId: 'ben', displayName: 'Ben', role: 'member' as const };
+  const stranger = { userId: 'zed', displayName: 'Zed', role: 'member' as const };
+  // An owner, on someone else's request: the same label, kind 'watch' (the page draws it quiet).
+  const watch = slotCall(place(), [view('comet')], lothsahn);
+  assert.deepEqual(watch && { ...watch, session: watch.session.id }, { kind: 'watch', session: 'comet', label: 'Live view: go' });
+  // The requester's call is unchanged: amber while the worker is between turns...
+  assert.equal(slotCall(place(), [view('comet')], ben)?.kind, 'live');
+  // ...and the requester's own view while the worker runs, or an owner's on a view that waits on the requester, is quiet.
+  assert.equal(slotCall(place([{ ...comet, status: 'running' }]), [view('comet')], ben)?.kind, 'watch');
+  assert.equal(slotCall(place([{ ...comet, status: 'running' }]), [view('comet')], lothsahn)?.kind, 'watch');
+  const waits = [{ session: comet, request: 'w1325', on: ['Ben'] }];
+  assert.equal(slotCall({ shown: [comet], older: [], waits }, [view('comet')], ben)?.kind, 'live');
+  assert.equal(slotCall({ shown: [comet], older: [], waits }, [view('comet')], lothsahn)?.kind, 'watch');
+  // A member who did not ask for the worker sees none, and neither does anyone when the view is stopped or absent.
+  assert.equal(slotCall(place(), [view('comet')], stranger), undefined);
+  assert.equal(slotCall(place(), [view('comet', 'stopped')], lothsahn), undefined);
+  assert.equal(slotCall(place(), undefined, lothsahn), undefined);
+  assert.equal(slotCall(place(), [view('other')], lothsahn), undefined);
+  assert.equal(slotCall(place(), [view('comet')], undefined), undefined);
 });
 
 test('w1430: fleetOf lists the chats that matter now per slot, the person-waiting one first, and folds the rest, the newest first', () => {

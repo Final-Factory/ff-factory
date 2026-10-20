@@ -51,6 +51,7 @@ import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from 
 import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
+import { readBenchLock } from './benchLock.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import { PauseKeeper, pauseFile } from './pause.ts';
 import { trayView } from './pauseRules.ts';
@@ -1227,7 +1228,9 @@ export class Daemon {
       // Each game player with its owner and age (w1196): list_sandboxes and the dashboard flag the orphans.
       const left = this.leftovers.report();
       if (unity && left.at) Object.assign(unity, { playerList: left.players, leftoverProcesses: left.others });
-      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}) });
+      // A timed run's bench lock (w1600): the portal keeps Live view editors from starting beside it.
+      const benchLock = readBenchLock(this.cfg.root);
+      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);
     }
