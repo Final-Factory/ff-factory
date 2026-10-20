@@ -620,7 +620,7 @@ days; a deploy is a person's call, and a week without one is worth their look.
   that needed Ben to reboot and log in to the m3, after FileVault, set `wake_me` check-ins of 2 h and 6 h and the ledger
   showed Working for about 10 hours). A check-in is for a machine or a job: it comes back to the work by itself, and no
   wake-up moves a person. So the worker harness tells workers (the "Waiting on a person" section of their brief,
-  `Agents.machineSandboxBrief`) to call `waiting_on_person` (who, what, optionally the request) and end their turn with a
+  `Agents.machineSandboxBrief`) to call `waiting_on_person` (who, what, the questions their card asks, optionally the request; w1597, [The question card](#the-question-card-one-question-its-answers-previews-w1597)) and end their turn with a
   report naming that person and action, with a `wNNN: still open: waiting on <Name> to <do what>` line; the request then
   derives as **Waiting on input (on <who>)**, also while a check-in of its own is pending (it may set one as a fallback).
   Two signals, in this order (`workLive`):
@@ -1678,11 +1678,64 @@ own turn only (`humanAsked`): a note in a turn that is not theirs answers nothin
 A dashboard answer goes the same way: the Waiting on input card's answer box sends the person's words to their own
 orchestrator, which records the note in that turn.
 
-**The page.** A Waiting on input card whose request has a `needsYou` shows it whole above the brief: who asks, the question,
+**The page** (until w1597; since then [the question card](#the-question-card-one-question-its-answers-previews-w1597) keeps all of this behind Details). A Waiting on input card whose request has a `needsYou` showed it whole above the brief: who asks, the question,
 the files (the path, and the still or clip under it), the pull requests as links, the end of the worker's report (folded),
 when it went to whose orchestrator, and "Answer in your chat" (the person's own chat). A worker's question gets the answer box
 too. In the chat, a `[needs you]` notice is amber and starts open, its body shown as Markdown (`shared/notices.ts`,
 `needs-you`).
+
+### The question card: one question, its answers, previews (w1597)
+
+Ben, 2026-10-20, with a screenshot of w1588's card: "i hate the dispatchers "waiting on input" and intake is so god damn
+confusing. I never know what its asking. so much text is devoted to stuff that is not relevant I'm never going to look at
+files at the /srv/ path, they must be previews. and theres so much information like pull request that i dont care about.
+just ask the question clearly, give me the option selections and thats it".
+
+What his card showed (w1588, before): the dispatcher's restatement, the worker's `what` listing six decisions, four bare
+`/srv/fff/review/…` paths (the Waiting tab rendered previews through Markdown with no image resolver, so only the paths showed),
+13 pull request numbers, the end of the worker's report, the brief and five "may repeat" requests, then a free-text box.
+
+**The rule for whoever writes a question for a person** (a worker's `waiting_on_person`, the dispatcher's `decide_work ask`, an
+orchestrator's `ask_person`):
+
+- **One question per decision**, in a plain sentence a person understands without opening anything. Several decisions are
+  several questions; the card asks them one at a time.
+- **2 to 4 answers**, each a full sentence in the person's voice ("Put it in, without the newest step"), the one you recommend
+  marked `recommended` (shown first, marked). An action is a question too: "Have you rebooted the m3 and logged in?" with
+  "Done: the m3 is back" / "Not today".
+- **Stills and clips as previews**: `![what it shows](<absolute path>)` in the question; the card shows a thumbnail that opens
+  full size (a clip plays).
+- **No file paths, pull request lists, worker or request ids, constraints or report text in the question or its answers.**
+  They stay in your report, which the card keeps behind Details. `checkAsks` refuses a question with a path, two or more
+  `#NNN` numbers or a worker id (`shared/questionCard.ts`).
+
+**Where the questions come from.** `waiting_on_person` takes `questions` (`questionsShape` in `server/launch.ts`: 1 to 6, each
+with 2 to 4 options), checked by `checkAsks` and kept on the declaration (`SessionInfo.waitingOn.asks`), then on the wait
+(`personWaits`) and the record (`WorkNeedsYou.asks`, `needsYouRecord`). `decide_work ask` requires them (refused without; kept
+as `WorkItem.question.asks`). A dead gate's question (`blockerDecide`) carries its own two answers. The `[needs you]` message
+lists them for the orchestrator to ask with `ask_person` as given. A worker on a machine whose daemon predates w1597 has no
+`questions` in its tool: its wait is kept, and its card falls back (below).
+
+**The card** (`web/src/components/QuestionCard.tsx`, on the Waiting on input tab and the Intake tab's Needs a human list) shows
+only: the request's title; the question (with several, "Question 2 of 6", progress dots and Back; the answers so far are kept
+across a reload and sent together after the last); the answers as buttons, the recommended one first and marked; a box for
+a free answer; the question's own stills and clips as thumbnails. Everything else is behind one **Details** link: who asked
+and when, the request and its workers (Open links), the worker's own words and the dispatcher's restatement, the pull
+requests, the review files it names (as thumbnails), the end of the report and the request's evidence; paths there are file
+names (`namesForPaths`). A worker's Live view is a "Watch it in the Live view" button under the question; a worker's
+permission cards stay on the card (they are the answer).
+
+- **A free-text question** (written before w1597, or by an old daemon's worker) is shown cleaned (`plainQuestion`: its paths,
+  the words pointing at them and brackets that only list pull requests taken out; a "Decide A, B and C" list as a list), with
+  its review stills, the free answer box and Details.
+- **An intake approval** asks "Should FF Factory work on this player's bug report?" (or "this request"), with "Approve it" and
+  "Decline it" (Approve marked recommended when the triage says so; a possible repeat is named by its title in the question);
+  the box declines with a reason. The same endpoints as before (`/api/work/<id>/approve`, `/decline`).
+- **A click answers exactly as typed words do** (`answerMessage`): the label (several questions: each question with its answer,
+  numbered) goes to the person's own orchestrator as "Answer on wNNN (title). It asked: … Please put this on wNNN as my answer
+  (update_work note).", which records it in their turn, and `answerNeedsYou` resumes the waiting worker. Tests:
+  `server/questionCard.test.ts`, `server/orchestrators.test.ts` ("w1597"), `e2e/intake.spec.ts` (a click and the same words
+  typed send the same message).
 
 ## Review media inline, never a bare path (w1384)
 

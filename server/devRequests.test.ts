@@ -904,7 +904,7 @@ test('w278, w351: a question for the requester goes to FFBox in a developer\'s w
   await c.next('dev_ack');
   const wid = String((await c.next('dev_filed')).workId);
   await c.next('dev_update');
-  const asked = await call(dispatcher().info, 'decide_work', { id: wid, action: 'ask', note: `For ${wid}: should the filter also apply to drones, or haulers only?` });
+  const asked = await call(dispatcher().info, 'decide_work', { id: wid, action: 'ask', note: `For ${wid}: should the filter also apply to drones, or haulers only?`, questions: [{ question: 'Which one?', options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] });
   assert.equal(asked.isError, false, asked.text);
   let u = await c.next('dev_update');
   assert.equal(u.status, 'open');
@@ -933,7 +933,7 @@ test('w278, w351: a request filed from an FFBox escalation gets the same events 
   store.putWork(w);
   let u = await c.next('dev_update');
   assert.deepEqual([u.conversation, u.request, u.status], ['612', 'w500', 'open']);
-  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w500', action: 'ask', note: 'Which save shows it?' })).isError, false);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w500', action: 'ask', note: 'Which save shows it?', questions: [{ question: 'Which one?', options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] })).isError, false);
   u = await c.next('dev_update');
   // NO OPERATOR FILED THIS THREAD (w351): nobody FFBox may DM, and a thread never hears a question; only that it waits.
   assert.deepEqual([u.question, u.held], [undefined, true]);

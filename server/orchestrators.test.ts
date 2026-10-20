@@ -19,6 +19,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import type { PrHealth } from '../shared/blockers.ts';
+import { answersText } from '../shared/questionCard.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS } from './placeAgain.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
@@ -570,7 +571,7 @@ test('requests: a question goes to its filer, whose answer brings it back; closi
   const { store, dispatcher, chat, call, heard } = setup(t, { gatherMs: 1500 });
   const loth = chat(LOTH).info;
   await call(loth, 'request_work', { title: 'Playtest the new tutorial', brief: 'Look for soft locks.' });
-  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Single-player or co-op?' });
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Single-player or co-op?', questions: [{ question: 'Which one?', options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] });
   assert.equal(store.work.get('w1')!.status, 'question');
   // w1378: a question for a person comes as [needs you], in full, with how to answer it.
   await until('Lothsahn hears the question', () => heard(loth.id, '[needs you]').length === 1);
@@ -2121,7 +2122,7 @@ test('w1378: a worker waiting on a person reaches that person’s orchestrator o
   sessions.events.emit('turnEnd', handle, report);
   // (decide_work ask is for a request that is not active: one put back to new, as a hold would.)
   Object.assign(store.work.get('w1')!, { status: 'new' });
-  const asked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben, is the look OK?' });
+  const asked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben, is the look OK?', questions: [{ question: 'Is the circuit button look OK?', options: [{ label: 'Yes, merge it', recommended: true }, { label: 'No, change it first' }] }] });
   assert.match(asked.text, /Ben's orchestrator already has this wait as \[needs you\] .*no second message/);
   assert.equal(agents.orchestrators.needsYouDigest(agents.personWaits()), 0);
   await new Promise((r) => setTimeout(r, 300));
@@ -2149,6 +2150,49 @@ test('w1378: a worker waiting on a person reaches that person’s orchestrator o
   await until('the second question', () => heard(ben.id, '[needs you]').length === 2);
   assert.match(heard(ben.id, '[needs you]')[1].text, /Question \(its worker \w+ ended its turn saying it needs Ben\):\n\nw1: still open: waiting on Ben to pick A or B for the hover colour/);
   assert.equal(store.work.get('w1')!.needsYou!.kind, 'report');
+});
+
+test('w1597: a worker asks with questions: refused with a path, a PR list or no answers; kept on the wait and the record, listed in [needs you]; the answer a click sends, recorded, resumes the worker', async (t) => {
+  const { store, machines, agents, sessions, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Pre-1.0 release picks', brief: 'Which fixes go in.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: Pre-1.0 release picks', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  const what = 'Decide the go-live moment and the vision speed-up from /srv/fff/review/w1/REPORT.md';
+  // Ben, w1597: "I'm never going to look at files at the /srv/ path ... theres so much information like pull request that i dont care about".
+  await assert.rejects(h.waiting_on_person!({ who: 'Ben', what, questions: [{ question: 'Decide from /srv/fff/review/w1/REPORT.md', options: [{ label: 'A' }, { label: 'B' }] }] }), /no file paths in the words/);
+  await assert.rejects(h.waiting_on_person!({ who: 'Ben', what, questions: [{ question: 'Include #1873, #1880 and #1909?', options: [{ label: 'Yes' }, { label: 'No' }] }] }), /no lists of pull requests/);
+  await assert.rejects(h.waiting_on_person!({ who: 'Ben', what, questions: [{ question: 'Go live now?', options: [{ label: 'Yes' }] }] }), /options: 2 to 4/);
+  assert.equal(info.waitingOn, undefined, 'nothing recorded by a refused call');
+  const questions = [
+    { question: 'When should the update go live? ![the release notes draft](</srv/fff/review/w1/notes.png>)', options: [{ label: 'Hold it: I pick the day' }, { label: 'As soon as it is built, with a Steam event', description: 'Ten builds reach players at once.', recommended: true }] },
+    { question: 'Should the vision speed-up go in?', options: [{ label: 'Put it in', recommended: true }, { label: 'Leave it out' }] },
+  ];
+  assert.match(String(await h.waiting_on_person!({ who: 'Ben', what, questions, request: 'w1' })), /with 2 questions as buttons on Ben's card/);
+  // The recommended answer first (shared/ask.ts checkAsk), on the declaration.
+  assert.deepEqual(info.waitingOn!.asks!.map((a) => a.options[0].label), ['As soon as it is built, with a Steam event', 'Put it in']);
+  sessions.events.emit('turnEnd', sessions.get(id), `w1: still open: waiting on Ben to ${what}`);
+  await until('Ben’s orchestrator hears it', () => heard(ben.id, '[needs you]').length === 1);
+  const r = store.work.get('w1')!.needsYou!;
+  assert.equal(r.asks?.length, 2, 'the record carries the questions for the card');
+  assert.ok(r.previews.includes('/srv/fff/review/w1/notes.png'), "a question's still is among the previews");
+  const msg = heard(ben.id, '[needs you]')[0].text;
+  assert.match(msg, /Ask these 2 one at a time with ask_person[\s\S]*Q1\. When should the update go live\?\n1\. As soon as it is built, with a Steam event \(Recommended\) - Ten builds reach players at once\.\n2\. Hold it: I pick the day\n\nQ2\. Should the vision speed-up go in\?\n1\. Put it in \(Recommended\)/);
+  // A click on the card sends the answer as typed words would (shared/questionCard.ts answerMessage); the orchestrator records
+  // it with update_work in Ben's turn, and the worker resumes with it.
+  const answer = answersText(r.asks!, ['As soon as it is built, with a Steam event', 'Put it in']);
+  // (The [needs you] message opened a turn of its own in Ben's chat: his answer comes in his next one.)
+  await until('that turn ends', () => chat(BEN).info.status === 'idle');
+  await new Promise((r) => setTimeout(r, 300));
+  chat(BEN).lastFrom = 'human';
+  const done = await call(ben, 'update_work', { id: 'w1', note: answer });
+  assert.match(done.text, new RegExp(`answers the \\[needs you\\] question: sent to its worker ${id}, which resumes with it`));
+  const pending = (agents as unknown as { waker: { pending(id: string): { note: string } | undefined } }).waker.pending(id);
+  assert.match(pending!.note, /^\[answer\] Ben answered on w1 "Pre-1\.0 release picks", in their own words: 1\. When should the update go live\?\n   As soon as it is built, with a Steam event\n2\. Should the vision speed-up go in\?\n   Put it in\n/);
+  assert.equal(store.work.get('w1')!.needsYou!.answered!.by, 'Ben');
 });
 
 test('w1378: waits on a person already open when it ships go once, as one [needs you] digest per person', async (t) => {
@@ -2188,7 +2232,7 @@ test('w1384: review media reaches the person inline: a [needs you] for a folder 
   fs.utimesSync(still, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
   const ben = chat(BEN).info;
   await call(ben, 'request_work', { title: 'Fog of war', brief: 'Explored stays explored.' });
-  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben: does fog preview v4 at /srv/fff/review/w1-fog-look-v4/ look right?' });
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben: does fog preview v4 at /srv/fff/review/w1-fog-look-v4/ look right?', questions: [{ question: 'Which one?', options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] });
   await until('Ben hears it', () => heard(ben.id, '[needs you]').length === 1);
   const msg = heard(ben.id, '[needs you]')[0].text;
   assert.ok(msg.includes(`- ![fog-v4-1920.mp4](<${clip}>)\n- ![sheet.png](<${still}>)`), msg);
@@ -2641,7 +2685,7 @@ test('w754: w750 as it happened: block on A, a hold, the hold lifted with A stil
   assert.equal((await decide('w3', { action: 'block', blocker: { kind: 'request', ref: 'w1', what: 'the Deck screens merged' } })).isError, false);
   assert.equal(store.work.get('w3')!.status, 'blocked');
   // 07:19 a hold (ask), which used to drop the gate: it stays.
-  assert.equal((await decide('w3', { action: 'ask', note: 'Held on lothsahn: a potential bug.' })).isError, false);
+  assert.equal((await decide('w3', { action: 'ask', note: 'Held on lothsahn: a potential bug.', questions: [{ question: 'Which one?', options: [{ label: 'The first', recommended: true }, { label: 'The second' }] }] })).isError, false);
   assert.equal(store.work.get('w3')!.status, 'question');
   assert.equal(store.work.get('w3')!.blocked?.ref, 'w1', 'the hold did not drop the gate');
   // 07:27 "You can unblock the release": the hold is lifted and w1 is still open: it goes back to Blocked, not to the dispatcher.
