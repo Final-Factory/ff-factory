@@ -6,6 +6,7 @@ import path from 'node:path';
 import { MachineRollout, ROLLOUT_FILE, VERIFIED_FILE, changedSettings, installerSummary, toolsLine, toolsResult, type RolloutHost, type RolloutMachine } from './machineRollout.ts';
 import { workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
 import type { Requester } from '../shared/types.ts';
+import type { LinkUpdateReport } from './machineProtocol.ts';
 
 /** The rollout after a verified portal deploy (w887, docs/ops-worker.md "After a verified deploy"). */
 
@@ -23,6 +24,8 @@ interface FakeMachine extends RolloutMachine {
   run: (remote: string) => { code: number; out?: string; after?: { online: boolean; daemon?: string }; adopt?: string[] };
   /** What a run of the installer's tools form does (w1476); default: published, ff-agents 1.29.19 -> 1.29.20. */
   tools?: (remote: string) => { code: number; out?: string; throws?: string };
+  /** w1596: its daemon updates over its own link: what its update job reports (or throws), and the machine afterwards. */
+  linkRun?: (form: 'update' | 'tools', commit: string) => { report?: Partial<LinkUpdateReport>; throws?: string; after?: { online: boolean; daemon?: string } };
 }
 
 /** What `worker.ts tools` prints (server/agentTools.ts), shortened to the lines the rollout reads. */
@@ -50,6 +53,8 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
   /** The agent tools runs (w1476), apart from the daemon updates in calls. */
   const toolCalls: { target: string; remote: string; at: number }[] = [];
   const told: { to: Requester | undefined; text: string }[] = [];
+  /** The updates over the daemons' links (w1596). */
+  const linkCalls: { id: string; form: string; commit: string }[] = [];
   let helloAt = 0;
   let adopted: Set<string> | undefined;
   const find = (id: string) => machines.find((m) => m.id === id)!;
@@ -78,13 +83,21 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
       }
       return { code: r.code, stdout: r.out ?? '', stderr: '' };
     },
+    link: (id) => find(id).online && !!find(id).linkRun,
+    linkUpdate: async (id, form, commit) => {
+      linkCalls.push({ id, form, commit });
+      const r = find(id).linkRun!(form, commit);
+      if (r.after) Object.assign(find(id), r.after);
+      if (r.throws) throw new Error(r.throws);
+      return { id: 'j', form, commit, ok: true, exit: 0, log: '', at: '', ...r.report };
+    },
     tell: (to, text) => told.push({ to, text }),
     requesterOf: () => o.requester,
   };
   const make = () =>
     new MachineRollout({ host, dataDir: dir, enabled: () => o.enabled !== false, tools: () => o.tools !== false, now: () => clock, sleep: async (ms) => void (clock += ms), limits: { settleMs: 10_000, graceMs: 10 * 60_000 } });
   const verify = (sha = NEW, at = clock) => fs.writeFileSync(path.join(dir, VERIFIED_FILE), JSON.stringify({ sha, previous: OLD, at: new Date(at).toISOString() }));
-  return { dir, calls, toolCalls, told, make, verify, advance: (ms: number) => void (clock += ms), setHello: (ids: string[]) => ((adopted = new Set(ids)), (helloAt = clock + 1)), find };
+  return { dir, calls, toolCalls, told, linkCalls, make, verify, advance: (ms: number) => void (clock += ms), setHello: (ids: string[]) => ((adopted = new Set(ids)), (helloAt = clock + 1)), find };
 }
 
 test('a verified deploy updates every online machine with the installer, naming no setting, and reports once to whoever asked', async () => {
@@ -444,4 +457,46 @@ test('the state survives a restart: a run cut off by it is looked at again', asy
   assert.equal(r.state.machines.m5.status, 'pending');
   await r.tick();
   assert.equal(w.calls.length, 1);
+});
+
+test('w1596: a daemon that updates over its own link is updated there, ssh never used (a PC the portal cannot reach on port 22); its tools too', async () => {
+  const log = `Before: daemon ${OLD.slice(0, 7)}\nAfter: daemon ${NEW.slice(0, 7)} (was ${OLD.slice(0, 7)}).\nSettings: none changed (every setting carried).\nThe portal sees coosego online running ${NEW.slice(0, 7)}.`;
+  const coosego = mac('coosego', {
+    platform: 'win32',
+    root: 'D:\\ffw',
+    // No ssh to it: its target would be refused as a shell argument, and nothing listens on its port 22.
+    target: 'not an ssh target',
+    linkRun: (form) => (form === 'tools' ? { report: { log: toolsOut() } } : { report: { log, before: OLD.slice(0, 7), after: NEW.slice(0, 7) }, after: { online: true, daemon: NEW.slice(0, 7) } }),
+  });
+  const w = world([coosego], { requester: LOTH });
+  w.verify();
+  await w.make().tick();
+  assert.equal(w.calls.length + w.toolCalls.length, 0, 'no ssh');
+  assert.deepEqual(w.linkCalls.map((c) => [c.id, c.form, c.commit]), [['coosego', 'update', NEW], ['coosego', 'tools', NEW]]);
+  assert.match(w.told[0].text, /- coosego: updated\. 1111111 → c5a93e0\. Limits unchanged\./);
+  assert.match(w.told[0].text, /After: daemon c5a93e0/, "the job's installer lines");
+  assert.match(w.told[0].text, /Agent tools: ff-agents 1\.29\.19 → 1\.29\.20/);
+});
+
+test("w1596: over the link, a new daemon that did not come back is put back by its job; a refusal changes nothing; a job that never reports is handled as an ssh run that failed", async () => {
+  const back = mac('m5', { linkRun: () => ({ report: { ok: false, exit: 1, rollback: 'ok', note: 'the new daemon did not come back healthy, so the job put 1111111aa back', log: 'FAILED: the portal does not see m5 online' } }) });
+  const w = world([back], { tools: false });
+  w.verify();
+  await w.make().tick();
+  assert.match(w.told[0].text, /- m5: FAILED: its update job \(over the daemon's link\) the new daemon did not come back healthy, so the job put 1111111aa back\..* Rollback: ok\./);
+  assert.equal(w.calls.length, 0, 'the job put it back; nothing is rerun over ssh');
+
+  const refused = mac('m3', { linkRun: () => ({ throws: 'm3 refused it: the bundle does not match what the portal said on the link' }) });
+  const w2 = world([refused], { tools: false });
+  w2.verify();
+  await w2.make().tick();
+  assert.match(w2.told[0].text, /- m3: FAILED: over its daemon's link: m3 refused it: the bundle does not match .*; nothing was changed, and the daemon keeps working\./);
+
+  const quiet = mac('biscuit', { linkRun: () => ({ throws: 'biscuit did not answer its update job in 25 minute(s)', after: { online: false } }), run: () => ({ code: 0, after: { online: true, daemon: OLD.slice(0, 7) } }) });
+  const w3 = world([quiet], { tools: false });
+  w3.verify();
+  await w3.make().tick();
+  assert.equal(w3.calls.length, 1, 'offline after the job went quiet: the installer put it back over ssh, where the portal can reach it');
+  assert.match(w3.calls[0].remote, /--daemon-ref 1111111$/);
+  assert.match(w3.told[0].text, /Rollback: ok\./);
 });

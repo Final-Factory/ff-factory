@@ -14,9 +14,10 @@ import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
-import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
+import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
-import { HOST_PROTOCOL, HostedSession, hostFolders, hostLook, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
+import { HOST_PROTOCOL, HostedSession, hostFolders, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
+import { SelfUpdater } from './selfUpdate.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import type { TrimPolicy } from '../server/cacheTrim.ts';
@@ -102,6 +103,11 @@ export interface DaemonConfig {
    * the pause, the schedule and the activity watch. The entry point turns it on; a daemon a test builds has none unless asked.
    */
   tray?: boolean;
+  /**
+   * The leftover reaper (machine/leftovers.ts): on unless false. A test install beside a computer's real one turns it off
+   * (worker.ts --no-cleanup, w1596): it reads every process on the computer and the shared player slots.
+   */
+  leftovers?: boolean;
   /** Scratch folder for agents: their TMP, TEMP and TMPDIR. */
   tempDir?: string;
   /** The Max events file agents here append to (docs/max.md); default ~/.config/ff-factory/max-events.jsonl, null: none. */
@@ -349,6 +355,13 @@ export class Daemon {
   readonly voice?: DaemonVoice;
   /** Its owner's pause (w1532, machine/pause.ts): the tray's, the schedule's and a person's input, kept in pause.json. */
   readonly pause: PauseKeeper;
+  /** Updates, restarts and unloads on the portal's word over this link (w1596, machine/selfUpdate.ts). */
+  readonly selfUpdate: SelfUpdater;
+  /** How a restart over the link ends this process (its supervisor starts it again); tests replace it. */
+  exitForRestart = () => {
+    this.shutdown();
+    setTimeout(() => process.exit(0), 500);
+  };
   /** The activity pause as the tray last set it, until the portal's machines.activityPause says the same (w1574). */
   private trayActivity?: { enabled: boolean; idleMinutes: number };
   private tray?: TrayHost;
@@ -371,6 +384,20 @@ export class Daemon {
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
     const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line));
     this.procs = () => pd.procs();
+    this.selfUpdate = new SelfUpdater({
+      root: cfg.root,
+      appDir: appDirOfConfig(cfg),
+      portalUrl: () => this.cfg.portalUrl,
+      token: cfg.token,
+      send: (msg) => {
+        if (this.ws?.readyState !== WebSocket.OPEN) return false;
+        this.ws.send(JSON.stringify(msg));
+        return true;
+      },
+      exit: () => this.exitForRestart(),
+      log: (...a) => log(...a),
+      nodeArgs: hostNodeArgs(),
+    });
     this.pause = new PauseKeeper({
       file: pauseFile(appDirOfConfig(cfg)),
       log: (line) => log(line),
@@ -844,7 +871,7 @@ export class Daemon {
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
     this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
     // What stopped workers left running (w1196, w1197): looked at once a minute.
-    this.timers.push(setInterval(() => void this.leftovers.tick(), 15_000));
+    if (this.cfg.leftovers !== false) this.timers.push(setInterval(() => void this.leftovers.tick(), 15_000));
     // The ledger facts for a clean-up worker's deletes (w1379): written every 30 s, so a stale file means a daemon that is not running.
     this.timers.push(setInterval(() => this.writeCleanupFacts(), 30_000));
     this.writeCleanupFacts();
@@ -880,6 +907,8 @@ export class Daemon {
     if (watch) this.outsideWatch = new OutsideWatch(watch);
     this.timers.push(setInterval(() => void this.outsideWatch?.tick(), 60_000));
     this.timers.push(setInterval(() => this.heartbeat(), 20_000));
+    // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.
+    this.timers.push(setInterval(() => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`)), 10_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
     // A stopped worker's temp folder (w913): swept a few minutes after its process ended, its clones after six hours.
     this.timers.push(setInterval(() => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`)), 30_000));
@@ -1189,6 +1218,8 @@ export class Daemon {
       compact: true,
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
+      // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.
+      ...(this.selfUpdate.offered() ? { selfUpdate: SELF_UPDATE_VERSION } : {}),
       // A worker root install (w513): its folders, for a record the portal never deployed.
       ...(this.cfg.root
         ? { layout: { root: this.cfg.root, appDir: appDirOfConfig(this.cfg), repoPath: this.cfg.repoPath, tempDir: this.cfg.tempDir, sandboxes: this.cfg.sandboxes ?? null } }
@@ -1204,6 +1235,8 @@ export class Daemon {
       },
     });
     this.flush();
+    // The result of an update job (w1596): the portal waits for it from the daemon that runs after the job.
+    void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`));
     // The portal showed these stopped while the link was down; give it their real state.
     for (const e of this.entries.values()) this.send({ type: 'session', info: e.s.info, live: e.s.live });
     this.reportSandboxes();
@@ -1978,6 +2011,12 @@ export class Daemon {
         this.relocate(msg.id, msg.url);
         return;
       }
+      case 'self_update':
+        void this.selfUpdate.onSelfUpdate(msg);
+        return;
+      case 'daemon_control':
+        void this.selfUpdate.onControl(msg);
+        return;
       case 'switch': {
         // An older portal may still ask for the main clone: no agent works there (w536).
         if (!msg.sandbox) {

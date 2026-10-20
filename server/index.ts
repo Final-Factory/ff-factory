@@ -72,6 +72,7 @@ import { portalPublicKey, tailnetAddress } from './machineSsh.ts';
 import { machineSshHttp } from './machineSshHttp.ts';
 import { tailscaleWhois } from './machineJoin.ts';
 import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller } from './machineJoinHttp.ts';
+import { updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { clientAddress, originOf, tailnetOnly } from './remoteChat.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
@@ -310,8 +311,9 @@ const joinHttp = machineJoinHttp({
   codes: machines.joins,
   records: { get: (id) => store.machines.get(id) },
   whois: joinWhois,
-  enrol: ({ machineId, tailnetName, limits, portalUrl }) => {
+  enrol: ({ machineId, tailnetName, limits, portalUrl, platform }) => {
     machines.deployMachine({ id: machineId, workerInstall: true, host: tailnetName, portalUrl, ...limits });
+    if (platform) machines.update(machineId, { platform });
     return issueMachineToken(cfg.dataDir, machineId);
   },
   portalUrl: (req) => originOf(req) || (cfg.publicUrl ?? '').replace(/\/+$/, ''),
@@ -1891,6 +1893,23 @@ const server = http.createServer(async (req, res) => {
       const r = machineAttachment(attachments, machineId && store.machines.has(machineId) ? machineId : undefined, machineFile[1]);
       if ('error' in r) return send(res, r.status, { error: r.error });
       return sendStream(req, res, new StreamReply('application/octet-stream', r.file, r.record.size, downloadDisposition(r.record.name)));
+    }
+    // A daemon fetching the code of an update it was told about on its link (w1596, server/machineLink.ts): its own token,
+    // and only the bundle offered to it; it checks the SHA-256 and size the link gave it, and git checks the commit.
+    const updateBundle =
+      req.method === 'GET'
+        ? await updateBundleFor(
+            url.pathname,
+            () => {
+              const id = machines.authenticate(req.headers.authorization);
+              return id && store.machines.has(id) ? id : undefined;
+            },
+            machines.bundles,
+          )
+        : undefined;
+    if (updateBundle) {
+      if (updateBundle.status !== 200) return send(res, updateBundle.status, { error: updateBundle.error });
+      return sendStream(req, res, new StreamReply('application/octet-stream', updateBundle.file, updateBundle.size, 'attachment; filename="ff-factory.bundle"'));
     }
     // A machine's daemon sending a file its agent published as an attachment (docs/attachments.md, "Agents' files"): its
     // own token, only an upload the portal opened for that machine, chunks that resume, the SHA-256 checked at the end.

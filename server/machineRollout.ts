@@ -5,6 +5,7 @@ import { readJsonDurable, writeJsonDurable } from './durable.ts';
 import { daemonBehind } from './machines.ts';
 import { SAFE_ROOT, SAFE_TARGET, workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
 import { AGENT_PLUGINS, EXIT, LINE, parseVersions, type Versions } from './agentTools.ts';
+import type { LinkUpdateReport } from './machineProtocol.ts';
 
 /**
  * The machine rollout (w887, lothsahn 2026-10-10: "Update FFFactory so that after updating the portal and validating, it
@@ -73,6 +74,10 @@ export interface RolloutHost {
   liveAtHello(id: string, since: number): ReadonlySet<string> | undefined;
   /** Run a command on it over the portal's ssh. */
   ssh(target: string, remote: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }>;
+  /** Whether its connected daemon updates over its own link (w1596): then ssh is not used for it. */
+  link?(id: string): boolean;
+  /** The installer's form over the daemon's link, to the deployed commit: its update job's report (server/machines.ts linkUpdate). */
+  linkUpdate?(id: string, form: 'update' | 'tools', commit: string): Promise<LinkUpdateReport>;
   /** Send the report to a person's orchestrator, or (no person) the dispatcher. */
   tell(person: Requester | undefined, text: string): void;
   /** Who asked for the deploy that verified at this time (epoch ms), if anyone did through the ops worker. */
@@ -259,7 +264,7 @@ export class MachineRollout {
           Object.assign(o, { status: 'skipped', note: "the portal's own host: the portal runs its daemon itself" });
         } else if (!m.root) {
           Object.assign(o, { status: 'skipped', note: 'not a worker root install: updated another way (the portal redeploys it itself once idle)' });
-        } else if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) {
+        } else if (!this.viaLink(m.id) && (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root))) {
           Object.assign(o, { status: 'skipped', note: 'its ssh target or root folder has characters this will not pass to a shell' });
         } else if (!this.d.host.online(m.id)) {
           o.note = 'offline';
@@ -292,21 +297,9 @@ export class MachineRollout {
     return !!this.d.host.outdated(id) || !daemon || !!daemonBehind({ daemon }, sha);
   }
 
-  private installCommand(m: RolloutMachine, daemonRef?: string): string {
-    // No setting is named, so the installer carries every limit as it is. A rollback names the commit it goes back to.
-    const flag = daemonRef ? (m.platform === 'win32' ? `-DaemonRef ${daemonRef}` : `--daemon-ref ${daemonRef}`) : '';
-    return workerUpdateRemote({ root: m.root!, platform: m.platform }, flag);
-  }
-
-  /** Update one machine, never throwing: its outcome is recorded whatever happens. */
-  private async updateOne(m: RolloutMachine, o: MachineOutcome, sha: string): Promise<void> {
+  /** The installer's update over the portal's ssh (a daemon before w1596, or one not connected when the rollout ran). */
+  private async updateOverSsh(m: RolloutMachine, o: MachineOutcome, sha: string, before: string | undefined): Promise<void> {
     const host = this.d.host;
-    const startedAt = this.now();
-    const before = host.daemon(m.id);
-    const agentsBefore = host.agents(m.id);
-    Object.assign(o, { status: 'updating', note: undefined, before, agentsBefore: agentsBefore.length });
-    this.save();
-    console.log(`machine rollout: updating ${m.id} (${before ?? 'unknown'} -> ${sha.slice(0, 9)}; ${agentsBefore.length} agent(s) alive)`);
     try {
       const r = await host.ssh(m.target, this.installCommand(m), this.lim.installMs);
       const out = `${r.stdout}\n${r.stderr}`;
@@ -321,6 +314,57 @@ export class MachineRollout {
     } catch (e) {
       await this.afterFailure(m, o, before, (e as Error).message);
     }
+  }
+
+  /** Its daemon updates over its own link (w1596): the rollout uses that, and ssh only for a daemon that does not. */
+  private viaLink(id: string): boolean {
+    return !!this.d.host.linkUpdate && !!this.d.host.link?.(id);
+  }
+
+  /**
+   * The update over the daemon's link (w1596): its job runs the same installer update and, when the new daemon does not come
+   * back, puts the code that ran before back itself, so nothing here reruns anything. A job that never reports (the machine
+   * gone quiet) is handled as an ssh run that failed: waited for, and put back over ssh where the portal can reach it.
+   */
+  private async updateOverLink(m: RolloutMachine, o: MachineOutcome, sha: string, before: string | undefined): Promise<void> {
+    const host = this.d.host;
+    let r: LinkUpdateReport;
+    try {
+      r = await host.linkUpdate!(m.id, 'update', sha);
+    } catch (e) {
+      const why = `over its daemon's link: ${(e as Error).message}`;
+      if (/refused it:/.test(why)) Object.assign(o, { status: 'failed', note: `${why}; nothing was changed, and the daemon keeps working` });
+      else await this.afterFailure(m, o, before, why);
+      return;
+    }
+    o.summary = installerSummary(r.log);
+    const changed = changedSettings(r.log);
+    if (changed.length) o.settingsChanged = changed;
+    if (r.ok) {
+      Object.assign(o, { status: 'ok', after: host.daemon(m.id) ?? r.after ?? sha.slice(0, 12) });
+      return;
+    }
+    if (r.rollback) o.rollback = r.rollback;
+    Object.assign(o, { status: 'failed', after: r.after, note: `its update job (over the daemon's link) ${r.note ?? `exited ${r.exit}`}${r.rollback === 'failed' ? ' (OFFLINE or broken: it needs a person)' : ''}` });
+  }
+
+  private installCommand(m: RolloutMachine, daemonRef?: string): string {
+    // No setting is named, so the installer carries every limit as it is. A rollback names the commit it goes back to.
+    const flag = daemonRef ? (m.platform === 'win32' ? `-DaemonRef ${daemonRef}` : `--daemon-ref ${daemonRef}`) : '';
+    return workerUpdateRemote({ root: m.root!, platform: m.platform }, flag);
+  }
+
+  /** Update one machine, never throwing: its outcome is recorded whatever happens. */
+  private async updateOne(m: RolloutMachine, o: MachineOutcome, sha: string): Promise<void> {
+    const host = this.d.host;
+    const startedAt = this.now();
+    const before = host.daemon(m.id);
+    const agentsBefore = host.agents(m.id);
+    Object.assign(o, { status: 'updating', note: undefined, before, agentsBefore: agentsBefore.length });
+    this.save();
+    console.log(`machine rollout: updating ${m.id} (${before ?? 'unknown'} -> ${sha.slice(0, 9)}; ${agentsBefore.length} agent(s) alive${this.viaLink(m.id) ? "; over its daemon's link" : ''})`);
+    if (this.viaLink(m.id)) await this.updateOverLink(m, o, sha, before);
+    else await this.updateOverSsh(m, o, sha, before);
     o.at = new Date(this.now()).toISOString();
     // Were the agents taken back by the new daemon? Its hello after the update says what it runs.
     if (agentsBefore.length) await this.checkAdoption(m.id, o, agentsBefore, startedAt);
@@ -373,8 +417,14 @@ export class MachineRollout {
     this.save();
     console.log(`machine rollout: publishing the agent tools on ${m.id}`);
     try {
-      const r = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }), this.lim.toolsMs);
-      Object.assign(t, toolsResult(r.code, `${r.stdout}\n${r.stderr}`));
+      if (this.viaLink(m.id)) {
+        // Over the daemon's link (w1596): the installer's tools form, run by a job from the deployed commit's checkout.
+        const r = await this.d.host.linkUpdate!(m.id, 'tools', this.state.sha!);
+        Object.assign(t, toolsResult(r.exit, r.log));
+      } else {
+        const r = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }), this.lim.toolsMs);
+        Object.assign(t, toolsResult(r.code, `${r.stdout}\n${r.stderr}`));
+      }
     } catch (e) {
       Object.assign(t, { status: 'failed', note: (e as Error).message });
     }

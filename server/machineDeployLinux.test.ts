@@ -4,7 +4,7 @@ import { linuxControlScript, linuxReloadLines, parseUnitShow, systemdUnit, unitF
 import { platformOfUname } from './machineDeploy.ts';
 import { checkPlayerLaunch, checkShell } from './guard.ts';
 import { linuxDrmGpu } from './system.ts';
-import { machinePlatformOf, platformNoun } from '../shared/types.ts';
+import { machineKind, machinePlatformOf, platformNoun } from '../shared/types.ts';
 import { editorBinary, editorLogPath, editorTree, editorsFor, hubConfigDir, hubListedEditors } from '../machine/unity.ts';
 import { gamePlayers, isUnityBinary, unityProcesses } from '../machine/unitySlots.ts';
 
@@ -57,6 +57,10 @@ test('linux: the platform, as uname, the daemon and sentences say it', () => {
   assert.equal(machinePlatformOf('darwin'), 'darwin');
   assert.equal(platformNoun('linux'), 'Linux PC');
   assert.equal(platformNoun(undefined), 'Mac', 'a record from before platforms is a Mac');
+  // w1603: desktop-coosego's join record (no platform yet) showed as a Mac.
+  assert.equal(machineKind({ awaitingInstall: '2026-10-20T04:10:13Z' }), 'new machine, its system not known until it joins');
+  assert.equal(machineKind({ platform: 'win32', awaitingInstall: '2026-10-20T04:10:13Z' }), 'Windows PC');
+  assert.equal(machineKind({}), 'Mac');
 });
 
 test('linux: the guard refuses a Linux player outside a slot and an agent stopping the daemon\'s systemd service', () => {
