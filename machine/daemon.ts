@@ -55,6 +55,7 @@ import { attachmentLine } from '../shared/attachments.ts';
 import { PauseKeeper, pauseFile } from './pause.ts';
 import { trayView } from './pauseRules.ts';
 import { TrayHost, trayInstance } from './tray.ts';
+import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { machinePlatformOf, type AttachmentRef, type CompactionTrigger, type HostHealth, type HostStats, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
@@ -350,6 +351,8 @@ export class Daemon {
   /** The activity pause as the tray last set it, until the portal's machines.activityPause says the same (w1574). */
   private trayActivity?: { enabled: boolean; idleMinutes: number };
   private tray?: TrayHost;
+  /** The tray's Close Firefox (w1593, machine/firefox.ts): off unless this machine turns it on (<app_dir>/firefox.json). */
+  private firefox?: FirefoxCloser;
   /** Every message from the tray app, for a demo or a test that asks it something (menu_layout, counts). */
   readonly trayEvents = new EventEmitter();
 
@@ -787,6 +790,12 @@ export class Daemon {
     this.pause.start();
     if (this.cfg.tray && process.platform === 'win32') {
       const appDir = appDirOfConfig(this.cfg);
+      this.firefox = new FirefoxCloser({
+        file: firefoxFile(appDir),
+        close: () => closeFirefox(winFirefoxDeps((line) => log(line))),
+        send: (msg) => this.tray?.send(msg),
+        log: (line) => log(line),
+      });
       this.tray = new TrayHost({
         appDir,
         instance: trayInstance(appDir),
@@ -1069,6 +1078,13 @@ export class Daemon {
       case 'log':
         log(`tray: ${String(m.text ?? '').slice(0, 500)}`);
         return;
+      case 'firefox_close':
+        void this.firefox?.request();
+        return;
+      case 'firefox_setting':
+        this.firefox?.setEnabled(m.enabled === true);
+        this.trayState();
+        return;
     }
   }
 
@@ -1083,7 +1099,7 @@ export class Daemon {
     // Paused, an agent still at work is finishing its step to hand back (w1532 critic: "1 agent working" under Paused read as a failed pause).
     const agents = working === 0 ? 'No agents working here' : `${working} agent${working === 1 ? '' : 's'} ${p.paused ? 'finishing a step' : 'working here'}`;
     const work = `${agents} · portal ${connected ? 'connected' : 'not connected'}`;
-    this.tray.send({ type: 'state', paused: p.paused, reason: p.reason ?? null, why: v.why, next: v.next ?? null, tip: v.tip ?? null, schedule: v.schedule, work, settings, machine: this.cfg.id, portalUrl: this.cfg.portalUrl });
+    this.tray.send({ type: 'state', paused: p.paused, reason: p.reason ?? null, why: v.why, next: v.next ?? null, tip: v.tip ?? null, schedule: v.schedule, work, settings, machine: this.cfg.id, portalUrl: this.cfg.portalUrl, firefox: this.firefox?.enabled ?? false });
   }
 
   /** For a still of the tray (w1532): open or close its menu or the schedule window. */
