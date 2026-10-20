@@ -23,6 +23,7 @@ import {
   PROVIDER_PROTOCOL,
   QUERY_LIMITS,
   QUERY_NAME,
+  SYMBOLS_UPLOAD,
   PROVIDER_TOKEN,
   acceptsWork,
   describeIssues,
@@ -245,7 +246,7 @@ interface PendingTransfer {
 }
 
 /** Answers never kept for the "last known" fallback: a page of logs or reports, or one report, would answer another question, and an earlier post's link would pass for this one's. */
-const NOT_KEPT = new Set(['logs', 'reports', 'report', 'thread_files', 'thread_file', 'post_message', 'symbols', 'symbol_file', 'diagnosis_files', 'diagnosis_file']);
+const NOT_KEPT = new Set(['logs', 'reports', 'report', 'thread_files', 'thread_file', 'post_message', 'symbols', 'symbol_file', 'diagnosis_files', 'diagnosis_file', 'symbols_put', 'symbols_ingest']);
 
 /** FFBox's conversation id (docs/ffbox-connector-contract.md, `conversation`). */
 export const CONVERSATION_ID = /^[A-Za-z0-9._:-]{1,80}$/;
@@ -1146,6 +1147,40 @@ export class ProviderManager {
     if (this.queryTimes.length >= QUERY_LIMITS.perMinute) return 'rate_limited';
     if (this.pending.size >= QUERY_LIMITS.inFlight) return 'busy';
     return undefined;
+  }
+
+  private partTimes: number[] = [];
+
+  /**
+   * One query of an urgent-lane symbol upload (w1639, server/ffboxUrgentSymbols.ts): `symbols_put` parts and the
+   * `symbols_ingest` that files them. Its own budget (SYMBOLS_UPLOAD.perMinute), not the 30 a minute the views share;
+   * nothing kept or shown as the last query. Never throws: the answer as FFBox gave it, or ok false with a code.
+   */
+  async partQuery(what: string, args: Record<string, number | string>, timeoutMs: number = QUERY_LIMITS.timeoutMsByQuery[what] ?? QUERY_LIMITS.timeoutMs): Promise<QueryResult> {
+    const id = `q-${this.now().toString(36)}-${randomBytes(4).toString('hex')}`;
+    const fail = (error: string, detail?: string): QueryResult => ({ type: 'query_result', id, ok: false, error, ...(detail ? { detail } : {}) });
+    if (!QUERY_NAME.test(what)) return fail('unsupported');
+    if (!this.enabled) return fail('switched_off');
+    if (!this.online) return fail('offline');
+    const now = this.now();
+    this.partTimes = this.partTimes.filter((t) => now - t < 60_000);
+    if (this.partTimes.length >= SYMBOLS_UPLOAD.perMinute) return fail('rate_limited');
+    this.partTimes.push(now);
+    return new Promise<QueryResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        resolve(fail('timeout', `no answer from FFBox within ${timeoutMs / 1000} s`));
+      }, timeoutMs);
+      timer.unref();
+      this.pending.set(id, {
+        key: what,
+        done: (r) => {
+          clearTimeout(timer);
+          resolve(r);
+        },
+      });
+      this.send(this.link!, { type: 'query', id, what, args });
+    });
   }
 
   /** Where a query's last good answer is kept: by name, and a conversation by its id too. */

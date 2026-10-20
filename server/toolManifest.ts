@@ -107,6 +107,7 @@ export const TOOL_MANIFEST = {
   fetch_discord_thread_files: { group: 'ffbox', kinds: [W] },
   list_ffbox_files: { group: 'ffbox', kinds: [W] },
   fetch_ffbox_symbols: { group: 'ffbox', kinds: [W] },
+  file_ffbox_symbols: { group: 'ffbox', kinds: [W] },
   // max
   max_activity: { group: 'max', kinds: [D, P, R], always: [P] },
   post_as_max: { group: 'max', kinds: [W, P] },
