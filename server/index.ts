@@ -17,7 +17,9 @@ import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
 import { setAppConfig, toggleNightly } from './appConfig.ts';
-import { LedgerSweep } from './ledgerSweep.ts';
+import { LedgerSweep, slugOf } from './ledgerSweep.ts';
+import { AutoDeploy, ghAutoDeploy } from './autoDeploy.ts';
+import { run as runProc } from './proc.ts';
 import { BlockerWatch, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
@@ -62,7 +64,7 @@ import { serveStatic, webBuild } from './webStatic.ts';
 import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries, volumeStat } from './cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
-import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, survivesRestart, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
+import { Drainer, clearPendingRestart, describeUncleanStop, isBusy, mayRecoverUnclean, parseRestartRequest, readAlive, survivesRestart, systemdSupervised, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, writeUpdateWanted, type RestartRequest } from './restart.ts';
 import { UsageTracker, accountLines, buildAccounts, sessionSource } from './usage.ts';
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
@@ -2561,6 +2563,51 @@ agents.requestRestart = (req) => {
   broadcast({ type: 'host', host: { ...host, drain: drainer.status } });
   return note;
 };
+
+// The automatic portal deploy (w1634, server/autoDeploy.ts, docs/ops-worker.md "Automatic deploys"): a new commit on main
+// with green CI goes out by itself once main is quiet, through the deploy path fffctl update uses (data/update.wanted).
+let appRepo: Promise<string | undefined> | undefined;
+let appSlug: string | undefined;
+const autoDeploy = new AutoDeploy({
+  dataDir: cfg.dataDir,
+  enabled: () => cfg.autoDeploy?.enabled !== false && systemdSupervised() && !isDryRun,
+  settings: () => cfg.autoDeploy ?? {},
+  running: () => appVersion().sha,
+  github: ghAutoDeploy(
+    () => (appRepo ??= (cfg.autoDeploy?.repo ? Promise.resolve(cfg.autoDeploy.repo) : slugOf(path.resolve(import.meta.dirname, '..')).catch(() => undefined)).then((s) => (appSlug = s))),
+    cfg.autoDeploy?.branch ?? 'main',
+    ghRunner(undefined, 'the automatic portal deploy'),
+  ),
+  busy: async () => {
+    const out: string[] = [];
+    if (drainer.status) out.push(`a restart is pending (${drainer.status.reason})`);
+    const has = (f: string) => fs.existsSync(path.join(cfg.dataDir, f));
+    if (has('update.wanted')) out.push('an update was asked for and has not started');
+    if (has('update.prepared.json')) out.push('an update is built and waits for its restart');
+    if (has('update.verifying.json')) out.push('the last update is still being verified');
+    if ((await runProc('systemctl', ['is-active', '--quiet', 'fff-update.service'], { timeoutMs: 10_000 }).catch(() => undefined))?.code === 0) out.push('fff-update is building a release');
+    const r = agents.rollout.state;
+    if (r.sha && !r.reported) out.push(`the machines are still being updated to ${r.sha.slice(0, 9)}`);
+    // The turns the restart stops and does not resume (restart.ts collectResume takes workers only).
+    for (const s of sessions.sessions.values()) {
+      const i = s.info;
+      if (i.kind !== 'worker' && !i.machineId && (isBusy(i.status) || i.turnOpenSince)) out.push(`${i.title} (${i.kind}) is mid-turn`);
+    }
+    for (const p of agents.builds.all()) out.push(`a release build is declared on ${p.machine} (${p.what})`);
+    return out;
+  },
+  request: (o) => writeUpdateWanted(cfg.dataDir, { ...o, auto: true }),
+  peopleOf: (n) => {
+    const out: Requester[] = [];
+    const repo = (appSlug ?? '').toLowerCase();
+    for (const w of store.work.values()) {
+      if (!(w.prs ?? []).some((p) => p.number === n && (repo ? p.repo.toLowerCase() === repo : /\/ff-factory$/i.test(p.repo)))) continue;
+      for (const r of w.requesters) if (!out.some((x) => x.userId.toLowerCase() === r.userId.toLowerCase())) out.push(r);
+    }
+    return out;
+  },
+  tell: (person, text) => void sessions.send(agents.orchestrators.personalFor(person).info.id, text, 'system', undefined, { requestedBy: person }),
+}).start();
 
 const plainStop = (reason: string): RestartRequest => ({ drain: false, drainMinutes: 0, reason, update: false, hold: false });
 process.on('SIGINT', () => stopServer(plainStop('interrupted (SIGINT)')));

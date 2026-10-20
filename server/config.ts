@@ -182,6 +182,14 @@ export interface Config {
   live?: { enabled?: boolean };
   masterBatch?: { enabled?: boolean; autoApprove?: { enabled?: boolean; maxPerDay?: number }; repo?: string; workflow?: string };
   /**
+   * The automatic portal deploy (w1634, server/autoDeploy.ts, docs/ops-worker.md "Automatic deploys"): a new commit on this
+   * app's main with green CI is deployed by itself once main has been quiet for quietMinutes (15) or the first undeployed
+   * commit has waited maxWaitMinutes (60). On unless enabled is false (set_app_config autoDeploy.enabled); only on the
+   * portal VM (systemd). drainMinutes (30, at most 60): how long the deploy's drain waits for busy turns. repo (owner/name)
+   * and branch (main): default this checkout's origin and main.
+   */
+  autoDeploy?: { enabled?: boolean; quietMinutes?: number; maxWaitMinutes?: number; drainMinutes?: number; repo?: string; branch?: string };
+  /**
    * Repos whose history is public, and the identity agents commit to them with. The guard refuses a push
    * to one of `repos` (default: this app's own origin) when a commit in it has an author or committer
    * email that is neither a GitHub noreply address nor `email`. Example:

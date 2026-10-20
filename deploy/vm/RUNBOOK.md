@@ -309,6 +309,12 @@ for two weeks (its task disabled, not removed).
 
 ## 6. Updating the portal
 
+*Since w1634 the portal updates itself: a commit merged into `main` with green CI is deployed once `main` has had no new
+merge for 15 minutes (60 at most), through the same `fff-update` path as below, only while no coordinator turn, release
+build or other update is under way ([docs/ops-worker.md](../../docs/ops-worker.md#automatic-deploys-w1634); `portal_logs`
+source `auto_deploy` says what it waits for). Off: `set_app_config autoDeploy.enabled false`. The command below is the
+deploy by hand, and works either way.*
+
 *The orchestration worker (w597, [docs/ops-worker.md](../../docs/ops-worker.md)) comes with an update: its account,
 its 2 GiB scratch, its sudo wrappers and `fff-ops.socket` are written by the guest `install.sh` that each update runs.
 After `fffctl update`: `systemctl is-active fff-ops.socket fff-ops-scratch.service` says `active` twice.*

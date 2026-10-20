@@ -26,7 +26,7 @@ A person's own orchestrator (Lothsahn's or Ben's) has the `ops_worker` tool:
 | action | what it does |
 |---|---|
 | `send` (`text`, `follow_up`, `fresh`) | gives it a job. **Every send in a turn the person started is a new job: a fresh conversation and a fresh process, without asking** (w738, w1133): no context and no token carries over from the last job, whoever it was for, so the text stands alone. `follow_up: true` is the explicit way to carry on the same job (an answer to its question, the next step, a correction): it keeps the conversation, and works only within the caller's own open job (12 hours), else it is refused. The orchestrator's harness turns (a check-in, a timer, its `[ops worker]` report) cannot open a job, so within the open job each is a follow-up with no flag and no count (w627). A new job is refused while the worker is still in a turn of the open job (it would cut that turn off): wait for the report, follow up, `interrupt`, or pass `fresh: true` to cut the turn off and start over. See [A new job, a follow-up](#a-new-job-a-follow-up-w1133) |
-| `deploy` (`text`: the person's words) | a portal deploy (`fffctl update`). Only in a turn the person started with their own message: never a check-in, a timer, a relayed report or a job's follow-up. See [Deploys](#deploys) |
+| `deploy` (`text`: the person's words) | a portal deploy by hand (`fffctl update`); merged code also deploys by itself, [Automatic deploys](#automatic-deploys-w1634). Only in a turn the person started with their own message: never a check-in, a timer, a relayed report or a job's follow-up. See [Deploys](#deploys) |
 | `status` | its state, the job and whose it is, its limits, and its last 20 steps |
 | `interrupt` | ends its turn |
 | `stop` | ends its process (the conversation stays, and the next `send` resumes it) |
@@ -433,10 +433,106 @@ report the one line it printed."}`.
 - **The VM's journal**: `fff-ops-ssh` logs each ssh (`journalctl -t fff-ops-ssh`), `fff-ops-priv` each fffctl
   (`-t fff-ops-priv`), sudo each elevation, and the launcher each start (`-t fff-ops`).
 
+## Automatic deploys (w1634)
+
+lothsahn, 2026-10-20: "Can we automatically deploy the portal on updates instead of waiting for confirmation?"
+
+**TL;DR:** the portal deploys itself. A new commit on ff-factory's `main` with green CI goes live once `main` has had no
+new merge for 15 minutes, or 60 minutes after the first commit the portal does not run, whichever comes first. It uses
+the same path as `fffctl update` (build beside the running release, drain, restart, verify, roll back by itself), then the
+machines follow as after every verified deploy. Each person whose pull request went out hears of it in one line. Off with
+config `autoDeploy.enabled false` (`set_app_config`, anyone; applies within a minute). A deploy by hand (`ops_worker
+deploy`, `sudo fffctl update`) still works as before, on Lothsahn's or Ben's own word.
+
+`AutoDeploy` (`server/autoDeploy.ts`, wired in `server/index.ts`) looks once a minute, only on the portal VM
+(`systemdSupervised`) and never in a dry run:
+
+1. **What main has.** `gh api repos/<repo>/commits/main` with the portal's GitHub token. The repo is the checkout's
+   origin (config `autoDeploy.repo` overrides), the branch `main` (`autoDeploy.branch`). The portal's own commit is
+   `appVersion().sha`. The same commit: nothing to do.
+2. **The batch.** It waits until `main` has had no new commit for `quietMinutes` (15), or the first commit the portal does
+   not run has waited `maxWaitMinutes` (60). *Measured* on ff-factory's own history, the 311 first-parent commits on `main`
+   from 2026-10-06 to 10-20 (22 a day): the gap between merges has a median of 21 minutes, a quarter are under 7.5
+   minutes (a worker landing a series), and a tenth over 2.7 hours. Replaying those merges:
+
+   | quiet wait, cap | deploys a day | merges per deploy | wait after a merge: median, 90th percentile, longest |
+   |---|---|---|---|
+   | 5 min, none | 18.5 | 1.20 | 5, 6, 13 min |
+   | 10 min, 60 | 15.6 | 1.42 | 10, 18, 32 min |
+   | **15 min, 60** | **13.2** | **1.68** | **15, 30, 60 min** |
+   | 20 min, 60 | 11.4 | 1.94 | 20, 47, 60 min |
+   | 30 min, 90 | 8.8 | 2.53 | 33, 77, 90 min |
+
+   15 minutes joins the merges a worker lands in a row while a fix is usually live a quarter of an hour after its merge;
+   at 10 minutes or less most bursts split into separate deploys, and past 20 the wait grows faster than the deploys drop.
+   The 60-minute cap keeps a busy afternoon of merges from holding the batch back. A deploy itself takes about a minute
+   before the drain (the build: 20 to 60 s on 2026-10-19/20, `fff-update` journal) and seconds to switch. Both numbers are
+   config (`autoDeploy.quietMinutes`, `autoDeploy.maxWaitMinutes`) but not `set_app_config` keys: a change is a pull
+   request with its reason.
+3. **Green CI.** Every GitHub Actions run on the head commit has finished with none failed (a push to `main` runs the
+   secret scan and the identity check, [ci.md](ci.md)), and the pull request it merged (`commits/<sha>/pulls`) finished
+   green on its head, where the whole suite ran. Still running: it waits. Red: it holds that commit and says so; the next
+   merge is looked at afresh. A commit that is no pull request's merge is never deployed by itself.
+4. **Nothing it would cut off** (`busy` in `server/index.ts`). It waits while any of these hold, and says which:
+   - **A coordinator turn is open**: a person's orchestrator, the dispatcher, the ops worker or a standing agent without a
+     machine. These are the portal's own processes: a restart stops them and does **not** resume the cut turn. Only
+     workers are in `resume.json` (`collectResume`, `server/restart.ts`); a cut-off orchestrator only gets "[app
+     restarted] ... that turn was cut off. Pick it up again", and only while `orchestrator.notifyOnWorkerEvents` is on, and
+     the ops worker's person is told to message it again. So the existing resume does not cover them, and the automatic
+     deploy waits for them twice: before it asks, and in the drain. Its restart request carries `auto: true` (`fff-update`
+     passes it on from `update.wanted`), and `Drainer` then also waits for `midTurnCoordinators`, with no drain message to
+     them, up to 30 minutes (`autoDeploy.drainMinutes`). A deploy by hand drains as before: workers only.
+   - **Workers**: with `machines.keepAgentsOnRestart` on (the VM's setting since 2026-10-05) the machines' workers are not
+     stopped by the portal's restart; the new portal takes them back (`survivesRestart`), and the machine rollout after it
+     updates each daemon without stopping agents (w605). With the setting off they are drained and resumed as for any
+     update ([restart.md](restart.md)).
+   - **A release build**: any `build_plan` declared, coming or running (`BuildPlans.all()`). The portal holds that build's
+     computer and resumes its paused workers when it ends, and the rollout after a deploy would restart that computer's
+     daemon in the middle, so no deploy starts until the plan is done (a plan ends by itself 3 hours after it was due). The
+     game's own release lane runs on FFBox's CI and needs the portal for nothing.
+   - **A restart or update already under way**: a drain pending, `update.wanted`, `update.prepared.json` or
+     `update.verifying.json` present, `fff-update.service` active, or the last deploy's machine rollout not yet reported.
+5. **The deploy.** It writes `data/update.wanted` with `ref` (the commit whose CI it read), `auto: true` and a 30-minute
+   drain: from there it is `fffctl update`'s path. `fff-update request` builds exactly that commit, refusing one that is
+   not on `origin/main` (`prepare --on-branch`), runs its system setup, then asks the server for the drain and restart;
+   `fff-health` verifies the new code and `fff-update` rolls back by itself when it does not answer.
+6. **The record.** `data/auto-deploy.json` (`portal_logs` source `auto_deploy`): what it waits for now, the deploy asked
+   for and the last 50, each with its commit, the commit before, the pull requests, why it went then, the outcome and who
+   was told. The deploy itself is recorded where every deploy is: `update.result.json` (`update_result`),
+   `update.verified.json` (`update_verified`), the journal (`auto-deploy: deploying ...`, `fff: update requested
+   (auto-deploy: #485, #486)`, `fff: update to ... verified`) and the restart summary to the dispatcher.
+7. **The outcome.** Once `fff-update verify` has written `update.verified.json` for it, each person of a ledger request
+   whose pull request was in the batch gets ONE line in their own orchestrator: `[portal deploy] Your FF Factory pull
+   requests #485 (...), #486 (...) are live: the portal deployed 1a2b3c4d5 by itself (automatic deploy, w1634).` The
+   machine rollout's `[machine updates]` report goes to the dispatcher, as for a deploy by hand at the VM. A request
+   blocked on the deploy is closed by the ledger cleanup as before. A failed build or system setup (`fff-update` now
+   records it in `update.result.json` too) or a rollback is recorded as failed, and that commit is not tried again;
+   `fff-update` tells the dispatcher itself, as always. The next commit on `main` is deployed normally.
+
+**Authority.** A merge into `main` goes through a pull request, its CI and its author's or reviewer's merge; lothsahn's
+request is the standing approval that merged code goes out ("instead of waiting for confirmation"). What the automatic
+deploy may do is narrower than a person's `fffctl update`: only a commit already on `origin/main` with green CI, never
+another branch, no rollback or restart of its own. The ops worker gets no new power: its `fffctl update` still needs a
+person's grant. To hold the portal on its commit, turn it off (`autoDeploy.enabled false`); deploys then wait for a person
+as before.
+
+**The first one.** The server that runs this code is the one that deploys by itself, so the merge of w1634 itself goes
+out by hand (`ops_worker deploy` on Lothsahn's or Ben's word, which also installs the new `fff-update`); every merge after
+it deploys by itself.
+
+Tests: `server/autoDeploy.test.ts` (the batch: two merges ten minutes apart are one deploy of the newer commit; a merge
+every ten minutes goes out at the 60-minute cap; the off switch and back on; CI running or red and a busy portal hold it;
+the outcome after the restart and the one line per person; a failed deploy is not retried, the next commit is; the CI
+reading of push runs and the merged pull request), `server/restart.test.ts` (an automatic deploy's drain waits for
+coordinator turns, the deadline still wins, a deploy by hand does not wait for them; `auto` and `ref` in the hand-off
+files), `server/appConfig.test.ts` (`autoDeploy.enabled`).
+
 ## Deploys
 
 Lothsahn, 2026-10-07: "Yes, please modify the ops worker to update yourself." After the first deploy of this feature
-(his, by hand), later portal updates can go through the worker.
+(his, by hand), later portal updates can go through the worker. Since w1634 merged code deploys by itself
+([Automatic deploys](#automatic-deploys-w1634)); this is the deploy by hand, for code a person wants out now or while
+`autoDeploy.enabled` is false.
 
 1. Lothsahn or Ben tells their orchestrator to deploy. In that same turn, the orchestrator calls `ops_worker deploy`.
    The server checks the turn is the person's own (`personTurn`, as for approvals: the person's message opened it, and
@@ -587,7 +683,8 @@ job, no worker.
   (renaming it `update.verified.done.json`; a marker older than a day is only retired) and keeps the rollout in
   `data/machine-rollout.json`, which survives a portal restart. Checked in `deploy/vm/test/ci-vm-e2e.sh` (the marker after the
   update, none after the rollback) and in `server/machineRollout.test.ts`.
-- **Authority.** The person's deploy approval covers it (`ops_worker deploy`, or Lothsahn's own `sudo fffctl update`): the
+- **Authority.** The person's deploy approval covers it (`ops_worker deploy`, Lothsahn's own `sudo fffctl update`, or the
+  standing approval of automatic deploys, w1634): the
   rollout opens no request and no ops job, and the only command it can run is the installer's update form, written by the
   server from the machine's record (`workerUpdateRemote`, the function `machine_update` uses) with **no setting named, so
   every limit stays as it is**. Anything the installer says it changed (`~ key: before -> after`) is flagged in the report.
@@ -620,7 +717,7 @@ job, no worker.
   changed nothing and is reported FAILED with the daemon's reason.
 - **The report** is one `[machine updates]` message to the orchestrator of the person whose `ops_worker deploy` it was
   (`OpsWorker.deployRequester`: the last deploy asked for within 3 hours before the verification), else to the dispatcher (a
-  deploy by hand). Per machine: updated, already current, skipped (with why), failed (with the installer's own lines and the
+  deploy by hand at the VM, or an automatic one, w1634, whose people hear of their pull requests in their own line). Per machine: updated, already current, skipped (with why), failed (with the installer's own lines and the
   rollback outcome) or waiting; the commit before and after; "Limits unchanged"; the agents adopted and any that ended. The ops
   worker is told in its `[deploy]` messages that it does not update the machines.
 - **Not replaced:** a change of setting (a sandbox count, an editor limit) is still `ops_worker machine_update` (over the
@@ -706,7 +803,8 @@ What living in the VM gives it, by design:
   - **What it deploys** is only `origin/main` as GitHub has it. `fff-ops-priv update` takes no ref or option, and the
     worker has no git and cannot push. So it can deploy only what was already merged to main through a pull request
     and its CI, by someone else's hands.
-  - **When** is only after Lothsahn or Ben asks in a turn of their own. The grant is the server's, written where
+  - **When**, for the worker, is only after Lothsahn or Ben asks in a turn of their own. (The portal's automatic deploy,
+    w1634, is not the worker's: the server writes `update.wanted` itself, only for a commit on `origin/main` with green CI.) The grant is the server's, written where
     `fff-ops` cannot write, good for 15 minutes and used once. A prompt injection that reaches the worker, or a
     harness turn of the orchestrator, cannot deploy.
   - **How** is the person's own path: `fff-update` builds beside the running release, drains, verifies, and rolls

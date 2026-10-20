@@ -837,6 +837,39 @@ test('w272: a declined request says so as a status with no text; a done one with
   assert.deepEqual([u.request, u.status, u.mergedIn, u.result], [yes, 'done', null, 'Belts move 4, 8 and 16 items a second.']);
 });
 
+test("w1640: two finished requests of one conversation are each sent once; the minute's recheck does not send them again and again", async (t) => {
+  // show dev_requests, 2026-10-20: "done, no merge" updates for w1297 and w1333 went every minute. What was last sent
+  // was kept per conversation, so two requests linked to one conversation each found the other's signature there.
+  const { connect, chat, call, pm } = await setup(t);
+  const c = await connect();
+  const conv = { id: '1162', threadId: undefined, url: undefined, channel: 'ask_claude' };
+  const loth = chat(LOTH);
+  loth.lastFrom = 'human';
+  const ids: string[] = [];
+  for (const [ref, title, note] of [['dev-1162-1', 'Explain the belt speeds', 'Belts move 4, 8 and 16 items a second.'], ['dev-1162-2', 'Which version is live?', '0.50.0.110 is live.']]) {
+    c.send(devRequest(ref, { conversation: conv, keys: [], title, brief: title }));
+    await c.next('dev_ack');
+    const filed = await c.next('dev_filed');
+    assert.equal(filed.outcome, 'filed', JSON.stringify(filed));
+    const wid = String(filed.workId);
+    await c.next('dev_update');
+    assert.equal((await call(loth.info, 'update_work', { id: wid, close: 'done', note })).isError, false);
+    const u = await c.next('dev_update');
+    assert.deepEqual([u.request, u.conversation, u.status, u.mergedIn], [wid, '1162', 'done', null]);
+    ids.push(wid);
+  }
+  assert.notEqual(ids[0], ids[1]);
+  const sent = () => c.received.filter((m) => m.type === 'dev_update').length;
+  // The first recheck may send the first request's done once more (its signature was overwritten before this fix
+  // kept one per request); from then on nothing changes, so nothing goes.
+  pm().dev!.recheck();
+  await new Promise((r) => setTimeout(r, 50));
+  const n = sent();
+  for (let i = 0; i < 3; i++) pm().dev!.recheck();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(sent(), n, 'three more minutes, no update sent again');
+});
+
 const PR_BODY = [
   '**TL;DR:** Haulers ignored the cargo filter after a reload (w271), so they moved everything. The filter is now saved with the hauler and applied on load.',
   '',

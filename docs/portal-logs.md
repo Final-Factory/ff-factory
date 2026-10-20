@@ -17,6 +17,7 @@ portal_logs {source: "updater", limit: 50}                        # the last upd
 portal_logs {source: "cleanup", machine: "lothdesktop", grep: "slot5"}
 portal_logs {source: "update_result"}                             # how the last portal update ended
 portal_logs {source: "machine_rollout"}                           # how each machine's daemon followed it
+portal_logs {source: "auto_deploy"}                               # the automatic deploy (w1634): what it waits for, each deploy and its outcome
 portal_logs {source: "journal", grep: "fff-ops", offset: 200}     # the next page
 ```
 
@@ -26,7 +27,7 @@ portal_logs {source: "journal", grep: "fff-ops", offset: 200}     # the next pag
 | `portal`, `updater`, `health` | one of those units alone (`fff-portal`, `fff-update`, `fff-health`) | the same |
 | `tailscaled` | the VM's Tailscale daemon (`tailscaled.service`, w1420): its control connection (`PollNetMap`, `dial plan`), link changes, DERP, Funnel hand-offs and the packet filter's `Drop:` lines; a Tailscale login link in it is masked | the same |
 | `cleanup` | one computer's clean-up passes as the portal keeps them (`data/cleanup/<machine>/cleanup-log.jsonl` and its rotated `.1`; no `machine`: this host's own `data/cleanup-log.jsonl`): one line per pass, then one per item removed, would-remove or kept for a person, with size and why, each starting with the pass's time | `since` / `until` on the pass's time |
-| `update_result`, `update_verified`, `update_prepared`, `update_verifying`, `machine_rollout`, `unit_watchdog` | the JSON files of the same names (`update.result.json` …, `machine-rollout.json`, `unit-watchdog.json`), pretty-printed, in order | the file as it is; `since` and `until` do not apply |
+| `update_result`, `update_verified`, `update_prepared`, `update_verifying`, `machine_rollout`, `auto_deploy`, `unit_watchdog` | the JSON files of the same names (`update.result.json` …, `machine-rollout.json`, `auto-deploy.json`, `unit-watchdog.json`), pretty-printed, in order | the file as it is; `since` and `until` do not apply |
 
 `grep` is a substring, any case. `regex` is any case too and refuses a quantified group, a backreference, a lookaround and
 more than 100 characters (the pattern runs on the portal). `limit` is 200 by default, 2000 at most, and a page stops at 48,000
