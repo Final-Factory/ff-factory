@@ -23,9 +23,13 @@ const box = (id: string, maxSandboxes: number, platform: string, o: Partial<Comp
 const timed = (n: number, first = 'probe A round 1'): BenchQueueReport => ({ timed: n, first });
 const work = (title: string, brief = ''): WorkItem => ({ title, brief, notes: [], needs: 'game' }) as unknown as WorkItem;
 
-test('w1628: only a release build is build work; timed work is told by its words, with the platform it names', () => {
-  assert.equal(needsBuild(work('Cut the 0.50.0.112 release build')), true);
-  assert.equal(needsBuild(work('w1588: ci-release for 1.0.0.12')), true);
+test('w1628: only a release build is build work (w1639: only an urgent one); timed work is told by its words, with the platform it names', () => {
+  // w1639, lothsahn: "Release builds should be handed by ffbox ... a release (ffbox) or a quick or urgent release (beast,
+  // if offline, LothDesktop)": a normal release builds nothing on these computers.
+  assert.equal(needsBuild(work('Cut the 0.50.0.112 release build')), false);
+  assert.equal(needsBuild(work('w1588: ci-release for 1.0.0.12')), false);
+  assert.equal(needsBuild(work('Urgent release of 1.0.0.12')), true);
+  assert.equal(needsBuild(work('Lothsahn: quick release please', 'ci-release, the urgent lane')), true);
   for (const t of ['Fix the belt stall', 'Record a 60 fps clip of the comet', 'Windows player build for the w1475 clip', 'MP check with a Mac build']) assert.equal(needsBuild(work(t)), false, t);
   assert.equal(needsTimed(work('Perf A/B of the belt cache', 'probe_ab_win.sh, 4 rounds')), 'win32');
   assert.equal(needsTimed(work('Benchmark the spatial map on the Mac')), 'darwin');
@@ -33,15 +37,18 @@ test('w1628: only a release build is build work; timed work is told by its words
   for (const t of ['Record a 60 fps clip of the comet', 'Fix the belt stall', 'Improve performance notes in the docs']) assert.equal(needsTimed(work(t)), false, t);
 });
 
-test('w1628: a release build passes over BEAST while a timed leg runs or waits there, and goes back to it once none does', () => {
+test('w1639 (was w1628): an urgent release stays on BEAST with a timed leg queued there, and goes to LothDesktop only when BEAST is offline', () => {
   const beast = box('beast', 8, 'win32', { benchQueue: timed(2) });
   const loth = box('lothdesktop', 4, 'win32');
-  const away = pickComputer([beast, loth], undefined, {}, 'game', false, 'build')!;
-  assert.equal(away.pick.id, 'lothdesktop');
-  assert.match(away.why, /beast has 2 timed runs in its bench queue, running or waiting \(the first: probe A round 1\) \(w1628: release builds go elsewhere meanwhile\)/);
-  assert.equal(pickComputer([{ ...beast, benchQueue: undefined }, loth], undefined, {}, 'game', false, 'build')!.pick.id, 'beast');
-  // Every computer has one: the general placement still answers.
-  assert.ok(pickComputer([beast, { ...loth, benchQueue: timed(1) }], undefined, {}, 'game', false, 'build'));
+  const stay = pickComputer([beast, loth], undefined, {}, 'game', false, 'build')!;
+  assert.equal(stay.pick.id, 'beast');
+  assert.match(stay.why, /it has 2 timed runs in its bench queue, running or waiting \(the first: probe A round 1\): the release's exclusive tickets go first after the leg running now/);
+  const off = pickComputer([{ ...beast, online: false }, loth], undefined, {}, 'game', false, 'build')!;
+  assert.equal(off.pick.id, 'lothdesktop');
+  assert.match(off.why, /^Urgent release work goes to the first with room in placement\.build \(beast > lothdesktop/);
+  // BEAST online but full: the general placement answers, and the note says an urgent release clears BEAST first.
+  const full = pickComputer([{ ...beast, freeSandboxes: 0, sandboxes: 8 }, { ...loth, online: false }, box('m3', 2, 'darwin')], undefined, {}, 'game', false, 'build')!;
+  assert.match(full.why, /beast is busy \(no free sandbox .*\): an urgent release clears it first \(build_plan coming with its work_id\), then goes there/);
 });
 
 test('w1628: timed work goes to the smallest computer with room and no timed leg queued, BEAST last, on the platform it names', () => {
@@ -62,8 +69,9 @@ test('w1628: timed work goes to the smallest computer with room and no timed leg
   assert.ok(capacityLines([beast, loth, m3]).some((l) => /^Next timed work \(benchmarks, perf A\/Bs and probes; on the platform it names, w1628\): m3 /.test(l)));
 });
 
-function plans(queue: Record<string, BenchQueueReport | undefined>, target: string | undefined) {
+function plans(queue: Record<string, BenchQueueReport | undefined>, target: string | undefined, offline: string[] = []) {
   const deps: BuildDeps = {
+    machineOnline: (id) => !offline.includes(id),
     buildMachines: () => ['beast', 'lothdesktop'],
     workersOn: () => [],
     isLive: () => false,
@@ -83,16 +91,17 @@ function plans(queue: Record<string, BenchQueueReport | undefined>, target: stri
   return new BuildPlans(deps);
 }
 
-test('w1628: a release build declared on BEAST while a timed leg is there is sent where the release placement points', () => {
+test('w1639 (was w1628): an urgent release declared on BEAST with a timed leg there stays there; an offline BEAST names LothDesktop', () => {
   const p = plans({ beast: timed(1, 'w1440 probe B round 2') }, 'lothdesktop');
-  const out = p.declare({ machine: 'beast', minutes: 10, what: '1.0.0.12 Windows player', builder: 's1', requests: ['w1588'], by: 'worker s1' });
-  assert.match(out, /^Not on beast \(w1628\): it has 1 timed run in its bench queue, running or waiting \(the first: w1440 probe B round 2\), and a release build goes elsewhere meanwhile\. Build it on lothdesktop: ask the dispatcher to move this work there \(stop_agent move_to lothdesktop\)/);
-  assert.equal(p.plan('beast'), undefined, 'nothing is held or cleared on beast');
-  // The dispatcher, for a request: told the machine to name.
-  assert.match(plans({ beast: timed(1) }, 'lothdesktop').declare({ machine: 'beast', minutes: 0, what: 'x', requests: ['w1588'], by: 'the dispatcher' }), /Build it on lothdesktop: build_plan coming with machine lothdesktop/);
-  // Nowhere else has room: it is declared there, and waits for the legs in the bench queue.
-  const stay = plans({ beast: timed(1) }, 'beast').declare({ machine: 'beast', minutes: 10, what: 'x', builder: 's1', requests: [], by: 'worker s1' });
-  assert.match(stay, /^Declared \(w1606\): x on beast at 18:10Z\. beast has 1 timed run in its bench queue.*no other computer has room for a release build: the build waits for those legs in its bench queue, never beside one\./);
+  const out = p.declare({ machine: 'beast', minutes: 10, what: '1.0.0.12 urgent release', builder: 's1', requests: ['w1639'], by: 'worker s1' });
+  assert.match(out, /^Declared \(w1606\): 1\.0\.0\.12 urgent release on beast at 18:10Z\. beast has 1 timed run in its bench queue, running or waiting \(the first: w1440 probe B round 2\): the release's exclusive tickets, at its request's urgent priority, go first after the leg running now, never beside one\./);
+  assert.ok(p.plan('beast'), 'beast is held for it');
+  // BEAST offline: refused, naming LothDesktop, for a worker and for the dispatcher.
+  const off = plans({}, 'lothdesktop', ['beast']);
+  assert.match(off.declare({ machine: 'beast', minutes: 0, what: 'x', builder: 's1', requests: [], by: 'worker s1' }), /^Not on beast \(w1639\): it is offline\. An urgent release builds on lothdesktop then: ask the dispatcher to move this work there \(stop_agent move_to lothdesktop\)/);
+  assert.match(off.declare({ machine: 'beast', minutes: 0, what: 'x', requests: ['w1639'], by: 'the dispatcher' }), /build_plan coming with machine lothdesktop, and place its request there/);
+  assert.equal(off.plan('beast'), undefined, 'nothing is held on an offline beast');
+  assert.match(plans({}, undefined, ['beast', 'lothdesktop']).declare({ machine: 'beast', minutes: 0, what: 'x', requests: [], by: 'the dispatcher' }), /No build computer \(beast, lothdesktop\) is online/);
   // No timed leg: as before.
   assert.match(plans({}, 'lothdesktop').declare({ machine: 'beast', minutes: 10, what: 'x', builder: 's1', requests: [], by: 'worker s1' }), /^Declared \(w1606\): x on beast at 18:10Z\. No new work/);
 });

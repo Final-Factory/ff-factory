@@ -95,10 +95,12 @@ export const DEFAULT_LIVE = ['beast'];
 export const liveOf = (prefs: PlacementPrefs): string[] => (prefs.live?.length ? prefs.live : DEFAULT_LIVE).map(placeId);
 
 /**
- * Where builds run when config placement.build is not set (w1606). Ben, 2026-10-20: "when you know builds are coming up, we
- * also prioritize using beast for builds because its faster".
+ * Where an urgent release builds when config placement.build is not set (w1606; w1639). Ben, 2026-10-20: "when you know
+ * builds are coming up, we also prioritize using beast for builds because its faster"; lothsahn, 2026-10-20 (w1639): "a
+ * quick or urgent release (beast, if offline, LothDesktop)". The first ONLINE one in order: an offline computer is
+ * skipped, a busy one is cleared for it (build_plan), never passed over.
  */
-export const DEFAULT_BUILD = ['beast'];
+export const DEFAULT_BUILD = ['beast', 'lothdesktop'];
 
 /** The computers builds try first, in order (placement.build, else DEFAULT_BUILD). */
 export const buildOf = (prefs: PlacementPrefs): string[] => (prefs.build?.length ? prefs.build : DEFAULT_BUILD).map(placeId);
@@ -111,7 +113,7 @@ export type FirstKind = 'live' | 'build' | TimedKind;
 
 const FIRST: Record<'live' | 'build', { of: (p: PlacementPrefs) => string[]; key: string; label: string; why: string }> = {
   live: { of: liveOf, key: 'placement.live', label: 'Live view work', why: 'w1600: Live views stream fastest there' },
-  build: { of: buildOf, key: 'placement.build', label: 'Release build work', why: 'w1606: builds run fastest there' },
+  build: { of: buildOf, key: 'placement.build', label: 'Urgent release work', why: 'w1639: "beast, if offline, LothDesktop"' },
 };
 
 /**
@@ -309,21 +311,17 @@ export function pickComputer(places: readonly Computer[], last?: string, prefs: 
     const hold = holdOf(prefs);
     const avoid = avoidOf(prefs);
     const skipped: string[] = [];
-    // A release build goes to another computer while a timed run is running or waiting in one's bench queue (w1628).
-    const timed = new Set<string>();
+    // An urgent release is never passed over for a timed leg in a bench queue (w1639; w1628 sent release builds elsewhere
+    // meanwhile): its exclusive tickets at the request's urgent priority go first, after the leg running now.
     for (const id of first) {
       const p = places.find((x) => x.id === id);
       if (!p) skipped.push(`${id} is not a computer here`);
       else if (hold.has(id)) skipped.push(`${id} is held (${hold.get(id)})`);
       else if (avoid.has(id)) skipped.push(`${id} is avoided (${avoid.get(id)})`);
-      else if (!hasRoom(p)) skipped.push(`${id} is busy (${busyReasons(p).join('; ')})`);
-      else if (firstKind === 'build' && p.benchQueue) {
-        timed.add(id);
-        skipped.push(`${id} ${timedText(p.benchQueue)} (w1628: release builds go elsewhere meanwhile)`);
-      } else return { pick: p, why: `${f.label} goes to the first with room in ${f.key} (${first.join(' > ')}; ${f.why})${p.benchLock ? `; ${benchText(p.benchLock)}: its worker waits for it before it starts its ${firstKind === 'live' ? 'editor' : 'build'}` : ''}` };
+      else if (!hasRoom(p)) skipped.push(`${id} is busy (${busyReasons(p).join('; ')})${firstKind === 'build' && p.online ? ': an urgent release clears it first (build_plan coming with its work_id), then goes there' : ''}`);
+      else return { pick: p, why: `${f.label} goes to the first with room in ${f.key} (${first.join(' > ')}; ${f.why})${p.benchQueue && firstKind === 'build' ? `; it ${timedText(p.benchQueue)}: the release's exclusive tickets go first after the leg running now` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}: its worker waits for it before it starts its ${firstKind === 'live' ? 'editor' : 'build'}` : ''}` };
     }
-    const others = places.filter((x) => !timed.has(x.id));
-    const rest = pickComputer(others.length ? others : places, last, prefs, kind, workflows) ?? (others.length < places.length ? pickComputer(places, last, prefs, kind, workflows) : undefined);
+    const rest = pickComputer(places, last, prefs, kind, workflows);
     return rest && { pick: rest.pick, why: `${f.label}, but ${skipped.join(', ')}; so the general placement: ${rest.why}` };
   }
   if (workflows) {
@@ -424,8 +422,8 @@ export function timedLine(places: readonly Computer[], last?: string, prefs: Pla
 export function buildLine(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
   if (places.length < 2) return undefined;
   const p = pickComputer(places, last, prefs, 'game', false, 'build');
-  if (!p) return `No computer has room for release build work now${heldNote(places, prefs, 'game')}.`;
-  return `Next release build work (w1606; release builds only, w1628): ${p.pick.id} (${p.why}).`;
+  if (!p) return `No computer has room for urgent release work now${heldNote(places, prefs, 'game')}.`;
+  return `Next urgent release work (a quick or urgent release, w1639; a normal release is FFBox's and needs none): ${p.pick.id} (${p.why}).`;
 }
 
 /**
@@ -490,7 +488,7 @@ export function placementHint(target: string, places: readonly Computer[], last?
   const held = holdOf(prefs).get(target);
   const busy = (kind === 'game' ? busyReasons(here) : agentBusyReasons(here)).filter((w) => w !== 'offline');
   const state = held ? `${target} is held (${held})` : avoided ? `${target} is avoided (${avoided})` : busy.length ? `${target} is busy (${busy.join('; ')})` : `${target} has ${pctOf(roomFor(here, kind))} room`;
-  return ` Note: ${state}; the next new ${live && kind === 'game' ? (live === 'build' ? 'release build' : live === true || live === 'live' ? 'Live view' : 'timed') : kind === 'game' ? 'game-repo' : 'non-game'} work goes to ${p.pick.id} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, or a worker going on in its own sandbox), put it there.`;
+  return ` Note: ${state}; the next new ${live && kind === 'game' ? (live === 'build' ? 'urgent release' : live === true || live === 'live' ? 'Live view' : 'timed') : kind === 'game' ? 'game-repo' : 'non-game'} work goes to ${p.pick.id} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, or a worker going on in its own sandbox), put it there.`;
 }
 
 /** The computers with room for `kind` of work in a RoomNow: the one place the two kinds are told apart. */
