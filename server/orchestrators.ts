@@ -1008,21 +1008,26 @@ export class Orchestrators {
     if (!isOpen(w)) return;
     const from = `${h.machine}${h.sandbox ? `/${h.sandbox}` : ''}`;
     const now = this.now().toISOString();
-    w.handedBack = { at: now, from, session: s.id, ...(h.branch ? { branch: h.branch } : {}), why: h.why, note: clip(h.note, 600), how: h.how, ...(h.saved ? { saved: h.saved } : {}), ...(h.message ? { message: clip(h.message, 2000) } : {}) };
-    this.moveOff(w, s.id, `handed back: ${h.machine} is ${h.why} (${h.how})`);
+    w.handedBack = { at: now, from, session: s.id, ...(h.branch ? { branch: h.branch } : {}), why: h.why, note: clip(h.note, 600), how: h.how, ...(h.saved ? { saved: h.saved } : {}), ...(h.message ? { message: clip(h.message, 2000) } : {}), ...(h.to ? { to: h.to } : {}) };
+    // A move (w1600, stop_agent move_to) names the computer it goes to and says its own reason; a pause says the machine's.
+    const because = h.to ? `it moves to ${h.to}: ${h.why}` : `${h.machine} is ${h.why}`;
+    this.moveOff(w, s.id, `${h.to ? 'moved' : 'handed back'}: ${because} (${h.how})`);
     w.status = 'queued';
-    w.queuedFor = { at: now };
-    this.stamp(w, `handed back from ${from}: queued for another computer, from branch ${h.branch ?? 'unknown'}; note: ${clip(h.note, 200)}${h.saved ? `; ${h.saved}` : ''}`);
+    w.queuedFor = { at: now, ...(h.to ? { needs: [h.to] } : {}) };
+    this.stamp(w, `${h.to ? 'moved' : 'handed back'} from ${from}: queued for ${h.to ?? 'another computer'}, from branch ${h.branch ?? 'unknown'}; note: ${clip(h.note, 200)}${h.saved ? `; ${h.saved}` : ''}`);
     this.store.putWork(w);
     const agent = needsOf(w) === 'agent';
     const facts = this.roomNow();
     const room = roomIds(facts, needsOf(w));
     const where = room.length ? `${agent ? 'Agent slots' : 'Room'} now: ${room.join(', ')}.` : `No computer has ${agent ? 'an agent slot' : 'room'} now: it stays Queued, and the capacity ping names it when one frees.`;
+    const on = h.to ? `on ${h.to}` : 'on another computer';
     const how = agent
-      ? `start_agent with work_id "${w.id}" in a FREE sandbox on another computer${h.branch ? `, and say in your text that it continues from the pushed branch ${h.branch} of its repository (in its own clone)` : ''}`
-      : `${h.branch ? `switch_branch a FREE sandbox on another computer to "${h.branch}" (it fetches the pushed branch), then ` : ''}start_agent with work_id "${w.id}" in that sandbox`;
+      ? `start_agent with work_id "${w.id}" in a FREE sandbox ${on}${h.branch ? `, and say in your text that it continues from the pushed branch ${h.branch} of its repository (in its own clone)` : ''}`
+      : `${h.branch ? `switch_branch a FREE sandbox ${on} to "${h.branch}" (it fetches the pushed branch), then ` : ''}start_agent with work_id "${w.id}" in that sandbox`;
+    const head = h.to ? `[ledger] MOVED (w1600): ${w.id}` : `[ledger] HANDED BACK (w1532): ${w.id}`;
+    const place = h.to ? `Place it on ${h.to}` : 'Place it on a computer that is not paused';
     this.toDispatcher(
-      `[ledger] HANDED BACK (w1532): ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) was taken off worker ${s.id} on ${from}, because ${h.machine} is ${h.why} (${h.how}). ${h.branch ? `Its work is on the branch ${h.branch}` : 'Its branch is unknown'}${h.saved ? `; ${h.saved}` : ''}. Place it on a computer that is not paused: ${how}. The new worker's handover carries the branch, its note${h.message ? ' and the message that was waiting for it' : ''}. ${where} Its note: ${clip(h.note, 300)}`,
+      `${head} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) was taken off worker ${s.id} on ${from}, because ${because} (${h.how}). ${h.branch ? `Its work is on the branch ${h.branch}` : 'Its branch is unknown'}${h.saved ? `; ${h.saved}` : ''}. ${place}: ${how}. The new worker's handover carries the branch, its note${h.message ? ' and the message that was waiting for it' : ''}. ${where} Its note: ${clip(h.note, 300)}`,
     );
   }
 

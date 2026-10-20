@@ -219,6 +219,10 @@ agents, free sandboxes, RAM, editors) and names the computer the next new game-r
 `create_sandbox` that place it elsewhere say so (w416; docs/machines.md, "Placing work"). Game-repo work is spread
 between BEAST and LothDesktop by room; BEAST keeps only what needs it. Work on FF Factory, FFBox, the plugin or any other
 non-Unity repo needs only an agent slot (w1098; "Next non-game work" in the same block) and may run on any computer with one.
+Work that needs a Live view (its worker started one, or its words ask for one; `list_work` says "Needs a Live view") goes
+where "Next Live view work" says: `placement.live`, BEAST unless set, else the general placement (w1600). A worker on one
+elsewhere moves there between turns with `stop_agent` `move_to: "beast"`: its request is Queued for BEAST with its branch
+and the view's settings, and a new session there goes on from the branch (docs/machines.md, "Placing work").
 
 `start_agent` refuses a request with a strong overlap still in flight (a commit only informs), or one that already has a
 live worker, unless `override_duplicate` says what is different. `work_id` is the dispatcher's alone. A worker started
