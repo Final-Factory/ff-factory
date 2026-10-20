@@ -602,6 +602,11 @@ worker's ssh to LothDesktop and BEAST is, [above](#updating)) does it in place; 
 UAC prompt (the same elevated step as the firewall rules). A non-elevated, non-interactive update (an ssh session that is
 not an administrator's) cannot make or attach it: with a drive that exists it starts `ffsb-helper-mount` (the daemon's
 user may start that task, nothing more) and uses it; with none, it says so and goes on without.
+Whether it is attached comes from `devdrive.ps1 -Action status` (`Get-OwnLetter`, `scripts/privileged/devdrive-lib.ps1`),
+which needs no administrator: a session that is not elevated gets `Get-DiskImage`'s `Attached` and `DevicePath` but no
+`Number`, so the disk number comes from the `PhysicalDriveN` of its `DevicePath` (or from the disk whose `Location` is the
+VHDX) and `Get-Partition -DiskNumber` gives the letter. Until w1633 it piped the image into `Get-Disk`, which fails there, and
+every automatic update on lothdesktop read its mounted `V:` as "not attached" (2026-10-20; `scripts/devdrive.test.ts`, w1633).
 
 **The boot mount.** `scripts/install-privileged-helpers.ps1` (run by the installer, elevated) copies
 `ffsb-helper.ps1` and `devdrive-lib.ps1` to `%ProgramData%\ffsb-helpers` (writable by SYSTEM and Administrators only) and
