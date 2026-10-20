@@ -1,18 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
-import type { AppState, WorkItem, WorkNeedsYou } from '../../../shared/types';
-import { waitAge, type WaitingAsk, type WaitingItem } from '../../../shared/waiting';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import type { Ask } from '../../../shared/ask';
+import { answerMessage, answersText, cardMedia, cardQuestions, legacySteps, namesForPaths, plainQuestion } from '../../../shared/questionCard';
+import type { AppState, WorkItem } from '../../../shared/types';
+import { intakeRecommendation, waitAge, type WaitingItem } from '../../../shared/waiting';
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
-import { holdReload } from '../freshness';
-import { useKeptState } from '../keep';
 import { attempt, focusWait, sessionsByIds, toast, useStore } from '../store';
 import { fmtClock, fmtRelative, navigate } from '../util';
-import { Markdown } from './Markdown';
+import { LocalImages, Markdown } from './Markdown';
+import { DetailLine, Previews, QuestionCard } from './QuestionCard';
 import { PermissionCard } from './Transcript';
-import { Dot, Icon } from './ui';
+import { Icon } from './ui';
 
-const ASK_LABEL: Record<WaitingAsk, string> = { approve: 'Approve or decline', answer: 'Answer', check: 'Check' };
 const AGE_TONE = { fresh: 'grey', old: 'amber', stale: 'red' } as const;
 
 /**
@@ -96,7 +96,7 @@ function Evidence({ w }: { w: WorkItem }) {
         </p>
       )}
       {/* Players' text is shown as it is, never as Markdown: no links, images or formatting from it. */}
-      <div className="wait-brief">{s?.untrusted ? <pre className="code intake-brief">{w.brief}</pre> : <Markdown text={w.brief} />}</div>
+      <div className="wait-brief">{s?.untrusted ? <pre className="code intake-brief">{w.brief}</pre> : <Markdown text={namesForPaths(w.brief)} />}</div>
       {w.overlaps.length > 0 && (
         <p className="dim small">Found at filing, may repeat: {w.overlaps.map((o) => `${o.ref} “${o.title}” (${o.why})`).join('; ')}</p>
       )}
@@ -115,41 +115,56 @@ function PrLink({ pr }: { pr: string }) {
   );
 }
 
-/** A still or a clip inline, a folder or a wildcard as code (server/needsYou.ts previewLine). */
-const previewMd = (p: string) => {
-  const name = p.split(/[\\/]/).pop() ?? p;
-  // The path always, so it can be found when the file cannot be shown; the still or the clip under it.
-  return !p.includes('*') && /\.(?:png|jpe?g|gif|webp|mp4|webm|mov)$/i.test(p) ? `\`${p}\`\n\n![${name}](<${p}>)` : `\`${p}\``;
-};
+/** Review stills in Details text are shown as stills (the review folder needs no session); other paths are names. */
+const reviewImage = (p: string) => `/api/image?${new URLSearchParams({ path: p })}`;
 
 /**
- * The question in full with what it is about (w1378, Ben: "it wants me to reply to a conversation but I can't really see the
- * conversation"): who asks, the question, the files to look at, the pull requests and the end of the worker's report, and
- * where it went: the person's own orchestrator chat, which asks and relays the answer.
+ * Everything a card does not ask (w1597, behind its Details link): who asked and when, the request, the worker's own words
+ * and the dispatcher's restatement, the pull requests, the end of the worker's report, and the request's evidence. Paths
+ * are shown as file names.
  */
-function NeedsYouBlock({ app, w, r, mine }: { app: AppState; w: WorkItem; r: WorkNeedsYou; mine: boolean }) {
-  const askedBy = r.kind === 'question' ? 'The dispatcher' : `Worker ${r.worker ?? ''}`.trim();
+function CardDetails({ app, item, now }: { app: AppState; item: WaitingItem; now: number }) {
+  const { w, ask, since } = item;
+  const r = w.needsYou;
+  const workers = sessionsByIds(app.sessions, w.sessionIds);
+  const asker = ask === 'approve' ? 'The intake' : r && r.kind !== 'question' ? `Worker ${r.worker ?? ''}`.trim() : 'The dispatcher';
+  const age = waitAge(since, now);
   return (
-    <div className="wait-needs-you" data-testid={`wait-needs-you-${w.id}`}>
-      {r.kind !== 'question' && (
-        <div className="wait-question" data-testid={`wait-question-${w.id}`}>
-          <p className="small">
-            <strong>{askedBy} asks {r.who.join(', ')}:</strong>
-          </p>
-          <Markdown text={r.question} />
+    <LocalImages.Provider value={reviewImage}>
+      <DetailLine label="Asked">
+        {asker},{' '}
+        <span className={`tone-${AGE_TONE[age]}`} title={new Date(since).toLocaleString()} data-testid={`wait-age-${w.id}`}>
+          {age === 'stale' ? 'stale · ' : ''}
+          {fmtRelative(since, now)}
+        </span>{' '}
+        · <span className="mono">{w.id}</span>{' '}
+        <button className="link-btn small" onClick={() => navigate({ view: 'dispatcher', tab: w.id })}>
+          Open {w.id}
+        </button>
+        {workers.slice(0, 2).map((x) => (
+          <button key={x.id} className="link-btn small" onClick={() => navigate(sessionRoute(x, app))}>
+            {' '}
+            <Icon name="chevron" size={11} /> Open {x.id}
+          </button>
+        ))}
+      </DetailLine>
+      {!item.mine && <DetailLine label="Waits on">{item.on.join(', ') || 'someone else'}</DetailLine>}
+      {ask === 'approve' && <DetailLine label="Why it waits">{item.text}</DetailLine>}
+      {item.recommendation && <DetailLine label="FF Factory recommends">{item.recommendation}</DetailLine>}
+      {r && r.kind !== 'question' && (
+        <div className="small" data-testid={`wait-question-${w.id}`}>
+          <span className="dim">Its worker’s words:</span> <Markdown text={namesForPaths(r.question)} />
         </div>
       )}
-      {r.previews.length > 0 && (
-        <div className="wait-previews" data-testid={`wait-previews-${w.id}`}>
-          <p className="small">
-            <strong>Look at:</strong>
-          </p>
-          <Markdown text={r.previews.map(previewMd).join('\n\n')} />
+      {w.question && (
+        <div className="small">
+          <span className="dim">The dispatcher’s words:</span> <Markdown text={namesForPaths(w.question.text)} />
         </div>
       )}
-      {r.prs.length > 0 && (
+      {w.flag && <DetailLine label="Design question">{namesForPaths(w.flag.text)}</DetailLine>}
+      {r && r.prs.length > 0 && (
         <p className="small" data-testid={`wait-prs-${w.id}`}>
-          <strong>Pull requests:</strong>{' '}
+          <span className="dim">Pull requests:</span>{' '}
           {r.prs.map((pr, i) => (
             <span key={pr}>
               {i ? ', ' : ''}
@@ -158,169 +173,144 @@ function NeedsYouBlock({ app, w, r, mine }: { app: AppState; w: WorkItem; r: Wor
           ))}
         </p>
       )}
-      {r.report && r.report.trim() !== r.question.trim() && (
+      {r && !r.answered && r.asks?.length && r.previews.length > 0 ? (
+        <div className="small">
+          <span className="dim">Review files it names:</span>
+          <Previews media={cardMedia(undefined, r.previews)} {...(r.worker ? { session: r.worker } : {})} />
+        </div>
+      ) : null}
+      {r?.report && r.report.trim() !== r.question.trim() && (
         <details className="wait-report" data-testid={`wait-report-${w.id}`}>
-          <summary className="small">The end of {r.worker ? `worker ${r.worker}'s` : 'its worker’s'} last report</summary>
-          <Markdown text={r.report} />
+          <summary className="small">The end of its worker’s last report</summary>
+          <Markdown text={namesForPaths(r.report)} />
         </details>
       )}
-      <p className="small dim" data-testid={`wait-routed-${w.id}`}>
-        {r.answered
-          ? `${r.answered.by} answered ${fmtClock(r.answered.at)}; ${r.worker ? `worker ${r.worker} resumes with it.` : 'the dispatcher carries on.'}`
-          : mine
-            ? `Sent to your orchestrator ${fmtClock(r.at)}: answer it there, in your own words, and it goes back to ${r.worker ? `worker ${r.worker}` : 'the dispatcher'}.`
-            : `Sent to ${r.who.join(', ')}'s orchestrator ${fmtClock(r.at)}.`}{' '}
-        {mine && !r.answered && app.orchestratorId && (
-          <button className="link-btn small" onClick={() => navigate({ view: 'home' })} data-testid={`wait-chat-${w.id}`}>
-            <Icon name="chevron" size={11} /> Answer in your chat
-          </button>
-        )}
-      </p>
-    </div>
+      {r && (
+        <p className="small dim" data-testid={`wait-routed-${w.id}`}>
+          {r.answered ? `${r.answered.by} answered ${fmtClock(r.answered.at)}.` : `Also sent to ${r.who.join(', ')}'s orchestrator chat ${fmtClock(r.at)}.`}
+        </p>
+      )}
+      <Evidence w={w} />
+    </LocalImages.Provider>
+  );
+}
+
+/** The labels of an intake approval's two answers: a click on one approves or declines it, as the buttons did. */
+export const APPROVE_LABEL = 'Approve it: the dispatcher picks it up and work starts';
+export const DECLINE_LABEL = 'Decline it: nothing is worked on it';
+
+/**
+ * An intake request waiting for a reviewer, as a question (w1597): "Should FF Factory work on this?", Approve (marked
+ * recommended when the triage says so) or Decline; the free box declines with a reason. The same endpoints as before.
+ */
+export function ApproveCard({ app, w, mine, reviewers, details, testId }: { app: AppState; w: WorkItem; mine: boolean; reviewers: string; details: ReactNode; testId: string }) {
+  const rec = intakeRecommendation(w);
+  const approveRec = !!rec?.startsWith('Approve');
+  // A possible repeat (intakeRecommendation's "Check first"), named by its title on the answer it bears on.
+  const repeat = w.overlaps[0];
+  const asks: Ask[] = [
+    {
+      question: `Should FF Factory work on this ${w.source?.kind === 'discord-bug' ? 'player’s bug report' : 'request'}?`,
+      options: [
+        { label: APPROVE_LABEL, description: '', ...(approveRec ? { recommended: true } : {}) },
+        { label: DECLINE_LABEL, description: '' },
+      ],
+    },
+  ];
+  const onAnswer = async (text: string) => {
+    const ok = await attempt(text === APPROVE_LABEL ? api.approveWork(w.id) : api.declineWork(w.id, text === DECLINE_LABEL ? undefined : text.slice(0, 300)));
+    if (ok !== undefined) toast(text === APPROVE_LABEL ? `${w.id} approved: the dispatcher decides it now.` : `${w.id} declined.`);
+    return ok !== undefined;
+  };
+  void app;
+  return (
+    <QuestionCard
+      id={`approve.${w.id}`}
+      testId={testId}
+      title={w.title}
+      asks={asks}
+      question=""
+      previews={[]}
+      mine={mine}
+      answeredBy={reviewers}
+      onAnswer={onAnswer}
+      freeLabel="Or decline with a reason"
+      {...(repeat ? { note: `It may repeat “${repeat.title.length > 80 ? `${repeat.title.slice(0, 79)}…` : repeat.title}” (${repeat.why}).` } : {})}
+      details={details}
+    />
   );
 }
 
 function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: number }) {
-  const { w, ask, mine, since } = item;
-  const [busy, setBusy] = useState(false);
-  // A decline form and an answer being written outlast a reload for a new version (web/src/keep.ts).
-  const [declining, setDeclining] = useKeptState(`wait.declining.${w.id}`, false);
-  const [reason, setReason] = useKeptState(`wait.reason.${w.id}`, '');
-  const [answer, setAnswer] = useKeptState(`wait.answer.${w.id}`, '');
+  const { w, ask, mine } = item;
   const [sent, setSent] = useState(false);
-  useEffect(() => {
-    holdReload(`wait:${w.id}`, busy);
-    return () => holdReload(`wait:${w.id}`, false);
-  }, [w.id, busy]);
   const workers = sessionsByIds(app.sessions, w.sessionIds);
   // A worker of it streams its Live view (w1430): the wait is often "drag the knobs", so the card opens it in one click.
   const live = app.config.live?.enabled ? app.live?.find((v) => v.state !== 'stopped' && w.sessionIds.includes(v.sessionId)) : undefined;
-  const age = waitAge(since, now);
-  const act = async (f: () => Promise<unknown>, done?: string) => {
-    setBusy(true);
-    const ok = await attempt(f());
-    setBusy(false);
-    if (ok !== undefined && done) toast(done);
-    return ok !== undefined;
+  const details = <CardDetails app={app} item={item} now={now} />;
+  if (ask === 'approve') return <ApproveCard app={app} w={w} mine={mine} reviewers={app.intake?.reviewers.join(' or ') || 'A reviewer'} details={details} testId={`wait-${w.id}`} />;
+  const r = w.needsYou;
+  const cq = cardQuestions(w);
+  // A wait with no question of its own (a worker's permission, a report that ends asking): what the ledger says it waits on.
+  const question = cq.asks.length ? '' : cq.text || plainQuestion(item.text);
+  // A free-text list of decisions is asked one at a time, each answered in words.
+  const asks = cq.asks.length ? cq.asks : (legacySteps(question) ?? []);
+  const answerable = mine && (ask === 'answer' || (ask === 'check' && !!r && !r.answered));
+  // A click on an answer and a typed answer send the same message (w1597; shared/questionCard.ts answerMessage).
+  const onAnswer = async (_text: string, answers: string[]) => {
+    if (!app.orchestratorId) return false;
+    const ok = await attempt(api.sendMessage(app.orchestratorId, answerMessage(w, answersText(asks, answers))));
+    if (ok === undefined) return false;
+    toast(`Sent to your orchestrator: it records the answer on ${w.id}.`);
+    setSent(true);
+    return true;
   };
-  const sendAnswer = async () => {
-    const text = answer.trim();
-    if (!text || !app.orchestratorId) return;
-    const asked = w.question?.text ?? w.flag?.text ?? w.needsYou?.question ?? '';
-    const ok = await act(
-      () => api.sendMessage(app.orchestratorId, `Answer on ${w.id} (${w.title}). It asked: “${asked.slice(0, 300)}”\n\n${text}\n\nPlease put this on ${w.id} as my answer (update_work note).`),
-      `Sent to your orchestrator: it records the answer on ${w.id}.`,
+  const permissions =
+    ask === 'check' &&
+    workers.flatMap((x) =>
+      x.pendingPermissions.map((p) => (
+        <div key={p.requestId}>
+          <p className="small tone-amber">{x.title} waits for an OK:</p>
+          <PermissionCard sessionId={x.id} requestId={p.requestId} toolName={p.toolName} input={p.input} reason={p.reason} pending />
+        </div>
+      )),
     );
-    if (ok) setSent(true);
-  };
-  return (
-    <article className={`wait-card${mine ? ' mine' : ''}`} data-testid={`wait-${w.id}`}>
-      <header className="wait-head">
-        <Dot tone={mine ? 'amber' : 'grey'} />
-        <span className="wait-title">{w.title}</span>
-        <span className="mono dim">{w.id}</span>
-        <span className="spacer" />
-        <span className={`wait-age tone-${AGE_TONE[age]}`} title={new Date(since).toLocaleString()} data-testid={`wait-age-${w.id}`}>
-          {age === 'stale' ? 'stale · ' : ''}
-          {fmtRelative(since, now)}
-        </span>
-      </header>
-      <p className="small wait-ask" data-testid={`wait-ask-${w.id}`}>
-        <strong>{mine ? ASK_LABEL[ask] : `Waits on ${item.on.join(', ') || 'someone else'}`}:</strong>{' '}
-        {/* A worker's question is shown whole below (w1378); this line says only whose it is. */}
-        {ask === 'check' && w.needsYou && !w.needsYou.answered && w.needsYou.kind !== 'question'
-          ? `worker ${w.needsYou.worker ?? ''} waits on ${w.needsYou.who.join(', ')} (since ${fmtRelative(w.needsYou.at, now)}): its question is below.`
-          : item.text}
-      </p>
-      {item.recommendation && (
-        <p className="small tone-blue" data-testid={`wait-recommendation-${w.id}`}>
-          FF Factory recommends: {item.recommendation}
-        </p>
-      )}
-      {w.needsYou && <NeedsYouBlock app={app} w={w} r={w.needsYou} mine={mine} />}
-      <Evidence w={w} />
-      {ask === 'check' &&
-        workers.flatMap((x) =>
-          x.pendingPermissions.map((p) => (
-            <div key={p.requestId}>
-              <p className="small tone-amber">
-                {x.title} ({x.id}) waits for an OK:
-              </p>
-              <PermissionCard sessionId={x.id} requestId={p.requestId} toolName={p.toolName} input={p.input} reason={p.reason} pending />
-            </div>
-          )),
-        )}
-      <div className="wait-actions">
-        {mine && ask === 'approve' && !declining && (
-          <>
-            <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => void act(() => api.approveWork(w.id), `${w.id} approved: the dispatcher decides it now.`)}>
-              Approve {w.id}
-            </button>
-            <button className="btn btn-sm btn-ghost" disabled={busy} onClick={() => setDeclining(true)}>
-              Decline…
-            </button>
-          </>
-        )}
-        {mine && ask === 'approve' && declining && (
-          <>
-            <input
-              data-kept
-              className="input wait-reason"
-              autoFocus
-              placeholder="Why (kept on the request)"
-              aria-label={`Reason to decline ${w.id}`}
-              value={reason}
-              maxLength={300}
-              onChange={(e) => setReason(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && !busy && void act(() => api.declineWork(w.id, reason.trim() || undefined), `${w.id} declined.`)}
-            />
-            <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => void act(() => api.declineWork(w.id, reason.trim() || undefined), `${w.id} declined.`)}>
-              Decline {w.id}
-            </button>
-            <button className="btn btn-sm btn-ghost" disabled={busy} onClick={() => setDeclining(false)}>
-              Back
-            </button>
-          </>
-        )}
-        {!mine && ask === 'approve' && <span className="dim small">{app.intake?.reviewers.join(' or ') || 'A reviewer'} decides</span>}
-        {mine && (ask === 'answer' || (ask === 'check' && !!w.needsYou && !w.needsYou.answered)) && (
-          <div className="wait-answer">
-            {sent ? (
-              <span className="small tone-green">Sent to your orchestrator. The card goes when it has recorded the answer.</span>
-            ) : (
-              <>
-                <textarea
-                  data-kept
-                  className="input wait-answer-text"
-                  rows={2}
-                  placeholder="Your answer"
-                  aria-label={`Answer on ${w.id}`}
-                  value={answer}
-                  onChange={(e) => setAnswer(e.target.value)}
-                />
-                <button className="btn btn-sm btn-primary" disabled={busy || !answer.trim() || !app.orchestratorId} onClick={() => void sendAnswer()}>
-                  Send answer
-                </button>
-              </>
-            )}
-          </div>
-        )}
-        {live && (
-          <button type="button" className="needs-you fl-call" title="Watch the game beside the worker's conversation and move the asset's knobs" data-testid={`wait-live-${w.id}`} onClick={() => navigate({ view: 'live', sessionId: live.sessionId })}>
-            <span className="lv-rec" aria-hidden /> Live view: go
-          </button>
-        )}
-        <div className="spacer" />
-        <button className="link-btn small" onClick={() => navigate({ view: 'dispatcher', tab: w.id })}>
-          Open {w.id}
-        </button>
-        {ask === 'check' &&
-          workers.slice(0, 2).map((x) => (
-            <button key={x.id} className="link-btn small" onClick={() => navigate(sessionRoute(x, app))}>
-              <Icon name="chevron" size={11} /> Open {x.id}
-            </button>
-          ))}
-      </div>
-    </article>
+  const look = live && (
+    <button type="button" className="btn btn-sm btn-ghost qc-live" title="Watch the game beside the worker's conversation and move the asset's knobs" data-testid={`wait-live-${w.id}`} onClick={() => navigate({ view: 'live', sessionId: live.sessionId })}>
+      <span className="lv-rec" aria-hidden /> Watch it in the Live view
+    </button>
   );
+  const done = sent ? (
+    <p className="small tone-green" data-testid={`wait-sent-${w.id}`}>
+      Sent to your orchestrator. The card goes when it has recorded the answer.
+    </p>
+  ) : r?.answered ? (
+    <p className="small dim">
+      {r.answered.by} answered {fmtClock(r.answered.at)}; {r.worker ? 'its worker resumes with it.' : 'the dispatcher carries on.'}
+    </p>
+  ) : undefined;
+  return (
+    <QuestionCard
+      id={`wait.${w.id}`}
+      testId={`wait-${w.id}`}
+      title={w.title}
+      asks={asks}
+      question={question}
+      previews={r && !r.answered ? r.previews : []}
+      {...(r?.worker ? { mediaSession: r.worker } : {})}
+      mine={answerable}
+      answeredBy={item.on.join(', ') || undefined}
+      {...(answerable ? { onAnswer } : {})}
+      {...(done ? { done } : {})}
+      look={look}
+      extra={permissions}
+      details={details}
+    />
+  );
+}
+
+/** The Intake tab's card for a request waiting for a reviewer (w1597): the same question card the Waiting on input tab shows. */
+export function IntakeApproveCard({ app, w, reviewer, now }: { app: AppState; w: WorkItem; reviewer: boolean; now: number }) {
+  const item = { w, ask: 'approve', mine: reviewer, on: [], since: w.createdAt, text: `Nothing is worked on it until it is approved${w.approval?.why ? ` (not approved automatically: ${w.approval.why})` : ''}.`, recommendation: intakeRecommendation(w) } as unknown as WaitingItem;
+  return <ApproveCard app={app} w={w} mine={reviewer} reviewers={app.intake?.reviewers.join(' or ') || 'A reviewer'} details={<CardDetails app={app} item={item} now={now} />} testId={`intake-${w.id}`} />;
 }

@@ -135,6 +135,9 @@ Now:
 
 ## On BEAST first (w1600)
 
+A build declared coming on BEAST (w1606, docs/orchestrators.md "Builds clear BEAST") leaves a worker whose Live view
+runs alone: a view a person may be steering comes before a build, and the build runs beside it.
+
 Ben, 2026-10-19: "can you prioritize beast for stuff that needs live view? live view is often too slow". The view's frame
 rate is the sandbox editor's, so the machine matters:
 

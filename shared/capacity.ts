@@ -82,3 +82,20 @@ export function needsLive(w: Pick<WorkItem, 'needs' | 'liveView' | 'title' | 'br
   if (w?.liveView) return true;
   return LIVE_VIEW_WORDS.test(`${w ? `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}\n` : ''}${text}`);
 }
+
+/**
+ * A player build named in words (w1606): "player build", "release build", "a build of the player", "build a player",
+ * "batchmode build", "Windows/Mac/Deck build". Not a bare "build" (build a feature, a CI build, the portal's build).
+ */
+export const BUILD_WORDS = /\b(?:player|release|standalone|batch-?mode|windows|mac|deck|steam) builds?\b|\bbuild (?:a|the|an?(?: new)?) (?:player|release|standalone)\b/i;
+
+/**
+ * Whether a request builds a player (w1606, Ben: "when you know builds are coming up, we also prioritize using beast for
+ * builds because its faster"): game work whose worker declared a build (`build`), or whose title, brief or people's notes
+ * name one, or `text` does (a dispatcher's brief).
+ */
+export function needsBuild(w: Pick<WorkItem, 'needs' | 'build' | 'title' | 'brief' | 'notes'> | undefined, text = ''): boolean {
+  if (w && needsOf(w) === 'agent') return false;
+  if (w?.build) return true;
+  return BUILD_WORDS.test(`${w ? `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}\n` : ''}${text}`);
+}

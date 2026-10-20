@@ -4,6 +4,7 @@
 import type { TurnUsage } from './spend.ts';
 import type { GithubPermissionId } from './githubRequirements.ts';
 import type { GhLogin } from './ghLogin.ts';
+import type { Ask } from './ask.ts';
 
 /** 'blocked': the editor is alive but stuck on a modal dialog, or silent for too long while starting (see unity.blocked). */
 /** A working tree's real state, read from git (docs: server/gitStatus.ts). */
@@ -268,7 +269,7 @@ export interface SessionInfo {
    * as Needs you. Kept by the portal, never by the daemon; gone with its next message (a new turn: it declares again if
    * it still waits). `request` limits it to one request when the worker serves several.
    */
-  waitingOn?: { who: string; what: string; at: string; request?: string };
+  waitingOn?: { who: string; what: string; at: string; request?: string; asks?: Ask[] };
   /**
    * Machine sessions (w691): a message to it found no agent host to run in ("could not start its agent host: …"). Nothing
    * runs for it whatever its status says (an older daemon went on reporting it mid-turn): the ledger shows its request
@@ -1679,9 +1680,10 @@ export interface WorkItem {
   mainCloneAccess?: { machine: string; by: string; at: string };
   /**
    * The question it waits on, from the dispatcher (decide_work ask) to its requester, until a note answers it (w278:
-   * FFBox posts it in the requester's thread). A design question is `flag` instead.
+   * FFBox posts it in the requester's thread). A design question is `flag` instead. `asks` (w1597): the questions as the
+   * card asks them, each with its 2-4 answers (shared/questionCard.ts).
    */
-  question?: { text: string; at: string };
+  question?: { text: string; at: string; asks?: Ask[] };
   /**
    * The newest wait on a person that went to their own orchestrators as a `[needs you]` message (w1378, Ben: "Those should
    * just be surfaced to you the orchestrator and then I'll answer you and you send the response back"): the question in
@@ -1768,6 +1770,11 @@ export interface WorkItem {
    * placement.live first (BEAST), and a move of it says to stage the view again. The first start, kept.
    */
   liveView?: { at: string; session: string; machine: string };
+  /**
+   * A worker on it declared a build coming (w1606, the build_plan tool): it builds a player from then on, so it is placed
+   * on placement.build first (BEAST). The first declaration, kept.
+   */
+  build?: { at: string; session: string; machine: string };
   /** The cleanup's last "Is it done?" to a worker about this merged request (w419): at most one a day. */
   followUp?: { at: string; sessionId: string };
   /** Workers the cleanup already resumed once after they were cut off, by session id: never a second time. */
@@ -1821,6 +1828,12 @@ export interface WorkNeedsYou {
   previews: string[];
   /** Pull requests it names ("Final-Factory/FinalFactory#1799"). */
   prs: string[];
+  /**
+   * The questions as the card asks them, one at a time, each with its 2-4 answers, the recommended one first (w1597: the
+   * worker's waiting_on_person questions, or the dispatcher's decide_work ask). Absent on a free-text question: the card shows
+   * it cleaned with a free answer box (shared/questionCard.ts).
+   */
+  asks?: Ask[];
   /** Sent in the one-off digest of waits already open when w1378 shipped, or after a restart. */
   digest?: boolean;
   /** A person answered it with a note in their own turn: who and when. */

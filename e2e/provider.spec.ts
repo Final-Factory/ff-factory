@@ -177,9 +177,11 @@ test("Max's escalations: only an ffbox-scoped key files, the body is checked, an
     expect(await (await post(ffboxKey, body)).json(), 'a resend: the same answer').toEqual(answer);
 
     await go(page, '#/dispatcher/intake');
-    const row = page.getByTestId('intake-tab').getByTestId(`work-${answer.workId}`);
-    await expect(row).toContainText(`Design question (via Max): Attack waves have no size cap ${tag}`);
-    await expect(row).toContainText('Needs a human');
+    // It waits under "Needs a human" as a question card: its title, Approve and Decline (w1597).
+    const card = page.getByTestId('intake-tab').locator('.intake-cards').getByTestId(`intake-${answer.workId}`);
+    await expect(card).toContainText(`Design question (via Max): Attack waves have no size cap ${tag}`);
+    await expect(card.getByRole('button', { name: /^Approve it/ })).toBeVisible();
+    await expect(card.getByRole('button', { name: /^Decline it/ })).toBeVisible();
   } finally {
     await api.dispose();
   }

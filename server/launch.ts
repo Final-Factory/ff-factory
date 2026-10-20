@@ -11,6 +11,36 @@ import type { StandingToolGroup } from '../shared/types.ts';
 import { WORK_LIVE_STATES, type WorkLiveState } from '../shared/workState.ts';
 import type { SecretRules } from './secretGuard.ts';
 import { WORKER_RULE_TOPICS } from './workerRules.ts';
+import { DESCRIPTION_CHARS, LABEL_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS } from '../shared/ask.ts';
+import { CARD_QUESTION_CHARS, MAX_ASKS } from '../shared/questionCard.ts';
+
+/**
+ * Questions for a person as their card asks them (w1597, Ben: "just ask the question clearly, give me the option selections
+ * and thats it"): waiting_on_person's and decide_work ask's. Checked again by shared/questionCard.ts checkAsks. `bare`: no
+ * field descriptions, for a tool whose own description says it (the dispatcher's always-loaded tools have a budget, w1158).
+ */
+export const questionsShape = (bare = false) => {
+  const d = (s: string) => (bare ? undefined : s);
+  // Bare, the limits are checkAsks' alone (each one here is schema text the model reads in every call).
+  const str = (max: number, min = 0, what?: string) => {
+    if (bare) return z.string();
+    const t = z.string().min(min).max(max);
+    return what ? t.describe(what) : t;
+  };
+  const words = d('ONE plain question, readable without opening anything; no file paths, PR lists or ids. A still: ![what](<absolute path>).');
+  const label = d('A full-sentence answer in their voice, sent as their words; never just "Yes".');
+  const desc = d('One line: what it means.');
+  const rec = d('true on the ONE you recommend.');
+  const options = z.array(
+    z.object({
+      label: str(LABEL_CHARS, 1, label),
+      description: str(DESCRIPTION_CHARS + MEDIA_CHARS, 0, desc).optional(),
+      recommended: rec ? z.boolean().optional().describe(rec) : z.boolean().optional(),
+    }),
+  );
+  const asks = z.array(z.object({ question: str(CARD_QUESTION_CHARS + MEDIA_CHARS, 1, words), options: bare ? options : options.min(MIN_OPTIONS).max(MAX_OPTIONS) }));
+  return bare ? asks : asks.min(1).max(MAX_ASKS);
+};
 
 /** A stdio MCP server the agent process starts (on a machine: the daemon's Unity MCP server, machine/unityMcp.ts). */
 export interface StdioServer {
@@ -117,6 +147,7 @@ export const CATALOG = {
   waiting_on_person: {
     who: z.string().min(1).max(120).describe('Whose action it waits on: a name ("Ben"), several separated by commas, or "a reviewer".'),
     what: z.string().min(1).max(400).describe('What they must do, in a line ("reboot the m3 and log in: FileVault asks for a password").'),
+    questions: questionsShape().describe(`What their card on the dashboard asks: ONE question per decision (several decisions: one each, at most ${MAX_ASKS}, shown one at a time), each with 2 to 4 full-sentence answers as buttons, your pick marked recommended. An action ("reboot the m3") is a question too: "Have you rebooted the m3 and logged in?" with "Done: the m3 is back" / "Not today". Stills and clips go in as ![what](<path>) previews; pull requests, ids and report text stay in your report.`),
     request: z.string().max(16).optional().describe('The request ("w665") it is about, when you serve several; default: all of them.'),
   },
   unity: {
@@ -128,6 +159,12 @@ export const CATALOG = {
     materials: z.array(z.string()).optional().describe('start: the materials whose shader properties are the knobs, as the game names them (e.g. ["VfxComet"]).'),
     fps: z.number().optional().describe('start: frames a second, 1-30 (default 15).'),
     width: z.number().optional().describe('start: frame width in px, 320-1920 (default 960).'),
+  },
+  /** Builds first on BEAST (w1606, server/buildPlans.ts): a worker says its player build is coming, starts it, ends it. */
+  build_plan: {
+    action: z.enum(['coming', 'start', 'done', 'status']),
+    minutes: z.number().int().min(0).max(240).optional().describe('coming: lead time in minutes until the build starts (0: now).'),
+    what: z.string().max(160).optional().describe('coming: what it builds ("Windows player for the w1475 clip").'),
   },
   switch_branch: {
     branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),

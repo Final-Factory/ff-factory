@@ -498,7 +498,7 @@ test("fleet: an owner sees a quiet \"Live view: go\" on a slot whose view is for
 test("fleet: the request's card on the Dispatcher's Waiting tab opens the waiting worker's Live view too (w1430)", async ({ page }) => {
   await fixedFleet(page, '#/dispatcher/waiting', waitingInSb2({ live: true }));
   const card = page.getByTestId('wait-w1325');
-  await expect(card.getByTestId('wait-live-w1325')).toHaveText('Live view: go');
+  await expect(card.getByTestId('wait-live-w1325')).toHaveText('Watch it in the Live view');
   await card.getByTestId('wait-live-w1325').click();
   await expect(page).toHaveURL(/#\/live\/l-knob$/);
 });

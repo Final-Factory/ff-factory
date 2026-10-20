@@ -224,6 +224,15 @@ test('set_app_config: placement.live (w1600) is a list like placement.prefer; nu
   assert.deepEqual(cfg.placement, { prefer: ['m5', 'lothdesktop'] });
 });
 
+test('set_app_config: placement.build (w1606) is a list like placement.live; null clears it back to beast', (t) => {
+  const { file, cfg } = setup(t);
+  assert.deepEqual(setAppConfig(file, cfg, 'placement.build', 'BEAST'), { before: undefined, after: ['beast'] });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement, { build: ['beast'] });
+  assert.throws(() => setAppConfig(file, cfg, 'placement.build', 5), /placement\.build is a list of computers/);
+  setAppConfig(file, cfg, 'placement.build', null);
+  assert.deepEqual(cfg.placement, {});
+});
+
 test('set_app_config: machines.githubFromVault switches one machine alone, true and false still set them all (w737, w1078: it was claudeFromVault, now the GitHub one)', (t) => {
   const { file, cfg } = setup(t);
   const on = (id: string) => githubFromVault(cfg, id);
