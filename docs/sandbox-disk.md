@@ -12,6 +12,9 @@ present on LothDesktop, but it needs an administrator and Microsoft documents it
 Windows 11. The rest (leaving proof videos and FMOD source audio out of sandboxes, trimming build caches on release,
 deleting unused assets) is worth 1 to 8 GB a sandbox each.
 
+**What was done, and what it measured:** "Results (phase 2, 2026-10-19)" at the end. ReFS deduplication runs on V:,
+which gained 132 GB of free space, and each sandbox now holds 4.6 to 8.2 GB alone.
+
 Measured on LothDesktop on 2026-10-19 between 21:50 and 22:40 UTC, read-only, while workers ran. Sizes are GiB
 (2^30 bytes), written GB. "Measured" means a number from the tools below. "Sourced" means a vendor doc. "Estimate" means
 my own inference.
@@ -132,3 +135,93 @@ G is not a disk saving. H is the fallback if A fails. J is small and can go with
 
 The unused-asset candidate lists (GUID scan, raw art, duplicates, specs by folder) were written to the w1576 worker's
 temp folder and published as FF Factory attachment `att_p0hdy2lymi80` (`w1576-sandbox-disk-data.zip`), not kept in this repo.
+
+## Results (phase 2, 2026-10-19)
+
+lothsahn: "Do 2-4.  For 1, let's not do 1b.  Let me run the admin prompts if necessary to make it work", then "Drop
+option 3; have the ops worker run the dedup script on lothdesktop over ssh". Their option numbers: 1 = A1, 2 = A3,
+3 = B and C, 4 = D and E.
+
+**TL;DR:** ReFS deduplication runs on LothDesktop's V: and gave the drive back 132 GB (65.0 to 197.2 GB free). What a
+sandbox holds alone fell from 21.6–30.8 GB to 4.6–8.2 GB (measured). A3, D and E shipped in FF Factory. B and C were
+dropped.
+
+### A1: ReFS deduplication on V: (on, LothDesktop)
+
+The admin script is `refs-dedup-trial.ps1`, run elevated by the ops worker at 19:13 local. It ran a scratch test first:
+a 32 GB ReFS Dev Drive VHDX holding two byte copies of the seed's `Library\Artifacts` (5.19 GB each). The test passed:
+
+- the job processed 10.34 GB and gave back 5.43 GB of free space;
+- 0 of 200 sampled files hashed differently afterwards;
+- a write to one copy left its twin unchanged.
+
+So Windows 11 (build 26300) runs it: the cmdlets work on a client edition, which Microsoft does not document. Then the
+script turned dedup on for V:, with these settings:
+
+- `Enable-ReFSDedup -Volume V: -Type Dedup`.
+- `Set-ReFSDedupSchedule`: every day at 03:00, 2 h cap, 50 % CPU, skipping files changed in the last hour.
+- A first job right away, with the same caps.
+- A SYSTEM task, `ffsb-helper-dedupstatus`, that the worker user may start. It writes `Get-ReFSDedupStatus` to
+  `C:\ProgramData\ffsb-helpers\results\dedup-status.json`.
+
+The full log is `C:\ProgramData\ffsb-helpers\results\refs-dedup-trial.log`. To undo:
+`Clear-ReFSDedupSchedule -Volume V:` then `Disable-ReFSDedup -Volume V:`. Data already shared stays shared (sourced).
+
+The first job, measured:
+
+| | Before (19:28 local) | After (21:30 local) |
+|---|---|---|
+| V: free | 65.01 GB | 197.16 GB |
+| `savingsOnLastRun` | 0 | 181.5 GB, of 274.7 GB processed |
+| Physical union of the sandboxes, seed, player slots and `tmp` (`Phys.cs`) | 174.34 GB | 79.65 GB |
+
+At 21:30 the job still said `running` at 98.7 % progress, a figure it had shown since 20:46, past its 2 h cap. V: free
+space did not change in that time.
+
+Per sandbox (`Phys.cs`, FSCTL_GET_RETRIEVAL_POINTERS). "Exclusive" counts the clusters only that sandbox uses. "Fair
+share" splits each shared cluster across its users.
+
+| Sandbox | Exclusive before | Exclusive after | Fair share before | Fair share after | Logical after |
+|---|---|---|---|---|---|
+| slot1 | 21.60 | 8.20 | 22.29 | 12.52 | 31.01 |
+| slot2 | 30.81 | 4.63 | 31.69 | 9.39 | 32.84 |
+| slot3 | 22.72 | 6.67 | 23.45 | 11.77 | 31.53 |
+| slot5 | 22.92 | 4.92 | 23.85 | 9.42 | 31.02 |
+| slot6 | 25.89 | 8.11 | 26.60 | 12.70 | 32.67 |
+
+All in GB. The logical sizes grew by 0 to 7.6 GB between the two measurements (workers built and imported meanwhile). The
+after figures hold more data, not less.
+
+Savings decay as workers rewrite files. The nightly run takes back what changed. What reading a deduplicated file costs
+the editor or a build is not measured.
+
+### A3: sandboxes share their LFS files from the start (FF Factory PR #464, merged)
+
+After provisioning, and on each release trim of a sandbox whose project is not open, `machine/sandboxes.ts` runs `git
+lfs dedup`. That re-creates each LFS file in the worktree as a block clone of the clone's `.git/lfs/objects`. In slot2 it
+shared 5,026 files, 9.10 GB (git-lfs's own count), in 9 s, and `git status` stayed clean. It skips a dirty worktree
+and says so in the log.
+
+The study also found Libraries that did not share the seed. Every copy mode FF Factory uses clones today: robocopy
+with `/MT:8`, robocopy single-threaded and `Copy-Item` all left 0.01 GB of 0.68 GB exclusive (measured). Why the
+Libraries made on 10-11 did not share stays unexplained. A1 now covers them anyway.
+
+### B and C: dropped
+
+All 3.1 GB of specs media and all 0.91 GB of FMOD Soundtrack/Production audio are LFS files (measured), so A3 already
+shares them. A sparse checkout would free about nothing more. It would also change the main clone's repository format
+(`extensions.worktreeConfig`) and make `git add` refuse proof files. lothsahn dropped it, and with it the proposed
+proofs-through-`publish_review` rule.
+
+### D and E: release trim and re-seeding (FF Factory PR #465)
+
+- **D:** the release trim (`server/cacheTrim.ts`, `playerCacheDirs`) drops `Library/EntitySceneBundles` and each
+  `Library/PlayerDataCache/<target>` whole once nothing in it was written for 24 h. It never trims part of one: a
+  half-kept folder could leave a build trusting archives that are gone. A dry run on LothDesktop found 1.48 GB to drop
+  today (slot2's Linux64 cache, untouched for 158 h). Every other sandbox had built a player within 8 h.
+- **E:** a sandbox nobody used for 3 days (`RESEED_IDLE_DAYS`) gets its Library cloned from the seed again. It acts
+  only where the copy is a block clone (`librarySeedCopy: 'clone'`, or a Mac). No sandbox on LothDesktop qualified
+  today.
+
+Not done: 1b, by lothsahn's decision (FF Factory sharing identical files with its own code, A2). Option 5 was not
+part of this phase.
