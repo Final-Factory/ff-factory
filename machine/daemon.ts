@@ -32,6 +32,7 @@ import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
 import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveSessionDeps } from './live.ts';
+import { FramePump, parseAck } from '../shared/framePump.ts';
 import { bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
@@ -1401,7 +1402,7 @@ export class Daemon {
 
   /** Tests' fake game for a live view (server/testLiveGame.ts); the real one is the sandbox editor's (machine/live.ts). */
   private readonly liveDeps?: (sandbox: string) => Partial<LiveSessionDeps>;
-  private readonly lives = new Map<string, { s: LiveSession; link?: WebSocket; latest?: Buffer; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout }>();
+  private readonly lives = new Map<string, { s: LiveSession; link?: WebSocket; pump: FramePump; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout }>();
 
   /** The live views it runs, for the hello (w1509): a portal that restarted takes them back. */
   private liveViews(): DaemonLiveView[] {
@@ -1468,11 +1469,18 @@ export class Daemon {
     const old = this.lives.get(msg.liveId);
     if (old) return 'already running';
     const pidOf = () => this.pool.list().find((x) => x.id === msg.sandbox)?.unity?.pid;
-    const entry: { s: LiveSession; link?: WebSocket; latest?: Buffer; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout } = {
+    const entry: { s: LiveSession; link?: WebSocket; pump: FramePump; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout } = {
       sandbox: msg.sandbox,
       sessionId: msg.sessionId,
       materials: Array.isArray(msg.materials) ? msg.materials.map(String).slice(0, 8) : [],
     } as never;
+    // Newest wins, kept to what the link to the portal carries (w1601, shared/framePump.ts).
+    entry.pump = new FramePump({
+      send: (frame) => entry.link?.send(frame, { binary: true, compress: false }),
+      buffered: () => (entry.link?.readyState === WebSocket.OPEN ? entry.link.bufferedAmount : -1),
+      now: () => Date.now(),
+      later: (fn, ms) => void setTimeout(fn, ms),
+    });
     entry.s = new LiveSession(msg.fps ?? 15, msg.width ?? 960, {
       editorPid: pidOf,
       channel: (pid) => readGameChannel(pid),
@@ -1481,10 +1489,7 @@ export class Daemon {
         return port ? bridgeExecute(port, DEV_TIER_SNIPPET) : 'no MCP bridge for this editor';
       },
       command: (ch, text) => gameCommand(ch, text),
-      frame: (jpeg) => {
-        entry.latest = jpeg;
-        this.pumpLive(msg.liveId);
-      },
+      frame: (jpeg) => entry.pump.push(jpeg),
       state: (state, detail) => this.send({ type: 'live_state', liveId: msg.liveId, state, detail, frames: entry.s.frames }),
       now: () => Date.now(),
       ...(this.liveDeps?.(msg.sandbox) ?? {}),
@@ -1504,27 +1509,20 @@ export class Daemon {
     const url = base.replace(/^http/, 'ws').replace(/\/+$/, '') + `/machine/live/${encodeURIComponent(liveId)}`;
     const ws = new WebSocket(url, { headers: { authorization: `Bearer ${this.cfg.token}` }, handshakeTimeout: 8_000, perMessageDeflate: false });
     l.link = ws;
-    ws.on('open', () => this.pumpLive(liveId));
+    l.pump.reset();
+    ws.on('open', () => l.link === ws && l.pump.flush());
+    // The portal answers each frame it takes (w1601); the pump sends the next on it.
+    ws.on('message', (data, isBinary) => {
+      if (isBinary || l.link !== ws) return;
+      const n = parseAck(String(data));
+      if (n !== undefined) l.pump.ack(n);
+    });
     ws.on('error', (e) => log(`live view ${liveId}: frame link: ${e.message}`));
     ws.on('close', () => {
       if (this.lives.get(liveId) !== l || l.link !== ws) return;
       l.link = undefined;
       l.timer = setTimeout(() => this.linkLive(liveId), 3000);
     });
-  }
-
-  /** Newest wins: the frame waits while the link is still sending the one before, and a newer one replaces it. */
-  private pumpLive(liveId: string) {
-    const l = this.lives.get(liveId);
-    const ws = l?.link;
-    if (!l?.latest || !ws || ws.readyState !== WebSocket.OPEN) return;
-    if (ws.bufferedAmount > 256 * 1024) {
-      setTimeout(() => this.pumpLive(liveId), 20);
-      return;
-    }
-    const frame = l.latest;
-    l.latest = undefined;
-    ws.send(frame, { binary: true, compress: false });
   }
 
   // ---------------------------------------------------------------- sessions

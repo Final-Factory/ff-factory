@@ -42,6 +42,30 @@ flowchart LR
   frame to each watching page. A page that is behind gets the next frame, never a queue.
   - Compression is off: JPEG does not compress.
 
+## Flow control (w1601)
+
+Ben, 2026-10-19: "live view is often too slow". Each hop that can fall behind keeps only what its link carries in one
+round trip, so the view lags the game by about a round trip and a frame on any link, instead of by the seconds of
+frames that pile up in socket buffers on a link slower than the stream.
+
+- **The far end answers.** The portal answers each frame from the daemon, and the page answers each frame it has drawn,
+  with a text message `a<count>`: how many frames that socket has brought so far.
+- **The pump keeps a window.** `FramePump` (`shared/framePump.ts`) runs on the daemon's link to the portal and on each
+  page the portal feeds.
+  - It sends only while the bytes unanswered fit a window: the fastest delivery rate measured from the answers times
+    the shortest round trip, plus one frame. That is BBR's way of sizing a window.
+  - A frame that does not fit waits, and a newer one replaces it.
+  - One frame may always go when nothing is in flight.
+- **Old ends still work.** A far end that never answers (a daemon or page from before w1601) keeps the old rule: send
+  while the socket buffers under 256 KB (daemon) or 1 MB (page).
+- **What a page gets.** `live_view status` ends with each watching page's frames drawn, frames skipped, round trip and
+  the rate its link carried, so an agent can see how the view reaches Ben.
+- **The game half (FinalFactory, w1601).** `LiveFrameStream` reads back the next frame while the last one encodes and
+  sends, and a newer frame replaces one not yet sent. Before, each frame waited for its own readback, encode and the
+  daemon's answer before the next readback started, so the stream ran at a fraction of the game's rate. It takes
+  frames on a schedule, so a 20 fps game streams 15 by taking three frames in four (a gap of 1/fps took every other
+  one). `live.frames` (status) prints each stage's mean and worst time and the game's own fps (`game_fps`).
+
 ## The agent's tool: `live_view`
 
 `live_view` is a worker tool, in the sandboxes group.
@@ -163,3 +187,29 @@ rate is the sandbox editor's, so the machine matters:
 - **The link:**
   - Portal to beast over the tailnet carries 18–48 Mbit/s sustained.
   - Ben's MacBook reaches the tailnet through a relay (DERP) at 128 ms; its throughput is not measured.
+
+## Measured, w1601 (beast)
+
+`scripts/liveLatencyBench.ts` runs the real daemon half (`LiveSession`) against the sandbox editor in play mode (a new
+game), the real portal half (`LiveHub`, from `--repo`, so an older checkout is the "before"), and a headless page that
+draws frames the way `LiveStage` does. The links are emulated: link A (daemon to portal) 40 Mbit/s with 20 ms (a guess),
+link B (portal to page) at the speed in the table with Ben's 128 ms round trip. Every 3 s it hides or shows the game's
+HUD (`ui.hide`) and times the first drawn frame that shows it. Each leg ran 40 s; 2026-10-19, under the bench lock.
+
+| Leg | Game → daemon fps, before → after | HUD change to drawn frame p50/p95 ms, before → after |
+|---|---|---|
+| 15 fps, 960 px, 100 Mbit/s | 12.9 → 15.0 | 219/250 → 235/252 |
+| 30 fps, 960 px, 100 Mbit/s | 17.8 → 29.3 | 220/254 → 216/240 |
+| 15 fps, 960 px, game held at 20 fps | 9.7 → 15.0 | 295/460 → 291/310 |
+| 30 fps, 960 px, game held at 20 fps | 10.0 → 19.8 | 292/318 → 291/314 |
+| 20 fps, 1280 px, 10 Mbit/s (12.5 fps drawn either way) | 17.1 → 20.0 | 2150/2277 → 409/438 |
+| 15 fps, 960 px, 5 Mbit/s (9 fps drawn either way) | 13.0 → 15.0 | 825/1092 → 499/559 |
+| 15 fps, 960 px, 100 Mbit/s, WebKit | 12.7 → 14.4 | 224/260 → 238/256 |
+
+- **Where the time goes on a fast link** (the after status, game at 45–58 fps): the GPU readback 41–47 ms mean (two
+  game frames; 78 ms at 20 fps), the JPEG encode 4 ms at 960 px and 7 ms at 1280, the write and the daemon's answer
+  0.3 ms, decode in the page 2–4 ms, the game's command channel 23–33 ms. The rest is the link: 64 ms one way to Ben.
+- **On a link slower than the stream** the drawn rate is what the link carries (frame size times fps); since w1601 that
+  costs frames, not seconds. A smaller frame (width, quality, or a video codec) is what would raise the rate there.
+- **The game's own rate bounds the stream.** A Live view of a late-game save runs at the game's rate: the w1466 worker
+  measured 0.5 fps on lothdesktop with the stream stopped (LogisticsNetworkConsumerUnitFinderJob, w1604).

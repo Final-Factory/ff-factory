@@ -21,7 +21,9 @@ const BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
 /**
  * Opens /live/<sessionId> (binary messages, one JPEG frame each, docs/live-view.md) and draws the newest frame on `canvas`.
  * Newest wins: a frame that arrives while the last one still decodes replaces the one waiting, so a slow page skips frames
- * and never falls behind. The canvas keeps its last picture while the socket is down or the game holds, so the view is
+ * and never falls behind. Each frame drawn is answered with how many frames this socket has brought ("a<count>", w1601):
+ * the portal sends no more than the link carries in one round trip, so the view never runs behind on a slow link
+ * (shared/framePump.ts). The canvas keeps its last picture while the socket is down or the game holds, so the view is
  * never blank after the first frame. Reconnects with backoff while `enabled`; closes on unmount and, to spare a phone's
  * data, while the tab is hidden.
  */
@@ -35,6 +37,9 @@ function useLiveFrames(sessionId: string, enabled: boolean, canvas: RefObject<HT
     let timer: ReturnType<typeof setTimeout> | undefined;
     let attempt = 0;
     let pending: Blob | null = null;
+    /** Frames this socket brought, and the number of the one waiting in `pending`. */
+    let received = 0;
+    let pendingNo = 0;
     let decoding = false;
     let drawn = false;
     let size = { w: 0, h: 0 };
@@ -54,11 +59,18 @@ function useLiveFrames(sessionId: string, enabled: boolean, canvas: RefObject<HT
       try {
         while (pending && !stopped) {
           const blob = pending;
+          const no = pendingNo;
+          const from = sock;
           pending = null;
+          // Done with it (drawn, or damaged): the portal may send the next. The count covers frames it replaced.
+          const answer = () => {
+            if (from && from === sock && from.readyState === WebSocket.OPEN) from.send(`a${no}`);
+          };
           let bmp: ImageBitmap;
           try {
             bmp = await createImageBitmap(blob);
           } catch {
+            answer();
             continue; // a damaged frame: the next one replaces it
           }
           const el = canvas.current;
@@ -72,6 +84,7 @@ function useLiveFrames(sessionId: string, enabled: boolean, canvas: RefObject<HT
             size = { w: bmp.width, h: bmp.height };
           }
           bmp.close();
+          answer();
         }
       } finally {
         decoding = false;
@@ -84,6 +97,8 @@ function useLiveFrames(sessionId: string, enabled: boolean, canvas: RefObject<HT
       const s = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/live/${encodeURIComponent(sessionId)}`);
       s.binaryType = 'blob';
       sock = s;
+      received = 0;
+      pending = null;
       s.onopen = () => {
         connected = true;
         publish();
@@ -93,6 +108,7 @@ function useLiveFrames(sessionId: string, enabled: boolean, canvas: RefObject<HT
         attempt = 0;
         arrivals.push(performance.now());
         pending = m.data; // replaces a frame still waiting to be drawn
+        pendingNo = ++received;
         void pump();
       };
       s.onclose = () => {
