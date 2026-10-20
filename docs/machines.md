@@ -489,8 +489,8 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   from `web/index.html`'s SVG by `make-icons.py`), with a grey F and an orange pause sign while paused. On Windows 11 it shows
   itself in the taskbar once, the first time (`NotifyIconSettings\…\IsPromoted`); the person's own choice after that stands.
   Its menu: the state and why, what happens next, the agents working here, Pause all work / Unpause, Work schedule…, Pause
-  when someone uses this PC, Open FF Factory. `daemon.json` `"tray": false` turns it off; a daemon a test builds has none
-  unless asked. The schedule window is not modal (`Show()`, so the menu stays usable): a WinForms button's `DialogResult`
+  when someone uses this PC, Allow closing Firefox from this menu and Close Firefox to free RAM ("Closing Firefox to free
+  RAM" below), Open FF Factory. `daemon.json` `"tray": false` turns it off; a daemon a test builds has none unless asked. The schedule window is not modal (`Show()`, so the menu stays usable): a WinForms button's `DialogResult`
   closes only a window shown with `ShowDialog()`, so its Cancel calls `Close()` itself (w1574, lothsahn: "The work schedule
   dialogue box in The task tray cancel button does not work"). Cancel, Esc and the X close it unsaved; checked on beast by
   window messages (BM_CLICK on Cancel, WM_SYSCOMMAND SC_CLOSE), where main's Cancel left it open.
@@ -563,6 +563,57 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
 - **Found while testing on beast**: a Windows Security firewall prompt for `finalfactory.exe` (a player started outside the
   slot pool) stood in front, and while an elevated window is in front Windows drops injected mouse input (UIPI) after the hooks
   have seen it. An agent that drives the desktop with `mouse_event` gets nothing there until a person answers the prompt.
+
+## Closing Firefox to free RAM
+
+A Windows PC's tray can close Firefox gracefully so its memory goes to agents and Unity editors (w1593, lothsahn,
+2026-10-19: "Can you make the daemon have an option in the tray to nicely shutdown Firefox (not force kill) to free ram?";
+then "Closing Firefox should be off by default"). Code: `machine/firefox.ts` and the tray item in
+`machine/tray/FFFactoryTray.cs`; tests: `server/firefox.test.ts`.
+
+- **Off unless the machine turns it on.** `<app_dir>/firefox.json` with `{"enabled": true}` turns it on; a missing or
+  unreadable file, or any other value, is off (`readFirefoxEnabled`). The tray's **Allow closing Firefox from this menu**
+  (ticked is on) writes the file; an agent on the machine can write it too. While it is off the tray shows no Close item, and
+  the daemon refuses a close it is asked for anyway (`FirefoxCloser.request`: the notification "Closing Firefox is off",
+  Firefox not touched). Nothing closes Firefox by itself (no low-RAM trigger): only a person's click.
+- **The item**: **Close Firefox to free RAM (it holds N GB)**, shown only while it is allowed and `firefox.exe` runs in the
+  tray's own Windows session (someone signed in over Remote Desktop keeps theirs). N is the private memory of those processes
+  when the menu opens. While a close runs it reads "Closing Firefox…" and is disabled; a second click does nothing.
+- **No confirmation first.** The person has just chosen an item that says what it does, and every loss Firefox itself guards
+  against still asks: the close-tabs warning, a page asking to leave, downloads in progress. The session comes back on the
+  next start (below), so a close by mistake costs a restart.
+- **How it closes.** WM_CLOSE, what a window's X sends, to each visible top-level window (no owner, class
+  `MozillaWindowClass`) of each Firefox main process, **one window at a time**: post, wait until it is gone, a second
+  (`SETTLE_MS`) for Firefox to save it, then the next (`WIN_FIREFOX_PS` close). Firefox ends by itself when its last window
+  closes. Never `taskkill /F`, `TerminateProcess`, `Stop-Process` or a kill of any kind: `server/firefox.test.ts` fails if
+  the close code holds one. `Process.CloseMainWindow` was not enough: it closes only one window of a process.
+  - Measured on beast (2026-10-19, Firefox 157.0.1): two windows sent WM_CLOSE together came back as one, the other lost
+    from the saved session; one at a time, three windows and their four tabs all came back.
+- **The session comes back on the next start.** Firefox writes its session when it ends, but brings it back by itself only
+  when its startup setting is "Open previous windows and tabs". So once a profile it had open is free, one line goes into
+  that profile's `prefs.js`: `user_pref("browser.sessionstore.resume_session_once", true);`, Firefox's one-shot restore
+  setting. Measured on beast with Firefox's default startup page: all windows and tabs came back, and the setting was false
+  again after that start (Firefox clears it once used). A profile is open while its `parent.lock` is held: Firefox leaves
+  the file behind when it ends, and only an open of it that fails (EBUSY) means it runs (measured, `profileInUse`). The
+  profiles are those `%APPDATA%\Mozilla\Firefox\profiles.ini` lists and any `-profile <folder>` on a Firefox command line.
+- **A prompt, or a Firefox that does not end**: within 45 s (`DEFAULT_WAIT_MS`) for its windows and its main process, it is
+  left running and the notification says so ("Firefox is still open … It may be asking something in its window … It was left
+  running; nothing was forced."). A window that stays open stops that Firefox's close there: its other windows are not asked.
+  Its profile is not written to. Measured on beast with the close-tabs warning on and a window of two tabs: Firefox's own
+  "Close tabs / Cancel" prompt held the window, the close stopped after the wait, and Firefox ran on.
+- **Several profiles, windows and child processes.** Each main process (a `firefox.exe` without `-contentproc`) is one Firefox,
+  closed in turn; its child processes (tabs, GPU, sockets: `-contentproc`, at any depth) have no windows and end after it
+  (up to 15 s more). Background-task processes (`--backgroundtask`) are not Firefox open and are left alone. Private windows
+  are never saved by Firefox, so they do not come back.
+- **The notification** (a tray balloon) says what came of it and the RAM: the machine's available memory before and after
+  (`os.freemem`), "Freed 2.9 GB (Free RAM 8.0 GB → 10.9 GB)", or, when other programs took memory meanwhile, what Firefox
+  held. The daemon log has one `firefox:` line per close (`portal_logs` or the daemon log, grep "firefox:").
+- **Macs**: none. The daemon has no menu-bar app on a Mac (the tray is Windows only, "Pausing a machine"), so there is no
+  item there.
+- **Checked on beast** (2026-10-19): a Firefox started with a throwaway profile in a temp folder, closed by pid
+  (`closeFirefox` `pids`) while another person's Firefox ran beside it: three windows closed one at a time, the main process
+  exited with code 0, and the same windows and tabs were running again after a restart; that person's Firefox kept its
+  processes. The real tray showed no item by default and the item once allowed.
 
 ## Machine sandboxes
 

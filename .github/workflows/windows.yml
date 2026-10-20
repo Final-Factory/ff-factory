@@ -28,6 +28,7 @@ on:
       - 'server/copyTree.test.ts'
       - 'server/elevation.test.ts'
       - 'server/elevation.ts'
+      - 'server/firefox.test.ts'
       - 'server/hostWatch.test.ts'
       - 'server/leftovers.test.ts'
       - 'server/machineDeploy.ts'

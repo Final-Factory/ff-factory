@@ -4,10 +4,15 @@
 //   daemon -> tray  {"type":"state", ...}  what to show; {"type":"show_menu"} / {"type":"hide_menu"} /
 //                   {"type":"show_schedule"} / {"type":"hide_schedule"} open and close them for a still; {"type":"counts"}
 //                   answered by the keys and clicks seen since it started, a person's and injected; {"type":"quit"}
+//                   {"type":"firefox","state":"closing"|"idle"} the Close Firefox item's state; {"type":"notify","title":
+//                   "...","text":"...","warn":bool} a notification; {"type":"firefox_item"} answered by the item as shown;
+//                   the state's "firefox" is whether closing Firefox is allowed here (off unless turned on)
 //   tray -> daemon  {"type":"hello"}, {"type":"pause"}, {"type":"unpause"}, {"type":"settings","settings":{...}},
 //                   {"type":"input","kind":"key"|"click","at":<epoch ms>} a person's key or click (at most one per
 //                   INPUT_EVERY_MS), {"type":"injected","keys":n,"clicks":n} input programs injected, ignored (once a
-//                   minute when there was any), {"type":"log","text":"..."}
+//                   minute when there was any), {"type":"log","text":"..."}, {"type":"firefox_close"} a person chose
+//                   Close Firefox (w1593: the daemon asks its windows to close, machine/firefox.ts; this app ends nothing),
+//                   {"type":"firefox_setting","enabled":bool} Allow closing Firefox from this menu, ticked or not
 // It ends when its stdin closes (the daemon stopped), so an update's new daemon starts the new build.
 //
 // A person's input is a key press or a mouse button press that the low-level hooks see without the injected flag
@@ -90,6 +95,11 @@ namespace FFFactory
         readonly ToolStripMenuItem schedule = new ToolStripMenuItem();
         readonly ToolStripMenuItem activity = new ToolStripMenuItem();
         readonly ToolStripMenuItem portal = new ToolStripMenuItem("Open FF Factory");
+        // Shown only while Firefox runs in this session (w1593, lothsahn: "an option in the tray to nicely shutdown Firefox
+        // (not force kill) to free ram"): the daemon closes its windows the way a person does (machine/firefox.ts).
+        readonly ToolStripMenuItem firefox = new ToolStripMenuItem();
+        // Off unless ticked (lothsahn: "Closing Firefox should be off by default"); the daemon keeps it in firefox.json.
+        readonly ToolStripMenuItem firefoxAllow = new ToolStripMenuItem("Allow closing Firefox from this menu");
         readonly Icon runIcon, pausedIcon;
         readonly Image runDot, pausedDot;
         readonly object outLock = new object();
@@ -111,7 +121,8 @@ namespace FFFactory
         static readonly bool[] held = new bool[256];
         long sentInput;
         DateTime lastInputSent = DateTime.MinValue, lastInjectedReport = DateTime.UtcNow, hooksAt = DateTime.UtcNow;
-        bool paused, haveState;
+        bool paused, haveState, firefoxBusy, firefoxAllowed;
+        readonly int session = Process.GetCurrentProcess().SessionId;
         string portalUrl;
         Dictionary<string, object> settings;
         ScheduleForm scheduleForm;
@@ -141,6 +152,10 @@ namespace FFFactory
             activity.CheckOnClick = false;
             activity.Text = "Pause when someone uses this PC";
             activity.Click += delegate { ToggleActivity(); };
+            firefox.Click += delegate { firefoxBusy = true; RefreshFirefox(); Send(new Dictionary<string, object> { { "type", "firefox_close" } }); };
+            menu.Opening += delegate { RefreshFirefox(); };
+            firefoxAllow.CheckOnClick = false;
+            firefoxAllow.Click += delegate { Send(new Dictionary<string, object> { { "type", "firefox_setting" }, { "enabled", !firefoxAllowed } }); };
             portal.Click += delegate { if (!string.IsNullOrEmpty(portalUrl)) try { Process.Start(portalUrl); } catch (Exception e) { Log("could not open the portal: " + e.Message); } };
 
             menu.ShowImageMargin = true;
@@ -149,8 +164,8 @@ namespace FFFactory
             // Flat, as Windows 11's own menus are: one background, a light hover, thin separators (not WinForms' gradient margin).
             menu.Renderer = new FlatRenderer();
             menu.Padding = new Padding(2, 4, 2, 4);
-            foreach (ToolStripItem it in new ToolStripItem[] { toggle, schedule, activity, portal }) it.Padding = new Padding(0, 3, 0, 3);
-            menu.Items.AddRange(new ToolStripItem[] { title, stateLine, whyLine, nextLine, workLine, new ToolStripSeparator(), toggle, new ToolStripSeparator(), scheduleLine, schedule, activity, new ToolStripSeparator(), portal });
+            foreach (ToolStripItem it in new ToolStripItem[] { toggle, schedule, activity, firefoxAllow, firefox, portal }) it.Padding = new Padding(0, 3, 0, 3);
+            menu.Items.AddRange(new ToolStripItem[] { title, stateLine, whyLine, nextLine, workLine, new ToolStripSeparator(), toggle, new ToolStripSeparator(), scheduleLine, schedule, activity, new ToolStripSeparator(), firefoxAllow, firefox, new ToolStripSeparator(), portal });
             icon.ContextMenuStrip = menu;
             icon.MouseUp += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) ShowMenuAtCursor(); };
             Render(null);
@@ -311,6 +326,9 @@ namespace FFFactory
             // A menu item's own click, for a demo where injected clicks cannot reach the desktop (w1532: an elevated window in
             // front drops them, UIPI): "toggle" is Pause / Unpause, "schedule" opens the schedule window.
             else if (type == "press") { string item = Str(m, "item"); if (item == "toggle") toggle.PerformClick(); else if (item == "schedule") schedule.PerformClick(); }
+            else if (type == "firefox") { firefoxBusy = Str(m, "state") == "closing"; RefreshFirefox(); }
+            else if (type == "notify") icon.ShowBalloonTip(15000, Str(m, "title") ?? "FF Factory", Str(m, "text") ?? "", Equals(m.ContainsKey("warn") ? m["warn"] : null, true) ? ToolTipIcon.Warning : ToolTipIcon.Info);
+            else if (type == "firefox_item") { RefreshFirefox(); Send(new Dictionary<string, object> { { "type", "firefox_item" }, { "allowed", firefoxAllowed }, { "allowItem", firefoxAllow.Checked }, { "visible", firefox.Available }, { "enabled", firefox.Enabled }, { "text", firefox.Text } }); }
             else if (type == "quit") Quit();
         }
 
@@ -345,7 +363,8 @@ namespace FFFactory
                 stateLine.Text = "Connecting to the daemon" + Ellipsis;
                 stateLine.Image = null;
                 whyLine.Visible = nextLine.Visible = workLine.Visible = false;
-                toggle.Enabled = schedule.Enabled = activity.Enabled = portal.Enabled = false;
+                toggle.Enabled = schedule.Enabled = activity.Enabled = portal.Enabled = firefoxAllow.Enabled = false;
+                firefoxAllowed = firefoxAllow.Checked = false;
                 toggle.Text = "Pause all work on this PC";
                 schedule.Text = "Edit work schedule" + Ellipsis;
                 scheduleLine.Visible = false;
@@ -366,12 +385,38 @@ namespace FFFactory
             object s;
             settings = m.TryGetValue("settings", out s) ? s as Dictionary<string, object> : null;
             activity.Checked = ActivityOn();
+            firefoxAllowed = firefoxAllow.Checked = Equals(m.ContainsKey("firefox") ? m["firefox"] : null, true);
+            firefoxAllow.Enabled = true;
+            RefreshFirefox();
             portalUrl = Str(m, "portalUrl");
             portal.Enabled = !string.IsNullOrEmpty(portalUrl);
             icon.Icon = paused ? pausedIcon : runIcon;
             string tip = "FF Factory: " + (paused ? "paused" : "running") + (Str(m, "tip") != null ? " (" + Str(m, "tip") + ")" : "");
-            icon.Text = tip.Length > 63 ? tip.Substring(0, 62) + "2026" : tip;
+            icon.Text = tip.Length > 63 ? tip.Substring(0, 62) + Ellipsis : tip;
             if (scheduleForm != null && !scheduleForm.IsDisposed) scheduleForm.Machine = machine;
+        }
+
+        // The Close Firefox item: there only while closing it is allowed here and firefox.exe runs in this session, with the
+        // private memory it holds now.
+        void RefreshFirefox()
+        {
+            long bytes = 0;
+            int count = 0;
+            foreach (Process p in Process.GetProcessesByName("firefox"))
+            {
+                try { if (p.SessionId == session) { count++; bytes += p.PrivateMemorySize64; } }
+                catch { /* it ended while being read */ }
+                finally { p.Dispose(); }
+            }
+            firefox.Available = firefoxAllowed && (count > 0 || firefoxBusy);
+            firefox.Enabled = haveState && !firefoxBusy;
+            firefox.Text = firefoxBusy ? "Closing Firefox" + Ellipsis : "Close Firefox to free RAM (it holds " + Size(bytes) + ")";
+        }
+
+        static string Size(long bytes)
+        {
+            double gb = bytes / 1073741824.0;
+            return gb >= 1 ? gb.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " GB" : (bytes / 1048576) + " MB";
         }
 
         static void SetLine(ToolStripLabel l, string text)
