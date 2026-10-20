@@ -131,6 +131,23 @@ Now:
   before answering. A stopped worker whose sandbox stays its (unsaved work) past the hold has its view ended the same
   way, so its editor can idle-stop.
 
+## On BEAST first (w1600)
+
+Ben, 2026-10-19: "can you prioritize beast for stuff that needs live view? live view is often too slow". The view's frame
+rate is the sandbox editor's, so the machine matters:
+
+- **Placed there.** A request needs a Live view once its worker runs `live_view start` (`WorkItem.liveView`) or its words
+  ask for one, and it goes where the Capacity block's "Next Live view work" says: `placement.live`, BEAST unless set, else
+  the general placement ([machines.md](machines.md), "Placing work").
+- **Moved there.** A worker that waits on a person with its view up elsewhere is moved by the dispatcher with `stop_agent`
+  `move_to: "beast"`: its view ends, and its request goes to a new session on BEAST, whose handover carries the view's
+  materials, fps and width to stage again. A conversation does not move between computers.
+- **Never beside a timed run.** While BEAST's bench lock is held (`machine/benchLock.ts`), a worker on Live view work there
+  is refused its editor start and `live_view start` and waits for the lock.
+- **The numbers so far.** BEAST: 23.2 fps received at 30 asked, 960 px (w1398, below). lothdesktop: about 3 fps for the
+  w1466 view (the w1600 request), then 15 fps stream (its asked rate) at about 30 fps in game on 2026-10-20 03:36Z (its
+  worker's own report). The default 15 fps hides the difference on a light scene; heavy scenes and 30 fps show it.
+
 ## Measured, w1393 and w1398 (beast)
 
 - **Edit to frame:** a material property edit shows in the next rendered frame (17.5 ms). A knob sent through the
