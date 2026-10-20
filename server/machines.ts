@@ -2202,17 +2202,19 @@ export class MachineManager {
         return;
       }
       case 'self_update_ack':
-        if (!this.linkAcks.settle(msg.id, msg.ok ? true : new Error(`${id} refused it: ${msg.error ?? 'no reason given'}`))) console.log(unwaitedAnswer(id, msg.id, this.linkAcks.late(msg.id), msg.ok ? 'took it' : `refused it: ${msg.error ?? 'no reason given'}`));
+        if (!this.linkAcks.settle(msg.id, msg.ok ? true : new Error(`${id} refused it: ${msg.error ?? 'no reason given'}`)) && !this.linkAcks.repeat(msg.id)) console.log(unwaitedAnswer(id, msg.id, this.linkAcks.late(msg.id), msg.ok ? 'took it' : `refused it: ${msg.error ?? 'no reason given'}`));
         return;
       case 'self_update_report': {
         const r = msg.report;
         if (!r || typeof r.id !== 'string') return;
         console.log(`machine ${id}: its ${r.form} job ${r.id.slice(0, 8)} ${r.ok ? 'finished' : 'FAILED'}${r.rollback ? ` (put back: ${r.rollback})` : ''}${r.note ? `: ${r.note}` : ''}`);
+        // The job ran, so the daemon took the call, whether or not its answer made it across the link (w1641).
+        this.linkAcks.settle(r.id, true);
         this.linkReports.settle(r.id, r);
         return;
       }
       case 'daemon_control_result':
-        if (!this.linkControls.settle(msg.id, msg.ok ? true : new Error(`${id} refused it: ${msg.error ?? 'no reason given'}`))) console.log(unwaitedAnswer(id, msg.id, this.linkControls.late(msg.id), msg.ok ? 'did it' : `refused it: ${msg.error ?? 'no reason given'}`));
+        if (!this.linkControls.settle(msg.id, msg.ok ? true : new Error(`${id} refused it: ${msg.error ?? 'no reason given'}`)) && !this.linkControls.repeat(msg.id)) console.log(unwaitedAnswer(id, msg.id, this.linkControls.late(msg.id), msg.ok ? 'did it' : `refused it: ${msg.error ?? 'no reason given'}`));
         return;
       case 'save_result': {
         const p = this.saveCalls.get(msg.id);

@@ -270,13 +270,27 @@ export interface SelfUpdaterDeps {
   launch?: typeof launchJob;
   remove?: typeof removeJob;
   fetch?: typeof fetch;
+  now?: () => number;
 }
+
+/**
+ * The answers the link may lose (w1641). At the 450f7d53c rollout the portal VM's Tailscale restarted 4.5 minutes into
+ * beast's update and the link was down 30 s: an answer sent then was dropped (send is false on a closed link), and one
+ * sent into a dead socket is lost too, since the daemon notices a silent portal only after 45 s (machine/daemon.ts
+ * heartbeat). Each is kept `keepMs` and sent again on the next link when it was not sent, or was sent within
+ * `beforeDropMs` of the drop; the portal ignores a repeat (server/machineLink.ts PendingCalls.repeat).
+ */
+export const ANSWERS = { keepMs: 30 * 60_000, beforeDropMs: 60_000 };
+
+type LinkAnswer = Extract<FromDaemon, { type: 'self_update_ack' | 'daemon_control_result' }>;
 
 /** The daemon's half of the updates over its link (see the top of the file); machine/daemon.ts holds one. */
 export class SelfUpdater {
   private busy = false;
   /** A finished job's task or LaunchAgent being removed: a new job or an unload waits for it rather than being refused (w1596). */
   private removing: Promise<void> | undefined;
+  /** Answers to the portal's calls, kept until the link surely had them (ANSWERS). */
+  private readonly answers = new Map<string, { msg: LinkAnswer; at: number; sentAt?: number }>();
   /** Its hands (the job launcher, the fetch); tests replace them. */
   readonly deps: SelfUpdaterDeps;
   constructor(d: SelfUpdaterDeps) {
@@ -290,6 +304,36 @@ export class SelfUpdater {
   /** The worker install it runs from, when it is one this can update: its root.json names the service. */
   private install() {
     return this.deps.root ? installOf(this.deps.root) : undefined;
+  }
+
+  private now() {
+    return (this.deps.now ?? Date.now)();
+  }
+
+  /** Answer a call of the portal's; one the link cannot take now is sent when it is back (ANSWERS). */
+  private answer(msg: LinkAnswer) {
+    const now = this.now();
+    for (const [k, a] of this.answers) if (now - a.at > ANSWERS.keepMs) this.answers.delete(k);
+    const sent = this.deps.send(msg);
+    this.answers.set(msg.id, { msg, at: now, ...(sent ? { sentAt: now } : {}) });
+    if (!sent) this.deps.log(`link down: the answer to call ${msg.id.slice(0, 8)} goes when it is back`);
+  }
+
+  /** The link closed: an answer sent shortly before may have gone into a dead socket, so it goes again on the next link. */
+  linkDown(at = this.now()): void {
+    for (const a of this.answers.values()) if (a.sentAt !== undefined && at - a.sentAt <= ANSWERS.beforeDropMs) delete a.sentAt;
+  }
+
+  /** The link is back (its hello sent): the answers it may not have had. */
+  relink(): void {
+    const now = this.now();
+    for (const [id, a] of this.answers) {
+      if (now - a.at > ANSWERS.keepMs) this.answers.delete(id);
+      else if (a.sentAt === undefined && this.deps.send(a.msg)) {
+        a.sentAt = now;
+        this.deps.log(`link back: sent the answer to call ${id.slice(0, 8)} again (${a.msg.ok ? 'ok' : `refused: ${a.msg.error ?? ''}`})`);
+      }
+    }
   }
 
   /** Whether the hello offers `selfUpdate`: a worker root install whose service is known. */
@@ -313,7 +357,7 @@ export class SelfUpdater {
   async onSelfUpdate(msg: Extract<ToDaemon, { type: 'self_update' }>): Promise<void> {
     const refuse = (error: string) => {
       this.deps.log(`update over the link refused: ${error}`);
-      this.deps.send({ type: 'self_update_ack', id: msg.id, ok: false, error });
+      this.answer({ type: 'self_update_ack', id: msg.id, ok: false, error });
     };
     const inst = this.install();
     if (!inst) return refuse('this daemon is not a worker root install whose root.json names its service');
@@ -330,7 +374,7 @@ export class SelfUpdater {
       removeOldBundles(this.deps.appDir, bundle);
       const how = await this.start(this.job(msg.form, msg.id, inst.service, { commit: msg.commit, ...(msg.flags ? { flags: msg.flags } : {}) }), inst.service);
       this.deps.log(`update over the link: the bundle checked (SHA-256 and commit), job ${msg.id} started as ${how}`);
-      this.deps.send({ type: 'self_update_ack', id: msg.id, ok: true });
+      this.answer({ type: 'self_update_ack', id: msg.id, ok: true });
     } catch (e) {
       refuse((e as Error).message);
     } finally {
@@ -341,7 +385,7 @@ export class SelfUpdater {
   /** daemon_control: restart (exit; the supervisor starts it again, its agents run on) or unload, as a job. */
   async onControl(msg: Extract<ToDaemon, { type: 'daemon_control' }>): Promise<void> {
     const answer = (ok: boolean, error?: string) => {
-      this.deps.send({ type: 'daemon_control_result', id: msg.id, ok, ...(error ? { error } : {}) });
+      this.answer({ type: 'daemon_control_result', id: msg.id, ok, ...(error ? { error } : {}) });
     };
     if (msg.action === 'restart') {
       answer(true);
