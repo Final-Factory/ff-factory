@@ -288,6 +288,40 @@ test('w1419: a question with buttons (ask_person) shows the stills and clips its
   await expect(optionA).toContainText('Your answer');
 });
 
+test("w1602: the Warden question's shape: a message with its clips, then a card that carries its own previews; a card without them is refused", async ({ authed: page, browserName }) => {
+  // Ben, 2026-10-19: the clips were in the message above the ask_person card, not in it: "when you ask me about visual things
+  // you have to include the previews". The message shows its clips; the call is refused until the card carries them too.
+  const port = new URL(test.info().project.use.baseURL!).port;
+  const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-clips').replace(/\\/g, '/');
+  const tag = uniq('w1602');
+  const me = await appState(page.request);
+  await sendMessage(page.request, me.orchestratorId!, `The Warden (w000) halo, as recorded ${tag}:\n\n![Halo clip](<${review}/clip.webm>)`);
+  const message = page.locator('.orch .msg-assistant', { hasText: tag });
+  await onScreen(message);
+  if (browserName === 'chromium') await expect(message.locator('.md-video video')).toHaveCount(1);
+  const bare = {
+    question: `Is the Warden halo of w000 right as it is (${tag})?`,
+    options: [
+      { label: `OK as is (${tag})`, description: 'Ship it.', recommended: true },
+      { label: `Add beads to the halo (${tag})`, description: 'Re-record w000.' },
+    ],
+  };
+  const refused = await useTool(page.request, me.orchestratorId!, 'ask_person', bare);
+  expect(refused).toMatch(/Not shown yet: your question names w000/);
+  expect(refused).toMatch(/!\[[^\]]+\]\(<[^>]*\/review\/w000-[^>]+\.(png|webm)>\)/);
+  await expect(page.getByTestId('ask').filter({ hasText: tag })).toHaveCount(0);
+  const withMedia = {
+    ...bare,
+    question: `${bare.question} ![Halo today](<${review}/option-a-1280.png>)`,
+    options: [{ ...bare.options[0], description: `Ship it. ![Halo clip](<${review}/clip.webm>)` }, bare.options[1]],
+  };
+  expect(await useTool(page.request, me.orchestratorId!, 'ask_person', withMedia)).not.toMatch(/Not shown yet|^ERROR/);
+  const card = page.getByTestId('ask').filter({ hasText: tag });
+  await card.scrollIntoViewIfNeeded();
+  await expectLoaded(card.locator('.md-img img'));
+  await expect(card.locator(browserName === 'chromium' ? '.md-video video' : '.md-video video, .ask-media code')).toHaveCount(1);
+});
+
 test('w1419: a long orchestrator message with six review stills between its paragraphs shows them all', async ({ authed: page }) => {
   // The shape of Ben's orchestrator's message of 2026-10-16 23:23 UTC: a TL;DR, then each option's words and its stills
   // as ![Option A at 1280](</srv/fff/review/…png>) lines, then the question. He saw none of them (Firefox).
