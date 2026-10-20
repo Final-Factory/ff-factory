@@ -28,7 +28,7 @@ import { linuxControlScript } from '../../server/machineDeployLinux.ts';
 import { macControlScript } from '../../server/machineDeploy.ts';
 import * as win from '../../server/machineDeployWin.ts';
 import { readJson, scrub, updateFiles, writeJson, type UpdateJob } from '../../machine/selfUpdate.ts';
-import { sameCommit, type WhoAmI } from './worker.ts';
+import { sameCommit, withStandardPaths, type WhoAmI } from './worker.ts';
 
 /** How long the code put back gets to be seen online, and when it is restarted once meanwhile. */
 export const PUT_BACK = { waitMs: 3 * 60_000, restartAfterMs: 60_000, pollMs: 3_000 };
@@ -233,6 +233,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return new Promise((resolve) => child.on('close', (c) => resolve(c ?? 1)));
   }
   const say = (line: string) => console.log(line);
+  // A LaunchAgent starts it with launchd's bare PATH, where git-lfs and node are not (m3, w1596; m5's ssh PATH, w629).
+  process.env.PATH = withStandardPaths(process.env.PATH ?? '');
   if (job.phase === 'done' || readJson<LinkUpdateReport>(f.result)?.id === job.id) return 0;
   const resumed = job.phase === 'running';
   if (resumed && job.pid && job.pid !== process.pid) {
