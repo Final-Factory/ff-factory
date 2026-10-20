@@ -516,6 +516,24 @@ export interface BenchLock {
   since: string;
 }
 
+/**
+ * Whether the run holding `lock` runs in the folder `dir` or below it (w1607): the owner line ends with the run's folder,
+ * `($PWD)`, which Git Bash writes as /f/ffw/... for F:\ffw\.... Compared without case and slash differences.
+ */
+export function benchLockIn(lock: BenchLock | undefined, dir: string): boolean {
+  const ran = /\(([^()]+)\)\s*$/.exec(lock?.owner ?? '')?.[1];
+  if (!ran) return false;
+  const key = (p: string) =>
+    p
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^\/([a-z])\//i, '$1:/')
+      .replace(/\/+$/, '')
+      .toLowerCase();
+  const [a, b] = [key(ran), key(dir)];
+  return !!b && (a === b || a.startsWith(`${b}/`));
+}
+
 // ---- machines (docs/machines.md) ----
 
 export type MachineStatus = 'deploying' | 'ready' | 'error';

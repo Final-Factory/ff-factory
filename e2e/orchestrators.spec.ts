@@ -175,7 +175,7 @@ test("worker updates go to the chats of the people the work is for, never to the
     const dispatcher = me.dispatcherId!;
 
     // A request of the owner's, started by the dispatcher: its updates reach the owner's chat.
-    await useTool(page.request, me.orchestratorId, 'request_work', { title: `Make the tutorial skippable ${tag}`, brief: 'Add a skip button.' });
+    await useTool(page.request, me.orchestratorId, 'request_work', { title: `Make the tutorial skippable ${tag}`, brief: 'Add a skip button.', needs: 'agent' });
     const w = await workTitled(page.request, `Make the tutorial skippable ${tag}`);
     const started = await useTool(page.request, dispatcher, 'start_agent', { sandbox: ALPHA, prompt: `add a skip button ${tag}`, title: `Skip ${tag}`, work_id: w.id, extra_agent: true });
     const worker = /Started agent (\w+)/.exec(started)![1];
