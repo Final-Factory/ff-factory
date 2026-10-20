@@ -1,4 +1,4 @@
-import type { BenchLock } from '../shared/types.ts';
+import type { BenchLock, BenchQueueReport } from '../shared/types.ts';
 
 /**
  * Where new work has room (w416, Lothsahn: "make sure jobs are getting scheduled on LothDesktop", then "Game work should
@@ -54,6 +54,10 @@ export interface Computer {
    * started meanwhile would spoil that run's numbers, so a worker with Live view work waits for it before it starts one.
    */
   benchLock?: BenchLock;
+  /** The timed legs in its bench queue, running or waiting (w1628, MachineStats.benchQueue): a release build goes elsewhere. */
+  benchQueue?: BenchQueueReport;
+  /** Its platform (win32, darwin, linux): timed work that names one stays on it (w1628). */
+  platform?: string;
 }
 
 
@@ -99,13 +103,44 @@ export const DEFAULT_BUILD = ['beast'];
 /** The computers builds try first, in order (placement.build, else DEFAULT_BUILD). */
 export const buildOf = (prefs: PlacementPrefs): string[] => (prefs.build?.length ? prefs.build : DEFAULT_BUILD).map(placeId);
 
-/** Work placed on a first list before the general placement: a Live view (w1600) or a build (w1606). */
-export type FirstKind = 'live' | 'build';
+/** Timed work (w1628, shared/capacity.ts needsTimed): on any platform, or on the one its words name. */
+export type TimedKind = 'timed' | 'timed:win32' | 'timed:darwin';
 
-const FIRST: Record<FirstKind, { of: (p: PlacementPrefs) => string[]; key: string; label: string; why: string }> = {
+/** Work placed on a first list before the general placement: a Live view (w1600), a release build (w1606), timed work (w1628). */
+export type FirstKind = 'live' | 'build' | TimedKind;
+
+const FIRST: Record<'live' | 'build', { of: (p: PlacementPrefs) => string[]; key: string; label: string; why: string }> = {
   live: { of: liveOf, key: 'placement.live', label: 'Live view work', why: 'w1600: Live views stream fastest there' },
-  build: { of: buildOf, key: 'placement.build', label: 'Build work', why: 'w1606: builds run fastest there' },
+  build: { of: buildOf, key: 'placement.build', label: 'Release build work', why: 'w1606: builds run fastest there' },
 };
+
+/**
+ * Where timed work goes (w1628). lothsahn, 2026-10-20: "We should also prefer boxes with a small number of slots and
+ * players for timed runs, not beast since it's big". Among the computers with room, not held or avoided, and on the
+ * platform its words name: first those with no timed leg in their bench queue (a leg queued behind another waits, while
+ * a computer with none runs it at once), then the smallest (fewest sandboxes, then fewest Unity processes: less else runs
+ * beside the leg), then the fewest live agents. A timed A/B compares its legs on one computer, so a slower one gives as
+ * good an answer; work whose absolute numbers must come from one computer names it, and the dispatcher keeps it there.
+ * Undefined when none has room: the general placement then.
+ */
+export function pickTimed(places: readonly Computer[], prefs: PlacementPrefs, t: TimedKind): { pick: Computer; why: string } | undefined {
+  const platform = t === 'timed' ? undefined : t.slice(6);
+  const hold = holdOf(prefs);
+  const avoid = avoidOf(prefs);
+  const ok = places.filter((p) => hasRoom(p) && !hold.has(p.id) && !avoid.has(p.id) && (!platform || p.platform === platform));
+  if (!ok.length) return undefined;
+  const queued = (p: Computer) => p.benchQueue?.timed ?? 0;
+  const key = (p: Computer) => [queued(p) ? 1 : 0, p.maxSandboxes, p.editors ?? 0, queued(p), p.live];
+  const sorted = [...ok].sort((a, b) => {
+    const [x, y] = [key(a), key(b)];
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] - y[i];
+    return 0;
+  });
+  const p = sorted[0];
+  const size = `${p.maxSandboxes} sandboxes, ${p.editors ?? 0} Unity processes, ${p.live} live agents`;
+  const q = queued(p) ? `every one with room ${platform ? `on ${platform} ` : ''}has timed runs queued; this one fewest (${queued(p)})` : 'no timed run queued there';
+  return { pick: p, why: `timed work goes to the smallest computer with room${platform ? ` on ${platform}` : ''} (w1628, lothsahn: "prefer boxes with a small number of slots and players for timed runs, not beast"): ${q}; ${size}` };
+}
 
 /**
  * RAM in use at which a computer counts as busy. A judgment set from w416's numbers: BEAST at 55 of 64 GB (86%) with 7
@@ -261,22 +296,34 @@ function spread(open: Computer[], last: string | undefined, kind: NeedKind): { p
  */
 export function pickComputer(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, kind: NeedKind = 'game', workflows = false, live: boolean | FirstKind = false): { pick: Computer; why: string } | undefined {
   const firstKind: FirstKind | undefined = live === true ? 'live' : live || undefined;
-  if (firstKind && kind === 'game') {
+  if (firstKind?.startsWith('timed') && kind === 'game') {
+    const t = pickTimed(places, prefs, firstKind as TimedKind);
+    if (t) return t;
+    const rest = pickComputer(places, last, prefs, kind, workflows);
+    return rest && { pick: rest.pick, why: `timed work, but no computer${firstKind === 'timed' ? '' : ` on ${firstKind.slice(6)}`} has room; so the general placement: ${rest.why}` };
+  }
+  if ((firstKind === 'live' || firstKind === 'build') && kind === 'game') {
     // Work that needs a Live view (w1600) or builds a player (w1606): the first computer in its list with room, else the general placement.
     const f = FIRST[firstKind];
     const first = f.of(prefs);
     const hold = holdOf(prefs);
     const avoid = avoidOf(prefs);
     const skipped: string[] = [];
+    // A release build goes to another computer while a timed run is running or waiting in one's bench queue (w1628).
+    const timed = new Set<string>();
     for (const id of first) {
       const p = places.find((x) => x.id === id);
       if (!p) skipped.push(`${id} is not a computer here`);
       else if (hold.has(id)) skipped.push(`${id} is held (${hold.get(id)})`);
       else if (avoid.has(id)) skipped.push(`${id} is avoided (${avoid.get(id)})`);
       else if (!hasRoom(p)) skipped.push(`${id} is busy (${busyReasons(p).join('; ')})`);
-      else return { pick: p, why: `${f.label} goes to the first with room in ${f.key} (${first.join(' > ')}; ${f.why})${p.benchLock ? `; ${benchText(p.benchLock)}: its worker waits for it before it starts its ${firstKind === 'live' ? 'editor' : 'build'}` : ''}` };
+      else if (firstKind === 'build' && p.benchQueue) {
+        timed.add(id);
+        skipped.push(`${id} ${timedText(p.benchQueue)} (w1628: release builds go elsewhere meanwhile)`);
+      } else return { pick: p, why: `${f.label} goes to the first with room in ${f.key} (${first.join(' > ')}; ${f.why})${p.benchLock ? `; ${benchText(p.benchLock)}: its worker waits for it before it starts its ${firstKind === 'live' ? 'editor' : 'build'}` : ''}` };
     }
-    const rest = pickComputer(places, last, prefs, kind, workflows);
+    const others = places.filter((x) => !timed.has(x.id));
+    const rest = pickComputer(others.length ? others : places, last, prefs, kind, workflows) ?? (others.length < places.length ? pickComputer(places, last, prefs, kind, workflows) : undefined);
     return rest && { pick: rest.pick, why: `${f.label}, but ${skipped.join(', ')}; so the general placement: ${rest.why}` };
   }
   if (workflows) {
@@ -318,6 +365,9 @@ const loadPart = (p: Computer) => {
   const ram = pct !== undefined ? `; RAM ${pct}% used` : '';
   return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}`;
 };
+
+/** "has 2 timed runs in its bench queue (the first: probe A round 3)" (w1628). */
+export const timedText = (q: BenchQueueReport) => `has ${q.timed} timed run${q.timed === 1 ? '' : 's'} in its bench queue, running or waiting${q.first ? ` (the first: ${q.first})` : ''}`;
 
 /** "its bench lock is held since 21:04Z (beast pid 4121 ... probe A round 2)": a timed run there (w1600). */
 export const benchText = (b: BenchLock) => `its bench lock is held since ${b.since.slice(11, 16)}Z (${b.owner.slice(0, 160)}): a timed run`;
@@ -363,11 +413,19 @@ export function liveLine(places: readonly Computer[], last?: string, prefs: Plac
  * Where the next piece of work that builds a player goes (w1606): first on placement.build (DEFAULT_BUILD), else as other
  * game work. Undefined with fewer than two computers, like preferLine.
  */
+/** Where the next timed work goes (w1628), or undefined with fewer than two computers. */
+export function timedLine(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
+  if (places.length < 2) return undefined;
+  const p = pickComputer(places, last, prefs, 'game', false, 'timed');
+  if (!p) return `No computer has room for timed work now${heldNote(places, prefs, 'game')}.`;
+  return `Next timed work (benchmarks, perf A/Bs and probes; on the platform it names, w1628): ${p.pick.id} (${p.why}).`;
+}
+
 export function buildLine(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
   if (places.length < 2) return undefined;
   const p = pickComputer(places, last, prefs, 'game', false, 'build');
-  if (!p) return `No computer has room for build work now${heldNote(places, prefs, 'game')}.`;
-  return `Next build work (game work that builds a player, w1606): ${p.pick.id} (${p.why}).`;
+  if (!p) return `No computer has room for release build work now${heldNote(places, prefs, 'game')}.`;
+  return `Next release build work (w1606; release builds only, w1628): ${p.pick.id} (${p.why}).`;
 }
 
 /**
@@ -401,7 +459,8 @@ export function capacityLines(places: readonly Computer[], last?: string, prefs:
   const wf = workflowLine(places, last, prefs);
   const live = liveLine(places, last, prefs);
   const build = buildLine(places, last, prefs);
-  return [`## Capacity (${how}; docs/machines.md, "Placing work")`, ...lines, ...(next ? [next] : []), ...(live ? [live] : []), ...(build ? [build] : []), nonGameLine(places, last, prefs), ...(wf ? [wf] : [])];
+  const timed = timedLine(places, last, prefs);
+  return [`## Capacity (${how}; docs/machines.md, "Placing work")`, ...lines, ...(next ? [next] : []), ...(live ? [live] : []), ...(build ? [build] : []), ...(timed ? [timed] : []), nonGameLine(places, last, prefs), ...(wf ? [wf] : [])];
 }
 
 /**
@@ -431,7 +490,7 @@ export function placementHint(target: string, places: readonly Computer[], last?
   const held = holdOf(prefs).get(target);
   const busy = (kind === 'game' ? busyReasons(here) : agentBusyReasons(here)).filter((w) => w !== 'offline');
   const state = held ? `${target} is held (${held})` : avoided ? `${target} is avoided (${avoided})` : busy.length ? `${target} is busy (${busy.join('; ')})` : `${target} has ${pctOf(roomFor(here, kind))} room`;
-  return ` Note: ${state}; the next new ${live && kind === 'game' ? (live === 'build' ? 'build' : 'Live view') : kind === 'game' ? 'game-repo' : 'non-game'} work goes to ${p.pick.id} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, or a worker going on in its own sandbox), put it there.`;
+  return ` Note: ${state}; the next new ${live && kind === 'game' ? (live === 'build' ? 'release build' : live === true || live === 'live' ? 'Live view' : 'timed') : kind === 'game' ? 'game-repo' : 'non-game'} work goes to ${p.pick.id} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, or a worker going on in its own sandbox), put it there.`;
 }
 
 /** The computers with room for `kind` of work in a RoomNow: the one place the two kinds are told apart. */

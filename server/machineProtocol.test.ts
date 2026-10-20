@@ -70,7 +70,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w1596 (no bump): `selfUpdate` in the hello (optional: an older portal ignores it and updates the machine over ssh), and
 // `self_update` and `daemon_control`, sent only to a daemon that offered it (an older daemon never gets one), answered by
 // `self_update_ack`, `self_update_report` and `daemon_control_result`, which an older portal never asks for and drops.
-const DECIDED = { protocol: 9, fingerprint: '5f243d39ead6d0d5' };
+// w1628 (no bump): `benchQueue` on `stats`, the timed legs in the machine's bench queue (machine/benchLock.ts readBenchQueue),
+// which an older portal drops (its stats handler copies the fields it knows); and `bench_priorities`, each worker's request
+// priority for the queue, which an older daemon's onMessage drops (no default case): its queue then counts every ticket normal.
+const DECIDED = { protocol: 9, fingerprint: '8c850af9154aed52' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

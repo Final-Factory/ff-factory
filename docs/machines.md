@@ -957,14 +957,18 @@ LothDesktop and Beast, not just when BEAST is full").
   - Which work: game work that builds a player, once its worker declares a build (`build_plan coming`,
     `WorkItem.build`) or when its title, brief or notes name one (`needsBuild`, `shared/capacity.ts`: "player build",
     "release build", "build a player"...; a bare "build" is not one).
-  - Where: the Capacity block's "Next build work (game work that builds a player, w1606): beast (…)", from `config
-    placement.build` (unset: `beast`, `DEFAULT_BUILD`), else the general placement.
+  - Release builds only (w1628): a worker's own build gets no plan (`NOT_RELEASE`) and no BEAST preference.
+  - Where: the Capacity block's "Next release build work (w1606; release builds only, w1628): beast (…)", from `config
+    placement.build` (unset: `beast`, `DEFAULT_BUILD`), passing over a computer whose bench queue holds a timed leg
+    (`MachineStats.benchQueue`, w1628), else the general placement. Timed work: "Next timed work", the smallest computer
+    with room on the platform it names, BEAST last (`pickTimed`, w1628).
   - A build declared coming holds its computer for new work at once (`Agents.placement()` adds `BuildPlans.holds()`),
     and when due moves its workers between turns elsewhere, pauses the ones that cannot move and asks the ones mid-turn
     to pause at a safe point; `build_plan start` waits (up to 20 minutes) for those turns, and the build queues for its turn in the bench queue itself (w1628); `done`
     resumes them. The paused workers' resumes are held by `machineHold` (`BuildPlans.resumeHold`), not by the computer's
     hold, so the builder and a running Live view go on. Details: [orchestrators.md](orchestrators.md), "Builds clear BEAST".
-  - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators.test.ts`.
+  - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators.test.ts`,
+    `server/w1628Placement.test.ts`.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
   computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it

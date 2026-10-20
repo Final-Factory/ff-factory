@@ -226,11 +226,19 @@ and the view's settings, and a new session there goes on from the branch (docs/m
 
 **Builds clear BEAST** (w1606; Ben, 2026-10-20: "when you know builds are coming up, we also prioritize using beast for
 builds because its faster. so when it's coming time, move work off beast, or when apropriate, pause work and finish the
-build, then resume. make this a rule of FFF"). Work that builds a player (a release, a clip, a playtest or MP check
-player; its worker declared a build, or its words name one: `list_work` says "Needs a build") goes where "Next build
-work" says: `placement.build`, BEAST unless set, else the general placement. A build is declared coming with
-`build_plan` (`server/buildPlans.ts`): by its worker (`coming`, with the minutes until it starts and what it builds), or by
-the dispatcher for a request (`work_id`) when it knows a release request reaches its build step. Then:
+build, then resume. make this a rule of FFF"). **Release builds only** (w1628; lothsahn, 2026-10-20: "Ben's guidance was
+only supposed to be for release builds of the software, not all builds that workers do when making fixes"): a worker's own
+player build (a fix, a clip, a playtest or MP check) gets no BEAST preference, is never a reason to move or pause work on
+BEAST, and goes wherever placement puts it; `build_plan` answers it "Nothing to plan" and it builds where it is, its shared
+ticket in the bench queue keeping it off a timed leg. Release build work (its worker declared one with `release: true`,
+or its words name one, "release build" or "ci-release": `list_work` says "Needs a release build") goes where "Next release build
+work" says: `placement.build`, BEAST unless set, else the general placement, **passing over a computer whose bench queue
+holds a timed leg, running or waiting** (w1628; lothsahn: "Yes, let's make the change you recommend to move things off
+when there are timed runs"; the daemon reports them, `MachineStats.benchQueue`). A release build declared on BEAST while
+one is there is answered `Not on beast (w1628)` with the computer to use; only when no other has room is it declared there,
+and it then waits for those legs in the queue. A release build is declared coming with `build_plan` (`server/buildPlans.ts`,
+`release: true`): by its worker (`coming`, with the minutes until it starts and what it builds), or by the dispatcher for a
+request (`work_id`) when it knows a release request reaches its build step. Then:
 
 1. **At once, no new work goes to that computer**: the Capacity block shows it `held: a build is coming at HH:MMZ (…;
    w1606)`, start_agent's note sends new work elsewhere, nothing is moved there, no released worker resumes there. The
@@ -261,8 +269,26 @@ the dispatcher for a request (`work_id`) when it knows a release request reaches
    the build took. A plan nobody ends is ended 3 hours after it was due (`PLAN_MAX_MS`). Plans live in
    `data/builds.json`, so a portal restart keeps the hold and the resumes.
 
-One build at a time per computer. A worker off BEAST that declares one builds where it is (nothing is cleared there);
-its request is marked build work, so its next placement is BEAST first. **FFBox stays the release lane**: official
+One build at a time per computer. A worker off BEAST that declares a release build builds where it is (nothing is cleared
+there); its request is marked build work, so its next placement is BEAST first.
+
+**Timed work goes to small computers first** (w1628; lothsahn, 2026-10-20: "We should also prefer boxes with a small
+number of slots and players for timed runs, not beast since it's big"). Work whose words name a benchmark, a perf A/B or
+probe, a timed run or frame times (`shared/capacity.ts` `needsTimed`) goes where "Next timed work" says
+(`server/placement.ts` `pickTimed`): among the computers with room, not held or avoided, and on the platform its words name
+("Windows", `probe_ab_win`, BEAST or LothDesktop: Windows; "Mac", m3 or m5: macOS), first those with no timed leg in their
+bench queue, then the smallest (fewest sandboxes, then fewest Unity processes), then the fewest live agents; BEAST, the
+biggest, comes last. A timed A/B compares its legs on one computer, so a slower one gives as good an answer; work whose
+absolute numbers must come from one computer names it in its brief, and you keep it there.
+
+**The bench queue's order** (w1628, the game repo's `scripts/bench/bench_queue.py`, `Documentation/Bench-Lock.md`): first
+by the priority of the worker's open requests (lothsahn: "Yes, the queue should first sort by priority, using the logic the
+worker is working on within each priority group"; urgent, high, normal, low), which FF Factory sends each machine's daemon
+at connect and every minute (`bench_priorities`, written to `bench.queue/priorities.json`, keyed by the worker's session);
+a ticket of no request (an editor boot, a nightly) counts as normal, and a changed priority moves a waiting ticket within
+the minute (a running one is never stopped). Within a priority, one timed leg, then the waiting group of shared tickets
+(builds, compiles, editor boots), then the next timed leg: a new shared ticket joins the group still waiting, or goes right
+after the next single timed leg, never to the end and never into a group already running. **FFBox stays the release lane**: official
 release builds and Steam uploads run on ffbox CI (`ci-release`), never on these computers, and nothing here touches
 Steam. A release build cannot run on BEAST under that lane; the smallest change would be a GitHub Actions self-hosted
 runner on BEAST for the Windows player job, which is Ben's and Lothsahn's call, not made here. The nightly lab's
