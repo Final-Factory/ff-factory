@@ -113,6 +113,17 @@ Two from a feature that adds to a person's orchestrator (w1397):
   chat and run in parallel: "no new event after a click" as a transcript length failed once another spec wrote to it
   (`e2e/ask.spec.ts`, "Chat more"). Filter the events by the test's unique tag (`uniq()`).
 
+Two from replacing a page's cards (w1597):
+
+- **Grep every e2e spec for each test id and text a replaced component gave.** The Intake tab's rows (`work-<id>`) became
+  question cards (`intake-<id>`); the local run covered the intake, fleet, dispatcher and ledger specs, and CI then failed
+  `e2e/provider.spec.ts` (Max's escalations), which looked the row up too. Before the push: `grep -rn "<old test id or
+  text>" e2e/` for each one the old component rendered, and run every spec it names.
+- **An e2e test that leaves a request waiting on the tester changes another spec's counts.** The Overview's
+  "N waiting on you" (`e2e/fleet.spec.ts`) counts every open request asking the tester, so it fails when it runs after a
+  spec that left one asking (it does on `main` with the intake, fleet, dispatcher and ledger specs together). Close what
+  your test leaves asking at its end (`patchWork(..., { status: 'rejected' })`, as the w1228 intake test does).
+
 Two from hangs (w906):
 
 - **Never end a process by a stale id.** Windows reuses process ids and never clears a dead parent's id from
