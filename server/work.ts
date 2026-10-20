@@ -336,7 +336,7 @@ export function describeItem(w: WorkItem, workerLine: (id: string) => string, no
   const state = now ? ` ${liveLine(now)}:` : '';
   const runs = w.runsFor ? ` Runs for ${w.runsFor.displayName} (${clip(oneLine(w.runsFor.why), 120)}): their Claude pool and GitHub token.` : '';
   // w1600: placed by the Capacity block's "Next Live view work" line (BEAST first), not the general one.
-  const live = needsLive(w) ? ` Needs a Live view${w.liveView ? ` (its worker started one on ${w.liveView.machine})` : ''}: place it by "Next Live view work".` : needsBuild(w) ? ` Needs a release build${w.build ? ` (its worker declared one on ${w.build.machine})` : ''}: place it by "Next release build work" (w1606).` : needsTimed(w) ? ` Timed work${needsTimed(w) === 'any' ? '' : ` on ${needsTimed(w)}`}: place it by "Next timed work" (w1628).` : '';
+  const live = needsLive(w) ? ` Needs a Live view${w.liveView ? ` (its worker started one on ${w.liveView.machine})` : ''}: place it by "Next Live view work".` : needsBuild(w) ? ` An urgent release${w.build ? ` (its worker declared its build on ${w.build.machine})` : ''}: place it by "Next urgent release work" (w1639: BEAST, else LothDesktop when BEAST is offline).` : needsTimed(w) ? ` Timed work${needsTimed(w) === 'any' ? '' : ` on ${needsTimed(w)}`}: place it by "Next timed work" (w1628).` : '';
   return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${runs}${live}${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
 }
 

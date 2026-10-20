@@ -210,7 +210,7 @@ export class BlockerWatch {
       }
       // Queued with room (w643): the same room test the page and decide_work queue read, for game work and for agent-slot work (w1098).
       const room: RoomNow | undefined = this.d.roomFacts?.() ?? (this.d.room ? { game: this.d.room(), agent: [], held: [] } : undefined);
-      if (room && (room.game.length || room.agent.length)) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');
+      if (room && (room.game.length || room.agent.length || room.reserved?.length)) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');
     } catch (e) {
       console.warn(`blocker watch: ${(e as Error).message}`);
     } finally {

@@ -4054,3 +4054,58 @@ test('w1628: each worker\'s bench priority is the highest of its open requests, 
   assert.equal(agents.benchPriorities('pc')[a.id], undefined, 'no open request: its tickets count as normal');
   assert.deepEqual(agents.benchPriorities('elsewhere'), {});
 });
+
+// w1643, lothsahn: "let's make the setting the minimum priority work that can go to a machine. If normal (all work), if high,
+// high and urgent, if urgent, urgent only".
+test('w1643: placement.minPriority: start_agent refuses a request below the computer\'s level and takes it once its person raises it; a new request sent to a worker there follows the rule while the worker\'s own goes on', async (t) => {
+  const { store, cfg, agents, dispatcher, chat, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  cfg.placement = { minPriority: { pc: 'urgent' } };
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', priority: 'high' }]);
+  // The dispatcher's brief names the reservation in force and where its rule is (the brief's budget, w1158); read_rules machines has it.
+  assert.match((agents.orchestratorOptions(dispatcher().info) as { systemPrompt: { append: string } }).systemPrompt.append, /\(now: pc RESERVED for urgent work only \(minPriority urgent, w1643: `read_rules machines` before you place, queue or move work there\)\)/);
+  assert.match(agents.rulesText('machines'), /never goes there, not even when nothing else has room: it waits Queued, since a reservation that overflowed would reserve nothing/);
+  const refused = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: do it', work_id: 'w1' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /pc is reserved for urgent work only \(placement\.minPriority urgent; this work is normal\): w1 is normal, so it does not go there\. Start it on another computer .*or queue it \(decide_work queue\)/);
+  assert.deepEqual(store.work.get('w1')!.sessionIds, [], 'nothing started');
+  // Its person raises it: eligible at once.
+  assert.equal((await call(chat(LOTH).info, 'update_work', { id: 'w1', priority: 'urgent' })).isError, false);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: do it', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  await until('its first turn', () => store.sessions.get(id)!.status === 'idle');
+  // w2 (high) is new work on pc: refused, whichever session it would go to.
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: id, text: 'also this', work_id: 'w2', title: 'w2: also this' });
+  assert.equal(sent.isError, true);
+  assert.match(sent.text, /pc is reserved for urgent work only \(placement\.minPriority urgent; this work is high\): w2 is high/);
+  // w1 lowered again: its worker goes on, and a follow-up on it still reaches it.
+  await call(chat(LOTH).info, 'update_work', { id: 'w1', priority: 'normal' });
+  const follow = await call(dispatcher().info, 'message_agent', { session_id: id, text: 'go on', work_id: 'w1' });
+  assert.equal(follow.isError, false, follow.text);
+});
+
+test('w1643: a request below a reserved computer\'s level waits Queued with the reservation named, not WRONG; raised to the level, queue is refused and the page and the WRONG flag count that computer', async (t) => {
+  const { store, agents, o, dispatcher, chat, call } = setup(t);
+  const f = { game: [] as string[], agent: [] as string[], held: [], reserved: [{ id: 'beast', min: 'high' as const, for: ['game', 'agent'] as ('game' | 'agent')[] }] };
+  agents.roomNow = () => f.game;
+  agents.roomFacts = () => f;
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', priority: 'urgent' }]);
+  (o as unknown as { now: () => Date }).now = () => new Date(T0);
+  const queued = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'only beast has room' });
+  assert.equal(queued.isError, false, queued.text);
+  assert.match(store.work.get('w1')!.log.join('\n'), /queued for capacity; beast has room but takes high and urgent work only \(placement\.minPriority; this is normal\)/);
+  const urgent = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'only beast has room' });
+  assert.equal(urgent.isError, true);
+  assert.match(urgent.text, /queue is for capacity only, and beast has room for w2 now/);
+  // After the grace it is still a right Queued: no flag, and the page says why.
+  (o as unknown as { now: () => Date }).now = () => new Date(Date.parse(T0) + 11 * 60_000);
+  const line = (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
+  assert.doesNotMatch(line, /WRONG/);
+  assert.match(line, /Queued \(queued for capacity: no computer that could take it has room; beast has room but takes high and urgent work only \(placement\.minPriority; this is normal\)\)/);
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), []);
+  // Its person raises it to high: it fits BEAST now.
+  await call(chat(LOTH).info, 'update_work', { id: 'w1', priority: 'high' });
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Queued \[WRONG: beast has room\]/);
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), ['w1']);
+});

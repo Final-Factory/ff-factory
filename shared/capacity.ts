@@ -84,16 +84,23 @@ export function needsLive(w: Pick<WorkItem, 'needs' | 'liveView' | 'title' | 'br
 }
 
 /**
- * A release build named in words (w1606, narrowed by w1628): "release build", "build a release", "ci-release". lothsahn,
- * 2026-10-20: "Ben's guidance was only supposed to be for release builds of the software, not all builds that workers do
- * when making fixes": a worker's own player build (a fix, a clip, a playtest or MP check) is placed like any game work.
+ * An URGENT release named in words (w1639): "quick release", "urgent release", "urgent build", the urgent release lane or
+ * its script. lothsahn, 2026-10-20: "Release builds should be handed by ffbox. We should update the version and just let
+ * ffbox build it ... If we need an urgent build, we should be able to ask beast or Lothdesktop to build it for us ...
+ * Then Ben and I can ask for a release (ffbox) or a quick or urgent release (beast, if offline, LothDesktop)". So a
+ * normal release ("release build", "ci-release") is FFBox's and builds nothing on these computers: it is not build work
+ * here, and only the urgent lane's is. (Until w1639, w1606 and w1628 placed every named release build here; a worker's
+ * own player build, a fix, a clip, a playtest or MP check, never was: w1628.)
  */
-export const BUILD_WORDS = /\brelease builds?\b|\bbuild (?:a|the|an?(?: new)?) release\b|\bci-release\b/i;
+export const URGENT_RELEASE_WORDS = /\b(?:quick|urgent)\s+(?:dev\s+)?(?:release|build)s?\b|\burgent[- ]release\b|\burgent_release\.py\b/i;
+/** Build work's words: since w1639 the urgent release's only (above). */
+export const BUILD_WORDS = URGENT_RELEASE_WORDS;
 
 /**
- * Whether a request makes a release build (w1606, Ben: "when you know builds are coming up, we also prioritize using beast
- * for builds because its faster"; release builds only since w1628): game work whose worker declared a release build
- * (`build`), or whose title, brief or people's notes name one, or `text` does (a dispatcher's brief).
+ * Whether a request makes a release build on an FF Factory computer (w1606, Ben: "when you know builds are coming up, we
+ * also prioritize using beast for builds because its faster"; release builds only since w1628; the urgent lane's only since
+ * w1639): game work whose worker declared a release build (`build`), or whose title, brief or people's notes ask for a quick
+ * or urgent release, or `text` does (a dispatcher's brief).
  */
 export function needsBuild(w: Pick<WorkItem, 'needs' | 'build' | 'title' | 'brief' | 'notes'> | undefined, text = ''): boolean {
   if (w && needsOf(w) === 'agent') return false;
@@ -121,3 +128,34 @@ export function needsTimed(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'note
   const mac = /\bmac(?:os)?\b|\bm[35]\b/i.test(all);
   return win === mac ? 'any' : win ? 'win32' : 'darwin';
 }
+
+/**
+ * The lowest priority of work a computer takes (w1643, config placement.minPriority). lothsahn, 2026-10-20: "Instead of a
+ * single setting, let's make the setting the minimum priority work that can go to a machine. If normal (all work), if high,
+ * high and urgent, if urgent, urgent only". normal is the default and takes low work too.
+ */
+export type MinPriority = 'normal' | 'high' | 'urgent';
+export const MIN_PRIORITIES: readonly MinPriority[] = ['normal', 'high', 'urgent'];
+
+/** low and normal are one level here: a computer at normal takes all work, low included. */
+const LEVEL: Record<string, number> = { low: 0, normal: 0, high: 1, urgent: 2 };
+
+/** Whether a computer whose lowest priority is `min` takes work of `priority` (a request's priority now; unknown is normal). */
+export const admitsPriority = (min: MinPriority | undefined, priority: string | undefined): boolean => (LEVEL[priority ?? 'normal'] ?? 0) >= (LEVEL[min ?? 'normal'] ?? 0);
+
+/** "high and urgent work only", "urgent work only": what a reserved computer takes. */
+export const minPriorityText = (min: MinPriority): string => (min === 'urgent' ? 'urgent work only' : min === 'high' ? 'high and urgent work only' : 'all work');
+
+/** A computer with room reserved for higher work (RoomNow.reserved, AppState.reservedRoom): its lowest priority and the kinds it has room for. */
+export interface ReservedRoom {
+  id: string;
+  min: MinPriority;
+  for: readonly ('game' | 'agent')[];
+}
+
+/** "beast has room but takes urgent work only (placement.minPriority; this is normal)": how a Queued reason names one. */
+export const reservedText = (reserved: readonly ReservedRoom[] | undefined, kind: 'game' | 'agent' | undefined, priority: string | undefined, slot = 'room'): string =>
+  (reserved ?? [])
+    .filter((r) => (!kind || r.for.includes(kind)) && !admitsPriority(r.min, priority))
+    .map((r) => `${r.id} has ${slot} but takes ${minPriorityText(r.min)} (placement.minPriority; this is ${priority ?? 'normal'})`)
+    .join('; ');

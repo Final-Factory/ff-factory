@@ -263,10 +263,22 @@ export const Transcript = memo(function Transcript({
   const loadedNow = useRef(loaded);
   loadedNow.current = loaded;
 
+  // The chat's last row and where it sat in the view at the last look: a reader's scroll moves it, the layout moving
+  // scrollTop (content above it drawn smaller, w1641) does not.
+  const lastRow = useRef<{ row: Element; at: number } | null>(null);
+
   const track = (el: HTMLElement) => {
     lastTop.current = el.scrollTop;
     lastHeight.current = el.scrollHeight;
     lastBox.current = { w: el.clientWidth, h: el.clientHeight };
+    const row = el.firstElementChild?.lastElementChild;
+    lastRow.current = row ? { row, at: row.getBoundingClientRect().top - el.getBoundingClientRect().top } : null;
+  };
+
+  /** The last row is where it was in the view: nobody scrolled, the layout moved scrollTop. */
+  const rowStayed = (el: HTMLElement) => {
+    const l = lastRow.current;
+    return !!l && l.row.isConnected && Math.abs(l.row.getBoundingClientRect().top - el.getBoundingClientRect().top - l.at) < 2;
   };
 
   const onScroll = () => {
@@ -279,8 +291,12 @@ export const Transcript = memo(function Transcript({
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     const grew = el.scrollHeight > lastHeight.current;
     const down = el.scrollTop >= lastTop.current;
+    // WebKit has no scroll anchoring: content above the view drawn smaller (a diagram that failed, w1641) pulls scrollTop down
+    // to the new end, and when a picture at the end loads before this event is handled, the content grew and the view went up,
+    // as when the reader scrolls up. Only the reader moves the rows on screen.
+    const stayed = atBottom.current && rowStayed(el);
     track(el);
-    if (atBottom.current && grew && down) {
+    if (atBottom.current && ((grew && down) || stayed)) {
       // Late content (a lazy image, a diagram) pushed the end away before this event was handled: still following, so follow.
       el.scrollTo({ top: el.scrollHeight });
       track(el);

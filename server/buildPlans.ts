@@ -2,13 +2,22 @@
 // know builds are coming up, we also prioritize using beast for builds because its faster. so when it's coming time, move
 // work off beast, or when apropriate, pause work and finish the build, then resume. make this a rule of FFF".
 //
+// SINCE w1639 THE ONLY RELEASE BUILD ON THESE COMPUTERS IS THE URGENT LANE'S (lothsahn, 2026-10-20: "Release builds should
+// be handed by ffbox ... If we need an urgent build, we should be able to ask beast or Lothdesktop to build it for us. For
+// that, we need to kick everyone else off the box (or at least have them pause) ... a quick or urgent release (beast, if
+// offline, LothDesktop)"). A normal release is FFBox's and declares nothing here.
+//
 // A worker (or the dispatcher, for a request) declares a build coming on a build computer (placement.build, DEFAULT_BUILD:
-// beast) with a rough lead time, through the build_plan tool. Then:
+// beast, then lothdesktop; an OFFLINE one is refused, naming the next online one) with a rough lead time, through the
+// build_plan tool. A timed leg in that computer's bench queue no longer sends it elsewhere (w1628 did, for release builds
+// in general): the release's own Unity runs take EXCLUSIVE tickets at its request's urgent priority, so they wait only for
+// the leg running now. Then:
 // - From the declaration, the computer is held for new work (Agents.placement() adds holds()): nothing new is placed there,
 //   no released worker resumes there, nothing is moved there. Its workers go on as they are until the build is due.
 // - When it is due, FF Factory clears it (clear()). Each other worker there:
-//   - one whose Live view runs is left alone: a Live view a person may be steering beats a build, and a move ends the view
-//     (the build runs beside it, a little slower);
+//   - one whose Live view runs is left in place, editor and view open: a Live view a person may be steering beats a build,
+//     and a move ends the view. It is asked (liveViewNotice) to start no compile, test run or player build until the build
+//     is done, and told when it is (the build runs beside the view, a little slower);
 //   - one between turns is moved (Agents.moveWorker, the w1600 route: process stopped, work saved and pushed, its requests
 //     Queued for the other computer with their branch) to the computer the general placement picks, when one has room;
 //     when none has, it is paused in place: its resumes (a check-in, CI, a reply) wait in the send queue (resumeHold) until
@@ -66,8 +75,10 @@ export interface BuildDeps {
   benchLock: (machineId: string) => BenchLock | undefined;
   /** The timed legs in its bench queue, running or waiting (w1628, MachineStats.benchQueue). */
   benchQueue?: (machineId: string) => BenchQueueReport | undefined;
-  /** Where a release build goes now (the release build placement, which passes over a computer with timed legs). */
+  /** Where an urgent release goes now (the release placement: the first online build computer with room). */
   releaseTarget?: () => string | undefined;
+  /** Whether a computer's daemon is connected now (w1639: an urgent release skips an offline BEAST for LothDesktop). */
+  machineOnline?: (machineId: string) => boolean;
   /** Another computer with room for this worker's work (the general placement, never `from`), or undefined. */
   moveTarget: (info: SessionInfo, from: string) => string | undefined;
   /** Agents.moveWorker: resolves with its answer, throws with why not. */
@@ -101,6 +112,18 @@ export function pauseNotice(p: Pick<BuildPlan, 'machine' | 'what' | 'by'>, reque
     "2. Stop your sandbox's Unity editor (mcp__machine__unity stop) and any player or batch run you started, unless a person is watching your Live view now.",
     `3. End your turn with one line per request: \`${example}: paused for the build on ${p.machine}; <where you stopped>\`. Set no wake_me for it.`,
     `Your check-ins and replies wait meanwhile, and when the build is done FF Factory tells you to carry on, in this same conversation and sandbox. If \`build_plan status\` says no build is planned on ${p.machine}, it is over: ignore this and carry on.`,
+  ].join('\n');
+}
+
+/**
+ * What a worker whose Live view runs on a computer being cleared for a build is told (w1639): its editor and view stay as
+ * they are, for the person who may be using them; only the heavy work it would start waits.
+ */
+export function liveViewNotice(p: Pick<BuildPlan, 'machine' | 'what' | 'by'>): string {
+  return [
+    `[FF Factory] BUILD (w1606, w1639): ${p.by} builds ${p.what} on ${p.machine} now. Your Live view stays open and your editor runs: a person may be using them, and nothing of yours is moved or closed.`,
+    'Until FF Factory says the build is done, start no compile, refresh, test run, player build or batch Unity run: the release has this computer\'s cores. Answering the person, looking, and edits that need no compile go on as usual.',
+    `If \`build_plan status\` says no build is planned on ${p.machine}, it is over: carry on.`,
   ].join('\n');
 }
 
@@ -168,17 +191,18 @@ export class BuildPlans {
     const minutes = Math.max(0, Math.min(MAX_LEAD_MIN, Math.round(Number(a.minutes) || 0)));
     const now = this.now();
     const old = this.plans.get(machine);
-    // w1628, lothsahn: "Yes, let's make the change you recommend to move things off when there are timed runs": while a
-    // timed leg runs or waits in this computer's bench queue, a release build goes to another computer with room.
-    const timed = old ? undefined : this.d.benchQueue?.(machine);
-    const other = timed ? this.d.releaseTarget?.() : undefined;
-    if (timed && other && other !== machine) {
-      return `Not on ${machine} (w1628): it ${timedText(timed)}, and a release build goes elsewhere meanwhile. Build it on ${other}: ${a.builder ? `ask the dispatcher to move this work there (stop_agent move_to ${other}), or build where you are if that is ${other}` : `build_plan coming with machine ${other}, and place its request there`}.`;
+    // w1639, lothsahn: "a quick or urgent release (beast, if offline, LothDesktop)": an offline build computer is refused,
+    // naming the next online one. A timed leg in the bench queue no longer sends the build elsewhere (w1628 did): the
+    // release's exclusive tickets at its urgent priority wait only for the leg running now.
+    if (!old && this.d.machineOnline && !this.d.machineOnline(machine)) {
+      const next = first.find((id) => id !== machine && this.d.machineOnline!(id));
+      return `Not on ${machine} (w1639): it is offline. ${next ? `An urgent release builds on ${next} then: ${a.builder ? `ask the dispatcher to move this work there (stop_agent move_to ${next})` : `build_plan coming with machine ${next}, and place its request there`}.` : `No build computer (${first.join(', ')}) is online: say so to the requester; a normal release (FFBox) needs none.`}`;
     }
+    const timed = old ? undefined : this.d.benchQueue?.(machine);
     if (old && !(a.builder && this.isBuilder(old, a.builder)) && !(a.by === 'the dispatcher' && old.by === 'the dispatcher')) {
       return `Not now: ${machine} is ${this.holdWhy(old).replace(/: no new work until it is done$/, '')}. One build at a time there: declare yours once that one is done (build_plan status), or build where you are.`;
     }
-    const queuedNote = timed ? ` ${machine} ${timedText(timed)} and no other computer has room for a release build: the build waits for those legs in its bench queue, never beside one.` : '';
+    const queuedNote = timed ? ` ${machine} ${timedText(timed)}: the release's exclusive tickets, at its request's urgent priority, go first after the leg running now, never beside one.` : '';
     const plan: BuildPlan = old
       ? { ...old, what: a.what || old.what, dueAt: old.clearedAt ? old.dueAt : now + minutes * 60_000, requests: [...new Set([...old.requests, ...a.requests])] }
       : { machine, what: (a.what || 'a player build').slice(0, 160), ...(a.builder ? { builder: a.builder } : {}), requests: a.requests, by: a.by, declaredAt: now, dueAt: now + minutes * 60_000, told: {}, paused: [], moved: [], kept: [] };
@@ -187,7 +211,7 @@ export class BuildPlans {
     this.d.log(`build: ${plan.by} declared ${plan.what} on ${machine}, due ${hhmm(plan.dueAt)}${plan.requests.length ? ` (${plan.requests.join(', ')})` : ''}`);
     if (!old) this.d.notify(`[ledger] BUILD COMING (w1606): ${plan.by} builds ${plan.what} on ${machine} at ${hhmm(plan.dueAt)} (in ${minutes} min)${plan.requests.length ? ` for ${plan.requests.join(', ')}` : ''}. No new work goes to ${machine} until it is done (Capacity shows it held). At ${hhmm(plan.dueAt)} FF Factory moves the workers there that are between turns to computers with room and pauses the rest at a safe point; it resumes them when the build is done. Nothing for you to do unless you want to place its request: then on ${machine}.`);
     if (minutes === 0) void this.clear(plan);
-    return `Declared (w1606): ${plan.what} on ${machine} at ${hhmm(plan.dueAt)}.${queuedNote} No new work goes there from now. ${minutes === 0 ? 'FF Factory clears it now' : `At ${hhmm(plan.dueAt)} FF Factory clears it`}: the workers between turns move to other computers with room, the ones mid-turn finish their step and pause, and a Live view that runs is left alone. When you are ready, build_plan start: it says go, or what it still waits for. After the build, build_plan done.`;
+    return `Declared (w1606): ${plan.what} on ${machine} at ${hhmm(plan.dueAt)}.${queuedNote} No new work goes there from now. ${minutes === 0 ? 'FF Factory clears it now' : `At ${hhmm(plan.dueAt)} FF Factory clears it`}: the workers between turns move to other computers with room, the ones mid-turn finish their step and pause, and a Live view that runs stays open (its worker starts no compile, test or build meanwhile). When you are ready, build_plan start: it says go, or what it still waits for. After the build, build_plan done.`;
   }
 
   /** build_plan start: go, or what the build still waits for. Starting before the due time clears the computer at once. */
@@ -234,6 +258,11 @@ export class BuildPlans {
       if (!this.d.isLive(id) && !this.d.workersOn(p.machine).some((s) => s.id === id)) continue;
       this.d.tell(id, `[FF Factory] The build on ${p.machine} is done (w1606): carry on where you stopped, in this conversation and sandbox. Start your editor again if you need it (mcp__machine__unity start).`);
       resumed.push(id);
+    }
+    // The Live views left open (w1639): their heavy work may start again.
+    for (const k of p.kept) {
+      if (!this.d.isLive(k.session) && !this.d.workersOn(p.machine).some((s) => s.id === k.session)) continue;
+      this.d.tell(k.session, `[FF Factory] The build on ${p.machine} is done (w1639): compiles, tests and builds may start again.`);
     }
     this.d.kick?.();
     this.d.log(`build: ${p.what} on ${p.machine} done (${why}); build ${took}; ${p.moved.length} moved, ${resumed.length} resumed, ${idleOf(p).length} paused between turns resume with their own next message`);
@@ -293,6 +322,8 @@ export class BuildPlans {
         const reqs = this.d.openRequestsOf(s.id);
         if (this.d.hasView(s.id)) {
           p.kept.push({ session: s.id, why: 'its Live view runs: a person may be steering it, and a move would end it' });
+          // w1639: its editor and view stay; only the heavy work it would start waits.
+          this.d.tell(s.id, liveViewNotice(p));
           continue;
         }
         const live = this.d.isLive(s.id);
@@ -355,4 +386,4 @@ export const NOT_RELEASE = 'Nothing to plan (w1628): build_plan is for release b
 
 /** The build_plan tool's description, the worker's and the dispatcher's (w1606). */
 export const BUILD_PLAN_DOC =
-  'Release builds only (w1628; lothsahn, 2026-10-20: "Ben\'s guidance was only supposed to be for release builds of the software, not all builds that workers do when making fixes"): a worker\'s own player build (a fix, a clip, a playtest or MP check) needs no plan and clears nothing: build where you are through unity-slot run. A release build runs first on BEAST (w1606, placement.build), but goes to another computer while BEAST has a timed run running or waiting in its bench queue (w1628): say it is coming (release: true), so FF Factory clears that computer for it. action coming (release: true, minutes: lead time, what) holds it for new work at once, and when due moves the workers there between turns to other computers and pauses the rest at a safe point (never mid-edit); start (release: true) says go, or what it still waits for (workers finishing their step); done ends it and resumes the paused work; status. A worker declares its own release build (it runs where the worker is); the dispatcher one for a request (work_id).';
+  'The urgent release lane\'s build only (w1639; release builds only since w1628; lothsahn, 2026-10-20: "Ben\'s guidance was only supposed to be for release builds of the software, not all builds that workers do when making fixes"): a normal release is FFBox\'s and plans nothing here, and a worker\'s own player build (a fix, a clip, a playtest or MP check) needs no plan and clears nothing: build where you are through unity-slot run. A quick or urgent release builds on BEAST, else LothDesktop when BEAST is offline (w1639, placement.build), whatever timed legs wait in the bench queue (its exclusive tickets at its urgent priority go first after the leg running now): say it is coming (release: true), so FF Factory clears that computer for it; a Live view there stays open, and its worker is asked to start no compile, test or build meanwhile. action coming (release: true, minutes: lead time, what) holds it for new work at once, and when due moves the workers there between turns to other computers and pauses the rest at a safe point (never mid-edit); start (release: true) says go, or what it still waits for (workers finishing their step); done ends it and resumes the paused work; status. A worker declares its own release build (it runs where the worker is); the dispatcher one for a request (work_id).';

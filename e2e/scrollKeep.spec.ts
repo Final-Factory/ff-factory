@@ -199,3 +199,33 @@ test('the Requests list keeps its scroll position across the Dispatcher conversa
   await panel.getByRole('tab', { name: /Requests/ }).click();
   await expect.poll(() => list.evaluate((el) => Math.round(el.scrollTop))).toBe(at);
 });
+
+// w1641: on WebKit (no scroll anchoring) a block above the view drawn smaller pulls scrollTop down to the new end, and a
+// picture at the end that loads before that scroll event is handled makes the chat look scrolled up: it stopped following
+// (CI, mobile-safari: 184 and 2963 px short of the end, after the seeded chat's broken mermaid diagram drew its error).
+test('a block above drawn smaller while a picture at the end loads keeps the chat at the bottom', async ({ authed: page }) => {
+  const me = await appState(page.request);
+  const tag = uniq('shrink');
+  for (let i = 0; i < 6; i++) await sendMessage(page.request, me.orchestratorId, `shrink ${i} ${tag} ` + 'words '.repeat(60));
+  await go(page, '#/');
+  const scope = page.locator('.orch').first();
+  await expect(scope.locator('.msg-assistant', { hasText: `shrink 5 ${tag}` })).toHaveCount(1);
+  const sc = scope.locator('.transcript-scroll');
+  await expectAtBottom(sc);
+  await sc.evaluate((el) => {
+    const block = document.createElement('div');
+    block.id = 'w1641-above';
+    block.style.height = '80px';
+    el.firstElementChild!.insertBefore(block, el.firstElementChild!.children[2]);
+  });
+  await expectAtBottom(sc);
+  await sc.evaluate((el, h) => {
+    document.getElementById('w1641-above')!.remove();
+    // Reading scrollTop lays the chat out: the browser moves scrollTop to the new end now, its scroll event comes later.
+    void el.scrollTop;
+    const pic = document.createElement('div');
+    pic.style.height = `${h}px`;
+    el.firstElementChild!.appendChild(pic);
+  }, PIC_H);
+  await expectAtBottom(sc);
+});

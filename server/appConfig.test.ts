@@ -454,3 +454,22 @@ test('autoDeploy.enabled (w1634): settable by anyone, checked, written, applied 
   assert.throws(() => normalizeSetting('autoDeploy.enabled', 'yes'), /true or false/);
   assert.ok(!OWNER_ONLY_KEYS.has('autoDeploy.enabled') && SETTABLE_KEYS.includes('autoDeploy.enabled'));
 });
+
+// w1643, lothsahn: "If normal (all work), if high, high and urgent, if urgent, urgent only".
+test('set_app_config: placement.minPriority (w1643) sets each computer\'s lowest priority, drops normal (the default), refuses a bad id or level, and null clears it leaving the rest', (t) => {
+  const { file, cfg } = setup(t);
+  setAppConfig(file, cfg, 'placement.hold', { m5: 'Ben testing' });
+  assert.deepEqual(setAppConfig(file, cfg, 'placement.minPriority', { BEAST: 'Urgent', lothdesktop: 'high', m3: 'normal' }).after, { beast: 'urgent', lothdesktop: 'high' });
+  assert.deepEqual(cfg.placement, { hold: { m5: 'Ben testing' }, minPriority: { beast: 'urgent', lothdesktop: 'high' } });
+  assert.throws(() => setAppConfig(file, cfg, 'placement.minPriority', { beast: 'low' }), /placement\.minPriority\.beast: "low" is not a level; one of normal, high, urgent/);
+  assert.throws(() => setAppConfig(file, cfg, 'placement.minPriority', { beast: 2 }), /is not a level/);
+  assert.throws(() => setAppConfig(file, cfg, 'placement.minPriority', 'urgent'), /placement\.minPriority is an object: computer id to the lowest priority/);
+  assert.throws(() => setAppConfig(file, cfg, 'placement.minPriority', { 'this host': 'high' }), /no place for work/);
+  assert.deepEqual(cfg.placement.minPriority, { beast: 'urgent', lothdesktop: 'high' }, 'a refused value changes nothing');
+  // Every computer back to normal is the same as clearing it.
+  assert.equal(setAppConfig(file, cfg, 'placement.minPriority', { beast: 'normal' }).after, undefined);
+  setAppConfig(file, cfg, 'placement.minPriority', { beast: 'high' });
+  setAppConfig(file, cfg, 'placement.minPriority', null);
+  assert.deepEqual(cfg.placement, { hold: { m5: 'Ben testing' } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement, { hold: { m5: 'Ben testing' } });
+});
