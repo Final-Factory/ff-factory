@@ -454,6 +454,8 @@ export class Agents {
   readonly ops: OpsWorker;
   /** Sandboxes not held for workers that resume much later, and placing them again when they do (w640). */
   readonly placeAgain: PlaceAgain;
+  /** placeAgain's minute tick; a test that removes the data folder clears it first, or a tick writes into a folder gone (w1576). */
+  readonly placeAgainTick: ReturnType<typeof setInterval>;
   /** Paused machines' hand-backs (w1532, server/machinePause.ts). */
   readonly pauses: MachinePauses;
   /** Commits that reached the base branch in the last 48 hours, for the ledger's overlap check; refreshed in the background. */
@@ -589,8 +591,8 @@ export class Agents {
       saveWork: (m, sb, branch, message, sessionId) => machines.saveWork(m, sb, branch, message, sessionId ? this.githubTokenFor(m, sessionId, `saving ${sessionId}'s work`) : undefined),
     });
     machines.placeAgain = (info) => this.placeAgain.answer(info);
-    const release = setInterval(() => this.placeAgain.tick(), 60_000);
-    release.unref?.();
+    this.placeAgainTick = setInterval(() => this.placeAgain.tick(), 60_000);
+    this.placeAgainTick.unref?.();
     this.timers = new Timers(
       {
         // The orchestrators' and the orchestration worker's (w1106: its polls survive deploys, restarts and its idle stop).

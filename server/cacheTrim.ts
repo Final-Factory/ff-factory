@@ -8,6 +8,12 @@ import { LIBRARY_CACHES } from './cleanup.ts';
  * lothdesktop's six, measured 2026-10-10). A trim keeps what a restart of the same work needs (entries written in the last
  * `keepHours`, the newest first up to `capGB` per cache) and drops the rest. It is a trim, not a wipe: the next worker's first
  * build stays warm. Never while an editor or a batchmode build has the project open (Temp/UnityLockfile).
+ *
+ * The player-build caches go whole once nothing in them was written for `keepHours` (w1576): Library/EntitySceneBundles (the
+ * Entities package's player-build working folder, Unity.Scenes.Editor/EntitySceneBuildUtility.cs:38, which keeps every content
+ * archive it ever wrote) and each target of Library/PlayerDataCache. 3.3 and 3.0 GB in LothDesktop's slot2 (measured 2026-10-19).
+ * Whole or not at all: a build rewrites what it needs from nothing, but may trust a half-kept folder. The next player build of
+ * that sandbox is then a full one.
  */
 export interface TrimPolicy {
   /** Files written within this many hours stay. */
@@ -32,6 +38,19 @@ export interface TrimResult {
   lfs?: { bytes: number } | { skipped: string };
   /** The build and capture output of the released sandbox taken with it (w913): entries and bytes. */
   swept?: { files: number; bytes: number };
+}
+
+/** The player-build caches of a project, each dropped whole when stale (w1576): EntitySceneBundles and each PlayerDataCache target. */
+export function playerCacheDirs(project: string): string[] {
+  const lib = path.join(project, 'Library');
+  const pdc = path.join(lib, 'PlayerDataCache');
+  let targets: string[] = [];
+  try {
+    targets = fs.readdirSync(pdc, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => path.join(pdc, e.name));
+  } catch {
+    // none
+  }
+  return [path.join(lib, 'EntitySceneBundles'), ...targets];
 }
 
 /** Whether an editor or a batchmode build has the project open. */
@@ -114,6 +133,30 @@ export async function trimLibraryCaches(project: string, policy: TrimPolicy = TR
     }
     await pruneEmpty(dir);
     res.keptBytes += kept;
+  }
+  for (const dir of playerCacheDirs(project)) {
+    const all: Entry[] = [];
+    await listFiles(dir, all, stop);
+    const why = stop();
+    if (why) return { ...res, stopped: why };
+    const bytes = all.reduce((n, e) => n + e.size, 0);
+    if (!all.length || all.some((e) => e.mtimeMs >= cutoff)) {
+      res.keptBytes += bytes;
+      continue;
+    }
+    for (const e of all) {
+      const w = stop();
+      if (w) return { ...res, stopped: w };
+      try {
+        await fs.promises.unlink(e.file);
+        res.files++;
+        res.removedBytes += e.size;
+      } catch {
+        res.keptBytes += e.size;
+      }
+    }
+    await pruneEmpty(dir);
+    await fs.promises.rmdir(dir).catch(() => undefined);
   }
   return res;
 }

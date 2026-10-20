@@ -1,0 +1,3 @@
+- **Released sandboxes shed their player-build caches, and idle ones start again from the seed** (w1576, asked by lothsahn):
+  - The release trim now also drops `Library/EntitySceneBundles` and each `Library/PlayerDataCache/<target>`, whole, once nothing in them was written for 24 h. These are 2.4 to 3.5 GB and 0.9 to 1.5 GB per sandbox on LothDesktop.
+  - A sandbox nobody has used for 3 days gets its Library cloned from the seed again, where the copy is a block clone. Its own Library is 17 to 21 GB on LothDesktop.
