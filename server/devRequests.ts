@@ -79,7 +79,7 @@ export interface DevState {
   finals: string[];
   /** The newest dev_update per conversation that FFBox has not confirmed (dev_received), resent on every reconnect. */
   updates?: (DevUpdate & { at: string })[];
-  /** What each conversation was last sent ("<conversation>" → the update's facts as JSON), so only a change goes. */
+  /** What each request last sent each conversation ("<work id>:<conversation>" → the update's facts as JSON; before w1640 "<conversation>"), so only a change goes. */
   sentUpdates?: Record<string, string>;
 }
 
@@ -901,8 +901,17 @@ export class DevRequests {
       // post (w352), and the question stays with the request's people here (the [intake question] they were sent).
       const operated = links.some((x) => x.link.conversation === conversation);
       const mine = !operated && facts.question ? (({ question: _q, ...rest }) => ({ ...rest, held: true }))(facts) : facts;
-      const key = conversation;
+      // ONE RECORD PER REQUEST AND CONVERSATION (w1640): kept per conversation alone, two requests linked to one
+      // conversation (w1637 hands a conversation over again once its request closes) each found the other's last
+      // update there and both were sent again every minute ("done, no merge" for w1297 and w1333). A record kept under
+      // the conversation alone before this still counts, once, so the change sends nothing again.
+      const key = `${target.id}:${conversation}`;
       const sig = `${target.id} ${mine === facts ? digest : JSON.stringify(mine)}`;
+      if (s.sentUpdates[conversation] === sig) {
+        delete s.sentUpdates[conversation];
+        s.sentUpdates[key] = sig;
+        changed = true;
+      }
       if (s.sentUpdates[key] === sig) continue;
       s.sentUpdates[key] = sig;
       const msg: DevUpdate = { type: 'dev_update', id: `u-${target.id}-${this.now().toString(36)}-${randomBytes(3).toString('hex')}`, request: target.id, conversation, ...mine };
