@@ -6,8 +6,9 @@
 # web build; $FFF_ROOT/app/current is the one fff-portal.service runs, previous the one before it. So the new code is
 # built while the old one runs, and the switch at the restart takes a second.
 #
-#   fff-update request       fff-update.path started it: data/update.wanted is there (request_app_update or
-#                            "fffctl update"). Builds origin/<branch>, runs that release's guest install.sh (the VM's
+#   fff-update request       fff-update.path started it: data/update.wanted is there (request_app_update, "fffctl
+#                            update" or the portal's automatic deploy, w1634). Builds origin/<branch> (or the commit its
+#                            ref names, which must be on origin/<branch>), runs that release's guest install.sh (the VM's
 #                            firewall, units, sshd, packages, scripts), then asks the server for the drain and the
 #                            restart (restart.request with update: true); the server leaves data/update.request
 #                            and exits, and the next start switches.
@@ -18,7 +19,8 @@
 #                            done (data/update.verified.json is written: the portal then updates every machine's
 #                            daemon, w887); past UPDATE_VERIFY_MIN minutes without that, roll back.
 #   fff-update rollback [WHY] back to the previous release, restart.
-#   fff-update prepare [REF] build REF (default origin/<branch>) and print the release folder.
+#   fff-update prepare [REF [--on-branch]]  build REF (default origin/<branch>; --on-branch: refused unless REF is on
+#                            origin/<branch>) and print the release folder.
 #   fff-update init [REF]    the first release (install.sh).
 set -o errexit -o nounset -o pipefail
 # shellcheck source=lib.sh
@@ -45,11 +47,15 @@ deps_from() {
 # prepare [REF]: build REF beside the running release and print its folder. Every step is checked here: this runs in
 # $(...) and under "if", where bash ignores errexit, so a failed npm ci would otherwise still mark the release ready.
 prepare() {
-  local ref=${1:-origin/$FFF_BRANCH} sha dir cur sub t
+  local ref=${1:-origin/$FFF_BRANCH} on_branch=${2:-} sha dir cur sub t
   log "fetching $ref"
   t=$(date +%s)
   as_fff git -C "$REPO" fetch --prune --quiet origin >&2 || die "git fetch of $FFF_REPO_URL failed"
   sha=$(as_fff git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}") || die "no commit $ref in $FFF_REPO_URL"
+  # A commit an automatic deploy names (w1634) is only ever one already merged into the branch.
+  if [ "$on_branch" = --on-branch ] && ! as_fff git -C "$REPO" merge-base --is-ancestor "$sha" "origin/$FFF_BRANCH"; then
+    die "${sha:0:12} is not on origin/$FFF_BRANCH; only merged code is deployed"
+  fi
   dir=$RELEASES/${sha:0:12}
   log "fetched ${sha:0:12} in $(($(date +%s) - t)) s"
   if [ -f "$dir.ready" ] && [ -e "$dir/.git" ]; then
@@ -147,22 +153,37 @@ switch_to() {
   chown -h "$FFF_USER:$FFF_USER" "$CURRENT" "$PREVIOUS" 2>/dev/null || true
 }
 
+# not_done WHAT: an update that stopped before any restart: recorded for the portal (update.result.json, which the
+# automatic deploy reads, w1634) and told to the dispatcher with the build log's last lines; the running version stays.
+not_done() {
+  local cur
+  cur=$(release_sha "$(current_dir)")
+  jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$cur" --arg e "$1 (nothing was restarted)" '{ok: false, at: $at, error: $e, headBefore: $b, headAfter: $b}' | data_write update.result.json
+  tell_dispatcher "[app update] The update was NOT done: $1, so nothing was restarted and the running version stays. Last lines (journalctl -u fff-update in the VM for all):
+$(tail -n 12 "$APP/last-build.log")"
+  exit 1
+}
+
 cmd_request() {
-  local wanted=$DATA/update.wanted drain=10 reason='update' dir sha cur_sha
+  local wanted=$DATA/update.wanted drain=10 reason='update' dir sha cur_sha ref="origin/$FFF_BRANCH" want='' auto=false
   if [ -f "$wanted" ]; then
     drain=$(jq -r '.drainMinutes // 10' "$wanted" 2>/dev/null || echo 10)
     reason=$(jq -r '.reason // "update"' "$wanted" 2>/dev/null || echo update)
+    want=$(jq -r '.ref // empty' "$wanted" 2>/dev/null || true)
+    auto=$(jq -r 'if .auto == true then "true" else "false" end' "$wanted" 2>/dev/null || echo false)
     rm -f "$wanted"
   fi
-  log "update requested ($reason): building origin/$FFF_BRANCH beside the running server"
+  # The automatic deploy (w1634) names the commit whose CI it read; only a full commit SHA is taken.
+  if [[ $want =~ ^[0-9a-f]{40}$ ]]; then ref=$want; elif [ -n "$want" ]; then warn "ref $want is not a full commit SHA; building origin/$FFF_BRANCH"; fi
+  local what="origin/$FFF_BRANCH"
+  [ "$ref" = "origin/$FFF_BRANCH" ] || what="${ref:0:12} (on origin/$FFF_BRANCH)"
+  log "update requested ($reason): building $what beside the running server"
   # The build's output goes to the journal as it happens (fffctl update shows each step from there) and to the build
   # log, whose last lines a failure reports.
   local buildlog=$APP/last-build.log out=$APP/.prepared-dir
   rm -f "$out"
-  if ! prepare "origin/$FFF_BRANCH" 2>&1 >"$out" | tee "$buildlog" >&2; then
-    tell_dispatcher "[app update] The update was NOT done: building origin/$FFF_BRANCH failed, so nothing was restarted and the running version stays. Last lines (journalctl -u fff-update in the VM for all):
-$(tail -n 12 "$buildlog")"
-    exit 1
+  if ! prepare "$ref" --on-branch 2>&1 >"$out" | tee "$buildlog" >&2; then
+    not_done "building $what failed"
   fi
   dir=$(cat "$out")
   rm -f "$out"
@@ -170,9 +191,7 @@ $(tail -n 12 "$buildlog")"
   cur_sha=$(release_sha "$(current_dir)")
   # The release's system setup, before anything restarts: a failure leaves the running version as it is.
   if ! system_setup "$dir" 2>&1 | tee -a "$buildlog" >&2; then
-    tell_dispatcher "[app update] The update was NOT done: the system setup of ${sha:0:9} (its guest install.sh) failed, so nothing was restarted and the running version stays. Last lines (journalctl -u fff-update in the VM for all):
-$(tail -n 12 "$buildlog")"
-    exit 1
+    not_done "the system setup of ${sha:0:9} (its guest install.sh) failed"
   fi
   if [ "$sha" = "$cur_sha" ]; then
     log "already at ${sha:0:12}; nothing to restart"
@@ -180,7 +199,7 @@ $(tail -n 12 "$buildlog")"
     return 0
   fi
   jq -n --arg sha "$sha" --arg dir "$dir" --arg at "$(date -u +%FT%TZ)" '{sha: $sha, dir: $dir, at: $at}' | data_write update.prepared.json
-  jq -n --argjson m "$drain" --arg r "update to ${sha:0:9} ($reason)" '{drain: "auto", drainMinutes: $m, reason: $r, update: true, hold: false}' |
+  jq -n --argjson m "$drain" --arg r "update to ${sha:0:9} ($reason)" --argjson auto "$auto" '{drain: "auto", drainMinutes: $m, reason: $r, update: true, hold: false, auto: $auto}' |
     data_write restart.request
   log "built ${sha:0:12}; asked the server to drain (up to $drain min) and restart"
 }
@@ -286,7 +305,7 @@ case "${1:-}" in
   activate) cmd_activate ;;
   verify) cmd_verify ;;
   rollback) shift; cmd_rollback "$*" ;;
-  prepare) shift; prepare "${1:-}" ;;
+  prepare) shift; prepare "${1:-}" "${2:-}" ;;
   init) shift; cmd_init "${1:-}" ;;
   prune) prune ;;
   *) sed -n '2,28p' "$0"; exit 2 ;;

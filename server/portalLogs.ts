@@ -55,6 +55,7 @@ export const LOG_SOURCES: Record<string, SourceDef> = {
   update_verified: { kind: 'doc', file: 'update.verified.json', what: 'data/update.verified.json: the last update the VM verified healthy (its commit); the machines are updated after it' },
   update_prepared: { kind: 'doc', file: 'update.prepared.json', what: 'data/update.prepared.json: a release built and waiting for the restart (absent when none)' },
   update_verifying: { kind: 'doc', file: 'update.verifying.json', what: 'data/update.verifying.json: an update being verified now and its deadline (absent when none)' },
+  auto_deploy: { kind: 'doc', file: 'auto-deploy.json', what: "data/auto-deploy.json: the automatic portal deploy (w1634): what it waits for now, the deploy asked for, and the last 50 with their commit, pull requests, outcome and who was told" },
   machine_rollout: { kind: 'doc', file: 'machine-rollout.json', what: "data/machine-rollout.json: the update of every machine's daemon after a portal update, machine by machine" },
   unit_watchdog: { kind: 'doc', file: 'unit-watchdog.json', what: "data/unit-watchdog.json: every critical unit's state and the last 50 things the watchdog did (a restart and why)" },
 };

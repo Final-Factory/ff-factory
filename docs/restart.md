@@ -21,7 +21,9 @@ worker run (`ops_worker restart`, [ops-worker.md](ops-worker.md) "Restarts (w974
    work (a WIP commit is fine) and end your turn. With `machines.keepAgentsOnRestart` on (since 2026-10-05, BEAST's own
    daemon's sandboxes included) workers on machines are not drained: they keep running ("Agents on machines" below).
    It waits until no worker is mid-turn, or until `-DrainMinutes` (default 10) passes. With
-   nobody busy it goes straight on. The orchestrators and the dispatcher are not waited for. The
+   nobody busy it goes straight on. The orchestrators and the dispatcher are not waited for, except by an automatic
+   deploy (w1634), which nobody timed: its drain also waits for their turns, and the ops worker's, up to 30 minutes
+   ([ops-worker.md](ops-worker.md) "Automatic deploys"). The
    dashboard shows a "Restart pending" banner meanwhile. The supervisor keeps running during the
    drain; if the script is interrupted, the server gives up after 5 more minutes, tells the drained
    workers to carry on, and nothing is lost.

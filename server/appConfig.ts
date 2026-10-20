@@ -97,6 +97,9 @@ export const SETTABLE_KEYS = [
   // switch and the auto-approve rule. Anyone may set them: they file the team's own CI work, never players' words.
   'masterBatch.enabled',
   'masterBatch.autoApprove',
+  // The automatic portal deploy (w1634, server/autoDeploy.ts): on unless false. Anyone may set it: it only decides whether
+  // code already merged into main through a pull request and its CI goes out without a person asking.
+  'autoDeploy.enabled',
   // The live view (w1398, docs/live-view.md): a sandbox's running game streamed beside its agent's chat, with the shader's
   // knobs. Off unless true. The owner's only (OWNER_ONLY_KEYS): it opens a new stream from the machines to the pages.
   'live.enabled',
@@ -603,6 +606,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'masterBatch.autoApprove':
       return checkMasterBatchAutoApprove(value);
+    case 'autoDeploy.enabled': {
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      throw new Error('autoDeploy.enabled is true or false');
+    }
     case 'live.enabled': {
       if (value === true || value === 'true') return true;
       if (value === false || value === 'false') return false;
@@ -837,6 +845,13 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (key === 'masterBatch.enabled') mb.enabled = v as boolean | undefined;
     else mb.autoApprove = v as NonNullable<Config['masterBatch']>['autoApprove'];
     cfg.masterBatch = mb;
+  }
+  // Live: the automatic deploy reads cfg.autoDeploy.enabled at every pass (each minute); null is the default, on.
+  else if (key === 'autoDeploy.enabled') {
+    const ad = { ...cfg.autoDeploy };
+    if (v === undefined) delete ad.enabled;
+    else ad.enabled = v as boolean;
+    cfg.autoDeploy = ad;
   }
   // Live: the live view reads cfg.live.enabled at every use (server/live.ts); null is the default, off.
   else if (key === 'live.enabled') cfg.live = v === undefined ? undefined : { ...cfg.live, enabled: v as boolean };

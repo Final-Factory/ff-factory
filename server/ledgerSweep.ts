@@ -875,6 +875,6 @@ export function summaryOf(acts: readonly { kind: Kind }[]): string {
 }
 
 /** A checkout's GitHub repo, owner/name, from its origin's URL. */
-async function slugOf(dir: string): Promise<string | undefined> {
+export async function slugOf(dir: string): Promise<string | undefined> {
   return /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec((await runProc('git', ['-C', dir, 'remote', 'get-url', 'origin'], { timeoutMs: 10_000 })).stdout.trim())?.[1];
 }

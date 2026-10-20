@@ -8,9 +8,11 @@ the launcher, its test, server/opsWorker.ts or the lockfiles change, and weekly;
 
 **What runs where** (w925, lothsahn: "3B"): a pull request runs the whole suite. A push to `main` runs only the secret
 scan and the identity check, each push in its own concurrency group so a later merge never cancels it, the way
-FinalFactory's `master` works (w1137: its one trunk; `develop` is retired). Nothing reads `main`'s CI result: there is no branch protection or ruleset, the portal's
-`ci:` gate and CI-read health read pull-request heads (`server/blockerWatch.ts`, `server/ciReadHealth.ts`), and
-`fffctl update` builds `origin/main` without asking CI (`deploy/vm/guest/fff-update`). Still on `main`: the nightly VM
+FinalFactory's `master` works (w1137: its one trunk; `develop` is retired). There is no branch protection or ruleset; the
+portal's `ci:` gate and CI-read health read pull-request heads (`server/blockerWatch.ts`, `server/ciReadHealth.ts`), and
+`fffctl update` by hand builds `origin/main` without asking CI (`deploy/vm/guest/fff-update`). The one reader of `main`'s
+CI is the portal's automatic deploy (w1634, [ops-worker.md](ops-worker.md) "Automatic deploys"): it deploys a commit only
+once its push runs and its pull request's runs have finished green. Still on `main`: the nightly VM
 run and the daily whole Windows suite (schedules). The whole suite on `main` by hand: `gh workflow run ci.yml --ref
 main` (likewise `vm-scripts.yml`, `windows.yml -f all=true`, `worker-update.yml`, `dev-drive.yml`).
 
