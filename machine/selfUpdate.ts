@@ -198,18 +198,19 @@ export interface SelfUpdaterDeps {
 /** The daemon's half of the updates over its link (see the top of the file); machine/daemon.ts holds one. */
 export class SelfUpdater {
   private busy = false;
-  private readonly d: SelfUpdaterDeps;
+  /** Its hands (the job launcher, the fetch); tests replace them. */
+  readonly deps: SelfUpdaterDeps;
   constructor(d: SelfUpdaterDeps) {
-    this.d = d;
+    this.deps = d;
   }
 
   private get platform() {
-    return this.d.platform ?? process.platform;
+    return this.deps.platform ?? process.platform;
   }
 
   /** The worker install it runs from, when it is one this can update: its root.json names the service. */
   private install() {
-    return this.d.root ? installOf(this.d.root) : undefined;
+    return this.deps.root ? installOf(this.deps.root) : undefined;
   }
 
   /** Whether the hello offers `selfUpdate`: a worker root install whose service is known. */
@@ -218,38 +219,38 @@ export class SelfUpdater {
   }
 
   private job(form: UpdateJob['form'], id: string, service: string, extra: Partial<UpdateJob> = {}): UpdateJob {
-    return { id, form, root: this.d.root!, appDir: this.d.appDir, service, createdAt: new Date().toISOString(), phase: 'staged', ...extra };
+    return { id, form, root: this.deps.root!, appDir: this.deps.appDir, service, createdAt: new Date().toISOString(), phase: 'staged', ...extra };
   }
 
   private async start(job: UpdateJob, service: string): Promise<string> {
-    const f = updateFiles(this.d.appDir);
+    const f = updateFiles(this.deps.appDir);
     writeJson(f.job, job);
     fs.rmSync(f.result, { force: true });
     fs.mkdirSync(path.dirname(f.log), { recursive: true });
-    return (this.d.launch ?? launchJob)({ service, node: this.d.node ?? process.execPath, args: jobArgs(this.d.appDir, this.d.nodeArgs ?? []), cwd: this.d.appDir, log: f.log }, this.platform);
+    return (this.deps.launch ?? launchJob)({ service, node: this.deps.node ?? process.execPath, args: jobArgs(this.deps.appDir, this.deps.nodeArgs ?? []), cwd: this.deps.appDir, log: f.log }, this.platform);
   }
 
   /** self_update: check the bundle, check out its commit, start the job; answered with self_update_ack. */
   async onSelfUpdate(msg: Extract<ToDaemon, { type: 'self_update' }>): Promise<void> {
     const refuse = (error: string) => {
-      this.d.log(`update over the link refused: ${error}`);
-      this.d.send({ type: 'self_update_ack', id: msg.id, ok: false, error });
+      this.deps.log(`update over the link refused: ${error}`);
+      this.deps.send({ type: 'self_update_ack', id: msg.id, ok: false, error });
     };
     const inst = this.install();
     if (!inst) return refuse('this daemon is not a worker root install whose root.json names its service');
     const why = selfUpdateProblem(msg);
     if (why) return refuse(why);
-    const f = updateFiles(this.d.appDir);
+    const f = updateFiles(this.deps.appDir);
     if (this.busy || jobInFlight(readJson<UpdateJob>(f.job))) return refuse('an update job of this machine is still running');
     this.busy = true;
     try {
-      this.d.log(`update over the link: ${msg.form} to ff-factory ${msg.commit.slice(0, 12)}; fetching the bundle (${msg.bundle.size} bytes)`);
-      const bundle = await downloadBundle(this.d.portalUrl(), this.d.token, msg.bundle, f.dir, this.d.fetch);
+      this.deps.log(`update over the link: ${msg.form} to ff-factory ${msg.commit.slice(0, 12)}; fetching the bundle (${msg.bundle.size} bytes)`);
+      const bundle = await downloadBundle(this.deps.portalUrl(), this.deps.token, msg.bundle, f.dir, this.deps.fetch);
       await checkoutFromBundle(f.src, bundle, msg.commit);
-      removeOldBundles(this.d.appDir, bundle);
+      removeOldBundles(this.deps.appDir, bundle);
       const how = await this.start(this.job(msg.form, msg.id, inst.service, { commit: msg.commit, ...(msg.flags ? { flags: msg.flags } : {}) }), inst.service);
-      this.d.log(`update over the link: the bundle checked (SHA-256 and commit), job ${msg.id} started as ${how}`);
-      this.d.send({ type: 'self_update_ack', id: msg.id, ok: true });
+      this.deps.log(`update over the link: the bundle checked (SHA-256 and commit), job ${msg.id} started as ${how}`);
+      this.deps.send({ type: 'self_update_ack', id: msg.id, ok: true });
     } catch (e) {
       refuse((e as Error).message);
     } finally {
@@ -260,21 +261,21 @@ export class SelfUpdater {
   /** daemon_control: restart (exit; the supervisor starts it again, its agents run on) or unload, as a job. */
   async onControl(msg: Extract<ToDaemon, { type: 'daemon_control' }>): Promise<void> {
     const answer = (ok: boolean, error?: string) => {
-      this.d.send({ type: 'daemon_control_result', id: msg.id, ok, ...(error ? { error } : {}) });
+      this.deps.send({ type: 'daemon_control_result', id: msg.id, ok, ...(error ? { error } : {}) });
     };
     if (msg.action === 'restart') {
       answer(true);
-      this.d.log('restart over the link: going; the supervisor starts the daemon again and it takes its agents back');
-      setTimeout(() => this.d.exit(), 300);
+      this.deps.log('restart over the link: going; the supervisor starts the daemon again and it takes its agents back');
+      setTimeout(() => this.deps.exit(), 300);
       return;
     }
     const inst = this.install();
     if (!inst) return answer(false, 'this daemon is not a worker root install whose root.json names its service');
-    if (!fs.existsSync(path.join(updateFiles(this.d.appDir).src, 'scripts', 'worker', 'linkJob.ts'))) return answer(false, "the install's checkout has no update job (scripts/worker/linkJob.ts): update it first");
-    if (jobInFlight(readJson<UpdateJob>(updateFiles(this.d.appDir).job))) return answer(false, 'an update job of this machine is still running');
+    if (!fs.existsSync(path.join(updateFiles(this.deps.appDir).src, 'scripts', 'worker', 'linkJob.ts'))) return answer(false, "the install's checkout has no update job (scripts/worker/linkJob.ts): update it first");
+    if (this.busy || jobInFlight(readJson<UpdateJob>(updateFiles(this.deps.appDir).job))) return answer(false, 'an update job of this machine is still running');
     try {
       const how = await this.start(this.job('uninstall', msg.id, inst.service), inst.service);
-      this.d.log(`unload over the link: job ${msg.id} started as ${how}`);
+      this.deps.log(`unload over the link: job ${msg.id} started as ${how}`);
       answer(true);
     } catch (e) {
       answer(false, (e as Error).message);
@@ -283,16 +284,22 @@ export class SelfUpdater {
 
   /** Send a result the portal has not had; once sent and the job's process is gone, remove the job's task or LaunchAgent. */
   async tick(): Promise<void> {
-    const r = pendingReport(this.d.appDir);
-    if (r && this.d.send({ type: 'self_update_report', report: r })) {
-      markReported(this.d.appDir, r.id);
-      this.d.log(`update over the link: job ${r.id} reported (${r.ok ? 'ok' : 'failed'}${r.rollback ? `, put back: ${r.rollback}` : ''})`);
+    const r = pendingReport(this.deps.appDir);
+    if (r && this.deps.send({ type: 'self_update_report', report: r })) {
+      markReported(this.deps.appDir, r.id);
+      this.deps.log(`update over the link: job ${r.id} reported (${r.ok ? 'ok' : 'failed'}${r.rollback ? `, put back: ${r.rollback}` : ''})`);
     }
-    const job = readJson<UpdateJob>(updateFiles(this.d.appDir).job);
+    const job = readJson<UpdateJob>(updateFiles(this.deps.appDir).job);
     if (job?.reported && !job.removed && job.phase === 'done' && !alive(job.pid) && !this.busy) {
-      const inst = this.install();
-      if (inst) await (this.d.remove ?? removeJob)(inst.service, this.platform).catch(() => undefined);
-      writeJson(updateFiles(this.d.appDir).job, { ...job, phase: 'done', reported: true, removed: true });
+      // Busy meanwhile, so no new job starts while the old one's task or LaunchAgent is removed (it would be removed too).
+      this.busy = true;
+      try {
+        const inst = this.install();
+        if (inst) await (this.deps.remove ?? removeJob)(inst.service, this.platform).catch(() => undefined);
+        if (readJson<UpdateJob>(updateFiles(this.deps.appDir).job)?.id === job.id) writeJson(updateFiles(this.deps.appDir).job, { ...job, removed: true });
+      } finally {
+        this.busy = false;
+      }
     }
   }
 }

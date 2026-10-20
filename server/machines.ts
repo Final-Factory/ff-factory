@@ -2521,7 +2521,7 @@ export class MachineManager {
 
   private readonly saveCalls = new Map<string, { resolve: (r: SaveResult) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   /** Updates over the daemons' links (w1596, server/machineLink.ts): the portal's code as bundles, and the calls waiting. */
-  readonly bundles: UpdateBundles;
+  bundles: UpdateBundles;
   private readonly linkAcks = new PendingCalls<true>();
   private readonly linkReports = new PendingCalls<LinkUpdateReport>();
   private readonly linkControls = new PendingCalls<true>();

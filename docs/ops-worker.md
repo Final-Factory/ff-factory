@@ -99,6 +99,15 @@ such call per machine, with no setting named. An update never needs a drain or a
 the agents in their agent hosts, mid-turn ones included, run on and are adopted by the new daemon
 ([worker-install.md](worker-install.md), "An update does not stop running work").
 
+**Over the daemon's link first** (w1596, lothsahn: "Yes, move updates and restarts onto the daemon link; drop the SSH
+need"): when the machine's daemon offers it (a worker root install from w1596 on, connected), `machine_update` does not give
+this worker a job at all. The portal sends the update over the daemon's own link (`OpsDeps.linkUpdate`, server/machines.ts
+`linkUpdate`), with only the settings named; the daemon checks the portal's code bundle and runs the installer's update in a
+job outside itself, which puts the old code back if the new daemon does not come back
+([worker-install.md](worker-install.md#updates-over-the-daemons-link-w1596)). The orchestrator gets the job's report as a
+`[machine update for wNNN]` message (`linkUpdateMessage`) and closes the request with `update_work` once the person has what
+they asked for. The ssh command below is for a daemon from before w1596 or one that is not connected.
+
 **The gate** (`OpsWorker.machineInstall`, `server/opsWorker.ts`; tested in `server/opsWorker.test.ts`):
 
 - Only Lothsahn's or Ben's own orchestrator (as for every action here).
@@ -126,13 +135,12 @@ orchestrator or the dispatcher for a code ("add desktop-coosego with a join code
 in their own words); a person at the PC, connected to Tailscale, double-clicks the installer, or opens
 `https://<the portal>/join`, or runs `irm https://<the portal>/join/windows.ps1 | iex` (a Mac or Linux PC:
 `bash -c "$(curl -fsSL https://<the portal>/join/unix.sh)"`) and types the code. The bootstrap installs the missing tools,
-turns on OpenSSH Server with a tailnet-only firewall rule, enrols the PC (the portal answers its credential once, into a
-private file on the PC), runs the installer below with the right answers (which puts the portal's key in place and pins the
-host key) and deletes the file. The code works once, for an hour, and only from the tailnet device it was made for. The
-one step left is the tailnet: a PC tagged `tag:fff-worker` once the policy has the block in
-[worker-install.md](worker-install.md#the-tailnet-w1592), or named in the `tcp:22` grant as before. Everything, with the
-decisions and what each rests on: [worker-install.md](worker-install.md#adding-a-machine-with-a-join-code-w1592). After
-the join, updates are this worker's as always (`machine_update`). The route below stays for a machine that cannot run the
+enrols the PC (the portal answers its credential once, into a private file on the PC), runs the installer below with the
+right answers and `-NoSsh` / `--no-ssh`, and deletes the file. The code works once, for an hour, and only from the tailnet
+device it was made for. Nothing is left for the tailnet: no tag, no grant, no OpenSSH Server (w1596), since the portal
+updates, restarts and unloads the PC over its daemon's own link ([worker-install.md](worker-install.md#updates-over-the-daemons-link-w1596)).
+Everything, with the decisions and what each rests on: [worker-install.md](worker-install.md#adding-a-machine-with-a-join-code-w1592).
+After the join, `machine_update` goes over that link; this worker has no ssh to such a PC. The route below stays for a machine that cannot run the
 bootstrap, and for a person who would rather.
 
 Lothsahn, 2026-10-07 (w676): "Make the op machine worker able to run fff-machine-ssh", then "And any other commands
@@ -566,8 +574,11 @@ machines." Then, asked "Isn't it possible to update a machine without disrupting
 no drain and no wait.
 
 **TL;DR:** once `fff-update` has verified a new portal release, the portal itself runs the worker installer's update on every
-online worker-root machine, one at a time, over its own ssh, and sends ONE report to the orchestrator of whoever asked for the
-deploy. A machine that is offline is updated when it comes back. No request, no ops job, no worker.
+online worker-root machine, one at a time, and sends ONE report to the orchestrator of whoever asked for the deploy. A machine
+whose daemon offers it is updated over its daemon's own link (w1596: the daemon checks the portal's code bundle and its job
+puts the old code back if the new daemon does not come back, [worker-install.md](worker-install.md#updates-over-the-daemons-link-w1596));
+an older daemon over the portal's ssh, as before. A machine that is offline is updated when it comes back. No request, no ops
+job, no worker.
 
 - **The trigger is the verification, never the restart.** `fff-update verify` (`deploy/vm/guest/fff-update`, run by
   `fff-health`) writes `data/update.verified.json` (`{sha, previous, at}`) only when the new release answers `/api/health`
@@ -602,13 +613,21 @@ deploy. A machine that is offline is updated when it comes back. No request, no 
   anything and exits 2 with the old daemon running ("Not updating: ... the daemon was not touched"); a machine seen online
   after a failed run is kept as it was. If a failed run leaves the machine offline or outdated, the rollout runs the
   installer again with `--daemon-ref <the commit the daemon ran before>` (`-DaemonRef` on Windows) to put the old code back;
-  if that fails too, the report says the daemon is OFFLINE and needs a person, the one case that does.
+  if that fails too, the report says the daemon is OFFLINE and needs a person, the one case that does. Over the link
+  (w1596) the machine's own update job does that put-back itself, and the report says "Rollback: ok" or that it needs a
+  person; a job that never reports and leaves the machine offline is handled as a failed ssh run (put back over ssh where
+  the portal reaches the machine). A link update the daemon refuses (a bundle that does not match, a job still running)
+  changed nothing and is reported FAILED with the daemon's reason.
 - **The report** is one `[machine updates]` message to the orchestrator of the person whose `ops_worker deploy` it was
   (`OpsWorker.deployRequester`: the last deploy asked for within 3 hours before the verification), else to the dispatcher (a
   deploy by hand). Per machine: updated, already current, skipped (with why), failed (with the installer's own lines and the
   rollback outcome) or waiting; the commit before and after; "Limits unchanged"; the agents adopted and any that ended. The ops
   worker is told in its `[deploy]` messages that it does not update the machines.
-- **Not replaced:** a change of setting (a sandbox count, an editor limit) is still `ops_worker machine_update`.
+- **Not replaced:** a change of setting (a sandbox count, an editor limit) is still `ops_worker machine_update` (over the
+  daemon's link when it takes one, w1596).
+- **What the first deploy with w1596 needs**: nothing more. Each machine's daemon is updated as before (over ssh, since its
+  daemon is older), and the new daemon then offers the link, so every later update, restart and unload of it goes there. A
+  PC that joins after the deploy runs the new daemon from its first start.
 
 ### The agent tools, in the same rollout (w1476)
 

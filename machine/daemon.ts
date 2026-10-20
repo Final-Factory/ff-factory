@@ -102,6 +102,11 @@ export interface DaemonConfig {
    * the pause, the schedule and the activity watch. The entry point turns it on; a daemon a test builds has none unless asked.
    */
   tray?: boolean;
+  /**
+   * The leftover reaper (machine/leftovers.ts): on unless false. A test install beside a computer's real one turns it off
+   * (worker.ts --no-cleanup, w1596): it reads every process on the computer and the shared player slots.
+   */
+  leftovers?: boolean;
   /** Scratch folder for agents: their TMP, TEMP and TMPDIR. */
   tempDir?: string;
   /** The Max events file agents here append to (docs/max.md); default ~/.config/ff-factory/max-events.jsonl, null: none. */
@@ -865,7 +870,7 @@ export class Daemon {
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
     this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
     // What stopped workers left running (w1196, w1197): looked at once a minute.
-    this.timers.push(setInterval(() => void this.leftovers.tick(), 15_000));
+    if (this.cfg.leftovers !== false) this.timers.push(setInterval(() => void this.leftovers.tick(), 15_000));
     // The ledger facts for a clean-up worker's deletes (w1379): written every 30 s, so a stale file means a daemon that is not running.
     this.timers.push(setInterval(() => this.writeCleanupFacts(), 30_000));
     this.writeCleanupFacts();

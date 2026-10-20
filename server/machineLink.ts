@@ -50,6 +50,8 @@ export class UpdateBundles {
     const head = await portalCommit(this.root);
     if (!head) throw new Error(`the portal's code at ${this.root} is not a git checkout, so it has no bundle to send`);
     if (commit && !head.startsWith(commit.toLowerCase())) throw new Error(`the portal's checkout is at ${head.slice(0, 12)}, not ${commit.slice(0, 12)}`);
+    // A shallow clone's bundle lacks the parents it names, and a machine's git refuses it ("did not send all necessary objects").
+    if ((await git(this.root, ['rev-parse', '--is-shallow-repository']).catch(() => '')).trim() === 'true') throw new Error(`the portal's checkout at ${this.root} is a shallow clone, whose bundle no machine can fetch`);
     let p = this.made.get(head);
     if (!p) {
       p = this.make(head);
@@ -93,6 +95,20 @@ export class UpdateBundles {
     }
     return undefined;
   }
+}
+
+/**
+ * GET /machine/update/<sha256> (server/index.ts): which file a machine gets, or the refusal. Only with its own credential,
+ * and only the bundle it was offered on its link.
+ */
+export async function updateBundleFor(pathname: string, machineOf: () => string | undefined, bundles: UpdateBundles): Promise<{ status: 200; file: string; size: number } | { status: 401 | 404; error: string } | undefined> {
+  const m = /^\/machine\/update\/([0-9a-f]{64})$/.exec(pathname);
+  if (!m) return undefined;
+  const machineId = machineOf();
+  if (!machineId) return { status: 401, error: 'a valid machine token is required' };
+  const file = await bundles.fileFor(machineId, m[1]);
+  if (!file || !fs.existsSync(file)) return { status: 404, error: 'no update bundle with that SHA-256 was offered to this machine' };
+  return { status: 200, file, size: fs.statSync(file).size };
 }
 
 /** A call to a daemon answered later by a message with its id (self_update_ack, self_update_report, daemon_control_result). */

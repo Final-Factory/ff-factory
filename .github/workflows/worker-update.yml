@@ -4,6 +4,8 @@ name: Worker update end to end
 # Windows and a real Mac, against the throwaway portal (scripts/worker/test/update-e2e.ts): no terminal and stdin
 # closed as over ssh, elevated on Windows (GitHub's Windows runner is), no game-repo fetch, every setting, the
 # credential and a Mac's PATH carried, the daemon restarted and seen online. docs/worker-install.md, "Updating".
+# w1596: then the updates over the daemon's own link (scripts/worker/test/link-e2e.ts): an update to the portal's commit, one
+# whose daemon never comes back and is put back by the job itself, a restart and an unload, all with no ssh.
 # On pull requests and by hand only; never on a push to main, whose pull request ran it (w925).
 
 on:
@@ -17,6 +19,7 @@ on:
       - 'server/machineDeployWin.ts'
       - 'server/machines.ts'
       - 'server/machineProtocol.ts'
+      - 'server/machineLink.ts'
       - 'shared/types.ts'
       - 'package.json'
       - 'package-lock.json'
@@ -42,6 +45,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # w1596: the throwaway portal sends its code as a git bundle, which a shallow clone cannot make.
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
@@ -63,3 +69,10 @@ jobs:
         if: always()
         shell: bash
         run: cat "${{ runner.temp }}/w613-update/root/daemon/logs/daemon.log" 2>/dev/null | tail -n 80 || true
+      - name: Update, roll back, restart and unload a test root over its daemon's link, with no ssh (w1596)
+        run: node scripts/worker/test/link-e2e.ts "${{ runner.temp }}/w1596-link" 8795
+      - name: The link test's daemon and job logs
+        if: always()
+        shell: bash
+        run: |
+          for f in daemon.log daemon.err.log supervisor.log update-job.log; do echo "== $f"; tail -n 60 "${{ runner.temp }}/w1596-link/root/daemon/logs/$f" 2>/dev/null || true; done
