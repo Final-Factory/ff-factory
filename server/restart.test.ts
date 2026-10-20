@@ -427,3 +427,52 @@ test('w974: a soft restart (keepAgentsOnRestart): machine workers are neither dr
   assert.equal(h.stops.length, 1);
   assert.deepEqual(h.stops[0].drained, [], 'and none is recorded as drained, so none is resumed by the portal');
 });
+
+test('drain for an automatic deploy (w1634): also waits for coordinator turns, without messaging them; a deploy by hand does not', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const sessions = [
+    snap({ id: 'loth', kind: 'orchestrator', title: 'Lothsahn', status: 'running' }),
+    snap({ id: 'disp', kind: 'orchestrator', title: 'Dispatcher', status: 'idle', turnOpen: true }),
+    snap({ id: 'w', status: 'idle' }),
+  ];
+  const auto = harness(sessions);
+  assert.match(auto.d.request({ ...REQ, auto: true }), /waiting for 2 coordinator turn\(s\) to end \(Lothsahn, Dispatcher\)/);
+  assert.deepEqual(auto.told, [], 'coordinators get no drain message');
+  assert.deepEqual(auto.d.status?.waitingFor, ['loth', 'disp']);
+  t.mock.timers.tick(60_000);
+  assert.equal(auto.stops.length, 0, 'still waiting for their turns');
+  sessions[0].status = 'idle';
+  sessions[1].turnOpen = false;
+  t.mock.timers.tick(3000);
+  assert.equal(auto.stops.length, 1, 'restarts once the turns ended');
+
+  sessions[0].status = 'running';
+  const byHand = harness(sessions);
+  assert.match(byHand.d.request(REQ), /restarting now/, 'a deploy a person asked for waits for workers only, as before');
+});
+
+test('drain for an automatic deploy: the deadline still wins over a coordinator turn that does not end', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const h = harness([snap({ id: 'o', kind: 'ops', status: 'running' }), snap({ id: 'm', kind: 'standing', machineId: 'beast', status: 'running' })]);
+  h.d.request({ ...REQ, auto: true, drainMinutes: 2 });
+  assert.deepEqual(h.d.status?.waitingFor, ['o'], 'a standing agent on a machine keeps running through the restart: not waited for');
+  t.mock.timers.tick(119_000);
+  assert.equal(h.stops.length, 0);
+  t.mock.timers.tick(3000);
+  assert.equal(h.stops.length, 1);
+});
+
+test('restart.request: auto is read from the updater (w1634); update.wanted carries the commit and auto', () => {
+  const r = parseRestartRequest(JSON.stringify({ drain: 'auto', drainMinutes: 30, reason: 'update to abc (auto-deploy)', update: true, hold: false, auto: true }));
+  assert.ok(r !== 'now' && r.auto === true && r.drainMinutes === 30);
+  const plain = parseRestartRequest(JSON.stringify({ drain: 'auto', drainMinutes: 10, reason: 'update', update: true, hold: false, auto: false }));
+  assert.ok(plain !== 'now' && plain.auto === undefined);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-wanted-'));
+  try {
+    const sha = 'a'.repeat(40);
+    writeUpdateWanted(dir, { drainMinutes: 30, reason: 'auto-deploy: #485', ref: sha, auto: true }, new Date('2026-10-20T20:00:00Z'));
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'update.wanted'), 'utf8')), { drainMinutes: 30, reason: 'auto-deploy: #485', ref: sha, auto: true, at: '2026-10-20T20:00:00.000Z' });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -525,7 +525,8 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 
 The stuck times are judgments (`shared/blockers.ts` `BLOCKER_STUCK_MS`): a CI run takes minutes to an hour; a lock held
 a day is a run that never ended; a machine away three days is down, not asleep; a weekly usage limit resets within 7
-days; a deploy is a person's call, and a week without one is worth their look.
+days; a portal deploy follows a merge by itself (w1634, [ops-worker.md](ops-worker.md) "Automatic deploys"), so a week
+without one means it is off or failing, worth a person's look.
 
 - **It unblocks by itself.** The blocker watch (`server/blockerWatch.ts`) looks at every blocked request each minute,
   and at once when one is blocked or the nightly lab reports. When the blocker clears, a worker whose check-in the block

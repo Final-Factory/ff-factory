@@ -443,3 +443,14 @@ test('set_app_config: machines.activityPause is off for every machine unless set
   assert.throws(() => setAppConfig(file, cfg, 'machines.activityPause.enabled', 'maybe', { machine: 'm5' }), /machines\.activityPause\.enabled is true/);
   assert.throws(() => setAppConfig(file, cfg, 'machines.activityPause.idleMinutes', 0, { machine: 'm5' }), /from 1 to 1440/);
 });
+
+test('autoDeploy.enabled (w1634): settable by anyone, checked, written, applied live, null back to the default (on)', (t) => {
+  const { file, cfg } = setup(t);
+  assert.deepEqual(setAppConfig(file, cfg, 'autoDeploy.enabled', 'false'), { before: undefined, after: false });
+  assert.equal(cfg.autoDeploy?.enabled, false, 'the automatic deploy reads it at its next pass: no restart');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')).autoDeploy, { enabled: false });
+  setAppConfig(file, cfg, 'autoDeploy.enabled', null);
+  assert.equal(cfg.autoDeploy?.enabled, undefined, 'null is the default (on)');
+  assert.throws(() => normalizeSetting('autoDeploy.enabled', 'yes'), /true or false/);
+  assert.ok(!OWNER_ONLY_KEYS.has('autoDeploy.enabled') && SETTABLE_KEYS.includes('autoDeploy.enabled'));
+});
