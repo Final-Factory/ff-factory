@@ -73,6 +73,47 @@ test('letters: the drive keeps the letter it had; its own reservation does not c
   assert.equal(pick({ prefer: 'T', skip: ['T'] }).letter, 'V');
 });
 
+
+// ---------------------------------------------------------------- whose letter, without administrator rights (w1633)
+
+/**
+ * Get-OwnLetter (scripts/privileged/devdrive-lib.ps1) against faked Storage cmdlets. `image`: what Get-DiskImage answers
+ * (null: it throws); `disks`: what Get-Disk lists; `parts`: each disk number's partitions. A session that is not elevated
+ * gets the image with Attached but no Number, and `$img | Get-Disk` then fails (measured on lothdesktop, 2026-10-20).
+ */
+function ownLetter(o: { image: { Attached: boolean; Number?: number | null; DevicePath?: string } | null; disks?: { Number: number; Location: string }[]; parts?: Record<number, { DriveLetter: string; Size: number; Type: string }[]> }): string {
+  const vhdx = 'D:\\work\\ffw\\devdrive.vhdx';
+  const json = (v: unknown) => `'${JSON.stringify(v ?? null).replace(/'/g, "''")}' | ConvertFrom-Json`;
+  const script = `. '${path.join(HERE, 'privileged', 'devdrive-lib.ps1')}'
+$Vhdx = '${vhdx}'
+$fakeImage = ${json(o.image)}
+$fakeDisks = @(${json(o.disks ?? [])})
+$fakeParts = ${json(o.parts ?? {})}
+function Get-DiskImage { param($ImagePath, $ErrorAction) if ($null -eq $fakeImage) { throw 'Access denied' }; $fakeImage }
+function Get-Disk { $fakeDisks | ForEach-Object { $_ } }
+function Get-Partition { param($DiskNumber, $ErrorAction) $p = $fakeParts."$DiskNumber"; if (-not $p) { throw "No MSFT_Partition objects found with property 'DiskNumber' equal to '$DiskNumber'." }; $p }
+'[' + (Get-OwnLetter) + ']'`;
+  const file = path.join(tmp('own'), 'own.ps1');
+  fs.writeFileSync(file, script);
+  const out = execFileSync(PWSH, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', env: { ...process.env, DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: '1' } });
+  fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  return out.trim().replace(/^\[|\]$/g, '');
+}
+
+const V_PARTS = { 4: [{ DriveLetter: '', Size: 16_759_808, Type: 'Reserved' }, { DriveLetter: 'V', Size: 322_105_753_088, Type: 'Basic' }] };
+
+test('w1633: a mounted Dev Drive counts as attached in a session that is not elevated (the image has no Number, only its DevicePath)', { skip: needPwsh }, () => {
+  assert.equal(ownLetter({ image: { Attached: true, Number: null, DevicePath: '\\\\.\\PhysicalDrive4' }, parts: V_PARTS }), 'V', 'lothdesktop\'s case: the update read this as "not attached"');
+  assert.equal(ownLetter({ image: { Attached: true, Number: 4, DevicePath: '\\\\.\\PhysicalDrive4' }, parts: V_PARTS }), 'V', 'elevated: the image\'s own Number');
+  assert.equal(ownLetter({ image: null, disks: [{ Number: 2, Location: 'PCI Slot 0' }, { Number: 4, Location: 'D:\\work\\ffw\\devdrive.vhdx' }], parts: V_PARTS }), 'V', 'Get-DiskImage refused: the disk whose Location is the VHDX');
+});
+
+test('w1633: a Dev Drive that is really not mounted is still "not attached", so the update starts the elevated mount task', { skip: needPwsh }, () => {
+  assert.equal(ownLetter({ image: { Attached: false, Number: null, DevicePath: '' }, parts: V_PARTS }), '', 'detached');
+  assert.equal(ownLetter({ image: null, disks: [{ Number: 2, Location: 'PCI Slot 0' }], parts: V_PARTS }), '', 'no image answer and no disk is the VHDX');
+  assert.equal(ownLetter({ image: { Attached: true, Number: null, DevicePath: '\\\\.\\PhysicalDrive4' }, parts: { 4: [{ DriveLetter: '', Size: 322_105_753_088, Type: 'Basic' }] } }), '', 'attached with no letter');
+});
+
 // ---------------------------------------------------------------- the boot mount (the helper's mount task, faked disks)
 
 interface Scenario {
