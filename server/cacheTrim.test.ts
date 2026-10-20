@@ -87,3 +87,20 @@ test('trim: an aborted signal stops it between files', async (t) => {
   assert.equal(r.stopped, 'timed out');
   assert.ok(p.has('Library/BuildCache/a/1') && p.has('Library/BuildCache/a/2'));
 });
+
+test('w1576: a player-build cache goes whole once nothing in it was written for the keep age, and stays whole while anything was', async (t) => {
+  const p = project(t, {
+    'Library/EntitySceneBundles/ContentArchives/a.archive': [100, 3000],
+    'Library/EntitySceneBundles/abc.entityheader': [90, 10],
+    'Library/PlayerDataCache/Linux642/Data/level0': [150, 2000],
+    'Library/PlayerDataCache/Linux642/ScriptsOnlyCache.yaml': [150, 5],
+    'Library/PlayerDataCache/Win642/Data/level0': [200, 2000],
+    'Library/PlayerDataCache/Win642/DataBuildDirtyInfo.json': [2, 5],
+  });
+  const r = await trimLibraryCaches(p.dir, { ...TRIM_DEFAULTS, keepHours: 24 }, { now: p.now });
+  assert.equal(r.files, 4, 'EntitySceneBundles and the Linux target, all of them');
+  assert.equal(r.removedBytes, 3000 + 10 + 2000 + 5);
+  assert.equal(r.keptBytes, 2000 + 5, 'the Windows target was written 2 h ago: kept whole, its old file too');
+  for (const gone of ['Library/EntitySceneBundles', 'Library/PlayerDataCache/Linux642']) assert.ok(!p.has(gone), gone);
+  for (const kept of ['Library/PlayerDataCache/Win642/Data/level0', 'Library/PlayerDataCache/Win642/DataBuildDirtyInfo.json']) assert.ok(p.has(kept), kept);
+});
