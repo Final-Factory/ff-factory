@@ -49,7 +49,8 @@ import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, pa
 import { asksAPerson, holdsOf, servedBy } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
-import { heldText, roomIds, type RoomNow } from './placement.ts';
+import { heldText, roomIds, unusableText, type RoomNow } from './placement.ts';
+import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
 import { askExcerpt, answerOf, checkAsk, isAskTool, splitMedia, type Ask } from '../shared/ask.ts';
@@ -1018,7 +1019,7 @@ export class Orchestrators {
     this.store.putWork(w);
     const agent = needsOf(w) === 'agent';
     const facts = this.roomNow();
-    const room = roomIds(facts, needsOf(w));
+    const room = roomIds(facts, needsOf(w), w.priority);
     const where = room.length ? `${agent ? 'Agent slots' : 'Room'} now: ${room.join(', ')}.` : `No computer has ${agent ? 'an agent slot' : 'room'} now: it stays Queued, and the capacity ping names it when one frees.`;
     const on = h.to ? `on ${h.to}` : 'on another computer';
     const how = agent
@@ -1353,6 +1354,8 @@ export class Orchestrators {
     if (input.priority && input.priority !== w.priority) {
       what.push(`priority ${w.priority} → ${input.priority}`);
       w.priority = input.priority;
+      // A computer placement.minPriority reserves (w1643) may take it now: the capacity ping looks again.
+      if (w.status === 'queued') this.capacityMayHaveFreed(`${w.id}'s priority changed to ${input.priority}`);
     }
     if (note) {
       what.push(`note: ${note}`);
@@ -1994,13 +1997,14 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       const needs = [...new Set((input.needs ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean))];
       const kind = needsOf(w);
       const facts = this.roomNow();
-      const room = roomIds(facts, kind).filter((id) => !needs.length || needs.includes(id.toLowerCase()));
+      const room = roomIds(facts, kind, w.priority).filter((id) => !needs.length || needs.includes(id.toLowerCase()));
       if (room.length) {
         throw new Error(
           `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: start it there (start_agent with work_id "${w.id}"), or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
         );
       }
-      const held = heldText(facts.held.filter((h) => !needs.length || needs.includes(h.id)), kind);
+      // Held computers, and those placement.minPriority reserves above its priority (w1643), with room it may not use.
+      const held = unusableText({ ...facts, held: facts.held.filter((h) => !needs.length || needs.includes(h.id)), reserved: (facts.reserved ?? []).filter((r) => !needs.length || needs.includes(r.id)) }, kind, w.priority);
       w.queuedFor = { at: this.now().toISOString(), ...(needs.length ? { needs } : {}) };
       what = `queued for capacity${needs.length ? ` on ${needs.join(' or ')}` : ''}${held ? `; ${held}` : ''}`;
     } else if (input.action === 'block') {
@@ -4453,7 +4457,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       const since = Date.parse(w.queuedFor?.at ?? w.updatedAt) || now;
       if (now - since < ROOM_GRACE_MS || now - (this.roomFlags.get(w.id) ?? 0) < 3_600_000) continue;
       const needs = w.queuedFor?.needs?.map((n) => n.toLowerCase());
-      const on = roomIds(facts, needsOf(w)).filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
+      const on = roomIds(facts, needsOf(w), w.priority).filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
       if (!on.length) continue;
       this.roomFlags.set(w.id, now);
       this.stamp(w, `flagged: queued for capacity while ${on.join(', ')} ${on.length > 1 ? 'have' : 'has'} ${needsOf(w) === 'agent' ? 'an agent slot' : 'room'} (${nums(on)} at this time)`);
@@ -4505,7 +4509,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       if (!queued.length) return;
       // The room now, not the room when the event happened: only a queued request that a computer with room could take is worth a ping.
       const facts = this.roomNow();
-      const fits = (w: WorkItem) => roomIds(facts, needsOf(w)).some((id) => !w.queuedFor?.needs?.length || w.queuedFor.needs.some((n) => n.toLowerCase() === id.toLowerCase()));
+      const fits = (w: WorkItem) => roomIds(facts, needsOf(w), w.priority).some((id) => !w.queuedFor?.needs?.length || w.queuedFor.needs.some((n) => n.toLowerCase() === id.toLowerCase()));
       const usable = queued.filter(fits);
       if (!usable.length) {
         console.log(`ledger: no capacity ping: ${events.map((e) => e.what).join('; ')}, but no computer with room can take ${queued.map((w) => w.id).join(', ')} now`);
@@ -4514,7 +4518,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       this.capacityWakes.push(now);
       const old = (e: { what: string; at: number }) => `${e.what}, ${Math.max(0, Math.round((now - e.at) / 60_000))} min ago`;
       const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${w.queuedFor?.needs?.length ? `; needs ${w.queuedFor.needs.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''})`;
-      const room = [facts.game.length ? `game work: ${facts.game.join(', ')}` : '', facts.agent.length ? `agent-slot work: ${facts.agent.join(', ')}` : '', facts.held.length ? heldText(facts.held) : ''].filter(Boolean).join('; ');
+      const room = [facts.game.length ? `game work: ${facts.game.join(', ')}` : '', facts.agent.length ? `agent-slot work: ${facts.agent.join(', ')}` : '', facts.held.length ? heldText(facts.held) : '', ...(facts.reserved ?? []).map((r) => `${r.id} has room for ${minPriorityText(r.min)} (placement.minPriority)`)].filter(Boolean).join('; ');
       const rest = queued.filter((w) => !usable.includes(w));
       this.toDispatcher(`[ledger] Capacity may have freed (${events.map(old).join('; ')}). Room now: ${room}. Queued for capacity and fitting it, by priority, then oldest: ${usable.map(line).join('; ')}.${rest.length ? ` Queued with no room for them now: ${rest.map((w) => w.id).join(', ')}.` : ''} Start what fits now (start_agent into a FREE sandbox: list_sandboxes marks them, and check the sandbox is still free); leave queued only what no computer with room can take, and block what waits on something else.`);
     };

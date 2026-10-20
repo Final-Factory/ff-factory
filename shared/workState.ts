@@ -21,7 +21,7 @@
 import type { SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
-import { needsOf } from './capacity.ts';
+import { admitsPriority, needsOf, reservedText, type ReservedRoom } from './capacity.ts';
 
 export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'paused' | 'followup' | 'stalled';
 export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'waiting', 'queued', 'blocked', 'paused', 'followup', 'stalled'];
@@ -79,6 +79,8 @@ export interface WorkLiveFacts {
   agentRoom?: readonly string[];
   /** Computers with room that a placement hold keeps work off (w1089), with who and why: a Queued request says so. */
   heldRoom?: readonly { id: string; why: string; for: readonly ('game' | 'agent')[] }[];
+  /** Computers with room that placement.minPriority reserves for higher work (w1643): room only for a request at that level now. */
+  reservedRoom?: readonly ReservedRoom[];
   now: number;
 }
 
@@ -351,12 +353,15 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
     // The same room test as Capacity's ROOM/BUSY and decide_work queue (w1089), by what the request needs (w1098).
     const kind = needsOf(w);
     const known = kind === 'game' ? f.room : f.agentRoom;
-    const room = (known ?? []).filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
+    // A computer reserved for higher work (w1643) is room only for a request whose priority now reaches its level.
+    const reserved = (f.reservedRoom ?? []).filter((r) => r.for.includes(kind) && (!needs?.length || needs.includes(r.id.toLowerCase())));
+    const room = [...(known ?? []), ...reserved.filter((r) => admitsPriority(r.min, w.priority)).map((r) => r.id)].filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
     const what = `for capacity${needs?.length ? ` on ${needs.join(' or ')}` : ''}`;
     const slot = kind === 'agent' ? 'an agent slot' : 'room';
     if (room.length) return { state: 'queued', why: `queued ${what}, but ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${slot}: the dispatcher should start it, or block it on what it waits for`, roomOn: room };
     const held = (f.heldRoom ?? []).filter((h) => h.for.includes(kind) && (!needs?.length || needs.includes(h.id.toLowerCase())));
-    const heldWhy = held.length ? `; ${held.map((h) => `${h.id} has ${slot} but is held (${h.why})`).join('; ')}` : '';
+    const reservedWhy = reservedText(reserved, kind, w.priority, slot);
+    const heldWhy = `${held.length ? `; ${held.map((h) => `${h.id} has ${slot} but is held (${h.why})`).join('; ')}` : ''}${reservedWhy ? `; ${reservedWhy}` : ''}`;
     return { state: 'queued', why: `queued ${what}${known ? ': no computer that could take it has ' + slot : ''}${heldWhy}` };
   }
 

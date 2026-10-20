@@ -9,6 +9,7 @@ import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
 import { writeFileDurable } from './durable.ts';
 import { placeId } from './placement.ts';
+import { MIN_PRIORITIES, type MinPriority } from '../shared/capacity.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
 import { poolLimits, poolSettingProblem, type PoolConfigKey } from './tokenPool.ts';
@@ -112,6 +113,8 @@ export const SETTABLE_KEYS = [
   'placement.live',
   // Where builds run first, and which computers a build declared coming clears (w1606, docs/orchestrators.md); unset: beast.
   'placement.build',
+  // The lowest priority of work each computer takes (w1643, docs/machines.md "Placing work"): { "beast": "urgent" }.
+  'placement.minPriority',
   // When the orchestrators compact their conversations by themselves (w535, server/autoCompact.ts): the context in
   // tokens, and a turn's cost in USD. 0 turns either trigger off.
   'orchestrator.compactAtTokens',
@@ -646,6 +649,22 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (Object.keys(out).length > 12) throw new Error(`${name} names at most 12 computers`);
       return Object.keys(out).length ? out : undefined;
     }
+    case 'placement.minPriority': {
+      // w1643, lothsahn: "If normal (all work), if high, high and urgent, if urgent, urgent only". normal is the default, so
+      // it is not stored: a computer left out takes all work.
+      const name = key;
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${name} is an object: computer id to the lowest priority of work it takes (${MIN_PRIORITIES.join(', ')}), e.g. { "beast": "urgent" }`);
+      const out: Record<string, MinPriority> = {};
+      for (const [k, level] of Object.entries(value as Record<string, unknown>)) {
+        const id = placeId(k);
+        if (!MACHINE_KEY.test(id) || id === 'host') throw new Error(`${name}: "${k.slice(0, 40)}" is not a machine id${NO_HOST}`);
+        const lv = typeof level === 'string' ? level.trim().toLowerCase() : level;
+        if (!MIN_PRIORITIES.includes(lv as MinPriority)) throw new Error(`${name}.${id}: ${JSON.stringify(level)?.slice(0, 40)} is not a level; one of ${MIN_PRIORITIES.join(', ')} (normal: all work, low included; high: high and urgent work only; urgent: urgent work only)`);
+        if (lv !== 'normal') out[id] = lv as MinPriority;
+      }
+      if (Object.keys(value as object).length > 12) throw new Error(`${name} names at most 12 computers`);
+      return Object.keys(out).length ? out : undefined;
+    }
     case 'voice.ttsVoice': {
       if (typeof value !== 'string' || !/^[a-z]{2}_[a-z]+$/.test(value.trim())) throw new Error('voice.ttsVoice is a Kokoro voice name such as "af_heart" or "bm_george"');
       return value.trim();
@@ -855,9 +874,9 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   }
   // Live: the live view reads cfg.live.enabled at every use (server/live.ts); null is the default, off.
   else if (key === 'live.enabled') cfg.live = v === undefined ? undefined : { ...cfg.live, enabled: v as boolean };
-  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build') {
+  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build' || key === 'placement.minPriority') {
     const p = { ...cfg.placement };
-    const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : 'hold';
+    const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : key === 'placement.minPriority' ? 'minPriority' : 'hold';
     if (v === undefined) delete p[field];
     else (p as Record<string, unknown>)[field] = v;
     cfg.placement = p;

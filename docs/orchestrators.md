@@ -455,6 +455,11 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      capacity: no computer that could take it has room; m5 has room but is held (Ben testing, 2026-10-12)". A held
      computer is not "room" for the WRONG test: a request waiting while only held computers have room is correctly Queued.
      `placement.avoid` is softer: an avoided computer takes work when nothing else has room, so it does count as room.
+   - **A reserved computer is named too** (w1643, config `placement.minPriority`, [machines.md](machines.md), "Placing
+     work"). A computer reserved for high or urgent work is room only for a request whose priority now reaches its level:
+     a normal request queued while only it has room is correctly Queued, its reason reads "beast has room but takes urgent
+     work only (placement.minPriority; this is normal)", and the same request raised to urgent is WRONG while it waits, and
+     `decide_work queue` is refused for it. A raise of a Queued request's priority wakes the capacity ping.
 
    **"Has room" is one test.** `roomNow` (`server/placement.ts`) returns the room for each kind of work and the held
    computers, built from the same `hasRoom` / `busyReasons` that print BUSY or ROOM in the Capacity block of
