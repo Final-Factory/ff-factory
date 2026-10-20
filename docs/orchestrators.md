@@ -2191,6 +2191,15 @@ orchestrator asks every question to its person with **`ask_person`**, one at a t
   same words typed would, with no reaction and no click-grant involved (w1039's rules are for the emoji). A held call
   (w830) rides along as with any message. Only the quote is FF Factory's, so a label is the only thing of theirs that counts as
   their words: it is why the tool tells the orchestrator to write labels as full answers, not "Yes".
+- **The answer above the card stays in view** (w1632). lothsahn, 2026-10-20: "you didn't answer my question in our chat
+  ... And instead you posted a question for me". A turn that answered his question in text and ended on an ask_person card
+  showed only the card on his phone: the chat followed its end, the card filled the screen, and the answer sat above the top
+  edge. Now `buildItems` (`web/src/components/Transcript.tsx`) gives a card the seq of the first message the orchestrator
+  wrote in its turn (since the turn began or its person last wrote), and `followEnd` starts the view at that message when
+  the two do not fit together, with the "New messages" pill pointing down to the card; once per card (`broughtUp`), so
+  scrolling down to the card is not undone. A card with no text before it in its turn, or one with a message after it,
+  follows the end as ever. Test: `e2e/ask.spec.ts` ("a turn that answers and then asks"), in the "asker" login's own chat
+  (`e2e/server.ts`), since another test's message would move the chat's end.
 - **The buttons lock after one choice.** Whether a question is answered is read from the transcript (`answerOf`): a message
   of the person's whose quote is that question and whose words are one of its labels. So it survives a reload, another tab
   and the phone, and the server refuses a second click (409 `already answered: "<label>"`, the page shows the pick locked,

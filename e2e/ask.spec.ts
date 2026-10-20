@@ -1,7 +1,7 @@
-import type { APIRequestContext, Page } from '@playwright/test';
+import type { APIRequestContext, BrowserContextOptions, Page } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
-import { BOX, appState, expect, expectNoHorizontalOverflow, expectTapTargets, isMobile, test, uniq, useTool } from './fixtures.ts';
+import { BOX, appState, expect, expectNoHorizontalOverflow, expectTapTargets, isMobile, sendToChat, test, uniq, useTool } from './fixtures.ts';
 import type { TranscriptEvent } from '../shared/types.ts';
 import { REPLY_MARK } from '../shared/replies.ts';
 
@@ -150,4 +150,60 @@ test('ask over the API: a click needs a real option of a real question, and a se
   await expect(card).toHaveClass(/ask-locked/);
   const dispatcher = (await appState(page.request)).dispatcherId!;
   expect((await post({ seq: call.seq, choice: 0 }, dispatcher)).status()).toBeGreaterThanOrEqual(400);
+});
+
+// w1632 (lothsahn, 2026-10-20: "you didn't answer my question in our chat ... And instead you posted a question for me"):
+// a turn that answers in text and then asks with buttons. The chat followed its end, and on a phone the card filled the
+// screen with the answer above the top edge. Now the answer starts on screen at the turn's end, the card right after it,
+// on a phone as on a desktop; the test does not scroll before it looks.
+// Its own login's chat (e2e/server.ts, "asker"): where the view ends depends on the chat's last message, which another
+// test's message, sent at the same time, would move.
+const asAsker = test.extend<{ solo: Page }>({
+  solo: async ({ browser }, use) => {
+    const ctx = await browser.newContext(test.info().project.use as BrowserContextOptions);
+    await expect(async () => {
+      const r = await ctx.request.post('/api/login', { data: { username: 'asker', password: 'e2e-password-246' } });
+      expect(r.ok(), await r.text()).toBeTruthy();
+    }).toPass({ intervals: [100, 200, 400, 800], timeout: 15_000 });
+    const page = await ctx.newPage();
+    await page.goto('/');
+    await expect(page.locator('.sidebar')).toBeAttached();
+    await use(page);
+    await ctx.close();
+  },
+});
+
+asAsker('ask: a turn that answers and then asks shows the answer on screen, the card after it', async ({ solo: page }) => {
+  const tag = uniq('answer');
+  const q = questionFor(tag);
+  // An answer as long as the orchestrator's were (a few paragraphs).
+  const answer = `Shell bots for ${tag} render as one instanced ring per platform; a hit on the platform takes them out with it.`;
+  const more = `A bot still flying to its platform for ${tag} is an ordinary entity until it docks, so turrets can shoot it. ` + 'It keeps its own health and armour while it flies, takes splash from rockets like any drone, and only becomes a count on the platform when it lands. '.repeat(4);
+  const me = await appState(page.request);
+  await sendToChat(page.request, me.orchestratorId, `#say ${answer}⏎⏎${more}\n#tool ask_person ${JSON.stringify(q)}`);
+  const card = page.getByTestId('ask').filter({ hasText: q.question });
+  await expect(card).toBeAttached();
+  const reply = page.locator('.orch .msg-assistant').filter({ hasText: answer });
+  await expect(reply).toContainText(more);
+  await page.waitForTimeout(600);
+  await shot(page, 'ask-turn-end');
+  // The start of the answer is on screen, under the chat's top edge.
+  const scroll = page.locator('.orch .transcript-scroll');
+  await expect.poll(async () => {
+    const [r, box] = [await reply.boundingBox(), await scroll.boundingBox()];
+    return !!r && !!box && r.y >= box.y - 1 && r.y < box.y + box.height - 40;
+  }, { message: 'the start of the answer is on screen' }).toBe(true);
+  await expect(reply.getByText(answer)).toBeInViewport();
+  // The card comes after the answer and does not sit over it.
+  const [a, c] = [await reply.boundingBox(), await card.boundingBox()];
+  expect(a!.y + a!.height).toBeLessThanOrEqual(c!.y + 1);
+  await shot(page, 'ask-after-answer');
+  // When they do not fit together, the pill points down to the card; going down there stays there.
+  if (c!.y + c!.height > (await scroll.boundingBox())!.y + (await scroll.boundingBox())!.height + 1) {
+    await expect(page.locator('.orch .jump-pill.has-new')).toBeVisible();
+    await page.locator('.orch .jump-pill').click();
+    await expect(card.getByTestId('ask-more')).toBeInViewport();
+    await page.waitForTimeout(500);
+    await expect(card.getByTestId('ask-more')).toBeInViewport();
+  } else await expect(card).toBeInViewport();
 });
