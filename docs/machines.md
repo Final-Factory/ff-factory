@@ -961,7 +961,7 @@ LothDesktop and Beast, not just when BEAST is full").
     placement.build` (unset: `beast`, `DEFAULT_BUILD`), else the general placement.
   - A build declared coming holds its computer for new work at once (`Agents.placement()` adds `BuildPlans.holds()`),
     and when due moves its workers between turns elsewhere, pauses the ones that cannot move and asks the ones mid-turn
-    to pause at a safe point; `build_plan start` waits for the bench lock and (up to 20 minutes) for those turns; `done`
+    to pause at a safe point; `build_plan start` waits (up to 20 minutes) for those turns, and the build queues for its turn in the bench queue itself (w1628); `done`
     resumes them. The paused workers' resumes are held by `machineHold` (`BuildPlans.resumeHold`), not by the computer's
     hold, so the builder and a running Live view go on. Details: [orchestrators.md](orchestrators.md), "Builds clear BEAST".
   - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators.test.ts`.

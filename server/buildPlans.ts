@@ -188,8 +188,13 @@ export class BuildPlans {
     }
     if (builder && !this.isBuilder(p, builder)) return `Not yours: ${p.machine} is ${this.holdWhy(p).replace(/: no new work until it is done$/, '')}. Build where you are, or wait until it is done.`;
     if (!p.clearedAt) await this.clear(p);
+    // w1628: a held bench lock no longer holds the build back here. The build's own Unity run takes a shared ticket in
+    // the machine's bench queue (unity-slot run, the game repo's build_player.sh / ff_unity_slot, w1615), so it waits
+    // for the timed leg running now and the ones queued before it, never runs beside one, and keeps its place ahead of
+    // the legs queued after it. Waiting here for a free lock was a poll that lost: BEAST's lock was free for at most
+    // 3.8 minutes at a time in the first 16 hours of 2026-10-20 (w1628's census).
     const lock = this.d.benchLock(p.machine);
-    if (lock) return `Not yet (w1606): on ${p.machine}, ${benchText(lock)}, and a build beside it would spoil that run's numbers. Do what needs no build meanwhile, then wake_me in 10 minutes and build_plan start again (a leg holds the lock under 15 minutes and gives it back between legs; a holder that dies frees it at once, w1615).`;
+    const queued = lock ? ` On ${p.machine}, ${benchText(lock)}: your build takes a shared ticket in its bench queue and starts as soon as that leg (and any queued before your build) ends, never beside one; \`python scripts/bench/bench_queue.py status\` shows its place (w1628).` : '';
     const busy = this.stillMidTurn(p);
     const waited = this.now() - (p.clearedAt ?? this.now());
     if (busy.length && waited < BUILD_WAIT_MS.value) {
@@ -202,7 +207,7 @@ export class BuildPlans {
     }
     const kept = p.kept.length ? ` Left alone: ${p.kept.map((k) => `${k.session} (${k.why})`).join('; ')}.` : '';
     const late = busy.length ? ` ${busy.join(', ')} did not end its turn in ${mins(BUILD_WAIT_MS.value)} minutes; the build goes ahead beside it, a little slower.` : '';
-    return `Go (w1606): ${p.machine} is cleared for ${p.what} (${p.moved.length} moved: ${p.moved.map((m) => `${m.session} to ${m.to}`).join(', ') || 'none'}; ${pausedOf(p).length} paused).${kept}${late} Build now through unity-slot run --label "${p.what}". When it is done (or failed), build_plan done at once: the paused work waits for it.`;
+    return `Go (w1606): ${p.machine} is cleared for ${p.what} (${p.moved.length} moved: ${p.moved.map((m) => `${m.session} to ${m.to}`).join(', ') || 'none'}; ${pausedOf(p).length} paused).${kept}${late} Build now through unity-slot run --label "${p.what}".${queued} When it is done (or failed), build_plan done at once: the paused work waits for it.`;
   }
 
   /** build_plan done: the hold lifts, the held resumes go, and every worker paused mid-turn is told to carry on. */

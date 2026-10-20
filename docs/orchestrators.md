@@ -249,8 +249,11 @@ the dispatcher for a request (`work_id`) when it knows a release request reaches
    - **its Live view runs: left alone.** A Live view a person may be steering beats a build, and a move would end it;
      the build runs beside it, a little slower.
 3. **The build starts when its worker asks** (`build_plan start`): `Go`, or `Not yet` with what it waits for:
-   - **a bench lock** (a timed run under the game repo's `scripts/bench/quiet_gate.sh`, w1440; machine/benchLock.ts):
-     the build waits for it, however long; a build beside a timed run would spoil its numbers, and it never overrides one;
+   - **not a bench lock** (w1628): a timed run holding the lock gets a `Go` with a note. The build's own Unity run
+     (`unity-slot run`, the game repo's `build_player.sh`) takes a shared ticket in the machine's bench queue (w1615),
+     so it waits for that leg and the ones queued before it, never runs beside one, and keeps its place ahead of the
+     legs queued after it. Waiting here for a free lock lost: BEAST's lock was free at most 3.8 minutes at a time in
+     the first 16 hours of 2026-10-20;
    - **workers asked to pause, still mid-turn**: up to 20 minutes (`BUILD_WAIT_MS`); past that the build goes ahead beside
      them and says so, rather than cut a turn off.
 4. **`build_plan done`** (by its worker right after the build, done or failed) ends it: the hold lifts, the queued resumes

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { Store } from './store.ts';
-import { SessionManager, setQueryForTesting } from './sessions.ts';
+import { isMidTurn, SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
@@ -168,6 +168,9 @@ test("a person's files reach their orchestrator as stored files, go with request
   await until('the follow-up', () => users(worker).length > 1);
   assert.deepEqual(users(worker)[1].attachments?.map((x) => x.id), [c.id]);
   assert.equal(fs.existsSync(inbox(c)), true);
+  // The follow-up's turn ends before the next start: a start beside a worker mid-turn is refused (w1607), and waiting
+  // only for the message left this a race the fake worker lost about half the time (w1628, CI and 6/12 local runs).
+  await until('the follow-up turn ends', () => !isMidTurn(store.sessions.get(worker)!));
 
   // A request's file deleted by retention before the work starts: the work starts without it, and the answer says so.
   const e = await upload('old.zip', Buffer.from('old save'));

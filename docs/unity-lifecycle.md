@@ -195,8 +195,24 @@ node cannot take the OS file locks the queue lives on):
 - **`readBenchLock`** (`machine/benchLock.ts`): a holder whose owner line names a ticket (`[t00000042]`) counts while
   its helper process lives, however old; an old-style line keeps the 40-minute rule.
 
-A checkout without `bench_queue.py` (a branch from before w1615) or a machine without python goes ahead without a
-ticket and logs why.
+- **The sandbox editor's own compiles, imports and test runs** (w1628, `machine/editorBenchGate.ts`; lothsahn: "Won't
+  builds use a ton of cpu and invalidate runs?"). A Unity MCP call that compiles, imports or runs tests (`refresh_unity`,
+  `run_tests`, `execute_menu_item`, the script and asset edits) first takes a shared ticket for the sandbox's editor and
+  waits for it up to 150 s inside the call (its hook matcher allows 180 s). Not granted by then, the call is refused with
+  `Queued (w1628)` and its place in line, which is kept 30 minutes for the call made again. The ticket stays while the
+  session keeps using its editor and goes 5 minutes after its last Unity MCP call (2 minutes when its turn came and no
+  call used it). One gate per sandbox per process: a sandbox's agents share one editor.
+- **A batch Unity started straight from the shell** (`Unity -batchmode ...`, `"$UNITY" -batchmode ...`) is refused by
+  the guard (`checkRawUnityBatch`, w1628) with the `unity-slot run` command to use instead, which takes a slot and a
+  ticket.
+
+A checkout without `bench_queue.py` (a branch from before w1615) takes its ticket with another sandbox's copy of the
+script (`sandboxBenchQueueScript`, w1628: the queue is its files, not its code); with none on the machine, or without
+python, it goes ahead without a ticket and logs why.
+
+**Still not covered** (w1628): an editor's own refresh when its window gets focus (Unity's Auto Refresh), play mode
+started from the editor, and scripts that start Unity inside a script file the guard does not read. The game repo's
+`quiet` gate waits for them before a leg starts, but one that starts mid-leg can still spoil it.
 
 ## Orphaned and hung batch builds are ended (w791)
 
