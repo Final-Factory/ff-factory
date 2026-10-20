@@ -46,7 +46,10 @@ test('visual: the seeded sandbox page', async ({ page }) => {
   const panel = await openSandbox(page, GALLERY);
   await expect(panel.locator('.msg-assistant[data-turn-end="ok"]')).toBeVisible();
   // The model chip (w1358, e2e/headerModel.spec.ts) is left out, as the orchestrator's context size is: the header is as before it existed.
-  await page.addStyleTag({ content: '[data-testid="active-model"] { display: none !important; }' });
+  // So are the global notice bars: they sit above the page in the layout, and one a parallel test raises on the shared
+  // server (vault.spec.ts adds a GitHub App the server's real token check refuses: "A GitHub token needs updating") took
+  // 35 px off this panel on WebKit (w1639, CI runs 39502838676 and 39507012306).
+  await page.addStyleTag({ content: '[data-testid="active-model"], .gbars { display: none !important; }' });
   await expect(panel).toHaveScreenshot('sandbox-gallery.png');
 });
 
