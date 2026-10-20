@@ -16,6 +16,7 @@ import { daemonConfig } from './machineDeploy.ts';
 import { describeCleanupItems } from './cleanup.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { UnitySlots } from '../machine/unitySlots.ts';
+import type { BenchTicket } from '../machine/benchQueue.ts';
 import { SandboxPool, type PoolOptions, deletable, idleSandboxEditors, lfsDedup, lfsDedupWords, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import { copyTree, removeTree, run } from './proc.ts';
@@ -145,7 +146,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket'] } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
   /** The status of each sandbox at every change the portal would be sent, consecutive repeats dropped (w898: the cleanup state's order). */
   const statuses: string[] = [];
@@ -170,6 +171,7 @@ function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined;
       ...(o.log ? { log: o.log } : {}),
       ...(o.reseedIdleDays !== undefined ? { reseedIdleDays: o.reseedIdleDays } : {}),
       librarySeedGB: 1,
+      ...(o.bootTicket ? { bootTicket: o.bootTicket } : {}),
       ...(o.slots ? { editorSlot: (id: string) => o.slots!().startRefusal(`sandbox:${id}`), slotsStatus: async () => (await o.slots!().tick(), o.slots!().describe()) } : {}),
     },
     d,
@@ -185,6 +187,91 @@ const ready = (p: SandboxPool, id: string) => until(`${id} ready`, () => {
 });
 
 // ---------------------------------------------------------------- the pool, against real git (CI runs this on Windows too)
+
+/** A bench ticket the test grants or fails by hand (machine/benchQueue.ts BenchTicket's wait/release). */
+function fakeTicket() {
+  const t = {
+    kind: 'waiting' as 'waiting' | 'granted' | 'failed',
+    line: 'shared ticket, place 2, waiting for t00000001 exclusive probe A round 2',
+    released: 0,
+    async wait(ms = Infinity, onLine?: (l: string) => void) {
+      const until = Date.now() + ms;
+      onLine?.(t.line);
+      while (t.kind === 'waiting' && Date.now() < until && !t.released) await new Promise((r) => setTimeout(r, 20));
+      return t.kind === 'granted' ? { kind: 'granted' as const, ticket: 't00000002', line: 'granted t00000002' } : t.kind === 'failed' ? { kind: 'failed' as const, line: 'gave up' } : { kind: 'waiting' as const, line: t.line };
+    },
+    release() {
+      t.released++;
+    },
+  };
+  return t;
+}
+
+test('w1615: an editor start takes a shared bench ticket after its slot: queued while a timed run holds the lock, started at its turn, the ticket let go once its bridge is up; a stop cancels a queued start', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const tickets: ReturnType<typeof fakeTicket>[] = [];
+  const { p, events, running } = pool(r, { settings: { maxUnity: 2 }, bootTicket: () => {
+    const k = fakeTicket();
+    tickets.push(k);
+    return { ticket: k as unknown as BenchTicket };
+  } });
+  t.after(() => tickets.forEach((k) => k.release())); // a failed assertion must not leave a queued start waiting forever
+  for (const id of ['a', 'b']) await p.create({ id, branch: `sandbox/${id}`, base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'a');
+  await ready(p, 'b');
+  // A timed run holds the lock: the start answers at once that it is queued, and no editor runs.
+  const said = await p.unity('a', 'start');
+  assert.match(said, /^Queued \(w1615\): .*place 2, waiting for t00000001 exclusive probe A round 2.*starts by itself at its turn/);
+  assert.equal(running.size, 0, 'nothing starts beside the timed run');
+  await p.tick();
+  assert.equal(p.list().find((s) => s.id === 'a')!.unity.state, 'starting', 'a look keeps it queued, not stopped');
+  assert.match(p.list().find((s) => s.id === 'a')!.unity.detail ?? '', /^queued in the bench queue: /);
+  assert.match(await p.unity('a', 'start'), /Already queued in the bench queue/, 'a second start does not queue twice');
+  assert.equal(tickets.length, 1);
+  // Its turn: the pool starts the editor itself and tells the worker.
+  tickets[0].kind = 'granted';
+  await until('a started at its turn', () => running.size === 1);
+  await until('the event', () => events.some((e) => /sandbox a: its queued editor start ran at its turn in the bench queue/.test(e.text)));
+  assert.equal(tickets[0].released, 0, 'held while the editor loads');
+  await p.tick();
+  assert.equal(p.list().find((s) => s.id === 'a')!.unity.state, 'running');
+  assert.equal(tickets[0].released, 1, 'let go once the bridge is up');
+  // A start that is granted at once runs at once; a stop of a queued start cancels it and lets its ticket go.
+  const b = p.unity('b', 'start');
+  tickets.length = 1;
+  assert.match(await b, /^Queued/);
+  assert.match(await p.unity('b', 'stop'), /Its queued start is cancelled \(w1615\)/);
+  assert.equal(tickets[1].released, 1);
+  tickets[1].kind = 'granted';
+  await new Promise((res) => setTimeout(res, 200));
+  assert.equal(running.has(path.join(r.sbRoot, 'b')), false, 'a cancelled start never runs');
+});
+
+test('w1615: a queued editor start whose slot is gone at its turn is not made, its ticket let go, and the worker told', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const tickets: ReturnType<typeof fakeTicket>[] = [];
+  let queue = true;
+  const { p, events, running } = pool(r, { settings: { maxUnity: 1 }, bootTicket: () => {
+    const k = fakeTicket();
+    if (!queue) k.kind = 'granted';
+    tickets.push(k);
+    return { ticket: k as unknown as BenchTicket };
+  } });
+  t.after(() => tickets.forEach((k) => k.release())); // a failed assertion must not leave a queued start waiting forever
+  for (const id of ['a', 'b']) await p.create({ id, branch: `sandbox/${id}`, base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'a');
+  await ready(p, 'b');
+  assert.match(await p.unity('a', 'start'), /^Queued/);
+  queue = false;
+  assert.match(await p.unity('b', 'start'), /Started \(fake\)/, 'granted at once: started at once');
+  tickets[0].kind = 'granted';
+  await until('a told', () => events.some((e) => /sandbox a: its queued editor start was not made at its turn .*already 1 sandbox editors running/.test(e.text)));
+  assert.equal(running.size, 1);
+  assert.equal(tickets[0].released, 1, 'no wait for a slot while holding the ticket: it is let go');
+  assert.match(p.list().find((s) => s.id === 'a')!.unity.detail ?? '', /^queued start not made: /);
+});
 
 test('machine sandboxes: a worktree of the main clone on its own branch, a warm Library, removed cleanly', async (t) => {
   const r = repos();

@@ -18,6 +18,7 @@ import { checkArray, readJsonDurable, writeJsonDurable } from '../server/durable
 import { armScriptReimport } from './scriptReimport.ts';
 import { MacUnity, MacUnityWatch, realDeps, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
+import type { BenchTicket } from './benchQueue.ts';
 import type { DiskLevel, GitStatus, MachineSandboxUnity, SandboxPoolSettings, SandboxStatus } from '../shared/types.ts';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -111,7 +112,19 @@ export interface PoolOptions {
   editorSlot?(id: string): Promise<string | undefined>;
   /** Every Unity editor of the machine, counted now, for `unity status`. */
   slotsStatus?(): Promise<string>;
+  /**
+   * A shared ticket in the machine's bench queue for an editor boot (w1615, machine/benchQueue.ts): a boot never runs
+   * beside a timed bench leg. Taken after the Unity slot check and let go once the editor's MCP bridge is up (or
+   * BOOT_TICKET_MAX_MS). A ticket that is not granted at once queues the start, which the pool makes itself at its turn.
+   * Unset, or { why }: the editor starts without one.
+   */
+  bootTicket?(sb: { id: string; path: string }): { ticket?: BenchTicket; why?: string };
 }
+
+/** How long `unity start` waits for a boot's bench ticket before it answers "queued" (python's start-up is under 1 s). */
+export const BOOT_TICKET_ANSWER_MS = 5_000;
+/** A boot's ticket goes once the bridge is up, or after this long (a first import can take long; the queue revokes at 30). */
+export const BOOT_TICKET_MAX_MS = 30 * 60_000;
 
 /** Why `branch` cannot be a sandbox branch (the host's rules, plus git's), or undefined. Exported for tests. */
 export async function sandboxBranchProblem(branch: string, git: PoolDeps['git']): Promise<string | undefined> {
@@ -280,6 +293,9 @@ export class SandboxPool {
   private readonly trimming = new Map<string, Promise<TrimResult>>();
   /** Per sandbox: whether it had a live agent at the last look, so the moment the last one goes is seen. */
   private readonly occupied = new Map<string, boolean>();
+  /** w1615: editor starts queued in the bench queue, and the boot tickets of editors still loading. */
+  private readonly queuedBoots = new Map<string, BenchTicket>();
+  private readonly bootTickets = new Map<string, { ticket: BenchTicket; at: number }>();
   /** Released sandboxes still to trim (the editor was up when the last agent left). */
   private readonly pendingTrim = new Set<string>();
   private disk: { level: DiskLevel; freeBytes?: number } = { level: 'ok' };
@@ -551,6 +567,7 @@ export class SandboxPool {
     this.editors.delete(id);
     this.unityState.delete(id);
     this.git.delete(id);
+    this.endBoot(id);
     this.changed();
     return `Deleted sandbox ${id} (${r.path})${note}.${problems.length ? ` Warnings: ${problems.join('; ')}` : ''}`;
   }
@@ -600,6 +617,7 @@ export class SandboxPool {
     this.editors.delete(id);
     this.unityState.delete(id);
     this.git.delete(id);
+    this.endBoot(id);
     this.changed();
     return `Released sandbox ${id}; ${r.path} and its editor are left as they are.`;
   }
@@ -756,7 +774,8 @@ export class SandboxPool {
   }
 
   private runningEditors() {
-    return [...this.recs.keys()].filter((id) => this.editorUp(id));
+    // A start queued in the bench queue (w1615) holds no slot: its turn checks the slots again, as the daemon's count does.
+    return [...this.recs.keys()].filter((id) => this.editorUp(id) && !this.queuedBoots.has(id));
   }
 
   /** status | start | stop | restart of a sandbox's editor. */
@@ -773,6 +792,7 @@ export class SandboxPool {
     const out: string[] = [];
     if (action === 'stop') this.stoppedAt.set(id, this.d.now());
     if (action === 'stop' || action === 'restart') {
+      if (this.endBoot(id)) out.push('Its queued start is cancelled (w1615).');
       const ed = this.editorFor(r);
       ed.watch?.expectExit();
       out.push(await ed.unity.stop({ force }));
@@ -786,15 +806,96 @@ export class SandboxPool {
     if (this.disk.level !== 'ok') throw new Error(`not started: disk space is ${this.disk.level} on ${s.root}; new editors wait until space is freed`);
     const current = this.editorFor(r);
     if (current.unity.editors(await this.d.procs()).length) return [...out, `Already running (${await current.unity.status()}).`].join(' ');
-    if (!hadEditor) {
-      if (this.o.editorSlot) {
-        const why = await this.o.editorSlot(id);
-        if (why) throw new Error(why);
-      } else {
-        const up = this.runningEditors().filter((x) => x !== id);
-        if (up.length >= s.maxUnity) throw new Error(`already ${up.length} sandbox editors running on this machine (${up.join(', ')}; max_unity ${s.maxUnity}); stop one first`);
+    if (this.queuedBoots.has(id)) return [...out, `Already queued in the bench queue (w1615): ${this.unityState.get(id)?.detail ?? 'waiting'}.`].join(' ');
+    if (!hadEditor) await this.checkSlot(id);
+    // w1615: the Unity slot first (above), then a shared ticket in the bench queue, never the other way round.
+    const boot = this.o.bootTicket?.(r);
+    if (boot?.why) this.o.log?.(`sandbox ${id}: editor start without a bench ticket: ${boot.why}`);
+    if (boot?.ticket) {
+      const st = await boot.ticket.wait(BOOT_TICKET_ANSWER_MS);
+      if (st.kind === 'waiting') {
+        this.queueBoot(r, boot.ticket, hadEditor, st.line);
+        return [...out, `Queued (w1615): this machine's bench queue has a timed run holding the lock or ahead of this start (${st.line}). The editor starts by itself at its turn, never beside a timed run; \`unity status\` shows its place. Do what needs no editor meanwhile, then wake_me in 10 minutes and look.`].join(' ');
+      }
+      if (st.kind === 'granted') this.bootTickets.set(id, { ticket: boot.ticket, at: this.d.now() });
+      else {
+        this.o.log?.(`sandbox ${id}: editor start without a bench ticket: ${st.line}`);
+        boot.ticket.release();
       }
     }
+    try {
+      out.push(...(await this.launch(r)));
+    } catch (e) {
+      this.endBoot(id);
+      throw e;
+    }
+    return out.join(' ');
+  }
+
+  /** Whether the machine's Unity slots let this sandbox's editor start now; throws why not. */
+  private async checkSlot(id: string) {
+    const s = this.need();
+    if (this.o.editorSlot) {
+      const why = await this.o.editorSlot(id);
+      if (why) throw new Error(why);
+    } else {
+      const up = this.runningEditors().filter((x) => x !== id);
+      if (up.length >= s.maxUnity) throw new Error(`already ${up.length} sandbox editors running on this machine (${up.join(', ')}; max_unity ${s.maxUnity}); stop one first`);
+    }
+  }
+
+  /** Let go of a sandbox's queued start or boot ticket; true when a start was queued. */
+  private endBoot(id: string): boolean {
+    const q = this.queuedBoots.get(id);
+    this.queuedBoots.delete(id);
+    q?.release();
+    this.bootTickets.get(id)?.ticket.release();
+    this.bootTickets.delete(id);
+    return !!q;
+  }
+
+  /** A start queued in the bench queue (w1615): made at its turn, after the gates are checked again (none is waited for). */
+  private queueBoot(r: Rec, t: BenchTicket, hadEditor: boolean, line: string) {
+    const id = r.id;
+    this.queuedBoots.set(id, t);
+    this.unityState.set(id, { state: 'starting', detail: `queued in the bench queue: ${line}`, startedAt: this.d.now() });
+    this.changed();
+    void (async () => {
+      const st = await t.wait(Infinity, (l) => {
+        if (this.queuedBoots.get(id) !== t) return;
+        this.unityState.set(id, { ...(this.unityState.get(id) ?? { state: 'starting' }), state: 'starting', detail: `queued in the bench queue: ${l}` });
+        this.changed();
+      });
+      if (this.queuedBoots.get(id) !== t) return; // stopped, restarted or released meanwhile: endBoot let it go
+      this.queuedBoots.delete(id);
+      if (st.kind === 'granted') this.bootTickets.set(id, { ticket: t, at: this.d.now() });
+      else {
+        this.o.log?.(`sandbox ${id}: queued editor start goes on without a bench ticket: ${st.line}`);
+        t.release();
+      }
+      try {
+        const rec = this.require(id);
+        if (rec.status !== 'ready') throw new Error(`sandbox ${id} is ${rec.status}`);
+        const gate = this.o.startGate?.();
+        if (gate) throw new Error(gate);
+        if (this.disk.level !== 'ok') throw new Error(`disk space is ${this.disk.level}`);
+        if (this.editorFor(rec).unity.editors(await this.d.procs()).length) throw new Error('an editor already runs there');
+        if (!hadEditor) await this.checkSlot(id);
+        const said = await this.launch(rec);
+        this.o.onEvent({ text: `sandbox ${id}: its queued editor start ran at its turn in the bench queue. ${said.join(' ')}`, sandbox: id, unity: true });
+      } catch (e) {
+        this.endBoot(id);
+        this.unityState.set(id, { state: 'stopped', detail: `queued start not made: ${(e as Error).message}` });
+        this.changed();
+        this.o.onEvent({ text: `sandbox ${id}: its queued editor start was not made at its turn in the bench queue: ${(e as Error).message}. Start it again.`, sandbox: id, unity: true });
+      }
+    })();
+  }
+
+  /** Launch the editor (the gates are checked); the lines to say. */
+  private async launch(r: Rec): Promise<string[]> {
+    const id = r.id;
+    const out: string[] = [];
     // A checkout written under core.autocrlf=true keeps CRLF copies of files a later .gitattributes rule made -text (a pull
     // rewrites only changed blobs): FMOD's mac bundle plists showed its "Repair FMOD Libraries" dialog at every start (w1275).
     try {
@@ -817,7 +918,7 @@ export class SandboxPool {
       this.changed();
       throw e;
     }
-    return out.join(' ');
+    return out;
   }
 
   /** The tail of a sandbox's editor log. */
@@ -898,6 +999,13 @@ export class SandboxPool {
       const ed = this.editorFor(r);
       const pid = ed.unity.editors(procs)[0]?.pid;
       const prev = this.unityState.get(r.id) ?? { state: 'stopped' as const };
+      // w1615: a boot's bench ticket goes once its bridge is up, its editor is gone, or BOOT_TICKET_MAX_MS passed.
+      const boot = this.bootTickets.get(r.id);
+      if (boot && ((pid && this.d.bridgeUp(r.path)) || (!pid && now - boot.at > 2 * 60_000) || now - boot.at > BOOT_TICKET_MAX_MS)) {
+        boot.ticket.release();
+        this.bootTickets.delete(r.id);
+      }
+      if (!pid && this.queuedBoots.has(r.id)) continue; // its state says where it is in the queue
       let next: MachineSandboxUnity & { startedAt?: number };
       if (pid) next = { ...prev, pid, state: this.d.bridgeUp(r.path) ? 'running' : 'starting', detail: this.d.bridgeUp(r.path) ? 'MCP bridge up' : (prev.detail ?? 'loading'), startedAt: prev.startedAt ?? now };
       else next = { state: prev.state === 'crashed' ? 'crashed' : 'stopped', detail: prev.state === 'crashed' ? prev.detail : undefined, logPath: prev.logPath };

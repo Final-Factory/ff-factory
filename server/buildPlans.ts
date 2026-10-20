@@ -189,7 +189,7 @@ export class BuildPlans {
     if (builder && !this.isBuilder(p, builder)) return `Not yours: ${p.machine} is ${this.holdWhy(p).replace(/: no new work until it is done$/, '')}. Build where you are, or wait until it is done.`;
     if (!p.clearedAt) await this.clear(p);
     const lock = this.d.benchLock(p.machine);
-    if (lock) return `Not yet (w1606): on ${p.machine}, ${benchText(lock)}, and a build beside it would spoil that run's numbers. Do what needs no build meanwhile, then wake_me in 10 minutes and build_plan start again (a run holds the lock under 15 minutes; one older than 40 minutes is a killed run's and no longer counts).`;
+    if (lock) return `Not yet (w1606): on ${p.machine}, ${benchText(lock)}, and a build beside it would spoil that run's numbers. Do what needs no build meanwhile, then wake_me in 10 minutes and build_plan start again (a leg holds the lock under 15 minutes and gives it back between legs; a holder that dies frees it at once, w1615).`;
     const busy = this.stillMidTurn(p);
     const waited = this.now() - (p.clearedAt ?? this.now());
     if (busy.length && waited < BUILD_WAIT_MS.value) {

@@ -174,6 +174,30 @@ with what waits, the RAM line and the game players. A machine with no `max_unity
 held up. Tests: `server/unitySlots.test.ts`, the w469 tests in `server/machineSandboxes.test.ts` and
 `server/beastMachine.test.ts`.
 
+## The bench queue: no build or boot beside a timed run (w1615)
+
+**Why** (lothsahn, 2026-10-20: "a queued bench lock that also covers builds"; "Make sure the locking scheme you build
+can't deadlock"). On BEAST a player build ran beside a held bench lock and its holder's quiet gate never passed, a worker
+took over a live 40-minute-old lock, and waiters polled with no order.
+
+The queue is the game repo's `scripts/bench/bench_queue.py` (its `Documentation/Bench-Lock.md` has the design, the
+deadlock rules and a test per case). A timed bench leg takes an `exclusive` ticket; a build, a batch compile or an
+editor boot a `shared` one, which runs beside other shared ones but never beside an exclusive one, first come, first
+served. FF Factory takes tickets in three places (`machine/benchQueue.ts` runs the game repo's helper as a child, since
+node cannot take the OS file locks the queue lives on):
+
+- **`unity-slot run`** takes a shared ticket after its Unity slots (`--bench exclusive`, or `FF_UNITY_SLOT_BENCH`, for a
+  timed run). A run made inside a bench hold (`FF_BENCH_TICKET`) reuses it, and waits for a slot at most 2 minutes.
+- **`unity start`** of a sandbox editor checks the slot first, then takes a shared ticket. Not granted within 5 s, it
+  answers `Queued (w1615)` and the pool starts the editor itself at its turn, checking the gates and the slot again
+  (none is waited for while it holds the ticket); `unity status` shows its place. The ticket goes once the editor's
+  MCP bridge is up, or after 30 minutes. A stop cancels a queued start.
+- **`readBenchLock`** (`machine/benchLock.ts`): a holder whose owner line names a ticket (`[t00000042]`) counts while
+  its helper process lives, however old; an old-style line keeps the 40-minute rule.
+
+A checkout without `bench_queue.py` (a branch from before w1615) or a machine without python goes ahead without a
+ticket and logs why.
+
 ## Orphaned and hung batch builds are ended (w791)
 
 **Why** (Ben, 2026-10-09: the harness learns from a repeated problem). Twice that day a sandbox's `-batchmode` build held a
