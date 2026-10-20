@@ -83,6 +83,15 @@ function Invoke-Portal([string]$method, [string]$path, $body = $null, [string]$t
         $status = 0
         if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
         $msg = "$($_.ErrorDetails.Message)"
+        # Windows PowerShell 5.1 can leave ErrorDetails empty; its HttpWebResponse still holds the portal's answer.
+        $resp = $_.Exception.Response
+        if (-not $msg -and $resp -and $resp.PSObject.Methods['GetResponseStream']) {
+            try {
+                $s = $resp.GetResponseStream()
+                if ($s.CanSeek) { $s.Position = 0 }
+                $msg = (New-Object IO.StreamReader($s)).ReadToEnd()
+            } catch { }
+        }
         $err = $null
         if ($msg) { try { $err = ($msg | ConvertFrom-Json).error } catch { $err = $msg } }
         if (-not $err) { $err = $_.Exception.Message }
