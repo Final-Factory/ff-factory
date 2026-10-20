@@ -526,6 +526,12 @@ export type MachinePlatform = 'darwin' | 'win32' | 'linux';
 /** "Mac", "Windows PC" or "Linux PC", for sentences about a machine (a record from before platforms is a Mac). */
 export const platformNoun = (p: MachinePlatform | undefined) => (p === 'win32' ? 'Windows PC' : p === 'linux' ? 'Linux PC' : 'Mac');
 
+/**
+ * A machine's kind, for people. A record waiting for its install (a join code, add_machine worker_install) has no platform
+ * until its PC tells the portal, so it is not called a Mac (w1603: desktop-coosego, a Windows PC, showed as a Mac).
+ */
+export const machineKind = (m: { platform?: MachinePlatform; awaitingInstall?: string }) => (!m.platform && m.awaitingInstall ? 'new machine, its system not known until it joins' : platformNoun(m.platform));
+
 /** A Node `process.platform` as a machine platform (anything that is neither Windows nor Linux is taken for a Mac). */
 export const machinePlatformOf = (p: string): MachinePlatform => (p === 'win32' ? 'win32' : p === 'linux' ? 'linux' : 'darwin');
 

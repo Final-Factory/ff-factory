@@ -111,6 +111,21 @@ http
           res.writeHead(h ? 200 : 404, { 'content-type': 'application/json' }).end(JSON.stringify(h ? { info: h.info, live: h.live, transcript: internals.store.readTranscript(agent[1]) } : null));
           return;
         }
+        // w1596: the updates over the daemon's link (link-e2e.ts): whether it takes them, and an update, restart or unload.
+        if (req.method === 'GET' && req.url === '/link') {
+          res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ canLink: machines.canLink(id), online: machines.isOnline(id), daemon: machines.daemonOf(id) ?? null }));
+          return;
+        }
+        if (req.method === 'POST' && req.url === '/link') {
+          const { action, flags } = JSON.parse(body) as { action: 'update' | 'restart' | 'uninstall'; flags?: Record<string, number> };
+          try {
+            const out = action === 'update' ? await machines.linkUpdate(id, { flags }) : (await machines.linkControl(id, action), null);
+            res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, report: out }));
+          } catch (e) {
+            res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: false, error: (e as Error).message }));
+          }
+          return;
+        }
         if (req.url === '/machine') {
           res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(internals.store.machines.get(id) ?? null));
           return;

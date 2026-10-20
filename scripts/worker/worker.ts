@@ -648,7 +648,9 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     maxEventsFile: path.join(l.daemon, 'max-events.jsonl'),
     ...(o.unityEditorRoot ? { unityEditorRoot: o.unityEditorRoot } : {}),
     ...(o.unityPath ? { unityPath: o.unityPath } : {}),
-    ...(o.noCleanup ? { cleanup: { everyMinutes: 0, softFreeGB: 0 } } : {}),
+    // A test install beside a computer's real one (--no-cleanup, w1596): it cleans nothing, ends no process (the leftover
+    // reaper reads every process here and the shared player slots) and starts no tray.
+    ...(o.noCleanup ? { cleanup: { everyMinutes: 0, softFreeGB: 0 }, leftovers: false, tray: false } : {}),
     sandboxes,
   };
 }
@@ -1650,9 +1652,10 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     if (!m.outside.some((x) => x.kind === 'authorized-key' && x.name.toLowerCase() === key.file.toLowerCase())) m.outside.push({ kind: 'authorized-key', name: key.file, note: blob, ...(keyExisted ? { existed: true } : {}) });
     writeManifest(l.root, m);
   }
-  if (!isWin) {
+  if (!isWin && !o.noCleanup) {
     // A Mac (or Linux PC) has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
-    // Its own block: as the else of the key step above it never ran on a Mac whose ssh key was set (m3, w596).
+    // Its own block: as the else of the key step above it never ran on a Mac whose ssh key was set (m3, w596). A test install
+    // (--no-cleanup) leaves the computer's own pointer alone (w1596).
     const cfg = writeMacSlotConfig(l.players, o.maxSandboxes);
     noteOutside(m, { kind: 'file', name: cfg, note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
@@ -1748,6 +1751,8 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
     carry: { ...config, sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
+    ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
   };
 }
@@ -1889,7 +1894,7 @@ export function withStandardPaths(current: string, platform: NodeJS.Platform = p
 }
 
 /** Whether `a` and `b` name the same commit (one may be short). */
-const sameCommit = (a: string | undefined, b: string | undefined) => !!a && !!b && a.length >= 7 && b.length >= 7 && (a.toLowerCase().startsWith(b.toLowerCase()) || b.toLowerCase().startsWith(a.toLowerCase()));
+export const sameCommit = (a: string | undefined, b: string | undefined) => !!a && !!b && a.length >= 7 && b.length >= 7 && (a.toLowerCase().startsWith(b.toLowerCase()) || b.toLowerCase().startsWith(a.toLowerCase()));
 
 /**
  * Whether an update succeeded (w629): only when the portal sees the daemon online, running the commit the update

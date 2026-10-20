@@ -38,6 +38,8 @@ import type { AttachmentRef, BenchLock, CompactionTrigger, CleanupSummary, HostH
  * Also (w1463, no bump): `gh_login`, the machine's gh account and scope names, which an older portal drops.
  * Also (w1519, no bump): `ghApp` in the hello and `gh_app_tokens`, GitHub App installation tokens, sent only to a daemon that
  * offered it.
+ * Also (w1596, no bump): `selfUpdate` in the hello, and `self_update` and `daemon_control`, sent only to a daemon that offered
+ * it, answered by `self_update_ack`, `self_update_report` and `daemon_control_result`, which an older portal never asks for.
  */
 export const PROTOCOL_VERSION = 9;
 
@@ -93,6 +95,39 @@ export function relocateProblem(url: string): string | undefined {
     return `"${url}" is not a URL`;
   }
   return undefined;
+}
+
+/** The version of the update over the daemon's link (w1596) a daemon offers in its hello as `selfUpdate`. */
+export const SELF_UPDATE_VERSION = 1;
+
+/** The settings an update over the link may change (w1596), as ops_worker machine_update names them; unset: carried. */
+export interface LinkUpdateFlags {
+  maxSandboxes?: number;
+  maxAgentsPerSandbox?: number;
+  maxUnity?: number;
+  devDrive?: boolean;
+  moveToDevDrive?: boolean;
+  devDriveMaxGB?: number;
+}
+
+/**
+ * What a worker install's update job (scripts/worker/linkJob.ts) left for its daemon to report (w1596): the installer's
+ * run, and its rollback when the new daemon did not come back. `log`: the end of the job's output, never a credential.
+ */
+export interface LinkUpdateReport {
+  id: string;
+  form: 'update' | 'tools';
+  commit: string;
+  /** The daemon's commit before and after (its machine/VERSION). */
+  before?: string;
+  after?: string;
+  ok: boolean;
+  exit: number;
+  /** The new daemon was not seen healthy, so the job put the code that ran before back: did it come back? */
+  rollback?: 'ok' | 'failed';
+  note?: string;
+  log: string;
+  at: string;
 }
 
 /** What the daemon reports of a sandbox; the portal adds purpose and sessionIds (MachineSandbox). */
@@ -207,7 +242,22 @@ export type ToDaemon =
    * `note` (who moved which knob) written into the session's conversation, held for its next message and counted as
    * activity. Sent only to a daemon whose hello offered `liveView`, so an older daemon never gets one.
    */
-  | { type: 'live'; id: string; op: 'start' | 'stop' | 'command'; liveId: string; sessionId: string; sandbox: string; fps?: number; width?: number; materials?: string[]; command?: string; note?: string };
+  | { type: 'live'; id: string; op: 'start' | 'stop' | 'command'; liveId: string; sessionId: string; sandbox: string; fps?: number; width?: number; materials?: string[]; command?: string; note?: string }
+  /**
+   * Update this worker install (w1596, docs/worker-install.md "Updates over the daemon's link"): fetch the portal's code as
+   * a git bundle (GET /machine/update/<sha256> with this machine's credential), check its SHA-256 and size and that it holds
+   * `commit`, then run the installer's form in a job outside the daemon (a scheduled task, a LaunchAgent) that puts the old
+   * code back when the new daemon does not come back. Answered by self_update_ack at once and self_update_report when the
+   * job ends (from the daemon that runs then). `tools`: the agent tools only, nothing restarted. Sent only to a daemon whose
+   * hello offered `selfUpdate`.
+   */
+  | { type: 'self_update'; id: string; form: 'update' | 'tools'; commit: string; bundle: { sha256: string; size: number }; flags?: LinkUpdateFlags }
+  /**
+   * Restart this daemon (its agents run on and the next daemon takes them back), or unload it as removing the machine does
+   * over ssh: its supervisor stopped and unregistered, its agents ended, its files kept. Answered by daemon_control_result
+   * before it goes (w1596). Sent only to a daemon whose hello offered `selfUpdate`.
+   */
+  | { type: 'daemon_control'; id: string; action: 'restart' | 'uninstall' };
 
 /** A live view a daemon runs (w1509), as its hello reports it. */
 export interface DaemonLiveView {
@@ -256,6 +306,8 @@ export type FromDaemon =
       compact?: boolean;
       /** Its owner's pause (w1532, machine/pause.ts): from its tray, its schedule or a person's input. An older portal ignores it. */
       pause?: MachinePause;
+      /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */
+      selfUpdate?: number;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */
       layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null };
     }
@@ -322,4 +374,10 @@ export type FromDaemon =
    */
   | { type: 'gh_login'; gh: GhLogin }
   /** A live view's state when it changes (w1398): live, holding (detail says why), stopped. An older portal drops it. */
-  | { type: 'live_state'; liveId: string; state: 'starting' | 'live' | 'holding' | 'stopped'; detail: string; frames: number };
+  | { type: 'live_state'; liveId: string; state: 'starting' | 'live' | 'holding' | 'stopped'; detail: string; frames: number }
+  /** The update's bundle checked and its job started, or why not (w1596): nothing was changed then. */
+  | { type: 'self_update_ack'; id: string; ok: boolean; error?: string }
+  /** An update job ended (w1596): sent by the daemon that runs afterwards, on its link, until the portal has it. */
+  | { type: 'self_update_report'; report: LinkUpdateReport }
+  /** The answer to daemon_control (w1596), before the daemon goes. */
+  | { type: 'daemon_control_result'; id: string; ok: boolean; error?: string };
