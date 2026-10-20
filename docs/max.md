@@ -18,8 +18,11 @@ from the token check), and each new event (`onEvent`) to record Max's replies an
 never posts.
 
 **#bug-reports and dev_bug_reports belong to FFBox** (Lothsahn, 2026-09-30): FFBox's harness answers their threads
-and reports merged fixes there. The intake never files from them, and FF Factory's agents only read them: the
-`ffdiscord` CLI refuses to post, reply, react, edit, rename or close in those channels and their threads. A worker that
+and reports merged fixes there. The intake never files from them, and the `ffdiscord` CLI refuses to post, reply, react,
+edit, rename or close in those channels and their threads. Since w1640 (lothsahn, 2026-10-20: "you or workers should be
+able to post direct to discord by asking ffbox to do it on your behalf through the tunnel, and it will post what you
+say") an orchestrator or a worker posts in one of their threads through FFBox: `reply_to_ffbox` or `post_as_max` with
+channel `conversation` ([ffbox.md](ffbox.md#discord)), never a "fixed" or "merged" notice. A worker that
 fixes a bug from one adds `Discord: https://discord.com/channels/<guild id>/<thread id>` to its PR description instead
 ([intake.md](intake.md#ffbox-owns-bug-reports)). The Discord inbound below still shows them, read-only.
 

@@ -1,5 +1,5 @@
 import { createSdkMcpServer, tool, type Options } from '@anthropic-ai/claude-agent-sdk';
-import { POST_CHANNELS } from '../shared/ffboxPost.ts';
+import { POST_TARGETS } from '../shared/ffboxPost.ts';
 import { z } from 'zod';
 import os from 'node:os';
 import path from 'node:path';
@@ -228,11 +228,12 @@ export const CATALOG = {
   },
   /** docs/ffbox.md, "Posting as Max" (w901). FFBox posts; the daemon reads `file` on the machine and sends its content as text. */
   post_as_max: {
-    channel: z.enum(POST_CHANNELS).describe('Where to post. dev_patch_notes: a release\'s patch notes. dev_chat: the developers\' chat. agent_testing: a test channel.'),
+    channel: z.enum(POST_TARGETS).describe('Where to post. dev_patch_notes: a release\'s patch notes. dev_chat: the developers\' chat. agent_testing: a test channel. conversation: a conversation FFBox holds (a #bug-reports or dev_bug_reports thread, an #ask-assistant conversation), named by conversation or thread.'),
     text: z.string().max(2000).optional().describe('The message, at most 2000 characters. Give this or file.'),
     file: z.string().max(260).optional().describe('A file on this computer in your working folder or your own temp folder (TMP) whose content is the message (at most 16 KB and 2000 characters), e.g. Temp/post-0.50.0.94.md. Give this or text.'),
     skip_lines: z.number().int().min(0).max(20).optional().describe('With file: leave out its first N lines (a release-notes file starts with two lines that are not the post: skip_lines 2).'),
-    thread: z.string().max(25).optional().describe('A Discord thread id, a thread of that channel.'),
+    thread: z.string().max(200).optional().describe("A Discord thread id of that channel; with channel conversation, the conversation's Discord thread (its id or URL)."),
+    conversation: z.string().max(20).optional().describe("With channel conversation: FFBox's conversation id (ffbox_activity and FFBox's messages name it)."),
     key: z.string().max(80).optional().describe('The dedupe key: a message with the same key in the same place is posted once, and a repeat answers the first one\'s link. Required for dev_patch_notes: the release\'s version, e.g. 0.50.0.94.'),
   },
   /** docs/orchestrators.md, "Workers read the ledger" (w642). Read-only: the portal answers from the ledger (server/workRead.ts). */
