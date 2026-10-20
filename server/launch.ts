@@ -129,6 +129,12 @@ export const CATALOG = {
     fps: z.number().optional().describe('start: frames a second, 1-30 (default 15).'),
     width: z.number().optional().describe('start: frame width in px, 320-1920 (default 960).'),
   },
+  /** Builds first on BEAST (w1606, server/buildPlans.ts): a worker says its player build is coming, starts it, ends it. */
+  build_plan: {
+    action: z.enum(['coming', 'start', 'done', 'status']),
+    minutes: z.number().int().min(0).max(240).optional().describe('coming: lead time in minutes until the build starts (0: now).'),
+    what: z.string().max(160).optional().describe('coming: what it builds ("Windows player for the w1475 clip").'),
+  },
   switch_branch: {
     branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),
     create_from: z.string().optional().describe('Base for a branch that exists neither here nor on origin. Default origin/master.'),

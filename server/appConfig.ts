@@ -107,6 +107,8 @@ export const SETTABLE_KEYS = [
   'placement.hold',
   // Where work that needs a Live view goes first (w1600, docs/machines.md "Placing work"); unset: beast.
   'placement.live',
+  // Where builds run first, and which computers a build declared coming clears (w1606, docs/orchestrators.md); unset: beast.
+  'placement.build',
   // When the orchestrators compact their conversations by themselves (w535, server/autoCompact.ts): the context in
   // tokens, and a turn's cost in USD. 0 turns either trigger off.
   'orchestrator.compactAtTokens',
@@ -611,7 +613,8 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     case 'intake.reviewers':
       return checkReviewers(value, users ?? []);
     case 'placement.prefer':
-    case 'placement.live': {
+    case 'placement.live':
+    case 'placement.build': {
       const name = key;
       const list = typeof value === 'string' ? value.split(',') : value;
       if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) throw new Error(`${name} is a list of computers, first choice first: machine ids such as "lothdesktop" (or one comma-separated string)`);
@@ -837,9 +840,9 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   }
   // Live: the live view reads cfg.live.enabled at every use (server/live.ts); null is the default, off.
   else if (key === 'live.enabled') cfg.live = v === undefined ? undefined : { ...cfg.live, enabled: v as boolean };
-  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live') {
+  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build') {
     const p = { ...cfg.placement };
-    const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : 'hold';
+    const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : 'hold';
     if (v === undefined) delete p[field];
     else (p as Record<string, unknown>)[field] = v;
     cfg.placement = p;

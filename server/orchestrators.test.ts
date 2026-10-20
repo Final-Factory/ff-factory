@@ -3867,3 +3867,41 @@ test('w1600: a Live view marks its request; a bench lock holds its editor; stop_
   const note = handoverNote(w, { related: [], handedBack: w.handedBack });
   assert.match(note, /Moved \(w1600\): w1 was taken off worker \w+ on pc\/alpha at .* UTC, because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. Continue from its branch sandbox\/alpha/);
 });
+
+test('w1606: a worker declares its build: the build computer is held, a worker that cannot move is paused, its resume waits for the build and goes when it is done', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, machines, dispatcher, call, heard, cfg } = env;
+  const beast = await startTestMachine(machines, { id: 'beast', sandboxes: ['slot1'] });
+  env.closers.push(() => beast.stop());
+  agentsRoom(agents, ['pc', 'beast']);
+  // pc is the build computer here (placement.build), and beast is full: the other worker there cannot move, so it is paused.
+  cfg.placement = { build: ['pc'] };
+  const places = agents.places.bind(agents);
+  agents.places = () => places().map((p) => (p.id === 'beast' ? { ...p, live: p.maxAgents } : p));
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }, { id: 'w2', by: BEN, status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  const turnsBefore = b.info.turns;
+
+  const declared = String(await a.h.build_plan!({ action: 'coming', minutes: 0, what: 'a Windows player for the w1 clip' }));
+  assert.match(declared, /^Declared \(w1606\): a Windows player for the w1 clip on pc at \d\d:\d\dZ\. No new work goes there from now\. FF Factory clears it now/);
+  assert.equal(store.work.get('w1')!.build?.machine, 'pc', 'its request builds a player: placed on placement.build first from now on');
+  await until('pc is cleared', () => !!agents.builds.plan('pc')?.clearedAt && agents.builds.plan('pc')!.paused.includes(b.id));
+  assert.deepEqual(agents.builds.plan('pc')!.moved, [], 'beast is full: nothing could move');
+  await until('the dispatcher is told', () => heard(dispatcher().info.id, '[ledger] BUILD COMING (w1606)').length > 0);
+  const listed = await call(dispatcher().info, 'list_sandboxes', {});
+  assert.match(listed.text, /^- pc \[held: cleared for a build since \d\d:\d\dZ \(a Windows player for the w1 clip, worker \w+ for w1; w1606\): no new work until it is done\]/m);
+
+  // The paused worker's next message waits for the build (Blocked on its machine), the builder's own does not.
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: b.id, text: 'CI is green: merge it', work_id: 'w2' });
+  assert.match(sent.text, /Queued, not refused: pc is cleared for a build since \d\d:\d\dZ .*: this worker was paused for it and resumes when it is done \(w1606\)/);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(b.info.turns, turnsBefore, 'not resumed during the build');
+  assert.match(String(await a.h.build_plan!({ action: 'start' })), /^Go \(w1606\): pc is cleared for a Windows player for the w1 clip \(0 moved: none; 1 paused\)/);
+
+  // Done: the hold lifts and the held message goes.
+  assert.match(String(await a.h.build_plan!({ action: 'done' })), /^Done \(w1606\): pc takes work again; the build took \d+ min\./);
+  assert.equal(agents.builds.plan('pc'), undefined);
+  await until('the paused worker resumes with its message', () => b.info.turns > turnsBefore);
+  assert.match(heard(dispatcher().info.id, '[ledger] BUILD DONE (w1606)')[0]?.text ?? '', /pc takes new work again/);
+});

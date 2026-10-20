@@ -951,11 +951,25 @@ LothDesktop and Beast, not just when BEAST is full").
     run measures, and a lower process priority would still share the GPU, so it waits rather than run lower. Other editors
     are the bench's own quiet gate's business.
   - Tests: `server/placement.test.ts`, `server/benchLock.test.ts`, the w1600 case in `server/orchestrators.test.ts`.
+- **Builds run on BEAST first, and a coming build clears it** (w1606, Ben, 2026-10-20: "when you know builds are coming
+  up, we also prioritize using beast for builds because its faster. so when it's coming time, move work off beast, or
+  when apropriate, pause work and finish the build, then resume. make this a rule of FFF").
+  - Which work: game work that builds a player, once its worker declares a build (`build_plan coming`,
+    `WorkItem.build`) or when its title, brief or notes name one (`needsBuild`, `shared/capacity.ts`: "player build",
+    "release build", "build a player"...; a bare "build" is not one).
+  - Where: the Capacity block's "Next build work (game work that builds a player, w1606): beast (…)", from `config
+    placement.build` (unset: `beast`, `DEFAULT_BUILD`), else the general placement.
+  - A build declared coming holds its computer for new work at once (`Agents.placement()` adds `BuildPlans.holds()`),
+    and when due moves its workers between turns elsewhere, pauses the ones that cannot move and asks the ones mid-turn
+    to pause at a safe point; `build_plan start` waits for the bench lock and (up to 20 minutes) for those turns; `done`
+    resumes them. The paused workers' resumes are held by `machineHold` (`BuildPlans.resumeHold`), not by the computer's
+    hold, so the builder and a running Live view go on. Details: [orchestrators.md](orchestrators.md), "Builds clear BEAST".
+  - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators.test.ts`.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
   computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it
   (FF Factory's own repo and its deploys are no longer such a pin: that work goes by agent slot, above). A worker going on in its own sandbox stays
-  there, and running workers are never moved; one between turns on Live view work moves with `stop_agent` `move_to` (above).
+  there, and running workers are never moved; one between turns on Live view work moves with `stop_agent` `move_to` (above), and a build declared coming moves or pauses the workers on its computer (above).
 - **Released sandboxes** (w640, Lothsahn on 2026-10-07: "Can we not reserve slots for workers that resume a long time
   from now?"; `server/placeAgain.ts`). That afternoon LothDesktop's slot1 counted as taken with no live agent, only two
   stopped workers whose check-ins were the next day, and five more sandboxes on BEAST and LothDesktop were held the same

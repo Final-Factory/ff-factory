@@ -224,6 +224,47 @@ where "Next Live view work" says: `placement.live`, BEAST unless set, else the g
 elsewhere moves there between turns with `stop_agent` `move_to: "beast"`: its request is Queued for BEAST with its branch
 and the view's settings, and a new session there goes on from the branch (docs/machines.md, "Placing work").
 
+**Builds clear BEAST** (w1606; Ben, 2026-10-20: "when you know builds are coming up, we also prioritize using beast for
+builds because its faster. so when it's coming time, move work off beast, or when apropriate, pause work and finish the
+build, then resume. make this a rule of FFF"). Work that builds a player (a release, a clip, a playtest or MP check
+player; its worker declared a build, or its words name one: `list_work` says "Needs a build") goes where "Next build
+work" says: `placement.build`, BEAST unless set, else the general placement. A build is declared coming with
+`build_plan` (`server/buildPlans.ts`): by its worker (`coming`, with the minutes until it starts and what it builds), or by
+the dispatcher for a request (`work_id`) when it knows a release request reaches its build step. Then:
+
+1. **At once, no new work goes to that computer**: the Capacity block shows it `held: a build is coming at HH:MMZ (…;
+   w1606)`, start_agent's note sends new work elsewhere, nothing is moved there, no released worker resumes there. The
+   dispatcher hears `[ledger] BUILD COMING (w1606)`. Its workers go on as they are until the build is due.
+2. **When it is due, FF Factory clears it**, every other worker there:
+   - **between turns: moved first** (the w1600 route, `stop_agent move_to`: its process stops, its uncommitted work is
+     saved and pushed on its branch, its requests are Queued for the computer the general placement picks, with the
+     branch; the dispatcher places them as the `MOVED` lines say). This takes agent-only work and work waiting on CI or a
+     person off BEAST; work not started is already kept off by step 1.
+   - **between turns, where no other computer has room** (or the move is refused): **paused in place**. Its check-ins,
+     CI and replies wait in the send queue (Blocked on its machine) and go when the build is done; it loses nothing, not
+     even its conversation.
+   - **mid-turn: asked to pause at a safe point, never cut off**: it finishes its step, commits and pushes, stops its
+     editor and ends its turn with `wNNN: paused for the build on beast; …`. It is then paused the same way, and when the
+     build is done FF Factory tells it to carry on, in the same conversation and sandbox.
+   - **its Live view runs: left alone.** A Live view a person may be steering beats a build, and a move would end it;
+     the build runs beside it, a little slower.
+3. **The build starts when its worker asks** (`build_plan start`): `Go`, or `Not yet` with what it waits for:
+   - **a bench lock** (a timed run under the game repo's `scripts/bench/quiet_gate.sh`, w1440; machine/benchLock.ts):
+     the build waits for it, however long; a build beside a timed run would spoil its numbers, and it never overrides one;
+   - **workers asked to pause, still mid-turn**: up to 20 minutes (`BUILD_WAIT_MS`); past that the build goes ahead beside
+     them and says so, rather than cut a turn off.
+4. **`build_plan done`** (by its worker right after the build, done or failed) ends it: the hold lifts, the queued resumes
+   go, the paused workers are told to carry on, and the dispatcher hears `[ledger] BUILD DONE (w1606)` with how long
+   the build took. A plan nobody ends is ended 3 hours after it was due (`PLAN_MAX_MS`). Plans live in
+   `data/builds.json`, so a portal restart keeps the hold and the resumes.
+
+One build at a time per computer. A worker off BEAST that declares one builds where it is (nothing is cleared there);
+its request is marked build work, so its next placement is BEAST first. **FFBox stays the release lane**: official
+release builds and Steam uploads run on ffbox CI (`ci-release`), never on these computers, and nothing here touches
+Steam. A release build cannot run on BEAST under that lane; the smallest change would be a GitHub Actions self-hosted
+runner on BEAST for the Windows player job, which is Ben's and Lothsahn's call, not made here. The nightly lab's
+machine is Lothsahn's choice (`intake.nightly.run`); its run is not declared as a build by itself.
+
 `start_agent` refuses a request with a strong overlap still in flight (a commit only informs), or one that already has a
 live worker, unless `override_duplicate` says what is different. `work_id` is the dispatcher's alone. A worker started
 for a request runs for the person who filed it, on their account. The requester's orchestrator can add a note (which
