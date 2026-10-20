@@ -2,10 +2,11 @@
 // passed from each daemon's frame socket to every watching page. A page that is behind skips frames; nothing queues.
 import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
+import { FramePump, parseAck } from '../shared/framePump.ts';
 import type { LiveKnobRequest, LiveMaterialKnobs, LiveViewInfo, Requester, SessionInfo, UserRole } from '../shared/types.ts';
 import type { DaemonLiveView, FromDaemon, ToDaemon } from './machineProtocol.ts';
 
-/** What a page may hold back before it misses frames (about a second of 960 px JPEGs). */
+/** What a page that does not answer frames (an older one) may hold back before it misses frames (about a second of 960 px JPEGs). */
 const VIEWER_BACKLOG_BYTES = 1024 * 1024;
 export const LIVE_FPS = { default: 15, max: 30 };
 export const LIVE_WIDTH = { default: 960, min: 320, max: 1920 };
@@ -36,7 +37,8 @@ interface View {
   info: LiveViewInfo;
   frames?: WebSocket;
   latest?: Buffer;
-  viewers: Set<WebSocket>;
+  /** Each watching page and its frame pump (w1601: it keeps to what the page's link carries, shared/framePump.ts). */
+  viewers: Map<WebSocket, FramePump>;
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -96,7 +98,7 @@ export class LiveHub {
     if (!machineId || !sandbox) return 'A live view shows a sandbox editor\'s game: this session has no sandbox.';
     if (action === 'status') {
       const v = this.bySession(info.id);
-      return v ? statusLine(v.info) : 'No live view for this session.';
+      return v ? statusLine(v.info) + viewersLine(v) : 'No live view for this session.';
     }
     if (action === 'stop') {
       const v = this.bySession(info.id);
@@ -118,7 +120,7 @@ export class LiveHub {
     const at = iso(this.now());
     const v: View = {
       info: { liveId: randomUUID(), sessionId: info.id, machineId, sandbox, state: 'starting', detail: 'asking the game to stream', fps, width, materials, startedAt: at, updatedAt: at, frames: 0 },
-      viewers: new Set(),
+      viewers: new Map(),
     };
     this.views.set(v.info.liveId, v);
     this.deps.changed();
@@ -135,7 +137,7 @@ export class LiveHub {
   private async stopView(v: View) {
     this.views.delete(v.info.liveId);
     v.frames?.close(1000, 'stopped');
-    for (const w of v.viewers) w.close(1000, 'the live view stopped');
+    for (const w of v.viewers.keys()) w.close(1000, 'the live view stopped');
     this.deps.changed();
     await this.deps.machines.live(v.info.machineId, { op: 'stop', liveId: v.info.liveId, sessionId: v.info.sessionId, sandbox: v.info.sandbox }).catch(() => undefined);
   }
@@ -181,7 +183,7 @@ export class LiveHub {
       const materials = (Array.isArray(r.materials) ? r.materials : []).map(String).filter((m) => NAME.test(m)).slice(0, 8);
       this.views.set(r.liveId, {
         info: { liveId: r.liveId, sessionId: r.sessionId, machineId, sandbox: r.sandbox, state: r.state, detail: String(r.detail ?? ''), fps: clamp(r.fps, 1, LIVE_FPS.max, LIVE_FPS.default), width: clamp(r.width, LIVE_WIDTH.min, LIVE_WIDTH.max, LIVE_WIDTH.default), materials, startedAt: at, updatedAt: at, frames: 0 },
-        viewers: new Set(),
+        viewers: new Map(),
       });
       this.deps.changed();
     }
@@ -274,12 +276,15 @@ export class LiveHub {
     if (!v || v.info.machineId !== machineId) return false;
     v.frames?.close(1000, 'replaced');
     v.frames = ws;
+    let taken = 0;
     ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
       if (!isBinary) return;
       const frame = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+      // The daemon's pump sends its next frame on this answer (w1601); an older daemon ignores it.
+      if (ws.readyState === ws.OPEN) ws.send(`a${++taken}`);
       v.latest = frame;
       v.info.frames++;
-      for (const w of v.viewers) send(w, frame);
+      for (const pump of v.viewers.values()) pump.push(frame);
     });
     ws.on('close', () => {
       if (v.frames === ws) v.frames = undefined;
@@ -291,17 +296,37 @@ export class LiveHub {
   addViewer(sessionId: string, ws: WebSocket): boolean {
     const v = this.bySession(sessionId);
     if (!v || !this.deps.enabled()) return false;
-    v.viewers.add(ws);
-    if (v.latest) send(ws, v.latest);
+    // Newest wins: a page whose link is full gets a later frame, never a queue (shared/framePump.ts).
+    const pump = new FramePump(
+      {
+        send: (frame) => ws.send(frame, { binary: true, compress: false }),
+        buffered: () => (ws.readyState === ws.OPEN ? ws.bufferedAmount : -1),
+        now: () => Date.now(),
+        later: (fn, ms) => void setTimeout(fn, ms),
+      },
+      VIEWER_BACKLOG_BYTES,
+    );
+    v.viewers.set(ws, pump);
+    ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+      if (isBinary) return;
+      const n = parseAck(String(data));
+      if (n !== undefined) pump.ack(n);
+    });
+    if (v.latest) pump.push(v.latest);
     ws.on('close', () => v.viewers.delete(ws));
     return true;
   }
 }
 
-/** Newest wins: a page still holding a backlog skips this frame and gets a later one. */
-function send(ws: WebSocket, frame: Buffer) {
-  if (ws.readyState !== ws.OPEN || ws.bufferedAmount > VIEWER_BACKLOG_BYTES) return;
-  ws.send(frame, { binary: true, compress: false });
+/** How each watching page keeps up (w1601): frames it drew, what it skipped, its round trip and its link's rate. */
+function viewersLine(v: View) {
+  if (!v.viewers.size) return ' Nobody is watching.';
+  const parts = [...v.viewers.values()].map((p) => {
+    const s = p.stats;
+    if (!s.acking) return `a page that does not answer frames (${s.sent} sent)`;
+    return `a page: ${s.acked} frames drawn, ${s.skipped} skipped, round trip ${s.rttMs} ms (shortest ${s.minRttMs} ms), ${Math.round((s.rateBps * 8) / 1e5) / 10} Mbit/s`;
+  });
+  return ` Watching: ${parts.join('; ')}.`;
 }
 
 export class LiveError extends Error {
