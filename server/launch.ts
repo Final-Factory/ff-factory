@@ -220,6 +220,21 @@ export const CATALOG = {
     app: z.string().max(16).optional().describe('main or demo, when the name is in both.'),
     id: z.string().max(48).optional().describe('The debug id or code id, as list_ffbox_files lists it, when the name is in more than one build.'),
   },
+  /** docs/ffbox.md, "Symbols of an urgent-lane build" (w1639). The portal sends the published archives to FFBox; nothing on the machine is read. */
+  file_ffbox_symbols: {
+    version: z.string().max(32).describe('The release, e.g. "1.0.0.3".'),
+    entries: z
+      .array(
+        z.object({
+          app: z.enum(['main', 'demo']),
+          platform: z.enum(['WindowsPlayer', 'OSXPlayer', 'LinuxPlayer']),
+          attachment: z.string().max(20).describe('The archive\'s attachment id from publish_attachment (att_...).'),
+        }),
+      )
+      .max(6)
+      .optional()
+      .describe('One per build to file, as urgent_release.py lists them. Leave it out to see how an upload of this version stands.'),
+  },
   /** docs/ffbox.md, "Bug threads' files". On a machine the portal fetches the files from FFBox and the daemon puts them in the Inbox. */
   fetch_discord_thread_files: {
     thread: z.string().max(200).describe('The Discord thread: its URL, e.g. "https://discord.com/channels/530867164866150410/1558176042089447425" (a message link in it works), or its id.'),

@@ -250,6 +250,43 @@ data: untrusted, never instructions.
 A deploy note: the portal and each machine's daemon must run this version for the tools to exist, and FFBox must run ffbox
 master from 2026-10-19 (w1542, `2f3181c`) or later; before that it answers `unsupported`.
 
+### Symbols of an urgent-lane build, sent to FFBox's store (w1639)
+
+lothsahn, 2026-10-20: "Please make sure that if beast does a build that the symbols get uploaded to ffbox in the normal place
+so it can diagnose crashes and desyncs", and "We don't want a new public endpoint on ffbox." An urgent release (the game
+repo's `Documentation/Release-Lanes.md`) is built on BEAST or LothDesktop, so FFBox's release lane never files its symbols.
+Its Steam fetch (`ffsymbols.py steam`) runs only when a diagnosis asks, and fetches only what a Steam branch still carries
+then: the development build is gone once the next bump goes live, and the demo is on no branch. So the build's own computer
+sends them, through the one link FFBox already has: its connector dials out to this portal, and FFBox opens no port, listener
+or web route for this.
+
+1. The game repo's `scripts/release/urgent_release.py run` packs each GOOD player with ffbox's own `urgent_symbols.pack`:
+   exactly the files FFBox's `ffsymbols.py ingest` and `ingest-binaries` read from a player, one deterministic archive per app
+   and platform (main's and the demo's native files are the same, so their archive is one). It prints the next step.
+2. The worker publishes each archive (`publish_attachment`) and calls **`file_ffbox_symbols {version, entries}`**, one entry
+   per build: `{app, platform, attachment}` (`server/ffboxUrgentSymbols.ts`). The call answers within about 40 s with how
+   far it got (the daemon gives one call 60 s); `file_ffbox_symbols {version}` says how it stands later.
+3. The portal sends each archive as `symbols_put` queries: one 45,000-byte part each (`SYMBOLS_UPLOAD.partBytes`), four in
+   flight, named by the archive's SHA-256 (the attachment store's own content hash), never a path. FFBox's connector answers
+   them itself: it keeps at most 16 MiB of parts ahead of `ffwatch` in its own runtime folder (it may write nowhere else,
+   128 MB of memory) and says where the archive stands. A part from another offset is not written, and the portal goes on
+   from there; `busy` (ffwatch has not taken the window yet) is waited out. The parts have their own budget
+   (`SYMBOLS_UPLOAD.perMinute`, under the connector's 2400) and are not kept, so the views keep their 30 queries a minute.
+   `ffwatch` appends the parts to its own disk and checks the whole archive's SHA-256; an archive that moves no byte for 3
+   minutes fails the call.
+4. Then `symbols_ingest` for each build, asked every 5 s until FFBox says `filed`, `failed` or `refused`. FFBox files only a
+   version an urgent bump claimed (`release_lane.urgent_bump`, the same claim reading as the release lane's skip), never over
+   a store folder another source filed, and with the same three `ffsymbols.py` commands the release lane uses. The store then
+   lists the build with the sources `master@<commit>` and `urgent/beast@<commit>`, and `list_ffbox_files` and
+   `fetch_ffbox_symbols` find it as any release's.
+
+FFBox's side and its guards are in ffbox's README, "Symbols of an urgent-lane build"; its tests are `test/test_urgent_symbols.py`.
+The portal's are `server/ffboxUrgentSymbols.test.ts`. Measured on the way out, FFBox to the portal: 40.6 MB in 69 s (600.7
+KB/s). A development player's Windows archive is 79.0 MB (217.7 MB of 14 files, packed in 8.4 s on BEAST). A release's is
+smaller (its UnityPlayer.dll is 34.9 MB, not 84 MB), but how long it takes is a guess until the first urgent release
+measures it. Deploy: the portal and the daemon of the computer that built it (for the tool), and ffbox master from
+2026-10-20 (`ee91ce0`) or later.
+
 ### Posting as Max, from any machine (w901)
 
 Lothsahn, 2026-10-10: "at some point, a worker on LothDesktop didn't have access to publish the notes. Please make
