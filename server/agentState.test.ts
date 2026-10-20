@@ -302,7 +302,7 @@ test("w613, w656: an agent whose daemon went away under it keeps its sandbox unt
   const text = agents.describeAllSandboxes();
   assert.doesNotMatch(text, /alpha FREE/, 'its sandbox stays its');
   assert.match(text, /- pc\/beta FREE/);
-  assert.match(agentStateText(info), /^Stopped \(its daemon restarted at (\d\d:\d\d) UTC; its sandbox is kept for it until \d\d:\d\d UTC\)$/);
+  assert.match(agentStateText(info), /^Stopped \(its daemon restarted at (\d\d:\d\d) UTC; its sandbox is kept for it until (?:tomorrow )?\d\d:\d\d UTC\)$/);
   assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 1, 'placement does not count it free');
   assert.equal(HOLD_PLACE_MS, 30 * 60_000, 'w656: half an hour, not a day');
   const later = Date.parse(info.heldSince!) + HOLD_PLACE_MS + 1;
