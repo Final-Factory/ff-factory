@@ -117,7 +117,7 @@ test('w1606: when it is due, BEAST is cleared: workers between turns move first,
   assert.match(t.notes.at(-1)!, /^\[ledger\] BUILD CLEARING \(w1606\): beast for a player for the w1588 clip\. Moved off it .*: w1500 to lothdesktop\. Asked to pause at a safe point: busy;/);
 });
 
-test('w1606: the build waits for workers finishing their step (up to BUILD_WAIT_MS) and for a bench lock (always); then goes; done resumes the paused work', async () => {
+test('w1606: the build waits for workers finishing their step (up to BUILD_WAIT_MS), not for a bench lock (w1628: its shared ticket queues); then goes; done resumes the paused work', async () => {
   const t = world([
     { id: 'builder', machine: 'beast', midTurn: true, requests: ['w1588'] },
     { id: 'busy', machine: 'beast', midTurn: true, requests: ['w1503'] },
@@ -132,12 +132,15 @@ test('w1606: the build waits for workers finishing their step (up to BUILD_WAIT_
   t.at(4);
   await t.plans.tick();
   assert.ok(t.plans.plan('beast')!.paused.includes('busy'));
-  // A timed run took the bench lock meanwhile: the build waits for it, however long it has waited for the workers.
+  // w1628: a timed run holds the bench lock: the build goes anyway, and its own Unity run's shared ticket waits for that
+  // leg in the bench queue (a poll for a free lock lost on BEAST, whose lock was never free for 4 minutes on 2026-10-20).
   t.bench.lock = { owner: 'BEAST pid 4121 probe A round 2', since: '2026-10-20T05:03:00.000Z' };
   t.at(40);
-  assert.match(await t.plans.start('builder', 'beast'), /^Not yet \(w1606\): on beast, its bench lock is held since 05:03Z \(BEAST pid 4121 probe A round 2\): a timed run, and a build beside it would spoil that run's numbers\./);
+  const go = await t.plans.start('builder', 'beast');
+  assert.match(go, /^Go \(w1606\): beast is cleared for the 0\.50\.0\.112 player \(0 moved: none; 2 paused\)\. Build now through unity-slot run --label "the 0\.50\.0\.112 player"\./);
+  assert.match(go, /On beast, its bench lock is held since 05:03Z \(BEAST pid 4121 probe A round 2\): a timed run: your build takes a shared ticket in its bench queue and starts as soon as that leg \(and any queued before your build\) ends, never beside one/);
   t.bench.lock = undefined;
-  assert.match(await t.plans.start('builder', 'beast'), /^Go \(w1606\): beast is cleared for the 0\.50\.0\.112 player \(0 moved: none; 2 paused\)\. Build now through unity-slot run --label "the 0\.50\.0\.112 player"\./);
+  assert.doesNotMatch(await t.plans.start('builder', 'beast'), /bench queue/, 'no lock: no queue note');
   // Done: the hold lifts, the queue looks again, the worker paused mid-turn is told to carry on; one paused between turns resumes with its own next message.
   t.at(62);
   const done = t.plans.done('beast', 'worker builder said it is done');
