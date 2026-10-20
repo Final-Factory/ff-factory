@@ -4,6 +4,7 @@ import { z } from 'zod';
 import os from 'node:os';
 import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
+import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchGate.ts';
 import { standingGuard } from './standingGuard.ts';
 import { publicIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
@@ -328,6 +329,9 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];
+  // w1628: a sandbox's editor compiles, imports and runs tests only in its turn in the machine's bench queue, never
+  // beside a timed leg (machine/editorBenchGate.ts). Its own matcher, so it may wait longer than a plain hook.
+  const editorGate = editorRunning && g.workerRoot ? editorBenchGateFor({ sandboxId: g.id, sandboxPath: g.ownPath, root: g.workerRoot }) : undefined;
   const mcpServers: NonNullable<Options['mcpServers']> = {};
   for (const [name, srv] of Object.entries(spec.stdioMcp ?? {})) mcpServers[name] = { type: 'stdio', command: srv.command, args: srv.args, ...(srv.env ? { env: srv.env } : {}) };
   if (spec.mcp) {
@@ -360,7 +364,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     strictMcpConfig: spec.strictMcp,
     mcpServers,
     ...(spec.maxBudgetUsd !== undefined ? { maxBudgetUsd: spec.maxBudgetUsd } : {}),
-    hooks: { PreToolUse: [{ hooks }] },
+    hooks: { PreToolUse: [{ hooks }, ...(editorGate ? [{ matcher: 'mcp__UnityMCP__.*', hooks: [editorGate.hook], timeout: GATE_HOOK_TIMEOUT_S }] : [])] },
     env: agentEnv,
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
   };

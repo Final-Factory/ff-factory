@@ -46,6 +46,8 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     data in the install folder for the worker"). Inside it, the worker's own temp and its own save copy in the game's saves
  *     folder (`<TMPDIR's name>-<name>`, w1505) stay allowed.
  *   - Unity MCP: refused until the session pins its own editor ("<id>@<hash>"), and never another.
+ *   - batch Unity (w1628): `Unity -batchmode` started straight from the shell is refused; under `unity-slot run`,
+ *     `ff_unity_slot` or `build_player.sh` it takes a Unity slot and a bench ticket (checkRawUnityBatch).
  *   - public repos (config publicGitIdentity, default this app's own repo, and any other GitHub repo that
  *     GitHub reports as public, server/publicGit.ts): a push is refused when a commit it would publish has
  *     an author or committer email that is neither a GitHub noreply address nor the configured public
@@ -115,6 +117,7 @@ export function sandboxGuard(opts: {
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, prBase: opts.prBase ?? ghPrBase, publicIdentity: opts.publicIdentity, env: opts.env }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
+        checkRawUnityBatch(cmd) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined);
       if (reason) return deny(reason);
       let flat = flatten(cmd);
@@ -217,6 +220,40 @@ export function checkPlayerLaunch(cmd: string, sandbox?: string): string | undef
           'prompt and stalls the run. Start it with `python scripts/nightly/player_slots.py launch <exe or build folder> -- <args>` ' +
           '(`--detach` returns at once), `"${FF_LAUNCH[@]}" <exe> -- <args>` in bash after sourcing scripts/nightly/player_launch.sh, ' +
           'or slot_path() in Python.'
+        );
+      }
+      break;
+    }
+  }
+  return undefined;
+}
+
+/** A Unity editor binary named in the program position: Unity.exe, a path ending in /Unity, the binary inside Unity.app. */
+const UNITY_BINARY = /(?:^|[\\/])unity(?:\.exe)?$|unity\.app[\\/]contents[\\/]macos[\\/]unity$/i;
+/** A variable holding one ("$UNITY", "${UNITY_EXE}", "$UNITY_PATH"): its value cannot be read, its name says it. */
+const UNITY_VARIABLE = /^\$\{?[A-Za-z0-9_]*unity[A-Za-z0-9_]*\}?$/i;
+
+/**
+ * w1628 (lothsahn: "Won't builds use a ton of cpu and invalidate runs?"): a batch Unity (`-batchmode`) started straight
+ * from the shell takes no Unity slot and no bench ticket, so it can compile beside another sandbox's timed leg. Under
+ * `unity-slot run`, the game repo's `ff_unity_slot`, `unity_slot.py run` or `build_player.sh` it takes both: their word
+ * is the program, so they pass. Only the program position of a simple command counts. Exported for tests.
+ */
+export function checkRawUnityBatch(cmd: string): string | undefined {
+  for (const seg of cmd.split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
+    if (!/(?:^|\s)-batchmode(?:\s|$)/i.test(seg)) continue;
+    const words = seg.trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+    for (const word of words) {
+      const w = word.replace(/^["']|["']$/g, '');
+      const lower = w.toLowerCase();
+      if (LAUNCHERS.has(lower) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || /^-/.test(w) || w === '""' || w === '') continue;
+      if (UNITY_BINARY.test(w.replace(/[\\/]+$/, '')) || UNITY_VARIABLE.test(w)) {
+        return (
+          `Refused (w1628): ${w} -batchmode started straight from the shell takes no Unity slot and no bench ticket, so it ` +
+          "can compile beside another sandbox's timed bench leg and spoil its numbers. Run it as " +
+          '`unity-slot run --label "<what>" -- <the same command>` (or the game repo\'s `ff_unity_slot`, ' +
+          '`python scripts/unity_slot.py run` or `scripts/nightly/build_player.sh`): it waits for a slot, then for its ' +
+          'turn in the bench queue, and never runs beside a timed leg.'
         );
       }
       break;

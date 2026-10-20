@@ -38,6 +38,30 @@ export function findBenchQueueScript(dirs: (string | undefined)[]): string | und
   return undefined;
 }
 
+/** The newest scripts/bench/bench_queue.py among <root>/sandboxes/* (w1628), or undefined. */
+export function sandboxBenchQueueScript(root: string | undefined): string | undefined {
+  if (!root) return undefined;
+  const dir = path.join(root, 'sandboxes');
+  let best: { s: string; t: number } | undefined;
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return undefined;
+  }
+  for (const n of names) {
+    const s = benchQueueScript(path.join(dir, n));
+    if (!s) continue;
+    try {
+      const t = fs.statSync(s).mtimeMs;
+      if (!best || t > best.t) best = { s, t };
+    } catch {
+      // gone meanwhile
+    }
+  }
+  return best?.s;
+}
+
 /** The lock dir the queue sits beside: $BENCH_LOCK, else <root>/tmp/bench.lock (quiet_gate.sh's place). */
 export function benchLockPath(root: string | undefined, env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (env.BENCH_LOCK) return env.BENCH_LOCK;
@@ -148,8 +172,10 @@ export class BenchTicket {
  */
 export function benchTicketFor(o: Omit<BenchTicketOptions, 'script' | 'lock'> & { checkouts: (string | undefined)[]; root?: string }): { ticket?: BenchTicket; why?: string } {
   const env = o.env ?? process.env;
-  const script = findBenchQueueScript(o.checkouts);
-  if (!script) return { why: 'no scripts/bench/bench_queue.py in this checkout (a branch from before w1615)' };
+  // w1628: a checkout from before w1615 has no queue script; any sandbox's copy on this machine keeps the same queue
+  // (the queue is its files, not its code), so the run still waits its turn instead of going ahead without a ticket.
+  const script = findBenchQueueScript(o.checkouts) ?? sandboxBenchQueueScript(o.root);
+  if (!script) return { why: 'no scripts/bench/bench_queue.py in this checkout (a branch from before w1615) or in any sandbox here' };
   const lock = benchLockPath(o.root, env);
   if (!lock) return { why: 'no worker root to keep the bench queue under' };
   return { ticket: new BenchTicket({ ...o, script, lock }).take() };
