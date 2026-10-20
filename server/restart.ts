@@ -277,6 +277,12 @@ export interface RestartRequest {
    * goes to data/relocate.result.json. A URL that is not a portal base URL refuses the whole request.
    */
   relocate?: string;
+  /**
+   * An automatic deploy (w1634, server/autoDeploy.ts): nobody chose this moment, so the drain also waits (bounded by
+   * drainMinutes) for the turns the restart would cut off and not resume: the portal's coordinators (people's
+   * orchestrators, the dispatcher, the ops worker, standing agents without a machine). They get no drain message.
+   */
+  auto?: boolean;
 }
 
 /** Where a restart request's relocate writes its outcome, before drain.done. */
@@ -318,6 +324,7 @@ export function parseRestartRequest(text: string): RestartRequest | 'now' {
     update: j.update === true,
     hold: j.hold === true,
     ...(relocate !== undefined ? { relocate } : {}),
+    ...(j.auto === true ? { auto: true } : {}),
   };
 }
 
@@ -364,6 +371,20 @@ export function busyWorkers(sessions: SessionSnapshot[]): SessionSnapshot[] {
   return sessions.filter((s) => s.kind === 'worker' && isBusy(s.status));
 }
 
+/**
+ * The portal's own coordinators mid-turn (w1634): people's orchestrators, the dispatcher, the ops worker and standing agents
+ * with no machine. The restart stops them and does not resume their turn (collectResume takes workers only), so an
+ * automatic deploy's drain (RestartRequest.auto) waits for them.
+ */
+export function midTurnCoordinators(sessions: SessionSnapshot[]): SessionSnapshot[] {
+  return sessions.filter((s) => s.kind !== 'worker' && !s.machineId && (isBusy(s.status) || !!s.turnOpen));
+}
+
+/** What a drain waits for: busy workers, and for an automatic deploy the coordinators mid-turn too. */
+function drainWaitsFor(req: RestartRequest, sessions: SessionSnapshot[]): { workers: SessionSnapshot[]; coordinators: SessionSnapshot[] } {
+  return { workers: busyWorkers(sessions), coordinators: req.auto ? midTurnCoordinators(sessions) : [] };
+}
+
 const GRACE_MS = 5000;
 
 export class Drainer {
@@ -394,8 +415,8 @@ export class Drainer {
       }
     }
     this.relocated = false;
-    const busy = busyWorkers(this.deps.snapshot());
-    if (req.drain === false || !busy.length || req.drainMinutes === 0) {
+    const { workers: busy, coordinators } = drainWaitsFor(req, this.deps.snapshot());
+    if (req.drain === false || (!busy.length && !coordinators.length) || req.drainMinutes === 0) {
       this.req = req;
       this.deps.log(`restart (${req.reason}): ${busy.length ? `not draining; ${busy.length} busy agent(s) will be resumed after it` : 'no agent is busy'}`);
       // A few seconds' grace so a tool call's reply reaches its caller before the server stops.
@@ -413,11 +434,12 @@ export class Drainer {
         this.deps.log(`drain: could not message ${s.id}: ${(e as Error).message}`);
       }
     }
-    this.status = { reason: req.reason, update: req.update, startedAt: new Date().toISOString(), deadline: deadline.toISOString(), waitingFor: busy.map((s) => s.id) };
-    this.deps.log(`drain (${req.reason}): asked ${busy.length} busy agent(s) to wrap up; waiting until ${deadline.toISOString()}`);
+    const coords = coordinators.length ? `; waiting for ${coordinators.length} coordinator turn(s) to end (${coordinators.map((s) => s.title).join(', ')})` : '';
+    this.status = { reason: req.reason, update: req.update, startedAt: new Date().toISOString(), deadline: deadline.toISOString(), waitingFor: [...busy, ...coordinators].map((s) => s.id) };
+    this.deps.log(`drain (${req.reason}): asked ${busy.length} busy agent(s) to wrap up${coords}; waiting until ${deadline.toISOString()}`);
     this.deps.changed();
     this.timer = setInterval(() => this.check(), 3000);
-    return `draining: asked ${busy.length} busy agent(s) to commit, push and end their turn; the restart follows when they are idle, at the latest in ${req.drainMinutes} min`;
+    return `draining: asked ${busy.length} busy agent(s) to commit, push and end their turn${coords}; the restart follows when they are idle, at the latest in ${req.drainMinutes} min`;
   }
 
   private check() {
@@ -426,7 +448,8 @@ export class Drainer {
       if (Date.now() > this.holdUntil) this.giveUp('nothing stopped the server after the drain');
       return;
     }
-    const busy = busyWorkers(this.deps.snapshot()).map((s) => s.id);
+    const w = drainWaitsFor(this.req, this.deps.snapshot());
+    const busy = [...w.workers, ...w.coordinators].map((s) => s.id);
     const late = Date.now() >= Date.parse(this.status.deadline);
     if (busy.join() !== this.status.waitingFor.join()) {
       this.status = { ...this.status, waitingFor: busy };
@@ -564,8 +587,10 @@ export const UPDATE_WANTED_FILE = 'update.wanted';
  * Windows, and the new code starts within seconds of the stop. Written whole (a temp file and a rename): the path
  * unit fires as soon as the file exists.
  */
-export function writeUpdateWanted(dataDir: string, o: { drainMinutes: number; reason: string }, now = new Date()) {
-  writeJsonDurable(path.join(dataDir, UPDATE_WANTED_FILE), { drainMinutes: o.drainMinutes, reason: o.reason, at: now.toISOString() }, { generations: 0 });
+export function writeUpdateWanted(dataDir: string, o: { drainMinutes: number; reason: string; ref?: string; auto?: boolean }, now = new Date()) {
+  // ref (w1634): the commit to build, which fff-update checks is on its branch; absent: the branch's head. auto: an
+  // automatic deploy, whose drain waits for the coordinators' turns too (RestartRequest.auto).
+  writeJsonDurable(path.join(dataDir, UPDATE_WANTED_FILE), { drainMinutes: o.drainMinutes, reason: o.reason, ...(o.ref ? { ref: o.ref } : {}), ...(o.auto ? { auto: true } : {}), at: now.toISOString() }, { generations: 0 });
 }
 
 /** The server's heartbeat (every 30 s): after an unclean stop it says when the server was last alive. */

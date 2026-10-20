@@ -332,6 +332,7 @@ export function ownerDataReads(dataDir: string, memoryRoot: string, platform: No
     'update.verified.json*',
     'update.verified.done.json*',
     'machine-rollout.json*',
+    'auto-deploy.json*',
     'relocate.result.json*',
     'restart.pending.json*',
     'alive.json*',
