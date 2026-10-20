@@ -111,6 +111,9 @@ export async function updateBundleFor(pathname: string, machineOf: () => string 
   return { status: 200, file, size: fs.statSync(file).size };
 }
 
+/** How long the portal waits for a daemon to take an update or tools publish over its link (self_update_ack, w1641). */
+export const LINK_ACK_MS = 12 * 60_000;
+
 /** How long a call that timed out is remembered, so its late answer is still logged with what it was (w1641). */
 const LATE_KEEP_MS = 6 * 3_600_000;
 const LATE_KEEP_MAX = 200;
