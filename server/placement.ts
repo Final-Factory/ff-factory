@@ -1,4 +1,5 @@
-import type { BenchLock, BenchQueueReport } from '../shared/types.ts';
+import type { BenchLock, BenchQueueReport, WorkPriority } from '../shared/types.ts';
+import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, type MinPriority, type ReservedRoom } from '../shared/capacity.ts';
 
 /**
  * Where new work has room (w416, Lothsahn: "make sure jobs are getting scheduled on LothDesktop", then "Game work should
@@ -83,6 +84,38 @@ export interface PlacementPrefs {
    * a player goes there first like Live view work, and a build declared coming there clears it (server/buildPlans.ts).
    */
   build?: string[];
+  /**
+   * Machine id to the lowest priority of work placed there (w1643, config placement.minPriority; lothsahn: "If normal (all
+   * work), if high, high and urgent, if urgent, urgent only"). For work below it the computer is held (holdOf): never picked,
+   * not even when nothing else has room, so that work waits Queued. The workers already there and their resumes are not
+   * touched (holdReason reads only `hold`).
+   */
+  minPriority?: Record<string, MinPriority>;
+  /**
+   * The priority of the work being placed, as its request has it now (w1643): what minPriority is held against. Unset is
+   * normal, which is also what the Capacity block's "Next" lines are for.
+   */
+  priority?: WorkPriority;
+}
+
+const ORDER: readonly WorkPriority[] = ['low', 'normal', 'high', 'urgent'];
+
+/** The lowest priority among `work` (what a move must let in, w1643), or undefined for none. */
+export const lowestPriority = (work: readonly { priority: WorkPriority }[]): WorkPriority | undefined =>
+  work.reduce<WorkPriority | undefined>((a, w) => (a === undefined || ORDER.indexOf(w.priority) < ORDER.indexOf(a) ? w.priority : a), undefined);
+
+/** The placement settings for work of `priority` (w1643): the same, with the priority minPriority is read against. */
+export const forPriority = (prefs: PlacementPrefs, priority: WorkPriority | undefined): PlacementPrefs => (priority ? { ...prefs, priority } : prefs);
+
+/** The computers reserved for higher work (placement.minPriority above normal), id to its lowest priority. */
+export const minOf = (prefs: PlacementPrefs) =>
+  new Map(Object.entries(prefs.minPriority ?? {}).filter(([, v]) => MIN_PRIORITIES.includes(v) && v !== 'normal').map(([k, v]) => [placeId(k), v]));
+
+/** "reserved for urgent work only (placement.minPriority urgent; this work is normal)": why `id` takes no work of `priority`, or undefined. */
+export function reservedReason(id: string, prefs: PlacementPrefs, priority = prefs.priority): string | undefined {
+  const min = minOf(prefs).get(placeId(id));
+  if (!min || admitsPriority(min, priority)) return undefined;
+  return `reserved for ${minPriorityText(min)} (placement.minPriority ${min}; this work is ${priority ?? 'normal'})`;
 }
 
 /**
@@ -211,15 +244,36 @@ export interface RoomNow {
   game: string[];
   agent: string[];
   held: { id: string; why: string; for: NeedKind[] }[];
+  /**
+   * Computers with room that placement.minPriority reserves for higher work (w1643), with their lowest priority: not in `game`
+   * or `agent`, which are for low and normal work; roomIds adds those a request's priority reaches.
+   */
+  reserved?: ReservedRoom[];
   /** Each computer with room, id to its numbers at this moment: a log line of a flag explains itself when it is read hours later. */
   detail?: Record<string, string>;
 }
 
-const holdOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.hold ?? {}).map(([k, v]) => [placeId(k), v]));
+/** The holds a person or FF Factory set (placement.hold, paused machines, coming builds): they also stop resumes there. */
+const holdOnly = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.hold ?? {}).map(([k, v]) => [placeId(k), v]));
+
+/**
+ * The computers new work of prefs.priority may not go to, id to why: the holds, and those placement.minPriority reserves for
+ * higher work (w1643). A reservation is a hold for the work below it, not an avoid: it never overflows when nothing else has
+ * room, since a reservation that overflows reserves nothing.
+ */
+const holdOf = (prefs: PlacementPrefs) => {
+  const out = holdOnly(prefs);
+  for (const id of minOf(prefs).keys()) {
+    const why = out.has(id) ? undefined : reservedReason(id, prefs);
+    if (why) out.set(id, why);
+  }
+  return out;
+};
 
 export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {}): RoomNow {
-  const hold = holdOf(prefs);
-  const out: RoomNow = { game: [], agent: [], held: [], detail: {} };
+  const hold = holdOnly(prefs);
+  const min = minOf(prefs);
+  const out: RoomNow = { game: [], agent: [], held: [], reserved: [], detail: {} };
   for (const p of places) {
     const kinds = (['game', 'agent'] as const).filter((k) => hasRoomFor(p, k));
     if (!kinds.length) continue;
@@ -227,6 +281,11 @@ export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {})
     const why = hold.get(p.id);
     if (why !== undefined) {
       out.held.push({ id: p.id, why, for: kinds });
+      continue;
+    }
+    const m = min.get(p.id);
+    if (m) {
+      out.reserved!.push({ id: p.id, min: m, for: kinds });
       continue;
     }
     for (const k of kinds) out[k].push(p.id);
@@ -239,7 +298,8 @@ export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {})
  * agent already on it (w1376): a hold also stops resumes there, not only new placements.
  */
 export function holdReason(id: string, prefs: PlacementPrefs = {}): string | undefined {
-  const why = holdOf(prefs).get(placeId(id));
+  // Not placement.minPriority (w1643): a worker already there goes on, whatever its request's priority.
+  const why = holdOnly(prefs).get(placeId(id));
   if (why === undefined) return undefined;
   // A machine paused from its tray app (w1532, server/machinePause.ts) is held the same way until it runs again.
   if (why.startsWith('paused from its tray app')) return `${id} is ${why}: nothing resumes there until it runs again (its tray's Unpause, its schedule, or 90 minutes without input)`;
@@ -382,8 +442,9 @@ export function preferLine(places: readonly Computer[], last?: string, prefs: Pl
 
 /** " (m5 has room but is held (Ben testing))": the computers with room that a hold keeps off. */
 function heldNote(places: readonly Computer[], prefs: PlacementPrefs, kind: NeedKind): string {
-  const held = roomNow(places, prefs).held.filter((h) => h.for.includes(kind));
-  return held.length ? ` (${heldText(held, kind)})` : '';
+  const r = roomNow(places, prefs);
+  const text = [heldText(r.held, kind), reservedText(r.reserved, kind, prefs.priority)].filter(Boolean).join('; ');
+  return text ? ` (${text})` : '';
 }
 
 /**
@@ -444,23 +505,47 @@ export function workflowLine(places: readonly Computer[], last?: string, prefs: 
 export function capacityLines(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string[] {
   if (!places.length) return [];
   const avoid = avoidOf(prefs);
-  const hold = holdOf(prefs);
+  const hold = holdOnly(prefs);
+  const min = minOf(prefs);
   const prefer = (prefs.prefer ?? []).map(placeId);
   const lines = places.map((p) => {
     const why = busyReasons(p);
-    const tags = [...(prefer.includes(p.id) ? [`preferred #${prefer.indexOf(p.id) + 1}`] : []), ...(avoid.has(p.id) ? [`avoided: ${avoid.get(p.id)}`] : []), ...(hold.has(p.id) ? [`held: ${hold.get(p.id)}`] : [])];
-    const verdict = why.length ? `BUSY (${why.join('; ')})` : hold.has(p.id) ? `ROOM ${pctOf(roomOf(p))} but HELD (${hold.get(p.id)}): no new work goes there` : `ROOM ${pctOf(roomOf(p))}`;
+    const m = min.get(p.id);
+    const tags = [...(prefer.includes(p.id) ? [`preferred #${prefer.indexOf(p.id) + 1}`] : []), ...(avoid.has(p.id) ? [`avoided: ${avoid.get(p.id)}`] : []), ...(hold.has(p.id) ? [`held: ${hold.get(p.id)}`] : []), ...(m ? [`reserved: ${minPriorityText(m)}`] : [])];
+    // A reservation (w1643) after a hold: a held computer takes nothing, whatever its level.
+    const reserved = m ? ` but RESERVED for ${minPriorityText(m)} (placement.minPriority ${m}): ${m === 'urgent' ? 'low, normal and high' : 'low and normal'} work does not go there` : '';
+    const verdict = why.length ? `BUSY (${why.join('; ')})` : hold.has(p.id) ? `ROOM ${pctOf(roomOf(p))} but HELD (${hold.get(p.id)}): no new work goes there` : `ROOM ${pctOf(roomOf(p))}${reserved}`;
     // Agent room for non-game work (w1098), beside the game verdict: the dispatcher reads both from the one line.
-    const agent = hasAgentRoom(p) ? (hold.has(p.id) ? 'agent slot: free but held' : `agent slot: free (${p.midTurn} of ${p.maxAgents} mid-turn)`) : `agent slot: none (${agentBusyReasons(p).join('; ')})`;
+    const agent = hasAgentRoom(p) ? (hold.has(p.id) ? 'agent slot: free but held' : `agent slot: free (${p.midTurn} of ${p.maxAgents} mid-turn)${m ? `, ${minPriorityText(m)}` : ''}`) : `agent slot: none (${agentBusyReasons(p).join('; ')})`;
     return `- ${p.id}${tags.length ? ` [${tags.join('; ')}]` : ''}: ${verdict}: ${loadPart(p)}; ${agent}`;
   });
-  const next = preferLine(places, last, prefs);
-  const how = prefer.length || avoid.size || hold.size ? `placement.prefer first, avoided last${hold.size ? ', held never' : ''}, the rest spread by room` : 'game-repo work is spread by room';
-  const wf = workflowLine(places, last, prefs);
-  const live = liveLine(places, last, prefs);
-  const build = buildLine(places, last, prefs);
-  const timed = timedLine(places, last, prefs);
-  return [`## Capacity (${how}; docs/machines.md, "Placing work")`, ...lines, ...(next ? [next] : []), ...(live ? [live] : []), ...(build ? [build] : []), ...(timed ? [timed] : []), nonGameLine(places, last, prefs), ...(wf ? [wf] : [])];
+  // The "Next" lines are for low and normal work (prefs.priority unset); reservedLine says where higher work goes.
+  const base = { ...prefs, priority: undefined };
+  const next = preferLine(places, last, base);
+  const how = prefer.length || avoid.size || hold.size || min.size ? `placement.prefer first, avoided last${hold.size ? ', held never' : ''}${min.size ? ', reserved only for the work they take' : ''}, the rest spread by room` : 'game-repo work is spread by room';
+  const wf = workflowLine(places, last, base);
+  const live = liveLine(places, last, base);
+  const build = buildLine(places, last, base);
+  const timed = timedLine(places, last, base);
+  const reserved = reservedLine(places, last, base);
+  return [`## Capacity (${how}; docs/machines.md, "Placing work")`, ...lines, ...(next ? [next] : []), ...(live ? [live] : []), ...(build ? [build] : []), ...(timed ? [timed] : []), nonGameLine(places, last, base), ...(wf ? [wf] : []), ...(reserved ? [reserved] : [])];
+}
+
+/**
+ * Where higher work goes while placement.minPriority reserves computers for it (w1643), or undefined when none is: the Next
+ * lines above it are for low and normal work. One part per level a reservation lets in, game and non-game.
+ */
+export function reservedLine(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
+  const min = minOf(prefs);
+  if (!min.size) return undefined;
+  const who = [...min].map(([id, m]) => `${id} ${minPriorityText(m)}`).join(', ');
+  const levels = (['high', 'urgent'] as const).filter((lv) => [...min.values()].some((m) => admitsPriority(m, lv)));
+  const at = (lv: WorkPriority, kind: NeedKind) => {
+    const p = pickComputer(places, last, forPriority(prefs, lv), kind);
+    return p ? `${p.pick.id} (${p.why})` : 'no computer has room now';
+  };
+  const parts = levels.map((lv) => `${lv} work: game ${at(lv, 'game')}; non-game ${at(lv, 'agent')}`);
+  return `Reserved by priority (placement.minPriority, w1643): ${who}. The Next lines above are for low and normal work; work below a computer's level waits Queued rather than go there, and a request raised to the level may go at once. Next ${parts.join('. Next ')}.`;
 }
 
 /**
@@ -494,4 +579,12 @@ export function placementHint(target: string, places: readonly Computer[], last?
 }
 
 /** The computers with room for `kind` of work in a RoomNow: the one place the two kinds are told apart. */
-export const roomIds = (r: RoomNow, kind: NeedKind): string[] => (kind === 'game' ? r.game : r.agent);
+export const roomIds = (r: RoomNow, kind: NeedKind, priority?: WorkPriority): string[] => [
+  ...(kind === 'game' ? r.game : r.agent),
+  // The reserved computers (w1643) the request's priority now reaches.
+  ...(r.reserved ?? []).filter((x) => x.for.includes(kind) && admitsPriority(x.min, priority)).map((x) => x.id),
+];
+
+/** The held and reserved computers with room that work of `kind` and `priority` may not use, as a Queued reason says them. */
+export const unusableText = (r: RoomNow, kind: NeedKind, priority?: WorkPriority): string =>
+  [heldText(r.held, kind), reservedText(r.reserved, kind, priority, kind === 'agent' ? 'an agent slot' : 'room')].filter(Boolean).join('; ');

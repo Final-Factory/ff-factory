@@ -2344,6 +2344,8 @@ export interface AppState {
   agentRoom?: string[];
   /** Computers with room that a placement hold keeps work off, with who and why (w1089); a Queued request says so. */
   heldRoom?: { id: string; why: string; for: ('game' | 'agent')[] }[];
+  /** Computers with room that placement.minPriority reserves for higher work (w1643), with their lowest priority: a request at that level may use them. */
+  reservedRoom?: { id: string; min: 'normal' | 'high' | 'urgent'; for: readonly ('game' | 'agent')[] }[];
   /** Discord and FFBox intake into the ledger (docs/intake.md); absent from a server older than this field. */
   intake?: IntakeSummary;
   /** The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): its switches and its last run. */

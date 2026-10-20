@@ -857,6 +857,49 @@ LothDesktop and Beast, not just when BEAST is full").
     included. The drain re-reads the hold every 30 seconds, delivers in order once `placement.hold` no longer names the computer,
     and never gives it up while the hold stands. A worker mid-turn there is not interrupted, and a message sent to a running turn
     (a stop-and-save request) still reaches it. Tests: `server/resumeRules.test.ts`.
+- **A computer can be reserved for higher work** (w1643, lothsahn, 2026-10-20: "Instead of a single setting, let's make
+  the setting the minimum priority work that can go to a machine. If normal (all work), if high, high and urgent, if
+  urgent, urgent only"). `placement.minPriority`, set with `set_app_config` and kept across restarts, names each computer's
+  lowest priority of work: `"minPriority": { "beast": "urgent", "lothdesktop": "high" }`. `normal`, the default, takes all
+  work, low included, so it is not stored (a computer left out is normal); `high` takes high and urgent work; `urgent` only
+  urgent. `set_app_config` refuses an id that is no machine (list_machines) and any other level; the whole map is replaced,
+  and `null` clears it. The code: `minOf`, `reservedReason`, `holdOf` and `roomIds` in `server/placement.ts`, the levels in
+  `shared/capacity.ts` (`admitsPriority`).
+  - **Which priority.** The request's priority now (`WorkItem.priority`), read at each placement, so a request a person
+    raises to the level may go there at once: `update_work` with the new priority, or "Start now" (urgent). A raise of a
+    Queued request wakes the capacity ping. Work started without a request counts as normal.
+  - **Below the level it waits; it never overflows.** For work below its level a reserved computer is held
+    (`holdOf` adds it with the reason, "reserved for urgent work only (placement.minPriority urgent; this work is
+    normal)"): never picked, not even when nothing else has room, and not "room" for `decide_work queue` or the WRONG
+    flag. Such a request is Queued, and its reason names the computer ("beast has room but takes urgent work only"). This
+    follows `placement.hold`, not `placement.avoid`: an avoided computer takes work when nothing else has room, which is
+    right for a preference, but a reservation that overflowed would reserve nothing. `placement.prefer` does not get past
+    it either.
+  - **Every placement reads it.** The Capacity block tags the computer `[reserved: urgent work only]` and reads `ROOM n% but
+    RESERVED for urgent work only (placement.minPriority urgent): low, normal and high work does not go there`, its agent
+    slot "…, urgent work only"; its "Next" lines are for low and normal work, and a last line, "Reserved by priority", says
+    where high and urgent work goes next, game and non-game. `start_agent` refuses a request below a computer's level
+    there, in a free sandbox or beside another agent, saying where to go instead, and `create_sandbox`'s note names the
+    reservation. `message_agent` with a request the worker is not on yet (new work on its computer, in its session or a new
+    one) is refused the same way. `stop_agent move_to` is refused when a request the worker serves is below the target's
+    level, and the workers a coming build moves go only to a computer that takes all their requests. `decide_work queue`,
+    the WRONG flag, the page and the capacity ping (`roomIds`, `RoomNow.reserved`, `AppState.reservedRoom`) count a
+    reserved computer as room only for a request at its level. `list_machines` shows `placement: reserved for …`, and the
+    dispatcher's prompt shows the setting in force ("pc RESERVED for urgent work only") with a pointer to
+    `read_rules machines`, which carries the rule with lothsahn's words (the brief's character budget, w1158).
+  - **The workers already there go on.** A worker on the computer whose request is below the level keeps running and is
+    not moved, and its resumes (a usage hold, a restart, a check-in, a follow-up on its own request) stay where its sandbox
+    is: `holdReason`, which every resume reads, reads `placement.hold` only. A request that already ran on that computer
+    is not new work there, so `start_agent` takes it there again. `decide_work link` is for workers already doing the work,
+    so it is not checked.
+  - **Live view, release builds and timed work.** Their first lists (`placement.live`, `placement.build`, the small
+    computers for timed work) order the computers a request may use, so a reserved computer is skipped for work below its
+    level, saying so ("beast is held (reserved for …)"), like a held one. A release build declared with `build_plan`
+    (`BuildPlans`' release target) counts as urgent: what reaches players is never kept off a computer by a reservation,
+    and a computer cleared for it is held anyway.
+  - Tests: `server/w1643MinPriority.test.ts` (each level, no overflow, a priority change, resumes, the Capacity block),
+    `server/orchestrators.test.ts` ("w1643: …": start_agent, message_agent, decide_work queue, the WRONG flag),
+    `server/appConfig.test.ts` (set and clear).
 - **Work that needs no Unity editor is placed by agent slot alone** (w1098, lothsahn, 2026-10-12: "Yes, please tell the
   dispatcher that.  Please update the rules to also indicate that--FFBox and FF Factory updates don't need unity editors").
   Which repositories: Final-Factory/ff-factory, Final-Factory/ffbox, the ff-agents plugin (Final-Factory/final-factory-agents)

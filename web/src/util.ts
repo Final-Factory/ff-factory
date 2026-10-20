@@ -307,8 +307,8 @@ export const chatOwner = (s: SessionInfo | undefined) => (s?.kind === 'orchestra
 export function useWorkLive(app: AppState, work: readonly WorkItem[], now: number): Map<string, WorkLive> {
   return useMemo(() => {
     const byId = new Map(app.sessions.map((s) => [s.id, s]));
-    return workLiveAll(work, { session: (id) => byId.get(id), ...(app.room ? { room: app.room } : {}), ...(app.agentRoom ? { agentRoom: app.agentRoom } : {}), ...(app.heldRoom ? { heldRoom: app.heldRoom } : {}), now });
-  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, work, now]);
+    return workLiveAll(work, { session: (id) => byId.get(id), ...(app.room ? { room: app.room } : {}), ...(app.agentRoom ? { agentRoom: app.agentRoom } : {}), ...(app.heldRoom ? { heldRoom: app.heldRoom } : {}), ...(app.reservedRoom ? { reservedRoom: app.reservedRoom } : {}), now });
+  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, app.reservedRoom, work, now]);
 }
 
 /**
