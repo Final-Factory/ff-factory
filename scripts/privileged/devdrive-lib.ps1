@@ -199,13 +199,32 @@ function Mount-DevDrive {
 }
 
 # The letter this Dev Drive's volume holds now ('' when it is detached or has none).
+# Works without administrator rights (w1633): a session that is not elevated gets the image with Attached but no Number,
+# so `$img | Get-Disk` fails and the drive read as "not attached" (lothdesktop's three failed updates, 2026-10-20). The disk
+# number comes from the image's DevicePath (\\.\PhysicalDriveN) then, or from the disk whose Location is this VHDX; both
+# Get-Partition -DiskNumber and Get-Disk answer a session that is not elevated.
 function Get-OwnLetter {
+  $n = $null
   try {
     $img = Get-DiskImage -ImagePath $Vhdx -ErrorAction Stop
     if (-not $img.Attached) { return '' }
-    $part = $img | Get-Disk -ErrorAction Stop | Get-Partition -ErrorAction Stop | Where-Object { $_.Type -ne 'Reserved' -and $_.Size -gt 1GB } | Sort-Object Size -Descending | Select-Object -First 1
+    $n = Get-ImageDiskNumber $img
+  } catch { }
+  if ($null -eq $n) {
+    try { $n = @(Get-Disk -ErrorAction Stop | Where-Object { "$($_.Location)" -ieq $Vhdx } | ForEach-Object { $_.Number })[0] } catch { }
+  }
+  if ($null -eq $n) { return '' }
+  try {
+    $part = Get-Partition -DiskNumber $n -ErrorAction Stop | Where-Object { $_.Type -ne 'Reserved' -and $_.Size -gt 1GB } | Sort-Object Size -Descending | Select-Object -First 1
     return ConvertTo-PartitionLetter $part.DriveLetter
   } catch { return '' }
+}
+
+# An attached image's disk number: its Number (an elevated session), else the N of its DevicePath \\.\PhysicalDriveN.
+function Get-ImageDiskNumber($img) {
+  if ("$($img.Number)" -match '^\d+$') { return [int]"$($img.Number)" }
+  if ("$($img.DevicePath)" -match 'PhysicalDrive(\d+)$') { return [int]$Matches[1] }
+  return $null
 }
 
 # A partition's DriveLetter is a char, and [char]0 (a NUL, not an empty string) when it has none.

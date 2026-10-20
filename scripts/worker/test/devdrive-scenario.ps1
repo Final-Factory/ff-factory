@@ -18,9 +18,10 @@ $global:Held = [string]$(if ($sc.attached) { $sc.autoLetter } else { '' })
 $global:Attached = [bool]$sc.attached
 $global:Gave = ''
 
-# The Windows cmdlets the library calls. Functions win over cmdlets of the same name.
+# The Windows cmdlets the library calls. Functions win over cmdlets of the same name. The helper runs elevated, where an
+# attached image carries its disk Number (Get-OwnLetter reads it, w1633).
 function global:Start-Sleep { [CmdletBinding()] param($Seconds, $Milliseconds) }
-function global:Get-DiskImage { [CmdletBinding()] param([string]$ImagePath) [pscustomobject]@{ ImagePath = $ImagePath; Attached = $global:Attached } }
+function global:Get-DiskImage { [CmdletBinding()] param([string]$ImagePath) [pscustomobject]@{ ImagePath = $ImagePath; Attached = $global:Attached; Number = $(if ($global:Attached) { 7 } else { $null }); DevicePath = $(if ($global:Attached) { '\\.\PhysicalDrive7' } else { '' }) } }
 function global:Mount-DiskImage { [CmdletBinding()] param([string]$ImagePath) [void]$global:Calls.Add('Mount-DiskImage'); $global:Attached = $true; $global:Held = [string]$global:Sc.autoLetter }
 function global:Get-Disk { [CmdletBinding()] param([Parameter(ValueFromPipeline)]$In) process { [pscustomobject]@{ Number = 7; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT' } } }
 function global:Set-Disk { [CmdletBinding()] param($Number, $IsOffline, $IsReadOnly) }
