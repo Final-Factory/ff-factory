@@ -885,7 +885,8 @@ LothDesktop and Beast, not just when BEAST is full").
     level, and the workers a coming build moves go only to a computer that takes all their requests. `decide_work queue`,
     the WRONG flag, the page and the capacity ping (`roomIds`, `RoomNow.reserved`, `AppState.reservedRoom`) count a
     reserved computer as room only for a request at its level. `list_machines` shows `placement: reserved for …`, and the
-    dispatcher's prompt carries the rule with lothsahn's words and the setting in force.
+    dispatcher's prompt shows the setting in force ("pc RESERVED for urgent work only") with a pointer to
+    `read_rules machines`, which carries the rule with lothsahn's words (the brief's character budget, w1158).
   - **The workers already there go on.** A worker on the computer whose request is below the level keeps running and is
     not moved, and its resumes (a usage hold, a restart, a check-in, a follow-up on its own request) stay where its sandbox
     is: `holdReason`, which every resume reads, reads `placement.hold` only. A request that already ran on that computer

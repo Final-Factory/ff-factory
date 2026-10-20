@@ -4062,6 +4062,9 @@ test('w1643: placement.minPriority: start_agent refuses a request below the comp
   agentsRoom(agents, ['pc']);
   cfg.placement = { minPriority: { pc: 'urgent' } };
   putRequests(store, [{ id: 'w1' }, { id: 'w2', priority: 'high' }]);
+  // The dispatcher's brief names the reservation in force and where its rule is (the brief's budget, w1158); read_rules machines has it.
+  assert.match((agents.orchestratorOptions(dispatcher().info) as { systemPrompt: { append: string } }).systemPrompt.append, /\(now: pc RESERVED for urgent work only \(minPriority urgent, w1643: `read_rules machines` before you place, queue or move work there\)\)/);
+  assert.match(agents.rulesText('machines'), /never goes there, not even when nothing else has room: it waits Queued, since a reservation that overflowed would reserve nothing/);
   const refused = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: do it', work_id: 'w1' });
   assert.equal(refused.isError, true);
   assert.match(refused.text, /pc is reserved for urgent work only \(placement\.minPriority urgent; this work is normal\): w1 is normal, so it does not go there\. Start it on another computer .*or queue it \(decide_work queue\)/);
