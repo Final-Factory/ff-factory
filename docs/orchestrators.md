@@ -226,21 +226,42 @@ where "Next Live view work" says: `placement.live`, BEAST unless set, else the g
 elsewhere moves there between turns with `stop_agent` `move_to: "beast"`: its request is Queued for BEAST with its branch
 and the view's settings, and a new session there goes on from the branch (docs/machines.md, "Placing work").
 
+**Two release lanes** (w1639; lothsahn, 2026-10-20: "Release builds should be handed by ffbox. We should update the version
+and just let ffbox build it. But that can take up to 90m because ffbox is slow. If we need an urgent build, we should be
+able to ask beast or Lothdesktop to build it for us. For that, we need to kick everyone else off the box (or at least have
+them pause) and then do the release directly on the box and upload to steam. We need to make sure when that happens that
+ffbox doesn't see the version update and do it's own release ... Then Ben and I can ask for a release (ffbox) or a quick or
+urgent release (beast, if offline, LothDesktop)"). Both orchestrators and the dispatcher route by the person's words
+(`read_rules release`, `server/releaseLanes.ts`; the game repo's `Documentation/Release-Lanes.md`):
+
+- **"A release"** (the default, any wording without "quick" or "urgent"): the worker bumps with `trigger-ci-release.sh`,
+  merges the bump, and **FFBox** builds, uploads and sets the main app live on development. No FF Factory computer builds
+  it: it is not build work (`needsBuild` is false for "release build" and "ci-release" since w1639), takes no `build_plan`,
+  and its worker sets `wake_me` 40 minutes after the merge, so no sandbox waits on FFBox.
+- **"A quick release" / "an urgent release"** (`shared/capacity.ts` `URGENT_RELEASE_WORDS`), from Ben or lothsahn only:
+  filed at priority **urgent**; built and uploaded on **BEAST, else LothDesktop when BEAST is offline** (`DEFAULT_BUILD`, the
+  first online one), with the game repo's `scripts/release/urgent_release.py`. Its bump (`trigger-ci-release.sh --urgent
+  <machine>`) carries `cicd/release-lane.json`, which FFBox's release lane reads and declines (ffbox `release_claim.py`), so
+  FFBox builds nothing for that version. The build clears the computer as below; the release's Unity runs take **exclusive**
+  bench tickets at the request's urgent priority, so they wait only for the timed leg running now.
+
 **Builds clear BEAST** (w1606; Ben, 2026-10-20: "when you know builds are coming up, we also prioritize using beast for
 builds because its faster. so when it's coming time, move work off beast, or when apropriate, pause work and finish the
 build, then resume. make this a rule of FFF"). **Release builds only** (w1628; lothsahn, 2026-10-20: "Ben's guidance was
-only supposed to be for release builds of the software, not all builds that workers do when making fixes"): a worker's own
-player build (a fix, a clip, a playtest or MP check) gets no BEAST preference, is never a reason to move or pause work on
-BEAST, and goes wherever placement puts it; `build_plan` answers it "Nothing to plan" and it builds where it is, its shared
-ticket in the bench queue keeping it off a timed leg. Release build work (its worker declared one with `release: true`,
-or its words name one, "release build" or "ci-release": `list_work` says "Needs a release build") goes where "Next release build
-work" says: `placement.build`, BEAST unless set, else the general placement, **passing over a computer whose bench queue
-holds a timed leg, running or waiting** (w1628; lothsahn: "Yes, let's make the change you recommend to move things off
-when there are timed runs"; the daemon reports them, `MachineStats.benchQueue`). A release build declared on BEAST while
-one is there is answered `Not on beast (w1628)` with the computer to use; only when no other has room is it declared there,
-and it then waits for those legs in the queue. A release build is declared coming with `build_plan` (`server/buildPlans.ts`,
-`release: true`): by its worker (`coming`, with the minutes until it starts and what it builds), or by the dispatcher for a
-request (`work_id`) when it knows a release request reaches its build step. Then:
+only supposed to be for release builds of the software, not all builds that workers do when making fixes"), and **since
+w1639 only the urgent lane's**: a worker's own player build (a fix, a clip, a playtest or MP check) gets no BEAST
+preference, is never a reason to move or pause work on BEAST, and goes wherever placement puts it; `build_plan` answers it
+"Nothing to plan" and it builds where it is, its shared ticket in the bench queue keeping it off a timed leg. Urgent release
+work (its worker declared one with `release: true`, or its words ask for a quick or urgent release: `list_work` says "An
+urgent release") goes where "Next urgent release work" says: `placement.build`, BEAST then LothDesktop unless set, the first
+online one with room. **A timed leg in its bench queue no longer sends it elsewhere** (w1628 did for release builds in
+general; lothsahn's w1639 rule is "beast, if offline, LothDesktop"): it is declared there and its exclusive tickets go first
+after the leg running now. A build computer that is offline is answered `Not on beast (w1639): it is offline` with the next
+online one; one online but full is cleared first (the dispatcher declares `build_plan coming` with the request's `work_id`,
+which moves the workers between turns off it), then the request goes there. An urgent release's build is declared coming
+with `build_plan` (`server/buildPlans.ts`, `release: true`): by its worker (`coming`, with the minutes until it starts and
+what it builds), or by the dispatcher for a request (`work_id`) when it knows a release request reaches its build step.
+Then:
 
 1. **At once, no new work goes to that computer**: the Capacity block shows it `held: a build is coming at HH:MMZ (…;
    w1606)`, start_agent's note sends new work elsewhere, nothing is moved there, no released worker resumes there. The
@@ -256,8 +277,10 @@ request (`work_id`) when it knows a release request reaches its build step. Then
    - **mid-turn: asked to pause at a safe point, never cut off**: it finishes its step, commits and pushes, stops its
      editor and ends its turn with `wNNN: paused for the build on beast; …`. It is then paused the same way, and when the
      build is done FF Factory tells it to carry on, in the same conversation and sandbox.
-   - **its Live view runs: left alone.** A Live view a person may be steering beats a build, and a move would end it;
-     the build runs beside it, a little slower.
+   - **its Live view runs: left in place, editor and view open.** A Live view a person may be steering beats a build, and
+     a move would end it; the build runs beside it, a little slower. Since w1639 its worker is told once
+     (`liveViewNotice`) to start no compile, refresh, test run, player build or batch Unity run until the build is done,
+     and told when it is; nothing of it is ever closed or moved without the person's word, and its messages are not held.
 3. **The build starts when its worker asks** (`build_plan start`): `Go`, or `Not yet` with what it waits for:
    - **not a bench lock** (w1628): a timed run holding the lock gets a `Go` with a note. The build's own Unity run
      (`unity-slot run`, the game repo's `build_player.sh`) takes a shared ticket in the machine's bench queue (w1615),
@@ -290,10 +313,10 @@ at connect and every minute (`bench_priorities`, written to `bench.queue/priorit
 a ticket of no request (an editor boot, a nightly) counts as normal, and a changed priority moves a waiting ticket within
 the minute (a running one is never stopped). Within a priority, one timed leg, then the waiting group of shared tickets
 (builds, compiles, editor boots), then the next timed leg: a new shared ticket joins the group still waiting, or goes right
-after the next single timed leg, never to the end and never into a group already running. **FFBox stays the release lane**: official
-release builds and Steam uploads run on ffbox CI (`ci-release`), never on these computers, and nothing here touches
-Steam. A release build cannot run on BEAST under that lane; the smallest change would be a GitHub Actions self-hosted
-runner on BEAST for the Windows player job, which is Ben's and Lothsahn's call, not made here. The nightly lab's
+after the next single timed leg, never to the end and never into a group already running. **FFBox is the normal release lane**: a
+release builds and uploads on ffbox CI (`ci-release`). Since w1639 the one exception is the urgent lane above, which builds
+and uploads on BEAST or LothDesktop with FFBox's own build, check and upload scripts, sets only development live, and only
+when Ben or lothsahn asks for a quick or urgent release. The nightly lab's
 machine is Lothsahn's choice (`intake.nightly.run`); its run is not declared as a build by itself.
 
 `start_agent` refuses a request with a strong overlap still in flight (a commit only informs), or one that already has a

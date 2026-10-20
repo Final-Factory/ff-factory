@@ -108,7 +108,13 @@ test('w1606: when it is due, BEAST is cleared: workers between turns move first,
   assert.match(notice, /^\[FF Factory\] BUILD \(w1606\): worker builder builds a player for the w1588 clip on beast now/);
   assert.match(notice, /Commit what is unfinished on your branch .* and push it\./);
   assert.match(notice, /`w1503: paused for the build on beast; <where you stopped>`/);
-  assert.ok(!t.told.some((x) => x.id === 'builder' || x.id === 'viewer' || x.id === 'elsewhere'), 'the builder, a Live view and other computers are not told');
+  assert.ok(!t.told.some((x) => x.id === 'builder' || x.id === 'elsewhere'), 'the builder and other computers are not told');
+  // w1639: the Live view stays open; its worker is asked only to hold its heavy work, never to stop its editor.
+  const view = t.told.filter((x) => x.id === 'viewer');
+  assert.equal(view.length, 1);
+  assert.match(view[0].text, /Your Live view stays open and your editor runs/);
+  assert.match(view[0].text, /start no compile, refresh, test run, player build or batch Unity run/);
+  assert.doesNotMatch(view[0].text, /Stop your sandbox's Unity editor|end your turn/i);
   // Paused workers' resumes wait in the send queue; the builder's and the Live view's do not.
   assert.match(t.plans.resumeHold({ id: 'stuck', machineId: 'beast' }) ?? '', /^beast is cleared for a build since 05:10Z \(a player for the w1588 clip, .*\): this worker was paused for it and resumes when it is done \(w1606\)$/);
   assert.match(t.plans.resumeHold({ id: 'busy', machineId: 'beast' }) ?? '', /paused for it/);

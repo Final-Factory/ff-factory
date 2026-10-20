@@ -161,10 +161,10 @@ export const CATALOG = {
     fps: z.number().optional().describe('start: frames a second, 1-30 (default 15).'),
     width: z.number().optional().describe('start: frame width in px, 320-1920 (default 960).'),
   },
-  /** Release builds first on BEAST (w1606, release builds only since w1628, server/buildPlans.ts): coming, start, done. */
+  /** An urgent release's build on BEAST, else LothDesktop (w1606, w1628; the urgent lane's only since w1639, server/buildPlans.ts): coming, start, done. */
   build_plan: {
     action: z.enum(['coming', 'start', 'done', 'status']),
-    release: z.boolean().optional().describe('coming, start: true for a release build, the only kind build_plan plans (w1628). Your own player build needs no plan: build where you are.'),
+    release: z.boolean().optional().describe('coming, start: true for an urgent release\'s build (a quick or urgent release, w1639), the only kind build_plan plans: a normal release is FFBox\'s and builds nothing here. Your own player build needs no plan: build where you are.'),
     minutes: z.number().int().min(0).max(240).optional().describe('coming: lead time in minutes until the build starts (0: now).'),
     what: z.string().max(160).optional().describe('coming: what it builds ("Windows player for the w1475 clip").'),
   },

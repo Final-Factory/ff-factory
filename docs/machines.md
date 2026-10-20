@@ -1000,10 +1000,11 @@ LothDesktop and Beast, not just when BEAST is full").
   - Which work: game work that builds a player, once its worker declares a build (`build_plan coming`,
     `WorkItem.build`) or when its title, brief or notes name one (`needsBuild`, `shared/capacity.ts`: "player build",
     "release build", "build a player"...; a bare "build" is not one).
-  - Release builds only (w1628): a worker's own build gets no plan (`NOT_RELEASE`) and no BEAST preference.
-  - Where: the Capacity block's "Next release build work (w1606; release builds only, w1628): beast (…)", from `config
-    placement.build` (unset: `beast`, `DEFAULT_BUILD`), passing over a computer whose bench queue holds a timed leg
-    (`MachineStats.benchQueue`, w1628), else the general placement. Timed work: "Next timed work", the smallest computer
+  - Release builds only (w1628), and since w1639 only the urgent lane's (a normal release is FFBox's): a worker's own
+    build gets no plan (`NOT_RELEASE`) and no BEAST preference.
+  - Where: the Capacity block's "Next urgent release work (a quick or urgent release, w1639; …): beast (…)", from `config
+    placement.build` (unset: `beast`, then `lothdesktop`, `DEFAULT_BUILD`), the first online one with room, never passed
+    over for a timed leg in its bench queue (w1639; w1628 did), else the general placement. Timed work: "Next timed work", the smallest computer
     with room on the platform it names, BEAST last (`pickTimed`, w1628).
   - A build declared coming holds its computer for new work at once (`Agents.placement()` adds `BuildPlans.holds()`),
     and when due moves its workers between turns elsewhere, pauses the ones that cannot move and asks the ones mid-turn

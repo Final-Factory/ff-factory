@@ -134,7 +134,7 @@ test('w428: the capacity block tags each computer, and placing on an avoided BEA
   assert.match(lines[3], /^Next new game-repo work: lothdesktop \(first with room in placement\.prefer/);
   // BEAST avoided: Live view work does not override the avoid (w1600).
   assert.match(lines[4], /^Next Live view work \(game work whose worker streams a Live view, w1600\): lothdesktop \(Live view work, but beast is avoided \(BEAST unstable, 2026-10-05\); so the general placement: first with room in placement\.prefer/);
-  assert.match(lines[5], /^Next release build work \(w1606; release builds only, w1628\): lothdesktop \(Release build work, but beast is avoided/);
+  assert.match(lines[5], /^Next urgent release work \(a quick or urgent release, w1639; a normal release is FFBox's and needs none\): lothdesktop \(Urgent release work goes to the first with room in placement\.build \(beast > lothdesktop/);
   assert.match(lines[6], /^Next timed work \(benchmarks, perf A\/Bs and probes; on the platform it names, w1628\): lothdesktop /);
   assert.equal(lines.length, 8, "header, two computers, the next game line, the Live view, release build and timed lines and the non-game line");
   assert.match(placementHint('beast', cs, undefined, PREFS) ?? '', /^ Note: beast is avoided \(BEAST unstable, 2026-10-05\); the next new game-repo work goes to lothdesktop \(first with room in placement\.prefer/);
@@ -212,7 +212,7 @@ test('w1600: the capacity block names where the next Live view work goes, with B
   assert.match(lines[1], /^- beast: ROOM \d+%: .*; its bench lock is held since 21:04Z \(BEAST pid 4121 .*probe A round 2 .*\): a timed run; agent slot/);
   assert.match(lines[4], /^Next new game-repo work: m5 \(first with room in placement\.prefer/);
   assert.match(lines[5], /^Next Live view work \(game work whose worker streams a Live view, w1600\): beast \(Live view work goes to the first with room in placement\.live \(beast; .*\); its bench lock is held since 21:04Z .*: its worker waits for it before it starts its editor\)\.$/);
-  assert.match(lines[6], /^Next release build work \(w1606; release builds only, w1628\): beast \(Release build work goes to the first with room in placement\.build \(beast; w1606: builds run fastest there\); its bench lock is held since 21:04Z .*: its worker waits for it before it starts its build\)\.$/);
+  assert.match(lines[6], /^Next urgent release work \(a quick or urgent release, w1639; .*\): beast \(Urgent release work goes to the first with room in placement\.build \(beast > lothdesktop; w1639: "beast, if offline, LothDesktop"\); its bench lock is held since 21:04Z .*: its worker waits for it before it starts its build\)\.$/);
   assert.match(lines[7], /^Next timed work /);
   assert.match(lines[8], /^Next non-game work/);
   // start_agent's note for Live view work placed elsewhere names BEAST; for other game work, the m5.
@@ -226,17 +226,17 @@ test('w1600: the capacity block names where the next Live view work goes, with B
  * builds because its faster"), by their own list (placement.build), and a computer a build is coming to is held for new work.
  */
 test('w1606: build work goes to placement.build first (beast), falls back when it is held for a coming build, and says so', () => {
-  assert.deepEqual(DEFAULT_BUILD, ['beast']);
+  assert.deepEqual(DEFAULT_BUILD, ['beast', 'lothdesktop'], 'w1639, lothsahn: "beast, if offline, LothDesktop"');
   const cs = [idle('beast', 6), idle('lothdesktop', 5), idle('m5', 3)];
   const b = pickComputer(cs, undefined, M5_FIRST, 'game', false, 'build')!;
   assert.equal(b.pick.id, 'beast');
-  assert.match(b.why, /^Release build work goes to the first with room in placement\.build \(beast; w1606: builds run fastest there\)/);
+  assert.match(b.why, /^Urgent release work goes to the first with room in placement\.build \(beast > lothdesktop; w1639: "beast, if offline, LothDesktop"\)/);
   assert.equal(pickComputer(cs, undefined, { ...M5_FIRST, build: ['m5'] }, 'game', false, 'build')!.pick.id, 'm5', 'placement.build set: its order wins');
   assert.equal(pickComputer(cs, undefined, { ...M5_FIRST, live: ['lothdesktop'] }, 'game', false, 'build')!.pick.id, 'beast', 'placement.live is the Live views\' list, not the builds\'');
   // A build coming to BEAST holds it (Agents.placement() adds BuildPlans.holds()): new build work goes elsewhere, saying why.
   const held = pickComputer(cs, undefined, { ...M5_FIRST, hold: { beast: 'a build is coming at 05:10Z (0.50.0.112, worker abc; w1606): no new work until it is done' } }, 'game', false, 'build')!;
-  assert.equal(held.pick.id, 'm5');
-  assert.match(held.why, /^Release build work, but beast is held \(a build is coming at 05:10Z/);
-  assert.match(buildLine(cs, undefined, M5_FIRST) ?? '', /^Next release build work \(w1606; release builds only, w1628\): beast/);
-  assert.match(placementHint('m5', cs, undefined, M5_FIRST, undefined, 'game', false, 'build') ?? '', /the next new release build work goes to beast/);
+  assert.equal(held.pick.id, 'lothdesktop', 'the next in placement.build');
+  assert.match(held.why, /^Urgent release work goes to the first with room in placement\.build/);
+  assert.match(buildLine(cs, undefined, M5_FIRST) ?? '', /^Next urgent release work \(a quick or urgent release, w1639; .*\): beast/);
+  assert.match(placementHint('m5', cs, undefined, M5_FIRST, undefined, 'game', false, 'build') ?? '', /the next new urgent release work goes to beast/);
 });
