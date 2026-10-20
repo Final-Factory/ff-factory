@@ -120,12 +120,18 @@ echo "nodev=$bestv"
 c=$(PATH="$HOME/.local/bin:$upath:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" command -v claude || true)
 [ -n "$c" ] && echo "claude=$c"
 for t in gh git-lfs; do echo "$t=$(PATH="$upath:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" command -v $t || true)"; done
-find "$HOME" -maxdepth 4 -type d -name .git -not -path "*/Library/*" 2>/dev/null | while read -r d; do
+${
+    // No slug, no search (as on Windows): the worker installer's probe knows its clone, and a home folder full of sandboxes
+    // kept this find going for over ten minutes on m3 (w1596).
+    slug
+      ? `find "$HOME" -maxdepth 4 -type d -name .git -not -path "*/Library/*" 2>/dev/null | while read -r d; do
   r=$(dirname "$d")
   u=$(git -C "$r" remote get-url origin 2>/dev/null || true)
   case "$u" in *[:/]${slug}|*[:/]${slug}.git) echo "repo=$r" ;; esac
 done
-`;
+`
+      : ''
+  }`;
 }
 
 /** What the Mac probe printed. Exported for scripts/worker. */

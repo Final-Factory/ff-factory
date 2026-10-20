@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { readToken, rootEnv, withRootDefaults } from '../machine/daemon.ts';
-import { macControlScript, macLabel, macReloadLines, plist } from '../server/machineDeploy.ts';
+import { macControlScript, macLabel, macProbeScript, macReloadLines, plist } from '../server/machineDeploy.ts';
 import { installScript, taskName, taskXml, uninstallScript } from '../server/machineDeployWin.ts';
 import { adoptLayout, leaveRoot, poolSettingsOf } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
@@ -705,4 +705,18 @@ test('worker update (w629): success only when the portal sees the daemon running
   assert.equal(outdated.ok, false);
   assert.match(outdated.line, /OUTDATED: it speaks protocol 6/);
   assert.equal(updateVerdict(target, '22b5', { online: true, daemon: '22b5' }, 'm5').ok, false, 'too short to name a commit');
+});
+
+test("w1596: the installer's Mac probe searches the home folder for clones only when it has a repo to find; a test install leaves the computer's own install alone", () => {
+  // m3: `find $HOME -maxdepth 4` ran over ten minutes in a home folder full of sandboxes, on every install and update.
+  assert.doesNotMatch(macProbeScript(''), /find "\$HOME"/);
+  assert.match(macProbeScript('Final-Factory/FinalFactory'), /find "\$HOME" -maxdepth 4[\s\S]*\*\[:\/\]Final-Factory\/FinalFactory\|/);
+  // --no-cleanup (a test install beside a real one): no clean-up, no leftover reaper, no tray, carried by its updates.
+  const l = layoutOf('/tmp/ffw-t');
+  const o = { root: l.root, portalUrl: 'http://p', token: 'ffm_t_x', maxSandboxes: 1, maxAgentsPerSandbox: 1, maxUnity: 1, repoUrl: 'r', service: 'com.fffactory.t', noCleanup: true } as InstallOptions;
+  const cfg = daemonJson(o, l, 't', undefined);
+  assert.deepEqual([cfg.leftovers, cfg.tray, (cfg.cleanup as { everyMinutes: number }).everyMinutes], [false, false, 0]);
+  const m = { machineId: 't', service: 'com.fffactory.t', slots: 1, outside: [] } as unknown as Manifest;
+  assert.equal(planUpdate(l.root, m, cfg, 'ffm_t_x', {}).noCleanup, true);
+  assert.equal(planUpdate(l.root, m, { ...cfg, leftovers: undefined }, 'ffm_t_x', {}).noCleanup, undefined, 'a real install is never made one');
 });
