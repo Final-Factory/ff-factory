@@ -128,3 +128,34 @@ export function needsTimed(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'note
   const mac = /\bmac(?:os)?\b|\bm[35]\b/i.test(all);
   return win === mac ? 'any' : win ? 'win32' : 'darwin';
 }
+
+/**
+ * The lowest priority of work a computer takes (w1643, config placement.minPriority). lothsahn, 2026-10-20: "Instead of a
+ * single setting, let's make the setting the minimum priority work that can go to a machine. If normal (all work), if high,
+ * high and urgent, if urgent, urgent only". normal is the default and takes low work too.
+ */
+export type MinPriority = 'normal' | 'high' | 'urgent';
+export const MIN_PRIORITIES: readonly MinPriority[] = ['normal', 'high', 'urgent'];
+
+/** low and normal are one level here: a computer at normal takes all work, low included. */
+const LEVEL: Record<string, number> = { low: 0, normal: 0, high: 1, urgent: 2 };
+
+/** Whether a computer whose lowest priority is `min` takes work of `priority` (a request's priority now; unknown is normal). */
+export const admitsPriority = (min: MinPriority | undefined, priority: string | undefined): boolean => (LEVEL[priority ?? 'normal'] ?? 0) >= (LEVEL[min ?? 'normal'] ?? 0);
+
+/** "high and urgent work only", "urgent work only": what a reserved computer takes. */
+export const minPriorityText = (min: MinPriority): string => (min === 'urgent' ? 'urgent work only' : min === 'high' ? 'high and urgent work only' : 'all work');
+
+/** A computer with room reserved for higher work (RoomNow.reserved, AppState.reservedRoom): its lowest priority and the kinds it has room for. */
+export interface ReservedRoom {
+  id: string;
+  min: MinPriority;
+  for: readonly ('game' | 'agent')[];
+}
+
+/** "beast has room but takes urgent work only (placement.minPriority; this is normal)": how a Queued reason names one. */
+export const reservedText = (reserved: readonly ReservedRoom[] | undefined, kind: 'game' | 'agent' | undefined, priority: string | undefined, slot = 'room'): string =>
+  (reserved ?? [])
+    .filter((r) => (!kind || r.for.includes(kind)) && !admitsPriority(r.min, priority))
+    .map((r) => `${r.id} has ${slot} but takes ${minPriorityText(r.min)} (placement.minPriority; this is ${priority ?? 'normal'})`)
+    .join('; ');
