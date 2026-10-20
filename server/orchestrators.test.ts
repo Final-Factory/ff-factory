@@ -4012,7 +4012,13 @@ test('w1606: a worker declares its build: the build computer is held, a worker t
   const b = await startedFor(env, 'w2');
   const turnsBefore = b.info.turns;
 
-  const declared = String(await a.h.build_plan!({ action: 'coming', minutes: 0, what: 'a Windows player for the w1 clip' }));
+  // w1628 (lothsahn: "Ben's guidance was only supposed to be for release builds of the software, not all builds that
+  // workers do when making fixes"): a worker's own build is not planned, clears nothing and marks nothing.
+  assert.match(String(await a.h.build_plan!({ action: 'coming', minutes: 0, what: 'a Windows player for the w1 clip' })), /^Nothing to plan \(w1628\): build_plan is for release builds only/);
+  assert.match(String(await a.h.build_plan!({ action: 'start' })), /^Nothing to plan \(w1628\)/);
+  assert.equal(agents.builds.plan('pc'), undefined);
+  assert.equal(store.work.get('w1')!.build, undefined);
+  const declared = String(await a.h.build_plan!({ action: 'coming', release: true, minutes: 0, what: 'a Windows player for the w1 clip' }));
   assert.match(declared, /^Declared \(w1606\): a Windows player for the w1 clip on pc at \d\d:\d\dZ\. No new work goes there from now\. FF Factory clears it now/);
   assert.equal(store.work.get('w1')!.build?.machine, 'pc', 'its request builds a player: placed on placement.build first from now on');
   await until('pc is cleared', () => !!agents.builds.plan('pc')?.clearedAt && agents.builds.plan('pc')!.paused.includes(b.id));
@@ -4026,11 +4032,25 @@ test('w1606: a worker declares its build: the build computer is held, a worker t
   assert.match(sent.text, /Queued, not refused: pc is cleared for a build since \d\d:\d\dZ .*: this worker was paused for it and resumes when it is done \(w1606\)/);
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(b.info.turns, turnsBefore, 'not resumed during the build');
-  assert.match(String(await a.h.build_plan!({ action: 'start' })), /^Go \(w1606\): pc is cleared for a Windows player for the w1 clip \(0 moved: none; 1 paused\)/);
+  assert.match(String(await a.h.build_plan!({ action: 'start', release: true })), /^Go \(w1606\): pc is cleared for a Windows player for the w1 clip \(0 moved: none; 1 paused\)/);
 
   // Done: the hold lifts and the held message goes.
   assert.match(String(await a.h.build_plan!({ action: 'done' })), /^Done \(w1606\): pc takes work again; the build took \d+ min\./);
   assert.equal(agents.builds.plan('pc'), undefined);
   await until('the paused worker resumes with its message', () => b.info.turns > turnsBefore);
   assert.match(heard(dispatcher().info.id, '[ledger] BUILD DONE (w1606)')[0]?.text ?? '', /pc takes new work again/);
+});
+
+test('w1628: each worker\'s bench priority is the highest of its open requests, read again when one changes', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active', priority: 'high' }, { id: 'w2', by: BEN, status: 'active', priority: 'low' }]);
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  assert.deepEqual(agents.benchPriorities('pc'), { [a.id]: { priority: 'high', requests: ['w1'] }, [b.id]: { priority: 'low', requests: ['w2'] } });
+  store.putWork({ ...store.work.get('w2')!, priority: 'urgent' });
+  assert.equal(agents.benchPriorities('pc')[b.id].priority, 'urgent', 'a changed priority is what the next push sends');
+  store.putWork({ ...store.work.get('w1')!, status: 'done' });
+  assert.equal(agents.benchPriorities('pc')[a.id], undefined, 'no open request: its tickets count as normal');
+  assert.deepEqual(agents.benchPriorities('elsewhere'), {});
 });

@@ -53,7 +53,7 @@ import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from 
 import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
-import { readBenchLock } from './benchLock.ts';
+import { readBenchLock, readBenchQueue, writeBenchPriorities } from './benchLock.ts';
 import { benchTicketFor } from './benchQueue.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import { PauseKeeper, pauseFile } from './pause.ts';
@@ -1267,7 +1267,9 @@ export class Daemon {
       if (unity && left.at) Object.assign(unity, { playerList: left.players, leftoverProcesses: left.others });
       // A timed run's bench lock (w1600): the portal keeps Live view editors from starting beside it.
       const benchLock = readBenchLock(this.cfg.root);
-      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}) });
+      // Its timed legs, running or waiting (w1628): a release build goes to another build computer meanwhile.
+      const benchQueue = readBenchQueue(this.cfg.root);
+      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);
     }
@@ -1925,6 +1927,10 @@ export class Daemon {
         return;
       case 'cleanup_context':
         this.staleCtx = msg.context;
+        return;
+      case 'bench_priorities':
+        // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.
+        writeBenchPriorities(this.cfg.root, msg.sessions);
         return;
       case 'cleanup_now':
         void this.cleaner.run('asked', { dryRun: !!msg.dryRun }).then(

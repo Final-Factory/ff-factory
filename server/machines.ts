@@ -27,7 +27,7 @@ import { hostStartFailed } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { BenchPriority, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
@@ -674,6 +674,17 @@ export class MachineManager {
     const ctx = this.cleanupContext?.();
     if (!ctx) return;
     for (const id of this.links.keys()) if (!this.store.machines.get(id)?.local) this.post(id, { type: 'cleanup_context', context: ctx }, false);
+  }
+
+  /** Each worker's request priority on a machine, for its bench queue (w1628; set by server/index.ts). */
+  benchPrioritiesFor?: (machineId: string) => Record<string, BenchPriority>;
+
+  /** Send every connected daemon its workers' request priorities for its bench queue (w1628): at connect and each minute. */
+  pushBenchPriorities() {
+    for (const id of this.links.keys()) {
+      const sessions = this.benchPrioritiesFor?.(id);
+      if (sessions) this.post(id, { type: 'bench_priorities', sessions }, false);
+    }
   }
 
   /** Send every connected daemon the usage poll interval (config usagePollMinutes, after it changed). */
@@ -1882,6 +1893,8 @@ export class MachineManager {
     if (activity) ws.send(JSON.stringify({ type: 'activity_config', config: activity } satisfies ToDaemon));
     const ctx = m.local ? undefined : this.cleanupContext?.();
     if (ctx) ws.send(JSON.stringify({ type: 'cleanup_context', context: ctx } satisfies ToDaemon));
+    const prio = this.benchPrioritiesFor?.(id);
+    if (prio) ws.send(JSON.stringify({ type: 'bench_priorities', sessions: prio } satisfies ToDaemon));
     ws.send(JSON.stringify({ type: 'usage_config', config: { everyMinutes: this.cfg.usagePollMinutes ?? DEFAULT_USAGE_POLL_MINUTES } } satisfies ToDaemon));
     console.log(`machine ${id} connected`);
   }
@@ -2227,7 +2240,7 @@ export class MachineManager {
         return;
       }
       case 'stats': {
-        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), at: new Date().toISOString() };
+        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), at: new Date().toISOString() };
         this.stats.set(id, stats);
         emit({ type: 'machine_stats', id, stats });
         return;

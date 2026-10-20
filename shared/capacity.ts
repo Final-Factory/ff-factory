@@ -84,18 +84,40 @@ export function needsLive(w: Pick<WorkItem, 'needs' | 'liveView' | 'title' | 'br
 }
 
 /**
- * A player build named in words (w1606): "player build", "release build", "a build of the player", "build a player",
- * "batchmode build", "Windows/Mac/Deck build". Not a bare "build" (build a feature, a CI build, the portal's build).
+ * A release build named in words (w1606, narrowed by w1628): "release build", "build a release", "ci-release". lothsahn,
+ * 2026-10-20: "Ben's guidance was only supposed to be for release builds of the software, not all builds that workers do
+ * when making fixes": a worker's own player build (a fix, a clip, a playtest or MP check) is placed like any game work.
  */
-export const BUILD_WORDS = /\b(?:player|release|standalone|batch-?mode|windows|mac|deck|steam) builds?\b|\bbuild (?:a|the|an?(?: new)?) (?:player|release|standalone)\b/i;
+export const BUILD_WORDS = /\brelease builds?\b|\bbuild (?:a|the|an?(?: new)?) release\b|\bci-release\b/i;
 
 /**
- * Whether a request builds a player (w1606, Ben: "when you know builds are coming up, we also prioritize using beast for
- * builds because its faster"): game work whose worker declared a build (`build`), or whose title, brief or people's notes
- * name one, or `text` does (a dispatcher's brief).
+ * Whether a request makes a release build (w1606, Ben: "when you know builds are coming up, we also prioritize using beast
+ * for builds because its faster"; release builds only since w1628): game work whose worker declared a release build
+ * (`build`), or whose title, brief or people's notes name one, or `text` does (a dispatcher's brief).
  */
 export function needsBuild(w: Pick<WorkItem, 'needs' | 'build' | 'title' | 'brief' | 'notes'> | undefined, text = ''): boolean {
   if (w && needsOf(w) === 'agent') return false;
   if (w?.build) return true;
   return BUILD_WORDS.test(`${w ? `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}\n` : ''}${text}`);
+}
+
+/**
+ * Timed work named in words (w1628): a benchmark, a perf A/B or probe, a timed run or leg, frame times. Not "fps" alone
+ * (60 fps clips are visual work) and not a bare "performance".
+ */
+export const TIMED_WORDS = /\b(?:bench(?:mark)?(?:s|ed|ing)?|perf (?:a\/b|probe|test|run|fix|regression)s?|performance (?:a\/b|probe|test|run|regression|fix)s?|timed (?:runs?|legs?|a\/b)|probe_ab\w*|frame ?times?|a\/b (?:runs?|test|legs?))\b/i;
+
+/**
+ * Whether a request runs timed legs (w1628), and on what platform when its words name one: 'win32' ("Windows", "win
+ * player", "probe_ab_win"), 'darwin' ("Mac"), else 'any'; false for no timed work. lothsahn, 2026-10-20: "We should also
+ * prefer boxes with a small number of slots and players for timed runs, not beast since it's big" (server/placement.ts
+ * pickTimed).
+ */
+export function needsTimed(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> | undefined, text = ''): false | 'any' | 'win32' | 'darwin' {
+  if (w && needsOf(w) === 'agent') return false;
+  const all = `${w ? `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}\n` : ''}${text}`;
+  if (!TIMED_WORDS.test(all)) return false;
+  const win = /\bwindows\b|\bwin(?:64)? (?:player|build)\b|probe_ab_win|\bbeast\b|\blothdesktop\b/i.test(all);
+  const mac = /\bmac(?:os)?\b|\bm[35]\b/i.test(all);
+  return win === mac ? 'any' : win ? 'win32' : 'darwin';
 }

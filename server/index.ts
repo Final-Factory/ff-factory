@@ -405,6 +405,9 @@ const auth = new Auth(cfg.dataDir, { trustProxy: cfg.trustProxy });
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);
+// Each machine's bench queue orders tickets by their worker's request priority first (w1628): at connect and each minute.
+machines.benchPrioritiesFor = (id) => agents.benchPriorities(id);
+setInterval(() => machines.pushBenchPriorities(), 60_000).unref();
 // The live view (w1398, docs/live-view.md): a sandbox's game streamed beside its agent's chat, behind config live.enabled.
 const liveHub = new LiveHub({
   enabled: () => cfg.live?.enabled === true,

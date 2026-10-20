@@ -505,6 +505,28 @@ export interface MachineStats extends HostStats {
   unity?: UnitySlotsReport;
   /** Its bench lock while a timed run holds it (w1600, machine/benchLock.ts); absent: free, or a daemon before it. */
   benchLock?: BenchLock;
+  /** The timed legs in its bench queue, running or waiting (w1628, machine/benchLock.ts readBenchQueue); absent: none. */
+  benchQueue?: BenchQueueReport;
+}
+
+/**
+ * The timed (exclusive) legs in a machine's bench queue (w1628): `timed` running or waiting, `first` the oldest one's
+ * "what". lothsahn, 2026-10-20: "Yes, let's make the change you recommend to move things off when there are timed runs":
+ * a release build goes to another build computer while one is there (server/placement.ts, server/buildPlans.ts).
+ */
+/**
+ * A worker's place in its machine's bench queue by priority (w1628). lothsahn, 2026-10-20: "Yes, the queue should first
+ * sort by priority, using the logic the worker is working on within each priority group": the highest priority of its
+ * open requests, and those requests.
+ */
+export interface BenchPriority {
+  priority: WorkPriority;
+  requests: string[];
+}
+
+export interface BenchQueueReport {
+  timed: number;
+  first?: string;
 }
 
 /**

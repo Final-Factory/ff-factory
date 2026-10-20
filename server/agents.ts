@@ -41,11 +41,11 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, hasRoom, holdReason, liveOf, pickComputer, placeId, pinnedWork, placementHint, roomNow, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, hasRoom, holdReason, liveOf, pickComputer, placeId, pinnedWork, placementHint, roomNow, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, pauseHolds } from './machinePause.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
-import { WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
+import { WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
@@ -68,8 +68,8 @@ import { REACTION_MEANINGS, REPLY_MARK } from '../shared/replies.ts';
 import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS, QUESTION_CHARS } from '../shared/ask.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { needsBuild, needsLive, needsOf } from '../shared/capacity.ts';
-import { BUILD_PLAN_DOC, BuildPlans } from './buildPlans.ts';
+import { needsBuild, needsLive, needsOf, needsTimed } from '../shared/capacity.ts';
+import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE } from './buildPlans.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
@@ -394,6 +394,9 @@ export function mainCloneGrantBrief(c: { path: string; requests: string[]; by: s
   return `- Protected: the FF Factory daemon's folder. The machine's main clone \`${c.path}\` is a person's own project folder, and ${c.by} granted your request${c.requests.length > 1 ? 's' : ''} (${c.requests.join(', ')}) work there: it explicitly asks for it. Only this, always as \`git -C ${c.path} ...\` (a cd into it is refused): quit the Unity editor open on it cleanly (if one is: \`python scripts/unity-bridge.py eval --project-path ${c.path} 'UnityEditor.SceneManagement.EditorSceneManager.SaveOpenScenes(); UnityEditor.EditorApplication.Exit(0); return "quit";'\`, then wait until its process is gone); back up uncommitted work first (\`git -C ${c.path} stash list\`, then \`stash push -u -m "<request> backup"\`, then \`stash list\` again; or a backup branch, \`git branch backup/<name>\`; or \`git diff --binary > <a file outside the clone>\`; say which and where in your report); \`git fetch\` (no prune or force); \`git checkout\` or \`git switch\` a branch (never -f, -B, \`--\`, or a path), \`git merge --ff-only\`, \`git pull --ff-only\`; and reopen Unity on it (\`open -n -a Unity --args -projectPath ${c.path}\`, or the editor binary with -projectPath and -logFile) if a person was using it. Everything else there is refused: deletes, reset, clean, restore, pop or drop of a stash, pushes, and Write or Edit of its files. Say in your report what you closed, backed up and reopened.`;
 }
 
+/** needsTimed's answer as a placement kind (w1628). */
+const timedKind = (t: ReturnType<typeof needsTimed>): TimedKind | false => (t === false ? false : t === 'any' ? 'timed' : `timed:${t}`);
+
 export class Agents {
   private readonly cfg: Config;
   private readonly store: Store;
@@ -532,6 +535,8 @@ export class Agents {
       },
       hasView: (id) => !!this.liveHub?.running(id),
       benchLock: (id) => this.machines.statsOf(id)?.benchLock,
+      benchQueue: (id) => this.machines.statsOf(id)?.benchQueue,
+      releaseTarget: () => pickComputer(this.places(), this.lastPlaced, this.placement(), 'game', false, 'build')?.pick.id,
       moveTarget: (info, from) => {
         const kind: NeedKind = this.openWorkOf(info).every((w) => needsOf(w) === 'agent') ? 'agent' : 'game';
         return pickComputer(this.places().filter((p) => p.id !== placeId(from)), this.lastPlaced, this.placement(), kind)?.pick.id;
@@ -2043,6 +2048,22 @@ export class Agents {
   }
 
   /** The open requests a worker serves (workIdsOf). */
+  /**
+   * Each worker on `machineId` with an open request, and its highest request priority (w1628), for that machine's bench
+   * queue. A worker with no open request is left out: its tickets count as normal.
+   */
+  benchPriorities(machineId: string): Record<string, BenchPriority> {
+    const out: Record<string, BenchPriority> = {};
+    for (const info of this.store.sessions.values()) {
+      if (info.kind !== 'worker' || info.machineId !== machineId) continue;
+      const open = this.openWorkOf(info);
+      if (!open.length) continue;
+      const top = open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority);
+      out[info.id] = { priority: top, requests: open.map((w) => w.id) };
+    }
+    return out;
+  }
+
   private openWorkOf(info: SessionInfo): WorkItem[] {
     return this.workIdsOf(info)
       .map((id) => this.store.work.get(id))
@@ -2086,6 +2107,8 @@ export class Agents {
       if (info && p && p.builder !== info.id && !this.openWorkOf(info).some((w) => p.requests.includes(w.id))) return `Not yours: the build on ${machine} is ${p.by}'s.`;
       return this.builds.done(machine, info ? `worker ${info.id} said it is done` : 'the dispatcher said it is done');
     }
+    // Release builds only (w1628): a worker's own build clears nothing; a plan already declared goes on.
+    if ((action === 'start' || action === 'coming') && a.release !== true && !this.builds.plan(machine)) return NOT_RELEASE;
     if (action === 'start') return this.builds.start(info?.id, machine);
     if (action !== 'coming') return `Unknown action ${action}: coming | start | done | status.`;
     refuseInDryRun('build_plan');
@@ -2133,7 +2156,7 @@ ${clone ? mainCloneGrantBrief(clone) : `- Protected: the machine's main clone \`
 - Tools: ${deferredToolsLine('worker', 'Your FF Factory tools (mcp__machine__*) are')} Rules few tasks need are in \`mcp__machine__read_rules\` (\`read_rules <topic>\`), named below where they apply: read the topic before you act in that case; it binds like this prompt.
 
 ## Unity
-Your sandbox has its own Unity editor, managed by the FF Factory daemon on this ${mac}. Use \`mcp__machine__unity\` to check its state, start, stop or restart it (force: true for a frozen one); restart it whenever it is hung, crashed or misbehaving, without asking. Use the tool, never taskkill or kill: other sandboxes' editors share this ${mac}, so the harness refuses killing Unity by hand. Every Unity process on this ${mac} counts toward its limit of ${poolSettingsOf(m)?.maxUnity ?? 2} editors, whoever started it, and a start is refused while it is full or while launches wait ahead of yours (the refusal says who holds them; wake_me and try again). Run every other Unity launch (a -batchmode build or test run, a second editor for a peer run) under \`unity-slot run [--count N] [--label "<what>"] -- <command>\`, and \`read_rules unity\` before your first one, when a start is refused for a batch build, or at a fresh sandbox's first boot. A player build: \`build_plan\` coming (with the minutes until it starts) as soon as you know, start right before it, done right after (builds run first on BEAST, which FF Factory clears for them). Your editor's MCP instance is \`${unityInstanceName(sb.path)}\`: before ANY Unity MCP call, \`set_active_instance\` with it, in one call (no \`mcpforunity://instances\` read needed; read it only if the pin is refused, and pin the \`${sb.id}@\` whose path is your worktree). The harness refuses Unity MCP calls until you pin, and refuses any other instance.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like D:\\... (forward slashes work in Bash and in git).' : ''}
+Your sandbox has its own Unity editor, managed by the FF Factory daemon on this ${mac}. Use \`mcp__machine__unity\` to check its state, start, stop or restart it (force: true for a frozen one); restart it whenever it is hung, crashed or misbehaving, without asking. Use the tool, never taskkill or kill: other sandboxes' editors share this ${mac}, so the harness refuses killing Unity by hand. Every Unity process on this ${mac} counts toward its limit of ${poolSettingsOf(m)?.maxUnity ?? 2} editors, whoever started it, and a start is refused while it is full or while launches wait ahead of yours (the refusal says who holds them; wake_me and try again). Run every other Unity launch (a -batchmode build or test run, a second editor for a peer run) under \`unity-slot run [--count N] [--label "<what>"] -- <command>\`, and \`read_rules unity\` before your first one, when a start is refused for a batch build, or at a fresh sandbox's first boot. Your own player build (a fix, a clip, a playtest) needs no plan: build where you are under \`unity-slot run\`. A release build only: \`build_plan\` coming with release: true (and the minutes until it starts) as soon as you know, start right before it, done right after (release builds run first on BEAST, which FF Factory clears for them, and elsewhere while BEAST has a timed run). Your editor's MCP instance is \`${unityInstanceName(sb.path)}\`: before ANY Unity MCP call, \`set_active_instance\` with it, in one call (no \`mcpforunity://instances\` read needed; read it only if the pin is refused, and pin the \`${sb.id}@\` whose path is your worktree). The harness refuses Unity MCP calls until you pin, and refuses any other instance.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like D:\\... (forward slashes work in Bash and in git).' : ''}
 
 ## Waiting on a person
 When only a person can move you on (they must reboot or log in to a computer, decide, approve, hand over a secret), call \`mcp__machine__waiting_on_person\` with who, what and questions (what their card asks: one question per decision in a plain sentence, 2 to 4 full-sentence answers with your pick marked recommended, stills and clips as previews, and no file paths, pull request lists or ids in the question; the detail stays in your report), then end your turn with a report that names them and the action, and a \`wNNN: still open: waiting on <Name> to <do what>\` line. The ledger then shows your request Waiting on input (on that person). Never poll for a person with \`wake_me\`: a pending check-in shows the request as Working, and nobody is. A check-in is for machines and jobs: CI, a build, an import. You may also set one as a fallback; the state stays Waiting on input. Your next message ends the declaration, so declare again if a person is still needed.
@@ -2480,6 +2503,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ...(m.gh ? { gh: ghLoginLabel(m.gh), ...(canPushWorkflows(m.gh) !== undefined ? { workflows: canPushWorkflows(m.gh) } : {}) } : {}),
         // A timed run's bench lock there (w1600): Live view work waits for it before its editor starts.
         ...(st?.benchLock ? { benchLock: st.benchLock } : {}),
+        // Its timed legs, running or waiting (w1628): a release build goes to another build computer meanwhile.
+        ...(st?.benchQueue ? { benchQueue: st.benchQueue } : {}),
+        ...(m.platform ? { platform: m.platform } : {}),
       });
     }
     return out;
@@ -2627,7 +2653,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             const on = a.machine ?? this.defaultSandboxMachine();
             if (!on) throw new Error('give machine: the portal holds no sandboxes of its own (w510); list_machines shows the machines with a sandbox_root');
             // Read before it is made: the new sandbox would count as in use (w416).
-            const hint = this.placeNote(on.toLowerCase(), w?.needs ?? 'game', undefined, needsLive(w) ? 'live' : needsBuild(w) ? 'build' : false);
+            const hint = this.placeNote(on.toLowerCase(), w?.needs ?? 'game', undefined, needsLive(w) ? 'live' : needsBuild(w) ? 'build' : timedKind(needsTimed(w)));
             const made = await this.machines.createSandbox(on, { name: a.name, branch, base: a.base, startUnity: a.start_unity, seedLibrary: a.seed_library });
             this.lastPlaced = on.toLowerCase();
             return `${made}${hint}`;
@@ -2733,7 +2759,7 @@ ${w.brief}
 ${w.repo ?? ''}
 ` : ''}${a.prompt}`) ? { person: w ? personForWork(this.cfg, w) : requestedBy.userId } : undefined;
             // Work that needs a Live view goes to placement.live first (w1600): said in the note, by request or prompt.
-            const hint = this.placeNote(newOn, needs, workflows, needsLive(w, a.prompt) ? 'live' : needsBuild(w, a.prompt) ? 'build' : false);
+            const hint = this.placeNote(newOn, needs, workflows, needsLive(w, a.prompt) ? 'live' : needsBuild(w, a.prompt) ? 'build' : timedKind(needsTimed(w, a.prompt)));
             // A sandbox a waiting worker released on its own branch is switched to a fresh one first (w640), never for work
             // that needs only an agent seat, nor under a worker there (w1607).
             const handed = await this.prepareForNewWork(a.sandbox, a.machine, w?.id ?? nextId, w?.source, !!a.extra_agent || needs === 'agent');
@@ -2902,6 +2928,7 @@ ${w.repo ?? ''}
           {
             action: z.enum(['coming', 'start', 'done', 'status']),
             machine: z.string().optional().describe('The build computer (default the first in placement.build: beast).'),
+            release: z.boolean().optional().describe('coming, start: true for a release build, the only kind build_plan plans (w1628).'),
             minutes: z.number().int().min(0).max(240).optional().describe('coming: lead time in minutes until the build starts (0: now).'),
             what: z.string().max(160).optional().describe('coming: what it builds ("0.50.0.112 Windows player for w1588").'),
             work_id: z.string().optional().describe('coming: the request it builds for; its worker is the builder.'),
@@ -4364,7 +4391,7 @@ ${this.worldBrief(true)}
 - One session per request (w740, Lothsahn and Ben): related work stays in the session that did the earlier work, unrelated work gets a fresh one (workers have no auto-compaction; stale context costs on every turn). start_agent always starts a NEW session, into a FREE sandbox (w1089: refused for a sandbox another request's agent occupies, and past max_agents_per_sandbox; a \`[ledger] Capacity may have freed\` ping can be minutes old, so look again just before you start; work that needs no editor and no game tree may sit beside another agent on purpose with extra_agent: true, which never switches its branch, w1607). message_agent with a work_id for a worker not on that request: the server sends a RELATED request (it names one of the worker's requests in related_ids, is about its PR or branch, or the overlap check calls it a match: a fix for a regression it just shipped, its feature's next step, a correction to its PR) to that session, and starts a NEW session in the same sandbox for an unrelated one (the default when nothing ties them), whose first message carries the brief, the request as filed, the branch state and the related requests (read with read_work); the old session stops once it has nothing in hand, never mid-turn. When it is ambiguous, pass session "same" or "new" with session_reason (one plain line; recorded in the reply and the log). Updates to a request (notes, answers, follow-ups, resumes) go to the session already on it: message_agent with the same work_id, never a new session. decide_work merge is for a duplicate; link is for a direct follow-up of what a worker is on, refused for an unrelated request while it has another in hand. **One person per session** (w1076: lothsahn's w1072, sent into Ben's worker, ran on Ben's Claude pool and stopped on Ben's limit): a request never goes into a session holding another person's open request, because a session runs on its requests' person's tokens; message_agent then starts a new session there (even with session "same"), a request already in such a session moves out on its next message_agent, and link is refused. To restart a request somewhere fresh (its session stopped on a usage limit, say), message_agent with its work_id, session "new" and a session_reason.
 - Titles (w575): each time you hand a worker a request, give \`title\`: the job in a few plain words for a person scanning the dashboard ("LothDesktop fresh install, sandboxes slot1..6"), not the request's title cut short; the request id goes in front by itself. start_agent always takes one; message_agent with a work_id needs one when the worker is not on that request yet; decide_work link takes one for the workers it links. set_agent_title renames a worker otherwise.
 - Sandbox labels are their names (slot1..N on a worker root) and never change; nobody sets them. A sandbox is free when list_sandboxes marks it FREE; what it is doing is its agents' titles. A worker stopped with its check-in more than ${RELEASE_AFTER_MS / 60_000} min away, its request over, ${HOLD_PLACE_MS / 60_000} min after its daemon restarted under it, or by FF Factory after ${RELEASE_AFTER_MS / 60_000} min Idle with nothing pending releases a clean sandbox (w640, w656): it shows FREE and the worker's line says "its sandbox is released"; new work there is switched to a fresh branch first, and the worker is placed again when it resumes (its own sandbox if still free, else another free one on its machine, on its branch). A sandbox "spoken for" is a resuming worker's: never new work there.
-- Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the Capacity block's last line (list_sandboxes, system_status) says, "Next new game-repo work: <computer> (why)", even when a sandbox elsewhere is free. That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Every worker runs in a sandbox (w536): start_agent with a machine alone is refused, and a machine without a sandbox_root takes no workers. Posting as Max does not pin a computer (post_as_max, w901). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. **Work that needs no Unity editor goes by agent slot alone** (w1098, lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): a request on another repo than the game's (FF Factory, FFBox, the ff-agents plugin; its list_work line says "needs an agent slot only", set at filing from its repo) goes where the Capacity block's "Next non-game work: <computer> (why)" says, in any sandbox with an agent seat (a free one first, else beside another request's agent with start_agent extra_agent: true, never past max_agents_per_sandbox: it works in its own clone in its temp folder), whatever the editors or RAM. It still respects the computer's agent cap, the person's own Claude pool (a held pool queues the worker's first prompt) and holds and avoids, and one queued while an allowed computer has an agent slot is flagged WRONG like game work; check the guessed repo in the log of one whose repo was not set. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. Live view and build work go by "Next Live view work" / "Next build work" (beast first, w1600, w1606); stop_agent move_to moves a waiting one there; build_plan clears a computer for a coming build. start_agent and create_sandbox add a note when new work goes to a computer other than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / avoid / live / build (null clears).
+- Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the Capacity block's last line (list_sandboxes, system_status) says, "Next new game-repo work: <computer> (why)", even when a sandbox elsewhere is free. That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Every worker runs in a sandbox (w536): start_agent with a machine alone is refused, and a machine without a sandbox_root takes no workers. Posting as Max does not pin a computer (post_as_max, w901). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. **Work that needs no Unity editor goes by agent slot alone** (w1098, lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): a request on another repo than the game's (FF Factory, FFBox, the ff-agents plugin; its list_work line says "needs an agent slot only", set at filing from its repo) goes where the Capacity block's "Next non-game work: <computer> (why)" says, in any sandbox with an agent seat (a free one first, else beside another request's agent with start_agent extra_agent: true, never past max_agents_per_sandbox: it works in its own clone in its temp folder), whatever the editors or RAM. It still respects the computer's agent cap, the person's own Claude pool (a held pool queues the worker's first prompt) and holds and avoids, and one queued while an allowed computer has an agent slot is flagged WRONG like game work; check the guessed repo in the log of one whose repo was not set. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. Live view, release build and timed work go by "Next Live view work" / "Next release build work" / "Next timed work" (w1600, w1606, w1628: a worker's own build gets no BEAST preference; timed work goes to small computers first, BEAST last); stop_agent move_to moves a waiting one there; build_plan clears a computer for a coming release build. start_agent and create_sandbox add a note when new work goes to a computer other than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / avoid / live / build (null clears).
 - Machines are fixed by the harness, never by a person: \`read_rules machines\` before you act on a request for work in a machine's main clone (w936: never handed back to a person, and the grant is a field, never brief text), on a machine change that needs its installer rerun or a daemon update (w855: never a question for a person; w605: never a drain or a wait; after a verified deploy FF Factory updates the daemons itself, w887), or on low disk (w626, w896: machine_cleanup, then a clean-up worker that deletes only inside the worker install folder; never ask anyone to free space).
 - Nobody reads this chat by default: do not write status reports for people. Act, and let the tools record it. When the owner writes here, answer with a one-line plain-language TL;DR, then detail only if useful, with request, sandbox and session ids. Your messages render as Markdown: \`![what it shows](<absolute path>)\` shows an image from a sandbox or a machine inline, and a \`\`\`mermaid block renders as a diagram.
 `.trim();

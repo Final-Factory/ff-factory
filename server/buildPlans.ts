@@ -20,9 +20,9 @@
 //   BUILD_WAIT_MS after the clearing began; past that the build goes ahead beside it, said so.
 // - build_plan done (or PLAN_MAX_MS past due, or its builder's requests all closed) ends it: the hold lifts, the queued
 //   resumes go, and each worker paused mid-turn is told to carry on.
-import type { BenchLock, SessionInfo, WorkItem } from '../shared/types.ts';
+import type { BenchLock, BenchQueueReport, SessionInfo, WorkItem } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
-import { benchText } from './placement.ts';
+import { benchText, timedText } from './placement.ts';
 
 /** How long a build waits for workers asked to pause to end their turns before it goes ahead beside them. */
 export const BUILD_WAIT_MS = { value: 20 * 60_000 };
@@ -64,6 +64,10 @@ export interface BuildDeps {
   /** Its Live view runs now (a person may be steering it). */
   hasView: (sessionId: string) => boolean;
   benchLock: (machineId: string) => BenchLock | undefined;
+  /** The timed legs in its bench queue, running or waiting (w1628, MachineStats.benchQueue). */
+  benchQueue?: (machineId: string) => BenchQueueReport | undefined;
+  /** Where a release build goes now (the release build placement, which passes over a computer with timed legs). */
+  releaseTarget?: () => string | undefined;
   /** Another computer with room for this worker's work (the general placement, never `from`), or undefined. */
   moveTarget: (info: SessionInfo, from: string) => string | undefined;
   /** Agents.moveWorker: resolves with its answer, throws with why not. */
@@ -164,9 +168,17 @@ export class BuildPlans {
     const minutes = Math.max(0, Math.min(MAX_LEAD_MIN, Math.round(Number(a.minutes) || 0)));
     const now = this.now();
     const old = this.plans.get(machine);
+    // w1628, lothsahn: "Yes, let's make the change you recommend to move things off when there are timed runs": while a
+    // timed leg runs or waits in this computer's bench queue, a release build goes to another computer with room.
+    const timed = old ? undefined : this.d.benchQueue?.(machine);
+    const other = timed ? this.d.releaseTarget?.() : undefined;
+    if (timed && other && other !== machine) {
+      return `Not on ${machine} (w1628): it ${timedText(timed)}, and a release build goes elsewhere meanwhile. Build it on ${other}: ${a.builder ? `ask the dispatcher to move this work there (stop_agent move_to ${other}), or build where you are if that is ${other}` : `build_plan coming with machine ${other}, and place its request there`}.`;
+    }
     if (old && !(a.builder && this.isBuilder(old, a.builder)) && !(a.by === 'the dispatcher' && old.by === 'the dispatcher')) {
       return `Not now: ${machine} is ${this.holdWhy(old).replace(/: no new work until it is done$/, '')}. One build at a time there: declare yours once that one is done (build_plan status), or build where you are.`;
     }
+    const queuedNote = timed ? ` ${machine} ${timedText(timed)} and no other computer has room for a release build: the build waits for those legs in its bench queue, never beside one.` : '';
     const plan: BuildPlan = old
       ? { ...old, what: a.what || old.what, dueAt: old.clearedAt ? old.dueAt : now + minutes * 60_000, requests: [...new Set([...old.requests, ...a.requests])] }
       : { machine, what: (a.what || 'a player build').slice(0, 160), ...(a.builder ? { builder: a.builder } : {}), requests: a.requests, by: a.by, declaredAt: now, dueAt: now + minutes * 60_000, told: {}, paused: [], moved: [], kept: [] };
@@ -175,7 +187,7 @@ export class BuildPlans {
     this.d.log(`build: ${plan.by} declared ${plan.what} on ${machine}, due ${hhmm(plan.dueAt)}${plan.requests.length ? ` (${plan.requests.join(', ')})` : ''}`);
     if (!old) this.d.notify(`[ledger] BUILD COMING (w1606): ${plan.by} builds ${plan.what} on ${machine} at ${hhmm(plan.dueAt)} (in ${minutes} min)${plan.requests.length ? ` for ${plan.requests.join(', ')}` : ''}. No new work goes to ${machine} until it is done (Capacity shows it held). At ${hhmm(plan.dueAt)} FF Factory moves the workers there that are between turns to computers with room and pauses the rest at a safe point; it resumes them when the build is done. Nothing for you to do unless you want to place its request: then on ${machine}.`);
     if (minutes === 0) void this.clear(plan);
-    return `Declared (w1606): ${plan.what} on ${machine} at ${hhmm(plan.dueAt)}. No new work goes there from now. ${minutes === 0 ? 'FF Factory clears it now' : `At ${hhmm(plan.dueAt)} FF Factory clears it`}: the workers between turns move to other computers with room, the ones mid-turn finish their step and pause, and a Live view that runs is left alone. When you are ready, build_plan start: it says go, or what it still waits for. After the build, build_plan done.`;
+    return `Declared (w1606): ${plan.what} on ${machine} at ${hhmm(plan.dueAt)}.${queuedNote} No new work goes there from now. ${minutes === 0 ? 'FF Factory clears it now' : `At ${hhmm(plan.dueAt)} FF Factory clears it`}: the workers between turns move to other computers with room, the ones mid-turn finish their step and pause, and a Live view that runs is left alone. When you are ready, build_plan start: it says go, or what it still waits for. After the build, build_plan done.`;
   }
 
   /** build_plan start: go, or what the build still waits for. Starting before the due time clears the computer at once. */
@@ -335,6 +347,12 @@ export class BuildPlans {
   }
 }
 
+/**
+ * build_plan's answer to a build that is not a release build (w1628). lothsahn, 2026-10-20: "Ben's guidance was only
+ * supposed to be for release builds of the software, not all builds that workers do when making fixes".
+ */
+export const NOT_RELEASE = 'Nothing to plan (w1628): build_plan is for release builds only (release: true). lothsahn, 2026-10-20: "Ben\'s guidance was only supposed to be for release builds of the software, not all builds that workers do when making fixes". Your own player build (a fix, a clip, a playtest or MP check) clears nothing and moves nobody: build where you are, through `unity-slot run` (or the game repo\'s build_player.sh). Its shared ticket in the machine\'s bench queue keeps it from running beside a timed leg, and it joins the builds waiting there.';
+
 /** The build_plan tool's description, the worker's and the dispatcher's (w1606). */
 export const BUILD_PLAN_DOC =
-  'Builds run first on BEAST (w1606, placement.build): say a player build is coming, so FF Factory clears that computer for it. action coming (minutes: lead time, what) holds it for new work at once, and when due moves the workers there between turns to other computers and pauses the rest at a safe point (never mid-edit); start says go, or what it still waits for (a bench lock\'s timed run, workers finishing their step); done ends it and resumes the paused work; status. A worker declares its own build (it runs where the worker is); the dispatcher one for a request (work_id).';
+  'Release builds only (w1628; lothsahn, 2026-10-20: "Ben\'s guidance was only supposed to be for release builds of the software, not all builds that workers do when making fixes"): a worker\'s own player build (a fix, a clip, a playtest or MP check) needs no plan and clears nothing: build where you are through unity-slot run. A release build runs first on BEAST (w1606, placement.build), but goes to another computer while BEAST has a timed run running or waiting in its bench queue (w1628): say it is coming (release: true), so FF Factory clears that computer for it. action coming (release: true, minutes: lead time, what) holds it for new work at once, and when due moves the workers there between turns to other computers and pauses the rest at a safe point (never mid-edit); start (release: true) says go, or what it still waits for (workers finishing their step); done ends it and resumes the paused work; status. A worker declares its own release build (it runs where the worker is); the dispatcher one for a request (work_id).';

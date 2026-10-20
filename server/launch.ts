@@ -161,9 +161,10 @@ export const CATALOG = {
     fps: z.number().optional().describe('start: frames a second, 1-30 (default 15).'),
     width: z.number().optional().describe('start: frame width in px, 320-1920 (default 960).'),
   },
-  /** Builds first on BEAST (w1606, server/buildPlans.ts): a worker says its player build is coming, starts it, ends it. */
+  /** Release builds first on BEAST (w1606, release builds only since w1628, server/buildPlans.ts): coming, start, done. */
   build_plan: {
     action: z.enum(['coming', 'start', 'done', 'status']),
+    release: z.boolean().optional().describe('coming, start: true for a release build, the only kind build_plan plans (w1628). Your own player build needs no plan: build where you are.'),
     minutes: z.number().int().min(0).max(240).optional().describe('coming: lead time in minutes until the build starts (0: now).'),
     what: z.string().max(160).optional().describe('coming: what it builds ("Windows player for the w1475 clip").'),
   },
@@ -330,8 +331,9 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];
   // w1628: a sandbox's editor compiles, imports and runs tests only in its turn in the machine's bench queue, never
-  // beside a timed leg (machine/editorBenchGate.ts). Its own matcher, so it may wait longer than a plain hook.
-  const editorGate = editorRunning && g.workerRoot ? editorBenchGateFor({ sandboxId: g.id, sandboxPath: g.ownPath, root: g.workerRoot }) : undefined;
+  // beside a timed leg (machine/editorBenchGate.ts). Its own matcher, so it may wait longer than a plain hook. Its tickets
+  // carry the worker's session, so they queue at its request's priority (w1628).
+  const editorGate = editorRunning && g.workerRoot ? editorBenchGateFor({ sandboxId: g.id, sandboxPath: g.ownPath, root: g.workerRoot, ...(agentEnv.FF_SESSION_ID ? { env: { ...process.env, FF_SESSION_ID: agentEnv.FF_SESSION_ID } } : {}) }) : undefined;
   const mcpServers: NonNullable<Options['mcpServers']> = {};
   for (const [name, srv] of Object.entries(spec.stdioMcp ?? {})) mcpServers[name] = { type: 'stdio', command: srv.command, args: srv.args, ...(srv.env ? { env: srv.env } : {}) };
   if (spec.mcp) {

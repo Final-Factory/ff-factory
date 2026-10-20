@@ -182,8 +182,12 @@ took over a live 40-minute-old lock, and waiters polled with no order.
 
 The queue is the game repo's `scripts/bench/bench_queue.py` (its `Documentation/Bench-Lock.md` has the design, the
 deadlock rules and a test per case). A timed bench leg takes an `exclusive` ticket; a build, a batch compile or an
-editor boot a `shared` one, which runs beside other shared ones but never beside an exclusive one, first come, first
-served. FF Factory takes tickets in three places (`machine/benchQueue.ts` runs the game repo's helper as a child, since
+editor boot a `shared` one, which runs beside other shared ones but never beside an exclusive one. The order (w1628):
+by the worker's request priority first (the daemon writes `bench.queue/priorities.json` from the portal's
+`bench_priorities`, each minute), then one exclusive ticket, then the waiting shared group, and so on; a new shared ticket
+joins the waiting group or goes right after the next exclusive one. The daemon reports the timed legs in the queue, running
+or waiting (`readBenchQueue`, `MachineStats.benchQueue`): a release build goes to another computer meanwhile. Editor-gate
+tickets carry the worker's `FF_SESSION_ID`, so they queue at its priority. FF Factory takes tickets in three places (`machine/benchQueue.ts` runs the game repo's helper as a child, since
 node cannot take the OS file locks the queue lives on):
 
 - **`unity-slot run`** takes a shared ticket after its Unity slots (`--bench exclusive`, or `FF_UNITY_SLOT_BENCH`, for a
