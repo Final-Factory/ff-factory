@@ -111,19 +111,45 @@ export async function updateBundleFor(pathname: string, machineOf: () => string 
   return { status: 200, file, size: fs.statSync(file).size };
 }
 
+/** How long a call that timed out is remembered, so its late answer is still logged with what it was (w1641). */
+const LATE_KEEP_MS = 6 * 3_600_000;
+const LATE_KEEP_MAX = 200;
+
+/** A call that timed out before its answer came (w1641): what it waited for and since when. */
+export interface LateCall {
+  machineId: string;
+  what: string;
+  /** When the call was made and when it gave up (ms). */
+  since: number;
+  gaveUp: number;
+}
+
 /** A call to a daemon answered later by a message with its id (self_update_ack, self_update_report, daemon_control_result). */
 export class PendingCalls<T> {
   private calls = new Map<string, { resolve: (v: T) => void; reject: (e: Error) => void; timer: NodeJS.Timeout; machineId: string }>();
+  /** Calls that timed out, oldest first: an answer that comes after is logged with its reason, never dropped (w1641). */
+  private expired = new Map<string, LateCall>();
+  private readonly now: () => number;
+  constructor(now: () => number = Date.now) {
+    this.now = now;
+  }
 
   wait(id: string, machineId: string, ms: number, what: string): Promise<T> {
+    const since = this.now();
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.calls.delete(id);
+        this.remember(id, { machineId, what, since, gaveUp: this.now() });
         reject(new Error(`${machineId} did not answer ${what} in ${Math.round(ms / 60_000) || 1} minute(s)`));
       }, ms);
       timer.unref?.();
       this.calls.set(id, { resolve, reject, timer, machineId });
     });
+  }
+
+  private remember(id: string, c: LateCall) {
+    for (const [k, v] of this.expired) if (this.expired.size >= LATE_KEEP_MAX || c.gaveUp - v.gaveUp > LATE_KEEP_MS) this.expired.delete(k);
+    this.expired.set(id, c);
   }
 
   /** The answer came: true when a call waited for it. */
@@ -137,7 +163,27 @@ export class PendingCalls<T> {
     return true;
   }
 
+  /** An answer no call waits for any more: the call it answers when that one timed out (once), else undefined. */
+  late(id: string): LateCall | undefined {
+    const c = this.expired.get(id);
+    this.expired.delete(id);
+    return c;
+  }
+
   has(id: string): boolean {
     return this.calls.has(id);
   }
+}
+
+const mins = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s`);
+
+/**
+ * The journal line for an answer from a daemon that no call waits for (w1641: beast refused a tools publish after the
+ * portal's 5 minutes, and the reason was dropped, so the rollout said only "did not answer"). `late`: the call it answers,
+ * when that one timed out; `said`: what the daemon answered ("took it", "refused it: <why>").
+ */
+export function unwaitedAnswer(machineId: string, callId: string, late: LateCall | undefined, said: string, now = Date.now()): string {
+  const job = callId.slice(0, 8);
+  if (!late) return `machine ${machineId}: an answer to call ${job} that nothing waits for (it ${said})`;
+  return `machine ${machineId}: a late answer to ${late.what} (call ${job}): it ${said}, ${mins(now - late.since)} after it was sent; the portal had given up after ${mins(late.gaveUp - late.since)}`;
 }

@@ -13,7 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { PendingCalls, UpdateBundles, updateBundleFor } from './machineLink.ts';
+import { PendingCalls, UpdateBundles, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
 import { checkoutFromBundle, downloadBundle, readJson, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
@@ -221,4 +221,23 @@ test('w1596: a call nobody answers times out with what it waited for', async () 
   assert.equal(p.settle('b', true), true);
   assert.equal(await q, true);
   assert.equal(p.settle('b', true), false, 'answered once');
+});
+
+test('w1641: an answer after its call timed out is told with what the call was, never dropped', async () => {
+  let t = 1_000_000;
+  const p = new PendingCalls<true>(() => t);
+  const hold = setTimeout(() => undefined, 1000);
+  const q = p.wait('a5c3a1cb-0000', 'beast', 20, 'the tools over its link');
+  t += 300_000;
+  await assert.rejects(q, /beast did not answer the tools over its link/);
+  clearTimeout(hold);
+  assert.equal(p.settle('a5c3a1cb-0000', new Error('beast refused it: git fetch failed')), false, 'nobody waits for it any more');
+  const late = p.late('a5c3a1cb-0000');
+  assert.equal(late?.what, 'the tools over its link');
+  assert.equal(
+    unwaitedAnswer('beast', 'a5c3a1cb-0000', late, 'refused it: git fetch failed', 1_000_000 + 400_000),
+    'machine beast: a late answer to the tools over its link (call a5c3a1cb): it refused it: git fetch failed, 6 min 40 s after it was sent; the portal had given up after 5 min 0 s',
+  );
+  assert.equal(p.late('a5c3a1cb-0000'), undefined, 'told once');
+  assert.match(unwaitedAnswer('beast', 'ffffffff-1', undefined, 'took it'), /an answer to call ffffffff that nothing waits for \(it took it\)/);
 });
