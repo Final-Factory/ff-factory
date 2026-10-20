@@ -196,6 +196,13 @@ draws frames the way `LiveStage` does. The links are emulated: link A (daemon to
 link B (portal to page) at the speed in the table with Ben's 128 ms round trip. Every 3 s it hides or shows the game's
 HUD (`ui.hide`) and times the first drawn frame that shows it. Each leg ran 40 s; 2026-10-19, under the bench lock.
 
+Check the game's own frame rate before you time the stream (`game_fps` in `live.frames`). The game starts capped at
+20 fps (`DisplaySettingsController.Awake`, game repo `Assets/Scripts/Behaviours/Settings/DisplaySettingsController.cs:48`)
+and lifts the cap only when it loads into a game (`StartController.cs:300`, `SaveGameManager.cs:1497`). A new game
+started by script before the title screen has finished loading stayed at 20 fps on beast, and later hung on
+"loading". Wait for the title screen (`Ecs.Ready` and the ItemConfig singleton) before you start the game, or call
+`ResetTemporaryFpsCap()`. The "game held at 20 fps" legs below keep that cap on purpose.
+
 | Leg | Game → daemon fps, before → after | HUD change to drawn frame p50/p95 ms, before → after |
 |---|---|---|
 | 15 fps, 960 px, 100 Mbit/s | 12.9 → 15.0 | 219/250 → 235/252 |
