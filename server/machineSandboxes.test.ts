@@ -621,6 +621,7 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
   const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 3, maxEventsFile: null, sandboxCacheTrim: false }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
     agents.orchestrators.close();
+    clearInterval(agents.placeAgainTick);
     daemon.shutdown();
     server.close();
     // The link's close comes after the last update the daemon sent; then the saves land before the folders go.
@@ -817,6 +818,7 @@ async function twoSandboxes(t: { after: (fn: () => void | Promise<void>) => void
   const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 4, maxEventsFile: null, sandboxCacheTrim: false }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
     agents.orchestrators.close();
+    clearInterval(agents.placeAgainTick);
     daemon.shutdown();
     server.close();
     await new Promise((res) => setTimeout(res, 300));
