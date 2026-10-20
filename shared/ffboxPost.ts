@@ -4,6 +4,8 @@
 /** The channels FFBox posts into (its fff_feed.POST_CHANNELS); it refuses any other, and never the bug channels. */
 export const POST_CHANNELS = ['dev_patch_notes', 'dev_chat', 'agent_testing'] as const;
 export type PostChannel = (typeof POST_CHANNELS)[number];
+/** What post_message takes as `channel`: those, or `conversation`, a conversation FFBox holds, bug threads included (w1640). */
+export const POST_TARGETS = [...POST_CHANNELS, 'conversation'] as const;
 /** Discord's limit for one message. */
 export const POST_TEXT_MAX = 2000;
 /** The most a `file` may hold before it is read (a message is 2000 characters; the rest is line endings and multi-byte text). */

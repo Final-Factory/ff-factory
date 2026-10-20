@@ -1,4 +1,5 @@
-// A worker's message posted as Max through FFBox (docs/ffbox.md, "Posting as Max"; FFBox w901). FFBox holds the Discord
+// A worker's or an orchestrator's message posted as Max through FFBox (docs/ffbox.md, "Posting as Max"; FFBox w901), into
+// a channel or into a conversation FFBox holds, bug threads included (w1640). FFBox holds the Discord
 // bot, so a worker on any machine asks FF Factory (the machine tool post_as_max), FF Factory asks FFBox (the
 // `post_message` query), and FFBox runs every guard and posts. No Discord credential is involved on this side, and the
 // bot token never leaves FFBox. The guards are FFBox's (its README, "Posting as Max"); the checks here only fail fast
@@ -7,12 +8,15 @@ import { type ProviderManager } from './providers.ts';
 import { clean } from './ffboxReports.ts';
 import type { CliEvent } from './maxEvents.ts';
 
-import { POST_CHANNELS, POST_TEXT_MAX } from '../shared/ffboxPost.ts';
+import { POST_CHANNELS, POST_TARGETS, POST_TEXT_MAX } from '../shared/ffboxPost.ts';
 
-export { POST_CHANNELS, POST_TEXT_MAX };
+export { POST_CHANNELS, POST_TARGETS, POST_TEXT_MAX };
 
 const KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
 const SNOWFLAKE = /^\d{15,25}$/;
+const CONVERSATION_ID = /^\d{1,12}$/;
+/** A thread's link, or a message's in it: the thread is the second id. */
+const THREAD_URL = /^https:\/\/discord\.com\/channels\/\d{15,25}\/(\d{15,25})(?:\/\d{15,25})?$/;
 /** An @ before a word, <@..>, <#..>, @everyone, @here: FFBox refuses all of them. */
 const MENTION = /@[\w&!]|<[@#]/;
 const LINK = /^https:\/\/discord\.com\/channels\/(\d{15,25})\/(\d{15,25})\/(\d{15,25})$/;
@@ -21,6 +25,8 @@ export interface PostInput {
   channel: string;
   text: string;
   thread?: string;
+  /** With channel conversation: FFBox's conversation id. */
+  conversation?: string;
   key?: string;
   /** Who asked, for FFBox's log: the request or the session. */
   by?: string;
@@ -29,8 +35,9 @@ export interface PostInput {
 /** The query's args out of a call, or a sentence saying what is wrong with it. */
 export function postArgs(input: PostInput): { args: Record<string, string> } | { error: string } {
   const channel = String(input.channel ?? '').trim();
-  if (!(POST_CHANNELS as readonly string[]).includes(channel)) {
-    return { error: `channel: one of ${POST_CHANNELS.join(', ')} (got ${JSON.stringify(clean(channel, 40))}). #bug-reports and dev_bug_reports belong to FFBox and are never posted into.` };
+  if (!(POST_TARGETS as readonly string[]).includes(channel)) {
+    const bug = channel === 'bug_reports' || channel === 'dev_bug_reports';
+    return { error: `channel: one of ${POST_TARGETS.join(', ')} (got ${JSON.stringify(clean(channel, 40))}).${bug ? ' To post in a thread of #bug-reports or dev_bug_reports, use channel "conversation" with its thread.' : ''}` };
   }
   const text = String(input.text ?? '').replace(/\r\n/g, '\n').trim();
   if (!text || text === '-') return { error: 'text: nothing to post' };
@@ -41,9 +48,18 @@ export function postArgs(input: PostInput): { args: Record<string, string> } | {
   const key = String(input.key ?? '').trim();
   if (key && !KEY.test(key)) return { error: 'key: letters, digits and . _ : - only, at most 80 characters' };
   if (channel === 'dev_patch_notes' && !key) return { error: "key: required for dev_patch_notes, the release's version (e.g. 0.50.0.94), so its notes post once." };
+  const by = clean(input.by ?? '', 120);
+  if (channel === 'conversation') {
+    const conversation = String(input.conversation ?? '').trim();
+    if (conversation && !CONVERSATION_ID.test(conversation)) return { error: "conversation: FFBox's conversation id, digits only (ffbox_activity and FFBox's messages name it)" };
+    const given = String(input.thread ?? '').trim();
+    const thread = THREAD_URL.exec(given)?.[1] ?? given;
+    if (thread && !SNOWFLAKE.test(thread)) return { error: 'thread: the conversation\'s Discord thread, its id or its link (https://discord.com/channels/<guild>/<thread>)' };
+    if (!conversation && !thread) return { error: 'conversation: give the FFBox conversation id or the Discord thread (its id or URL)' };
+    return { args: { channel, text, ...(conversation ? { conversation } : {}), ...(thread ? { thread } : {}), ...(key ? { key } : {}), ...(by ? { by } : {}) } };
+  }
   const thread = String(input.thread ?? '').trim();
   if (thread && !SNOWFLAKE.test(thread)) return { error: 'thread: a Discord thread id (a thread of that channel)' };
-  const by = clean(input.by ?? '', 120);
   return { args: { channel, text, ...(thread ? { thread } : {}), ...(key ? { key } : {}), ...(by ? { by } : {}) } };
 }
 
@@ -81,7 +97,9 @@ export async function postAsMax(providers: ProviderManager, input: PostInput, se
   const channel = str(d.channel, 40) || parsed.args.channel;
   const dup = d.duplicate === true;
   const m = LINK.exec(link);
-  const facts = `${link || `message ${str(d.message_id, 25)}`} (#${channel.replace(/_/g, '-')}${d.thread ? `, thread ${str(d.thread, 25)}` : ''}, ${Number(d.chars) || '?'} characters)`;
+  // FFBox answers a conversation post's channel as "conversation <id>".
+  const place = channel.startsWith('conversation') ? `FFBox ${channel}` : `#${channel.replace(/_/g, '-')}`;
+  const facts = `${link || `message ${str(d.message_id, 25)}`} (${place}${d.thread ? `, thread ${str(d.thread, 25)}` : ''}, ${Number(d.chars) || '?'} characters)`;
   if (dup) return { text: `Already posted, nothing was sent again: ${facts}. FFBox found the same ${parsed.args.key ? `key "${parsed.args.key}"` : 'text'} posted there before.` };
   return {
     text: `Posted as Max by FFBox: ${facts}. Put the link in your report.`,

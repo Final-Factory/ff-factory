@@ -14,7 +14,7 @@ import { COMPACTING, isMidTurn, type AutoCompaction, type SessionHandle, type Se
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type LinkUpdateFlags, type LinkUpdateReport, type ToDaemon } from './machineProtocol.ts';
-import { PendingCalls, UpdateBundles } from './machineLink.ts';
+import { LINK_ACK_MS, PendingCalls, UpdateBundles, unwaitedAnswer } from './machineLink.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -942,7 +942,9 @@ export class MachineManager {
     const form = o.form ?? 'update';
     const report = this.linkReports.wait(callId, id, o.timeoutMs ?? (o.flags?.moveToDevDrive ? 4 * 3_600_000 : 25 * 60_000), `its ${form} job`);
     report.catch(() => undefined);
-    const ack = this.linkAcks.wait(callId, id, 5 * 60_000, `the ${form} over its link`);
+    // Longer than the daemon's own limits before it answers (the bundle's download, machine/selfUpdate.ts DOWNLOAD.totalMs,
+    // then git), so its refusal arrives while this still waits (w1641: beast's came 16 s after a 5-minute wait).
+    const ack = this.linkAcks.wait(callId, id, LINK_ACK_MS, `the ${form} over its link`);
     this.post(id, { type: 'self_update', id: callId, form, commit: b.commit, bundle: { sha256: b.sha256, size: b.size }, ...(o.flags && Object.keys(o.flags).length ? { flags: o.flags } : {}) });
     console.log(`machine ${id}: ${form} over its link to ${b.commit.slice(0, 12)} (bundle ${b.size} bytes, sha256 ${b.sha256.slice(0, 12)}…), job ${callId.slice(0, 8)}`);
     try {
@@ -2200,7 +2202,7 @@ export class MachineManager {
         return;
       }
       case 'self_update_ack':
-        this.linkAcks.settle(msg.id, msg.ok ? true : new Error(`${id} refused it: ${msg.error ?? 'no reason given'}`));
+        if (!this.linkAcks.settle(msg.id, msg.ok ? true : new Error(`${id} refused it: ${msg.error ?? 'no reason given'}`))) console.log(unwaitedAnswer(id, msg.id, this.linkAcks.late(msg.id), msg.ok ? 'took it' : `refused it: ${msg.error ?? 'no reason given'}`));
         return;
       case 'self_update_report': {
         const r = msg.report;
@@ -2210,7 +2212,7 @@ export class MachineManager {
         return;
       }
       case 'daemon_control_result':
-        this.linkControls.settle(msg.id, msg.ok ? true : new Error(`${id} refused it: ${msg.error ?? 'no reason given'}`));
+        if (!this.linkControls.settle(msg.id, msg.ok ? true : new Error(`${id} refused it: ${msg.error ?? 'no reason given'}`))) console.log(unwaitedAnswer(id, msg.id, this.linkControls.late(msg.id), msg.ok ? 'did it' : `refused it: ${msg.error ?? 'no reason given'}`));
         return;
       case 'save_result': {
         const p = this.saveCalls.get(msg.id);

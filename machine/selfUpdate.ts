@@ -92,29 +92,106 @@ export function selfUpdateProblem(m: { commit?: unknown; bundle?: { sha256?: unk
   return undefined;
 }
 
-/** Download the bundle and check it against what the portal said on the link; returns its path. Exported for tests. */
-export async function downloadBundle(portalUrl: string, token: string, b: { sha256: string; size: number }, dir: string, doFetch: typeof fetch = fetch): Promise<string> {
+/**
+ * The bundle download's limits (w1641). beast's tools download at the 8c66ee8 deploy stalled at 6,962,988 of 18,549,629
+ * bytes and sat there until undici's own body timeout (300 s without a byte) ended it as "terminated", after the portal had
+ * stopped waiting (5 minutes): a stall is now noticed after `stallMs` and the download resumes where it stopped (the portal
+ * answers a Range request, server/index.ts sendStream), at most `attempts` times, all of it within `totalMs`.
+ */
+export const DOWNLOAD = { stallMs: 30_000, attempts: 6, totalMs: 8 * 60_000 };
+
+/** What a failed fetch says, its cause included (undici's "terminated" hides why: UND_ERR_BODY_TIMEOUT, UND_ERR_SOCKET). */
+export function fetchError(e: unknown): string {
+  const err = e as { message?: string; cause?: { code?: string; message?: string } };
+  const c = err?.cause;
+  const cause = c ? [c.code, c.message].filter(Boolean).join(': ') : '';
+  return `${err?.message ?? String(e)}${cause ? ` (${cause})` : ''}`;
+}
+
+/** A failure another try would not mend: the portal refusing the bundle, a bundle unlike what it said, a disk that will not take it. */
+class Final extends Error {}
+
+/**
+ * Download the bundle and check it against what the portal said on the link; returns its path. A download that stalls or
+ * breaks resumes from the bytes it has (DOWNLOAD), each retry logged with its reason. Exported for tests.
+ */
+export async function downloadBundle(
+  portalUrl: string,
+  token: string,
+  b: { sha256: string; size: number },
+  dir: string,
+  doFetch: typeof fetch = fetch,
+  o: { stallMs?: number; attempts?: number; totalMs?: number; log?: (line: string) => void } = {},
+): Promise<string> {
+  const stallMs = o.stallMs ?? DOWNLOAD.stallMs;
+  const attempts = o.attempts ?? DOWNLOAD.attempts;
+  const deadline = Date.now() + (o.totalMs ?? DOWNLOAD.totalMs);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${b.sha256.slice(0, 16)}.bundle`);
   const part = `${file}.part`;
-  const res = await doFetch(`${portalUrl.replace(/\/+$/, '')}/machine/update/${b.sha256}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10 * 60_000) });
-  if (res.status !== 200 || !res.body) {
-    await res.body?.cancel();
-    throw new Error(`the portal answered ${res.status} for the update's bundle`);
-  }
-  const hash = createHash('sha256');
+  const url = `${portalUrl.replace(/\/+$/, '')}/machine/update/${b.sha256}`;
+  const out = await fs.promises.open(part, 'w');
+  let hash = createHash('sha256');
   let size = 0;
-  const out = fs.createWriteStream(part);
+  const restart = async () => {
+    await out.truncate(0);
+    hash = createHash('sha256');
+    size = 0;
+  };
   try {
-    for await (const chunk of Readable.fromWeb(res.body as import('node:stream/web').ReadableStream<Uint8Array>)) {
-      size += chunk.length;
-      if (size > b.size) throw new Error(`the bundle is larger than the ${b.size} bytes the portal said`);
-      hash.update(chunk);
-      if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
+    for (let attempt = 1; ; attempt++) {
+      const ctl = new AbortController();
+      let timedOut: 'stall' | 'total' | undefined;
+      let timer: NodeJS.Timeout | undefined;
+      const arm = () => {
+        clearTimeout(timer);
+        const left = deadline - Date.now();
+        timer = setTimeout(() => {
+          timedOut = left <= stallMs ? 'total' : 'stall';
+          ctl.abort();
+        }, Math.max(1, Math.min(stallMs, left)));
+      };
+      arm();
+      try {
+        const from = size;
+        const res = await doFetch(url, { headers: { authorization: `Bearer ${token}`, ...(from ? { range: `bytes=${from}-` } : {}) }, signal: ctl.signal });
+        if (res.status >= 400 && res.status < 500) {
+          await res.body?.cancel();
+          throw new Final(`the portal answered ${res.status} for the update's bundle`);
+        }
+        if ((res.status !== 200 && res.status !== 206) || !res.body) {
+          await res.body?.cancel();
+          throw new Error(`the portal answered ${res.status} for the update's bundle`);
+        }
+        // A resume the portal answered with the whole file, or a range that does not start where this one stopped: from 0.
+        if (from && (res.status === 200 || !new RegExp(`^bytes ${from}-`).test(res.headers.get('content-range') ?? ''))) await restart();
+        for await (const chunk of Readable.fromWeb(res.body as import('node:stream/web').ReadableStream<Uint8Array>)) {
+          arm();
+          if (size + chunk.length > b.size) throw new Final(`the bundle is larger than the ${b.size} bytes the portal said`);
+          await out.write(chunk, 0, chunk.length, size).catch((e) => {
+            throw new Final(`could not write ${part}: ${(e as Error).message}`);
+          });
+          hash.update(chunk);
+          size += chunk.length;
+        }
+        // The portal sent all it has (a cut connection is an error, not an end): what it said is checked below.
+        break;
+      } catch (e) {
+        if (e instanceof Final) throw e;
+        const why = timedOut === 'stall' ? `stalled (no byte in ${Math.round(stallMs / 1000)} s)` : timedOut === 'total' ? `did not finish in ${Math.round((o.totalMs ?? DOWNLOAD.totalMs) / 1000)} s` : `broke: ${fetchError(e)}`;
+        if (timedOut === 'total' || attempt >= attempts || Date.now() >= deadline) throw new Error(`the bundle's download ${why} at ${size} of ${b.size} bytes, after ${attempt} attempt(s)`);
+        o.log?.(`update over the link: the bundle's download ${why} at ${size} of ${b.size} bytes; attempt ${attempt + 1} of ${attempts} resumes from there`);
+        await new Promise((r) => setTimeout(r, Math.min(1000 * attempt, 5000, Math.max(0, deadline - Date.now()))));
+      } finally {
+        clearTimeout(timer);
+      }
     }
-  } finally {
-    await new Promise((r) => out.end(r));
+  } catch (e) {
+    await out.close();
+    fs.rmSync(part, { force: true });
+    throw e;
   }
+  await out.close();
   const sha = hash.digest('hex');
   if (size !== b.size || sha !== b.sha256) {
     fs.rmSync(part, { force: true });
@@ -248,7 +325,7 @@ export class SelfUpdater {
     this.busy = true;
     try {
       this.deps.log(`update over the link: ${msg.form} to ff-factory ${msg.commit.slice(0, 12)}; fetching the bundle (${msg.bundle.size} bytes)`);
-      const bundle = await downloadBundle(this.deps.portalUrl(), this.deps.token, msg.bundle, f.dir, this.deps.fetch);
+      const bundle = await downloadBundle(this.deps.portalUrl(), this.deps.token, msg.bundle, f.dir, this.deps.fetch, { log: (l) => this.deps.log(l) });
       await checkoutFromBundle(f.src, bundle, msg.commit);
       removeOldBundles(this.deps.appDir, bundle);
       const how = await this.start(this.job(msg.form, msg.id, inst.service, { commit: msg.commit, ...(msg.flags ? { flags: msg.flags } : {}) }), inst.service);

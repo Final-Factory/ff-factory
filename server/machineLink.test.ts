@@ -13,10 +13,10 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { PendingCalls, UpdateBundles, updateBundleFor } from './machineLink.ts';
+import { PendingCalls, UpdateBundles, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
-import { checkoutFromBundle, downloadBundle, readJson, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
+import { checkoutFromBundle, downloadBundle, fetchError, readJson, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
 import type { JobSpec } from '../machine/osJob.ts';
 import type { Config } from './config.ts';
 
@@ -221,4 +221,90 @@ test('w1596: a call nobody answers times out with what it waited for', async () 
   assert.equal(p.settle('b', true), true);
   assert.equal(await q, true);
   assert.equal(p.settle('b', true), false, 'answered once');
+});
+
+test('w1641: an answer after its call timed out is told with what the call was, never dropped', async () => {
+  let t = 1_000_000;
+  const p = new PendingCalls<true>(() => t);
+  const hold = setTimeout(() => undefined, 1000);
+  const q = p.wait('a5c3a1cb-0000', 'beast', 20, 'the tools over its link');
+  t += 300_000;
+  await assert.rejects(q, /beast did not answer the tools over its link/);
+  clearTimeout(hold);
+  assert.equal(p.settle('a5c3a1cb-0000', new Error('beast refused it: git fetch failed')), false, 'nobody waits for it any more');
+  const late = p.late('a5c3a1cb-0000');
+  assert.equal(late?.what, 'the tools over its link');
+  assert.equal(
+    unwaitedAnswer('beast', 'a5c3a1cb-0000', late, 'refused it: git fetch failed', 1_000_000 + 400_000),
+    'machine beast: a late answer to the tools over its link (call a5c3a1cb): it refused it: git fetch failed, 6 min 40 s after it was sent; the portal had given up after 5 min 0 s',
+  );
+  assert.equal(p.late('a5c3a1cb-0000'), undefined, 'told once');
+  assert.match(unwaitedAnswer('beast', 'ffffffff-1', undefined, 'took it'), /an answer to call ffffffff that nothing waits for \(it took it\)/);
+});
+
+/** A bundle server for the download tests: `plan(n, range)` says what its n-th request (from 1) does. */
+async function bundleServer(t: { after: (f: () => void) => void }, body: Buffer, plan: (n: number, range: string | undefined) => 'stall' | 'cut' | 'whole' | 'serve' | number) {
+  const seen: (string | undefined)[] = [];
+  const held: http.ServerResponse[] = [];
+  const s = http.createServer((req, res) => {
+    const range = req.headers.range;
+    seen.push(range);
+    const what = plan(seen.length, range);
+    if (typeof what === 'number') return void res.writeHead(what).end();
+    const from = what !== 'whole' && range ? Number(/^bytes=(\d+)-$/.exec(range)?.[1] ?? 0) : 0;
+    res.writeHead(from ? 206 : 200, { 'content-length': String(body.length - from), ...(from ? { 'content-range': `bytes ${from}-${body.length - 1}/${body.length}` } : {}) });
+    if (what === 'stall' || what === 'cut') {
+      // Half of what is left, then nothing more (the w1641 stall), or the connection cut.
+      res.write(body.subarray(from, from + Math.floor((body.length - from) / 2)));
+      if (what === 'cut') setTimeout(() => res.socket?.destroy(), 20);
+      else held.push(res);
+      return;
+    }
+    res.end(body.subarray(from));
+  });
+  await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()));
+  t.after(() => {
+    for (const r of held) r.socket?.destroy();
+    s.close();
+  });
+  return { url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`, seen };
+}
+
+test('w1641: a bundle download that stalls or is cut resumes where it stopped, each retry logged with its reason', async (t) => {
+  const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 7) % 251));
+  const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // beast's case: the stream stops sending and stays open. Before w1641 nothing noticed for 300 s (undici's body timeout).
+  const stall = await bundleServer(t, body, (n) => (n === 1 ? 'stall' : 'serve'));
+  const lines: string[] = [];
+  const file = await downloadBundle(stall.url, 'tok', b, path.join(dir, 'a'), fetch, { stallMs: 300, log: (l) => lines.push(l) });
+  assert.equal(createHash('sha256').update(fs.readFileSync(file)).digest('hex'), b.sha256);
+  assert.deepEqual(stall.seen, [undefined, `bytes=${body.length / 2}-`], 'the second request resumes from the bytes the first got');
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /stalled \(no byte in 0 s\) at 100000 of 200000 bytes; attempt 2 of 6 resumes from there/);
+
+  // A cut connection says why (the cause undici keeps behind "terminated").
+  const cut = await bundleServer(t, body, (n) => (n === 1 ? 'cut' : 'serve'));
+  lines.length = 0;
+  await downloadBundle(cut.url, 'tok', b, path.join(dir, 'b'), fetch, { stallMs: 5000, log: (l) => lines.push(l) });
+  assert.match(lines[0] ?? '', /broke: .+ at 100000 of 200000 bytes/);
+
+  // A portal that answers a resume with the whole file: taken from 0, still the bundle it said.
+  const whole = await bundleServer(t, body, (n) => (n === 1 ? 'stall' : 'whole'));
+  const f2 = await downloadBundle(whole.url, 'tok', b, path.join(dir, 'c'), fetch, { stallMs: 300 });
+  assert.equal(createHash('sha256').update(fs.readFileSync(f2)).digest('hex'), b.sha256);
+
+  // Every try stalls: it gives up with the reason, the part file gone.
+  const never = await bundleServer(t, body, () => 'stall');
+  await assert.rejects(downloadBundle(never.url, 'tok', b, path.join(dir, 'd'), fetch, { stallMs: 200, attempts: 2 }), /the bundle's download stalled \(no byte in 0 s\) at \d+ of 200000 bytes, after 2 attempt\(s\)/);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'd')), []);
+
+  // A refusal is not retried.
+  const refused = await bundleServer(t, body, () => 404);
+  await assert.rejects(downloadBundle(refused.url, 'tok', b, path.join(dir, 'e'), fetch, { stallMs: 300 }), /the portal answered 404/);
+  assert.equal(refused.seen.length, 1);
+
+  assert.equal(fetchError(Object.assign(new TypeError('terminated'), { cause: Object.assign(new Error('Body Timeout Error'), { code: 'UND_ERR_BODY_TIMEOUT' }) })), 'terminated (UND_ERR_BODY_TIMEOUT: Body Timeout Error)');
 });

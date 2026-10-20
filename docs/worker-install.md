@@ -311,7 +311,10 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
    portal serves only the bundle it offered that machine, for an hour), checks the size and SHA-256 against the message (which
    came on its own authenticated link), runs `git bundle verify`, fetches it into the install's checkout `<daemon>/src` (git
    checks every object), checks that the bundle's HEAD is the commit named, and checks it out. A mismatch is refused with
-   the reason (`self_update_ack`) and changes nothing.
+   the reason (`self_update_ack`) and changes nothing. A download that stalls (30 s without a byte) or breaks resumes from
+   the bytes it has with a Range request, up to 6 tries within 8 minutes, each logged in the daemon's log with its cause
+   (`machine/selfUpdate.ts` `DOWNLOAD`; w1641: beast's stalled at 7 of 18.5 MB and Node's fetch sat 300 s before it said
+   "terminated"). The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
 3. **The job runs outside the daemon**: `<daemon>/update/job.json`, and `scripts/worker/linkJob.ts` from that commit,
    started as the OS's own (`machine/osJob.ts`), since a daemon restart ends everything the daemon started but its agent
    hosts (`Stop-FFDaemon`): the scheduled task `<service>Job` on Windows (this user, interactive, not elevated, headless, four
