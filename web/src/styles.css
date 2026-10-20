@@ -2147,9 +2147,12 @@ button.react-chip:hover {
   transition: background 0.15s var(--ease), border-color 0.15s var(--ease), opacity 0.15s;
 }
 
-.ask-opt:hover:not(:disabled) {
-  border-color: var(--text-3);
-  background: var(--hover);
+/* Not on touch: a tap leaves :hover on whatever slides under the finger (w1632: an option lit after a jump). */
+@media (hover: hover) {
+  .ask-opt:hover:not(:disabled) {
+    border-color: var(--text-3);
+    background: var(--hover);
+  }
 }
 
 .ask-opt:focus-visible {

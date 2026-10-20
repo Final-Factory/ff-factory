@@ -20,6 +20,14 @@ import { Icon } from './ui';
  * its button, never inside it (a click on a still opens it large; a click on the button answers). The words alone are the
  * button's text and the quote's.
  */
+// When the chat last jumped the view on a tap (w1632): an answer button that slid under the finger in that jump is not
+// clicked by the next tap.
+let jumpedAt = -Infinity;
+const JUMP_GUARD_MS = 700;
+export const markJump = () => {
+  jumpedAt = performance.now();
+};
+
 export function AskCard({ seq, ask, sessionId }: { seq: number; ask: Ask; sessionId: string }) {
   const chat = useContext(ChatActionsContext);
   // Which option of this question was clicked, read from the person's messages after it (-1: none yet).
@@ -38,7 +46,7 @@ export function AskCard({ seq, ask, sessionId }: { seq: number; ask: Ask; sessio
   const locked = picked >= 0;
   const live = !!chat?.interactive && !locked;
   const click = async (i: number) => {
-    if (!live || sending >= 0) return;
+    if (!live || sending >= 0 || performance.now() - jumpedAt < JUMP_GUARD_MS) return;
     setSending(i);
     const ok = await attempt(api.answer(sessionId, seq, i));
     if (ok === undefined) setSending(-1);

@@ -4,7 +4,7 @@ import { NOTICE_TAG, parseNotice, type Notice, type NoticeKind } from '../../../
 import { parseReaction, reactionsByMessage, splitReply, splitVia } from '../../../shared/replies';
 import { HELD_MARK } from '../../../shared/conditional';
 import { checkAsk, isAskTool, type Ask } from '../../../shared/ask';
-import { AskCard } from './AskCard';
+import { AskCard, markJump } from './AskCard';
 import { holdReload } from '../freshness';
 import { keptMap, useKeptState } from '../keep';
 import { api } from '../api';
@@ -148,6 +148,8 @@ const HOLD_MS = 4000;
 const broughtUp = new Set<string>();
 /** How far below the top edge the answer above a question card starts, px. */
 const ANSWER_MARGIN = 8;
+// The room the jump pill takes at the chat's bottom edge (.jump-pill: 36 px tall, 12 px up, and its shadow).
+const PILL_ZONE = 56;
 /** How long the place is held after the view is resized (a phone turned, a keyboard opened): the layout may still be settling, a frame at a time. */
 const RESIZE_HOLD_MS = 1500;
 
@@ -302,7 +304,7 @@ export const Transcript = memo(function Transcript({
   const endAsk = useMemo(() => {
     for (let i = items.length - 1; i >= 0; i--) {
       const it = items[i];
-      if (it.type === 'ask') return it.answer !== undefined ? { seq: it.seq, answer: it.answer } : undefined;
+      if (it.type === 'ask') return { seq: it.seq, answer: it.answer };
       if (it.type !== 'notice' && it.type !== 'divider' && it.type !== 'activity' && it.type !== 'event') return undefined;
     }
     return undefined;
@@ -313,26 +315,42 @@ export const Transcript = memo(function Transcript({
    * in our chat ... And instead you posted a question for me"): on a phone the card fills the screen, so the bottom showed
    * the card and the answer sat above the top edge. When the answer and the card do not fit together, the view starts at
    * the answer instead, the card below it and the "New messages" pill pointing down; once per card, so scrolling down to
-   * the card is not undone.
+   * the card is not undone. The pill goes there too: a tap on it while reading lands on the new answer, not past it on the
+   * card, and a tap on an answer button just after (one that slid under the finger) is not taken as a choice (`markJump`).
    */
-  const followEnd = () => {
+  const followEnd = (smooth = false) => {
     const el = scroller.current;
     const a = endAsk;
     const key = a && `${session.id}:${a.seq}`;
-    if (el && a && key && !broughtUp.has(key)) {
+    if (el && a && a.answer !== undefined && key && !broughtUp.has(key)) {
       const row = Array.from(el.firstElementChild?.children ?? []).find((c) => c.getAttribute('data-seq') === String(a.answer));
       if (row) {
         broughtUp.add(key);
-        const top = row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - ANSWER_MARGIN;
+        const box = el.getBoundingClientRect().top - el.scrollTop;
+        const rowTop = row.getBoundingClientRect().top - box;
+        let top = rowTop - ANSWER_MARGIN;
         if (top < el.scrollHeight - el.clientHeight - 1) {
+          // The pill must not sit on the question's first line: the question shows clear above the pill (scrolled down, if
+          // the answer's first line stays on screen), else the card starts below the screen, the pill pointing down to it.
+          const card = el.querySelector(`.ask[data-seq="${a.seq}"]`);
+          const q = card?.querySelector('.ask-q') ?? card;
+          const h = el.clientHeight;
+          if (card && q) {
+            const cardTop = card.getBoundingClientRect().top - box;
+            const qBottom = Math.min(q.getBoundingClientRect().bottom - box, cardTop + 2 * PILL_ZONE);
+            if (cardTop < top + h && qBottom > top + h - PILL_ZONE) {
+              const down = qBottom + PILL_ZONE - h;
+              top = down <= rowTop ? down : Math.max(0, cardTop - h - ANSWER_MARGIN);
+            }
+          }
           atBottom.current = false;
-          pending.current = { top, seq: a.answer, off: ANSWER_MARGIN, latest: a.answer };
+          pending.current = { top, seq: a.answer, off: rowTop - top, latest: a.answer };
           restore();
           return;
         }
       }
     }
-    scrollToBottom();
+    scrollToBottom(smooth);
   };
 
   const scrollToBottom = (smooth = false) => {
@@ -494,8 +512,11 @@ export const Transcript = memo(function Transcript({
         </div>
       </div>
       {jump !== 'none' && (
-        <button className={`jump-pill${jump === 'new' ? ' has-new' : ''}`} onClick={() => scrollToBottom(true)} aria-label="Jump to latest" title="Jump to the latest message">
-          {jump === 'new' && <span>New messages</span>}
+        <button className={`jump-pill${jump === 'new' ? ' has-new' : ''}`} onClick={() => {
+            markJump();
+            followEnd(true);
+          }} aria-label="Jump to latest" title="Jump to the latest message">
+          {jump === 'new' && <span>{endAsk && !streaming ? 'Question below' : 'New messages'}</span>}
           <Icon name="arrowDown" size={16} />
         </button>
       )}

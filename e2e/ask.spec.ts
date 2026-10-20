@@ -173,12 +173,13 @@ const asAsker = test.extend<{ solo: Page }>({
   },
 });
 
-asAsker('ask: a turn that answers and then asks shows the answer on screen, the card after it', async ({ solo: page }) => {
+// An answer as long as the orchestrator's were (a few paragraphs), and a short one.
+for (const [len, repeat, name] of [['long', 4, 'ask'], ['short', 0, 'ask-short']] as const)
+asAsker(`ask: a turn that answers and then asks shows the answer on screen, the card after it (${len} answer)`, async ({ solo: page }) => {
   const tag = uniq('answer');
   const q = questionFor(tag);
-  // An answer as long as the orchestrator's were (a few paragraphs).
   const answer = `Shell bots for ${tag} render as one instanced ring per platform; a hit on the platform takes them out with it.`;
-  const more = `A bot still flying to its platform for ${tag} is an ordinary entity until it docks, so turrets can shoot it. ` + 'It keeps its own health and armour while it flies, takes splash from rockets like any drone, and only becomes a count on the platform when it lands. '.repeat(4);
+  const more = `A bot still flying to its platform for ${tag} is an ordinary entity until it docks, so turrets can shoot it. ` + 'It keeps its own health and armour while it flies, takes splash from rockets like any drone, and only becomes a count on the platform when it lands. '.repeat(repeat);
   const me = await appState(page.request);
   await sendToChat(page.request, me.orchestratorId, `#say ${answer}⏎⏎${more}\n#tool ask_person ${JSON.stringify(q)}`);
   const card = page.getByTestId('ask').filter({ hasText: q.question });
@@ -186,7 +187,21 @@ asAsker('ask: a turn that answers and then asks shows the answer on screen, the 
   const reply = page.locator('.orch .msg-assistant').filter({ hasText: answer });
   await expect(reply).toContainText(more);
   await page.waitForTimeout(600);
-  await shot(page, 'ask-turn-end');
+  // A chat opened on an earlier card's answer is scrolled up: this turn shows the pill, and one tap lands on this answer,
+  // not past it on the card. A second tap on the same spot right after does not answer the question with whatever
+  // button slid under it.
+  const sbox = (await page.locator('.orch .transcript-scroll').boundingBox())!;
+  const rbox = (await reply.boundingBox())!;
+  if (rbox.y > sbox.y + sbox.height || rbox.y + rbox.height < sbox.y) {
+    await expect(page.locator('.orch .jump-pill.has-new')).toHaveText('Question below');
+    await page.locator('.orch .jump-pill').click();
+    await page.waitForTimeout(250);
+    // A tap on a button that slid under the finger (dispatched, so Playwright does not scroll to it).
+    await card.locator('.ask-opt:not(.ask-more)').last().dispatchEvent('click');
+    await page.waitForTimeout(600);
+    await expect(card).not.toHaveClass(/ask-locked/);
+  }
+  await shot(page, `${name}-turn-end`);
   // The start of the answer is on screen, under the chat's top edge.
   const scroll = page.locator('.orch .transcript-scroll');
   await expect.poll(async () => {
@@ -197,13 +212,17 @@ asAsker('ask: a turn that answers and then asks shows the answer on screen, the 
   // The card comes after the answer and does not sit over it.
   const [a, c] = [await reply.boundingBox(), await card.boundingBox()];
   expect(a!.y + a!.height).toBeLessThanOrEqual(c!.y + 1);
-  await shot(page, 'ask-after-answer');
-  // When they do not fit together, the pill points down to the card; going down there stays there.
-  if (c!.y + c!.height > (await scroll.boundingBox())!.y + (await scroll.boundingBox())!.height + 1) {
-    await expect(page.locator('.orch .jump-pill.has-new')).toBeVisible();
+  await shot(page, `${name}-after-answer`);
+  // When they do not fit together (and the chat is not within 80 px of its end, where it counts as at the end), the pill
+  // says the question is below; going down there stays there.
+  if (c!.y + c!.height > (await scroll.boundingBox())!.y + (await scroll.boundingBox())!.height + 80) {
+    await expect(page.locator('.orch .jump-pill.has-new')).toHaveText('Question below');
+    // The pill does not sit on the question: it shows clear above the pill, or the card starts below the screen.
+    const [qb, pill, sb] = [await card.locator('.ask-q').boundingBox(), await page.locator('.orch .jump-pill').boundingBox(), await scroll.boundingBox()];
+    expect(qb!.y >= sb!.y + sb!.height - 1 || qb!.y + qb!.height <= pill!.y + 1, `question ${JSON.stringify(qb)} under the pill ${JSON.stringify(pill)}`).toBe(true);
     await page.locator('.orch .jump-pill').click();
     await expect(card.getByTestId('ask-more')).toBeInViewport();
     await page.waitForTimeout(500);
     await expect(card.getByTestId('ask-more')).toBeInViewport();
-  } else await expect(card).toBeInViewport();
+  } else await expect(card.locator('.ask-q')).toBeInViewport({ ratio: 1 });
 });
