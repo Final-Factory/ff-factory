@@ -243,7 +243,7 @@ export const QUERY_LIMITS = {
   inFlight: 8,
   /** conversation and logs are answered on FFBox's next pass (about 5 s; logs reads the journal for up to 6 s), and the
    * connector gives up at 12 s. */
-  timeoutMsByQuery: { conversation: 15_000, logs: 15_000, reports: 15_000, report: 15_000, thread_files: 15_000, thread_file: 15_000, post_message: 20_000, symbols: 15_000, symbol_file: 15_000, diagnosis_files: 15_000, diagnosis_file: 15_000 } as Record<string, number>,
+  timeoutMsByQuery: { conversation: 15_000, logs: 15_000, reports: 15_000, report: 15_000, thread_files: 15_000, thread_file: 15_000, post_message: 20_000, symbols: 15_000, symbol_file: 15_000, diagnosis_files: 15_000, diagnosis_file: 15_000, symbols_put: 10_000, symbols_ingest: 15_000 } as Record<string, number>,
   /** Conversations whose last answer is kept for the fallback. */
   keptConversations: 20,
 } as const;
@@ -281,6 +281,30 @@ export type QueryResult = z.infer<typeof QueryResultSchema>;
  * Players' reports (FFBox w320): a `report` answer's `transfer` is followed by its bytes, as report_chunk frames in order
  * and one report_end. The portal checks each offset, and the SHA-256 against the answer's and report_end's.
  */
+/**
+ * An urgent-lane release's symbols (w1639, docs/ffbox.md "Symbols of an urgent-lane build"): each archive goes to FFBox
+ * as `symbols_put` queries, one part each, answered by its connector itself (ffbox scripts/fffconnector.py SYMBOLS_*),
+ * then `symbols_ingest` files it. The parts have their own budget, not the 30 queries a minute, and nothing is kept.
+ */
+export const SYMBOLS_UPLOAD = {
+  /** Raw bytes in one part: 60000 base64 characters, inside LIMITS.maxMessageBytes (the connector's SYMBOLS_PART_BYTES). */
+  partBytes: 45_000,
+  /** Parts a minute, under the connector's SYMBOLS_PUT_PER_MINUTE (2400). */
+  perMinute: 2_000,
+  /** Parts in flight at once. The connector writes only the one at the offset it stands at and says where that is. */
+  window: 4,
+  /** The connector's SYMBOLS_ARCHIVE_MAX and ffbox urgent_symbols.ARCHIVE_MAX_BYTES. */
+  maxArchiveBytes: 512 * 1024 * 1024,
+  /** An archive that moves no byte for this long fails (FFBox down, its ffwatch stopped). */
+  stallMs: 180_000,
+  /** How long one archive's filing may take on FFBox (dump_syms over a Mac player's two architectures). */
+  fileTimeoutMs: 20 * 60_000,
+  /** How often to ask how a filing goes, and how a sent archive's check goes. */
+  pollMs: 5_000,
+  /** Builds in one call: main and demo on three platforms. */
+  maxEntries: 6,
+} as const;
+
 export const REPORT_LIMITS = {
   /** Raw bytes in one report_chunk: 60000 base64 characters, inside LIMITS.maxMessageBytes. */
   maxChunkBytes: 45_000,
