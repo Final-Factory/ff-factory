@@ -2095,6 +2095,17 @@ orchestrator asks every question to its person with **`ask_person`**, one at a t
   `e2e/images.spec.ts` (w1419) asks with a review still and clip and checks they load, on desktop Chrome and the iPhone
   project; the same file checks a plain message with a review PNG, WebM and MP4 in the `![x](</…>)` form, before and
   after a reload.
+- **Previews live in the card** (w1602). Ben, 2026-10-19, after a question about the Warden whose clips were in the message
+  above the card: "when you ask me about visual things you have to include the previews". The message's own media shows (a
+  plain message renders `![..](<path>)` as players and stills, checked by `e2e/images.spec.ts`), but the question is the
+  card, and media left only above it is not in it. So `Orchestrators.previewsMissing` refuses an `ask_person` call whose
+  question, labels and descriptions name a request wNNN with stills or clips in its review folder (`reviewMedia.previewsOf`:
+  `<root>/wNNN` or `<root>/wNNN-*`, newest first) while none of them carries an `![..](..)`. The refusal lists the newest
+  files (up to 6 per request) as `![name](<path>)` lines, and the same call sent again goes through, for a question the
+  media is not about. It refuses rather than attaches: a folder holds every iteration (w1465's Warden clips next to older
+  takes), a wrong still on a button is worse than none, and the orchestrator alone knows which belongs to which option. The
+  page draws a refused call (`tool_result` with `isError`) as an ordinary tool step, not a card, and `answerWords` refuses a
+  click on one. The brief has the rule in one line (`agents.ts`, "Ask every question to").
 - **A click is the person's own message.** `POST /api/sessions/<id>/answer` with the question's seq and the option's index
   (`Orchestrators.answerWords`). The server reads the label and the question from the transcript, never from the page, and
   sends it as a reply (shared/replies.ts, "Replies and reactions"): the person's words are the label, then `REPLY_MARK` and

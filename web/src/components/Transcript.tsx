@@ -78,7 +78,8 @@ function buildItems(events: TranscriptEvent[], now: number): Item[] {
   };
   for (const e of events) {
     if (e.kind === 'tool_result' && uses.has(e.toolUseId)) continue;
-    if (e.kind === 'tool_use' && !e.parentToolUseId && isAskTool(e.name)) {
+    // A call the tool refused (w1602: no previews in it) is no question: its card would offer buttons the orchestrator never asked.
+    if (e.kind === 'tool_use' && !e.parentToolUseId && isAskTool(e.name) && !results.get(e.toolUseId)?.isError) {
       const checked = checkAsk(e.input);
       if ('ask' in checked) {
         flush();

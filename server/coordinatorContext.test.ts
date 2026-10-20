@@ -124,7 +124,9 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w1399 (Ben, 2026-10-16: "you make bad UI mistakes constantly") added the one-line UI-stills trigger to both briefs; the
   // owner's brief measured 26,180 characters with it (Lothsahn's name, the longest, about 100 times), so the cap moved from
   // 26,000 to 26,500. The rule itself is the read_rules ui topic.
-  const PROMPT_MAX = 26_500;
+  // w1602 (Ben: "when you ask me about visual things you have to include the previews") added the one-line rule that a
+  // visual question carries its previews in the card; the owner's brief measured 26,629, so the cap moved to 26,750.
+  const PROMPT_MAX = 26_750;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
