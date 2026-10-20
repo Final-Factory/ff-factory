@@ -755,6 +755,13 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   chat's line ("waits on Lothsahn") and calls nobody. `slotCall` in `shared/fleet.ts`. The slot drops its FREE chip
   while it calls you. Placement still counts it free: a stopped worker that waits on a person does not hold its sandbox
   (`occupies`, `server/placeAgain.ts`), and the row's tooltip says so.
+  **Who sees the button** (w1599, lothsahn: "Give everyone a button to go to the live view even if it's not theirs"): whenever a
+  worker in the slot streams a Live view, everyone who may watch it sees "Live view: go" on the slot's row: the session's
+  requester (`requestedBy`, `lastRequestedBy`) and the owners, the live-view access rule (`LiveHub.canWatch`). Only the person
+  the view waits on gets the amber pill above, with the FREE chip dropped; for everyone else it is `kind: 'watch'`, the board's
+  outlined chip (`fl-chip fl-call-quiet`), at the same size and on the same text edge, which calls nobody: the row keeps its
+  state and FREE chip and shows no "Asked you". A member who did not ask for the worker sees no button. A person asked a
+  question by another worker in the same slot (no view) sees "Asked you" and no button.
 
 ![The sidebar grouped by computer](images/fleet-sidebar-desktop-chromium.png)
 ![The Overview board](images/fleet-overview-desktop-chromium.png)

@@ -233,12 +233,18 @@ function Agents({ agents, me, now, sel, variant, open }: { agents: PlaceAgents; 
  */
 function CallButton({ call, onGo }: { call: SlotCall; onGo: () => void }) {
   const what = call.session.waitingOn?.what;
+  // w1599: a view up that waits on nobody here is the outlined chip of the board's free-slot line, not the amber pill.
+  const quiet = call.kind === 'watch';
   return (
     <button
       type="button"
-      className="needs-you fl-call"
+      className={quiet ? 'fl-chip fl-call fl-call-quiet' : 'needs-you fl-call'}
       onClick={onGo}
-      title={`${call.request ? `${call.request}: ` : ''}${call.session.title} waits on you${what ? `: ${what}` : ': its Live view is up for you to move the knobs'}`}
+      title={
+        quiet
+          ? `${call.session.title}: its Live view is up, and you may watch it`
+          : `${call.request ? `${call.request}: ` : ''}${call.session.title} waits on you${what ? `: ${what}` : ': its Live view is up for you to move the knobs'}`
+      }
       data-testid="fl-call"
     >
       <span className="lv-rec" aria-hidden />
@@ -281,12 +287,13 @@ function SandboxItem({ sb, me, call, now, sel, variant, go }: { sb: FleetSandbox
   // A worker here waits on you (w1430): the slot says "Asked you", quietly, with no badge (w1521: "Needs you" and its badge are a
   // permission's, which placeGlance already says), unless something more urgent (a permission, a blocked editor, a failure)
   // already speaks for it; what it is doing is that worker's title.
-  const g: Glance = call && placeGlance.tone !== 'red' && placeGlance.tone !== 'amber' ? { ...placeGlance, tone: 'grey', label: 'Asked you', progress: false } : placeGlance;
+  const calls = call && call.kind !== 'watch'; // w1599: a view you may watch calls nobody
+  const g: Glance = calls && placeGlance.tone !== 'red' && placeGlance.tone !== 'amber' ? { ...placeGlance, tone: 'grey', label: 'Asked you', progress: false } : placeGlance;
   const unityAbout = /^Unity/.test(g.label);
-  const free = sb.free && !call;
+  const free = sb.free && !calls;
   // The label is the sandbox's name (w575); what it is doing is its live agents' titles, Working first.
   const title = sb.id;
-  const titles = call && !sb.doing.includes(call.session.title) ? [call.session.title, ...sb.doing] : sb.doing;
+  const titles = calls && !sb.doing.includes(call.session.title) ? [call.session.title, ...sb.doing] : sb.doing;
   const doing = titles.length ? `${titles[0]}${titles.length > 1 ? ` (+${titles.length - 1})` : ''}` : '';
   const head = (
     <PlaceHead
@@ -316,7 +323,7 @@ function SandboxItem({ sb, me, call, now, sel, variant, go }: { sb: FleetSandbox
         </>
       }
       active={sel.sandbox === sb.key && !sel.sessionId}
-      hint={`Slot ${sb.key} · ${sb.branch}${sb.status === 'ready' ? ` · ${unityLabel[sb.unity]}` : ''}${agentsHint(sb.agents)}${call?.kind === 'asked' ? `\nAsked you${call.session.waitingOn?.what ? `: ${call.session.waitingOn.what}` : ''} (answer it in your orchestrator chat)` : ''}${call && sb.free ? '\nIts worker is stopped while it waits on you: placement may give the sandbox other work meanwhile' : ''}`}
+      hint={`Slot ${sb.key} · ${sb.branch}${sb.status === 'ready' ? ` · ${unityLabel[sb.unity]}` : ''}${agentsHint(sb.agents)}${call?.kind === 'asked' ? `\nAsked you${call.session.waitingOn?.what ? `: ${call.session.waitingOn.what}` : ''} (answer it in your orchestrator chat)` : ''}${calls && sb.free ? '\nIts worker is stopped while it waits on you: placement may give the sandbox other work meanwhile' : ''}`}
       onClick={() => go(sandboxRoute(sb))}
       testId="fl-sandbox-row"
     />
@@ -324,7 +331,7 @@ function SandboxItem({ sb, me, call, now, sel, variant, go }: { sb: FleetSandbox
   return (
     <div className="fl-sb" data-testid={`fl-sandbox-${sb.key}`}>
       {head}
-      {call?.kind === 'live' && (
+      {call && call.kind !== 'asked' && (
         <div className="fl-call-line">
           <CallButton call={call} onGo={() => go({ view: 'live', sessionId: call.session.id })} />
         </div>
