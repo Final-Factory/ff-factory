@@ -347,7 +347,9 @@ function Invoke-Installer([string[]]$arguments, [string]$work) {
 
 function Invoke-FFJoin {
     Say 'FF Factory: join this PC (one step). Nothing secret is shown on screen.'
-    if ($script:OnWindows) {
+    # install.ps1 refuses an elevated new install (its files would belong to Administrators), so this refuses first; a
+    # test's own -Installer makes no files, which lets the tests run on CI's elevated Windows runner.
+    if ($script:OnWindows -and -not $Installer) {
         $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
         if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
             Say 'Run this from a normal PowerShell, not as administrator: the steps that need admin rights ask for them.'
