@@ -47,7 +47,8 @@ import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
-import { accountSetupLines, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, scrubTranscripts, shownRoles } from './secrets.ts';
+import { accountSetupLines, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
+import { scrubAtStart } from './scrubSecrets.ts';
 import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
@@ -198,10 +199,12 @@ const githubApps = new GithubApps({ vault: () => vault, log: (line) => console.w
 const github = new GithubTokens({ vault: () => vault, cfg, repos: () => cfg.vault?.githubRepos ?? GITHUB_REQUIRED_REPOS, payer: () => identity.systemPayer().userId, apps: githubApps, log: (line) => console.warn(line), report: (title, body) => hostNotice(title, body) });
 setGithubTokens(github);
 github.start();
-// Transcripts written before redaction existed: no Claude OAuth or Discord token stays on disk (server/secrets.ts).
+// Records and files written before their store redacted, or before a token shape was known (w1584): masked at start, once
+// per scrub version for the whole data folder (server/scrubSecrets.ts). Paths and counts only in the log.
 setTimeout(() => {
-  const n = scrubTranscripts(path.join(cfg.dataDir, 'transcripts'));
-  if (n) console.log(`secrets: redacted secrets (Claude OAuth or Discord tokens) in ${n} transcript(s)`);
+  const held = store.scrubSecrets();
+  if (held) console.log(`secrets: redacted ${held} secret(s) in the sessions and work items held`);
+  void scrubAtStart(cfg.dataDir, (line) => console.log(`secrets: ${line}`));
 }, 5000);
 const sessions = new SessionManager(cfg, store);
 sessions.keepTranscript = (id) => {

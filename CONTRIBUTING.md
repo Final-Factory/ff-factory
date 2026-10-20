@@ -24,11 +24,12 @@ prepush identity test): compare a failure with `main` before you chase it; CI on
 sandbox, the sandbox's guard refuses `git checkout -b` while its Unity editor runs: make the branch with `git branch <name>` and
 `git symbolic-ref HEAD refs/heads/<name>` (same commit), or `git worktree add <dir> -b <name> origin/main`.
 
-**A worker runs the tests with its GitHub token unset: `env -u GH_TOKEN -u GITHUB_TOKEN npm test`** (w1519). A worker's
-environment holds its person's vault token as `GH_TOKEN`. A test whose code under test reads `process.env` (the gh runners do)
-puts that value in the arguments, and a failing assertion prints them: w1519's first run printed a real token into the worker's
-transcript this way. Tests also pass `env: {}`, or their own fake values, to code that would otherwise read `process.env`. On
-Windows, the 11 tests that fail on a clean `main` (measured 2026-10-19, beast) are the same with or without the variable.
+**The tests never see a credential** (w1519, w1584). A worker's environment holds its person's vault token as `GH_TOKEN`; w1519's
+first run printed it into the worker's transcript through a failing assertion. `npm test` and `npm run test:coverage` load
+`scripts/testEnv.ts` first, which deletes every credential variable (by name, or by a token-shaped value), so they are safe to
+run as they are. A single file run by hand gets the same with `node --import ./scripts/testEnv.ts --test server/x.test.ts`.
+A test that needs a token sets a fake one (`ghp_` plus a repeated `FAKE`, built at run time so gitleaks passes it), and code
+that would read `process.env` gets `env: {}` or fake values.
 
 ## Tests
 

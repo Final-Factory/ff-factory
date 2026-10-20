@@ -87,6 +87,10 @@
 #                                       it to FILE (0600), never the screen, and --create-member makes the login first (a member,
 #                                       a random password nobody sees). Never an owner's login, never ben's or lothsahn's, never a
 #                                       key that acts for the owner or has a scope (node server/apikey.ts; docs/ops-worker.md)
+#   fffctl scrub-secrets [--dry-run]    mask every vault value and token shape already on disk (w1584): the data folder (transcripts,
+#                                       saved generations of state.json and work.json, logs) and the portal account's Claude Code
+#                                       transcripts. Prints paths and counts, never a value; the last line is "remaining: N", and
+#                                       "remaining: 0" means none is left. --dry-run counts only (node server/scrubSecretsCli.ts)
 #   fffctl migrate --key | --dry-run-copy | --rollback-dry-run | --cut-over [--ssh USER@HOST]
 #                                       move the portal from BEAST into this VM, pulling its config, data and conversations
 #                                       over ssh (deploy/vm/RUNBOOK.md "Dry run" and "Cut-over"; fffctl migrate --help)
@@ -450,6 +454,12 @@ cmd_base_clone() {
 vault_cli() {
   [ -e "$CURRENT/server/vaultCli.ts" ] || die "the current release has no vault (fffctl update first)"
   (cd "$CURRENT" && FFF_VAULT_KEY_FILE=$FFF_VAULT_KEY FFSB_CONFIG=$FFF_ROOT/config/config.json node server/vaultCli.ts "$@")
+}
+
+# Secrets already on disk (w1584), through the portal's own code as root (the vault key opens its values): file owners kept.
+scrub_cli() {
+  [ -e "$CURRENT/server/scrubSecretsCli.ts" ] || die "the current release has no server/scrubSecretsCli.ts (fffctl update first)"
+  (cd "$CURRENT" && FFF_VAULT_KEY_FILE=$FFF_VAULT_KEY FFSB_CONFIG=$FFF_ROOT/config/config.json node server/scrubSecretsCli.ts --claude-projects "$FFF_ROOT/home/.claude/projects" "$@")
 }
 
 # API keys for member logins (w1415), through the portal's own code as the portal's account, so users.json and
@@ -890,6 +900,7 @@ case "${1:-status}" in
   vault) shift; cmd_vault "$@" ;;
   machine-credential) shift; vault_cli machine-credential "$@" ;;
   apikey) shift; apikey_cli "$@" ;;
+  scrub-secrets) shift; case "${1:-}" in '' | --dry-run) [ $# -le 1 ] || die "fffctl scrub-secrets [--dry-run]"; scrub_cli "$@" ;; *) die "fffctl scrub-secrets [--dry-run]" ;; esac ;;
   -h | --help | help) sed -n '2,/^set -o/{/^#/p}' "$0" ;;
   *) die "unknown command $1 (fffctl help)" ;;
 esac

@@ -1,4 +1,4 @@
-import { redactValue } from './secrets.ts';
+import { redactInPlace, redactValue } from './secrets.ts';
 import { SnapshotFile, dataRecoveries, isObject, readJsonDurable, writeFileDurable, type Check } from './durable.ts';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,7 +11,11 @@ import { meterStates, type MeterStates } from './meterStates.ts';
 /** Everything the UI hears about goes through here and out the WebSocket. */
 export const bus = new EventEmitter<{ event: [ServerEvent] }>();
 bus.setMaxListeners(100);
-export const emit = (e: ServerEvent) => bus.emit('event', e);
+/**
+ * Every event leaves with its secrets redacted (w1584): a streamed delta, a notice, a session's result or a work item's
+ * log never shows a vault token or a token shape on a page. Transcript events are redacted when they are recorded.
+ */
+export const emit = (e: ServerEvent) => bus.emit('event', e.type === 'transcript' || e.type === 'machine_stats' ? e : redactValue(e));
 
 interface Persisted {
   /**
@@ -172,8 +176,8 @@ export class Store {
   }
 
   putSession(s: SessionInfo) {
-    // A permission prompt shows a tool call's arguments: never a Claude OAuth token in state.json or on screen.
-    if (s.pendingPermissions.length) s.pendingPermissions = redactValue(s.pendingPermissions);
+    // A permission prompt's tool arguments, a result, a status detail: never a secret in state.json or on screen (w1584).
+    redactInPlace(s);
     this.sessions.set(s.id, s);
     this.save();
     emit({ type: 'session', session: s });
@@ -186,6 +190,7 @@ export class Store {
   }
 
   putStanding(a: StandingAgent) {
+    redactInPlace(a);
     this.standing.set(a.id, a);
     this.save();
     emit({ type: 'standing', agent: a });
@@ -198,6 +203,7 @@ export class Store {
   }
 
   putDelegation(d: DelegationRequest) {
+    redactInPlace(d);
     this.delegations.set(d.id, d);
     this.save();
     emit({ type: 'delegation', request: d });
@@ -205,6 +211,8 @@ export class Store {
 
   /** Save a work item (data/work.json, its own file: state.json is rewritten on every session update). */
   putWork(w: WorkItem) {
+    // Its log lines, DONE reports, [needs you] text and notes: never a secret in work.json or on screen (w1584).
+    redactInPlace(w);
     this.work.set(w.id, w);
     this.saveWork();
     emit({ type: 'work', item: w });
@@ -512,6 +520,20 @@ export class Store {
   }
 
   /** Save now, on the main thread (shutdown, tests): state.json, and the work ledger when it has changes. */
+  /**
+   * Redact every session, standing agent, delegation and work item held (w1584): records saved before their store redacted
+   * (a result or a log line with a token). Run at start, before the files are scrubbed. How many strings changed.
+   */
+  scrubSecrets(): number {
+    let n = 0;
+    for (const m of [this.sessions, this.standing, this.delegations]) for (const v of m.values()) n += redactInPlace(v);
+    if (n) this.save();
+    let w = 0;
+    for (const v of this.work.values()) w += redactInPlace(v);
+    if (w) this.saveWork();
+    return n + w;
+  }
+
   flush() {
     if (this.workFile.pending) this.workFile.flushSync();
     this.stateFile.flushSync();

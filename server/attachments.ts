@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes, randomInt } from 'node:crypto';
+import { redactFileText } from './scrubSecrets.ts';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -242,14 +243,17 @@ export class AttachmentStore {
       this.cancel(meta.uploadId);
       throw new AttachmentError(422, `${meta.name} arrived damaged (sha256 ${sha256.slice(0, 12)}…, expected ${meta.sha256.slice(0, 12)}…); publish it again`);
     }
-    const blob = this.blobPath(sha256);
+    // A text file (a log a worker publishes, a person's paste) is kept with its secrets masked (w1584): what is stored, sent
+    // to a worker's Inbox and shown is the masked copy, under its own SHA-256.
+    const { sha256: kept, size } = await redactTextFile(file, meta.name, sha256, meta.size);
+    const blob = this.blobPath(kept);
     fs.mkdirSync(path.dirname(blob), { recursive: true });
-    if (fs.existsSync(blob) && fs.statSync(blob).size === meta.size) fs.rmSync(file, { force: true });
+    if (fs.existsSync(blob) && fs.statSync(blob).size === size) fs.rmSync(file, { force: true });
     else fs.renameSync(file, blob);
     fs.rmSync(this.metaPath(meta.uploadId), { force: true });
     const now = new Date(this.now()).toISOString();
     const { kind, mediaType } = attachmentKind(meta.name);
-    const rec: AttachmentRecord = { id: this.newId(), name: meta.name, size: meta.size, sha256, kind, mediaType, ...(meta.uploadedBy ? { uploadedBy: meta.uploadedBy } : {}), ...(meta.source ? { source: meta.source } : {}), createdAt: now, lastUsedAt: now };
+    const rec: AttachmentRecord = { id: this.newId(), name: meta.name, size, sha256: kept, kind, mediaType, ...(meta.uploadedBy ? { uploadedBy: meta.uploadedBy } : {}), ...(meta.source ? { source: meta.source } : {}), createdAt: now, lastUsedAt: now };
     this.records.set(rec.id, rec);
     this.save();
     return rec;
@@ -528,6 +532,23 @@ export async function publishableFile(
   );
   if (!inside.some(Boolean)) throw new AttachmentError(403, `${raw}: ${outside}`);
   return { path: real, size: st.size };
+}
+
+/** Text attachments whose secrets are masked on arrival (w1584): logs, text, JSON, Markdown, CSV, up to 64 MB. */
+const REDACTED_TEXT = /\.(?:log|txt|json|jsonl|md|csv|ya?ml)$/i;
+const REDACT_MAX_BYTES = 64 * 1024 * 1024;
+
+/** Mask the secrets of a text attachment in place (server/scrubSecrets.ts); its SHA-256 and size, new when it changed. */
+export async function redactTextFile(file: string, name: string, sha256: string, size: number): Promise<{ sha256: string; size: number; redacted: number }> {
+  if (!REDACTED_TEXT.test(name) || size > REDACT_MAX_BYTES) return { sha256, size, redacted: 0 };
+  const buf = await fs.promises.readFile(file);
+  // A file that is not UTF-8 text (a binary under a text name) is kept as it came.
+  const text = buf.toString('utf8');
+  if (Buffer.byteLength(text) !== buf.length) return { sha256, size, redacted: 0 };
+  const { text: clean, n } = redactFileText(name, text);
+  if (!n) return { sha256, size, redacted: 0 };
+  await fs.promises.writeFile(file, clean);
+  return { sha256: await sha256File(file), size: Buffer.byteLength(clean), redacted: n };
 }
 
 /** A file's SHA-256, read as a stream. */
