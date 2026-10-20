@@ -206,7 +206,7 @@ test("every machine worker's brief: the same Discord rules in a machine sandbox"
   const { agents, machines } = await setupOnMachine(t);
   const brief = (agents as unknown as { machineSandboxBrief: (m: unknown, sb: unknown) => string }).machineSandboxBrief(machines.require('pc'), machines.requireSandbox('pc', 'alpha'));
   // FFBox's channels and the no-"fixed"-post rule are CLAUDE.md's, said once (w1482); the brief points there.
-  assert.match(brief, /## Discord\nCLAUDE\.md's "Discord: FFBox owns #bug-reports" binds you: read and download there, never post, and no "fixed" post after an `ffbox\/\*` merge/);
+  assert.match(brief, /## Discord\nCLAUDE\.md's "Discord: FFBox owns #bug-reports" binds you: read and download there, never post with `ffdiscord`, and no "fixed" post after an `ffbox\/\*` merge\. A word your work needs to a reporter there \(asking for a save\) goes through FFBox: `mcp__machine__post_as_max` with channel conversation/);
   assert.ok(brief.includes('`Discord: https://discord.com/channels/<guild id>/<thread id>`'));
   assert.ok(brief.includes('`Report: <report id>`'));
 });
