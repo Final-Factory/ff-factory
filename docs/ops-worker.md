@@ -119,6 +119,20 @@ Its `ssh`, `scp`, `sftp`, `fffctl` and `fff-machine-ssh` are wrappers on its PAT
 
 ## A new machine
 
+**The short way since w1592: a join code, and no job for this worker.** lothsahn: "I can connect to tailscale and then it
+should contact the portal to set itself up with an installer." An owner asks their orchestrator or the dispatcher for a
+code ("add desktop-coosego with a join code": `add_machine` `join_code`, owners only, in their own words); a person at the
+PC, connected to Tailscale, runs `irm https://<the portal>/join/windows.ps1 | iex` (a Mac or Linux PC:
+`bash -c "$(curl -fsSL https://<the portal>/join/unix.sh)"`) and types the code. The bootstrap installs the missing tools,
+turns on OpenSSH Server with a tailnet-only firewall rule, enrols the PC (the portal answers its credential once, into a
+private file on the PC), runs the installer below with the right answers (which puts the portal's key in place and pins the
+host key) and deletes the file. The code works once, for an hour, and only from the tailnet device it was made for. The
+one step left is the tailnet: a PC tagged `tag:fff-worker` once the policy has the block in
+[worker-install.md](worker-install.md#the-tailnet-w1592), or named in the `tcp:22` grant as before. Everything, with the
+decisions and what each rests on: [worker-install.md](worker-install.md#adding-a-machine-with-a-join-code-w1592). After
+the join, updates are this worker's as always (`machine_update`). The route below stays for a machine that cannot run the
+bootstrap, and for a person who would rather.
+
 Lothsahn, 2026-10-07 (w676): "Make the op machine worker able to run fff-machine-ssh", then "And any other commands
 necessary to install a new worker". The motive: Ben's biscuit setup asked the worker for `fff-machine-ssh --check` and it
 answered `command not found`, so it read the key line out of m3's `authorized_keys` instead.

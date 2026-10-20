@@ -109,6 +109,9 @@ restarts on failure, and, when someone is logged on, is running. It fails until 
 another folder that a non-administrator run could not replace counts as missing. Re-running the installer repairs it,
 the uninstall removes it, and `check` lists it.
 
+**The short way for a new machine: a join code** (w1592): an owner asks for one, and one line at the PC does the rest,
+record and credential included ([Adding a machine with a join code](#adding-a-machine-with-a-join-code-w1592)).
+
 **A new machine needs its record first** (w676). The installer's check `GET /machine/whoami` answers 401 for a
 credential whose machine has no record ("no machine record has it"), and the daemon's link is refused the same way. A
 person adds it through the dispatcher: `add_machine <id> worker_install` (with `ssh_host user@host` when the portal
@@ -123,6 +126,121 @@ issue <id> --out /tmp/<id>.cred` writes one to a 0600 file and never prints it. 
 it to the installer with `-CredentialFile` / `--credential-file` (deleted by hand afterwards), or paste it at the hidden
 prompt. Everything else a worker needs (the Claude token, the GitHub token) comes from the vault with each run, so the
 installer asks for no other secret. A migration needs none: it keeps the token the old daemon already has.
+
+### Adding a machine with a join code (w1592)
+
+**TL;DR:** an owner asks for a join code; at the new PC, connected to Tailscale, a person runs one line and types the code.
+The PC checks its tools and installs the missing ones, turns on OpenSSH Server, enrols itself with the portal, runs this
+installer with the right answers and shows what the portal sees. No credential passes through chat or the screen.
+
+lothsahn asked for it on 2026-10-20 (w1592): "Can you make an installer I can run so this is easier in the future? I can
+connect to tailscale and then it should contact the portal to set itself up with an installer." The manual route below
+and in [ops-worker.md](ops-worker.md#a-new-machine) still works; this one replaces its steps 1, 3 and 4 and the ops
+worker's whole job.
+
+1. **An owner asks for the code**, in their own words, from their orchestrator or the dispatcher's chat: "add desktop-coosego
+   with a join code". The dispatcher runs `add_machine` with `join_code` (and `tailnet_name` when the PC's tailnet name
+   differs from the id; limits if the owner gives any). It makes the record ("Setting up", waiting for its join bootstrap)
+   and answers the code, valid for an hour, and the command to run.
+2. **At the PC**, in a normal PowerShell (not "Run as administrator"):
+
+   ```powershell
+   irm https://<the portal>.<tailnet>.ts.net/join/windows.ps1 | iex
+   ```
+
+   A Mac or a Linux PC, in a terminal: `bash -c "$(curl -fsSL https://<the portal>.<tailnet>.ts.net/join/unix.sh)"`.
+   It asks for the code, shows the machine id and the limits it will use, and asks once before it changes anything.
+   Options: `-Root D:\ffw`, `-MaxSandboxes N`, `-MaxAgentsPerSandbox N`, `-MaxUnity N`, `-DryRun` (checks everything, changes
+   nothing, leaves the code unused), `-Yes` (asks nothing but the code), `-Tag` and `-NoTag` (the tailnet tag, below). To
+   pass them: `& ([scriptblock]::Create((irm https://<the portal>/join/windows.ps1))) -DryRun`.
+3. **Once per tailnet, by a tailnet admin**, the policy block in [The tailnet](#the-tailnet-w1592); then each new PC
+   either takes the tag at its join or is named in the grant. Until then the daemon works and only the portal's updates
+   over ssh wait.
+
+What the Windows bootstrap (`scripts/worker/join.ps1`) does, in order:
+
+1. Finds the portal: the portal serves the script with its own tailnet URL written in (`GET /join/windows.ps1`), and the
+   script checks `/api/health`. It reads this PC's tailnet name and tags from `tailscale status --json`.
+2. Checks the code with the portal (`POST /machine/join` with `check`: nothing changes, the code stays unused) and shows
+   the machine id and the limits.
+3. **The tools**: node 22.6+, git 2.48+, git-lfs and Claude Code. On a yes it installs the missing ones with winget
+   (`OpenJS.NodeJS.LTS`, `Git.Git`, `GitHub.GitLFS`) and Claude Code with its own installer (`irm https://claude.ai/install.ps1 | iex`,
+   which updates itself, as [Claude Code's setup page](https://code.claude.com/docs/en/setup) recommends). No winget: it
+   says to install App Installer from the Microsoft Store, and lists the commands. **Unity Hub and its editors are
+   reported, never installed**: an editor is several GB, its licence needs the person's own Unity sign-in, and the version
+   is the game repo's (`ProjectSettings/ProjectVersion.txt`), so the person installs it in Unity Hub.
+4. **OpenSSH Server**, in one administrator prompt: `Add-WindowsCapability OpenSSH.Server` when it is missing, the `sshd`
+   service started and set to start with Windows, and an inbound firewall rule `FFFactory-sshd-tailnet` ("FF Factory:
+   OpenSSH Server from the tailnet") for TCP 22 from the tailnet's addresses only (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`).
+   Skipped, with no prompt, when all three are already there.
+5. **Enrols**: `POST /machine/join` with the code. The portal makes the record (or updates the waiting one), issues the
+   machine's credential and answers it once. The script writes it straight into `machine-credential` in a new folder
+   under `%TEMP%` whose ACL is this account only, and shows its last four characters.
+6. **Installs**: this installer (`install.ps1` from ff-factory's main) with `-Root -PortalUrl -MaxSandboxes
+   -MaxAgentsPerSandbox -MaxUnity -CredentialFile`: the Dev Drive, the clone, the daemon's task, the firewall rules for the
+   player slots, **the portal's key in `administrators_authorized_keys` with its ACL, and this PC's host keys pinned on the
+   portal** ([The portal's ssh](#the-portals-ssh-w568)), which is why OpenSSH Server comes first. Then it deletes the
+   credential file, and the folder it made for it, whether the installer succeeded or not. It deletes nothing else.
+7. **Shows what the portal sees**: `GET /machine/whoami` (online, the daemon's commit, the root) and `GET /machine/ssh?check=1`
+   (whether the portal's ssh gets in). When it does not, it offers the tailnet tag (below), else prints the admin's step.
+
+The Mac and Linux bootstrap (`scripts/worker/join.sh`) does the same with Homebrew for the tools (Linux: it names what to
+install), checks Remote Login (sshd) and says how to turn it on (System Settings > General > Sharing > Remote Login;
+`systemsetup -setremotelogin on` needs Full Disk Access on a current macOS, so a person flips it), and writes the credential
+into a 0600 file in a 0700 `mktemp -d` folder.
+
+**Run again on an installed PC** (its daemon's task points at a root with `root.json`, or `-Root` names one), it needs no
+code: it updates the install (`install.ps1 -Update -Root <root>`, with any limit given) and checks the tools and OpenSSH
+Server again. A PC whose first run stopped before the installer finished asks for a new code; the owner's new code
+replaces the old one, and the portal updates the same record, never a second one.
+
+**The decisions, and what each rests on:**
+
+| Decision | Chosen | Why |
+|---|---|---|
+| How the PC proves it may join | A one-use code, 100 bits (20 characters of Crockford base32, `XXXXX-XXXXX-XXXXX-XXXXX`), valid 60 minutes, bound to one machine id, the limits the owner gave and **one tailnet device**: the portal runs `tailscale whois` on the request's address and refuses any other device. Only its SHA-256 is kept (`data/machine-joins.json`, 0600); one code per machine, a new one replaces it; `remove_machine` drops it | Creating it is `add_machine`, a user-asked tool that runs only for a person's own words, and `join_code` also requires an owner (`ownerOnlyProblem`, as owner-only settings do): the same guarantee as today. The code is shown in chat once, so the device binding is what makes a copy useless: an agent that read it on another machine is refused (its whois names another device), the code dies at its first use, and it lapses in an hour. The credential itself goes from the portal to a file on the PC over the tailnet's HTTPS, never through chat |
+| Where the join is answered | Tailnet only: `/machine/join` and `/join/*` refuse a Funnel request (`Tailscale-Funnel-Request`) and any address outside the tailnet (`tailnetOnly`, as the orchestrator chat does); 10 wrong codes from one address in 15 minutes and it answers 429 | The portal is also on the public internet through Funnel, and the new PC is on the tailnet by definition |
+| The tailnet | The tag `tag:fff-worker`, granted port 22 from `tag:fff-portal` once in the policy; the bootstrap offers `tailscale login --advertise-tags=tag:fff-worker` (a tag owner's browser sign-in) only when the portal's ssh does not get in, and never with `-Yes`; otherwise it prints the admin console step | Only a tag owner or admin may apply a tag, and the CLI needs a sign-in to do it ([Tailscale: tags](https://tailscale.com/kb/1068/tags): "To assign tags to a device using the CLI, run `tailscale login` command with the `--advertise-tags=tag:<tag-name>` flag"; `tailscale set` has no such flag, [CLI](https://tailscale.com/kb/1080/cli)). A tagged device's key expiry is off by default, which removes the "Disable key expiry" step. But a tagged device leaves its user's identity ("Applying a tag to a device previously authenticated with a user account removes the user account"), so the `autogroup:member` grants stop covering it: the policy block gives `tag:fff-worker` the same reach a member device has. Naming each PC in the grant, as today, still works and needs an admin each time |
+| Default limits | Unity editors: one per 16 GB of RAM above 8 GB and per 4 logical CPUs, 1 to 4. Sandboxes: editors + 1, at most one per 60 GB free on the root's drive, 1 to 8. Agents per sandbox: 2. No RAM figure: the installer's 3, 2, 2. A limit the owner gave with the code wins; one given at the PC wins over both; `add_machine` and `machine_update` change them later | A guess built on measurements: four Unity processes building took about 45 GB on LothDesktop's 64 GB (w469, [unity-lifecycle.md](unity-lifecycle.md#unity-slots-every-editor-counts)), about 12 GB for an editor with its build; a sandbox takes 15 to 125 GB (w511, above); a Claude process about 0.6 GB (portal-on-ffbox-host.md). 64 GB and 24 CPUs give 3 editors and 4 sandboxes, what LothDesktop runs |
+| Rerun | An installed PC updates with no code; a waiting record is reused; an installed id refuses a code ("run the bootstrap on it again"); an ssh-deployed id refuses one too (migrate it) | One record and one credential per machine; a code for an installed machine would only cut its daemon off |
+
+**What it never does**: print or log a credential (the portal logs the code's and the credential's last four only), put the
+code on a command line (it is typed at a prompt, which PowerShell keeps out of its history), install a Unity editor, change
+the tailnet policy, make an ssh key, or delete anything but the folder it made. OpenSSH Server and the `FFFactory-sshd-tailnet`
+rule stay after an uninstall: a Windows feature the person may use; remove them by hand if not wanted.
+
+**Tests**: `server/machineJoin.test.ts` (codes, hashes, expiry, defaults, whois), `server/machineJoinHttp.test.ts` (tailnet
+only, device binding, check versus redeem, one use, throttle, dry-run portal), and `scripts/join.test.ts`, the dry run
+against a test enrolment: both bootstraps against a local portal running the real join routes, with a fake tailscale and a
+fake installer. A `-DryRun` leaves the code unused; a join hands the installer a private credential file that is gone
+afterwards, the credential and the code never reach the output, and the code then fails; a second run on an installed PC
+updates it with no code. The Windows-only steps (winget, the OpenSSH Server prompt, the Dev Drive) run for the first time
+on a real PC.
+
+### The tailnet (w1592)
+
+The portal reaches machines over ssh only through the tailnet policy's `tcp:22` grant from `tag:fff-portal`. For PCs that
+join with a code, a tailnet admin adds this once (Access controls; [RUNBOOK](../deploy/vm/RUNBOOK.md) section 1 has the
+rest of the policy). `<owner logins>` are the people who may tag a PC at its join (an admin always may):
+
+```jsonc
+"tagOwners": { "tag:fff-portal": ["autogroup:admin"], "tag:fff-worker": ["autogroup:admin", "<owner logins>"] },
+"grants": [
+  // ...the grants already there, then:
+  // a tagged worker keeps what a member device had: people's devices reach it, it reaches them and the other workers
+  { "src": ["autogroup:member", "tag:fff-worker"], "dst": ["tag:fff-worker"], "ip": ["*"] },
+  { "src": ["tag:fff-worker"], "dst": ["autogroup:member"], "ip": ["*"] },
+  // it reaches the portal's HTTPS
+  { "src": ["tag:fff-worker"], "dst": ["tag:fff-portal"], "ip": ["tcp:443"] },
+  // and the portal reaches it over ssh, and nothing else
+  { "src": ["tag:fff-portal"], "dst": ["tag:fff-worker"], "ip": ["tcp:22"] }
+],
+"tests": [ { "src": "tag:fff-portal", "accept": ["tag:fff-worker:22"], "deny": ["tag:fff-worker:443"] } ]
+```
+
+Then a PC takes the tag at its join (the bootstrap's offer, a tag owner signing in), or an admin adds it in the admin
+console (Machines, the PC, Edit ACL tags). Without the block, an admin names the PC in the existing grant instead and
+turns off its key expiry, as for the machines added before.
 
 ### Updating
 

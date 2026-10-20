@@ -27,7 +27,7 @@ async function serve(over: Partial<MachineSshDeps> = {}) {
     const r = await fetch(url, { ...init, headers: { ...(init.auth ? { authorization: init.auth } : {}), 'content-type': 'application/json' } });
     return { status: r.status, body: (await r.json()) as Record<string, unknown> };
   };
-  return { call, registered, close: () => server.close() };
+  return { call, url, registered, close: () => server.close() };
 }
 
 test('machine ssh http: only a machine\'s own credential gets the key line or registers anything', async (t) => {
@@ -63,4 +63,12 @@ test('machine ssh http: no portal key is a 404 the installer reports; no tailnet
   assert.equal((await s2.call({ auth: GOOD })).body.authorizedKey, `no-agent-forwarding,no-port-forwarding,no-X11-forwarding ${PUB}`);
   assert.deepEqual(await s2.call({ method: 'POST', auth: GOOD, body: JSON.stringify({ user: 'b', host: 'm3', hostKeys: [ED] }) }), { status: 409, body: { error: 'this portal is a dry run' } });
   assert.deepEqual(s2.registered, []);
+});
+
+test('machine ssh http: GET ?check=1 says whether the portal\'s ssh gets in now (w1592), for its own machine only', async (t) => {
+  const s = await serve({ check: async (id) => ({ host: `benryding@${id}`, reachable: false, detail: 'Operation timed out' }) });
+  t.after(s.close);
+  const r = await fetch(`${s.url}?check=1`, { headers: { authorization: GOOD } });
+  assert.deepEqual(await r.json(), { host: 'benryding@m3', reachable: false, detail: 'Operation timed out' });
+  assert.equal((await fetch(`${s.url}?check=1`, { headers: { authorization: 'Bearer ffm_m3_wrong' } })).status, 401);
 });

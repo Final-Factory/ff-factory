@@ -70,6 +70,10 @@ import { startBaseRefresh } from './baseRefresh.ts';
 import { DRY_RUN_BANNER, DRY_RUN_WHY, dryRun } from './dryRun.ts';
 import { portalPublicKey, tailnetAddress } from './machineSsh.ts';
 import { machineSshHttp } from './machineSshHttp.ts';
+import { tailscaleWhois } from './machineJoin.ts';
+import { machineJoinHttp } from './machineJoinHttp.ts';
+import { issueMachineToken } from './machineTokens.ts';
+import { originOf } from './remoteChat.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -291,6 +295,27 @@ machines.sandboxEvent = (machineId, text, e) => {
     }
   }
 };
+// A new PC joining with an owner's join code (w1592, server/machineJoinHttp.ts): tailnet-only; the code, and the device
+// `tailscale whois` names, decide. The credential goes back to the bootstrap once, which writes it into a file.
+const joinHttp = machineJoinHttp({
+  codes: machines.joins,
+  records: { get: (id) => store.machines.get(id) },
+  whois: async (addr) => tailscaleWhois((await import('./proc.ts')).run, addr),
+  enrol: ({ machineId, tailnetName, limits, portalUrl }) => {
+    machines.deployMachine({ id: machineId, workerInstall: true, host: tailnetName, portalUrl, ...limits });
+    return issueMachineToken(cfg.dataDir, machineId);
+  },
+  portalUrl: (req) => originOf(req) || (cfg.publicUrl ?? '').replace(/\/+$/, ''),
+  script: (kind) => {
+    try {
+      return fs.readFileSync(path.join(ROOT, 'scripts', 'worker', kind === 'windows' ? 'join.ps1' : 'join.sh'), 'utf8');
+    } catch {
+      return undefined;
+    }
+  },
+  refused: () => (dryRun() ? DRY_RUN_WHY : undefined),
+  report: (text) => machines.report?.(text),
+});
 machines.report = (text) => {
   console.log(text);
   const orch = store.orchestratorId;
@@ -1831,6 +1856,9 @@ const server = http.createServer(async (req, res) => {
       const machineId = machines.authenticate(req.headers.authorization);
       return await reviewHttp(review, machineId && store.machines.has(machineId) ? machineId : undefined, req, res, reviewUpload[1], Number(url.searchParams.get('offset') ?? 0));
     }
+    if (url.pathname === '/machine/join' || url.pathname === '/join/windows.ps1' || url.pathname === '/join/unix.sh') {
+      return await joinHttp(req, res, url.pathname);
+    }
     // A worker install setting up the portal's ssh (w568, server/machineSshHttp.ts): its own token, nothing else.
     if (url.pathname === '/machine/ssh') {
       const { run } = await import('./proc.ts');
@@ -1843,6 +1871,7 @@ const server = http.createServer(async (req, res) => {
           publicKey: () => portalPublicKey(),
           tailnetAddress: () => tailnetAddress(run),
           register: (id, ssh) => machines.registerSsh(id, ssh),
+          check: (id) => machines.checkSsh(id),
           refused: () => (dryRun() ? DRY_RUN_WHY : undefined),
         },
         req,
