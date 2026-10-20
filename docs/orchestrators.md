@@ -421,6 +421,13 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      to start the worker and queue its brief. The dispatcher may pass `extra_agent: true` to share on purpose (work that
      needs no editor and no game tree, w1098), never past the per-sandbox limit. A second session for the request already
      there, and `message_agent` with a work_id (w740's new session in the worker's sandbox), are not affected.
+   - **A busy sandbox's branch never moves for new work** (w1607: w1602's `extra_agent` start switched beast/slot1 under
+     w1440's Unity batch build). Busy is a worker there mid-turn, between turns with a background job (a build, a test,
+     a bench: "Working: … between turns"), or a timed run from its folder holding the machine's bench lock
+     (`Agents.busyIn`). An `extra_agent` start, or any request that needs only an agent slot, never switches the
+     sandbox's branch: it sits beside on the branch there. Game work is refused beside a busy worker even with
+     `extra_agent` ("sandbox … is busy"), so it goes to a FREE sandbox or is queued. The hand-over of a released worker's
+     branch (`prepareForNewWork`, docs/machines.md "Placing work") also skips any sandbox with an unreleased worker in it.
    - The dispatcher also re-reads room whenever it acts (`decide_work queue` checks it again, and `start_agent` adds a note when it
      places work on a computer other than the next one), and on every `[ledger] … is unblocked`.
    - The page re-reads room with every state push (`room`, `agentRoom`, `heldRoom` in `AppState`), so its Queued reason

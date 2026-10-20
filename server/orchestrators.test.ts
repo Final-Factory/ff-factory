@@ -19,7 +19,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import type { PrHealth } from '../shared/blockers.ts';
-import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
+import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
 import { LIVE_HOLD_MS } from './placeAgain.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
@@ -3283,7 +3283,8 @@ test("w1089: start_agent refuses a request's worker into a sandbox another reque
   shortSlowTurns(t);
   const { store, sessions, agents, dispatcher, call } = await setupOnMachine(t, {}, { maxAgentsPerSandbox: 2 });
   agentsRoom(agents, ['pc']);
-  putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }, { id: 'w4' }]);
+  // w2 and w3 need only an agent slot: game work never goes beside a mid-turn worker (w1607).
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', needs: 'agent' }, { id: 'w3', needs: 'agent' }, { id: 'w4' }]);
   const start = (wid: string, extra: Record<string, unknown> = {}) => call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: `#slow ${wid}`, title: `${wid}: job`, work_id: wid, ...extra });
   const first = await start('w1');
   assert.equal(first.isError, false, first.text);
@@ -3306,6 +3307,90 @@ test("w1089: start_agent refuses a request's worker into a sandbox another reque
   assert.match(full.text, /sandbox pc\/alpha is full: .*2 agents mid-turn there \(max_agents_per_sandbox 2\), so a worker started there would only wait in the send queue/);
   assert.equal(store.work.get('w3')!.status, 'new');
   assert.equal([...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').length, 2);
+});
+
+/**
+ * w1607 as it happened (2026-10-20 04:35 UTC, beast/slot1): w1440's worker 9c38a500 was between turns with a Unity batch
+ * build running in the sandbox, on sandbox/slot1-w1440, the branch an earlier w1440 session (80b00fed) had released. The
+ * dispatcher started w1602, an FF Factory change, beside it with extra_agent, and the start's hand-over saw 80b00fed's
+ * branch and switched the worktree under the build. Here: worker A on w1 builds in pc/alpha, released worker R had A's
+ * branch, and B (w2, another repo) and C (w3, game work) arrive.
+ */
+async function busySandbox(t: Parameters<typeof setupOnMachine>[0]) {
+  const env = await setupOnMachine(t, {}, { maxAgentsPerSandbox: 2 });
+  const { store, sessions, machines, agents, dispatcher, call, pc } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', needs: 'agent', repo: 'Final-Factory/ff-factory' }, { id: 'w3' }]);
+  const start = (wid: string, extra: Record<string, unknown> = {}) => call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: `${wid} work`, title: `${wid}: job`, work_id: wid, ...extra });
+  const first = await start('w1');
+  assert.equal(first.isError, false, first.text);
+  const a = sessions.get(/Started agent (\w+)/.exec(first.text)![1]);
+  await until('A is between turns', () => a.live && a.info.status === 'idle');
+  // Its batch build runs in the background: "Working: Unity batch build bench-sl1, between turns".
+  Object.assign(a.info, { backgroundTasks: 1, backgroundJobs: [{ type: 'local_bash', description: 'Unity batch build bench-sl1' }] });
+  const sb = () => machines.requireSandbox('pc', 'alpha');
+  const branch = sb().git?.branch ?? sb().branch;
+  sb().git = { branch, dirty: 0, untracked: 0, at: new Date().toISOString() };
+  // The earlier session of the same work released the sandbox on that branch (80b00fed).
+  const r: SessionInfo = { id: 'r80b00fe', kind: 'worker', title: 'w1: earlier session', status: 'stopped', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 4, costUsd: 1, pendingPermissions: [], sdkSessionId: 'fake-r', machineId: 'pc', machineSandbox: 'alpha', placeReleased: { at: T0, sandbox: 'alpha', branch, why: 'it waits on CI' } };
+  store.putSession(r);
+  sb().sessionIds = [...sb().sessionIds, r.id];
+  const switches: string[] = [];
+  machines.switchBranch = (async (_m: string, to: string) => {
+    switches.push(to);
+    throw new Error(`switched pc/alpha to ${to}`);
+  }) as typeof machines.switchBranch;
+  return { ...env, a, branch, start, switches, alpha: pc.path('alpha') };
+}
+
+test('w1607: a request that needs only an agent slot, started with extra_agent beside a worker with a background build, sits beside it and never switches the sandbox branch', async (t) => {
+  const { agents, start, switches, branch, sessions, store } = await busySandbox(t);
+  const b = await start('w2', { extra_agent: true });
+  assert.equal(b.isError, false, b.text);
+  assert.match(b.text, new RegExp(`Not handed over: pc/alpha stays on the branch ${branch}, which worker r80b00fe released; this worker needs only an agent seat and works in its own clone, so the sandbox's branch was not switched\\.`));
+  assert.deepEqual(switches, [], 'the worktree under the build was not switched');
+  const bs = sessions.get(/Started agent (\w+)/.exec(b.text)![1]);
+  assert.equal(bs.info.machineSandbox, 'alpha', 'B sits beside A');
+  assert.equal(store.work.get('w2')!.sessionIds.includes(bs.info.id), true);
+  // The same request in a FREE sandbox on a released worker's branch is not switched either (needs: agent alone).
+  const prep = await agents.prepareForNewWork('pc/alpha', undefined, 'w2', undefined, true);
+  assert.equal(prep.branch, undefined);
+  assert.deepEqual(switches, []);
+});
+
+test('w1607: game work is refused beside a worker with a background build, extra_agent or not, and the hand-over never switches a sandbox a live worker is in', async (t) => {
+  const { agents, machines, start, switches, a, store, alpha } = await busySandbox(t);
+  const plain = await start('w3');
+  assert.equal(plain.isError, true);
+  assert.match(plain.text, /sandbox pc\/alpha is not free: \w+ "w1: job" \(Working: Unity batch build bench-sl1\)/);
+  const extra = await start('w3', { extra_agent: true });
+  assert.equal(extra.isError, true);
+  assert.match(extra.text, /sandbox pc\/alpha is busy: \w+ "w1: job" is between turns with Unity batch build bench-sl1 running\. Game work never goes beside a busy worker, extra_agent or not/);
+  assert.equal(store.work.get('w3')!.status, 'new', 'nothing was started or linked');
+  // Any other way in (a fresh session, the page's own start): the released worker's branch is A's now, so no switch.
+  const prep = await agents.prepareForNewWork('pc/alpha', undefined, 'w3');
+  assert.equal(prep.branch, undefined);
+  assert.match(prep.note, /Not handed over: pc\/alpha stays on the branch .*, but \w+ "w1: job" is between turns with Unity batch build bench-sl1 running, so it was not switched under them\./);
+  assert.deepEqual(switches, []);
+  // A's build ends; a timed run from the sandbox's folder still holds the machine's bench lock: busy all the same.
+  Object.assign(a.info, { backgroundTasks: 0, backgroundJobs: [] });
+  const stats = machines.statsOf.bind(machines);
+  const lock = { owner: `pc pid 4242 ben 22:34:00 bench-sl1 (${alpha})`, since: new Date().toISOString() };
+  machines.statsOf = ((id: string) => ({ ...(stats(id) ?? {}), benchLock: lock })) as typeof machines.statsOf;
+  const locked = await start('w3', { extra_agent: true });
+  assert.equal(locked.isError, true);
+  assert.match(locked.text, /sandbox pc\/alpha is busy: a timed run there holds pc's bench lock \(pc pid 4242/);
+  assert.deepEqual(switches, []);
+});
+
+test("w1607: a bench lock belongs to the sandbox its run's folder is in, Git Bash's /f/... spelling included", () => {
+  const lock = (dir: string) => ({ owner: `beast pid 812 ben 22:34:00 bench-sl1 (${dir})`, since: T0 });
+  assert.equal(benchLockIn(lock('/f/ffw/sandboxes/slot1'), 'F:\\ffw\\sandboxes\\slot1'), true);
+  assert.equal(benchLockIn(lock('/f/ffw/sandboxes/slot1/scripts/bench'), 'F:/ffw/sandboxes/slot1/'), true);
+  assert.equal(benchLockIn(lock('/f/ffw/sandboxes/slot10'), 'F:\\ffw\\sandboxes\\slot1'), false);
+  assert.equal(benchLockIn(lock('/Users/ben/ffw/sandboxes/slot2'), '/Users/ben/ffw/sandboxes/slot2'), true);
+  assert.equal(benchLockIn({ owner: 'its owner line is not written yet', since: T0 }, '/Users/ben/ffw/sandboxes/slot2'), false);
+  assert.equal(benchLockIn(undefined, '/Users/ben/ffw/sandboxes/slot2'), false);
 });
 
 test('w1099: the capacity ping and the queued-with-room flag list queued requests by priority, then oldest', async (t) => {

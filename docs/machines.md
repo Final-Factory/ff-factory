@@ -864,7 +864,7 @@ LothDesktop and Beast, not just when BEAST is full").
   the editor and RAM-for-Unity limits (the 85% `RAM_BUSY_PCT` line is the game's, an editor's 8-12 GB). What still applies: the
   computer's agent cap (the agents mid-turn, what start_agent's queue counts: `machines.ts` `capFull`), a seat in some
   sandbox (`max_agents_per_sandbox` less the agents mid-turn there, or room to make a sandbox; a second agent in a busy
-  sandbox is fine when the dispatcher says so (`start_agent` `extra_agent: true`; w1089): it works in its own clone in its temp folder, not in the sandbox's game tree), the person's own Claude
+  sandbox is fine when the dispatcher says so (`start_agent` `extra_agent: true`; w1089): it works in its own clone in its temp folder, not in the sandbox's game tree, and its start never switches the sandbox's branch, w1607), the person's own Claude
   pool (a held pool queues the worker's first prompt, docs/vault.md), `placement.hold` (a held computer gets nothing) and
   `placement.avoid` (last). The test is `hasAgentRoom` / `agentBusyReasons` (`server/placement.ts`), side by side with the
   game test `hasRoom`; `roomNow` returns both, and `pickComputer(…, 'agent')` picks the computer (the most agent room,
@@ -1101,7 +1101,14 @@ LothDesktop and Beast, not just when BEAST is full").
     fresh branch, `sandbox/<slot>-<request id>` (`ffbox-f/…` for FFBox work) from origin/master, so the new worker
     never commits on the other's branch. That switch pushes any commits of the old branch no remote has first
     (`switch_branch`'s rule), and it frees the branch for checkout elsewhere (git allows a branch in one worktree only).
-    The tool's answer says it was handed over.
+    The tool's answer says it was handed over. **Never under another worker** (w1607, `Agents.prepareForNewWork`;
+    2026-10-20 04:35 UTC, beast/slot1: w1602's start switched the worktree under w1440's Unity batch build, because an
+    earlier w1440 session had released that same branch): no switch while a worker that has not released the sandbox
+    is there (the branch is its now), while the sandbox is busy (a worker there mid-turn, between turns with a
+    background job such as a build, a test or a bench, or a timed run from its folder holding the machine's bench lock:
+    `Agents.busyIn`), or for work that needs only an agent seat (`extra_agent`, or a request on another repo: it works
+    in its own clone). The answer then says "Not handed over" and why. Game work never starts beside a busy worker,
+    `extra_agent` or not: `start_agent` refuses it ("sandbox … is busy"), so it goes to a FREE sandbox or is queued.
   - **When it resumes** (its check-in, or anyone's message), it is placed again like new work: its own sandbox if that
     is still free (switched back to its branch if someone switched it), else a free sandbox on the same machine whose
     editor is not running first, stopped and switched to its branch (`switch_branch`, so a sandbox with uncommitted
