@@ -466,7 +466,10 @@ test("fleet: an owner sees a quiet \"Live view: go\" on a slot whose view is for
   const both = (s: AppState): AppState => {
     const f = waitingInSb2({ live: true })(s);
     const view: LiveViewInfo = { liveId: 'live-sb1', sessionId: 'l-review', machineId: 'lothdesktop', sandbox: 'sb1', state: 'live', detail: '', fps: 15, width: 960, materials: ['VfxComet'], startedAt: min(8), updatedAt: min(0), frames: 100 };
-    return { ...f, live: [...(f.live ?? []), view] };
+    // A worker copies its orchestrator's lastRequestedBy, which an earlier test of the shared server may have set to the viewer.
+    const lothsahn = { userId: 'lothsahn', displayName: 'Lothsahn' };
+    const sessions = f.sessions.map((x) => (x.id === 'l-review' ? { ...x, requestedBy: lothsahn, lastRequestedBy: lothsahn } : x));
+    return { ...f, sessions, live: [...(f.live ?? []), view] };
   };
   await fixedFleet(page, '#/', both);
   const sidebar = await openSidebar(page);
