@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EVEN_MARGIN, RAM_BUSY_PCT, busyReasons, capacityLines, hasRoom, pickComputer, placementHint, preferLine, roomOf, type Computer, type PlacementPrefs } from './placement.ts';
+import { DEFAULT_LIVE, EVEN_MARGIN, RAM_BUSY_PCT, busyReasons, capacityLines, hasRoom, liveLine, pickComputer, placementHint, preferLine, roomOf, type Computer, type PlacementPrefs } from './placement.ts';
 
 /**
  * Where new work goes (w416): spread by room between the computers with sandboxes ("Game work should be spread between
@@ -132,7 +132,9 @@ test('w428: the capacity block tags each computer, and placing on an avoided BEA
   assert.match(lines[1], /^- beast \[avoided: BEAST unstable, 2026-10-05\]: ROOM \d+%: 0 live agents of 6/);
   assert.match(lines[2], /^- lothdesktop \[preferred #1\]: ROOM \d+%/);
   assert.match(lines[3], /^Next new game-repo work: lothdesktop \(first with room in placement\.prefer/);
-  assert.equal(lines.length, 5, "header, two computers, the next game line and the non-game line");
+  // BEAST avoided: Live view work does not override the avoid (w1600).
+  assert.match(lines[4], /^Next Live view work \(game work whose worker streams a Live view, w1600\): lothdesktop \(Live view work, but beast is avoided \(BEAST unstable, 2026-10-05\); so the general placement: first with room in placement\.prefer/);
+  assert.equal(lines.length, 6, "header, two computers, the next game line, the Live view line and the non-game line");
   assert.match(placementHint('beast', cs, undefined, PREFS) ?? '', /^ Note: beast is avoided \(BEAST unstable, 2026-10-05\); the next new game-repo work goes to lothdesktop \(first with room in placement\.prefer/);
   assert.equal(placementHint('lothdesktop', cs, undefined, PREFS), undefined);
 });
@@ -162,4 +164,55 @@ test('w615: a machine whose GPU Whisper is loaded says how much VRAM it holds; u
   const lines = capacityLines([{ ...BEAST, voiceVramMiB: 1161 }, LOTH]);
   assert.match(lines[1], /; editors 2 of 3; Whisper holds ~1\.1 GB VRAM \(unloaded for the editors when VRAM runs short\); agent slot: free \(5 of 6 mid-turn\)$/);
   assert.doesNotMatch(lines[2], /Whisper/);
+});
+
+/**
+ * Live view work goes to BEAST first (w1600, Ben, 2026-10-19: "can you prioritize beast for stuff that needs live view? live
+ * view is often too slow"), while every other piece of game work keeps the general preference (the m5 and lothdesktop first).
+ */
+const M5_FIRST: PlacementPrefs = { prefer: ['m5', 'lothdesktop'] };
+
+test('w1600: Live view work goes to BEAST first when it has room; other game work keeps placement.prefer', () => {
+  assert.deepEqual(DEFAULT_LIVE, ['beast']);
+  const cs = [idle('beast', 6), idle('lothdesktop', 5), idle('m5', 3)];
+  assert.equal(pickComputer(cs, undefined, M5_FIRST)!.pick.id, 'm5', 'game work: placement.prefer as before');
+  const live = pickComputer(cs, undefined, M5_FIRST, 'game', false, true)!;
+  assert.equal(live.pick.id, 'beast');
+  assert.match(live.why, /^Live view work goes to the first with room in placement\.live \(beast; w1600/);
+  // Work that needs no editor never streams a Live view: the flag changes nothing for it.
+  assert.equal(pickComputer(cs, undefined, M5_FIRST, 'agent', false, true)!.pick.id, 'm5');
+  // placement.live set: its order wins.
+  assert.equal(pickComputer(cs, undefined, { ...M5_FIRST, live: ['LothDesktop', 'beast'] }, 'game', false, true)!.pick.id, 'lothdesktop');
+});
+
+test('w1600: BEAST full, held or avoided: Live view work falls back to the general placement, and says why', () => {
+  const full: Computer = { ...idle('beast', 6), live: 6 };
+  const cs = [full, idle('lothdesktop', 5), idle('m5', 3)];
+  const p = pickComputer(cs, undefined, M5_FIRST, 'game', false, true)!;
+  assert.equal(p.pick.id, 'm5');
+  assert.match(p.why, /^Live view work, but beast is busy \(6 live agents of 6\); so the general placement: first with room in placement\.prefer \(m5 > lothdesktop\)/);
+  const held = pickComputer([idle('beast', 6), idle('m5', 3)], undefined, { ...M5_FIRST, hold: { beast: 'Ben testing' } }, 'game', false, true)!;
+  assert.equal(held.pick.id, 'm5');
+  assert.match(held.why, /beast is held \(Ben testing\)/);
+  const avoided = pickComputer([idle('beast', 6), idle('m5', 3)], undefined, { avoid: { beast: 'unstable' } }, 'game', false, true)!;
+  assert.equal(avoided.pick.id, 'm5');
+  assert.match(avoided.why, /beast is avoided \(unstable\)/);
+  // Nothing has room at all: no pick, and the line says so.
+  assert.equal(pickComputer([full], undefined, {}, 'game', false, true), undefined);
+  assert.equal(liveLine([full, { ...idle('m5', 3), live: 3 }], undefined, {}), 'No computer has room for Live view work now.');
+  assert.equal(liveLine([idle('beast', 6)], undefined, {}), undefined, 'one computer: no line, like preferLine');
+});
+
+test('w1600: the capacity block names where the next Live view work goes, with BEAST\'s bench lock when a timed run holds it', () => {
+  const beast: Computer = { ...idle('beast', 6), benchLock: { owner: 'BEAST pid 4121 worker 21:04:10 probe A round 2 (/f/ffw/sandboxes/slot4)', since: '2026-10-19T21:04:10.000Z' } };
+  const cs = [beast, idle('lothdesktop', 5), idle('m5', 3)];
+  const lines = capacityLines(cs, undefined, M5_FIRST);
+  assert.match(lines[1], /^- beast: ROOM \d+%: .*; its bench lock is held since 21:04Z \(BEAST pid 4121 .*probe A round 2 .*\): a timed run; agent slot/);
+  assert.match(lines[4], /^Next new game-repo work: m5 \(first with room in placement\.prefer/);
+  assert.match(lines[5], /^Next Live view work \(game work whose worker streams a Live view, w1600\): beast \(Live view work goes to the first with room in placement\.live \(beast; .*\); its bench lock is held since 21:04Z .*: its worker waits for it before it starts its editor\)\.$/);
+  assert.match(lines[6], /^Next non-game work/);
+  // start_agent's note for Live view work placed elsewhere names BEAST; for other game work, the m5.
+  assert.match(placementHint('lothdesktop', cs, undefined, M5_FIRST, undefined, 'game', false, true) ?? '', /^ Note: lothdesktop has \d+% room; the next new Live view work goes to beast \(Live view work goes to/);
+  assert.match(placementHint('lothdesktop', cs, undefined, M5_FIRST) ?? '', /the next new game-repo work goes to m5/);
+  assert.equal(placementHint('beast', cs, undefined, M5_FIRST, undefined, 'game', false, true), undefined);
 });

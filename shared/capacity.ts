@@ -68,3 +68,17 @@ export function resolveNeeds(o: { needs?: 'game' | 'agent'; repo?: string; title
 
 /** What a request needs of a computer: its stored `needs`, game when absent. */
 export const needsOf = (w: Pick<WorkItem, 'needs'>): 'game' | 'agent' => w.needs ?? 'game';
+
+/** A Live view named in words (w1600): "Live view", "live-view", "liveview", any case. */
+export const LIVE_VIEW_WORDS = /\blive[ -]?view\b/i;
+
+/**
+ * Whether a request needs a Live view (w1600, Ben: "can you prioritize beast for stuff that needs live view? live view is
+ * often too slow"): game work (never work that needs only an agent slot) whose worker started one (`liveView`), or whose
+ * title, brief or people's notes ask for one ("i want live view", w1468), or `text` does (a dispatcher's brief).
+ */
+export function needsLive(w: Pick<WorkItem, 'needs' | 'liveView' | 'title' | 'brief' | 'notes'> | undefined, text = ''): boolean {
+  if (w && needsOf(w) === 'agent') return false;
+  if (w?.liveView) return true;
+  return LIVE_VIEW_WORDS.test(`${w ? `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}\n` : ''}${text}`);
+}

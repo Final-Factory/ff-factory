@@ -2,7 +2,7 @@
 // first (with its own daemon's sandboxes when it has one, as BEAST does; the portal itself holds none, w510), then each
 // machine, each with its sandboxes and the agents in them (every worker runs in a sandbox, w536). Pure, so the server's
 // tests can check it and the browser can run it.
-import type { AppState, HostStats, LiveViewInfo, Machine, MachineSandbox, MachinePlatform, PlayerSeen, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState, WorkItem } from './types.ts';
+import type { AppState, HostStats, LiveViewInfo, Machine, MachineSandbox, MachinePlatform, PlayerSeen, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState, UserRole, WorkItem } from './types.ts';
 import { AGENT_STATE_RANK, agentState, holdsSandbox, placeRank, sortAgents } from './agentState.ts';
 import { holdsOf, workLiveAll } from './workState.ts';
 
@@ -162,10 +162,15 @@ function agentsIn(ids: string[], byId: Map<string, SessionInfo>, ledger: ChatLed
  * should pipe it through you and then i answer you. i want to stay in this chat to the extent possible"): the question is
  * answered in the person's orchestrator chat ([needs you] and its buttons), and "Needs you" is a permission's alone. A Live
  * view running while its worker is between turns is a wait on the person who asked for that worker as well, said or not: the
- * knobs are theirs to move (docs/live-view.md). Undefined when nothing here waits on the viewer.
+ * knobs are theirs to move (docs/live-view.md). Undefined when nothing here waits on the viewer and no view up here is one they
+ * may watch.
+ *
+ * w1599 (lothsahn: "Give everyone a button to go to the live view even if it's not theirs"): a view up that waits on nobody
+ * here is still one the viewer may watch (the session's requester, or an owner: `LiveHub.canWatch`), so it gets the same
+ * button in a quiet style, kind 'watch'. That one calls nobody: no amber, no "Asked you", and the FREE chip stays.
  */
 export interface SlotCall {
-  kind: 'live' | 'asked';
+  kind: 'live' | 'asked' | 'watch';
   session: SessionInfo;
   /** The request it waits on, when the ledger says ("w1325"). */
   request?: string;
@@ -175,7 +180,7 @@ export interface SlotCall {
 export function slotCall(
   agents: Pick<PlaceAgents, 'shown' | 'older' | 'waits'>,
   views: readonly LiveViewInfo[] | undefined,
-  me: { userId: string; displayName: string } | undefined,
+  me: { userId: string; displayName: string; role?: UserRole } | undefined,
 ): SlotCall | undefined {
   if (!me) return undefined;
   const name = me.displayName.toLowerCase();
@@ -186,7 +191,9 @@ export function slotCall(
   if (mine[0]) return { kind: 'asked', session: mine[0].session, request: mine[0].request, label: 'Asked you' };
   const asked = (s: SessionInfo) => [s.requestedBy, s.lastRequestedBy].some((r) => r?.userId.toLowerCase() === me.userId.toLowerCase());
   const idle = [...agents.shown, ...agents.older].find((s) => s.status !== 'running' && s.status !== 'starting' && streams(s) && asked(s));
-  return idle && { kind: 'live', session: idle, label: 'Live view: go' };
+  if (idle) return { kind: 'live', session: idle, label: 'Live view: go' };
+  const watch = [...agents.shown, ...agents.older].find((s) => streams(s) && (me.role === 'owner' || asked(s)));
+  return watch && { kind: 'watch', session: watch, label: 'Live view: go' };
 }
 
 const waiting = (a: PlaceAgents) => a.live.reduce((n, s) => n + s.pendingPermissions.length, 0);

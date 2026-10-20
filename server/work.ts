@@ -5,6 +5,7 @@ import { WORK_LIVE_LABEL, type WorkLive } from '../shared/workState.ts';
 import { sourceTag } from './intakeRules.ts';
 import { WORK_OPEN, type AttachmentRef, type Requester, type WorkItem, type WorkOverlap, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { fmtBytes } from '../shared/attachments.ts';
+import { needsLive } from '../shared/capacity.ts';
 
 /** An overlap at or above this is strong: the dispatcher must give a reason to start work on the request anyway. */
 export const STRONG = 0.8;
@@ -334,7 +335,9 @@ export function describeItem(w: WorkItem, workerLine: (id: string) => string, no
   const prs = w.prs?.length ? ` PRs: ${w.prs.map((p) => `#${p.number} ${p.state}`).join(', ')}.` : '';
   const state = now ? ` ${liveLine(now)}:` : '';
   const runs = w.runsFor ? ` Runs for ${w.runsFor.displayName} (${clip(oneLine(w.runsFor.why), 120)}): their Claude pool and GitHub token.` : '';
-  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${runs}${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
+  // w1600: placed by the Capacity block's "Next Live view work" line (BEAST first), not the general one.
+  const live = needsLive(w) ? ` Needs a Live view${w.liveView ? ` (its worker started one on ${w.liveView.machine})` : ''}: place it by "Next Live view work".` : '';
+  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${runs}${live}${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
 }
 
 /**
@@ -552,7 +555,7 @@ export function handoverNote(w: Pick<WorkItem, 'id'>, h: Handover): string {
   }
   if (h.handedBack) {
     const b = h.handedBack;
-    lines.push(`Handed back (w1532): ${w.id} was taken off worker ${b.session} on ${b.from} at ${b.at.slice(0, 16).replace('T', ' ')} UTC, because that machine is ${b.why} (${b.how}). ${b.branch ? `Continue from its branch ${b.branch}: check that your sandbox (or clone) is on it with its pushed commits (git status, git log -3), and fetch and check it out if not, before you change anything.` : 'Its branch is unknown: find its pushed work by the request id (git branch -r, its PRs) before you start over.'} Its worker's note: ${b.note}${b.saved ? ` (${b.saved})` : ''}. Read its log with read_work ${w.id}.`);
+    lines.push(`${b.to ? 'Moved (w1600)' : 'Handed back (w1532)'}: ${w.id} was taken off worker ${b.session} on ${b.from} at ${b.at.slice(0, 16).replace('T', ' ')} UTC, because ${b.to ? `it moves to ${b.to}: ${b.why}` : `that machine is ${b.why}`} (${b.how}). ${b.branch ? `Continue from its branch ${b.branch}: check that your sandbox (or clone) is on it with its pushed commits (git status, git log -3), and fetch and check it out if not, before you change anything.` : 'Its branch is unknown: find its pushed work by the request id (git branch -r, its PRs) before you start over.'} Its worker's note: ${b.note}${b.saved ? ` (${b.saved})` : ''}. Read its log with read_work ${w.id}.`);
     if (b.message) lines.push(`The message that was waiting for it when it was handed back, now yours:\n~~~text\n${b.message}\n~~~`);
   }
   if (h.related.length) {

@@ -65,7 +65,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w1574 (no bump): `activity_config` (the machine's machines.activityPause), which an older daemon's onMessage drops (it keeps
 // its pause.json's own setting; the portal then ignores its activity pauses while the setting is off), and `activity_set`
 // from the tray, which an older portal drops (the tray's choice stays on that machine).
-const DECIDED = { protocol: 9, fingerprint: 'dd4809897698f4e7' };
+// w1600 (no bump): `benchLock` on `stats`, the machine's bench lock while a timed run holds it (machine/benchLock.ts). An older
+// portal drops it (its stats handler copies `stats` and `unity` only); an older daemon sends none, so nothing waits for its lock.
+const DECIDED = { protocol: 9, fingerprint: '757c268cddcf2b5a' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

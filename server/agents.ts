@@ -41,7 +41,7 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, holdReason, pinnedWork, placementHint, roomNow, voiceVram, type Computer, type NeedKind, type PlacementPrefs, type RoomNow } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, busyReasons, capacityLines, hasRoom, holdReason, liveOf, placeId, pinnedWork, placementHint, roomNow, voiceVram, type Computer, type NeedKind, type PlacementPrefs, type RoomNow } from './placement.ts';
 import { MachinePauses, pauseHolds } from './machinePause.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
@@ -68,7 +68,7 @@ import { REACTION_MEANINGS, REPLY_MARK } from '../shared/replies.ts';
 import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS, QUESTION_CHARS } from '../shared/ask.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { needsOf } from '../shared/capacity.ts';
+import { needsLive, needsOf } from '../shared/capacity.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
@@ -504,12 +504,8 @@ export class Agents {
         store.append(id, { kind: 'system', text: why });
         h.stop(true);
       },
-      save: (i, branch, message) => (i.machineId && i.machineSandbox && machines.canSaveWork(i.machineId) ? machines.saveWork(i.machineId, i.machineSandbox, branch, message, this.githubTokenFor(i.machineId, i.id, `saving ${i.id}'s work at a pause`)) : Promise.reject(new Error(`${i.machineId ?? 'its machine'}'s daemon cannot save work now (offline, or before w656)`))),
-      branchOf: (i) => {
-        const sb = i.machineId && i.machineSandbox ? store.machines.get(i.machineId)?.sandboxes?.find((x) => x.id === i.machineSandbox) : undefined;
-        const b = sb?.git?.branch && sb.git.branch !== 'detached HEAD' ? sb.git.branch : sb?.branch;
-        return b || undefined;
-      },
+      save: (i, branch, message) => this.saveSandboxWork(i, branch, message, 'at a pause'),
+      branchOf: (i) => this.branchNow(i),
       handBack: (w, i, h) => this.orchestrators?.handBack(w, i, h),
       log: (line) => console.log(line),
     });
@@ -720,8 +716,18 @@ export class Agents {
             waiting_on_person: async (a) => this.declareWaiting(info.id, a),
             cancel_wake: async () => this.cancelWakeTool(info.id),
             blocked_on: async (a) => this.declareBlocked(info.id, a),
-            unity: async (a) => machines.unity(m.id, a.action as 'status' | 'start' | 'stop' | 'restart' | 'clear_batch', a.force === true, sb),
-            live_view: async (a) => (this.liveHub ? this.liveHub.tool(info, a) : 'The live view is off on this portal.'),
+            unity: async (a) => {
+              const benched = a.action === 'start' || a.action === 'restart' ? this.liveBenchWait(info, m.id, 'start its editor') : undefined;
+              return benched ?? machines.unity(m.id, a.action as 'status' | 'start' | 'stop' | 'restart' | 'clear_batch', a.force === true, sb);
+            },
+            live_view: async (a) => {
+              if (!this.liveHub) return 'The live view is off on this portal.';
+              const benched = a.action === 'start' ? this.liveBenchWait(info, m.id, 'start a Live view', true) : undefined;
+              if (benched) return benched;
+              const out = await this.liveHub.tool(info, a);
+              if (a.action === 'start' && out.startsWith('Live view started')) this.markLive(info, m.id);
+              return out;
+            },
             switch_branch: async (a) => this.switchBranch({ sandbox: `${m.id}/${sb}`, branch: String(a.branch ?? ''), createFrom: typeof a.create_from === 'string' ? a.create_from : undefined, callerSessionId: info.id }),
             fetch_attachment: async (a) => this.attachmentForMachine(m.id, a.id),
             fetch_ffbox_report: async (a) => this.ffboxReportForMachine(m.id, info.id, a),
@@ -1925,6 +1931,100 @@ export class Agents {
     return Object.keys(paused).length ? { ...p, hold: { ...paused, ...(p.hold ?? {}) } } : p;
   }
 
+  /** A sandbox worker's branch now (its daemon's last git read, else the sandbox's own), or undefined. */
+  private branchNow(i: SessionInfo): string | undefined {
+    const sb = i.machineId && i.machineSandbox ? this.store.machines.get(i.machineId)?.sandboxes?.find((x) => x.id === i.machineSandbox) : undefined;
+    const b = sb?.git?.branch && sb.git.branch !== 'detached HEAD' ? sb.git.branch : sb?.branch;
+    return b || undefined;
+  }
+
+  /** Commit and push a sandbox worker's uncommitted work on `branch` through its daemon (w656), or a rejection saying why not. */
+  private saveSandboxWork(i: SessionInfo, branch: string, message: string, when: string) {
+    return i.machineId && i.machineSandbox && this.machines.canSaveWork(i.machineId)
+      ? this.machines.saveWork(i.machineId, i.machineSandbox, branch, message, this.githubTokenFor(i.machineId, i.id, `saving ${i.id}'s work ${when}`))
+      : Promise.reject(new Error(`${i.machineId ?? 'its machine'}'s daemon cannot save work now (offline, or before w656)`));
+  }
+
+  /**
+   * stop_agent move_to (w1600, Ben: "can you prioritize beast for stuff that needs live view? live view is often too slow"):
+   * a worker between turns leaves its computer for `to`. Its process stops (history kept), its Live view ends, its sandbox's
+   * uncommitted work is saved and pushed on its branch, and each open request it serves is handed back (Orchestrators.handBack,
+   * the w1532 route) Queued for `to`, with the branch and a note: the view's settings to stage again, and its last report. A
+   * running worker is never moved, and a conversation does not cross computers (its transcript is on the old one's disk):
+   * the request goes on in a new session there, whose handover carries the note. Refused mid-turn, and when `to` is offline,
+   * held, or has no room for game work (the worker stays where it is then).
+   */
+  private async moveWorker(sessionId: string, to: string, why: string): Promise<string> {
+    const h = this.sessions.get(sessionId);
+    const info = h.info;
+    if (info.kind !== 'worker' || !info.machineId || !info.machineSandbox) throw new Error(`${sessionId} is not a worker in a machine sandbox: nothing to move`);
+    const from = `${info.machineId}/${info.machineSandbox}`;
+    const target = placeId(to);
+    if (target === placeId(info.machineId)) throw new Error(`${sessionId} is on ${info.machineId} already`);
+    const place = this.places().find((p) => p.id === target);
+    if (!place) throw new Error(`${target} is not a computer that takes workers (list_machines)`);
+    const held = holdReason(target, this.placement());
+    if (held) throw new Error(`${held}; ${sessionId} stays on ${from}`);
+    if (!hasRoom(place)) throw new Error(`${target} has no room for game work now (${busyReasons(place).join('; ')}): ${sessionId} stays on ${from}. Move it when list_sandboxes shows room there.`);
+    if (isMidTurn(info) || info.pendingPermissions.length) throw new Error(`${sessionId} is mid-turn: move it once its turn ends (a move hands its requests to a new session, and a turn cut off loses its step)`);
+    const reqs = this.openWorkOf(info);
+    if (!reqs.length) throw new Error(`${sessionId} serves no open request: nothing to move (stop_agent without move_to stops it)`);
+    const reason = why.replace(/\s+/g, ' ').trim().slice(0, 200) || `moved to ${target} by the dispatcher`;
+    if (h.live) {
+      this.store.append(info.id, { kind: 'system', text: `Stopped by FF Factory: its requests move to ${target} (${reason}; w1600).` });
+      h.stop(true);
+    }
+    const view = await this.liveHub?.endFor(info.id);
+    const branch = this.branchNow(info);
+    let saved: string | undefined;
+    if (branch) {
+      try {
+        const r = await this.saveSandboxWork(info, branch, `FF Factory: WIP saved from ${info.id} before its move to ${target} (w1600)\n\n${reqs.map((w) => w.id).join(', ')} moved: ${reason}. \`git reset HEAD~1\` gives the work back uncommitted.`, `before its move to ${target}`);
+        saved = r.sha ? `its sandbox's uncommitted work (${r.files} file(s)) was saved as WIP commit ${r.sha.slice(0, 10)} on ${branch}${r.pushed ? ' and pushed' : `, not pushed (${r.notes.join('; ')})`}` : `its sandbox had no uncommitted work on ${branch}`;
+      } catch (e) {
+        saved = `its sandbox's uncommitted work could not be saved (${(e as Error).message}); what its worker pushed is what the next one gets`;
+      }
+    }
+    const stage = view ? `Its Live view ran on ${from} (materials ${JSON.stringify(view.materials)}, fps ${view.fps}, width ${view.width}): stage it again in your sandbox's editor (the scene and the asset on screen in play mode, the HUD hidden, the camera where the person should look), live_view start with the same settings, and tell the person it streams again from ${target}. ` : '';
+    for (const w of reqs) {
+      const note = `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`;
+      this.orchestrators?.handBack(w, info, { machine: info.machineId, sandbox: info.machineSandbox, ...(branch ? { branch } : {}), why: reason, note, how: 'moved by stop_agent move_to (w1600)', ...(saved ? { saved } : {}), to: target });
+    }
+    console.log(`move: ${reqs.map((w) => w.id).join(', ')} from worker ${info.id} on ${from} to ${target} (${reason}); branch ${branch ?? 'unknown'}${saved ? `; ${saved}` : ''}`);
+    return `Moved ${reqs.map((w) => w.id).join(', ')} off ${sessionId} on ${from}, for ${target}: its process stopped${view ? ', its Live view ended' : ''}${saved ? `, ${saved}` : ''}. Each is Queued for ${target} with its branch ${branch ?? '(unknown)'} and a note${view ? ' (the Live view settings to stage again)' : ''}. Now ${branch ? `switch_branch a FREE ${target} sandbox to "${branch}", then ` : ''}start_agent with its work_id in that sandbox; the new worker's handover carries the note.`;
+  }
+
+  /** The open requests a worker serves (workIdsOf). */
+  private openWorkOf(info: SessionInfo): WorkItem[] {
+    return this.workIdsOf(info)
+      .map((id) => this.store.work.get(id))
+      .filter((w): w is WorkItem => !!w && isOpen(w));
+  }
+
+  /**
+   * Why a worker must not start its editor or a Live view now (w1600), or undefined: its machine's bench lock is held by a
+   * timed run (machine/benchLock.ts), and a Live view editor beside it would spoil that run's numbers (a streaming editor
+   * in play mode takes the CPU and GPU the run measures). It waits for the lock rather than run at a lower priority: a
+   * lower CPU priority leaves the GPU shared. Only for Live view work (`always`: a live_view start is that by itself);
+   * any other editor is the bench's own quiet gate's business (the game repo's scripts/bench/quiet_gate.sh).
+   */
+  private liveBenchWait(info: SessionInfo, machineId: string, what: string, always = false): string | undefined {
+    const lock = this.machines.statsOf(machineId)?.benchLock;
+    if (!lock) return undefined;
+    if (!always && !this.openWorkOf(info).some((w) => needsLive(w))) return undefined;
+    return `Not now (w1600): on ${machineId}, ${benchText(lock)}, and a Live view editor beside it would spoil that run's numbers. Do what needs no editor meanwhile, then wake_me in 10 minutes and ${what} again (a run holds the lock under 15 minutes; one older than 40 minutes is a killed run's and no longer counts).`;
+  }
+
+  /** A worker started a Live view (w1600): each open game request it serves needs one from now on (WorkItem.liveView). */
+  private markLive(info: SessionInfo, machineId: string) {
+    for (const w of this.openWorkOf(info)) {
+      if (w.liveView || needsOf(w) === 'agent') continue;
+      this.orchestrators?.ledgerEdit(w.id, `its worker ${info.id} started a Live view on ${machineId}: it needs one from now on, so it is placed on ${liveOf(this.placement()).join(' > ')} first (w1600)`, (x) => {
+        x.liveView = { at: new Date().toISOString(), session: info.id, machine: machineId };
+      });
+    }
+  }
+
   /**
    * The machine's main clone, when a request this worker serves was granted work there (w936, WorkItem.mainCloneAccess):
    * the guard then lets it quit the editor, back up, git fetch and checkout, and reopen Unity there (server/mainCloneGuard.ts).
@@ -2263,6 +2363,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ...voiceVram(this.machines.voiceMachines().find((v) => v.machine === m.id)?.status),
         // Its own gh login (w1463): whether work here may push .github/workflows.
         ...(m.gh ? { gh: ghLoginLabel(m.gh), ...(canPushWorkflows(m.gh) !== undefined ? { workflows: canPushWorkflows(m.gh) } : {}) } : {}),
+        // A timed run's bench lock there (w1600): Live view work waits for it before its editor starts.
+        ...(st?.benchLock ? { benchLock: st.benchLock } : {}),
       });
     }
     return out;
@@ -2295,8 +2397,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    * (w1463): the work changes .github/workflows, for `person`, whose vault GitHub token (where machines.githubFromVault is on)
    * takes the place of each machine's own login.
    */
-  private placeNote(on: string | undefined, kind: NeedKind = 'game', workflows?: { person: string | undefined }): string {
-    return on ? (placementHint(on, workflows ? this.placesFor(workflows.person) : this.places(), this.lastPlaced, this.placement(), this.review?.root, kind, !!workflows) ?? '') : '';
+  private placeNote(on: string | undefined, kind: NeedKind = 'game', workflows?: { person: string | undefined }, live = false): string {
+    return on ? (placementHint(on, workflows ? this.placesFor(workflows.person) : this.places(), this.lastPlaced, this.placement(), this.review?.root, kind, !!workflows, live) ?? '') : '';
   }
 
   /** places() for one person's work (w1463): a machine where their runs get a vault GitHub token counts as able to push workflow files. */
@@ -2410,7 +2512,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             const on = a.machine ?? this.defaultSandboxMachine();
             if (!on) throw new Error('give machine: the portal holds no sandboxes of its own (w510); list_machines shows the machines with a sandbox_root');
             // Read before it is made: the new sandbox would count as in use (w416).
-            const hint = this.placeNote(on.toLowerCase());
+            const hint = this.placeNote(on.toLowerCase(), w?.needs ?? 'game', undefined, needsLive(w));
             const made = await this.machines.createSandbox(on, { name: a.name, branch, base: a.base, startUnity: a.start_unity, seedLibrary: a.seed_library });
             this.lastPlaced = on.toLowerCase();
             return `${made}${hint}`;
@@ -2513,7 +2615,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
 ${w.brief}
 ${w.repo ?? ''}
 ` : ''}${a.prompt}`) ? { person: w ? personForWork(this.cfg, w) : requestedBy.userId } : undefined;
-            const hint = this.placeNote(newOn, w?.needs ?? 'game', workflows);
+            // Work that needs a Live view goes to placement.live first (w1600): said in the note, by request or prompt.
+            const hint = this.placeNote(newOn, w?.needs ?? 'game', workflows, needsLive(w, a.prompt));
             // A sandbox a waiting worker released on its own branch is switched to a fresh one first (w640).
             const handed = await this.prepareForNewWork(a.sandbox, a.machine, w?.id ?? nextId, w?.source);
             // An intake request always carries its rules (untrusted text, posting limits, the markers), whatever the brief says.
@@ -2663,9 +2766,14 @@ ${w.repo ?? ''}
         ),
         tool(
           'stop_agent',
-          'Stop a worker agent process. It keeps its history and resumes when messaged again. In a machine sandbox, its uncommitted work is saved on its branch and the sandbox released within a few minutes (w656); it is placed again when it resumes.',
-          { session_id: z.string() },
-          wrap(async ({ session_id }) => {
+          'Stop a worker agent process. It keeps its history and resumes when messaged again. In a machine sandbox, its uncommitted work is saved on its branch and the sandbox released within a few minutes (w656); it is placed again when it resumes. With move_to (w1600, e.g. Live view work to beast): a worker between turns stops, its view ends, its work is saved, and its requests are Queued for that computer; the reply says how to place them there.',
+          {
+            session_id: z.string(),
+            move_to: z.string().optional().describe('Computer to move its requests to ("beast"): refused mid-turn, held or full.'),
+            why: z.string().optional().describe('With move_to: why, one line.'),
+          },
+          wrap(async ({ session_id, move_to, why }) => {
+            if (move_to?.trim()) return this.moveWorker(session_id, move_to, why ?? '');
             worker(session_id).stop();
             return 'Stopped.';
           }),
@@ -4126,7 +4234,7 @@ ${this.worldBrief(true)}
 - One session per request (w740, Lothsahn and Ben): related work stays in the session that did the earlier work, unrelated work gets a fresh one (workers have no auto-compaction; stale context costs on every turn). start_agent always starts a NEW session, into a FREE sandbox (w1089: refused for a sandbox another request's agent occupies, and past max_agents_per_sandbox; a \`[ledger] Capacity may have freed\` ping can be minutes old, so look again just before you start; work that needs no editor and no game tree may sit beside another agent on purpose with extra_agent: true). message_agent with a work_id for a worker not on that request: the server sends a RELATED request (it names one of the worker's requests in related_ids, is about its PR or branch, or the overlap check calls it a match: a fix for a regression it just shipped, its feature's next step, a correction to its PR) to that session, and starts a NEW session in the same sandbox for an unrelated one (the default when nothing ties them), whose first message carries the brief, the request as filed, the branch state and the related requests (read with read_work); the old session stops once it has nothing in hand, never mid-turn. When it is ambiguous, pass session "same" or "new" with session_reason (one plain line; recorded in the reply and the log). Updates to a request (notes, answers, follow-ups, resumes) go to the session already on it: message_agent with the same work_id, never a new session. decide_work merge is for a duplicate; link is for a direct follow-up of what a worker is on, refused for an unrelated request while it has another in hand. **One person per session** (w1076: lothsahn's w1072, sent into Ben's worker, ran on Ben's Claude pool and stopped on Ben's limit): a request never goes into a session holding another person's open request, because a session runs on its requests' person's tokens; message_agent then starts a new session there (even with session "same"), a request already in such a session moves out on its next message_agent, and link is refused. To restart a request somewhere fresh (its session stopped on a usage limit, say), message_agent with its work_id, session "new" and a session_reason.
 - Titles (w575): each time you hand a worker a request, give \`title\`: the job in a few plain words for a person scanning the dashboard ("LothDesktop fresh install, sandboxes slot1..6"), not the request's title cut short; the request id goes in front by itself. start_agent always takes one; message_agent with a work_id needs one when the worker is not on that request yet; decide_work link takes one for the workers it links. set_agent_title renames a worker otherwise.
 - Sandbox labels are their names (slot1..N on a worker root) and never change; nobody sets them. A sandbox is free when list_sandboxes marks it FREE; what it is doing is its agents' titles. A worker stopped with its check-in more than ${RELEASE_AFTER_MS / 60_000} min away, its request over, ${HOLD_PLACE_MS / 60_000} min after its daemon restarted under it, or by FF Factory after ${RELEASE_AFTER_MS / 60_000} min Idle with nothing pending releases a clean sandbox (w640, w656): it shows FREE and the worker's line says "its sandbox is released"; new work there is switched to a fresh branch first, and the worker is placed again when it resumes (its own sandbox if still free, else another free one on its machine, on its branch). A sandbox "spoken for" is a resuming worker's: never new work there.
-- Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the Capacity block's last line (list_sandboxes, system_status) says, "Next new game-repo work: <computer> (why)", even when a sandbox elsewhere is free. That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Every worker runs in a sandbox (w536): start_agent with a machine alone is refused, and a machine without a sandbox_root takes no workers. Posting as Max does not pin a computer (post_as_max, w901). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. **Work that needs no Unity editor goes by agent slot alone** (w1098, lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): a request on another repo than the game's (FF Factory, FFBox, the ff-agents plugin; its list_work line says "needs an agent slot only", set at filing from its repo) goes where the Capacity block's "Next non-game work: <computer> (why)" says, in any sandbox with an agent seat (a free one first, else beside another request's agent with start_agent extra_agent: true, never past max_agents_per_sandbox: it works in its own clone in its temp folder), whatever the editors or RAM. It still respects the computer's agent cap, the person's own Claude pool (a held pool queues the worker's first prompt) and holds and avoids, and one queued while an allowed computer has an agent slot is flagged WRONG like game work; check the guessed repo in the log of one whose repo was not set. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. start_agent and create_sandbox add a note when new work goes to a computer other than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / placement.avoid (null clears).
+- Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the Capacity block's last line (list_sandboxes, system_status) says, "Next new game-repo work: <computer> (why)", even when a sandbox elsewhere is free. That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Every worker runs in a sandbox (w536): start_agent with a machine alone is refused, and a machine without a sandbox_root takes no workers. Posting as Max does not pin a computer (post_as_max, w901). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. **Work that needs no Unity editor goes by agent slot alone** (w1098, lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): a request on another repo than the game's (FF Factory, FFBox, the ff-agents plugin; its list_work line says "needs an agent slot only", set at filing from its repo) goes where the Capacity block's "Next non-game work: <computer> (why)" says, in any sandbox with an agent seat (a free one first, else beside another request's agent with start_agent extra_agent: true, never past max_agents_per_sandbox: it works in its own clone in its temp folder), whatever the editors or RAM. It still respects the computer's agent cap, the person's own Claude pool (a held pool queues the worker's first prompt) and holds and avoids, and one queued while an allowed computer has an agent slot is flagged WRONG like game work; check the guessed repo in the log of one whose repo was not set. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. Live view work (list_work: "Needs a Live view") goes by "Next Live view work" (w1600, beast first); stop_agent move_to moves a waiting one there. start_agent and create_sandbox add a note when new work goes to a computer other than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / placement.avoid / placement.live (null clears).
 - Machines are fixed by the harness, never by a person: \`read_rules machines\` before you act on a request for work in a machine's main clone (w936: never handed back to a person, and the grant is a field, never brief text), on a machine change that needs its installer rerun or a daemon update (w855: never a question for a person; w605: never a drain or a wait; after a verified deploy FF Factory updates the daemons itself, w887), or on low disk (w626, w896: machine_cleanup, then a clean-up worker that deletes only inside the worker install folder; never ask anyone to free space).
 - Nobody reads this chat by default: do not write status reports for people. Act, and let the tools record it. When the owner writes here, answer with a one-line plain-language TL;DR, then detail only if useful, with request, sandbox and session ids. Your messages render as Markdown: \`![what it shows](<absolute path>)\` shows an image from a sandbox or a machine inline, and a \`\`\`mermaid block renders as a diagram.
 `.trim();

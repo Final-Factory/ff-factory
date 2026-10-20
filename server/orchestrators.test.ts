@@ -13,7 +13,7 @@ import { OPS_ID } from './opsWorker.ts';
 import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
-import { requestAsFiled } from './work.ts';
+import { handoverNote, requestAsFiled } from './work.ts';
 import { BlockerWatch } from './blockerWatch.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
@@ -3844,4 +3844,70 @@ test('w1582: Agents.liveHold keeps a worker whose Live view is up while it waits
   assert.equal(hold(a.info), undefined);
   void dispatcher;
   void call;
+});
+
+test('w1600: a Live view marks its request; a bench lock holds its editor; stop_agent move_to moves the waiting worker to beast, refused mid-turn, held or full', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, machines, dispatcher, call, heard, cfg } = env;
+  const beast = await startTestMachine(machines, { id: 'beast', sandboxes: ['slot1'] });
+  env.closers.push(() => beast.stop());
+  agentsRoom(agents, ['pc', 'beast']);
+  putRequests(store, [{ id: 'w1', by: BEN, status: 'active' }]);
+  const ended: string[] = [];
+  agents.liveHub = {
+    tool: async () => 'Live view started (15 fps, 960 px, knobs on Ballista): streaming',
+    endFor: async (id: string) => (ended.push(id), { materials: ['Ballista'], fps: 15, width: 960 }),
+  } as unknown as NonNullable<typeof agents.liveHub>;
+  const a = await startedFor(env, 'w1');
+
+  // Its worker starts a Live view: the request needs one from now on.
+  assert.match(String(await a.h.live_view!({ action: 'start', materials: ['Ballista'] })), /^Live view started/);
+  assert.equal(store.work.get('w1')!.liveView?.machine, 'pc');
+  assert.match(store.work.get('w1')!.log.join('\n'), /its worker \w+ started a Live view on pc: it needs one from now on, so it is placed on beast first \(w1600\)/);
+  const listed = await call(dispatcher().info, 'list_sandboxes', {});
+  assert.match(listed.text, /^Next Live view work \(game work whose worker streams a Live view, w1600\): beast \(Live view work goes to the first with room in placement\.live \(beast;/m);
+
+  // A timed run holds pc's bench lock: its Live view editor and view wait; other actions go through.
+  const stats = machines.statsOf.bind(machines);
+  const lock = { owner: 'pc pid 4121 ben 21:04:10 probe A round 2 (/tmp/x)', since: new Date().toISOString() };
+  machines.statsOf = (id: string) => (id === 'pc' ? { ...(stats(id) ?? ({} as NonNullable<ReturnType<typeof stats>>)), benchLock: lock } : stats(id));
+  assert.match(String(await a.h.unity!({ action: 'start' })), /^Not now \(w1600\): on pc, its bench lock is held since \d\d:\d\dZ \(pc pid 4121 .*\): a timed run, and a Live view editor beside it would spoil that run's numbers\. .*wake_me in 10 minutes and start its editor again/);
+  assert.match(String(await a.h.live_view!({ action: 'start' })), /^Not now \(w1600\)/);
+  machines.statsOf = stats;
+
+  // Refused: mid-turn, beast held, beast full. The worker stays where it is each time.
+  const move = (extra: Record<string, unknown> = {}) => call(dispatcher().info, 'stop_agent', { session_id: a.id, move_to: 'BEAST', why: 'its Live view streams faster on beast (w1600)', ...extra });
+  const was = a.info.status;
+  a.info.status = 'running';
+  assert.match((await move()).text, /is mid-turn: move it once its turn ends/);
+  a.info.status = was;
+  cfg.placement = { hold: { beast: 'Ben testing' } };
+  assert.match((await move()).text, /beast is on hold \(Ben testing\).*stays on pc\/alpha/);
+  cfg.placement = {};
+  const places = agents.places.bind(agents);
+  agents.places = () => places().map((p) => (p.id === 'beast' ? { ...p, live: p.maxAgents } : p));
+  assert.match((await move()).text, /beast has no room for game work now \(\d+ live agents of \d+\): \w+ stays on pc\/alpha/);
+  agents.places = places;
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.deepEqual(ended, []);
+
+  // Moved: its view ends, it is taken off the worker and Queued for beast with its branch and the view's settings.
+  const moved = await move();
+  assert.equal(moved.isError, false, moved.text);
+  assert.match(moved.text, /^Moved w1 off \w+ on pc\/alpha, for beast: its process stopped, its Live view ended, its sandbox (had no uncommitted work|'s uncommitted work)/);
+  assert.match(moved.text, /switch_branch a FREE beast sandbox to "sandbox\/alpha", then start_agent with its work_id in that sandbox/);
+  assert.deepEqual(ended, [a.id]);
+  const w = store.work.get('w1')!;
+  assert.equal(w.status, 'queued');
+  assert.ok(!w.sessionIds.includes(a.id), 'taken off the old worker');
+  assert.deepEqual(w.queuedFor?.needs, ['beast']);
+  assert.equal(w.handedBack?.to, 'beast');
+  assert.equal(w.handedBack?.branch, 'sandbox/alpha');
+  assert.match(w.handedBack!.note, /^Its Live view ran on pc\/alpha \(materials \["Ballista"\], fps 15, width 960\): stage it again/);
+  assert.match(w.log.join('\n'), /moved from pc\/alpha: queued for beast, from branch sandbox\/alpha/);
+  await until('the dispatcher is told', () => heard(dispatcher().info.id, '[ledger] MOVED (w1600)').length > 0);
+  assert.match(heard(dispatcher().info.id, '[ledger] MOVED (w1600)')[0].text, /w1 "Request w1" .*because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. .*Place it on beast: switch_branch a FREE sandbox on beast to "sandbox\/alpha"/);
+  // The new worker's handover says where it came from and what to stage.
+  const note = handoverNote(w, { related: [], handedBack: w.handedBack });
+  assert.match(note, /Moved \(w1600\): w1 was taken off worker \w+ on pc\/alpha at .* UTC, because it moves to beast: its Live view streams faster on beast \(w1600\) \(moved by stop_agent move_to \(w1600\)\)\. Continue from its branch sandbox\/alpha/);
 });
