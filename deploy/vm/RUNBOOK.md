@@ -57,7 +57,9 @@ and the Macs within reach of FFBox's `ffdev` containers (design 1.4, rule 1).
    login, so the member-to-member grant already lets Lothsahn's PC (`lothdesktop`, Loth2800 by its tailnet name) and
    Ben's devices in. Then, in Machines, **Disable key expiry** on the new machine (an untagged node's key otherwise
    expires after 180 days and the machine drops off the tailnet). Its host key goes in
-   [`guest/machines.ssh`](guest/machines.ssh), pinned by the next `fffctl update`.
+   [`guest/machines.ssh`](guest/machines.ssh), pinned by the next `fffctl update`. **Or by tag** (w1592): with the
+   `tag:fff-worker` block of [docs/worker-install.md](../../docs/worker-install.md#the-tailnet-w1592) in the policy once,
+   a PC that joins with a join code takes the tag and needs no edit here, no key-expiry click and no host-key line.
 2. **An auth key** (Settings, Keys, Generate auth key): **not** reusable, **not** ephemeral, **pre-approved**, tag
    `tag:fff-portal`, expiry 1 day. It only has to work once: after the join the node keeps its own identity. Ben sends
    it to Lothsahn privately, not in a chat the agents read. A rebuilt VM needs a fresh one.

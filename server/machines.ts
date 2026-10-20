@@ -1,4 +1,5 @@
 import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
+import { JoinCodes, machineJoinsFile } from './machineJoin.ts';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import type { SaveResult } from './saveWork.ts';
@@ -371,6 +372,7 @@ export class MachineManager {
     this.sessions = sessions;
     sessions.placeFull = (s) => this.placeFull(s);
     this.tokensFile = machineTokensFile(cfg.dataDir);
+    this.joins = new JoinCodes(machineJoinsFile(cfg.dataDir));
     // A deploy runs in this process: one still marked at boot was cut short by a restart. Left 'deploying', the
     // offline watch (redeployDue) would never redeploy it; its daemon's hello clears the error if it did start.
     for (const m of store.machines.values()) {
@@ -436,6 +438,13 @@ export class MachineManager {
     return { host, ...r };
   }
 
+  /** Whether the portal's ssh gets into machine `id` now, with what its installer registered (w1592). */
+  async checkSsh(id: string): Promise<{ host: string; reachable: boolean; detail: string }> {
+    const m = this.require(id);
+    if (!m.ssh) return { host: m.host, reachable: false, detail: 'no ssh registered yet: its installer registers it' };
+    return { host: m.host, ...(await this.sshCheck(m.host)) };
+  }
+
   list() {
     return [...this.store.machines.values()].sort((a, b) => a.id.localeCompare(b.id));
   }
@@ -493,6 +502,8 @@ export class MachineManager {
 
   /** Tells the orchestrator (wired by index.ts). */
   report?: (text: string) => void;
+  /** The pending join codes (w1592, server/machineJoin.ts). */
+  readonly joins: JoinCodes;
   /** A machine has been offline OFFLINE_ALERT_MS with work waiting on it (w1249; wired by index.ts: the orchestrator and a push). */
   offlineAlert?: (machineId: string, title: string, text: string) => void;
   /** The machines offlineAlert told about, with when they went offline, until they are back. */
@@ -1125,6 +1136,7 @@ export class MachineManager {
     const m = this.require(id);
     for (const sid of m.sessionIds) if (this.sessions.sessions.has(sid)) this.sessions.remove(sid);
     revokeMachineToken(this.cfg.dataDir, m.id);
+    this.joins.revoke(m.id);
     this.links.get(m.id)?.ws.close(4001, 'machine removed');
     this.store.removeMachine(m.id);
     if (m.ssh) this.pinHostKeys(); // its pinned host keys go with it (w568)

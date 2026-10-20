@@ -84,6 +84,17 @@ Two more rules from flakes (w858, corrected by w906):
   node too when it cuts the output short: PowerShell's `& node ... | Select-Object -First 1` ends node mid-exit; take
   `(& node ...) | Select-Object -First 1` (w906: the probe's `node -p` was every empty file).
 
+Two from a script a person runs (w1592):
+
+- **A script run as `irm <url> | iex` never calls `exit`**: under `iex` it runs in the person's own PowerShell, and `exit`
+  closes their window with the message unread. Return a code from a main function, and `exit` with it only when
+  `$MyInvocation.MyCommand.Path` is set (run as a file: tests, `-File`). `scripts/worker/join.ps1` does this.
+- **Without pwsh, shellcheck or gitleaks on a Mac** (m3 had none), the PowerShell script tests skip and prepush says SKIPPED.
+  Each one's release binary works from your temp folder with no install: PowerShell's `powershell-<v>-osx-arm64.tar.gz`,
+  shellcheck's `shellcheck-<v>.darwin.aarch64.tar.xz` and gitleaks' `gitleaks_<v>_darwin_arm64.tar.gz`, unpacked into
+  `$TMPDIR/tools` and put first on `PATH` for `npm test` and `npm run prepush`. Then the tests run on this machine, not
+  only in CI.
+
 One from a process tree (w1196):
 
 - **A fake process list has the real machine's shape.** The leftover reaper spared the daemon's parent with its whole tree;

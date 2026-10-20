@@ -53,15 +53,20 @@ export function tailnetAddress(ip: string): boolean {
  * Funnel request is refused even if the header were ever missing. The forwarded address is read only from a connection
  * that came from this machine (the proxy); any other connection is judged by its own address.
  */
-export function tailnetOnly(req: Pick<http.IncomingMessage, 'headers' | 'socket'>): string | undefined {
-  if (req.headers['tailscale-funnel-request'] !== undefined) return 'this request came in through Tailscale Funnel (the public internet); the orchestrator chat is tailnet-only';
+export function tailnetOnly(req: Pick<http.IncomingMessage, 'headers' | 'socket'>, what = 'the orchestrator chat'): string | undefined {
+  if (req.headers['tailscale-funnel-request'] !== undefined) return `this request came in through Tailscale Funnel (the public internet); ${what} is tailnet-only`;
+  const addr = clientAddress(req);
+  if (loopback(addr) || tailnetAddress(addr)) return undefined;
+  return `this request did not come from the tailnet (a Tailscale address); ${what} is tailnet-only`;
+}
+
+/** The client's address: the proxy's X-Forwarded-For on a connection from this machine (Tailscale Serve), else the connection's own. */
+export function clientAddress(req: Pick<http.IncomingMessage, 'headers' | 'socket'>): string {
   const direct = (req.socket.remoteAddress ?? '').replace(/^::ffff:/i, '');
   const fwd = String(req.headers['x-forwarded-for'] ?? '')
     .split(',')[0]
     .trim();
-  const addr = loopback(direct) && fwd ? fwd : direct;
-  if (loopback(addr) || tailnetAddress(addr)) return undefined;
-  return 'this request did not come from the tailnet (a Tailscale address); the orchestrator chat is tailnet-only';
+  return (loopback(direct) && fwd ? fwd : direct).replace(/^::ffff:/i, '');
 }
 
 /** `https://fff.<tailnet>.ts.net` for the host the client reached us at, or '' (links then stay relative). Never the Funnel address from config. */

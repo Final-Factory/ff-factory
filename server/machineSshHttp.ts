@@ -12,6 +12,8 @@ export interface MachineSshDeps {
   publicKey(): string | undefined;
   tailnetAddress(): Promise<string | undefined>;
   register(id: string, ssh: MachineSsh): Promise<{ host: string; reachable: boolean; detail: string }>;
+  /** Whether the portal's ssh gets in now, with what is registered (GET ?check=1, w1592: the join bootstrap's summary). */
+  check?(id: string): Promise<{ host: string; reachable: boolean; detail: string }>;
   /** Why it acts on nothing (a dry-run portal), or undefined. */
   refused?(): string | undefined;
 }
@@ -36,6 +38,7 @@ async function body(req: http.IncomingMessage): Promise<unknown> {
 export async function machineSshHttp(d: MachineSshDeps, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const id = d.machineOf(req.headers.authorization);
   if (!id) return send(res, 401, { error: 'a valid machine token is required' });
+  if (req.method === 'GET' && d.check && new URL(req.url ?? '/', 'http://x').searchParams.get('check') === '1') return send(res, 200, await d.check(id));
   if (req.method === 'GET') {
     const publicKey = d.publicKey();
     if (!publicKey) return send(res, 404, { error: "the portal has no ssh key (~/.ssh/id_ed25519.pub of the portal's account)" });

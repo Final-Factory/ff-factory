@@ -33,6 +33,7 @@ import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
 import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, parseSandboxRef, poolSettingsOf, sameCommit } from './machines.ts';
+import { JOIN_TTL_MINUTES, checkJoinLimits, joinRefusal } from './machineJoin.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG } from './launch.ts';
 import { AutoCompactor, LONG_WAIT_MS } from './autoCompact.ts';
@@ -2533,7 +2534,7 @@ ${w.repo ?? ''}
             return `Started agent ${s.info.id} "${s.info.title}" ${where}, requested by ${requestedBy.displayName}${item}.${withFiles}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${handed.note}${hint}`;
           }),
         ),
-        ...this.machineToolSpecs(tool, from),
+        ...this.machineToolSpecs(tool, from, ctx),
         tool(
           'message_agent',
           ctx.role === 'personal'
@@ -3036,7 +3037,7 @@ ${w.repo ?? ''}
   }
 
   /** The machines part of the tool belt (docs/machines.md). */
-  private machineToolSpecs(tool: ToolMaker, _from: 'orchestrator' | 'human'): ToolSpec[] {
+  private machineToolSpecs(tool: ToolMaker, _from: 'orchestrator' | 'human', ctx: BeltCtx): ToolSpec[] {
     const mm = this.machines;
     return [
       tool(
@@ -3177,8 +3178,38 @@ ${w.repo ?? ''}
             .describe(
               "Only the record, for a new machine whose worker installer runs on the machine itself (docs/worker-install.md; any Linux PC, or a new Mac or Windows PC): no ssh deploy and no credential. The installer's credential check and the daemon's link need it. Then the orchestration worker (or a person) pins its host key, issues its credential into a file there and runs its installer (docs/ops-worker.md, \"A new machine\"). Its folders and sandbox count come from the installer; ssh_host, portal_url, the label and the limits may be given.",
             ),
+          join_code: z
+            .boolean()
+            .optional()
+            .describe(
+              `A new PC that joins by itself (w1592, docs/worker-install.md "Adding a machine with a join code"): makes the worker_install record and a one-use join code, valid ${JOIN_TTL_MINUTES} min, redeemable only from the tailnet device tailnet_name, with the limits given here (else the PC's own, from its RAM and CPUs). Owners only. Relay the code and the command this returns to the person who asked; they type the code at the PC. The credential never passes through chat.`,
+            ),
+          tailnet_name: z.string().optional().describe('With join_code: the PC\'s tailnet device name as the Tailscale admin console shows it (default: the id).'),
         },
         wrap(async (a) => {
+          if (a.join_code) {
+            const problem = this.ownerOnlyProblem('join_code', ctx, (a as { work_id?: unknown }).work_id);
+            if (problem) throw new Error(problem);
+            const id = a.id.trim().toLowerCase();
+            const refusal = joinRefusal({ get: (x) => this.store.machines.get(x) }, id);
+            if (refusal) throw new Error(refusal);
+            const limits = checkJoinLimits({ maxSandboxes: a.max_sandboxes, maxAgentsPerSandbox: a.max_agents_per_sandbox, maxUnity: a.max_unity });
+            const tailnet = (a.tailnet_name ?? id).trim().toLowerCase();
+            const workId = (a as { work_id?: unknown }).work_id;
+            const w = typeof workId === 'string' ? this.store.work.get(workId.trim().toLowerCase()) : undefined;
+            const by = (w?.requestedBy ?? this.identity.owner()).displayName;
+            const m = mm.deployMachine({ id: a.id, workerInstall: true, host: a.ssh_host ?? tailnet, portalUrl: a.portal_url, ...limits });
+            const j = mm.joins.create({ machineId: m.id, tailnetName: tailnet, limits, by });
+            mm.update(m.id, { statusDetail: `waiting for its join bootstrap on tailnet device ${tailnet} (code ...${j.last4}, until ${j.expiresAt}): no daemon yet` });
+            const given = Object.entries(limits).map(([k, v]) => `${k} ${v}`);
+            return [
+              `Join code for ${m.id}: ${j.code}`,
+              `It works once, until ${j.expiresAt}, and only from the tailnet device "${tailnet}". Limits: ${given.length ? given.join(', ') : "the PC's own, from its RAM and CPUs"} (overridable at the PC).`,
+              `On that PC, connected to Tailscale, in a normal PowerShell (not as administrator): irm ${m.portalUrl}/join/windows.ps1 | iex`,
+              `A Mac or Linux PC, in a terminal: bash -c "$(curl -fsSL ${m.portalUrl}/join/unix.sh)"`,
+              'It asks for the code, then installs and enrols the machine by itself; list_machines shows it online when it is done. Relay the code and the command to the person who asked, as they are.',
+            ].join('\n');
+          }
           const m = mm.deployMachine({
             id: a.id,
             host: a.ssh_host,
