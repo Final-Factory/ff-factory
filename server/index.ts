@@ -1892,6 +1892,16 @@ const server = http.createServer(async (req, res) => {
       if ('error' in r) return send(res, r.status, { error: r.error });
       return sendStream(req, res, new StreamReply('application/octet-stream', r.file, r.record.size, downloadDisposition(r.record.name)));
     }
+    // A daemon fetching the code of an update it was told about on its link (w1596, server/machineLink.ts): its own token,
+    // and only the bundle offered to it; it checks the SHA-256 and size the link gave it, and git checks the commit.
+    const updateBundle = req.method === 'GET' ? /^\/machine\/update\/([0-9a-f]{64})$/.exec(url.pathname) : null;
+    if (updateBundle) {
+      const machineId = machines.authenticate(req.headers.authorization);
+      if (!machineId || !store.machines.has(machineId)) return send(res, 401, { error: 'a valid machine token is required' });
+      const file = await machines.bundles.fileFor(machineId, updateBundle[1]);
+      if (!file || !fs.existsSync(file)) return send(res, 404, { error: 'no update bundle with that SHA-256 was offered to this machine' });
+      return sendStream(req, res, new StreamReply('application/octet-stream', file, fs.statSync(file).size, 'attachment; filename="ff-factory.bundle"'));
+    }
     // A machine's daemon sending a file its agent published as an attachment (docs/attachments.md, "Agents' files"): its
     // own token, only an upload the portal opened for that machine, chunks that resume, the SHA-256 checked at the end.
     const attachmentUpload = /^\/machine\/attachments\/uploads\/([a-f0-9]{32})$/.exec(url.pathname);

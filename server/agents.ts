@@ -655,6 +655,8 @@ export class Agents {
         if (!(isOpen(w) || w.status === 'stalled')) return `${id} is ${w.status}`;
         return w.requesters.some((r) => r.userId.toLowerCase() === personId.toLowerCase()) ? undefined : `${id} is not one of their own requests`;
       },
+      // w1596: a machine whose daemon updates over its own link is updated by the portal itself, not over ssh.
+      linkUpdate: (id, flags) => (machines.canLink(id) ? machines.linkUpdate(id, { flags }) : undefined),
     });
     // After a verified portal deploy, every worker machine's daemon is updated by FF Factory itself (w887), and its agent tools (w1476).
     this.rollout = new MachineRollout({
@@ -671,6 +673,8 @@ export class Agents {
         agents: (id) => [...sessions.sessions.values()].filter((x) => x.info.machineId === id && x.live).map((x) => ({ id: x.info.id, title: x.info.title })),
         liveAtHello: (id, since) => machines.liveAtHello(id, since),
         ssh: (target, remote, timeoutMs) => run('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', target, remote], { timeoutMs }),
+        link: (id) => machines.canLink(id),
+        linkUpdate: (id, form, commit) => machines.linkUpdate(id, { form, commit }),
         tell: (person, text) => {
           const to = person ? this.orchestrators.personalFor(person).info.id : store.orchestratorId;
           if (to) void sessions.send(to, text, 'system', undefined, person ? { requestedBy: person } : undefined);

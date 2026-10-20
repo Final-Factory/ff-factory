@@ -76,9 +76,9 @@ function fakes(dir: string, shell: 'ps' | 'sh') {
     installer = path.join(dir, 'fake-install.ps1');
     fs.writeFileSync(
       installer,
-      `param([string]$Root, [string]$PortalUrl, [int]$MaxSandboxes, [int]$MaxAgentsPerSandbox, [int]$MaxUnity, [string]$CredentialFile, [switch]$Update)
+      `param([string]$Root, [string]$PortalUrl, [int]$MaxSandboxes, [int]$MaxAgentsPerSandbox, [int]$MaxUnity, [string]$CredentialFile, [switch]$Update, [switch]$NoSsh)
 $cred = $(if ($CredentialFile) { (Get-Content -Raw -LiteralPath $CredentialFile).Trim() } else { '' })
-@{ args = @($args); root = $Root; portal = $PortalUrl; limits = @($MaxSandboxes, $MaxAgentsPerSandbox, $MaxUnity); credentialFile = $CredentialFile; credential = $cred; update = [bool]$Update } | ConvertTo-Json | Set-Content -LiteralPath '${record.replace(/'/g, "''")}'
+@{ args = @($args); root = $Root; portal = $PortalUrl; limits = @($MaxSandboxes, $MaxAgentsPerSandbox, $MaxUnity); credentialFile = $CredentialFile; credential = $cred; update = [bool]$Update; noSsh = [bool]$NoSsh } | ConvertTo-Json | Set-Content -LiteralPath '${record.replace(/'/g, "''")}'
 Write-Host 'fake installer: done'
 exit 0
 `,
@@ -151,7 +151,9 @@ test('join.ps1: a dry run changes nothing; the join hands the installer a privat
   assert.ok(!r.out.includes(code), 'nor does the code');
   assert.match(r.out, new RegExp(`credential \\(\\.\\.\\.${cred.slice(-4)}\\)`));
   assert.match(r.out, /The portal sees it: online, daemon abc1234/);
-  assert.match(r.out, /The portal's ssh \(tester@testpc\): gets in/);
+  assert.equal(rec.noSsh, true, 'w1596: a new join installs with -NoSsh: the portal updates it over its daemon link');
+  assert.match(r.out, /no ssh, firewall rule or tailnet tag is needed/);
+  assert.doesNotMatch(r.out, /OpenSSH|tag:fff-worker|port 22/);
   assert.equal(portal.codes.find(code), undefined, 'the code is spent');
 
   const again = await run(powershell!, psArgs(script, '-Root', path.join(tmp, 'root2'), '-Tailscale', f.tailscale, '-Installer', f.installer, '-SkipMachineSetup', '-Yes'), env);
@@ -159,7 +161,7 @@ test('join.ps1: a dry run changes nothing; the join hands the installer a privat
   assert.match(again.out, /The portal refused the code: that join code is wrong, used or expired/);
 });
 
-test('join.ps1: run again on an installed PC, it updates the install with no code; an ssh the portal cannot use names the tailnet step', { skip: !powershell && 'no PowerShell here (pwsh not on PATH)' }, async (t) => {
+test('join.ps1: run again on an installed PC, it updates the install with no code, keeping its ssh; a new join asks for no ssh or tailnet tag (w1596)', { skip: !powershell && 'no PowerShell here (pwsh not on PATH)' }, async (t) => {
   const portal = await testPortal({ sshReachable: false });
   t.after(portal.close);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-ps2-'));
@@ -177,15 +179,15 @@ test('join.ps1: run again on an installed PC, it updates the install with no cod
   assert.equal(rec.root, installed);
   assert.equal(rec.limits[2], 3, 'a limit given here goes to the update');
   assert.equal(rec.credential, '');
+  assert.equal(rec.noSsh, false, 'an update carries the ssh a PC joined with (install.ps1 -Update reads root.json)');
   assert.equal(portal.issued.length, 0, 'no credential is issued for an update');
 
   fs.rmSync(f.record);
   const { code } = portal.codes.create({ machineId: 'testpc', tailnetName: 'testpc', limits: {}, by: 'Lothsahn' });
   const r = await run(powershell!, psArgs(script, '-PortalUrl', portal.base, '-Root', path.join(tmp, 'fresh'), '-Tailscale', f.tailscale, '-Installer', f.installer, '-SkipMachineSetup', '-Yes'), { ...env, FF_JOIN_CODE: code });
   assert.equal(r.code, 0, r.out);
-  assert.match(r.out, /This PC is not tagged tag:fff-worker/);
-  assert.match(r.out, /Edit ACL tags > tag:fff-worker/, '-Yes never tags; it prints the step for a tailnet admin');
-  assert.match(r.out, /does not get in yet: ssh: connect to host testpc port 22: Operation timed out/);
+  assert.equal(JSON.parse(fs.readFileSync(f.record, 'utf8')).noSsh, true);
+  assert.doesNotMatch(r.out, /tag:fff-worker|Edit ACL tags|port 22|OpenSSH/, 'no tailnet step: the portal does not need ssh to this PC');
 });
 
 test('join.sh: a dry run changes nothing; the join hands install.sh a 0600 credential file, never shows it, deletes it; an installed computer is updated', { skip: isWin && 'bash bootstrap: Mac and Linux' }, async (t) => {
@@ -214,6 +216,8 @@ test('join.sh: a dry run changes nothing; the join hands install.sh a 0600 crede
   assert.equal(rec.credential, cred);
   assert.equal(rec.mode, '-rw-------', 'owner-only');
   assert.ok(rec.args.includes('--max-sandboxes') && rec.args.includes(root));
+  assert.ok(rec.args.includes('--no-ssh'), 'w1596: a new join installs with --no-ssh');
+  assert.doesNotMatch(r.out, /Remote Login is off|sshd: |No sshd|tag:fff-worker/);
   assert.ok(!fs.existsSync(rec.credentialFile), 'deleted');
   assert.equal(fs.readdirSync(tmp).filter((n) => n.startsWith('ff-join.')).length, 0, "the run's private folder is gone");
   assert.ok(!r.out.includes(cred) && !r.out.includes(code), 'neither the credential nor the code reaches the screen');

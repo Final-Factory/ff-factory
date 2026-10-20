@@ -11,13 +11,14 @@
      made for, once, within its hour);
   2. checks node 22.6+, git 2.48+, git-lfs and Claude Code, and installs the missing ones with winget (or Claude Code's
      own installer) on your yes; reports Unity Hub and editors, and installs none;
-  3. turns on OpenSSH Server with a firewall rule for the tailnet only (one administrator prompt), so the portal can
-     update this PC later;
-  4. redeems the code: the portal makes the machine's record and answers its credential, which goes straight into a
-     file only you can read, never onto the screen; runs the worker installer (install.ps1: the Dev Drive, the daemon,
-     the portal's ssh key and host-key pin) with that file, and deletes the file;
-  5. shows what the portal sees, and whether its ssh gets in (if not: the tailnet tag step, below).
-  Run again on a PC that is already installed, it updates the install instead and needs no code.
+  3. redeems the code: the portal makes the machine's record and answers its credential, which goes straight into a
+     file only you can read, never onto the screen; runs the worker installer (install.ps1 -NoSsh: the Dev Drive, the
+     daemon) with that file, and deletes the file;
+  4. shows what the portal sees.
+  No OpenSSH Server, firewall rule or tailnet tag (w1596): the portal updates, restarts and unloads this PC over its
+  daemon's own link to the portal (docs/worker-install.md, "Updates over the daemon's link").
+  Run again on a PC that is already installed, it updates the install instead and needs no code; one that joined with
+  ssh keeps it as it is.
 
 .PARAMETER Root
   The worker's root folder (default: <the fixed drive with the most free space>:\ffw).
@@ -27,10 +28,6 @@
   Check everything and change nothing: the code stays unused.
 .PARAMETER Yes
   Ask nothing but the code: take the defaults, install the missing tools.
-.PARAMETER Tag
-  Offer to tag this PC tag:fff-worker even when the portal's ssh already gets in, or on an update.
-.PARAMETER NoTag
-  Never offer the tag; print the step for a tailnet admin instead.
 #>
 param(
     [string]$PortalUrl = '__FF_PORTAL_URL__',
@@ -40,16 +37,13 @@ param(
     [int]$MaxUnity = 0,
     [switch]$DryRun,
     [switch]$Yes,
-    [switch]$Tag,
-    [switch]$NoTag,
-    # Tests only (scripts/worker/join.test.ts): a fake tailscale, a fake installer, and no machine setup (tools, sshd).
+    # Tests only (scripts/worker/join.test.ts): a fake tailscale, a fake installer, and no machine setup (tools).
     [string]$Tailscale = '',
     [string]$Installer = '',
     [switch]$SkipMachineSetup
 )
 
 $ErrorActionPreference = 'Stop'
-$script:WorkerTag = 'tag:fff-worker'
 $script:InstallUrl = 'https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1'
 $script:OnWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or $IsWindows
 
@@ -247,49 +241,6 @@ function Show-Unity {
     Say "Unity: $hubText; $edText. The game's sandboxes need its Unity version: install it in Unity Hub and sign in there (this script installs no editor)."
 }
 
-# ---------------------------------------------------------------- OpenSSH Server, for the portal's later updates
-
-function Test-SshdReady {
-    $svc = Get-Service sshd -ErrorAction SilentlyContinue
-    $rule = Get-NetFirewallRule -Name 'FFFactory-sshd-tailnet' -ErrorAction SilentlyContinue
-    return [bool]($svc -and $svc.Status -eq 'Running' -and $svc.StartType -eq 'Automatic' -and $rule)
-}
-
-function Enable-Sshd([string]$work) {
-    if (Test-SshdReady) { Say 'OpenSSH Server: running, starts with Windows, and the tailnet firewall rule is there.'; return $true }
-    $result = Join-Path $work 'sshd-result.json'
-    $elevated = @"
-`$ErrorActionPreference = 'Stop'
-`$out = @{}
-try {
-    `$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-    if (`$cap -and `$cap.State -ne 'Installed') { Add-WindowsCapability -Online -Name `$cap.Name | Out-Null; `$out.installed = `$true }
-    if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) { throw 'no sshd service after installing OpenSSH Server' }
-    Set-Service sshd -StartupType Automatic
-    Start-Service sshd
-    if (-not (Get-NetFirewallRule -Name 'FFFactory-sshd-tailnet' -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -Name 'FFFactory-sshd-tailnet' -DisplayName 'FF Factory: OpenSSH Server from the tailnet' -Group 'FF Factory' -Direction Inbound -Protocol TCP -LocalPort 22 -RemoteAddress '100.64.0.0/10', 'fd7a:115c:a1e0::/48' -Action Allow -Profile Any | Out-Null
-        `$out.firewall = 'added'
-    }
-    `$out.ok = `$true
-} catch { `$out.error = "`$_" }
-`$out | ConvertTo-Json | Set-Content -LiteralPath '$($result -replace "'", "''")' -Encoding UTF8
-"@
-    Say 'Turning on OpenSSH Server with a firewall rule for the tailnet only (Windows asks for administrator rights once)...'
-    $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($elevated))
-    try {
-        Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $b64
-    } catch {
-        Say "The administrator prompt was refused: $($_.Exception.Message)"
-        return $false
-    }
-    if (-not (Test-Path -LiteralPath $result)) { Say 'OpenSSH Server: the administrator step wrote no result.'; return $false }
-    $r = Get-Content -Raw -LiteralPath $result | ConvertFrom-Json
-    if (-not $r.ok) { Say "OpenSSH Server could not be set up: $($r.error)"; return $false }
-    Say "OpenSSH Server: $(if ($r.installed) { 'installed, ' } else { '' })running, starts with Windows; firewall rule 'FF Factory: OpenSSH Server from the tailnet' $(if ($r.firewall) { 'added' } else { 'kept' })."
-    return $true
-}
-
 # ---------------------------------------------------------------- the credential file
 
 # A new folder only this account can read (its ACL protected from inheritance), for the credential and the result files.
@@ -307,36 +258,6 @@ function New-PrivateFolder {
         & chmod 700 $dir
     }
     return $dir
-}
-
-# ---------------------------------------------------------------- the tailnet tag
-
-function Show-TagStep([string]$name) {
-    Say "For the portal's ssh to reach this PC, the tailnet policy's grant must cover it. One of these, by a tailnet admin:"
-    Say "  - tag it: Tailscale admin console > Machines > $name > Edit ACL tags > $($script:WorkerTag) (the policy grants $($script:WorkerTag) port 22 from tag:fff-portal; docs/worker-install.md, 'The tailnet'), or"
-    Say "  - name it: add $name to the policy's tcp:22 grant for tag:fff-portal (deploy/vm/RUNBOOK.md section 1, 'Adding a machine'), and turn off its key expiry."
-    Say 'The daemon works meanwhile; only the portal''s updates over ssh wait for it.'
-}
-
-# Tags this PC through `tailscale login --advertise-tags`, on a yes: a browser sign-in by a tag owner.
-function Add-WorkerTag([string]$exe, $self) {
-    if ($NoTag -or -not $exe) { Show-TagStep $self.Name; return $false }
-    Say "This PC is not tagged $($script:WorkerTag). Tagging it signs it into Tailscale again, in your browser (a tag owner's sign-in): the PC then belongs to the tag instead of your login, keeps its address and name, and its key no longer expires."
-    if (-not (Confirm-Step "Tag it $($script:WorkerTag) now?" $false)) { Show-TagStep $self.Name; return $false }
-    & $exe login "--advertise-tags=$($script:WorkerTag)" | Out-Host
-    $after = Get-TailnetSelf $exe
-    if (-not $after -or -not $after.Running -or -not ($after.Tags -contains $script:WorkerTag)) {
-        Say 'The tag did not take (the policy may not have the tag yet, or the sign-in was not a tag owner''s).'
-        Show-TagStep $self.Name
-        return $false
-    }
-    $h = Invoke-Portal 'GET' '/api/health'
-    if (-not $h.Ok) {
-        Say "WARNING: tagged, and the portal no longer answers ($($h.Error)): the tailnet policy lacks the grants for $($script:WorkerTag) (docs/worker-install.md, 'The tailnet'). Undo with: tailscale login --force-reauth  (sign in as yourself)."
-        return $false
-    }
-    Say "Tagged $($script:WorkerTag); the portal still answers."
-    return $true
 }
 
 # ---------------------------------------------------------------- running the installer
@@ -399,14 +320,12 @@ function Invoke-Update([string]$root, [string]$tsExe, $self, [string]$work) {
     if (-not $SkipMachineSetup) {
         if (-not (Install-Tools)) { return 2 }
         Show-Unity
-        [void](Enable-Sshd $work)
     }
     $a = @('-Update', '-Root', $root)
     if ($MaxSandboxes) { $a += @('-MaxSandboxes', $MaxSandboxes) }
     if ($MaxAgentsPerSandbox) { $a += @('-MaxAgentsPerSandbox', $MaxAgentsPerSandbox) }
     if ($MaxUnity) { $a += @('-MaxUnity', $MaxUnity) }
     $code = Invoke-Installer $a $work
-    if ($Tag -and -not ($self.Tags -contains $script:WorkerTag)) { [void](Add-WorkerTag $tsExe $self) }
     Step 'Summary'
     Say $(if ($code -eq 0) { "Updated$(if ($id) { " $id" }) at $root; the installer's report is above." } else { "The update did not finish (exit $code); its report is above. Run this again once that is fixed." })
     return $code
@@ -437,17 +356,14 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
             $missing = Get-MissingTools
             Say $(if ($missing.Count) { "Would install: $(($missing | ForEach-Object { $_.Name }) -join ', ')." } else { 'node, git, git-lfs and Claude Code: all here.' })
             Show-Unity
-            Say $(if (Test-SshdReady) { 'OpenSSH Server: ready.' } else { 'Would turn on OpenSSH Server with a tailnet-only firewall rule (one administrator prompt).' })
         }
         Say "Dry run: nothing was changed, and the code is still unused. Run it again without -DryRun to join."
         return 0
     }
-    if (-not $Yes -and -not (Confirm-Step 'Go on: install what is missing, set up OpenSSH Server, enrol and install this PC?' $true)) { Say 'Stopped; nothing was changed and the code is still unused.'; return 1 }
+    if (-not $Yes -and -not (Confirm-Step 'Go on: install what is missing, enrol and install this PC?' $true)) { Say 'Stopped; nothing was changed and the code is still unused.'; return 1 }
     if (-not $SkipMachineSetup) {
         if (-not (Install-Tools)) { return 2 }
         Show-Unity
-        Step 'OpenSSH Server'
-        if (-not (Enable-Sshd $work)) { Say 'Going on without it: the daemon works, and the portal cannot update this PC over ssh until OpenSSH Server runs (run this again to retry).' }
     }
 
     Step 'Enrolling'
@@ -461,7 +377,7 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
     Say "The portal made the record for '$($r.Body.machineId)' and issued its credential (...$($r.Body.last4)), written to a private file for the installer."
 
     Step 'Installing (install.ps1)'
-    $a = @('-Root', $root, '-PortalUrl', $script:Portal, '-MaxSandboxes', $limits.maxSandboxes, '-MaxAgentsPerSandbox', $limits.maxAgentsPerSandbox, '-MaxUnity', $limits.maxUnity, '-CredentialFile', $credFile)
+    $a = @('-Root', $root, '-PortalUrl', $script:Portal, '-MaxSandboxes', $limits.maxSandboxes, '-MaxAgentsPerSandbox', $limits.maxAgentsPerSandbox, '-MaxUnity', $limits.maxUnity, '-CredentialFile', $credFile, '-NoSsh')
     try {
         $exit = Invoke-Installer $a $work
     } finally {
@@ -471,10 +387,6 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
 
     Step 'What the portal sees'
     $who = Invoke-Portal 'GET' '/machine/whoami' $null $credential
-    $ssh = Invoke-Portal 'GET' '/machine/ssh?check=1' $null $credential
-    if ($ssh.Ok -and -not $ssh.Body.reachable -and -not $NoTag) { [void](Add-WorkerTag $tsExe $self); $ssh = Invoke-Portal 'GET' '/machine/ssh?check=1' $null $credential }
-    elseif ($Tag -and -not ($self.Tags -contains $script:WorkerTag)) { [void](Add-WorkerTag $tsExe $self) }
-    elseif ($ssh.Ok -and -not $ssh.Body.reachable) { Show-TagStep $self.Name }
     $credential = $null
 
     Step 'Summary'
@@ -483,7 +395,7 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
     Say "- Installer: $(if ($exit -eq 0) { 'finished' } else { "stopped (exit $exit); its report is above. Fix that and run this again: it updates what is there, or asks for a new code if nothing was installed" })."
     if ($who.Ok) { Say "- The portal sees it: $(if ($who.Body.online) { 'online' } else { 'not online yet' })$(if ($who.Body.daemon) { ", daemon $($who.Body.daemon)" })$(if ($who.Body.root) { ", root $($who.Body.root)" }). list_machines shows it." }
     else { Say "- The portal's view: $($who.Error)" }
-    if ($ssh.Ok) { Say "- The portal's ssh ($($ssh.Body.host)): $(if ($ssh.Body.reachable) { 'gets in, so the portal can update this PC' } else { "does not get in yet: $($ssh.Body.detail)" })." }
+    Say "- Updates: the portal updates, restarts and unloads this PC over its daemon's own link; no ssh, firewall rule or tailnet tag is needed."
     Say '- No credential was shown or kept outside the install (its own secrets folder).'
     return $exit
 }

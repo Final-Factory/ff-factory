@@ -1,0 +1,127 @@
+// The portal's half of updates over a daemon's link (w1596, docs/worker-install.md "Updates over the daemon's link";
+// machine/selfUpdate.ts is the daemon's). The code a machine updates to is the portal's own: a git bundle of the checkout
+// it runs from (deploy/vm/guest/fff-update makes each release a worktree of one clone), at its HEAD. The bundle's SHA-256
+// and size go in the `self_update` message on the machine's own authenticated link; the machine downloads it with its own
+// credential (GET /machine/update/<sha256>, only a machine it was offered to) and checks both, and git checks the commit.
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
+export interface UpdateBundle {
+  commit: string;
+  file: string;
+  sha256: string;
+  size: number;
+}
+
+const git = (cwd: string, args: string[]) =>
+  new Promise<string>((resolve, reject) => {
+    const p = spawn('git', ['-C', cwd, ...args], { windowsHide: true });
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (err += d));
+    p.on('error', reject);
+    p.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(`git ${args[0]} failed (${code}): ${err.trim().slice(-300)}`))));
+  });
+
+/** The commit the portal's checkout is at (its HEAD, the full id), or undefined when it is not a git checkout. */
+export async function portalCommit(root: string): Promise<string | undefined> {
+  const sha = (await git(root, ['rev-parse', 'HEAD']).catch(() => '')).trim();
+  return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+}
+
+/** The bundles a machine may fetch: made once per commit in the data folder, the newest few kept. */
+export class UpdateBundles {
+  private readonly dir: string;
+  private readonly root: string;
+  private made = new Map<string, Promise<UpdateBundle>>();
+  /** machine id -> the bundle's SHA-256 it was offered, until when (ms). */
+  private offers = new Map<string, { sha256: string; until: number }>();
+
+  constructor(o: { dataDir: string; root: string }) {
+    this.dir = path.join(o.dataDir, 'update-bundles');
+    this.root = o.root;
+  }
+
+  /** The bundle of the portal's checkout at its HEAD, which must be `commit` (the code a rollout or update asked for). */
+  async prepare(commit?: string): Promise<UpdateBundle> {
+    const head = await portalCommit(this.root);
+    if (!head) throw new Error(`the portal's code at ${this.root} is not a git checkout, so it has no bundle to send`);
+    if (commit && !head.startsWith(commit.toLowerCase())) throw new Error(`the portal's checkout is at ${head.slice(0, 12)}, not ${commit.slice(0, 12)}`);
+    let p = this.made.get(head);
+    if (!p) {
+      p = this.make(head);
+      this.made.set(head, p);
+      p.catch(() => this.made.delete(head));
+    }
+    return p;
+  }
+
+  private async make(commit: string): Promise<UpdateBundle> {
+    fs.mkdirSync(this.dir, { recursive: true });
+    const file = path.join(this.dir, `${commit.slice(0, 16)}.bundle`);
+    if (!fs.existsSync(file)) {
+      const tmp = `${file}.${process.pid}.tmp`;
+      // Its HEAD as the bundle's HEAD: the machine fetches HEAD and checks the commit (machine/selfUpdate.ts checkoutFromBundle).
+      await git(this.root, ['bundle', 'create', '--quiet', tmp, 'HEAD']);
+      fs.renameSync(tmp, file);
+    }
+    const sha256 = await new Promise<string>((resolve, reject) => {
+      const h = createHash('sha256');
+      fs.createReadStream(file).on('data', (d) => h.update(d)).on('error', reject).on('end', () => resolve(h.digest('hex')));
+    });
+    // The two newest stay: one a rollout may still hand out, one before it.
+    const old = fs.readdirSync(this.dir).filter((n) => n.endsWith('.bundle') && path.join(this.dir, n) !== file).map((n) => path.join(this.dir, n)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    for (const f of old.slice(1)) fs.rmSync(f, { force: true });
+    return { commit, file, sha256, size: fs.statSync(file).size };
+  }
+
+  /** This machine may fetch this bundle for the next hour. */
+  offer(machineId: string, b: UpdateBundle, now = Date.now()) {
+    this.offers.set(machineId, { sha256: b.sha256, until: now + 3_600_000 });
+  }
+
+  /** The bundle file a machine asks for, when it was offered that one and the offer stands; else undefined. */
+  async fileFor(machineId: string, sha256: string, now = Date.now()): Promise<string | undefined> {
+    const o = this.offers.get(machineId);
+    if (!o || o.sha256 !== sha256 || o.until < now) return undefined;
+    for (const p of this.made.values()) {
+      const b = await p.catch(() => undefined);
+      if (b?.sha256 === sha256) return b.file;
+    }
+    return undefined;
+  }
+}
+
+/** A call to a daemon answered later by a message with its id (self_update_ack, self_update_report, daemon_control_result). */
+export class PendingCalls<T> {
+  private calls = new Map<string, { resolve: (v: T) => void; reject: (e: Error) => void; timer: NodeJS.Timeout; machineId: string }>();
+
+  wait(id: string, machineId: string, ms: number, what: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.calls.delete(id);
+        reject(new Error(`${machineId} did not answer ${what} in ${Math.round(ms / 60_000) || 1} minute(s)`));
+      }, ms);
+      timer.unref?.();
+      this.calls.set(id, { resolve, reject, timer, machineId });
+    });
+  }
+
+  /** The answer came: true when a call waited for it. */
+  settle(id: string, v: T | Error): boolean {
+    const c = this.calls.get(id);
+    if (!c) return false;
+    this.calls.delete(id);
+    clearTimeout(c.timer);
+    if (v instanceof Error) c.reject(v);
+    else c.resolve(v);
+    return true;
+  }
+
+  has(id: string): boolean {
+    return this.calls.has(id);
+  }
+}

@@ -65,7 +65,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w1574 (no bump): `activity_config` (the machine's machines.activityPause), which an older daemon's onMessage drops (it keeps
 // its pause.json's own setting; the portal then ignores its activity pauses while the setting is off), and `activity_set`
 // from the tray, which an older portal drops (the tray's choice stays on that machine).
-const DECIDED = { protocol: 9, fingerprint: 'dd4809897698f4e7' };
+// w1596 (no bump): `selfUpdate` in the hello (optional: an older portal ignores it and updates the machine over ssh), and
+// `self_update` and `daemon_control`, sent only to a daemon that offered it (an older daemon never gets one), answered by
+// `self_update_ack`, `self_update_report` and `daemon_control_result`, which an older portal never asks for and drops.
+const DECIDED = { protocol: 9, fingerprint: 'a4ef804e7ca4a502' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

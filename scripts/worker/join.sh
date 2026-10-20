@@ -4,10 +4,11 @@
 # add_machine join_code:
 #   bash -c "$(curl -fsSL https://<the portal>/join/unix.sh)"
 # The portal serves this file with its own address written in. It checks node 22.6+, git 2.48+, git-lfs and Claude Code
-# (installs the missing ones with Homebrew on a Mac, and Claude Code with its own installer, on your yes), checks that
-# Remote Login (sshd) is on, redeems the code (the credential goes straight into a private file, never onto the screen),
-# runs the worker installer (install.sh) with it and deletes the file. Run again on an installed computer, it updates the
-# install instead and needs no code.
+# (installs the missing ones with Homebrew on a Mac, and Claude Code with its own installer, on your yes), redeems the code
+# (the credential goes straight into a private file, never onto the screen), runs the worker installer (install.sh
+# --no-ssh) with it and deletes the file. No Remote Login (sshd) or tailnet tag (w1596): the portal updates, restarts and
+# unloads this computer over its daemon's own link. Run again on an installed computer, it updates the install instead and
+# needs no code; one that joined with ssh keeps it as it is.
 #
 # Options: --root <dir>, --max-sandboxes N, --max-agents-per-sandbox N, --max-unity N, --dry-run (change nothing, the
 # code stays unused), --yes (ask nothing but the code). Tests only (scripts/worker/join.test.ts): --tailscale <fake>,
@@ -15,7 +16,6 @@
 set -euo pipefail
 
 PORTAL_URL='__FF_PORTAL_URL__'
-WORKER_TAG='tag:fff-worker'
 INSTALL_URL='https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh'
 ROOT='' MAX_SANDBOXES='' MAX_AGENTS='' MAX_UNITY='' DRY_RUN=0 YES=0 TAILSCALE='' INSTALLER='' SKIP_SETUP=0
 
@@ -73,8 +73,6 @@ if [ -z "$TAILSCALE" ] || ! "$TAILSCALE" status >/dev/null 2>&1; then
   say 'Tailscale is not connected on this computer. Install it (https://tailscale.com/download), sign in, then run this again.'
   exit 2
 fi
-TAGGED=0
-"$TAILSCALE" status --json 2>/dev/null | grep -q "\"$WORKER_TAG\"" && TAGGED=1
 if ! curl -fsS --max-time 15 "$PORTAL/api/health" >/dev/null 2>&1; then
   say "The portal at $PORTAL does not answer."
   exit 2
@@ -118,15 +116,6 @@ install_tools() {
   if [ -n "${missing// /}" ]; then say "Still missing: $missing. Install it, then run this again."; return 1; fi
   say 'node, git, git-lfs and Claude Code: all here now.'
 }
-ssh_check() {
-  if (exec 3<>/dev/tcp/127.0.0.1/22) 2>/dev/null; then say 'sshd: on (the portal updates this computer over it).'; return 0; fi
-  if [ "$OS" = macos ]; then
-    say 'Remote Login is off: turn it on in System Settings > General > Sharing > Remote Login (for your user), so the portal can update this Mac later.'
-  else
-    say 'No sshd answers on port 22: install and start it (Ubuntu: sudo apt install openssh-server), so the portal can update this PC later.'
-  fi
-  say 'Going on without it: the daemon works; only the portal''s updates over ssh wait for it.'
-}
 
 # --- an install that is already here: update it, no code
 root_installed() { [ -n "$1" ] && { [ -f "$1/root.json" ] || [ -f "$1/moved.json" ]; }; }
@@ -141,7 +130,7 @@ fi
 if root_installed "$ROOT"; then
   step "Already installed at $ROOT: updating it (no join code needed)"
   if [ "$DRY_RUN" = 1 ]; then say "Dry run: it would update the install at $ROOT (install.sh --update)."; exit 0; fi
-  if [ "$SKIP_SETUP" = 0 ]; then install_tools || exit 2; ssh_check; fi
+  if [ "$SKIP_SETUP" = 0 ]; then install_tools || exit 2; fi
   args=(--update --root "$ROOT")
   [ -n "$MAX_SANDBOXES" ] && args+=(--max-sandboxes "$MAX_SANDBOXES")
   [ -n "$MAX_AGENTS" ] && args+=(--max-agents-per-sandbox "$MAX_AGENTS")
@@ -152,7 +141,7 @@ fi
 
 # --- a new machine: the tools first (the rest reads the portal's JSON with node)
 step 'Tools'
-if [ "$SKIP_SETUP" = 0 ]; then install_tools || exit 2; ssh_check; fi
+if [ "$SKIP_SETUP" = 0 ]; then install_tools || exit 2; fi
 command -v node >/dev/null || { say 'node is needed to go on.'; exit 2; }
 
 ROOT_GUESS=${ROOT:-$HOME/ffw}
@@ -194,7 +183,7 @@ node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[
 say "The portal made the record for '$ID' and issued its credential (...$(json "$WORK/join.json" last4)), written to a private file for the installer."
 
 step 'Installing (install.sh)'
-args=(--root "$ROOT" --portal-url "$PORTAL" --max-sandboxes "$LS" --max-agents-per-sandbox "$LA" --max-unity "$LU" --credential-file "$CRED")
+args=(--root "$ROOT" --portal-url "$PORTAL" --max-sandboxes "$LS" --max-agents-per-sandbox "$LA" --max-unity "$LU" --credential-file "$CRED" --no-ssh)
 rc=0
 if [ -n "$INSTALLER" ]; then bash "$INSTALLER" "${args[@]}" || rc=$?; else bash -c "$(curl -fsSL "$INSTALL_URL")" -- "${args[@]}" || rc=$?; fi
 rm -f "$CRED"
@@ -203,6 +192,6 @@ say "The credential file is deleted$([ -e "$CRED" ] && echo " (NOT: remove $CRED
 step 'Summary'
 say "- Machine: $ID, root $ROOT."
 if [ "$rc" = 0 ]; then say '- Installer: finished; its report is above. list_machines shows the machine.'; else say "- Installer: stopped (exit $rc); its report is above. Fix that and run this again."; fi
-[ "$TAGGED" = 1 ] || say "- The portal's ssh reaches this computer only if the tailnet policy's tcp:22 grant covers it: a tailnet admin tags it $WORKER_TAG (admin console > Machines > Edit ACL tags) or names it in that grant (docs/worker-install.md, 'The tailnet')."
+say "- Updates: the portal updates, restarts and unloads this computer over its daemon's own link; no Remote Login (ssh) or tailnet tag is needed."
 say '- No credential was shown or kept outside the install (its own secrets folder).'
 exit "$rc"

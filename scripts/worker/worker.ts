@@ -1889,7 +1889,7 @@ export function withStandardPaths(current: string, platform: NodeJS.Platform = p
 }
 
 /** Whether `a` and `b` name the same commit (one may be short). */
-const sameCommit = (a: string | undefined, b: string | undefined) => !!a && !!b && a.length >= 7 && b.length >= 7 && (a.toLowerCase().startsWith(b.toLowerCase()) || b.toLowerCase().startsWith(a.toLowerCase()));
+export const sameCommit = (a: string | undefined, b: string | undefined) => !!a && !!b && a.length >= 7 && b.length >= 7 && (a.toLowerCase().startsWith(b.toLowerCase()) || b.toLowerCase().startsWith(a.toLowerCase()));
 
 /**
  * Whether an update succeeded (w629): only when the portal sees the daemon online, running the commit the update
