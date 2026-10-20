@@ -272,9 +272,9 @@ export function devFacts(
   facts: { watch?: DevUpdate['watch']; version?: string | null; mergedIn?: string | null; branch?: string },
   extra: { summary?: string; prUrl?: string; fixPr?: { number: number; url: string } } = {},
 ): Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> {
-  // QUESTIONS AND RESULTS ARE FOR A DEVELOPER (w351): FFBox posts them only in a private channel, and from a public
-  // thread DMs them to the operator who filed the request, so they keep their internal detail (ids, files, PRs).
-  // Only the PR summary and the merge notice reach players, and those stay player-safe (prSummary, FFBox's own line).
+  // QUESTIONS AND RESULTS ARE FOR A DEVELOPER (w351): FFBox DMs a question to the operator who filed the request, so
+  // it keeps its internal detail (ids, files, PRs), and since w1640 it records a result and the PR summary without
+  // posting them; only its merge notice reaches the thread by itself (docs/ffbox.md, "What FFBox posts by itself").
   if (w.status === 'rejected' || w.status === 'cancelled') {
     const reason = cleanLine(w.outcome ?? '', 300);
     return { status: w.status === 'rejected' ? 'declined' : 'cancelled', ...(reason ? { result: reason } : {}) };
