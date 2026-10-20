@@ -198,6 +198,8 @@ export interface SelfUpdaterDeps {
 /** The daemon's half of the updates over its link (see the top of the file); machine/daemon.ts holds one. */
 export class SelfUpdater {
   private busy = false;
+  /** A finished job's task or LaunchAgent being removed: a new job or an unload waits for it rather than being refused (w1596). */
+  private removing: Promise<void> | undefined;
   /** Its hands (the job launcher, the fetch); tests replace them. */
   readonly deps: SelfUpdaterDeps;
   constructor(d: SelfUpdaterDeps) {
@@ -241,6 +243,7 @@ export class SelfUpdater {
     const why = selfUpdateProblem(msg);
     if (why) return refuse(why);
     const f = updateFiles(this.deps.appDir);
+    await this.removing;
     if (this.busy || jobInFlight(readJson<UpdateJob>(f.job))) return refuse('an update job of this machine is still running');
     this.busy = true;
     try {
@@ -272,6 +275,7 @@ export class SelfUpdater {
     const inst = this.install();
     if (!inst) return answer(false, 'this daemon is not a worker root install whose root.json names its service');
     if (!fs.existsSync(path.join(updateFiles(this.deps.appDir).src, 'scripts', 'worker', 'linkJob.ts'))) return answer(false, "the install's checkout has no update job (scripts/worker/linkJob.ts): update it first");
+    await this.removing;
     if (this.busy || jobInFlight(readJson<UpdateJob>(updateFiles(this.deps.appDir).job))) return answer(false, 'an update job of this machine is still running');
     try {
       const how = await this.start(this.job('uninstall', msg.id, inst.service), inst.service);
@@ -292,14 +296,20 @@ export class SelfUpdater {
     const job = readJson<UpdateJob>(updateFiles(this.deps.appDir).job);
     if (job?.reported && !job.removed && job.phase === 'done' && !alive(job.pid) && !this.busy) {
       // Busy meanwhile, so no new job starts while the old one's task or LaunchAgent is removed (it would be removed too).
+      // A daemon restarted right after a job (w1596's Windows CI: a restart, then an unload as the new daemon connected) removes
+      // it at its first tick, just as the portal's next command arrives: that command waits for this.
       this.busy = true;
-      try {
-        const inst = this.install();
-        if (inst) await (this.deps.remove ?? removeJob)(inst.service, this.platform).catch(() => undefined);
-        if (readJson<UpdateJob>(updateFiles(this.deps.appDir).job)?.id === job.id) writeJson(updateFiles(this.deps.appDir).job, { ...job, removed: true });
-      } finally {
-        this.busy = false;
-      }
+      this.removing = (async () => {
+        try {
+          const inst = this.install();
+          if (inst) await (this.deps.remove ?? removeJob)(inst.service, this.platform).catch(() => undefined);
+          if (readJson<UpdateJob>(updateFiles(this.deps.appDir).job)?.id === job.id) writeJson(updateFiles(this.deps.appDir).job, { ...job, removed: true });
+        } finally {
+          this.busy = false;
+          this.removing = undefined;
+        }
+      })();
+      await this.removing;
     }
   }
 }

@@ -188,7 +188,20 @@ test('w1596: a restart over the link answers, then the daemon exits for its supe
   await assert.rejects(s.mm.linkControl('mx', 'uninstall'), /has no update job/);
   fs.mkdirSync(path.join(updateFiles(s.appDir).src, 'scripts', 'worker'), { recursive: true });
   fs.writeFileSync(path.join(updateFiles(s.appDir).src, 'scripts', 'worker', 'linkJob.ts'), '');
+  // A daemon just restarted after a job removes that job's task at its first tick, as the next command arrives (w1596's
+  // Windows CI run: "refused it: an update job of this machine is still running"): the unload waits for it.
+  const f = updateFiles(s.appDir);
+  fs.mkdirSync(f.dir, { recursive: true });
+  writeJson(f.job, { id: 'old', form: 'update', root: s.root, appDir: s.appDir, service: 'com.fffactory.linktest', createdAt: new Date().toISOString(), phase: 'done', reported: true });
+  let removal = false;
+  s.d.selfUpdate.deps.remove = async () => {
+    removal = true;
+    await new Promise((r) => setTimeout(r, 300));
+  };
+  const ticking = s.d.selfUpdate.tick();
+  assert.equal(removal, true, 'the removal is under way');
   await s.mm.linkControl('mx', 'uninstall');
+  await ticking;
   assert.equal(readJson<UpdateJob>(updateFiles(s.appDir).job)?.form, 'uninstall');
   assert.equal(s.launched.length, 1);
 
