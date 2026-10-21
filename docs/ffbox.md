@@ -266,12 +266,15 @@ or web route for this.
 2. The worker publishes each archive (`publish_attachment`) and calls **`file_ffbox_symbols {version, entries}`**, one entry
    per build: `{app, platform, attachment}` (`server/ffboxUrgentSymbols.ts`). The call answers within about 40 s with how
    far it got (the daemon gives one call 60 s); `file_ffbox_symbols {version}` says how it stands later.
-3. The portal sends each archive as `symbols_put` queries: one 45,000-byte part each (`SYMBOLS_UPLOAD.partBytes`), four in
-   flight, named by the archive's SHA-256 (the attachment store's own content hash), never a path. FFBox's connector answers
+3. The portal sends each archive as `symbols_put` queries: one 45,000-byte part each (`SYMBOLS_UPLOAD.partBytes`), eight in
+   flight on a sliding window (`SYMBOLS_UPLOAD.window`, w1664: each answer frees a place, where w1639 sent four and waited
+   for all four), named by the archive's SHA-256 (the attachment store's own content hash), never a path. FFBox's connector answers
    them itself: it keeps at most 16 MiB of parts ahead of `ffwatch` in its own runtime folder (it may write nowhere else,
    128 MB of memory) and says where the archive stands. A part from another offset is not written, and the portal goes on
-   from there; `busy` (ffwatch has not taken the window yet) is waited out. The parts have their own budget
-   (`SYMBOLS_UPLOAD.perMinute`, under the connector's 2400) and are not kept, so the views keep their 30 queries a minute.
+   from there, once per miss; `busy` (ffwatch has not taken the window yet) is waited out, one part first. The parts have
+   their own budget (`SYMBOLS_UPLOAD.perMinute`, under the connector's 2400) and their own count of answers waited for, so
+   the views and a post keep their 30 queries a minute and their 8 in flight (w1664: a post is never `busy` behind an
+   upload), and are not kept. What a post or a view waits behind on the link is the window: 480 KB, about 0.6 s of it.
    `ffwatch` appends the parts to its own disk and checks the whole archive's SHA-256; an archive that moves no byte for 3
    minutes fails the call.
 4. Then `symbols_ingest` for each build, asked every 5 s until FFBox says `filed`, `failed` or `refused`. FFBox files only a
@@ -283,8 +286,10 @@ or web route for this.
 FFBox's side and its guards are in ffbox's README, "Symbols of an urgent-lane build"; its tests are `test/test_urgent_symbols.py`.
 The portal's are `server/ffboxUrgentSymbols.test.ts`. Measured on the way out, FFBox to the portal: 40.6 MB in 69 s (600.7
 KB/s). A development player's Windows archive is 79.0 MB (217.7 MB of 14 files, packed in 8.4 s on BEAST). A release's is
-smaller (its UnityPlayer.dll is 34.9 MB, not 84 MB), but how long it takes is a guess until the first urgent release
-measures it. Deploy: the portal and the daemon of the computer that built it (for the tool), and ffbox master from
+smaller (its UnityPlayer.dll is 34.9 MB, not 84 MB). 1.0.0.3's six builds were 127.0 MB in four archives, sent and filed
+in 9 min 51 s on the old window of four. Measured upload, a 45.0 MB dummy archive from beast (w1664, 2026-10-21): 178 s at
+271.8 KB/s on the window of four, 54 s at 878.4 KB/s on the sliding window of eight with FFBox's query thread; a post to
+#agent-testing during it reached Discord 1.5 s after the call (4.6 s before, 0.6 s idle). Deploy: the portal and the daemon of the computer that built it (for the tool), and ffbox master from
 2026-10-20 (`ee91ce0`) or later.
 
 ### Posting as Max, from any machine (w901)
@@ -318,8 +323,18 @@ FFBox answers `refused` with its own reason for anything that passes.
 
 Every post that was made (not a repeat) is also a Max event (`MaxManager.ingest`, [max.md](max.md)), so the Max page
 and `max_activity` show it with its channel, link, first line, the session that did it and the computer it ran on. A
-failed or timed-out call is not an event; FFBox's `max_post` and `ffbox_activity` `show: "logs"` (`ffwatch`) have it. A
-timeout (FFBox answers within 12 s) may still have posted: the worker asks again with the same key and gets the link.
+failed call is not an event; FFBox's `max_post` and `ffbox_activity` `show: "logs"` (`ffwatch`) have it.
+
+**An answer that does not come is asked again, so a post that went out answers posted** (w1664; lothsahn: "The patch notes
+uploaded to discord but the worker thought they didn't"). The 1.0.0.3 notes were posted while the call said `timeout`.
+On `timeout`, `no_answer`, `disconnected`, `busy`, `not_ready` or `unavailable` the portal asks `post_message` again with
+the same args (`POST_RETRY` in `server/ffboxPost.ts`: while another 20 s ask fits in 75 s, inside the daemon's 90 s for the
+call). The same key (or the same text, once a day) makes FFBox answer the first post's link when it went out, and post it
+once when it never did; FFBox answers its requests one at a time, so a repeat is answered after the first. A repeat that
+finds a post made since this call began is this call's post: "Posted as Max by FFBox ... FFBox's first answer came late",
+with its Max event. Only when every ask in the budget went unanswered does the call say it may have been posted. FFBox
+answers on a thread of its own since w1664 (`ffwatch` `fff_query_thread_start`), every 0.25 s, so a post no longer waits
+for the daemon's pass (its 5 s sleep and the CI and release lanes) against the connector's 12 s.
 The answer is never kept as a "last known" one. Deploy: the portal and each machine's daemon must run this version for
 the tool to exist, and FFBox must run ffbox master with `post_message` (connector 2.9.0); before that it answers
 `unsupported`.

@@ -1129,7 +1129,9 @@ export class ProviderManager {
 
   // ---------------------------------------------------------------- read-only queries
 
-  private readonly pending = new Map<string, { key: string; done: (r: QueryResult) => void; transfer?: PendingTransfer }>();
+  /** Queries waiting for their answer. `part`: an urgent-lane symbol upload's (partQuery), which never counts against the
+   * views' QUERY_LIMITS.inFlight (w1664: a post must never answer busy because an upload is running). */
+  private readonly pending = new Map<string, { key: string; done: (r: QueryResult) => void; transfer?: PendingTransfer; part?: boolean }>();
   /** Reports coming in (FFBox w320), by query id. */
   private readonly transfers = new Map<string, { t: ReportTransfer; sink: TransferSink; received: number; chain: Promise<void>; done: (o: TransferOutcome) => void; idle: NodeJS.Timeout; failed?: boolean }>();
   private queryTimes: number[] = [];
@@ -1145,7 +1147,9 @@ export class ProviderManager {
     const now = this.now();
     this.queryTimes = this.queryTimes.filter((t) => now - t < 60_000);
     if (this.queryTimes.length >= QUERY_LIMITS.perMinute) return 'rate_limited';
-    if (this.pending.size >= QUERY_LIMITS.inFlight) return 'busy';
+    let asked = 0;
+    for (const q of this.pending.values()) if (!q.part) asked++;
+    if (asked >= QUERY_LIMITS.inFlight) return 'busy';
     return undefined;
   }
 
@@ -1174,6 +1178,7 @@ export class ProviderManager {
       timer.unref();
       this.pending.set(id, {
         key: what,
+        part: true,
         done: (r) => {
           clearTimeout(timer);
           resolve(r);
