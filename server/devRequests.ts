@@ -299,6 +299,24 @@ export function devFacts(
   return out;
 }
 
+/**
+ * A sent update's signature ("<work id> <facts as JSON>") without a done update's branch. A FINISHED REQUEST'S BRANCH IS
+ * NOT NEWS (w1640): boardFacts names the branch its newest worker's sandbox is on NOW, and that sandbox moves on to other
+ * work, so "done, no merge" for w1270 went to FFBox again each time it did (show dev_requests, 2026-10-20 22:59, 23:00,
+ * 23:33, 23:35). The first done update still carries the branch; a later one goes only when something else changed.
+ */
+const steady = (sig: string) => {
+  const at = sig.indexOf(' ');
+  try {
+    const facts = JSON.parse(sig.slice(at + 1)) as Record<string, unknown>;
+    if (facts.status !== 'done' || !('branch' in facts)) return sig;
+    delete facts.branch;
+    return `${sig.slice(0, at)} ${JSON.stringify(facts)}`;
+  } catch {
+    return sig;
+  }
+};
+
 /** An update in a few words, for the dev_requests view: "open, watching fix/x PR #12", "done, master@abc1234, 0.50.0.70". */
 const updateWords = (u: DevUpdate) =>
   u.status === 'open'
@@ -907,13 +925,19 @@ export class DevRequests {
       // the conversation alone before this still counts, once, so the change sends nothing again.
       const key = `${target.id}:${conversation}`;
       const sig = `${target.id} ${mine === facts ? digest : JSON.stringify(mine)}`;
-      if (s.sentUpdates[conversation] === sig) {
+      const old = s.sentUpdates[conversation];
+      if (old !== undefined && steady(old) === steady(sig)) {
         delete s.sentUpdates[conversation];
         s.sentUpdates[key] = sig;
         changed = true;
       }
-      if (s.sentUpdates[key] === sig) continue;
+      const prev = s.sentUpdates[key];
+      if (prev === sig) continue;
       s.sentUpdates[key] = sig;
+      if (prev !== undefined && steady(prev) === steady(sig)) {
+        changed = true;
+        continue;
+      }
       const msg: DevUpdate = { type: 'dev_update', id: `u-${target.id}-${this.now().toString(36)}-${randomBytes(3).toString('hex')}`, request: target.id, conversation, ...mine };
       s.updates = [...s.updates.filter((u) => u.conversation !== conversation), { ...msg, at: this.iso() }].slice(-KEEP_UPDATES);
       const person = links.find((x) => x.link.conversation === conversation)?.link.person.userId ?? target.requestedBy.userId;

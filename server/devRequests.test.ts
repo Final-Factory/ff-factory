@@ -870,6 +870,37 @@ test("w1640: two finished requests of one conversation are each sent once; the m
   assert.equal(sent(), n, 'three more minutes, no update sent again');
 });
 
+test("w1640: a finished request is not sent again when its worker's sandbox moves on to another branch", async (t) => {
+  // show dev_requests, 2026-10-20: "done, no merge w1270" went at 22:59, 23:00, 23:33 and 23:35. Its done update named
+  // the branch its worker's sandbox was on at the time, and every move of that sandbox made the facts "new".
+  const { connect, chat, call, pm, pc, store, dispatcher } = await setupOnMachine(t);
+  const c = await connect();
+  c.send(devRequest('dev-moved-on'));
+  await c.next('dev_ack');
+  const wid = String((await c.next('dev_filed')).workId);
+  await c.next('dev_update');
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Answer it.', title: 'Answer', work_id: wid });
+  assert.equal(started.isError, false, started.text);
+  await settleWorker(store, started.text, wid);
+  await setMachinePr(pc, store, 'alpha', { branch: 'sandbox/answer', pr: { number: 902, url: 'https://github.com/Final-Factory/FinalFactory/pull/902', title: 'Answer', draft: false } });
+  const loth = chat(LOTH);
+  loth.lastFrom = 'human';
+  assert.equal((await call(loth.info, 'update_work', { id: wid, close: 'done', note: 'Answered, nothing to merge.' })).isError, false);
+  const u = await nextUpdate(c, (x) => x.status === 'done');
+  assert.deepEqual([u.request, u.mergedIn, u.branch], [wid, null, 'sandbox/answer']);
+  const sent = () => c.received.filter((m) => m.type === 'dev_update' && m.request === wid).length;
+  pm().dev!.recheck();
+  await new Promise((r) => setTimeout(r, 50));
+  const n = sent();
+  // The sandbox takes other work: another branch, another PR. Nothing about this request changed.
+  for (const [branch, number] of [['sandbox/other', 903], ['sandbox/third', 904]] as const) {
+    await setMachinePr(pc, store, 'alpha', { branch, pr: { number, url: `https://github.com/Final-Factory/FinalFactory/pull/${number}`, title: 'Other', draft: false } });
+    pm().dev!.recheck();
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.equal(sent(), n, 'the sandbox moved twice; no done update went again');
+});
+
 const PR_BODY = [
   '**TL;DR:** Haulers ignored the cargo filter after a reload (w271), so they moved everything. The filter is now saved with the hauler and applied on load.',
   '',
