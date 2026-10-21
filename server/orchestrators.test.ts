@@ -3493,6 +3493,32 @@ async function secondWorkerOn(env: Awaited<ReturnType<typeof setupOnMachine>>, w
   return b;
 }
 
+test('w1696: w665 as it happened: a request whose title names another request, sent once to that request’s live worker for a side job and then again to its own, stays with its own worker; the release pass does not call its work over', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [
+    { id: 'w663', title: "Ben's m5 froze on a multiplayer join" },
+    { id: 'w665', title: "Mac: GPU page fault joining MP as client, freezing Ben's m5 (w663)", relatedIds: ['w663'] },
+  ]);
+  // dc19eb45 (b) diagnosed w663; d558ba14 (a) works w665.
+  const b = await startedFor(env, 'w663');
+  const a = await startedFor(env, 'w665');
+  let clock = Date.now() + 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(clock);
+  // 2026-10-07: the dispatcher sends w665 to b for the m5's logs: that is a real give, and w665 is b's for now.
+  o.linkWorker('w665', b.info, `sent to worker ${b.id}`);
+  assert.deepEqual(store.work.get('w665')!.sessionIds, [a.id, b.id]);
+  assert.ok(agents.workOver(a.info)?.includes(`with another worker now (w665: ${b.id})`), String(agents.workOver(a.info)));
+  // 2026-10-21: the dispatcher sends w665 to a again ("already on it"). a keeps its place in the list, b stays last.
+  clock += 14 * 24 * 3_600_000;
+  o.linkWorker('w665', a.info, `sent to worker ${a.id}, already on it`);
+  assert.equal(store.work.get('w665')!.sessionIds.at(-1), b.id, 'the list order is the trap');
+  assert.equal(agents.workOver(a.info), undefined, `the bug: "its request is with another worker now (w665: ${b.id})", and a was stopped and its temp folder swept`);
+  // b still has w663, which names nobody else: its own work is not over either.
+  assert.equal(agents.workOver(b.info), undefined);
+});
+
 test('w1094: w1049 as it happened: the worker that set a ci: gate keeps its request while another, newer worker waits on Ben; CI finishing resumes the setter, not the newer one, whose own check-in stays its', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents, o } = env;

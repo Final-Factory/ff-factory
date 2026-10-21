@@ -5,6 +5,7 @@
 import type { AppState, HostStats, LiveViewInfo, Machine, MachineSandbox, MachinePlatform, PlayerSeen, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState, UserRole, WorkItem } from './types.ts';
 import { AGENT_STATE_RANK, agentState, holdsSandbox, placeRank, sortAgents } from './agentState.ts';
 import { holdsOf, workLiveAll } from './workState.ts';
+import { newestFirst } from './blockers.ts';
 
 /**
  * Agents with a process (working, waiting on someone, idle), and stopped ones their wake_me or a queued message will
@@ -55,7 +56,7 @@ export function chatLedger(work: readonly WorkItem[] | undefined, byId: Map<stri
   const current = new Map<string, string[]>();
   const holders = new Map<string, string>();
   for (const w of open) {
-    const sid = [...w.sessionIds].reverse().find((id) => byId.has(id) && holdsOf(id, open).held.has(w.id));
+    const sid = newestFirst(w).find((id) => byId.has(id) && holdsOf(id, open).held.has(w.id));
     if (!sid) continue;
     holders.set(w.id, sid);
     current.set(sid, [...(current.get(sid) ?? []), w.id]);

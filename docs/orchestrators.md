@@ -829,6 +829,20 @@ What ends a hold, each recorded on the request (`setAside`, per worker):
   waits for closes or the worker says DONE for that one.
 - Being sent the request again voids a release or a pause.
 
+**A request is with the worker it was last given, by when, not by list order** (w1696, ben, 2026-10-21: "Fix it so a
+request stays with its own worker unless the dispatcher or a person actually moves it"). Its newest worker is the one
+whose `links` entry is newest (`latestWorker`, `newestFirst` in `shared/blockers.ts`); a worker with no entry (before
+w418) is older than any with one, and a tie goes to the later in `sessionIds`. Only a real give moves a request:
+`start_agent` or `message_agent` with its `work_id` and `decide_work link` (each renews that worker's entry), a merge
+(the merged request's entries travel with its workers), or a DONE for it from a request that names it. Nothing is read
+from a title, `related_ids` or an overlap. `sessionIds` is a set in the order workers were first given the request, so
+sending it again to a worker already on it keeps that worker's old place: w665 was sent to dc19eb45 (w663's worker) on
+2026-10-07 for a side job and to its own worker d558ba14 again on 2026-10-21, and reading the last in the list, the
+release pass stopped d558ba14 at 15:47 and 16:13 UTC as "its request is with another worker now (w665: dc19eb45)" and
+its temp folder was swept. What reads the newest worker: `isWith` (the release pass's `workOver`, `ciWait`, `waitOn`,
+the resumable list), `resumeOrder`, a gate's resume (`gateOwner`), the report and branch a request shows, and the
+fleet's holder.
+
 The worker's current turn (`servedBy`: the request it was last sent, plus those linked since) is what the report- and
 message-based signals read (its last report asking a person to decide, a message waiting in the send queue), and spend
 (`docs/spend.md`) and who a request waits on (`stillOn`) still read it too. A held request that is not served gets only
