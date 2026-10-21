@@ -286,8 +286,10 @@ or web route for this.
 FFBox's side and its guards are in ffbox's README, "Symbols of an urgent-lane build"; its tests are `test/test_urgent_symbols.py`.
 The portal's are `server/ffboxUrgentSymbols.test.ts`. Measured on the way out, FFBox to the portal: 40.6 MB in 69 s (600.7
 KB/s). A development player's Windows archive is 79.0 MB (217.7 MB of 14 files, packed in 8.4 s on BEAST). A release's is
-smaller (its UnityPlayer.dll is 34.9 MB, not 84 MB), but how long it takes is a guess until the first urgent release
-measures it. Deploy: the portal and the daemon of the computer that built it (for the tool), and ffbox master from
+smaller (its UnityPlayer.dll is 34.9 MB, not 84 MB). 1.0.0.3's six builds were 127.0 MB in four archives, sent and filed
+in 9 min 51 s on the old window of four. Measured upload, a 45.0 MB dummy archive from beast (w1664, 2026-10-21): 178 s at
+271.8 KB/s on the window of four, 54 s at 878.4 KB/s on the sliding window of eight with FFBox's query thread; a post to
+#agent-testing during it reached Discord 1.5 s after the call (4.6 s before, 0.6 s idle). Deploy: the portal and the daemon of the computer that built it (for the tool), and ffbox master from
 2026-10-20 (`ee91ce0`) or later.
 
 ### Posting as Max, from any machine (w901)
