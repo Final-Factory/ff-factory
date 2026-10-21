@@ -260,6 +260,12 @@ export class BuildPlans {
     if (builder && !this.isBuilder(p, builder)) return `Not yours: ${p.machine} is ${this.holdWhy(p).replace(/: no new work until it is done$/, '')}. Build where you are, or wait until it is done.`;
     if (!p.clearedAt) await this.clear(p);
     // w1668: the build runs in the computer's slot1, its Library warm from the last release: the builder moves there first.
+    // A builder placed here after the clearing gets its seat now.
+    const here = builder ? this.d.workersOn(p.machine).find((s) => s.id === builder) : undefined;
+    if (here && this.d.seat && !p.seat && here.machineSandbox !== RELEASE_SANDBOX) {
+      p.seat = { sandbox: RELEASE_SANDBOX, since: this.now(), told: {} };
+      this.save();
+    }
     if (builder && this.seatPending(p)) {
       await this.seatStep(p);
       if (this.seatPending(p)) {

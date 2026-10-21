@@ -274,3 +274,14 @@ test('w1668: slot1 that cannot be emptied in time: the builder is told to build 
   // PlaceAgain keeps slot1 for the builder only while the seat is pending.
   assert.equal(t.plans.seats('beast').size, 0);
 });
+
+test('w1668: a builder placed on the computer after its clearing still gets slot1 at its start', async () => {
+  const ws: W[] = [];
+  const t = world(ws, { seat: [{ wait: 'the builder is mid-turn: it moves once its turn ends' }] });
+  t.plans.declare({ machine: 'beast', minutes: 0, what: '1.0.0.6 urgent release', requests: ['w1702'], by: 'the dispatcher' });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(t.plans.plan('beast')!.seat, undefined, 'no builder there at the clearing');
+  ws.push({ id: 'late', machine: 'beast', midTurn: true, requests: ['w1702'], sandbox: 'slot4' });
+  assert.match(await t.plans.start('late', 'beast'), /^Not yet \(w1668\)/);
+  assert.equal(t.plans.plan('beast')!.seat?.sandbox, 'slot1');
+});
