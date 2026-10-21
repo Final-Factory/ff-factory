@@ -23,10 +23,11 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import { inspect } from 'node:util';
 import { AgentSession, setQueryForTesting, type AutoCompaction, type SessionHandle, type SessionSink, type TurnEndMeta } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
-import { SECRET_ENV, addSecretValues, redactValue } from '../server/secrets.ts';
+import { addSecretEnv, redactSecrets, redactValue } from '../server/secrets.ts';
 import type { FromDaemon, SignalName } from '../server/machineProtocol.ts';
 import type { DeliveredAttachment, ImageInput, PermissionMode, Requester, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { meterStates } from '../server/meterStates.ts';
@@ -738,7 +739,8 @@ export const hostPlace = (dir: string) => readJson<{ cwd: string; sandbox?: stri
 export async function runHost(dir: string, start: HostStart): Promise<void> {
   const f = hostFiles(dir);
   const id = start.info.id;
-  addSecretValues(Object.entries(start.spec.env ?? {}).filter(([k]) => SECRET_ENV.test(k)).map(([, v]) => v));
+  // The run's secrets, whatever they are called (w1688): the spec's secretEnv names what the vault gave, SECRET_ENV the rest.
+  addSecretEnv(start.spec.env, Array.isArray(start.spec.secretEnv) ? start.spec.secretEnv : []);
   fs.writeFileSync(f.host, JSON.stringify({ hostProtocol: HOST_PROTOCOL, sessionId: id, pid: process.pid, startedAt: new Date().toISOString() } satisfies HostRecord));
   const beat = () => {
     try {
@@ -924,6 +926,11 @@ async function readStdin(): Promise<string> {
 // Run when started directly (by the daemon), not when imported.
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
   const dir = process.argv[2];
+  // host.log never holds a secret either (w1688): every line, an error's message included, redacted as it is written
+  for (const k of ['log', 'warn', 'error'] as const) {
+    const raw = console[k].bind(console);
+    console[k] = (...a: unknown[]) => raw(...a.map((x) => redactSecrets(typeof x === 'string' ? x : inspect(x))));
+  }
   const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
   process.on('uncaughtException', (e) => log('UNCAUGHT (kept running):', e));
   process.on('unhandledRejection', (e) => log('UNHANDLED REJECTION (kept running):', e));

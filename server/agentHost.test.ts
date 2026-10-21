@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, type SessionHandle, type TurnEndMeta } from './sessions.ts';
@@ -26,7 +27,7 @@ const until = async (what: string, cond: () => boolean, ms = 20_000, more = () =
 };
 
 /** A throwaway portal with one machine, and a way to start that machine's daemon as a process of its own. */
-async function setup() {
+async function setup(o: { env?: Record<string, string>; secretEnv?: string[]; daemonEnv?: Record<string, string> } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-hosts-'));
   const cfg = { dataDir: path.join(tmp, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
   fs.mkdirSync(cfg.dataDir);
@@ -37,7 +38,7 @@ async function setup() {
   // The worker is in sandbox "sb" on the portal's side; this daemon has no pool, so its spec names no sandbox (as in
   // machines.test.ts) and it runs under the machine's agent cap.
   mm.hooks = {
-    specFor: (info) => ({ cwd: agentDir, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: agentDir, protectedPaths: [], gameRepos: [] }, model: info.model }),
+    specFor: (info) => ({ cwd: agentDir, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: agentDir, protectedPaths: [], gameRepos: [] }, model: info.model, ...(o.env ? { env: o.env } : {}), ...(o.secretEnv ? { secretEnv: o.secretEnv } : {}) }),
     handlersFor: () => ({}),
   };
   const server = http.createServer();
@@ -58,7 +59,7 @@ async function setup() {
   const daemons: ChildProcess[] = [];
   let logs = '';
   const daemon = () => {
-    const d = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', DAEMON, configFile], { env: { ...process.env, FF_AGENT_HOST_FAKE: '1' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const d = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', DAEMON, configFile], { env: { ...process.env, FF_AGENT_HOST_FAKE: '1', ...o.daemonEnv }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     d.stdout!.on('data', (c) => (logs += c));
     d.stderr!.on('data', (c) => (logs += c));
     daemons.push(d);
@@ -102,7 +103,7 @@ async function setup() {
       : [];
     return [logs, ...each].join('\n');
   };
-  return { store, sessions, mm, daemon, daemons, kill, hostDir, hostPid, said, cleanup, logs: allLogs };
+  return { tmp, store, sessions, mm, daemon, daemons, kill, hostDir, hostPid, said, cleanup, logs: allLogs };
 }
 
 test('w605: an agent mid-turn outlives its daemon being killed, the next daemon takes it back, and its turn reaches the portal; idle, it stays live too', { timeout: 180_000 }, async (t) => {
@@ -229,4 +230,52 @@ test('w1469: the portal compacts an idle worker through its daemon and host; the
   assert.deepEqual(ends.at(-1), { text: 'Echo: big #ctx 210000', meta: { compaction: 'tokens' } });
   assert.equal(s.info.lastResult, 'Echo: big #ctx 210000');
   assert.throws(() => sessions.compact(s.info.id, 'x'), /orchestrators/, 'a worker is never compacted on a message');
+});
+
+test("w1688: a worker that prints vault secrets, whatever they are called, leaves them masked in its transcript, its tool result and Claude Code's own transcript", { timeout: 180_000 }, async (t) => {
+  // fake secrets, made here: one under a *_PASSWORD name, one under a name no rule knows, given as the vault's (secretEnv)
+  const fake = () => `fake-${randomBytes(12).toString('base64url')}`;
+  const A = fake();
+  const B = fake();
+  const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-claude-'));
+  const { tmp, store, sessions, mm, daemon, said, cleanup, logs } = await setup({
+    env: { FAKE_PASSWORD: A, FAKE_STEAM_LOGIN: B },
+    secretEnv: ['FAKE_PASSWORD', 'FAKE_STEAM_LOGIN'],
+    daemonEnv: { CLAUDE_CONFIG_DIR: claudeDir, FF_CLI_SCRUB: 'on' },
+  });
+  t.after(async () => {
+    await cleanup();
+    fs.rmSync(claudeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  const forms = (v: string) => [v, encodeURIComponent(v), Buffer.from(v).toString('base64').replace(/=+$/, '')];
+  const leaks = (text: string) => [A, B].flatMap(forms).filter((f) => text.includes(f)).length;
+  const filesIn = (dir: string): string[] => (fs.existsSync(dir) ? fs.readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).map((e) => path.join(e.parentPath, e.name)) : []);
+  const readAll = (dir: string) => filesIn(dir).map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+
+  daemon();
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined, 60_000, logs);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  const id = s.info.id;
+  sessions.send(id, '#printenv FAKE_PASSWORD FAKE_STEAM_LOGIN');
+  await until('answered', () => said(id, 'assistant').some((x) => x.startsWith('It printed')), 60_000, logs);
+
+  // the portal's transcript, as agent_transcript and search_transcripts read it: the tool result and the reply, masked
+  const events = store.readTranscript(id);
+  const result = events.find((e) => e.kind === 'tool_result');
+  assert.ok(result && result.kind === 'tool_result', 'the Bash call came back');
+  assert.equal(leaks(JSON.stringify(events)), 0, 'no form of either value in the transcript');
+  assert.equal(result.text.split('\n').length, 2);
+  for (const line of result.text.split('\n')) {
+    assert.match(line, /^FAKE_(?:PASSWORD|STEAM_LOGIN)=\[redacted vault secret ….{4}\] url=\[redacted vault secret ….{4}\] b64=\[redacted vault secret, base64 ….{4}\]=*$/, 'each form masked, by name and by the spec alone');
+  }
+  // on disk: the portal's data and the daemon's hosts, every file
+  store.flush();
+  await store.saved();
+  assert.equal(leaks(readAll(tmp)), 0, "nothing of the portal's or the daemon's on disk holds them");
+  // Claude Code's own transcript (written by the fake agent as the CLI does): masked in place by the daemon's scrubber
+  await until('the CLI transcript masked', () => filesIn(claudeDir).length > 0 && leaks(readAll(claudeDir)) === 0, 30_000, () => `${logs()}\nleaks: ${leaks(readAll(claudeDir))}`);
+  const cli = readAll(claudeDir);
+  assert.match(cli, /\[redacted\*+\]/, 'the same-length mask');
+  for (const line of cli.split('\n').filter((l) => l.trim())) JSON.parse(line);
+  await until('the daemon logged it', () => /masked \d+ secret value\(s\) in place/.test(logs()), 10_000, logs);
 });

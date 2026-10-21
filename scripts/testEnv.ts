@@ -7,3 +7,5 @@
 import { secretEnvNames } from '../shared/secretShapes.ts';
 
 for (const name of secretEnvNames(process.env)) delete process.env[name];
+// Tests never scrub the real Claude Code transcripts (server/cliScrub.ts, w1688); a test that checks it turns it on.
+process.env.FF_CLI_SCRUB ??= 'off';

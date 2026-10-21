@@ -5,7 +5,7 @@ import { githubFromVault } from './githubTokens.ts';
 import { tokenKey, usageEnv } from './usage.ts';
 import { poolLimits, reserveOf, reserveReason, type PoolLimits, type Reserve } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
-import { maybeTokenShape, redactTokenShapes } from '../shared/secretShapes.ts';
+import { maybeTokenShape, redactTokenShapes, secretEnvNames } from '../shared/secretShapes.ts';
 
 /**
  * Secrets agents may set but nobody may read back (set_app_config's write-only keys): FFBox's connector token (the Claude
@@ -27,32 +27,173 @@ export const maskSecret = (v: unknown) => (typeof v === 'string' && v ? `set (�
 const lastFour = (m: string) => m.slice(-4);
 
 /**
- * Values the token vault holds (server/vault.ts, w512), whatever their form: redacted by value, so a vault secret with no
- * recognisable shape (an env-kind API key) never reaches a transcript or a log either. Only values of 8+ characters.
+ * Values the token vault holds (server/vault.ts, w512) and every other secret a run or the portal is handed, whatever their
+ * form and whatever their variable is called (w1688: a worker printed its environment through a filter of its own that hid
+ * only names with TOKEN, and FFSTEAM_PASSWORD's value reached Claude Code's transcript): redacted by value, so a secret with
+ * no recognisable shape never reaches a transcript, a tool result, a report, a post or a log. Each value is masked as it is
+ * and in its common encodings (URL-encoded, base64 and base64url of the bare value, JSON-escaped), all through one regular
+ * expression built when the set changes (valueMatcher).
+ *
+ * MIN_SECRET_LENGTH: a value shorter than 8 characters is not masked by value. Masking every "1234", "true" or "admin" would
+ * rewrite ordinary words and numbers all over the transcripts, and the vault already refuses an env secret under 8
+ * (server/vault.ts valueProblem). The names of the secrets skipped for it are kept (skippedSecrets), never their values.
  */
+export const MIN_SECRET_LENGTH = 8;
+/** From this length a mask shows the value's last four characters; a shorter value's mask shows none (4 of 8 is half of it). */
+export const SHOW_LAST4_FROM = 16;
+/** Values kept: the newest first. Each daemon learns a run's secrets at every launch, so the set is small (tens). */
+const MAX_VALUES = 2000;
+
 let knownValues: string[] = [];
+/** Bumped whenever a value is learnt that was not known: the transcript scrubbers (server/cliScrub.ts) scan again for it. */
+let valuesVersion = 0;
+/** For each version, the values new in it (cliScrub's back-scan looks for only those in the files it has already read). */
+const added: { version: number; values: string[]; recent: boolean }[] = [];
+const skipped = new Set<string>();
+let matcher: { re: RegExp; masks: Map<string, string> } | undefined | null = null;
+let byteMatcher: { re: RegExp; maxLen: number } | undefined | null = null;
+
+/** The forms a value is masked in, each with its label in the mask (none for the value itself). */
+function forms(v: string): [string, string][] {
+  const out: [string, string][] = [[v, '']];
+  const url = encodeURIComponent(v);
+  if (url !== v) out.push([url, 'URL-encoded'], [url.replace(/%[0-9A-F]{2}/g, (s) => s.toLowerCase()), 'URL-encoded'], [url.replace(/%20/g, '+'), 'URL-encoded']);
+  const b64 = Buffer.from(v, 'utf8').toString('base64').replace(/=+$/, '');
+  out.push([b64, 'base64'], [b64.replace(/\+/g, '-').replace(/\//g, '_'), 'base64']);
+  // in a JSON text (a transcript line, redactValue's quick check) a quote, a backslash or a control character is escaped
+  for (const [f, label] of [...out]) {
+    const json = JSON.stringify(f).slice(1, -1);
+    if (json !== f) out.push([json, label]);
+  }
+  const seen = new Set<string>();
+  return out.filter(([f]) => f.length >= MIN_SECRET_LENGTH && !seen.has(f) && !!seen.add(f));
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** The mask of a value (and of each of its encodings): "[redacted vault secret …abcd]", "[redacted vault secret, base64]". */
+const maskOf = (v: string, label: string) => `[redacted vault secret${label ? `, ${label}` : ''}${v.length >= SHOW_LAST4_FROM ? ` …${lastFour(v)}` : ''}]`;
+
+/** One regular expression for every form of every known value, longest first, built once per change of the set. */
+function valueMatcher() {
+  if (matcher !== null) return matcher;
+  const masks = new Map<string, string>();
+  for (const v of knownValues) for (const [f, label] of forms(v)) if (!masks.has(f)) masks.set(f, maskOf(v, label));
+  const all = [...masks.keys()].sort((a, b) => b.length - a.length);
+  matcher = all.length ? { re: new RegExp(all.map(escapeRe).join('|'), 'g'), masks } : undefined;
+  return matcher;
+}
+
+function setValues(values: string[], recent = false) {
+  const before = new Set(knownValues);
+  knownValues = values;
+  matcher = byteMatcher = null;
+  const fresh = values.filter((v) => !before.has(v));
+  if (fresh.length) {
+    valuesVersion++;
+    added.push({ version: valuesVersion, values: fresh, recent });
+    while (added.length > 50) added.shift();
+  }
+  return fresh.length;
+}
+
+const usable = (v: unknown): v is string => typeof v === 'string' && v.length >= MIN_SECRET_LENGTH;
+
+/** The values to redact, replacing the ones known (the portal, from its vault at each load and change). */
 export function registerSecretValues(values: readonly string[]) {
-  knownValues = [...new Set(values.filter((v) => typeof v === 'string' && v.length >= 8))].sort((a, b) => b.length - a.length);
+  setValues([...new Set(values.filter(usable))].slice(0, MAX_VALUES));
 }
-
-/** Learn more values to redact without forgetting the ones known (a daemon, from each launch spec it gets). At most 200 kept. */
-export function addSecretValues(values: readonly string[]) {
-  registerSecretValues([...values, ...knownValues].slice(0, 200));
-}
-
-/** Whether `text` may hold a secret this module redacts (a cheap check before the regexes). */
-const maybeSecret = (text: string) => maybeTokenShape(text) || knownValues.some((v) => text.includes(v));
 
 /**
- * `text` with its secrets replaced: a value the vault handed out by "[redacted vault secret …abcd]", and every token shape
- * (shared/secretShapes.ts) by its kind and last four characters: "github_pat_[redacted …abcd]",
+ * Learn more values to redact without forgetting the ones known (a daemon, from each launch spec it gets). How many were
+ * new. `recent`: the values were minted just now (a GitHub App installation token), so no file written before can hold them
+ * and the scrubbers need not look back for them.
+ */
+export function addSecretValues(values: readonly string[], o: { recent?: boolean } = {}): number {
+  const fresh = [...new Set(values.filter(usable))].filter((v) => !knownValues.includes(v));
+  return fresh.length ? setValues([...fresh, ...knownValues].slice(0, MAX_VALUES), o.recent) : 0;
+}
+
+/**
+ * Learn the secrets of an environment (a launch spec's, the portal's own): every variable `names` lists (LaunchSpec
+ * secretEnv: what the vault granted the run, whatever it is called), every variable whose name says it carries one
+ * (SECRET_ENV) and every value shaped like a token. A secret under MIN_SECRET_LENGTH is skipped, and its name kept. How many
+ * values were new.
+ */
+export function addSecretEnv(env: Record<string, string | undefined> | undefined, names: readonly string[] = []): number {
+  if (!env) return 0;
+  const want = new Set([...names, ...secretEnvNames(env)]);
+  const values: string[] = [];
+  for (const k of want) {
+    const v = env[k];
+    if (typeof v !== 'string' || !v) continue;
+    if (v.length < MIN_SECRET_LENGTH) skipped.add(k);
+    else values.push(v);
+  }
+  return addSecretValues(values);
+}
+
+/** The names of the secrets not masked by value because they are shorter than MIN_SECRET_LENGTH (never their values). */
+export const skippedSecrets = (): string[] => [...skipped].sort();
+
+/** What redaction knows: how many values, how many forms of them it masks, and the version of the set. Never a value. */
+export function secretValueStats(): { values: number; forms: number; version: number; skipped: string[] } {
+  return { values: knownValues.length, forms: valueMatcher()?.masks.size ?? 0, version: valuesVersion, skipped: skippedSecrets() };
+}
+
+/** The version of the set of values (bumped by each new one). */
+export const secretValuesVersion = () => valuesVersion;
+
+/**
+ * The values learnt after `version`, and whether every one of them was minted just now (`recent`): what a back-scan of
+ * files already read must look for. `undefined` when that version is too old to tell: look for every value.
+ */
+export function secretValuesSince(version: number): { values: string[]; recent: boolean } | undefined {
+  if (version >= valuesVersion) return { values: [], recent: true };
+  const later = added.filter((a) => a.version > version);
+  if (!later.length || later[0].version !== version + 1) return undefined;
+  const live = new Set(knownValues);
+  return { values: [...new Set(later.flatMap((a) => a.values))].filter((v) => live.has(v)), recent: later.every((a) => a.recent) };
+}
+
+/**
+ * A matcher of the bytes of every form of `values` (default: every known value) as they sit in a UTF-8 file, as a regular
+ * expression over the file read as latin1 (one character per byte, so an index is a byte offset), and the longest form in
+ * bytes: what server/cliScrub.ts overwrites in place. undefined when there is nothing to look for.
+ */
+export function secretBytesMatcher(values?: readonly string[]): { re: RegExp; maxLen: number } | undefined {
+  if (!values && byteMatcher !== null) return byteMatcher;
+  const all = new Set<string>();
+  for (const v of values ?? knownValues) for (const [f] of forms(v)) all.add(Buffer.from(f, 'utf8').toString('latin1'));
+  const list = [...all].sort((a, b) => b.length - a.length);
+  const m = list.length ? { re: new RegExp(list.map(escapeRe).join('|'), 'g'), maxLen: list[0].length } : undefined;
+  if (!values) byteMatcher = m;
+  return m;
+}
+
+/** Whether `text` holds a known value in any form. */
+const hasValue = (text: string) => {
+  const m = valueMatcher();
+  if (!m) return false;
+  m.re.lastIndex = 0;
+  return m.re.test(text);
+};
+
+/** Whether `text` may hold a secret this module redacts (a cheap check before the regexes). */
+const maybeSecret = (text: string) => maybeTokenShape(text) || hasValue(text);
+
+/**
+ * `text` with its secrets replaced: a value the vault handed out (in any of its forms) by "[redacted vault secret …abcd]",
+ * and every token shape (shared/secretShapes.ts) by its kind and last four characters: "github_pat_[redacted …abcd]",
  * "sk-ant-oat01-[redacted …abcd]", "[redacted Discord token …abcd]".
  */
 export function redactSecrets(text: string): string {
-  if (!maybeSecret(text)) return text;
   let out = text;
-  for (const v of knownValues) if (out.includes(v)) out = out.split(v).join(`[redacted vault secret …${lastFour(v)}]`);
-  return redactTokenShapes(out);
+  if (hasValue(text)) {
+    const m = valueMatcher()!;
+    out = text.replace(m.re, (s) => m.masks.get(s) ?? '[redacted vault secret]');
+  }
+  return maybeTokenShape(out) ? redactTokenShapes(out) : out;
 }
 
 /** Every string in `v` (keys too) redacted; the same object where nothing changed. */
@@ -230,6 +371,8 @@ export interface MachineRunEnv {
   github?: string;
   /** Whose pool the token came from. */
   person?: string;
+  /** The variables of `env` that hold a secret the vault gave (w1688): the daemon masks their values whatever they are called. */
+  secretEnv: string[];
 }
 
 /**
@@ -262,9 +405,10 @@ export function machineRunEnv(
   // GitHub Apps (w1519, docs/github-apps.md): the apps this run may use, by name. Its daemon keeps their installation tokens,
   // and the run's git and gh take one for a repository an app is installed on. Only beside a vault GitHub token: the git
   // credential helper that routes by repository replaces the machine's own helpers, so a run on the machine's login gets none.
+  const secretEnv = [...Object.keys(s.env), 'CLAUDE_CODE_OAUTH_TOKEN'];
   const apps = s.github ? ctx.vault.githubAppsFor({ machineId: refId(machine), role: run.role, userId: person }).map((e) => e.name) : [];
   if (apps.length) s.env.FF_GH_APP_NAMES = apps.join(',');
-  if (s.claude) return { env: { ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person), ...github, ...(person ? { person } : {}) };
+  if (s.claude) return { env: { ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person), secretEnv, ...github, ...(person ? { person } : {}) };
   // Every token of the person's is over its caps or used up: the run waits for the first to free up (w739).
   if (s.claudeHold) throw new PoolHeldError(`${person ?? 'this run'}'s Claude token pool is held: ${s.claudeHold.why}`, s.claudeHold.next);
   const why = noTokenWhy(person, s, `a ${run.role} run on ${refId(machine)}`);

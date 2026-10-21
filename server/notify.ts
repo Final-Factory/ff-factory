@@ -6,7 +6,7 @@ import type { SessionHandle, SessionManager, TurnEndMeta } from './sessions.ts';
 import type { DelegationRequest, NotifyKind, NotifyPrefs, Requester, ServerEvent, SessionInfo, StandingAgent, StandingRun, WorkItem } from '../shared/types.ts';
 import { checkArray, isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
 import { dryRun } from './dryRun.ts';
-import { redactValue } from './secrets.ts';
+import { addSecretValues, redactValue } from './secrets.ts';
 
 /** A browser's push subscription, as PushSubscription.toJSON() gives it, plus that device's choices. */
 export interface PushSub {
@@ -77,6 +77,8 @@ export class Notifier {
       writeJsonDurable(keyFile, vapid, { indent: 2, mode: 0o600 });
     }
     this.vapid = vapid;
+    // its private key is a secret of the portal's (w1688): never in a transcript or a log
+    addSecretValues([vapid.privateKey]);
     // A kind added after a device subscribed starts at its default.
     this.subs = (readJsonDurable<PushSub[]>(this.file, { check: checkArray, mode: 0o600 }) ?? []).map((s) => ({ ...s, prefs: { ...DEFAULT_PREFS, ...s.prefs } }));
     for (const s of store.sessions.values()) this.lastStatus.set(s.id, s.status);
