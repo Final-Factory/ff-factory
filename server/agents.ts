@@ -50,7 +50,7 @@ import { WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, t
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
-import { MACHINE_ACCOUNT, SECRET_KEYS, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv } from './secrets.ts';
+import { MACHINE_ACCOUNT, SECRET_KEYS, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
 import { Identity, forLine } from './identity.ts';
 import { crossOwnerLine, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { beltFor, type BeltRole } from './belts.ts';
@@ -2435,6 +2435,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         // Redacted like every *_KEY of a launch spec (server/secrets.ts SECRET_ENV); never in a brief or a file.
         ...this.nightlyRunEnv(info, m),
       },
+      secretEnv: run.secretEnv,
       login: run.login,
     };
   }
@@ -3129,7 +3130,8 @@ ${w.repo ?? ''}
           wrap(async ({ session_id, last, full_text }) => {
             const s = this.sessions.get(session_id);
             const head = `${s.info.title} [${s.info.status}${s.info.statusDetail ? `: ${s.info.statusDetail}` : ''}] turns=${s.info.turns} cost=$${s.info.costUsd.toFixed(2)}`;
-            return `${head}\n${this.condensed(this.store.readTranscript(session_id, last ?? 40), !!full_text)}`;
+            // redacted again as it is read (w1688): a transcript written before a secret's value was known
+            return redactSecrets(`${head}\n${this.condensed(this.store.readTranscript(session_id, last ?? 40), !!full_text)}`);
           }),
         ),
         tool(

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import type { SearchHit, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import { redactSecrets } from './secrets.ts';
 
 export interface SearchQuery {
   /** Words; every one must appear (case-insensitive). "quoted phrases" count as one word. */
@@ -119,7 +120,7 @@ export function searchTranscripts(dir: string, sessions: Map<string, SessionInfo
         seq: e.seq,
         t: e.t,
         kind: e.kind,
-        snippet: snippet(text, words),
+        snippet: redactSecrets(snippet(text, words)),
         title: s?.title ?? sessionId,
         sessionKind: s?.kind,
         sandboxId: s?.sandboxId,

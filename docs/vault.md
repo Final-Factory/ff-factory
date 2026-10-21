@@ -36,7 +36,7 @@ Paths and code come from w511's map (`docs/worker-root.md`, ff-factory #135, mea
 | Unity's licence activation | the editors | each machine | **Stays**: Unity binds it to the machine |
 | The self-hosted GitHub runner's registration (BEAST, `finalfactory-mode2-windows`) | the game repo's CI | `C:\Users\rydin\actions-runner-finalfactory-mode2\` | **Stays**: GitHub's runner, outside FF Factory |
 | steamcmd's login cache (M5, `~/.steamcmd-home`) | last-resort manual uploads (`mp-beta-deploy`) | the M5 | **Stays**: a person's own login, used by a person (w511 5.1); releases go through ffbox CI |
-| The Steam build account `Lothsahn_FFBox`'s password (w1639), and its Steam Guard authenticator's `shared_secret` if it ever has one | the urgent release lane on BEAST, else LothDesktop: FFBox's `ffsteam.py` logs the account in by itself from the password when steamcmd's cached token is gone, making a Guard code (TOTP) from the secret only when there is one (ffbox 971cd6f, 74083e4) | nowhere before: a person typed the password at each computer's steamcmd once | **New**: an entry of kind `env`, `FFSTEAM_PASSWORD`, roles `workers`, machines `beast, lothdesktop`, shared with any run (an urgent release may be Ben's or lothsahn's); `FFSTEAM_GUARD_SECRET` the same way only if the account gets an authenticator (lothsahn: "Let's assume no authenticator for now"). Both names end `_PASSWORD`/`_SECRET`, so the daemon redacts their values (`SECRET_ENV`). FFBox keeps its own copy in its `secrets.env` ("nothing shared with FFBox"). Design: the game repo's `Documentation/Release-Lanes.md`, "Steam credentials" |
+| The Steam build account `Lothsahn_FFBox`'s password (w1639), and its Steam Guard authenticator's `shared_secret` if it ever has one | the urgent release lane on BEAST, else LothDesktop: FFBox's `ffsteam.py` logs the account in by itself from the password when steamcmd's cached token is gone, making a Guard code (TOTP) from the secret only when there is one (ffbox 971cd6f, 74083e4) | nowhere before: a person typed the password at each computer's steamcmd once | **New**: an entry of kind `env`, `FFSTEAM_PASSWORD`, roles `workers`, machines `beast, lothdesktop`, shared with any run (an urgent release may be Ben's or lothsahn's); `FFSTEAM_GUARD_SECRET` the same way only if the account gets an authenticator (lothsahn: "Let's assume no authenticator for now"). The daemon masks their values because the launch spec lists them as the vault's (`secretEnv`, w1688), whatever they are called. FFBox keeps its own copy in its `secrets.env` ("nothing shared with FFBox"). Design: the game repo's `Documentation/Release-Lanes.md`, "Steam credentials" |
 | FFBox's config and secrets (`~/.config/ffbox`, its connector token) | FFBox | FFBox's host, LothDesktop | **Stays, never shared**: the "nothing shared with FFBox" rule (D8) |
 | `AgentControl/session-*.json` bearer tokens | the game's agent automation | the game's data folder | **Stays**: the game makes one per session, for local use only |
 | The portal's own: its GitHub token (D7; since w868 its reads for a request use that request's person's vault token where `machines.githubFromVault` has `portal` on, section 13), its Discord token copy, web-push keys, API keys | the portal | `/srv/fff/secrets`, `/srv/fff/home`, `data/` | **Stay as they are**: no worker uses them. (Lothsahn's subscription token for the orchestrators, D4, was `/srv/fff/secrets/claude-oauth-token`; w1078 moved every orchestrator onto vault tokens and the portal deletes that file, [section 4](#4-which-claude-token-a-run-gets).) |
@@ -1379,6 +1379,27 @@ the model (the tool result) and Claude Code's own transcript on the worker's mac
   a file changed in the last two minutes (named; run it again). On a worker machine, with the release's checkout:
   `node server/scrubSecretsCli.ts --no-data --claude-projects ~/.claude/projects [--dry-run]`.
 
-What masking cannot reach: what the model already read, and Claude Code's transcript on the worker's machine while it is being
-written. A run's `GH_TOKEN` is in its environment by design (`gh` and the git credential helper read it), so `env` in a
+- **By value, whatever the name, in every common form** (w1688: a worker printed its environment through a filter of its
+  own that hid only names with TOKEN, and `FFSTEAM_PASSWORD`'s value reached Claude Code's transcript in clear). A launch
+  spec lists the variables the vault gave the run (`LaunchSpec.secretEnv`), and the daemon and the agent host learn those
+  values (`addSecretEnv`) along with every `SECRET_ENV` name and token-shaped value; an older daemon goes by the names. The
+  portal learns its vault's values, the vault key, the VAPID private key and its own secret environment. One regular
+  expression masks each value as it is, URL-encoded (either hex case, `+` for a space), base64 and base64url of the bare
+  value, and JSON-escaped, rebuilt only when the set changes: 0.5 ms per 180 KB of text with 10 values, 4.6 ms with 2,000,
+  under 1 µs for a short event (measured on beast; the old per-value check took 42 ms at 2,000). A value under 8 characters
+  (`MIN_SECRET_LENGTH`) is not masked by value, since masking every "1234" or "admin" would rewrite ordinary words, and its
+  name is logged (`secrets: not masked by value, under 8 characters: …`); the vault refuses an env secret that short
+  anyway. A value under 16 characters is masked without its last four. agent_transcript, search_transcripts' snippets and
+  post_as_max's text are masked again as they are read or sent, and the agent host's own log too.
+- **Claude Code's own transcripts, in place** (`server/cliScrub.ts`). The CLI writes every tool result to
+  `~/.claude/projects/<cwd>/<session>.jsonl` (and tool-results files, subagents' transcripts) before FF Factory sees it.
+  Each daemon, and the portal for its orchestrators, watches that folder and overwrites every known value, in all its forms,
+  with a mask of the same length (`[redacted*****]`), so the line stays valid JSON, nothing moves and the CLI appending at
+  that moment loses nothing; each agent temp folder's `claude` folder (background task output) is swept every 2 minutes.
+  A value learnt that was not known is looked for in every file once (a GitHub App token minted just now is not). Each pass
+  that masked something is logged by path and count, and a daemon's goes to the portal's clean-up log (`portal_logs`
+  source cleanup, that machine, `"kind":"secret-scrub"`). `FF_CLI_SCRUB=off` turns it off (the tests).
+
+What masking cannot reach: what the model already read (the value was in the tool result it was sent), and the second or so
+between Claude Code writing a line and the scrubber masking it. A run's `GH_TOKEN` is in its environment by design (`gh` and the git credential helper read it), so `env` in a
 worker's shell still shows it to the model; only keeping it out of the environment would change that.

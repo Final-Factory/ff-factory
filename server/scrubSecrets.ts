@@ -155,8 +155,11 @@ export function reportLines(r: ScrubReport, o: { dryRun?: boolean; remaining?: n
   ];
 }
 
-/** Raise when the masking learns something new (a token shape): each portal then scrubs its data folder again at its next start. */
-export const SCRUB_VERSION = 1;
+/**
+ * Raise when the masking learns something new (a token shape): each portal then scrubs its data folder again at its next
+ * start. 2 (w1688): every value in its URL-encoded, base64 and JSON-escaped forms too.
+ */
+export const SCRUB_VERSION = 2;
 /** `<dataDir>/secret-scrub.json`: the scrub version this data folder was last scrubbed at, when, and how many were masked. */
 export const SCRUB_MARKER = 'secret-scrub.json';
 

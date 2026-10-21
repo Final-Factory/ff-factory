@@ -49,8 +49,10 @@ import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
-import { accountSetupLines, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
+import { accountSetupLines, addSecretEnv, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
 import { scrubAtStart } from './scrubSecrets.ts';
+import { CliScrubber } from './cliScrub.ts';
+import { cliProjectsDir } from './cliTranscript.ts';
 import { clock, firstFree, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
@@ -198,6 +200,8 @@ setInterval(() => guardMemory('backup'), 10 * 60_000).unref();
 // systemd's credentials folder (the VM: the vault key) is kept here and taken out of the environment every agent inherits.
 const credentialsDir = process.env.CREDENTIALS_DIRECTORY;
 delete process.env.CREDENTIALS_DIRECTORY;
+// The portal's own secrets in its environment (w1688: a password, a bot token, a key), masked by value like the vault's.
+addSecretEnv(process.env);
 const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
 // The vault's GitHub tokens (w868, docs/vault.md section 13): the portal's gh reads per person, and each token's health.
 // The vault's GitHub Apps (w1519, docs/github-apps.md): installation tokens for the repositories an allowed account installed
@@ -212,6 +216,9 @@ setTimeout(() => {
   const held = store.scrubSecrets();
   if (held) console.log(`secrets: redacted ${held} secret(s) in the sessions and work items held`);
   void scrubAtStart(cfg.dataDir, (line) => console.log(`secrets: ${line}`));
+  // The orchestrators' own Claude Code transcripts on this host (w1688), masked in place as they are written; the first pass
+  // looks through every one of them for the values known now.
+  if (process.env.FF_CLI_SCRUB !== 'off') new CliScrubber({ root: cliProjectsDir(), log: (line) => console.log(line) }).start();
 }, 5000);
 const sessions = new SessionManager(cfg, store);
 sessions.keepTranscript = (id) => {

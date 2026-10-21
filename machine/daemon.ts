@@ -26,7 +26,9 @@ import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
 import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
-import { SECRET_ENV, addSecretValues, redactSecrets, redactValue } from '../server/secrets.ts';
+import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
+import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
+import { cliProjectsDir } from '../server/cliTranscript.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
@@ -227,6 +229,19 @@ export const appDirOfConfig = (cfg: Pick<DaemonConfig, 'appDir'>, home = HOME) =
 /** Where agents' own temp folders go: the machine's temp_dir, else the system's. Exported for tests. */
 export const agentTempRoot = (tempDir: string | undefined) => tempDir || os.tmpdir();
 
+/** The `claude` folder of each agent's temp folder (<temp root>/<ffa-session>/claude): Claude Code's background task output. */
+export function cliTempFolders(tempRoot: string): string[] {
+  try {
+    return fs
+      .readdirSync(tempRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => path.join(tempRoot, e.name, 'claude'))
+      .filter((d) => fs.existsSync(d));
+  } catch {
+    return [];
+  }
+}
+
 /** The clean-up settings the portal last sent, kept in the daemon's folder so they hold while it is down. */
 /** A clean-up log entry for the portal: its item lists cut to 300 each, so one frame stays small. */
 export function trimLogEntry(e: object): Record<string, unknown> {
@@ -326,6 +341,10 @@ export class Daemon {
   private wakes = new Map<string, number>();
   /** The machine's gh login and its token's scopes, names only (w1463, machine/ghLogin.ts); none when the probes have no gh. */
   private ghLogin?: GhLoginWatch;
+  /** Claude Code's own transcripts on this computer, kept free of the secret values this daemon knows (w1688). */
+  private cliScrub?: CliScrubber;
+  /** The secrets named so far as too short to mask by value (logged once each, by name). */
+  private skippedNamed = new Set<string>();
   /** The sessions the portal's last welcome listed for this machine: a process of one of them is this machine's. */
   private portalSessions = new Set<string>();
   /** The portal's welcome came since this daemon started: until then who is live or waited for is not known (w1196). */
@@ -822,6 +841,17 @@ export class Daemon {
     }
     this.startGuard();
     this.connect();
+    // Claude Code writes every tool result to its transcript before anything of ours sees it (w1688): masked in place as it
+    // lands, and looked back through for each secret value learnt (server/cliScrub.ts). FF_CLI_SCRUB=off (the tests) skips it.
+    if (process.env.FF_CLI_SCRUB !== 'off') {
+      this.cliScrub = new CliScrubber({
+        root: cliProjectsDir(),
+        extraRoots: () => cliTempFolders(agentTempRoot(this.cfg.tempDir)),
+        log: (line) => log(line),
+        // the portal keeps it beside the clean-up passes (portal_logs cleanup, this machine): paths and counts only
+        report: (r: CliScrubReport) => this.out({ type: 'cleanup_log', entry: { ...r } }),
+      }).start();
+    }
     // The pause (w1532): its schedule and a person's 90 minutes run here; the tray app shows it and feeds it on a Windows PC.
     this.pause.start();
     if (this.cfg.tray && process.platform === 'win32') {
@@ -955,11 +985,22 @@ export class Daemon {
     }
   }
 
+  /** Learn a run's secret values for redaction; a new one is looked for in Claude Code's transcripts at once. */
+  private learnSecrets(env: Record<string, string> | undefined, names: string[] | undefined) {
+    if (addSecretEnv(env, Array.isArray(names) ? names : [])) void this.cliScrub?.sweep();
+    const short = skippedSecrets().filter((n) => !this.skippedNamed.has(n));
+    if (short.length) {
+      for (const n of short) this.skippedNamed.add(n);
+      log(`secrets: not masked by value, under 8 characters: ${short.join(', ')}`);
+    }
+  }
+
   shutdown() {
     this.stopped = true;
     this.tray?.stop();
     this.pause.stop();
     this.guard?.stop();
+    this.cliScrub?.stop();
     clearTimeout(this.usageTimer);
     for (const t of this.timers) clearInterval(t);
     this.slots.close();
@@ -1995,7 +2036,8 @@ export class Daemon {
             const e = this.entry(msg.info, msg.lastSeq);
             e.spec = msg.spec;
             // The vault's secrets for this run (docs/vault.md): this daemon's log redacts them by value too.
-            addSecretValues(Object.entries(msg.spec.env ?? {}).filter(([k]) => SECRET_ENV.test(k)).map(([, v]) => v));
+            // Whatever they are called (w1688): the spec's secretEnv names what the vault gave, SECRET_ENV the rest.
+            this.learnSecrets(msg.spec.env, msg.spec.secretEnv);
             if (!e.s.live) prepare(msg.spec, this.cfg.tempDir);
             e.s.send(this.withLiveNotes(id, msg.text), msg.from, msg.uuid, msg.images, msg.requestedBy, attachments);
           } catch (err) {
@@ -2054,7 +2096,7 @@ export class Daemon {
       case 'gh_app_tokens': {
         // GitHub App installation tokens (w1519): learnt by redaction first, then the file the runs' helper and gh shim read.
         if (!this.ghApp || !Array.isArray(msg.tokens)) break;
-        addSecretValues(msg.tokens.map((t) => t.token));
+        addSecretValues(msg.tokens.map((t) => t.token), { recent: true });
         try {
           writeGhAppTokens(this.ghApp.file, msg.tokens);
         } catch (e) {
