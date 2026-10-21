@@ -291,8 +291,12 @@ export const SYMBOLS_UPLOAD = {
   partBytes: 45_000,
   /** Parts a minute, under the connector's SYMBOLS_PUT_PER_MINUTE (2400). */
   perMinute: 2_000,
-  /** Parts in flight at once. The connector writes only the one at the offset it stands at and says where that is. */
-  window: 4,
+  /**
+   * Parts in flight at once, on a sliding window (w1664). The connector writes only the one at the offset it stands at
+   * and says where that is. Eight parts are 480 KB on the link: about 0.6 s of it at the 800 KB/s it carries (599.6 KB/s
+   * of a file, base64), which is all a post or a view can wait behind an upload, and enough to keep the link busy.
+   */
+  window: 8,
   /** The connector's SYMBOLS_ARCHIVE_MAX and ffbox urgent_symbols.ARCHIVE_MAX_BYTES. */
   maxArchiveBytes: 512 * 1024 * 1024,
   /** An archive that moves no byte for this long fails (FFBox down, its ffwatch stopped). */

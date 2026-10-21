@@ -44,8 +44,9 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }) {
 }
 
 type Q = { id: string; what: string; args?: Record<string, unknown> };
-function onQuery(c: MockConnector, answer: (q: Q) => void) {
+function onQuery(c: MockConnector, answer: (q: Q) => void, onBatch?: (puts: number) => void) {
   const timer = setInterval(() => {
+    onBatch?.(c.received.filter((m) => m.type === 'query' && (m as Q).what === 'symbols_put').length);
     for (let i = c.received.findIndex((m) => m.type === 'query'); i >= 0; i = c.received.findIndex((m) => m.type === 'query')) answer(c.received.splice(i, 1)[0] as Q);
   }, 5);
   return () => clearInterval(timer);
@@ -56,11 +57,14 @@ function onQuery(c: MockConnector, answer: (q: Q) => void) {
  * ffwatch, which takes them on every 4th part), complete once the bytes' SHA-256 is the archive's name; symbols_ingest
  * filing, then filed (or refused for `refuse`).
  */
-function fakeFfbox(c: MockConnector, opts: { refuse?: string; busyEvery?: number; refusePut?: boolean } = {}) {
+function fakeFfbox(c: MockConnector, opts: { refuse?: string; busyEvery?: number; refusePut?: boolean; lose?: number } = {}) {
   const got = new Map<string, Buffer[]>();
   const log: { what: string; args: Record<string, unknown> }[] = [];
   let puts = 0;
   const filings = new Map<string, number>();
+  // The most symbols_put waiting for an answer at once: the parts the portal had in flight.
+  const flight = { max: 0 };
+  let lost = false;
   const stop = onQuery(c, (q) => {
     const a = q.args ?? {};
     log.push({ what: q.what, args: a });
@@ -76,6 +80,11 @@ function fakeFfbox(c: MockConnector, opts: { refuse?: string; busyEvery?: number
       if (have === total && sha(Buffer.concat(parts)) === name) return c.send({ type: 'query_result', id: q.id, what: q.what, ok: true, data: { have, complete: true } });
       if (Number(a.offset) !== have || have >= total) return c.send({ type: 'query_result', id: q.id, what: q.what, ok: true, data: { have, complete: false } });
       const data = Buffer.from(String(a.data), 'base64');
+      // A part that never reached ffwatch (its connector restarted): FFBox says where it stands, behind it.
+      if (opts.lose === Number(a.offset) && !lost) {
+        lost = true;
+        return c.send({ type: 'query_result', id: q.id, what: q.what, ok: true, data: { have, complete: false } });
+      }
       parts.push(data);
       return c.send({ type: 'query_result', id: q.id, what: q.what, ok: true, data: { have: have + data.length, complete: false } });
     }
@@ -87,8 +96,8 @@ function fakeFfbox(c: MockConnector, opts: { refuse?: string; busyEvery?: number
       return c.send({ type: 'query_result', id: q.id, what: q.what, ok: true, data: n < 2 ? { state: 'filing', archive: a.archive } : { state: 'filed', modules: 12, sources: ['master@abc'] } });
     }
     c.send({ type: 'query_result', id: q.id, what: q.what, ok: false, error: 'unsupported' });
-  });
-  return { got, log, stop };
+  }, (n) => (flight.max = Math.max(flight.max, n)));
+  return { got, log, stop, flight };
 }
 
 const ARCHIVE = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 7919 + 13) % 253));
@@ -169,6 +178,47 @@ test('w1639: FFBox\'s refusal ends the upload with its words; a filing FFBox ref
   assert.equal(job2.entries[0].state, 'refused');
   assert.match(describeSymbolUpload(job2), /never files over it/);
   assert.match(describeSymbolUpload(job2), /Not every build was filed/);
+});
+
+const BIG = Buffer.from(Array.from({ length: 1_000_000 }, (_, i) => (i * 7907 + 5) % 251));
+
+test('w1664: parts go on a sliding window of 8, never more, and a post or a view is never busy behind an upload', async (t) => {
+  const { pm, store, c, dataDir } = await setup(t);
+  const ffbox = fakeFfbox(c);
+  t.after(ffbox.stop);
+  const big = await publish(store, dataDir, 'big.tgz', BIG);
+  const job = new FfboxSymbolUploads(pm, store, quick).start('1.0.0.3', [{ app: 'main', platform: 'WindowsPlayer', attachment: big.id }], 'w');
+  const busy: (string | undefined)[] = [];
+  while (!job.finished) {
+    busy.push(pm.queryProblem('post_message'));
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  assert.equal(job.error, undefined, job.error ?? '');
+  assert.deepEqual(Buffer.concat(ffbox.got.get(sha(BIG))!), BIG, 'the archive arrived whole, in order');
+  assert.equal(SYMBOLS_UPLOAD.window, 8);
+  assert.ok(ffbox.flight.max <= SYMBOLS_UPLOAD.window, `at most ${SYMBOLS_UPLOAD.window} parts in flight (saw ${ffbox.flight.max})`);
+  assert.ok(ffbox.flight.max > 4, `more in flight than w1639's batches of 4 (saw ${ffbox.flight.max})`);
+  assert.deepEqual([...new Set(busy)], [undefined], 'post_message was never refused busy while 8 parts were in flight');
+  const puts = ffbox.log.filter((l) => l.what === 'symbols_put' && Number(l.args.offset) < BIG.length);
+  assert.equal(puts.length, Math.ceil(BIG.length / SYMBOLS_UPLOAD.partBytes), 'each part crossed once: nothing sent twice on a clean link');
+});
+
+test('w1664: a part FFBox did not write is sent again from where FFBox stands, once, not once per part behind it', async (t) => {
+  const { pm, store, c, dataDir } = await setup(t);
+  const ffbox = fakeFfbox(c, { lose: 3 * SYMBOLS_UPLOAD.partBytes });
+  t.after(ffbox.stop);
+  const big = await publish(store, dataDir, 'big.tgz', BIG);
+  const job = new FfboxSymbolUploads(pm, store, quick).start('1.0.0.3', [{ app: 'main', platform: 'WindowsPlayer', attachment: big.id }], 'w');
+  await job.done;
+  assert.equal(job.error, undefined, job.error ?? '');
+  assert.deepEqual(Buffer.concat(ffbox.got.get(sha(BIG))!), BIG);
+  const at = (o: number) => ffbox.log.filter((l) => l.what === 'symbols_put' && Number(l.args.offset) === o).length;
+  assert.equal(at(3 * SYMBOLS_UPLOAD.partBytes), 2, 'the lost part went twice');
+  const parts = Math.ceil(BIG.length / SYMBOLS_UPLOAD.partBytes);
+  const sent = ffbox.log.filter((l) => l.what === 'symbols_put' && Number(l.args.offset) < BIG.length).length;
+  assert.ok(sent > parts && sent <= parts + SYMBOLS_UPLOAD.window, `one resend from where FFBox stood: at most a window again (${sent} parts for ${parts})`);
+  assert.equal(at(20 * SYMBOLS_UPLOAD.partBytes), 1, 'nothing past the window was sent twice');
+  assert.equal(job.archives.get(sha(BIG))!.state, 'here');
 });
 
 test('w1639: the call is checked here first: a version, 1 to 6 builds, each once, an archive this portal holds', async (t) => {

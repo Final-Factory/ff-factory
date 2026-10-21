@@ -5,6 +5,7 @@
 // bot token never leaves FFBox. The guards are FFBox's (its README, "Posting as Max"); the checks here only fail fast
 // with a sentence, with the same rules, and FFBox answers `refused` with its own reason for anything they let through.
 import { type ProviderManager } from './providers.ts';
+import { QUERY_LIMITS } from './providerProtocol.ts';
 import { clean } from './ffboxReports.ts';
 import type { CliEvent } from './maxEvents.ts';
 
@@ -72,19 +73,47 @@ export interface PostResult {
 
 const str = (v: unknown, max: number) => (typeof v === 'string' ? clean(v, max) : '');
 
+/** Answers that say nothing about whether FFBox posted (or that nothing was posted yet): asked again with the same args. */
+const AGAIN = new Set(['timeout', 'no_answer', 'disconnected', 'busy', 'not_ready', 'unavailable']);
+/** FFBox's clock against this one's, for "this call's post" (they share the FFBox host's NTP). */
+const CLOCK_SLACK_MS = 5_000;
+
+export interface PostRetry {
+  /** One ask's longest wait: QUERY_LIMITS.timeoutMsByQuery.post_message. */
+  askMs: number;
+  /** All the asks of one call, inside the daemon's 90 s for post_as_max (machine/daemon.ts). */
+  budgetMs: number;
+  /** Before asking again after busy, not_ready or unavailable (FFBox did not take the request). */
+  pauseMs: number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+export const POST_RETRY: PostRetry = { askMs: QUERY_LIMITS.timeoutMsByQuery.post_message, budgetMs: 75_000, pauseMs: 3_000, sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
+
 /**
  * Ask FFBox to post one message as Max. Throws an Error with a plain sentence when nothing was posted (or when it could
  * not be told). A repeated key answers the first post's link, with `duplicate`, and posts nothing.
  */
-export async function postAsMax(providers: ProviderManager, input: PostInput, session?: string, now: () => Date = () => new Date()): Promise<PostResult> {
+export async function postAsMax(providers: ProviderManager, input: PostInput, session?: string, now: () => Date = () => new Date(), opts: PostRetry = POST_RETRY): Promise<PostResult> {
   const parsed = postArgs(input);
   if ('error' in parsed) throw new Error(parsed.error);
-  const a = await providers.query('post_message', parsed.args);
+  const started = now().getTime();
+  let a = await providers.query('post_message', parsed.args);
+  // AN ANSWER THAT DID NOT COME IS ASKED AGAIN (w1664; lothsahn: "The patch notes uploaded to discord but the worker thought
+  // they didn't"). The same args carry the same key (or the same text, which posts once a day), so FFBox's dedupe answers
+  // the first post's link when it went out, and posts it now, once, when it never did: either way the call ends with the
+  // link, not "may have been posted". FFBox answers its requests one at a time, so a repeat is answered after the first.
+  let asks = 1;
+  while (!a.live && AGAIN.has(a.error ?? '') && now().getTime() - started + opts.askMs <= opts.budgetMs) {
+    await opts.sleep(a.error === 'busy' || a.error === 'not_ready' || a.error === 'unavailable' ? opts.pauseMs : 0);
+    a = await providers.query('post_message', parsed.args);
+    asks++;
+  }
   const words = [a.reason, a.hint, a.detail].filter(Boolean).join('; ');
   if (!a.live || !a.data) {
     const sure = a.error === 'refused' || a.error === 'rate_limited' || a.error === 'failed' || a.error === 'bad_args' || a.error === 'unsupported' || a.error === 'offline' || a.error === 'switched_off' || a.error === 'disabled';
     throw new Error(
-      `FFBox did not post it: ${a.error ?? 'no answer'}${words ? ` (${clean(words, 300)})` : ''}.` +
+      `FFBox did not post it: ${a.error ?? 'no answer'}${words ? ` (${clean(words, 300)})` : ''}${asks > 1 ? `, asked ${asks} times in ${Math.round((now().getTime() - started) / 1000)} s` : ''}.` +
         (sure
           ? a.error === 'unsupported'
             ? ' FFBox may be updating, or is older than this tool; try again in a few minutes.'
@@ -93,6 +122,10 @@ export async function postAsMax(providers: ProviderManager, input: PostInput, se
     );
   }
   const d = a.data as Record<string, unknown>;
+  // A repeat that found the post this call made (its first answer was late) is this call's post, not an old one.
+  const postedAt = Date.parse(str(d.posted_at, 40));
+  const late = d.duplicate === true && asks > 1 && Number.isFinite(postedAt) && postedAt >= started - CLOCK_SLACK_MS;
+  if (late) d.duplicate = false;
   const link = str(d.link, 200);
   const channel = str(d.channel, 40) || parsed.args.channel;
   const dup = d.duplicate === true;
@@ -102,7 +135,7 @@ export async function postAsMax(providers: ProviderManager, input: PostInput, se
   const facts = `${link || `message ${str(d.message_id, 25)}`} (${place}${d.thread ? `, thread ${str(d.thread, 25)}` : ''}, ${Number(d.chars) || '?'} characters)`;
   if (dup) return { text: `Already posted, nothing was sent again: ${facts}. FFBox found the same ${parsed.args.key ? `key "${parsed.args.key}"` : 'text'} posted there before.` };
   return {
-    text: `Posted as Max by FFBox: ${facts}. Put the link in your report.`,
+    text: `Posted as Max by FFBox: ${facts}. ${late ? `FFBox's first answer came late; asked again with the same ${parsed.args.key ? 'key' : 'text'}, it answered the post it had made. ` : ''}Put the link in your report.`,
     event: {
       v: 1,
       at: now().toISOString(),

@@ -7,7 +7,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ProviderManager } from './providers.ts';
 import { PROVIDER_QUERIES, QUERY_LIMITS, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
-import { POST_CHANNELS, POST_TARGETS, postArgs, postAsMax } from './ffboxPost.ts';
+import { POST_CHANNELS, POST_RETRY, POST_TARGETS, postArgs, postAsMax } from './ffboxPost.ts';
 import { CATALOG } from './launch.ts';
 import { MockConnector } from '../e2e/mockConnector.ts';
 import { CliEventSchema } from './maxEvents.ts';
@@ -124,7 +124,7 @@ test('a refusal throws with FFBox\'s reason; an answer that did not come says it
   );
   await assert.rejects(postAsMax(pm, { channel: 'dev_chat', text: 'x' }), (e: Error) => /FFBox did not post it: refused \(the text carries a GitHub token; nothing was posted\)\.$/.test(e.message));
   mode = 'timeout';
-  await assert.rejects(postAsMax(pm, { channel: 'dev_chat', text: 'y' }), (e: Error) => /timeout/.test(e.message) && /may have been posted: ask again with the same key/.test(e.message));
+  await assert.rejects(postAsMax(pm, { channel: 'dev_chat', text: 'y' }, undefined, undefined, { ...POST_RETRY, budgetMs: 0 }), (e: Error) => /timeout/.test(e.message) && /may have been posted: ask again with the same key/.test(e.message));
 });
 
 test('a call the checks refuse never reaches FFBox', async (t) => {
@@ -204,4 +204,55 @@ test('w1640: a conversation post goes out with its args and the answer names FFB
   assert.match(r.text, /\(FFBox conversation 1163, thread 1562003559732486144, /);
   assert.ok(!/#conversation/.test(r.text));
   assert.equal(CliEventSchema.parse(r.event).channel, 'conversation 1163');
+});
+
+const noWait = (budgetMs: number) => ({ askMs: 10, budgetMs, pauseMs: 0, sleep: async () => {} });
+
+test('w1664: a post whose answer came late is asked again with the same key and answers posted, with the link and an event', async (t) => {
+  // The 1.0.0.3 patch notes (lothsahn: "The patch notes uploaded to discord but the worker thought they didn't"): FFBox
+  // posted, its answer did not come in time; the same key asked again answers the post it made.
+  const { pm, c } = await setup(t);
+  const seen: Q[] = [];
+  t.after(
+    onQuery(c, (q) => {
+      seen.push(q);
+      if (seen.length === 1) c.send({ type: 'query_result', id: q.id, what: 'post_message', ok: false, error: 'timeout' });
+      else c.send(posted(q.id, { duplicate: true, channel: 'dev_patch_notes', key: '1.0.0.3', posted_at: '2026-10-21T06:58:10Z' }));
+    }),
+  );
+  const r = await postAsMax(pm, { channel: 'dev_patch_notes', text: 'notes', key: '1.0.0.3' }, 'sess1', () => new Date('2026-10-21T06:58:00Z'), noWait(60_000));
+  assert.equal(seen.length, 2, 'asked twice');
+  assert.deepEqual(seen[1].args, seen[0].args, 'the same args, so the same key');
+  assert.match(r.text, /^Posted as Max by FFBox: https:\/\/discord\.com\/channels\/\d+\/\d+\/1558176042089447001 \(#dev-patch-notes/);
+  assert.match(r.text, /first answer came late; asked again with the same key, it answered the post it had made/);
+  assert.ok(!/may have been posted/.test(r.text));
+  assert.equal(CliEventSchema.parse(r.event).action, 'post', 'this call made the post: a Max event');
+});
+
+test('w1664: a post an earlier call made is still "Already posted" after a late answer', async (t) => {
+  const { pm, c } = await setup(t);
+  let n = 0;
+  t.after(onQuery(c, (q) => (++n === 1 ? c.send({ type: 'query_result', id: q.id, what: 'post_message', ok: false, error: 'timeout' }) : c.send(posted(q.id, { duplicate: true, posted_at: '2026-10-20T06:00:00Z' })))));
+  const r = await postAsMax(pm, { channel: 'agent_testing', text: 'x', key: 'old' }, 's', () => new Date('2026-10-21T06:58:00Z'), noWait(60_000));
+  assert.match(r.text, /^Already posted, nothing was sent again/);
+  assert.equal(r.event, undefined);
+});
+
+test('w1664: asks again only inside its budget, and then says how often it asked', async (t) => {
+  const { pm, c } = await setup(t);
+  let n = 0;
+  t.after(onQuery(c, (q) => (n++, c.send({ type: 'query_result', id: q.id, what: 'post_message', ok: false, error: 'timeout' }))));
+  let clock = Date.parse('2026-10-21T06:58:00Z');
+  const now = () => new Date((clock += 15_000));
+  await assert.rejects(postAsMax(pm, { channel: 'agent_testing', text: 'x', key: 'k' }, 's', now, { ...noWait(75_000), askMs: 20_000 }), (e: Error) => /timeout/.test(e.message) && /asked \d+ times in \d+ s/.test(e.message) && /may have been posted/.test(e.message));
+  assert.ok(n >= 2 && n <= 4, `asked ${n} times within 75 s`);
+  assert.equal(POST_RETRY.budgetMs + POST_RETRY.askMs <= 95_000 && POST_RETRY.budgetMs < 90_000, true, "the asks fit inside the daemon's 90 s for the call");
+});
+
+test('w1664: a refusal is never asked again', async (t) => {
+  const { pm, c } = await setup(t);
+  let n = 0;
+  t.after(onQuery(c, (q) => (n++, c.send({ type: 'query_result', id: q.id, what: 'post_message', ok: false, error: 'refused', reason: 'no' }))));
+  await assert.rejects(postAsMax(pm, { channel: 'agent_testing', text: 'x', key: 'k' }, 's', undefined, noWait(60_000)), /refused/);
+  assert.equal(n, 1);
 });
