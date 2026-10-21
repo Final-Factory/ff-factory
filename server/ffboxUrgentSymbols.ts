@@ -140,53 +140,97 @@ export class FfboxSymbolUploads {
     for (const e of job.entries) await this.file(job, e);
   }
 
-  /** One archive into FFBox's .incoming, in parts, a window at a time; then until FFBox says it is there whole. */
+  /**
+   * One archive into FFBox's .incoming, in parts on a sliding window, then until FFBox says it is there whole (w1664).
+   * Up to `window` parts are in flight at once, and each answer frees a place for the next, so the link is never idle
+   * between rounds (w1639 sent four and waited for all four: 271.8 KB/s measured for 45.0 MB, against the 599.6 KB/s the
+   * same link streams the other way). The window also bounds what a post or a view waits behind on the link: at most
+   * `window` parts of 60,000 characters. The connector writes a part only at the offset the archive stands at and says
+   * where that is, so a part it did not write (FFBox busy, a part lost) sends again from where FFBox stands: once per
+   * miss, never once per part still in flight behind it (`gen`).
+   */
   private async send(a: ArchiveState) {
     a.state = 'sending';
     a.started = this.now();
     const { partBytes, window, stallMs, pollMs } = this.limits;
     const fh = await fs.promises.open(a.file, 'r');
     let lastMove = this.now();
-    let offset = 0;
+    let acked = 0;
+    let next = 0;
+    let gen = 0;
+    let serial = 0;
+    let pauseUntil = 0;
+    // After a busy FFBox, one part goes first, and the window opens again once FFBox takes it.
+    let open = window;
+    const flight = new Map<number, Promise<{ n: number; o: number; len: number; g: number; r: QueryResult }>>();
+    const rewind = (to: number, pause: boolean) => {
+      next = to;
+      gen++;
+      if (pause) {
+        pauseUntil = this.now() + 500;
+        open = 1;
+      }
+    };
     try {
       for (;;) {
-        const offs: number[] = [];
-        for (let o = offset; o < a.bytes && offs.length < window; o += partBytes) offs.push(o);
-        const asks = offs.length
-          ? await Promise.all(
-              offs.map(async (o) => {
-                const buf = Buffer.alloc(Math.min(partBytes, a.bytes - o));
-                await fh.read(buf, 0, buf.length, o);
-                return { o, r: await this.providers.partQuery('symbols_put', { archive: a.sha256, bytes: a.bytes, offset: o, data: buf.toString('base64') }) };
-              }),
-            )
-          : [{ o: a.bytes, r: await this.providers.partQuery('symbols_put', { archive: a.sha256, bytes: a.bytes, offset: a.bytes, data: 'AA==' }) }];
-        if (!offs.length) a.state = 'checking';
-        let stands: number | undefined;
-        let again = false;
-        for (const { o, r } of asks) {
-          const d = (r.data ?? {}) as { have?: unknown; complete?: unknown };
-          if (r.ok && d.complete === true) {
-            a.sent = a.bytes;
-            a.state = 'here';
-            a.finished = this.now();
-            return;
+        if (this.now() - lastMove > stallMs) throw new Error(`archive ${a.sha256.slice(0, 12)}… moved no byte for ${Math.round(stallMs / 1000)} s at ${acked} of ${a.bytes}`);
+        if (this.now() >= pauseUntil) {
+          while (flight.size < open && next < a.bytes) {
+            const o = next;
+            const buf = Buffer.alloc(Math.min(partBytes, a.bytes - o));
+            await fh.read(buf, 0, buf.length, o);
+            next = o + buf.length;
+            const n = serial++;
+            const g = gen;
+            flight.set(n, this.providers.partQuery('symbols_put', { archive: a.sha256, bytes: a.bytes, offset: o, data: buf.toString('base64') }).then((r) => ({ n, o, len: buf.length, g, r })));
           }
-          if (r.ok && typeof d.have === 'number' && Number.isSafeInteger(d.have) && d.have >= 0 && d.have <= a.bytes) {
-            // Where FFBox stands: past this part when it took it, or back where it is when it did not.
-            stands = d.have < o ? Math.min(stands ?? d.have, d.have) : Math.max(stands ?? d.have, d.have);
-          } else if (!r.ok && AGAIN.has(r.error ?? '')) again = true;
-          else throw new Error(`FFBox refused archive ${a.sha256.slice(0, 12)}… at byte ${o}: ${words(r) || 'no answer'}`);
         }
-        if (stands !== undefined && stands !== offset) {
-          if (stands > offset) lastMove = this.now();
-          offset = stands;
-          a.sent = offset;
-        } else if (this.now() - lastMove > stallMs) {
-          throw new Error(`archive ${a.sha256.slice(0, 12)}… moved no byte for ${Math.round(stallMs / 1000)} s at ${offset} of ${a.bytes}${again ? ' (FFBox kept saying busy or did not answer)' : ''}`);
+        if (!flight.size) {
+          if (next < a.bytes) {
+            await this.sleep(Math.max(1, pauseUntil - this.now()));
+            continue;
+          }
+          // Every byte sent and taken: FFBox checks the whole archive's SHA-256 once ffwatch has it all.
+          a.state = 'checking';
+          const r = await this.providers.partQuery('symbols_put', { archive: a.sha256, bytes: a.bytes, offset: a.bytes, data: 'AA==' });
+          const d = (r.data ?? {}) as { have?: unknown; complete?: unknown };
+          if (r.ok && d.complete === true) break;
+          if (r.ok && typeof d.have === 'number' && Number.isSafeInteger(d.have) && d.have >= 0 && d.have < a.bytes) {
+            // FFBox lost parts (its connector restarted): from where it stands.
+            acked = d.have;
+            a.sent = acked;
+            a.state = 'sending';
+            rewind(acked, false);
+            continue;
+          }
+          if (!r.ok && !AGAIN.has(r.error ?? '')) throw new Error(`FFBox refused archive ${a.sha256.slice(0, 12)}… at byte ${a.bytes}: ${words(r) || 'no answer'}`);
+          await this.sleep(Math.min(pollMs, 1_000));
+          continue;
         }
-        if (again || !offs.length) await this.sleep(again ? 500 : Math.min(pollMs, 1_000));
+        const { n, o, len, g, r } = await Promise.race(flight.values());
+        flight.delete(n);
+        const d = (r.data ?? {}) as { have?: unknown; complete?: unknown };
+        if (r.ok && d.complete === true) break;
+        if (r.ok && typeof d.have === 'number' && Number.isSafeInteger(d.have) && d.have >= 0 && d.have <= a.bytes) {
+          if (d.have > acked) lastMove = this.now();
+          // Where FFBox stands. A part it did not write answers where it stands, which may be behind what an earlier
+          // answer said (FFBox lost parts): its newest word wins.
+          if (d.have >= o + len) {
+            acked = Math.max(acked, d.have);
+            open = window;
+          }
+          else if (g === gen) {
+            acked = d.have;
+            rewind(d.have, false);
+          }
+          a.sent = acked;
+        } else if (!r.ok && AGAIN.has(r.error ?? '')) {
+          if (g === gen) rewind(acked, true);
+        } else throw new Error(`FFBox refused archive ${a.sha256.slice(0, 12)}… at byte ${o}: ${words(r) || 'no answer'}`);
       }
+      a.sent = a.bytes;
+      a.state = 'here';
+      a.finished = this.now();
     } catch (e) {
       a.state = 'failed';
       a.reason = e instanceof Error ? e.message : String(e);
