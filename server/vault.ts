@@ -742,8 +742,8 @@ export class Vault {
       // `priority`: the token a new worker would get now (w979), at most one per pool; none when nothing may serve a worker.
       const pick = pickPool(list.map((x) => x.t), { orchestrator: false, limits, now });
       const first = pick.token?.id;
-      // Listed in the order the picker uses, with the states it read (the near-reset rule needs the whole pool, w1539).
-      const order = pickOrder(list.map((x) => x.t), pick.views, now);
+      // Listed in the order the picker uses (w1659), with the states it read (the near-reset caps need the whole pool, w1539).
+      const order = pickOrder(limits, now);
       out.set(person, [...list].sort((a, b) => order(a.t, b.t)).map(({ e, t }) => ({ entry: this.meta(e), view: pick.views.get(t.id)!, live: t.others, priority: t.id === first })));
     }
     return out;

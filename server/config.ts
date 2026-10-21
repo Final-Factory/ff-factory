@@ -292,7 +292,8 @@ export interface Config {
      * set_app_config: sessionHoldPercent (80), onePerWeeklyPercent (95), retireWeeklyPercent (99), reservePerDayPercent
      * (5: the dispatcher's token keeps this per day left until its weekly reset), reserveSessionPercent (20) and
      * dispatcherStopPercent (95: either meter of the dispatcher's token at or above it stops its workers, w1109),
-     * nearResetHours (12: the near-reset rule's window before a token's weekly reset, 0 off, w1539) and nearResetFloorTokens (1).
+     * nearResetHours (12: the near-reset caps' window before a token's weekly reset, 0 off, w1539), nearResetFloorTokens (1) and
+     * resetOffsetHours (12: the score's soft offset off the hours to a token's weekly reset, 0 off, w1659).
      */
     pool?: PoolConfig;
   };
