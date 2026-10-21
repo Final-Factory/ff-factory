@@ -128,7 +128,9 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // visual question carries its previews in the card; the owner's brief measured 26,629, so the cap moved to 26,750.
   // w1691 (lothsahn: "Tell the agents they can still write performance tests but they should all be flagged performance if
   // they check timings") added one line on Performance-tagged game tests to both briefs; the dispatcher's measured 27,093, so the cap moved to 27,100.
-  const PROMPT_MAX = 27_100;
+  // w1692 (lothsahn: "Not windows by default, any OS.  Being particular about a machine or OS limits the fleet we can use")
+  // added one line on where a determinism check runs to both briefs; the dispatcher's measured 27,428, so the cap moved to 27,450.
+  const PROMPT_MAX = 27_450;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
