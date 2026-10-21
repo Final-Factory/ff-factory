@@ -4,6 +4,7 @@
 // decides who may be held. The rules (lothsahn, 2026-10-08/09):
 //   - a person's runs use that person's own tokens only (their pool): no shared Claude token, no one else's;
 //   - among the pool, the token with the most weekly headroom per hour left until its weekly reset first (scoreOf, w971),
+//     the hours counted less a soft offset so room about to be lost at a reset is used sooner (w1659, effectiveHours),
 //     scaled by the room left in its 5-hour window; ties: the soonest weekly reset, then the 5-hour reset, fewer live runs, the name;
 //   - a pool token that is also the dispatcher's credential (or the host token), while it is inside that credential's reserve
 //     (reserveOf), goes to nothing but a person's own orchestrator, and to it only when no other token has room (w971);
@@ -25,10 +26,10 @@
 // token is inside that reserve whatever the buffer says (w1109): no new worker starts on it, and the workers already on it
 // are asked to stop (server/dispatcherStop.ts).
 //
-// The near-reset rule (w1539, judgePool and pickOrder): inside the last `nearResetHours` (12) before a token's weekly reset, room
-// left at the reset is lost, so that token's one-at-a-time and retire caps are lifted (it may be used up to 100) and it goes
-// first for the room the pool's pace would not use before the reset (poolPace); both only while at least `nearResetFloor` (1)
-// other token of the pool can take a new process, so a sudden 5-hour burst always has more than one window to draw on.
+// The near-reset caps (w1539, judgePool): inside the last `nearResetHours` (12) before a token's weekly reset, room left at the
+// reset is lost, so that token's one-at-a-time and retire caps are lifted (it may be used up to 100), only while at least
+// `nearResetFloor` (1) other token of the pool can take a new process, so a sudden 5-hour burst always has more than one window
+// to draw on. No token "goes first" any more (w1659): the soft offset of the score (`resetOffsetHours`) does that by weight.
 
 import type { PlanUsage } from '../shared/types.ts';
 
@@ -50,14 +51,18 @@ export interface PoolLimits {
   nearResetHours: number;
   /** The near-reset rule applies only while at least this many OTHER tokens of the pool can take a new process (w1539). */
   nearResetFloor: number;
+  /** The score's soft offset, hours (w1659, effectiveHours): about this many hours are taken off a token's time to its weekly reset. 0 turns it off. */
+  resetOffsetHours: number;
 }
 
 /**
  * nearResetHours 12 and nearResetFloor 1 (w1539): in the replay of the pools' measured meters (2026-10-12..19, PR of w1539)
- * they kept burst readiness at or above today's; 8 h caught less, 16-24 h used tokens up earlier, floor 0 left more hours
- * with one token ready, floor 2 lost most of the gain. lothsahn's own figure was 12 h.
+ * they kept burst readiness at or above the score alone; floor 0 left more hours with one token ready, floor 2 lost most of
+ * the gain. resetOffsetHours 24 (w1659, lothsahn, 2026-10-21: "Let's make the new setting 24 hours, not 12"): in the replay
+ * of 2026-10-12..21 (docs/vault.md, "Near a weekly reset") it used the room before a reset sooner than w1539's "goes first"
+ * and 12 h, and lost a little less at the resets, for a little more of the pool's burst room.
  */
-export const POOL_DEFAULTS: Readonly<PoolLimits> = { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20, dispatcherStop: 95, nearResetHours: 12, nearResetFloor: 1 };
+export const POOL_DEFAULTS: Readonly<PoolLimits> = { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20, dispatcherStop: 95, nearResetHours: 12, nearResetFloor: 1, resetOffsetHours: 24 };
 
 /** Config vault.pool: the same, with the unit in the name. Anything unset is the default. */
 export interface PoolConfig {
@@ -69,12 +74,13 @@ export interface PoolConfig {
   dispatcherStopPercent?: number;
   nearResetHours?: number;
   nearResetFloorTokens?: number;
+  resetOffsetHours?: number;
 }
 
-export const POOL_CONFIG_KEYS = ['sessionHoldPercent', 'onePerWeeklyPercent', 'retireWeeklyPercent', 'reservePerDayPercent', 'reserveSessionPercent', 'dispatcherStopPercent', 'nearResetHours', 'nearResetFloorTokens'] as const;
+export const POOL_CONFIG_KEYS = ['sessionHoldPercent', 'onePerWeeklyPercent', 'retireWeeklyPercent', 'reservePerDayPercent', 'reserveSessionPercent', 'dispatcherStopPercent', 'nearResetHours', 'nearResetFloorTokens', 'resetOffsetHours'] as const;
 export type PoolConfigKey = (typeof POOL_CONFIG_KEYS)[number];
 
-/** Each setting's range: the percents 0 to 100, the near-reset window in hours (a week at most), the floor a whole number of tokens. */
+/** Each setting's range: the percents 0 to 100, the near-reset window and the score's offset in hours (a week at most), the floor a whole number of tokens. */
 const RANGE: Record<PoolConfigKey, { hi: number; int?: boolean; what: string }> = {
   sessionHoldPercent: { hi: 100, what: 'a percent from 0 to 100' },
   onePerWeeklyPercent: { hi: 100, what: 'a percent from 0 to 100' },
@@ -84,6 +90,7 @@ const RANGE: Record<PoolConfigKey, { hi: number; int?: boolean; what: string }> 
   dispatcherStopPercent: { hi: 100, what: 'a percent from 0 to 100' },
   nearResetHours: { hi: 168, what: 'a number of hours from 0 (off) to 168' },
   nearResetFloorTokens: { hi: 10, int: true, what: 'a whole number of tokens from 0 to 10' },
+  resetOffsetHours: { hi: 168, what: 'a number of hours from 0 (off) to 168' },
 };
 
 /** Why `v` is not a value of vault.pool.<k>, or undefined. */
@@ -107,6 +114,7 @@ export function poolLimits(cfg: { vault?: { pool?: PoolConfig } } | undefined): 
     dispatcherStop: pct(p?.dispatcherStopPercent, POOL_DEFAULTS.dispatcherStop),
     nearResetHours: val('nearResetHours', p?.nearResetHours, POOL_DEFAULTS.nearResetHours),
     nearResetFloor: val('nearResetFloorTokens', p?.nearResetFloorTokens, POOL_DEFAULTS.nearResetFloor),
+    resetOffsetHours: val('resetOffsetHours', p?.resetOffsetHours, POOL_DEFAULTS.resetOffsetHours),
   };
   // A hand-edited config.json that breaks the order is read as the retire limit for both (checkPoolConfig refuses it at load).
   if (out.onePerWeekly > out.retireWeekly) out.onePerWeekly = out.retireWeekly;
@@ -201,16 +209,29 @@ const pc = (n: number) => (n < 100 && Math.round(n) >= 100 ? n.toFixed(1) : Stri
 export const MIN_HOURS_TO_RESET = 1;
 
 /**
+ * The hours to a weekly reset the score divides by (w1659): the hours less a soft offset of `offset` hours,
+ * h - offset x (1 - e^(-h / offset)), never below MIN_HOURS_TO_RESET. Days from the reset it is about h - offset (lothsahn,
+ * 2026-10-21: "subtract 12 or 18 hours from the time remaining so that it starts getting consumed first"); near the reset it
+ * bends smoothly to about h^2 / (2 x offset) instead of hitting the floor at `offset` hours, so no token jumps to the front
+ * at one hour mark: its weight grows as the reset nears. With 24 (the default): 26 h counts as 10.1, 45 h as 24.7, 119 h as 95.2.
+ */
+export function effectiveHours(hours: number, offset: number): number {
+  const h = offset > 0 ? hours - offset * (1 - Math.exp(-hours / offset)) : hours;
+  return Math.max(MIN_HOURS_TO_RESET, h);
+}
+
+/**
  * The token's score (w971): its weekly headroom per hour until the weekly window resets, (100 - weekly) / hours left, scaled by
  * the room left in the 5-hour window, (100 - 5-hour) / 100. A token with 73% left and 4 days to go scores 0.76 %/h (18 %/day);
  * one with 3% left and 3 days scores 0.04 %/h (1 %/day). Per day. `undefined` without a weekly reset time (a token with no
- * numbers yet), which ranks after every scored token. The hours left are never below MIN_HOURS_TO_RESET.
+ * numbers yet), which ranks after every scored token. The hours left are `effectiveHours` with the pool's `resetOffsetHours`
+ * (`offset`, w1659; 0 counts them as they are), never below MIN_HOURS_TO_RESET.
  */
-export function scoreOf(t: PoolToken, now: number): { perDay?: number } {
+export function scoreOf(t: PoolToken, now: number, offset = 0): { perDay?: number } {
   const m = metersOf(t.usage);
   const reset = ms(m.weeklyResetsAt);
   if (!m.known || !Number.isFinite(reset)) return {};
-  const hours = Math.max(MIN_HOURS_TO_RESET, (reset - now) / 3_600_000);
+  const hours = effectiveHours((reset - now) / 3_600_000, offset);
   const left = Math.max(0, 100 - m.weekly);
   const sessionLeft = Math.max(0, 100 - m.session);
   const perDay = ((left / hours) * 24 * sessionLeft) / 100;
@@ -294,13 +315,13 @@ export function bySoonestReset(a: PoolToken, b: PoolToken): number {
 }
 
 /**
- * The pool's order (w971): the highest score first (scoreOf: weekly headroom per hour to the reset, scaled by the 5-hour room);
- * a token with no score after every scored one. Equal scores (within 1e-9): the soonest weekly reset (use what would otherwise
- * be lost), the 5-hour reset, the fewer live runs (spread the load), then the name.
+ * The pool's order (w971): the highest score first (scoreOf: weekly headroom per hour to the reset, the hours less the soft
+ * `offset`, scaled by the 5-hour room); a token with no score after every scored one. Equal scores (within 1e-9): the soonest
+ * weekly reset (use what would otherwise be lost), the 5-hour reset, the fewer live runs (spread the load), then the name.
  */
-export const byScore = (now: number) => (a: PoolToken, b: PoolToken): number => {
-  const x = scoreOf(a, now).perDay;
-  const y = scoreOf(b, now).perDay;
+export const byScore = (now: number, offset = 0) => (a: PoolToken, b: PoolToken): number => {
+  const x = scoreOf(a, now, offset).perDay;
+  const y = scoreOf(b, now, offset).perDay;
   if (x !== y) {
     if (x === undefined) return 1;
     if (y === undefined) return -1;
@@ -308,8 +329,6 @@ export const byScore = (now: number) => (a: PoolToken, b: PoolToken): number => 
   }
   return bySoonestReset({ ...a, name: '' }, { ...b, name: '' }) || a.others - b.others || a.name.localeCompare(b.name);
 };
-
-const WEEK_HOURS = 168;
 
 /** Hours to a token's weekly reset (never below 0), or undefined without a reading or a reset time. */
 function hoursToReset(t: PoolToken, now: number): number | undefined {
@@ -339,44 +358,12 @@ export function judgePool(tokens: readonly PoolToken[], limits: PoolLimits, now:
 }
 
 /**
- * The pool's pace (w1539): the weekly percent a token of it uses an hour, averaged over its tokens with a reading, each its
- * weekly meter over the hours its week has run (168 minus the hours to its reset, at least 1). Undefined with no reading.
+ * The pick order (w1659): byScore with the pool's soft offset (`resetOffsetHours`), so a token's room nearer its weekly reset
+ * weighs more as the reset nears, and no token goes first by a switch. lothsahn, 2026-10-21: "Instead of having it go first
+ * like that, can we just adjust the weighting so it gets used sooner?" The burst floor stays on the caps (judgePool), not on
+ * the order: in the replay a guard that dropped the weight while the other tokens were low put that work on them instead.
  */
-export function poolPace(tokens: readonly PoolToken[], now: number): number | undefined {
-  const rates = tokens.flatMap((t) => {
-    const h = hoursToReset(t, now);
-    return h === undefined ? [] : [metersOf(t.usage).weekly / Math.max(1, WEEK_HOURS - h)];
-  });
-  return rates.length ? rates.reduce((a, b) => a + b, 0) / rates.length : undefined;
-}
-
-/**
- * The weekly room a token would still have at its reset if it only took its even share of the pool's pace until then
- * (w1539): its room minus pace x hours to the reset. Above 0 is room that would be lost.
- */
-export function roomLostAtReset(t: PoolToken, pace: number, now: number): number {
-  const h = hoursToReset(t, now);
-  return h === undefined ? 0 : 100 - metersOf(t.usage).weekly - pace * h;
-}
-
-/**
- * The pick order over a judged pool (w1539): first the tokens the near-reset rule applies to (judgePool) whose room would
- * otherwise be lost at their reset (roomLostAtReset > 0), the soonest reset first; then everything else by byScore (w971).
- * Only that share goes first: once the room left is what the pool's pace uses before the reset, the token is back in the
- * score order, so it is not drained hours early and the pool keeps its burst windows (the plain "near-reset first" rule used
- * tokens up 30-84 token-hours early in the replay and cut the worst-case burst below today's).
- */
-export function pickOrder(tokens: readonly PoolToken[], views: ReadonlyMap<string, PoolView>, now: number): (a: PoolToken, b: PoolToken) => number {
-  const pace = poolPace(tokens, now) ?? 0;
-  const first = new Set(tokens.filter((t) => views.get(t.id)?.nearReset && roomLostAtReset(t, pace, now) > 0).map((t) => t.id));
-  const score = byScore(now);
-  return (a, b) => {
-    const x = first.has(a.id);
-    const y = first.has(b.id);
-    if (x !== y) return x ? -1 : 1;
-    return (x && bySoonestReset({ ...a, name: '' }, { ...b, name: '' })) || score(a, b);
-  };
-}
+export const pickOrder = (limits: PoolLimits, now: number): ((a: PoolToken, b: PoolToken) => number) => byScore(now, limits.resetOffsetHours);
 
 /** Room left on the fuller meter (100 minus it), for the over-cap order. */
 const room = (t: PoolToken) => {
@@ -401,7 +388,7 @@ export interface PoolPick {
  * either. `sticky`: the id the session ran on last, kept while it still passes. `now`: the clock the scores read (default
  * the current time). No tokens at all is the caller's business (the transition: today's account), not a hold.
  *
- * The order is pickOrder's: a near-reset token's room that would be lost first (w1539), then the highest score (scoreOf, w971). A token inside the dispatcher's reserve (state `reserved`) is
+ * The order is pickOrder's: the highest score (scoreOf, w971), its hours to the weekly reset less the soft offset (w1659). A token inside the dispatcher's reserve (state `reserved`) is
  * handed to nothing while another token has room; when none has, the person's orchestrator takes it (it uses the pool
  * up), a worker waits (held), so the dispatcher keeps its buffer. The ops worker, when no token has room, takes the
  * person's token past its caps with the most room, and the dispatcher's reserved token only when it is the last one not used
@@ -412,7 +399,7 @@ export function pickPool(tokens: readonly PoolToken[], o: { orchestrator: boolea
   const views = judgePool(tokens, o.limits, now);
   const state = (t: PoolToken) => views.get(t.id)!.state;
   const ok = (t: PoolToken) => usable(views.get(t.id)!);
-  const order = pickOrder(tokens, views, now);
+  const order = pickOrder(o.limits, now);
   const kept = o.sticky ? tokens.find((t) => t.id === o.sticky && ok(t)) : undefined;
   const best = kept ?? [...tokens].filter(ok).sort(order)[0];
   if (best) return { token: best, how: 'normal', views };

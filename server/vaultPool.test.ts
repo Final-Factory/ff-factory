@@ -417,7 +417,7 @@ test('set_app_config: the pool limits are anyone\'s, checked, applied live and c
   assert.equal(normalizeSetting('claudeAccounts.dispatcher', 'vault'), undefined, 'the account setting is the owner\'s only (w1078)');
   assert.equal(OWNER_ONLY_KEYS.has('claudeAccounts.dispatcher'), true);
   // Not owner-only keys: the pool limits are one system-wide set that any person's orchestrator may change.
-  for (const k of ['vault.pool.sessionHoldPercent', 'vault.pool.onePerWeeklyPercent', 'vault.pool.retireWeeklyPercent', 'vault.pool.reservePerDayPercent', 'vault.pool.reserveSessionPercent', 'vault.pool.dispatcherStopPercent', 'vault.pool.nearResetHours', 'vault.pool.nearResetFloorTokens'] as const) {
+  for (const k of ['vault.pool.sessionHoldPercent', 'vault.pool.onePerWeeklyPercent', 'vault.pool.retireWeeklyPercent', 'vault.pool.reservePerDayPercent', 'vault.pool.reserveSessionPercent', 'vault.pool.dispatcherStopPercent', 'vault.pool.nearResetHours', 'vault.pool.nearResetFloorTokens', 'vault.pool.resetOffsetHours'] as const) {
     assert.equal(OWNER_ONLY_KEYS.has(k), false, k);
   }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pool-cfg-'));
@@ -450,6 +450,15 @@ test('set_app_config: the pool limits are anyone\'s, checked, applied live and c
   assert.equal(poolLimits(cfg).nearResetFloor, 2);
   for (const bad of [169, -1, 'soon', '']) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.nearResetHours', bad as never), /nearResetHours is a number of hours from 0 \(off\) to 168/, String(bad));
   for (const bad of [1.5, 11, -1]) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.nearResetFloorTokens', bad as never), /nearResetFloorTokens is a whole number of tokens from 0 to 10/, String(bad));
+  // The score's soft offset (w1659): hours from 0 (off) to 168.
+  assert.equal(poolLimits(cfg).resetOffsetHours, 24);
+  setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', '18');
+  assert.equal(poolLimits(cfg).resetOffsetHours, 18);
+  setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', 0);
+  assert.equal(poolLimits(cfg).resetOffsetHours, 0);
+  for (const bad of [169, -1, 'soon', '']) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', bad as never), /resetOffsetHours is a number of hours from 0 \(off\) to 168/, String(bad));
+  setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', null);
+  assert.equal(poolLimits(cfg).resetOffsetHours, 24);
 });
 
 // ---------------------------------------------------------------- w971: the reserve is enforced, the score orders
@@ -517,7 +526,7 @@ test('w979: the pool listing orders by the picker, labels each token, and marks 
   assert.ok(!r.ben.concat(r.loth).join(' ').match(/score|%\/day|left over/));
 });
 
-test('w1539: a near-reset token takes priority in the listing, on exactly one token per pool, and its caps read as lifted', (t) => {
+test('w1539/w1659: a token near its reset takes priority in the listing by weight, on exactly one token per pool, and its caps read as lifted', (t) => {
   const { make } = setup(t);
   const v = make();
   v.add({ name: 'ben-a', kind: 'claude', value: B1, owner: 'ben', share: 'owner' });
@@ -533,15 +542,22 @@ test('w1539: a near-reset token takes priority in the listing, on exactly one to
   // ben-a: 93% used, resets in 11 h; ben-b fresh (6 days); ben-c 60% (3 days). lothsahn's one token far from its reset.
   const m = { [fp(B1)]: usage(0, 93, { weeklyDays: 11 * H }), [fp(B2)]: usage(0, 1, { weeklyDays: 6 }), [fp(SHARED)]: usage(0, 60, { weeklyDays: 3 }), [fp(L1)]: usage(0, 40, { weeklyDays: 4 }) };
   const r = labels(m);
-  assert.deepEqual(r.ben, ['ben-a pool:ok priority', 'ben-b pool:ok', 'ben-c pool:ok'], 'the near-reset token first, the rest by score');
+  assert.deepEqual(r.ben, ['ben-a pool:ok priority', 'ben-b pool:ok', 'ben-c pool:ok'], 'the near-reset token first, by the soft offset');
   assert.deepEqual(r.loth, ['loth-a pool:ok priority']);
   assert.deepEqual(r.priorities, [1, 1], 'exactly one priority per pool');
-  // The rule off: the score order of w971, priority on the fresh token.
-  const off = labels(m, {}, { vault: { pool: { nearResetHours: 0 } } });
+  // Both rules off: the score order of w971, priority on the fresh token.
+  const off = labels(m, {}, { vault: { pool: { nearResetHours: 0, resetOffsetHours: 0 } } });
   assert.deepEqual(off.ben, ['ben-b pool:ok priority', 'ben-a pool:ok', 'ben-c pool:ok']);
-  // At 97% with a job on it, inside the window: its one-at-a-time cap is lifted (pool:ok, not one-at-a-time); its last 3% is
-  // what the pool's pace uses before the reset, so priority goes back to the score order, still on exactly one token.
+  // At 97% with a job on it, inside the window: its one-at-a-time cap is lifted (pool:ok, not one-at-a-time), and its last 3%
+  // 11 h out still outweighs the fresh token (1.38 against 0.82 %/h with the 24 h offset), on exactly one token. At 99% it no
+  // longer does (0.46).
   const late = labels({ ...m, [fp(B1)]: usage(0, 97, { weeklyDays: 11 * H }) }, { [fp(B1)]: 1 });
-  assert.deepEqual(late.ben, ['ben-b pool:ok priority', 'ben-c pool:ok', 'ben-a pool:ok']);
+  assert.deepEqual(late.ben, ['ben-a pool:ok priority', 'ben-b pool:ok', 'ben-c pool:ok']);
   assert.deepEqual(late.priorities, [1, 1]);
+  const later = labels({ ...m, [fp(B1)]: usage(0, 99, { weeklyDays: 11 * H }) }, { [fp(B1)]: 1 });
+  assert.deepEqual(later.ben, ['ben-b pool:ok priority', 'ben-c pool:ok', 'ben-a pool:ok']);
+  // lothsahn's case (w1659, Ben's pool at ~06:00Z 2026-10-21): 12% left 26 h out takes priority over 58% left 119 h out.
+  const ben = { [fp(B1)]: usage(4, 42, { weeklyDays: 119 * H }), [fp(B2)]: usage(0, 88, { weeklyDays: 26 * H }), [fp(SHARED)]: usage(8, 78, { weeklyDays: 45 * H }), [fp(L1)]: usage(0, 40, { weeklyDays: 4 }) };
+  assert.deepEqual(labels(ben).ben, ['ben-b pool:ok priority', 'ben-c pool:ok', 'ben-a pool:ok']);
+  assert.deepEqual(labels(ben, {}, { vault: { pool: { resetOffsetHours: 0 } } }).ben, ['ben-a pool:ok priority', 'ben-b pool:ok', 'ben-c pool:ok'], 'without the offset: the 58% token, as the portal showed');
 });

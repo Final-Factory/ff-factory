@@ -15,6 +15,11 @@ shuffled quiet and busy weeks of the measured days (--seeds). Assumptions: every
 meter rises K points per weekly point (fitted to the readings) and closes 5 h after it opened; one process burns at most
 --one-proc % weekly an hour; work no token may take waits and is served first the next hour. It does not model processes
 running past the 99% retire cap (the measured resets show they do), so it overstates what lifting that cap gains.
+Schemes (w1659): the w971 score alone, w1539's near-reset "goes first" with its caps lifted, the score with a hard offset
+(hours less 12 or 18, floored at 1 h) and with a soft one (--soft: h - o (1 - e^(-h/o)), server/tokenPool.ts effectiveHours),
+each with and without the caps lifted (--near-h, --floor), and with a burst guard on the weight (--guard N:ROOM). Columns:
+room lost per reset, room left 24 h before a reset (lower: used sooner), waiting work, hours with <= 1 token ready,
+token-hours unusable for the weekly caps, and the worst-case / mean share of the busiest measured 5 h the pool could absorb.
 """
 import argparse, csv, datetime as dt, math, random
 from collections import defaultdict
@@ -120,9 +125,31 @@ def views(pool, now, near_h, floor, one_proc):
     return out
 
 
-def score(t, now, offset=0.0):
-    h = max(1.0, (t.reset - now) / H - offset)
+def eff_hours(h, offset=0.0, soft=0.0):
+    """The hours the score divides by: the hours to the reset, less a hard offset (floored at 1 h), or less a soft one
+    (w1659): soft - soft * exp(-h / soft), about h - soft far from the reset and h^2 / (2 soft) near it, never below 0."""
+    if soft > 0:
+        h = h - soft * (1 - math.exp(-h / soft))
+    return max(1.0, h - offset)
+
+
+def score(t, now, offset=0.0, soft=0.0):
+    h = eff_hours((t.reset - now) / H, offset, soft)
     return (100 - t.w) / h * (100 - t.s) / 100
+
+
+def burst_ready(o, now, one_proc, K, room):
+    """Another token that can take a 5-hour burst (w1659): it may start a process, and has `room` weekly % before its retire
+    cap (one 5-hour window is about HOLD / K of the week)."""
+    return plain_ok(o, now, one_proc) and RETIRE - o.w >= room
+
+
+def guarded(t, pool, now, one_proc, K, guard, offset, soft):
+    """The boosted score while at least `guard[0]` other tokens can take a burst of `guard[1]` weekly %, else the plain one."""
+    n, room = guard
+    if n and sum(1 for o in pool if o is not t and burst_ready(o, now, one_proc, K, room)) < n:
+        return score(t, now)
+    return score(t, now, offset, soft)
 
 
 def pace(pool, now):
@@ -139,14 +166,16 @@ def pick_near(cand, v, pool, now):
     return max(cand, key=lambda t: (score(t, now), -t.reset))
 
 
-def run(names, start, demand, resets_at, w0, scheme, K, one_proc, near_h=0.0, floor=1, offset=0.0):
+def run(names, start, demand, resets_at, w0, scheme, K, one_proc, near_h=0.0, floor=1, offset=0.0, soft=0.0, guard=(0, 0.0)):
     pool = [Tok(n, resets_at[n], w0[n]) for n in names]
-    m = dict(backlog=0.0, ready1=0, burst=[])
+    m = dict(backlog=0.0, ready1=0, burst=[], dry=0, room24=[])
     busiest = max(sum(demand[i:i + 5]) for i in range(len(demand) - 4)) or 1.0
     backlog = 0.0
     for i, d in enumerate(demand):
         now = start + i * H
         for t in pool:
+            if 23 * H < t.reset - now <= 24 * H:
+                m['room24'].append(100 - t.w)
             if now >= t.reset:
                 t.lost.append(100 - t.w)
                 t.w, t.reset = 0.0, t.reset + WEEK
@@ -156,6 +185,7 @@ def run(names, start, demand, resets_at, w0, scheme, K, one_proc, near_h=0.0, fl
         v = views(pool, now, near_h, floor, one_proc)
         ready = [t for t in pool if v[t][0]]
         m['ready1'] += len(ready) <= 1
+        m['dry'] += sum(1 for t in pool if t.w >= (100 if v[t][1] else RETIRE))
         cap = sum(min((100 - t.s) / K, (100 if v[t][1] else RETIRE) - t.w) for t in ready)
         m['burst'].append(min(1.0, max(0.0, cap) / busiest))
         want, got = d + backlog, 0.0
@@ -167,7 +197,7 @@ def run(names, start, demand, resets_at, w0, scheme, K, one_proc, near_h=0.0, fl
             if scheme == 'near':
                 t = pick_near(cand, v, pool, now)
             else:
-                t = max(cand, key=lambda t: (score(t, now, offset), -t.reset))
+                t = max(cand, key=lambda t: (guarded(t, pool, now, one_proc, K, guard, offset, soft), -t.reset))
             c = min(CHUNK, want - got)
             t.w = min(100.0, t.w + c)
             t.win = now if t.win is None else t.win
@@ -181,6 +211,7 @@ def run(names, start, demand, resets_at, w0, scheme, K, one_proc, near_h=0.0, fl
     n = sum(len(t.lost) for t in pool) or 1
     m['lost'] = sum(sum(t.lost) for t in pool) / n
     m['full'] = sum(t.full for t in pool)
+    m['room24'] = sum(m['room24']) / max(1, len(m['room24']))
     return m
 
 
@@ -209,10 +240,21 @@ def replay(rows, names, args):
     days = [demand[i:i + 24] for i in range(0, hours - 23, 24)]
     print(f'\n## Replay (an estimate): {", ".join(names)}, {iso(start)} .. {iso(end)}; K {K} (rmse {rmse:.0f} points); '
           f'daily demand {" ".join(f"{sum(d):.0f}" for d in days)} (% of one token)')
-    schemes = [('today (w971)', dict(scheme='score')), ('offset 12 h (lothsahn)', dict(scheme='score', offset=12)),
-               ('offset 24 h', dict(scheme='score', offset=24)),
-               (f'near-reset {args.near_h:g} h, floor {args.floor} (w1539)', dict(scheme='near', near_h=args.near_h, floor=args.floor))]
-    head = 'lost/reset  backlog %h  h<=1 ready  h at 100  burst min/mean'
+    lift = dict(near_h=args.near_h, floor=args.floor)
+    schemes = [('w971 score alone', dict(scheme='score')),
+               (f'live: w1539 {args.near_h:g} h first+lift', dict(scheme='near', **lift)),
+               ('offset 12 h, hard', dict(scheme='score', offset=12)),
+               ('offset 18 h, hard', dict(scheme='score', offset=18)),
+               ('offset 12 h, hard + lift', dict(scheme='score', offset=12, **lift)),
+               ('offset 18 h, hard + lift', dict(scheme='score', offset=18, **lift))]
+    for o in args.soft:
+        schemes += [(f'soft offset {o:g} h', dict(scheme='score', soft=o)), (f'soft offset {o:g} h + lift', dict(scheme='score', soft=o, **lift))]
+        for g in args.guard:
+            n, room = g.split(':')
+            schemes += [(f'soft {o:g} h + lift, guard {n}x{room}%', dict(scheme='score', soft=o, guard=(int(n), float(room)), **lift))]
+    if args.only:
+        schemes = [x for x in schemes if any(k in x[0] for k in args.only)]
+    head = 'lost/reset  room@-24h  backlog %h  h<=1 ready  tok-h dry  burst min/mean'
     for label, scale in [('the measured week repeated', None), ('shuffled quiet and busy weeks', 'shuffle')]:
         for level in args.levels:
             print(f'\n{label}, demand x{level}: {head}')
@@ -229,11 +271,11 @@ def replay(rows, names, args):
                             for _ in range(7):
                                 seq += [x * f for x in rnd.choice(days)]
                     m = run(names, start, seq, resets_at, w0, K=K, one_proc=args.one_proc, **kw)
-                    for k in ('lost', 'backlog', 'ready1', 'full'):
+                    for k in ('lost', 'backlog', 'ready1', 'full', 'dry', 'room24'):
                         acc[k] += m[k] / seeds
                     acc['bmin'] += min(m['burst']) / seeds
                     acc['bmean'] += sum(m['burst']) / len(m['burst']) / seeds
-                print(f'  {name:34} {acc["lost"]:10.2f} {acc["backlog"]:10.0f} {acc["ready1"]:11.1f} {acc["full"]:9.1f}   {acc["bmin"]:.2f}/{acc["bmean"]:.3f}')
+                print(f'  {name:34} {acc["lost"]:10.2f} {acc["room24"]:10.1f} {acc["backlog"]:10.0f} {acc["ready1"]:11.1f} {acc["dry"]:9.1f}   {acc["bmin"]:.2f}/{acc["bmean"]:.3f}')
 
 
 if __name__ == '__main__':
@@ -244,6 +286,9 @@ if __name__ == '__main__':
     ap.add_argument('--near-h', type=float, default=12.0)
     ap.add_argument('--floor', type=int, default=1)
     ap.add_argument('--one-proc', type=float, default=2.0)
+    ap.add_argument('--soft', type=float, nargs='*', default=[12.0, 18.0, 24.0], help='soft offsets to replay (w1659)')
+    ap.add_argument('--guard', nargs='*', default=[], help='N:ROOM burst guards to replay with each soft offset (w1659)')
+    ap.add_argument('--only', nargs='*', default=[], help='replay only the schemes whose label holds one of these')
     ap.add_argument('--tile', type=int, default=4)
     ap.add_argument('--seeds', type=int, default=30)
     ap.add_argument('--levels', type=float, nargs='+', default=[0.7, 0.85, 1.0])
