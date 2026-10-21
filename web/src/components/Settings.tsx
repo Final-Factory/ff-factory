@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NOTIFY_KINDS, type AppVersion } from '../../../shared/types';
-import { disablePush, enablePush, setPref, testNotification, usePush } from '../notify';
+import { disablePush, enableInTab, enablePush, pushMode, setPref, testNotification, usePush } from '../notify';
 import { api } from '../api';
 import { logout, toast, toastError } from '../store';
 import { SHORTCUT_LABEL, VOICE_PREF_DEFAULTS, refreshVoiceStatus, setVoicePrefs, useVoicePrefs, useVoiceStatus, type TtsEnginePref } from '../voice/dictation';
@@ -14,18 +14,22 @@ import { VaultSettings } from './Vault';
 export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () => void }) {
   const p = usePush();
   const [testing, setTesting] = useState(false);
-  const on = !!p.endpoint;
-  const canInPage = p.permission === 'granted';
+  const mode = pushMode(p);
+  const on = mode === 'push';
+  const inTab = mode === 'tab';
+  const inTabCapable = !p.supported && !p.needsHomeScreen && p.permission !== 'unsupported' && p.permission !== 'denied';
 
-  const status = !p.supported
-    ? p.needsHomeScreen
-      ? 'On iPhone and iPad, add FF Factory to the Home Screen first (Share → Add to Home Screen), open it from there, then turn notifications on here.'
-      : 'This browser cannot receive push notifications. While this tab is open in the background it can still show them.'
+  const status = p.needsHomeScreen
+    ? 'On iPhone and iPad, add FF Factory to the Home Screen first (Share → Add to Home Screen), open it from there, then turn notifications on here.'
     : p.permission === 'denied'
       ? 'Notifications are blocked for this site. Allow them in the browser’s site settings, then come back.'
       : on
         ? 'On: this device gets notifications even when FF Factory is closed.'
-        : 'Off on this device.';
+        : inTab
+          ? 'On in this tab only: this browser cannot receive push notifications, so this tab shows them while it is in the background, and you get none once it is closed.'
+          : !p.supported
+            ? 'This browser cannot receive push notifications. Allowing them lets this tab show them while it is in the background.'
+            : 'Off on this device: no notifications, from the browser or from this page.';
 
   return (
     <Modal
@@ -37,7 +41,7 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
             Sign out
           </button>
           <span className="spacer" />
-          {(on || canInPage) && (
+          {mode !== 'off' && (
             <button
               className="btn btn-ghost"
               disabled={testing}
@@ -60,9 +64,9 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
               {p.busy ? 'Working…' : on ? 'Turn off' : 'Turn on'}
             </button>
           )}
-          {!p.supported && 'Notification' in window && p.permission === 'default' && (
-            <button className="btn btn-primary" onClick={() => Notification.requestPermission().then(() => location.reload())}>
-              Allow in-tab notifications
+          {inTabCapable && (
+            <button className={`btn ${inTab ? 'btn-outline' : 'btn-primary'}`} disabled={p.busy} onClick={() => (inTab ? disablePush() : enableInTab()).catch(toastError)}>
+              {inTab ? 'Turn off' : p.permission === 'default' ? 'Allow in-tab notifications' : 'Turn on'}
             </button>
           )}
         </>
