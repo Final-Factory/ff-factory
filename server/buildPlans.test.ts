@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BuildPlans, PLAN_MAX_MS, pauseNotice, type BuildDeps } from './buildPlans.ts';
+import { BuildPlans, PLAN_MAX_MS, pauseNotice, type BuildDeps, type SeatResult } from './buildPlans.ts';
 import type { BenchLock, SessionInfo, WorkItem } from '../shared/types.ts';
 
 /**
@@ -19,9 +19,11 @@ interface W {
   live?: boolean;
   view?: boolean;
   requests: string[];
+  /** Its sandbox (default slot-<id>). */
+  sandbox?: string;
 }
 
-function world(ws: W[], o: { moveTo?: Record<string, string | undefined>; moveFails?: string[]; bench?: BenchLock; file?: string } = {}) {
+function world(ws: W[], o: { moveTo?: Record<string, string | undefined>; moveFails?: string[]; bench?: BenchLock; file?: string; seat?: SeatResult[] } = {}) {
   let now = Date.parse('2026-10-20T05:00:00Z');
   const told: { id: string; text: string }[] = [];
   const notes: string[] = [];
@@ -30,7 +32,8 @@ function world(ws: W[], o: { moveTo?: Record<string, string | undefined>; moveFa
   const stopped: string[] = [];
   let kicks = 0;
   const bench = { lock: o.bench };
-  const info = (w: W) => ({ id: w.id, kind: 'worker', machineId: w.machine, machineSandbox: `slot-${w.id}`, pendingPermissions: [] }) as unknown as SessionInfo;
+  const info = (w: W) => ({ id: w.id, kind: 'worker', machineId: w.machine, machineSandbox: w.sandbox ?? `slot-${w.id}`, pendingPermissions: [] }) as unknown as SessionInfo;
+  const seats: string[] = [];
   const deps: BuildDeps = {
     buildMachines: () => ['beast'],
     workersOn: (m) => ws.filter((w) => w.machine === m).map(info),
@@ -56,9 +59,19 @@ function world(ws: W[], o: { moveTo?: Record<string, string | undefined>; moveFa
     log: () => {},
     now: () => now,
     ...(o.file ? { file: o.file } : {}),
+    ...(o.seat
+      ? {
+          seat: async (_p, id) => {
+            seats.push(id);
+            const r = o.seat!.shift() ?? { wait: 'nothing scripted' };
+            if (r.moved) ws.find((w) => w.id === id)!.sandbox = 'slot1';
+            return r;
+          },
+        }
+      : {}),
   };
   const plans = new BuildPlans(deps);
-  return { plans, told, notes, moves, marked, stopped, bench, kicks: () => kicks, at: (min: number) => (now = Date.parse('2026-10-20T05:00:00Z') + min * 60_000), ws };
+  return { plans, told, notes, moves, marked, stopped, bench, seats, kicks: () => kicks, at: (min: number) => (now = Date.parse('2026-10-20T05:00:00Z') + min * 60_000), ws };
 }
 
 test('w1606: a build declared coming holds BEAST for new work at once, and clears nothing before it is due', () => {
@@ -212,4 +225,52 @@ test('w1606: a plan survives a portal restart (data/builds.json), so paused work
   const b = world([], { file });
   assert.equal(b.plans.restore(), 1);
   assert.match(b.plans.holds().beast, /^a build is coming at 05:30Z \(a player, worker b for w1; w1606\)/);
+});
+
+test('w1668: an urgent release builds in slot1: a builder elsewhere is told to end its turn, moved there, then goes; one in slot1 goes at once', async () => {
+  // lothsahn: "Let's make sure that urgent builds always get scheduled in slot1 on whatever machine they run in so that it uses caches as warm as possible."
+  const t = world(
+    [
+      { id: 'builder', machine: 'beast', midTurn: true, requests: ['w1700'], sandbox: 'slot3' },
+      { id: 'nightly', machine: 'beast', midTurn: true, requests: ['w1650'], sandbox: 'slot1' },
+    ],
+    { seat: [{ wait: 'nightly is mid-turn there' }, { wait: 'the builder is mid-turn: it moves once its turn ends' }, { done: 'moved its builder builder from slot3 to slot1 on its branch w1700-rel', moved: true }] },
+  );
+  t.plans.declare({ machine: 'beast', minutes: 0, what: '1.0.0.5 urgent release', builder: 'builder', requests: ['w1700'], by: 'worker builder' });
+  await new Promise((r) => setImmediate(r));
+  const p = t.plans.plan('beast')!;
+  assert.equal(p.seat?.sandbox, 'slot1', 'the clearing sets the seat for a builder outside slot1');
+  const first = await t.plans.start('builder', 'beast');
+  assert.match(first, /^Not yet \(w1668\): urgent release builds run in beast\/slot1/);
+  assert.match(first, /END YOUR TURN NOW, with no check-in/);
+  assert.match(first, /Now: nightly is mid-turn there\.$/);
+  assert.equal(p.startedAt, undefined, 'not started until the builder is in slot1');
+  await t.plans.tick();
+  assert.equal(p.seat?.waiting, 'the builder is mid-turn: it moves once its turn ends');
+  t.ws[0].midTurn = false;
+  t.ws[0].live = false;
+  await t.plans.tick();
+  assert.match(p.seat?.done ?? '', /^moved its builder/);
+  const seated = t.told.find((x) => x.id === 'builder')!.text;
+  assert.match(seated, /^\[FF Factory\] You are in beast\/slot1 now \(w1668/);
+  assert.match(seated, /Run `build_plan start` \(release: true\) again/);
+  assert.deepEqual(t.seats, ['builder', 'builder', 'builder']);
+  assert.match(await t.plans.start('builder', 'beast'), /^Go \(w1606\)/);
+  assert.equal(t.seats.length, 3, 'seated: start asks no more');
+
+  // A builder already in slot1: no seat, Go at once.
+  const u = world([{ id: 'b1', machine: 'beast', midTurn: true, requests: ['w1701'], sandbox: 'slot1' }], { seat: [] });
+  assert.match(await u.plans.start('b1', 'beast'), /^Go \(w1606\)/);
+  assert.equal(u.plans.plan('beast')!.seat, undefined);
+  assert.deepEqual(u.seats, []);
+});
+
+test('w1668: slot1 that cannot be emptied in time: the builder is told to build where it is, and start goes', async () => {
+  const t = world([{ id: 'builder', machine: 'beast', midTurn: true, requests: ['w1700'], sandbox: 'slot2' }], { seat: [{ wait: 'a Unity batch run of slot1 is in flight' }, { gaveUp: 'slot1 was not free after 10 min: a Unity batch run of slot1 is in flight' }] });
+  assert.match(await t.plans.start('builder', 'beast'), /^Not yet \(w1668\).*Now: a Unity batch run of slot1 is in flight\.$/s);
+  await t.plans.tick();
+  assert.match(t.told.at(-1)!.text, /^\[FF Factory\] beast\/slot1 could not be emptied for the release build \(w1668\): slot1 was not free after 10 min.*build where you are/);
+  assert.match(await t.plans.start('builder', 'beast'), /^Go \(w1606\)/);
+  // PlaceAgain keeps slot1 for the builder only while the seat is pending.
+  assert.equal(t.plans.seats('beast').size, 0);
 });

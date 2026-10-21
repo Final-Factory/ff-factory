@@ -326,6 +326,11 @@ export interface PlaceAgainDeps {
    * repo's), so it resumes on an agent seat (seatFor), not a game sandbox (w1135). Unset: every worker is game work.
    */
   agentOnly?: (s: SessionInfo) => boolean;
+  /**
+   * Sandboxes of a machine kept for a worker on its way there (w1668: an urgent release's builder moving into slot1,
+   * BuildPlans.seats): sandbox to session id. Nobody else is placed there meanwhile, and no new work starts there.
+   */
+  reserved?: (machineId: string) => ReadonlyMap<string, string>;
   /** How many agents a sandbox of the machine takes (its pool's max_agents_per_sandbox; default 2). */
   seats?: (machineId: string) => number;
   /** Run the release pass again soon (a worker was just stopped to release its sandbox: w890 frees it within a minute of its turn's end). */
@@ -410,6 +415,7 @@ export class PlaceAgain {
     const out = new Map<string, string>();
     if (!m) return out;
     for (const [id, p] of this.placing) if (p.machine === machineId) out.set(p.sandbox, id);
+    for (const [sandbox, id] of this.d.reserved?.(machineId) ?? []) if (!out.has(sandbox)) out.set(sandbox, id);
     const f = this.facts(machineId);
     // A worker on work that is not the game's takes an agent seat, never a game sandbox (w1135): it claims none.
     const waiting = f.sessions.filter((s) => s.placeReleased && !f.live(s.id) && !this.placing.has(s.id) && this.d.queued(s.id) && !this.d.agentOnly?.(s)).sort((a, b) => (this.d.order?.(a, b) ?? 0) || a.id.localeCompare(b.id));

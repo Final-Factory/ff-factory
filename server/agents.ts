@@ -70,7 +70,8 @@ import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, MAX_OPTIONS,
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, handoverNote, isFor, isOpen, ledgerOrder, names, overlapLine, priorityThenAge, requestAsFiled, requestLineRule, startProblem } from './work.ts';
 import { minPriorityText, needsBuild, needsLive, needsOf, needsTimed } from '../shared/capacity.ts';
-import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE } from './buildPlans.ts';
+import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
+import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
@@ -551,6 +552,8 @@ export class Agents {
         return pickComputer(this.places().filter((p) => p.id !== placeId(from)), this.lastPlaced, forPriority(this.placement(), lowestPriority(open)), kind)?.pick.id;
       },
       move: (id, to, why) => this.moveWorker(id, to, why),
+      // w1668: an urgent release builds in its computer's slot1: its builder is moved there first.
+      seat: (p, id) => this.seatRelease(p, id),
       // w1656: a release build's start stops a paused worker's editor (its compile or test run ends, to run again).
       stopEditor: async (id) => {
         const info = store.sessions.get(id);
@@ -623,6 +626,7 @@ export class Agents {
         const open = this.workIdsOf(info).map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
         return open.length > 0 && open.every((w) => needsOf(w) === 'agent');
       },
+      reserved: (id) => this.builds.seats(id),
       seats: (id) => {
         const m = store.machines.get(id);
         return (m && poolSettingsOf(m)?.maxAgentsPerSandbox) || 2;
@@ -2091,6 +2095,105 @@ export class Agents {
     }
     console.log(`move: ${reqs.map((w) => w.id).join(', ')} from worker ${info.id} on ${from} to ${target} (${reason}); branch ${branch ?? 'unknown'}${saved ? `; ${saved}` : ''}`);
     return `Moved ${reqs.map((w) => w.id).join(', ')} off ${sessionId} on ${from}, for ${target}: its process stopped${view ? ', its Live view ended' : ''}${saved ? `, ${saved}` : ''}. Each is Queued for ${target} with its branch ${branch ?? '(unknown)'} and a note${view ? ' (the Live view settings to stage again)' : ''}. Now ${branch ? `switch_branch a FREE ${target} sandbox to "${branch}", then ` : ''}start_agent with its work_id in that sandbox; the new worker's handover carries the note.`;
+  }
+
+  /**
+   * One step towards an urgent release's builder working in its build computer's slot1 (w1668, server/releaseSeat.ts says
+   * why and the order): empty slot1 of other game work (tell, then stop, a worker mid-turn; stop one between turns; release
+   * a stopped one's sandbox for it, its uncommitted work committed and pushed first), then move the builder there once it
+   * is stopped: its own sandbox to a fresh hand-over branch, slot1 to its branch, its record to slot1. Its next message
+   * says where it is now (movedNote). Never throws for a step that failed: it says so, and the next look tries again.
+   */
+  private async seatRelease(p: BuildPlan, builderId: string): Promise<SeatResult> {
+    const seat = p.seat!;
+    const m = this.store.machines.get(p.machine);
+    const b = this.store.sessions.get(builderId);
+    if (!m || !b) return { wait: 'its builder or computer is not known' };
+    const sb = m.sandboxes?.find((x) => x.id === seat.sandbox);
+    const live = (id: string) => !!this.sessions.sessions.get(id)?.live;
+    const others = [...this.store.sessions.values()].filter((s) => s.kind === 'worker' && s.id !== b.id && s.machineId === m.id && s.machineSandbox === seat.sandbox && (live(s.id) || this.openWorkOf(s).length > 0));
+    const u = this.machines.statsOf(m.id)?.unity;
+    const a = seatAction({
+      builder: b,
+      target: sb,
+      others,
+      live,
+      midTurn: (s) => isMidTurn(s),
+      agentOnly: (s) => {
+        const open = this.openWorkOf(s);
+        return open.length > 0 && open.every((w) => needsOf(w) === 'agent');
+      },
+      unityHolders: u ? [...u.granted, ...u.waiting].map((x) => x.holder) : [],
+      seat,
+      now: Date.now(),
+    });
+    if (a.do === 'done') return { done: a.why };
+    if (a.do === 'give-up') return { gaveUp: a.why };
+    if (a.do === 'wait') return { wait: a.why };
+    if (a.do === 'clear') {
+      const saved = new Set<string>();
+      for (const step of a.steps) {
+        const o = this.store.sessions.get(step.id);
+        if (!o) continue;
+        if (step.do === 'tell') {
+          seat.told[o.id] = Date.now();
+          this.sessions.send(o.id, seatNotice(m.id, seat.sandbox, p.what), 'system');
+        } else if (step.do === 'interrupt' || step.do === 'stop') {
+          this.store.append(o.id, { kind: 'system', text: `Stopped by FF Factory (w1668): the urgent release ${p.what} builds in ${m.id}/${seat.sandbox}${step.do === 'interrupt' ? `, and its turn had not ended ${SEAT_GRACE_MS / 60_000} minutes after it was asked to` : ''}. Its sandbox is released for it; it resumes in another sandbox on ${m.id}, on its branch.` });
+          this.sessions.sessions.get(o.id)?.stop(true);
+        } else {
+          let note = 'its worktree was clean';
+          if (step.save && !saved.has(step.branch)) {
+            const r = await this.machines.saveWork(m.id, seat.sandbox, step.branch, `FF Factory: saved ${o.id}'s uncommitted work before ${m.id}/${seat.sandbox} went to the urgent release build (w1668)\n\n${p.what}. \`git reset HEAD~1\` gives the work back uncommitted.`, this.githubTokenFor(m.id, o.id, `saving ${o.id}'s work`));
+            saved.add(step.branch);
+            if (r.sha) o.savedWork = { sha: r.sha, files: r.files, pushed: r.pushed, branch: step.branch, at: new Date().toISOString() };
+            note = r.notes.join('; ') || 'its uncommitted work was saved';
+          }
+          const why = `${m.id}/${seat.sandbox} builds the urgent release ${p.what} (w1668: urgent builds run in slot1)`;
+          o.placeReleased = { at: new Date().toISOString(), sandbox: seat.sandbox, branch: step.branch, why };
+          delete o.releaseDue;
+          delete o.heldSince;
+          this.store.putSession(o);
+          this.store.append(o.id, { kind: 'system', text: `Its sandbox ${m.id}/${seat.sandbox} is released (${note}): ${why}. When it resumes it is placed again on its branch ${step.branch}, in another sandbox on ${m.id}.` });
+          console.log(`release seat: released ${m.id}/${seat.sandbox} of ${o.id} for ${p.what} (${note})`);
+        }
+      }
+      return { wait: a.why };
+    }
+    if (a.do === 'stop-builder') {
+      this.store.append(b.id, { kind: 'system', text: `Stopped by FF Factory between turns (w1668): it moves to ${m.id}/${seat.sandbox} to build ${p.what}; a message resumes it there.` });
+      this.sessions.sessions.get(b.id)?.stop(true);
+      return { wait: 'stopping the builder between turns, to move it' };
+    }
+    // a.do === 'move': the builder is stopped and slot1 is empty of other game work.
+    const from = m.sandboxes?.find((x) => x.id === b.machineSandbox);
+    const branch = from?.git?.branch;
+    if (!from || !sb || !branch || branch === 'detached HEAD' || branch === '?') return { gaveUp: `the builder's sandbox or branch is not known (${b.machineSandbox ?? 'none'})` };
+    try {
+      if ((from.git?.dirty ?? 0) > 0 || (from.git?.untracked ?? 0) > 0) {
+        await this.machines.saveWork(m.id, from.id, branch, `FF Factory: saved ${b.id}'s uncommitted work before its move to ${m.id}/${sb.id} for the urgent release build (w1668)\n\n\`git reset HEAD~1\` gives the work back uncommitted.`, this.githubTokenFor(m.id, b.id, `saving ${b.id}'s work`));
+      }
+      for (const x of [from, sb]) if (x.unity.state !== 'stopped') await this.machines.unity(m.id, 'stop', false, x.id);
+      // One branch in one worktree (git): the builder's own sandbox lets go of its branch first.
+      const handed = handOverBranch(from.id, `after-${b.id.slice(0, 8)}`);
+      await this.machines.switchBranch(m.id, handed, undefined, from.id);
+      try {
+        await this.machines.switchBranch(m.id, branch, undefined, sb.id);
+      } catch (e) {
+        await this.machines.switchBranch(m.id, branch, undefined, from.id).catch(() => undefined);
+        throw e;
+      }
+    } catch (e) {
+      return { gaveUp: `moving it failed: ${(e as Error).message}` };
+    }
+    const fresh = this.store.machines.get(m.id) ?? m;
+    b.movedFrom = { sandbox: from.id, path: from.path, at: new Date().toISOString(), why: `urgent release builds run in ${sb.id} (w1668)`, branch };
+    b.machineSandbox = sb.id;
+    for (const x of fresh.sandboxes ?? []) x.sessionIds = x.id === sb.id ? [...x.sessionIds.filter((i) => i !== b.id), b.id] : x.sessionIds.filter((i) => i !== b.id);
+    this.store.putMachine(fresh);
+    this.store.putSession(b);
+    console.log(`release seat: moved builder ${b.id} from ${m.id}/${from.id} to ${m.id}/${sb.id} on ${branch} for ${p.what}`);
+    return { done: `moved its builder ${b.id} from ${from.id} to ${sb.id} on its branch ${branch}`, moved: true };
   }
 
   /** The open requests a worker serves (workIdsOf). */

@@ -146,7 +146,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket'] } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket']; warm?: string[] } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
   /** The status of each sandbox at every change the portal would be sent, consecutive repeats dropped (w898: the cleanup state's order). */
   const statuses: string[] = [];
@@ -170,6 +170,7 @@ function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined;
       ...(o.releaseSweep ? { releaseSweep: o.releaseSweep } : {}),
       ...(o.log ? { log: o.log } : {}),
       ...(o.reseedIdleDays !== undefined ? { reseedIdleDays: o.reseedIdleDays } : {}),
+      ...(o.warm ? { warm: o.warm } : {}),
       librarySeedGB: 1,
       ...(o.bootTicket ? { bootTicket: o.bootTicket } : {}),
       ...(o.slots ? { editorSlot: (id: string) => o.slots!().startRefusal(`sandbox:${id}`), slotsStatus: async () => (await o.slots!().tick(), o.slots!().describe()) } : {}),
@@ -1177,6 +1178,44 @@ test('w1576: a sandbox unused for days gets its Library cloned from the seed aga
   assert.ok(logs.some((l) => /^sandbox sb1: unused for 5 days: its Library \(0\.0 GB\) cloned from the seed again$/.test(l)), logs.join(' | '));
 });
 
+test('w1668: slot1 on a build computer (warm), where urgent releases build, keeps its own Library however long it lies unused', async (t) => {
+  // lothsahn: "Let's make sure that urgent builds always get scheduled in slot1 on whatever machine they run in so that it uses caches as warm as possible."
+  const r = repos();
+  t.after(r.cleanup);
+  const seed = path.join(r.root, 'seed', 'Library');
+  fs.mkdirSync(path.join(seed, 'Artifacts'), { recursive: true });
+  fs.writeFileSync(path.join(seed, 'Artifacts', 'seed.bin'), 'seed');
+  const logs: string[] = [];
+  const { p } = pool(r, {
+    settings: { librarySeed: seed, librarySeedCopy: 'clone' },
+    activity: () => ({ busy: false, lastActivityMs: Date.now() - 5 * 86_400_000 }),
+    liveAgents: () => 0,
+    log: (l) => logs.push(l),
+    warm: ['slot1'],
+  });
+  await p.create({ id: 'slot1', branch: 'sandbox/slot1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'slot1');
+  const lib = path.join(r.sbRoot, 'slot1', 'Library');
+  fs.mkdirSync(path.join(lib, 'ShaderCache'), { recursive: true });
+  fs.writeFileSync(path.join(lib, 'ShaderCache', 'metal.bin'), 'compiled for the Mac player');
+  fs.mkdirSync(path.join(r.sbRoot, 'slot1', 'ProjectSettings'));
+  fs.writeFileSync(path.join(r.sbRoot, 'slot1', 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 6000.3.0f1');
+  // A second sandbox as stale: the one reseed of the pass goes to it, not to slot1 (one at a time, in creation order).
+  await p.create({ id: 'sb2', branch: 'sandbox/sb2', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb2');
+  const lib2 = path.join(r.sbRoot, 'sb2', 'Library');
+  fs.mkdirSync(path.join(lib2, 'Artifacts'), { recursive: true });
+  fs.writeFileSync(path.join(lib2, 'Artifacts', 'own.bin'), 'grown over days');
+  fs.mkdirSync(path.join(r.sbRoot, 'sb2', 'ProjectSettings'));
+  fs.writeFileSync(path.join(r.sbRoot, 'sb2', 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 6000.3.0f1');
+  const old = new Date(Date.now() - 5 * 86_400_000);
+  for (const d of [path.join(lib, 'ShaderCache'), lib, path.join(lib2, 'Artifacts'), lib2]) fs.utimesSync(d, old, old);
+  await p.tick();
+  await until('a reseed', () => logs.some((l) => /cloned from the seed again/.test(l)) && p.list().every((x) => x.status === 'ready'));
+  assert.ok(logs.some((l) => /^sandbox sb2: unused for 5 days/.test(l)), logs.join(' | '));
+  assert.ok(fs.existsSync(path.join(lib, 'ShaderCache', 'metal.bin')), 'slot1 keeps its own Library');
+});
+
 test('w1576: lfsDedup reads the bytes git lfs dedup shared, and never throws', async () => {
   const said = (code: number, stdout: string, stderr = '') => async () => ({ code, stdout, stderr });
   const ok = await lfsDedup(said(0, 'Success:\n  De-duplicated  size: 9103132700 bytes\n                count: 5026\n'), 'X');
@@ -1203,4 +1242,29 @@ test('w1576: the release trim runs git lfs dedup in the sandbox and logs what it
   await p.tick();
   await until('the trim to end', () => p.list()[0].status === 'ready' && logs.some((l) => /Library cache trim/.test(l)));
   assert.ok(logs.some((l) => /Library cache trim \(released\).*; LFS (files shared with the store|dedup skipped)/.test(l)), logs.join(' | '));
+});
+
+test('w1668: a warm sandbox (slot1 on a build computer) is not trimmed when released; its build output is still swept', async (t) => {
+  // Measured on biscuit, a Linux release build (main): 81 s warm, 244 s once the caches the trim drops were gone.
+  const r = repos();
+  t.after(r.cleanup);
+  let live = 1;
+  const trimmed: string[] = [];
+  const swept: string[] = [];
+  const { p } = pool(r, {
+    liveAgents: () => live,
+    warm: ['slot1'],
+    trimmer: async (project) => (trimmed.push(path.basename(project)), { files: 1, removedBytes: 1, keptBytes: 0 }),
+    releaseSweep: async (sb) => (swept.push(path.basename(sb)), { files: 0, bytes: 0 }),
+  });
+  for (const id of ['slot1', 'sb2']) {
+    await p.create({ id, branch: `sandbox/${id}`, base: 'origin/master', seedLibrary: false, startUnity: false });
+    await ready(p, id);
+  }
+  await p.tick();
+  live = 0;
+  await p.tick();
+  await until('both releases to end', () => p.list().every((x) => x.status === 'ready') && swept.length === 2);
+  assert.deepEqual(trimmed, ['sb2'], 'slot1 keeps its Library caches');
+  assert.deepEqual(swept.sort(), ['sb2', 'slot1'], 'both sweep their build output');
 });

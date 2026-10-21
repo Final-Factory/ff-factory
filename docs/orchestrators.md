@@ -292,6 +292,17 @@ Then:
      `BuildPlans.releaseBuilder`), and the release lane's own Unity runs take a pre-empting ticket (the game repo's
      `bench_queue.py`, `Documentation/Bench-Lock.md` "An urgent release pre-empts"): every holder's batch run or timed
      leg stops cleanly (exit 75, to be run again), and the release is granted at once.
+   - **in slot1** (w1668; lothsahn: "Let's make sure that urgent builds always get scheduled in slot1 on whatever machine
+     they run in so that it uses caches as warm as possible"): `urgent_release.py` builds the checkout it runs from, and a
+     Library that never built Mac or Linux compiles every shader for it (1.0.0.3 in LothDesktop's slot3: Mac 2485 s,
+     Linux 2899 s, Windows 925 s; the game repo's Release-Lanes.md, "Where the time goes"). So a builder outside slot1 is
+     answered `Not yet (w1668)` and ends its turn; FF Factory empties slot1 (`server/releaseSeat.ts`, one step per 30 s
+     look: a worker between turns there is stopped and its sandbox released for it, uncommitted work committed and pushed
+     first, and it resumes in another sandbox there on its branch; one mid-turn is asked to end its turn and stopped after
+     2 minutes; agent-seat work in its own clone stays; a Unity batch run there is waited for), then moves the builder in
+     (its own sandbox to a fresh hand-over branch, slot1 to the builder's branch) and resumes it with `You are in
+     <computer>/slot1 now`. PlaceAgain keeps slot1 for it meanwhile (`BuildPlans.seats`). Not empty within 10 minutes:
+     the builder is told to build where it is.
 4. **`build_plan done`** (by its worker right after the build, done or failed) ends it: the hold lifts, the queued resumes
    go, the paused workers are told to carry on, and the dispatcher hears `[ledger] BUILD DONE (w1606)` with how long
    the build took. A plan nobody ends is ended 3 hours after it was due (`PLAN_MAX_MS`). Plans live in
