@@ -88,6 +88,13 @@ export interface PoolOptions {
   liveAgents?(id: string): number;
   /** The trim's limits (server/cacheTrim.ts TRIM_DEFAULTS), or false to switch it off. */
   trim?: Partial<TrimPolicy> | false;
+  /**
+   * Sandboxes whose Library caches stay warm (w1668: slot1 on a build computer, where urgent releases build): never
+   * trimmed when released and never cloned from the seed again. lothsahn: "urgent builds always get scheduled in slot1 on
+   * whatever machine they run in so that it uses caches as warm as possible". Measured on biscuit (Linux release build,
+   * main): 81 s warm, 244 s once the caches the trim drops were gone (Burst 82 s again, the player 172 s against 39 s).
+   */
+  warm?: readonly string[];
   /** The trim itself (tests put a hung or failing one here). */
   trimmer?: typeof trimLibraryCaches;
   /**
@@ -655,7 +662,8 @@ export class SandboxPool {
       try {
         res = await Promise.race([
           (async () => {
-            let t = await (this.o.trimmer ?? trimLibraryCaches)(r.path, policy, { signal: ac.signal });
+            // A warm sandbox keeps its caches (w1668); its LFS dedup and build-output sweep still run.
+            let t: TrimResult = this.o.warm?.includes(id) ? { files: 0, removedBytes: 0, keptBytes: 0 } : await (this.o.trimmer ?? trimLibraryCaches)(r.path, policy, { signal: ac.signal });
             if (t.skipped || t.stopped || ac.signal.aborted) return t;
             // The LFS files a branch switch or merge smudged into full copies since, shared again (w1576); a clean worktree only.
             if (!projectOpen(r.path)) t = { ...t, lfs: await lfsDedup(this.d.git, r.path, ac.signal) };
@@ -706,6 +714,9 @@ export class SandboxPool {
     for (const r of this.recs.values()) {
       if (r.status !== 'ready' || this.busy.has(r.id) || this.trimming.has(r.id) || this.editorUp(r.id) || projectOpen(r.path)) continue;
       if ((this.o.liveAgents?.(r.id) ?? 0) > 0) continue;
+      // The urgent release lane builds there (w1668, `warm`): its Library keeps the shaders every target compiled, which
+      // the seed's does not (1.0.0.3: a Library that never built Mac and Linux cost about an hour more), however long it lies idle.
+      if (this.o.warm?.includes(r.id)) continue;
       const a = this.o.activity(r.id);
       if (a.busy || now - a.lastActivityMs < days * 86_400_000) continue;
       const stale = await staleUnityLibraries([r.path], days, now, 0);

@@ -798,3 +798,15 @@ test('w1582: the resumed worker is asked to stage its Live view again with the s
   assert.match(text, /live_view start \(materials \["WardenMaterial"\], fps 30, width 1920\)/);
   assert.match(text, /mcp__machine__unity start/);
 });
+
+test('w1668: slot1 kept for an urgent release builder on its way there is spoken for: no released worker is placed there, and its own former worker resumes elsewhere', () => {
+  // lothsahn: "Let's make sure that urgent builds always get scheduled in slot1 on whatever machine they run in so that it uses caches as warm as possible."
+  const nightly = worker('n1', { status: 'stopped', machineSandbox: 'slot1', placeReleased: { at: iso(NOW - MIN), sandbox: 'slot1', branch: 'feature/slot1', why: 'the urgent release builds there' } });
+  // After the move slot1 is on the builder's branch, and n1's branch is checked out nowhere.
+  const both = { id: 'pc', sandboxes: [sandbox('slot1', {}, { branch: 'w1700-rel' }), sandbox('slot2', {}, { branch: 'feature/slot2' })] } as unknown as Machine;
+  const p = new PlaceAgain({ ...deps([nightly], sandbox('slot1')), machine: () => both, queued: () => true, reserved: () => new Map([['slot1', 'builder']]) });
+  assert.equal(p.claimedBy('pc', 'slot1'), 'builder');
+  assert.equal(p.claimedBy('pc', 'slot2'), 'n1', 'its own slot1 is the builder\'s: it goes to slot2');
+  const none = new PlaceAgain({ ...deps([nightly], sandbox('slot1')), machine: () => both, queued: () => true });
+  assert.equal(none.claimedBy('pc', 'slot1'), 'n1', 'without the reservation it would go back to slot1');
+});

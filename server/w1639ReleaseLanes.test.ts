@@ -114,3 +114,10 @@ test('w1656: a normal release asks A or B too, and B in FFBox\'s lane is --from 
   assert.match(normal, /`trigger-ci-release\.sh --from green --request <wNNN> --notes <file>` \(no --urgent\)/);
   assert.match(normal, /merged with a merge commit, as it is/);
 });
+
+test('w1668: read_rules release puts the urgent build in slot1 of its computer, and says how a builder elsewhere gets there', () => {
+  // lothsahn: "Let's make sure that urgent builds always get scheduled in slot1 on whatever machine they run in so that it uses caches as warm as possible."
+  assert.match(RELEASE_RULES, /THE BUILD RUNS IN THAT COMPUTER'S slot1 \(w1668/);
+  assert.match(RELEASE_RULES, /a builder in another sandbox is moved into slot1 by FF Factory at build_plan start/);
+  assert.match(RELEASE_RULES, /told to build where it is if slot1 cannot be emptied within 10 minutes/);
+});

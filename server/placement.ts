@@ -484,7 +484,7 @@ export function buildLine(places: readonly Computer[], last?: string, prefs: Pla
   if (places.length < 2) return undefined;
   const p = pickComputer(places, last, prefs, 'game', false, 'build');
   if (!p) return `No computer has room for urgent release work now${heldNote(places, prefs, 'game')}.`;
-  return `Next urgent release work (a quick or urgent release, w1639; a normal release is FFBox's and needs none): ${p.pick.id} (${p.why}).`;
+  return `Next urgent release work (a quick or urgent release, w1639; a normal release is FFBox's and needs none): ${p.pick.id} (${p.why}); its build runs in ${p.pick.id}/slot1 (w1668): start it there when FREE, else anywhere there and build_plan moves it in.`;
 }
 
 /**

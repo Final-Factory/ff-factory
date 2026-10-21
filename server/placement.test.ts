@@ -212,7 +212,7 @@ test('w1600: the capacity block names where the next Live view work goes, with B
   assert.match(lines[1], /^- beast: ROOM \d+%: .*; its bench lock is held since 21:04Z \(BEAST pid 4121 .*probe A round 2 .*\): a timed run; agent slot/);
   assert.match(lines[4], /^Next new game-repo work: m5 \(first with room in placement\.prefer/);
   assert.match(lines[5], /^Next Live view work \(game work whose worker streams a Live view, w1600\): beast \(Live view work goes to the first with room in placement\.live \(beast; .*\); its bench lock is held since 21:04Z .*: its worker waits for it before it starts its editor\)\.$/);
-  assert.match(lines[6], /^Next urgent release work \(a quick or urgent release, w1639; .*\): beast \(Urgent release work goes to the first with room in placement\.build \(beast > lothdesktop; w1639: "beast, if offline, LothDesktop"\); its bench lock is held since 21:04Z .*: its worker waits for it before it starts its build\)\.$/);
+  assert.match(lines[6], /^Next urgent release work \(a quick or urgent release, w1639; .*\): beast \(Urgent release work goes to the first with room in placement\.build \(beast > lothdesktop; w1639: "beast, if offline, LothDesktop"\); its bench lock is held since 21:04Z .*: its worker waits for it before it starts its build\); its build runs in beast\/slot1 \(w1668\): start it there when FREE, else anywhere there and build_plan moves it in\.$/);
   assert.match(lines[7], /^Next timed work /);
   assert.match(lines[8], /^Next non-game work/);
   // start_agent's note for Live view work placed elsewhere names BEAST; for other game work, the m5.

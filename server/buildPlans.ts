@@ -40,6 +40,7 @@
 import type { BenchLock, BenchQueueReport, SessionInfo, WorkItem } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { benchText, timedText } from './placement.ts';
+import { gaveUpNotice, RELEASE_SANDBOX, SEAT_GIVE_UP_MS, seatedNotice, type Seat } from './releaseSeat.ts';
 
 /** A plan not ended this long after it was due is ended by itself (a release build and its tests take under two hours). */
 export const PLAN_MAX_MS = { value: 3 * 60 * 60_000 };
@@ -67,6 +68,19 @@ export interface BuildPlan {
   moved: { session: string; to: string; requests: string[] }[];
   /** Workers left alone, with why ("its Live view runs"). */
   kept: { session: string; why: string }[];
+  /** w1668: its builder being moved into the build computer's slot1 (server/releaseSeat.ts). */
+  seat?: Seat;
+}
+
+/** What one step towards the builder working in slot1 did (Agents.seatRelease, w1668). */
+export interface SeatResult {
+  /** The builder is there now (moved: by this step), or there was nothing to move. */
+  done?: string;
+  moved?: boolean;
+  /** Slot1 could not be emptied in time: the builder builds where it is. */
+  gaveUp?: string;
+  /** What it still waits for. */
+  wait?: string;
 }
 
 export interface BuildDeps {
@@ -93,6 +107,11 @@ export interface BuildDeps {
   tell: (sessionId: string, text: string) => void;
   /** Stop the editor of this worker's sandbox (w1656: a release build starts; its compile or test run ends, to run again). */
   stopEditor?: (sessionId: string) => Promise<string | undefined>;
+  /**
+   * w1668: one step towards the builder working in the build computer's slot1 (Agents.seatRelease, server/releaseSeat.ts):
+   * empty slot1 of other game work, then move the builder there. Unset: builds run where their builder is.
+   */
+  seat?: (p: BuildPlan, builderId: string) => Promise<SeatResult>;
   /** The dispatcher's [ledger] line. */
   notify: (text: string) => void;
   /** The send queue looks again (a resume held for the build may go now). */
@@ -140,6 +159,8 @@ export class BuildPlans {
   private readonly now: () => number;
   private readonly plans = new Map<string, BuildPlan>();
   private clearing = new Set<string>();
+  /** Computers whose seat step runs now (w1668). */
+  private readonly seating = new Set<string>();
 
   constructor(d: BuildDeps) {
     this.d = d;
@@ -225,7 +246,7 @@ export class BuildPlans {
     this.d.log(`build: ${plan.by} declared ${plan.what} on ${machine}, due ${hhmm(plan.dueAt)}${plan.requests.length ? ` (${plan.requests.join(', ')})` : ''}`);
     if (!old) this.d.notify(`[ledger] BUILD COMING (w1606): ${plan.by} builds ${plan.what} on ${machine} at ${hhmm(plan.dueAt)} (in ${minutes} min)${plan.requests.length ? ` for ${plan.requests.join(', ')}` : ''}. No new work goes to ${machine} until it is done (Capacity shows it held). At ${hhmm(plan.dueAt)} FF Factory moves the workers there that are between turns to computers with room and pauses the rest at a safe point; it resumes them when the build is done. Nothing for you to do unless you want to place its request: then on ${machine}.`);
     if (minutes === 0) void this.clear(plan);
-    return `Declared (w1606): ${plan.what} on ${machine} at ${hhmm(plan.dueAt)}.${queuedNote} No new work goes there from now. ${minutes === 0 ? 'FF Factory clears it now' : `At ${hhmm(plan.dueAt)} FF Factory clears it`}: the workers between turns move to other computers with room, the ones mid-turn finish their step and pause, and a Live view that runs stays open (its worker starts no compile, test or build meanwhile). When you are ready, build_plan start: it says go, or what it still waits for. After the build, build_plan done.`;
+    return `Declared (w1606): ${plan.what} on ${machine} at ${hhmm(plan.dueAt)}.${queuedNote} No new work goes there from now. ${minutes === 0 ? 'FF Factory clears it now' : `At ${hhmm(plan.dueAt)} FF Factory clears it`}: the workers between turns move to other computers with room, the ones mid-turn finish their step and pause, and a Live view that runs stays open (its worker starts no compile, test or build meanwhile). When you are ready, build_plan start: it says go, or what it still waits for. The build runs in ${machine}'s ${RELEASE_SANDBOX}, its Library kept warm for release builds (w1668): a builder in another sandbox there is moved into it at the clearing, once its turn ends (start says so). After the build, build_plan done.`;
   }
 
   /** build_plan start: go, or what the build still waits for. Starting before the due time clears the computer at once. */
@@ -238,6 +259,20 @@ export class BuildPlans {
     }
     if (builder && !this.isBuilder(p, builder)) return `Not yours: ${p.machine} is ${this.holdWhy(p).replace(/: no new work until it is done$/, '')}. Build where you are, or wait until it is done.`;
     if (!p.clearedAt) await this.clear(p);
+    // w1668: the build runs in the computer's slot1, its Library warm from the last release: the builder moves there first.
+    // A builder placed here after the clearing gets its seat now.
+    const here = builder ? this.d.workersOn(p.machine).find((s) => s.id === builder) : undefined;
+    if (here && this.d.seat && !p.seat && here.machineSandbox !== RELEASE_SANDBOX) {
+      p.seat = { sandbox: RELEASE_SANDBOX, since: this.now(), told: {} };
+      this.save();
+    }
+    if (builder && this.seatPending(p)) {
+      await this.seatStep(p);
+      if (this.seatPending(p)) {
+        const s = p.seat!;
+        return `Not yet (w1668): urgent release builds run in ${p.machine}/${s.sandbox}, whose Library is kept warm for them (lothsahn: "urgent builds always get scheduled in slot1 on whatever machine they run in so that it uses caches as warm as possible"; a Library that never built Mac and Linux cost 1.0.0.3 about an hour more). Commit and push what is unfinished on your branch, then END YOUR TURN NOW, with no check-in: FF Factory empties ${s.sandbox} (its workers go to other sandboxes here, on their branches), moves you there on your branch and resumes you with a message, usually within two minutes. Then build_plan start again and build. If ${s.sandbox} cannot be emptied within ${SEAT_GIVE_UP_MS / 60_000} minutes you are told to build where you are. Now: ${s.waiting ?? 'emptying it'}.`;
+      }
+    }
     // w1628: a held bench lock no longer holds the build back here. The build's own Unity run takes a shared ticket in
     // the machine's bench queue (unity-slot run, the game repo's build_player.sh / ff_unity_slot, w1615), so it waits
     // for the timed leg running now and the ones queued before it, never runs beside one, and keeps its place ahead of
@@ -306,6 +341,7 @@ export class BuildPlans {
         continue;
       }
       if (!p.clearedAt && now >= p.dueAt) await this.clear(p);
+      if (this.seatPending(p)) await this.seatStep(p);
       let changed = false;
       for (const id of Object.keys(p.told)) {
         const s = this.d.workersOn(p.machine).find((x) => x.id === id);
@@ -317,6 +353,53 @@ export class BuildPlans {
       }
       if (changed) this.save();
     }
+  }
+
+  /** The builder working on the build computer now, or undefined (the dispatcher declared it and none is placed there yet). */
+  private builderOn(p: BuildPlan): SessionInfo | undefined {
+    const on = this.d.workersOn(p.machine).filter((s) => this.isBuilder(p, s.id));
+    return on.find((s) => s.id === p.builder) ?? on.find((s) => this.d.isLive(s.id)) ?? on[0];
+  }
+
+  /** Whether its builder is still being moved into slot1 (w1668). */
+  private seatPending(p: BuildPlan): boolean {
+    return !!p.seat && !p.seat.done && !p.seat.gaveUp && !!this.d.seat;
+  }
+
+  /** The sandbox a build's builder is being moved into, per computer, for PlaceAgain's claims (w1668): nobody else is placed there. */
+  seats(machineId: string): Map<string, string> {
+    const out = new Map<string, string>();
+    const p = this.plan(machineId);
+    const b = p && this.seatPending(p) ? this.builderOn(p) : undefined;
+    if (p?.seat && b) out.set(p.seat.sandbox, b.id);
+    return out;
+  }
+
+  /** One step towards the builder working in slot1 (w1668, Agents.seatRelease); the builder is told when it is there, or not. */
+  private async seatStep(p: BuildPlan): Promise<void> {
+    const s = p.seat!;
+    const b = this.builderOn(p);
+    if (!b || this.seating.has(p.machine)) return;
+    this.seating.add(p.machine);
+    let r: SeatResult;
+    try {
+      r = await this.d.seat!(p, b.id);
+    } catch (e) {
+      r = { wait: `failed: ${(e as Error).message}` };
+    } finally {
+      this.seating.delete(p.machine);
+    }
+    if (r.done) {
+      s.done = r.done;
+      delete s.waiting;
+      this.d.log(`build: ${p.what} on ${p.machine}: ${r.done} (w1668)`);
+      if (r.moved) this.d.tell(b.id, seatedNotice(p.machine, s.sandbox, p.what));
+    } else if (r.gaveUp) {
+      s.gaveUp = r.gaveUp;
+      this.d.log(`build: ${p.what} on ${p.machine}: builds where its builder is: ${r.gaveUp} (w1668)`);
+      this.d.tell(b.id, gaveUpNotice(p.machine, s.sandbox, r.gaveUp));
+    } else s.waiting = r.wait;
+    this.save();
   }
 
   /** w1656: the editors of the workers this build paused or asked to pause, stopped at its start (never a Live view's). */
@@ -381,6 +464,9 @@ export class BuildPlans {
         }
         p.paused.push(s.id);
       }
+      // w1668: a builder on this computer outside slot1 is moved there (seatStep); slot1's other work goes first.
+      const b = this.builderOn(p);
+      if (b && this.d.seat && b.machineSandbox !== RELEASE_SANDBOX && !p.seat) p.seat = { sandbox: RELEASE_SANDBOX, since: this.now(), told: {} };
       this.save();
       this.d.log(`build: cleared ${p.machine} for ${p.what}: moved ${p.moved.map((m) => `${m.session} to ${m.to}`).join(', ') || 'none'}; paused between turns ${p.paused.join(', ') || 'none'}; asked to pause ${Object.keys(p.told).join(', ') || 'none'}; left alone ${p.kept.map((k) => k.session).join(', ') || 'none'}`);
       if (p.moved.length || Object.keys(p.told).length) {

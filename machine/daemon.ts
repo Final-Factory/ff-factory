@@ -21,6 +21,8 @@ import { SelfUpdater } from './selfUpdate.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import type { TrimPolicy } from '../server/cacheTrim.ts';
+import { DEFAULT_BUILD } from '../server/placement.ts';
+import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
 import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
@@ -483,6 +485,8 @@ export class Daemon {
         activity: (id) => this.sandboxActivity(id),
         liveAgents: (id) => this.liveIn(id),
         trim: cfg.sandboxCacheTrim,
+        // w1668: urgent releases build in slot1 of a build computer (placement.build's default list): its caches stay warm.
+        warm: DEFAULT_BUILD.includes(cfg.id.toLowerCase()) ? [RELEASE_SANDBOX] : [],
         releaseSweep: (sandboxPath) => this.releaseSweep(sandboxPath),
         log,
         startGate: () => this.guard?.blockReason('editor'),
