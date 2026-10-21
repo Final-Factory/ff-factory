@@ -106,3 +106,11 @@ test('w1656: an urgent release asks A or B on one card first, and its build wait
   assert.doesNotMatch(r, /at most 20 minutes/);
   assert.match(r, /follow it every 2 to 3 minutes with `urgent_release\.py wait --out <run> --minutes 3`/);
 });
+
+test('w1656: a normal release asks A or B too, and B in FFBox\'s lane is --from green without --urgent', () => {
+  const normal = RELEASE_RULES.split('\n').find((l) => l.startsWith('- NORMAL'))!;
+  assert.match(normal, /"A normal release should also provide the option of starting from the last fully green commit"/);
+  assert.match(normal, /ONE CARD FIRST here too/);
+  assert.match(normal, /`trigger-ci-release\.sh --from green --request <wNNN> --notes <file>` \(no --urgent\)/);
+  assert.match(normal, /merged with a merge commit, as it is/);
+});
