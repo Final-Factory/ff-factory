@@ -15,6 +15,7 @@ export const GITHUB_ORG = 'Final-Factory';
 export const GITHUB_REQUIRED_REPOS: readonly string[] = [
   'Final-Factory/Facepunch.Steamworks',
   'Final-Factory/FinalFactory',
+  'Final-Factory/FinalFactoryModTemplate',
   'Final-Factory/final-factory-agents',
   'Final-Factory/ffbox',
   'Final-Factory/finalfactory-agent-kit',

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BUILD_WAIT_MS, BuildPlans, PLAN_MAX_MS, type BuildDeps } from './buildPlans.ts';
+import { BuildPlans, PLAN_MAX_MS, pauseNotice, type BuildDeps } from './buildPlans.ts';
 import type { BenchLock, SessionInfo, WorkItem } from '../shared/types.ts';
 
 /**
@@ -27,6 +27,7 @@ function world(ws: W[], o: { moveTo?: Record<string, string | undefined>; moveFa
   const notes: string[] = [];
   const moves: { id: string; to: string }[] = [];
   const marked: string[] = [];
+  const stopped: string[] = [];
   let kicks = 0;
   const bench = { lock: o.bench };
   const info = (w: W) => ({ id: w.id, kind: 'worker', machineId: w.machine, machineSandbox: `slot-${w.id}`, pendingPermissions: [] }) as unknown as SessionInfo;
@@ -48,6 +49,7 @@ function world(ws: W[], o: { moveTo?: Record<string, string | undefined>; moveFa
       return 'Moved';
     },
     tell: (id, text) => told.push({ id, text }),
+    stopEditor: async (id) => (stopped.push(id), 'Stopped'),
     notify: (t) => notes.push(t),
     kick: () => void kicks++,
     markBuild: (w) => void marked.push(w.id),
@@ -56,7 +58,7 @@ function world(ws: W[], o: { moveTo?: Record<string, string | undefined>; moveFa
     ...(o.file ? { file: o.file } : {}),
   };
   const plans = new BuildPlans(deps);
-  return { plans, told, notes, moves, marked, bench, kicks: () => kicks, at: (min: number) => (now = Date.parse('2026-10-20T05:00:00Z') + min * 60_000), ws };
+  return { plans, told, notes, moves, marked, stopped, bench, kicks: () => kicks, at: (min: number) => (now = Date.parse('2026-10-20T05:00:00Z') + min * 60_000), ws };
 }
 
 test('w1606: a build declared coming holds BEAST for new work at once, and clears nothing before it is due', () => {
@@ -123,7 +125,7 @@ test('w1606: when it is due, BEAST is cleared: workers between turns move first,
   assert.match(t.notes.at(-1)!, /^\[ledger\] BUILD CLEARING \(w1606\): beast for a player for the w1588 clip\. Moved off it .*: w1500 to lothdesktop\. Asked to pause at a safe point: busy;/);
 });
 
-test('w1606: the build waits for workers finishing their step (up to BUILD_WAIT_MS), not for a bench lock (w1628: its shared ticket queues); then goes; done resumes the paused work', async () => {
+test('w1656: a release build goes at once, waiting neither for workers finishing their step nor for a bench lock (w1628: its ticket queues); done resumes the paused work', async () => {
   const t = world([
     { id: 'builder', machine: 'beast', midTurn: true, requests: ['w1588'] },
     { id: 'busy', machine: 'beast', midTurn: true, requests: ['w1503'] },
@@ -131,7 +133,19 @@ test('w1606: the build waits for workers finishing their step (up to BUILD_WAIT_
   ]);
   t.plans.declare({ machine: 'beast', minutes: 0, what: 'the 0.50.0.112 player', builder: 'builder', requests: ['w1588'], by: 'worker builder' });
   await t.plans.tick();
-  assert.match(await t.plans.start('builder', 'beast'), /^Not yet \(w1606\): 1 worker\(s\) on beast were asked at 05:00Z to finish their step and pause \(busy\); none is cut off mid-edit\./);
+  // w1656, lothsahn: a release build does not wait for other workers to pause; it starts at once and takes the bench first
+  // (1.0.0.3 waited 20 minutes for one worker, then behind that worker's test run).
+  const first = await t.plans.start('builder', 'beast');
+  assert.match(first, /^Go \(w1606\): beast is cleared for the 0\.50\.0\.112 player \(0 moved: none; 2 paused\)/);
+  assert.match(first, /busy still finishing their step \(asked at 05:00Z to start no new one\): the release does not wait for them \(w1656\); your bench tickets count as urgent/);
+  assert.equal(t.plans.releaseBuilder('beast', 'builder'), true, 'its tickets count as urgent');
+  // w1656: the editors of the workers it paused or asked to pause stop at the start (their compile or test run ends,
+  // to run again after done); never the builder's.
+  assert.deepEqual(t.stopped.sort(), ['busy', 'idle']);
+  assert.match(first, /Stopped the editors of (busy, idle|idle, busy) \(w1656/);
+  assert.match(t.told.find((x) => x.id === 'busy' && /stopped your sandbox's Unity editor/.test(x.text))!.text, /start your editor again \(mcp__machine__unity start\) and run that step again/);
+  assert.equal(t.plans.releaseBuilder('beast', 'busy'), false);
+  assert.match(t.told.find((x) => x.id === 'busy')!.text, /start no new one: no compile, refresh, test run, player build or batch Unity run\. The release starts now and takes the bench first \(w1656\)/);
   assert.match(await t.plans.start('idle', 'beast'), /^Not yours/);
   // Its turn ends: it is paused, and the build may go.
   t.ws.find((w) => w.id === 'busy')!.midTurn = false;
@@ -150,26 +164,28 @@ test('w1606: the build waits for workers finishing their step (up to BUILD_WAIT_
   // Done: the hold lifts, the queue looks again, the worker paused mid-turn is told to carry on; one paused between turns resumes with its own next message.
   t.at(62);
   const done = t.plans.done('beast', 'worker builder said it is done');
-  assert.match(done, /^Done \(w1606\): beast takes work again; the build took 22 min\. 1 paused worker\(s\) told to carry on; 1 paused between turns/);
+  assert.match(done, /^Done \(w1606\): beast takes work again; the build took 62 min\. 1 paused worker\(s\) told to carry on; 1 paused between turns/);
+  assert.equal(t.plans.releaseBuilder('beast', 'builder'), false, 'no plan: back to its request\'s priority');
   assert.deepEqual(t.plans.holds(), {});
   assert.equal(t.plans.resumeHold({ id: 'idle', machineId: 'beast' }), undefined);
   assert.equal(t.kicks(), 1);
   const carryOn = t.told.filter((x) => /The build on beast is done/.test(x.text)).map((x) => x.id);
   assert.deepEqual(carryOn, ['busy']);
-  assert.match(t.notes.at(-1)!, /^\[ledger\] BUILD DONE \(w1606\): the 0\.50\.0\.112 player on beast \(worker builder said it is done; the build took 22 min\)\./);
+  assert.match(t.notes.at(-1)!, /^\[ledger\] BUILD DONE \(w1606\): the 0\.50\.0\.112 player on beast \(worker builder said it is done; the build took 62 min\)\./);
 });
 
-test('w1606: a worker still mid-turn after BUILD_WAIT_MS is not cut off: the build goes ahead beside it and says so', async () => {
+test('w1656: a worker mid-turn is not cut off and not waited for: the build goes at once beside it and says so', async () => {
   const t = world([
     { id: 'builder', machine: 'beast', midTurn: true, requests: ['w1588'] },
     { id: 'long', machine: 'beast', midTurn: true, requests: ['w1503'] },
   ]);
   t.plans.declare({ machine: 'beast', minutes: 0, what: 'a player', builder: 'builder', requests: ['w1588'], by: 'worker builder' });
   await t.plans.tick();
-  t.at(BUILD_WAIT_MS.value / 60_000 + 1);
   const go = await t.plans.start('builder', 'beast');
   assert.match(go, /^Go \(w1606\)/);
-  assert.match(go, /long did not end its turn in 20 minutes; the build goes ahead beside it, a little slower\./);
+  assert.match(go, /long still finishing their step .*: the release does not wait for them \(w1656\)/);
+  assert.equal(t.plans.plan('beast')!.startedAt, Date.parse('2026-10-20T05:00:00Z'), 'started at once');
+  assert.ok(pauseNotice);
 });
 
 test('w1606: the dispatcher declares a build for a request; its worker is the builder; a plan nobody ends is ended after PLAN_MAX_MS', async () => {

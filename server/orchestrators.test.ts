@@ -4050,6 +4050,12 @@ test('w1628: each worker\'s bench priority is the highest of its open requests, 
   assert.deepEqual(agents.benchPriorities('pc'), { [a.id]: { priority: 'high', requests: ['w1'] }, [b.id]: { priority: 'low', requests: ['w2'] } });
   store.putWork({ ...store.work.get('w2')!, priority: 'urgent' });
   assert.equal(agents.benchPriorities('pc')[b.id].priority, 'urgent', 'a changed priority is what the next push sends');
+  // w1656: the builder of the release planned on the computer takes the bench first, whatever its request's priority.
+  const real = agents.builds.releaseBuilder.bind(agents.builds);
+  agents.builds.releaseBuilder = (m: string, id: string) => m === 'pc' && id === a.id;
+  assert.equal(agents.benchPriorities('pc')[a.id].priority, 'urgent', 'the release builder\'s tickets count as urgent');
+  agents.builds.releaseBuilder = real;
+  assert.equal(agents.benchPriorities('pc')[a.id].priority, 'high');
   store.putWork({ ...store.work.get('w1')!, status: 'done' });
   assert.equal(agents.benchPriorities('pc')[a.id], undefined, 'no open request: its tickets count as normal');
   assert.deepEqual(agents.benchPriorities('elsewhere'), {});
