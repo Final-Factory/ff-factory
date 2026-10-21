@@ -58,11 +58,11 @@ export interface PoolLimits {
 /**
  * nearResetHours 12 and nearResetFloor 1 (w1539): in the replay of the pools' measured meters (2026-10-12..19, PR of w1539)
  * they kept burst readiness at or above the score alone; floor 0 left more hours with one token ready, floor 2 lost most of
- * the gain. resetOffsetHours 12 (w1659, lothsahn's figure): in the replay of 2026-10-12..21 (docs/vault.md, "Near a weekly
- * reset") it used the room before a reset sooner than w1539's "goes first" and lost less at the resets; 18 and 24 h used it
- * sooner still for a little more of the pool's burst room.
+ * the gain. resetOffsetHours 24 (w1659, lothsahn, 2026-10-21: "Let's make the new setting 24 hours, not 12"): in the replay
+ * of 2026-10-12..21 (docs/vault.md, "Near a weekly reset") it used the room before a reset sooner than w1539's "goes first"
+ * and 12 h, and lost a little less at the resets, for a little more of the pool's burst room.
  */
-export const POOL_DEFAULTS: Readonly<PoolLimits> = { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20, dispatcherStop: 95, nearResetHours: 12, nearResetFloor: 1, resetOffsetHours: 12 };
+export const POOL_DEFAULTS: Readonly<PoolLimits> = { sessionHold: 80, onePerWeekly: 95, retireWeekly: 99, reservePerDay: 5, reserveSession: 20, dispatcherStop: 95, nearResetHours: 12, nearResetFloor: 1, resetOffsetHours: 24 };
 
 /** Config vault.pool: the same, with the unit in the name. Anything unset is the default. */
 export interface PoolConfig {
@@ -213,7 +213,7 @@ export const MIN_HOURS_TO_RESET = 1;
  * h - offset x (1 - e^(-h / offset)), never below MIN_HOURS_TO_RESET. Days from the reset it is about h - offset (lothsahn,
  * 2026-10-21: "subtract 12 or 18 hours from the time remaining so that it starts getting consumed first"); near the reset it
  * bends smoothly to about h^2 / (2 x offset) instead of hitting the floor at `offset` hours, so no token jumps to the front
- * at one hour mark: its weight grows as the reset nears. With 12: 26 h counts as 15.4, 45 h as 33.3, 119 h as 107.
+ * at one hour mark: its weight grows as the reset nears. With 24 (the default): 26 h counts as 10.1, 45 h as 24.7, 119 h as 95.2.
  */
 export function effectiveHours(hours: number, offset: number): number {
   const h = offset > 0 ? hours - offset * (1 - Math.exp(-hours / offset)) : hours;

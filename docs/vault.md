@@ -167,7 +167,7 @@ entries are unchanged. A worker or standing agent also needs the entry granted t
 account setting is its consent).
 
 **The order (w971, w1659).** The token with the highest **score** first. The score is its weekly headroom per hour until its
-weekly window resets: `(100 - weekly %) / hours to the weekly reset`, the hours less a soft offset of about 12 ("Near a weekly
+weekly window resets: `(100 - weekly %) / hours to the weekly reset`, the hours less a soft offset of about 24 ("Near a weekly
 reset" below), scaled by the room left in its 5-hour window, `(100 - 5-hour %) / 100`. The score only orders the pool; it is not shown anywhere (w979, below). lothsahn, 2026-10-11:
 "let's prefer the token weighted by the reset, but not solely based on the reset. Basically like use the token with the largest
 remaining %/time left or something like that." Reading it as headroom per hour: a token with 3% left and 3 days to go scores
@@ -202,15 +202,15 @@ nearly used-up one first (vault-ben-2 at 97% on 2026-10-11 04:32Z). Details *(gu
   a pool for that person it reads that account's meters as before.
 **Near a weekly reset (w1539, w1659).** lothsahn, 2026-10-21: "Instead of having it go first like that, can we just adjust the
 weighting so it gets used sooner? Like subtract 12 or 18 hours from the time remaining so that it starts getting consumed
-first?", with his earlier limit (2026-10-19): "We don't want it to always use the token about to expire first, though, as we
+first?", then "Let's make the new setting 24 hours, not 12", with his earlier limit (2026-10-19): "We don't want it to always use the token about to expire first, though, as we
 want to be able to handle a sudden 5 hour burst of activity--and if all the tokens are used up except one, we'll only have 1 5
 hour session to pull from." Two rules (`server/tokenPool.ts`):
 - **The soft offset (the order, `effectiveHours`, `pickOrder`).** The score divides by the hours to the reset less
-  `vault.pool.resetOffsetHours` (12), softly: `h - 12 x (1 - e^(-h/12))`, never below 1 h. Days from the reset that is the hours
-  less 12; near it the weight grows smoothly (26 h counts as 15.4, 12 h as 4.4, 3 h as 1), so no token jumps the queue at an
+  `vault.pool.resetOffsetHours` (24), softly: `h - 24 x (1 - e^(-h/24))`, never below 1 h. Days from the reset that is the hours
+  less 24; near it the weight grows smoothly (26 h counts as 10.1, 12 h as 2.6, 3 h as 1), so no token jumps the queue at an
   hour mark, and a token with little room left near its reset still waits behind one with much more. On 2026-10-21 ~06:00Z the
   score alone ranked vault-ben-3 (58% left, 119 h) over vault-ben-2 (12%, 26 h) and vault-ben-1 (22%, 45 h), 0.47 / 0.46 / 0.45
-  %/h; with the offset the order is ben-2 (0.78), ben-1 (0.61), ben-3 (0.52). 0 turns it off.
+  %/h; with the offset the order is ben-2 (1.19), ben-1 (0.82), ben-3 (0.59). 0 turns it off.
 - **The caps lifted (`judgePool`).** Inside the last `vault.pool.nearResetHours` (12) before a token's weekly reset its
   **one-at-a-time (95%) and retire (99%) caps are lifted**: room left at the reset is lost, so it may take parallel work up to
   100%. Only while at least `vault.pool.nearResetFloorTokens` (1) **other** token of the pool can take a new process on its own
@@ -229,14 +229,16 @@ weeks of the measured days, at 0.7 / 0.85 / 1.0 of the measured demand; a 5-hour
 | w1539: 12 h "goes first" + caps lifted | 20.57 / 8.45 / 2.19 | 41.0 / 24.6 / 11.0 | 1.2 / 51 / 252 | 0.58 / 0.29 / 0.09 |
 | subtract 12 h (floor 1 h), caps lifted | 20.36 / 8.29 / 2.11 | 40.4 / 23.0 / 9.8 | 2.5 / 54 / 267 | 0.51 / 0.23 / 0.06 |
 | subtract 18 h (floor 1 h), caps lifted | 20.29 / 8.24 / 2.09 | 39.6 / 21.7 / 8.8 | 2.8 / 54 / 267 | 0.44 / 0.19 / 0.05 |
-| **soft 12 h, caps lifted (chosen)** | **20.40 / 8.28 / 2.11** | **40.3 / 23.1 / 9.9** | **2.2 / 53 / 261** | **0.52 / 0.25 / 0.07** |
+| soft 12 h, caps lifted | 20.40 / 8.28 / 2.11 | 40.3 / 23.1 / 9.9 | 2.2 / 53 / 261 | 0.52 / 0.25 / 0.07 |
 | soft 18 h, caps lifted | 20.33 / 8.26 / 2.11 | 40.0 / 22.5 / 9.4 | 2.5 / 54 / 264 | 0.49 / 0.23 / 0.05 |
+| **soft 24 h, caps lifted (the default, lothsahn's pick)** | **20.31 / 8.25 / 2.09** | **39.7 / 22.0 / 9.0** | **2.5 / 54 / 266** | **0.47 / 0.21 / 0.05** |
 | soft 12 h, caps not lifted | 20.40 / 8.49 / 2.49 | 40.1 / 22.6 / 9.4 | 4.0 / 64 / 284 | 0.49 / 0.24 / 0.06 |
 
-- The soft offset uses the room before a reset sooner than w1539 (0.7-1.5 points less left a day out) and loses a little less at
-  the resets; it costs a little burst readiness against w1539 (1-9 more hours with one token ready in about five weeks, a
-  worst-case share 0.02-0.06 lower). Against the score alone it has fewer hours with one token ready, with a worst-case share
-  0.01-0.04 lower. The hard offsets (lothsahn's "subtract 12 or 18 hours" with a 1 h floor) put every token inside the last
+- The soft 24 h offset uses the room before a reset sooner than w1539 (1.3-2.6 points less left a day out) and loses a little
+  less at the resets (0.10-0.26 points); it costs some burst readiness against w1539 (1-14 more hours with one token ready in
+  about five weeks, a worst-case share 0.04-0.11 lower). Soft 12 h sits between them (0.7-1.5 points sooner, 1-9 more hours,
+  0.02-0.06 lower). Against the score alone the 24 h offset has fewer hours with one token ready, with a worst-case share
+  0.03-0.09 lower. The hard offsets (lothsahn's "subtract 12 or 18 hours" with a 1 h floor) put every token inside the last
   13 or 19 h at the front, the switch he asked to drop, and lost more worst-case burst for no less room lost.
 - **The caps lifted still help**: without them the offsets left 11-23 more hours with one token ready at 0.85 and 1.0 of the
   demand, and lost up to 0.4 points more per reset. A 24 h lift window brought the hours with one token ready under w1539's in
@@ -259,7 +261,7 @@ logged in the portal journal with who made it; they apply at the next process st
 | `vault.pool.retireWeeklyPercent` | 99 | its weekly meter: **retired**, handed to nobody until the weekly window resets |
 | `vault.pool.nearResetHours` | 12 | (hours, 0 to 168; 0 turns it off) inside these last hours before its **weekly reset**: its one-at-a-time and retire caps are lifted ("Near a weekly reset" above, w1539) |
 | `vault.pool.nearResetFloorTokens` | 1 | (whole tokens, 0 to 10) the near-reset rule applies only while at least this many **other** tokens of the pool can take a new process |
-| `vault.pool.resetOffsetHours` | 12 | (hours, 0 to 168; 0 turns it off) not a cap: the pick order takes about this many hours, softly, off each token's time to its **weekly reset**, so room that a reset would lose is used sooner ("Near a weekly reset" above, w1659) |
+| `vault.pool.resetOffsetHours` | 24 | (hours, 0 to 168; 0 turns it off) not a cap: the pick order takes about this many hours, softly, off each token's time to its **weekly reset**, so room that a reset would lose is used sooner ("Near a weekly reset" above, w1659) |
 | `vault.pool.dispatcherStopPercent` | 95 | the **dispatcher's pinned token** only, either meter: its workers are asked to save and stop, and no new worker starts on it until that window resets ("The stop line" below, w1109) |
 | (at 100) | | either meter: **used up**, handed to nobody until it resets (a rejection by the API counts as 100) |
 

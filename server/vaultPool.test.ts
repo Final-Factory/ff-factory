@@ -451,14 +451,14 @@ test('set_app_config: the pool limits are anyone\'s, checked, applied live and c
   for (const bad of [169, -1, 'soon', '']) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.nearResetHours', bad as never), /nearResetHours is a number of hours from 0 \(off\) to 168/, String(bad));
   for (const bad of [1.5, 11, -1]) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.nearResetFloorTokens', bad as never), /nearResetFloorTokens is a whole number of tokens from 0 to 10/, String(bad));
   // The score's soft offset (w1659): hours from 0 (off) to 168.
-  assert.equal(poolLimits(cfg).resetOffsetHours, 12);
+  assert.equal(poolLimits(cfg).resetOffsetHours, 24);
   setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', '18');
   assert.equal(poolLimits(cfg).resetOffsetHours, 18);
   setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', 0);
   assert.equal(poolLimits(cfg).resetOffsetHours, 0);
   for (const bad of [169, -1, 'soon', '']) assert.throws(() => setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', bad as never), /resetOffsetHours is a number of hours from 0 \(off\) to 168/, String(bad));
   setAppConfig(file, cfg, 'vault.pool.resetOffsetHours', null);
-  assert.equal(poolLimits(cfg).resetOffsetHours, 12);
+  assert.equal(poolLimits(cfg).resetOffsetHours, 24);
 });
 
 // ---------------------------------------------------------------- w971: the reserve is enforced, the score orders
@@ -549,11 +549,12 @@ test('w1539/w1659: a token near its reset takes priority in the listing by weigh
   const off = labels(m, {}, { vault: { pool: { nearResetHours: 0, resetOffsetHours: 0 } } });
   assert.deepEqual(off.ben, ['ben-b pool:ok priority', 'ben-a pool:ok', 'ben-c pool:ok']);
   // At 97% with a job on it, inside the window: its one-at-a-time cap is lifted (pool:ok, not one-at-a-time), and its last 3%
-  // 11 h out still outweighs the fresh token (0.79 against 0.75 %/h), on exactly one token. At 98% it no longer does.
+  // 11 h out still outweighs the fresh token (1.38 against 0.82 %/h with the 24 h offset), on exactly one token. At 99% it no
+  // longer does (0.46).
   const late = labels({ ...m, [fp(B1)]: usage(0, 97, { weeklyDays: 11 * H }) }, { [fp(B1)]: 1 });
   assert.deepEqual(late.ben, ['ben-a pool:ok priority', 'ben-b pool:ok', 'ben-c pool:ok']);
   assert.deepEqual(late.priorities, [1, 1]);
-  const later = labels({ ...m, [fp(B1)]: usage(0, 98, { weeklyDays: 11 * H }) }, { [fp(B1)]: 1 });
+  const later = labels({ ...m, [fp(B1)]: usage(0, 99, { weeklyDays: 11 * H }) }, { [fp(B1)]: 1 });
   assert.deepEqual(later.ben, ['ben-b pool:ok priority', 'ben-c pool:ok', 'ben-a pool:ok']);
   // lothsahn's case (w1659, Ben's pool at ~06:00Z 2026-10-21): 12% left 26 h out takes priority over 58% left 119 h out.
   const ben = { [fp(B1)]: usage(4, 42, { weeklyDays: 119 * H }), [fp(B2)]: usage(0, 88, { weeklyDays: 26 * H }), [fp(SHARED)]: usage(8, 78, { weeklyDays: 45 * H }), [fp(L1)]: usage(0, 40, { weeklyDays: 4 }) };
