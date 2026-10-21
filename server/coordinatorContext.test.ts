@@ -126,7 +126,9 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // 26,000 to 26,500. The rule itself is the read_rules ui topic.
   // w1602 (Ben: "when you ask me about visual things you have to include the previews") added the one-line rule that a
   // visual question carries its previews in the card; the owner's brief measured 26,629, so the cap moved to 26,750.
-  const PROMPT_MAX = 26_750;
+  // w1691 (lothsahn: "Tell the agents they can still write performance tests but they should all be flagged performance if
+  // they check timings") added one line on Performance-tagged game tests to both briefs; the dispatcher's measured 27,093, so the cap moved to 27,100.
+  const PROMPT_MAX = 27_100;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
