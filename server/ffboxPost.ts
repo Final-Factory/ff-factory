@@ -8,6 +8,7 @@ import { type ProviderManager } from './providers.ts';
 import { QUERY_LIMITS } from './providerProtocol.ts';
 import { clean } from './ffboxReports.ts';
 import type { CliEvent } from './maxEvents.ts';
+import { redactSecrets } from './secrets.ts';
 
 import { POST_CHANNELS, POST_TARGETS, POST_TEXT_MAX } from '../shared/ffboxPost.ts';
 
@@ -40,7 +41,8 @@ export function postArgs(input: PostInput): { args: Record<string, string> } | {
     const bug = channel === 'bug_reports' || channel === 'dev_bug_reports';
     return { error: `channel: one of ${POST_TARGETS.join(', ')} (got ${JSON.stringify(clean(channel, 40))}).${bug ? ' To post in a thread of #bug-reports or dev_bug_reports, use channel "conversation" with its thread.' : ''}` };
   }
-  const text = String(input.text ?? '').replace(/\r\n/g, '\n').trim();
+  // never a secret's value in a post (w1688): masked as in every transcript, whatever its variable is called
+  const text = redactSecrets(String(input.text ?? '').replace(/\r\n/g, '\n').trim());
   if (!text || text === '-') return { error: 'text: nothing to post' };
   if ([...text].length > POST_TEXT_MAX) return { error: `text: ${[...text].length} characters; Discord takes ${POST_TEXT_MAX} in one message. Tighten it.` };
   if (MENTION.test(text)) return { error: 'text: mentions someone (an @ before a word, <@..>, <#..>, @everyone or @here); posts through this route never mention anybody.' };

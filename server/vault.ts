@@ -622,7 +622,7 @@ export class Vault {
   private publishValues() {
     if (!this.o.onValues) return;
     const { key } = this.key();
-    this.o.onValues(key ? this.data.entries.map((e) => this.open(key, e)).filter((v): v is string => !!v) : []);
+    this.o.onValues(key ? [...this.data.entries.map((e) => this.open(key, e)).filter((v): v is string => !!v), key.toString('base64')] : []);
   }
 
   /** The Claude tokens the usage meters poll: every enabled claude entry the key opens, labelled by name. */

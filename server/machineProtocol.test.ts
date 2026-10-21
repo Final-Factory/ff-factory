@@ -73,7 +73,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w1628 (no bump): `benchQueue` on `stats`, the timed legs in the machine's bench queue (machine/benchLock.ts readBenchQueue),
 // which an older portal drops (its stats handler copies the fields it knows); and `bench_priorities`, each worker's request
 // priority for the queue, which an older daemon's onMessage drops (no default case): its queue then counts every ticket normal.
-const DECIDED = { protocol: 9, fingerprint: '8c850af9154aed52' };
+// w1688 (no bump): `secretEnv` on LaunchSpec, the variables whose values the vault gave the run, which an older daemon
+// ignores (it masks by SECRET_ENV names, as before); a newer daemon with an older portal has none and does the same.
+const DECIDED = { protocol: 9, fingerprint: '6ae65fa2acc7f91e' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

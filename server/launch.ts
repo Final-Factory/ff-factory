@@ -106,6 +106,12 @@ export interface LaunchSpec {
   };
   env?: Record<string, string>;
   /**
+   * The variables of `env` whose values are secrets (w1688): what the vault granted the run, whatever each is called. The
+   * daemon and the agent host mask those values in everything they write or send (server/secrets.ts addSecretEnv); an older
+   * daemon goes by the names alone (SECRET_ENV).
+   */
+  secretEnv?: string[];
+  /**
    * Run on the computer's stored claude.ai login (docs/accounts.md): credentials in the process environment it
    * starts from are dropped (usage.ts AUTH_ENV), so only a token in `env` (a person's own) can override the login.
    */

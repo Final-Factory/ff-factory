@@ -855,7 +855,7 @@ export class StandingAgents {
         // vault.unattributed.nightly names ("Whose tokens").
         const tokenUser = a.id === NIGHTLY_SENTRY ? unattributedPerson(this.cfg, 'nightly') : undefined;
         const run = machineRunEnv(this.cfg, m ?? a.machineId, { role: 'standing', requestedBy: this.currentRequester(a), sessionId: a.sessionId, tokenUser });
-        return { env: run.env, login: run.login };
+        return { env: run.env, login: run.login, secretEnv: run.secretEnv };
       })(),
     };
   }
@@ -931,6 +931,7 @@ ${a.charter}
       // Its claude.ai connectors: config claudeAiConnectors.standing (w516; on by default).
       env: { ...place.env, FF_STANDING_AGENT: a.id, FF_SESSION_ID: a.sessionId, ...connectorEnv(this.cfg, 'standing') },
       login: place.login,
+      secretEnv: place.secretEnv,
       init: { files: { [NOTES]: this.notesSeed(a) } },
     };
   }

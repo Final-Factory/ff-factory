@@ -37,7 +37,7 @@ function setup(t: { after: (fn: () => void) => void }) {
 }
 
 test('vault: a value is sealed on disk and never listed; only its fingerprint and last four show', (t) => {
-  const { data, make, values } = setup(t);
+  const { data, keyFile, make, values } = setup(t);
   const v = make();
   const e = v.add({ name: 'ben-max', kind: 'claude', value: A, owner: 'ben', share: 'owner' });
   assert.equal(e.fingerprint, fingerprintOf(A));
@@ -48,7 +48,8 @@ test('vault: a value is sealed on disk and never listed; only its fingerprint an
   const disk = fs.readFileSync(path.join(data, 'vault.json'), 'utf8');
   assert.ok(!disk.includes(A.slice(13, 40)), 'no plaintext on disk');
   assert.ok(!JSON.stringify(v.list()).includes(A.slice(13, 40)), 'no value in the listing');
-  assert.deepEqual(values.at(-1), [A], 'redaction learned the value');
+  assert.deepEqual(values.at(-1)?.slice(0, -1), [A], 'redaction learned the value');
+  assert.equal(values.at(-1)?.at(-1), fs.readFileSync(keyFile, 'utf8').trim(), "and the vault key itself (w1688: a secret of the portal's)");
   // A second reader (fffctl next to the portal) sees the same entries.
   assert.deepEqual(make().list().map((x) => x.name), ['ben-max']);
   assert.equal(v.status().key, 'loaded');
@@ -390,7 +391,7 @@ test('addSecretValues: a daemon learns the secret values of a launch spec withou
     registerSecretValues([DISCORD]);
     const spec = { GH_TOKEN: GH, FFDISCORD_APP_TOKEN: 'x'.repeat(12), FF_SESSION_ID: 'session-123456' };
     addSecretValues(Object.entries(spec).filter(([k]) => SECRET_ENV.test(k)).map(([, v]) => v));
-    assert.equal(redactSecrets(`${DISCORD} ${'x'.repeat(12)} session-123456`), `[redacted vault secret …${DISCORD.slice(-4)}] [redacted vault secret …xxxx] session-123456`);
+    assert.equal(redactSecrets(`${DISCORD} ${'x'.repeat(12)} session-123456`), `[redacted vault secret …${DISCORD.slice(-4)}] [redacted vault secret] session-123456`);
   } finally {
     registerSecretValues([]);
   }

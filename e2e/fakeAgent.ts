@@ -13,6 +13,8 @@
  *   "#die"         the agent process ends mid-turn (as when the server's process tree is stopped)
  *   "#wait <s>"    stays mid-turn that many seconds, then says "Waited <s> s." (w605: a turn across a daemon restart)
  *   "#bg"          starts a background task (a background command, a watcher) and ends the turn
+ *   "#printenv <NAME>..."  a Bash call that prints those variables with their values, URL-encoded and base64 (w1688), also
+ *                  written to Claude Code's own transcript under CLAUDE_CONFIG_DIR when it is set
  *   "#whoami"      says the sender line the message came with: "Sender: [from …]", or "Sender: none" (w389)
  *   "/compact [focus]"  Claude Code's /compact, as the CLI answers it when the message is the command itself (w518):
  *                  "compacting", a compact_boundary with the context before and the summary's size, a result of no
@@ -33,6 +35,8 @@
  */
 import type { McpServerConfig, Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
@@ -220,6 +224,27 @@ export function fakeQuery(fake: FakeOptions = {}) {
         } else if (/#die\b/i.test(words)) {
           yield text('Working on it...');
           throw new Error('Claude Code process exited with code 1');
+        } else if (/#printenv\s+[A-Z_]/.test(words)) {
+          // w1688: an agent that prints its environment, values and all (and their URL and base64 forms), as Claude Code
+          // would: the Bash call and its result in the stream, and in the CLI's own transcript when CLAUDE_CONFIG_DIR is set
+          const names = /#printenv\s+([A-Z0-9_ ]+)/.exec(words)![1].trim().split(/\s+/);
+          const env = { ...process.env, ...options?.env };
+          const out = names.map((n) => `${n}=${env[n] ?? ''} url=${encodeURIComponent(env[n] ?? '')} b64=${Buffer.from(env[n] ?? '').toString('base64')}`).join('\n');
+          const toolId = `tool-${++msgId}`;
+          const input = { command: `env | grep -v TOKEN`, description: 'Print the environment' };
+          const dir = process.env.CLAUDE_CONFIG_DIR;
+          if (dir) {
+            const cwd = options?.cwd ?? process.cwd();
+            const file = path.join(dir, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${sessionId}.jsonl`);
+            fs.mkdirSync(path.dirname(file), { recursive: true });
+            const line = (d: object) => fs.appendFileSync(file, JSON.stringify({ sessionId, timestamp: new Date().toISOString(), ...d }) + '\n');
+            line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: toolId, name: 'Bash', input }] } });
+            line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolId, content: out }] }, toolUseResult: { stdout: out, stderr: '' } });
+          }
+          yield toolUse(toolId, 'Bash', input);
+          yield toolResult(toolId, out);
+          yield text(`It printed:\n${out}`);
+          yield result(uuid, true, `It printed:\n${out}`);
         } else if (/#whoami\b/i.test(words)) {
           const line = /^\[from [^\]\n]*\]/.exec(said)?.[0] ?? 'none';
           yield text(`Sender: ${line}`);
