@@ -3019,6 +3019,19 @@ button.react-chip:hover {
   font-weight: 600;
 }
 
+/* A phone's chat scrolls only up and down (w1698; Ben: "It should only scroll vertically"): code wraps instead of panning
+   inside its box, and the chat's own scroller, whose overflow-y: auto makes its overflow-x auto too, never pans. Wider screens keep their sideways-scrolling code blocks. */
+@media (max-width: 860px) {
+  .transcript-scroll {
+    overflow-x: hidden;
+  }
+
+  .md pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
 .md input[type='checkbox'] {
   accent-color: var(--accent);
 }
