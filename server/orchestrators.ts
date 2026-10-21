@@ -7,7 +7,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, RESUME_SWEEP_MS, gatesName, gatesOf, MAX_GATES, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, newestFirst, RESUME_SWEEP_MS, gatesName, gatesOf, MAX_GATES, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
 import type { OptionsFactory, SessionHandle, SessionManager } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -778,7 +778,7 @@ export class Orchestrators {
       this.store.putWork(w);
       return `${open.who.join(', ')}'s orchestrator already has this wait as [needs you] (worker ${open.worker ?? '?'}'s question, sent ${open.at.slice(11, 16)} UTC): no second message. Their answer comes back as a [work update] and goes to that worker.`;
     }
-    const worker = [...w.sessionIds].reverse().map((id) => this.store.sessions.get(id)).find((s) => s?.kind === 'worker' && s.lastResult);
+    const worker = newestFirst(w).map((id) => this.store.sessions.get(id)).find((s) => s?.kind === 'worker' && s.lastResult);
     const to = this.needsYou(w, { kind: 'question', key: `question:${q.at}`, question: q.text, names: [w.requestedBy.displayName], ...(worker?.lastResult ? { report: worker.lastResult } : {}) });
     return to.length ? `${names(to)}'s orchestrator has your question as [needs you].` : `${names([w.requestedBy])}'s orchestrator already has this question.`;
   }
@@ -1955,6 +1955,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       const t = into!;
       for (const r of w.requesters) if (!isFor(t, r.userId)) t.requesters.push(r);
       t.sessionIds = [...new Set([...t.sessionIds, ...w.sessionIds])];
+      // When each was given it travels with it, so its newest worker stays the newest (latestWorker, w1696).
+      if (w.links) t.links = { ...w.links, ...t.links };
       this.stamp(t, `merged ${w.id} from ${names(w.requesters)}: ${note}`);
       this.store.putWork(t);
       w.mergedInto = t.id;
@@ -2192,7 +2194,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     // w1126: a usage hold stopped a worker that has work in hand (w1116..w1124 waited two hours for someone to message them):
     // its end resumes that worker as CI's and a deploy's do; with none, the dispatcher starts the request.
     if (!setters.length && !gates.some((g) => g.kind === 'ci' || g.kind === 'deploy' || g.kind === 'usage')) return undefined;
-    const sid = [...w.sessionIds].reverse().find(exists);
+    const sid = newestFirst(w).find(exists);
     return sid ? { sid, ...(setters.length ? { gone: setters[0] } : {}) } : undefined;
   }
 
@@ -2329,7 +2331,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   resumeAfterDeploy(id: string, why: string, step: string): boolean {
     const w = this.store.work.get(id);
     if (!w || !['blocked', 'active', 'new'].includes(w.status)) return false;
-    const sid = [...w.sessionIds].reverse().find((x) => this.store.sessions.get(x));
+    const sid = newestFirst(w).find((x) => this.store.sessions.get(x));
     if (!sid) return false;
     const note = `${w.id}: the deploy you waited for has happened (${why}). Your report put a step after it: "${clip(step, 200)}". Do it now, then report.`;
     if (!this.wakeNow(sid, note, w.id)) return false;
@@ -3582,7 +3584,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     let branch: string | undefined;
     let pr: number | undefined;
     if (w.ffbox?.branch) [branch, pr] = [w.ffbox.branch, w.ffbox.pr];
-    for (const sid of [...w.sessionIds].reverse()) {
+    for (const sid of newestFirst(w)) {
       if (branch) break;
       const s = this.store.sessions.get(sid);
       const place = s ? this.placeOf(s) : undefined;
@@ -3871,7 +3873,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   /** "Already fixed in 0.50.0.69 (PR #412).": the release that carries a finished request's fix, else its PR or commit. */
   private fixedLine(w: WorkItem): string {
     let pr = w.ffbox?.pr ?? w.source?.pr;
-    for (const sid of [...w.sessionIds].reverse()) {
+    for (const sid of newestFirst(w)) {
       if (pr) break;
       const s = this.store.sessions.get(sid);
       pr = s ? this.placeOf(s)?.pr : undefined;
@@ -4335,7 +4337,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       this.toPeople(w.requesters, dispatchNotice(w, `unblocked: it waited on ${name} (${b.what}), and ${why}; its worker ${back.join(', ')} carries on now`));
       return;
     }
-    const worker = [...w.sessionIds].reverse().find((sid) => this.store.sessions.get(sid));
+    const worker = newestFirst(w).find((sid) => this.store.sessions.get(sid));
     this.toPeople(w.requesters, dispatchNotice(w, `unblocked: it waited on ${name} (${b.what}), and ${why}; the dispatcher starts it next`));
     this.toDispatcher(
       `[ledger] ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) is unblocked: it waited on ${name} (${b.what}), and ${why}. Start it now: start_agent with work_id "${w.id}"${worker ? `, or message_agent with work_id to its worker ${worker}` : ''}. If no computer that can take it has room, decide_work queue it; if it still waits on something, decide_work block it on that.`,

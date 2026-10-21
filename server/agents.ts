@@ -19,7 +19,7 @@ import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, asksAPerson, liveCounts, personWaitIn, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { reportTail, type NeedsYouWait } from './needsYou.ts';
 import { inlineReviewMedia, reviewRootOf } from './reviewMedia.ts';
-import { BLOCKER_KIND_HELP, conflictText, gateSetter, gatesName, gatesOf, isWith, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_KIND_HELP, conflictText, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork } from './vault.ts';
 import { githubFromVault, githubTokens } from './githubTokens.ts';
 import { READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
@@ -909,7 +909,7 @@ export class Agents {
    * priority. That will help it get queued"): the one whose open request comes first by priority, then age; one with none last.
    */
   resumeOrder(a: SessionInfo, b: SessionInfo): number {
-    const first = (i: SessionInfo) => [...this.store.work.values()].filter((w) => w.sessionIds.at(-1) === i.id && WORK_OPEN.includes(w.status)).sort(priorityThenAge)[0];
+    const first = (i: SessionInfo) => [...this.store.work.values()].filter((w) => latestWorker(w) === i.id && WORK_OPEN.includes(w.status)).sort(priorityThenAge)[0];
     const x = first(a);
     const y = first(b);
     return x && y ? priorityThenAge(x, y) : x ? -1 : y ? 1 : 0;
@@ -920,7 +920,7 @@ export class Agents {
     const items = [...this.store.work.values()].filter((w) => w.sessionIds.includes(i.id) && w.status !== 'merged');
     if (items.length && items.every((w) => !WORK_OPEN.includes(w.status))) return `its request${items.length > 1 ? 's are' : ' is'} closed (${items.map((w) => `${w.id} ${w.status}`).join(', ')})`;
     // A worker that set a gate its request still waits on is with it (w1094, shared/blockers.ts isWith).
-    if (items.length && items.every((w) => !isWith(w, i.id))) return `its request${items.length > 1 ? 's are' : ' is'} with another worker now (${items.map((w) => `${w.id}: ${w.sessionIds.at(-1)}`).join(', ')})`;
+    if (items.length && items.every((w) => !isWith(w, i.id))) return `its request${items.length > 1 ? 's are' : ' is'} with another worker now (${items.map((w) => `${w.id}: ${latestWorker(w)}`).join(', ')})`;
     return undefined;
   }
 
@@ -4412,11 +4412,11 @@ ${w.repo ?? ''}
       const folded = !!w.needsYou && !w.needsYou.answered && w.needsYou.kind !== 'question';
       if (w.question && !folded) {
         if (only) continue;
-        const s = [...w.sessionIds].reverse().map((id) => this.store.sessions.get(id)).find((x) => x?.kind === 'worker' && x.lastResult);
+        const s = newestFirst(w).map((id) => this.store.sessions.get(id)).find((x) => x?.kind === 'worker' && x.lastResult);
         out.push({ w, wait: { kind: 'question', key: `question:${w.question.at}`, question: w.question.text, names: [w.requestedBy.displayName], ...(s?.lastResult ? { report: s.lastResult } : {}), ...(w.question.asks?.length ? { asks: w.question.asks } : {}) } });
         continue;
       }
-      const workers = [...w.sessionIds].reverse().map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => s?.kind === 'worker');
+      const workers = newestFirst(w).map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => s?.kind === 'worker');
       if (workers.some((s) => s.status === 'waiting_permission')) continue;
       // w1504: the worker whose wait the ledger shows, when it says, so a settled wait of another worker is not sent again.
       const mine = workers.filter((s) => (only ? s.id === only.worker : !l.worker || s.id === l.worker));

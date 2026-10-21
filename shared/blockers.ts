@@ -106,8 +106,28 @@ export const gateSetter = (g: Pick<WorkBlocker, 'by'>): string | undefined => /^
  * reading only the newest, the release pass stopped 0b5f813d as "with another worker now", and the CI's end resumed
  * 39772f0c, which did not know the PR was its to merge.
  */
-export function isWith(w: Pick<WorkItem, 'sessionIds' | 'status' | 'blocked' | 'alsoBlocked'>, sessionId: string): boolean {
-  return w.sessionIds.at(-1) === sessionId || (w.status === 'blocked' && gatesOf(w).some((g) => gateSetter(g) === sessionId));
+export function isWith(w: Pick<WorkItem, 'sessionIds' | 'links' | 'status' | 'blocked' | 'alsoBlocked'>, sessionId: string): boolean {
+  return latestWorker(w) === sessionId || (w.status === 'blocked' && gatesOf(w).some((g) => gateSetter(g) === sessionId));
+}
+
+/**
+ * A request's newest worker (w1696): the one it was last sent or linked to (WorkItem.links), not the last in sessionIds.
+ * Sending a request again to a worker already on it keeps that worker's place in sessionIds (a Set) and only renews its
+ * link, so the last in the list can be a worker given a side job long ago: w665 was sent to dc19eb45 on 2026-10-07 for
+ * the m5's logs, then to d558ba14 again on 2026-10-21, and the release pass stopped d558ba14 twice as "with another worker
+ * now (w665: dc19eb45)". A worker with no link record (given it before w418) is older than any with one; on a tie, the
+ * later in sessionIds.
+ */
+export const latestWorker = (w: Pick<WorkItem, 'sessionIds' | 'links'>): string | undefined => newestFirst(w)[0];
+
+/** A request's workers, the one it was last sent or linked to first (latestWorker); every "its newest worker" reads this. */
+export function newestFirst(w: Pick<WorkItem, 'sessionIds' | 'links'>): string[] {
+  const at = (sid: string) => {
+    const t = Date.parse(w.links?.[sid]?.at ?? '');
+    return Number.isFinite(t) ? t : -Infinity;
+  };
+  // A stable sort, oldest first, then reversed: on a tie the later in sessionIds comes first.
+  return w.sessionIds.map((sid, i) => ({ sid, i, t: at(sid) })).sort((a, b) => a.t - b.t || a.i - b.i).reverse().map((x) => x.sid);
 }
 
 /** Every gate of a request, first the primary `blocked` and then `alsoBlocked` (w754); empty when it has none. */

@@ -1,7 +1,7 @@
 // w643: what a Blocked request waits on, and when each kind of blocker clears, stays open, gets stuck or needs a person.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, isWith, latestWorker, newestFirst, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import type { WorkBlocker, WorkItem } from '../shared/types.ts';
 import { checksState, ghChecks, ghPr, ghPrHealth, prHealthOf, runsState } from './blockerWatch.ts';
 import type { RunResult } from './proc.ts';
@@ -329,4 +329,26 @@ test('w907: gh pr view is read for the head, the base and GitHub\'s mergeability
   assert.equal(checksState({ state: 'OPEN', statusCheckRollup: [] }, ref).none, true);
   assert.equal(runsState({ workflow_runs: [] }, ref).none, true);
   assert.equal(runsState({ workflow_runs: [{ name: 'CI', status: 'in_progress' }] }, ref).none, undefined);
+});
+
+test('w1696: a request is with the worker it was last sent or linked to, not the last in sessionIds; a re-send to a worker already on it makes it the newest again', () => {
+  // w665 as it happened: d558ba14 was its worker; dc19eb45 (w663's worker) was sent it for a side job on 2026-10-07; the
+  // dispatcher sent it to d558ba14 again on 2026-10-21, which kept d558ba14 first in sessionIds and only renewed its link.
+  const w = {
+    sessionIds: ['d558ba14', 'dc19eb45'],
+    status: 'active' as const,
+    links: { d558ba14: { at: '2026-10-21T15:36:00Z', how: 'sent' as const }, dc19eb45: { at: '2026-10-07T22:05:00Z', how: 'sent' as const } },
+  };
+  assert.equal(latestWorker(w), 'd558ba14', 'the bug: dc19eb45, the last in the list');
+  assert.equal(isWith(w, 'd558ba14'), true);
+  assert.equal(isWith(w, 'dc19eb45'), false);
+  // Before the re-send, the side job was the newest give, and the request was with dc19eb45.
+  assert.equal(latestWorker({ ...w, links: { ...w.links, d558ba14: { at: '2026-10-07T21:30:00Z', how: 'sent' } } }), 'dc19eb45');
+  // No link records (before w418): the last in the list, as before; one without a record is older than one with.
+  assert.equal(latestWorker({ sessionIds: ['a', 'b'] }), 'b');
+  assert.equal(latestWorker({ sessionIds: ['a', 'b'], links: { a: { at: '2026-10-01T00:00:00Z', how: 'sent' } } }), 'a');
+  assert.equal(latestWorker({ sessionIds: [] }), undefined);
+  // Every "its newest worker" reader (a gate's resume, the report, the fleet's holder) takes this order.
+  assert.deepEqual(newestFirst(w), ['d558ba14', 'dc19eb45']);
+  assert.deepEqual(newestFirst({ sessionIds: ['a', 'b', 'c'], links: { a: { at: '2026-10-02T00:00:00Z', how: 'sent' }, b: { at: '2026-10-01T00:00:00Z', how: 'sent' } } }), ['a', 'b', 'c']);
 });
