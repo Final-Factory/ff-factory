@@ -4,6 +4,16 @@
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
+// "Turn off" on this device (web/src/notify.ts) leaves this flag in the Cache API, the one store a worker and the page
+// share; the push service should have no subscription left, but a push that still arrives is dropped here.
+async function turnedOff() {
+  try {
+    return !!(await (await caches.open('ffsb-device')).match('/__notify-off'));
+  } catch {
+    return false;
+  }
+}
+
 self.addEventListener('push', (event) => {
   let n = {};
   try {
@@ -13,6 +23,12 @@ self.addEventListener('push', (event) => {
   }
   event.waitUntil(
     (async () => {
+      if (await turnedOff()) {
+        // The browser still holds a subscription the person turned off: end it, so the push service stops sending.
+        const sub = await self.registration.pushManager.getSubscription();
+        if (sub) await sub.unsubscribe();
+        return;
+      }
       // Someone is looking at the app right now: the page itself shows what changed.
       const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       if (wins.some((w) => w.focused && w.visibilityState === 'visible') && n.tag !== 'test') return;

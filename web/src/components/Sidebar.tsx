@@ -21,7 +21,7 @@ import {
   type Route,
 } from '../util';
 import { Dot, Icon, type IconName } from './ui';
-import { usePush } from '../notify';
+import { pushMode, usePush } from '../notify';
 import { unreadHere } from './PeopleMessages';
 import { SettingsModal } from './Settings';
 import { SystemFooter } from './SystemMeters';
@@ -44,6 +44,7 @@ export function Sidebar({
   onNavigate: () => void;
 }) {
   const push = usePush();
+  const notifying = pushMode(push) !== 'off';
   const now = useNow(15_000);
   const [settings, setSettings] = useState(false);
   const attention = useAttention(app);
@@ -87,8 +88,8 @@ export function Sidebar({
         <button className="btn btn-ghost btn-icon side-icon" title="Search every conversation" aria-label="Search" onClick={() => go({ view: 'search' })}>
           <Icon name="search" size={17} />
         </button>
-        <button className="btn btn-ghost btn-icon side-icon" title={push.endpoint ? 'Settings: notifications are on' : 'Settings: notifications and voice'} aria-label="Settings" onClick={() => setSettings(true)}>
-          <Icon name={push.endpoint ? 'bell' : 'bellOff'} size={17} />
+        <button className="btn btn-ghost btn-icon side-icon" title={notifying ? 'Settings: notifications are on' : 'Settings: notifications and voice'} aria-label="Settings" onClick={() => setSettings(true)}>
+          <Icon name={notifying ? 'bell' : 'bellOff'} size={17} />
         </button>
       </div>
 
