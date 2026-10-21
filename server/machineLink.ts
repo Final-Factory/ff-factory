@@ -101,14 +101,14 @@ export class UpdateBundles {
  * GET /machine/update/<sha256> (server/index.ts): which file a machine gets, or the refusal. Only with its own credential,
  * and only the bundle it was offered on its link.
  */
-export async function updateBundleFor(pathname: string, machineOf: () => string | undefined, bundles: UpdateBundles): Promise<{ status: 200; file: string; size: number } | { status: 401 | 404; error: string } | undefined> {
+export async function updateBundleFor(pathname: string, machineOf: () => string | undefined, bundles: UpdateBundles): Promise<{ status: 200; file: string; size: number; machineId: string } | { status: 401 | 404; error: string } | undefined> {
   const m = /^\/machine\/update\/([0-9a-f]{64})$/.exec(pathname);
   if (!m) return undefined;
   const machineId = machineOf();
   if (!machineId) return { status: 401, error: 'a valid machine token is required' };
   const file = await bundles.fileFor(machineId, m[1]);
   if (!file || !fs.existsSync(file)) return { status: 404, error: 'no update bundle with that SHA-256 was offered to this machine' };
-  return { status: 200, file, size: fs.statSync(file).size };
+  return { status: 200, file, size: fs.statSync(file).size, machineId };
 }
 
 /** How long the portal waits for a daemon to take an update or tools publish over its link (self_update_ack, w1641). */
@@ -132,6 +132,8 @@ export class PendingCalls<T> {
   private calls = new Map<string, { resolve: (v: T) => void; reject: (e: Error) => void; timer: NodeJS.Timeout; machineId: string }>();
   /** Calls that timed out, oldest first: an answer that comes after is logged with its reason, never dropped (w1641). */
   private expired = new Map<string, LateCall>();
+  /** Calls answered lately: a daemon sends an answer again after a link drop (machine/selfUpdate.ts ANSWERS), and a repeat is no news. */
+  private answered = new Map<string, number>();
   private readonly now: () => number;
   constructor(now: () => number = Date.now) {
     this.now = now;
@@ -161,6 +163,9 @@ export class PendingCalls<T> {
     if (!c) return false;
     this.calls.delete(id);
     clearTimeout(c.timer);
+    const now = this.now();
+    for (const [k, at] of this.answered) if (this.answered.size >= LATE_KEEP_MAX || now - at > LATE_KEEP_MS) this.answered.delete(k);
+    this.answered.set(id, now);
     if (v instanceof Error) c.reject(v);
     else c.resolve(v);
     return true;
@@ -173,9 +178,25 @@ export class PendingCalls<T> {
     return c;
   }
 
+  /** An answer to a call that was already answered: the daemon sent it again after a link drop, nothing to tell. */
+  repeat(id: string): boolean {
+    return this.answered.has(id);
+  }
+
   has(id: string): boolean {
     return this.calls.has(id);
   }
+}
+
+/**
+ * The journal line for an update bundle the portal served (w1641): until then the portal said nothing about a download,
+ * so a daemon's "terminated" had no other side to compare with. `sent`: the bytes handed to the socket; `finished`: the
+ * whole answer was written before the connection closed.
+ */
+export function bundleServedLine(machineId: string, d: { start: number; sent: number; size: number; ms: number; finished: boolean }): string {
+  const from = d.start ? ` from byte ${d.start}` : '';
+  const what = d.finished ? `went out${from}` : `was cut${from} after ${d.start + d.sent} of ${d.size} bytes`;
+  return `machine ${machineId}: the update bundle ${what} in ${(d.ms / 1000).toFixed(1)} s (${Math.round(d.sent / Math.max(d.ms / 1000, 0.001) / 1024)} KB/s)`;
 }
 
 const mins = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s`);

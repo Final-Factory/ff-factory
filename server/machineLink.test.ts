@@ -13,10 +13,10 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { PendingCalls, UpdateBundles, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
+import { PendingCalls, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
-import { checkoutFromBundle, downloadBundle, fetchError, readJson, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
+import { ANSWERS, SelfUpdater, checkoutFromBundle, downloadBundle, fetchError, readJson, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
 import type { JobSpec } from '../machine/osJob.ts';
 import type { Config } from './config.ts';
 
@@ -307,4 +307,72 @@ test('w1641: a bundle download that stalls or is cut resumes where it stopped, e
   assert.equal(refused.seen.length, 1);
 
   assert.equal(fetchError(Object.assign(new TypeError('terminated'), { cause: Object.assign(new Error('Body Timeout Error'), { code: 'UND_ERR_BODY_TIMEOUT' }) })), 'terminated (UND_ERR_BODY_TIMEOUT: Body Timeout Error)');
+});
+
+test('w1641: an answer the link could not carry goes again when it is back; one sent just before a drop too; the portal ignores a repeat', async () => {
+  let t = 1_000_000;
+  let up = false;
+  const sent: { id: string; ok: boolean }[] = [];
+  const logs: string[] = [];
+  const u = new SelfUpdater({
+    appDir: fs.mkdtempSync(path.join(os.tmpdir(), 'ffans-')),
+    portalUrl: () => 'http://127.0.0.1:1',
+    token: 'tok',
+    send: (m) => {
+      if (!up) return false;
+      sent.push(m as { id: string; ok: boolean });
+      return true;
+    },
+    exit: () => undefined,
+    log: (...a) => logs.push(a.join(' ')),
+    now: () => t,
+  });
+  const call = (id: string) => u.onSelfUpdate({ type: 'self_update', id, form: 'update', commit: 'a'.repeat(40), bundle: { sha256: 'b'.repeat(64), size: 1 } });
+  // The 450f7d53c rollout: the answer came while the portal VM's Tailscale restarted and the link was down.
+  await call('e158273f-0001');
+  assert.equal(sent.length, 0, 'not sent: the link is down');
+  assert.match(logs.join('\n'), /link down: the answer to call e158273f goes when it is back/);
+  up = true;
+  t += 30_000;
+  u.relink();
+  assert.deepEqual(sent.map((m) => [m.id, m.ok]), [['e158273f-0001', false]], 'sent once the link is back');
+  u.relink();
+  assert.equal(sent.length, 1, 'once');
+  t += 120_000;
+
+  // One sent into a socket that was already dead (noticed only after 45 s of silence): the drop within a minute sends it again.
+  await call('8681c507-0002');
+  assert.equal(sent.length, 2);
+  t += 50_000;
+  u.linkDown();
+  u.relink();
+  assert.deepEqual(sent.map((m) => m.id), ['e158273f-0001', '8681c507-0002', '8681c507-0002']);
+  // A drop long after it was sent: the link had it.
+  t += 120_000;
+  u.linkDown();
+  u.relink();
+  assert.equal(sent.length, 3);
+  // An answer kept longer than ANSWERS.keepMs is let go.
+  up = false;
+  await call('0cf7e814-0003');
+  t += ANSWERS.keepMs + 1;
+  up = true;
+  u.relink();
+  assert.equal(sent.length, 3, 'too old to matter');
+
+  const p = new PendingCalls<true>(() => t);
+  const q = p.wait('8681c507-0002', 'beast', 5000, 'the tools over its link');
+  assert.equal(p.settle('8681c507-0002', true), true);
+  await q;
+  assert.equal(p.settle('8681c507-0002', true), false);
+  assert.equal(p.repeat('8681c507-0002'), true, 'a repeat: nothing to log');
+  assert.equal(p.repeat('ffffffff-9'), false);
+});
+
+test('w1641: the portal logs each update bundle it serves, finished or cut', () => {
+  assert.equal(bundleServedLine('beast', { start: 0, sent: 18_595_141, size: 18_595_141, ms: 7_400, finished: true }), 'machine beast: the update bundle went out in 7.4 s (2454 KB/s)');
+  assert.equal(
+    bundleServedLine('beast', { start: 6_962_988, sent: 1_000_000, size: 18_595_141, ms: 312_000, finished: false }),
+    'machine beast: the update bundle was cut from byte 6962988 after 7962988 of 18595141 bytes in 312.0 s (3 KB/s)',
+  );
 });

@@ -1071,6 +1071,7 @@ export class Daemon {
     ws.on('close', (code) => {
       if (this.ws !== ws) return;
       this.ws = undefined;
+      this.selfUpdate.linkDown();
       if (this.stopped) return;
       // Sleep, wake, a network change or a portal restart: try again, forever. For the first two minutes
       // every ~2 s (a portal restart takes 20-60 s), then back off to 30 s.
@@ -1239,6 +1240,8 @@ export class Daemon {
       },
     });
     this.flush();
+    // An answer to an update or restart the link may have lost while it was down (w1641).
+    this.selfUpdate.relink();
     // The result of an update job (w1596): the portal waits for it from the daemon that runs after the job.
     void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`));
     // The portal showed these stopped while the link was down; give it their real state.

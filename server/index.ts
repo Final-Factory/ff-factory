@@ -74,7 +74,7 @@ import { portalPublicKey, tailnetAddress } from './machineSsh.ts';
 import { machineSshHttp } from './machineSshHttp.ts';
 import { tailscaleWhois } from './machineJoin.ts';
 import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller } from './machineJoinHttp.ts';
-import { updateBundleFor } from './machineLink.ts';
+import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { clientAddress, originOf, tailnetOnly } from './remoteChat.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
@@ -1914,7 +1914,11 @@ const server = http.createServer(async (req, res) => {
         : undefined;
     if (updateBundle) {
       if (updateBundle.status !== 200) return send(res, updateBundle.status, { error: updateBundle.error });
-      return sendStream(req, res, new StreamReply('application/octet-stream', updateBundle.file, updateBundle.size, 'attachment; filename="ff-factory.bundle"'));
+      const t0 = Date.now();
+      const start = parseRange(req.headers.range, updateBundle.size);
+      const sent = sendStream(req, res, new StreamReply('application/octet-stream', updateBundle.file, updateBundle.size, 'attachment; filename="ff-factory.bundle"'));
+      res.on('close', () => console.log(bundleServedLine(updateBundle.machineId, { start: start && start !== 'unsatisfiable' ? start.start : 0, sent: sent(), size: updateBundle.size, ms: Date.now() - t0, finished: res.writableFinished })));
+      return;
     }
     // A machine's daemon sending a file its agent published as an attachment (docs/attachments.md, "Agents' files"): its
     // own token, only an upload the portal opened for that machine, chunks that resume, the SHA-256 checked at the end.
@@ -2102,20 +2106,28 @@ server.on('upgrade', (req, socket, head) => {
   });
 });
 
-function sendStream(req: http.IncomingMessage, res: http.ServerResponse, f: StreamReply) {
+/** Returns how many bytes of the file it has handed to the socket so far. */
+function sendStream(req: http.IncomingMessage, res: http.ServerResponse, f: StreamReply): () => number {
+  let sent = 0;
   const headers = { 'content-type': f.type, 'accept-ranges': 'bytes', 'cache-control': 'private, max-age=300', 'x-content-type-options': 'nosniff', 'content-security-policy': FILE_CSP, ...(f.disposition ? { 'content-disposition': f.disposition } : {}) };
   const range = parseRange(req.headers.range, f.size);
   if (range === 'unsatisfiable') {
     res.writeHead(416, { ...headers, 'content-range': `bytes */${f.size}` });
-    return res.end();
+    res.end();
+    return () => sent;
   }
   const { start, end } = range ?? { start: 0, end: f.size - 1 };
   res.writeHead(range ? 206 : 200, { ...headers, 'content-length': String(end - start + 1), ...(range ? { 'content-range': `bytes ${start}-${end}/${f.size}` } : {}) });
-  if (f.size === 0) return res.end();
+  if (f.size === 0) {
+    res.end();
+    return () => sent;
+  }
   const stream = fs.createReadStream(f.path, { start, end });
   stream.on('error', () => res.destroy());
+  stream.on('data', (c) => (sent += c.length));
   res.on('close', () => stream.destroy());
   stream.pipe(res);
+  return () => sent;
 }
 
 // Sockets die silently (a laptop asleep, a phone suspending the tab, a NAT or proxy dropping an idle
