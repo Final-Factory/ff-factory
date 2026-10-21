@@ -24,17 +24,23 @@
 //     the build is done, and then go;
 //   - one mid-turn is asked to finish its step, commit and push, stop its editor and end its turn (pauseNotice): never cut
 //     off. Once its turn ends it is paused the same way, and when the build is done FF Factory resumes it (done()).
-// - The build starts when its worker asks (build_plan start) and the computer is clear: refused while the computer's bench
-//   lock is held (a timed run's numbers, w1440: never overridden), and while a worker asked to pause is still mid-turn, up to
-//   BUILD_WAIT_MS after the clearing began; past that the build goes ahead beside it, said so.
+// - The build starts when its worker asks (build_plan start), AT ONCE (w1656, lothsahn: a release build does not wait for
+//   other workers to pause; it starts at once and takes the bench lock first). Clearing still moves the workers between
+//   turns and asks the ones mid-turn to finish their step and start no new Unity work; the build does not wait for them
+//   (1.0.0.3 waited 20 minutes for one, then behind that worker's test run). Its builder's bench tickets count as urgent
+//   whatever its request's priority (Agents.benchPriorities, releaseBuilder), and they PRE-EMPT the machine's bench queue
+//   (the game repo's bench_queue.py: every holder's batch run or leg stops, to run again after done). At the start FF
+//   Factory also stops the editor of every worker it paused or asked to pause (stopEditor), so an editor compile or test
+//   run ends at once and its Unity slot is free; never a Live view's editor (left alone above) nor the builder's.
+//   lothsahn (w1656), after 1.0.0.3 waited 12 minutes here and 15 more behind a worker's compile and test run: "Why did it
+//   have to wait so long for the lock? i said it was urgent. How do we never let this happen again? It was supposed to kick
+//   work off the machine".
 // - build_plan done (or PLAN_MAX_MS past due, or its builder's requests all closed) ends it: the hold lifts, the queued
 //   resumes go, and each worker paused mid-turn is told to carry on.
 import type { BenchLock, BenchQueueReport, SessionInfo, WorkItem } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { benchText, timedText } from './placement.ts';
 
-/** How long a build waits for workers asked to pause to end their turns before it goes ahead beside them. */
-export const BUILD_WAIT_MS = { value: 20 * 60_000 };
 /** A plan not ended this long after it was due is ended by itself (a release build and its tests take under two hours). */
 export const PLAN_MAX_MS = { value: 3 * 60 * 60_000 };
 /** The longest lead time a declaration takes. */
@@ -85,6 +91,8 @@ export interface BuildDeps {
   move: (sessionId: string, to: string, why: string) => Promise<string>;
   /** A system message into a worker's turn (or the next one). */
   tell: (sessionId: string, text: string) => void;
+  /** Stop the editor of this worker's sandbox (w1656: a release build starts; its compile or test run ends, to run again). */
+  stopEditor?: (sessionId: string) => Promise<string | undefined>;
   /** The dispatcher's [ledger] line. */
   notify: (text: string) => void;
   /** The send queue looks again (a resume held for the build may go now). */
@@ -108,7 +116,7 @@ export function pauseNotice(p: Pick<BuildPlan, 'machine' | 'what' | 'by'>, reque
   const example = requests[0] ?? 'wNNN';
   return [
     `[FF Factory] BUILD (w1606): ${p.by} builds ${p.what} on ${p.machine} now, and builds run there alone, so FF Factory pauses the other work on it. You are not stopped and lose nothing:`,
-    '1. Finish the step you are on and start no new one. Commit what is unfinished on your branch (a WIP commit is fine) and push it.',
+    '1. Finish the step you are on and start no new one: no compile, refresh, test run, player build or batch Unity run. The release starts now and takes the bench first (w1656): a batch run or leg of yours stops, and FF Factory stops your editor, so a compile or test run ends and is run again after the build. Commit what is unfinished on your branch (a WIP commit is fine) and push it.',
     "2. Stop your sandbox's Unity editor (mcp__machine__unity stop) and any player or batch run you started, unless a person is watching your Live view now.",
     `3. End your turn with one line per request: \`${example}: paused for the build on ${p.machine}; <where you stopped>\`. Set no wake_me for it.`,
     `Your check-ins and replies wait meanwhile, and when the build is done FF Factory tells you to carry on, in this same conversation and sandbox. If \`build_plan status\` says no build is planned on ${p.machine}, it is over: ignore this and carry on.`,
@@ -146,6 +154,12 @@ export class BuildPlans {
 
   all(): BuildPlan[] {
     return [...this.plans.values()];
+  }
+
+  /** Whether this worker builds the release planned on its computer now (w1656): its bench tickets then count as urgent. */
+  releaseBuilder(machineId: string, sessionId: string): boolean {
+    const p = this.plan(machineId);
+    return !!p && this.isBuilder(p, sessionId);
   }
 
   private isBuilder(p: BuildPlan, sessionId: string): boolean {
@@ -231,19 +245,20 @@ export class BuildPlans {
     // 3.8 minutes at a time in the first 16 hours of 2026-10-20 (w1628's census).
     const lock = this.d.benchLock(p.machine);
     const queued = lock ? ` On ${p.machine}, ${benchText(lock)}: your build takes a shared ticket in its bench queue and starts as soon as that leg (and any queued before your build) ends, never beside one; \`python scripts/bench/bench_queue.py status\` shows its place (w1628).` : '';
+    // w1656: no wait for the workers asked to pause. They finish their step beside the build and start no new Unity work
+    // (pauseNotice); the build's exclusive tickets at urgent priority go first in the bench queue after the leg running now.
     const busy = this.stillMidTurn(p);
-    const waited = this.now() - (p.clearedAt ?? this.now());
-    if (busy.length && waited < BUILD_WAIT_MS.value) {
-      return `Not yet (w1606): ${busy.length} worker(s) on ${p.machine} were asked at ${hhmm(p.clearedAt!)} to finish their step and pause (${busy.join(', ')}); none is cut off mid-edit. wake_me in 5 minutes and build_plan start again; after ${mins(BUILD_WAIT_MS.value)} minutes of waiting the build goes ahead beside them.`;
-    }
+    let stopped: string[] = [];
     if (!p.startedAt) {
       p.startedAt = this.now();
       this.save();
-      this.d.log(`build: ${p.what} on ${p.machine} starts (${p.moved.length} moved, ${pausedOf(p).length} paused, ${p.kept.length} left alone${busy.length ? `; ${busy.join(', ')} still mid-turn after ${mins(waited)} min` : ''})`);
+      stopped = await this.stopEditors(p);
+      this.d.log(`build: ${p.what} on ${p.machine} starts (${p.moved.length} moved, ${pausedOf(p).length} paused, ${p.kept.length} left alone${busy.length ? `; ${busy.join(', ')} still finishing their step` : ''})`);
     }
     const kept = p.kept.length ? ` Left alone: ${p.kept.map((k) => `${k.session} (${k.why})`).join('; ')}.` : '';
-    const late = busy.length ? ` ${busy.join(', ')} did not end its turn in ${mins(BUILD_WAIT_MS.value)} minutes; the build goes ahead beside it, a little slower.` : '';
-    return `Go (w1606): ${p.machine} is cleared for ${p.what} (${p.moved.length} moved: ${p.moved.map((m) => `${m.session} to ${m.to}`).join(', ') || 'none'}; ${pausedOf(p).length} paused).${kept}${late} Build now through unity-slot run --label "${p.what}".${queued} When it is done (or failed), build_plan done at once: the paused work waits for it.`;
+    const late = busy.length ? ` ${busy.join(', ')} still finishing their step (asked at ${hhmm(p.clearedAt!)} to start no new one): the release does not wait for them (w1656); your bench tickets count as urgent and pre-empt whatever holds the bench.` : '';
+    const ended = stopped.length ? ` Stopped the editors of ${stopped.join(', ')} (w1656: their compiles and test runs run again after done).` : '';
+    return `Go (w1606): ${p.machine} is cleared for ${p.what} (${p.moved.length} moved: ${p.moved.map((m) => `${m.session} to ${m.to}`).join(', ') || 'none'}; ${pausedOf(p).length} paused).${kept}${late}${ended} Build now through unity-slot run --label "${p.what}".${queued} When it is done (or failed), build_plan done at once: the paused work waits for it.`;
   }
 
   /** build_plan done: the hold lifts, the held resumes go, and every worker paused mid-turn is told to carry on. */
@@ -302,6 +317,28 @@ export class BuildPlans {
       }
       if (changed) this.save();
     }
+  }
+
+  /** w1656: the editors of the workers this build paused or asked to pause, stopped at its start (never a Live view's). */
+  private async stopEditors(p: BuildPlan): Promise<string[]> {
+    if (!this.d.stopEditor) return [];
+    const kept = new Set(p.kept.map((k) => k.session));
+    const out: string[] = [];
+    for (const id of pausedOf(p)) {
+      if (kept.has(id) || this.isBuilder(p, id) || this.d.hasView(id)) continue;
+      if (!this.d.workersOn(p.machine).some((s) => s.id === id)) continue;
+      try {
+        const said = await this.d.stopEditor(id);
+        if (said !== undefined) out.push(id);
+      } catch (e) {
+        this.d.log(`build: could not stop ${id}'s editor on ${p.machine}: ${(e as Error).message}`);
+      }
+    }
+    if (out.length) {
+      this.d.log(`build: ${p.what} on ${p.machine}: stopped the editors of ${out.join(', ')} (w1656)`);
+      for (const id of out) this.d.tell(id, `[FF Factory] The release build on ${p.machine} started (w1656): FF Factory stopped your sandbox's Unity editor, so a compile or test run you had going ended. Nothing committed or saved is lost. When FF Factory says the build is done, start your editor again (mcp__machine__unity start) and run that step again.`);
+    }
+    return out;
   }
 
   private stillMidTurn(p: BuildPlan): string[] {

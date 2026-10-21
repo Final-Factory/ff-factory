@@ -281,14 +281,17 @@ Then:
      a move would end it; the build runs beside it, a little slower. Since w1639 its worker is told once
      (`liveViewNotice`) to start no compile, refresh, test run, player build or batch Unity run until the build is done,
      and told when it is; nothing of it is ever closed or moved without the person's word, and its messages are not held.
-3. **The build starts when its worker asks** (`build_plan start`): `Go`, or `Not yet` with what it waits for:
-   - **not a bench lock** (w1628): a timed run holding the lock gets a `Go` with a note. The build's own Unity run
-     (`unity-slot run`, the game repo's `build_player.sh`) takes a shared ticket in the machine's bench queue (w1615),
-     so it waits for that leg and the ones queued before it, never runs beside one, and keeps its place ahead of the
-     legs queued after it. Waiting here for a free lock lost: BEAST's lock was free at most 3.8 minutes at a time in
-     the first 16 hours of 2026-10-20;
-   - **workers asked to pause, still mid-turn**: up to 20 minutes (`BUILD_WAIT_MS`); past that the build goes ahead beside
-     them and says so, rather than cut a turn off.
+3. **The build starts when its worker asks** (`build_plan start`), **at once** (w1656; lothsahn, after the 1.0.0.3 build
+   waited 12 minutes here for a worker to pause and 15 more in the bench queue behind that worker's compile and test run:
+   "Why did it have to wait so long for the lock? i said it was urgent. How do we never let this happen again? It was
+   supposed to kick work off the machine"):
+   - **no wait for workers asked to pause**: they finish their step beside it, and the `Go` names them. At the start FF
+     Factory stops the editor of every worker it paused or asked to pause (`stopEditor`), so an editor compile or test
+     run ends now and is run again after `done`; never a Live view's editor, nor the builder's;
+   - **the bench queue is pre-empted**: the builder's tickets count as urgent (`Agents.benchPriorities`,
+     `BuildPlans.releaseBuilder`), and the release lane's own Unity runs take a pre-empting ticket (the game repo's
+     `bench_queue.py`, `Documentation/Bench-Lock.md` "An urgent release pre-empts"): every holder's batch run or timed
+     leg stops cleanly (exit 75, to be run again), and the release is granted at once.
 4. **`build_plan done`** (by its worker right after the build, done or failed) ends it: the hold lifts, the queued resumes
    go, the paused workers are told to carry on, and the dispatcher hears `[ledger] BUILD DONE (w1606)` with how long
    the build took. A plan nobody ends is ended 3 hours after it was due (`PLAN_MAX_MS`). Plans live in

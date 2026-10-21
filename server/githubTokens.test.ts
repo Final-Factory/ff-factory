@@ -187,7 +187,7 @@ test('probe (w904): every required repository and every readable permission; a 4
   assert.equal(ben.login, 'bryding');
   assert.equal(ben.userId, 481770);
   assert.equal(ben.expiresAt, '2026-10-20T00:00:00.000Z');
-  assert.equal(ben.repos?.length, GITHUB_REQUIRED_REPOS.length, 'all nine');
+  assert.equal(ben.repos?.length, GITHUB_REQUIRED_REPOS.length, 'all ten');
   assert.deepEqual(ben.repos!.find((r) => r.repo === 'Final-Factory/FinalFactory')!.access, { metadata: 'read', contents: 'read', 'pull-requests': 'read', actions: 'denied', issues: 'read', 'commit-statuses': 'read', discussions: 'read' });
   assert.deepEqual(ben.repos!.find((r) => r.repo === 'Final-Factory/ffbox')!.access, { metadata: 'not-selected' });
   assert.deepEqual(ben.problems, [
