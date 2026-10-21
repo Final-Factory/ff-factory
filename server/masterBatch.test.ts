@@ -16,6 +16,7 @@ import type { RunResult } from './proc.ts';
 import { workerRules } from './intakeRules.ts';
 import {
   JOB_NAME,
+  JOB_SKIPPED,
   MasterBatchWatch,
   culpritDraft,
   ghMasterBatch,
@@ -228,7 +229,7 @@ test('w1180: the other two requests, and the worker rules', () => {
 
 class FakeGh implements MasterBatchGh {
   list: BatchRun[] = [];
-  logs = new Map<number, string | Error | undefined>();
+  logs = new Map<number, string | typeof JOB_SKIPPED | Error | undefined>();
   prs = new Map<number, PrFacts>();
   calls: string[] = [];
   async runs(repo: string, workflow: string) {
@@ -445,6 +446,26 @@ test('w1180: a red run that a later run passed files nothing', async (t) => {
   assert.ok(out.includes('run 101: red, superseded by a later green run'));
 });
 
+test('w1658: a run whose batch job was skipped (a version bump) is read once and never supersedes a red one', async (t) => {
+  const s = setup(t);
+  s.gh.list = [run(100, 'success')];
+  await s.make().tick();
+  s.gh.list = [run(102, 'success'), run(101, 'failure'), run(100, 'success')];
+  s.gh.logs.set(101, logOf(verdict()));
+  s.gh.logs.set(102, JOB_SKIPPED);
+  // The red run cannot be filed yet (a cap), so it is looked at again after a restart, when the skipped run is old news.
+  s.skip('the daily cap');
+  const { out } = await quiet(() => s.make().tick());
+  assert.ok(out.includes('run 102: its batch job was skipped (a version bump: its own release run tests that commit), nothing to read'), out.join('\n'));
+  assert.equal(s.filed.length, 0);
+  assert.deepEqual(s.state().skipped, ['102']);
+  s.skip();
+  const again = await quiet(() => s.make().tick());
+  assert.ok(!again.out.some((l) => l.includes('superseded')), again.out.join('\n'));
+  assert.equal(s.filed.length, 1, 'the red run is filed');
+  assert.equal(s.gh.calls.filter((c) => c === 'log 102').length, 1, 'read once');
+});
+
 test('w1180: cancelled and old runs, and a failed run with no verdict line, file nothing', async (t) => {
   const s = setup(t);
   s.gh.list = [run(100, 'success')];
@@ -569,8 +590,10 @@ test('w1180: the gh reads are api calls on the system payer\'s runner, and the v
   assert.equal(await old.jobLog(REPO, 8), 'old gh log');
   assert.deepEqual(plain.slice(1), [`api --allow-escape-sequences repos/${REPO}/actions/jobs/13/logs`, `api repos/${REPO}/actions/jobs/13/logs`]);
   // No such job: undefined, not an error. A refused call: an error with gh's words on one line.
-  const none = ghMasterBatch(fake({ 'runs/6/jobs': JSON.stringify({ jobs: [{ id: 1, name: 'Other' }] }) }));
+  const none = ghMasterBatch(fake({ 'runs/6/jobs': JSON.stringify({ jobs: [{ id: 1, name: 'Other' }] }), 'runs/9/jobs': JSON.stringify({ jobs: [{ id: 14, name: JOB_NAME, conclusion: 'skipped' }] }) }));
   assert.equal(await none.jobLog(REPO, 6), undefined);
+  // A skipped batch job (a version bump's push, w1658) has no log to read.
+  assert.equal(await none.jobLog(REPO, 9), JOB_SKIPPED);
   await assert.rejects(none.jobLog(REPO, 7), { message: `gh api repos/${REPO}/actions/runs/7/jobs?per_page=100: HTTP 404: Not Found (repos/${REPO}/actions/runs/7/jobs?per_page=100) more` });
 });
 

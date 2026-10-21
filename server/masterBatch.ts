@@ -30,6 +30,8 @@ import type { WorkItem, WorkSource, WorkTriage } from '../shared/types.ts';
 const EVERY_MS = 3 * 60_000;
 /** The job whose log holds the verdict. */
 export const JOB_NAME = 'Master batch (full editmode)';
+/** jobLog's answer for a run whose batch job was skipped: a version bump's push, which the bump's own main.yml run tests (w1658). */
+export const JOB_SKIPPED = Symbol('master batch job skipped');
 export const DEFAULT_REPO = 'Final-Factory/FinalFactory';
 export const DEFAULT_WORKFLOW = 'master-batch.yml';
 const BRANCH = 'master';
@@ -180,8 +182,8 @@ export interface PrFacts {
 export interface MasterBatchGh {
   /** The newest runs of the workflow on master, newest first. */
   runs(repo: string, workflow: string): Promise<BatchRun[]>;
-  /** The log of the run's `Master batch (full editmode)` job; undefined when the run has no such job. */
-  jobLog(repo: string, runId: number): Promise<string | undefined>;
+  /** The log of the run's `Master batch (full editmode)` job; undefined when the run has no such job, JOB_SKIPPED when it was skipped. */
+  jobLog(repo: string, runId: number): Promise<string | typeof JOB_SKIPPED | undefined>;
   pr(repo: string, number: number): Promise<PrFacts | undefined>;
 }
 
@@ -223,6 +225,7 @@ export function ghMasterBatch(runnerFor: (what: string) => Runner): MasterBatchG
       const jobs = obj(JSON.parse(await call(`the jobs of run ${runId} of ${repo}`, [`repos/${repo}/actions/runs/${runId}/jobs?per_page=100`])))?.jobs;
       const job = (Array.isArray(jobs) ? jobs : []).map(obj).find((j) => j?.name === JOB_NAME);
       if (!job || typeof job.id !== 'number' || !Number.isInteger(job.id) || job.id <= 0) return undefined;
+      if (job.conclusion === 'skipped') return JOB_SKIPPED;
       // A Unity job log carries terminal escape sequences, and gh 2.102 refuses to print such a response unless asked
       // ("the response contains terminal escape sequences", exit 1; measured w1180 on a Test in editmode log). An older gh
       // without the flag prints it anyway, so it is asked plainly when the flag is unknown.
@@ -374,6 +377,8 @@ interface Persisted {
   seen: string[];
   /** "<run id>:<culprit sha>" (or ":no-results", ":unbisected") to the request filed for it. */
   filed: Record<string, { work: string; at: string }>;
+  /** Runs that ended in success with the batch job skipped (a version bump's push, w1658), newest last: never a later green batch. */
+  skipped: string[];
 }
 
 export interface MasterBatchDeps {
@@ -412,6 +417,7 @@ export class MasterBatchWatch {
       baselined: raw?.baselined === true,
       seen: Array.isArray(raw?.seen) ? raw.seen.filter((x): x is string => typeof x === 'string') : [],
       filed: obj(raw?.filed) ? (raw!.filed as Persisted['filed']) : {},
+      skipped: Array.isArray(raw?.skipped) ? raw.skipped.filter((x): x is string => typeof x === 'string') : [],
     };
   }
 
@@ -438,6 +444,7 @@ export class MasterBatchWatch {
 
   private save() {
     this.data.seen = this.data.seen.slice(-KEEP_SEEN);
+    this.data.skipped = this.data.skipped.slice(-KEEP_SEEN);
     const keys = Object.keys(this.data.filed);
     if (keys.length > KEEP_FILED) for (const k of keys.sort((a, b) => this.data.filed[a].at.localeCompare(this.data.filed[b].at)).slice(0, keys.length - KEEP_FILED)) delete this.data.filed[k];
     try {
@@ -513,6 +520,13 @@ export class MasterBatchWatch {
       try {
         const log = await this.gh.jobLog(s.repo, run.id);
         this.readOk(`log ${run.id}`);
+        if (log === JOB_SKIPPED) {
+          if (!this.data.skipped.includes(String(run.id))) this.data.skipped.push(String(run.id));
+          this.markSeen(run);
+          this.save();
+          did.push(`run ${run.id}: its batch job was skipped (a version bump: its own release run tests that commit), nothing to read`);
+          continue;
+        }
         looks.push({ run, v: log === undefined ? undefined : parseVerdict(log), read: true });
       } catch (e) {
         this.readFailed(`log ${run.id}`, `the log of run ${run.id}`, e);
@@ -543,8 +557,9 @@ export class MasterBatchWatch {
         this.save();
         continue;
       }
-      // A later run that passed contains this tip's merges, so whatever broke it is fixed or reverted by now.
-      if (finished.some((r) => r.conclusion === 'success' && Date.parse(r.createdAt) > Date.parse(run.createdAt))) {
+      // A later run that passed contains this tip's merges, so whatever broke it is fixed or reverted by now. A run whose
+      // batch job was skipped tested nothing here, and its tip may still hold the culprit.
+      if (finished.some((r) => r.conclusion === 'success' && !this.data.skipped.includes(String(r.id)) && Date.parse(r.createdAt) > Date.parse(run.createdAt))) {
         console.log(`master batch: run ${run.id} was red, but a later run passed; nothing filed`);
         did.push(`run ${run.id}: red, superseded by a later green run`);
         this.markSeen(run);
