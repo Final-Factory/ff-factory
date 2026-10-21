@@ -1033,7 +1033,8 @@ measured from `gh repo list Final-Factory` and the repositories named in this re
 | Final-Factory/KNN (internal) | the game's KNN package (lothsahn, w904) | required |
 | Final-Factory/Facepunch.Steamworks (public) | the game's Steamworks fork (lothsahn, w904) | required |
 | Final-Factory/ff-factory-private, multiplayer-community-contributions, nevergames-website | none found in this repo's code or briefs | no ("All repositories" covers them anyway) |
-| bryding/FinalFactoryModTemplate, Lothsahn/* | the mod template (game repo `CLAUDE.md`, "Modding"); personal repositories | **cannot**: a fine-grained token has one resource owner. With `GH_TOKEN` set, gh and git use only it, so work on these fails with the person token. Until the template moves to the organization, such work needs a run without the switch (its machine `githubFromVault` off) |
+| Final-Factory/FinalFactoryModTemplate (public) | the mod template (game repo `CLAUDE.md`, "Modding"); moved from bryding/ into the organization (w1650), where a vault token's push and pull request worked | required |
+| Lothsahn/* | personal repositories | **cannot**: a fine-grained token has one resource owner. With `GH_TOKEN` set, gh and git use only it, so work on these fails with the person token; such work needs a run without the switch (its machine `githubFromVault` off) |
 
 ### 13.3 Selection, fallback, expiry
 
