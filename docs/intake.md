@@ -533,6 +533,10 @@ back to its request.
   24 hours as a flood guard); with it off, or past the day's count, the request waits on the Intake tab.
 - **Flaky.** A `flaky` verdict, or a green run with a flaky list, files nothing: one warning in the portal log per run.
   A red run that a **later run passed** (the tip is fixed or reverted by now) files nothing either.
+- **A version bump's push.** The game repo's batch skips a bump commit (w1658, lothsahn: "bumps stop waiting on the
+  train, and the train skips release commits"): the bump's own main.yml run tests the whole suite. That run ends in
+  success with the `Master batch (full editmode)` job skipped; the watch reads no log for it, files nothing, and keeps its
+  id (`skipped` in `master-batch.json`) so it never counts as the later run that passed.
 - **Once.** Each (run, culprit) is filed once, kept with the runs already seen in `<dataDir>/master-batch.json`, so a
   restart repeats nothing. On a first start (no file) the runs already finished are only **recorded**: a deploy never files
   for an old red batch. A run that finished more than 48 hours ago is not acted on, and a switch turned off and on again
