@@ -93,3 +93,16 @@ test('w1639: without a Live view the same worker mid-turn is asked to pause as b
   assert.deepEqual(Object.keys(t.plans.plan('beast')!.told), ['viewer']);
   assert.match(t.told.find((x) => x.id === 'viewer')!.text, /Stop your sandbox's Unity editor/);
 });
+
+test('w1656: an urgent release asks A or B on one card first, and its build waits for no one', () => {
+  const r = RELEASE_RULES;
+  assert.match(r, /"Update your rules to ask about B when someone asks for an urgent release/);
+  assert.match(r, /"Build now from the last fully green commit <sha> \(B: skips the N merges since it\)" \(recommended\)/);
+  assert.match(r, /"Bump on master's tip \(A: ships N merges that only had gate tests\)"/);
+  assert.match(r, /scripts\/release\/last_green\.py/);
+  assert.match(r, /--from green/);
+  assert.match(r, /A RELEASE BUILD WAITS FOR NO ONE/);
+  assert.match(r, /pre-empt every holder/);
+  assert.doesNotMatch(r, /at most 20 minutes/);
+  assert.match(r, /follow it every 2 to 3 minutes with `urgent_release\.py wait --out <run> --minutes 3`/);
+});

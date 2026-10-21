@@ -551,6 +551,14 @@ export class Agents {
         return pickComputer(this.places().filter((p) => p.id !== placeId(from)), this.lastPlaced, forPriority(this.placement(), lowestPriority(open)), kind)?.pick.id;
       },
       move: (id, to, why) => this.moveWorker(id, to, why),
+      // w1656: a release build's start stops a paused worker's editor (its compile or test run ends, to run again).
+      stopEditor: async (id) => {
+        const info = store.sessions.get(id);
+        const m = info?.machineId ? store.machines.get(info.machineId) : undefined;
+        const sb = m?.sandboxes?.find((x) => x.id === info?.machineSandbox);
+        if (!info?.machineId || !sb || sb.unity?.state === 'stopped') return undefined;
+        return this.machines.unity(info.machineId, 'stop', false, sb.id);
+      },
       tell: (id, text) => {
         try {
           sessions.send(id, text, 'system');
@@ -2097,7 +2105,8 @@ export class Agents {
       const open = this.openWorkOf(info);
       if (!open.length) continue;
       const top = open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority);
-      out[info.id] = { priority: top, requests: open.map((w) => w.id) };
+      // w1656: the builder of the release planned here takes the bench first, whatever its request's priority.
+      out[info.id] = { priority: this.builds?.releaseBuilder(machineId, info.id) ? 'urgent' : top, requests: open.map((w) => w.id) };
     }
     return out;
   }
