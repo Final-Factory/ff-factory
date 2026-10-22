@@ -32,7 +32,10 @@ Known causes, so a future failure can be named at once:
   to GitHub's runners lost the limit and w1758 put it back: 3 WebKit jobs hung there on 2026-10-22).
   `scripts/e2e-legs.test.ts` fails a ci.yml whose browser install has no time limit, cleanup or second try.
 - **A job shown "in progress" after it finished**: GitHub never marked it completed (5 times in 14 days, all "Commit
-  identities are noreply"; on #294 the run sat 89 minutes until it was re-run). Re-run the run.
+  identities are noreply"; on #294 the run sat 89 minutes until it was re-run). Re-run the run. On 2026-10-22 it held two
+  pull requests' runs (CI of #532, 14 minutes; "Worker update end to end" of #533, 40) with every job completed green,
+  and `ff-pr merge` waits on the run's status: when `gh api repos/<repo>/actions/runs/<id>/jobs` shows every job
+  completed and green, `gh pr merge <n> --merge --match-head-commit <head>` (w1758).
 - **"Commit identities are noreply" on a manual run**: it checked main's 11 non-noreply commits of 2026-10-05/06 again;
   a manual run now checks only `origin/main..HEAD` (w922).
 - **Nested VM, `error: Domain is already active`** at "10/12" of the second host install (7 in 14 days, all on the
