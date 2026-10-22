@@ -89,8 +89,8 @@ async function keepsPlace(opts: {
 }
 
 // Its own login's chat (e2e/server.ts, "scroller"): the owner's orchestrator chat takes other files' messages while this
-// runs, and one landing after row 9 (a question card from sideways.spec.ts) moved the view off it; a chat that ends on an
-// answer and its card when it loads opens on the answer (w1632), not at the bottom (w1745: WebKit, PR #518 and #520).
+// runs, and one landing after row 9 (a question card from sideways.spec.ts) moved the view off it, and a chat that ends on
+// an answer and its card when it loads opens on the answer (w1632), not at the bottom (w1745: WebKit, PR #518 and #520).
 const asScroller = test.extend<{ solo: Page }>({
   solo: async ({ browser }, use) => {
     const ctx = await browser.newContext(test.info().project.use as BrowserContextOptions);
@@ -221,7 +221,7 @@ test('the Requests list keeps its scroll position across the Dispatcher conversa
 // w1641: on WebKit (no scroll anchoring) a block above the view drawn smaller pulls scrollTop down to the new end, and a
 // picture at the end that loads before that scroll event is handled makes the chat look scrolled up: it stopped following
 // (CI, mobile-safari: 184 and 2963 px short of the end, after the seeded chat's broken mermaid diagram drew its error).
-asScroller('a block above drawn smaller while a picture at the end loads keeps the chat at the bottom', async ({ solo: page }) => {
+test('a block above drawn smaller while a picture at the end loads keeps the chat at the bottom', async ({ authed: page }) => {
   const me = await appState(page.request);
   const tag = uniq('shrink');
   for (let i = 0; i < 6; i++) await sendMessage(page.request, me.orchestratorId, `shrink ${i} ${tag} ` + 'words '.repeat(60));
