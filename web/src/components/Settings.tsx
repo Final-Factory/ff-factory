@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { NOTIFY_KINDS, type AppVersion } from '../../../shared/types';
 import { disablePush, enableInTab, enablePush, pushMode, setPref, testNotification, usePush } from '../notify';
 import { api } from '../api';
-import { logout, toast, toastError } from '../store';
+import { attempt, logout, toast, toastError, useStore } from '../store';
 import { SHORTCUT_LABEL, VOICE_PREF_DEFAULTS, refreshVoiceStatus, setVoicePrefs, useVoicePrefs, useVoiceStatus, type TtsEnginePref } from '../voice/dictation';
 import { browserSpeechSupported } from '../voice/browserSpeech';
 import type { VoiceEnginePref } from '../../../shared/voice';
@@ -87,6 +87,7 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
         </div>
         <p className="dim small">These choices belong to this device; your phone and your desktop can differ. While the app is in front, nothing pops up.</p>
         <VoiceSettings />
+        <PoolSettings />
         <VaultSettings />
         {app && (
           <div className="field about" data-testid="about-version">
@@ -101,6 +102,49 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
         )}
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Whose Claude pool each person's work runs on (w1717, docs/vault.md section 4, "Picking another person's pool"): "self" by
+ * default, or another person's pool. Anyone signed in may change anyone's; the server checks the pick.
+ */
+function PoolSettings() {
+  const people = useStore((s) => s.app?.poolPeople);
+  const pools = useStore((s) => s.app?.settings?.pool);
+  if (!people?.length) return null;
+  const poolOf = (userId: string) => Object.entries(pools ?? {}).find(([k]) => k.toLowerCase() === userId.toLowerCase())?.[1] ?? 'self';
+  const nameOf = (userId: string) => people.find((o) => o.userId === userId)?.displayName ?? userId;
+  return (
+    <div className="field" data-testid="pool-settings">
+      <span>Claude pool</span>
+      <p className="small dim">
+        Whose Claude tokens each person’s work runs on: their new requests and the ones they act on. Self is their own pool. Another person’s pool keeps its own limits, and the work waits while it is held.
+        Orchestrators and GitHub tokens stay each person’s own. Anyone signed in may change these.
+      </p>
+      <div className="pool-rows">
+        {people.map((p) => {
+          const value = poolOf(p.userId);
+          const self = value.toLowerCase() === p.userId.toLowerCase() ? 'self' : value;
+          const pick = (to: string) => void attempt(api.setPool(p.userId, to).then(() => toast(`${p.displayName}’s work: ${to === 'self' ? 'their own pool' : `${nameOf(to)}’s pool`}`)));
+          return (
+            <label key={p.userId} className="pool-row">
+              <span>{p.displayName}’s work</span>
+              <select className="input" value={self} onChange={(e) => pick(e.target.value)}>
+                <option value="self">{p.hasPool ? 'Self' : 'Self (no token yet)'}</option>
+                {people
+                  .filter((o) => o.userId.toLowerCase() !== p.userId.toLowerCase() && (o.hasPool || o.userId.toLowerCase() === self.toLowerCase()))
+                  .map((o) => (
+                    <option key={o.userId} value={o.userId}>
+                      {o.displayName}’s pool
+                    </option>
+                  ))}
+              </select>
+            </label>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

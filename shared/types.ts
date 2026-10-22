@@ -1582,6 +1582,20 @@ export interface AppSettings {
    * `shared/dismissals.ts` unitEventKey. The banner stays hidden for those events and returns for a new one (w751).
    */
   dismissedEvents?: Record<string, string[]>;
+  /**
+   * Whose Claude pool each person's work runs on, by user id (w1717, docs/vault.md section 4, "Whose pool"): another
+   * person's user id; a person with no key runs on their own ("self"). Any operator changes anyone's, in Settings or with
+   * set_pool. Only the Claude token follows it: the GitHub token stays the person's own.
+   */
+  pool?: Record<string, string>;
+}
+
+/** A person as the Settings pool menu lists them (w1717): whether they have a Claude pool another's work could run on. */
+export interface PoolPerson {
+  userId: string;
+  displayName: string;
+  /** An enabled Claude token of theirs is in the vault (its metadata; the server checks that it opens before it takes a pick). */
+  hasPool: boolean;
 }
 
 // ---- the work ledger (docs/orchestrators.md) ----
@@ -2352,6 +2366,8 @@ export interface AppState {
   ledger?: LedgerCleanupState;
   config: { defaultModel: string; models: string[]; defaultBase: string; attachments: AttachmentSettings; live?: { enabled: boolean } };
   settings: AppSettings;
+  /** The people the Settings pool menu offers (w1717); absent from a server older than the field. */
+  poolPeople?: PoolPerson[];
   /** The live views this person may watch (w1398, docs/live-view.md); absent from a server older than the field. */
   live?: LiveViewInfo[];
 }

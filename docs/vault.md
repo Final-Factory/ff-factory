@@ -155,7 +155,8 @@ expire. When the portal is back, the next start gets current values, so a rotate
 ## 4. Which Claude token a run gets
 
 A person's runs use **that person's own tokens, their pool, and nobody else's** (lothsahn, 2026-10-08: "each operator is
-only going to use its own pool going forward--except for the dispatcher"). The pick is `pickPool` (`server/tokenPool.ts`,
+only going to use its own pool going forward--except for the dispatcher"), unless their **pool setting** names another
+person's pool for their work (w1717, "Picking another person's pool" below). The pick is `pickPool` (`server/tokenPool.ts`,
 pure functions), called from `Vault.forRun` (`server/vault.ts`) at every process start, resumes included.
 
 **Whose pool.** The run's person: its requester, else the system payer (config `systemPayer`, else the owner) for work
@@ -165,6 +166,39 @@ entry with no owner (`share: anyone`, added by hand before the pool) is in nobod
 entries are unchanged. A worker or standing agent also needs the entry granted to its role and machine (`roles`,
 `machines`); the ops worker takes the workers' grants on no machine; a person's orchestrator takes no grant (the
 account setting is its consent).
+
+**Picking another person's pool (w1717).** lothsahn, 2026-10-21: "Please modify ff-factory so I can use tokens in ben's pool",
+then "Make the pool that we use a setting in the settings menu, and it defaults to "self". Any operator can change that
+setting", "and that setting will affect both new workitems as well as when an operator comments on or pushes an existing
+workitem forward", and "all operators are the same--default to self, can change it to a different pool if desired".
+- **The setting.** One per person, `AppSettings.pool` (`data/settings.json`, by user id): "self" (no key, the default) or another
+  person's user id. Change it in the portal's **Settings** (the gear), **Claude pool**: one row per login, "Self (their own pool)" or
+  "<person>'s pool" for each person with an enabled Claude token. Any signed-in operator may change anyone's (`POST /api/settings`
+  `{ pool: { person, from } }`, the route the heartbeat already used; no new endpoint). A person's own orchestrator does it with
+  `set_pool` (`pool: "ben"` or `"self"`, optional `person`), only in a turn its person started with a message of their own. The
+  server refuses, nothing written, an unknown login or a person with no Claude pool (`withPool`, `Vault.hasClaudeFor`); each
+  change is logged (`pool setting (w1717): lothsahn's work now runs on ben's pool (was their own), set by …`). No person is a
+  special case: everyone's pool may be picked by anyone's setting.
+- **What it moves.** Every worker and standing agent run whose person (`personForWork`: who last acted on the request, else
+  `vault.unattributed`'s person, else its requester, section 10) has a setting takes its Claude token from that pool
+  (`machineRunEnv` → `VaultRun.claudeOwner` → `eligible`, `server/secrets.ts`, `server/vault.ts`). So a new request follows its
+  filer's setting, and a note, an answer, an approval, a reopen or a priority change takes a request over (w1031) onto the pool
+  **the actor's** setting picks; with "self" nothing differs from before. The setting is read at each process start, not
+  stored on requests: changing it moves all of that person's work, and an idle live worker restarts on the new pool at its next
+  message (`Agents.accountMove`, w1717 line; never mid-turn or with a background task). The ledger cleanup's limit check reads
+  the picked pool (`limitsClearFor`).
+- **What it does not move.** The GitHub token and the other secrets stay the person's own (the run's `userId`). A person's
+  orchestrator, the ops worker and the dispatcher stay on their own pool: they use a pool up past its caps, which would spend
+  the other person's pool beyond its limits.
+- **The picked pool keeps its own limits.** Its tokens are judged exactly as for its owner's work: the 5-hour hold, one at a
+  time, retire, used up, the dispatcher's reserve and its stop line. When none may serve, the run is **held** on that pool
+  ("ben's Claude token pool is held (lothsahn's work runs on ben's pool: their pool setting, w1717): …") and waits; it never
+  falls back to the person's own pool. A picked pool with no usable token does not start, with the reason and "set it back to
+  self in Settings".
+- **What the ledger shows.** The account each process started on (`SessionInfo.ranAs`) names the pool and whose work it is:
+  `vault token vault-ben-1 …nQAA (ben's pool, for lothsahn's work by their pool setting, docs/vault.md)`; `ranFor` stays the
+  person. `spend_report` attributes each turn to that account, and to the request and its person as before (`docs/spend.md`), so
+  Ben's tokens show lothsahn's spend under their own account label, and lothsahn's requests stay lothsahn's.
 
 **The order (w971, w1659).** The token with the highest **score** first. The score is its weekly headroom per hour until its
 weekly window resets: `(100 - weekly %) / hours to the weekly reset`, the hours less a soft offset of about 24 ("Near a weekly
@@ -686,7 +720,8 @@ so it pushes as that login, not as the person (decision 13.3: a push is not held
 The token person changes only which vault entries a run gets. Who a request is billed to in the ledger, who hears
 about it, and the usage attribution stay as they are.
 
-**Tokens are not shared across people.** Every per-person entry is `share: owner`. A run whose person has no token in
+**Tokens are not shared across people**, except by a person's pool setting (w1717, section 4): it moves only the Claude
+token, never the GitHub token. Every per-person entry is `share: owner`. A run whose person has no token in
 the vault gets nobody else's: it does not start, and `system_status` warns (w1078; before, it ran on the machine's own login or the host token). Change the defaults with `vault.unattributed` in `config.json`, e.g.
 `"vault": { "unattributed": { "intake": "lothsahn", "ffbox": "lothsahn", "nightly": "ben" } }` (user ids).
 

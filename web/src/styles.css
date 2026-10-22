@@ -5137,6 +5137,23 @@ button.react-chip:hover {
   min-width: 0;
 }
 
+/* The Claude pool rows (w1717): one column of names, one of menus, so the menus line up. */
+.pool-rows {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 6px 10px;
+  font-size: var(--fs-md);
+}
+
+.pool-row {
+  display: contents;
+}
+
+.pool-row select {
+  min-width: 0;
+}
+
 .voice-sub {
   margin-top: 10px;
   font-weight: 600;

@@ -96,6 +96,8 @@ export const TOOL_MANIFEST = {
   update_timer: { group: 'timers', kinds: [D, P, R, O], always: [O] },
   cancel_timer: { group: 'timers', kinds: [D, P, R, O], always: [O] },
   set_heartbeat: { group: 'timers', kinds: [P, R] },
+  // w1717: whose Claude pool a person's work runs on (AppSettings.pool), like the Settings menu's.
+  set_pool: { group: 'admin', kinds: [P, R] },
   cancel_wake: { group: 'timers', kinds: [W] },
   blocked_on: { group: 'timers', kinds: [W] },
   waiting_on_person: { group: 'timers', kinds: [W] },
