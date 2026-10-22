@@ -41,7 +41,8 @@ import { FramePump, parseAck } from '../shared/framePump.ts';
 import { bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
+import { onInstallDrive } from '../server/rootFence.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
 import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers } from '../server/installLeftovers.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
@@ -575,12 +576,14 @@ export class Daemon {
         const root = this.sandboxRoot();
         const settings = staleOutputSettings(this.cleanupSettings.staleOutput);
         // A sandbox's Builds/ is the stale-output rules' (attributed, or listed): the old 7-day age rule only when they are off.
-        const rules = cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [] }, DEFAULT_CLEANUP);
+        // w1755: on Windows the plan reads only the install drive (and the Dev Drive's folders): no rule on C:, none in Never Games.
+        const roots = this.cfg.root ? [this.cfg.root, ...(this.cfg.extraRoots ?? [])] : undefined;
+        const rules = rulesOnInstallDrive(cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [] }, DEFAULT_CLEANUP), roots, HOME);
         return cleanupPass({
           opts,
           guard,
           mode: settings.mode,
-          regular: () => planCleanup({ rules, guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
+          regular: () => planCleanup({ rules, guard, low, libraries: { roots: onInstallDrive(HOME, this.cfg.root) ? [HOME] : [], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
           // Plus the install folder's own leftovers (w899): build caches, the nightly lab, stopped sessions' temp, runaway task output.
           stale: async () =>
             mergePlans(
@@ -602,15 +605,17 @@ export class Daemon {
             }
           },
           // w896: with a worker root, only what is inside it is removed; the rest is measured and listed. The Dev Drive's folders (w900) are inside it.
-          root: this.cfg.root ? [this.cfg.root, ...(this.cfg.extraRoots ?? [])] : undefined,
+          root: roots,
           // FF Factory's own leftovers (w626): only while free space is below the soft threshold, or asked for.
           ...(low || opts.dryRun ? { own: this.ownLeftovers(guard) } : {}),
         });
       },
-      consumers: () => biggestConsumers(env),
+      // w1755: on Windows only the install drive is measured (biggestConsumers' root).
+      consumers: () => biggestConsumers(env, [], { root: this.cfg.root }),
       root: () => this.cfg.root,
       staleAt: staleAtFile(appDirOfConfig(cfg)),
-      stale: async () => (await staleUnityLibraries([HOME], DEFAULT_CLEANUP.libraryReportDays)).filter((l) => !neverDelete(l.path, this.cleanupGuard())),
+      // w1755: on Windows a home folder off the install drive (C:) is not searched for Unity projects.
+      stale: async () => (await staleUnityLibraries(onInstallDrive(HOME, this.cfg.root) ? [HOME] : [], DEFAULT_CLEANUP.libraryReportDays)).filter((l) => !neverDelete(l.path, this.cleanupGuard())),
       log: (e) => {
         appendCleanupLog(appDirOfConfig(cfg), e);
         // The portal keeps every pass too (w459): what went, why, and what was listed, where people can see it.
@@ -647,20 +652,25 @@ export class Daemon {
       const sandboxes = this.pool.list();
       const live = new Set([...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox).map((e) => e.spec!.sandbox!));
       const up = machinePlatformOf(platform);
-      const listed = hubListedEditors(up, process.env, HOME, read).map((e) => editorFolderOf(e.bin)).filter((x): x is string => !!x).map((f) => path.dirname(f));
+      // w1755: on Windows with the home folder off the install drive (C:), nothing there is read: not Unity Hub's lists, not a
+      // person's projects; an editor no sandbox or clone needs then stays, since what a person's project uses cannot be known.
+      const onDrive = (p: string) => onInstallDrive(p, this.cfg.root);
+      const homeOk = onDrive(HOME);
+      const listed = homeOk ? hubListedEditors(up, process.env, HOME, read).map((e) => editorFolderOf(e.bin)).filter((x): x is string => !!x).map((f) => path.dirname(f)) : [];
       const procs = await this.procs().catch(() => undefined);
       return {
         platform,
         home: HOME,
+        homeOffLimits: !homeOk,
         guard,
-        slotRoots: playerSlotRoots({ platform, home: HOME, workerRoot: this.cfg.root, env: process.env }),
+        slotRoots: playerSlotRoots({ platform, home: HOME, workerRoot: this.cfg.root, env: process.env }).filter(onDrive),
         host: os.hostname(),
         alive: isAlive,
         clones: [this.cfg.repoPath, ...(this.cfg.root ? [path.join(this.cfg.root, 'repo')] : [])],
         sandboxes: sandboxes.map((s) => s.path),
         busy: sandboxes.filter((s) => live.has(s.id)).map((s) => s.path),
         relax: [this.cfg.repoPath, this.sandboxRoot()].filter((x): x is string => !!x),
-        editorDirs: [...(this.cfg.unityEditorRoot ? [this.cfg.unityEditorRoot] : []), ...hubEditorDirs(up, process.env, HOME, read), ...listed],
+        editorDirs: [...(this.cfg.unityEditorRoot ? [this.cfg.unityEditorRoot] : []), ...(homeOk ? hubEditorDirs(up, process.env, HOME, read) : []), ...listed].filter(onDrive),
         procs: procs?.map((p) => p.cmd),
       };
     };
