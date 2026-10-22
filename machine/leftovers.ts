@@ -720,6 +720,16 @@ export function ownLeftovers(session: string, procs: Proc[], env: Map<number, Pr
   // not a shell: its MCP servers.
   const own = new Set([...chain].filter(ours));
   for (const p of procs) if (own.has(p.ppid) && !chain.has(p.pid) && !SHELL.test(programOf(p, platform))) sub(p.pid, skip);
+  // What this command's own shells run beside it (the shells from it up to the agent): a pipeline's `tail` or `while read`
+  // subshell, never a background job. A pipeline element bash has forked and not yet exec'd still reads as a shell with
+  // the session, so without this a loaded machine's `ff-leftovers end | tail` ended its own tail (w1758: CI's
+  // "status=0 Terminated", the list lost with it).
+  const command = new Set<number>();
+  for (const from of [selfPid, ...(o.callers ?? [])]) {
+    command.add(from);
+    for (let x = byPid.get(byPid.get(from)?.ppid ?? -1); x && !command.has(x.pid) && SHELL.test(programOf(x, platform)); x = byPid.get(x.ppid)) command.add(x.pid);
+  }
+  for (const p of procs) if (command.has(p.ppid) && !chain.has(p.pid)) sub(p.pid, skip);
   for (const u of unityProcesses(procs, platform)) if (u.kind === 'interactive') sub(u.pid, skip);
   for (const p of procs) if (!chain.has(p.pid) && !skip.has(p.pid) && ours(p.pid)) out.add(p.pid);
   return procs.filter((p) => out.has(p.pid));

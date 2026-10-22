@@ -373,6 +373,17 @@ test('ff-leftovers: a worker\'s own processes, not its own chain, not claude\'s 
   const env = new Map<number, ProcEnv>(procs.filter((p) => p.pid !== 9212 && p.pid !== 22).map((p) => [p.pid, { session: 'me' }]));
   env.set(22, { session: 'someone-else' });
   assert.deepEqual(ownLeftovers('me', procs, env, 15, 'linux').map((p) => p.pid), [16, 17, 18, 19]);
+  // w1758: what the command's own shell runs beside it is the command's, not a background job: `ff-leftovers end | tail`
+  // with tail forked and not yet exec'd (it reads as the same bash, with the session), and a `while read` subshell. CI's
+  // loaded runner ended its own tail ("status=0 Terminated", the list lost).
+  const piped: Proc[] = [
+    ...procs,
+    { pid: 23, ppid: 14, cmd: "/bin/bash -c ff-leftovers end 2>&1 | tail -20; echo status=$?" },
+    { pid: 24, ppid: 14, cmd: '/bin/bash -c ff-leftovers end' },
+    { pid: 25, ppid: 24, cmd: 'cat' },
+  ];
+  for (const p of piped.slice(-3)) env.set(p.pid, { session: 'me' });
+  assert.deepEqual(ownLeftovers('me', piped, env, 15, 'linux').map((p) => p.pid), [16, 17, 18, 19]);
 });
 
 test('ff-leftovers on Windows (w1219): Git Bash breaks the parent chain at the shim, and claude, its shell and its MCP servers are still never its leftovers', () => {
@@ -464,7 +475,9 @@ test('on this machine: `ff-leftovers end` run through its shim from a bash pipel
     // A compound command, as claude's background tasks are: bash stays (a lone \`bash -c 'sleep 600'\` execs into sleep on
     // Linux, and a non-shell child of the agent is one of its own tools, like an MCP server, so it is spared by design).
     const bg = spawn(${JSON.stringify(BASH)}, ['-c', 'sleep 600; true'], { stdio: 'ignore' });
-    setTimeout(() => execFile(${JSON.stringify(BASH)}, ['-c', ${JSON.stringify(`'${shim}' end 2>&1 | tail -20; echo "status=\${PIPESTATUS[0]}"`)}], { timeout: 120000 }, (e, out, err) => {
+    // The pipeline's reader is a subshell (w1758): a shell beside the command, as a forked tail is until it execs, which
+    // a loaded CI runner caught and ended ("status=0 Terminated"); it is the command's own and must be spared every time.
+    setTimeout(() => execFile(${JSON.stringify(BASH)}, ['-c', ${JSON.stringify(`'${shim}' end 2>&1 | while IFS= read -r l; do echo "$l"; done | tail -20; echo "status=\${PIPESTATUS[0]}"`)}], { timeout: 120000 }, (e, out, err) => {
       setTimeout(() => {
         let bgAlive = true;
         try { process.kill(bg.pid, 0); } catch { bgAlive = false; }
