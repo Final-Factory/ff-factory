@@ -21,6 +21,9 @@
  *   fourth login       asker / e2e-password-246, "Ask Tester", a member whose own orchestrator only e2e/ask.spec.ts's
  *                      answer-then-card test writes to (w1632): where the chat's view ends depends on its last message,
  *                      which another test's message would move
+ *   fifth login        scroller / e2e-password-135, "Scroll Tester", a member whose own orchestrator only
+ *                      e2e/scrollKeep.spec.ts's orchestrator test writes to: it checks that the chat's last message is in
+ *                      view, and another test's message (a question card) landing after it moved the view (w1745)
  *   dispatcher turns   POST <port + 200> (e2e/fixtures.ts, sendToChat): the only way a test makes the dispatcher take a turn
  *   Max                a mock Discord on <port + 100> (e2e/mockDiscord.ts) with a bot token in a scratch ffbox config, and
  *                      five seeded events from the gallery worker (e2e/max.spec.ts)
@@ -51,6 +54,8 @@ export const COMPACTOR = 'compactor';
 export const COMPACTOR_PASSWORD = 'e2e-password-789';
 export const ASKER = 'asker';
 export const ASKER_PASSWORD = 'e2e-password-246';
+export const SCROLLER = 'scroller';
+export const SCROLLER_PASSWORD = 'e2e-password-135';
 const withProvider = process.env.E2E_PROVIDER === '1';
 const withIntake = process.env.E2E_INTAKE === '1';
 /** The Discord user id the intake projects trust, mapped to tester (e2e/intake.spec.ts). */
@@ -247,7 +252,7 @@ fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
 // dispatcher and the machine's workers start. The portal's vault reads this file and key at its start.
 const { Vault, VAULT_FILE } = await import('../server/vault.ts');
 const vault = new Vault({ file: path.join(dataDir, VAULT_FILE), key: () => ({ file: path.join(base, 'vault.key') }) });
-for (const login of [USER, MATE, COMPACTOR, ASKER]) vault.add({ name: `vault-${login}-1`, kind: 'claude', value: fakeToken(login), owner: login, share: 'owner' });
+for (const login of [USER, MATE, COMPACTOR, ASKER, SCROLLER]) vault.add({ name: `vault-${login}-1`, kind: 'claude', value: fakeToken(login), owner: login, share: 'owner' });
 
 const { Auth } = await import('../server/auth.ts');
 const auth = new Auth(dataDir, { trustProxy: false });
@@ -255,6 +260,7 @@ await auth.setUser(USER, PASSWORD);
 await auth.setUser(MATE, MATE_PASSWORD, { displayName: 'Team Mate', role: 'member' });
 await auth.setUser(COMPACTOR, COMPACTOR_PASSWORD, { displayName: 'Compact Tester', role: 'member' });
 await auth.setUser(ASKER, ASKER_PASSWORD, { displayName: 'Ask Tester', role: 'member' });
+await auth.setUser(SCROLLER, SCROLLER_PASSWORD, { displayName: 'Scroll Tester', role: 'member' });
 fs.writeFileSync(path.join(base, 'teammate-key.txt'), auth.createApiKey('teammate-laptop', MATE));
 // FFBox's key for Max's escalations (docs/intake.md), scoped to POST /api/intake/ffbox (e2e/provider.spec.ts).
 if (withProvider) fs.writeFileSync(path.join(base, 'ffbox-key.txt'), auth.createApiKey('ffbox', undefined, 'ffbox'));
