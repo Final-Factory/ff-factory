@@ -6,7 +6,7 @@ import { HELD_MARK } from '../../../shared/conditional';
 import { checkAsk, isAskTool, type Ask } from '../../../shared/ask';
 import { AskCard, markJump } from './AskCard';
 import { holdReload } from '../freshness';
-import { keptMap, useKeptState } from '../keep';
+import { keptMap, onPageSave, useKeptState } from '../keep';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
 import { attempt, clearFocusEvent, focusEvent, focusPermission, sessionIndex, useStore } from '../store';
@@ -164,7 +164,7 @@ const dbgLog: unknown[] = ((window as unknown as { __scrollLog?: unknown[] }).__
     return [];
   }
 })());
-window.addEventListener('pagehide', () => sessionStorage.setItem('w1758.scrollLog', JSON.stringify(dbgLog.slice(-150))));
+onPageSave(() => sessionStorage.setItem('w1758.scrollLog', JSON.stringify(dbgLog.slice(-150))));
 function dbg(what: string, el: HTMLElement | null | undefined, extra: Record<string, unknown> = {}) {
   if (dbgLog.length > 400) dbgLog.splice(0, 100);
   dbgLog.push({ t: Math.round(performance.now()), what, ...(el ? { top: Math.round(el.scrollTop), sh: el.scrollHeight, ch: el.clientHeight } : {}), ...extra });
