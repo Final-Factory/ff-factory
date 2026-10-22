@@ -169,9 +169,23 @@ sandbox, its branch, the worker's conversation and its hold stay.
 - **Idle.** Each minute the portal (`LiveIdleCloser`, `server/liveIdle.ts`) looks at every running view whose daemon
   offers it (hello `liveIdleClose`). The editor closes when, for config `live.idleCloseMinutes` (default 15; 0 never; an
   owner's `set_app_config` key, applied at the next minute), every worker in that sandbox (an editor is the sandbox's) has
-  had no turn, no running tool, no background job, no permission waiting and no check-in pending (`wakeAt`, any time
-  ahead), nobody has had the view open, and no knob moved (`liveIdleBlock`). The editor must be up and running. It applies
-  to every person's views, owners' included.
+  had no turn, no background job, no permission waiting and no check-in due within 30 minutes (`wakeAt`;
+  `LIVE_IDLE_WAKE_HOLD_MS`), nobody has looked at the view, and no knob moved (`liveIdleBlock`). The editor must be up
+  and running. It applies to every person's views, owners' included.
+- **What is not activity** (w1746, after BEAST's two views stayed open on 2026-10-22: beast/slot5 on "1 page watching"
+  from a page opened at 17:15Z and left open, beast/slot3 on "b0ae73cf is running Bash" from a worker not mid-turn):
+  - A page open that nobody looks at. The page says `p` over its frame socket every 30 s while its tab is visible and
+    focused, and at each touch (pointer, key, wheel, focus; `web/src/components/LiveStage.tsx`). A page silent for 90 s
+    (`LIVE_PRESENT_MS`, `server/live.ts`) stops counting: behind other windows, on a screen nobody looks at, or on a link
+    that died without a close. The idle time runs from its last `p`, and the kept-open line says "idle 3 of 15 min (1 page
+    open, not looked at)". Coming back to that page (its next `p`) counts as opening the view: an editor closed meanwhile
+    wakes its worker. A hidden tab already closes its socket.
+  - A tool recorded on a session between turns: a tool runs only inside a turn, so only a turn (`running`, `starting`,
+    `waiting_permission`) counts. A stopped or errored session counts only for a check-in due soon.
+  - A check-in more than 30 minutes away: its wake's message starts the editor again, as such a check-in already lets a
+    sandbox take other work.
+  - A portal restart: a view the portal takes back from a daemon (`LiveHub.daemonHello`) counts its idle time from its
+    sessions' last activity, not from the restart.
 - **No work lost.** The portal sends the daemon `live` op `idleClose`; the daemon (`idleCloseEditor`,
   `machine/liveIdle.ts`) works through the editor's MCP bridge:
   1. It reads the editor's state (play mode, compiling or importing, the open scenes with unsaved changes). Unreadable (no
