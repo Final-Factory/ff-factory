@@ -156,7 +156,15 @@ const RESIZE_HOLD_MS = 1500;
 const READER_MS = 1000;
 
 // w1758 EXPERIMENT: a ring buffer of the chat's scroll decisions, read by the e2e specs when one fails.
-const dbgLog: unknown[] = ((window as unknown as { __scrollLog?: unknown[] }).__scrollLog ??= []);
+const dbgLog: unknown[] = ((window as unknown as { __scrollLog?: unknown[] }).__scrollLog ??= (() => {
+  // Kept across a reload: the page before it wrote the place that comes back.
+  try {
+    return [...(JSON.parse(sessionStorage.getItem('w1758.scrollLog') ?? '[]') as unknown[]).slice(-150), { what: '--- reload ---' }];
+  } catch {
+    return [];
+  }
+})());
+window.addEventListener('pagehide', () => sessionStorage.setItem('w1758.scrollLog', JSON.stringify(dbgLog.slice(-150))));
 function dbg(what: string, el: HTMLElement | null | undefined, extra: Record<string, unknown> = {}) {
   if (dbgLog.length > 400) dbgLog.splice(0, 100);
   dbgLog.push({ t: Math.round(performance.now()), what, ...(el ? { top: Math.round(el.scrollTop), sh: el.scrollHeight, ch: el.clientHeight } : {}), ...extra });
@@ -326,6 +334,7 @@ export const Transcript = memo(function Transcript({
     if (atBottom.current || !(hold.current || pending.current)) {
       const at = atBottom.current ? undefined : placeOf(el);
       scrollMemory.set(session.id, atBottom.current ? 'bottom' : { top: el.scrollTop, seq: at?.seq, off: at?.off ?? 0, latest: latestSeq.current });
+      dbg('mem:scroll', el, { seq: at?.seq, off: at?.off, bottom: atBottom.current });
     }
     setJump((j) => (atBottom.current ? 'none' : j === 'new' ? 'new' : dist > el.clientHeight * 0.6 ? 'far' : 'none'));
   };
@@ -495,6 +504,7 @@ export const Transcript = memo(function Transcript({
         const was = scrollMemory.get(sessionNow.current);
         const at = placeOf(box);
         if (was && was !== 'bottom' && at) scrollMemory.set(sessionNow.current, { ...was, top: box.scrollTop, seq: at.seq, off: at.off });
+        dbg('mem:ro', box, { seq: at?.seq, off: at?.off, was: JSON.stringify(was ?? null) });
       }
       // Whatever was done, the new size is the one scroll events are measured against.
       lastBox.current = { w: box.clientWidth, h: box.clientHeight };

@@ -59,8 +59,8 @@ const unknown = PICKED.filter((n) => !PROJECTS.some((p) => p.name === n));
 if (unknown.length) throw new Error(`E2E_PROJECTS names no such project: ${unknown.join(', ')}`);
 const ACTIVE = PICKED.length ? PROJECTS.filter((p) => PICKED.includes(p.name)) : PROJECTS;
 // w1758 EXPERIMENT: the scroll, freshness and replies specs again, 4 times each, on the same servers while the suite runs.
-const REPEAT = /(scrollKeep|freshness|replies)\.spec\.ts/;
-const REPS = ACTIVE.filter((p) => p.name === 'desktop-chromium' || p.name === 'mobile-safari').map((p) => ({ ...p, name: `${p.name}-rep`, only: REPEAT, repeatEach: 4 }));
+const REPEAT = /freshness\.spec\.ts/;
+const REPS = ACTIVE.filter((p) => p.name === 'mobile-safari').map((p) => ({ ...p, name: `${p.name}-rep`, only: REPEAT, repeatEach: 8 }));
 
 /** Every project's name, for scripts/e2e-legs.test.ts. */
 export const PROJECT_NAMES = PROJECTS.map((p) => p.name);
