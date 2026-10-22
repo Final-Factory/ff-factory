@@ -1371,8 +1371,9 @@ the `ff-agents` plugin (repo final-factory-agents). The briefs hold only what ev
 build players run (a Steam branch, a build number) rests on running that build, or a build of its exact commit, with the
 feature opened; from a grep, git or a past report it is a guess that names the build to run. Every worker's brief says so
 in `EVIDENCE_RULES`, with the DONE lines of a player-facing fix (`Ships in:` and `pre-1.0:`); the person's orchestrator's
-"How to work" adds that when its person asks it to investigate, a doubt its quick look leaves becomes reproduce work
-filed in the same turn, never a confident answer. Ben, after the Load screen's Saves/Autosaves tabs (PR #1760) were
+"How to work" carries a one-line trigger: when its person asks it to investigate, it investigates, and before it says
+what a build players run holds it reads `read_rules builds` (`rulesText`), where a doubt its quick look leaves becomes
+reproduce work filed in the same turn, never a confident answer. Ben, after the Load screen's Saves/Autosaves tabs (PR #1760) were
 called present in the 1.0 development build from a code grep, and in Build 111 from git: "My playtesters who are all on
 the 1.0 development branch are saying it's not there, so you're lying to me, or you didn't actually check." The full
 rule and the report check (`build_claim_check.py`) are the ff-agents `evidence-gate` skill's

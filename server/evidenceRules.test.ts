@@ -180,13 +180,17 @@ test("w1770: what players run is checked by running it, in every worker's brief 
   assert.match(EVIDENCE_RULES, /from a grep, git or a past report it is a guess that names the build to run/);
   assert.match(EVIDENCE_RULES, /Asked to investigate, settle any doubt your quick look leaves with that run/);
   assert.match(EVIDENCE_RULES, /A DONE for a player-facing fix names the Steam branch and build that carry it \(`Ships in:`\) and whether pre-1\.0 needs a cherry-pick \(`pre-1\.0:`\)/);
-  // The person's orchestrator: investigate when asked, file the reproduce work in the same turn, never answer from a grep.
+  // The person's orchestrator: the trigger in its brief, the rule in read_rules builds.
   const personal = (agents.orchestratorOptions(agents.orchestrators.personalFor(BEN).info) as { systemPrompt: { append: string } }).systemPrompt.append;
-  assert.match(personal, /When Ben asks you to investigate or find out what happened, investigate: a grep, git or a past report is where you start, not the answer/);
-  assert.match(personal, /Never tell Ben a feature or fix is, or isn't, in a build players run \(a Steam branch, a build number\) from code, git or a worker's git check/);
-  assert.match(personal, /file the reproduce work in the same turn \(request_work: run that build, or a build of its exact commit, and open the feature\)/);
-  assert.match(personal, /names the Steam branch and build that carry it and whether pre-1\.0 needs a cherry-pick/);
-  assert.match(personal, /lessons\/whats-in-a-players-build-is-checked-by-running-it\.md/);
+  assert.match(personal, /Asked to investigate or find out what happened, investigate \(w1770\): a grep, git or a past report is where you start, never the answer/);
+  assert.match(personal, /comes only from running it: `read_rules builds` before you tell Ben, and when your quick look leaves any doubt, file the run in the same turn/);
+  const rule = agents.rulesText('builds', BEN);
+  assert.match(rule, /When Ben asks you to investigate or find out what happened, investigate: a grep, git or a past report is where you start, not the answer/);
+  assert.match(rule, /Never tell Ben a feature or fix is, or isn't, in a build players run \(a Steam branch, a build number\) from code, git or a worker's git check/);
+  assert.match(rule, /file the reproduce work in the same turn \(request_work: run that build, or a build of its exact commit, and open the feature\)/);
+  assert.match(rule, /names the Steam branch and build that carry it \(`Ships in:`\) and whether pre-1\.0 needs a cherry-pick \(`pre-1\.0:`\)/);
+  assert.match(rule, /you're lying to me, or you didn't actually check/);
+  assert.match(rule, /lessons\/whats-in-a-players-build-is-checked-by-running-it\.md/);
 });
 
 test('every agent a person hears from is told to say what each id is, every time (w302)', (t) => {

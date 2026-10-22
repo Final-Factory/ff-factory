@@ -2,5 +2,5 @@
   are saying it's not there, so you're lying to me, or you didn't actually check."). Every worker's brief
   (`EVIDENCE_RULES`) says a claim that a feature or fix is, or isn't, in a build players run rests on running that build
   or its exact commit, and that a player-facing fix's DONE names `Ships in:` and `pre-1.0:`; the person's orchestrator's
-  "How to work" adds that a request to investigate is investigated, with the reproduce work filed in the same turn when a
-  quick look leaves doubt. The full rule is the ff-agents evidence-gate lesson.
+  "How to work" says a request to investigate is investigated, and its new `read_rules builds` topic files the reproduce
+  work in the same turn when a quick look leaves doubt (the owner's brief cap moved to 27,900 for the trigger line). The full rule is the ff-agents evidence-gate lesson.
