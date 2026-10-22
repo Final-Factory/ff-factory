@@ -909,8 +909,11 @@ async function twoSandboxes(t: { after: (fn: () => void | Promise<void>) => void
     clearInterval(agents.placeAgainTick);
     daemon.shutdown();
     server.close();
-    await new Promise((res) => setTimeout(res, 300));
+    // The link's close comes after the last update the daemon sent; then the saves land before the folders go (w1758: a
+    // fixed 300 ms wait here was a guess at it, which a slow Windows runner can outlast).
+    await until('the daemon gone', () => !mm.isOnline('pc'), 5000).catch(() => undefined);
     store.flush();
+    await store.saved();
     r.cleanup();
   });
   daemon.start();

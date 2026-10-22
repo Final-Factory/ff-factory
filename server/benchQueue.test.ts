@@ -73,15 +73,24 @@ test('w1615: queueTickets lists live tickets in order; heldTicket only a granted
   assert.equal(heldTicket(lock, {}, alive), undefined);
 });
 
-/** A stand-in for `bench_queue.py hold`: says waiting, then granted after GRANT_MS, then released on <status>.release. */
+/**
+ * A stand-in for `bench_queue.py hold`: says waiting, then granted when the test writes <status>.grant, then released on
+ * <status>.release. It also ends when the test's folder is gone: a test that fails before its release would otherwise
+ * leave it running, and its stderr pipe holds the test file's process open until the run's deadline (w1758: the Windows
+ * daily run of 2026-10-22 hung 15 min on one).
+ */
 const FAKE = `
-const fs = require('fs');
+const fs = require('fs'); const path = require('path');
 const a = process.argv.slice(2); const st = a[a.indexOf('--status') + 1];
 const say = (l) => fs.writeFileSync(st, l + '\\n');
 say('waiting t00000002: shared ticket, place 2, waiting for t00000001 exclusive probe');
 if (process.env.FAKE_FAIL) process.exit(3);
-setTimeout(() => { say('granted t00000002 shared pid ' + process.pid);
-  const iv = setInterval(() => { if (fs.existsSync(st + '.release')) { say('released t00000002'); clearInterval(iv); } }, 20); }, Number(process.env.GRANT_MS || 0));
+let granted = false;
+const iv = setInterval(() => {
+  if (!fs.existsSync(path.dirname(st))) process.exit(0);
+  if (!granted && fs.existsSync(st + '.grant')) { granted = true; say('granted t00000002 shared pid ' + process.pid); }
+  else if (granted && fs.existsSync(st + '.release')) { say('released t00000002'); clearInterval(iv); }
+}, 20);
 `;
 
 test('w1615: BenchTicket runs the helper for this process, hears its place, its grant and its failure, and releases through the file', async (t) => {
@@ -89,10 +98,15 @@ test('w1615: BenchTicket runs the helper for this process, hears its place, its 
   const script = path.join(dir, 'fake.cjs');
   fs.writeFileSync(script, FAKE);
   const lines: string[] = [];
-  const k = new BenchTicket({ script, lock: path.join(dir, 'bench.lock'), mode: 'shared', what: 'unity: build', python: process.execPath, tempDir: dir, env: { ...process.env, GRANT_MS: '300' } }).take();
-  const first = await k.wait(50);
-  assert.equal(first.kind, 'waiting');
-  const s = await k.wait(10_000, (l) => lines.push(l));
+  const k = new BenchTicket({ script, lock: path.join(dir, 'bench.lock'), mode: 'shared', what: 'unity: build', python: process.execPath, tempDir: dir }).take();
+  // Its first line, however long its node takes to start (w1758: over 50 ms on Windows, where a fixed wait read
+  // 'taking a ticket'), and granted only once the test has heard it.
+  const started = Date.now() + 10_000;
+  while (k.state().line === 'taking a ticket' && Date.now() < started) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(k.state().kind, 'waiting');
+  const granted = k.wait(10_000, (l) => lines.push(l));
+  fs.writeFileSync(`${k.status}.grant`, '');
+  const s = await granted;
   assert.deepEqual(s.kind === 'granted' && s.ticket, 't00000002');
   assert.match(lines[0], /place 2, waiting for t00000001/);
   k.release();
