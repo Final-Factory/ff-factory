@@ -188,9 +188,12 @@ sandbox, its branch, the worker's conversation and its hold stay.
   A skipped close is asked again after another idle period. The crash watch is told first, so the quit is not restarted.
 - **Shown and logged.** A closed sandbox carries `idleClosed` (`MachineSandbox`, kept in the daemon's `sandboxes.json`):
   list_sandboxes shows "editor closed: idle 15 min; reopens on resume (closed HH:MMZ, saved ... first)" in place of
-  `unity stopped`, system_status has a "Live view idle close" line with the setting and the editors closed now, and the
-  view holds with "editor closed: idle 15 min; reopens on resume". The portal journal has a `[live] live idle:` line for
-  each close or skip and each reopen (`portal_logs` grep `live idle`); the daemon's log has the same with `live:`.
+  `unity stopped`, system_status has a "Live view idle close" line with the setting, the editors closed now and each view
+  kept open with why ("kept open: beast/slot5 (1 page watching)"), and the view holds with "editor closed: idle 15 min;
+  reopens on resume". The portal journal has a `[live] live idle:` line for each close or skip, each reopen, and each
+  view kept open when the kind of reason changes ("stays open: 1 page watching", "stays open: idle 0 of 15 min": the
+  count up is not logged each minute) (`portal_logs` grep `live idle`); the daemon's log has the same with `live:`. A view
+  that looks idle and has no line is not in the portal's list (its daemon has not reported it since the portal started).
 - **Reopened.** The next message to any worker in that sandbox (a person's, a check-in, a resume) starts the editor
   (`Daemon.reopenIdle`) and begins with a `[live view]` line: when it closed, what it saved, and to stage the view again
   before answering; the view streams again by itself once the game is in play mode. A person who opens a view whose editor

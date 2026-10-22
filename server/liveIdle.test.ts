@@ -111,7 +111,8 @@ test('w1746: the sweep asks once, logs the close, wakes the worker once when a p
   // The daemon reopened it at that turn: the sweep logs it, and a later close can wake the worker again.
   k.sb = sandbox({ unity: { state: 'starting' } });
   await k.c.sweep();
-  assert.match(k.logs.at(-1)!, /^live idle: beast\/slot5: its editor opened again \(unity starting\)$/);
+  assert.match(k.logs.at(-2)!, /^live idle: beast\/slot5: its editor opened again \(unity starting\)$/);
+  assert.equal(k.logs.at(-1), "live idle: beast/slot5: w1's Live view stays open: its editor is starting");
 });
 
 test('w1746: a skipped close (unsaved changes it could not save) is logged and asked again only after another idle period', async () => {
@@ -140,4 +141,31 @@ test('w1746: system_status says the rule and the editors closed now', () => {
   assert.equal(liveIdleStatusLine(true, 15, m), 'Live view idle close: a Live view idle 15 min has its editor closed (live.idleCloseMinutes); editor closed: idle; reopens on resume: beast/slot5 (since 14:00Z).');
   assert.equal(liveIdleStatusLine(true, 15, [{ id: 'beast', sandboxes: [] }]), 'Live view idle close: a Live view idle 15 min has its editor closed (live.idleCloseMinutes); no editor closed now.');
   assert.equal(liveIdleStatusLine(false, 15, m), undefined);
+});
+
+test('w1746: a view kept open says why, in the journal once per kind of reason and in system_status', async () => {
+  const k = closer();
+  k.v.viewers = 1;
+  await k.c.sweep();
+  await k.c.sweep();
+  assert.deepEqual(k.logs, ["live idle: beast/slot5: w1's Live view stays open: 1 page watching"], 'logged once while the reason holds');
+  assert.deepEqual(k.c.keptOpen(), ['beast/slot5 (1 page watching)']);
+  assert.equal(
+    liveIdleStatusLine(true, 15, [{ id: 'beast', sandboxes: [k.sb] }], k.c.keptOpen()),
+    'Live view idle close: a Live view idle 15 min has its editor closed (live.idleCloseMinutes); no editor closed now; kept open: beast/slot5 (1 page watching).',
+  );
+  // The page closed a moment ago: the idle count logs once, not every minute it counts up.
+  k.v.viewers = 0;
+  k.v.watchedAt = NOW;
+  await k.c.sweep();
+  k.advance(min(1));
+  await k.c.sweep();
+  assert.deepEqual(k.logs.slice(1), ["live idle: beast/slot5: w1's Live view stays open: idle 0 of 15 min"]);
+  assert.deepEqual(k.c.keptOpen(), ['beast/slot5 (idle 1 of 15 min)']);
+  // Idle long enough: the close is asked and the view is no longer listed as kept open.
+  k.advance(min(15));
+  await k.c.sweep();
+  await k.settle();
+  assert.equal(k.asked.length, 1);
+  assert.deepEqual(k.c.keptOpen(), []);
 });

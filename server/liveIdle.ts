@@ -78,6 +78,8 @@ export class LiveIdleCloser {
   private readonly closed = new Set<string>();
   /** Sandboxes whose worker a viewer already woke since the close. */
   private readonly woken = new Set<string>();
+  /** Why each view's editor stays open now ("machine/sandbox" → reason), for the log and system_status. */
+  private readonly why = new Map<string, string>();
   private running = false;
   private readonly d: LiveIdleDeps;
 
@@ -124,12 +126,25 @@ export class LiveIdleCloser {
       const sb = this.d.sandbox(v.machineId, v.sandbox);
       if (sb?.idleClosed) {
         this.closed.add(key);
+        this.why.delete(key);
         continue;
       }
-      if (this.closing.has(v.liveId) || !this.d.canClose(v.machineId)) continue;
+      if (this.closing.has(v.liveId)) continue;
+      if (!this.d.canClose(v.machineId)) {
+        this.keep(key, v, `${v.machineId}'s daemon does not close editors yet (it needs a daemon update)`);
+        continue;
+      }
       const block = liveIdleBlock(v, { sandbox: sb, sessions: this.sessionsOf(v, sb), wakePending: (id) => this.d.wakePending(id) }, now, minutes);
-      if (block) continue;
-      if (now - (this.tried.get(v.liveId) ?? -Infinity) < minutes * 60_000) continue;
+      if (block) {
+        this.keep(key, v, block);
+        continue;
+      }
+      const tried = this.tried.get(v.liveId);
+      if (tried !== undefined && now - tried < minutes * 60_000) {
+        this.keep(key, v, `its last close was skipped ${Math.floor((now - tried) / 60_000)} min ago; asked again after ${minutes} min`);
+        continue;
+      }
+      this.why.delete(key);
       this.tried.set(v.liveId, now);
       this.closing.add(v.liveId);
       // Not awaited: a close takes up to a few minutes (leaving play mode, saving, the quit), and other views go meanwhile.
@@ -146,6 +161,24 @@ export class LiveIdleCloser {
     }
     const live = new Set(views.map((v) => v.liveId));
     for (const id of [...this.tried.keys()]) if (!live.has(id)) this.tried.delete(id);
+    const keys = new Set(views.map((v) => `${v.machineId}/${v.sandbox}`));
+    for (const key of [...this.why.keys()]) if (!keys.has(key)) this.why.delete(key);
+  }
+
+  /**
+   * A view's editor stays open: logged when the kind of reason changes (numbers aside, so "idle 3 of 15 min" counting up
+   * logs once), so the journal says why a view that looks idle was not closed.
+   */
+  private keep(key: string, v: LiveIdleView, reason: string) {
+    const was = this.why.get(key);
+    this.why.set(key, reason);
+    const kind = (r: string) => r.replace(/\d+/g, '#');
+    if (was === undefined || kind(was) !== kind(reason)) this.d.log(`live idle: ${key}: ${v.sessionId}'s Live view stays open: ${reason}`);
+  }
+
+  /** The views whose editor stays open now, each with why ("beast/slot5 (1 page watching)"), for system_status. */
+  keptOpen(): string[] {
+    return [...this.why].map(([key, reason]) => `${key} (${reason})`);
   }
 
   /**
@@ -177,9 +210,9 @@ export function idleClosedPart(sb: Pick<MachineSandbox, 'idleClosed'>): string |
 }
 
 /** system_status's line (w1746): the setting, and the editors closed idle now. Undefined while the live view is off. */
-export function liveIdleStatusLine(enabled: boolean, minutes: number, machines: { id: string; sandboxes?: MachineSandbox[] }[]): string | undefined {
+export function liveIdleStatusLine(enabled: boolean, minutes: number, machines: { id: string; sandboxes?: MachineSandbox[] }[], keptOpen: string[] = []): string | undefined {
   if (!enabled) return undefined;
   const closed = machines.flatMap((m) => (m.sandboxes ?? []).filter((s) => s.idleClosed).map((s) => `${m.id}/${s.id} (since ${s.idleClosed!.at.slice(11, 16)}Z)`));
   const rule = minutes > 0 ? `a Live view idle ${minutes} min has its editor closed (live.idleCloseMinutes)` : 'off (live.idleCloseMinutes 0)';
-  return `Live view idle close: ${rule}; ${closed.length ? `editor closed: idle; reopens on resume: ${closed.join(', ')}` : 'no editor closed now'}.`;
+  return `Live view idle close: ${rule}; ${closed.length ? `editor closed: idle; reopens on resume: ${closed.join(', ')}` : 'no editor closed now'}${keptOpen.length ? `; kept open: ${keptOpen.join(', ')}` : ''}.`;
 }
