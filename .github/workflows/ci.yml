@@ -168,7 +168,17 @@ jobs:
             echo "::warning::Rendering visual baselines instead of comparing them; commit the linux-snapshots artifact into e2e/__screenshots__/."
           fi
       - name: This job's browser and its system libraries (both when rendering baselines)
+        id: browser
         if: steps.need.outputs.run == 'true'
+        # 22 s median in Chromium and 37 s in WebKit, 55 s at most over 60 jobs of 2026-10-21/22 (w1758, measured). The Ubuntu
+        # mirror sometimes hangs apt-get update instead: 3 WebKit jobs on 2026-10-22 sat in it until the job's 20-minute
+        # timeout, and others took 207 and 827 s. Give up after 4 minutes and try once more, as w922 did before w1194 lost it.
+        timeout-minutes: 4
+        continue-on-error: true
+        run: npx playwright install --with-deps ${{ steps.snap.outputs.update == 'true' && 'chromium webkit' || matrix.browser }}
+      - name: This job's browser and its system libraries (again, after a hung mirror)
+        if: steps.need.outputs.run == 'true' && steps.browser.outcome != 'success'
+        timeout-minutes: 6
         run: npx playwright install --with-deps ${{ steps.snap.outputs.update == 'true' && 'chromium webkit' || matrix.browser }}
       - name: Build the web UI
         if: steps.need.outputs.run == 'true'

@@ -34,3 +34,27 @@ test('e2e legs: every Playwright project runs in exactly one of ci.yml\'s e2e le
   }
   for (const x of named) assert.ok(PROJECT_NAMES.includes(x), `ci.yml names ${x}, which is no project in playwright.config.ts`);
 });
+
+/** The steps of ci.yml's e2e job that run `playwright install`: their names, `timeout-minutes` and `if`. */
+export function installSteps(yml: string): { name: string; timeout?: number; cond: string }[] {
+  const e2e = /^  e2e:\n((?:(?: {4}.*)?\n)+)/m.exec(yml)?.[1] ?? '';
+  return e2e
+    .split(/^ {6}- /m)
+    .slice(1)
+    .filter((s) => /playwright install/.test(s))
+    .map((s) => ({
+      name: /^name: (.+)$/m.exec(s)?.[1] ?? '',
+      timeout: Number(/^ {8}timeout-minutes: (\d+)$/m.exec(s)?.[1]) || undefined,
+      cond: /^ {8}if: (.+)$/m.exec(s)?.[1] ?? '',
+    }));
+}
+
+// The Ubuntu mirror sometimes hangs apt-get update inside `playwright install --with-deps` for the job's whole 20 minutes
+// (3 WebKit jobs on 2026-10-22). w922 gave the step a time limit and a second try; w1194's move back to GitHub's runners
+// dropped both, unseen (w1758). Each try has its own limit, and a second one runs after a first that did not succeed.
+test('e2e legs: the browser install gives up on a hung mirror and tries again', () => {
+  const steps = installSteps(fs.readFileSync(WORKFLOW, 'utf8').replace(/\r\n/g, '\n'));
+  assert.ok(steps.length >= 2, `ci.yml installs the browsers in ${steps.length} step(s): a first try and a second after it`);
+  for (const s of steps) assert.ok(s.timeout && s.timeout <= 6, `"${s.name}" has timeout-minutes ${s.timeout ?? 'unset'} (at most 6)`);
+  assert.ok(steps.slice(1).every((s) => /outcome != 'success'/.test(s.cond)), 'the later tries run only after one that did not succeed');
+});
