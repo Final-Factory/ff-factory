@@ -49,6 +49,7 @@ import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryRootOf, pruneMemoryTrash } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
+import { TokenSwitch, orchestratorOut, type RateLimitInfo } from './tokenSwitch.ts';
 import { accountSetupLines, addSecretEnv, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
 import { scrubAtStart } from './scrubSecrets.ts';
 import { CliScrubber } from './cliScrub.ts';
@@ -2474,7 +2475,7 @@ agents.usagePollChanged = () => {
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
-  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {
@@ -2579,6 +2580,56 @@ agents.tokenUnusable = (account) => {
   }
   return undefined;
 };
+// w1745: a token Claude refuses is out until that window's reset; its agents move to a token with room in their person's pool at
+// their next turn (accountMove above), one the limit stopped is resumed there at once, or held when the pool has no room, and
+// each switch is logged on the request and in system_status (server/tokenSwitch.ts, docs/vault.md "When a token runs out").
+const tokenLabel = (account: string) => {
+  const e = vault.list().find((x) => x.kind === 'claude' && `token:${x.fingerprint}` === account);
+  return e ? `${e.name} …${e.last4}` : undefined;
+};
+const poolViews = () => [...gatePoolsRaw()].map(([person, list]) => [person, list.map((t) => ({ key: `token:${t.entry.fingerprint}`, label: `${t.entry.name} …${t.entry.last4}`, state: t.view.state, why: t.view.why }))] as const);
+agents.orchestratorTokenOut = (account, pool) => orchestratorOut(poolViews(), account, pool);
+const tokenSwitch = new TokenSwitch({
+  file: path.join(cfg.dataDir, 'token-switches.json'),
+  label: tokenLabel,
+  meters: (account) => usage.usageOf(account),
+  markOut: (account, mark, label) => usage.markOut(account, mark, label),
+  serves: (s) => {
+    // A standing agent's new run picks its token at its start, and waits for its pool when no token has room (w1126).
+    if (s.kind === 'standing') return true;
+    if (s.kind !== 'orchestrator') return limitsClearFor(s);
+    const person = agents.orchestrators.ownerOf(s)?.userId;
+    return !!person && !!s.account && !!orchestratorOut(poolViews(), s.account, agents.poolOf(person));
+  },
+  resume: (s, text) => {
+    try {
+      if (s.kind === 'standing' && s.standingId) agents.standing.runNow(s.standingId, 'manual', text);
+      else void sessions.send(s.id, text, 'system');
+    } catch (e) {
+      console.warn(`token switch (w1745): could not resume ${s.kind} ${s.id}: ${(e as Error).message}`);
+    }
+  },
+  hold: (s, ref, what) => agents.orchestrators.tokenStopBlocked(s.id, { ref, what }, { stamp: "stopped on its Claude token's usage limit (w1745)", told: "stopped on its Claude token's usage limit" }),
+  note: (s, line) => agents.orchestrators.noteOnHeld(s.id, line),
+  log: (line) => console.log(line),
+});
+agents.accountMoving = (info, why) => tokenSwitch.moving(info, why);
+if (!isDryRun) {
+  sessions.events.on('rateLimit', (s: { info: SessionInfo }, info: RateLimitInfo) => tokenSwitch.rateLimit(s.info, info));
+  // A machine's session reports its last result beside the turn's end: read it a moment later, from the store.
+  sessions.events.on('turnEnd', (s: { info: SessionInfo }) => {
+    const id = s.info.id;
+    setTimeout(() => {
+      const info = store.sessions.get(id);
+      if (info) tokenSwitch.turnEnded(info);
+    }, 3_000).unref();
+  });
+  bus.on('event', (e: ServerEvent) => {
+    if (e.type === 'session') tokenSwitch.seen(e.session);
+  });
+}
+const tokenSwitchLines = () =>
+  tokenSwitch.statusLines(usage.outsNow(), (key) => [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error').map((s) => `${s.kind} ${s.id}`));
 if (!isDryRun) setInterval(() => tokenStop.tick(), 30_000).unref();
 const outsideWatchLines = () => {
   const w = watcher();

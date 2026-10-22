@@ -993,6 +993,14 @@ LothDesktop and Beast, not just when BEAST is full").
     start` with "Not now (w1600)" and waits (wake_me) for the lock: a Live view editor in play mode takes CPU and GPU the
     run measures, and a lower process priority would still share the GPU, so it waits rather than run lower. Other editors
     are the bench's own quiet gate's business.
+  - **No players or clips beside a timed run** (w1750, lothsahn: "Why is the game player running if the worker has an
+    exclusive lock on beast?"). While another worker's granted exclusive ticket holds a machine's lock, the shell guard
+    refuses a command that starts a built player by its slot path or grabs the screen with ffmpeg, naming the holder and
+    the end of its hold (`server/guard.ts` `checkBenchBusyLaunch`, `machine/benchLock.ts` `foreignTimedHold`). The
+    worker's own session passes; dead, revoked, overdue, waiting and shared tickets never block. The game repo's
+    `player_slots.py` (every scripted launch) and ff-agents `record_clip` check the same lock and can wait
+    (`--bench-wait`, `FF_BENCH_WAIT_S`): the game repo's `Documentation/Bench-Lock.md`, "No players or clips beside a timed
+    run". Tests: `server/benchBusy.test.ts`.
   - Tests: `server/placement.test.ts`, `server/benchLock.test.ts`, the w1600 case in `server/orchestrators.test.ts`.
 - **Builds run on BEAST first, and a coming build clears it** (w1606, Ben, 2026-10-20: "when you know builds are coming
   up, we also prioritize using beast for builds because its faster. so when it's coming time, move work off beast, or

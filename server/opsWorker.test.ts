@@ -214,7 +214,7 @@ async function fakeSocket(reply: (header: string) => string | undefined) {
     });
     c.on('end', () => c.end());
   });
-  await new Promise<void>((r) => server.listen(p, r));
+  await new Promise<void>((r) => server.listen({ path: p }, () => r()));
   return { path: p, headers, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
 
@@ -336,7 +336,7 @@ async function fakeSystemd(o: { exitMs: number; unitLagMs: number }) {
       if (!turn) exit();
     });
   });
-  await new Promise<void>((r) => server.listen(p, r));
+  await new Promise<void>((r) => server.listen({ path: p }, () => r()));
   return { path: p, log, most: () => most, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
 

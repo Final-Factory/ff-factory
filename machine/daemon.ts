@@ -52,6 +52,7 @@ import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import type { SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { installPrShim } from './prFlow.ts';
+import { agentNodePathDir } from '../server/agentNode.ts';
 import { ghAppPaths, ghAppRunEnv, installGhAppShims, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -1358,10 +1359,13 @@ export class Daemon {
   slotEnv(spec: Pick<LaunchSpec, 'sandbox' | 'cwd'>): Record<string, string> {
     const env: Record<string, string> = { FF_UNITY_SLOTS: this.slots.dir };
     if (spec.sandbox) env.FF_UNITY_HOLDER = `sandbox:${spec.sandbox}`;
-    if (this.slotBin) {
+    // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
+    // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
+    const first = [this.slotBin, agentNodePathDir(this.cfg.root)].filter((d): d is string => !!d);
+    if (first.length) {
       // Windows keeps it as "Path": the same key, or the agent would get two.
       const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
-      env[key] = [this.slotBin, process.env[key]].filter(Boolean).join(path.delimiter);
+      env[key] = [...first, process.env[key]].filter(Boolean).join(path.delimiter);
     }
     return env;
   }
