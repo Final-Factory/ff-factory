@@ -139,7 +139,8 @@ before redeploying by hand.
   with the biggest remaining consumers. Every pass is logged to `cleanup-log.jsonl` in the daemon's folder. On a machine with a
   worker install (`root`), clean-up removes only what is inside the install folder; what its rules pick outside it is measured
   and listed ([self-recovery.md](self-recovery.md#where-clean-up-may-delete-w896), w896), except on Windows, where nothing
-  off the install drive (C:) is measured, listed or named in a notice, and a worker's scan there is refused
+  off the install drive (C:) is read, measured, listed or named in a notice, and a worker's scan there is refused, apart from
+  reading the game's AppData `Never Games` folders, which nothing modifies
   ([self-recovery.md](self-recovery.md#windows-the-install-drive-only-w1755), w1755).
   `machine_cleanup` runs a pass now.
 - **Standing agents** run on a machine and need one ([standing-agents.md](standing-agents.md)): their folder is `agents/<id>` in the daemon's folder

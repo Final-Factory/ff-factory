@@ -12,6 +12,10 @@ import path from 'node:path';
  * it does not know; those are the instructions' job (DISK_HYGIENE in server/agents.ts, docs/self-recovery.md "Where clean-up
  * may delete").
  *
+ * On Windows the game's data folders under AppData (inNeverGames) are read-only besides: a move, rename, copy into them or
+ * write there is refused too (w1755, lothsahn, 2026-10-22: "Let's let it scan the never games folder, but not the rest of C.
+ * And it shouldn't modify it."), apart from the worker's own save copy.
+ *
  * What stays allowed: anything strictly inside the install folder or inside `allow` (the worker's own sandbox), the agent's
  * own temp (`$TMP`, `$env:TEMP`, `%TEMP%`, `/tmp`), and an entry of the game's saves folder (a save copy the worker put there,
  * which its brief tells it to remove again). Unknown text (an unset variable, `$(...)`, a path on a mount it cannot map) is not
@@ -46,6 +50,12 @@ const SHELL_PAYLOAD_FLAGS = new Set(['-c', '-lc', '-ic', '-command', '/c', '/k']
 /** PowerShell parameters (and rm's) whose next word is a value, not a path. */
 const VALUE_FLAGS = new Set(['-erroraction', '-ea', '-include', '-exclude', '-filter', '-stream', '-credential']);
 const PATH_FLAGS = new Set(['-path', '-literalpath', '-lp']);
+/** Verbs that change every path they name: a move or rename takes the source away and writes the destination (w1755). */
+const MOVE_VERBS = new Set(['mv', 'move', 'move-item', 'mi', 'ren', 'rename', 'rename-item', 'rni']);
+/** Verbs that write their destination (the last path, or -Destination's). */
+const COPY_VERBS = new Set(['cp', 'copy', 'copy-item', 'cpi', 'xcopy']);
+/** Verbs that write or create every path they name. */
+const WRITE_VERBS = new Set(['set-content', 'add-content', 'ac', 'out-file', 'new-item', 'ni', 'clear-content', 'clc', 'clear-item', 'cli', 'set-item', 'tee', 'tee-object', 'touch', 'mkdir', 'md', 'truncate']);
 
 const TMP_VAR = /^(?:\$env:(?:tmp|temp)|\$\{?(?:tmp|temp|tmpdir)\}?|%(?:tmp|temp)%)(?=$|[\\/])/i;
 /**
@@ -235,11 +245,28 @@ export function checkOutsideRootDelete(cmd: string, ctx: RootFenceContext): stri
     return !!tag && !!m && m[1].startsWith(`${tag}-`) && m[1].length > tag.length + 1 && !unquote(raw).replace(/\\/g, '/').split('/').includes('..');
   };
 
+  /** On Windows the game's data folders under AppData are read-only: no delete, move, rename or write there (w1755). */
+  const neverGames = (raw: string, n: string): string | undefined =>
+    win && inNeverGames(n, home) && !ownSave(raw, n)
+      ? `Refused: ${unquote(raw)} is in the game's data folder under AppData (Never Games). On this Windows computer it may be read and measured, ` +
+        `never modified (lothsahn, 2026-10-22, w1755: "Let's let it scan the never games folder, but not the rest of C.  And it shouldn't modify it."): no delete, move, rename, copy into it or write there, by a clean-up ` +
+        `or any other disk work. A test's saves and settings go in and out through the game repo's \`python scripts/game_data.py\` (\`read_rules saves\`); ` +
+        `the one thing you may put there and remove again is your own save copy, named after your temp folder (\`ffa-<session>-<name>.zip\` in its saves folder).`
+      : undefined;
+
+  /** A path a move, copy or write changes: refused only in the game's data folders (the rest is not this fence's). */
+  const judgeWrite = (raw: string): string | undefined => {
+    const n = resolvePath(raw, { home, cwd: dir, win });
+    return n === undefined || n === 'ok' ? undefined : neverGames(raw, n);
+  };
+
   const judge = (raw: string): string | undefined => {
     const n = resolvePath(raw, { home, cwd: dir, win });
     if (n === undefined || n === 'ok') return undefined;
     if (allowed.some((a) => strictlyInside(n, a))) return undefined;
     if (ownSave(raw, n)) return undefined;
+    const ng = neverGames(raw, n);
+    if (ng) return ng;
     const why = allowed.includes(n) ? `${unquote(raw)} is the install folder itself` : `${unquote(raw)} is outside this machine's worker install folder (${ctx.root})`;
     const outside = win
       ? `On this Windows computer disk work stays on the install drive (${driveLabel(ctx.root)}): never read, measure or touch C: or another drive ` +
@@ -310,11 +337,50 @@ export function checkOutsideRootDelete(cmd: string, ctx: RootFenceContext): stri
           const r = judge(t);
           if (r) return r;
         }
+        if (win) {
+          for (const t of [...changedPaths(verb, args), ...redirects(w)]) {
+            const r = judgeWrite(t);
+            if (r) return r;
+          }
+        }
       }
     }
     return undefined;
   };
   return run(cmd);
+}
+
+/** The paths a move, copy, robocopy or write changes (w1755): the game's data folders under AppData are never one of them. */
+function changedPaths(verb: string, args: string[]): string[] {
+  if (MOVE_VERBS.has(verb) || WRITE_VERBS.has(verb)) return pathsOf(verb, args);
+  if (COPY_VERBS.has(verb)) {
+    const k = args.findIndex((a) => /^-(?:destination|dest|target-directory)$|^--target-directory$|^-t$/i.test(unquote(a).replace(/[:=].*$/, '')));
+    if (k >= 0) {
+      const inline = /^-{1,2}[a-z-]+[:=](.+)$/i.exec(unquote(args[k]))?.[1];
+      return [inline ?? unquote(args[k + 1] ?? '')].filter(Boolean);
+    }
+    return pathsOf(verb, args).filter((a) => !/^\/[a-zA-Z](?::.*)?$/.test(a)).slice(-1);
+  }
+  if (verb === 'robocopy') {
+    const flags = args.map(unquote).filter((a) => a.startsWith('/'));
+    if (flags.some((f) => /^\/l$/i.test(f))) return [];
+    const [src, dst] = args.map(unquote).filter((a) => !a.startsWith('/'));
+    const moves = flags.some((f) => /^\/(?:mov|move|purge|mir)$/i.test(f));
+    return [dst, ...(moves ? [src] : [])].filter((x): x is string => !!x);
+  }
+  return [];
+}
+
+/** The files a statement's output redirections write (`> x`, `>> x`, `2>x`, `*> x`); `2>&1` writes none. */
+function redirects(w: string[]): string[] {
+  const out: string[] = [];
+  for (let k = 0; k < w.length; k++) {
+    const m = /^(?:\d|\*)?>>?\|?(.*)$/.exec(w[k]);
+    if (!m) continue;
+    const t = m[1] || w[++k];
+    if (t && !t.startsWith('&')) out.push(t);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- Windows: the install drive only (w1755)
@@ -327,6 +393,22 @@ export function installDrive(root: string | undefined): string | undefined {
 
 /** `V:` for a Windows install folder, the folder itself for a POSIX one. */
 export const driveLabel = (root: string) => (installDrive(root) ? `${installDrive(root)!.toUpperCase()}:` : root);
+
+/**
+ * Whether `p` is in one of the game's data folders under a Windows profile's AppData, the one exception to the install drive
+ * rule (w1755, lothsahn, 2026-10-22: "Let's let it scan the never games folder, but not the rest of C.  And it shouldn't
+ * modify it." and "By never games I mean in appdata"): `AppData\LocalLow\Never Games` (the game's saves, settings and logs),
+ * `AppData\Local\Never Games` and `AppData\Roaming\Never Games`, of any profile in the folder that holds this user's profile
+ * (the parent of os.homedir(), which Windows takes from USERPROFILE: C:\Users on a usual install). A worker may read and
+ * measure them there; nothing modifies them (checkOutsideRootDelete). A `Never Games` folder anywhere else, and every other
+ * AppData folder, is not one of them. Always false for a POSIX home.
+ */
+export function inNeverGames(p: string, home: string = os.homedir()): boolean {
+  const n = path.posix.normalize(p.replace(/\\/g, '/').replace(/^\/([a-zA-Z])(?=\/|$)/, '$1:')).replace(/\/+$/, '').toLowerCase();
+  const profiles = path.posix.dirname(path.posix.normalize(home.replace(/\\/g, '/')).replace(/\/+$/, '')).toLowerCase();
+  if (!/^[a-z]:\/./.test(profiles) || !n.startsWith(profiles + '/')) return false;
+  return /^[^/]+\/appdata\/(?:locallow|local|roaming)\/never games(?:\/|$)/.test(n.slice(profiles.length + 1));
+}
 
 /**
  * Whether `p` is somewhere a Windows worker may read, measure or delete on (w1755): on the install folder's drive, and when
@@ -364,7 +446,7 @@ const SCAN_VALUE_FLAGS = new Set(['-d', '--max-depth', '-depth', '--block-size',
  * them in a pipeline, Measure-Object included); deletes are the delete fence's
  * (checkOutsideRootDelete, which already refuses any outside the install folder). The allowed drive is the install folder's
  * (root.json's root: V:\ffw on LothDesktop, F:\ffw on BEAST), never a fixed letter; a root on C: allows only the folder
- * itself. Only a Windows root is judged. Like the rest of the guard it is a SEATBELT: a script, python's os.walk or a
+ * itself. The game's data folders under AppData (inNeverGames) may be read too. Only a Windows root is judged. Like the rest of the guard it is a SEATBELT: a script, python's os.walk or a
  * variable it cannot resolve is the instructions' job. Exported for tests.
  */
 export function checkOffDriveScan(cmd: string, ctx: RootFenceContext): string | undefined {
@@ -377,14 +459,16 @@ export function checkOffDriveScan(cmd: string, ctx: RootFenceContext): string | 
   const judge = (raw: string | undefined, verb: string): string | undefined => {
     const n = raw === undefined ? dir : resolvePath(raw, { home, cwd: dir, win: true });
     if (n === undefined || n === 'ok') return undefined;
-    if (onInstallDrive(n, ctx.root) || allowed.some((a) => n === a || strictlyInside(n, a))) return undefined;
+    if (onInstallDrive(n, ctx.root) || inNeverGames(n, home) || allowed.some((a) => n === a || strictlyInside(n, a))) return undefined;
     const shown = raw === undefined ? `the current folder ${n}` : unquote(raw);
     return (
       `Refused: ${verb} would scan ${shown}, off this Windows computer's install drive ${driveLabel(ctx.root)} (the install folder is ${ctx.root}). ` +
       `On Windows, disk work (clean-ups, low-disk checks, leftover scans, disk measurements) reads, measures and deletes only on the install ` +
       `drive, never on C: (lothsahn, 2026-10-22, w1755: "Your worker on LothDesktop is still scanning c:  it should not.  You need to only look ` +
-      `at v:.  Stop messing with my c:"). Measure inside ${ctx.root} instead (\`ff-leftovers folders\`, du of a folder there), and say in your ` +
-      `report what you could not free there; do not ask a person to look on C: either (docs/self-recovery.md, "Where clean-up may delete").`
+      `at v:.  Stop messing with my c:"). The one exception on C: is reading the game's data folders under AppData (AppData\\LocalLow\\Never Games, ` +
+      `and AppData\\Local's and AppData\\Roaming's Never Games), which nothing modifies (lothsahn: "Let's let it scan the never games folder, but not ` +
+      `the rest of C.  And it shouldn't modify it."). Measure inside ${ctx.root} instead (\`ff-leftovers folders\`, du of a folder there), and say ` +
+      `in your report what you could not free there; do not ask a person to look on C: either (docs/self-recovery.md, "Where clean-up may delete").`
     );
   };
 

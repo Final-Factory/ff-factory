@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import type { CleanupPolicy } from './config.ts';
 import type { CleanupSummary } from '../shared/types.ts';
 import type { StaleOutputSettings } from './staleOutput.ts';
-import { installDrive, onInstallDrive } from './rootFence.ts';
+import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
 
@@ -497,6 +497,20 @@ export async function staleUnityLibraries(roots: string[], minDays: number, now 
 }
 
 /** Left behind by a removal that failed halfway (runCleanup renames first): always removed. */
+/**
+ * The rules a pass on a Windows computer with a worker install folder may read (w1755, lothsahn, 2026-10-22: "Let's let it
+ * scan the never games folder, but not the rest of C.  And it shouldn't modify it."): those whose folder is on the drive of one
+ * of `roots` (the install folder, the Dev Drive's folders), never C:'s AppData caches, temp or an Actions runner on C:\, and
+ * never the game's data folders (the PlaytestSessions rule), which nothing modifies. Before w1755 the plan read those folders
+ * and the w896 fence then only listed what it found; now they are not read at all. Every rule stays for macOS, Linux and a
+ * computer without a worker root.
+ */
+export function rulesOnInstallDrive(rules: CleanupRule[], roots: string | string[] | undefined, home?: string): CleanupRule[] {
+  const win = [roots ?? []].flat().filter((r) => installDrive(r));
+  if (!win.length) return rules;
+  return rules.filter((r) => win.some((root) => onInstallDrive(r.dir, root)) && !inNeverGames(r.dir, home));
+}
+
 const LEFTOVER = /\.ffclean-\d+$/;
 
 /**

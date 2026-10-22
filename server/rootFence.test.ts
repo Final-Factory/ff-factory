@@ -18,7 +18,7 @@ const MAC_TAG: RootFenceContext = { ...MAC, saveTag: 'ffa-2' };
 const LINUX: RootFenceContext = { root: '/home/ben-ryding/ffw', cwd: '/home/ben-ryding/ffw/sandboxes/slot1', allow: ['/home/ben-ryding/ffw/sandboxes/slot1'], home: '/home/ben-ryding', saveTag: 'ffa-c1687d63' };
 const refused = (cmd: string, ctx = WIN) => checkOutsideRootDelete(cmd, ctx);
 const fine = (cmd: string, ctx = WIN) => assert.equal(checkOutsideRootDelete(cmd, ctx), undefined, cmd);
-const no = (cmd: string, ctx = WIN) => assert.match(checkOutsideRootDelete(cmd, ctx) ?? '', /^Refused: .* (?:is outside this machine's worker install folder|is the install folder itself)/, cmd);
+const no = (cmd: string, ctx = WIN) => assert.match(checkOutsideRootDelete(cmd, ctx) ?? '', /^Refused: .* (?:is outside this machine's worker install folder|is the install folder itself|is in the game's data folder under AppData \(Never Games\))/, cmd);
 
 test('what w876 deleted on C: is refused, in PowerShell, Git Bash and cmd spellings', () => {
   no('Remove-Item -Recurse -Force "C:\\Users\\loth\\AppData\\Local\\Temp\\*"');
