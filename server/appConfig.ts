@@ -105,6 +105,9 @@ export const SETTABLE_KEYS = [
   // The live view (w1398, docs/live-view.md): a sandbox's running game streamed beside its agent's chat, with the shader's
   // knobs. Off unless true. The owner's only (OWNER_ONLY_KEYS): it opens a new stream from the machines to the pages.
   'live.enabled',
+  // Minutes a Live view sits idle (no turn, job, check-in or viewer) before its sandbox's editor is closed (w1746,
+  // docs/live-view.md "Idle editors close"): default 15, 0 never. The owner's only: it closes editors on every machine.
+  'live.idleCloseMinutes',
   // Where new game-repo work goes first, and which computers it stays off (w428, docs/machines.md "Placing work").
   'placement.prefer',
   'placement.avoid',
@@ -144,7 +147,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync'];
@@ -621,6 +624,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === false || value === 'false') return false;
       throw new Error('live.enabled is true or false');
     }
+    case 'live.idleCloseMinutes': {
+      const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+      if (typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 1440) return n;
+      throw new Error('live.idleCloseMinutes is a whole number of minutes from 0 (never) to 1440');
+    }
     case 'providers.ffbox.devRequests':
       return checkDevRequests(value);
     case 'intake.reviewers':
@@ -875,7 +883,14 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     cfg.autoDeploy = ad;
   }
   // Live: the live view reads cfg.live.enabled at every use (server/live.ts); null is the default, off.
-  else if (key === 'live.enabled') cfg.live = v === undefined ? undefined : { ...cfg.live, enabled: v as boolean };
+  else if (key === 'live.enabled' || key === 'live.idleCloseMinutes') {
+    // Live: the idle close reads cfg.live.idleCloseMinutes at every pass (server/liveIdle.ts); null is the default, 15.
+    const l: NonNullable<Config['live']> = { ...cfg.live };
+    const field = key === 'live.enabled' ? 'enabled' : 'idleCloseMinutes';
+    if (v === undefined) delete l[field];
+    else (l as Record<string, unknown>)[field] = v;
+    cfg.live = Object.keys(l).length ? l : undefined;
+  }
   else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build' || key === 'placement.minPriority') {
     const p = { ...cfg.placement };
     const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : key === 'placement.minPriority' ? 'minPriority' : 'hold';

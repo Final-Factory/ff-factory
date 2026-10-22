@@ -713,7 +713,9 @@ compile the script cannot run; it stays and runs at the next start that compiles
 run's kept as `sandbox-editor-<time>.log`, the newest three), so its hang and crash watch (`MacUnityWatch`) reads its own log, not the shared `Editor.log`. The daemon looks every 30 s: the editor's state
 (starting until its MCP bridge is up), the watch (a hung or crashed editor restarted, at most 3 in 30 minutes, and
 its agents told), git status every 2 minutes, the disk guard, and the idle stop (an editor with no agent activity
-there for 2 hours, and no agent mid-turn, is stopped; `daemon.json` `sandboxIdleStopMinutes`).
+there for 2 hours, and no agent mid-turn, is stopped; `daemon.json` `sandboxIdleStopMinutes`). A running Live view counts as activity there, so that stop leaves its editor alone; the Live view's own idle close
+(15 minutes with no turn, job, check-in or viewer, config `live.idleCloseMinutes`) saves and closes it instead and
+reopens it at the next turn ([live-view.md](live-view.md), "Idle editors close", w1746).
 
 **Where things live.** `<app_dir>/sandboxes.json` keeps the pool across daemon restarts (a create or delete cut off
 by one shows as an error: delete it again). The portal keeps each sandbox (daemon facts plus purpose and agents) on

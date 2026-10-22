@@ -35,7 +35,8 @@ import { run } from '../server/proc.ts';
 import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
-import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveSessionDeps } from './live.ts';
+import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveDeps } from './live.ts';
+import { idleCloseEditor, idleClosedDetail, idleReopenNote } from './liveIdle.ts';
 import { FramePump, parseAck } from '../shared/framePump.ts';
 import { bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { hostStats } from '../server/system.ts';
@@ -398,7 +399,7 @@ export class Daemon {
   guard?: MachineGuard;
   private readonly guardEffects?: MachineGuardEffects;
 
-  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>, liveDeps?: (sandbox: string) => Partial<LiveSessionDeps>) {
+  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>, liveDeps?: (sandbox: string) => LiveDeps) {
     this.cfg = cfg;
     this.liveDeps = liveDeps;
     this.guardEffects = guardEffects;
@@ -1141,6 +1142,8 @@ export class Daemon {
         this.pause.command(m.type === 'pause');
         return;
       case 'input':
+        // w1746: kept whatever the activity pause says, so a Live view's idle close leaves an editor a person is playing.
+        this.personInputAt = Math.max(this.personInputAt ?? 0, Math.min(Number(m.at) || Date.now(), Date.now()));
         this.pause.input(String(m.kind ?? 'input'), Number(m.at));
         return;
       case 'injected':
@@ -1264,6 +1267,7 @@ export class Daemon {
       ...(this.ghApp ? { ghApp: true } : {}),
       // It streams a sandbox's running game for a live view (w1398, docs/live-view.md), and says which views run (w1509).
       liveView: true,
+      liveIdleClose: true,
       liveViews: this.liveViews(),
       // It compacts an idle agent on request and says a compaction's turn end (w1469, the workers' automatic compaction).
       compact: true,
@@ -1455,10 +1459,74 @@ export class Daemon {
     };
   }
 
+  // ---------------------------------------------------------------- a Live view's idle editor (w1746, docs/live-view.md)
+
+  /** A person's last key or click on this computer, as the tray reports it (w1746), whether or not the activity pause is on. */
+  private personInputAt?: number;
+  /** Sandboxes whose editor is being closed idle now. */
+  private readonly idleClosing = new Set<string>();
+
+  /**
+   * The portal found the sandbox's Live view idle (server/liveIdle.ts): save and quit its editor through the editor, or say
+   * why not (machine/liveIdle.ts). The view keeps running and holds, saying the editor is closed until the next turn.
+   */
+  private async liveIdleClose(msg: Extract<ToDaemon, { type: 'live' }>, sbPath: string): Promise<string> {
+    const id = msg.sandbox;
+    const minutes = Math.max(1, Math.round(Number(msg.minutes) || 15));
+    if (this.sandboxActivity(id).busy) return 'skipped: an agent is mid-turn there';
+    if (this.idleClosing.has(id)) return 'skipped: it is being closed already';
+    this.idleClosing.add(id);
+    try {
+      const bridge = this.liveDeps?.(id)?.bridge ?? (async (code: string, o?: { safetyChecks?: boolean }) => {
+        const port = bridgeInfo(sbPath).port;
+        return port ? bridgeExecute(port, code, 60_000, '127.0.0.1', o?.safetyChecks ?? true) : 'no MCP bridge for this editor';
+      });
+      const res = await this.pool.idleClose(id, minutes, () =>
+        idleCloseEditor(
+          {
+            bridge,
+            editorPids: () => this.pool.editorPids(id),
+            personInputAgoMs: () => (this.personInputAt === undefined ? undefined : Date.now() - this.personInputAt),
+            sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+            now: () => Date.now(),
+          },
+          minutes,
+        ),
+      );
+      log(`live: sandbox ${id}: its Live view sat idle ${minutes} min: editor ${res.text}`);
+      if (res.closed) {
+        for (const [liveId, l] of this.lives) {
+          if (l.sandbox !== id) continue;
+          l.s.closedNote = idleClosedDetail(minutes);
+          this.send({ type: 'live_state', liveId, state: 'holding', detail: l.s.closedNote, frames: l.s.frames });
+        }
+      }
+      return res.text;
+    } finally {
+      this.idleClosing.delete(id);
+    }
+  }
+
+  /**
+   * A message goes to a worker in a sandbox whose editor was closed idle (w1746): start the editor again, and answer the line
+   * the message starts with (idleReopenNote); undefined when it was not closed.
+   */
+  private reopenIdle(sandbox: string | undefined, sessionId: string): string | undefined {
+    if (!sandbox) return undefined;
+    const closed = this.pool.idleClosedOf(sandbox);
+    if (!closed) return undefined;
+    for (const l of this.lives.values()) if (l.sandbox === sandbox) l.s.closedNote = undefined;
+    void this.pool.unity(sandbox, 'start').then(
+      (text) => log(`live: sandbox ${sandbox}: its editor, closed idle at ${closed.at}, starts again for the next turn: ${text}`),
+      (e) => log(`live: sandbox ${sandbox}: its editor, closed idle at ${closed.at}, did not start again: ${(e as Error).message}`),
+    );
+    return idleReopenNote(closed, 'its start is under way', [...this.lives.values()].some((l) => l.sandbox === sandbox && l.sessionId === sessionId));
+  }
+
   // ---------------------------------------------------------------- live view (w1398, docs/live-view.md)
 
   /** Tests' fake game for a live view (server/testLiveGame.ts); the real one is the sandbox editor's (machine/live.ts). */
-  private readonly liveDeps?: (sandbox: string) => Partial<LiveSessionDeps>;
+  private readonly liveDeps?: (sandbox: string) => LiveDeps;
   private readonly lives = new Map<string, { s: LiveSession; link?: WebSocket; pump: FramePump; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout }>();
 
   /** The live views it runs, for the hello (w1509): a portal that restarted takes them back. */
@@ -1490,6 +1558,9 @@ export class Daemon {
       clearTimeout(l.timer);
       l.link?.close(1000, 'stopped');
       await l.s.stop();
+      // w1746: the last view of a sandbox whose editor was closed idle ended (its hold is over, the sandbox released): the
+      // next worker there is not told to stage a view, nor its editor started for one.
+      if (![...this.lives.values()].some((x) => x.sandbox === l.sandbox)) this.pool.forgetIdleClosed(l.sandbox);
       return 'stopped';
     }
     if (msg.op === 'command') {
@@ -1522,6 +1593,7 @@ export class Daemon {
       }
       return reply.result;
     }
+    if (msg.op === 'idleClose') return this.liveIdleClose(msg, sb.path);
     // start
     const old = this.lives.get(msg.liveId);
     if (old) return 'already running';
@@ -1551,6 +1623,9 @@ export class Daemon {
       now: () => Date.now(),
       ...(this.liveDeps?.(msg.sandbox) ?? {}),
     });
+    // w1746: started again (a daemon restart) while its editor is closed idle: it says so, not "not running".
+    const closed = this.pool.idleClosedOf(msg.sandbox);
+    if (closed) entry.s.closedNote = idleClosedDetail(closed.minutes);
     this.lives.set(msg.liveId, entry);
     this.liveTouched.set(msg.sandbox, Date.now());
     this.linkLive(msg.liveId);
@@ -2043,7 +2118,10 @@ export class Daemon {
             // Whatever they are called (w1688): the spec's secretEnv names what the vault gave, SECRET_ENV the rest.
             this.learnSecrets(msg.spec.env, msg.spec.secretEnv);
             if (!e.s.live) prepare(msg.spec, this.cfg.tempDir);
-            e.s.send(this.withLiveNotes(id, msg.text), msg.from, msg.uuid, msg.images, msg.requestedBy, attachments);
+            // w1746: its sandbox's editor was closed while its Live view sat idle: it starts again with this turn.
+            const reopened = this.reopenIdle(msg.spec.sandbox, id);
+            const text = this.withLiveNotes(id, msg.text);
+            e.s.send(reopened ? `${reopened}\n\n${text}` : text, msg.from, msg.uuid, msg.images, msg.requestedBy, attachments);
           } catch (err) {
             this.out({ type: 'failed', sessionId: id, error: (err as Error).message });
           }

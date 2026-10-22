@@ -160,9 +160,10 @@ export function bridgePing(port: number, timeoutMs = 8000, host = '127.0.0.1'): 
 /**
  * Run a C# snippet in the editor through its MCP bridge (w1398, the live view's dev tier: machine/live.ts): connect,
  * read the WELCOME line, send a framed {"type":"execute_code"} and resolve the editor's answer text, or an error text.
- * Never throws. The editor compiles the snippet first (about a second).
+ * Never throws. The editor compiles the snippet first (about a second). `safetyChecks` false lets the snippet call what the
+ * bridge refuses by default, such as EditorApplication.Exit (w1746's save and quit, machine/liveIdle.ts).
  */
-export function bridgeExecute(port: number, code: string, timeoutMs = 45_000, host = '127.0.0.1'): Promise<string> {
+export function bridgeExecute(port: number, code: string, timeoutMs = 45_000, host = '127.0.0.1', safetyChecks = true): Promise<string> {
   return new Promise((resolve) => {
     let done = false;
     let buf = Buffer.alloc(0);
@@ -186,7 +187,7 @@ export function bridgeExecute(port: number, code: string, timeoutMs = 45_000, ho
         if (!buf.subarray(0, nl).toString('ascii').startsWith('WELCOME UNITY-MCP')) return finish('not a Unity MCP bridge');
         welcomed = true;
         buf = buf.subarray(nl + 1);
-        const payload = Buffer.from(JSON.stringify({ type: 'execute_code', params: { action: 'execute', code, safety_checks: true } }), 'utf8');
+        const payload = Buffer.from(JSON.stringify({ type: 'execute_code', params: { action: 'execute', code, safety_checks: safetyChecks } }), 'utf8');
         const header = Buffer.alloc(8);
         header.writeBigUInt64BE(BigInt(payload.length));
         sock.write(Buffer.concat([header, payload]));

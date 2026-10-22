@@ -149,13 +149,54 @@ Now:
   `Agents.liveHold`, `releaseStep` in `server/placeAgain.ts`, and the idle reaper's `keepIdle`. list_sandboxes says
   "its Live view is up while it waits on Ben". A wait on a deploy, a request or CI is no hold: nobody is about to look.
 - **The editor stays up.** The daemon counts a running view as activity in its sandbox (`sandboxActivity`,
-  `machine/daemon.ts`), so the 120-minute idle stop leaves its editor alone while the view runs.
+  `machine/daemon.ts`), so the 120-minute idle stop leaves its editor alone while the view runs. Since w1746 the view's
+  own idle close saves and closes it after 15 quiet minutes and reopens it at the next turn ("Idle editors close" below).
 - **Ended, then staged again.** When the hold is over, or the sandbox is released any other way, the release pass stops
   the view (`PlaceAgainDeps.liveLost`, `LiveHub.endFor`), so it never shows another worker's game, and records it on the
   session (`SessionInfo.liveLost`). The worker's next message, a person's or its check-in, starts with a `[live view]`
   line (`liveLostNote`): start the editor, stage the scene, and `live_view start` with the same materials, fps and width
   before answering. A stopped worker whose sandbox stays its (unsaved work) past the hold has its view ended the same
   way, so its editor can idle-stop.
+
+## Idle editors close (w1746)
+
+lothsahn, 2026-10-22: "If a live view is idle for more than 15 minutes can we close it down to free the box?" The views
+above are held for hours, and their editors with them: on BEAST two (w1466, w1475) had sat about 6 hours with no turn,
+holding 2 of its 3 editor slots, 8–12 GB of RAM each, and the bench's quiet-machine gate (a streaming editor in play mode
+is a Unity process above 40% CPU, the game repo's `scripts/bench/quiet_gate.sh`). Now only the editor goes; the view, the
+sandbox, its branch, the worker's conversation and its hold stay.
+
+- **Idle.** Each minute the portal (`LiveIdleCloser`, `server/liveIdle.ts`) looks at every running view whose daemon
+  offers it (hello `liveIdleClose`). The editor closes when, for config `live.idleCloseMinutes` (default 15; 0 never; an
+  owner's `set_app_config` key, applied at the next minute), every worker in that sandbox (an editor is the sandbox's) has
+  had no turn, no running tool, no background job, no permission waiting and no check-in pending (`wakeAt`, any time
+  ahead), nobody has had the view open, and no knob moved (`liveIdleBlock`). The editor must be up and running. It applies
+  to every person's views, owners' included.
+- **No work lost.** The portal sends the daemon `live` op `idleClose`; the daemon (`idleCloseEditor`,
+  `machine/liveIdle.ts`) works through the editor's MCP bridge:
+  1. It reads the editor's state (play mode, compiling or importing, the open scenes with unsaved changes). Unreadable (no
+     bridge, an error): skipped. Compiling or importing: skipped.
+  2. In play mode with a person's key or click on that computer within the idle minutes (the tray's report, kept whether or
+     not the activity pause is on): skipped. Otherwise it leaves play mode, which ends the game's session and puts every
+     knob back (`LiveLook`), so a knob value is never saved into a `.mat`.
+  3. An untitled scene with unsaved changes (saving would ask where): skipped.
+  4. One snippet saves the open scenes and the assets (`EditorSceneManager.SaveOpenScenes`, `AssetDatabase.SaveAssets`, as
+     the clean quit of a person's main clone does), checks no scene is still dirty, and only then calls
+     `EditorApplication.Exit(0)` on the editor's next update. That call needs the bridge's safety checks off
+     (`bridgeExecute`'s `safetyChecks`), which the bridge otherwise refuses.
+  5. It waits up to 3 minutes for the process to go. One that does not is left running, never killed.
+  A skipped close is asked again after another idle period. The crash watch is told first, so the quit is not restarted.
+- **Shown and logged.** A closed sandbox carries `idleClosed` (`MachineSandbox`, kept in the daemon's `sandboxes.json`):
+  list_sandboxes shows "editor closed: idle 15 min; reopens on resume (closed HH:MMZ, saved ... first)" in place of
+  `unity stopped`, system_status has a "Live view idle close" line with the setting and the editors closed now, and the
+  view holds with "editor closed: idle 15 min; reopens on resume". The portal journal has a `[live] live idle:` line for
+  each close or skip and each reopen (`portal_logs` grep `live idle`); the daemon's log has the same with `live:`.
+- **Reopened.** The next message to any worker in that sandbox (a person's, a check-in, a resume) starts the editor
+  (`Daemon.reopenIdle`) and begins with a `[live view]` line: when it closed, what it saved, and to stage the view again
+  before answering; the view streams again by itself once the game is in play mode. A person who opens a view whose editor
+  is closed wakes its worker with a system message (once per close), whose turn does the same. An editor started any other
+  way (`unity start`) clears the mark too, and so does the end of the sandbox's last view (its hold over, the sandbox
+  released): the next worker there is not told to stage a view. A second worker sharing the sandbox gets a shorter line.
 
 ## On BEAST first (w1600)
 

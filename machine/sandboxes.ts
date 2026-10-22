@@ -19,7 +19,8 @@ import { armScriptReimport } from './scriptReimport.ts';
 import { MacUnity, MacUnityWatch, realDeps, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
 import type { BenchTicket } from './benchQueue.ts';
-import type { DiskLevel, GitStatus, MachineSandboxUnity, SandboxPoolSettings, SandboxStatus } from '../shared/types.ts';
+import type { IdleCloseResult } from './liveIdle.ts';
+import type { DiskLevel, GitStatus, MachineSandboxIdleClosed, MachineSandboxUnity, SandboxPoolSettings, SandboxStatus } from '../shared/types.ts';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const GB = 1024 ** 3;
@@ -41,6 +42,8 @@ interface Rec {
   status: SandboxStatus;
   statusDetail?: string;
   logPath?: string;
+  /** Its editor was closed because its Live view sat idle (w1746); kept across daemon restarts so the next turn reopens it. */
+  idleClosed?: MachineSandboxIdleClosed;
 }
 
 /** The editor side of one sandbox: its MacUnity and hang/crash watch (a fake in tests). */
@@ -308,6 +311,8 @@ export class SandboxPool {
   private disk: { level: DiskLevel; freeBytes?: number } = { level: 'ok' };
   /** When each sandbox's editor was last stopped with the tool (its launches keep a holder's priority a while, w469). */
   private readonly stoppedAt = new Map<string, number>();
+  /** The pids of each editor closed idle (w1746): a look that still lists one is not a new start. */
+  private readonly idleClosedPids = new Map<string, number[]>();
   private lastGitAt = 0;
   private lastReseedLookAt = 0;
   private reseeding = false;
@@ -369,8 +374,50 @@ export class SandboxPool {
     return [...this.recs.values()].map((r) => {
       const u = this.unityState.get(r.id) ?? { state: 'stopped' as const };
       const { startedAt: _s, ...unity } = u;
-      return { id: r.id, branch: r.branch, base: r.base, path: r.path, createdAt: r.createdAt, status: r.status, statusDetail: r.statusDetail, unity: { ...unity, logPath: unity.logPath ?? r.logPath }, git: this.git.get(r.id) };
+      return { id: r.id, branch: r.branch, base: r.base, path: r.path, createdAt: r.createdAt, status: r.status, statusDetail: r.statusDetail, unity: { ...unity, logPath: unity.logPath ?? r.logPath }, git: this.git.get(r.id), ...(r.idleClosed ? { idleClosed: r.idleClosed } : {}) };
     });
+  }
+
+  /** The pids of a sandbox's editor processes now (w1746). */
+  async editorPids(id: string): Promise<number[]> {
+    return this.editorFor(this.require(id)).unity.editors(await this.d.procs()).map((e) => e.pid);
+  }
+
+  /** Whether its editor was closed idle (w1746), and how; undefined when not. */
+  idleClosedOf(id: string): MachineSandboxIdleClosed | undefined {
+    return this.recs.get(id)?.idleClosed;
+  }
+
+  /**
+   * Close a sandbox's running editor because its Live view sat idle (w1746): `close` saves and quits it through the editor
+   * (machine/liveIdle.ts idleCloseEditor). Closed: the sandbox is marked (list_sandboxes shows it, the next turn reopens
+   * it). The crash watch is told first, so the quit is not taken for a crash and restarted.
+   */
+  async idleClose(id: string, minutes: number, close: () => Promise<IdleCloseResult>): Promise<IdleCloseResult> {
+    const r = this.require(id);
+    if (r.status !== 'ready') return { closed: false, saved: [], text: `skipped: the sandbox is ${r.status}` };
+    if (this.unityState.get(id)?.state !== 'running' || this.queuedBoots.has(id)) return { closed: false, saved: [], text: 'skipped: its editor is not up and running' };
+    const pids = await this.editorPids(id);
+    this.editorFor(r).watch?.expectExit(10 * 60_000);
+    const res = await close();
+    if (!res.closed) return res;
+    this.idleClosedPids.set(id, pids);
+    this.stoppedAt.set(id, this.d.now());
+    this.unityState.set(id, { state: 'stopped', detail: `closed: Live view idle ${minutes} min; reopens on resume`, logPath: this.unityState.get(id)?.logPath });
+    this.changed(r, { idleClosed: { at: new Date(this.d.now()).toISOString(), minutes, ...(res.saved.length ? { saved: res.saved } : {}) } });
+    return res;
+  }
+
+  /** Its Live view ended while its editor was closed idle (w1746): nothing is to reopen for it any more. */
+  forgetIdleClosed(id: string) {
+    const r = this.recs.get(id);
+    if (r) this.clearIdleClosed(r);
+  }
+
+  /** The editor of a sandbox closed idle starts again (w1746): the mark goes, whoever starts it. */
+  private clearIdleClosed(r: Rec) {
+    this.idleClosedPids.delete(r.id);
+    if (r.idleClosed) this.changed(r, { idleClosed: undefined });
   }
 
   diskState() {
@@ -920,6 +967,7 @@ export class SandboxPool {
     pruneEditorLogs(logsDir, logFile);
     const ed = this.editorFor(r, logFile);
     this.changed(r, { logPath: logFile });
+    this.clearIdleClosed(r);
     this.unityState.set(id, { state: 'starting', detail: 'launching', logPath: logFile, startedAt: this.d.now() });
     this.changed();
     try {
@@ -1017,6 +1065,8 @@ export class SandboxPool {
         this.bootTickets.delete(r.id);
       }
       if (!pid && this.queuedBoots.has(r.id)) continue; // its state says where it is in the queue
+      // w1746: an editor closed idle that runs again (started by hand, or adopted) is no longer closed.
+      if (pid && r.idleClosed && !this.idleClosedPids.get(r.id)?.includes(pid)) this.clearIdleClosed(r);
       let next: MachineSandboxUnity & { startedAt?: number };
       if (pid) next = { ...prev, pid, state: this.d.bridgeUp(r.path) ? 'running' : 'starting', detail: this.d.bridgeUp(r.path) ? 'MCP bridge up' : (prev.detail ?? 'loading'), startedAt: prev.startedAt ?? now };
       else next = { state: prev.state === 'crashed' ? 'crashed' : 'stopped', detail: prev.state === 'crashed' ? prev.detail : undefined, logPath: prev.logPath };
