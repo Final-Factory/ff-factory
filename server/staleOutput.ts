@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { OwnLeftoverPlan } from './ownLeftovers.ts';
+import { onInstallDrive } from './rootFence.ts';
 import { fenceToRoot, hasLocalWork, neverDelete, runCleanup, sizeOf, sizePlan, touchedSince, type CleanupGuard, type CleanupItem, type CleanupRun, type PassOptions } from './cleanup.ts';
 
 /**
@@ -309,7 +310,11 @@ export async function cleanupPass(o: {
   const own0 = o.own ? await o.own.plan().catch(() => none) : none;
   const own = { ...own0, items: fence(own0.items) };
   const listed: NonNullable<CleanupRun['listed']> = [];
-  for (const l of [...plan.listed, ...own.listed, ...outside]) listed.push({ ...l, bytes: await sizeOf(l.path, 300_000) });
+  // On Windows nothing off the install drive is measured or listed (w1755, lothsahn: "You need to only look at v:.  Stop
+  // messing with my c:"): a listed C: folder was a clean-up worker's cue to measure it.
+  const roots = o.root ? (Array.isArray(o.root) ? o.root : [o.root]) : [];
+  const onDrive = (p: string) => !roots.length || roots.some((r) => onInstallDrive(p, r));
+  for (const l of [...plan.listed, ...own.listed, ...outside]) if (onDrive(l.path)) listed.push({ ...l, bytes: await sizeOf(l.path, 300_000) });
   listed.sort((a, b) => b.bytes - a.bytes);
   if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await sizePlan([...regular, ...plan.items, ...own.items]), listed };
   const live = o.mode === 'on' ? plan.items : [];

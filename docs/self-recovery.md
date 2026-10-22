@@ -817,8 +817,9 @@ back> --split <deploy date>` ends with every prompt by kind, before and after.
 general we should only be clearing D:", then "Sorry, in general we should only be clearing data in the install folder for
 the worker"): clean-up deletes only inside the machine's worker install folder, the `root` of its `root.json`
 (`D:\work\ffw` on LothDesktop, `F:\ffw` on BEAST, `~/ffw` or `/Users/Shared/ffw` on a Mac; `FF_WORKER_ROOT` in every
-agent's environment). Outside it a worker only **measures and reports** sizes, and lists every setting, script or
-tool that makes FF Factory write outside the folder, so the write can be moved inside (a request of its own). A brief that
+agent's environment). Outside it a worker on macOS or Linux only **measures and reports** sizes, and lists every setting,
+script or tool that makes FF Factory write outside the folder, so the write can be moved inside (a request of its own). On
+Windows it does not even measure there: [Windows: the install drive only](#windows-the-install-drive-only-w1755). A brief that
 tells a worker to delete outside the folder is wrong, whoever wrote it.
 
 **What happened.** On 2026-10-10 w876 (LothDesktop's low-disk clean-up) deleted on C:, outside `D:\work\ffw`: dotnet
@@ -832,12 +833,59 @@ remaining", which reads as an invitation.
 
 | Layer | Where | What it does |
 |---|---|---|
-| every worker's brief | `DISK_HYGIENE`, `server/agents.ts` | delete only inside the root; measure and report outside; a brief that says otherwise is wrong; only a save copy in the game's saves folder is removed outside |
+| every worker's brief | `DISK_HYGIENE`, `server/agents.ts` | delete only inside the root; on Windows read and measure only on the install drive, never C: (w1755); on macOS and Linux measure and report outside; a brief that says otherwise is wrong; only a save copy in the game's saves folder is removed outside |
 | the dispatcher's and the orchestrators' instructions | `server/agents.ts` (the low-disk lines of both) | a clean-up worker's brief says the same and never contains a delete outside the folder; `list_machines` shows each machine's install folder (`describeDirs`) |
 | the notice "Clean-up cannot free enough disk space" | `describeShortfall`, `server/cleanup.ts` | states the rule with the machine's root, and tags every "biggest remaining" consumer `[inside the install folder]` or `[outside it: measure only]` |
 | the daemon's own pass | `cleanupPass` `root`, `fenceToRoot`; `machine/daemon.ts` | on a machine with a root, only entries strictly inside it are removed, whatever rule picked them; the rest is measured and listed in the pass's log, `machine_cleanup` and the dashboard ("Kept, for a person") |
 | a worker's shell | `server/rootFence.ts` via `sandboxGuard` (`workerRoot`, set from the machine's `root`) | refuses `rm`, `rmdir`, `del`, `rd`, `Remove-Item`, `find -delete`, `xargs rm` and a listing piped into a removal that name a path outside the root |
 | the harness lesson | ff-agents evidence-gate `lessons/delete-only-inside-the-worker-root.md` and its delete checklist | the check a worker meets before any delete |
+
+### Windows: the install drive only (w1755)
+
+**The rule** (lothsahn, 2026-10-22: "Your worker on LothDesktop is still scanning c:  it should not.  You need to only look
+at v:.  Stop messing with my c:", then "Fix the instructions for Windows boxes to only look at v:"): on a Windows machine,
+every agent's disk work (a clean-up, a low-disk check, a leftover scan, a disk measurement) reads, measures and deletes only
+on the drive of the worker install folder, and never on C:. The drive is the install folder's (`root.json`'s `root`,
+`FF_WORKER_ROOT`), never a fixed letter: `V:` on LothDesktop (`V:\ffw`, a Dev Drive), `F:` on BEAST (`F:\ffw`). A machine
+whose install folder is on C: may be looked at only inside that folder. macOS and Linux keep the w896 rule above (measure and
+report outside the folder).
+
+**The one exception: the game's data folders under AppData, read-only** (lothsahn, 2026-10-22: "Let's let it scan the never
+games folder, but not the rest of C.  And it shouldn't modify it.", then "By never games I mean in appdata"). A worker may
+read and measure `AppData\LocalLow\Never Games` (the game's saves, settings and logs), and a `Never Games` folder in
+`AppData\Local` or `AppData\Roaming`, of any profile in the folder that holds the user's profile (the parent of
+`os.homedir()`, which Windows takes from `USERPROFILE`; `inNeverGames`, `server/rootFence.ts`). Nothing modifies them: no
+delete, move, rename, copy into them or write there, by a worker's clean-up, any other disk work or the daemon's clean-up.
+Every other folder on C:, the rest of AppData and a `Never Games` folder outside AppData included, stays off limits for
+reading too. The one file a worker puts there and removes again is its own save copy for a test (`ffa-<session>-<name>.zip`
+in the saves folder, `read_rules saves`); a test's settings go through the game repo's `scripts/game_data.py`, which the
+guard does not see.
+
+**What happened.** w1754, LothDesktop's clean-up of 2026-10-22, ran `du` over `C:\Users\…\AppData` and `~\.claude` after
+the orchestrator asked where AppData's space went: the w896 rule said to "measure and report" outside the install folder,
+and the daemon's notice named the home folder and AppData as the biggest consumers. It deleted nothing on C:.
+
+| Layer | Where | What it does |
+|---|---|---|
+| every worker's brief | `DISK_HYGIENE`, `server/agents.ts` | on Windows, disk work stays on the install drive, never C:; the harness refuses a scan there |
+| `read_rules cleanup` | `CLEANUP`, `server/workerRules.ts` | the same, with what C: holds (home, AppData, `~/.claude`, the system temp, LocalLow) and what to report instead |
+| the dispatcher's and the orchestrators' instructions | `server/agents.ts` (the low-disk lines of both) | a clean-up brief for a Windows machine never asks for a look at C: |
+| the notice "Clean-up cannot free enough disk space" | `describeShortfall`, `server/cleanup.ts` | on Windows states the drive rule instead of "measure and report", and names only consumers on the install drive |
+| the daemon's measurement | `biggestConsumers` (`root`), `server/cleanup.ts`; `runStaleOutput`'s list, `server/staleOutput.ts`; the stale Unity Libraries, `machine/daemon.ts` | on Windows measures only the install drive (the install folder's children, the agents' temp, that drive's root files); lists nothing off it; does not search a home folder on another drive for Unity projects |
+| a worker's shell | `checkOffDriveScan`, `server/rootFence.ts`, via `sandboxGuard` (`workerRoot`) | on a Windows root refuses `du`, `dust`, `ncdu`, `gdu`, `tree`, `find`, `ff-leftovers check <path>`, `robocopy <source> ... /L`, and `Get-ChildItem`/`gci`/`ls`/`dir` with `-Recurse`, `-r`, `-R` or `/s`, of a path off the install drive, except in the AppData `Never Games` folders (`inNeverGames`); the delete fence's message there says the drive rule; tests in `server/installDrive.test.ts` |
+| a worker's shell, Never Games | `checkOutsideRootDelete`, `server/rootFence.ts` | on a Windows root refuses a delete, `mv`/`Move-Item`/`Rename-Item`, a `cp`/`Copy-Item`/`xcopy`/`robocopy` into, a `>` redirection or `Set-Content`/`Out-File`/`New-Item` and the like in an AppData `Never Games` folder, apart from the worker's own save copy; tests both ways in `server/installDrive.test.ts` |
+| the daemon's clean-up plan | `rulesOnInstallDrive`, `server/cleanup.ts`; the pass in `machine/daemon.ts`; `homeOffLimits`, `server/ownLeftovers.ts` | on Windows with a root, drops every rule whose folder is off the install drive (and the Dev Drive's folders) or in Never Games before anything is read; does not search the home folder for Unity projects; reads neither Unity Hub's lists nor editors off the drive, so no Unity editor is removed by the own-leftovers step there (what a person's project on C: uses cannot be known) |
+| `ff-leftovers` | `machine/leftovers.ts` | `check` judges a Windows path off the install drive KEEP without looking at it, and a path in an AppData `Never Games` folder KEEP as read-only; its help says so |
+| the harness lesson | ff-agents evidence-gate `lessons/clean-up-after-yourself.md`, "Windows: disk work stays on the install drive, never C: (w1755)", and its delete checklist item 1a | the check a worker meets before any disk measurement on Windows |
+
+The guard is a seatbelt like the delete fence: it reads the command's text and cannot see a script, python's `os.walk` or a
+variable it cannot resolve; those are the instructions' job. A worker's own save copy in the game's saves folder (on C:
+under LocalLow) is a test step, not disk work, and stays allowed (`read_rules saves`).
+
+What still touches C: on a Windows root machine, and why: the daemon reads the free space of the volumes under its home
+folder, the main clone and the sandboxes (`diskPaths`, one `statfs` per volume; no folder is listed or measured), and Unity,
+the game and the tools write their own data there as they run. The portal's own clean-up (`server/index.ts`) runs on the
+portal's Linux VM, with no worker root.
 
 **The daemon's own rules, by place** (the audit asked for in w896; `server/installFolderFence.test.ts` pins this table for
 a root-install shape). Before w896 every row below the first removed things on C: that FF Factory does not keep inside the
@@ -852,6 +900,10 @@ root. Now only the first group removes anything on a machine with a root.
 | the game's data folder | `playtest-sessions` | `LocalLow\Never Games\finalfactory*\PlaytestSessions` | **listed** |
 | other | `worker-archives` (`~/ff-worker`), `actions-work` (runner job folders), `stale-library` (Unity Libraries of projects under the home folder) | the home folder, `C:\` | **listed** |
 | own leftovers outside the root | player slots outside the root (the old default places are gone, 2026-10-10), Unity editors in Unity Hub's folders, worktrees of a clone outside the root | | **listed** |
+
+Since w1755, on a **Windows** machine with a root every row below the first is **not read at all** (`rulesOnInstallDrive`):
+those folders are on C:, and the `playtest-sessions` row is in Never Games, which nothing modifies. On macOS and Linux they
+are still listed.
 
 A machine **without** a root (the portal's own host, an install from before w513) is not fenced: nothing tells the daemon
 which folder is the worker's. Nothing is configurable: a person who wants a rule outside the root back says so, and it

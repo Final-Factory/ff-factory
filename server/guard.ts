@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { repoIsPublic } from './publicGit.ts';
-import { checkOutsideRootDelete } from './rootFence.ts';
+import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
 import os from 'node:os';
 import path from 'node:path';
@@ -44,7 +44,9 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *   - disk: on a machine with a worker install (opts.workerRoot), no rm / rmdir / del / rd / Remove-Item / find -delete that
  *     names a path outside the install folder (server/rootFence.ts; w896, lothsahn: "in general we should only be clearing
  *     data in the install folder for the worker"). Inside it, the worker's own temp and its own save copy in the game's saves
- *     folder (`<TMPDIR's name>-<name>`, w1505) stay allowed.
+ *     folder (`<TMPDIR's name>-<name>`, w1505) stay allowed. On a Windows machine, no du / find / tree / ff-leftovers check /
+ *     Get-ChildItem -Recurse / dir /s either that scans a path off the install folder's drive, C: above all (checkOffDriveScan;
+ *     w1755, lothsahn: "You need to only look at v:.  Stop messing with my c:").
  *   - Unity MCP: refused until the session pins its own editor ("<id>@<hash>"), and never another.
  *   - batch Unity (w1628): `Unity -batchmode` started straight from the shell is refused; under `unity-slot run`,
  *     `ff_unity_slot` or `build_player.sh` it takes a Unity slot and a bench ticket (checkRawUnityBatch).
@@ -125,7 +127,8 @@ export function sandboxGuard(opts: {
         checkPlayerLaunch(cmd, opts.sandboxId) ??
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
         checkRawUnityBatch(cmd) ??
-        (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined);
+        (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined) ??
+        (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
       if (reason) return deny(reason);
       let flat = flatten(cmd);
       if (cloneGrant && cloneNames) {
