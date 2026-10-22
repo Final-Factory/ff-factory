@@ -94,6 +94,10 @@ Known causes, so a future failure can be named at once:
   (`coordinatorContext`), a bench-queue stand-in left polling after a failed assert (the 15-minute hang of 2026-10-22), and
   w1755's C:-install rule (`installFolderFence`). A pull request runs only `.github/windows-tests.txt`; run the whole suite
   on a branch that touches shared test helpers: `gh workflow run windows.yml --ref <branch> -f all=true`.
+- **A Linux unit run that stalled whole** (once in 291 runs, 2026-10-22, run 39839493504 on main): the watchdog ended it
+  at 10 minutes (a run takes 220 s median, 283 s at most) listing nearly every file's tests in flight since about 176 s
+  in, so no single test hung; the cause is unknown (a guess: the runner itself stalled). Re-run it; if it comes back,
+  look at what the files in flight share, not at the first one named.
 - **gitleaks `generic-api-key` in a test or doc**: every one in the window was a fake key in a fixture; add it to
   `.gitleaksignore` or make the fixture not look like a key.
 
