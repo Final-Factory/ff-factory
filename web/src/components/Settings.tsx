@@ -119,8 +119,7 @@ function PoolSettings() {
     <div className="field" data-testid="pool-settings">
       <span>Claude pool</span>
       <p className="small dim">
-        Whose Claude tokens each person’s work runs on: their new requests and the ones they act on. Self is their own pool. Another person’s pool keeps its own limits, and the work waits while it is held.
-        Orchestrators and GitHub tokens stay each person’s own. Anyone signed in may change these.
+        Whose Claude tokens each person’s work runs on; Self is their own. Another person’s pool keeps its limits, and anyone signed in may change these.
       </p>
       <div className="pool-rows">
         {people.map((p) => {

@@ -5143,6 +5143,8 @@ button.react-chip:hover {
   grid-template-columns: max-content minmax(0, 1fr);
   align-items: center;
   gap: 6px 10px;
+  /* the same break before the next section as the paragraph that ends Voice input */
+  margin-bottom: 18px;
   font-size: var(--fs-md);
 }
 
