@@ -314,6 +314,8 @@ const TRASH_STAMP = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z-/;
 export function memoryDeleteProblem(file: unknown, dir: string, platform: NodeJS.Platform = process.platform, fsx: GuardFs = realFs): string | undefined {
   const P = platform === 'win32' ? path.win32 : path.posix;
   if (typeof file === 'string' && /[*?[\]{}]/.test(file)) return 'one file at a time: wildcards are refused; give the full path of one Markdown file in your memory folder';
+  // A folder first: on Linux its link count is above 1, which the write guard reports as a hard link.
+  if (typeof file === 'string' && P.isAbsolute(file) && fsx.lstat(P.resolve(file))?.directory) return `${file} is a folder: only Markdown files are deleted`;
   const why = memoryWriteProblem(file, dir, '', platform, fsx);
   if (why) return why.replace(/\bwrite\b/g, 'delete');
   const target = P.resolve(file as string);

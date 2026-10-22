@@ -323,8 +323,9 @@ test('delete_memory: refused outside its own folder, for MEMORY.md, folders, wil
     `${ben}/../person-lothsahn/theirs.md`,
     `${ben}/sub/../../dispatcher/disp.md`,
     `${ben}-evil/x.md`,
-    ben,
   ]) refused(outside, /delete only in your memory folder|is outside it/);
+  refused(ben, /is a folder/);
+  refused(loth, /is a folder/);
   refused(path.join(ben, 'MEMORY.md'), /MEMORY\.md is your memory's index and is never deleted: Edit it/);
   refused(path.join(ben, 'memory.MD'), /MEMORY\.md is your memory's index/);
   refused(path.join(loth, 'MEMORY.md'), /outside it/);
@@ -430,5 +431,5 @@ test('delete_memory tool: in every orchestrator’s belt; runs only in its perso
   assert.ok(allow.includes(trash));
   assert.ok(!allow.includes(memoryTrashDir(root, 'person-ben')));
   // The brief says how to use it.
-  assert.match((agents.orchestratorOptions(loth.info) as { systemPrompt: { append: string } }).systemPrompt.append, /delete its file with delete_memory \(one \.md file directly in this folder, never MEMORY\.md, same turn rule; a copy is kept 30 days in your trash folder, which you may Read\), then Edit MEMORY\.md to remove its line/);
+  assert.match((agents.orchestratorOptions(loth.info) as { systemPrompt: { append: string } }).systemPrompt.append, /A wrong memory: delete_memory its file, then remove its line from MEMORY\.md \(no emptied stubs\)\./);
 });
