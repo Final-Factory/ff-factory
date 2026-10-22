@@ -27,9 +27,10 @@ Known causes, so a future failure can be named at once:
 
 - **Windows, `coverage file is empty`**: Node's coverage on Windows; fixed in w906.
 - **Playwright shard at 20 minutes in "Install browser system libraries"**: the Ubuntu mirror hung `apt-get update`
-  (log ends at `azure.archive.ubuntu.com ... InRelease`). The step gives up after 4 minutes and tries once more (w922;
-  w1194's move back to GitHub's runners lost it and w1758 put it back: 3 WebKit jobs hung there on 2026-10-22).
-  `scripts/e2e-legs.test.ts` fails a ci.yml whose browser install has no time limit or no second try.
+  (log ends at `azure.archive.ubuntu.com ... InRelease`). Each try gets 4 minutes; a try cut off has its `apt-get`
+  ended (it holds dpkg's lock) and the second goes to Ubuntu's own archive instead of Azure's mirror (w922; w1194's move back
+  to GitHub's runners lost the limit and w1758 put it back: 3 WebKit jobs hung there on 2026-10-22).
+  `scripts/e2e-legs.test.ts` fails a ci.yml whose browser install has no time limit, cleanup or second try.
 - **A job shown "in progress" after it finished**: GitHub never marked it completed (5 times in 14 days, all "Commit
   identities are noreply"; on #294 the run sat 89 minutes until it was re-run). Re-run the run.
 - **"Commit identities are noreply" on a manual run**: it checked main's 11 non-noreply commits of 2026-10-05/06 again;
