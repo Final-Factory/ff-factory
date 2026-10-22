@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { SessionManager, setQueryForTesting, type AutoCompaction, type SessionHandle, type TurnEndMeta } from './sessions.ts';
-import { AUTO_COMPACT_DEFAULTS, AutoCompactor, COST_TRIGGER_MIN_TOKENS, DISPATCHER_FOCUS, MIN_TURNS_BETWEEN, PERSONAL_FOCUS, QUIET_COMPACT_DEFAULTS, RETRY_AFTER_MS, autoCompactSettings, compactBlocker, compactionDue, quietWaitMs } from './autoCompact.ts';
+import { AUTO_COMPACT_DEFAULTS, AutoCompactor, COMPACT_HOLD, COST_TRIGGER_MIN_TOKENS, DISPATCHER_FOCUS, MAX_COMPACT_ATTEMPTS, MIN_TURNS_BETWEEN, PERSONAL_FOCUS, QUIET_COMPACT_DEFAULTS, RETRY_AFTER_MS, autoCompactSettings, compactBlocker, compactionDue, quietWaitMs } from './autoCompact.ts';
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo } from '../shared/types.ts';
@@ -25,9 +25,10 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, orchestra
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-autocompact-'));
   const store = new Store(dir);
   // No quiet wait (w1538) unless a test sets one: the tests from before it compact at the turn's end.
-  const cfg = { limits: { maxSessions: 6 }, orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false, compactIdleSeconds: 0, ...orchestrator } } as unknown as Config;
+  // dataDir: the send queue is saved there (w1749: what a restart must not lose).
+  const cfg = { dataDir: dir, limits: { maxSessions: 6 }, orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false, compactIdleSeconds: 0, ...orchestrator } } as unknown as Config;
   const sessions = new SessionManager(cfg, store);
-  const auto = new AutoCompactor(sessions, cfg, { settleMs });
+  const auto = new AutoCompactor(sessions, cfg, { settleMs, retryDelaysMs: RETRIES });
   t.after(async () => {
     auto.stop();
     sessions.stopAll();
@@ -47,8 +48,11 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, orchestra
   const make = (role: 'personal' | 'dispatcher' = 'personal') =>
     sessions.create({ kind: 'orchestrator', title: role === 'personal' ? 'lothsahn' : 'Dispatcher', permissionMode: 'default', options: () => ({ model: 'opus' }), orchestratorRole: role, ...(role === 'personal' ? { requestedBy: LOTHSAHN } : {}) });
   const say = (id: string, text: string) => sessions.send(id, text, 'human', undefined, { requestedBy: LOTHSAHN });
-  return { store, sessions, auto, compactions, ends, make, say, cfg };
+  return { dir, store, sessions, auto, compactions, ends, make, say, cfg };
 }
+
+/** w1749: the retries' waits here, ms (the portal's are 10 s to 5 min). */
+const RETRIES = [30, 30, 30, 30, 30];
 
 async function until(pred: () => boolean, what: string, ms = 4000) {
   const end = Date.now() + ms;
@@ -232,20 +236,38 @@ test('compact_conversation: the orchestrator asks for it; it runs after the turn
   assert.throws(() => auto.request(o.info.id, 'x'.repeat(2001)), /2001 characters/);
 });
 
-test('an automatic compaction that fails says so and is not retried for half an hour', async (t) => {
+test('w1749: an automatic compaction that fails is retried, each attempt logged, and given up after MAX_COMPACT_ATTEMPTS; then not for half an hour', async (t) => {
   const { store, auto, make, say } = setup(t);
   const o = make();
   say(o.info.id, 'hello');
   await until(() => o.info.status === 'idle', 'the first turn');
+  // Its own focus fails every time ("#fail"), and goes with every retry.
   auto.request(o.info.id, '#fail');
+  const logged: string[] = [];
+  const log = console.log;
+  const warn = console.warn;
+  console.log = (...a: unknown[]) => void logged.push(a.join(' '));
+  console.warn = (...a: unknown[]) => void logged.push(a.join(' '));
+  t.after(() => {
+    console.log = log;
+    console.warn = warn;
+  });
   say(o.info.id, 'big #ctx 60000');
-  await until(() => store.readTranscript(o.info.id).some((e) => e.kind === 'error'), 'the failure');
+  const errors = () => store.readTranscript(o.info.id).filter((e) => e.kind === 'error');
+  await until(() => errors().length === MAX_COMPACT_ATTEMPTS && !o.info.compactOwed, 'every attempt', 8000);
   await until(() => o.info.status === 'idle', 'idle');
-  assert.equal(store.readTranscript(o.info.id).filter((e) => e.kind === 'error').at(-1)!.text, 'The automatic compaction failed: the summary request failed.');
-  assert.equal(o.info.lastResult, 'Echo: big #ctx 60000');
+  assert.equal(errors().at(-1)!.text, 'The automatic compaction failed: the summary request failed.');
+  assert.equal(o.info.lastResult, 'Echo: big #ctx 60000', 'a failed compaction is no reply');
+  // One log line per attempt, and one per failure, numbered.
+  for (let n = 1; n <= MAX_COMPACT_ATTEMPTS; n++) {
+    assert.ok(logged.some((l) => l.includes(`; attempt ${n} of ${MAX_COMPACT_ATTEMPTS}`)), `attempt ${n} logged`);
+    assert.ok(logged.some((l) => l.includes(`attempt ${n} of ${MAX_COMPACT_ATTEMPTS} failed (the summary request failed)`)), `failure ${n} logged`);
+  }
+  assert.match(systemLines(store, o.info.id).at(-1)!, /^FF Factory gave up compacting this conversation after 6 attempts \(the last failed: the summary request failed\)/);
+  // Given up: the old rule holds the next automatic one for half an hour.
   assert.match(auto.check(o.info.id), /did not finish/);
   assert.match(auto.check(o.info.id, Date.now() + RETRY_AFTER_MS + 1000), /^compacting: the context passed 50,000 tokens/);
-  await until(() => compacted(store, o.info.id).length === 1, 'the retry');
+  await until(() => compacted(store, o.info.id).length === 1, 'the next one');
 });
 
 test('a person\'s /compact (w518) still says so at once and when done, and counts as the last compaction', async (t) => {
@@ -360,4 +382,128 @@ test('w1538: a message that arrives while a quiet-wait compaction runs waits beh
   const done = all.findIndex((l) => l.startsWith('Compacted'));
   assert.ok(done >= 0 && done < all.indexOf('Echo: are you there?'), 'the compaction first, then the answer');
   assert.equal(o.info.turns, 2);
+});
+
+/**
+ * w1749 (lothsahn: "Can you make sure compaction works even if I close the browser or the session is closed?"): on
+ * 2026-10-22 the portal stopped lothsahn's orchestrator 35 s into an automatic compaction (a deploy's SIGTERM, 05:44) and
+ * 79 s into the next (the nightly restart, 06:00); stop() failed each one ("the session was stopped") and nothing ran it
+ * again until a later turn. No browser takes part in any of these tests: the compaction is the portal's alone.
+ */
+const queuedFor = (sessions: SessionManager, id: string) => sessions.queued().filter((q) => q.id === id);
+const index = (store: Store, id: string, pred: (l: string) => boolean) => store.readTranscript(id).findIndex((e) => 'text' in e && pred(e.text));
+
+test('w1749: due while the session is closed, the portal starts it and compacts it', async (t) => {
+  const { store, compactions, make, say } = quietSetup(t, 0.3);
+  const o = make();
+  say(o.info.id, 'big #ctx 60000');
+  await until(() => o.info.status === 'idle', 'the turn');
+  // Due, waiting for quiet: owed from now on, so neither a stop nor a restart loses it.
+  await until(() => o.info.compactOwed?.attempts === 0, 'owed');
+  assert.equal(o.info.compactOwed!.reason, 'the context passed 50,000 tokens');
+  // The person closes the session inside the quiet wait.
+  o.stop();
+  assert.equal(o.live, false);
+  await until(() => compacted(store, o.info.id).length === 1, 'the compaction, its process started for it');
+  assert.equal(compactions.length, 1);
+  assert.equal(o.info.compactOwed, undefined, 'nothing owed once it is done');
+  await until(() => o.info.status === 'idle', 'idle again');
+  assert.equal(o.info.lastResult, 'Echo: big #ctx 60000');
+});
+
+test('w1749: closed partway through, the compaction is retried; the messages sent meanwhile wait and are answered after it', async (t) => {
+  const { store, sessions, compactions, make, say } = setup(t);
+  const o = make();
+  const compact = sessions.compact.bind(sessions);
+  let first = true;
+  sessions.compact = (...args) => {
+    const note = compact(...args);
+    if (first) {
+      first = false;
+      // A worker's update arrives while it compacts, then the person closes the session, then a dispatch arrives.
+      sessions.send(o.info.id, '[worker update] w1 is done', 'system');
+      o.stop();
+      sessions.send(o.info.id, '[dispatch] w2 is yours', 'system');
+    }
+    return note;
+  };
+  say(o.info.id, 'big #ctx 60000');
+  await until(() => o.info.lastResult === 'Echo: [dispatch] w2 is yours' && o.info.status === 'idle', 'both answered', 8000);
+  assert.equal(compactions.length, 2, 'the attempt the stop cut off, and the retry');
+  const failed = index(store, o.info.id, (l) => l === 'The automatic compaction failed: the session was stopped.');
+  const done = index(store, o.info.id, (l) => l.startsWith('Compacted: '));
+  const update = index(store, o.info.id, (l) => l === 'Echo: [worker update] w1 is done');
+  const dispatch = index(store, o.info.id, (l) => l === 'Echo: [dispatch] w2 is yours');
+  assert.ok(failed >= 0 && failed < done, 'the stop failed the first attempt; the retry finished it');
+  assert.ok(done < update && update < dispatch, 'both messages after the compaction, in the order they came');
+  assert.ok(systemLines(store, o.info.id).some((l) => l.startsWith(`A message is waiting for this conversation's compaction (${COMPACT_HOLD})`)));
+  assert.equal(o.info.compactOwed, undefined);
+  assert.deepEqual(queuedFor(sessions, o.info.id), []);
+});
+
+test('w1749: a portal restart during the compaction: the next portal runs it again, then delivers what waited', async (t) => {
+  const { dir, store, sessions, auto, cfg, make, say } = setup(t);
+  const o = make();
+  const compact = sessions.compact.bind(sessions);
+  sessions.compact = (...args) => {
+    const note = compact(...args);
+    // A timer fires while it compacts; then the portal stops (index.ts stopServer: stopAll, flush).
+    sessions.send(o.info.id, '[timer] check w3', 'system');
+    sessions.stopAll();
+    // This portal is gone: its pending checks (the retry the stop just timed) with it.
+    auto.stop();
+    store.flush();
+    return note;
+  };
+  say(o.info.id, 'big #ctx 60000');
+  await until(() => !!o.info.compactOwed?.lastError, 'the attempt cut off');
+  assert.equal(o.info.compactOwed!.lastError, 'the session was stopped');
+  store.flush();
+
+  // The next portal: the session comes back stopped, its owed compaction and its waiting message with it.
+  const again = new Store(dir);
+  const restored = new SessionManager(cfg, again);
+  const cutOff = restored.restore(() => () => ({ model: 'opus' }));
+  assert.deepEqual(cutOff, [], 'a compaction is no turn of a person\'s to resume');
+  assert.equal(restored.queued().length, 1, 'the timer waits in the saved send queue');
+  const next = new AutoCompactor(restored, cfg, { settleMs: 20, retryDelaysMs: RETRIES });
+  t.after(() => {
+    next.stop();
+    restored.stopAll();
+  });
+  const r = restored.get(o.info.id);
+  assert.equal(r.info.compactOwed?.attempts, 1);
+  assert.equal(next.boot(), 1);
+  await until(() => r.info.lastResult === 'Echo: [timer] check w3' && r.info.status === 'idle', 'the timer answered', 8000);
+  const done = index(again, o.info.id, (l) => l.startsWith('Compacted: '));
+  assert.ok(done >= 0 && done < index(again, o.info.id, (l) => l === 'Echo: [timer] check w3'), 'compacted first');
+  assert.equal(r.info.compactOwed, undefined);
+  assert.deepEqual(restored.queued(), []);
+  again.flush();
+});
+
+test('w1749: a portal killed mid-compaction (no clean stop): the next portal says so and compacts it', async (t) => {
+  const { dir, cfg } = setup(t);
+  const seed = new Store(dir);
+  const base = { title: 'lothsahn', permissionMode: 'default' as const, createdAt: 'x', lastActivityAt: 'x', turns: 5, costUsd: 0, pendingPermissions: [], requestedBy: LOTHSAHN, orchestratorRole: 'personal' as const };
+  seed.putSession({ ...base, id: 'o1', kind: 'orchestrator', sdkSessionId: 'fake-killed', contextTokens: 60_000, status: 'running', statusDetail: 'compacting the conversation', compactOwed: { trigger: 'tokens', reason: 'the context passed 50,000 tokens', since: new Date().toISOString(), attempts: 1, lastAttemptAt: new Date().toISOString() } });
+  seed.flush();
+  const again = new Store(dir);
+  const restored = new SessionManager(cfg, again);
+  assert.deepEqual(restored.restore(() => () => ({ model: 'opus' })), []);
+  assert.match(again.readTranscript('o1').map((e) => ('text' in e ? e.text : '')).at(-1)!, /restarted while this conversation was being compacted; FF Factory compacts it again now/);
+  const next = new AutoCompactor(restored, cfg, { settleMs: 20, retryDelaysMs: RETRIES });
+  t.after(() => {
+    next.stop();
+    restored.stopAll();
+  });
+  // A message before the retry goes: it waits for it.
+  restored.send('o1', 'are you there?', 'human', undefined, { requestedBy: LOTHSAHN });
+  assert.equal(restored.queued().length, 1);
+  next.boot();
+  const r = restored.get('o1');
+  await until(() => r.info.lastResult === 'Echo: are you there?' && r.info.status === 'idle', 'the answer', 8000);
+  assert.ok(index(again, 'o1', (l) => l.startsWith('Compacted: ')) < index(again, 'o1', (l) => l === 'Echo: are you there?'));
+  assert.equal(r.info.compactOwed, undefined);
+  again.flush();
 });

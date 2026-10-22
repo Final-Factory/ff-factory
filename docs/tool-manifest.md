@@ -25,7 +25,7 @@ The groups (`TOOL_GROUPS`), picked from what the tools are used for together:
 
 | Group | Tools |
 |---|---|
-| `core` | `read_rules`, `compact_conversation`, `message_person`, `ask_person` |
+| `core` | `read_rules`, `compact_conversation`, `delete_memory`, `message_person`, `ask_person` |
 | `ledger` | `list_work`, `request_work`, `update_work`, `decide_work`, `conditional_decisions`, `read_work` |
 | `workers` | `start_agent`, `message_agent`, `set_agent_title`, `interrupt_agent`, `stop_agent`, `agent_transcript`, `search_transcripts` |
 | `sandboxes` | `list_sandboxes`, `create_sandbox`, `delete_sandbox`, `list_branches`, `switch_branch`, `unity`, `live_view` |

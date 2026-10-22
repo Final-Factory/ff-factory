@@ -1426,6 +1426,31 @@ decides every write, and a hook's refusal holds in every permission mode:
   it, so it never writes memory in a turn of its own). Orchestrators read text agents wrote (`[worker update]`, relayed Discord and FFBox reports); a harness turn
   must not be able to plant an instruction that every later conversation loads.
 
+### Deleting a memory (w1748)
+
+Lothsahn asked (w1748): "Please make it so you can delete memory files". Orchestrators have no shell, so a memory that
+turned out wrong could only be emptied to a stub (`person-lothsahn/m5-for-ben.md`, a "removed, see m5-open" stub). The
+`delete_memory` tool (group `core`, deferred; `deleteMemoryFile` in `server/orchestratorMemory.ts`) deletes one file, and
+the orchestrator then edits `MEMORY.md` to remove its line (the tool's answer says when the index still names it).
+
+- **Where:** the write rules above (`memoryWriteProblem`: its own folder only, after `..`, links and Windows' path
+  rules), narrower still (`memoryDeleteProblem`): one existing `.md` file **directly** in the folder, never in a folder
+  inside it, never `MEMORY.md` (the index stays; Edit it), no folders and no wildcards (`*?[]{}`).
+- **When:** only in a turn its person started with a message of their own (`personTurn`), the gate of Write and Edit.
+- **Logged:** one line in the server's journal, where the memory's commits are logged (`fffctl logs`, `portal_logs`
+  source `journal`): `orchestrator memory: Lothsahn (lothsahn)'s orchestrator deleted person-lothsahn/m5-for-ben.md at
+  <time>; a copy is kept until <date> at <path>`.
+- **Recoverable for 30 days:** the file is copied (on disk before the delete) to
+  `<root>.backup/trash/<folder>/<UTC time>-<name>`, and each backup pass removes trash copies older than 30 days
+  (`pruneMemoryTrash`, `MEMORY_TRASH_DAYS`). A trash of its own because the existing copies do not cover a delete: the
+  crash backup keeps three copies, each taken when anything changed, so a deleted file leaves it after three changes
+  (half an hour of activity at most), and the private repository's history exists only where its owner switched it on.
+  Its orchestrator may Read its own trash folder (`orchestratorSecrets`), so it can Write a file back itself; the rest
+  of `<root>.backup` stays closed to it.
+- **The dispatcher** has the tool too, behind the same gate: it already has Write and Edit on its own folder, and a
+  memory it can write but never delete would leave it the same stubs. It passes the gate only in a turn the owner started
+  by writing on its page; its harness turns (workers, intake, timers) never do.
+
 ### Memory in a private repository
 
 The memory holds one person's preferences, in their words, so it does not belong in a public repository; and a folder
@@ -1663,16 +1688,40 @@ compacts every orchestrator of this portal, the dispatcher included, by itself (
   `fffctl conf get|set` reaches both too, the orchestration worker's included, through the same check; such a change
   takes effect at the portal's next start (docs/ops-worker.md, "The portal's own settings (w1538)"). The wait is the
   compactor's own per-orchestrator timer (no polling), measured from the saved end of the last turn (`lastResultAt`),
-  so a portal restart loses nothing: an orchestrator's process does not outlive the restart, and the next turn's end
-  arms the timer again. The dispatcher is an orchestrator here and takes the same wait. Workers do not
+  so a portal restart loses nothing: a due compaction is saved on the session (`compactOwed`, w1749), and the next
+  portal checks it again at boot, with the wait measured from the same saved turn end. The dispatcher is an orchestrator here and takes the same wait. Workers do not
   (`worker.compactAtTokens`, below).
-- **Only between turns.** It runs 2 s after a turn ends, and only if the orchestrator is idle with its process up: not
-  mid-turn, no permission prompt open, no message unanswered or waiting in the send queue (`compactBlocker`). A message
-  that arrives in those 2 s goes first, and the check runs again after that turn. One that arrives while it compacts
-  (it took 54 s at 525k tokens) waits behind it and is answered after it, as with `/compact`. It waits 3 turns after any
-  compaction, and the token trigger waits until the context has grown by half the threshold past what the last one left,
-  so a conversation a summary cannot bring under the threshold is not compacted over and over. One that does not finish
-  holds the next automatic one for 30 minutes.
+- **Only between turns.** It runs 2 s after a turn ends, and only between turns: not mid-turn, no permission prompt
+  open, no message unanswered or waiting in the send queue (`compactBlocker`). A message that arrives in those 2 s goes
+  first, and the check runs again after that turn. One that arrives while it compacts (it took 54 s at 525k tokens)
+  waits in the send queue and is answered after it. It waits 3 turns after any compaction, and the token trigger waits
+  until the context has grown by half the threshold past what the last one left, so a conversation a summary cannot
+  bring under the threshold is not compacted over and over.
+- **It always finishes** (w1749, lothsahn: "Can you make sure compaction works even if I close the browser or the
+  session is closed?"). It runs on the portal, from the session's own events; no browser takes part, so closing every
+  tab changes nothing. A due compaction is saved on the session (`SessionInfo.compactOwed`) until one finishes:
+  - **A closed or stopped orchestrator** is started for it (its conversation resumes, compacts, and goes idle), where it
+    used to wait for its next message.
+  - **An attempt that fails** (the session was stopped or closed partway, its process ended, Claude Code's summary
+    failed, its process would not start) is tried again after 10 s, 30 s, 1, 2 and 5 minutes: at most 6 attempts in all
+    (`MAX_COMPACT_ATTEMPTS`, `COMPACT_RETRY_DELAYS_MS`). Each attempt is a journal line, "auto-compact <id> (<title>):
+    <why>; context N tokens; attempt 2 of 6", and each failure one more, "attempt 2 of 6 failed (<why>); tried again in
+    30 s". After the sixth the chat says FF Factory gave up, and the next automatic one waits for a later turn, 30 minutes
+    on at the earliest.
+  - **A portal restart** in the middle (a deploy, the nightly restart, an unclean stop) leaves it owed; the next portal
+    runs it again at boot (`AutoCompactor.boot`, journal "owed across the restart"). A compaction cut off is no turn of a
+    person's: the orchestrator gets no "[app restarted] … pick it up again" message for it.
+  - **Nothing is lost.** While an attempt runs or a retry is owed, every message to that orchestrator, a person's, a
+    worker's report, a dispatch, a timer or a wake, waits in the saved send queue (`send-queue.json`; its chat says "A
+    message is waiting for this conversation's compaction") and goes after it, in order, so a stop or a restart in the
+    middle drops none. A message that comes while a retry waits starts that retry at once. A person's own `/compact`
+    is not retried: one a restart cut off says so, to be sent again.
+
+  What failed before (2026-10-22, lothsahn's orchestrator, read in the portal journal): an automatic compaction started
+  at 05:43:42 and the portal was stopped at 05:44:17 for a deploy; `AgentSession.stop` failed it ("The automatic
+  compaction failed: the session was stopped."), the orchestrator came back stopped, and a stopped orchestrator was never
+  started just to compact, so the next attempt waited for a later turn (05:59:09, with the context grown from 84,680 to
+  92,409 tokens). That one was 79 s in when the nightly restart stopped the portal at 06:00:28.
 - **What it keeps.** Claude Code's `/compact` with a focus: for a person's orchestrator, every open request with its id,
   state, worker, sandbox or machine, PRs and what it waits on; unanswered questions both ways; decisions, approvals and
   holds with who gave them; timers and check-ins; promised reports; every id with what it is (`PERSONAL_FOCUS`). The
