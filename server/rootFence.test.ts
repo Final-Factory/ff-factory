@@ -18,7 +18,7 @@ const MAC_TAG: RootFenceContext = { ...MAC, saveTag: 'ffa-2' };
 const LINUX: RootFenceContext = { root: '/home/ben-ryding/ffw', cwd: '/home/ben-ryding/ffw/sandboxes/slot1', allow: ['/home/ben-ryding/ffw/sandboxes/slot1'], home: '/home/ben-ryding', saveTag: 'ffa-c1687d63' };
 const refused = (cmd: string, ctx = WIN) => checkOutsideRootDelete(cmd, ctx);
 const fine = (cmd: string, ctx = WIN) => assert.equal(checkOutsideRootDelete(cmd, ctx), undefined, cmd);
-const no = (cmd: string, ctx = WIN) => assert.match(checkOutsideRootDelete(cmd, ctx) ?? '', /^Refused: .* (?:is outside this machine's worker install folder|is the install folder itself)/, cmd);
+const no = (cmd: string, ctx = WIN) => assert.match(checkOutsideRootDelete(cmd, ctx) ?? '', /^Refused: .* (?:is outside this machine's worker install folder|is the install folder itself|is in the game's data folder under AppData \(Never Games\))/, cmd);
 
 test('what w876 deleted on C: is refused, in PowerShell, Git Bash and cmd spellings', () => {
   no('Remove-Item -Recurse -Force "C:\\Users\\loth\\AppData\\Local\\Temp\\*"');
@@ -163,9 +163,14 @@ test('the message says the rule, what to do instead and who said it', () => {
   const msg = refused('rm -rf /c/Users/loth/AppData/Local/Temp/x')!;
   assert.match(msg, /outside this machine's worker install folder \(D:\\work\\ffw\)/);
   assert.match(msg, /lothsahn, 2026-10-10, w896: "in general we should only be clearing data in the install folder for the worker"/);
-  assert.match(msg, /measure and report sizes/);
-  assert.match(msg, /list any setting or script that makes FF Factory write there so it can be moved inside the folder/);
+  // Windows (w1755): the install drive only, never a measurement on C:.
+  assert.match(msg, /stays on the install drive \(D:\): never read, measure or touch C:/);
+  assert.doesNotMatch(msg, /measure and report/);
   assert.match(msg, /docs\/self-recovery\.md, "Where clean-up may delete"/);
+  // macOS and Linux keep measuring and reporting outside the folder.
+  const mac = refused('rm -rf ~/Library/Caches/x', MAC)!;
+  assert.match(mac, /measure and report sizes/);
+  assert.match(mac, /list any setting or script that makes FF Factory write there so it can be moved inside the folder/);
 });
 
 test('the sandbox guard applies it when the spec carries a worker root, and not otherwise', async () => {

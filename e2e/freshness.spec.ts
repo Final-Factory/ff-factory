@@ -173,8 +173,10 @@ test('a tab with a form open (it cannot be put back) shows the bar, and reloads 
   await expect.poll(() => oldPage(page), { timeout: 20_000 }).toBe(false);
 });
 
+// Its own login's chat (e2e/server.ts, "reloader"): on the owner's, other files' messages scrolled the chat as it followed
+// them, and the tap on an answer button missed (w1758, 7 CI runs in WebKit).
 test('an open ask_person question is still open, with its buttons, after the reload', async ({ page }) => {
-  await signIn(page);
+  await signIn(page, 'reloader', 'e2e-password-680');
   const deploy = await deployable(page);
   await page.goto('/');
   const me = await appState(page.request);
@@ -190,7 +192,7 @@ test('an open ask_person question is still open, with its buttons, after the rel
   await expect(card).toBeVisible();
   await expect(card.getByTestId('ask-option').first()).toBeEnabled();
   await expect(card).not.toHaveClass(/ask-locked/);
-  // The server is shared by the other specs: answer, so the question does not stay in the orchestrator's chat.
+  // Answer, so the question does not stay open in the chat for the next test.
   await card.getByTestId('ask-option').filter({ hasText: 'Wait' }).click();
   await expect(card.getByTestId('ask-option').filter({ hasText: 'Wait' })).toContainText('Your answer');
 });
@@ -219,8 +221,9 @@ test('an approval being declined keeps its note over the reload', async ({ page 
   await expect(page.locator('.sb-panel .perm-pending')).toHaveCount(0);
 });
 
+// The reloader's chat too: pictures in other files' messages above the rows loaded after the scroll and moved them.
 test('a chat scrolled up is at the same message after the reload', async ({ page }) => {
-  await signIn(page);
+  await signIn(page, 'reloader', 'e2e-password-680');
   const deploy = await deployable(page);
   await page.goto('/');
   const me = await appState(page.request);
@@ -233,9 +236,10 @@ test('a chat scrolled up is at the same message after the reload', async ({ page
     const sc = el.closest('.transcript-scroll')!;
     sc.scrollTop += el.getBoundingClientRect().top - sc.getBoundingClientRect().top - 60;
   });
-  await page.waitForTimeout(600);
-  const where = await topOf(row(5));
   await handOff(page);
+  // Where the row is as the page goes, not just after the scroll: pictures above it that load after the scroll move it
+  // down on WebKit (no scroll anchoring), 136 px on CI (w1758), and the page keeps the place the reader then sees.
+  const where = await topOf(row(5));
   await markPage(page);
 
   await deploy.go();

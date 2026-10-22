@@ -1,4 +1,4 @@
-import { expect, test as base, type APIRequestContext, type Cookie, type Locator, type Page } from '@playwright/test';
+import { expect, test as base, type APIRequestContext, type BrowserContextOptions, type Cookie, type Locator, type Page } from '@playwright/test';
 import type { AppState, MachineSandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 export const USER = 'tester';
@@ -9,18 +9,19 @@ export const isMobile = (page: Page) => (page.viewportSize()?.width ?? 1440) <= 
 /** This worker's session cookie per server: one login per worker and project, not one per test. */
 const sessionCookies = new Map<string, Cookie[]>();
 
-/** Sign in through the API (sets the session cookie on the page's context). */
-export async function signIn(page: Page) {
+/** Sign in through the API (sets the session cookie on the page's context): the owner, or another login of e2e/server.ts. */
+export async function signIn(page: Page, username = USER, password = PASSWORD) {
   const base = test.info().project.use.baseURL!;
-  const cached = sessionCookies.get(base);
+  const key = `${base} ${username}`;
+  const cached = sessionCookies.get(key);
   if (cached) return page.context().addCookies(cached);
   // The server hashes at most two passwords at once and answers the rest "Busy, try again in a
   // moment" (429); parallel workers log in at the same time, so do as it says.
   await expect(async () => {
-    const r = await page.request.post('/api/login', { data: { username: USER, password: PASSWORD } });
+    const r = await page.request.post('/api/login', { data: { username, password } });
     expect(r.ok(), await r.text()).toBeTruthy();
   }).toPass({ intervals: [100, 200, 400, 800], timeout: 15_000 });
-  sessionCookies.set(base, await page.context().cookies(base));
+  sessionCookies.set(key, await page.context().cookies(base));
 }
 
 export async function appState(request: APIRequestContext): Promise<AppState> {
@@ -226,6 +227,27 @@ export const test = base.extend<{ authed: Page }>({
 });
 
 export { expect };
+
+/**
+ * A test whose `solo` page is signed in as another login (e2e/server.ts), in a context of its own: that login's orchestrator
+ * chat is the test file's alone. The owner's chat takes every other file's messages while a test runs, and they move it.
+ */
+export function asLogin(username: string, password: string) {
+  return test.extend<{ solo: Page }>({
+    solo: async ({ browser }, use) => {
+      const ctx = await browser.newContext(test.info().project.use as BrowserContextOptions);
+      await expect(async () => {
+        const r = await ctx.request.post('/api/login', { data: { username, password } });
+        expect(r.ok(), await r.text()).toBeTruthy();
+      }).toPass({ intervals: [100, 200, 400, 800], timeout: 15_000 });
+      const page = await ctx.newPage();
+      await page.goto('/');
+      await expect(page.locator('.sidebar')).toBeAttached();
+      await use(page);
+      await ctx.close();
+    },
+  });
+}
 
 /**
  * Safari's and Chrome's on-screen keyboards, and an iPad's shortcut bar, as the page sees them: a

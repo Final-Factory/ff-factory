@@ -38,10 +38,12 @@
 // before the portal's welcome since the daemon started (until then who is live or waited for is not known). Every end is
 // logged with what, why and whose, and told to the portal.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { factsProblem, judgePath, planFolders, renderFolders, withGitCheck, type CleanupFacts } from '../server/cleanupFolders.ts';
 import { parsePsJson } from '../server/watchdog.ts';
+import { driveLabel, inNeverGames, installDrive, onInstallDrive } from '../server/rootFence.ts';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { gamePlayers, isUnityBinary, splitArgs, unityProcesses } from './unitySlots.ts';
 import { inspectProcs, type ProcFacts } from './unityReaper.ts';
@@ -720,6 +722,16 @@ export function ownLeftovers(session: string, procs: Proc[], env: Map<number, Pr
   // not a shell: its MCP servers.
   const own = new Set([...chain].filter(ours));
   for (const p of procs) if (own.has(p.ppid) && !chain.has(p.pid) && !SHELL.test(programOf(p, platform))) sub(p.pid, skip);
+  // What this command's own shells run beside it (the shells from it up to the agent): a pipeline's `tail` or `while read`
+  // subshell, never a background job. A pipeline element bash has forked and not yet exec'd still reads as a shell with
+  // the session, so without this a loaded machine's `ff-leftovers end | tail` ended its own tail (w1758: CI's
+  // "status=0 Terminated", the list lost with it).
+  const command = new Set<number>();
+  for (const from of [selfPid, ...(o.callers ?? [])]) {
+    command.add(from);
+    for (let x = byPid.get(byPid.get(from)?.ppid ?? -1); x && !command.has(x.pid) && SHELL.test(programOf(x, platform)); x = byPid.get(x.ppid)) command.add(x.pid);
+  }
+  for (const p of procs) if (command.has(p.ppid) && !chain.has(p.pid)) sub(p.pid, skip);
   for (const u of unityProcesses(procs, platform)) if (u.kind === 'interactive') sub(u.pid, skip);
   for (const p of procs) if (!chain.has(p.pid) && !skip.has(p.pid) && ours(p.pid)) out.add(p.pid);
   return procs.filter((p) => out.has(p.pid));
@@ -754,7 +766,18 @@ export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: N
     const bad = factsProblem(facts, now);
     let kept = 0;
     for (const a of args) {
-      const r = bad ? { verdict: 'keep' as const, why: bad } : await withGitCheck(judgePath(path.resolve(a), facts!, now), facts!.root);
+      // w1755: on Windows a path off the install drive (C:) is not looked at, not even for its git state.
+      const offDrive = !!facts?.root && (!onInstallDrive(a, facts.root) || !onInstallDrive(path.resolve(a), facts.root));
+      // w1755: the game's data folders under AppData may be looked at, never deleted.
+      const home = e.USERPROFILE || os.homedir();
+      const neverGames = !!installDrive(facts?.root) && (inNeverGames(a, home) || inNeverGames(path.resolve(a), home));
+      const r = bad
+        ? { verdict: 'keep' as const, why: bad }
+        : neverGames
+          ? { verdict: 'keep' as const, why: "the game's data folder under AppData (Never Games): read-only, never deleted, moved or written by a clean-up (w1755)" }
+        : offDrive
+          ? { verdict: 'keep' as const, why: `not looked at: off this Windows computer's install drive ${driveLabel(facts!.root!)}; disk work never reads, measures or touches C: (w1755)` }
+          : await withGitCheck(judgePath(path.resolve(a), facts!, now), facts!.root);
       if (r.verdict === 'keep') kept++;
       out(`${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${a}\n        ${r.why}\n`);
     }
@@ -772,7 +795,7 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   const session = e.FF_SESSION_ID;
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
   if (!session || !['list', 'end'].includes(cmd)) {
-    process.stdout.write(`usage: ff-leftovers [list|end|folders|check <path>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
+    process.stdout.write(`usage: ff-leftovers [list|end|folders|check <path>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive, apart from the game's AppData Never Games folders, which are always KEEP (w1755)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
     return session ? 2 : 1;
   }
   const { realDeps } = await import('./unity.ts');

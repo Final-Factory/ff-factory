@@ -24,6 +24,12 @@
  *   fifth login        scroller / e2e-password-135, "Scroll Tester", a member whose own orchestrator only
  *                      e2e/scrollKeep.spec.ts's orchestrator test writes to: it checks that the chat's last message is in
  *                      view, and another test's message (a question card) landing after it moved the view (w1745)
+ *   sixth login        replier / e2e-password-579, "Reply Tester", a member whose own orchestrator only e2e/replies.spec.ts
+ *                      writes to: its taps land on a message's buttons, and the owner's chat, scrolling as other files'
+ *                      messages come, moved them under the tap (w1758: the take-back missed, 11 CI runs)
+ *   seventh login      reloader / e2e-password-680, "Reload Tester", a member whose own orchestrator only two tests of
+ *                      e2e/freshness.spec.ts write to: a question answered with a tap after the reload, and a chat scrolled
+ *                      up that must be at the same message after it (w1758: other files' messages and pictures moved both)
  *   dispatcher turns   POST <port + 200> (e2e/fixtures.ts, sendToChat): the only way a test makes the dispatcher take a turn
  *   Max                a mock Discord on <port + 100> (e2e/mockDiscord.ts) with a bot token in a scratch ffbox config, and
  *                      five seeded events from the gallery worker (e2e/max.spec.ts)
@@ -56,6 +62,10 @@ export const ASKER = 'asker';
 export const ASKER_PASSWORD = 'e2e-password-246';
 export const SCROLLER = 'scroller';
 export const SCROLLER_PASSWORD = 'e2e-password-135';
+export const REPLIER = 'replier';
+export const REPLIER_PASSWORD = 'e2e-password-579';
+export const RELOADER = 'reloader';
+export const RELOADER_PASSWORD = 'e2e-password-680';
 const withProvider = process.env.E2E_PROVIDER === '1';
 const withIntake = process.env.E2E_INTAKE === '1';
 /** The Discord user id the intake projects trust, mapped to tester (e2e/intake.spec.ts). */
@@ -252,7 +262,7 @@ fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
 // dispatcher and the machine's workers start. The portal's vault reads this file and key at its start.
 const { Vault, VAULT_FILE } = await import('../server/vault.ts');
 const vault = new Vault({ file: path.join(dataDir, VAULT_FILE), key: () => ({ file: path.join(base, 'vault.key') }) });
-for (const login of [USER, MATE, COMPACTOR, ASKER, SCROLLER]) vault.add({ name: `vault-${login}-1`, kind: 'claude', value: fakeToken(login), owner: login, share: 'owner' });
+for (const login of [USER, MATE, COMPACTOR, ASKER, SCROLLER, REPLIER, RELOADER]) vault.add({ name: `vault-${login}-1`, kind: 'claude', value: fakeToken(login), owner: login, share: 'owner' });
 
 const { Auth } = await import('../server/auth.ts');
 const auth = new Auth(dataDir, { trustProxy: false });
@@ -261,6 +271,8 @@ await auth.setUser(MATE, MATE_PASSWORD, { displayName: 'Team Mate', role: 'membe
 await auth.setUser(COMPACTOR, COMPACTOR_PASSWORD, { displayName: 'Compact Tester', role: 'member' });
 await auth.setUser(ASKER, ASKER_PASSWORD, { displayName: 'Ask Tester', role: 'member' });
 await auth.setUser(SCROLLER, SCROLLER_PASSWORD, { displayName: 'Scroll Tester', role: 'member' });
+await auth.setUser(REPLIER, REPLIER_PASSWORD, { displayName: 'Reply Tester', role: 'member' });
+await auth.setUser(RELOADER, RELOADER_PASSWORD, { displayName: 'Reload Tester', role: 'member' });
 fs.writeFileSync(path.join(base, 'teammate-key.txt'), auth.createApiKey('teammate-laptop', MATE));
 // FFBox's key for Max's escalations (docs/intake.md), scoped to POST /api/intake/ffbox (e2e/provider.spec.ts).
 if (withProvider) fs.writeFileSync(path.join(base, 'ffbox-key.txt'), auth.createApiKey('ffbox', undefined, 'ffbox'));
@@ -270,6 +282,12 @@ setQueryForTesting(fakeQuery() as never);
 
 const { internals } = await import('../server/index.ts');
 await pc.connect(internals.machines);
+// A kept-alive connection is not closed under a request (w1758): Playwright's page.request and route.fetch keep their idle
+// sockets with no time limit (an http.Agent with keepAlive and no timeout, playwright-core), and this server closed an idle
+// one after Node's default 5 s, so a request sent on a socket just as it closed died with "read ECONNRESET" or "socket hang
+// up" (5 CI failures 2026-10-20..22, freshness and scrollKeep specs). No test leaves a context idle for a minute.
+internals.server.keepAliveTimeout = 65_000;
+internals.server.headersTimeout = 66_000;
 
 // The dispatcher takes no person's message any more (docs/orchestrators.md), so a test that needs its fake model to take
 // a turn (call one of its tools) has this stand-in on <port + 200> (which also patches a request for e2e/ledger.spec.ts): it sends the owner's words straight to the

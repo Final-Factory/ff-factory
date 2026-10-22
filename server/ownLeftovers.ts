@@ -409,6 +409,11 @@ export function editorBlocked(p: string, g: CleanupGuard, procs: string[]): stri
 export interface OwnLeftoverInputs {
   platform: string;
   home: string;
+  /**
+   * The home folder may not be read (w1755: on Windows it is off the install drive): a person's own projects there are not
+   * searched for the Unity version they use, so no editor is judged unused and none goes.
+   */
+  homeOffLimits?: boolean;
   guard: CleanupGuard;
   /** Player slot roots (playerSlotRoots). */
   slotRoots: string[];
@@ -436,8 +441,9 @@ export async function planOwnLeftovers(i: OwnLeftoverInputs): Promise<OwnLeftove
   const slots = await planPlayerSlots({ roots: i.slotRoots, guard: i.guard, host: i.host, alive: i.alive, now: i.now });
   if (!i.procs) return { ...slots, prune: [] };
   const trees = await planWorktrees({ clones: i.clones, sandboxes: i.sandboxes, busy: i.busy, relax: i.relax, guard: i.guard, procs: i.procs, now: i.now, git: i.git, localWork: i.localWork });
-  const keep = await unityVersionsInUse({ projects: i.sandboxes, clones: i.clones, recentRoots: [i.home], now: i.now, git: i.git });
-  const editors = await planUnityEditors({ editorDirs: i.editorDirs, keep, procs: i.procs, guard: i.guard });
+  const keep = i.homeOffLimits ? new Set<string>() : await unityVersionsInUse({ projects: i.sandboxes, clones: i.clones, recentRoots: [i.home], now: i.now, git: i.git });
+  // An empty keep set plans nothing (planUnityEditors): with the home folder off limits no editor goes.
+  const editors = await planUnityEditors({ editorDirs: i.homeOffLimits ? [] : i.editorDirs, keep, procs: i.procs, guard: i.guard });
   return {
     items: [...slots.items, ...trees.items, ...editors.items],
     listed: [...slots.listed, ...trees.listed, ...editors.listed],

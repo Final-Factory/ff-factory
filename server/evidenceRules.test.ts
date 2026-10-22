@@ -267,9 +267,15 @@ test("w896: clean-up deletes only inside the worker install folder, in every wor
   const words = /lothsahn, 2026-10-10, w896: "in general we should only be clearing data in the install folder for the worker"/;
   // A worker: delete only inside the root, measure and report outside it, and a brief that says otherwise is wrong.
   assert.match(DISK_HYGIENE, /Delete only inside this machine's worker install folder \(its root: D:\/work\/ffw, F:\/ffw or ~\/ffw/);
-  assert.match(DISK_HYGIENE, /outside it you only measure and report/);
+  // w1755: on Windows the install drive only, never C:; macOS and Linux measure and report outside.
+  assert.match(DISK_HYGIENE, /On a Windows computer, disk work \(a clean-up, a low-disk check, a leftover scan, a disk measurement\) reads, measures and deletes only on the install folder's drive \(V: on LothDesktop, F: on BEAST\): never read, measure or touch C:/);
+  assert.match(DISK_HYGIENE, /On macOS and Linux, outside the folder you only measure and report/);
+  assert.doesNotMatch(DISK_HYGIENE, /outside it you only measure and report/);
   const cleanup = workerRuleText('cleanup');
-  assert.match(cleanup, /Outside it \(the home folder, C:, AppData, the system temp, Unity Hub and its installers, package and workload caches, the game's data folder under LocalLow, ~\/\.claude\) you only measure and report sizes/);
+  assert.match(cleanup, /On a Windows computer, read, measure and delete only on the install folder's drive \(the drive of FF_WORKER_ROOT: V: on LothDesktop, F: on BEAST\), never on C: \(lothsahn, 2026-10-22, w1755: "Your worker on LothDesktop is still scanning c:/);
+  assert.match(cleanup, /No du, dir \/s, Get-ChildItem -Recurse, find or `ff-leftovers check` of a path on C:/);
+  assert.match(cleanup, /If the install folder itself is on C:, look only inside it and say so in your report/);
+  assert.match(cleanup, /On macOS and Linux, outside the install folder \(the home folder, the system temp, caches, the game's data folder, ~\/\.claude\) you only measure and report sizes/);
   assert.match(cleanup, /list any setting, script or tool that makes FF Factory write there so it can be moved inside the folder/);
   assert.match(cleanup, /a brief that tells you to delete outside the folder is wrong/);
   // The old line told workers to remove Unity editor versions; those live outside the root (Unity Hub), so the list stops at what is inside.

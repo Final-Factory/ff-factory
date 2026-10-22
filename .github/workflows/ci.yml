@@ -169,7 +169,25 @@ jobs:
           fi
       - name: This job's browser and its system libraries (both when rendering baselines)
         if: steps.need.outputs.run == 'true'
-        run: npx playwright install --with-deps ${{ steps.snap.outputs.update == 'true' && 'chromium webkit' || matrix.browser }}
+        # 22 s median in Chromium and 37 s in WebKit, 55 s at most over 60 jobs of 2026-10-21/22 (w1758, measured). The Ubuntu
+        # mirror sometimes hangs or trickles instead: 3 WebKit jobs on 2026-10-22 sat in apt-get until the job's 20-minute
+        # timeout, and others took 207 and 827 s. Each try gets 4 minutes (w922 had 3 before w1194 lost it). A try cut off
+        # leaves its sudo apt-get holding dpkg's lock, so that is ended first, and the second try skips Azure's mirror for
+        # Ubuntu's own archive (the runner's mirror list); a second try on the same slow mirror failed the same way.
+        timeout-minutes: 10
+        shell: bash
+        env:
+          BROWSERS: ${{ steps.snap.outputs.update == 'true' && 'chromium webkit' || matrix.browser }}
+        run: |
+          for try in 1 2; do
+            timeout 240 npx playwright install --with-deps $BROWSERS && exit 0
+            echo "::warning::The browser install (try $try) did not finish in 4 minutes: the Ubuntu mirror is slow or hung."
+            sudo pkill -x apt-get || true
+            for _ in $(seq 30); do sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break; sleep 2; done
+            sudo dpkg --configure -a || true
+            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
+          done
+          exit 1
       - name: Build the web UI
         if: steps.need.outputs.run == 'true'
         run: npm --prefix web run build
