@@ -26,6 +26,9 @@ test('w1746: a Live view idle 15 minutes (no turn, job, check-in or viewer) has 
 
 test('w1746: a viewer watching, or watching until a moment ago, or a knob moved: no close', () => {
   assert.equal(liveIdleBlock(view({ viewers: 1 }), facts(), NOW, 15), '1 page watching');
+  // A page open that nobody has looked at for 5 min (live.ts LIVE_PRESENT_MS): the idle time runs, and says why.
+  assert.equal(liveIdleBlock(view({ viewers: 0, pagesOpen: 1, watchedAt: NOW - min(5) }), facts(), NOW, 15), 'idle 5 of 15 min (1 page open, not looked at)');
+  assert.equal(liveIdleBlock(view({ viewers: 0, pagesOpen: 1, watchedAt: NOW - min(16) }), facts(), NOW, 15), undefined);
   assert.equal(liveIdleBlock(view({ watchedAt: NOW - min(5) }), facts(), NOW, 15), 'idle 5 of 15 min');
   assert.equal(liveIdleBlock(view({ touchedAt: NOW - min(2) }), facts(), NOW, 15), 'idle 2 of 15 min');
 });
@@ -33,15 +36,29 @@ test('w1746: a viewer watching, or watching until a moment ago, or a knob moved:
 test('w1746: a turn, a running tool, a background job, a permission or a check-in in that sandbox: no close', () => {
   const block = (s: Partial<SessionInfo>, wake = false) => liveIdleBlock(view(), facts({ sessions: [session(s)], wake }), NOW, 15);
   assert.equal(block({ status: 'running' }), 'w1 is mid-turn');
-  assert.equal(block({ activeTool: { id: 't1', name: 'Bash', since: iso(NOW - min(30)) } }), 'w1 is running Bash');
   assert.equal(block({ backgroundTasks: 1 }), 'w1 has a background job running');
-  assert.equal(block({ wakeAt: iso(NOW + min(90)) }), `w1 has a check-in pending (${iso(NOW + min(90))})`);
+  assert.equal(block({ wakeAt: iso(NOW + min(10)) }), `w1 has a check-in pending (${iso(NOW + min(10))})`);
+  assert.equal(block({ wakeAt: iso(NOW + min(30)) }), `w1 has a check-in pending (${iso(NOW + min(30))})`);
   assert.equal(block({}, true), 'w1 has a check-in pending');
   // The other worker sharing the sandbox counts too.
   assert.equal(liveIdleBlock(view(), facts({ sessions: [session(), session({ id: 'w2', status: 'starting' })] }), NOW, 15), 'w2 is mid-turn');
   // An editor not running, or closed already, is not closed again.
   assert.equal(liveIdleBlock(view(), facts({ sb: sandbox({ unity: { state: 'starting' } }) }), NOW, 15), 'its editor is starting');
   assert.equal(liveIdleBlock(view(), facts({ sb: sandbox({ unity: { state: 'stopped' }, idleClosed: { at: iso(NOW), minutes: 15 } }) }), NOW, 15), 'its editor is closed already');
+});
+
+test('w1746: what is not activity: a session gone, a tool left over between turns, a check-in more than 30 min away', () => {
+  const block = (s: Partial<SessionInfo>, wake = false) => liveIdleBlock(view(), facts({ sessions: [session(s)], wake }), NOW, 15);
+  // beast/slot3, 2026-10-22 17:05Z: "b0ae73cf is running Bash" from a worker that was not mid-turn.
+  assert.equal(block({ activeTool: { id: 't1', name: 'Bash', since: iso(NOW - min(30)) } }), undefined);
+  assert.equal(block({ status: 'stopped', backgroundTasks: 2, activeTool: { id: 't1', name: 'Bash', since: iso(NOW - min(90)) } }), undefined);
+  assert.equal(block({ status: 'error', pendingPermissions: [{}] as unknown as SessionInfo['pendingPermissions'] }), undefined);
+  // A check-in further off: its wake starts the editor again, so it does not hold it now.
+  assert.equal(block({ wakeAt: iso(NOW + min(90)) }), undefined);
+  // A stopped worker's check-in soon still holds it.
+  assert.equal(block({ status: 'stopped', wakeAt: iso(NOW + min(5)) }), `w1 has a check-in pending (${iso(NOW + min(5))})`);
+  // The other worker of the sandbox, stopped with a tool left over, does not hold it either.
+  assert.equal(liveIdleBlock(view(), facts({ sessions: [session(), session({ id: 'b0ae73cf', status: 'stopped', activeTool: { id: 't2', name: 'Bash', since: iso(NOW - min(60)) } })] }), NOW, 15), undefined);
 });
 
 function closer(o: { answer?: string; minutes?: number } = {}) {

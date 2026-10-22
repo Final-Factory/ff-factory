@@ -9,6 +9,12 @@ import type { LiveIdleView } from './liveIdle.ts';
 
 /** What a page that does not answer frames (an older one) may hold back before it misses frames (about a second of 960 px JPEGs). */
 const VIEWER_BACKLOG_BYTES = 1024 * 1024;
+/**
+ * A page counts as watching while it said "p" (present) this recently (w1746): it says so every 30 s while its tab is
+ * visible and focused, and at each touch (web/src/components/LiveStage.tsx). A page left open behind other windows, on a
+ * screen nobody looks at, or whose link died without a close, stops counting after this, so the view can go idle.
+ */
+export const LIVE_PRESENT_MS = 90_000;
 export const LIVE_FPS = { default: 15, max: 30 };
 export const LIVE_WIDTH = { default: 960, min: 320, max: 1920 };
 /**
@@ -42,6 +48,10 @@ interface View {
   latest?: Buffer;
   /** Each watching page and its frame pump (w1601: it keeps to what the page's link carries, shared/framePump.ts). */
   viewers: Map<WebSocket, FramePump>;
+  /** When each page last said it is looked at (ms; LIVE_PRESENT_MS). */
+  present: Map<WebSocket, number>;
+  /** Taken back from a daemon after a portal restart (daemonHello): its idle time counts from its sessions, not the restart. */
+  takenBack?: boolean;
   /** The last time a page opened or left it, and the last knob move or reset (ms): a watched or tuned view is not idle (w1746). */
   watchedAt?: number;
   touchedAt?: number;
@@ -127,6 +137,7 @@ export class LiveHub {
     const v: View = {
       info: { liveId: randomUUID(), sessionId: info.id, machineId, sandbox, state: 'starting', detail: 'asking the game to stream', fps, width, materials, startedAt: at, updatedAt: at, frames: 0 },
       viewers: new Map(),
+      present: new Map(),
     };
     this.views.set(v.info.liveId, v);
     this.deps.changed();
@@ -190,6 +201,8 @@ export class LiveHub {
       this.views.set(r.liveId, {
         info: { liveId: r.liveId, sessionId: r.sessionId, machineId, sandbox: r.sandbox, state: r.state, detail: String(r.detail ?? ''), fps: clamp(r.fps, 1, LIVE_FPS.max, LIVE_FPS.default), width: clamp(r.width, LIVE_WIDTH.min, LIVE_WIDTH.max, LIVE_WIDTH.default), materials, startedAt: at, updatedAt: at, frames: 0 },
         viewers: new Map(),
+        present: new Map(),
+        takenBack: true,
       });
       this.deps.changed();
     }
@@ -218,7 +231,22 @@ export class LiveHub {
     if (!this.deps.enabled()) return [];
     return [...this.views.values()]
       .filter((v) => v.info.state !== 'stopped')
-      .map((v) => ({ liveId: v.info.liveId, sessionId: v.info.sessionId, machineId: v.info.machineId, sandbox: v.info.sandbox, startedAtMs: Date.parse(v.info.startedAt) || 0, viewers: v.viewers.size, ...(v.watchedAt ? { watchedAt: v.watchedAt } : {}), ...(v.touchedAt ? { touchedAt: v.touchedAt } : {}) }));
+      .map((v) => {
+        const now = this.now();
+        const seen = [...v.present.values()];
+        const watchedAt = Math.max(v.watchedAt ?? 0, ...seen);
+        return {
+          liveId: v.info.liveId,
+          sessionId: v.info.sessionId,
+          machineId: v.info.machineId,
+          sandbox: v.info.sandbox,
+          startedAtMs: v.takenBack ? 0 : Date.parse(v.info.startedAt) || 0,
+          viewers: seen.filter((t) => now - t < LIVE_PRESENT_MS).length,
+          pagesOpen: v.viewers.size,
+          ...(watchedAt ? { watchedAt } : {}),
+          ...(v.touchedAt ? { touchedAt: v.touchedAt } : {}),
+        };
+      });
   }
 
   /** Every live view of a session that is gone (its worker ended). */
@@ -322,16 +350,28 @@ export class LiveHub {
       VIEWER_BACKLOG_BYTES,
     );
     v.viewers.set(ws, pump);
+    v.present.set(ws, this.now());
     ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
       if (isBinary) return;
-      const n = parseAck(String(data));
+      const text = String(data);
+      if (text === 'p') {
+        // Looked at again after a while away: its editor may have closed idle meanwhile, so it counts as an opening (w1746).
+        const was = v.present.get(ws) ?? 0;
+        v.present.set(ws, this.now());
+        if (this.now() - was >= LIVE_PRESENT_MS) this.deps.viewerOpened?.(v.info, who);
+        return;
+      }
+      const n = parseAck(text);
       if (n !== undefined) pump.ack(n);
     });
     if (v.latest) pump.push(v.latest);
     v.watchedAt = this.now();
     ws.on('close', () => {
       v.viewers.delete(ws);
-      v.watchedAt = this.now();
+      // Watched until now, or last looked at a while ago: a page closed long after anyone looked does not restart the idle time.
+      const seen = v.present.get(ws) ?? 0;
+      v.watchedAt = Math.max(v.watchedAt ?? 0, this.now() - seen < LIVE_PRESENT_MS ? this.now() : seen);
+      v.present.delete(ws);
     });
     this.deps.viewerOpened?.(v.info, who);
     return true;
