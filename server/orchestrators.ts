@@ -2433,7 +2433,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * own, so it is resumed when the gate clears (resumeGatedWorker); its process then starts again on a token with room
    * (Agents.accountMove). Returns the requests blocked.
    */
-  tokenStopBlocked(sessionId: string, a: { ref: string; what: string }): string[] {
+  tokenStopBlocked(sessionId: string, a: { ref: string; what: string }, how = { stamp: "stopped at the dispatcher's token's stop line", told: 'saved its work and stopped' }): string[] {
     const items = [...this.store.work.values()];
     const now = this.now();
     const done: string[] = [];
@@ -2449,12 +2449,21 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       w.gateResumes = undefined;
       const cancelled = this.cancelCheckIns(w, sessionId);
       const name = gatesName([gate], now.getTime());
-      this.stamp(w, `worker ${sessionId} stopped at the dispatcher's token's stop line: blocked on ${name} (${gate.what}); it is resumed on a token with room, or after the reset${cancelled}`);
+      this.stamp(w, `worker ${sessionId} ${how.stamp}: blocked on ${name} (${gate.what}); it is resumed on a token with room, or after the reset${cancelled}`);
       this.store.putWork(w);
-      this.toPeople(w.requesters, dispatchNotice(w, `blocked on ${name} (${gate.what}); its worker ${sessionId} saved its work and stopped, and is resumed when a token has room`));
+      this.toPeople(w.requesters, dispatchNotice(w, `blocked on ${name} (${gate.what}); its worker ${sessionId} ${how.told}, and is resumed when a token has room`));
       done.push(w.id);
     }
     return done;
+  }
+
+  /**
+   * A line in the log of each open request a session holds (w1745: a token switch, server/tokenSwitch.ts), leaving its status
+   * and its activity time alone. Returns the ids.
+   */
+  noteOnHeld(sessionId: string, line: string): string[] {
+    const ids = [...holdsOf(sessionId, [...this.store.work.values()]).held];
+    return ids.filter((id) => !!this.ledgerEdit(id, line, () => {}, true));
   }
 
   /** A worker was started, messaged or approved for a request: link it, mark the request active, tell its requesters. */

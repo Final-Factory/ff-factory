@@ -242,6 +242,47 @@ nearly used-up one first (vault-ben-2 at 97% on 2026-10-11 04:32Z). Details *(gu
   The ledger cleanup decides whether to resume a worker a limit cut off from its person's pool too (`limitsClearFor` →
   `poolForRef`: some token of the pool is one a new worker would get), not from the meters of the one account that hit it. Without
   a pool for that person it reads that account's meters as before.
+
+**When a token runs out (w1745).** lothsahn, 2026-10-22: "we do want to run that account out. Can we have it run the account
+out and then have the dispatcher notice and change them once out?" A running agent keeps the token its process started on
+while that token works: nothing moves it early, at any meter, so a token is used up before its reset. Each point *read* from the
+code and covered by `server/tokenSwitch.test.ts`:
+- **Out.** A token is out when Claude refuses it, or when the pool retires it (weekly at `vault.pool.retireWeeklyPercent`,
+  above). A refusal is a session's `rate_limit_event` with status `rejected` (not `allowed_warning`, not an `overage` one), or a
+  turn that ends on Claude's limit line ("You've hit your weekly limit · resets 3am", `LIMIT_END` in `server/ledgerRules.ts`),
+  on any session, the dispatcher's included. It marks the token's refused window (the event's type, else the line's words, else
+  the fuller meter) **used up** until that window's reset (the event's `resetsAt`, else the meter's, else an hour):
+  `UsageTracker.markOut` in `server/usage.ts`, kept in `usage.json` as `outs` so a restart keeps it, and never lowered by a
+  poll before the reset (a poll at 98% would otherwise put it back in the pool, and its agents back onto it). The journal says
+  `usage: vault-ben-1 …nQAA is out (w1745): ...`.
+- **Every agent on it moves at its next turn** (w1375's path: `Agents.accountMove`, `tokenUnusable`): an idle worker's
+  process stops before its next message and the message starts a new one, in the same conversation, sandbox and requests, on
+  the pool's best token (`pickPool`). Never mid-turn (a message during a turn reaches that turn), never with a background task
+  running. A person's **orchestrator** moves the same way (`orchestratorPoolMove` → `orchestratorOut`) when its token is used
+  up and its pool has a token that is not, or when it is retired and its pool has one that is neither; it uses the pool up as
+  before otherwise. A **standing agent** starts each run on a fresh process, so its next run picks a token with room. The
+  **dispatcher** stays on the token `claudeAccounts.dispatcher` pins (or its payer's pool, unpinned) and is never moved or
+  resumed by this; the ops worker starts a fresh process for every job.
+- **An agent the limit stopped is resumed at once** (`TokenSwitch.turnEnded`, 3 seconds after its turn ends): when the pool
+  its work runs on can serve it (`limitsClearFor`, the rule the ledger cleanup uses: its person's pool, or the pool their
+  setting names, w1717) it gets `[token switch] Your last turn stopped because vault-ben-1 …nQAA ran out ... Carry on where you
+  stopped`, which waits in the send queue while its process restarts on the new token. A standing agent gets a new run with
+  that text; a person's orchestrator the same message.
+- **No token with room: held, as before.** A worker's open requests are **Blocked** on the out token's usage gate
+  (`Orchestrators.tokenStopBlocked`, the w1109 gate; its people are told why), and the blocker watch resumes it when a token of
+  that pool has room (`ownerPoolServes`), on that token. The ledger cleanup no longer stalls a blocked request for its worker's
+  cut-off (`cutOffStep`): its blocker resumes it. An orchestrator stays where it is (the pool banner says why); a standing run
+  waits for its pool (w1126). A worker whose process could not move (a background task kept it) and is refused again within
+  two hours is not resumed again, nor held on a gate that would clear at once: it moves at its first message once nothing
+  keeps the process, so nothing loops.
+- **Only the person's own pool.** The new token comes from the pool `pickPool` reads for the work's person (their own, or the one
+  their pool setting names, w1717), never another person's, the host's or any fallback. A lothsahn worker on his out token waits
+  while Ben's pool has room, unless lothsahn's setting names Ben's pool.
+- **Logged.** When the moved process reports its new account, the switch goes in the portal journal, in the log of every
+  request the agent holds, and in `system_status`: `token switch (w1745): worker 8f2f4372 moved from vault-ben-1 …nQAA to
+  vault-ben-2 …dAAA: vault-ben-1 …nQAA ran out ("You've hit your weekly limit ...")`. `system_status` also lists each token
+  out now ("Token out (w1745): ... Still on it: ...") and the moves waiting for their next process, and the last 24 hours of
+  switches (`data/token-switches.json` keeps the last 20). A token is only ever named by its vault name and last four characters.
 **Near a weekly reset (w1539, w1659).** lothsahn, 2026-10-21: "Instead of having it go first like that, can we just adjust the
 weighting so it gets used sooner? Like subtract 12 or 18 hours from the time remaining so that it starts getting consumed
 first?", then "Let's make the new setting 24 hours, not 12", with his earlier limit (2026-10-19): "We don't want it to always use the token about to expire first, though, as we
