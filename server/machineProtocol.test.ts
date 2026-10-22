@@ -75,7 +75,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // priority for the queue, which an older daemon's onMessage drops (no default case): its queue then counts every ticket normal.
 // w1688 (no bump): `secretEnv` on LaunchSpec, the variables whose values the vault gave the run, which an older daemon
 // ignores (it masks by SECRET_ENV names, as before); a newer daemon with an older portal has none and does the same.
-const DECIDED = { protocol: 9, fingerprint: '6ae65fa2acc7f91e' };
+// w1746 (no bump): `live` op idleClose with `minutes`, sent only to a daemon whose hello offers `liveIdleClose` (an older
+// daemon would take an unknown op for a start), and MachineSandbox `idleClosed`, which an older portal ignores.
+const DECIDED = { protocol: 9, fingerprint: '8057e74ed6be0263' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
