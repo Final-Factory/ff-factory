@@ -12,7 +12,13 @@
   group "Final Factory Unity editors". It records Root, the layout and the count (Pairs) in %ProgramData%\FinalFactory\player-slots.json,
   where player_slots.py finds the slots outside the daemon (a CI runner, a person's shell).
 
-  -Remove deletes both groups' rules, and the config file if it points at -Root.
+  -AgentNode names the agents' node (<root>\tools\node\node.exe, server/agentNode.ts, w1742): one inbound allow rule
+  for that exact path, every profile, in the group "Final Factory agent node", the same as a player folder's. Its own
+  listeners bind 127.0.0.1 (ff-factory's server/listenLoopback.test.ts), which never prompts; the rule is for any other
+  node listen, so it never prompts either. -StaleUnder (the root's tmp folder) deletes the rules earlier prompts left for programs
+  under it: a worker's own node copies, each in a session temp folder the harness has since removed.
+
+  -Remove deletes the three groups' rules, and the config file if it points at -Root.
   Idempotent. Never touches NotifyOnListen (lothsahn, 2026-10-06: the prompts stay on).
 #>
 param(
@@ -20,6 +26,8 @@ param(
     # The machine's sandbox count: player folders slot1-0..slot<Pairs>-1.
     [int]$Pairs = 1,
     [string]$UnityExe = '',
+    [string]$AgentNode = '',
+    [string]$StaleUnder = '',
     [switch]$Remove,
     [string]$LogFile = '',
     # A test install beside a live one: its own rule groups ("<group> <suffix>") and no slot config (the live one's stays).
@@ -28,7 +36,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $SlotGroup = 'Final Factory player slots'
 $UnityGroup = 'Final Factory Unity editors'
-if ($GroupSuffix) { $SlotGroup = "$SlotGroup $GroupSuffix"; $UnityGroup = "$UnityGroup $GroupSuffix" }
+$NodeGroup = 'Final Factory agent node'
+if ($GroupSuffix) { $SlotGroup = "$SlotGroup $GroupSuffix"; $UnityGroup = "$UnityGroup $GroupSuffix"; $NodeGroup = "$NodeGroup $GroupSuffix" }
 $Config = Join-Path $env:ProgramData 'FinalFactory\player-slots.json'
 
 function Say([string]$text) {
@@ -70,7 +79,7 @@ function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why, [s
 }
 
 try {
-    $old = @(Get-NetFirewallRule -Group $SlotGroup -ErrorAction SilentlyContinue) + @(Get-NetFirewallRule -Group $UnityGroup -ErrorAction SilentlyContinue)
+    $old = @(Get-NetFirewallRule -Group $SlotGroup -ErrorAction SilentlyContinue) + @(Get-NetFirewallRule -Group $UnityGroup -ErrorAction SilentlyContinue) + @(Get-NetFirewallRule -Group $NodeGroup -ErrorAction SilentlyContinue)
     if ($old.Count) { $old | Remove-NetFirewallRule }
     if ($Remove) {
         $removedConfig = $false
@@ -92,6 +101,17 @@ try {
             $made += Add-Allow (Join-Path $Root "slot$k-$p\player\finalfactory.exe") "Final Factory player slot$k-$p" $SlotGroup "$who's player $p (scripts/nightly/player_slots.py, w576)" -One
         }
     }
+    if ($AgentNode) {
+        $made += Add-Allow $AgentNode 'Final Factory agent node' $NodeGroup "The agents' node at its one fixed path (server/agentNode.ts, w1742)" -One
+    }
+    $staleGone = 0
+    if ($StaleUnder) {
+        # Rules prompts left for programs in the root's temp folders (a worker's node copy, w1742), never one of ours.
+        $under = ([IO.Path]::GetFullPath($StaleUnder)).TrimEnd('\') + '\'
+        $staleRules = @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object { [string]$_.Program -like ($under + '*') } |
+                        Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Group -ne $SlotGroup -and $_.Group -ne $UnityGroup -and $_.Group -ne $NodeGroup })
+        if ($staleRules.Count) { $staleRules | Remove-NetFirewallRule; $staleGone = $staleRules.Count }
+    }
     $editors = 0
     foreach ($exe in @($UnityExe -split ';' | Where-Object { $_ })) {
         $made += Add-Allow $exe "Unity editor $(Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $exe)))" $UnityGroup 'Unity editor play mode (worker install, w513)'
@@ -101,7 +121,7 @@ try {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
         [IO.File]::WriteAllText($Config, (@{ root = $Root; layout = 'sandbox-pairs'; count = $Pairs } | ConvertTo-Json))
     }
-    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1 ($(2 * $Pairs) player folders, one rule each) and $editors Unity editor(s)$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
+    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1 ($(2 * $Pairs) player folders, one rule each) and $editors Unity editor(s)$(if ($AgentNode) { ", one for the agents' node $AgentNode" } else { '' })$(if ($staleGone) { "; removed $staleGone rule(s) earlier prompts left under $StaleUnder" } else { '' })$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
 } catch {
     Say "FAILED: $($_.Exception.Message)"
     exit 1
