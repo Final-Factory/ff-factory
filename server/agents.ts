@@ -428,6 +428,13 @@ export class Agents {
    * first (accountMove).
    */
   tokenUnusable?: (account: string) => string | undefined;
+  /**
+   * An orchestrator's token that is out (w1745: used up, refused by Claude, or retired) while `pool` (whose pool its work runs
+   * on) has a token that is not: its label and why, else undefined. Wired by index.ts.
+   */
+  orchestratorTokenOut?: (account: string, pool: string) => string | undefined;
+  /** An idle agent's process stops to restart on another account (accountMove): where it ran and why, for the switch log (w1745). */
+  accountMoving?: (info: SessionInfo, why: string) => void;
   /** Who owns the vault token `account` (a session's credential key, "token:<fingerprint>"), for the pool setting's move (w1717); wired by index.ts. */
   tokenOwner?: (account: string) => string | undefined;
   /** Whether a person has a Claude pool (Vault.hasClaudeFor), checked before the pool setting names them (w1717); wired by index.ts. */
@@ -1993,6 +2000,13 @@ export class Agents {
    * background task runs (a build the restart would kill): that process carries on, as before.
    */
   private accountMove(s: SessionHandle): string | undefined {
+    const why = this.accountMoveWhy(s);
+    // w1745: remember the token it leaves, so the start that follows is logged as a switch (server/tokenSwitch.ts).
+    if (why) this.accountMoving?.(s.info, why);
+    return why;
+  }
+
+  private accountMoveWhy(s: SessionHandle): string | undefined {
     const i = s.info;
     if (i.kind === 'orchestrator') return this.orchestratorPoolMove(s);
     if (i.kind !== 'worker' || !i.machineId || !s.live || i.backgroundTasks) return undefined;
@@ -2029,6 +2043,10 @@ export class Agents {
     const person = owner?.userId ?? (dispatcherOwnAccount(this.cfg) ? undefined : this.identity.systemPayer().userId);
     if (!person) return undefined;
     const pool = this.poolOf(person);
+    // w1745: its token is out (used up, refused by Claude, or retired) and the pool its work runs on has a token that is not:
+    // it restarts there before this message. The dispatcher stays on the token it is pinned to, as configured.
+    const out = i.orchestratorRole === 'dispatcher' ? undefined : this.orchestratorTokenOut?.(i.account, pool);
+    if (out) return `its process runs on ${out}, so it restarts on a token with room in ${isSamePerson(pool, person) ? 'its person' : pool}'s pool before this message (w1745)`;
     const on = this.tokenOwner?.(i.account);
     if (!on || isSamePerson(on, pool)) return undefined;
     return `its process runs on ${on}'s Claude pool and ${person}'s pool setting names ${isSamePerson(pool, person) ? 'their own' : `${pool}'s`} now, so it restarts there before this message (w1717)`;
