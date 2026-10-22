@@ -1,6 +1,6 @@
-import type { APIRequestContext, BrowserContextOptions, Locator, Page } from '@playwright/test';
+import type { APIRequestContext, Locator, Page } from '@playwright/test';
 import type { TranscriptEvent } from '../shared/types.ts';
-import { ALPHA, appState, expect, go, openSandbox, sendMessage, sendToChat, startWorker, test, uniq } from './fixtures.ts';
+import { ALPHA, appState, asLogin, expect, go, openSandbox, sendMessage, sendToChat, startWorker, test, uniq } from './fixtures.ts';
 
 /**
  * Leaving a page and coming back keeps the reader's place (w1100): at the bottom, a chat is still at the bottom, with what
@@ -91,20 +91,7 @@ async function keepsPlace(opts: {
 // Its own login's chat (e2e/server.ts, "scroller"): the owner's orchestrator chat takes other files' messages while this
 // runs, and one landing after row 9 (a question card from sideways.spec.ts) moved the view off it, and a chat that ends on
 // an answer and its card when it loads opens on the answer (w1632), not at the bottom (w1745: WebKit, PR #518 and #520).
-const asScroller = test.extend<{ solo: Page }>({
-  solo: async ({ browser }, use) => {
-    const ctx = await browser.newContext(test.info().project.use as BrowserContextOptions);
-    await expect(async () => {
-      const r = await ctx.request.post('/api/login', { data: { username: 'scroller', password: 'e2e-password-135' } });
-      expect(r.ok(), await r.text()).toBeTruthy();
-    }).toPass({ intervals: [100, 200, 400, 800], timeout: 15_000 });
-    const page = await ctx.newPage();
-    await page.goto('/');
-    await expect(page.locator('.sidebar')).toBeAttached();
-    await use(page);
-    await ctx.close();
-  },
-});
+const asScroller = asLogin('scroller', 'e2e-password-135');
 
 asScroller('the orchestrator chat keeps its place across a visit to the Dispatcher', async ({ solo: page }) => {
   const me = await appState(page.request);

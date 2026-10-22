@@ -28,9 +28,12 @@ test('visual: orchestrator home', async ({ page }) => {
   // The orchestrator is shared with the chat tests running alongside: its conversation and state are
   // theirs, and while one of their turns runs the composer shows Stop and a follow-up placeholder; the
   // phone's needs-you bell counts their permission requests. The frame (header, composer) is compared. The context
-  // size (w535) shows once a turn has run, so it is left out, not hidden: the header is as before it existed.
+  // size (w535) shows once a turn has run, so it is left out, not hidden: the header is as before it existed. The global
+  // notice bars are left out too, as on the sandbox page below: one a parallel test raises took 35 px off this section
+  // (1160x865 against 900; w1758, 20 CI failures 2026-10-19..22).
   await page.addStyleTag({
     content: `
+      .gbars { display: none !important; }
       section.orch .transcript-inner, section.orch .orch-state, section.orch .hb-on, section.orch .needs-you, section.orch .drawer-dot { visibility: hidden !important; }
       section.orch [data-testid="context-size"], section.orch [data-testid="active-model"],
       section.orch .composer-hint, section.orch .jump-pill, section.orch .btn-stop-main, section.orch .btn-stop-mini,

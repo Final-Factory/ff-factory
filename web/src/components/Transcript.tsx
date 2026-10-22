@@ -152,6 +152,8 @@ const ANSWER_MARGIN = 8;
 const PILL_ZONE = 56;
 /** How long the place is held after the view is resized (a phone turned, a keyboard opened): the layout may still be settling, a frame at a time. */
 const RESIZE_HOLD_MS = 1500;
+/** How long after the reader's own wheel, touch, pointer or key a scroll event is taken for theirs. */
+const READER_MS = 1000;
 
 const seqOf = (c: Element): number | undefined => {
   const v = c.getAttribute('data-seq') ?? c.getAttribute('data-seqs')?.trim().split(/\s+/)[0];
@@ -266,6 +268,8 @@ export const Transcript = memo(function Transcript({
   // The chat's last row and where it sat in the view at the last look: a reader's scroll moves it, the layout moving
   // scrollTop (content above it drawn smaller, w1641) does not.
   const lastRow = useRef<{ row: Element; at: number } | null>(null);
+  // When the reader last turned a wheel, touched, pressed a pointer or a key in the chat.
+  const readerAt = useRef(-Infinity);
 
   const track = (el: HTMLElement) => {
     lastTop.current = el.scrollTop;
@@ -295,8 +299,12 @@ export const Transcript = memo(function Transcript({
     // to the new end, and when a picture at the end loads before this event is handled, the content grew and the view went up,
     // as when the reader scrolls up. Only the reader moves the rows on screen.
     const stayed = atBottom.current && rowStayed(el);
+    // And with the chat's size changed and nothing from the reader just before, the layout moved scrollTop (w1758: on CI a
+    // block above drawn smaller while a picture at the end loaded moved the last row a few px, so `stayed` missed it, and
+    // the chat stopped following 236 px short of the end, in Chromium too).
+    const layout = el.scrollHeight !== lastHeight.current && performance.now() - readerAt.current > READER_MS;
     track(el);
-    if (atBottom.current && ((grew && down) || stayed)) {
+    if (atBottom.current && ((grew && down) || stayed || layout)) {
       // Late content (a lazy image, a diagram) pushed the end away before this event was handled: still following, so follow.
       el.scrollTo({ top: el.scrollHeight });
       track(el);
@@ -314,6 +322,7 @@ export const Transcript = memo(function Transcript({
   // The reader takes over: nothing is held against them.
   const released = () => {
     hold.current = null;
+    readerAt.current = performance.now();
   };
 
   // The question card the chat ends on (ask_person), with the answer the orchestrator wrote before it in that turn, if any.
@@ -461,6 +470,14 @@ export const Transcript = memo(function Transcript({
         // edge may now be wholly above it, and the first one in view another, which would become the place to go back to.
         if (at && at !== 'bottom' && alignTo(box, at)) hold.current = { place: at, until: performance.now() + RESIZE_HOLD_MS };
         track(box);
+      } else {
+        // Content above drawn bigger or smaller (a picture loading, a diagram) under a reader scrolled up: Chromium's scroll
+        // anchoring keeps the rows still and says so with a scroll event; WebKit moves the rows and says nothing. What the
+        // reader sees now is the place to come back to (w1758: on CI pictures above loaded just after the reader scrolled,
+        // the rows moved 137 px down, and a reload put them back where they had been before).
+        const was = scrollMemory.get(sessionNow.current);
+        const at = placeOf(box);
+        if (was && was !== 'bottom' && at) scrollMemory.set(sessionNow.current, { ...was, top: box.scrollTop, seq: at.seq, off: at.off });
       }
       // Whatever was done, the new size is the one scroll events are measured against.
       lastBox.current = { w: box.clientWidth, h: box.clientHeight };

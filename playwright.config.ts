@@ -65,7 +65,10 @@ export const PROJECT_NAMES = PROJECTS.map((p) => p.name);
 export default defineConfig({
   testDir: './e2e',
   outputDir: './test-results',
-  timeout: 30_000,
+  // A loaded CI runner: the slowest passing tests in WebKit took up to 30.2 s (orchestrators.spec "one person messages
+  // another", p50 24 s; vault.spec 30.1 s), 22 s in Chromium, over 77,656 passes in CI 2026-10-16..22 (w1758, measured from
+  // the list reporter's times). 30 s cut the slow ones off ("Test timeout of 30000ms exceeded"); twice the slowest leaves room.
+  timeout: 60_000,
   expect: {
     timeout: 7_000,
     toHaveScreenshot: { maxDiffPixelRatio: 0.02, threshold: 0.25, animations: 'disabled', caret: 'hide', scale: 'css' },
