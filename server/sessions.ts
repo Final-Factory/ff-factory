@@ -74,6 +74,8 @@ export interface QueuedSend {
   resumeOf?: { work: string; note: string };
   /** It waits for its worker's process to restart on another person's Claude tokens (w1076, SessionManager.accountMove). */
   account?: boolean;
+  /** It waits for its orchestrator's automatic compaction to finish (w1749, SessionManager.compactHold). */
+  compaction?: boolean;
 }
 
 /** How long a worker stopped to restart on another account may take to go before it is told to stop again (w1076). */
@@ -227,6 +229,16 @@ export interface AutoCompaction {
 /** What 'turnEnd' carries besides the session and its text (w535): set when the turn was a compaction, and whose. */
 export interface TurnEndMeta {
   compaction?: CompactionTrigger;
+}
+
+/**
+ * What 'compactEnd' carries (w1749): a /compact this session sent finished (`ok`) or failed (`why`), and whether FF Factory
+ * started it (server/autoCompact.ts retries those).
+ */
+export interface CompactEnd {
+  ok: boolean;
+  why?: string;
+  auto: boolean;
 }
 
 function textOf(content: unknown): string {
@@ -488,6 +500,7 @@ export class AgentSession implements SessionHandle {
     if (!auto) this.lastTurnText = line;
     this.store.append(this.info.id, { kind: 'error', text: line });
     if (this.info.statusDetail === COMPACTING) this.update({ statusDetail: undefined });
+    this.events.emit('compactEnd', this, { ok: false, why, auto: !!auto } satisfies CompactEnd);
   }
 
   /** The context in use now, as Claude Code measures it (getContextUsage), or undefined when it cannot say within 20 s. */
@@ -626,6 +639,7 @@ export class AgentSession implements SessionHandle {
             const turns = this.info.turns;
             // Until it is measured, the context is at least the summary (w535): the automatic trigger must not read the old size.
             this.info.contextTokens = meta.post_tokens;
+            this.events.emit('compactEnd', this, { ok: true, auto: !!c.auto } satisfies CompactEnd);
             const q = this.q;
             void (q ? this.contextNow(q) : Promise.resolve(undefined)).then((after) => {
               this.store.append(id, { kind: 'system', text: compactedLine(meta.pre_tokens, after, meta.post_tokens, meta.duration_ms ?? Date.now() - c.at, c.auto) });
@@ -1044,6 +1058,12 @@ export class SessionManager {
    * closed while the resume waited. Set by Agents (Orchestrators.staleResume, which keeps it for the new gates).
    */
   staleResume?: (work: string, sessionId: string, note: string) => string | undefined;
+  /**
+   * Why a message to this orchestrator must wait for its automatic compaction (w1749: one runs, or a retry is owed), or
+   * undefined. Set by AutoCompactor. Checked before anything else may start its process. `incoming`: a message sent now
+   * (a waiting retry then runs at once), not one the queue tries again.
+   */
+  compactHold?: (s: SessionHandle, incoming?: boolean) => string | undefined;
   /** Workers this manager stopped to restart them on another account, and when (moveFor). */
   private readonly moving = new Map<string, number>();
 
@@ -1096,7 +1116,12 @@ export class SessionManager {
       info.pendingPermissions = [];
       // Busy by its status, or by the marks its process left (it may have ended a moment before the server did).
       const busy = info.status === 'running' || info.status === 'starting' || info.status === 'waiting_permission' || !!info.turnOpenSince;
-      if (busy) {
+      // w1749: a compaction the stop cut off is no turn of anyone's (messages wait in the send queue meanwhile): FF Factory's
+      // automatic compaction runs an owed one again (server/autoCompact.ts); a person's own /compact is theirs to send again.
+      if (busy && !info.turnOpenSince && (info.statusDetail === COMPACTING || (info.kind === 'orchestrator' && (info.compactOwed?.attempts ?? 0) > 0))) {
+        this.store.append(info.id, { kind: 'system', text: info.compactOwed ? 'The server restarted while this conversation was being compacted; FF Factory compacts it again now, before any message that came meanwhile.' : 'The server restarted while this conversation was being compacted, so the compaction did not finish. Send /compact again to compact it.' });
+        info.statusDetail = undefined;
+      } else if (busy) {
         // Say so in the transcript: otherwise a turn cut off by a restart just looks finished.
         this.store.append(info.id, { kind: 'system', text: 'The server restarted while this session was working, so that turn was cut off. Send a message to resume it.' });
         cutOff.push({ ...info });
@@ -1205,7 +1230,7 @@ export class SessionManager {
   private enqueue(q: QueuedSend) {
     this.queue.push(q);
     this.saveQueue();
-    this.store.append(q.id, { kind: 'system', text: q.on === 'pool' ? `A message is waiting for its person's Claude pool (${q.why}); it is delivered as soon as a token has room.` : q.on === 'machine' ? `A message is waiting for its machine (${q.why}); it is delivered as soon as it can go.` : q.account ? `A message is waiting for this worker's process to restart (${q.why}); it is delivered as soon as the new process can start.` : `A message is waiting for a free agent slot (${q.why}); it is delivered as soon as one frees.` });
+    this.store.append(q.id, { kind: 'system', text: q.compaction ? `A message is waiting for this conversation's compaction (${q.why}); it is delivered as soon as the compaction is done.` : q.on === 'pool' ? `A message is waiting for its person's Claude pool (${q.why}); it is delivered as soon as a token has room.` : q.on === 'machine' ? `A message is waiting for its machine (${q.why}); it is delivered as soon as it can go.` : q.account ? `A message is waiting for this worker's process to restart (${q.why}); it is delivered as soon as the new process can start.` : `A message is waiting for a free agent slot (${q.why}); it is delivered as soon as one frees.` });
     console.log(`sessions: queued a message for ${q.id}: ${q.why}`);
     return q.uuid;
   }
@@ -1241,6 +1266,12 @@ export class SessionManager {
       if (stale) {
         drop();
         this.notDelivered(q.id, stale);
+        continue;
+      }
+      // w1749: an orchestrator's automatic compaction goes first; its messages go once it is done.
+      const compacting = this.compactHold?.(s);
+      if (compacting) {
+        held.add(q.id);
         continue;
       }
       // w1376: a held computer resumes nobody; checked before a restart (moveFor) or a slot, so nothing stops or starts there.
@@ -1322,6 +1353,10 @@ export class SessionManager {
     // w1532: on a paused machine the worker's requests are handed back instead, the message going with them.
     if (onHold && this.pauseHeld?.(s, text)) return '';
     if (onHold) return queue(onHold, 'machine');
+    // w1749: while an orchestrator's automatic compaction runs or is retried, its messages wait in the (saved) send queue,
+    // so a stop or a restart in the middle loses none, and each goes after the compaction.
+    const compacting = this.compactHold?.(s, true);
+    if (compacting) return this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), ...(opts.resumeOf ? { resumeOf: opts.resumeOf } : {}), at: new Date().toISOString(), why: compacting, on: 'capacity', compaction: true });
     const move = this.moveFor(s);
     if (move) return queue(move, 'capacity', true);
     // ALL RUNNING SLOTS BUSY (w384): the message waits and goes when a turn ends, instead of being refused. So does any
@@ -1402,5 +1437,16 @@ export class SessionManager {
    */
   stopAll(which: (s: SessionHandle) => boolean = () => true) {
     for (const s of this.sessions.values()) if (which(s)) s.stop(false);
+  }
+
+  /** Save a session's info after a field was set on it from outside (w1749: its owed compaction). */
+  saveInfo(id: string) {
+    const s = this.sessions.get(id);
+    if (s) this.store.putSession(s.info);
+  }
+
+  /** A system line in a session's transcript (w1749: what the automatic compaction's retries did). */
+  note(id: string, text: string) {
+    if (this.sessions.has(id)) this.store.append(id, { kind: 'system', text });
   }
 }

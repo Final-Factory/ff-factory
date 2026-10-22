@@ -1341,6 +1341,9 @@ export class Agents {
       (info) => (info.kind === 'orchestrator' ? this.orchestratorOptions : info.kind === 'ops' ? this.opsOptions : info.kind === 'standing' ? this.standing.noMachineOptions : undefined),
       (info) => this.machines.restore(info),
     );
+    // w1749: the orchestrators' compactions the last server owed (cut off by its stop, or a retry it had timed) run now.
+    const owed = this.autoCompact.boot();
+    if (owed) console.log(`auto-compact: ${owed} compaction(s) owed across the restart`);
     // The orchestration worker is never resumed by itself after a restart: the person whose job it was hears it.
     this.ops.start();
     this.rollout.start();
