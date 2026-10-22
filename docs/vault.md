@@ -258,7 +258,11 @@ code and covered by `server/tokenSwitch.test.ts`:
 - **Every agent on it moves at its next turn** (w1375's path: `Agents.accountMove`, `tokenUnusable`): an idle worker's
   process stops before its next message and the message starts a new one, in the same conversation, sandbox and requests, on
   the pool's best token (`pickPool`). Never mid-turn (a message during a turn reaches that turn), never with a background task
-  running. A person's **orchestrator** moves the same way (`orchestratorPoolMove` → `orchestratorOut`) when its token is used
+  running. On a machine the agent runs in an agent host (`machine/agentHost.ts`) that keeps the environment it was launched
+  with, so a message whose run has other credentials (`credsOf`: a hash of the Claude and GitHub tokens, kept in the host
+  folder's `creds.sha`) never goes to a host whose agent has ended: the host is told to stop and a new host carries the message
+  on the new token (`server/hostCreds.test.ts`). Before that fix, on 2026-10-22 17:23Z, worker 568cd4d4's message reached its
+  closing host, which started the agent again on vault-ben-1 …nQAA, and the turn ended on the weekly limit at once. A person's **orchestrator** moves the same way (`orchestratorPoolMove` → `orchestratorOut`) when its token is used
   up and its pool has a token that is not, or when it is retired and its pool has one that is neither; it uses the pool up as
   before otherwise. A **standing agent** starts each run on a fresh process, so its next run picks a token with room. The
   **dispatcher** stays on the token `claudeAccounts.dispatcher` pins (or its payer's pool, unpinned) and is never moved or

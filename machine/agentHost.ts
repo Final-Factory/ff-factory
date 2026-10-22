@@ -22,7 +22,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { EventEmitter } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { inspect } from 'node:util';
 import { AgentSession, setQueryForTesting, type AutoCompaction, type SessionHandle, type SessionSink, type TurnEndMeta } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
@@ -109,7 +109,16 @@ export class LineTail {
 
 export function hostFiles(dir: string) {
   const f = (n: string) => path.join(dir, n);
-  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), beat: f('beat'), log: f('host.log') };
+  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha') };
+}
+
+const CREDENTIAL_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'] as const;
+
+/** The credentials a run's environment gives, as a hash (w1745): never the values, so the host folder holds no secret. */
+export function credsOf(env: Record<string, string | undefined> | undefined): string {
+  const h = createHash('sha256');
+  for (const k of CREDENTIAL_ENV) h.update(`${k}=${env?.[k] ?? ''};`);
+  return h.digest('hex').slice(0, 32);
 }
 
 /** What a daemon sends a host. `n` numbers them, so a host that closed says how many it carried out. */
@@ -274,6 +283,8 @@ export class HostedSession implements SessionHandle {
   /** Its host's tree being stopped and its folder removed (w799); messages sent meanwhile wait in `waiting`. */
   private stoppingNow?: Promise<void>;
   private waiting: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>[] = [];
+  /** The credentials its running host started with (credsOf), so a message for other ones starts a new host (w1745). */
+  private creds?: string;
   private readonly files: ReturnType<typeof hostFiles>;
   private readonly deps: HostDeps;
   private readonly procs: HostProcs;
@@ -323,6 +334,7 @@ export class HostedSession implements SessionHandle {
     const f = this.files;
     const state = readJson<Extract<HostMessage, { op: 'state' }>>(f.state);
     if (state) this.applyState(state, false);
+    this.creds = readFileOr(f.creds, '').trim() || undefined;
     const offset = Number(readFileOr(f.offset, '0')) || 0;
     this.n = countLines(f.in);
     // Its process runs: taken back even with a late heartbeat (w799); the poll looks at it again.
@@ -352,9 +364,17 @@ export class HostedSession implements SessionHandle {
       ...(requestedBy ? { requestedBy } : {}),
       ...(attachments?.length ? { attachments } : {}),
     } as const;
-    if (this.stoppingNow) {
+    if (this.stoppingNow || this.waiting.length) {
       // Its old host's tree is still being stopped (w799): the new host starts once it is gone, with this message.
       this.waiting.push(cmd);
+    } else if (this.running && !this.liveNow && this.creds !== undefined && this.creds !== credsOf(this.deps.spec().env)) {
+      // w1745: its agent ended (a usage limit, a stop for another account) and its host is closing, while this message's run
+      // has other credentials (the portal moved it to another token). A host keeps the environment it started with, so given
+      // this message it would start the agent again on the old token: the old host is told to stop, and a new host, started
+      // with the run's credentials now, carries the message once the old one has closed.
+      this.waiting.push(cmd);
+      this.command({ op: 'stop', onPurpose: false });
+      this.deps.log(`agent host ${this.info.id}: a message for other credentials than its host started with: a new host carries it once this one has closed (w1745)`);
     } else if (!this.running) {
       // No host started (w665, w691): nothing runs, so it is not mid-turn. Marking it so reported a worker running for
       // hours that had nothing running, and the portal showed its request Working.
@@ -433,6 +453,8 @@ export class HostedSession implements SessionHandle {
     fs.mkdirSync(f.dir, { recursive: true });
     const spec = this.deps.spec();
     fs.writeFileSync(f.place, JSON.stringify({ cwd: spec.cwd, ...(spec.sandbox ? { sandbox: spec.sandbox } : {}) }));
+    this.creds = credsOf(spec.env);
+    fs.writeFileSync(f.creds, this.creds);
     fs.writeFileSync(f.offset, '0');
     this.n = 0;
     this.savedOffset = 0;
@@ -605,7 +627,8 @@ export class HostedSession implements SessionHandle {
         this.sends = [];
         if (left.length && !this.disposed) {
           this.deps.log(`agent host ${id} closed with ${left.length} message(s) not delivered; starting a new one for them`);
-          this.waiting.push(...left.map(withoutN));
+          // Ahead of any sent after it decided to close (w1745: those wait for a new host too), so they keep their order.
+          this.waiting.unshift(...left.map(withoutN));
           void this.teardown(HOST_WATCH.EXIT_WAIT_MS);
           return;
         }

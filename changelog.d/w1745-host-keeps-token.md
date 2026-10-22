@@ -1,0 +1,1 @@
+- **A worker moved off a used-up Claude token really starts on the new one** (w1745): a machine's agent host kept the token it was launched with, so a message that reached it while it was closing started the agent again on the used-up token, and the turn ended on the limit at once. Such a message now waits for a new host, started on the run's new token.
