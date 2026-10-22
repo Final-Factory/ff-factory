@@ -653,16 +653,27 @@ function logs(appDir: string) {
 test('windows (real tray app): built with the in-box csc, it starts, counts a SendInput key as injected (never a person), and quits (w1532)', { skip: process.platform !== 'win32' && 'Windows only', timeout: 3 * 60_000 }, async (t) => {
   const { buildTray, traySourceDir, trayInstance } = await import('../machine/tray.ts');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-tray-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }));
+  // One hook, the tray ended before its folder goes (w1758): Windows refuses to delete the exe of a running process, and a
+  // throwing after hook skips the ones after it, so a failed test left the tray running with its pipes holding the file's
+  // process open until the run's deadline.
+  let child: ReturnType<typeof spawn> | undefined;
+  t.after(async () => {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const gone = new Promise((r) => child!.once('exit', r));
+      child.kill();
+      await gone;
+    }
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+  });
   const first = await buildTray(traySourceDir(), dir);
   assert.equal(first.built, true);
   assert.ok(fs.existsSync(first.exe) && fs.existsSync(path.join(dir, 'fff.ico')) && fs.existsSync(path.join(dir, 'fff-paused.ico')));
   assert.equal((await buildTray(traySourceDir(), dir)).built, false, 'the same sources: not built again');
-  const child = spawn(first.exe, ['--instance', trayInstance(dir)], { stdio: ['pipe', 'pipe', 'pipe'] });
-  t.after(() => child.kill());
+  const tray = spawn(first.exe, ['--instance', trayInstance(dir)], { stdio: ['pipe', 'pipe', 'pipe'] });
+  child = tray;
   const lines: Record<string, unknown>[] = [];
   let buf = '';
-  child.stdout.on('data', (d: Buffer) => {
+  tray.stdout.on('data', (d: Buffer) => {
     buf += d.toString();
     for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) {
       const line = buf.slice(0, i).trim();
@@ -681,7 +692,7 @@ test('windows (real tray app): built with the in-box csc, it starts, counts a Se
   };
   const hello = await waitFor('hello');
   t.diagnostic(`tray hello: ${JSON.stringify(hello)}`);
-  child.stdin.write(`${JSON.stringify({ type: 'state', paused: false, why: 'No schedule: work runs any time', schedule: 'none', work: 'No agents working here', settings: { schedule: { enabled: false, start: '22:00', end: '08:00', days: [0, 1, 2, 3, 4, 5, 6] }, activity: { enabled: true, idleMinutes: 90 } }, machine: 'test' })}\n`);
+  tray.stdin.write(`${JSON.stringify({ type: 'state', paused: false, why: 'No schedule: work runs any time', schedule: 'none', work: 'No agents working here', settings: { schedule: { enabled: false, start: '22:00', end: '08:00', days: [0, 1, 2, 3, 4, 5, 6] }, activity: { enabled: true, idleMinutes: 90 } }, machine: 'test' })}\n`);
   if (hello.hooks === 'keyboard and mouse') {
     // F24: a key no program acts on, injected the way agents' tools inject input.
     const ps1 = path.join(dir, 'inject.ps1');
@@ -704,14 +715,14 @@ public static class Inj {
     const sent = execFileSync(powershell ?? 'powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1], { windowsHide: true }).toString().trim();
     assert.equal(sent, '2', 'SendInput took the key down and up');
     await new Promise((r) => setTimeout(r, 1500));
-    child.stdin.write(`${JSON.stringify({ type: 'counts' })}\n`);
+    tray.stdin.write(`${JSON.stringify({ type: 'counts' })}\n`);
     const counts = await waitFor('counts');
     t.diagnostic(`tray counts: ${JSON.stringify(counts)}`);
     assert.ok(Number(counts.injectedKeys) >= 1, "the hook saw the injected key as injected");
     if (Number(counts.personKeys) === 0 && Number(counts.personClicks) === 0) assert.equal(lines.filter((l) => l.type === 'input').length, 0, 'an injected key is never a person\'s input');
     else t.diagnostic('someone used this computer during the test: the no-input check is skipped');
   } else t.diagnostic(`the tray's input hooks did not install here (${String(hello.hooks)}): the injected-key check is skipped`);
-  child.stdin.write(`${JSON.stringify({ type: 'quit' })}\n`);
-  const code = await new Promise<number | null>((r) => child.on('exit', (c) => r(c)));
+  tray.stdin.write(`${JSON.stringify({ type: 'quit' })}\n`);
+  const code = await new Promise<number | null>((r) => tray.on('exit', (c) => r(c)));
   assert.equal(code, 0);
 });
