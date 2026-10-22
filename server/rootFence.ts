@@ -56,9 +56,11 @@ const SAVES = /\/(?:appdata\/locallow|\.config\/unity3d|library\/application sup
 
 /**
  * Whether a backslash at `i` escapes the whitespace or quote after it (Bash's `Never\ Games`). In a Windows path a backslash
- * is a separator: once the word has used one so (`D:\work\ffw\ -Recurse`), a backslash before a space ends the word.
+ * is a separator: once the word has used one so (`D:\work\ffw\ -Recurse`), a backslash before a space ends the word, and so
+ * does one right after a drive (`C:\ -Recurse`, w1755).
  */
-const escapes = (s: string, i: number, word: string) => s[i] === '\\' && i + 1 < s.length && /[\s"']/.test(s[i + 1]) && !/\\(?![\s"'])/.test(word);
+const escapes = (s: string, i: number, word: string) =>
+  s[i] === '\\' && i + 1 < s.length && /[\s"']/.test(s[i + 1]) && !/\\(?![\s"'])/.test(word) && !/^["']?[a-zA-Z]:$/.test(word);
 
 /** A word with its shell quoting removed: quoted parts joined to the rest (`~/"Never Games"/x`), `\ ` as a space. */
 function unquote(w: string): string {
@@ -239,10 +241,13 @@ export function checkOutsideRootDelete(cmd: string, ctx: RootFenceContext): stri
     if (allowed.some((a) => strictlyInside(n, a))) return undefined;
     if (ownSave(raw, n)) return undefined;
     const why = allowed.includes(n) ? `${unquote(raw)} is the install folder itself` : `${unquote(raw)} is outside this machine's worker install folder (${ctx.root})`;
+    const outside = win
+      ? `On this Windows computer disk work stays on the install drive (${driveLabel(ctx.root)}): never read, measure or touch C: or another drive ` +
+        `(lothsahn, 2026-10-22, w1755: "Fix the instructions for Windows boxes to only look at v:"); report what you could not free inside the folder`
+      : `Outside it, measure and report sizes (du), and list any setting or script that makes FF Factory write there so it can be moved inside the folder`;
     return (
       `Refused: ${why}. Disk clean-up deletes only inside the worker install folder (lothsahn, 2026-10-10, w896: "in general we should only be ` +
-      `clearing data in the install folder for the worker"). Outside it, measure and report sizes (du, Get-ChildItem | Measure-Object), and list ` +
-      `any setting or script that makes FF Factory write there so it can be moved inside the folder; delete nothing there, and do not ask a person ` +
+      `clearing data in the install folder for the worker"). ${outside}; delete nothing there, and do not ask a person ` +
       `to either. Fine to delete: anything inside ${ctx.root}, your own temp folder ($TMP), and a save copy you put in the game's saves folder ` +
       `(docs/self-recovery.md, "Where clean-up may delete").`
     );
@@ -303,6 +308,148 @@ export function checkOutsideRootDelete(cmd: string, ctx: RootFenceContext): stri
 
         for (const t of targets ?? []) {
           const r = judge(t);
+          if (r) return r;
+        }
+      }
+    }
+    return undefined;
+  };
+  return run(cmd);
+}
+
+// ---------------------------------------------------------------- Windows: the install drive only (w1755)
+
+/** The drive of a Windows install folder, lower case without the colon ('v' for V:\ffw); undefined for a POSIX root. */
+export function installDrive(root: string | undefined): string | undefined {
+  const m = /^([a-zA-Z]):(?:[\\/]|$)/.exec(root ?? '');
+  return m ? m[1].toLowerCase() : undefined;
+}
+
+/** `V:` for a Windows install folder, the folder itself for a POSIX one. */
+export const driveLabel = (root: string) => (installDrive(root) ? `${installDrive(root)!.toUpperCase()}:` : root);
+
+/**
+ * Whether `p` is somewhere a Windows worker may read, measure or delete on (w1755): on the install folder's drive, and when
+ * that drive is C: only inside the folder itself. Always true for a POSIX root (macOS and Linux keep the w896 rule), and for a
+ * path that is not a drive path.
+ */
+export function onInstallDrive(p: string, root: string | undefined): boolean {
+  const drive = installDrive(root);
+  if (!drive) return true;
+  const n = p.replace(/\\/g, '/').replace(/^\/([a-zA-Z])(?=\/|$)/, '$1:').toLowerCase();
+  const d = /^([a-z]):(?:\/|$)/.exec(n)?.[1];
+  if (!d) return true;
+  if (d !== drive) return false;
+  if (drive !== 'c') return true;
+  const r = path.posix.normalize(root!.replace(/\\/g, '/')).replace(/\/+$/, '').toLowerCase();
+  const x = path.posix.normalize(n).replace(/\/+$/, '');
+  return x === r || x.startsWith(r + '/');
+}
+
+/** Programs that walk a whole tree whatever their flags. */
+const ALWAYS_SCAN = new Set(['du', 'dust', 'ncdu', 'gdu', 'tree', 'find', 'ff-leftovers']);
+/** Listers that walk a tree only with a recursive flag (`-Recurse`, `-r`, `-R`, cmd's `/s`). */
+const RECURSIVE_LISTERS = new Set(['get-childitem', 'gci', 'ls', 'dir']);
+const isRecursiveFlag = (a: string) => /^-(?:r|rec\w*)(?::\$true)?$/i.test(a) || /^\/s$/i.test(a) || /^-[a-zA-Z]*R[a-zA-Z]*$/.test(a) || a === '--recursive';
+/** Value flags of the scanners whose next word is no path (du -d 1, find -maxdepth 2, Get-ChildItem -Depth 3). */
+const SCAN_VALUE_FLAGS = new Set(['-d', '--max-depth', '-depth', '--block-size', '-t', '--threshold', '--exclude', '-filter', '-include', '-exclude', '-erroraction', '-ea', '-attributes']);
+
+/**
+ * The reason a shell command is refused because it scans or measures off this Windows computer's install drive, or undefined
+ * (w1755, lothsahn, 2026-10-22: "Your worker on LothDesktop is still scanning c:  it should not.  You need to only look at v:.
+ * Stop messing with my c:" and "Fix the instructions for Windows boxes to only look at v:"). A LothDesktop clean-up worker
+ * ran du over C:\Users\...\AppData and ~\.claude because the rules said to "measure and report" outside the install folder.
+ * Read here: du, dust, ncdu, gdu, tree, find, `ff-leftovers check <path>`, `robocopy <source> ... /L` (the w1561 way to size
+ * a Windows folder; its source is judged), and Get-ChildItem / gci / ls / dir with -Recurse, -r, -R or /s (whatever follows
+ * them in a pipeline, Measure-Object included); deletes are the delete fence's
+ * (checkOutsideRootDelete, which already refuses any outside the install folder). The allowed drive is the install folder's
+ * (root.json's root: V:\ffw on LothDesktop, F:\ffw on BEAST), never a fixed letter; a root on C: allows only the folder
+ * itself. Only a Windows root is judged. Like the rest of the guard it is a SEATBELT: a script, python's os.walk or a
+ * variable it cannot resolve is the instructions' job. Exported for tests.
+ */
+export function checkOffDriveScan(cmd: string, ctx: RootFenceContext): string | undefined {
+  if (!installDrive(ctx.root)) return undefined;
+  const home = ctx.home ?? os.homedir();
+  const norm = (p: string) => path.posix.normalize(p.replace(/\\/g, '/')).replace(/\/+$/, '').toLowerCase();
+  const allowed = (ctx.allow ?? []).map(norm);
+  let dir: string | undefined = ctx.cwd ? norm(ctx.cwd) : undefined;
+
+  const judge = (raw: string | undefined, verb: string): string | undefined => {
+    const n = raw === undefined ? dir : resolvePath(raw, { home, cwd: dir, win: true });
+    if (n === undefined || n === 'ok') return undefined;
+    if (onInstallDrive(n, ctx.root) || allowed.some((a) => n === a || strictlyInside(n, a))) return undefined;
+    const shown = raw === undefined ? `the current folder ${n}` : unquote(raw);
+    return (
+      `Refused: ${verb} would scan ${shown}, off this Windows computer's install drive ${driveLabel(ctx.root)} (the install folder is ${ctx.root}). ` +
+      `On Windows, disk work (clean-ups, low-disk checks, leftover scans, disk measurements) reads, measures and deletes only on the install ` +
+      `drive, never on C: (lothsahn, 2026-10-22, w1755: "Your worker on LothDesktop is still scanning c:  it should not.  You need to only look ` +
+      `at v:.  Stop messing with my c:"). Measure inside ${ctx.root} instead (\`ff-leftovers folders\`, du of a folder there), and say in your ` +
+      `report what you could not free there; do not ask a person to look on C: either (docs/self-recovery.md, "Where clean-up may delete").`
+    );
+  };
+
+  /** The paths a scanner names; none means the current folder. */
+  const scanPaths = (verb: string, args: string[]): string[] => {
+    // robocopy <source> <destination> /L: only the source is read.
+    if (verb === 'robocopy') return args.map(unquote).filter((a) => !a.startsWith('/')).slice(0, 1);
+    const out: string[] = [];
+    let flags = true;
+    for (let i = verb === 'ff-leftovers' ? 1 : 0; i < args.length; i++) {
+      const a = unquote(args[i]);
+      const low = a.toLowerCase();
+      if (flags && a === '--') {
+        flags = false;
+        continue;
+      }
+      if (verb === 'find' && flags && (['!', '(', ')'].includes(a) || a.startsWith('-'))) break; // find's expression
+      if (flags && PATH_FLAGS.has(low.replace(/:.*$/, ''))) {
+        const inline = /^-[a-z]+:(.+)$/i.exec(a)?.[1];
+        const v = inline ?? (i + 1 < args.length ? unquote(args[++i]) : undefined);
+        if (v) out.push(...v.split(','));
+        continue;
+      }
+      if (flags && SCAN_VALUE_FLAGS.has(low)) {
+        i++;
+        continue;
+      }
+      if (flags && a.startsWith('-')) continue;
+      if (flags && ['dir', 'tree'].includes(verb) && /^\/[a-zA-Z](?::.*)?$/.test(a)) continue; // cmd's /s /a /f
+      out.push(...a.split(',').filter(Boolean));
+    }
+    return out;
+  };
+
+  const run = (command: string): string | undefined => {
+    for (const stages of statements(command)) {
+      for (let stage of stages) {
+        for (let k = 0; k < 5 && stage.search(SUBSTITUTION) >= 0; k++) stage = stage.replace(SUBSTITUTION, '$$SUB');
+        const w = words(stage);
+        let i = 0;
+        while (i < w.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w[i]) || ['&', '.', 'sudo', 'exec', 'nohup', 'time', 'env', 'command'].includes(unquote(w[i]).toLowerCase()))) i++;
+        const verb = w[i] ? verbOf(w[i]) : '';
+        const args = w.slice(i + 1);
+        if (['cd', 'pushd', 'chdir', 'set-location', 'sl', 'push-location'].includes(verb)) {
+          const target = args.map(unquote).find((a) => !a.startsWith('-') || a === '-');
+          const n = target ? resolvePath(target, { home, cwd: dir, win: true }) : undefined;
+          dir = n && n !== 'ok' ? n : undefined;
+          continue;
+        }
+        const payload = args.findIndex((a, k) => SHELL_PAYLOAD_FLAGS.has(unquote(a).toLowerCase()) && k + 1 < args.length);
+        if (payload >= 0 && /^(?:bash|sh|zsh|dash|cmd|powershell|pwsh)$/.test(verb)) {
+          const r = run(unquote(args.slice(payload + 1).join(' ')));
+          if (r) return r;
+          continue;
+        }
+        // ff-leftovers list, end and folders read the daemon's own facts; only `check <path>` names a path.
+        if (verb === 'ff-leftovers' && unquote(args[0] ?? '').toLowerCase() !== 'check') continue;
+        const scans =
+          ALWAYS_SCAN.has(verb) ||
+          (RECURSIVE_LISTERS.has(verb) && args.some((a) => isRecursiveFlag(unquote(a)))) ||
+          (verb === 'robocopy' && args.some((a) => /^\/l$/i.test(unquote(a))));
+        if (!scans) continue;
+        const ps = scanPaths(verb, args);
+        for (const t of ps.length ? ps : verb === 'ff-leftovers' ? [] : [undefined]) {
+          const r = judge(t, verb);
           if (r) return r;
         }
       }

@@ -140,9 +140,15 @@ test('the notice for a pass that cannot free enough tells a worker to delete ins
   };
   const text = describeShortfall(s);
   assert.match(text, /Clean-up work on this computer deletes only inside its worker install folder D:\\work\\ffw \(w896\)/);
-  assert.match(text, /a worker only measures and reports, with sizes, and it lists any setting or script that makes FF Factory write there so it can be moved inside the folder; it deletes nothing outside/);
-  assert.match(text, /C:\\Users\\loth\\AppData\\Local 40\.0 GB \[outside it: measure only\]/);
+  // w1755: a Windows install folder: the install drive only; nothing on C: is named or measured.
+  assert.match(text, /on Windows it reads, measures and deletes only on the install drive D:, never on C: \(lothsahn, 2026-10-22, w1755: "Fix the instructions for Windows boxes to only look at v:"\)/);
+  assert.doesNotMatch(text, /measures and reports/);
+  assert.doesNotMatch(text, /AppData/);
   assert.match(text, /D:\\work\\ffw\\sandboxes 300\.0 GB \[inside the install folder\]/);
+  // macOS and Linux: outside the folder a worker measures and reports.
+  const mac = describeShortfall({ ...s, root: '/Users/Shared/ffw', consumers: [{ path: '/Users/loth/Library/Caches', bytes: 40 * GB }, { path: '/Users/Shared/ffw/sandboxes', bytes: 300 * GB }] });
+  assert.match(mac, /a worker only measures and reports, with sizes, and it lists any setting or script that makes FF Factory write there so it can be moved inside the folder; it deletes nothing outside/);
+  assert.match(mac, /\/Users\/loth\/Library\/Caches 40\.0 GB \[outside it: measure only\]/);
   // Without a root (the portal's own host) there is no folder to name and no tags.
   const host = describeShortfall({ ...s, root: undefined });
   assert.ok(!/install folder/.test(host));

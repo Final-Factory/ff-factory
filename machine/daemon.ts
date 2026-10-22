@@ -41,6 +41,7 @@ import { FramePump, parseAck } from '../shared/framePump.ts';
 import { bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
+import { onInstallDrive } from '../server/rootFence.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
 import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers } from '../server/installLeftovers.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
@@ -607,10 +608,12 @@ export class Daemon {
           ...(low || opts.dryRun ? { own: this.ownLeftovers(guard) } : {}),
         });
       },
-      consumers: () => biggestConsumers(env),
+      // w1755: on Windows only the install drive is measured (biggestConsumers' root).
+      consumers: () => biggestConsumers(env, [], { root: this.cfg.root }),
       root: () => this.cfg.root,
       staleAt: staleAtFile(appDirOfConfig(cfg)),
-      stale: async () => (await staleUnityLibraries([HOME], DEFAULT_CLEANUP.libraryReportDays)).filter((l) => !neverDelete(l.path, this.cleanupGuard())),
+      // w1755: on Windows a home folder off the install drive (C:) is not searched for Unity projects.
+      stale: async () => (await staleUnityLibraries(onInstallDrive(HOME, this.cfg.root) ? [HOME] : [], DEFAULT_CLEANUP.libraryReportDays)).filter((l) => !neverDelete(l.path, this.cleanupGuard())),
       log: (e) => {
         appendCleanupLog(appDirOfConfig(cfg), e);
         // The portal keeps every pass too (w459): what went, why, and what was listed, where people can see it.

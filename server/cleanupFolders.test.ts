@@ -289,3 +289,15 @@ test("w1387: a sandbox's ignored build output stays deletable though the sandbox
   const rows = await planFolders(closed);
   assert.equal(rows.find((r) => norm(r.path).endsWith('slot1/builds/cache'))!.verdict, 'delete');
 });
+
+test('w1755: on a Windows install, ff-leftovers check keeps a path on C: without looking at it', async (t) => {
+  const { tempRoot, facts } = world(t);
+  const file = path.join(tempRoot, '..', 'cleanup-facts.json');
+  fs.writeFileSync(file, JSON.stringify({ ...facts, root: 'V:\\ffw' }));
+  const out: string[] = [];
+  const code = await foldersMain('check', ['C:\\Users\\loth\\AppData\\Local', '/c/Users/loth/.claude'], { FF_CLEANUP_FACTS: file } as NodeJS.ProcessEnv, Date.now(), (s) => void out.push(s));
+  assert.equal(code, 1);
+  const text = out.join('');
+  assert.equal(text.match(/^KEEP /gm)?.length, 2, text);
+  assert.match(text, /not looked at: off this Windows computer's install drive V:; disk work never reads, measures or touches C: \(w1755\)/);
+});

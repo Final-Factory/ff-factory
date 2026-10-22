@@ -42,6 +42,7 @@ import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { factsProblem, judgePath, planFolders, renderFolders, withGitCheck, type CleanupFacts } from '../server/cleanupFolders.ts';
 import { parsePsJson } from '../server/watchdog.ts';
+import { driveLabel, onInstallDrive } from '../server/rootFence.ts';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { gamePlayers, isUnityBinary, splitArgs, unityProcesses } from './unitySlots.ts';
 import { inspectProcs, type ProcFacts } from './unityReaper.ts';
@@ -754,7 +755,13 @@ export async function foldersMain(cmd: 'folders' | 'check', args: string[], e: N
     const bad = factsProblem(facts, now);
     let kept = 0;
     for (const a of args) {
-      const r = bad ? { verdict: 'keep' as const, why: bad } : await withGitCheck(judgePath(path.resolve(a), facts!, now), facts!.root);
+      // w1755: on Windows a path off the install drive (C:) is not looked at, not even for its git state.
+      const offDrive = !!facts?.root && (!onInstallDrive(a, facts.root) || !onInstallDrive(path.resolve(a), facts.root));
+      const r = bad
+        ? { verdict: 'keep' as const, why: bad }
+        : offDrive
+          ? { verdict: 'keep' as const, why: `not looked at: off this Windows computer's install drive ${driveLabel(facts!.root!)}; disk work never reads, measures or touches C: (w1755)` }
+          : await withGitCheck(judgePath(path.resolve(a), facts!, now), facts!.root);
       if (r.verdict === 'keep') kept++;
       out(`${r.verdict === 'keep' ? 'KEEP  ' : 'DELETE'}  ${a}\n        ${r.why}\n`);
     }
@@ -772,7 +779,7 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   const session = e.FF_SESSION_ID;
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
   if (!session || !['list', 'end'].includes(cmd)) {
-    process.stdout.write(`usage: ff-leftovers [list|end|folders|check <path>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
+    process.stdout.write(`usage: ff-leftovers [list|end|folders|check <path>...]\n  list: what this worker's session (FF_SESSION_ID) started that still runs: players, Xvfb, builds, servers, background jobs\n  end: end them (SIGTERM, then SIGKILL after 5 s), before DONE or a stop\n  folders: a clean-up's candidates under the install folder, each KEEP or DELETE by the ledger (a request not closed keeps its worker's folders)\n  check <path>...: the same verdict for paths you mean to delete; exit 1 if any is to be kept. Only paths in the install folder: on Windows never one on C: or another drive (w1755)\n${session ? '' : 'FF_SESSION_ID is not set: run it from a worker of FF Factory.\n'}`);
     return session ? 2 : 1;
   }
   const { realDeps } = await import('./unity.ts');

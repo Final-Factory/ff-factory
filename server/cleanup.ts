@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import type { CleanupPolicy } from './config.ts';
 import type { CleanupSummary } from '../shared/types.ts';
 import type { StaleOutputSettings } from './staleOutput.ts';
+import { installDrive, onInstallDrive } from './rootFence.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
 
@@ -609,13 +610,20 @@ export async function removeRenamed(it: CleanupItem, out: CleanupRun): Promise<b
 /**
  * The biggest folders and files where scratch collects (the home folder's and LocalAppData's children, the
  * temp folders, files at the drive roots such as a VHDX), for a notice that clean-up could not free enough.
- * Stops measuring after `budgetMs`; unmeasured entries are left out.
+ * Stops measuring after `budgetMs`; unmeasured entries are left out. With a Windows install folder (`root`), only its
+ * drive is measured: the install folder's children, the agents' temp and files at that drive's root, never C: or the home
+ * folder on it (w1755, lothsahn, 2026-10-22: "You need to only look at v:.  Stop messing with my c:").
  */
-export async function biggestConsumers(env: CleanupEnv, extra: string[] = [], opts: { top?: number; budgetMs?: number } = {}): Promise<{ path: string; bytes: number }[]> {
+export async function biggestConsumers(env: CleanupEnv, extra: string[] = [], opts: { top?: number; budgetMs?: number; root?: string } = {}): Promise<{ path: string; bytes: number }[]> {
   const deadline = Date.now() + (opts.budgetMs ?? 120_000);
   const j = (...a: string[]) => P(a[0]).join(...a);
-  const roots = [env.home, env.tmp, env.agentTemp, env.localAppData, env.platform === 'darwin' ? j(env.home, 'Library') : undefined, env.platform === 'darwin' ? j(env.home, 'Library', 'Caches') : undefined].filter((x): x is string => !!x);
-  const rootFiles = [...new Set([env.home, ...extra].map((p) => P(p).parse(P(p).resolve(p)).root))];
+  const win = env.platform === 'win32' && !!installDrive(opts.root);
+  const keep = (p: string) => !win || onInstallDrive(p, opts.root);
+  const roots = [env.home, env.tmp, env.agentTemp, env.localAppData, env.platform === 'darwin' ? j(env.home, 'Library') : undefined, env.platform === 'darwin' ? j(env.home, 'Library', 'Caches') : undefined, win ? opts.root : undefined]
+    .filter((x): x is string => !!x)
+    .filter(keep);
+  extra = extra.filter(keep);
+  const rootFiles = [...new Set([win ? opts.root! : env.home, ...extra].map((p) => P(p).parse(P(p).resolve(p)).root))];
   const seen = new Set(roots.map(norm));
   const out: { path: string; bytes: number }[] = [];
   for (const r of rootFiles) {
@@ -912,12 +920,16 @@ export function describeShortfall(s: CleanupSummary): string {
   const free = s.freeBytes === undefined ? '?' : gb(s.freeBytes);
   const root = s.root;
   const tag = (p: string) => (root ? (strictlyWithin(p, root) ? ' [inside the install folder]' : ' [outside it: measure only]') : '');
-  const biggest = s.consumers?.length ? ` Biggest remaining: ${s.consumers.map((c) => `${c.path} ${gb(c.bytes)}${tag(c.path)}`).join(', ')}.` : '';
+  // On Windows nothing off the install drive is named (w1755): a C: folder in the notice is a worker's cue to measure it.
+  const consumers = (s.consumers ?? []).filter((c) => !root || onInstallDrive(c.path, root));
+  const biggest = consumers.length ? ` Biggest remaining: ${consumers.map((c) => `${c.path} ${gb(c.bytes)}${tag(c.path)}`).join(', ')}.` : '';
   // The rule (w896, lothsahn: "in general we should only be clearing data in the install folder for the worker"). Without a root
   // (the portal's own host) there is no folder to name, and the notice says nothing about one.
-  const rule = root
-    ? ` Clean-up work on this computer deletes only inside its worker install folder ${root} (w896). What is outside it (the home folder, AppData, system temp, caches, the game's data folder) a worker only measures and reports, with sizes, and it lists any setting or script that makes FF Factory write there so it can be moved inside the folder; it deletes nothing outside, whatever the sizes below suggest.`
-    : '';
+  const rule = !root
+    ? ''
+    : installDrive(root)
+      ? ` Clean-up work on this computer deletes only inside its worker install folder ${root} (w896), and on Windows it reads, measures and deletes only on the install drive ${root.slice(0, 2).toUpperCase()}, never on C: (lothsahn, 2026-10-22, w1755: "Fix the instructions for Windows boxes to only look at v:"): nothing on C: is measured or named here, and a worker never looks there; it reports what it freed in the folder and what is still short.`
+      : ` Clean-up work on this computer deletes only inside its worker install folder ${root} (w896). What is outside it (the home folder, AppData, system temp, caches, the game's data folder) a worker only measures and reports, with sizes, and it lists any setting or script that makes FF Factory write there so it can be moved inside the folder; it deletes nothing outside, whatever the sizes below suggest.`;
   return `Clean-up freed ${gb(s.freedBytes ?? 0)} (${s.removed} item(s)) but only ${free} is free on disk, below the soft threshold of ${s.softFreeGB} GB. What is left is not on the clean-up's lists: file clean-up work for a worker on that computer to remove FF Factory's own leftovers among it and report what it freed; never ask its owner to free space (w626).${rule}${biggest}${staleLine(s)}`;
 }
 
