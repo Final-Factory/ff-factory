@@ -106,10 +106,10 @@ try {
     }
     $staleGone = 0
     if ($StaleUnder) {
-        # Rules prompts left for programs in the root's temp folders (a worker's node copy, w1742), never one of ours.
+        # Rules prompts left for programs in the root's temp folders (a worker's node copy, w1742), never one of ours or a test install's.
         $under = ([IO.Path]::GetFullPath($StaleUnder)).TrimEnd('\') + '\'
         $staleRules = @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object { [string]$_.Program -like ($under + '*') } |
-                        Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Group -ne $SlotGroup -and $_.Group -ne $UnityGroup -and $_.Group -ne $NodeGroup })
+                        Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { ([string]$_.Group) -notlike 'Final Factory*' })
         if ($staleRules.Count) { $staleRules | Remove-NetFirewallRule; $staleGone = $staleRules.Count }
     }
     $editors = 0

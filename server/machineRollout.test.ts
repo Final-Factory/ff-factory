@@ -450,6 +450,15 @@ test('w1476: the tools output is read into before, after and master versions; th
   assert.equal(toolsLine(undefined), '');
 });
 
+test('w1742: a tools run that published but warned (a firewall rule it could not make) says so in the report', () => {
+  const warn = 'WARNING: Windows Firewall: no allow rule for V:\\ffw\\tools\\node\\node.exe. This session is not elevated';
+  const ok = toolsResult(0, `${toolsOut()}\n${warn}\n`);
+  assert.equal(ok.status, 'ok');
+  assert.deepEqual(ok.warnings, [warn]);
+  assert.ok(toolsLine({ status: 'ok', warnings: ok.warnings }).endsWith(` ${warn}`));
+  assert.equal(toolsResult(0, toolsOut()).warnings, undefined);
+});
+
 test('the state survives a restart: a run cut off by it is looked at again', async () => {
   const w = world([mac('m5')]);
   fs.writeFileSync(path.join(w.dir, ROLLOUT_FILE), JSON.stringify({ sha: NEW, verifiedAt: '2026-10-10T18:00:00.000Z', machines: { m5: { status: 'updating' } } }));
@@ -476,6 +485,29 @@ test('w1596: a daemon that updates over its own link is updated there, ssh never
   assert.match(w.told[0].text, /- coosego: updated\. 1111111 → c5a93e0\. Limits unchanged\./);
   assert.match(w.told[0].text, /After: daemon c5a93e0/, "the job's installer lines");
   assert.match(w.told[0].text, /Agent tools: ff-agents 1\.29\.19 → 1\.29\.20/);
+});
+
+test('w1742: a tools run over the link that finds a firewall rule missing runs again over ssh (elevated there), which makes it', async () => {
+  const missing = 'WARNING: Windows Firewall: no allow rule for D:\\ffw\\tools\\node\\node.exe. This session is not elevated; an elevated tools run or update (the portal\'s ssh, ops_worker machine_update) makes them.';
+  const linkTools = (form: 'update' | 'tools') =>
+    form === 'tools' ? { report: { log: `${toolsOut()}\n${missing}` } } : { report: { log: 'After: daemon c5a93e0', before: OLD.slice(0, 7), after: NEW.slice(0, 7) }, after: { online: true, daemon: NEW.slice(0, 7) } };
+  const made = 'Windows Firewall: no allow rule for D:\\ffw\\tools\\node\\node.exe; making the install\'s rules again.\nOK: 13 allow rule(s)';
+  const lothdesktop = mac('lothdesktop', { platform: 'win32', root: 'D:\\ffw', target: 'Lothsahn@loth2800', linkRun: linkTools, tools: () => ({ code: 0, out: `${toolsOut()}\n${made}` }) });
+  const w = world([lothdesktop], { requester: LOTH });
+  w.verify();
+  await w.make().tick();
+  assert.deepEqual(w.toolCalls.map((c) => [c.target, c.remote]), [['Lothsahn@loth2800', workerToolsRemote({ root: 'D:\\ffw', platform: 'win32' })]]);
+  assert.match(w.told[0].text, /Agent tools: ff-agents 1\.29\.19 → 1\.29\.20/);
+  assert.doesNotMatch(w.told[0].text, /WARNING/, 'made over ssh: nothing left to warn of');
+
+  // Not an administrator's account (the ssh run warns too), and a Mac or a PC with no ssh target: the warning stays.
+  const plain = mac('pc', { platform: 'win32', root: 'D:\\ffw', target: 'ben@pc', linkRun: linkTools, tools: () => ({ code: 0, out: `${toolsOut()}\n${missing}` }) });
+  const noSsh = mac('coosego', { platform: 'win32', root: 'D:\\ffw', target: 'not an ssh target', linkRun: linkTools });
+  const w2 = world([plain, noSsh], { requester: LOTH });
+  w2.verify();
+  await w2.make().tick();
+  assert.deepEqual(w2.toolCalls.map((c) => c.target), ['ben@pc'], 'no ssh where there is no target');
+  assert.equal(w2.told[0].text.split('Windows Firewall: no allow rule').length - 1, 2, 'both still warn');
 });
 
 test("w1596: over the link, a new daemon that did not come back is put back by its job; a refusal changes nothing; a job that never reports is handled as an ssh run that failed", async () => {

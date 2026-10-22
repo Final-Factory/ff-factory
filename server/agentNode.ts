@@ -24,7 +24,10 @@ export const AGENT_NODE = {
   sha256: 'd2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5',
 } as const;
 
-export const agentNodeDir = (root: string) => path.join(root, 'tools', 'node');
+/** The firewall group of the node's rule (scripts/worker/firewall.ps1 $NodeGroup). */
+export const NODE_GROUP = 'Final Factory agent node';
+
+export const agentNodeDir =(root: string) => path.join(root, 'tools', 'node');
 export const agentNodeExe = (root: string) => path.join(agentNodeDir(root), 'node.exe');
 
 type Ran = { code: number | null; stdout: string; stderr: string };
@@ -110,4 +113,41 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
 export function agentNodePathDir(root: string | undefined, platform: NodeJS.Platform = process.platform, exists: (p: string) => boolean = fs.existsSync): string | undefined {
   if (!root || platform !== 'win32') return undefined;
   return exists(agentNodeExe(root)) ? agentNodeDir(root) : undefined;
+}
+
+/**
+ * The PowerShell that reads, with no administrator rights, whether Windows Firewall lets each program listen without a
+ * prompt (w1742): "ok <path>" when an enabled inbound Allow rule names that exact path and no enabled Block does, else
+ * "missing <path>"; then "stale=<n>", the inbound rules earlier prompts left for programs under `tmp` (outside the
+ * install's own "Final Factory ..." groups), which scripts/worker/firewall.ps1 -StaleUnder deletes. Two bulk reads
+ * (every application filter, every inbound rule) joined on the rule's id: one Get-NetFirewallApplicationFilter per
+ * path took about 2.5 s each on lothdesktop's 696 rules (player_slots.py firewall, measured).
+ */
+export function firewallCheckScript(exes: string[], tmp: string): string {
+  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  const under = `${path.win32.resolve(tmp).replace(/\\+$/, '')}\\`.toLowerCase();
+  return `$ErrorActionPreference = 'Stop'
+$progs = @{}
+foreach ($f in @(Get-NetFirewallApplicationFilter)) { if ($f.Program) { $progs[[string]$f.InstanceID] = ([string]$f.Program).ToLowerInvariant() } }
+$allow = @{}; $block = @{}; $stale = 0
+foreach ($r in @(Get-NetFirewallRule -Direction Inbound)) {
+  $p = $progs[[string]$r.Name]
+  if (-not $p) { continue }
+  if ([string]$r.Enabled -eq 'True') { if ([string]$r.Action -eq 'Allow') { $allow[$p] = 1 } elseif ([string]$r.Action -eq 'Block') { $block[$p] = 1 } }
+  if ($p.StartsWith(${q(under)}) -and ([string]$r.Group) -notlike 'Final Factory*') { $stale++ }
+}
+foreach ($e in @(${exes.map(q).join(', ')})) {
+  $k = $e.ToLowerInvariant()
+  if ($allow[$k] -and -not $block[$k]) { "ok $e" } else { "missing $e" }
+}
+"stale=$stale"
+`;
+}
+
+/** firewallCheckScript's answer: the paths without an allow rule and the count of stale temp rules; undefined when unreadable. */
+export function parseFirewallCheck(out: string): { missing: string[]; stale: number } | undefined {
+  const lines = out.replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const stale = lines.map((l) => /^stale=(\d+)$/.exec(l)).find(Boolean);
+  if (!stale) return undefined;
+  return { missing: lines.filter((l) => l.startsWith('missing ')).map((l) => l.slice('missing '.length)), stale: Number(stale[1]) };
 }
