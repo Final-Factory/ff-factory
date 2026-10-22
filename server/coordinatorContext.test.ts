@@ -24,7 +24,7 @@ const kindOf = (kinds: [string, SessionInfo][], k: string) => kinds.find(([name]
 /** Which coordinator reads which topic: the dispatcher's are about placing work, the person's about their chat. */
 const TOPICS: Record<'dispatcher' | 'personal', readonly RuleTopic[]> = {
   dispatcher: ['ffbox', 'intake', 'release', 'machines', 'ui'],
-  personal: ['ffbox', 'machines', 'reactions', 'ui'],
+  personal: ['ffbox', 'machines', 'reactions', 'ui', 'builds'],
 };
 
 test('w1158: every read_rules topic is named in the brief of each coordinator that reads it, and has its text', async () => {
@@ -134,7 +134,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // there") added one line pointing a personal orchestrator at set_pool; the owner's brief measured 27,514, so the cap moved to 27,550.
   // w1748 (lothsahn: "Please make it so you can delete memory files") added one sentence on delete_memory to every brief's memory
   // rules (91 characters, trimmed from 280); Lothsahn's own measured 27,606, so the cap moved to 27,650.
-  const PROMPT_MAX = 27_650;
+  // w1770 (Ben: "I mean, you can check the code, but it just seems like you didn't investigate at all. Like, if you're unsure,
+  // then do the check.") added the one-line trigger for the read_rules builds topic to a person's orchestrator's brief (the
+  // rule itself is the topic); the owner's brief measured 27,898, so the cap moved to 27,900.
+  const PROMPT_MAX = 27_900;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask

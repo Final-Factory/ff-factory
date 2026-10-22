@@ -1367,6 +1367,18 @@ money, publishing or posting outside, live settings, releases and deploys, which
 The full rule, the checklists (visual changes, merges, releases) and the dated lessons are the `evidence-gate` skill of
 the `ff-agents` plugin (repo final-factory-agents). The briefs hold only what every agent needs without loading it.
 
+**What players run is checked by running it** (w1770, 2026-10-22). A claim that a feature or fix is, or isn't, in a
+build players run (a Steam branch, a build number) rests on running that build, or a build of its exact commit, with the
+feature opened; from a grep, git or a past report it is a guess that names the build to run. Every worker's brief says so
+in `EVIDENCE_RULES`, with the DONE lines of a player-facing fix (`Ships in:` and `pre-1.0:`); the person's orchestrator's
+"How to work" carries a one-line trigger: when its person asks it to investigate, it investigates, and before it says
+what a build players run holds it reads `read_rules builds` (`rulesText`), where a doubt its quick look leaves becomes
+reproduce work filed in the same turn, never a confident answer. Ben, after the Load screen's Saves/Autosaves tabs (PR #1760) were
+called present in the 1.0 development build from a code grep, and in Build 111 from git: "My playtesters who are all on
+the 1.0 development branch are saying it's not there, so you're lying to me, or you didn't actually check." The full
+rule and the report check (`build_claim_check.py`) are the ff-agents `evidence-gate` skill's
+`lessons/whats-in-a-players-build-is-checked-by-running-it.md`.
+
 **Ids come with words** (Ben, 2026-10-03). Every worker's and orchestrator's brief, the dispatcher's brief and the
 relay of worker updates tell the agent to say what each id is, every time it appears in something a person reads: "w293
 (stopping people from chatting with the dispatcher)", "PR #972 (the fix for lost saves on rejoin)", a commit, a worker or
