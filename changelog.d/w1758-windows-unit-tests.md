@@ -10,3 +10,8 @@
   `configMigration.test.ts` skip Windows, which has no POSIX modes; `configMigration.test.ts` and `ask.test.ts` expect the
   native path. The w890 sandbox harness waits for the daemon's link to close before it removes its data folder, as the other
   harnesses in `machineSandboxes.test.ts` do, instead of a fixed 300 ms.
+- **`ff-factory-join.cmd` runs Windows' own `curl.exe` and removes an old `join.ps1` before it downloads** (w1758). Git
+  for Windows' curl 8.14, first on a PATH that has Git ahead of System32, exits 0 when `--retry` gives up, so an unreachable
+  portal went on to step 2 and ran whatever `join.ps1` an earlier run had left (measured on LothDesktop; `join.test.ts`
+  failed there every run, and once on Windows CI). The tray test (`machineDeployWin.test.ts`) ends the tray before it
+  removes its folder: a throwing after hook skipped the kill, and a failed run hung its file until the deadline.
