@@ -9,7 +9,7 @@ import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { Agents, FFBOX_BRIEF } from './agents.ts';
 import { Identity } from './identity.ts';
-import { memoryDirFor, memoryGuard, memoryKey, memoryWriteProblem, secretIn, type GuardFs } from './orchestratorMemory.ts';
+import { deleteMemoryFile, memoryDeleteProblem, memoryDirFor, memoryGuard, memoryKey, memoryTrashDir, memoryWriteProblem, pruneMemoryTrash, secretIn, type GuardFs } from './orchestratorMemory.ts';
 import { connectorEnv, type Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
@@ -266,4 +266,170 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
   assert.equal((opts(sessions.get(agents.dispatcherId!).info).settings as { disableClaudeAiConnectors?: boolean }).disableClaudeAiConnectors, undefined);
   assert.equal((opts(o.personalFor(BEN).info).settings as { disableClaudeAiConnectors?: boolean }).disableClaudeAiConnectors, true);
   assert.equal(connectorEnv(cfg, 'standing').ENABLE_CLAUDEAI_MCP_SERVERS, 'false');
+});
+
+// ---------------------------------------------------------------- delete_memory (w1748)
+
+test('delete_memory: one .md file of its own, in its person’s turn; a copy in the trash, a log line, the index named', (t) => {
+  const { ben } = world(t);
+  const root = path.dirname(ben);
+  const file = path.join(ben, 'm5-for-ben.md');
+  fs.writeFileSync(file, 'removed, see m5-open');
+  fs.writeFileSync(path.join(ben, 'MEMORY.md'), '- [m5](m5-for-ben.md)\n');
+  const lines: string[] = [];
+  const now = new Date('2026-10-22T15:30:00.123Z');
+  const text = deleteMemoryFile({ file, dir: ben, root, who: 'Ben (ben)\'s orchestrator', personTurn: true, now, log: (l) => lines.push(l) });
+  assert.ok(!fs.existsSync(file), 'the file is gone');
+  const kept = path.join(memoryTrashDir(root, 'person-ben'), '20261022T153000Z-m5-for-ben.md');
+  assert.equal(fs.readFileSync(kept, 'utf8'), 'removed, see m5-open', 'the recoverable copy');
+  assert.ok(kept.startsWith(`${root}.backup${path.sep}trash${path.sep}`), 'beside the crash backups, outside every memory folder');
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0], `orchestrator memory: Ben (ben)'s orchestrator deleted person-ben/m5-for-ben.md at 2026-10-22T15:30:00.123Z; a copy is kept until 2026-11-21 at ${kept}`);
+  assert.match(text, /^Deleted .*m5-for-ben\.md\. A copy is kept until 2026-11-21 at .*: Read it there and Write it back/);
+  assert.match(text, /MEMORY\.md still names m5-for-ben\.md: Edit it to remove that line/);
+  assert.ok(fs.existsSync(path.join(ben, 'MEMORY.md')), 'the index is untouched');
+  // The same name deleted again in the same second keeps both copies.
+  fs.writeFileSync(file, 'second');
+  deleteMemoryFile({ file, dir: ben, root, who: 'Ben', personTurn: true, now, log: () => {} });
+  assert.equal(fs.readFileSync(path.join(memoryTrashDir(root, 'person-ben'), '20261022T153000Z-2-m5-for-ben.md'), 'utf8'), 'second');
+  // Kept 30 days, then the backup pass removes it; a name without a time is never removed.
+  fs.writeFileSync(path.join(memoryTrashDir(root, 'person-ben'), 'no-stamp.md'), 'x');
+  assert.equal(pruneMemoryTrash(root, new Date('2026-11-21T15:29:59Z')), 0, 'not yet 30 days');
+  assert.ok(fs.existsSync(kept));
+  assert.equal(pruneMemoryTrash(root, new Date('2026-11-21T15:30:01Z')), 2);
+  assert.ok(!fs.existsSync(kept));
+  assert.ok(fs.existsSync(path.join(memoryTrashDir(root, 'person-ben'), 'no-stamp.md')));
+  assert.equal(pruneMemoryTrash(path.join(root, 'missing')), 0, 'no trash yet');
+});
+
+test('delete_memory: refused outside its own folder, for MEMORY.md, folders, wildcards and subfolders; nothing touched', (t) => {
+  const { tmp, dataDir, repo, ben, loth, disp } = world(t);
+  const root = path.dirname(ben);
+  for (const [d, n] of [[ben, 'keep.md'], [loth, 'theirs.md'], [disp, 'disp.md'], [ben, 'MEMORY.md'], [loth, 'MEMORY.md']] as const) fs.writeFileSync(path.join(d, n), 'x');
+  fs.mkdirSync(path.join(ben, 'sub'));
+  fs.writeFileSync(path.join(ben, 'sub', 'deep.md'), 'x');
+  fs.mkdirSync(path.join(ben, 'folder.md'));
+  fs.writeFileSync(path.join(dataDir, 'notes.md'), 'x');
+  const refused = (file: unknown, re: RegExp) => {
+    assert.match(memoryDeleteProblem(file, ben) ?? 'allowed', re, String(file));
+    assert.throws(() => deleteMemoryFile({ file, dir: ben, root, who: 'Ben', personTurn: true, log: () => assert.fail('logged a refused delete') }), re, String(file));
+  };
+  for (const outside of [
+    path.join(loth, 'theirs.md'),
+    path.join(disp, 'disp.md'),
+    path.join(dataDir, 'notes.md'),
+    path.join(repo, 'README.md'),
+    path.join(tmp, 'app', 'config.json'),
+    `${ben}/../person-lothsahn/theirs.md`,
+    `${ben}/sub/../../dispatcher/disp.md`,
+    `${ben}-evil/x.md`,
+  ]) refused(outside, /delete only in your memory folder|is outside it/);
+  refused(ben, /is a folder/);
+  refused(loth, /is a folder/);
+  refused(path.join(ben, 'MEMORY.md'), /MEMORY\.md is your memory's index and is never deleted: Edit it/);
+  refused(path.join(ben, 'memory.MD'), /MEMORY\.md is your memory's index/);
+  refused(path.join(loth, 'MEMORY.md'), /outside it/);
+  refused(path.join(ben, '*.md'), /wildcards are refused/);
+  refused(path.join(ben, 'k?ep.md'), /wildcards are refused/);
+  refused(path.join(ben, 'sub', 'deep.md'), /directly in your memory folder/);
+  refused(path.join(ben, 'folder.md'), /is a folder/);
+  refused(path.join(ben, 'gone.md'), /does not exist/);
+  refused(path.join(ben, 'notes.txt'), /Markdown \(\.md\)/);
+  refused('keep.md', /give the full path/);
+  refused(undefined, /no file_path/);
+  for (const f of [path.join(ben, 'keep.md'), path.join(loth, 'theirs.md'), path.join(disp, 'disp.md'), path.join(ben, 'MEMORY.md'), path.join(ben, 'sub', 'deep.md'), path.join(dataDir, 'notes.md'), path.join(repo, 'README.md')]) assert.ok(fs.existsSync(f), f);
+  assert.ok(!fs.existsSync(`${root}.backup`), 'no trash copy of a refused delete');
+});
+
+test('delete_memory on Windows paths: case, ".." and streams follow the write guard', () => {
+  const dir = 'C:\\ffsb\\data\\orchestrator-memory\\person-ben';
+  const fsx: GuardFs = { realpath: (p) => p, lstat: (p) => (/old\.md$/i.test(p) ? { symlink: false, links: 1 } : undefined) };
+  const w = (p: string) => memoryDeleteProblem(p, dir, 'win32', fsx);
+  assert.equal(w('C:\\ffsb\\data\\orchestrator-memory\\person-ben\\old.md'), undefined);
+  assert.equal(w('c:/FFSB/data/orchestrator-memory/person-ben/OLD.md'), undefined, 'case and forward slashes');
+  assert.match(w('C:\\ffsb\\data\\orchestrator-memory\\PERSON-BEN\\Memory.md')!, /never deleted/);
+  assert.match(w('C:\\ffsb\\data\\orchestrator-memory\\person-ben\\..\\person-lothsahn\\old.md')!, /outside it/);
+  assert.match(w('C:\\ffsb\\data\\orchestrator-memory\\person-ben\\old.md:x')!, /alternate data stream/);
+  assert.match(w('\\\\?\\C:\\ffsb\\data\\orchestrator-memory\\person-ben\\old.md')!, /wildcards|UNC and device/);
+});
+
+test('delete_memory tool: in every orchestrator’s belt; runs only in its person’s turn, on its own folder; its trash readable', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-mem-del-'));
+  const cfg = {
+    dataDir: dir,
+    sandboxRoot: dir,
+    standingRoot: path.join(dir, '_agents'),
+    repo: { url: path.join(dir, 'base'), basePath: path.join(dir, 'base') },
+    defaultBase: 'origin/develop',
+    models: ['opus'],
+    defaultModel: 'opus',
+    protectedPaths: [],
+    limits: { maxSessions: 30, maxUnity: 2, maxSandboxes: 4, minFreeGB: 0, minFreeRamGB: 0 },
+    orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false },
+    worker: { permissionMode: 'bypassPermissions', effort: 'low' },
+    unity: {},
+  } as unknown as Config;
+  const store = new Store(dir);
+  const sessions = new SessionManager(cfg, store);
+  const machines = new MachineManager(cfg, store, sessions);
+  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
+  agents.boot();
+  t.after(async () => {
+    agents.orchestrators.close();
+    sessions.stopAll();
+    await new Promise((r) => setTimeout(r, 60));
+    store.flush();
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  });
+  const call = async (info: SessionInfo, args: Record<string, unknown>) => {
+    const tool = agents.orchestratorBelt(info).find((x) => x.name === 'delete_memory');
+    if (!tool) throw new Error(`${info.title} has no delete_memory`);
+    const r = await tool.handler(args);
+    return { text: r.content.map((c) => c.text).join('\n'), isError: !!r.isError };
+  };
+  const loth = agents.orchestrators.personalFor(LOTH);
+  const disp = sessions.get(agents.dispatcherId!);
+  const root = path.join(dir, 'orchestrator-memory');
+  const mine = memoryDirFor(cfg, loth.info);
+  const ben = memoryDirFor(cfg, { orchestratorRole: 'personal', requestedBy: BEN });
+  const file = path.join(mine, 'm5-for-ben.md');
+  fs.writeFileSync(file, 'removed, see m5-open');
+  fs.writeFileSync(path.join(ben, 'note.md'), 'Ben’s');
+  // A turn the harness started (a worker update, a relayed Discord message, a timer) deletes nothing.
+  loth.lastFrom = 'system';
+  const harness = await call(loth.info, { file_path: file });
+  assert.equal(harness.isError, true);
+  assert.match(harness.text, /deleted only in a turn your person started/);
+  assert.ok(fs.existsSync(file));
+  // Lothsahn's own message: his own file goes; Ben's stays out of reach.
+  loth.lastFrom = 'human';
+  const other = await call(loth.info, { file_path: path.join(ben, 'note.md') });
+  assert.equal(other.isError, true);
+  assert.match(other.text, /outside it/);
+  assert.ok(fs.existsSync(path.join(ben, 'note.md')));
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => void lines.push(a.join(' '));
+  let ok: Awaited<ReturnType<typeof call>>;
+  try {
+    ok = await call(loth.info, { file_path: file });
+  } finally {
+    console.log = log;
+  }
+  assert.equal(ok.isError, false, ok.text);
+  assert.ok(!fs.existsSync(file));
+  const trash = memoryTrashDir(root, 'person-lothsahn');
+  assert.deepEqual(fs.readdirSync(trash).map((n) => fs.readFileSync(path.join(trash, n), 'utf8')), ['removed, see m5-open']);
+  assert.ok(lines.some((l) => l.startsWith("orchestrator memory: Lothsahn (lothsahn)'s orchestrator deleted person-lothsahn/m5-for-ben.md at ")), lines.join('\n'));
+  // The dispatcher has it too, on its own folder and under the same gate.
+  assert.ok(agents.orchestratorBelt(disp.info).some((x) => x.name === 'delete_memory'));
+  disp.lastFrom = 'system';
+  fs.writeFileSync(path.join(memoryDirFor(cfg, disp.info), 'old.md'), 'x');
+  assert.match((await call(disp.info, { file_path: path.join(memoryDirFor(cfg, disp.info), 'old.md') })).text, /deleted only in a turn your person started/);
+  // Its own trash is readable (to Write a file back); another orchestrator's is not listed.
+  const allow = agents.orchestratorSecrets(mine, loth.info).allow;
+  assert.ok(allow.includes(trash));
+  assert.ok(!allow.includes(memoryTrashDir(root, 'person-ben')));
+  // The brief says how to use it.
+  assert.match((agents.orchestratorOptions(loth.info) as { systemPrompt: { append: string } }).systemPrompt.append, /A wrong memory: delete_memory its file, then remove its line from MEMORY\.md \(no emptied stubs\)\./);
 });

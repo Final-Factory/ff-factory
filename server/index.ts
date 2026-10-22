@@ -46,7 +46,7 @@ import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './uni
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
-import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
+import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryRootOf, pruneMemoryTrash } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
 import { TokenSwitch, orchestratorOut, type RateLimitInfo } from './tokenSwitch.ts';
@@ -187,6 +187,9 @@ const guardMemory = (what: 'heal' | 'backup') => {
     if (what === 'heal') healMemory(memoryRoot);
     else {
       backupMemory(memoryRoot);
+      // Deleted memory files (delete_memory, w1748) are kept 30 days in <root>.backup/trash.
+      const pruned = pruneMemoryTrash(memoryRoot);
+      if (pruned) console.log(`orchestrator memory: removed ${pruned} deleted file(s) older than ${MEMORY_TRASH_DAYS} days from the trash`);
       versionMemoryNow();
     }
   } catch (e) {
