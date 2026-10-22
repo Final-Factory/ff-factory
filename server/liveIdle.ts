@@ -12,6 +12,13 @@ import type { MachineSandbox, SessionInfo } from '../shared/types.ts';
 
 export const LIVE_IDLE_DEFAULT_MINUTES = 15;
 const BUSY = new Set<SessionInfo['status']>(['running', 'starting', 'waiting_permission']);
+/** A session whose process is gone: what it last said it was running (a tool, a background job) runs no more. */
+const GONE = new Set<SessionInfo['status']>(['stopped', 'error']);
+/**
+ * A check-in this close holds the editor (w1746). A check-in further off does not: the wake's message starts the editor
+ * again (the daemon's send), as a check-in more than 30 minutes away already lets a sandbox take other work.
+ */
+export const LIVE_IDLE_WAKE_HOLD_MS = 30 * 60_000;
 
 /** One running view, as the idle close sees it (LiveHub.idleFacts). */
 export interface LiveIdleView {
@@ -20,9 +27,11 @@ export interface LiveIdleView {
   machineId: string;
   sandbox: string;
   startedAtMs: number;
-  /** Pages watching it now. */
+  /** Pages looked at now: visible and focused, or touched, within LIVE_PRESENT_MS (server/live.ts). */
   viewers: number;
-  /** The last time a page opened or left it (ms). */
+  /** Pages connected, looked at or not. */
+  pagesOpen?: number;
+  /** The last time a page opened, was looked at, or left it (ms). */
   watchedAt?: number;
   /** The last knob move or reset (ms). */
   touchedAt?: number;
@@ -42,14 +51,22 @@ export function liveIdleBlock(
   if (sb.unity.state !== 'running') return `its editor is ${sb.unity.state}`;
   if (v.viewers > 0) return `${v.viewers} page${v.viewers > 1 ? 's' : ''} watching`;
   for (const s of f.sessions) {
+    const wake = s.wakeAt ? Date.parse(s.wakeAt) : f.wakePending(s.id) ? now : undefined;
+    const wakeNear = wake !== undefined && !(wake - now > LIVE_IDLE_WAKE_HOLD_MS);
+    if (GONE.has(s.status)) {
+      if (wakeNear) return `${s.id} has a check-in pending${s.wakeAt ? ` (${s.wakeAt})` : ''}`;
+      continue;
+    }
+    // A tool runs only inside a turn, which BUSY covers; a tool still recorded on a session between turns is left over
+    // (beast/slot3, 2026-10-22 17:05Z: "b0ae73cf is running Bash" from a worker that was not mid-turn kept the editor open).
     if (BUSY.has(s.status)) return `${s.id} is mid-turn`;
-    if (s.activeTool) return `${s.id} is running ${s.activeTool.name}`;
     if ((s.backgroundTasks ?? 0) > 0 || s.backgroundJobs?.length) return `${s.id} has a background job running`;
     if (s.pendingPermissions?.length) return `${s.id} waits for a permission answer`;
-    if (s.wakeAt || f.wakePending(s.id)) return `${s.id} has a check-in pending${s.wakeAt ? ` (${s.wakeAt})` : ''}`;
+    if (wakeNear) return `${s.id} has a check-in pending${s.wakeAt ? ` (${s.wakeAt})` : ''}`;
   }
   const last = Math.max(v.startedAtMs, v.watchedAt ?? 0, v.touchedAt ?? 0, ...f.sessions.map((s) => Date.parse(s.lastActivityAt) || 0));
-  if (now - last < minutes * 60_000) return `idle ${Math.floor((now - last) / 60_000)} of ${minutes} min`;
+  const unseen = (v.pagesOpen ?? 0) - v.viewers;
+  if (now - last < minutes * 60_000) return `idle ${Math.floor((now - last) / 60_000)} of ${minutes} min${unseen > 0 ? ` (${unseen} page${unseen > 1 ? 's' : ''} open, not looked at)` : ''}`;
   return undefined;
 }
 

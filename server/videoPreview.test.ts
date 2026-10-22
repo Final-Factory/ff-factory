@@ -16,9 +16,10 @@ function topic(t: { after: (fn: () => void) => void }) {
 
 /**
  * A stand-in ffmpeg: copies its input (the argument after -i) to its output (the last argument), counting its runs in
- * `<dir>/runs`; exits 1 on an input named "bad*". A node script, so it runs on every platform.
+ * `<dir>/runs`; exits 1 on an input named "bad*". A node script run by this node, so it runs on every platform: a `.cmd`
+ * shim never ran on Windows, where node spawns none without a shell (spawn EINVAL; w1758).
  */
-function fakeFfmpeg(dir: string): string {
+function fakeFfmpeg(dir: string): string[] {
   const js = path.join(dir, 'fake-ffmpeg.mjs');
   fs.writeFileSync(
     js,
@@ -31,14 +32,7 @@ await new Promise((r) => setTimeout(r, 50));
 fs.copyFileSync(input, a[a.length - 1]);
 `,
   );
-  if (process.platform === 'win32') {
-    const cmd = path.join(dir, 'fake-ffmpeg.cmd');
-    fs.writeFileSync(cmd, `@"${process.execPath}" "${js}" %*\r\n`);
-    return cmd;
-  }
-  const sh = path.join(dir, 'fake-ffmpeg');
-  fs.writeFileSync(sh, `#!/bin/sh\nexec "${process.execPath}" "${js}" "$@"\n`, { mode: 0o755 });
-  return sh;
+  return [process.execPath, js];
 }
 
 const runs = (dir: string) => (fs.existsSync(path.join(dir, 'runs')) ? fs.readFileSync(path.join(dir, 'runs'), 'utf8').trim().split('\n') : []);

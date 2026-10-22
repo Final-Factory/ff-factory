@@ -11,7 +11,7 @@ const BEN = { userId: 'ben', displayName: 'Ben' };
 const KAI = { userId: 'kai', displayName: 'Kai' };
 const session = { id: 's1', kind: 'worker', title: 'Comet', machineId: 'beast', machineSandbox: 'slot1', requestedBy: KAI } as unknown as SessionInfo;
 
-function hub(opts: { enabled?: boolean; canLive?: boolean; answers?: Record<string, string> } = {}) {
+function hub(opts: { enabled?: boolean; canLive?: boolean; answers?: Record<string, string>; now?: () => number; opened?: string[] } = {}) {
   const calls: Record<string, unknown>[] = [];
   let changes = 0;
   const roles: Record<string, UserRole> = { ben: 'owner', kai: 'member', lee: 'member' };
@@ -29,6 +29,8 @@ function hub(opts: { enabled?: boolean; canLive?: boolean; answers?: Record<stri
     session: (id) => (id === 's1' ? session : undefined),
     roleOf: (u) => roles[u],
     changed: () => changes++,
+    ...(opts.now ? { now: opts.now } : {}),
+    viewerOpened: (i, who) => opts.opened?.push(`${i.sessionId} by ${who}`),
   });
   return { h, calls, changes: () => changes };
 }
@@ -193,4 +195,41 @@ test('w1509: a restarted portal takes back the views a daemon still runs, and st
   assert.equal((calls.at(-1) as { command?: string } | undefined)?.command, 'look.material.set|StationShieldMaterial|_Concept|2');
   // And its frame socket is accepted again.
   assert.equal(h.attachFrames('beast', 'lv-1', fakeSocket() as unknown as WebSocket), true);
+});
+
+test('w1746: a page counts as watching only while it is looked at, and coming back to it counts as opening the view', async () => {
+  let t = Date.parse('2026-10-22T17:15:45Z');
+  const opened: string[] = [];
+  const { h } = hub({ now: () => t, opened });
+  await h.tool(session, { action: 'start', materials: [] });
+  const page = fakeSocket();
+  assert.equal(h.addViewer('s1', page as unknown as WebSocket, 'Ben'), true);
+  const facts = () => h.idleFacts()[0];
+  assert.deepEqual([facts().viewers, facts().pagesOpen, facts().watchedAt], [1, 1, t], 'a page just opened is looked at');
+  opened.length = 0;
+  t += 60_000;
+  page.emit('message', Buffer.from('p'), false);
+  assert.equal(facts().viewers, 1);
+  assert.deepEqual(opened, [], 'still looked at: no new opening');
+  // beast/slot5, 2026-10-22: a page opened at 17:15:45Z and left open held the editor ("1 page watching") for over an hour.
+  // Its tab behind other windows says nothing, so 90 s on it no longer counts, and the idle time runs from its last "p".
+  t += 100_000;
+  assert.deepEqual([facts().viewers, facts().pagesOpen, facts().watchedAt], [0, 1, t - 100_000]);
+  // The person comes back to it: it counts again, and as an opening (an editor closed idle meanwhile wakes its worker).
+  page.emit('message', Buffer.from('p'), false);
+  assert.equal(facts().viewers, 1);
+  assert.deepEqual(opened, ['s1 by Ben']);
+  // A page closed long after anyone looked at it does not restart the idle time.
+  t += 5 * 60_000;
+  const last = t - 5 * 60_000;
+  page.close();
+  assert.deepEqual([facts().viewers, facts().pagesOpen, facts().watchedAt], [0, 0, last]);
+});
+
+test('w1746: a view taken back after a portal restart keeps no restart time, so its idle time runs from its sessions', async () => {
+  const { h } = hub({ now: () => Date.parse('2026-10-22T17:04:33Z') });
+  await h.daemonHello('beast', [{ liveId: 'lv-1', sessionId: 's1', sandbox: 'slot1', fps: 15, width: 960, materials: [], state: 'live', detail: '', frames: 1 }]);
+  assert.equal(h.idleFacts()[0].startedAtMs, 0);
+  await h.tool(session, { action: 'start', materials: [] });
+  assert.equal(h.idleFacts()[0].startedAtMs, Date.parse('2026-10-22T17:04:33Z'), 'a view started here counts from its start');
 });

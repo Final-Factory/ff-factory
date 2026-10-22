@@ -286,7 +286,7 @@ test('set_app_config (w1078): providers.ffbox.token keeps only its hash, in a fi
   const r = setAppConfig(file, cfg, 'providers.ffbox.token', token);
   assert.deepEqual(r, { before: 'not set', after: `set (…${hash.slice(-4)})` });
   assert.equal(fs.readFileSync(hashFile, 'utf8').trim(), hash, 'the hash is in the secrets folder');
-  assert.equal(fs.statSync(hashFile).mode & 0o777, 0o600, 'its owner only');
+  if (process.platform !== 'win32') assert.equal(fs.statSync(hashFile).mode & 0o777, 0o600, 'its owner only');
   const saved = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
   assert.equal(saved.providers.ffbox.tokenSha256File, hashFile, 'config.json names the file');
   assert.equal(saved.providers.ffbox.tokenSha256, undefined);

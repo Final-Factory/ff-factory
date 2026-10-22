@@ -50,14 +50,16 @@ const OLD = {
   intake: { nightly: { run: { enabled: true, time: '03:00' } } },
 };
 
+// Windows has no POSIX file modes (every file reads 0o666, or 0o444 read-only): the asserts on them skip it (w1758).
 const mode = (f: string) => fs.statSync(f).mode & 0o777;
 
 test('the start splits config.json once: retired Claude keys out, the FFBox hash into its file, the old file kept in the secrets folder (w1078)', (t) => {
   const p = portal(t, OLD);
   const original = fs.readFileSync(p.config, 'utf8');
   assert.equal(secretsDirOf(p.config), p.secrets, "the VM's layout: secrets beside config's folder");
-  assert.equal(secretsDirOf('/tmp/ffsb-x/config.json', '/srv/app'), '/tmp/ffsb-x/secrets', 'a config in any other folder keeps its secrets inside it, never in a shared /tmp/secrets');
-  assert.equal(secretsDirOf('/srv/app/config.json', '/srv/app'), '/srv/app/secrets');
+  // path.resolve: the same rule on Windows, where '/tmp' is a folder of the current drive (w1758).
+  assert.equal(secretsDirOf(path.resolve('/tmp/ffsb-x/config.json'), path.resolve('/srv/app')), path.resolve('/tmp/ffsb-x/secrets'), 'a config in any other folder keeps its secrets inside it, never in a shared /tmp/secrets');
+  assert.equal(secretsDirOf(path.resolve('/srv/app/config.json'), path.resolve('/srv/app')), path.resolve('/srv/app/secrets'));
   const m = migrateConfig(p.config, p.secrets, new Date('2026-10-12T04:00:00Z'));
   const said = m.changes.join('; ');
   for (const k of ['claudeEnv', 'userClaudeEnv', 'claudeTokenFile', 'machines.useHostClaudeEnv', 'machines.claudeFromVault', 'claudeAccounts.orchestrator', 'providers.ffbox.tokenSha256']) assert.match(said, new RegExp(k.replace('.', '\\.')), k);
@@ -74,14 +76,14 @@ test('the start splits config.json once: retired Claude keys out, the FFBox hash
   assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'vault', dispatcher: 'vault:vault-lothsahn-1' }, 'the orchestrators stay on "vault" written out (a rollback reads it), the pinned dispatcher stays');
   assert.deepEqual(cfg.providers.ffbox, { enabled: true, tokenSha256File: path.join(p.secrets, FFBOX_HASH_FILE) });
   assert.deepEqual(cfg.intake, OLD.intake, 'every other setting as it was');
-  assert.equal(mode(p.config), 0o600, "config.json keeps its mode");
+  if (process.platform !== 'win32') assert.equal(mode(p.config), 0o600, "config.json keeps its mode");
 
   const hashFile = path.join(p.secrets, FFBOX_HASH_FILE);
   assert.equal(fs.readFileSync(hashFile, 'utf8'), `${HASH}\n`);
-  assert.equal(mode(hashFile), 0o600);
+  if (process.platform !== 'win32') assert.equal(mode(hashFile), 0o600);
   assert.ok(m.backup && m.backup.startsWith(p.secrets + path.sep), 'the backup is in the secrets folder');
   assert.equal(fs.readFileSync(m.backup!, 'utf8'), original, 'the backup is the file as it was');
-  assert.equal(mode(m.backup!), 0o600);
+  if (process.platform !== 'win32') assert.equal(mode(m.backup!), 0o600);
 
   // Once: a second start changes nothing and keeps no second backup.
   const after = fs.readFileSync(p.config, 'utf8');
@@ -164,7 +166,7 @@ test('set_app_config providers.ffbox.token writes only its hash, to the file in 
   const file = path.join(p.secrets, FFBOX_HASH_FILE);
   const want = createHash('sha256').update(token).digest('hex');
   assert.equal(fs.readFileSync(file, 'utf8').trim(), want);
-  assert.equal(mode(file), 0o600);
+  if (process.platform !== 'win32') assert.equal(mode(file), 0o600);
   const text = fs.readFileSync(p.config, 'utf8');
   assert.ok(!text.includes(want) && !text.includes(token), 'config.json holds neither the token nor its hash');
   assert.equal(JSON.parse(text).providers.ffbox.tokenSha256File, file);

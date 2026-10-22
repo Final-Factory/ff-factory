@@ -292,7 +292,7 @@ test("w1602: a question that names a request with review media and carries none 
   assert.equal(first.isError, true);
   assert.match(first.text, /Not shown yet: your question names w77/);
   assert.match(first.text, /in the card/);
-  assert.ok(first.text.includes(`![new.mp4](<${dir}/new.mp4>)`), first.text);
+  assert.ok(first.text.includes(`![new.mp4](<${path.resolve(dir, 'new.mp4')}>)`), first.text); // the native path, as the folder is read (w1758)
   assert.ok(first.text.indexOf('new.mp4') < first.text.indexOf('mid.png') && first.text.indexOf('mid.png') < first.text.indexOf('old.mp4'), 'newest first');
   assert.doesNotMatch(first.text, /unrelated/);
   // Nothing was shown, and the same call again (the media is not for this question) is shown as it is.

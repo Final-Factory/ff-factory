@@ -164,7 +164,8 @@ test('join http: /join is a page for the new PC with the download; the installer
   const cmd = await r.text();
   assert.ok(!/[^\r]\n/.test(cmd), 'CRLF line endings only (cmd.exe misreads LF-only batch files)');
   // w1603: downloaded to a file and run with -File, never `-Command "irm ... | iex"` (Defender's "Access is denied.").
-  assert.ok(cmd.includes(`curl.exe -fsS --connect-timeout 20 --retry 2 -o "%FF_JOIN_PS1%" "https://fff.tail1234.ts.net/join/windows.ps1"`), cmd);
+  assert.ok(cmd.includes(`"%FF_CURL%" -fsS --connect-timeout 20 --retry 2 -o "%FF_JOIN_PS1%" "https://fff.tail1234.ts.net/join/windows.ps1"`), cmd);
+  assert.ok(cmd.includes('set "FF_CURL=%SystemRoot%\\System32\\curl.exe"'), "Windows' own curl, never the first on PATH (w1758)");
   assert.ok(cmd.includes(`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%FF_JOIN_PS1%"`), cmd);
   assert.doesNotMatch(cmd, /-Command/);
   assert.ok(cmd.includes('set "FF_JOIN_CODE="\r\n'), 'no code in the download anyone on the tailnet may take: the bootstrap asks');

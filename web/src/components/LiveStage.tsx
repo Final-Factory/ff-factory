@@ -17,6 +17,10 @@ export interface FrameStats {
 const NONE: FrameStats = { hasFrame: false, fps: 0, width: 0, height: 0, connected: false };
 const FPS_WINDOW_MS = 2000;
 const BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
+/** How often a looked-at page says so ("p"), and the least gap between two (server/live.ts LIVE_PRESENT_MS, w1746). */
+const PRESENT_EVERY_MS = 30_000;
+const PRESENT_GAP_MS = 10_000;
+const TOUCHES = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'focus'] as const;
 
 /**
  * Opens /live/<sessionId> (binary messages, one JPEG frame each, docs/live-view.md) and draws the newest frame on `canvas`.
@@ -25,7 +29,8 @@ const BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
  * the portal sends no more than the link carries in one round trip, so the view never runs behind on a slow link
  * (shared/framePump.ts). The canvas keeps its last picture while the socket is down or the game holds, so the view is
  * never blank after the first frame. Reconnects with backoff while `enabled`; closes on unmount and, to spare a phone's
- * data, while the tab is hidden.
+ * data, while the tab is hidden. While the tab is visible and focused, and at each touch, it says "p" (present): a page
+ * nobody looks at stops counting as watching, so the view's idle editor can close (w1746, docs/live-view.md).
  */
 function useLiveFrames(sessionId: string, enabled: boolean, canvas: RefObject<HTMLCanvasElement | null>): FrameStats {
   const [stats, setStats] = useState<FrameStats>(NONE);
@@ -135,6 +140,17 @@ function useLiveFrames(sessionId: string, enabled: boolean, canvas: RefObject<HT
       }
     };
     document.addEventListener('visibilitychange', onVisible);
+    let saidPresent = 0;
+    const present = (e?: Event) => {
+      const t = Date.now();
+      if (!sock || sock.readyState !== WebSocket.OPEN || document.visibilityState !== 'visible') return;
+      if (!e && !document.hasFocus()) return;
+      if (t - saidPresent < PRESENT_GAP_MS) return;
+      saidPresent = t;
+      sock.send('p');
+    };
+    for (const k of TOUCHES) window.addEventListener(k, present, { passive: true });
+    const presence = setInterval(present, PRESENT_EVERY_MS);
     // fps decays to 0 by itself when frames stop.
     const tick = setInterval(publish, 500);
     open();
@@ -142,6 +158,8 @@ function useLiveFrames(sessionId: string, enabled: boolean, canvas: RefObject<HT
       stopped = true;
       clearTimeout(timer);
       clearInterval(tick);
+      clearInterval(presence);
+      for (const k of TOUCHES) window.removeEventListener(k, present);
       document.removeEventListener('visibilitychange', onVisible);
       const s = sock;
       sock = null;
