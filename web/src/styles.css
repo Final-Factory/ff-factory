@@ -2110,6 +2110,10 @@ button.react-chip:hover {
 
 .ask-media .md p {
   margin: 0;
+  /* A flex item is as wide as its content, and a clip's player is 480 px wide whatever the card (w1781): the paragraph that
+     holds it may shrink to the column. */
+  min-width: 0;
+  max-width: 100%;
 }
 
 .ask-media .md-img img,
@@ -2957,6 +2961,10 @@ button.react-chip:hover {
 .md .md-video-cap .ellipsis {
   flex: 1;
   min-width: 0;
+  /* The caption wraps inside the column (w1781: a long one ran off a phone's edge); .ellipsis would keep it to one line. */
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
 }
 
 .md-code-actions {

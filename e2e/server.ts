@@ -112,6 +112,9 @@ fs.mkdirSync(clips, { recursive: true });
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.webm'));
 // The same bytes named .mp4: Playwright's Chromium has no H.264, so this one only proves the page asks for it as a video.
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.mp4'));
+// A 1920x1080 clip, the size of a game recording (e2e/sideways.spec.ts, w1781: its player must stay inside a phone's column), as .webm and as .mp4 bytes.
+fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip-1080.webm'), path.join(clips, 'clip-1080.webm'));
+fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip-1080.webm'), path.join(clips, 'clip-1080.mp4'));
 // A still, as a worker's publish_review leaves one (e2e/images.spec.ts, w1419).
 fs.writeFileSync(path.join(clips, 'option-a-1280.png'), Buffer.from(RED_PNG, 'base64'));
 // Six stills in a topic of their own, as a worker's mocks are published (e2e/images.spec.ts, w1419: a long message).
