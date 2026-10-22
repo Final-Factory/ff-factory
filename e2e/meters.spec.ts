@@ -223,7 +223,7 @@ test('meters: the server lists its accounts: the vault tokens, never a login or 
   expect(Object.keys(s.machineStats ?? {})).toEqual(['pc']);
   // Every Claude process runs on a vault token (w1078): the test server's vault holds one fake token per login (e2e/server.ts),
   // and neither this host's login nor the machine's own is an account any more.
-  expect(s.accounts?.length).toBe(4);
+  expect(s.accounts?.length).toBe(5);
   for (const a of s.accounts!) {
     expect(a.kind).toBe('token');
     expect(a.label).toMatch(/^vault-[a-z0-9._-]+-1 …/);
