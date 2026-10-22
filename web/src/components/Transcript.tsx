@@ -153,6 +153,13 @@ const PILL_ZONE = 56;
 /** How long the place is held after the view is resized (a phone turned, a keyboard opened): the layout may still be settling, a frame at a time. */
 const RESIZE_HOLD_MS = 1500;
 
+// w1758 EXPERIMENT: a ring buffer of the chat's scroll decisions, read by the e2e specs when one fails.
+const dbgLog: unknown[] = ((window as unknown as { __scrollLog?: unknown[] }).__scrollLog ??= []);
+function dbg(what: string, el: HTMLElement | null | undefined, extra: Record<string, unknown> = {}) {
+  if (dbgLog.length > 400) dbgLog.splice(0, 100);
+  dbgLog.push({ t: Math.round(performance.now()), what, ...(el ? { top: Math.round(el.scrollTop), sh: el.scrollHeight, ch: el.clientHeight } : {}), ...extra });
+}
+
 const seqOf = (c: Element): number | undefined => {
   const v = c.getAttribute('data-seq') ?? c.getAttribute('data-seqs')?.trim().split(/\s+/)[0];
   const n = v === null || v === undefined ? NaN : Number(v);
@@ -185,7 +192,10 @@ function alignTo(box: HTMLElement, p: Held): boolean {
   for (const c of Array.from(box.firstElementChild?.children ?? [])) {
     if (c.getAttribute('data-seq') !== want && c.getAttribute('data-seq2') !== want && !c.getAttribute('data-seqs')?.includes(` ${want} `)) continue;
     const delta = c.getBoundingClientRect().top - box.getBoundingClientRect().top - p.off;
-    if (Math.abs(delta) >= 1) box.scrollTop += delta;
+    if (Math.abs(delta) >= 1) {
+      dbg('align', box, { seq: p.seq, off: p.off, delta: Math.round(delta) });
+      box.scrollTop += delta;
+    }
     return true;
   }
   return false;
@@ -287,7 +297,7 @@ export const Transcript = memo(function Transcript({
     // The view was resized and the browser moved its scroll position to fit (WebKit tells us before the ResizeObserver below
     // does): the reader did not scroll, so neither the bottom they were pinned to nor the place they were at is theirs to
     // forget. The ResizeObserver puts both back.
-    if (el.clientWidth !== lastBox.current.w || el.clientHeight !== lastBox.current.h) return;
+    if (el.clientWidth !== lastBox.current.w || el.clientHeight !== lastBox.current.h) return void dbg('scroll:resized', el);
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     const grew = el.scrollHeight > lastHeight.current;
     const down = el.scrollTop >= lastTop.current;
@@ -295,6 +305,7 @@ export const Transcript = memo(function Transcript({
     // to the new end, and when a picture at the end loads before this event is handled, the content grew and the view went up,
     // as when the reader scrolls up. Only the reader moves the rows on screen.
     const stayed = atBottom.current && rowStayed(el);
+    dbg('scroll', el, { dist: Math.round(dist), grew, down, stayed, atBottom: atBottom.current, lastTop: Math.round(lastTop.current), lastH: lastHeight.current, hold: !!hold.current, pending: !!pending.current });
     track(el);
     if (atBottom.current && ((grew && down) || stayed)) {
       // Late content (a lazy image, a diagram) pushed the end away before this event was handled: still following, so follow.
@@ -360,6 +371,7 @@ export const Transcript = memo(function Transcript({
             }
           }
           atBottom.current = false;
+          dbg('followEnd:answer', el, { seq: a.answer });
           pending.current = { top, seq: a.answer, off: rowTop - top, latest: a.answer };
           restore();
           return;
@@ -372,6 +384,7 @@ export const Transcript = memo(function Transcript({
   const scrollToBottom = (smooth = false) => {
     const el = scroller.current;
     if (!el) return;
+    dbg('toBottom', el, { smooth });
     pending.current = null;
     hold.current = null;
     el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
@@ -387,6 +400,7 @@ export const Transcript = memo(function Transcript({
     const p = pending.current;
     if (!el || !p) return;
     if (alignTo(el, p)) {
+      dbg('restore:aligned', el, { seq: p.seq, off: p.off });
       pending.current = null;
       const h = { place: p, until: performance.now() + HOLD_MS };
       hold.current = h;
@@ -402,6 +416,7 @@ export const Transcript = memo(function Transcript({
       if (p.latest !== undefined && latestSeq.current > p.latest) setJump('new');
     } else if (loadedNow.current) {
       pending.current = null;
+      dbg('restore:pixels', el, { want: p.top, seq: p.seq });
       if (el.scrollHeight > el.clientHeight) {
         el.scrollTop = p.top;
         atBottom.current = false;
@@ -413,6 +428,7 @@ export const Transcript = memo(function Transcript({
   // A chat on screen: where it was left, else the bottom.
   useLayoutEffect(() => {
     const saved = scrollMemory.get(session.id);
+    dbg('open', scroller.current, { session: session.id, saved: JSON.stringify(saved ?? null) });
     pending.current = null;
     hold.current = null;
     seenLatest.current = latestSeq.current;
@@ -448,6 +464,7 @@ export const Transcript = memo(function Transcript({
     if (!box || !el || typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver(() => {
       const resized = box.clientWidth !== lastBox.current.w || box.clientHeight !== lastBox.current.h;
+      dbg('ro', box, { resized, atBottom: atBottom.current, pending: !!pending.current, hold: !!hold.current && performance.now() < hold.current.until });
       if (atBottom.current) {
         box.scrollTo({ top: box.scrollHeight });
         track(box);

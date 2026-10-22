@@ -1,5 +1,8 @@
 import type { Locator, Page, WebSocketRoute } from '@playwright/test';
 import { ALPHA, appState, BOX, boxText, expect, openSandbox, openSidebar, sendMessage, signIn, startWorker, test, uniq, useTool } from './fixtures.ts';
+import { dumpScroll } from './fixtures.ts';
+// w1758 EXPERIMENT
+test.afterEach(async ({ browser }, info) => dumpScroll(browser, info));
 
 // A tab left open across a deploy moves to the new UI by itself (web/src/freshness.ts, w285, w1489), and loses nothing
 // on the way. A deploy is played here the way the page sees it: the server (health, the page, the state its socket sends)
