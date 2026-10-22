@@ -569,6 +569,15 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
    new version replaces the folder's contents, never its path, so the install's rule for it keeps fitting; a node still
    running from the old folder leaves it for the next rollout (`... is in use`). A failure prints `WARNING: Agent node:`
    and does not change the exit code.
+9. Windows, when the install made firewall rules: reads, without admin rights, whether each player slot and the agents'
+   node has an enabled inbound allow rule for its exact path, and whether rules earlier prompts left under `<root>\tmp`
+   remain (`firewallCheckScript`, two bulk reads, 4 s on lothdesktop's 696 rules). All there: one `Windows Firewall: ...
+   are there.` line. Something missing and the run elevated: runs `firewall.ps1` as the install does and records the node's
+   group in root.json. Not elevated: `WARNING: Windows Firewall: ...`, and the exit code stays. A daemon update and a tools
+   run over the daemon's link are never elevated, so the node's rule from #517 reached no machine (w1742); the rollout
+   therefore reruns the tools form over the portal's ssh (elevated for an administrator's account,
+   administrators_authorized_keys) when a run over the link warns of a firewall rule, and the report carries any
+   warning that remains (`Agent tools: ... WARNING: ...`).
 
 Running agents keep the plugin version they started with (its cached copy stays on disk); new sessions load the new one.
 No agent is stopped or waited for.

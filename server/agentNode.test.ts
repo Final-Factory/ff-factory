@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodePathDir, ensureAgentNode, type AgentNodeDeps } from './agentNode.ts';
+import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodePathDir, ensureAgentNode, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
 
 /**
  * w1742: the agents' node lives at one fixed path per Windows worker root, so no worker unpacks its own into a session temp
@@ -88,4 +88,18 @@ test('not Windows: nothing to place, and nothing goes on PATH; Windows: the fold
   assert.equal(agentNodePathDir(undefined, 'win32', () => true), undefined);
   assert.equal(agentNodePathDir(root, 'win32', () => false), undefined);
   assert.equal(agentNodePathDir(root, 'win32', () => true), agentNodeDir(root));
+});
+
+test('w1742: the firewall read names each path, quoted, and the temp folder in lower case with one trailing backslash', () => {
+  const s = firewallCheckScript(["V:\\ffw\\tools\\node\\node.exe", "C:\\it's\\player.exe"], 'V:\\ffw\\TMP\\');
+  assert.ok(s.includes("@('V:\\ffw\\tools\\node\\node.exe', 'C:\\it''s\\player.exe')"), s);
+  assert.ok(s.includes("$p.StartsWith('v:\\ffw\\tmp\\')"), s);
+  assert.ok(s.includes("-notlike 'Final Factory*'"), 'the install\'s own groups (a test install\'s too) are never stale');
+});
+
+test('w1742: the firewall answer (as lothdesktop gave it after #517: node and a tenth slot missing, six temp-node rules)', () => {
+  const out = 'ok V:\\ffw\\players\\slot1-0\\player\\finalfactory.exe\r\nmissing V:\\ffw\\tools\\node\\node.exe\r\nmissing V:\\ffw\\players\\slot9-0\\player\\finalfactory.exe\r\nstale=6\r\n';
+  assert.deepEqual(parseFirewallCheck(out), { missing: ['V:\\ffw\\tools\\node\\node.exe', 'V:\\ffw\\players\\slot9-0\\player\\finalfactory.exe'], stale: 6 });
+  assert.deepEqual(parseFirewallCheck('ok A\nstale=0'), { missing: [], stale: 0 });
+  assert.equal(parseFirewallCheck('reading the firewall rules failed: Access is denied'), undefined, 'an unreadable answer is not "all there"');
 });

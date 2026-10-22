@@ -95,6 +95,8 @@ export interface ToolsOutcome {
   latestSha?: string;
   note?: string;
   summary?: string[];
+  /** A run that published but said WARNING (w1742: a firewall rule missing on a computer the run could not fix). */
+  warnings?: string[];
   at?: string;
 }
 
@@ -421,6 +423,21 @@ export class MachineRollout {
         // Over the daemon's link (w1596): the installer's tools form, run by a job from the deployed commit's checkout.
         const r = await this.d.host.linkUpdate!(m.id, 'tools', this.state.sha!);
         Object.assign(t, toolsResult(r.exit, r.log));
+        // The link's job runs as the daemon, never elevated, so it can only say a firewall rule is missing (w1742: the agent
+        // node's rule never reached lothdesktop or BEAST). The portal's ssh to an administrator's Windows account is
+        // elevated (administrators_authorized_keys, w568), and the same tools run there makes the rules.
+        const warned = t.warnings ?? [];
+        if (m.platform === 'win32' && SAFE_TARGET.test(m.target) && t.status === 'ok' && warned.some((w) => w.includes('Windows Firewall'))) {
+          console.log(`machine rollout: ${m.id}: a firewall rule is missing; the tools run again over ssh, elevated`);
+          try {
+            const s = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }), this.lim.toolsMs);
+            const again = toolsResult(s.code, `${s.stdout}\n${s.stderr}`);
+            t.warnings = again.status === 'ok' ? again.warnings : [...warned, `WARNING: the tools run over ssh, for the firewall rules, ${again.status}: ${again.note ?? ''}`];
+            if (!t.warnings?.length) delete t.warnings;
+          } catch (e) {
+            t.warnings = [...warned, `WARNING: the tools run over ssh, for the firewall rules, failed: ${(e as Error).message}`];
+          }
+        }
       } else {
         const r = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }), this.lim.toolsMs);
         Object.assign(t, toolsResult(r.code, `${r.stdout}\n${r.stderr}`));
@@ -538,6 +555,7 @@ export function toolsResult(code: number, out: string): Omit<ToolsOutcome, 'at'>
     ...(after ? { after: parseVersions(after.slice(LINE.after.length)) } : {}),
     ...(latest ? { latest: parseVersions(latest[2]), latestSha: latest[1] } : {}),
     ...(failed ? { note: clip(why ?? `the installer's tools run exited ${code}`, 300), summary: toolsSummary(lines) } : {}),
+    ...(!failed && lines.some((l) => l.startsWith('WARNING')) ? { warnings: lines.filter((l) => l.startsWith('WARNING')).slice(-4).map((l) => clip(l, 300)) } : {}),
   };
 }
 
@@ -556,7 +574,7 @@ export function toolsLine(t: ToolsOutcome | undefined): string {
   const note = (t.note ?? '').replace(/\.+$/, '');
   switch (t.status) {
     case 'ok':
-      return ` Agent tools: ${list}${master}; every installed plugin on master.`;
+      return ` Agent tools: ${list}${master}; every installed plugin on master.${(t.warnings ?? []).map((w) => ` ${w}`).join('')}`;
     case 'not-published':
       return ` Agent tools NOT PUBLISHED: ${note}. ${list}.`;
     case 'failed':

@@ -33,7 +33,7 @@ import { carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, 
 import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
 import { publishAgentTools } from '../../server/agentTools.ts';
-import { agentNodeDir, agentNodeExe, ensureAgentNode } from '../../server/agentNode.ts';
+import { NODE_GROUP, agentNodeDir, agentNodeExe, ensureAgentNode, firewallCheckScript, parseFirewallCheck } from '../../server/agentNode.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
 export const LAYOUT_VERSION = 1;
@@ -1636,6 +1636,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     const sfx = o.firewallSuffix ? ` ${o.firewallSuffix}` : '';
     noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.maxSandboxes} sandboxes' player folders (slot1-0..slot${o.maxSandboxes}-1) under ${l.players}` });
     if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP + sfx, note: editors.join('; ') });
+    noteOutside(m, { kind: 'firewall-group', name: NODE_GROUP + sfx, note: agentNodeExe(l.root) });
     if (!o.firewallSuffix) noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
     steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.maxSandboxes, editors, o.firewallSuffix) });
@@ -2052,7 +2053,35 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
   if ((await ensureAgentNode(l.root, { exec, say, platform: process.platform })) === 'installed' && owner) {
     await giveTo(owner, [agentNodeDir(l.root)]).catch((e) => say(`WARNING: could not give ${agentNodeDir(l.root)} to ${owner}: ${(e as Error).message}`));
   }
+  if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) await firewallRepair(l, m);
   return code;
+}
+
+/**
+ * The install's firewall rules, checked on every tools rollout and made again when one is missing (w1742). A daemon update
+ * runs without administrator rights and skips firewall.ps1, so the agent node's rule (new in #517) never reached
+ * lothdesktop or BEAST, and a slot rule lost after a root move stays lost while root.json still lists its group. The
+ * tools run comes over the portal's ssh, elevated on an administrator's computer (administrators_authorized_keys,
+ * w568), so it can run the step itself; otherwise it says what is missing, never a prompt nobody answers.
+ */
+export async function firewallRepair(l: Layout, m: Manifest) {
+  const slots = Array.from({ length: m.slots }, (_, i) => [0, 1].map((p) => path.join(l.players, `slot${i + 1}-${p}`, 'player', 'finalfactory.exe'))).flat();
+  const node = agentNodeExe(l.root);
+  const exes = [...slots, ...(fs.existsSync(node) ? [node] : [])];
+  const seen = parseFirewallCheck(await ps('reading the firewall rules', firewallCheckScript(exes, l.tmp), 2 * 60_000).catch((e) => `${(e as Error).message}`));
+  if (!seen) return say('WARNING: Windows Firewall: could not read the rules, so they were not checked.');
+  if (!seen.missing.length && !seen.stale) return say(`Windows Firewall: the rules for the ${slots.length} player folders${exes.includes(node) ? ' and the agent node' : ''} are there.`);
+  const what = [...(seen.missing.length ? [`no allow rule for ${seen.missing.join(', ')}`] : []), ...(seen.stale ? [`${seen.stale} rule(s) earlier prompts left under ${l.tmp}`] : [])].join('; ');
+  if (!elevated()) return say(`WARNING: Windows Firewall: ${what}. This session is not elevated; an elevated tools run or update (the portal's ssh, ops_worker machine_update) makes them.`);
+  const sfx = m.firewallSuffix ? ` ${m.firewallSuffix}` : '';
+  try {
+    say(`Windows Firewall: ${what}; making the install's rules again.`);
+    say((await elevatedSteps([{ kind: 'firewall', args: firewallArgs('add', l, m.slots, unityEditors(), m.firewallSuffix) }])).trim());
+    if (exes.includes(node)) noteOutside(m, { kind: 'firewall-group', name: NODE_GROUP + sfx, note: node });
+    writeManifest(l.root, m);
+  } catch (e) {
+    say(`WARNING: Windows Firewall: ${what}, and making them failed: ${(e as Error).message}`);
+  }
 }
 
 export const NIGHTLY_TASK = 'ff-nightly-e2e';
