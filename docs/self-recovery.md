@@ -637,7 +637,9 @@ shim also hands node the Windows pids of its MSYS parents (`/proc/<pid>/winpid`,
 that runs it is spared too; a Mac and Linux keep an intact chain (`exec` replaces the process) and set nothing. What the
 command's own shells run beside it (`ff-leftovers end | tail`, a `while read` subshell) is the command's, never a leftover
 (w1758, `ownLeftovers` in `machine/leftovers.ts`): a pipeline's `tail` that bash has forked and not yet exec'd reads as a
-shell carrying the session, and on a loaded CI runner `end` ended it, losing its own list ("status=0 Terminated").
+shell carrying the session, and on a loaded CI runner `end` ended it, losing its own list ("status=0 Terminated"). The
+process tree cannot tell a pipeline's reader from a job started with `&` in that same command line, so such a job is spared
+too: run `ff-leftovers end` as a command of its own, after the one that started the job.
 
 Tests: `server/leftovers.test.ts` (biscuit's two players and their Xvfb end; a waited-for worker's, a gnome session's and a
 batch build's leftovers end; the orphan ends; a live worker's player, a check-in's run, an interactive editor, the main
