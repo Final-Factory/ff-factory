@@ -1426,6 +1426,31 @@ decides every write, and a hook's refusal holds in every permission mode:
   it, so it never writes memory in a turn of its own). Orchestrators read text agents wrote (`[worker update]`, relayed Discord and FFBox reports); a harness turn
   must not be able to plant an instruction that every later conversation loads.
 
+### Deleting a memory (w1748)
+
+Lothsahn asked (w1748): "Please make it so you can delete memory files". Orchestrators have no shell, so a memory that
+turned out wrong could only be emptied to a stub (`person-lothsahn/m5-for-ben.md`, a "removed, see m5-open" stub). The
+`delete_memory` tool (group `core`, deferred; `deleteMemoryFile` in `server/orchestratorMemory.ts`) deletes one file, and
+the orchestrator then edits `MEMORY.md` to remove its line (the tool's answer says when the index still names it).
+
+- **Where:** the write rules above (`memoryWriteProblem`: its own folder only, after `..`, links and Windows' path
+  rules), narrower still (`memoryDeleteProblem`): one existing `.md` file **directly** in the folder, never in a folder
+  inside it, never `MEMORY.md` (the index stays; Edit it), no folders and no wildcards (`*?[]{}`).
+- **When:** only in a turn its person started with a message of their own (`personTurn`), the gate of Write and Edit.
+- **Logged:** one line in the server's journal, where the memory's commits are logged (`fffctl logs`, `portal_logs`
+  source `journal`): `orchestrator memory: Lothsahn (lothsahn)'s orchestrator deleted person-lothsahn/m5-for-ben.md at
+  <time>; a copy is kept until <date> at <path>`.
+- **Recoverable for 30 days:** the file is copied (on disk before the delete) to
+  `<root>.backup/trash/<folder>/<UTC time>-<name>`, and each backup pass removes trash copies older than 30 days
+  (`pruneMemoryTrash`, `MEMORY_TRASH_DAYS`). A trash of its own because the existing copies do not cover a delete: the
+  crash backup keeps three copies, each taken when anything changed, so a deleted file leaves it after three changes
+  (half an hour of activity at most), and the private repository's history exists only where its owner switched it on.
+  Its orchestrator may Read its own trash folder (`orchestratorSecrets`), so it can Write a file back itself; the rest
+  of `<root>.backup` stays closed to it.
+- **The dispatcher** has the tool too, behind the same gate: it already has Write and Edit on its own folder, and a
+  memory it can write but never delete would leave it the same stubs. It passes the gate only in a turn the owner started
+  by writing on its page; its harness turns (workers, intake, timers) never do.
+
 ### Memory in a private repository
 
 The memory holds one person's preferences, in their words, so it does not belong in a public repository; and a folder
