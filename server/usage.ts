@@ -656,6 +656,31 @@ interface UsageFile {
   entries: Record<string, UsageEntry>;
   /** When the usage endpoint last refused a token, so a restart does not ask again at once (w1041): by token key (a hash prefix), epoch ms. */
   holds?: Record<string, { noScopeAt?: number; retryAt?: number }>;
+  /** Tokens Claude refused (w1745), by token key: which window, until when, why. */
+  outs?: Record<string, TokenOutMark>;
+}
+
+/**
+ * A vault token Claude refused (w1745, docs/vault.md "When a token runs out"): a session on it got a rejected rate-limit answer
+ * or ended its turn on Claude's usage-limit line. That window counts as 100% (used up) until `until`, whatever a poll reads
+ * meanwhile, so no agent is handed it again, and none is moved back onto it, before its reset.
+ */
+export interface TokenOutMark {
+  field: 'session' | 'weekly';
+  /** Epoch ms: the window's reset. */
+  until: number;
+  /** Epoch ms: when it was refused. */
+  at: number;
+  why: string;
+}
+
+/** A reading with an out mark applied (w1745): the refused window at 100% at least, resetting when the mark ends. */
+export function withOut(u: PlanUsage | undefined, o: TokenOutMark | undefined, now: number): PlanUsage | undefined {
+  if (!o || o.until <= now) return u;
+  const base: PlanUsage = u?.available ? u : { available: true, asOf: new Date(o.at).toISOString(), models: [] };
+  const was = base[o.field];
+  const meter: UsageMeter = { ...(was ?? { label: o.field === 'weekly' ? 'Weekly' : 'Session (5 h)' }), percent: Math.max(100, was?.percent ?? 0), resetsAt: new Date(o.until).toISOString() };
+  return { ...base, [o.field]: meter };
 }
 
 /** How the tracker reaches the network and its log; tests pass fakes. */
@@ -710,6 +735,8 @@ export class UsageTracker {
   private nearTimer?: NodeJS.Timeout;
   /** Credentials read successfully by this process (w1041): every other reading is a persisted one until a poll answers. */
   private readonly freshKeys = new Set<string>();
+  /** Tokens Claude refused, by token key (w1745, markOut). */
+  private readonly outs = new Map<string, TokenOutMark>();
 
   constructor(cfg: Config, changed: () => void, deps: UsageDeps = {}) {
     this.cfg = cfg;
@@ -735,6 +762,7 @@ export class UsageTracker {
           if (h.noScopeAt && now - h.noScopeAt < NO_SCOPE_RETRY_MS) this.noScope.set(k, h.noScopeAt);
           if (h.retryAt && h.retryAt > now) this.retryAt.set(k, h.retryAt);
         }
+        for (const [k, o] of Object.entries(f.outs ?? {})) if (o && o.until > now && (o.field === 'session' || o.field === 'weekly')) this.outs.set(k, o);
       }
     } catch {
       // first run
@@ -757,7 +785,33 @@ export class UsageTracker {
    */
   usageOf(key: string, now: number = Date.now()): PlanUsage | undefined {
     const u = this.entries.get(key)?.usage;
-    return effectiveUsage(u, now, !!u && (!this.freshKeys.has(key) || !!u.error));
+    return withOut(effectiveUsage(u, now, !!u && (!this.freshKeys.has(key) || !!u.error)), this.outOf(key, now), now);
+  }
+
+  /**
+   * Claude refused this token (w1745): a rejected rate-limit answer, or a turn that ended on its usage-limit line. Its window
+   * counts as used up (100%) until `mark.until` (its reset), so the pool skips it for every new process and the agents on it
+   * move at their next turn. A mark that ends later replaces an earlier one; a poll never shortens it.
+   */
+  markOut(key: string, mark: TokenOutMark, label?: string) {
+    if (!key.startsWith('token:') || !(mark.until > mark.at)) return;
+    const was = this.outOf(key, mark.at);
+    if (was && was.until >= mark.until) return;
+    this.outs.set(key, mark);
+    this.log(`usage: ${label ?? 'a vault token'} is out (w1745): ${mark.why}; its ${mark.field === 'weekly' ? 'weekly' : '5-hour'} window counts as used up until ${new Date(mark.until).toISOString()}`);
+    this.save();
+    this.changed();
+  }
+
+  /** The token's out mark while it lasts (w1745), else undefined. */
+  outOf(key: string, now: number = Date.now()): TokenOutMark | undefined {
+    const o = this.outs.get(key);
+    return o && o.until > now ? o : undefined;
+  }
+
+  /** Every token out now (w1745), by key. */
+  outsNow(now: number = Date.now()): [string, TokenOutMark][] {
+    return [...this.outs].filter(([, o]) => o.until > now);
   }
 
   /** The entries with their usage as usageOf gives it (for the accounts list). */
@@ -1026,7 +1080,8 @@ export class UsageTracker {
       const now = Date.now();
       for (const [k, at] of this.noScope) if (now - at < NO_SCOPE_RETRY_MS) holds[k] = { ...holds[k], noScopeAt: at };
       for (const [k, at] of this.retryAt) if (at > now) holds[k] = { ...holds[k], retryAt: at };
-      writeJsonDurable(this.file, { entries: Object.fromEntries(this.entries), ...(Object.keys(holds).length ? { holds } : {}) } satisfies UsageFile);
+      const outs = Object.fromEntries([...this.outs].filter(([, o]) => o.until > now));
+      writeJsonDurable(this.file, { entries: Object.fromEntries(this.entries), ...(Object.keys(holds).length ? { holds } : {}), ...(Object.keys(outs).length ? { outs } : {}) } satisfies UsageFile);
     } catch {
       // not fatal
     }

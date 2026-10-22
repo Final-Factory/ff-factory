@@ -716,7 +716,9 @@ export class LedgerSweep {
 
   /** A worker a limit, a restart or a refused tool stopped: resume it once, or stall the request with the reason. */
   private cutOffStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[]): boolean {
-    if (!isOpen(w) || !workers.length) return false;
+    // A blocked request waits on its blocker (w643), which resumes its worker when it clears: a worker a limit stopped with no
+    // token of its pool free is Blocked on that token's usage gate (w1745, server/tokenSwitch.ts), never stalled for it here.
+    if (!isOpen(w) || w.status === 'blocked' || !workers.length) return false;
     const last = this.latest(workers);
     if (!last) return false;
     const evidence = this.d.store.readTranscript(last.id, 8).flatMap((e) => (e.kind === 'error' || e.kind === 'system' || e.kind === 'result' || e.kind === 'assistant' ? [e.text] : []));
