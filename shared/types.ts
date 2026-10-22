@@ -292,6 +292,12 @@ export interface SessionInfo {
   /** Its last compaction (w518, w535), whoever started it. */
   lastCompaction?: CompactionRecord;
   /**
+   * An automatic compaction FF Factory owes this orchestrator (w1749, server/autoCompact.ts): set when one is due, cleared
+   * when one finishes. Saved, so a portal restart, a stop or a closed session runs or retries it; while an attempt runs or
+   * a retry is owed, messages to it wait in the send queue and go after it.
+   */
+  compactOwed?: CompactionOwed;
+  /**
    * Machine sessions: stopped or interrupted on purpose (stop_agent, interrupt_agent, the UI) since its last message.
    * Kept by the portal, never by the daemon: no dropped link or restart resumes it until it is sent a message again.
    */
@@ -342,6 +348,21 @@ export interface SessionInfo {
 export type CompactionTrigger = 'person' | 'tokens' | 'cost' | 'self' | 'claude' | 'wait';
 
 /** One finished compaction of a session's conversation (w535): when, why, and the context before and after. */
+/** An automatic compaction not done yet (w1749): why, its focus when the orchestrator gave one, and its attempts so far. */
+export interface CompactionOwed {
+  trigger: Exclude<CompactionTrigger, 'person' | 'claude'>;
+  reason: string;
+  /** compact_conversation's own focus (w535); absent: the default one. */
+  focus?: string;
+  /** When it first came due. */
+  since: string;
+  /** Attempts started (0 while it waits for quiet, w1538). */
+  attempts: number;
+  lastAttemptAt?: string;
+  /** Why the last attempt failed. */
+  lastError?: string;
+}
+
 export interface CompactionRecord {
   at: string;
   trigger: CompactionTrigger;

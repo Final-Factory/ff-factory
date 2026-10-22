@@ -25,9 +25,19 @@
 // averaged 357k tokens of context, and a modelled compaction at 200k with the one before waits cut their cost by about
 // 45%. A machine's worker compacts through its daemon (`compact`, offered in its hello); one that did not offer it is
 // left alone. First a pilot: worker.compactPilotPercent (34) of worker sessions, by id.
+//
+// IT ALWAYS FINISHES (w1749, lothsahn: "Can you make sure compaction works even if I close the browser or the session is
+// closed?"). It runs here, on the portal, from the session's own events: no browser takes part. An orchestrator's due
+// compaction is saved on the session (SessionInfo.compactOwed) until one finishes. A stopped or closed orchestrator is started
+// for it (it no longer waits for its next message), and an attempt that fails (the process ended, the session was stopped,
+// a portal restart cut it off, Claude Code's summary failed) is tried again after COMPACT_RETRY_DELAYS_MS, at most
+// MAX_COMPACT_ATTEMPTS times in all, each attempt logged as "auto-compact <id> ... attempt N of M". A portal restart runs an
+// owed one again at boot. While an attempt runs or a retry is owed, every message to that orchestrator (a person's, a
+// worker update, a dispatch, a timer) waits in the saved send queue and goes after it, so a stop or a restart in the
+// middle loses none; a message that comes while a retry waits starts the retry at once.
 import type { Config } from './config.ts';
-import type { SessionInfo } from '../shared/types.ts';
-import { COMPACT_FOCUS_CHARS, isMidTurn, type AutoCompaction, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
+import type { CompactionOwed, SessionInfo } from '../shared/types.ts';
+import { COMPACT_FOCUS_CHARS, isMidTurn, type AutoCompaction, type CompactEnd, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
 
 /** The defaults: the context in tokens, and a turn's cost in USD (with the context at COST_TRIGGER_MIN_TOKENS or more). */
 export const AUTO_COMPACT_DEFAULTS = { atTokens: 200_000, atTurnUsd: 1 } as const;
@@ -52,6 +62,18 @@ export const MIN_TURNS_BETWEEN = 3;
 
 /** After an automatic compaction that did not finish, the next automatic one waits this long. */
 export const RETRY_AFTER_MS = 30 * 60_000;
+
+/** An orchestrator's owed compaction is tried at most this many times in all (w1749); then it waits for a later turn. */
+export const MAX_COMPACT_ATTEMPTS = 6;
+
+/** The wait before each retry of an orchestrator's compaction (w1749), ms: after the first failure, the second, … */
+export const COMPACT_RETRY_DELAYS_MS: readonly number[] = [10_000, 30_000, 60_000, 120_000, 300_000];
+
+/** A message to an orchestrator whose retry waits starts that retry at once (w1749), at most this often. */
+export const KICK_AFTER_MS = 10_000;
+
+/** Why its messages wait (w1749): the send queue's line in its chat. */
+export const COMPACT_HOLD = 'its conversation is being compacted';
 
 /** How long after a turn's end the check waits, so a message sent with the turn's end goes first. */
 export const SETTLE_MS = 2_000;
@@ -161,25 +183,32 @@ export function compactionDue(info: Pick<SessionInfo, 'contextTokens' | 'lastTur
 
 /**
  * Why this orchestrator must not be compacted now, or undefined. Only between turns: not mid-turn, no permission
- * prompt, no message of anyone's waiting in the send queue or unanswered, not compacting already, and its process up
- * (a stopped one is not started just to compact; it is checked again after its next turn).
+ * prompt, no message of anyone's waiting in the send queue or unanswered, not compacting already. `resume` (w1749, an
+ * orchestrator of this portal): a stopped process is started for it; otherwise (a worker) it must be up.
  */
-export function compactBlocker(s: SessionHandle & { compactingNow?: boolean }, queued: boolean): string | undefined {
+export function compactBlocker(s: SessionHandle & { compactingNow?: boolean }, queued: boolean, resume = false): string | undefined {
   const i = s.info;
   if ((i.kind !== 'orchestrator' && i.kind !== 'worker') || !s.compact) return i.kind === 'worker' ? 'its daemon cannot compact' : 'not an orchestrator or a worker';
   if (!i.sdkSessionId) return 'no conversation yet';
-  if (!s.live) return 'its process is not running';
+  if (!s.live && !resume) return 'its process is not running';
   if (s.compactingNow) return 'compacting already';
-  if (isMidTurn(i) || i.status !== 'idle') return `it is ${i.status.replace('_', ' ')}`;
+  if (isMidTurn(i) || (s.live && i.status !== 'idle')) return `it is ${i.status.replace('_', ' ')}`;
   if (i.turnOpenSince) return 'a message to it is not answered yet';
   if (i.pendingPermissions.length) return 'a permission prompt is open';
   if (queued) return 'a message to it is waiting in the send queue';
   return undefined;
 }
 
+/** The sessions whose compaction is owed and retried (w1749): this portal's orchestrators (a worker's daemon runs its own). */
+const owesOn = (i: SessionInfo) => i.kind === 'orchestrator' && !i.machineId;
+
+/** An attempt at its owed compaction was made and did not finish (w1749): a retry is owed. */
+const retrying = (i: SessionInfo) => owesOn(i) && (i.compactOwed?.attempts ?? 0) > 0;
+
 /**
  * Compacts the orchestrators by themselves (see the top of this file). Listens to every turn's end; a compaction's own end
- * is not a turn to check. Nothing is persisted here: the triggers read the session's own fields, which are.
+ * is not a turn to check. The triggers read the session's own fields, which are saved, and so is an orchestrator's owed
+ * compaction (w1749, SessionInfo.compactOwed); the timers and compact_conversation's requests here are not.
  */
 export class AutoCompactor {
   /** compact_conversation requests (w535), by session: the focus the orchestrator gave, '' for the default one. */
@@ -190,22 +219,51 @@ export class AutoCompactor {
   /** When each session's last turn ended, as seen here (w1538's quiet clock; after a restart, its saved lastResultAt). */
   private readonly turnEnded = new Map<string, number>();
   private readonly settleMs: number;
+  /** The waits before each retry (w1749; tests make them short). */
+  private readonly retryDelaysMs: readonly number[];
   private readonly sessions: SessionManager;
   private readonly cfg: Pick<Config, 'orchestrator'> & Partial<Pick<Config, 'worker'>>;
   /** Why a worker now waits a long time (a person, another request, a merge, a deploy, a far check-in), or undefined (w1469). */
   private readonly waitsLong: (i: SessionInfo) => string | undefined;
 
-  constructor(sessions: SessionManager, cfg: Pick<Config, 'orchestrator'> & Partial<Pick<Config, 'worker'>>, opts: { settleMs?: number; waitsLong?: (i: SessionInfo) => string | undefined } = {}) {
+  constructor(sessions: SessionManager, cfg: Pick<Config, 'orchestrator'> & Partial<Pick<Config, 'worker'>>, opts: { settleMs?: number; waitsLong?: (i: SessionInfo) => string | undefined; retryDelaysMs?: readonly number[] } = {}) {
     this.sessions = sessions;
     this.cfg = cfg;
     this.settleMs = opts.settleMs ?? SETTLE_MS;
+    this.retryDelaysMs = opts.retryDelaysMs?.length ? opts.retryDelaysMs : COMPACT_RETRY_DELAYS_MS;
     this.waitsLong = opts.waitsLong ?? (() => undefined);
     sessions.events.on('turnEnd', (s: SessionHandle, _text: string, meta?: TurnEndMeta) => {
       if (s.info.kind !== 'orchestrator' && s.info.kind !== 'worker') return;
       this.turnEnded.set(s.info.id, Date.now());
-      if (meta?.compaction) return;
+      // w1749: a failed attempt's own end lets its retry go, unless a retry is already timed.
+      if (meta?.compaction) {
+        if (retrying(s.info) && !this.timers.has(s.info.id)) this.soon(s.info.id);
+        return;
+      }
       this.soon(s.info.id);
     });
+    sessions.events.on('compactEnd', (s: SessionHandle, e: CompactEnd) => {
+      if (!owesOn(s.info)) return;
+      if (e.ok) this.finished(s);
+      else if (e.auto) this.failed(s.info.id, e.why ?? 'no reason given');
+    });
+    sessions.compactHold = (s, incoming) => this.hold(s, incoming);
+  }
+
+  /**
+   * After a portal restart (w1749): the compactions owed when the last one stopped (one cut off by the stop, a retry that
+   * was timed, one waiting for quiet) are checked again now, the stopped orchestrators started for them.
+   */
+  boot(): number {
+    let n = 0;
+    for (const s of this.sessions.sessions.values()) {
+      const o = s.info.compactOwed;
+      if (!o || !owesOn(s.info)) continue;
+      console.log(`auto-compact ${s.info.id} (${s.info.title}): owed across the restart (${o.reason}; ${o.attempts} attempt(s) so far${o.lastError ? `, the last failed: ${o.lastError}` : ''}); checked again now`);
+      this.soon(s.info.id);
+      n++;
+    }
+    return n;
   }
 
   /** Check this session after SETTLE_MS, or `ms` (a later turn end moves it: the quiet wait starts again, w1538). */
@@ -224,13 +282,60 @@ export class AutoCompactor {
   }
 
   /**
+   * Why a message to this orchestrator waits (w1749): its compaction runs, or a retry is owed. A message that comes while
+   * a retry waits starts it at once (at most every KICK_AFTER_MS), so it waits for one attempt, not a backoff.
+   */
+  private hold(s: SessionHandle & { compactingNow?: boolean }, incoming = false): string | undefined {
+    if (!owesOn(s.info)) return undefined;
+    if (s.compactingNow) return COMPACT_HOLD;
+    if (!retrying(s.info)) return undefined;
+    const last = Date.parse(s.info.compactOwed!.lastAttemptAt ?? '') || 0;
+    if (incoming && Date.now() - last >= KICK_AFTER_MS && !s.info.turnOpenSince) this.soon(s.info.id);
+    return COMPACT_HOLD;
+  }
+
+  private save(s: SessionHandle, owed: CompactionOwed | undefined) {
+    s.info.compactOwed = owed;
+    this.sessions.saveInfo(s.info.id);
+  }
+
+  /** A compaction finished (any: automatic, a person's /compact): nothing is owed, and the messages it held go. */
+  private finished(s: SessionHandle) {
+    const o = s.info.compactOwed;
+    if (!o) return;
+    if (o.attempts > 1) console.log(`auto-compact ${s.info.id} (${s.info.title}): done at attempt ${o.attempts} of ${MAX_COMPACT_ATTEMPTS}`);
+    this.save(s, undefined);
+  }
+
+  /** An attempt failed (w1749): tried again after its delay, or given up after MAX_COMPACT_ATTEMPTS; each one logged. */
+  private failed(id: string, why: string) {
+    const s = this.sessions.sessions.get(id);
+    const o = s?.info.compactOwed;
+    if (!s || !o) return;
+    const err = why.replace(/\s+/g, ' ').slice(0, 300);
+    if (o.attempts >= MAX_COMPACT_ATTEMPTS) {
+      this.save(s, undefined);
+      console.warn(`auto-compact ${id} (${s.info.title}): attempt ${o.attempts} of ${MAX_COMPACT_ATTEMPTS} failed (${err}); given up, tried again after a later turn`);
+      this.sessions.note(id, `FF Factory gave up compacting this conversation after ${o.attempts} attempts (the last failed: ${err}). It tries again after a later turn, ${RETRY_AFTER_MS / 60_000} minutes from now at the earliest; the messages that waited for it go now.`);
+      setImmediate(() => this.sessions.drain());
+      return;
+    }
+    const wait = this.retryDelaysMs[Math.min(o.attempts, this.retryDelaysMs.length) - 1];
+    this.save(s, { ...o, lastError: err });
+    console.warn(`auto-compact ${id} (${s.info.title}): attempt ${o.attempts} of ${MAX_COMPACT_ATTEMPTS} failed (${err}); tried again in ${Math.round(wait / 1000)} s`);
+    this.soon(id, wait);
+  }
+
+  /**
    * Compact this orchestrator now when it is due and between turns: what it did ("compacting: <why>"), or why not. For
    * the turn-end check and tests.
    */
   check(id: string, now = Date.now()): string {
     const s = this.sessions.sessions.get(id) as (SessionHandle & { compactingNow?: boolean }) | undefined;
     if (!s) return 'no such session';
-    const blocked = compactBlocker(s, this.sessions.queued().some((q) => q.id === id));
+    // w1749: an orchestrator of this portal is started for it; the messages held for it are no message ahead of it.
+    const orch = owesOn(s.info);
+    const blocked = compactBlocker(s, this.sessions.queued().some((q) => q.id === id && !q.compaction), orch);
     if (blocked) return `not now: ${blocked}`;
     const worker = s.info.kind === 'worker';
     let ws: WorkerCompactSettings | undefined;
@@ -238,28 +343,46 @@ export class AutoCompactor {
       ws = workerCompactSettings(this.cfg);
       if (!inPilot(id, ws.pilotPercent)) return 'not in the pilot';
     }
+    const owed = orch ? s.info.compactOwed : undefined;
     const asked = this.requested.get(id);
-    const due: AutoCompaction | undefined = asked !== undefined ? { trigger: 'self', reason: 'the orchestrator asked for it' } : ws ? workerCompactionDue(s.info, ws, this.waitsLong(s.info)) : compactionDue(s.info, autoCompactSettings(this.cfg));
+    let due: AutoCompaction | undefined = asked !== undefined ? { trigger: 'self', reason: 'the orchestrator asked for it' } : ws ? workerCompactionDue(s.info, ws, this.waitsLong(s.info)) : compactionDue(s.info, autoCompactSettings(this.cfg));
+    // An owed one stays due until one finishes (w1749).
+    if (!due && owed) due = { trigger: owed.trigger, reason: owed.reason };
     if (!due) return 'not due';
+    const retry = !!owed && owed.attempts > 0;
     const tried = this.attempts.get(id);
     const finished = tried !== undefined && s.info.lastCompaction && Date.parse(s.info.lastCompaction.at) >= tried;
-    if (due.trigger !== 'self' && tried !== undefined && !finished && now - tried < RETRY_AFTER_MS) return 'not now: the last automatic compaction did not finish; it is tried again later';
-    if (!worker && due.trigger !== 'self') {
+    if (!retry && due.trigger !== 'self' && tried !== undefined && !finished && now - tried < RETRY_AFTER_MS) return 'not now: the last automatic compaction did not finish; it is tried again later';
+    if (!worker && due.trigger !== 'self' && !retry) {
       // w1538: under the hard threshold, only after a quiet spell. A turn that ends meanwhile checks again and starts it over.
       const s2 = autoCompactSettings(this.cfg);
       const since = Math.max(this.turnEnded.get(id) ?? -Infinity, s.info.lastResultAt ? Date.parse(s.info.lastResultAt) || -Infinity : -Infinity);
       const wait = quietWaitMs(s.info, s2, since, now);
       if (wait > 0) {
+        // Owed from now (w1749): a restart or a stop during the wait does not lose it.
+        if (orch && !owed) this.save(s, { trigger: due.trigger, reason: due.reason, since: new Date(now).toISOString(), attempts: 0 });
         this.soon(id, wait);
         return `not yet: ${due.reason}; it compacts after ${s2.idleSeconds} s without a turn (${Math.ceil(wait / 1000)} s more), or at once from ${num(s2.hardAtTokens!)} tokens`;
       }
     }
     const dispatcher = s.info.orchestratorRole === 'dispatcher' || (!s.info.orchestratorRole && !s.info.requestedBy);
-    const focus = asked || (worker ? WORKER_FOCUS : dispatcher ? DISPATCHER_FOCUS : PERSONAL_FOCUS);
+    const own = asked || owed?.focus;
+    const focus = own || (worker ? WORKER_FOCUS : dispatcher ? DISPATCHER_FOCUS : PERSONAL_FOCUS);
     this.requested.delete(id);
     this.attempts.set(id, now);
-    console.log(`auto-compact ${id} (${s.info.title}): ${due.reason}; context ${s.info.contextTokens ?? '?'} tokens`);
-    this.sessions.compact(id, focus, undefined, due);
+    const n = (owed?.attempts ?? 0) + 1;
+    const wasStopped = !s.live;
+    if (orch) this.save(s, { trigger: due.trigger, reason: due.reason, ...(own ? { focus: own } : {}), since: owed?.since ?? new Date(now).toISOString(), attempts: n, lastAttemptAt: new Date(now).toISOString(), ...(owed?.lastError ? { lastError: owed.lastError } : {}) });
+    const attempt = orch ? `; attempt ${n} of ${MAX_COMPACT_ATTEMPTS}${wasStopped ? ' (its process was not running: started for it)' : ''}` : '';
+    console.log(`auto-compact ${id} (${s.info.title}): ${due.reason}; context ${s.info.contextTokens ?? '?'} tokens${attempt}`);
+    try {
+      this.sessions.compact(id, focus, undefined, due);
+    } catch (e) {
+      // It could not even start (its process would not start, a dry run): an attempt that failed, tried again (w1749).
+      if (!orch) throw e;
+      this.failed(id, (e as Error).message);
+      return `not compacted: ${(e as Error).message}`;
+    }
     return `compacting: ${due.reason}`;
   }
 
