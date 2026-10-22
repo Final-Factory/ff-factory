@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { cleanupPass, type StaleContext } from './staleOutput.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { descendants, installLeftoverSettings, mergePlans, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
@@ -278,4 +279,111 @@ test("w1099: a sandbox night's nightly-history loses old runs and logs as the la
   assert.ok(!taken.has('nightly-history/runs/2026-10-02'), 'the newest run stays, however old');
   assert.ok(taken.has('nightly-history/logs/nightly-2026-10-01.log'));
   for (const x of taken) assert.ok(!/^nightly-history\/(state|reports|fixtures)/.test(x), x);
+});
+
+/** Every entry under `dir` (and `dir`) aged `ageH` hours, deepest first, so nothing looks newer than what it holds. */
+function ageAll(dir: string, ageH: number) {
+  const at = (NOW - ageH * HOUR) / 1000;
+  const walk = (p: string) => {
+    if (fs.lstatSync(p).isDirectory()) for (const n of fs.readdirSync(p)) walk(path.join(p, n));
+    fs.utimesSync(p, at, at);
+  };
+  walk(dir);
+}
+
+/** An idle worker's folder as biscuit's were on 2026-10-22 (w1719): caches beside the work that must stay. */
+function idleSession(base: string) {
+  const w = (rel: string, data: string | Buffer = 'x') => {
+    const p = path.join(base, ...rel.split('/'));
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, data);
+  };
+  const capture = Buffer.concat([Buffer.from('PD3U'), Buffer.alloc(1024 ** 2)]);
+  w('build-lzg-013039/player/UnityPlayer.so');
+  w('build-lzg-013039/player/finalfactory_Data/data.unity3d');
+  w('build-lzg-013039/build.log');
+  w('ff-rawreader/ProjectSettings/ProjectVersion.txt');
+  w('ff-rawreader/Assets/CpuBudget.cs');
+  w('ff-rawreader/Library/ArtifactDB');
+  w('ff-rawreader/Temp/x.tmp');
+  w('ff/package.json');
+  w('ff/node_modules/a/index.js');
+  w('prof2-075440/branch/round1/save-idle.raw', capture);
+  w('prof2-075440/branch/round1/save-idle.csv');
+  w('prof2-075440/branch/round1/budget.txt');
+  w('undigested/cap.raw', capture);
+  w('notprofiler/img.raw', Buffer.alloc(1024 ** 2 + 4));
+  w('notprofiler/img.csv');
+  w('look-wide-190347/takeover.mp4');
+  w('look-wide-190347/frames/f000001.jpg');
+  w('look-wide-190347/frames/f000002.jpg');
+  w('look-wide-190347/held-3s.png');
+  w('shots-only/frames/f000001.png');
+  w('report.md');
+  // A game clone: its ignored Library goes, an untracked build in its work tree is uncommitted work and stays.
+  w('game/.gitignore', '/[Ll]ibrary/\n');
+  w('game/ProjectSettings/ProjectVersion.txt');
+  w('game/Library/ArtifactDB');
+  w('game/out/UnityPlayer.dll');
+  execFileSync('git', ['init', '-q', path.join(base, 'game')]);
+  // The prof2 digest is written after the capture; the undigested capture has none.
+  ageAll(base, 30);
+  const digest = (NOW - 29 * HOUR) / 1000;
+  for (const f of ['save-idle.csv', 'budget.txt']) fs.utimesSync(path.join(base, 'prof2-075440', 'branch', 'round1', f), digest, digest);
+  fs.utimesSync(path.join(base, 'notprofiler', 'img.csv'), digest, digest);
+}
+
+test("w1719: a resumable worker's folder with no activity for 24 h loses its rebuildable caches, never its work", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-idle-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tmp = path.join(root, 'tmp');
+  const idle = path.join(tmp, 'ffa-7a60f775');
+  idleSession(idle);
+  ageAll(tmp, 30);
+  const guard: CleanupGuard = { keep: [], inUse: [], resumable: [idle], home: path.join(root, 'home') };
+  const p = await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs: [], settings, now: NOW });
+  const taken = p.items.filter((i) => i.rule === 'session-idle-cache').map((i) => rel(idle, i.path)).sort();
+  assert.deepEqual(taken, [
+    'build-lzg-013039/player',
+    'ff-rawreader/Library',
+    'ff-rawreader/Temp',
+    'ff/node_modules',
+    'game/Library',
+    'look-wide-190347/frames',
+    'prof2-075440/branch/round1/save-idle.raw',
+  ]);
+  assert.ok(p.items.every((i) => i.inSession === idle && /no activity for 24 h/.test(i.why)), 'each item names its rule and session');
+  assert.ok(!p.items.some((i) => i.path === idle), 'the folder itself stays: its request may resume it');
+
+  // The removal's last check lets the caches through the resumable guard and still refuses the folder; each is logged with its size.
+  const r = await runCleanup([...p.items, { path: idle, why: 'test', rule: 'x' }], guard);
+  assert.equal(r.removed.length, 7);
+  assert.ok(r.removed.every((x) => x.bytes > 0 && x.rule === 'session-idle-cache'));
+  assert.ok(r.failed.some((f) => f.path === idle && /resume/.test(f.why)), 'the folder itself is refused');
+  for (const keep of ['report.md', 'build-lzg-013039/build.log', 'ff-rawreader/Assets/CpuBudget.cs', 'ff/package.json', 'prof2-075440/branch/round1/budget.txt', 'undigested/cap.raw', 'notprofiler/img.raw', 'look-wide-190347/takeover.mp4', 'look-wide-190347/held-3s.png', 'shots-only/frames/f000001.png', 'game/out/UnityPlayer.dll', 'game/.git/HEAD']) {
+    assert.ok(fs.existsSync(path.join(idle, ...keep.split('/'))), `${keep} stays`);
+  }
+});
+
+test('w1719: no cache goes from a folder that is live, written within 24 h, named by a process, open in Unity or not yet judged by the ledger', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-idle-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tmp = path.join(root, 'tmp');
+  const [live, fresh, named, open] = ['ffa-11111111', 'ffa-22222222', 'ffa-33333333', 'ffa-44444444'].map((n) => path.join(tmp, n));
+  for (const d of [live, fresh, named, open]) idleSession(d);
+  fs.writeFileSync(path.join(open, 'ff-rawreader', 'Temp', 'UnityLockfile'), '');
+  ageAll(tmp, 30);
+  fs.writeFileSync(path.join(fresh, 'prof2-075440', 'notes.txt'), 'written an hour ago');
+  fs.utimesSync(path.join(fresh, 'prof2-075440', 'notes.txt'), (NOW - HOUR) / 1000, (NOW - HOUR) / 1000);
+  const home = path.join(root, 'home');
+  const run = async (guard: CleanupGuard) =>
+    (await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs: [{ pid: 9, ppid: 1, cmd: `${path.join(named, 'build-lzg-013039', 'player', 'finalfactory.x86_64')} -batchmode` }], settings, now: NOW })).items.filter((i) => i.rule === 'session-idle-cache');
+  const items = await run({ keep: [], inUse: [live], resumable: [fresh, named, open], home });
+  const sessions = new Set(items.map((i) => path.basename(i.inSession!)));
+  assert.deepEqual([...sessions], ['ffa-44444444'], 'only the folder with no activity has caches taken');
+  assert.ok(!items.some((i) => /ff-rawreader[\\/](Library|Temp)$/.test(i.path)), "a Unity project open in an editor or a build keeps its Library and Temp");
+  // Before the portal's welcome the whole temp root is resumable: nothing goes.
+  assert.deepEqual(await run({ keep: [], inUse: [], resumable: [tmp], home }), []);
+  // idleCacheHours 0 turns the rule off.
+  assert.deepEqual((await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard: { keep: [], inUse: [], resumable: [open], home }, settings: { ...settings, idleCacheHours: 0 }, now: NOW })).items.filter((i) => i.rule === 'session-idle-cache'), []);
 });
