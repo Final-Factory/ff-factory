@@ -113,6 +113,29 @@ Two from a feature that adds to a person's orchestrator (w1397):
   chat and run in parallel: "no new event after a click" as a transcript length failed once another spec wrote to it
   (`e2e/ask.spec.ts`, "Chat more"). Filter the events by the test's unique tag (`uniq()`).
 
+Three from the Playwright flakes (w1758):
+
+- **An e2e test that taps a chat's buttons or measures where its rows sit runs on a login of its own** (`asLogin` and
+  `signIn(page, user, password)` in `e2e/fixtures.ts`, the logins in `e2e/server.ts`). The owner's chat takes every other
+  file's messages and pictures while a test runs: it scrolled under a tap ("element is not stable", then no request: the
+  reaction and the question answer, 20 CI failures) and moved the rows a test had measured. Tagging what you count is not
+  enough when the test touches the layout.
+- **An element screenshot hides the global notice bars** (`.gbars { display: none }`): a parallel test raises one on the
+  shared server and it takes 35 px off whatever the shot frames (`e2e/visual.spec.ts`).
+- **A CI step's time limit and retry are part of the job and survive a move between runners**: w1194's move back to GitHub's
+  runners dropped w922's, and three WebKit jobs sat on a hung Ubuntu mirror for 20 minutes. `scripts/e2e-legs.test.ts`
+  checks the browser install's; give any new guard of a workflow a check like it.
+
+Two from the Windows whole-suite run (w1758):
+
+- **node:test runs a test's after-hooks in order, and one that throws skips the rest.** Removing a folder throws on Windows
+  while a process still runs from it, so the hook that would have ended the process never ran and the file hung for 15
+  minutes. End and await the processes first, in the same hook, then remove the folder (`machineDeployWin.test.ts`).
+- **A stand-in process a test drives waits for the test, not a timer, and ends when its folder goes.** The bench queue's
+  stand-in granted after 300 ms and the test read after 50 ms; Node starts slower on Windows, the assert failed, and the
+  stand-in polled forever with its pipe holding the test file open (`benchQueue.test.ts`). And Node spawns no `.cmd`
+  without a shell: run a node script as `[process.execPath, script]`.
+
 Two from replacing a page's cards (w1597):
 
 - **Grep every e2e spec for each test id and text a replaced component gave.** The Intake tab's rows (`work-<id>`) became
