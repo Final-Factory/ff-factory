@@ -12,6 +12,7 @@ import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
 import { MachineManager, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
 import { LiveError, LiveHub } from './live.ts';
+import { LIVE_IDLE_DEFAULT_MINUTES, LiveIdleCloser, liveIdleStatusLine } from './liveIdle.ts';
 import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationView } from './providers.ts';
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
@@ -428,8 +429,23 @@ const liveHub = new LiveHub({
   switched: () => {
     for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
   },
+  viewerOpened: (info, who) => liveIdle.viewerOpened(info, who),
 });
 agents.liveHub = liveHub;
+// A Live view's idle editor closed, and opened again at the next turn (w1746, server/liveIdle.ts, docs/live-view.md).
+const liveIdle = new LiveIdleCloser({
+  minutes: () => cfg.live?.idleCloseMinutes ?? LIVE_IDLE_DEFAULT_MINUTES,
+  views: () => liveHub.idleFacts(),
+  sandbox: (machineId, sandbox) => store.machines.get(machineId)?.sandboxes?.find((x) => x.id === sandbox),
+  session: (id) => store.sessions.get(id),
+  wakePending: (id) => !!store.sessions.get(id)?.wakeAt,
+  canClose: (machineId) => machines.canLiveIdleClose(machineId),
+  close: (v, minutes) => machines.live(v.machineId, { op: 'idleClose', liveId: v.liveId, sessionId: v.sessionId, sandbox: v.sandbox, minutes }, 8 * 60_000),
+  send: (sessionId, text) => sessions.send(sessionId, text, 'system'),
+  log: (line) => console.log(`[live] ${line}`),
+  now: () => Date.now(),
+});
+setInterval(() => void liveIdle.sweep(), 60_000).unref();
 machines.onLiveFrames = (machineId, liveId, ws) => liveHub.attachFrames(machineId, liveId, ws);
 machines.onLiveState = (machineId, msg) => liveHub.onState(machineId, msg);
 machines.onLiveHello = (machineId, running) => void liveHub.daemonHello(machineId, running);
@@ -2110,7 +2126,7 @@ server.on('upgrade', (req, socket, head) => {
     }
     liveWss.handleUpgrade(req, socket, head, (ws) => {
       ws.on('error', () => undefined);
-      if (!liveHub.addViewer(watch[1], ws)) ws.close(4404, 'no live view for this session');
+      if (!liveHub.addViewer(watch[1], ws, requesterOf(req).displayName)) ws.close(4404, 'no live view for this session');
     });
     return;
   }
@@ -2471,7 +2487,8 @@ agents.usagePollChanged = () => {
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
-  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...(retiredKeys ? [retiredKeys] : [])];
+  const idle = liveIdleStatusLine(cfg.live?.enabled === true, cfg.live?.idleCloseMinutes ?? LIVE_IDLE_DEFAULT_MINUTES, machines.list());
+  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {

@@ -5,6 +5,7 @@ import type { WebSocket } from 'ws';
 import { FramePump, parseAck } from '../shared/framePump.ts';
 import type { LiveKnobRequest, LiveMaterialKnobs, LiveViewInfo, Requester, SessionInfo, UserRole } from '../shared/types.ts';
 import type { DaemonLiveView, FromDaemon, ToDaemon } from './machineProtocol.ts';
+import type { LiveIdleView } from './liveIdle.ts';
 
 /** What a page that does not answer frames (an older one) may hold back before it misses frames (about a second of 960 px JPEGs). */
 const VIEWER_BACKLOG_BYTES = 1024 * 1024;
@@ -30,6 +31,8 @@ export interface LiveHubDeps {
   changed(): void;
   /** The switch moved: every page needs its state again (the switch is in AppState.config). */
   switched?(): void;
+  /** A person opened a view (w1746): an editor closed idle wakes its worker (server/liveIdle.ts viewerOpened). */
+  viewerOpened?(info: LiveViewInfo, who: string | undefined): void;
   now?(): number;
 }
 
@@ -39,6 +42,9 @@ interface View {
   latest?: Buffer;
   /** Each watching page and its frame pump (w1601: it keeps to what the page's link carries, shared/framePump.ts). */
   viewers: Map<WebSocket, FramePump>;
+  /** The last time a page opened or left it, and the last knob move or reset (ms): a watched or tuned view is not idle (w1746). */
+  watchedAt?: number;
+  touchedAt?: number;
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -207,6 +213,14 @@ export class LiveHub {
     return { materials: [...v.info.materials], fps: v.info.fps, width: v.info.width };
   }
 
+  /** Every running view, as the idle close reads it (w1746, server/liveIdle.ts). */
+  idleFacts(): LiveIdleView[] {
+    if (!this.deps.enabled()) return [];
+    return [...this.views.values()]
+      .filter((v) => v.info.state !== 'stopped')
+      .map((v) => ({ liveId: v.info.liveId, sessionId: v.info.sessionId, machineId: v.info.machineId, sandbox: v.info.sandbox, startedAtMs: Date.parse(v.info.startedAt) || 0, viewers: v.viewers.size, ...(v.watchedAt ? { watchedAt: v.watchedAt } : {}), ...(v.touchedAt ? { touchedAt: v.touchedAt } : {}) }));
+  }
+
   /** Every live view of a session that is gone (its worker ended). */
   async sessionGone(sessionId: string) {
     const v = this.bySession(sessionId);
@@ -258,6 +272,7 @@ export class LiveHub {
   }
 
   private command(v: View, command: string, note?: string) {
+    if (note) v.touchedAt = this.now();
     return this.deps.machines.live(v.info.machineId, { op: 'command', liveId: v.info.liveId, sessionId: v.info.sessionId, sandbox: v.info.sandbox, command, ...(note ? { note } : {}) }, 30_000);
   }
 
@@ -293,7 +308,7 @@ export class LiveHub {
   }
 
   /** A page watching a session's view (/live/<sessionId>); the caller checked canWatch. It gets the newest frame at once. */
-  addViewer(sessionId: string, ws: WebSocket): boolean {
+  addViewer(sessionId: string, ws: WebSocket, who?: string): boolean {
     const v = this.bySession(sessionId);
     if (!v || !this.deps.enabled()) return false;
     // Newest wins: a page whose link is full gets a later frame, never a queue (shared/framePump.ts).
@@ -313,7 +328,12 @@ export class LiveHub {
       if (n !== undefined) pump.ack(n);
     });
     if (v.latest) pump.push(v.latest);
-    ws.on('close', () => v.viewers.delete(ws));
+    v.watchedAt = this.now();
+    ws.on('close', () => {
+      v.viewers.delete(ws);
+      v.watchedAt = this.now();
+    });
+    this.deps.viewerOpened?.(v.info, who);
     return true;
   }
 }

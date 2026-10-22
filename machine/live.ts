@@ -111,6 +111,12 @@ export class FrameParser {
 
 export type LiveState = 'starting' | 'live' | 'holding' | 'stopped';
 
+/** What a daemon's tests and the idle close (w1746) put in place of the real game and editor bridge, per sandbox. */
+export type LiveDeps = Partial<LiveSessionDeps> & {
+  /** Runs C# in the sandbox editor (its MCP bridge); the real one is bridgeExecute. */
+  bridge?(code: string, opts?: { safetyChecks?: boolean }): Promise<string>;
+};
+
 export interface LiveSessionDeps {
   /** The sandbox editor's process id, or undefined while it is not running. */
   editorPid(): number | undefined;
@@ -140,6 +146,8 @@ export class LiveSession {
   private lastState: LiveState | undefined;
   private lastDetail = '';
   frames = 0;
+  /** Why the editor is not running when the daemon closed it (w1746: idle), shown instead of "not running" while it holds. */
+  closedNote?: string;
   hello: Record<string, unknown> | undefined;
 
   readonly fps: number;
@@ -240,7 +248,7 @@ export class LiveSession {
     this.trying = true;
     try {
       const pid = this.deps.editorPid();
-      if (!pid) return this.report('holding', 'the sandbox editor is not running');
+      if (!pid) return this.report('holding', this.closedNote ?? 'the sandbox editor is not running');
       let ch = this.deps.channel(pid);
       if (!ch) return this.report('holding', 'the game is not in play mode (no agent channel)');
       if (ch.tier !== 'all') {

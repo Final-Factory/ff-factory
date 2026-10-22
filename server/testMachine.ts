@@ -10,7 +10,7 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { Daemon, type Probes, type SessionFactory } from '../machine/daemon.ts';
-import type { LiveSessionDeps } from '../machine/live.ts';
+import type { LiveDeps } from '../machine/live.ts';
 import { SandboxPool, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { mergeSandboxes, type MachineManager } from './machines.ts';
 import { machineAttachment } from './attachments.ts';
@@ -166,7 +166,7 @@ export interface TestMachineOptions {
   /** The daemon's agents (default: the real AgentSession, answered by whatever query the test installed). */
   makeSession?: SessionFactory;
   /** A stand-in game for live views (server/testLiveGame.ts, w1398), per sandbox. */
-  liveDeps?: (sandbox: string) => Partial<LiveSessionDeps>;
+  liveDeps?: (sandbox: string) => LiveDeps;
   /** The daemon's trim of a released sandbox's Library caches (default off in tests, so no sandbox is ever briefly 'cleanup'). */
   cacheTrim?: Partial<TrimPolicy> | false;
   /** Free bytes on the sandbox volume (default 500 GB). */

@@ -245,9 +245,11 @@ export type ToDaemon =
    * A live view (w1398, docs/live-view.md), answered by `live_result`. start: stream the sandbox's running game to the
    * portal at /machine/live/<liveId>; stop; command: one of the game's live commands (look.material.list|set|reset), with
    * `note` (who moved which knob) written into the session's conversation, held for its next message and counted as
-   * activity. Sent only to a daemon whose hello offered `liveView`, so an older daemon never gets one.
+   * activity. Sent only to a daemon whose hello offered `liveView`, so an older daemon never gets one. idleClose (w1746, only
+   * to a daemon whose hello offered `liveIdleClose`): the view sat idle `minutes`; save and quit the sandbox's editor, or
+   * answer "skipped: <why>". The view stays; the editor starts again at the next message to a worker in that sandbox.
    */
-  | { type: 'live'; id: string; op: 'start' | 'stop' | 'command'; liveId: string; sessionId: string; sandbox: string; fps?: number; width?: number; materials?: string[]; command?: string; note?: string }
+  | { type: 'live'; id: string; op: 'start' | 'stop' | 'command' | 'idleClose'; liveId: string; sessionId: string; sandbox: string; fps?: number; width?: number; materials?: string[]; command?: string; note?: string; minutes?: number }
   /**
    * Update this worker install (w1596, docs/worker-install.md "Updates over the daemon's link"): fetch the portal's code as
    * a git bundle (GET /machine/update/<sha256> with this machine's credential), check its SHA-256 and size and that it holds
@@ -300,6 +302,8 @@ export type FromDaemon =
       saveWork?: boolean;
       /** It streams a sandbox's running game for a live view (w1398, `live`). An older portal ignores it. */
       liveView?: boolean;
+      /** It closes a Live view's idle editor on request (w1746, `live` op idleClose) and reopens it at the next turn. An older portal ignores it. */
+      liveIdleClose?: boolean;
       /**
        * The live views it runs now (w1509): a portal that restarted takes them back, and one whose views are missing here
        * (this daemon restarted) starts them again. An older daemon sends none; an older portal ignores it.

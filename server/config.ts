@@ -179,8 +179,11 @@ export interface Config {
    * `enabled` defaults to true (an off switch needs no restart), `autoApprove` to { enabled: true, maxPerDay: 10 }, `repo` to
    * Final-Factory/FinalFactory and `workflow` to master-batch.yml.
    */
-  /** The live view (w1398, docs/live-view.md): a sandbox game streamed beside its agent's chat. Off unless enabled is true. */
-  live?: { enabled?: boolean };
+  /**
+   * The live view (w1398, docs/live-view.md): a sandbox game streamed beside its agent's chat. Off unless enabled is true.
+   * idleCloseMinutes (w1746): a view idle this long (no turn, job, check-in or viewer) has its sandbox's editor closed; default 15, 0 never.
+   */
+  live?: { enabled?: boolean; idleCloseMinutes?: number };
   masterBatch?: { enabled?: boolean; autoApprove?: { enabled?: boolean; maxPerDay?: number }; repo?: string; workflow?: string };
   /**
    * The automatic portal deploy (w1634, server/autoDeploy.ts, docs/ops-worker.md "Automatic deploys"): a new commit on this

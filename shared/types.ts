@@ -735,6 +735,18 @@ export interface MachineSandbox {
    * until they are gone. Sent by daemons from w799 on; an older portal ignores it.
    */
   lingering?: { sessionId: string; pid: number; since: string }[];
+  /**
+   * Its editor was closed because its Live view sat idle (w1746, docs/live-view.md "Idle editors close"): when, after how
+   * many idle minutes, and the scenes saved first. It starts again at the next message to a worker there. Cleared when the
+   * editor starts by any path. Sent by daemons from w1746 on; an older portal ignores it.
+   */
+  idleClosed?: MachineSandboxIdleClosed;
+}
+
+export interface MachineSandboxIdleClosed {
+  at: string;
+  minutes: number;
+  saved?: string[];
 }
 
 export interface MachineSandboxUnity {
