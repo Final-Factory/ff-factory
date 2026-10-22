@@ -1,5 +1,5 @@
 import type { APIRequestContext, Locator, Page } from '@playwright/test';
-import { ALPHA, BOX, appState, expect, expectNoHorizontalOverflow, isMobile, sendToChat, test, uniq } from './fixtures.ts';
+import { ALPHA, BOX, appState, asLogin, expect, expectNoHorizontalOverflow, isMobile, sendToChat, test, uniq } from './fixtures.ts';
 import type { TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { REPLY_MARK } from '../shared/replies.ts';
 
@@ -41,9 +41,14 @@ async function press(page: Page, message: Locator, name: string) {
   }).toPass({ timeout: 20_000 });
 }
 
+// Its own login's chat (e2e/server.ts, "replier") for the tests that tap a message's buttons: the owner's chat takes other
+// files' messages and pictures while they run, it follows them down, and a tap Playwright aimed at the reaction chip landed
+// beside it as the chat moved ("element is not stable", then no request: w1758, 11 CI runs in WebKit).
+const asReplier = asLogin('replier', 'e2e-password-579');
+
 const answerTo = (page: Page, tag: string) => page.locator('.orch .msg-assistant', { hasText: `Echo: ${tag}` }).first();
 
-test('reply: Reply on the orchestrator’s answer quotes it above the new message, and the orchestrator is handed it after the words', async ({ authed: page }) => {
+asReplier('reply: Reply on the orchestrator’s answer quotes it above the new message, and the orchestrator is handed it after the words', async ({ solo: page }) => {
   const tag = uniq('reply');
   await say(page, `first ${tag}`);
   const first = answerTo(page, `first ${tag}`);
@@ -128,7 +133,7 @@ test('reply: your own message and a relayed worker update can be replied to too'
   await page.getByTestId('composer-reply').getByRole('button', { name: 'Cancel the reply' }).click();
 });
 
-test('reaction: an emoji shows on the message, reaches the orchestrator as a short response with the message quoted, and can be taken back', async ({ authed: page }) => {
+asReplier('reaction: an emoji shows on the message, reaches the orchestrator as a short response with the message quoted, and can be taken back', async ({ solo: page }) => {
   const tag = uniq('react');
   await say(page, `shall we ${tag}`);
   const asked = answerTo(page, `shall we ${tag}`);
@@ -146,12 +151,12 @@ test('reaction: an emoji shows on the message, reaches the orchestrator as a sho
   await expect(reaction).toContainText('reacted 👍 to a message in this chat');
   await expect(reaction).toContainText(`Echo: shall we ${tag}`);
   // A 👍 on the orchestrator's own message is armed as the person's yes (w1039); the echo shows the text it was handed.
-  await expect(reaction).toContainText("This is your own message and tester answered it with a yes");
+  await expect(reaction).toContainText("This is your own message and Reply Tester answered it with a yes");
   await expect(page.locator('.orch .notice', { hasText: '[reaction]' })).toHaveCount(0);
   const events = await transcript(page.request, orchestratorId);
   // Other tests share this chat: find our reaction line by the message it quotes.
   const sent = events.find((e) => e.kind === 'user' && e.text.startsWith('[reaction]') && e.text.includes(`> Echo: shall we ${tag}`));
-  expect(sent && sent.kind === 'user' ? [sent.from, sent.text.startsWith('[reaction] tester reacted 👍 to a message in this chat:\n#')] : []).toEqual(['system', true]);
+  expect(sent && sent.kind === 'user' ? [sent.from, sent.text.startsWith('[reaction] Reply Tester reacted 👍 to a message in this chat:\n#')] : []).toEqual(['system', true]);
 
   // It stays across a reload (the chat is the record), then one press takes it back; nothing more is sent to the orchestrator.
   await page.reload();
