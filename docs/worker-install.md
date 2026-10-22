@@ -52,7 +52,7 @@ MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\
 | What | Windows | macOS |
 |---|---|---|
 | The service | scheduled task `FFFactoryDaemon` (at logon, the user's interactive session, not elevated) | LaunchAgent `com.fffactory.daemon` (`~/Library/LaunchAgents`); on Linux the systemd user unit `~/.config/systemd/user/com.fffactory.daemon.service` |
-| Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile) and group "Final Factory Unity editors" (each Unity editor the Hub has) | none |
+| Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile), group "Final Factory Unity editors" (each Unity editor the Hub has) and group "Final Factory agent node" (one inbound rule for `<root>\tools\node\node.exe`, the agents' node at its one fixed path, w1742); the step also deletes rules earlier prompts left for programs under `<root>\tmp` | none |
 | The slot config for scripts outside the daemon | `%ProgramData%\FinalFactory\player-slots.json` | `~/.config/finalfactory/player-slots.json` |
 | The Unity slots mailbox (`~/.ff-factory/unity-slots`, its standard place: no pointer is written, so the daemon, its agents and the nightly harness all use the same one, w469) | `%USERPROFILE%\.ff-factory\unity-slots` | `~/.ff-factory/unity-slots` |
 | The Dev Drive (w900, w1070) | the SYSTEM tasks `ffsb-helper-mount` (also at every boot), `-trim` and `-compact`, and their script in `%ProgramData%\ffsb-helpers`; the folder given at install, which keeps the drive's file and what starts before it (`devdrive.vhdx`, `devdrive.json`, `start-daemon.ps1`, `moved.json`) | none |
@@ -561,6 +561,14 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
    so the non-elevated git there does not refuse them.
 7. Prints `Agent tools after:` and exits 0 only when every installed plugin is on master's version and ff-agents and
    ff-speckit are installed; else `FAILED: ...` and exit 1.
+8. Windows: puts the agents' node, the pinned `AGENT_NODE` build (`server/agentNode.ts`, v24.22.1, its SHA-256 checked),
+   at `<root>\tools\node\node.exe` unless that one is there (`Agent node: ... (current)`), and the daemon puts that folder
+   first on its agents' PATH after `unity-slot` (w1742). FF Factory's own tests need node 23.6+; before this, workers on a
+   machine with an older node unpacked one into their session temp folder, a new program path each session, and Windows
+   Firewall asked about each one (lothdesktop kept rules for three `V:\ffw\tmp\ffa-*\` node.exe paths, 2026-10-12..20). A
+   new version replaces the folder's contents, never its path, so the install's rule for it keeps fitting; a node still
+   running from the old folder leaves it for the next rollout (`... is in use`). A failure prints `WARNING: Agent node:`
+   and does not change the exit code.
 
 Running agents keep the plugin version they started with (its cached copy stays on disk); new sessions load the new one.
 No agent is stopped or waited for.

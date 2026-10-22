@@ -33,6 +33,7 @@ import { carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, 
 import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
 import { publishAgentTools } from '../../server/agentTools.ts';
+import { agentNodeDir, agentNodeExe, ensureAgentNode } from '../../server/agentNode.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
 export const LAYOUT_VERSION = 1;
@@ -1317,7 +1318,9 @@ export function syncPlayerFolders(players: string, keep: string[], log: (line: s
 
 function firewallArgs(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string): string[] {
   const script = path.join(SRC, 'scripts', 'worker', 'firewall.ps1');
-  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Pairs', String(slots), ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
+  // The agents' node (w1742, server/agentNode.ts): its path gets its rule before the rollout first puts node there.
+  const node = action === 'add' ? ['-AgentNode', agentNodeExe(l.root), '-StaleUnder', l.tmp] : [];
+  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Pairs', String(slots), ...node, ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
 }
 
 /**
@@ -2044,7 +2047,12 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
   let owner = ownerFlag;
   if (isWin && elevated() && !owner) owner = (await taskUser(m.service))?.owner;
   say(`FF Factory agent tools on ${m.machineId} (${l.root})`);
-  return publishAgentTools(l.root, { exec, say, env: process.env, home: os.homedir(), platform: process.platform, ...(owner ? { giveTo: (paths: string[]) => giveTo(owner, paths) } : {}) }, { claude });
+  const code = await publishAgentTools(l.root, { exec, say, env: process.env, home: os.homedir(), platform: process.platform, ...(owner ? { giveTo: (paths: string[]) => giveTo(owner, paths) } : {}) }, { claude });
+  // The agents' node at one fixed path (w1742): a WARNING when it cannot be placed, never a failed publish of the plugins.
+  if ((await ensureAgentNode(l.root, { exec, say, platform: process.platform })) === 'installed' && owner) {
+    await giveTo(owner, [agentNodeDir(l.root)]).catch((e) => say(`WARNING: could not give ${agentNodeDir(l.root)} to ${owner}: ${(e as Error).message}`));
+  }
+  return code;
 }
 
 export const NIGHTLY_TASK = 'ff-nightly-e2e';

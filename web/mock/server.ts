@@ -630,4 +630,4 @@ if (process.env.MOCK_LIVE_STATE && state.live?.length) liveSetState(process.env.
 
 startLiveTraffic(world, broadcast, append as never);
 
-server.listen(PORT, () => console.log(`mock FF Factory backend (${SCENARIO}) on http://localhost:${PORT}: any username, password "mock"`));
+server.listen(PORT, '127.0.0.1', () => console.log(`mock FF Factory backend (${SCENARIO}) on http://localhost:${PORT}: any username, password "mock"`));
