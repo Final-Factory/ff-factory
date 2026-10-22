@@ -3,6 +3,7 @@ import path from 'node:path';
 import { hasLocalWork, neverDelete, norm, sessionRelaxed, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
 import { CONTEXT_MAX_AGE_HOURS, requestIdsIn, type StaleContext, type StalePlan } from './staleOutput.ts';
 import { mentions } from './ownLeftovers.ts';
+import { gitIgnores } from './cleanupFolders.ts';
 
 /**
  * Leftovers inside the install folder (w899, docs/self-recovery.md "Install-folder leftovers"): what w876 had to remove
@@ -18,6 +19,8 @@ import { mentions } from './ownLeftovers.ts';
  *   entry by entry instead, so only that clone or entry stays (w1575: one 1-commit clone kept 48.7 GB on beast);
  * - per-commit player builds in every session's folder, live and resumed ones too, beyond the newest few (w1575: 24 builds,
  *   about 46 GB, in the folders of LothDesktop's open requests on 2026-10-19);
+ * - the rebuildable caches in a session's folder that had no activity for a day, resumed sessions' too (w1719): player
+ *   builds, a Unity project's Library/Temp/obj, node_modules, digested Profiler captures, frames beside their clip;
  * - a Claude task `.output` file past a cap (a runaway writer reached 99.6 GB; the space came back only when its
  *   process ended): the file goes and, when its session has stopped, so does the process still writing it.
  *
@@ -46,6 +49,8 @@ export interface InstallLeftoverSettings {
   scratchDays: number;
   /** A Claude task `.output` file past this many GB is removed, and its writer ended when its session has stopped. */
   outputCapGB: number;
+  /** A session's folder with nothing written for this many hours, and no worker or process on it, loses its rebuildable caches (w1719); 0: never. */
+  idleCacheHours: number;
 }
 
 export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
@@ -58,6 +63,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   sessionTempHours: 2,
   scratchDays: 3,
   outputCapGB: 2,
+  idleCacheHours: 24,
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
@@ -75,6 +81,7 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
     sessionTempHours: n('sessionTempHours', 1, 24 * 30),
     scratchDays: n('scratchDays', 1, 365),
     outputCapGB: n('outputCapGB', 0.1, 1000),
+    idleCacheHours: n('idleCacheHours', 0, 24 * 30),
   };
 }
 
@@ -128,6 +135,78 @@ const BUILD_DEPTH = 5;
 const REPO_DEPTH = 4;
 /** Not looked into for repos: a repo's own insides, dependencies, Unity's caches. */
 const NO_REPO_LOOK = /^(\.git|node_modules|library)$/i;
+/** How deep an idle session's folder is searched for rebuildable caches (w1719): as deep as for player builds. */
+const CACHE_DEPTH = 5;
+/** A Unity project's folders the editor rebuilds on open (beside its ProjectSettings/ProjectVersion.txt). */
+const UNITY_CACHE = /^(library|temp|obj)$/i;
+/** The first bytes of a Unity Profiler capture (`.raw`, -profiler-log-file); all 155 on biscuit on 2026-10-22 had them. */
+const PROFILER_MAGIC = 'PD3U';
+const IMAGE = /\.(png|jpe?g|bmp|webp|tga)$/i;
+const VIDEO = /\.(mp4|mkv|webm|mov|avi)$/i;
+
+/** A player build: a folder holding UnityPlayer.dll or .so, or an .app holding UnityPlayer.dylib. */
+function isPlayerBuild(p: string, name: string): boolean {
+  return fs.existsSync(path.join(p, 'UnityPlayer.dll')) || fs.existsSync(path.join(p, 'UnityPlayer.so')) || (/\.app$/i.test(name) && fs.existsSync(path.join(p, 'Contents', 'Frameworks', 'UnityPlayer.dylib')));
+}
+
+/** A Unity Profiler capture whose digest is done: a `.csv` or `.txt` beside it written after it (bench/cpu_budget_run.sh's budget.txt, the per-frame CSVs). */
+async function digestedCapture(file: string, siblings: fs.Dirent[]): Promise<boolean> {
+  const st = await fs.promises.lstat(file).catch(() => undefined);
+  if (!st?.isFile() || st.size < 1024 ** 2) return false;
+  const head = Buffer.alloc(4);
+  const fd = await fs.promises.open(file, 'r').catch(() => undefined);
+  if (!fd) return false;
+  try {
+    await fd.read(head, 0, 4, 0);
+  } finally {
+    await fd.close();
+  }
+  if (head.toString('latin1') !== PROFILER_MAGIC) return false;
+  const dir = path.dirname(file);
+  for (const s of siblings) if (s.isFile() && /\.(csv|txt)$/i.test(s.name) && (await mtimeOf(path.join(dir, s.name))) >= st.mtimeMs) return true;
+  return false;
+}
+
+/** A folder of nothing but images: frames taken from a clip, or the clip encoded from them. */
+async function onlyImages(dir: string): Promise<boolean> {
+  const es = await children(dir);
+  return es.length > 0 && es.every((e) => e.isFile() && IMAGE.test(e.name));
+}
+
+export interface IdleCache {
+  path: string;
+  what: string;
+}
+
+/**
+ * The rebuildable caches in `dir` (w1719), found by what they hold, so the same on every OS: player builds (a worker builds
+ * one per commit), a Unity project's Library, Temp and obj, npm's node_modules beside a package.json, Unity Profiler captures
+ * whose digest sits beside them (the game repo's bench/capture_raw.sh deletes its own once digested), and a `frames` folder of
+ * images beside the clip they came from or went into. Never a `.git`, the session's Claude task folders, nor anything else:
+ * clips, stills, logs, reports, saves and clones stay.
+ */
+export async function idleCachesIn(dir: string, depth = 1, out: IdleCache[] = []): Promise<IdleCache[]> {
+  const es = await children(dir);
+  const unity = fs.existsSync(path.join(dir, 'ProjectSettings', 'ProjectVersion.txt'));
+  // An editor or a batchmode build has the project open while Temp/UnityLockfile exists: its caches are not ours.
+  const unityOpen = unity && fs.existsSync(path.join(dir, 'Temp', 'UnityLockfile'));
+  for (const e of es) {
+    const p = path.join(dir, e.name);
+    if (e.isFile()) {
+      if (/\.raw$/i.test(e.name) && (await digestedCapture(p, es))) out.push({ path: p, what: 'a Unity Profiler capture with its digest beside it' });
+      continue;
+    }
+    if (!e.isDirectory() || /^\.git$/i.test(e.name) || (depth === 1 && /^claude/i.test(e.name))) continue;
+    if (isPlayerBuild(p, e.name)) out.push({ path: p, what: 'a player build' });
+    else if (unity && UNITY_CACHE.test(e.name)) {
+      if (!unityOpen) out.push({ path: p, what: `a Unity project's ${e.name}` });
+    } else if (e.name === 'node_modules') {
+      if (fs.existsSync(path.join(dir, 'package.json'))) out.push({ path: p, what: 'npm packages (node_modules)' });
+    } else if (/^frames$/i.test(e.name) && es.some((x) => x.isFile() && VIDEO.test(x.name)) && (await onlyImages(p))) out.push({ path: p, what: 'frames beside the clip they belong to' });
+    else if (depth < CACHE_DEPTH && !NEVER_SEGMENT.test(e.name)) await idleCachesIn(p, depth + 1, out);
+  }
+  return out;
+}
 
 async function children(dir: string): Promise<fs.Dirent[]> {
   return fs.promises.readdir(dir, { withFileTypes: true }).catch(() => [] as fs.Dirent[]);
@@ -255,7 +334,7 @@ export async function planInstallLeftovers(o: {
     for (const e of await children(dir)) {
       if (!e.isDirectory() || NEVER_SEGMENT.test(e.name) || /^claude/i.test(e.name)) continue;
       const p = path.join(dir, e.name);
-      if (fs.existsSync(path.join(p, 'UnityPlayer.dll')) || fs.existsSync(path.join(p, 'UnityPlayer.so')) || (/\.app$/i.test(e.name) && fs.existsSync(path.join(p, 'Contents', 'Frameworks', 'UnityPlayer.dylib')))) out.push(p);
+      if (isPlayerBuild(p, e.name)) out.push(p);
       else if (depth < BUILD_DEPTH && !fs.existsSync(path.join(p, '.git'))) await buildsIn(p, depth + 1, out);
     }
     return out;
@@ -278,6 +357,43 @@ export async function planInstallLeftovers(o: {
       if ((o.procs ?? []).some((p) => mentions(p.cmd, b))) continue;
       if (await touchedSince(b, now - s.buildUntouchedHours * HOUR)) continue;
       items.set(b, { path: b, rule: 'session-old-build', why: `a player build beyond its session's newest ${s.keepBuilds}, untouched for ${s.buildUntouchedHours} h (rebuildable)`, base: t, inSession: session });
+    }
+  };
+  /** Why git holds `p`, or undefined: a repo inside it, or the repo around it (below the session's folder) does not ignore it. */
+  const gitHolds = async (p: string, session: string): Promise<string | undefined> => {
+    const down = async (d: string, depth: number): Promise<string | undefined> => {
+      if (fs.existsSync(path.join(d, '.git'))) return d;
+      if (depth >= REPO_DEPTH) return undefined;
+      for (const e of await children(d)) if (e.isDirectory() && !NO_REPO_LOOK.test(e.name)) {
+        const r = await down(path.join(d, e.name), depth + 1);
+        if (r) return r;
+      }
+      return undefined;
+    };
+    const inside = await down(p, 0);
+    if (inside) return `holds a git repo (${inside})`;
+    for (let d = path.dirname(p); within(d, session); d = path.dirname(d)) {
+      if (fs.existsSync(path.join(d, '.git'))) return (await gitIgnores(d, p)) ? undefined : `in the work tree of ${d}, which does not ignore it`;
+      if (norm(d) === norm(session)) break;
+    }
+    return undefined;
+  };
+  /**
+   * The rebuildable caches of a session's folder with no activity for idleCacheHours (w1719, lothsahn: "delete caches after 24
+   * hours of inactivity for that test folder"). Its request may still resume the worker, so the folder stays (judgeSession,
+   * resumable), but what a resumed worker rebuilds by itself goes. Activity: the session runs (the guard's inUse), a process
+   * names its folder, or anything in the folder was written within the window (a folder too big to judge counts as active).
+   * Nothing git holds goes: an item inside a repo's work tree only when git ignores it, never one holding a repo.
+   */
+  const idleCaches = async (session: string, t: string) => {
+    if (!s.idleCacheHours || live(session) || !within(session, root)) return;
+    if ((o.procs ?? []).some((p) => mentions(p.cmd, session))) return;
+    if ((await touchedWhy(session, now - s.idleCacheHours * HOUR)) !== undefined) return;
+    const g = sessionRelaxed(session, relaxed(t));
+    for (const c of await idleCachesIn(session)) {
+      if (items.has(c.path) || !within(c.path, root) || neverDelete(c.path, g)) continue;
+      if (await gitHolds(c.path, session)) continue;
+      items.set(c.path, { path: c.path, rule: 'session-idle-cache', why: `${c.what}, in a worker's temp folder with no activity for ${s.idleCacheHours} h (rebuildable)`, base: t, inSession: session });
     }
   };
   /** The entries of `dir`, newest first (by last activity). */
@@ -347,6 +463,7 @@ export async function planInstallLeftovers(o: {
         for (const b of big) listed.set(b.file, `a task output of a LIVE session past ${s.outputCapGB} GB (${(b.bytes / GB).toFixed(1)} GB): kept, someone should look`);
         continue;
       }
+      await idleCaches(dir, t);
       for (const b of big) {
         const no = (await blocked(b.file, t, undefined))?.why;
         if (no) continue;
