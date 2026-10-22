@@ -59,17 +59,27 @@ function lock(port: number): boolean {
   }
 }
 
-/** Whether nothing listens on `port` now, on loopback and on every address. */
+/**
+ * Whether nothing listens on `port` now, on loopback and on every address. It binds loopback only (w1742): a listen on
+ * 0.0.0.0 raises a Windows Firewall prompt for every node path the firewall has no rule for, and a worker's node is often
+ * a fresh copy, so this check covered the screen of an unattended machine. A listener on every address (0.0.0.0 or ::)
+ * still answers a loopback connection, and Windows lets a loopback bind succeed beside it (measured on lothdesktop), so
+ * the connection is what finds that one.
+ */
 async function bindable(port: number): Promise<boolean> {
-  for (const host of ['127.0.0.1', '0.0.0.0']) {
-    const ok = await new Promise<boolean>((r) => {
-      const s = net.createServer();
-      s.once('error', () => r(false));
-      s.listen(port, host, () => s.close(() => r(true)));
-    });
-    if (!ok) return false;
-  }
-  return true;
+  const ok = await new Promise<boolean>((r) => {
+    const s = net.createServer();
+    s.once('error', () => r(false));
+    s.listen(port, '127.0.0.1', () => s.close(() => r(true)));
+  });
+  if (!ok) return false;
+  const answered = await new Promise<boolean>((r) => {
+    const c = net.connect({ port, host: '127.0.0.1' });
+    c.setTimeout(2000, () => (c.destroy(), r(false)));
+    c.once('connect', () => (c.destroy(), r(true)));
+    c.once('error', () => r(false));
+  });
+  return !answered;
 }
 
 const mine = new Set<number>();
