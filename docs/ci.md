@@ -69,6 +69,28 @@ Known causes, so a future failure can be named at once:
   - `test-watchdog.test.ts` "a hung run": two node starts outlasted the 3 s deadline; a run that had not reached its hang
     goes again with a longer one.
   - How they were reproduced on a 16-core PC: 12 to 16 copies of the test at once beside 24 busy-loop node processes.
+- **Playwright flakes of 2026-10-13..22** (w1758, PRs #529 and #532; flaky = passed on Playwright's retry or a re-run of the
+  same commit, over 246 WebKit and 253 Chromium job attempts):
+  - `scrollKeep` "the orchestrator chat keeps its place" (82, WebKit): other files' messages in the owner's chat; its own
+    login since #523 (w1745).
+  - `scrollKeep` "a block above drawn smaller ..." (9) and `freshness` "a chat scrolled up ..." (35): two page bugs, found
+    with a scroll log (below). At the bottom, a layout-driven scroll event moved the last row a few px and the chat stopped
+    following 236-248 px short of the end; scrolled up in WebKit, pictures above loaded without a scroll event and the
+    remembered place went stale by 136 px. `Transcript.tsx` now tells the layout from the reader by their wheel, touch,
+    pointer and keys, and keeps the remembered place to what is on screen.
+  - `replies` reaction take-back (12) and `freshness` open question (8): a tap on a moving chat missed ("element is not
+    stable", then no request). Both run on logins of their own (`replier`, `reloader`, e2e/server.ts).
+  - `visual` "orchestrator home" (10): another test's notice bar took 35 px (1160x865 against 900); `.gbars` is hidden.
+  - `read ECONNRESET` / `socket hang up` from `route.fetch` and `page.request` (5): Node's server closes an idle keep-alive
+    socket after 5 s and Playwright's agent keeps its own forever; the e2e server waits 65 s.
+  - `Test timeout of 30000ms exceeded` (4): passing WebKit tests took up to 30.2 s; the timeout is 60 s.
+  - The browser install hung on the Ubuntu mirror until the job's 20 minutes (3 on 2026-10-22): see the first item.
+- **The daily whole-suite Windows run was red every day 2026-10-11..22** (w1758, PR #533), never a flake: POSIX file modes
+  and `/` paths asserted on Windows (`appConfig`, `configMigration`, `ask`: what BEAST's run showed), a `.cmd` encoder
+  stand-in Node will not spawn (`videoPreview`), the runner's long temp path pushing a brief over its size budget
+  (`coordinatorContext`), a bench-queue stand-in left polling after a failed assert (the 15-minute hang of 2026-10-22), and
+  w1755's C:-install rule (`installFolderFence`). A pull request runs only `.github/windows-tests.txt`; run the whole suite
+  on a branch that touches shared test helpers: `gh workflow run windows.yml --ref <branch> -f all=true`.
 - **gitleaks `generic-api-key` in a test or doc**: every one in the window was a fake key in a fixture; add it to
   `.gitleaksignore` or make the fixture not look like a key.
 
@@ -106,3 +128,10 @@ ephemeral range, locked per process, checked free. Never listen on 0, close, and
 - A failure that passed on the same commit and the same job name is flaky; a cancelled job whose run has a newer run on
   the same branch was cancelled by `concurrency` (on `main` too: 68 of 310 main commits never got a finished CI run).
 - A job killed at its timeout keeps its log unless its runner was lost (`rerun-lost-runner.yml` tells the two apart).
+- Count Playwright's own retries too: a job that passed can hold a test that failed once ("N flaky" in the list reporter's
+  summary), and the job fails only when both tries do. The per-test census is in the logs, not in the job conclusions.
+- **An e2e flake that only CI shows: instrument it on a draft pull request, don't guess** (w1758). PR #527 kept a ring
+  buffer of the chat's scroll decisions in `Transcript.tsx`, printed it with the rows' positions when a test failed, and
+  added `-rep` projects to playwright.config.ts (the same port and server, `testMatch` the spec, `repeatEach: 4`) so the
+  spec ran 5 times beside the normal suite: one run showed both causes. Keep the log across a reload in sessionStorage when
+  the test reloads. Close the draft unmerged.
