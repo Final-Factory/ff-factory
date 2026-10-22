@@ -5137,23 +5137,9 @@ button.react-chip:hover {
   min-width: 0;
 }
 
-/* The Claude pool rows (w1717): one column of names, one of menus, so the menus line up. */
-.pool-rows {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  align-items: center;
-  gap: 6px 10px;
-  /* the same break before the next section as the paragraph that ends Voice input */
+/* The Claude pool row (w1717): the same break before the next section as the paragraph that ends Voice input. */
+.pool-pick {
   margin-bottom: 18px;
-  font-size: var(--fs-md);
-}
-
-.pool-row {
-  display: contents;
-}
-
-.pool-row select {
-  min-width: 0;
 }
 
 .voice-sub {

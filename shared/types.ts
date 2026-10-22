@@ -1584,7 +1584,7 @@ export interface AppSettings {
   dismissedEvents?: Record<string, string[]>;
   /**
    * Whose Claude pool each person's work runs on, by user id (w1717, docs/vault.md section 4, "Whose pool"): another
-   * person's user id; a person with no key runs on their own ("self"). Any operator changes anyone's, in Settings or with
+   * person's user id; a person with no key runs on their own ("self"). Each operator sets their own, in Settings or with
    * set_pool. Only the Claude token follows it: the GitHub token stays the person's own.
    */
   pool?: Record<string, string>;

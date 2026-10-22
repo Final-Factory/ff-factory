@@ -236,30 +236,31 @@ test('settings: a browser with no Web Push shows notices in the page until "Turn
 });
 
 
-test('settings: the Claude pool menu (w1717) lists every login, defaults to self, and any operator may pick another pool', async ({ page }) => {
+test("settings: the Claude pool row (w1717) is the signed-in operator's own, defaults to self, and offers every other operator's pool", async ({ page }) => {
   await signIn(page);
   await page.goto('/');
   const sidebar = await openSidebar(page);
   await sidebar.getByRole('button', { name: 'Settings' }).click();
   const pools = page.getByRole('dialog').getByTestId('pool-settings');
   await expect(pools).toContainText('Claude pool');
-  const tester = pools.getByRole('combobox', { name: /^tester’s work$/i });
-  const mate = pools.getByRole('combobox', { name: 'Team Mate’s work', exact: true });
-  await expect(tester).toHaveValue('self');
-  await expect(mate).toHaveValue('self');
-  // every other login with a Claude token is offered, and not the person's own (that is "Self")
-  await expect(tester.locator('option')).toContainText(['Self', 'Team Mate’s pool', 'Compact Tester’s pool', 'Ask Tester’s pool']);
-  await expect(tester.locator('option', { hasText: /^tester’s pool$/i })).toHaveCount(0);
-  // the signed-in tester sets another person's: the server keeps it and the page hears it
-  await mate.selectOption('tester');
-  await expect(page.locator('.toast', { hasText: /^Team Mate’s work: tester’s pool$/i })).toBeVisible();
-  await expect.poll(async () => (await appState(page.request)).settings.pool).toEqual({ teammate: 'tester' });
-  await expect(mate).toHaveValue('tester');
+  // one row, the signed-in tester's own
+  const mine = pools.getByRole('combobox', { name: 'Bill my work to' });
+  await expect(pools.getByRole('combobox')).toHaveCount(1);
+  await expect(mine).toHaveValue('self');
+  // every other login with a Claude token is offered, and not the tester's own (that is "My own pool")
+  await expect(mine.locator('option')).toContainText(['My own pool', 'Team Mate’s pool', 'Compact Tester’s pool', 'Ask Tester’s pool']);
+  await expect(mine.locator('option', { hasText: /^tester’s pool$/i })).toHaveCount(0);
+  // pick another operator's: the server keeps it under the tester's own id and the page hears it
+  await mine.selectOption('teammate');
+  await expect.poll(async () => (await appState(page.request)).settings.pool).toEqual({ tester: 'teammate' });
+  await expect(mine).toHaveValue('teammate');
   // the server refuses what the menu never offers
-  const bad = await page.request.post('/api/settings', { data: { pool: { person: 'teammate', from: 'nobody' } } });
+  const bad = await page.request.post('/api/settings', { data: { pool: 'nobody' } });
   expect(bad.status()).toBe(400);
   expect(await bad.text()).toContain('nobody is not a login here');
+  const shape = await page.request.post('/api/settings', { data: { pool: { person: 'teammate', from: 'tester' } } });
+  expect(shape.status(), "only the caller's own: no person to name").toBe(400);
   // back to self: no key left
-  await mate.selectOption('self');
+  await mine.selectOption('self');
   await expect.poll(async () => (await appState(page.request)).settings.pool).toEqual({});
 });

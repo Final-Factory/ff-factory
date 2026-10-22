@@ -11,7 +11,7 @@ import { Identity } from './identity.ts';
 import { IntakeManager, type DiscordReader } from './intake.ts';
 import { parseBugThread, type DiscordMessage, type DiscordThread } from './intakeRules.ts';
 import { PoolHeldError, Vault, fingerprintOf, newKeyText, tokenPersonForWork, type KeySource, type VaultContext } from './vault.ts';
-import { machineRunEnv } from './secrets.ts';
+import { machineRunEnv, poolRunEnv } from './secrets.ts';
 import { poolLimits } from './tokenPool.ts';
 import { describeItem } from './work.ts';
 import { SpendStore, buildReport, renderReport, renderRequest, type SpendContext } from './spend.ts';
@@ -521,14 +521,14 @@ test("the pool setting (w1717): self is the default and changes nothing; a picke
   assert.equal(agents.poolOf('lothsahn'), 'lothsahn');
 });
 
-test("the pool setting is checked on the server (w1717): a login that exists, a person with a Claude pool; any operator may set anyone's", (t) => {
+test("the pool setting is checked on the server (w1717): a login that exists, a person with a Claude pool, kept in the logins' spelling", (t) => {
   const { agents, store } = setup(t);
   agents.hasPool = (u) => u === 'ben';
   assert.throws(() => agents.setPool('sam', 'ben', 'Ben'), /sam is not a login here/);
   assert.throws(() => agents.setPool('ben', 'sam', 'Ben'), /sam is not a login here/);
   assert.throws(() => agents.setPool('ben', 'lothsahn', 'Ben'), /lothsahn has no Claude pool/);
   assert.equal(agents.poolOf('ben'), 'ben', 'nothing written');
-  assert.equal(agents.setPool('LOTHSAHN', 'Ben', 'Ben'), 'ben', "another operator sets lothsahn's, kept in the logins' own spelling");
+  assert.equal(agents.setPool('LOTHSAHN', 'Ben', 'Lothsahn'), 'ben', "kept in the logins' own spelling");
   assert.deepEqual(store.settings.pool, { lothsahn: 'ben' });
   assert.equal(agents.poolOf('Lothsahn'), 'ben');
   assert.equal(agents.setPool('lothsahn', 'lothsahn', 'Lothsahn'), 'lothsahn', 'their own pool is self');
@@ -593,4 +593,51 @@ test('a live idle worker follows a pool setting change at its next message (w171
   assert.equal(move('token:ben-fp'), undefined, 'already on the picked pool');
   agents.setPool('lothsahn', 'self', 'Ben');
   assert.match(move('token:ben-fp') ?? '', /runs on ben's Claude pool and lothsahn's work runs on their own now/);
+});
+
+test("all of a person's billing follows their pool setting (w1717): their orchestrator and the ops worker's jobs for them too, and vice versa", (t) => {
+  const { v } = vaultOf(t);
+  const pools: Record<string, string> = {};
+  const ctx = { ...ctxOf(v), poolOf: (p: string) => pools[p] ?? p };
+  const run = (personId: string, role: 'orchestrator' | 'ops' = 'orchestrator') => poolRunEnv({ role, personId, sessionId: 'o1' }, ctx);
+  // self: each on their own, as before
+  assert.equal(run('lothsahn').env.CLAUDE_CODE_OAUTH_TOKEN, L1);
+  assert.match(run('lothsahn').account, /^vault token vault-lothsahn-1 …dddd \(lothsahn's pool, docs/);
+  // lothsahn picks Ben's pool: his orchestrator and his ops jobs bill there, the account line says whose work it is
+  pools.lothsahn = 'ben';
+  const o = run('lothsahn');
+  assert.equal(o.env.CLAUDE_CODE_OAUTH_TOKEN, B1);
+  assert.match(o.account, /^vault token vault-ben-1 …bbbb \(ben's pool, for lothsahn's work by their pool setting, docs/);
+  assert.equal(run('lothsahn', 'ops').env.CLAUDE_CODE_OAUTH_TOKEN, B1);
+  assert.equal(run('ben').env.CLAUDE_CODE_OAUTH_TOKEN, B1, "Ben's own stays on Ben's");
+  // "or vice versa": Ben picks lothsahn's
+  pools.ben = 'lothsahn';
+  assert.equal(run('ben').env.CLAUDE_CODE_OAUTH_TOKEN, L1);
+  assert.equal(run('ben', 'ops').env.CLAUDE_CODE_OAUTH_TOKEN, L1);
+  // a picked pool with no token: refused with the reason, never the person's own pool
+  pools.lothsahn = 'sam';
+  assert.throws(() => run('lothsahn'), (e: unknown) => e instanceof PoolHeldError && /sam has no Claude token in the vault/.test(e.message) && /lothsahn's pool setting picks sam's pool/.test(e.message));
+});
+
+test("a live idle orchestrator moves to its person's picked pool at its next message (w1717), never mid-turn; the unpinned dispatcher follows the system payer's", (t) => {
+  const { agents } = setup(t);
+  agents.hasPool = () => true;
+  agents.tokenOwner = (account) => ({ 'token:ben-fp': 'ben', 'token:loth-fp': 'lothsahn' })[account];
+  const move = (info: Partial<SessionInfo>, status: SessionInfo['status'] = 'idle') =>
+    (agents as unknown as { accountMove(s: unknown): string | undefined }).accountMove({ info: { id: 'o1', kind: 'orchestrator', status, ...info }, live: true });
+  const loth: Partial<SessionInfo> = { orchestratorRole: 'personal', requestedBy: LOTH, account: 'token:loth-fp' };
+  assert.equal(move(loth), undefined, 'self, on his own pool: as before');
+  agents.setPool('lothsahn', 'ben', 'Lothsahn');
+  assert.match(move(loth) ?? '', /runs on lothsahn's Claude pool and lothsahn's pool setting names ben's now, so it restarts there before this message \(w1717\)/);
+  assert.equal(move(loth, 'running'), undefined, 'never mid-turn: a message during the turn reaches it');
+  assert.equal(move({ ...loth, account: 'token:ben-fp' }), undefined, 'already on the picked pool');
+  agents.setPool('lothsahn', 'self', 'Lothsahn');
+  assert.match(move({ ...loth, account: 'token:ben-fp' }) ?? '', /names their own now/);
+  // the dispatcher (pinned to no token) runs on the system payer's pool, so it follows the payer's setting
+  const payer = (agents as unknown as { identity: Identity }).identity.systemPayer().userId;
+  const other = payer === 'ben' ? 'lothsahn' : 'ben';
+  const dispatcher: Partial<SessionInfo> = { orchestratorRole: 'dispatcher', account: `token:${payer === 'ben' ? 'ben' : 'loth'}-fp` };
+  assert.equal(move(dispatcher), undefined);
+  agents.setPool(payer, other, 'Ben');
+  assert.match(move(dispatcher) ?? '', new RegExp(`${payer}'s pool setting names ${other}'s now`));
 });

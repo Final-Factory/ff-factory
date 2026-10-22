@@ -1648,20 +1648,20 @@ function deviceName(ua: string) {
 // ---- settings (heartbeat) and wake-ups (server/wake.ts)
 
 /**
- * heartbeatMinutes: the signed-in person's own heartbeat (docs/orchestrators.md). pool (w1717): { person, from } sets whose
- * Claude pool `person`'s work runs on, `from` a user id or "self"/null; anyone signed in may set anyone's (docs/vault.md
- * section 4, "Whose pool").
+ * heartbeatMinutes: the signed-in person's own heartbeat (docs/orchestrators.md). pool (w1717): whose Claude pool the
+ * signed-in person's work runs on, a user id or "self"/null (docs/vault.md section 4, "Picking another person's pool").
  */
 route('POST', '/api/settings', async (req) => {
-  const b = await readJson<{ heartbeatMinutes?: number | null; pool?: { person?: unknown; from?: unknown } }>(req);
+  const b = await readJson<{ heartbeatMinutes?: number | null; pool?: unknown }>(req);
   const m = b.heartbeatMinutes;
   if (m !== undefined && m !== null && (!Number.isInteger(m) || m < 5 || m > 240)) throw new HttpError(400, 'heartbeatMinutes: 5 to 240, or null for off');
   const p = b.pool;
-  if (p !== undefined && (typeof p !== 'object' || p === null || typeof p.person !== 'string' || (p.from !== null && p.from !== undefined && typeof p.from !== 'string'))) throw new HttpError(400, 'pool: { person: a user id, from: a user id or "self" }');
+  if (p !== undefined && p !== null && typeof p !== 'string') throw new HttpError(400, 'pool: a user id, or "self"');
   if (m !== undefined) agents.setHeartbeat(requesterOf(req).userId, m);
-  if (p) {
+  if (p !== undefined) {
+    const me = requesterOf(req);
     try {
-      agents.setPool(p.person as string, (p.from as string | null | undefined) ?? null, requesterOf(req).displayName);
+      agents.setPool(me.userId, p, me.displayName);
     } catch (e) {
       throw new HttpError(400, (e as Error).message);
     }

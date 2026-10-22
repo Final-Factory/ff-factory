@@ -19,8 +19,8 @@ claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnecto
   `system_status`, `ffbox_activity`, `max_activity`, `list_standing_agents`, `list_delegation_requests`;
 - its own `wake_me`, its own timers (`set_timer`, `list_timers`, `update_timer`, `cancel_timer`; [Timers](#timers)), and
   its person's heartbeat (`set_heartbeat`);
-- whose Claude pool its person's work runs on (`set_pool`, w1717: "self" or another person's; only in a turn its person started;
-  the same as Settings, "Claude pool", [vault.md](vault.md) section 4);
+- whose Claude pool all of its person's billing runs on, its own included (`set_pool`, w1717: "self" or another operator's; only
+  in a turn its person started; the same as their Settings, "Claude pool", [vault.md](vault.md) section 4);
 - `message_agent`, only to its person's own workers: one they started, or one any of their requests is on (the
   dispatcher started it for the request, sent it the request with `work_id`, or linked it), whoever started it, while
   that request is open, stalled or closed in the last 7 days (w431: a worker Lothsahn started and the dispatcher then

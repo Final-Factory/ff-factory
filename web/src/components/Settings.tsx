@@ -106,43 +106,36 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
 }
 
 /**
- * Whose Claude pool each person's work runs on (w1717, docs/vault.md section 4, "Picking another person's pool"): "self" by
- * default, or another person's pool. Anyone signed in may change anyone's; the server checks the pick.
+ * Whose Claude pool the signed-in person's work runs on (w1717, docs/vault.md section 4, "Picking another person's pool"):
+ * "self" by default, or another operator's. lothsahn: "It should just be one row that allows me to override my default pool
+ * for another operator (ben) and then all my billing goes there, or vice versa". The server checks the pick.
  */
 function PoolSettings() {
+  const me = useStore((s) => s.app?.me?.userId);
   const people = useStore((s) => s.app?.poolPeople);
   const pools = useStore((s) => s.app?.settings?.pool);
-  if (!people?.length) return null;
-  const poolOf = (userId: string) => Object.entries(pools ?? {}).find(([k]) => k.toLowerCase() === userId.toLowerCase())?.[1] ?? 'self';
-  const nameOf = (userId: string) => people.find((o) => o.userId === userId)?.displayName ?? userId;
+  if (!me || !people?.length) return null;
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  const set = Object.entries(pools ?? {}).find(([k]) => same(k, me))?.[1];
+  const value = set && !same(set, me) ? set : 'self';
+  const others = people.filter((o) => !same(o.userId, me) && (o.hasPool || same(o.userId, value)));
+  if (!others.length && value === 'self') return null;
+  // No toast: the menu shows what the server kept (the settings event), and a refusal shows as an error.
+  const pick = (to: string) => void attempt(api.setPool(to));
   return (
     <div className="field" data-testid="pool-settings">
       <span>Claude pool</span>
-      <p className="small dim">
-        Whose Claude tokens each person’s work runs on; Self is their own. Another person’s pool keeps its limits, and anyone signed in may change these.
-      </p>
-      <div className="pool-rows">
-        {people.map((p) => {
-          const value = poolOf(p.userId);
-          const self = value.toLowerCase() === p.userId.toLowerCase() ? 'self' : value;
-          const pick = (to: string) => void attempt(api.setPool(p.userId, to).then(() => toast(`${p.displayName}’s work: ${to === 'self' ? 'their own pool' : `${nameOf(to)}’s pool`}`)));
-          return (
-            <label key={p.userId} className="pool-row">
-              <span>{p.displayName}’s work</span>
-              <select className="input" value={self} onChange={(e) => pick(e.target.value)}>
-                <option value="self">{p.hasPool ? 'Self' : 'Self (no token yet)'}</option>
-                {people
-                  .filter((o) => o.userId.toLowerCase() !== p.userId.toLowerCase() && (o.hasPool || o.userId.toLowerCase() === self.toLowerCase()))
-                  .map((o) => (
-                    <option key={o.userId} value={o.userId}>
-                      {o.displayName}’s pool
-                    </option>
-                  ))}
-              </select>
-            </label>
-          );
-        })}
-      </div>
+      <label className="voice-engine pool-pick">
+        <span>Bill my work to</span>
+        <select className="input" value={value} onChange={(e) => pick(e.target.value)}>
+          <option value="self">My own pool</option>
+          {others.map((o) => (
+            <option key={o.userId} value={o.userId}>
+              {o.displayName}’s pool
+            </option>
+          ))}
+        </select>
+      </label>
     </div>
   );
 }
