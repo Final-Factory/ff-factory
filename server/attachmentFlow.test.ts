@@ -73,6 +73,12 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { h
   agents.boot();
   // Notices to the dispatcher gather 1.5 s in production; 100 ms here.
   (agents.orchestrators as unknown as { d: { gatherMs: number } }).d.gatherMs = 100;
+  // The ledger asks a worker how its request stands 3 s after a turn whose report had no `DONE:` or still-open line
+  // (Orchestrators.askStatus), and the fake worker's echo has neither. Not what these tests are about, and on a loaded
+  // runner the tests outlast those 3 s: the question landed mid-test as an extra message to the worker, and its turn made
+  // the sandbox busy for the next start_agent (w1758: CI's "pc/alpha is busy", 11 of 32 runs here under load). Never
+  // within a test here.
+  agents.orchestrators.statusAskDelayMs = 3_600_000;
   /** Run first at the end (a machine's daemon goes before the portal's folder). */
   const closers: (() => Promise<void>)[] = [];
   t.after(async () => {
@@ -90,12 +96,14 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { h
     return { text: r.content.map((c) => c.text).join('\n'), isError: !!r.isError };
   };
   const users = (id: string) => store.readTranscript(id).filter((e): e is UserEv => e.kind === 'user');
+  /** The message to `id` that says `text`: found by its words, never by its place (the harness may send its own). */
+  const said = (id: string, text: string) => users(id).find((e) => e.text.includes(text));
   const replies = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'assistant').map((e) => (e as { text: string }).text);
   const upload = async (name: string, data: Buffer) => {
     const { uploadId } = files.begin({ name, size: data.length, uploadedBy: 'lothsahn' });
     return (await files.append(uploadId, 0, Readable.from([data]))).attachment!;
   };
-  return { store, sessions, machines, closers, agents, files, alpha, call, users, replies, upload, dispatcher: () => sessions.get(agents.dispatcherId), chat: (r: Requester) => agents.orchestrators.personalFor(r) };
+  return { store, sessions, machines, closers, agents, files, alpha, call, users, said, replies, upload, dispatcher: () => sessions.get(agents.dispatcherId), chat: (r: Requester) => agents.orchestrators.personalFor(r) };
 }
 
 /** Sandbox alpha on a machine (pc/alpha, a worktree on its in-process daemon): the portal holds none of its own (w510). */
@@ -107,7 +115,7 @@ async function setupOnMachine(t: { after: (fn: () => void | Promise<void>) => vo
 }
 
 test("a person's files reach their orchestrator as stored files, go with request_work, and land in the worker's Inbox", async (t) => {
-  const { store, agents, files, alpha, call, users, replies, upload, dispatcher, chat } = await setupOnMachine(t);
+  const { store, agents, files, alpha, call, users, said, replies, upload, dispatcher, chat } = await setupOnMachine(t);
   const save = randomBytes(40_000);
   const log = Buffer.from('NullReferenceException at BeltSystem.OnUpdate\n');
   const a = await upload('Battleship.zip', save);
@@ -165,8 +173,8 @@ test("a person's files reach their orchestrator as stored files, go with request
   const more = await call(dispatcher().info, 'message_agent', { session_id: worker, text: 'Here is the desync report too.', work_id: 'w1', attachments: [c.id] });
   assert.equal(more.isError, false, more.text);
   assert.match(more.text, /with the attachment in its Inbox\//);
-  await until('the follow-up', () => users(worker).length > 1);
-  assert.deepEqual(users(worker)[1].attachments?.map((x) => x.id), [c.id]);
+  await until('the follow-up', () => !!said(worker, 'Here is the desync report too.'));
+  assert.deepEqual(said(worker, 'Here is the desync report too.')!.attachments?.map((x) => x.id), [c.id]);
   assert.equal(fs.existsSync(inbox(c)), true);
   // The follow-up's turn ends before the next start: a start beside a worker mid-turn is refused (w1607), and waiting
   // only for the message left this a race the fake worker lost about half the time (w1628, CI and 6/12 local runs).
@@ -184,7 +192,8 @@ test("a person's files reach their orchestrator as stored files, go with request
   const d = await upload('Player-prev.log', Buffer.from('earlier log'));
   const follow = await call(loth, 'message_agent', { session_id: worker, text: 'And the log from the run before.', attachments: [d.id] });
   assert.equal(follow.isError, false, follow.text);
-  await until('the second follow-up', () => users(worker).length > 2);
+  await until('the second follow-up', () => !!said(worker, 'And the log from the run before.'));
+  assert.deepEqual(said(worker, 'And the log from the run before.')!.attachments?.map((x) => x.id), [d.id]);
   assert.equal(fs.existsSync(inbox(d)), true);
 });
 
@@ -241,7 +250,7 @@ test('the orchestrators turn a review-folder file into an attachment, and only t
 
 test("w677: an owner's follow-up on another owner's worker carries files too, into that worker's Inbox", async (t) => {
   const owners: UserInfo[] = [...PEOPLE.filter((p) => p.userId !== 'lothsahn'), { ...LOTH, role: 'owner' }];
-  const { alpha, call, upload, dispatcher, chat, users } = await setupOnMachine(t, owners);
+  const { alpha, call, upload, dispatcher, chat, users, said } = await setupOnMachine(t, owners);
   await call(chat({ userId: 'ben', displayName: 'Ben' }).info, 'request_work', { title: 'Mac GPU page fault', brief: 'x' });
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Find it.', title: 'GPU fault', work_id: 'w1' });
   const worker = /Started agent (\w+)/.exec(started.text)![1];
@@ -250,7 +259,7 @@ test("w677: an owner's follow-up on another owner's worker carries files too, in
   const r = await call(chat(LOTH).info, 'message_agent', { session_id: worker, text: 'The M3 crash report, measured.', attachments: [a.id] });
   assert.equal(r.isError, false, r.text);
   assert.match(r.text, /^Sent, for Lothsahn, with the attachment in its Inbox\/\. It is Ben's work/);
-  await until('the follow-up', () => users(worker).length > 1);
-  assert.deepEqual(users(worker)[1].attachments?.map((x) => x.id), [a.id]);
+  await until('the follow-up', () => !!said(worker, 'The M3 crash report, measured.'));
+  assert.deepEqual(said(worker, 'The M3 crash report, measured.')!.attachments?.map((x) => x.id), [a.id]);
   assert.equal(fs.readFileSync(path.join(alpha, 'Inbox', `${a.id}-m3-crash.ips`), 'utf8'), 'EXC_BAD_ACCESS (SIGBUS) in MTLCompilerService');
 });
