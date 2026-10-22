@@ -170,6 +170,36 @@ export function sessionPerson(cfg: UnattributedCfg, held: readonly WorkItem[], s
   return acted?.runsFor!.userId ?? (served[0] ? personForWork(cfg, served[0]) : personForWork(cfg, held[0]));
 }
 
+/**
+ * Whose Claude pool a person's work runs on (w1717, AppSettings.pool, set in the portal's Settings or with set_pool): the
+ * person their setting names, else their own ("self"). lothsahn, 2026-10-21: "Make the pool that we use a setting in the
+ * settings menu, and it defaults to "self". Any operator can change that setting", "all operators are the same". Keys
+ * compare without case.
+ */
+export function poolOwnerOf(pools: Readonly<Record<string, string>> | undefined, person: string): string {
+  const key = Object.keys(pools ?? {}).find((k) => k.toLowerCase() === person.toLowerCase());
+  return (key && pools![key]) || person;
+}
+
+/**
+ * The pool settings with `person`'s set to `from` (w1717): a person's own pool (or null, or "self") removes their key, so
+ * "self" is the absence of a setting and everything behaves as before. `people` are the logins (user ids); `hasPool` says
+ * whether one has a Claude pool (Vault.hasClaudeFor). Throws, nothing changed, on an unknown login or a pool that is not one.
+ */
+export function withPool(pools: Readonly<Record<string, string>> | undefined, person: string, from: string | null | undefined, people: readonly string[], hasPool: (userId: string) => boolean): Record<string, string> {
+  const login = (id: string) => people.find((u) => u.toLowerCase() === id.trim().toLowerCase());
+  const who = login(person);
+  if (!who) throw new Error(`${person} is not a login here (${people.join(', ')})`);
+  const out = Object.fromEntries(Object.entries(pools ?? {}).filter(([k]) => k.toLowerCase() !== who.toLowerCase()));
+  const raw = from?.trim();
+  if (!raw || raw.toLowerCase() === 'self' || raw.toLowerCase() === who.toLowerCase()) return out;
+  const to = login(raw);
+  if (!to) throw new Error(`${raw} is not a login here (${people.join(', ')}); "self" is ${who}'s own pool`);
+  if (!hasPool(to)) throw new Error(`${to} has no Claude pool: no enabled Claude token of theirs in the vault that its key opens, so ${who}'s work would not start`);
+  out[who] = to;
+  return out;
+}
+
 /** Whether two people are one (user ids compare without case). */
 export const isSamePerson = (a: string | undefined, b: string | undefined) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
@@ -293,6 +323,11 @@ export interface VaultRun {
   role: RunRole;
   /** The person the run is for (its requester, else the system payer). */
   userId?: string;
+  /**
+   * Whose Claude pool the run's token comes from, when it is not `userId`'s own (w1717: the person's pool setting names
+   * another person's pool). Only the Claude token follows it; the GitHub token and the other secrets stay `userId`'s.
+   */
+  claudeOwner?: string;
   sessionId?: string;
 }
 
@@ -310,7 +345,7 @@ export function eligible(e: VaultEntryMeta, run: VaultRun): boolean {
     if (!e.roles.includes(run.role === 'ops' ? 'workers' : run.role)) return false;
     if (run.role !== 'ops' && !e.machines.includes('*') && !e.machines.some((m) => same(m, run.machineId))) return false;
   }
-  if (e.kind === 'claude') return same(e.owner, run.userId);
+  if (e.kind === 'claude') return same(e.owner, run.claudeOwner ?? run.userId);
   return e.share === 'anyone' || same(e.owner, run.userId);
 }
 
@@ -840,6 +875,8 @@ export interface VaultContext {
   /** The clock the pool reads (tests); default the current time. */
   now?: () => number;
   payer?: () => string | undefined;
+  /** Whose Claude pool a person's work runs on (w1717, poolOwnerOf over AppSettings.pool); unset, their own. */
+  poolOf?: (person: string) => string;
   /** A run that wanted a vault Claude token and fell back, or an entry that would not open: for the log and system_status. */
   onProblem?: (line: string) => void;
   /** Whether a GitHub token may be handed out (not refused by GitHub, not expired: server/githubTokens.ts, w868). */

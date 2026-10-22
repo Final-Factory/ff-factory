@@ -1,6 +1,6 @@
 import { HOST_ROLES, pinnedVaultEntry, type ClaudeAccount, type Config, type HostRole } from './config.ts';
 import type { Requester, SessionInfo, SessionKind } from '../shared/types.ts';
-import { PoolHeldError, vaultContext, type VaultContext, type VaultRole } from './vault.ts';
+import { PoolHeldError, isSamePerson, vaultContext, type VaultContext, type VaultRole } from './vault.ts';
 import { githubFromVault } from './githubTokens.ts';
 import { tokenKey, usageEnv } from './usage.ts';
 import { poolLimits, reserveOf, reserveReason, type PoolLimits, type Reserve } from './tokenPool.ts';
@@ -337,9 +337,9 @@ function noTokenWhy(person: string | undefined, s: { poolSize?: number; problems
   return `${person} has no Claude token in the vault, so ${what} cannot start: add one with \`sudo fffctl vault add-claude ${person}\` (docs/vault.md, section 4). It never runs on another credential (w1078)`;
 }
 
-/** "vault token ben-max …abcd" for a run's account line, safe to show. */
-function poolAccount(c: { entry: { name: string; last4: string }; how: 'normal' | 'over-cap' | 'in-reserve' }, person: string | undefined): string {
-  return `vault token ${c.entry.name} …${c.entry.last4} (${person ? `${person}'s pool` : 'a pool'}${c.how === 'over-cap' ? ', over its caps: used up first' : c.how === 'in-reserve' ? ", inside the dispatcher's reserve: no other token has room" : ''}, docs/vault.md)`;
+/** "vault token ben-max …abcd" for a run's account line, safe to show; `forWhom` when the pool is not the run's person's own (w1717). */
+function poolAccount(c: { entry: { name: string; last4: string }; how: 'normal' | 'over-cap' | 'in-reserve' }, person: string | undefined, forWhom?: string): string {
+  return `vault token ${c.entry.name} …${c.entry.last4} (${person ? `${person}'s pool` : 'a pool'}${forWhom ? `, for ${forWhom}'s work by their pool setting` : ''}${c.how === 'over-cap' ? ', over its caps: used up first' : c.how === 'in-reserve' ? ", inside the dispatcher's reserve: no other token has room" : ''}, docs/vault.md)`;
 }
 
 /**
@@ -369,8 +369,10 @@ export interface MachineRunEnv {
   account: string;
   /** The vault GitHub entry given as GH_TOKEN (w868), "vault-ben-github …abcd"; absent: the machine's own gh login. */
   github?: string;
-  /** Whose pool the token came from. */
+  /** The person the run is for: whose GitHub token it got, and whose pool setting picked the Claude pool (SessionInfo.ranFor). */
   person?: string;
+  /** Whose pool the Claude token came from, when it is not `person`'s own (w1717). */
+  pool?: string;
   /** The variables of `env` that hold a secret the vault gave (w1688): the daemon masks their values whatever they are called. */
   secretEnv: string[];
 }
@@ -392,8 +394,12 @@ export function machineRunEnv(
 ): MachineRunEnv {
   if (!ctx) throw new PoolHeldError(NO_VAULT);
   const person = run.tokenUser ?? run.requestedBy?.userId ?? ctx.payer?.();
+  // w1717: the Claude token comes from the pool the person's setting names (their own unless they picked another's); the
+  // GitHub token and the other secrets stay theirs. That pool's own caps, reserve and stop line apply; held, the run waits.
+  const pool = person ? (ctx.poolOf?.(person) ?? person) : undefined;
+  const other = !!pool && !isSamePerson(pool, person);
   const wantGithub = githubFromVault(cfg, refId(machine));
-  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, sessionId: run.sessionId }, { claude: true, github: wantGithub, githubUsable: ctx.githubUsable, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
+  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, ...(other ? { claudeOwner: pool } : {}), sessionId: run.sessionId }, { claude: true, github: wantGithub, githubUsable: ctx.githubUsable, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
   for (const p of s.problems) ctx.onProblem?.(p);
   // GitHub (w868): the person's own token, else the machine's own gh login as before; never another person's.
   const github = s.github ? { github: `${s.github.name} …${s.github.last4}` } : {};
@@ -408,10 +414,11 @@ export function machineRunEnv(
   const secretEnv = [...Object.keys(s.env), 'CLAUDE_CODE_OAUTH_TOKEN'];
   const apps = s.github ? ctx.vault.githubAppsFor({ machineId: refId(machine), role: run.role, userId: person }).map((e) => e.name) : [];
   if (apps.length) s.env.FF_GH_APP_NAMES = apps.join(',');
-  if (s.claude) return { env: { ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, person), secretEnv, ...github, ...(person ? { person } : {}) };
-  // Every token of the person's is over its caps or used up: the run waits for the first to free up (w739).
-  if (s.claudeHold) throw new PoolHeldError(`${person ?? 'this run'}'s Claude token pool is held: ${s.claudeHold.why}`, s.claudeHold.next);
-  const why = noTokenWhy(person, s, `a ${run.role} run on ${refId(machine)}`);
+  if (s.claude) return { env: { ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: poolAccount(s.claude, pool, other ? person : undefined), secretEnv, ...github, ...(person ? { person } : {}), ...(other ? { pool } : {}) };
+  // Every token of the pool is over its caps or used up: the run waits for the first to free up (w739); never on another pool.
+  const forWhom = other ? ` (${person}'s work runs on ${pool}'s pool: their pool setting, w1717)` : '';
+  if (s.claudeHold) throw new PoolHeldError(`${pool ?? 'this run'}'s Claude token pool is held${forWhom}: ${s.claudeHold.why}`, s.claudeHold.next);
+  const why = noTokenWhy(pool, s, `a ${run.role} run on ${refId(machine)}${other ? ` for ${person}` : ''}`) + (other ? `; ${person}'s pool setting picks ${pool}'s pool (w1717): set it back to self in Settings` : '');
   ctx.onProblem?.(why);
   throw new PoolHeldError(why);
 }
@@ -423,21 +430,25 @@ export function machineRunEnv(
  * token applies to the next session start. All their tokens capped: an orchestrator and the ops worker use the pool up past
  * the caps (w1112: the ops worker is never held by them, like the dispatcher) and stop only once every token is used up;
  * no token at all, or none opens: the start fails with the reason (w1078: no fallback). Each throws PoolHeldError, and the
- * session start shows it.
+ * session start shows it. w1717: the pool is the one the person's pool setting names (their own unless they picked another's),
+ * with the same rules there as on their own.
  */
 export function poolRunEnv(run: { role: 'orchestrator' | 'ops'; personId: string | undefined; sessionId?: string }, ctx: VaultContext | undefined = vaultContext()): { env: Record<string, string | undefined>; account: string } {
   if (!ctx) throw new PoolHeldError(NO_VAULT);
   const what = run.role === 'ops' ? 'the orchestration worker' : 'an orchestrator';
   if (!run.personId) throw new PoolHeldError(noTokenWhy(undefined, { problems: [] }, what));
-  const s = ctx.vault.forRun({ machineId: 'portal', role: run.role, userId: run.personId, sessionId: run.sessionId }, { claude: true, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
+  const pool = ctx.poolOf?.(run.personId) ?? run.personId;
+  const other = !isSamePerson(pool, run.personId);
+  const s = ctx.vault.forRun({ machineId: 'portal', role: run.role, userId: run.personId, ...(other ? { claudeOwner: pool } : {}), sessionId: run.sessionId }, { claude: true, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
   for (const p of s.problems) ctx.onProblem?.(p);
-  if (s.claude) return { env: { ...hostBaseEnv(), CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, account: poolAccount(s.claude, run.personId) };
+  if (s.claude) return { env: { ...hostBaseEnv(), CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, account: poolAccount(s.claude, pool, other ? run.personId : undefined) };
   // Only a pool whose every token is used up gets here (pickPool's use-it-up for both roles): Claude would refuse them all.
   if (s.claudeHold) {
     const stop = run.role === 'ops' ? ", so the orchestration worker cannot start until a token resets (Claude refuses a used-up token; the pool's limits never hold it, w1112)" : '';
-    throw new PoolHeldError(`${run.personId}'s Claude token pool is used up${stop}: ${s.claudeHold.why}`, s.claudeHold.next);
+    const forWhom = other ? ` (${run.personId}'s work runs on ${pool}'s pool: their pool setting, w1717)` : '';
+    throw new PoolHeldError(`${pool}'s Claude token pool is used up${forWhom}${stop}: ${s.claudeHold.why}`, s.claudeHold.next);
   }
-  const why = noTokenWhy(run.personId, s, what);
+  const why = noTokenWhy(pool, s, `${what}${other ? ` for ${run.personId}` : ''}`) + (other ? `; ${run.personId}'s pool setting picks ${pool}'s pool (w1717): set it back to self in Settings` : '');
   ctx.onProblem?.(why);
   throw new PoolHeldError(why);
 }

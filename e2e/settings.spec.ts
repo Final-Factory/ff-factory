@@ -234,3 +234,33 @@ test('settings: a browser with no Web Push shows notices in the page until "Turn
   await finishATurn(page);
   await expect.poll(async () => (await shown(page)).length).toBeGreaterThan(before);
 });
+
+
+test("settings: the Claude pool row (w1717) is the signed-in operator's own, defaults to self, and offers every other operator's pool", async ({ page }) => {
+  await signIn(page);
+  await page.goto('/');
+  const sidebar = await openSidebar(page);
+  await sidebar.getByRole('button', { name: 'Settings' }).click();
+  const pools = page.getByRole('dialog').getByTestId('pool-settings');
+  await expect(pools).toContainText('Claude pool');
+  // one row, the signed-in tester's own
+  const mine = pools.getByRole('combobox', { name: 'Bill my work to' });
+  await expect(pools.getByRole('combobox')).toHaveCount(1);
+  await expect(mine).toHaveValue('self');
+  // every other login with a Claude token is offered, and not the tester's own (that is "My own pool")
+  await expect(mine.locator('option')).toContainText(['My own pool', 'Team Mate’s pool', 'Compact Tester’s pool', 'Ask Tester’s pool']);
+  await expect(mine.locator('option', { hasText: /^tester’s pool$/i })).toHaveCount(0);
+  // pick another operator's: the server keeps it under the tester's own id and the page hears it
+  await mine.selectOption('teammate');
+  await expect.poll(async () => (await appState(page.request)).settings.pool).toEqual({ tester: 'teammate' });
+  await expect(mine).toHaveValue('teammate');
+  // the server refuses what the menu never offers
+  const bad = await page.request.post('/api/settings', { data: { pool: 'nobody' } });
+  expect(bad.status()).toBe(400);
+  expect(await bad.text()).toContain('nobody is not a login here');
+  const shape = await page.request.post('/api/settings', { data: { pool: { person: 'teammate', from: 'tester' } } });
+  expect(shape.status(), "only the caller's own: no person to name").toBe(400);
+  // back to self: no key left
+  await mine.selectOption('self');
+  await expect.poll(async () => (await appState(page.request)).settings.pool).toEqual({});
+});

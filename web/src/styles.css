@@ -5137,6 +5137,11 @@ button.react-chip:hover {
   min-width: 0;
 }
 
+/* The Claude pool row (w1717): the same break before the next section as the paragraph that ends Voice input. */
+.pool-pick {
+  margin-bottom: 18px;
+}
+
 .voice-sub {
   margin-top: 10px;
   font-weight: 600;

@@ -11,7 +11,7 @@ import { Identity } from './identity.ts';
 import { IntakeManager, type DiscordReader } from './intake.ts';
 import { parseBugThread, type DiscordMessage, type DiscordThread } from './intakeRules.ts';
 import { PoolHeldError, Vault, fingerprintOf, newKeyText, tokenPersonForWork, type KeySource, type VaultContext } from './vault.ts';
-import { machineRunEnv } from './secrets.ts';
+import { machineRunEnv, poolRunEnv } from './secrets.ts';
 import { poolLimits } from './tokenPool.ts';
 import { describeItem } from './work.ts';
 import { SpendStore, buildReport, renderReport, renderRequest, type SpendContext } from './spend.ts';
@@ -447,4 +447,197 @@ test('spend_report attributes each turn to the account its process ran on, and a
   spend.observe('s1', result(3, T0 + 180_000, 1.3, tok(1.3)));
   assert.ok(spend.request('w1')!.accounts![UNRECORDED_ACCOUNT]);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- the pool setting (w1717)
+
+test("the pool setting (w1717): self is the default and changes nothing; a picked pool follows every path that sets a request's person", async (t) => {
+  const { o, bug, call, human, runsFor, newest, agents, store } = setup(t);
+  agents.hasPool = () => true;
+  const pool = (w: WorkItem) => agents.poolOf(runsFor(w));
+  const run = async () => {
+    // a new request each files
+    await call(human(LOTH).info, 'request_work', { title: `Lothsahn's task ${store.workSeq}`, brief: 'x' });
+    const lFiled = newest();
+    await call(human(BEN).info, 'request_work', { title: `Ben's task ${store.workSeq}`, brief: 'x' });
+    const bFiled = newest();
+    // a note on the other's request (the w1031 take-over)
+    await call(human(LOTH).info, 'update_work', { id: bFiled.id, note: 'Lothsahn here.' });
+    await call(human(LOTH).info, 'request_work', { title: `Lothsahn's other task ${store.workSeq}`, brief: 'x' });
+    const bNoted = newest();
+    await call(human(BEN).info, 'update_work', { id: bNoted.id, note: 'Ben here.' });
+    // an approval, an answer and a reopen of intake requests nobody asked for, and one nobody has touched
+    const approved = bug();
+    o.approveIntake(approved.id, LOTH);
+    const answered = bug();
+    o.approveIntake(answered.id, BEN);
+    answered.status = 'question';
+    answered.flag = { kind: 'design', text: 'alternate?', at: new Date().toISOString(), for: [LOTH] };
+    answered.requesters = [BEN, LOTH];
+    store.putWork(answered);
+    assert.equal((await call(human(LOTH).info, 'update_work', { id: answered.id, note: 'Yes.' })).isError, false);
+    const reopened = bug();
+    o.approveIntake(reopened.id, BEN);
+    reopened.status = 'done';
+    reopened.requesters = [BEN, LOTH];
+    store.putWork(reopened);
+    assert.equal((await call(human(LOTH).info, 'update_work', { id: reopened.id, reopen: true })).isError, false);
+    const nobody = bug();
+    return { lFiled, lNoted: bFiled, bNoted, approved, answered, reopened, nobody };
+  };
+  const view = (ws: Record<string, WorkItem>) => Object.fromEntries(Object.entries(ws).map(([k, w]) => [k, [runsFor(w), pool(w)]]));
+  // Self (no setting): every request runs on the pool of the person it runs for, exactly as before w1717.
+  const self = await run();
+  assert.deepEqual(view(self), {
+    lFiled: ['lothsahn', 'lothsahn'],
+    lNoted: ['lothsahn', 'lothsahn'],
+    bNoted: ['ben', 'ben'],
+    approved: ['lothsahn', 'lothsahn'],
+    answered: ['lothsahn', 'lothsahn'],
+    reopened: ['lothsahn', 'lothsahn'],
+    nobody: ['lothsahn', 'lothsahn'],
+  });
+  // lothsahn picks Ben's pool (set_pool, in his own turn): everything that runs for him runs on Ben's pool, his note on Ben's
+  // request included (it still takes it over for him, w1031); Ben's own stays on Ben's.
+  const set = await call(human(LOTH).info, 'set_pool', { pool: 'ben' });
+  assert.equal(set.isError, false, set.text);
+  assert.match(set.text, /lothsahn's work runs on ben's Claude pool/);
+  const picked = await run();
+  for (const ws of [self, picked]) for (const [k, w] of Object.entries(ws)) assert.equal(pool(w), 'ben', k);
+  assert.equal(runsFor(picked.lNoted), 'lothsahn', 'the note still takes the request over for him (w1031)');
+  assert.equal(picked.lNoted.requestedBy.userId, 'ben', 'whose request it is does not change');
+  // every operator is the same: Ben picks lothsahn's pool, and Ben's own work, his note on lothsahn's request included, runs there
+  agents.setPool('ben', 'lothsahn', 'Lothsahn');
+  assert.equal(pool(picked.bNoted), 'lothsahn');
+  assert.equal(pool(picked.lFiled), 'ben');
+  // back to self: each person's own again, and no key is left
+  assert.equal((await call(human(LOTH).info, 'set_pool', { pool: 'self' })).isError, false);
+  agents.setPool('Ben', null, 'Ben');
+  for (const [k, w] of Object.entries(picked)) assert.equal(pool(w), runsFor(w), k);
+  assert.deepEqual(store.settings.pool, {});
+  // a turn that is not his own (a harness message) changes nothing
+  const quiet = await call(human(LOTH, 'system').info, 'set_pool', { pool: 'ben' });
+  assert.equal(quiet.isError, true);
+  assert.equal(agents.poolOf('lothsahn'), 'lothsahn');
+});
+
+test("the pool setting is checked on the server (w1717): a login that exists, a person with a Claude pool, kept in the logins' spelling", (t) => {
+  const { agents, store } = setup(t);
+  agents.hasPool = (u) => u === 'ben';
+  assert.throws(() => agents.setPool('sam', 'ben', 'Ben'), /sam is not a login here/);
+  assert.throws(() => agents.setPool('ben', 'sam', 'Ben'), /sam is not a login here/);
+  assert.throws(() => agents.setPool('ben', 'lothsahn', 'Ben'), /lothsahn has no Claude pool/);
+  assert.equal(agents.poolOf('ben'), 'ben', 'nothing written');
+  assert.equal(agents.setPool('LOTHSAHN', 'Ben', 'Lothsahn'), 'ben', "kept in the logins' own spelling");
+  assert.deepEqual(store.settings.pool, { lothsahn: 'ben' });
+  assert.equal(agents.poolOf('Lothsahn'), 'ben');
+  assert.equal(agents.setPool('lothsahn', 'lothsahn', 'Lothsahn'), 'lothsahn', 'their own pool is self');
+  assert.deepEqual(store.settings.pool, {});
+});
+
+test("a picked pool reaches the process (w1717): its Claude token, the person's own GitHub token, and the picked pool's own limits", (t) => {
+  const { v } = vaultOf(t);
+  v.add({ name: 'vault-lothsahn-github', kind: 'github', value: `github_pat_${'l'.repeat(60)}`, owner: 'lothsahn', share: 'owner' });
+  v.add({ name: 'vault-ben-github', kind: 'github', value: `github_pat_${'b'.repeat(60)}`, owner: 'ben', share: 'owner' });
+  const cfg = cfgOf({ machines: { githubFromVault: true } });
+  const pools: Record<string, string> = {};
+  const ctx = { ...ctxOf(v), poolOf: (p: string) => pools[p] ?? p };
+  const loth = (c: VaultContext = ctx) => machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: LOTH, sessionId: 's1' }, c);
+  // self: as before
+  let r = loth();
+  assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, L1);
+  assert.equal(r.pool, undefined);
+  assert.match(r.account, /^vault token vault-lothsahn-1 …dddd \(lothsahn's pool, docs/);
+  // Ben's pool picked: Ben's Claude token, lothsahn's GitHub token, and the account line says whose work it is
+  pools.lothsahn = 'ben';
+  r = loth();
+  assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, B1);
+  assert.match(r.env.GH_TOKEN ?? '', /^github_pat_l/, "his own GitHub token, never Ben's");
+  assert.deepEqual([r.person, r.pool], ['lothsahn', 'ben']);
+  assert.match(r.account, /^vault token vault-ben-1 …bbbb \(ben's pool, for lothsahn's work by their pool setting, docs/);
+  const NOW = Date.parse('2026-10-11T12:00:00Z');
+  const meter = (session: number, weekly: number, days = 5) => ({ available: true, asOf: new Date(NOW).toISOString(), models: [], session: { label: '5-hour', percent: session }, weekly: { label: 'weekly', percent: weekly, resetsAt: new Date(NOW + days * 86_400_000).toISOString() } });
+  const onBen = (m: ReturnType<typeof meter>) => (fp: string) => (fp === fingerprintOf(B1) ? (m as never) : undefined);
+  // Ben's pool held (its 5-hour meter past the hold): the run waits on Ben's pool, never falls back to lothsahn's own
+  assert.throws(
+    () => loth({ ...ctx, usageOf: onBen(meter(95, 50)) }),
+    (e: unknown) => e instanceof PoolHeldError && /^ben's Claude token pool is held \(lothsahn's work runs on ben's pool: their pool setting, w1717\): /.test(e.message) && !e.message.includes(B1.slice(13, 40)),
+  );
+  // Ben's token is the dispatcher's, inside its reserve (weekly 80% with 5 days to go: the buffer is 25%): held for this work too
+  const dispatcher = (fp: string) => (fp === fingerprintOf(B1) ? 'the dispatcher' : undefined);
+  assert.throws(() => loth({ ...ctx, usageOf: onBen(meter(10, 80)), reservedFor: dispatcher }), PoolHeldError);
+  // the dispatcher's stop line (95%) on Ben's token, half a day before its reset: held as well
+  assert.throws(() => loth({ ...ctx, usageOf: onBen(meter(10, 96, 0.5)), reservedFor: dispatcher }), PoolHeldError);
+  // Ben's own work is untouched by lothsahn's setting
+  const ben = machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: BEN, sessionId: 's2' }, ctx);
+  assert.equal(ben.env.CLAUDE_CODE_OAUTH_TOKEN, B1);
+  assert.match(ben.env.GH_TOKEN ?? '', /^github_pat_b/);
+  // work nobody asked for runs for vault.unattributed's person (tokenUser), then on that person's pool setting
+  const nightly = machineRunEnv(cfg, { id: 'm3' }, { role: 'workers', requestedBy: BEN, tokenUser: 'lothsahn', sessionId: 's3' }, ctx);
+  assert.equal(nightly.env.CLAUDE_CODE_OAUTH_TOKEN, B1);
+  assert.match(nightly.env.GH_TOKEN ?? '', /^github_pat_l/);
+  // a picked pool with no token: refused with the reason, never the person's own pool
+  pools.lothsahn = 'sam';
+  assert.throws(() => loth(), (e: unknown) => e instanceof PoolHeldError && /sam has no Claude token in the vault/.test(e.message) && /pool setting picks sam's pool/.test(e.message));
+});
+
+test('a live idle worker follows a pool setting change at its next message (w1717); one on the pool its setting picks stays', (t) => {
+  const { agents } = setup(t);
+  agents.hasPool = () => true;
+  agents.tokenOwner = (account) => ({ 'token:ben-fp': 'ben', 'token:loth-fp': 'lothsahn' })[account];
+  const move = (account: string, status: SessionInfo['status'] = 'idle') =>
+    (agents as unknown as { accountMove(s: unknown): string | undefined }).accountMove({ info: { id: 'wq', kind: 'worker', machineId: 'm3', status, account, ranFor: 'lothsahn', requestedBy: LOTH }, live: true });
+  assert.equal(move('token:loth-fp'), undefined, 'self, on his own pool: as before');
+  agents.setPool('lothsahn', 'ben', 'Lothsahn');
+  assert.match(move('token:loth-fp') ?? '', /runs on lothsahn's Claude pool and lothsahn's work runs on ben's now \(their pool setting\), so it restarts there before this turn \(w1717\)/);
+  assert.equal(move('token:ben-fp'), undefined, 'already on the picked pool');
+  agents.setPool('lothsahn', 'self', 'Ben');
+  assert.match(move('token:ben-fp') ?? '', /runs on ben's Claude pool and lothsahn's work runs on their own now/);
+});
+
+test("all of a person's billing follows their pool setting (w1717): their orchestrator and the ops worker's jobs for them too, and vice versa", (t) => {
+  const { v } = vaultOf(t);
+  const pools: Record<string, string> = {};
+  const ctx = { ...ctxOf(v), poolOf: (p: string) => pools[p] ?? p };
+  const run = (personId: string, role: 'orchestrator' | 'ops' = 'orchestrator') => poolRunEnv({ role, personId, sessionId: 'o1' }, ctx);
+  // self: each on their own, as before
+  assert.equal(run('lothsahn').env.CLAUDE_CODE_OAUTH_TOKEN, L1);
+  assert.match(run('lothsahn').account, /^vault token vault-lothsahn-1 …dddd \(lothsahn's pool, docs/);
+  // lothsahn picks Ben's pool: his orchestrator and his ops jobs bill there, the account line says whose work it is
+  pools.lothsahn = 'ben';
+  const o = run('lothsahn');
+  assert.equal(o.env.CLAUDE_CODE_OAUTH_TOKEN, B1);
+  assert.match(o.account, /^vault token vault-ben-1 …bbbb \(ben's pool, for lothsahn's work by their pool setting, docs/);
+  assert.equal(run('lothsahn', 'ops').env.CLAUDE_CODE_OAUTH_TOKEN, B1);
+  assert.equal(run('ben').env.CLAUDE_CODE_OAUTH_TOKEN, B1, "Ben's own stays on Ben's");
+  // "or vice versa": Ben picks lothsahn's
+  pools.ben = 'lothsahn';
+  assert.equal(run('ben').env.CLAUDE_CODE_OAUTH_TOKEN, L1);
+  assert.equal(run('ben', 'ops').env.CLAUDE_CODE_OAUTH_TOKEN, L1);
+  // a picked pool with no token: refused with the reason, never the person's own pool
+  pools.lothsahn = 'sam';
+  assert.throws(() => run('lothsahn'), (e: unknown) => e instanceof PoolHeldError && /sam has no Claude token in the vault/.test(e.message) && /lothsahn's pool setting picks sam's pool/.test(e.message));
+});
+
+test("a live idle orchestrator moves to its person's picked pool at its next message (w1717), never mid-turn; the unpinned dispatcher follows the system payer's", (t) => {
+  const { agents } = setup(t);
+  agents.hasPool = () => true;
+  agents.tokenOwner = (account) => ({ 'token:ben-fp': 'ben', 'token:loth-fp': 'lothsahn' })[account];
+  const move = (info: Partial<SessionInfo>, status: SessionInfo['status'] = 'idle') =>
+    (agents as unknown as { accountMove(s: unknown): string | undefined }).accountMove({ info: { id: 'o1', kind: 'orchestrator', status, ...info }, live: true });
+  const loth: Partial<SessionInfo> = { orchestratorRole: 'personal', requestedBy: LOTH, account: 'token:loth-fp' };
+  assert.equal(move(loth), undefined, 'self, on his own pool: as before');
+  agents.setPool('lothsahn', 'ben', 'Lothsahn');
+  assert.match(move(loth) ?? '', /runs on lothsahn's Claude pool and lothsahn's pool setting names ben's now, so it restarts there before this message \(w1717\)/);
+  assert.equal(move(loth, 'running'), undefined, 'never mid-turn: a message during the turn reaches it');
+  assert.equal(move({ ...loth, account: 'token:ben-fp' }), undefined, 'already on the picked pool');
+  agents.setPool('lothsahn', 'self', 'Lothsahn');
+  assert.match(move({ ...loth, account: 'token:ben-fp' }) ?? '', /names their own now/);
+  // the dispatcher (pinned to no token) runs on the system payer's pool, so it follows the payer's setting
+  const payer = (agents as unknown as { identity: Identity }).identity.systemPayer().userId;
+  const other = payer === 'ben' ? 'lothsahn' : 'ben';
+  const dispatcher: Partial<SessionInfo> = { orchestratorRole: 'dispatcher', account: `token:${payer === 'ben' ? 'ben' : 'loth'}-fp` };
+  assert.equal(move(dispatcher), undefined);
+  agents.setPool(payer, other, 'Ben');
+  assert.match(move(dispatcher) ?? '', new RegExp(`${payer}'s pool setting names ${other}'s now`));
 });

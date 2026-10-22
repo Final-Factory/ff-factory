@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { NOTIFY_KINDS, type AppVersion } from '../../../shared/types';
 import { disablePush, enableInTab, enablePush, pushMode, setPref, testNotification, usePush } from '../notify';
 import { api } from '../api';
-import { logout, toast, toastError } from '../store';
+import { attempt, logout, toast, toastError, useStore } from '../store';
 import { SHORTCUT_LABEL, VOICE_PREF_DEFAULTS, refreshVoiceStatus, setVoicePrefs, useVoicePrefs, useVoiceStatus, type TtsEnginePref } from '../voice/dictation';
 import { browserSpeechSupported } from '../voice/browserSpeech';
 import type { VoiceEnginePref } from '../../../shared/voice';
@@ -87,6 +87,7 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
         </div>
         <p className="dim small">These choices belong to this device; your phone and your desktop can differ. While the app is in front, nothing pops up.</p>
         <VoiceSettings />
+        <PoolSettings />
         <VaultSettings />
         {app && (
           <div className="field about" data-testid="about-version">
@@ -101,6 +102,41 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
         )}
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Whose Claude pool the signed-in person's work runs on (w1717, docs/vault.md section 4, "Picking another person's pool"):
+ * "self" by default, or another operator's. lothsahn: "It should just be one row that allows me to override my default pool
+ * for another operator (ben) and then all my billing goes there, or vice versa". The server checks the pick.
+ */
+function PoolSettings() {
+  const me = useStore((s) => s.app?.me?.userId);
+  const people = useStore((s) => s.app?.poolPeople);
+  const pools = useStore((s) => s.app?.settings?.pool);
+  if (!me || !people?.length) return null;
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  const set = Object.entries(pools ?? {}).find(([k]) => same(k, me))?.[1];
+  const value = set && !same(set, me) ? set : 'self';
+  const others = people.filter((o) => !same(o.userId, me) && (o.hasPool || same(o.userId, value)));
+  if (!others.length && value === 'self') return null;
+  // No toast: the menu shows what the server kept (the settings event), and a refusal shows as an error.
+  const pick = (to: string) => void attempt(api.setPool(to));
+  return (
+    <div className="field" data-testid="pool-settings">
+      <span>Claude pool</span>
+      <label className="voice-engine pool-pick">
+        <span>Bill my work to</span>
+        <select className="input" value={value} onChange={(e) => pick(e.target.value)}>
+          <option value="self">My own pool</option>
+          {others.map((o) => (
+            <option key={o.userId} value={o.userId}>
+              {o.displayName}’s pool
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
   );
 }
 

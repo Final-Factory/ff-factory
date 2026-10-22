@@ -80,7 +80,7 @@ import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { clientAddress, originOf, tailnetOnly } from './remoteChat.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
-import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest } from '../shared/types.ts';
+import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
 import { SpendStore, buildReport } from './spend.ts';
 import { isCoordinatorRole, type SpendSummaryReply } from '../shared/spend.ts';
@@ -857,6 +857,12 @@ const masterBatch = new MasterBatchWatch({ cfg, store, identity, orchestrators: 
 
 let lastSystem: SystemStats | undefined;
 
+/** The people the Settings pool menu lists (w1717), from the vault's metadata: no token is opened for it. */
+function poolPeople(): PoolPerson[] {
+  const owners = vault.list().filter((e) => e.kind === 'claude' && !e.disabled && e.owner).map((e) => e.owner!.toLowerCase());
+  return identity.list().map((u) => ({ userId: u.userId, displayName: u.displayName, hasPool: owners.includes(u.userId.toLowerCase()) }));
+}
+
 /** The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). */
 function appState(user: string | undefined): AppState {
   const u = auth.userInfo(user);
@@ -886,6 +892,7 @@ function appState(user: string | undefined): AppState {
     ledger: ledgerSweep.state(),
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings, live: { enabled: cfg.live?.enabled === true } },
     settings: store.settings,
+    poolPeople: poolPeople(),
     live: liveHub.viewsFor(me.userId),
   };
 }
@@ -1640,12 +1647,25 @@ function deviceName(ua: string) {
 
 // ---- settings (heartbeat) and wake-ups (server/wake.ts)
 
-/** heartbeatMinutes: the signed-in person's own heartbeat (docs/orchestrators.md). */
+/**
+ * heartbeatMinutes: the signed-in person's own heartbeat (docs/orchestrators.md). pool (w1717): whose Claude pool the
+ * signed-in person's work runs on, a user id or "self"/null (docs/vault.md section 4, "Picking another person's pool").
+ */
 route('POST', '/api/settings', async (req) => {
-  const b = await readJson<{ heartbeatMinutes?: number | null }>(req);
+  const b = await readJson<{ heartbeatMinutes?: number | null; pool?: unknown }>(req);
   const m = b.heartbeatMinutes;
   if (m !== undefined && m !== null && (!Number.isInteger(m) || m < 5 || m > 240)) throw new HttpError(400, 'heartbeatMinutes: 5 to 240, or null for off');
+  const p = b.pool;
+  if (p !== undefined && p !== null && typeof p !== 'string') throw new HttpError(400, 'pool: a user id, or "self"');
   if (m !== undefined) agents.setHeartbeat(requesterOf(req).userId, m);
+  if (p !== undefined) {
+    const me = requesterOf(req);
+    try {
+      agents.setPool(me.userId, p, me.displayName);
+    } catch (e) {
+      throw new HttpError(400, (e as Error).message);
+    }
+  }
   return store.settings;
 });
 
@@ -2316,6 +2336,7 @@ setVaultContext({
   limits: () => poolLimits(cfg),
   reservedFor,
   payer: () => identity.systemPayer().userId,
+  poolOf: (person) => agents.poolOf(person),
   githubUsable: github.usable,
   onGithubUse: (e, what) => github.noteUse(e, what),
   onGithubMissing: (person, machineId, what) => {
@@ -2352,7 +2373,8 @@ function limitsClearFor(s: SessionInfo): boolean | undefined {
   // w1375: a resume starts on the pool's pick, never on the account that hit its limit, so what matters is whether its person's pool
   // can serve a worker now (the rule a new job gets, retired and used-up accounts skipped), not that one account's meters.
   const person = agents.orchestrators.sessionPersonOf(s.id) ?? s.requestedBy?.userId;
-  const pool = person ? poolForRef(person, gatePools()) : undefined;
+  // w1717: the pool the person's setting picks, their own unless they chose another's.
+  const pool = person ? poolForRef(agents.poolOf(person), gatePools()) : undefined;
   if (pool) return pool.serves;
   const source = sourceOf(s);
   const u = accountsNow().find((a) => a.sources.includes(source))?.usage;
@@ -2542,6 +2564,9 @@ agents.tokenStopped = (account) => {
   return t && t.key === account && stopMeters(usage.usageOf(t.key), poolLimits(cfg)).length ? t.name : undefined;
 };
 // w1375: a retired or used-up token is one the pool skips for every new job; a live worker process on it restarts on its person's usable account at its next message.
+// w1717: who owns the vault token a live process runs on, so a pool setting change moves an idle worker at its next message.
+agents.tokenOwner = (account) => vault.list().find((e) => e.kind === 'claude' && `token:${e.fingerprint}` === account)?.owner;
+agents.hasPool = (userId) => vault.hasClaudeFor(userId);
 agents.tokenUnusable = (account) => {
   for (const list of gatePoolsRaw().values()) {
     for (const t of list) {

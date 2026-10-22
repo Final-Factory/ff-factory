@@ -171,6 +171,8 @@ export const api = {
   /** Close a banner about these events for the signed-in person (shared/dismissals.ts). */
   dismissEvents: (keys: string[]) => request<AppSettings>('POST', '/api/dismiss', { keys }),
   setSettings: (patch: Partial<AppSettings>) => request<AppSettings>('POST', '/api/settings', patch),
+  /** Whose Claude pool the signed-in person's work runs on (w1717): a user id, or "self". */
+  setPool: (from: string) => request<AppSettings>('POST', '/api/settings', { pool: from }),
   search: (q: { q: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string }) =>
     request<{ hits: SearchHit[]; scanned: number; ms: number }>('GET', `/api/search?${new URLSearchParams(Object.entries(q).filter(([, v]) => v) as [string, string][])}`),
   eventsFrom: (sessionId: string, seq: number) => request<TranscriptEvent[]>('GET', `/api/sessions/${enc(sessionId)}/events?from=${seq}`),
