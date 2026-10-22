@@ -50,12 +50,12 @@ test('compactBlocker: a worker whose daemon cannot compact is left alone', () =>
   assert.equal(compactBlocker(s, false), 'its daemon cannot compact');
 });
 
-function setup(t: { after: (fn: () => void | Promise<void>) => void }, worker: Partial<Config['worker']>, waits: { why?: string }) {
+function setup(t: { after: (fn: () => void | Promise<void>) => void }, worker: Partial<Config['worker']>, waits: { why?: string; move?: string }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-workercompact-'));
   const store = new Store(dir);
   const cfg = { limits: { maxSessions: 6 }, orchestrator: { model: 'opus', effort: 'low' }, worker: { permissionMode: 'bypassPermissions', effort: 'high', ...worker } } as unknown as Config;
   const sessions = new SessionManager(cfg, store);
-  const auto = new AutoCompactor(sessions, cfg, { settleMs: 20, waitsLong: () => waits.why });
+  const auto = new AutoCompactor(sessions, cfg, { settleMs: 20, waitsLong: () => waits.why, moving: () => waits.move });
   t.after(async () => {
     auto.stop();
     sessions.stopAll();
@@ -73,7 +73,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, worker: P
   sessions.events.on('turnEnd', (_h: SessionHandle, text: string, meta?: TurnEndMeta) => ends.push({ text, meta }));
   const w = sessions.create({ kind: 'worker', title: 'w1469: worker', permissionMode: 'bypassPermissions', options: () => ({ model: 'opus' }) });
   const say = (text: string) => sessions.send(w.info.id, text, 'orchestrator');
-  return { sessions, compactions, ends, w, say };
+  return { sessions, auto, compactions, ends, w, say };
 }
 
 async function until(pred: () => boolean, what: string, ms = 4000) {
@@ -113,4 +113,20 @@ test('past 200,000 a worker in the pilot compacts; one outside the pilot never d
   await until(() => outside.w.info.status === 'idle' && outside.w.info.turns === 1, 'the turn');
   await new Promise((r) => setTimeout(r, 80));
   assert.equal(outside.compactions.length, 0);
+});
+
+test('w1745: a worker whose process must restart on another account first is not compacted until it has (7d4cb2df, 2026-10-22)', async (t) => {
+  // Its token ran out: the /compact sent then ran on the used-up token, failed at once, and kept the turn open ahead of the
+  // resume that moves it. It compacts after the restart, at a later turn's end.
+  const waits: { why?: string; move?: string } = { move: 'its process runs on vault token vault-ben-1 …AAAA (weekly 100%: used up)' };
+  const { auto, compactions, w, say } = setup(t, { compactPilotPercent: 100 }, waits);
+  say('big #ctx 210000');
+  await until(() => w.info.status === 'idle' && w.info.turns === 1, 'the turn');
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(compactions.length, 0, 'not on the used-up token');
+  assert.match(auto.check(w.info.id), /^not now: its process restarts first \(its process runs on vault token vault-ben-1 …AAAA/);
+  waits.move = undefined;
+  say('moved #ctx 215000');
+  await until(() => !!w.info.lastCompaction && w.info.status === 'idle', 'the compaction after the move');
+  assert.equal(compactions.length, 1);
 });

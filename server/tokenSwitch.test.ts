@@ -129,6 +129,7 @@ function world(t: { after: (fn: () => void | Promise<void>) => void }) {
     label,
     meters: (account) => usage.usageOf(account),
     markOut: (account, mark, l) => usage.markOut(account, mark, l),
+    out: (account) => !!agents.tokenUnusable?.(account),
     serves: (s) => {
       const person = s.requestedBy?.userId;
       return person ? poolForRef(poolOf(person), gate())?.serves : undefined;
@@ -155,7 +156,7 @@ function world(t: { after: (fn: () => void | Promise<void>) => void }) {
     return h;
   };
   const runEnv = (sid: string, person: string) => machineRunEnv({ machines: [] } as never, { id: 'lothdesktop' } as never, { role: 'workers', requestedBy: { userId: person, displayName: person }, sessionId: sid }, ctx);
-  return { dir, store, sessions, agents, usage, meter, sw, add, runEnv, resumed, held, notes, logs, poolSetting, views, label };
+  return { dir, store, sessions, agents, usage, meter, sw, deps, add, runEnv, resumed, held, notes, logs, poolSetting, views, label };
 }
 
 const worker = (id: string, account: string, over: Partial<SessionInfo> = {}): SessionInfo =>
@@ -343,4 +344,65 @@ test('w1745: the dispatcher and the ops worker are not resumed; one whose proces
   bg.info.backgroundTasks = 0;
   w.sessions.send('w-bg', 'the build finished', 'system');
   assert.equal(bg.stops, 1);
+});
+
+test('w1745: a worker left idle on the out token after its resume is resumed again 10 min later, at most 3 times (7d4cb2df, 2026-10-22)', (t) => {
+  // Worker 7d4cb2df (w1752): its resume went into an agent host that predated the daemon fix, ran on vault-ben-1 again, and it
+  // then sat idle there from 18:31Z, waiting for "its next message", which nothing sent.
+  const w = world(t);
+  w.meter(B1, reading(50, 97));
+  w.meter(B2, reading(0, 0));
+  let clock = NOW;
+  const sw = new TokenSwitch({ ...w.deps, now: () => clock });
+  w.agents.accountMoving = (i, why) => sw.moving(i, why);
+  const h = w.add(worker('w-stuck', key(B1), { lastResult: LIMIT_LINE, lastResultAt: iso(clock) }));
+  sw.turnEnded(h.info);
+  assert.equal(w.resumed.length, 1);
+  assert.equal(h.stops, 1);
+  /** Its process did not move: the message ran on vault-ben-1 again and its turn ended on the limit at once. */
+  const failsAgain = () => {
+    assert.equal(w.sessions.drain(), 1, 'the resume is delivered');
+    h.live = true;
+    h.info.lastResultAt = iso(clock);
+    sw.turnEnded(h.info);
+  };
+  failsAgain();
+  assert.equal(w.resumed.length, 1, 'not resumed at once: that would loop on the out token');
+  assert.match(w.logs.at(-1)!, /w-stuck stopped on vault-ben-1 …\w{4} again after its resume: .*resumed again in 10 min/);
+  clock += 5 * 60_000;
+  sw.tick([h.info]);
+  assert.equal(w.resumed.length, 1, 'not before 10 min');
+  clock += 6 * 60_000;
+  sw.tick([h.info]);
+  assert.equal(w.resumed.length, 2, 'resumed again');
+  assert.match(w.logs.at(-1)!, /^token switch \(w1745\): worker w-stuck is still idle on vault-ben-1 …\w{4}, which is out, 11 min after its turn stopped there; resumed again on a token with room in its pool \(1 of 3\)$/);
+  assert.equal(h.stops, 2, 'its idle process on vault-ben-1 stops first, so the next one starts on the pool pick');
+  assert.match(w.sessions.queued()[0].why, /restarts on its person's usable account/);
+  sw.tick([h.info]);
+  assert.equal(w.resumed.length, 2, 'one resume per failed turn');
+  for (let k = 2; k <= 3; k++) {
+    failsAgain();
+    clock += 11 * 60_000;
+    sw.tick([h.info]);
+    assert.equal(w.resumed.length, k + 1);
+  }
+  failsAgain();
+  clock += 11 * 60_000;
+  sw.tick([h.info]);
+  sw.tick([h.info]);
+  assert.equal(w.resumed.length, 4, 'after 3 more tries it waits for its next message');
+  assert.equal(w.logs.filter((l) => /is still on vault-ben-1 …\w{4} after 3 more resumes; not resumed again/.test(l)).length, 1, 'said once');
+  // Never resumed: a worker whose background task keeps its process, one whose last turn did not end on the limit, one on a
+  // token with room, one mid-turn, one a person stopped.
+  const quiet = [
+    worker('w-bg', key(B1), { lastResult: LIMIT_LINE, lastResultAt: iso(NOW), backgroundTasks: 1 } as Partial<SessionInfo>),
+    worker('w-done', key(B1), { lastResult: 'Done. PR #12 merged.', lastResultAt: iso(NOW) }),
+    worker('w-room', key(B2), { lastResult: LIMIT_LINE, lastResultAt: iso(NOW) }),
+    worker('w-busy', key(B1), { lastResult: LIMIT_LINE, lastResultAt: iso(NOW), status: 'running' }),
+    worker('w-stopped', key(B1), { lastResult: LIMIT_LINE, lastResultAt: iso(NOW), status: 'stopped' }),
+  ];
+  for (const q of quiet) w.add(q);
+  sw.tick(quiet);
+  assert.equal(w.resumed.length, 4);
+  for (const line of w.logs) for (const tok of [B1, B2]) assert.ok(!line.includes(tok) && !line.includes(fingerprintOf(tok)), `no token or key in "${line.slice(0, 80)}"`);
 });

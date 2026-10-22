@@ -225,13 +225,16 @@ export class AutoCompactor {
   private readonly cfg: Pick<Config, 'orchestrator'> & Partial<Pick<Config, 'worker'>>;
   /** Why a worker now waits a long time (a person, another request, a merge, a deploy, a far check-in), or undefined (w1469). */
   private readonly waitsLong: (i: SessionInfo) => string | undefined;
+  /** Why a worker's process restarts on another account before its next turn (w1745, Agents.accountMoveWhy), or undefined. */
+  private readonly moving: (s: SessionHandle) => string | undefined;
 
-  constructor(sessions: SessionManager, cfg: Pick<Config, 'orchestrator'> & Partial<Pick<Config, 'worker'>>, opts: { settleMs?: number; waitsLong?: (i: SessionInfo) => string | undefined; retryDelaysMs?: readonly number[] } = {}) {
+  constructor(sessions: SessionManager, cfg: Pick<Config, 'orchestrator'> & Partial<Pick<Config, 'worker'>>, opts: { settleMs?: number; waitsLong?: (i: SessionInfo) => string | undefined; moving?: (s: SessionHandle) => string | undefined; retryDelaysMs?: readonly number[] } = {}) {
     this.sessions = sessions;
     this.cfg = cfg;
     this.settleMs = opts.settleMs ?? SETTLE_MS;
     this.retryDelaysMs = opts.retryDelaysMs?.length ? opts.retryDelaysMs : COMPACT_RETRY_DELAYS_MS;
     this.waitsLong = opts.waitsLong ?? (() => undefined);
+    this.moving = opts.moving ?? (() => undefined);
     sessions.events.on('turnEnd', (s: SessionHandle, _text: string, meta?: TurnEndMeta) => {
       if (s.info.kind !== 'orchestrator' && s.info.kind !== 'worker') return;
       this.turnEnded.set(s.info.id, Date.now());
@@ -349,6 +352,11 @@ export class AutoCompactor {
     // An owed one stays due until one finishes (w1749).
     if (!due && owed) due = { trigger: owed.trigger, reason: owed.reason };
     if (!due) return 'not due';
+    // w1745: a worker whose process restarts on another account first (its token ran out) compacts after that restart. Sent
+    // now, the /compact ran on the used-up token, failed at once and kept the turn open ahead of the resume (7d4cb2df and
+    // 9888f324 on 2026-10-22: "auto-compact" 2 s after the limit, then the resume onto the same token).
+    const move = worker ? this.moving(s) : undefined;
+    if (move) return `not now: its process restarts first (${move})`;
     const retry = !!owed && owed.attempts > 0;
     const tried = this.attempts.get(id);
     const finished = tried !== undefined && s.info.lastCompaction && Date.parse(s.info.lastCompaction.at) >= tried;
