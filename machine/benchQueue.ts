@@ -197,6 +197,11 @@ export interface QueueTicket {
   created?: string;
   granted?: { at: string; ts: number };
   revoked?: { at: string; why: string };
+  /** The worker session that took it (FF_SESSION_ID), its host, its requests and its hold bound in minutes (w1750). */
+  session?: string;
+  host?: string;
+  requests?: string[];
+  maxMin?: number;
 }
 
 /** The tickets in the queue whose helper process lives, in order (read only: the helpers' OS locks are the truth). */
@@ -219,7 +224,7 @@ export function queueTickets(lock: string, alive: (pid: number) => boolean): Que
   for (const n of names) {
     const info = read(path.join(dir, n, 'info.json'));
     if (!info || !Number.isInteger(info.pid) || !alive(info.pid)) continue;
-    out.push({ ticket: n, mode: info.mode === 'shared' ? 'shared' : 'exclusive', what: String(info.what ?? ''), pid: info.pid, sandbox: info.sandbox || undefined, cwd: info.cwd || undefined, created: info.created, granted: read(path.join(dir, n, 'granted')), revoked: read(path.join(dir, n, 'revoked')) });
+    out.push({ ticket: n, mode: info.mode === 'shared' ? 'shared' : 'exclusive', what: String(info.what ?? ''), pid: info.pid, sandbox: info.sandbox || undefined, cwd: info.cwd || undefined, created: info.created, granted: read(path.join(dir, n, 'granted')), revoked: read(path.join(dir, n, 'revoked')), session: info.session || undefined, host: info.host || undefined, requests: Array.isArray(info.requests) ? info.requests.map(String) : undefined, maxMin: typeof info.max_min === 'number' ? info.max_min : undefined });
   }
   return out;
 }

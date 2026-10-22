@@ -81,6 +81,12 @@ export function sandboxGuard(opts: {
    * checkout, reopen Unity) instead of refused whole; Write and Edit there, and every other protected path, stay refused.
    */
   mainClone?: MainCloneGrant;
+  /**
+   * w1750: while another worker's timed run holds this machine's bench lock, its "bench lock held by ..." line, else
+   * undefined (machine/benchLock.ts foreignTimedHold). A player started by its slot path or an ffmpeg screen grab is
+   * refused then (checkBenchBusyLaunch). Absent: not checked.
+   */
+  benchBusy?: () => string | undefined;
 }): HookCallback {
   // Drive-letter paths are normalised textually so the guard behaves the same on any host OS.
   const norm = (p: string) => (/^[a-zA-Z]:[\\/]/.test(p) ? p : path.resolve(p)).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -117,6 +123,7 @@ export function sandboxGuard(opts: {
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, prBase: opts.prBase ?? ghPrBase, publicIdentity: opts.publicIdentity, env: opts.env }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
+        (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
         checkRawUnityBatch(cmd) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined);
       if (reason) return deny(reason);
@@ -221,6 +228,51 @@ export function checkPlayerLaunch(cmd: string, sandbox?: string): string | undef
           '(`--detach` returns at once), `"${FF_LAUNCH[@]}" <exe> -- <args>` in bash after sourcing scripts/nightly/player_launch.sh, ' +
           'or slot_path() in Python.'
         );
+      }
+      break;
+    }
+  }
+  return undefined;
+}
+
+/** ffmpeg's screen and window grabbers (Windows gdigrab, ddagrab, gfxcapture; Linux x11grab; macOS avfoundation). */
+const SCREEN_GRAB = /(?:^|[\s=,;'"])(?:gdigrab|ddagrab|gfxcapture|x11grab|avfoundation)(?:[\s=,;:'"]|$)/i;
+const FFMPEG_BINARY = /(?:^|[\\/])ffmpeg(?:\.exe)?$/i;
+
+/**
+ * w1750 (lothsahn, 2026-10-22: "Why is the game player running if the worker has an exclusive lock on beast?"): while
+ * another worker's timed run holds this machine's bench lock, a shell command that starts a built player by its slot
+ * path or grabs the screen with ffmpeg is refused, with who holds it and until when (`busy`, machine/benchLock.ts
+ * foreignTimedHold), so the work moves to another machine or waits. The game repo's player_slots.py launch and the
+ * ff-agents record_clip check the same lock themselves (and can wait, --bench-wait), so they pass here. `busy` is read
+ * only for a command that would start one. Exported for tests.
+ */
+export function checkBenchBusyLaunch(cmd: string, busy: () => string | undefined): string | undefined {
+  for (const seg of cmd.split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
+    const words = seg.trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+    let underTimeout = false; // `timeout [-s TERM] 30 <program>`: the program is past its signal and duration
+    for (const word of words) {
+      const w = word.replace(/^["']|["']$/g, '');
+      const lower = w.toLowerCase();
+      if (LAUNCHERS.has(lower) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || /^-/.test(w) || w === '""' || w === '') continue;
+      if (lower === 'timeout' || lower === 'gtimeout') {
+        underTimeout = true;
+        continue;
+      }
+      if (underTimeout && (/^\d+(?:\.\d+)?[smhd]?$/.test(w) || /^(?:SIG)?[A-Z]+$/.test(w))) continue;
+      const bare = w.replace(/[\\/]+$/, '');
+      const what = PLAYER_BINARY.test(bare) ? 'a game player' : FFMPEG_BINARY.test(bare) && SCREEN_GRAB.test(seg) ? 'a screen capture' : undefined;
+      if (what) {
+        const held = busy();
+        if (held) {
+          return (
+            `Refused (w1750): ${held}. ${what[0].toUpperCase()}${what.slice(1)} does not start on this machine while another ` +
+            "worker's timed run holds its bench lock: it would spoil the run's numbers. Move the work to another machine, or " +
+            'wait for the lock: `python scripts/nightly/player_slots.py launch --bench-wait <seconds> <exe> -- <args>` (and ' +
+            '`record_clip`, which checks it too) waits up to that long and starts when it ends. ' +
+            '`python scripts/bench/bench_queue.py status` shows the queue.'
+          );
+        }
       }
       break;
     }
