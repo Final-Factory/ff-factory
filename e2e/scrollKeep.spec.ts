@@ -1,6 +1,9 @@
 import type { APIRequestContext, Locator, Page } from '@playwright/test';
 import type { TranscriptEvent } from '../shared/types.ts';
 import { ALPHA, appState, asLogin, expect, go, openSandbox, sendMessage, sendToChat, startWorker, test, uniq } from './fixtures.ts';
+import { dumpScroll } from './fixtures.ts';
+// w1758 EXPERIMENT
+test.afterEach(async ({ browser }, info) => dumpScroll(browser, info));
 
 /**
  * Leaving a page and coming back keeps the reader's place (w1100): at the bottom, a chat is still at the bottom, with what

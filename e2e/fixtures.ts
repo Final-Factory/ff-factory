@@ -213,6 +213,28 @@ export async function pastePng(page: Page, selector: string, base64: string, nam
   );
 }
 
+/** w1758 EXPERIMENT: when a test failed, print every open page's chat scroll state and the chat's scroll decisions. */
+export async function dumpScroll(browser: import('@playwright/test').Browser, info: import('@playwright/test').TestInfo) {
+      if (info.status === info.expectedStatus) return;
+  for (const ctx of browser.contexts())
+    for (const pg of ctx.pages()) {
+      const dump = await pg
+        .evaluate(() => {
+          const chats = Array.from(document.querySelectorAll('.transcript-scroll')).map((sc) => {
+            const box = sc.getBoundingClientRect();
+            const rows = Array.from(sc.firstElementChild?.children ?? []).map((c, i) => {
+              const r = c.getBoundingClientRect();
+              return { i, seq: c.getAttribute('data-seq') ?? c.getAttribute('data-seqs'), cls: c.className.slice(0, 40), top: Math.round(r.top - box.top), h: Math.round(r.height), text: (c.textContent ?? '').slice(0, 40) };
+            });
+            return { top: Math.round(sc.scrollTop), sh: sc.scrollHeight, ch: sc.clientHeight, rows: rows.filter((r) => r.top > -1500 && r.top < 2500) };
+          });
+          return { url: location.href, chats, log: ((window as unknown as { __scrollLog?: unknown[] }).__scrollLog ?? []).slice(-120) };
+        })
+        .catch((e) => String(e));
+      console.log(`SCROLLDBG ${info.titlePath.join(' > ')} retry=${info.retry} ${JSON.stringify(dump)}`);
+    }
+}
+
 export const test = base.extend<{ authed: Page }>({
   authed: async ({ page }, use) => {
     await signIn(page);

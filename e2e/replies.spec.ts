@@ -1,5 +1,8 @@
 import type { APIRequestContext, Locator, Page } from '@playwright/test';
 import { ALPHA, BOX, appState, asLogin, expect, expectNoHorizontalOverflow, isMobile, sendToChat, test, uniq } from './fixtures.ts';
+import { dumpScroll } from './fixtures.ts';
+// w1758 EXPERIMENT
+test.afterEach(async ({ browser }, info) => dumpScroll(browser, info));
 import type { TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { REPLY_MARK } from '../shared/replies.ts';
 
