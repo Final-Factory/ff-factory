@@ -176,6 +176,11 @@ rate is the sandbox editor's, so the machine matters:
 - **The numbers so far.** BEAST: 23.2 fps received at 30 asked, 960 px (w1398, below). lothdesktop: about 3 fps for the
   w1466 view (the w1600 request), then 15 fps stream (its asked rate) at about 30 fps in game on 2026-10-20 03:36Z (its
   worker's own report). The default 15 fps hides the difference on a light scene; heavy scenes and 30 fps show it.
+  BEAST, the w1475 Shield Battery view on the raid save (beast/slot3, 2026-10-22, its worker's measurement): the game at
+  34.4 fps in play mode (2588 frames in 75.2 s), and 30 fps asked at 1280 px. The stream delivered about 16 frames a
+  second while Ben watched, and about 9.8 with nobody watching. The game ran faster than the stream, so the stream, not
+  the machine, set the rate the person saw (a guess: the worker thought the stream sends fewer frames with nobody
+  watching). Nobody measured that view on the m5, where it ran before, so there is no same-view before and after.
 
 ## Measured, w1393 and w1398 (beast)
 
