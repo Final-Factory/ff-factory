@@ -51,7 +51,7 @@ test('watchdog: the processes below the run, not its siblings', () => {
   assert.deepEqual(descendants(procs, 10).map((p) => p.pid), [11, 12]);
 });
 
-test('watchdog: a hung run is ended at its deadline with exit 124, naming the test that hung', { timeout: 60_000 }, () => {
+test('watchdog: a hung run is ended at its deadline with exit 124, naming the test that hung', { timeout: 200_000 }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-watchdog-'));
   try {
     const file = path.join(dir, 'hang.test.ts');
@@ -61,11 +61,19 @@ test('watchdog: a hung run is ended at its deadline with exit 124, naming the te
     // NODE_TEST_CONTEXT, with which a node --test inside a test file runs no files.
     const env: NodeJS.ProcessEnv = { ...process.env, NODE_V8_COVERAGE: '', FF_TEST_INFLIGHT: path.join(dir, 'inflight.json') };
     delete env.NODE_TEST_CONTEXT;
-    const r = spawnSync(process.execPath, [WATCHDOG, '--minutes', '0.05', '--', process.execPath, '--test', `--test-reporter=${REPORTER}`, '--test-reporter-destination=stdout', file], {
-      encoding: 'utf8',
-      env,
-      timeout: 50_000,
-    });
+    const run = (minutes: number) =>
+      spawnSync(process.execPath, [WATCHDOG, '--minutes', String(minutes), '--', process.execPath, '--test', `--test-reporter=${REPORTER}`, '--test-reporter-destination=stdout', file], {
+        encoding: 'utf8',
+        env,
+        timeout: minutes * 60_000 + 40_000,
+      });
+    // The run must reach the hanging test before the deadline. Two node processes start first, and on a loaded runner
+    // that took longer than 3 s: the file was 1 s old at the deadline, 'waits forever' not yet started (w1758; here 22 of
+    // 24 runs beside 24 busy processes). A run that ended before its hang began goes again with a longer deadline; one
+    // that never names the hung test still fails, at the last.
+    const reached = (stderr: string) => /waits forever: running/.test(stderr);
+    let r = run(0.05);
+    for (const minutes of [0.25, 0.75]) if (r.status === 124 && !reached(r.stderr)) r = run(minutes);
     assert.equal(r.status, 124, r.stderr);
     assert.match(r.stderr, /WATCHDOG: the run is still going/);
     assert.match(r.stderr, /hang\.test\.ts: running for \d+ s\n\s+waits forever: running for \d+ s/);

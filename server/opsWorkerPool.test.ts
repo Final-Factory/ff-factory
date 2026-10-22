@@ -34,9 +34,16 @@ const usage = (session: number, weekly: number, sessionMin: number, weeklyDays =
   weekly: { label: 'weekly', percent: weekly, resetsAt: iso(NOW + weeklyDays * 86_400_000) },
 });
 
-function world(t: { after: (fn: () => void) => void }, meters: Record<string, PlanUsage>, second = false) {
+async function until(what: string, cond: () => boolean, ms = 10_000) {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+function world(t: { after: (fn: () => void | Promise<void>) => void }, meters: Record<string, PlanUsage>, second = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-pool-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const keyFile = path.join(dir, 'vault.key');
   fs.writeFileSync(keyFile, newKeyText(), { mode: 0o600 });
   fs.chmodSync(keyFile, 0o600);
@@ -70,7 +77,15 @@ function world(t: { after: (fn: () => void) => void }, meters: Record<string, Pl
     file: path.join(dir, 'ops-worker.json'),
     now: () => NOW,
   });
-  t.after(() => ops.close());
+  // The ops worker's turn may still be running when the test ends (a loaded runner): stop its process before the folder
+  // goes, or its next transcript line lands in a deleted folder (w1758: ENOENT ops-worker.jsonl "after the test ended").
+  t.after(async () => {
+    ops.close();
+    sessions.stopAll();
+    store.flush();
+    await store.saved();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   const worker = () => machineRunEnv({ machines: {} } as never, { id: 'lothdesktop' }, { role: 'workers', requestedBy: LOTH, sessionId: 'w-new' }, ctx);
   return { ops, store, tokens, worker };
 }
@@ -80,7 +95,7 @@ test('w1112: ops_worker deploy goes through while the pool is held past the sess
   // The 07:30Z picture: lothsahn's one token, the dispatcher's, at 92% of its 5-hour window (cap 80), resetting at 07:50Z.
   const w = world(t, { [fingerprintOf(DISP)]: usage(92, 40, 20) });
   assert.match(w.ops.deploy(lothOrch, 'deploy'), /may run fffctl update once/);
-  await new Promise((r) => setTimeout(r, 100));
+  await until('the deploy job starts its process', () => w.tokens.length > 0 && w.store.readTranscript(OPS_ID, 50).some((e) => e.kind === 'user'));
   assert.deepEqual(w.tokens, [DISP], 'the deploy job started a process, on lothsahn\'s token');
   assert.ok(w.store.readTranscript(OPS_ID, 50).some((e) => e.kind === 'user' && e.text.startsWith('[deploy] Lothsahn asked')));
   // The caps still hold a new worker job on the same pool, with the reason and the reset.
@@ -95,7 +110,7 @@ test("w1112: past the caps the ops worker takes the person's other token before 
   // vault-lothsahn-2 is held at 85%. A worker gets neither; the ops worker gets vault-lothsahn-2, keeping the dispatcher's buffer.
   const w = world(t, { [fingerprintOf(DISP)]: usage(10, 70, 200, 6), [fingerprintOf(L2)]: usage(85, 30, 60) }, true);
   w.ops.send(lothOrch, 'check m5', true);
-  await new Promise((r) => setTimeout(r, 100));
+  await until('the job starts its process', () => w.tokens.length > 0);
   assert.deepEqual(w.tokens, [L2]);
   assert.throws(w.worker, (e: unknown) => e instanceof PoolHeldError && /every token is at a limit \(.*inside the buffer kept for the dispatcher/.test(e.message));
 });
