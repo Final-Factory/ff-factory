@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import { HostedSession, credsOf, hostFiles, type HostDeps, type HostStart } from '../machine/agentHost.ts';
 import type { SessionInfo } from '../shared/types.ts';
 
@@ -92,7 +93,33 @@ test('w1745: the same token keeps today\'s path: a message while the host closes
   assert.equal(r.launched.length, 1);
 });
 
-test('w1745: a message the old host did not carry out goes to the new host ahead of one sent after the stop', { timeout: 30_000 }, async (t) => {
+test('w1745: a host an older daemon started (no creds.sha), taken back across the update, gets no message once its agent ended: a new host on the new token carries it', { timeout: 30_000 }, async (t) => {
+  // Worker 9888f324 on Biscuit, 2026-10-22: its host predated the daemon fix, so its credentials were unknown, and at
+  // 19:10:37Z the resume went into it and ran on vault-ben-1 again. A process stands in for the old host (alive, its own pid).
+  const r = rig('m4');
+  const old = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  t.after(() => {
+    old.kill();
+    fs.rmSync(r.root, { recursive: true, force: true });
+  });
+  fs.mkdirSync(r.f.dir, { recursive: true });
+  fs.writeFileSync(r.f.host, JSON.stringify({ hostProtocol: 1, sessionId: 'm4', pid: old.pid, startedAt: new Date().toISOString() }));
+  fs.writeFileSync(r.f.beat, '');
+  fs.writeFileSync(r.f.state, JSON.stringify({ op: 'state', info: { ...info('m4'), status: 'stopped' }, live: false, lastFrom: 'system' }));
+  assert.ok(!fs.existsSync(r.f.creds), 'an older daemon wrote no creds.sha');
+  assert.equal(r.s.adopt(), true);
+  assert.equal(r.s.live, false, 'its agent has ended (the portal stopped it to move it)');
+  r.setToken(TOKEN_ROOM);
+  r.s.send('resumed on a token with room', 'system');
+  assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'stop'], 'the old host gets a stop, not the message');
+  assert.equal(r.launched.length, 0);
+  r.hostSays({ op: 'closed', consumed: r.commands().length });
+  await until('a new host started', () => r.launched.length === 1);
+  assert.equal(r.launched[0].spec.env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_ROOM);
+  assert.deepEqual(r.commands().filter((c) => c.op === 'send').map((c) => c.text), ['resumed on a token with room']);
+});
+
+test('w1745: a message the old host did not carry out goes to the new host ahead of one sent after the stop',{ timeout: 30_000 }, async (t) => {
   const r = rig('m3');
   t.after(() => fs.rmSync(r.root, { recursive: true, force: true }));
   r.s.send('first turn', 'system');

@@ -25,6 +25,10 @@ import type { PlanUsage, SessionInfo } from '../shared/types.ts';
 export const OUT_FALLBACK_MS = 60 * 60_000;
 /** A session refused again on the token it was resumed from within this long did not move (a background task kept its process): held, not resumed again. */
 const STUCK_MS = 2 * 3_600_000;
+/** A worker still idle on an out token after a limit stop is resumed again this long after its last turn ended (TokenSwitch.tick). */
+export const RETRY_STUCK_MS = 10 * 60_000;
+/** At most this many such resumes per worker and token: each one that fails costs a turn that ends at once. */
+export const MAX_STUCK_RETRIES = 3;
 /** Switches kept for system_status. */
 const KEEP = 20;
 /** A move not seen to finish within this long is dropped (a held pool waits up to 8 days, docs/vault.md section 4). */
@@ -69,6 +73,8 @@ export interface TokenSwitchDeps {
   meters: (account: string) => PlanUsage | undefined;
   /** Mark the token out (UsageTracker.markOut). */
   markOut: (account: string, mark: TokenOutMark, label: string) => void;
+  /** Whether the token (its key) is out: used up or retired, so the pool hands it to no new job (Agents.tokenUnusable). */
+  out: (account: string) => boolean;
   /** Whether the pool this agent's next process starts from (its person's, by their pool setting) can serve it now. */
   serves: (s: SessionInfo) => boolean | undefined;
   /** Resume it: a message the send queue holds until its process has restarted on the pool's pick (worker, orchestrator), or a new run (standing). */
@@ -124,6 +130,8 @@ export class TokenSwitch {
   private readonly refused = new Map<string, string>();
   /** Sessions resumed after a refusal, and on which token, so one whose process could not move is held, not resumed in a loop. */
   private readonly resumed = new Map<string, { account: string; at: number }>();
+  /** Resumes by tick of a worker left on an out token, by session id: on which token, how many, and whether giving up was logged. */
+  private readonly retries = new Map<string, { account: string; tries: number; gaveUp?: boolean }>();
   private pending = new Map<string, Pending>();
   private recent: TokenSwitchRecord[] = [];
 
@@ -186,8 +194,8 @@ export class TokenSwitch {
     if (stuck) {
       // Its process could not move (a background task keeps it, accountMove): another resume would run on the out token again,
       // and a usage gate would clear at once (its pool has room) and loop. It moves at its first message once the task is done;
-      // the ledger cleanup resumes a worker a limit cut off (cutOffStep) when nothing else does.
-      this.d.log(`token switch (w1745): ${who} stopped on ${label} again after its resume: its process is still there (${s.backgroundTasks ? 'a background task keeps it' : 'it did not restart'}), so it is not resumed again; it moves at its next message once nothing keeps the process`);
+      // tick resumes it again RETRY_STUCK_MS later, a few times, and the ledger cleanup resumes a worker a limit cut off (cutOffStep).
+      this.d.log(`token switch (w1745): ${who} stopped on ${label} again after its resume: its process is still there (${s.backgroundTasks ? 'a background task keeps it' : 'it did not restart'}), so it is not resumed at once; it moves at its next message once nothing keeps the process, or is resumed again in ${RETRY_STUCK_MS / 60_000} min`);
       return;
     }
     const reason = 'no token in its pool has room';
@@ -195,6 +203,45 @@ export class TokenSwitch {
       const blocked = this.d.hold(s, label, `${label} ran out and ${reason}`);
       this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out, and ${reason}: ${blocked.length ? `${blocked.join(', ')} blocked on its usage limit, resumed when a token of the pool has room` : 'nothing to block'}`);
     } else this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out, and ${reason}: it waits (its next message or run starts when a token has room)`);
+  }
+
+  /**
+   * Every minute (index.ts): a worker still idle on an out token whose last turn ended on Claude's limit line is resumed again,
+   * RETRY_STUCK_MS after that turn, at most MAX_STUCK_RETRIES times per token. Without it a worker whose move did not take
+   * waited for "its next message", which nothing sent: 7d4cb2df (w1752) sat on vault-ben-1 from 18:31Z on 2026-10-22, its
+   * process kept by an agent host that predated the daemon fix, and a portal restart forgets who was resumed. Not while a
+   * background task keeps its process (that move waits for the task), and not when its pool has no room (the usage gate holds it).
+   */
+  tick(sessions: Iterable<SessionInfo>) {
+    const now = this.now();
+    for (const s of sessions) {
+      if (s.kind !== 'worker' || !s.account || MID_TURN.has(s.status) || s.status === 'stopped' || s.status === 'error' || s.backgroundTasks) continue;
+      if (!LIMIT_END.test((s.lastResult ?? '').trim())) continue;
+      const ended = Date.parse(s.lastResultAt ?? '');
+      if (!Number.isFinite(ended) || now - ended < RETRY_STUCK_MS) continue;
+      const label = this.d.label(s.account);
+      if (!label || !this.d.out(s.account)) continue;
+      // Its last resume is still on its way (the restart, the queued message): not another on top.
+      const last = this.resumed.get(s.id);
+      if (last?.account === s.account && now - last.at < RETRY_STUCK_MS) continue;
+      const r = this.retries.get(s.id);
+      const tries = r?.account === s.account ? r.tries : 0;
+      const who = `${s.kind} ${s.id}`;
+      if (tries >= MAX_STUCK_RETRIES) {
+        if (!r?.gaveUp) {
+          this.retries.set(s.id, { account: s.account, tries, gaveUp: true });
+          this.d.log(`token switch (w1745): ${who} is still on ${label} after ${tries} more resumes; not resumed again, it moves at its next message`);
+        }
+        continue;
+      }
+      if (this.d.serves(s) !== true) continue;
+      this.retries.set(s.id, { account: s.account, tries: tries + 1 });
+      this.resumed.set(s.id, { account: s.account, at: now });
+      const why = `${label} ran out ("${(s.lastResult ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)}")`;
+      this.moving(s, why);
+      this.d.log(`token switch (w1745): ${who} is still idle on ${label}, which is out, ${Math.round((now - ended) / 60_000)} min after its turn stopped there; resumed again on a token with room in its pool (${tries + 1} of ${MAX_STUCK_RETRIES})`);
+      this.d.resume(s, this.resumeText(s, label, why));
+    }
   }
 
   /**

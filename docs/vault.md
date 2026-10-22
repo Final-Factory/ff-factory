@@ -262,7 +262,12 @@ code and covered by `server/tokenSwitch.test.ts`:
   with, so a message whose run has other credentials (`credsOf`: a hash of the Claude and GitHub tokens, kept in the host
   folder's `creds.sha`) never goes to a host whose agent has ended: the host is told to stop and a new host carries the message
   on the new token (`server/hostCreds.test.ts`). Before that fix, on 2026-10-22 17:23Z, worker 568cd4d4's message reached its
-  closing host, which started the agent again on vault-ben-1 …nQAA, and the turn ended on the weekly limit at once. A person's **orchestrator** moves the same way (`orchestratorPoolMove` → `orchestratorOut`) when its token is used
+  closing host, which started the agent again on vault-ben-1 …nQAA, and the turn ended on the weekly limit at once. A host an
+  older daemon started has no `creds.sha`; its credentials count as other, so it gets no message once its agent has ended
+  either (9888f324 on Biscuit, 19:10Z the same day, sat in such a host, adopted across the daemon update, and went back onto
+  vault-ben-1). A worker whose process must move is not compacted first: the automatic compaction (`AutoCompactor.check`,
+  `moving` = `Agents.accountMoveWhy`) waits for the restart, since a `/compact` sent 2 s after the limit ran on the used-up token,
+  failed at once and kept the turn open ahead of the resume (7d4cb2df and 9888f324). A person's **orchestrator** moves the same way (`orchestratorPoolMove` → `orchestratorOut`) when its token is used
   up and its pool has a token that is not, or when it is retired and its pool has one that is neither; it uses the pool up as
   before otherwise. A **standing agent** starts each run on a fresh process, so its next run picks a token with room. The
   **dispatcher** stays on the token `claudeAccounts.dispatcher` pins (or its payer's pool, unpinned) and is never moved or
@@ -277,8 +282,13 @@ code and covered by `server/tokenSwitch.test.ts`:
   that pool has room (`ownerPoolServes`), on that token. The ledger cleanup no longer stalls a blocked request for its worker's
   cut-off (`cutOffStep`): its blocker resumes it. An orchestrator stays where it is (the pool banner says why); a standing run
   waits for its pool (w1126). A worker whose process could not move (a background task kept it) and is refused again within
-  two hours is not resumed again, nor held on a gate that would clear at once: it moves at its first message once nothing
-  keeps the process, so nothing loops.
+  two hours is not resumed at once, nor held on a gate that would clear at once: it moves at its first message once nothing
+  keeps the process. And it is not left there: every minute `TokenSwitch.tick` resumes a worker still idle on an out token
+  whose last turn ended on the limit line, 10 minutes after that turn (`RETRY_STUCK_MS`), with no background task and a pool
+  with room, at most 3 times per token (`MAX_STUCK_RETRIES`), each logged `... is still idle on vault-ben-1 …nQAA, which is
+  out, 11 min after its turn stopped there; resumed again ... (1 of 3)`. A portal restart forgets who was resumed; this
+  finds them from their sessions. Before it, worker 7d4cb2df (w1752) sat on vault-ben-1 from 18:31Z on 2026-10-22, waiting
+  for a message nothing sent.
 - **Only the person's own pool.** The new token comes from the pool `pickPool` reads for the work's person (their own, or the one
   their pool setting names, w1717), never another person's, the host's or any fallback. A lothsahn worker on his out token waits
   while Ben's pool has room, unless lothsahn's setting names Ben's pool.

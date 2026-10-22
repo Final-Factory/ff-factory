@@ -496,7 +496,7 @@ export class Agents {
     this.waker = new Waker(sessions, store, path.join(cfg.dataDir, 'wakes.json'));
     // w1384: a person never gets a bare path to review media from their orchestrator: what a reply names is shown inline.
     store.assistantText = (id, text) => this.inlineForPerson(id, text);
-    this.autoCompact = new AutoCompactor(sessions, cfg, { settleMs: cfg.orchestrator?.compactSettleMs, waitsLong: (i) => this.waitsLong(i) });
+    this.autoCompact = new AutoCompactor(sessions, cfg, { settleMs: cfg.orchestrator?.compactSettleMs, waitsLong: (i) => this.waitsLong(i), moving: (s) => this.accountMoveWhy(s) });
     // IDLE WORKERS (w384): what keeps one from being stopped to make room, and the reaper of finished ones.
     sessions.keepIdle = (s) => this.keepIdle(s);
     // One person's tokens per turn (w1076): a live worker whose requests changed person restarts on theirs first.

@@ -2613,6 +2613,7 @@ const tokenSwitch = new TokenSwitch({
   label: tokenLabel,
   meters: (account) => usage.usageOf(account),
   markOut: (account, mark, label) => usage.markOut(account, mark, label),
+  out: (account) => !!agents.tokenUnusable?.(account),
   serves: (s) => {
     // A standing agent's new run picks its token at its start, and waits for its pool when no token has room (w1126).
     if (s.kind === 'standing') return true;
@@ -2646,6 +2647,8 @@ if (!isDryRun) {
   bus.on('event', (e: ServerEvent) => {
     if (e.type === 'session') tokenSwitch.seen(e.session);
   });
+  // A worker whose move did not take (its process stayed on the out token) is resumed again, a few times (TokenSwitch.tick).
+  setInterval(() => tokenSwitch.tick(store.sessions.values()), 60_000).unref();
 }
 const tokenSwitchLines = () =>
   tokenSwitch.statusLines(usage.outsNow(), (key) => [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error').map((s) => `${s.kind} ${s.id}`));

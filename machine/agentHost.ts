@@ -367,11 +367,13 @@ export class HostedSession implements SessionHandle {
     if (this.stoppingNow || this.waiting.length) {
       // Its old host's tree is still being stopped (w799): the new host starts once it is gone, with this message.
       this.waiting.push(cmd);
-    } else if (this.running && !this.liveNow && this.creds !== undefined && this.creds !== credsOf(this.deps.spec().env)) {
+    } else if (this.running && !this.liveNow && this.creds !== credsOf(this.deps.spec().env)) {
       // w1745: its agent ended (a usage limit, a stop for another account) and its host is closing, while this message's run
       // has other credentials (the portal moved it to another token). A host keeps the environment it started with, so given
       // this message it would start the agent again on the old token: the old host is told to stop, and a new host, started
-      // with the run's credentials now, carries the message once the old one has closed.
+      // with the run's credentials now, carries the message once the old one has closed. A host an older daemon started
+      // recorded none (no creds.sha): unknown counts as other, since its agent has ended anyway (9888f324 on Biscuit,
+      // 2026-10-22 19:10:37Z, went back onto its used-up token in a host adopted across the daemon update).
       this.waiting.push(cmd);
       this.command({ op: 'stop', onPurpose: false });
       this.deps.log(`agent host ${this.info.id}: a message for other credentials than its host started with: a new host carries it once this one has closed (w1745)`);
