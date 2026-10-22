@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
 import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchGate.ts';
+import { foreignTimedHold } from '../machine/benchLock.ts';
 import { standingGuard } from './standingGuard.ts';
 import { publicIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
@@ -349,6 +350,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       editorRunning,
       // The shell's own variables, so `cd $TMPDIR/ffbox && git push origin HEAD:master` is read where it goes (w1132).
       env: agentEnv,
+      // w1750: no player or screen grab beside another worker's timed run; the worker's own session passes.
+      ...(g.workerRoot ? { benchBusy: () => foreignTimedHold(g.workerRoot, agentEnv.FF_SESSION_ID) } : {}),
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];
