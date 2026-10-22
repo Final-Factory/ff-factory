@@ -101,3 +101,74 @@ test('the chat on a desktop, for the before and after (SIDEWAYS_SHOTS)', async (
   const reply = await wideChat(page, uniq('desk'));
   await shot(page, 'desktop', reply);
 });
+
+/**
+ * w1781 (Ben, on his Android phone: "The preview video is clipping off the screen on my phone"): a 1920x1080 clip, in a message
+ * and in an ask_person card, stays inside the column with its caption, as the stills do. Phone widths 360 (a small Android) and
+ * 412 (a Pixel). Set SIDEWAYS_SHOTS to keep a screenshot of each.
+ */
+const CLIP_CAPTION = 'A 45-second clip of setting it up in a built game with a caption that is long enough to need wrapping';
+
+for (const width of [360, 412]) {
+  test(`a 1920x1080 clip and its caption stay inside the column at ${width} px, in a message and in a card`, async ({ authed: page, browserName }) => {
+    test.skip(browserName !== 'chromium', 'WebKit builds cannot decode the WebM fixture and hide the player');
+    await page.setViewportSize({ width, height: 800 });
+    const port = new URL(test.info().project.use.baseURL!).port;
+    const review = path.join(os.tmpdir(), `ffsb-e2e-${port}`, 'review', 'w000-clips').replaceAll(path.sep, '/');
+    const app = await appState(page.request);
+    const tag = uniq('clip');
+    const still = `![Option A at 1280](<${review}/option-a-1280.png>)`;
+    const clip = `![${CLIP_CAPTION}](<${review}/clip-1080.mp4>)`;
+    await sendMessage(page.request, app.orchestratorId!, `Clip in a message ${tag}\n\n${still}\n\n${clip}\n\n${still}`);
+    const reply = page.locator('.orch .msg-assistant', { hasText: tag });
+    await expect(reply).toBeVisible();
+    await useTool(page.request, app.orchestratorId!, 'ask_person', {
+      question: `Ship the halo ${tag}? ${still} ${still} ${clip}`,
+      options: [
+        { label: `Ship it (${tag})`, description: `As recorded. ${clip}`, recommended: true },
+        { label: `Wait (${tag})`, description: `Not yet. ${still}` },
+      ],
+    });
+    const card = page.getByTestId('ask').filter({ hasText: tag }).last();
+    await expect(card).toBeVisible();
+    await expect(reply.locator('video')).toHaveCount(1);
+    await expect(card.locator('video')).toHaveCount(2);
+    // The players take their size from the file's header (1920 x 1080): wait for it, so a layout that follows it shows.
+    await expect.poll(() => page.evaluate(() => [...document.querySelectorAll<HTMLVideoElement>('video')].filter((v) => v.currentSrc.includes('clip-1080') && v.videoWidth === 1920).length)).toBeGreaterThanOrEqual(3);
+    await page.waitForTimeout(500);
+    const m = await page.evaluate(() => {
+      const scroller = document.querySelector<HTMLElement>('.orch .transcript-scroll')!;
+      const col = scroller.getBoundingClientRect();
+      const colRight = col.left + scroller.clientWidth;
+      const what = (e: Element) => `${e.tagName.toLowerCase()}.${String(e.className).slice(0, 24)}`;
+      const media = [...scroller.querySelectorAll('video, .md-video, .md-video-cap, .md-video-cap .ellipsis, .md-img img, .ask-media')].map((e) => {
+        const r = e.getBoundingClientRect();
+        const h = e as HTMLElement;
+        return { el: what(e), right: Math.round(r.right), width: Math.round(r.width), scrollWidth: h.scrollWidth, clientWidth: h.clientWidth, whiteSpace: getComputedStyle(e).whiteSpace };
+      });
+      return {
+        vw: window.innerWidth,
+        colRight: Math.round(colRight),
+        chat: { scrollWidth: scroller.scrollWidth, clientWidth: scroller.clientWidth },
+        page: { scrollWidth: document.scrollingElement!.scrollWidth, clientWidth: document.scrollingElement!.clientWidth },
+        media,
+      };
+    });
+    const dir = process.env.SIDEWAYS_SHOTS;
+    if (dir) {
+      fs.mkdirSync(dir, { recursive: true });
+      await reply.locator('video').first().evaluate((el) => el.scrollIntoView({ block: 'center' }));
+      await page.screenshot({ path: path.join(dir, `clip-message-${width}.png`) });
+      await card.locator('video').first().evaluate((el) => el.scrollIntoView({ block: 'center' }));
+      await page.screenshot({ path: path.join(dir, `clip-card-${width}.png`) });
+      fs.writeFileSync(path.join(dir, `clip-${width}.json`), JSON.stringify(m, null, 1));
+    }
+    expect(m.page.scrollWidth, 'the page scrolls sideways').toBeLessThanOrEqual(m.page.clientWidth);
+    expect(m.chat.scrollWidth, 'the chat holds something wider than itself').toBeLessThanOrEqual(m.chat.clientWidth);
+    for (const e of m.media) {
+      expect(e.right, `${e.el} runs past the column (right edge ${e.right} px, column ${m.colRight} px)`).toBeLessThanOrEqual(m.colRight + 1);
+      expect(e.scrollWidth, `${e.el} holds ${e.scrollWidth} px in ${e.clientWidth}`).toBeLessThanOrEqual(e.clientWidth + 1);
+      expect(e.whiteSpace, `${e.el} does not wrap`).not.toBe('pre');
+    }
+  });
+}
