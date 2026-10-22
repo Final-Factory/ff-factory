@@ -85,3 +85,30 @@ export function writeBenchPriorities(root: string | undefined, sessions: Record<
     return undefined;
   }
 }
+
+const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16) + 'Z';
+
+/**
+ * w1750 (lothsahn, 2026-10-22, after a worker shot clips with a player on BEAST beside another worker's timed profile:
+ * "Why is the game player running if the worker has an exclusive lock on beast?"): while another worker's timed run
+ * holds this machine's bench lock, its message for a refused player launch or clip ("bench lock held by <worker>, until
+ * <time>"), else undefined. A timed run is a granted, unrevoked exclusive ticket whose helper lives and that is inside
+ * its hold bound (the game repo's bench_queue.py timed_hold, the same rules), or a live old-style lock. The worker's own
+ * (the same session) never counts: its other shell calls belong to its own run.
+ */
+export function foreignTimedHold(root: string | undefined, session: string | undefined, now: number = Date.now(), alive: (pid: number) => boolean = pidAlive): string | undefined {
+  if (!root) return undefined;
+  for (const t of queueTickets(benchLockDir(root), alive)) {
+    if (t.mode !== 'exclusive' || !t.granted || t.revoked) continue;
+    if (session && t.session === session) return undefined;
+    const since = t.granted.ts * 1000;
+    const until = since + (t.maxMin ?? 60) * 60_000;
+    if (now >= until) continue; // past its bound: the next waiter revokes it
+    const bits = [(t.requests ?? []).join(','), [t.host, t.sandbox].filter(Boolean).join('/'), t.what ? `"${t.what.slice(0, 120)}"` : ''].filter(Boolean);
+    const who = t.session ? `worker ${t.session}` : `pid ${t.pid}`;
+    return `bench lock held by ${who}${bits.length ? ` (${bits.join(', ')})` : ''}, until ${hhmm(until)} at the latest (held since ${hhmm(since)})`;
+  }
+  const old = readBenchLock(root, now, alive);
+  if (old && !/\[t\d{8}\]/.test(old.owner)) return `bench lock held by an old-style lock: ${old.owner} (seen since ${hhmm(Date.parse(old.since))}, 40 minutes at most)`;
+  return undefined;
+}
