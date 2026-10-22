@@ -27,7 +27,10 @@ Known causes, so a future failure can be named at once:
 
 - **Windows, `coverage file is empty`**: Node's coverage on Windows; fixed in w906.
 - **Playwright shard at 20 minutes in "Install browser system libraries"**: the Ubuntu mirror hung `apt-get update`
-  (log ends at `azure.archive.ubuntu.com ... InRelease`). The step now gives up after 3 minutes and retries (w922).
+  (log ends at `azure.archive.ubuntu.com ... InRelease`). Each try gets 4 minutes; a try cut off has its `apt-get`
+  ended (it holds dpkg's lock) and the second goes to Ubuntu's own archive instead of Azure's mirror (w922; w1194's move back
+  to GitHub's runners lost the limit and w1758 put it back: 3 WebKit jobs hung there on 2026-10-22).
+  `scripts/e2e-legs.test.ts` fails a ci.yml whose browser install has no time limit, cleanup or second try.
 - **A job shown "in progress" after it finished**: GitHub never marked it completed (5 times in 14 days, all "Commit
   identities are noreply"; on #294 the run sat 89 minutes until it was re-run). Re-run the run.
 - **"Commit identities are noreply" on a manual run**: it checked main's 11 non-noreply commits of 2026-10-05/06 again;
@@ -52,6 +55,20 @@ Known causes, so a future failure can be named at once:
   - `unitySlots.test.ts` crashed holder, dropped waiter and the CLI run (12, Windows): a 200 ms stale limit or 150 ms head
     start that a runner's stall reached (w636, f700b15). The "goes over its limit" failure (2, Linux, w469's own branch)
     was a real bug fixed before it merged, not a flake.
+- **Unit-test flakes of 2026-10-11..22** (w1758; each failing commit checked for its fix with `git merge-base`):
+  - fixed before w1758, every failure on a commit without the fix: `agentState.test.ts` w613/w656 "until tomorrow HH:MM"
+    from 23:30 UTC (e0a4f6d6); `attachments.test.ts` resume `10000 !== 15000` (306d14d6); `agentHost.test.ts` w1469
+    `meta: undefined` (fc71f7af); `machineVoice.test.ts` w615 `ENOTEMPTY` (ecc9d927).
+  - `attachmentFlow.test.ts` "pc/alpha is busy" (still 12 of 32 under load after w1628's c9f39ccc): the ledger's
+    status question (`Orchestrators.askStatus`, 3 s after a worker's turn without a `DONE:` or still-open line) landed
+    mid-test. The test sets `statusAskDelayMs` out of reach and finds messages by their words.
+  - `leftovers.test.ts` w1219 `status=0 Terminated`: `ff-leftovers end` ended its own pipeline's `tail` (forked, not yet
+    exec'd, so a shell with the session). A product bug: `ownLeftovers` spares what the command's shells run beside it.
+  - `opsWorkerPool.test.ts` `ENOENT ... ops-worker.jsonl` "after the test ended": the folder went before the ops
+    worker's turn ended; the test stops it first.
+  - `test-watchdog.test.ts` "a hung run": two node starts outlasted the 3 s deadline; a run that had not reached its hang
+    goes again with a longer one.
+  - How they were reproduced on a 16-core PC: 12 to 16 copies of the test at once beside 24 busy-loop node processes.
 - **gitleaks `generic-api-key` in a test or doc**: every one in the window was a fake key in a fixture; add it to
   `.gitleaksignore` or make the fixture not look like a key.
 

@@ -133,8 +133,14 @@ test('vault (w1519): a GitHub App goes in from the page, its .pem chosen as a fi
   await row.getByRole('button', { name: 'Save' }).click();
   await expect(row.getByTestId(`vault-github-app-${name}`)).toContainText('installations of Gherik1, Other-Modder (uninstalls the others)');
   await expect(row).toContainText(`…${body.slice(-4)}`);
+  // GitHub refuses the made-up App ID, so the app gets a banner once it has been checked: wait for that check where it runs.
+  const banner = page.locator('.gbar', { hasText: name });
+  await expect(banner).toBeVisible({ timeout: 15_000 }).catch(() => undefined);
 
   await row.getByRole('button', { name: 'Remove' }).click();
   await row.getByRole('button', { name: 'Really remove?' }).click();
   await expect(row).toHaveCount(0);
+  // Its banner goes with it, not at the next 20-second refresh: left up, it covered the orchestrator's visual baseline in the
+  // test that ran next (w1745, ff-factory #528's first CI run).
+  await expect(banner).toHaveCount(0, { timeout: 5_000 });
 });

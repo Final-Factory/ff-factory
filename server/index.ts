@@ -1073,9 +1073,11 @@ const vaultView = () => ({
 const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map((x) => x.trim()).filter(Boolean) : undefined);
 const vaultChanged = () => {
   usage.poke();
-  void github.tick();
+  // The banners follow at once, not at the next 20-second refresh: a removed entry's banner goes now (its health is read
+  // from what the vault holds), and what the checks below find shows when they are done.
+  refreshTokenWarnings();
   // A grant may have changed which machines get an app: they get the new set either way.
-  void githubApps.tick().then(() => machines.pushGhAppTokens());
+  void Promise.allSettled([github.tick(), githubApps.tick().then(() => machines.pushGhAppTokens())]).then(() => refreshTokenWarnings());
 };
 // Probe every GitHub token and the portal's login now (w904, the banner's and the vault page's "Re-check now"): anyone
 // signed in, as the banner is shown to a token's own person; GitHub reads only, at most every 30 seconds, never a value.
