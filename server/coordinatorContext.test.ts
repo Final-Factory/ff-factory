@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
-import { withCoordinators } from '../scripts/coordinatorContext.ts';
+import { asOnLinuxCi, withCoordinators } from '../scripts/coordinatorContext.ts';
 import { ALWAYS_LOADED } from './belts.ts';
 import { deferredToolsLine } from './toolManifest.ts';
 import { RULE_TOPICS, type Agents, type RuleTopic } from './agents.ts';
@@ -119,7 +119,7 @@ test('w1158: each coordinator loads its everyday tools in every call and finds t
 });
 
 test('w1158: what a coordinator carries in every call stays within its budget', async () => {
-  // Characters (exact); the API's own count was ~2.9 characters a token for this text. Before w1158: the dispatcher's
+  // Characters (exact), with this machine's paths as CI's Linux runner has them (asOnLinuxCi, w1758); the API's own count was ~2.9 characters a token for this text. Before w1158: the dispatcher's
   // prompt 37,004 characters and every one of its 51 tools in full, 84,200 (measured).
   // w1399 (Ben, 2026-10-16: "you make bad UI mistakes constantly") added the one-line UI-stills trigger to both briefs; the
   // owner's brief measured 26,180 characters with it (Lothsahn's name, the longest, about 100 times), so the cap moved from
@@ -142,7 +142,7 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   const ALWAYS_LOADED_MAX = 24_500;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
-      const prompt = promptOf(agents, info).length;
+      const prompt = asOnLinuxCi(promptOf(agents, info)).length;
       const tools = agents
         .orchestratorToolDefs(info)
         .filter((t) => t._meta?.['anthropic/alwaysLoad'])

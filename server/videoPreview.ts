@@ -36,14 +36,17 @@ export function previewPathOf(original: string): string {
 }
 
 export interface PreviewOptions {
-  /** The ffmpeg program. Default "ffmpeg" on PATH; absent there, every request gets the original. */
-  ffmpeg?: string;
+  /**
+   * The ffmpeg program, or a program and its first arguments (the tests' node script: Windows runs no `.cmd` without a
+   * shell, w1758). Default "ffmpeg" on PATH; absent there, every request gets the original.
+   */
+  ffmpeg?: string | readonly string[];
   /** An encode running longer than this is ended. Default 10 minutes. */
   timeoutMs?: number;
 }
 
 export class VideoPreviews {
-  private readonly ffmpeg: string;
+  private readonly ffmpeg: readonly string[];
   private readonly timeoutMs: number;
   /** Encodes in progress or queued, by original path: one per file, one at a time (the portal's CPU is shared). */
   private readonly pending = new Map<string, Promise<string | undefined>>();
@@ -54,7 +57,7 @@ export class VideoPreviews {
   private readonly failed = new Set<string>();
 
   constructor(o: PreviewOptions = {}) {
-    this.ffmpeg = o.ffmpeg ?? 'ffmpeg';
+    this.ffmpeg = typeof o.ffmpeg === 'string' ? [o.ffmpeg] : (o.ffmpeg ?? ['ffmpeg']);
     this.timeoutMs = o.timeoutMs ?? 10 * 60_000;
   }
 
@@ -93,7 +96,7 @@ export class VideoPreviews {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
         this.missing = true;
-        console.warn(`video previews: ${this.ffmpeg} not found; inline videos play their originals`);
+        console.warn(`video previews: ${this.ffmpeg[0]} not found; inline videos play their originals`);
       } else {
         this.failed.add(original);
         console.warn(`video preview of ${path.basename(original)} failed: ${(e as Error).message}`);
@@ -106,7 +109,7 @@ export class VideoPreviews {
 
   private run(args: string[]): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+      const child = spawn(this.ffmpeg[0], [...this.ffmpeg.slice(1), ...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
       try {
         if (child.pid) os.setPriority(child.pid, 10); // behind the portal's own work
       } catch {

@@ -18,7 +18,7 @@ import { SessionManager, setQueryForTesting } from '../server/sessions.ts';
 import { MachineManager } from '../server/machines.ts';
 import { Agents } from '../server/agents.ts';
 import { Identity } from '../server/identity.ts';
-import type { Config } from '../server/config.ts';
+import { ROOT, type Config } from '../server/config.ts';
 import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { useFakeVault } from '../server/testVault.ts';
@@ -34,6 +34,19 @@ const PEOPLE: UserInfo[] = [{ ...BEN, role: 'owner' }, { ...LOTH, role: 'owner' 
 /** The tools as the SDK's MCP server lists them: name, description, JSON schema of the input. */
 function toolTexts(belt: { name: string; description: string; schema: unknown }[]): ToolText[] {
   return belt.map((t) => ({ name: t.name, description: t.description, inputSchema: z.toJSONSchema(z.object(t.schema as z.ZodRawShape)) }));
+}
+
+/**
+ * A brief with this machine's paths written as CI's Linux runner has them, so its size is the same on every machine
+ * (w1758). The brief names the fake world's folders (in the temp folder) and the config file beside the app; Windows CI's
+ * temp folder is 33 characters longer than `/tmp`, three times over, and the dispatcher's brief failed its budget there
+ * only (26,765 against 26,750 in the daily run of 2026-10-21, while Linux passed).
+ */
+export function asOnLinuxCi(text: string): string {
+  const swaps: [string, string][] = [[ROOT, '/home/runner/work/ff-factory/ff-factory'], [os.tmpdir(), '/tmp']];
+  // The longer one first: a clone may sit inside the temp folder (a worker's), or the temp folder inside the clone.
+  for (const [from, to] of swaps.sort((a, b) => b[0].length - a[0].length)) text = text.split(from).join(to);
+  return text;
 }
 
 /** Runs `fn` with a fake world's Agents and each coordinator kind's session info, then closes the world. */
@@ -82,7 +95,7 @@ export const coordinatorContexts = (): Promise<CoordinatorContext[]> =>
 
 const sizeOf = (c: CoordinatorContext) => {
   const tools = c.tools.reduce((n, t) => n + t.name.length + t.description.length + JSON.stringify(t.inputSchema).length, 0);
-  return { prompt: c.prompt.length, tools, descriptions: c.tools.reduce((n, t) => n + t.description.length, 0) };
+  return { prompt: asOnLinuxCi(c.prompt).length, tools, descriptions: c.tools.reduce((n, t) => n + t.description.length, 0) };
 };
 
 if (import.meta.url === `file://${process.argv[1]}`) {

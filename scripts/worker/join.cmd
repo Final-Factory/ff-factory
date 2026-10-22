@@ -25,14 +25,18 @@ if not exist "%FF_JOIN_DIR%\" (
 
 echo.
 echo == Step 1 of 2: downloading the join script (__FF_PORTAL_URL__/join/windows.ps1)
-where curl.exe >nul 2>&1
-if errorlevel 1 (
+rem Windows' own curl, never the first on PATH: Git for Windows' curl 8.14 exits 0 when --retry gives up (w1758, measured),
+rem and an older join.ps1 left here would then run as if downloaded. That one is removed first.
+set "FF_CURL=%SystemRoot%\System32\curl.exe"
+if not exist "%FF_CURL%" (
   echo FAILED at step 1 of 2: this Windows has no curl.exe ^(Windows 10 before version 1803^). Update Windows, or use the PowerShell line on the dashboard's Add a machine.
   >>"%FF_JOIN_LOG%" echo step 1 FAILED: no curl.exe
   goto done
 )
-curl.exe -fsS --connect-timeout 20 --retry 2 -o "%FF_JOIN_PS1%" "__FF_PORTAL_URL__/join/windows.ps1"
+if exist "%FF_JOIN_PS1%" del /f /q "%FF_JOIN_PS1%"
+"%FF_CURL%" -fsS --connect-timeout 20 --retry 2 -o "%FF_JOIN_PS1%" "__FF_PORTAL_URL__/join/windows.ps1"
 set "FF_RC=%ERRORLEVEL%"
+if "%FF_RC%"=="0" if not exist "%FF_JOIN_PS1%" set "FF_RC=0, but no file"
 if not "%FF_RC%"=="0" (
   >>"%FF_JOIN_LOG%" echo step 1 FAILED: curl exit %FF_RC%
   echo.

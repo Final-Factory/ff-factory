@@ -19,6 +19,9 @@ const H = 3_600_000;
 const D = 24 * H;
 const GB = 1024 ** 3;
 
+/** A Windows install folder on C:, where nothing outside the folder itself is read or measured (w1755). */
+const onC = (root: string) => process.platform === 'win32' && /^c:/i.test(root);
+
 function world(t: { after: (fn: () => void) => void }) {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ff-fence-')));
   t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 }));
@@ -58,14 +61,17 @@ test('the pass with a root removes only what is inside it, and lists what its ru
 
   const dry = await cleanupPass({ ...base, opts: { stale: false, dryRun: true }, root });
   assert.deepEqual(dry.planned?.map((p) => p.path), [inside], 'a dry run plans only what a real pass would remove');
-  assert.deepEqual(dry.listed?.map((l) => l.path).sort(), [cache, temp].sort(), 'and lists the rest, measured');
+  // The rest is listed, measured, except where a Windows worker reads nothing outside the folder: an install folder on C:
+  // (w1755), as this test's temp folder is on GitHub's Windows runners (w1758: the daily whole-suite run failed here).
+  const listed = (paths: string[]) => (onC(root) ? [] : paths.sort());
+  assert.deepEqual(dry.listed?.map((l) => l.path).sort(), listed([cache, temp]), 'and lists the rest, measured');
   assert.ok(dry.listed?.every((l) => l.bytes >= 100 && /outside the worker install folder/.test(l.why)));
 
   const real = await cleanupPass({ ...base, opts: ONCE, root });
   assert.deepEqual(real.removed.map((r) => r.path), [inside]);
   assert.ok(!fs.existsSync(inside));
   assert.ok(fs.existsSync(temp) && fs.existsSync(cache), 'nothing outside the root is touched');
-  assert.deepEqual(real.listed?.map((l) => l.path).sort(), [cache, temp].sort());
+  assert.deepEqual(real.listed?.map((l) => l.path).sort(), listed([cache, temp]));
 });
 
 test('without a root (the portal host, an old install) the pass is unfenced, as before', async (t) => {
@@ -94,7 +100,7 @@ test('the stale-output rules and FF Factory\'s own leftovers are fenced too (a p
   const r = await cleanupPass({ guard, mode: 'on', regular: async () => [], stale, own, opts: { stale: true, dryRun: false }, root });
   assert.deepEqual(r.removed.map((x) => x.path), [path.join(inSlots, 'slot0')]);
   assert.ok(fs.existsSync(path.join(oldSlots, 'slot0')), 'a slot in an old default outside the root stays');
-  assert.deepEqual(r.listed?.map((l) => l.path).sort(), [path.join(outside, 'Builds', 'w1'), path.join(oldSlots, 'slot0')].sort());
+  assert.deepEqual(r.listed?.map((l) => l.path).sort(), onC(root) ? [] : [path.join(outside, 'Builds', 'w1'), path.join(oldSlots, 'slot0')].sort());
 });
 
 test('the rules by place (w896 audit): on a worker root what lies outside is listed, only the temp, builds and slots inside it go', () => {
