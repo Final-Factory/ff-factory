@@ -2265,7 +2265,7 @@ test('w1812: one question from one worker on two requests is ONE [needs you]; th
   assert.equal(store.work.get('w1')!.question, undefined, 'nothing recorded by the refused ask');
   // The brief says it: look in the request's log and its worker's other requests before asking.
   const brief = (agents as unknown as { personalBrief(r: Requester): string }).personalBrief(BEN);
-  assert.match(brief, /\*\*Never ask Ben what they already answered\*\* \(w1812[^\n]*read the request's log and notes \(list_work with its id\) and those of the other requests its worker holds/);
+  assert.match(brief, /\*\*Never re-ask an answered question\*\* \(w1812\): first read the notes of the request and of its worker's other requests/);
 });
 
 test('w1812: no [needs you] when the answer is already logged after the question was raised, on its request or on another its worker holds; a new question still goes', async (t) => {

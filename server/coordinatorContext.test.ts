@@ -137,7 +137,10 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // w1770 (Ben: "I mean, you can check the code, but it just seems like you didn't investigate at all. Like, if you're unsure,
   // then do the check.") added the one-line trigger for the read_rules builds topic to a person's orchestrator's brief (the
   // rule itself is the topic); the owner's brief measured 27,898, so the cap moved to 27,900.
-  const PROMPT_MAX = 27_900;
+  // w1812 (Ben: "i already answered this why are you asking me in the waiting on input for this still") added one sentence
+  // to the [needs you] rule: read the notes of the request and its worker's other requests before asking (cut from 560
+  // characters to 240; ask_person's refusal carries the rest); the owner's brief measured 28,140, so the cap moved to 28,150.
+  const PROMPT_MAX = 28_150;
   // w1163: the always-loaded sets now follow measured use (docs/tool-manifest.md); the dispatcher's is 23,436 characters
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
