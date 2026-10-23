@@ -145,3 +145,14 @@ export function foreignTimedHold(root: string | undefined, session: string | und
   if (old && !/\[t\d{8}\]/.test(old.owner)) return `bench lock held by an old-style lock: ${old.owner} (seen since ${hhmm(Date.parse(old.since))}, 40 minutes at most)`;
   return undefined;
 }
+
+/**
+ * w1923: the granted exclusive ticket this worker session holds on this machine (`bench_queue.py timed`, a `--timed`
+ * snippet, `bench_lock --timing`, `run --mode exclusive`), else undefined: a timing measurement runs only inside one
+ * (server/timingGuard.ts). A session-less worker holds none.
+ */
+export function ownTimedHold(root: string | undefined, session: string | undefined, now: number = Date.now(), alive: (pid: number) => boolean = pidAlive): string | undefined {
+  if (!root || !session) return undefined;
+  const t = timedHolder(root, now, alive);
+  return t && t.session === session ? t.ticket : undefined;
+}

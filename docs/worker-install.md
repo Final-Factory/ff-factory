@@ -869,6 +869,13 @@ Three fixes from LothLaptop's reset V: (w1918, 2026-10-23):
   keeps 20 GB free at its fullest, so a quarter of it is crossed only once the drive is mostly full. The portal host keeps
   the number set for it.
 
+**If the drive comes back empty** (it was reset or made again by hand: LothLaptop, 2026-10-23, w1918), what is on D: is
+intact, and the rest is made again by the update over the link and by the daemon: `machine_update` clones the repo again (the
+installer clones whenever `<root>\repo` has no `HEAD`, `worker.ts` `cloneRepo`) and recreates the root's folders, and the
+pool remakes each free sandbox whose folder is gone, once the sandbox root and the clone are there, on its branch (the clone's,
+else origin's, else its base; `machine/sandboxes.ts` `remakeGone`, once per sandbox per daemon run). Work never pushed went
+with the drive. While the drive is not attached there is no sandbox root, so nothing is remade then.
+
 The maximum of an existing drive cannot be lowered in place (ReFS cannot shrink a volume, and `Optimize-VHD` needs the Hyper-V
 tools; both measured on LothDesktop on 2026-10-12): an update keeps it and says so; a reinstall makes the drive again.
 

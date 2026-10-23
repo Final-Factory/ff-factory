@@ -26,6 +26,8 @@ export interface BenchGlance {
   next: string;
   /** What the exclusive turn closed ("for it: 2 editors closed, 1 player asked to quit"), or empty. */
   closed: string;
+  /** w1923: "2 timing calls outside an exclusive ticket in the last hour (refused: ...)", or empty. */
+  untimed: string;
   /** Every holder and waiter, one per line, for the hover. */
   hint: string;
 }
@@ -147,6 +149,7 @@ export function benchGlance(b: BenchState | undefined, now: number): BenchGlance
   // A player is asked to quit, and may be left running (machine/benchTurn.ts askPlayerToQuit): said as asked.
   const closedBits = c ? [c.editors.length ? `${plural(c.editors.length, 'editor')} closed` : '', c.players ? `${plural(c.players, 'player')} asked to quit` : ''].filter(Boolean) : [];
   const closed = closedBits.length ? `for it: ${closedBits.join(', ')}` : '';
+  const untimed = untimedText(b);
   const lines = [
     ...b.running.map((t) => hintLine(t, now, single, false, b.waiting)),
     ...(b.runningCount > b.running.length ? [`and ${b.runningCount - b.running.length} more running`] : []),
@@ -156,6 +159,7 @@ export function benchGlance(b: BenchState | undefined, now: number): BenchGlance
     ...(n ? [`next: ${hintLine(n, now, single, true)}${n.ahead ? ` (${n.ahead} ahead of it)` : ''}`] : []),
     `${b.waiting} waiting`,
     ...(single ? ['one worker on this machine: no turn limits'] : []),
+    ...(b.untimed ?? []).map((u) => `timing outside an exclusive ticket: ${untimedLine(u)}`),
   ];
   return {
     mode: b.mode,
@@ -168,6 +172,19 @@ export function benchGlance(b: BenchState | undefined, now: number): BenchGlance
     waiting: b.waiting ? `${b.waiting} waiting` : '',
     next,
     closed,
+    untimed,
     hint: `Bench queue: ${BENCH_LABEL[b.mode]}\n${lines.join('\n')}`,
   };
+}
+
+/** One untimed timing call (w1923): "20:31Z refused unity-bridge.py eval_file bench.cs (Stopwatch), worker ffb56863". */
+export function untimedLine(u: NonNullable<BenchState['untimed']>[number]): string {
+  return `${u.at.slice(11, 16)}Z ${u.outcome} ${u.via}${u.markers?.length ? ` (${u.markers.join(', ')})` : ''}${u.session ? `, worker ${u.session.slice(0, 8)}` : ''}${u.sandbox ? ` in ${u.sandbox}` : ''}${u.why ? `: ${u.why}` : ''}`;
+}
+
+/** The machine's timing calls outside an exclusive ticket in the last hour (w1923), in a line, or "". */
+export function untimedText(b: BenchState | undefined): string {
+  const n = b?.untimedCount ?? b?.untimed?.length ?? 0;
+  if (!n || !b?.untimed?.length) return '';
+  return `${plural(n, 'timing call')} outside an exclusive ticket in the last hour (latest: ${untimedLine(b.untimed[0])})`;
 }
