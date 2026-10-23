@@ -880,6 +880,24 @@ LothDesktop and Beast, not just when BEAST is full").
     included. The drain re-reads the hold every 30 seconds, delivers in order once `placement.hold` no longer names the computer,
     and never gives it up while the hold stands. A worker mid-turn there is not interrupted, and a message sent to a running turn
     (a stop-and-save request) still reaches it. Tests: `server/resumeRules.test.ts`.
+  - **A hold can let named requests through (w1863).** lothsahn, 2026-10-23: "stop all work on LothDesktop except w1785
+    until it's done". The plain hold set for it at 15:15 UTC also queued a message to w1785's own worker dec9a619
+    ("lothdesktop is on hold … nothing resumes there until the hold is lifted"), until the dispatcher swapped it for
+    `placement.avoid`. A hold's value may now be `{ "why": "…", "except": ["w1785"] }`:
+    `set_app_config placement.hold { "lothdesktop": { "why": "lothsahn: w1785 timing runs", "except": ["w1785"] } }`.
+    - A worker holding an open request the hold names resumes there (`holdReason` with the worker's open requests, from
+      `Agents.machineHold`): its check-ins, dispatches and messages go.
+    - Every other worker's message waits Blocked on the machine, as above. A plain-string hold lets nobody through, so
+      Ben's w1376 case ("dont use the m5 i need to shut it down") is unchanged.
+    - The hold's reason reads "…; except w1785" wherever it is shown (Capacity block, Queued reasons, the Blocked line).
+    - Stored split, so every reader of `placement.hold` still gets reasons: the reasons in `placement.hold`, the
+      exceptions in `placement.holdExcept` (`server/appConfig.ts` `splitHold`). Setting the hold again replaces both, and
+      `null` clears both.
+    - A machine paused from its tray app, or held for a coming build, lets nothing through (`Agents.placement()` drops the
+      exceptions for those computers).
+    - New placement on a held computer was never refused, only noted ("… is held …"), so `start_agent` for w1785 there
+      needs no exception.
+    - Tests: the w1863 cases in `server/resumeRules.test.ts` and `server/appConfig.test.ts`.
 - **A computer can be reserved for higher work** (w1643, lothsahn, 2026-10-20: "Instead of a single setting, let's make
   the setting the minimum priority work that can go to a machine. If normal (all work), if high, high and urgent, if
   urgent, urgent only"). `placement.minPriority`, set with `set_app_config` and kept across restarts, names each computer's

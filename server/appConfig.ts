@@ -668,15 +668,36 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (ids.length > 12) throw new Error(`${name} names at most 12 computers`);
       return ids.length ? ids : undefined;
     }
-    case 'placement.avoid':
     case 'placement.hold': {
+      // w1863, lothsahn: "stop all work on LothDesktop except w1785 until it's done": a hold may name the requests it lets
+      // through, { "lothdesktop": { "why": "...", "except": ["w1785"] } }; a plain string holds everything (w1089, w1376).
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('placement.hold is an object: computer id to who holds it and why, e.g. { "m5": "Ben testing, 2026-10-12" }, or to { "why": "...", "except": ["w1785"] } to let the workers of those requests through');
+      const out: Record<string, string | { why: string; except: string[] }> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        const id = placeId(k);
+        if (!MACHINE_KEY.test(id) || id === 'host') throw new Error(`placement.hold: "${k.slice(0, 40)}" is not a machine id${NO_HOST}`);
+        const obj = typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+        const why = obj ? obj.why : v;
+        if (typeof why !== 'string' || !oneLine(why) || oneLine(why).length > 200) throw new Error(`placement.hold.${id}: say who holds it and why in one line of at most 200 characters${obj ? ' (its "why")' : ''}`);
+        const extra = obj ? Object.keys(obj).filter((x) => x !== 'why' && x !== 'except') : [];
+        if (extra.length) throw new Error(`placement.hold.${id}: only "why" and "except" (unknown: ${extra.join(', ').slice(0, 60)})`);
+        const ex = obj?.except === undefined ? [] : typeof obj.except === 'string' ? obj.except.split(',') : obj.except;
+        if (!Array.isArray(ex) || ex.some((x) => typeof x !== 'string' || !/^w\d{1,6}$/i.test(x.trim()))) throw new Error(`placement.hold.${id}.except: a list of request ids such as "w1785"`);
+        const except = [...new Set((ex as string[]).map((x) => x.trim().toLowerCase()))];
+        if (except.length > 12) throw new Error(`placement.hold.${id}.except names at most 12 requests`);
+        out[id] = except.length ? { why: oneLine(why), except } : oneLine(why);
+      }
+      if (Object.keys(out).length > 12) throw new Error('placement.hold names at most 12 computers');
+      return Object.keys(out).length ? out : undefined;
+    }
+    case 'placement.avoid': {
       const name = key;
-      if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(name === 'placement.hold' ? 'placement.hold is an object: computer id to who holds it and why, e.g. { "m5": "Ben testing, 2026-10-12" }' : 'placement.avoid is an object: computer id to why, e.g. { "beast": "BEAST unstable, 2026-10-05" }');
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('placement.avoid is an object: computer id to why, e.g. { "beast": "BEAST unstable, 2026-10-05" }');
       const out: Record<string, string> = {};
       for (const [k, why] of Object.entries(value as Record<string, unknown>)) {
         const id = placeId(k);
         if (!MACHINE_KEY.test(id) || id === 'host') throw new Error(`${name}: "${k.slice(0, 40)}" is not a machine id${NO_HOST}`);
-        if (typeof why !== 'string' || !oneLine(why) || oneLine(why).length > 200) throw new Error(`${name}.${id}: say ${name === 'placement.hold' ? 'who holds it and why' : 'why'} in one line of at most 200 characters`);
+        if (typeof why !== 'string' || !oneLine(why) || oneLine(why).length > 200) throw new Error(`${name}.${id}: say why in one line of at most 200 characters`);
         out[id] = oneLine(why);
       }
       if (Object.keys(out).length > 12) throw new Error(`${name} names at most 12 computers`);
@@ -824,6 +845,17 @@ export function nextPerMachine<T extends boolean | number>(cur: unknown, machine
  * providers.ffbox.token is never written to config.json (w1078): its hash goes to the file in the secrets folder that
  * providers.ffbox.tokenSha256File names (named there the first time).
  */
+/**
+ * placement.hold's value as stored (w1863): the reasons under `hold`, which every reader takes, and the requests each hold
+ * lets through under `holdExcept`. Undefined parts are left out.
+ */
+function splitHold(v: unknown): { hold?: Record<string, string>; except?: Record<string, string[]> } {
+  const given = (v ?? {}) as Record<string, string | { why: string; except: string[] }>;
+  const hold = Object.fromEntries(Object.entries(given).map(([id, x]) => [id, typeof x === 'string' ? x : x.why]));
+  const except = Object.fromEntries(Object.entries(given).flatMap(([id, x]) => (typeof x === 'string' ? [] : [[id, x.except]])));
+  return { ...(Object.keys(hold).length ? { hold } : {}), ...(Object.keys(except).length ? { except } : {}) };
+}
+
 export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { machine?: string; users?: readonly string[] } = {}): { before: unknown; after: unknown } {
   if (!SETTABLE_KEYS.includes(key)) throw new Error(`${key} cannot be changed by an agent; allowed: ${SETTABLE_KEYS.join(', ')}`);
   const perMachine = key === 'machines.githubFromVault' || key.startsWith('machines.activityPause.') || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
@@ -834,7 +866,12 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   if (key === 'providers.ffbox.token') return setFfboxToken(file, cfg, raw, text, v as string | undefined);
   const before = getPath(raw, key);
   const next = perMachine ? nextPerMachine(before, opts.machine, v as boolean | number | undefined) : v;
-  setPath(raw, key, next);
+  // w1863: a hold's { why, except } form is stored split, so every reader of placement.hold keeps getting reasons.
+  if (key === 'placement.hold') {
+    const split = splitHold(next);
+    setPath(raw, 'placement.hold', split.hold);
+    setPath(raw, 'placement.holdExcept', split.except);
+  } else setPath(raw, key, next);
   // The last vault.unattributed key removed leaves no empty block behind.
   if (key.startsWith('vault.unattributed.') && Object.keys((getPath(raw, 'vault.unattributed') as object) ?? {}).length === 0) setPath(raw, 'vault.unattributed', undefined);
   writeFileDurable(file + '.prev', text, { generations: 0 });
@@ -917,8 +954,12 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build' || key === 'placement.minPriority') {
     const p = { ...cfg.placement };
     const field = key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : key === 'placement.minPriority' ? 'minPriority' : 'hold';
+    const split = field === 'hold' ? splitHold(v) : undefined;
     if (v === undefined) delete p[field];
-    else (p as Record<string, unknown>)[field] = v;
+    else (p as Record<string, unknown>)[field] = split ? split.hold : v;
+    // w1863: the whole hold is replaced, so are its exceptions.
+    if (split?.except) p.holdExcept = split.except;
+    else if (split) delete p.holdExcept;
     cfg.placement = p;
   }
   else if (key === 'hostGuard.cleanup.staleOutput') cfg.hostGuard.cleanup.staleOutput = v as Partial<StaleOutputSettings> | undefined;

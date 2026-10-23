@@ -24,6 +24,8 @@ export const MIN_OPTIONS = 2;
 export const MAX_OPTIONS = 4;
 export const QUESTION_CHARS = 600;
 export const LABEL_CHARS = 90;
+/** The most a label may be when given (w1869): one over LABEL_CHARS is shortened and its full text moved to its description. */
+export const LABEL_INPUT_CHARS = 600;
 export const DESCRIPTION_CHARS = 220;
 /**
  * Room for stills and clips on top of the words (w1419): a question or an option may name its media as
@@ -82,30 +84,44 @@ export interface Ask {
 
 const oneLine = (s: unknown, max: number) => (typeof s === 'string' ? s.replace(/\s+/g, ' ').trim().slice(0, max) : '');
 
+/** A label cut at a word boundary to at most LABEL_CHARS, ending with "…" (w1869). */
+export function shortenLabel(label: string): string {
+  if (label.length <= LABEL_CHARS) return label;
+  const room = label.slice(0, LABEL_CHARS - 1);
+  const at = label[room.length] === ' ' ? room.length : room.lastIndexOf(' ');
+  return `${(at > 0 ? room.slice(0, at) : room).replace(/[\s,;:.\-–—]+$/, '')}…`;
+}
+
 /**
  * The tool's input as an Ask, or a reason it is no question. The recommended option moves to the front; two marked
- * recommended is refused (one pick is the point).
+ * recommended is refused (one pick is the point). A label over LABEL_CHARS is shortened, its full text put first in that
+ * option's description, and a warning says so (w1869, lothsahn: "Analyze your recent tool failures"): the page checks the
+ * same input again to draw it, so both read the same shortened label.
  */
-export function checkAsk(input: unknown): { ask: Ask } | { problem: string } {
+export function checkAsk(input: unknown): { ask: Ask; warnings: string[] } | { problem: string } {
   const o = (input ?? {}) as { question?: unknown; options?: unknown };
   const question = typeof o.question === 'string' ? o.question.trim() : '';
   if (!splitMedia(question).text) return { problem: 'question: the question, in a sentence' };
   if (splitMedia(question).text.length > QUESTION_CHARS) return { problem: `question: at most ${QUESTION_CHARS} characters of words (put the detail in your message above it)` };
   if (!Array.isArray(o.options) || o.options.length < MIN_OPTIONS || o.options.length > MAX_OPTIONS) return { problem: `options: ${MIN_OPTIONS} to ${MAX_OPTIONS} (the page adds "${CHAT_MORE_LABEL}" itself)` };
   const options: AskOption[] = [];
-  for (const raw of o.options as { label?: unknown; description?: unknown; recommended?: unknown }[]) {
-    const label = oneLine(raw?.label, LABEL_CHARS + 1);
-    if (!label) return { problem: 'every option needs a label' };
-    if (label.length > LABEL_CHARS) return { problem: `option labels: at most ${LABEL_CHARS} characters ("${label.slice(0, 30)}…")` };
+  const warnings: string[] = [];
+  for (const [i, raw] of (o.options as { label?: unknown; description?: unknown; recommended?: unknown }[]).entries()) {
+    const full = oneLine(raw?.label, LABEL_INPUT_CHARS);
+    if (!full) return { problem: 'every option needs a label' };
+    const label = shortenLabel(full);
+    if (label !== full) warnings.push(`label ${i + 1} was ${full.length} chars, shortened to ${label.length}; the full text is in its description`);
     if (label.toLowerCase() === CHAT_MORE_LABEL.toLowerCase()) return { problem: `"${CHAT_MORE_LABEL}" is added by the page; leave it out` };
     if (options.some((x) => x.label.toLowerCase() === label.toLowerCase())) return { problem: `two options are both "${label}"` };
-    const description = typeof raw?.description === 'string' ? withMedia(raw.description, DESCRIPTION_CHARS) : '';
+    const written = typeof raw?.description === 'string' ? raw.description : '';
+    // The full label rides in front of the words the option had, and the room grows by its length so those are not cut for it.
+    const description = label === full ? (written ? withMedia(written, DESCRIPTION_CHARS) : '') : withMedia(`${full}${splitMedia(written).text ? ' - ' : ''}${written}`, DESCRIPTION_CHARS + full.length + 3);
     options.push({ label, description, ...(raw?.recommended === true ? { recommended: true } : {}) });
   }
   const picks = options.filter((x) => x.recommended);
   if (picks.length > 1) return { problem: 'mark ONE option recommended: the one you most prefer' };
   if (picks.length === 1) options.unshift(...options.splice(options.indexOf(picks[0]), 1));
-  return { ask: { question, options } };
+  return { ask: { question, options }, warnings };
 }
 
 /** The question as the quote of an answer shows it: the question, then its options (recommended marked). */
