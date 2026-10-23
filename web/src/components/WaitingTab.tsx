@@ -2,14 +2,15 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Ask } from '../../../shared/ask';
 import { answerMessage, answersText, cardMedia, cardQuestions, legacySteps, namesForPaths, plainQuestion } from '../../../shared/questionCard';
 import type { AppState, WorkItem } from '../../../shared/types';
-import { intakeRecommendation, waitAge, type WaitingItem } from '../../../shared/waiting';
+import { intakeRecommendation, waitAge, type AskItem, type WaitingItem } from '../../../shared/waiting';
+import { APPROVE_LABEL, DECLINE_LABEL, approveAsk, waitSummary, waitedFor, whatOf, type WaitSummary } from '../../../shared/waitSummary';
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
 import { attempt, focusWait, sessionsByIds, toast, useStore } from '../store';
 import { fmtClock, fmtRelative, navigate } from '../util';
 import { LocalImages, Markdown } from './Markdown';
-import { DetailLine, Previews, QuestionCard } from './QuestionCard';
+import { DetailLine, Previews, QuestionCard, type CardSummary } from './QuestionCard';
 import { PermissionCard } from './Transcript';
 import { Icon } from './ui';
 
@@ -22,9 +23,12 @@ const AGE_TONE = { fresh: 'grey', old: 'amber', stale: 'red' } as const;
  * clear it: Approve, Decline with a reason, Answer (sent to the viewer's own orchestrator, the way they would say it),
  * or Open. The same endpoints the Intake tab and the orchestrator chat use; nothing new is allowed here.
  */
-export function WaitingTab({ app, items, now }: { app: AppState; items: WaitingItem[]; now: number }) {
+export function WaitingTab({ app, items, asks = [], now }: { app: AppState; items: WaitingItem[]; asks?: AskItem[]; now: number }) {
   const mine = items.filter((i) => i.mine);
   const others = items.filter((i) => !i.mine);
+  // The viewer's own orchestrator's open questions (w1868) sit among their own requests' cards, oldest first.
+  const ownCards = [...mine.map((i) => ({ at: i.since, key: `w:${i.w.id}`, el: <WaitCard key={`w:${i.w.id}`} app={app} item={i} now={now} /> })), ...asks.map((a) => ({ at: a.a.at, key: `a:${a.sessionId}:${a.a.seq}`, el: <AskWaitCard key={`a:${a.sessionId}:${a.a.seq}`} app={app} item={a} now={now} /> }))].sort((x, y) => x.at.localeCompare(y.at));
+  const onYou = mine.length + asks.length;
   // A "Needs you" item names the request it is about (w1356): put its card at the top, with its buttons in view, and flash it.
   const focusId = useStore((s) => s.focusWaitId);
   const root = useRef<HTMLDivElement>(null);
@@ -41,16 +45,14 @@ export function WaitingTab({ app, items, now }: { app: AppState; items: WaitingI
   return (
     <div className="sa-scroll waiting-tab" data-testid="waiting-tab" ref={root}>
       <p className="dim small ledger-none" data-testid="waiting-summary">
-        {items.length
-          ? `${items.length} ${items.length === 1 ? 'request waits' : 'requests wait'} on input: ${mine.length} on you, ${others.length} on someone else. The oldest waits first.`
+        {items.length || asks.length
+          ? `${items.length} ${items.length === 1 ? 'request waits' : 'requests wait'} on input: ${mine.length} on you, ${others.length} on someone else.${asks.length ? ` Your orchestrator asks you ${asks.length} more question${asks.length > 1 ? 's' : ''}.` : ''} The oldest waits first.`
           : 'Nothing waits on input.'}
       </p>
-      <h3 className="intake-h">Waiting on you · {mine.length}</h3>
-      {mine.length ? (
+      <h3 className="intake-h">Waiting on you · {onYou}</h3>
+      {onYou ? (
         <div className="wait-list" data-testid="waiting-mine">
-          {mine.map((i) => (
-            <WaitCard key={i.w.id} app={app} item={i} now={now} />
-          ))}
+          {ownCards.map((c) => c.el)}
         </div>
       ) : (
         <p className="dim small ledger-none">Nothing waits on you.</p>
@@ -195,28 +197,37 @@ function CardDetails({ app, item, now }: { app: AppState; item: WaitingItem; now
   );
 }
 
-/** The labels of an intake approval's two answers: a click on one approves or declines it, as the buttons did. */
-export const APPROVE_LABEL = 'Approve it: the dispatcher picks it up and work starts';
-export const DECLINE_LABEL = 'Decline it: nothing is worked on it';
+export { APPROVE_LABEL, DECLINE_LABEL };
+
+/** A summary's parts as the card shows them (w1868): what it is, who acts and for how long, the step, what follows, stale. */
+export function cardSummary(s: WaitSummary, now: number, title?: string): CardSummary {
+  const age = waitAge(s.since, now);
+  return {
+    what: s.what,
+    meta: (
+      <>
+        <span className={age === 'fresh' ? '' : `tone-${AGE_TONE[age]}`}>
+          {s.who} must act · waiting {waitedFor(s.since, now)}
+        </span>
+        {title ? <span title={title}> · {title}</span> : null}
+      </>
+    ),
+    ...(s.step ? { step: s.step } : {}),
+    after: s.after,
+    ...(s.stale ? { stale: s.stale } : {}),
+    ...(s.noMedia ? { noMedia: true } : {}),
+  };
+}
 
 /**
  * An intake request waiting for a reviewer, as a question (w1597): "Should FF Factory work on this?", Approve (marked
  * recommended when the triage says so) or Decline; the free box declines with a reason. The same endpoints as before.
  */
-export function ApproveCard({ app, w, mine, reviewers, details, testId }: { app: AppState; w: WorkItem; mine: boolean; reviewers: string; details: ReactNode; testId: string }) {
+export function ApproveCard({ app, w, mine, reviewers, details, testId, summary }: { app: AppState; w: WorkItem; mine: boolean; reviewers: string; details: ReactNode; testId: string; summary?: CardSummary }) {
   const rec = intakeRecommendation(w);
-  const approveRec = !!rec?.startsWith('Approve');
   // A possible repeat (intakeRecommendation's "Check first"), named by its title on the answer it bears on.
   const repeat = w.overlaps[0];
-  const asks: Ask[] = [
-    {
-      question: `Should FF Factory work on this ${w.source?.kind === 'discord-bug' ? 'player’s bug report' : 'request'}?`,
-      options: [
-        { label: APPROVE_LABEL, description: '', ...(approveRec ? { recommended: true } : {}) },
-        { label: DECLINE_LABEL, description: '' },
-      ],
-    },
-  ];
+  const asks: Ask[] = [approveAsk(w, rec)];
   const onAnswer = async (text: string) => {
     const ok = await attempt(text === APPROVE_LABEL ? api.approveWork(w.id) : api.declineWork(w.id, text === DECLINE_LABEL ? undefined : text.slice(0, 300)));
     if (ok !== undefined) toast(text === APPROVE_LABEL ? `${w.id} approved: the dispatcher decides it now.` : `${w.id} declined.`);
@@ -237,6 +248,7 @@ export function ApproveCard({ app, w, mine, reviewers, details, testId }: { app:
       freeLabel="Or decline with a reason"
       {...(repeat ? { note: `It may repeat “${repeat.title.length > 80 ? `${repeat.title.slice(0, 79)}…` : repeat.title}” (${repeat.why}).` } : {})}
       details={details}
+      {...(summary ? { summary } : {})}
     />
   );
 }
@@ -248,11 +260,15 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
   // A worker of it streams its Live view (w1430): the wait is often "drag the knobs", so the card opens it in one click.
   const live = app.config.live?.enabled ? app.live?.find((v) => v.state !== 'stopped' && w.sessionIds.includes(v.sessionId)) : undefined;
   const details = <CardDetails app={app} item={item} now={now} />;
-  if (ask === 'approve') return <ApproveCard app={app} w={w} mine={mine} reviewers={app.intake?.reviewers.join(' or ') || 'A reviewer'} details={details} testId={`wait-${w.id}`} />;
+  const reviewers = app.intake?.reviewers.join(' or ') || 'A reviewer';
+  // The six parts (w1868, shared/waitSummary.ts): what it is, who acts and since when, the question, its answers, media, what follows.
+  const sum = waitSummary(item, { session: (id) => app.sessions.find((x) => x.id === id), reviewers: app.intake?.reviewers.join(' or ') });
+  const summary = cardSummary(sum, now, w.title);
+  if (ask === 'approve') return <ApproveCard app={app} w={w} mine={mine} reviewers={reviewers} details={details} testId={`wait-${w.id}`} summary={summary} />;
   const r = w.needsYou;
   const cq = cardQuestions(w);
-  // A wait with no question of its own (a worker's permission, a report that ends asking): what the ledger says it waits on.
-  const question = cq.asks.length ? '' : cq.text || plainQuestion(item.text);
+  // A wait with no question of its own (a worker's permission, a report that ends asking): the summary's question.
+  const question = cq.asks.length ? '' : cq.text || sum.question || plainQuestion(item.text);
   // A free-text list of decisions is asked one at a time, each answered in words.
   const asks = cq.asks.length ? cq.asks : (legacySteps(question) ?? []);
   const answerable = mine && (ask === 'answer' || (ask === 'check' && !!r && !r.answered));
@@ -305,6 +321,67 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
       look={look}
       extra={permissions}
       details={details}
+      summary={summary}
+    />
+  );
+}
+
+/**
+ * One open question of the viewer's own orchestrator (w1868): what it is about, the question with its buttons, its stills and
+ * clips, and what follows. A click answers it exactly as the click in the chat does (POST /api/sessions/<id>/answer: the
+ * person's own message, the question quoted); typed words go as a reply to it. The card goes once the server sees the answer.
+ */
+function AskWaitCard({ app, item, now }: { app: AppState; item: AskItem; now: number }) {
+  const { a, w, sessionId } = item;
+  const [sent, setSent] = useState(false);
+  const me = app.me?.displayName ?? 'you';
+  const summary: CardSummary = {
+    what: w ? whatOf(w) : 'A question from your orchestrator, in your chat with it.',
+    meta: (
+      <span className={waitAge(a.at, now) === 'fresh' ? '' : `tone-${AGE_TONE[waitAge(a.at, now)]}`}>
+        {me} must act · waiting {waitedFor(a.at, now)} · asked by your orchestrator{w ? ` about ${w.id}` : ''}
+      </span>
+    ),
+    after: a.after ?? 'Your orchestrator carries on with your answer, as if you had clicked it in your chat.',
+  };
+  const onAnswer = async (text: string) => {
+    const i = a.ask.options.findIndex((o) => o.label === text);
+    const ok = i >= 0 ? await attempt(api.answer(sessionId, a.seq, i)) : await attempt(api.sendMessage(sessionId, text, undefined, undefined, a.seq));
+    if (ok === undefined) return false;
+    toast('Sent to your orchestrator as your answer.');
+    setSent(true);
+    return true;
+  };
+  const details = (
+    <>
+      <DetailLine label="Asked">
+        your orchestrator, {fmtRelative(a.at, now)}{' '}
+        <button className="link-btn small" onClick={() => { const chat = app.sessions.find((x) => x.id === sessionId); navigate(chat ? sessionRoute(chat, app) : { view: 'session', sessionId }); }}>
+          Open the chat
+        </button>
+        {w && (
+          <button className="link-btn small" onClick={() => navigate({ view: 'dispatcher', tab: w.id })}>
+            {' '}
+            Open {w.id}
+          </button>
+        )}
+      </DetailLine>
+      {w && <DetailLine label="The request">{w.title}</DetailLine>}
+    </>
+  );
+  return (
+    <QuestionCard
+      id={`ask.${sessionId}.${a.seq}`}
+      testId={`ask-${a.seq}`}
+      title={w?.title ?? 'Your orchestrator asks'}
+      asks={[a.ask]}
+      question=""
+      previews={[]}
+      mine
+      onAnswer={onAnswer}
+      {...(sent ? { done: <p className="small tone-green">Sent to your orchestrator. The card goes when it has your answer.</p> } : {})}
+      details={details}
+      summary={summary}
     />
   );
 }
@@ -312,5 +389,6 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
 /** The Intake tab's card for a request waiting for a reviewer (w1597): the same question card the Waiting on input tab shows. */
 export function IntakeApproveCard({ app, w, reviewer, now }: { app: AppState; w: WorkItem; reviewer: boolean; now: number }) {
   const item = { w, ask: 'approve', mine: reviewer, on: [], since: w.createdAt, text: `Nothing is worked on it until it is approved${w.approval?.why ? ` (not approved automatically: ${w.approval.why})` : ''}.`, recommendation: intakeRecommendation(w) } as unknown as WaitingItem;
-  return <ApproveCard app={app} w={w} mine={reviewer} reviewers={app.intake?.reviewers.join(' or ') || 'A reviewer'} details={<CardDetails app={app} item={item} now={now} />} testId={`intake-${w.id}`} />;
+  const summary = cardSummary(waitSummary({ ...item, live: { state: 'waiting', why: '' } }, { reviewers: app.intake?.reviewers.join(' or ') }), now, w.title);
+  return <ApproveCard app={app} w={w} mine={reviewer} reviewers={app.intake?.reviewers.join(' or ') || 'A reviewer'} details={<CardDetails app={app} item={item} now={now} />} testId={`intake-${w.id}`} summary={summary} />;
 }

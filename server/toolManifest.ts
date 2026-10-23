@@ -51,6 +51,7 @@ export const TOOL_MANIFEST = {
   compact_conversation: { group: 'core', kinds: [D, P] },
   delete_memory: { group: 'core', kinds: [D, P] },
   ask_person: { group: 'core', kinds: [P], always: [P] },
+  close_question: { group: 'core', kinds: [P] },
   message_person: { group: 'core', kinds: [P], always: [P] },
   // ledger
   list_work: { group: 'ledger', kinds: [D, P, R], always: [D, P] },

@@ -2345,6 +2345,110 @@ test('w1812: one question from one worker on two requests is ONE [needs you]; th
   assert.match(brief, /\*\*Never re-ask an answered question\*\* \(w1812\): first read the notes of the request and of its worker's other requests/);
 });
 
+// ---------------------------------------------------------------- w1868: each question its own card and its own answer
+
+/** w1821 as on 2026-10-23: one worker asked two questions (the frame look, the Station strip) on one request. */
+const FRAME_Q = { question: 'How solid should a window frame be where windows stack?', options: [{ label: 'Keep frames see-through over space, solid only over a window', recommended: true }, { label: 'Make every frame fully solid' }] };
+const STRIP_Q = { question: 'When a window covers the Station strip, what should come up over it?', options: [{ label: 'The whole strip comes up over the window', recommended: true }, { label: 'Only the Hide button comes up over the window' }] };
+const wakeOf = (agents: Agents, id: string) => (agents as unknown as { waker: { pending(id: string): { note: string } | undefined } }).waker.pending(id);
+
+test('w1868: two questions on one request, the first answered: the second can still be asked, its card stays, and the worker resumes once both are answered', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, sessions, agents, dispatcher, chat, call, heard } = env;
+  const loth = chat(LOTH).info;
+  await call(loth, 'request_work', { title: 'Stacked windows show the back text', brief: 'Fix the see-through frames and the covered Hide button.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: frames', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const h = env.machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  const declared = await h.waiting_on_person!({ who: 'Lothsahn', what: 'Pick the frame look and what comes up over the strip', questions: [FRAME_Q, STRIP_Q], about: 'Stacked game windows let the back window’s text show through.', after: 'I build the picked look and bring you its clips.' });
+  assert.match(String(declared), /with 2 questions as buttons/);
+  assert.equal(info.waitingOn?.about, 'Stacked game windows let the back window’s text show through.');
+  sessions.events.emit('turnEnd', sessions.get(id), 'Stills published.\n\nw1: still open: waiting on Lothsahn to pick the frame look and the strip');
+  await until('Lothsahn hears it', () => heard(loth.id, '[needs you]').length >= 1);
+  const msg = heard(loth.id, '[needs you]')[0].text;
+  assert.match(msg, /What it is: Stacked game windows let the back window’s text show through\./);
+  assert.match(msg, /After the answer: I build the picked look and bring you its clips\./);
+  assert.equal(store.work.get('w1')!.needsYou!.about, 'Stacked game windows let the back window’s text show through.');
+
+  // He answers the frame look: that question is answered, the strip question still waits on the card, the worker is not woken.
+  await until('that turn ends', () => chat(LOTH).info.status === 'idle');
+  chat(LOTH).lastFrom = 'human';
+  const first = await call(loth, 'update_work', { id: 'w1', note: 'Frame look, verbatim: "Keep frames see-through over space, solid only over a window".' });
+  assert.match(first.text, /answers question 1 of the 2 in its \[needs you\] \(w1868\); question 2 still waits on the card/);
+  const r = store.work.get('w1')!.needsYou!;
+  assert.deepEqual(r.answeredAsks, [0]);
+  assert.equal(r.answered, undefined);
+  assert.equal(agents.workLive().get('w1')?.state, 'waiting', 'it still waits on input');
+  assert.equal(wakeOf(agents, id), undefined, 'the worker waits for both');
+
+  // The strip question goes through (it was refused twice on 2026-10-23); the frame one again is refused, with his words.
+  const strip = await call(loth, 'ask_person', STRIP_Q);
+  assert.equal(strip.isError, false, strip.text);
+  const frame = await call(loth, 'ask_person', FRAME_Q);
+  assert.equal(frame.isError, true);
+  assert.match(frame.text, /Not asked: Lothsahn already answered this question on w1 .*in their words: "Frame look, verbatim/);
+
+  // The strip answer: both answered, and the worker resumes with both answers.
+  chat(LOTH).lastFrom = 'human';
+  const second = await call(loth, 'update_work', { id: 'w1', note: 'Station strip: "The whole strip comes up over the window".' });
+  assert.match(second.text, /answers the \[needs you\] question/);
+  assert.ok(store.work.get('w1')!.needsYou!.answered);
+  assert.match(wakeOf(agents, id)!.note, /Frame look, verbatim[\s\S]*Station strip: "The whole strip comes up over the window"/);
+});
+
+test('w1868: every ask_person question is an open card until it is answered, asked again, closed or refused', async (t) => {
+  const env = setup(t);
+  const { store, o, chat, call } = env;
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const loth = chat(LOTH);
+  const asked = (input: Record<string, unknown>, toolUseId: string, isError = false) => {
+    const ev = store.append(loth.info.id, { kind: 'tool_use', toolUseId, name: 'mcp__sandboxes__ask_person', input });
+    store.append(loth.info.id, { kind: 'tool_result', toolUseId, isError, text: isError ? 'refused' : 'Shown' });
+    return ev.seq;
+  };
+  const q = (n: number, request: string) => ({ question: `Question ${n} about ${request}: should it go ahead now?`, options: [{ label: `Go ahead with ${request} (${n})`, description: '', recommended: true }, { label: `Hold ${request} (${n})`, description: '' }], request });
+  const seqs = [asked(q(1, 'w11'), 'a1'), asked(q(2, 'w12'), 'a2'), asked(q(3, 'w13'), 'a3'), asked(q(4, 'w14'), 'a4'), asked(q(5, 'w14'), 'a5')];
+  const open = () => (o.personalOf('lothsahn')!.info.openAsks ?? []).map((a) => a.seq);
+  assert.deepEqual(open(), seqs, 'five questions, five cards, two of them about w14');
+  assert.equal(o.personalOf('lothsahn')!.info.openAsks![0].request, 'w11');
+  // A refused call was never shown: no card.
+  asked(q(6, 'w15'), 'a6', true);
+  assert.equal(open().length, 5);
+  // Asked again: one card, the newer.
+  const again = asked(q(2, 'w12'), 'a7');
+  assert.deepEqual(open(), [seqs[0], seqs[2], seqs[3], seqs[4], again]);
+  // A click (the person's reply quoting it) answers it: the card goes.
+  const words = o.answerWords(loth.info.id, seqs[0], 0);
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: words, requestedBy: LOTH });
+  assert.deepEqual(open(), [seqs[2], seqs[3], seqs[4], again]);
+  // The orchestrator closes one that events overtook.
+  const closed = await call(loth.info, 'close_question', { seq: seqs[2], why: 'w13 was cancelled' });
+  assert.equal(closed.isError, false, closed.text);
+  assert.deepEqual(open(), [seqs[3], seqs[4], again]);
+  const listed = await call(loth.info, 'close_question', { why: 'list' });
+  assert.match(listed.text, new RegExp(`${seqs[3]}: Question 4 about w14`));
+});
+
+test('w1868: waiting_on_person refuses a still on the worker’s own machine; the brief asks every question with ask_person', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, dispatcher, chat, call, agents } = env;
+  await call(chat(LOTH).info, 'request_work', { title: 'A look', brief: 'Pick a look.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: look', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const h = env.machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  await assert.rejects(
+    async () => h.waiting_on_person!({ who: 'Lothsahn', what: 'Pick a look', about: 'A look.', after: 'I build it.', questions: [{ question: 'Which look? ![A](<F:/ffw/tmp/ffa-1/a.png>)', options: [{ label: 'The first look, A', recommended: true }, { label: 'The second look, B' }] }] }),
+    /is on your machine, where the card cannot show it .*Publish it with publish_review/,
+  );
+  assert.equal(info.waitingOn, undefined, 'nothing recorded');
+  const brief = (agents as unknown as { personalBrief(r: Requester): string }).personalBrief(LOTH);
+  assert.match(brief, /Ask every question to Lothsahn with ask_person, never in text only: each is a card on Lothsahn's Waiting on input tab/);
+});
+
 test('w1812: no [needs you] when the answer is already logged after the question was raised, on its request or on another its worker holds; a new question still goes', async (t) => {
   const { store, sessions, agents, chat, call, heard, ben, id, h } = await twoRequestsOneWorker(t);
   await h.waiting_on_person!({ who: 'Ben', what: 'Pick a direction for marking circuit structures, and one for the circuit view', questions: CIRCUIT_QUESTIONS });

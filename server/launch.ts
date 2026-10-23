@@ -1,6 +1,7 @@
 import { createSdkMcpServer, tool, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { POST_TARGETS } from '../shared/ffboxPost.ts';
 import { z } from 'zod';
+import { WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
 import os from 'node:os';
 import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
@@ -157,7 +158,9 @@ export const CATALOG = {
   waiting_on_person: {
     who: z.string().min(1).max(120).describe('Whose action it waits on: a name ("Ben"), several separated by commas, or "a reviewer".'),
     what: z.string().min(1).max(400).describe('What they must do, in a line ("reboot the m3 and log in: FileVault asks for a password").'),
-    questions: questionsShape().describe(`What their card on the dashboard asks: ONE question per decision (several decisions: one each, at most ${MAX_ASKS}, shown one at a time), each with 2 to 4 full-sentence answers as buttons, your pick marked recommended. An action ("reboot the m3") is a question too: "Have you rebooted the m3 and logged in?" with "Done: the m3 is back" / "Not today". Stills and clips go in as ![what](<path>) previews; pull requests, ids and report text stay in your report.`),
+    questions: questionsShape().describe(`What their card on the dashboard asks: ONE question per decision (several decisions: one each, at most ${MAX_ASKS}, shown one at a time), each with 2 to 4 full-sentence answers as buttons, your pick marked recommended, each answer's description saying what it does and costs (time, spend, risk). An action ("reboot the m3") is a question too: "Have you rebooted the m3 and logged in?" with "Done: the m3 is back" / "Not today". Stills and clips go in as ![what](<path>) previews, by the path publish_review answers (a path on your own machine shows on no card); pull requests, ids and report text stay in your report.`),
+    about: z.string().min(1).max(WAIT_LINE_CHARS).describe('What the request is, in ONE plain line for someone who has read nothing about it ("The station brakes to a stop after Disable Transit, where today it stops dead"); not the title, no ids or paths.'),
+    after: z.string().min(1).max(WAIT_LINE_CHARS).describe('What happens once they answer ("I merge the fix and it ships in the next dev build"; "I build the picked look and bring you its clip").'),
     request: z.string().max(16).optional().describe('The request ("w665") it is about, when you serve several; default: all of them.'),
   },
   unity: {

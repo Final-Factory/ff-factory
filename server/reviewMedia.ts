@@ -126,6 +126,21 @@ function nameIn(name: string, folders: readonly string[], o: ReviewMediaOptions)
   return undefined;
 }
 
+/** Whether a path names a file outside the review folder: a worker's own machine ("F:/ffw/...", "/Users/..."). */
+export const outsideReview = (ref: string, root: string) => /^(?:[A-Za-z]:[\\/]|\/)/.test(ref) && !onDisk(ref, root);
+
+/**
+ * A still or clip a worker named by a path on its own machine, as its published copy in the review folder (w1871: "A
+ * question that names media only by a path on its worker's machine (F:/ffw/...) is resolved to the published
+ * /srv/fff/review copy"): the file of the same name in the request's review topics, else any topic's top level. A review
+ * path is itself; undefined when no copy was published.
+ */
+export function publishedCopy(ref: string, o: ReviewMediaOptions): string | undefined {
+  if (!outsideReview(ref, o.root)) return ref;
+  if (!MEDIA_FILE.test(ref) || !isDir(o.root)) return undefined;
+  return nameIn(path.basename(slash(ref)), [], o);
+}
+
 /**
  * The stills and clips of each request id's review folder (`root/w1465` or a topic `root/w1465-warden`), newest first (at
  * most MEDIA_PER_FOLDER), for the ids that have any. What a question about a request's visual work should carry

@@ -85,7 +85,7 @@ test('workState: waiting on input, and on whom', () => {
   const perm = one(item('w4', { sessionIds: ['a'] }), [session('a', { status: 'waiting_permission', requestedBy: LOTH, pendingPermissions: [{ requestId: 'p', toolName: 'Bash', input: {}, createdAt: ago(0.1) }] })]);
   assert.deepEqual([perm?.state, perm?.why, perm?.waitsOn], ['waiting', 'a waits for permission to use Bash', ['Lothsahn']]);
   const asked = one(item('w5', { sessionIds: ['a'] }), [session('a', { lastResult: 'Two ways to do it. Needs your decision: A or B.' })]);
-  assert.deepEqual([asked?.state, asked?.why], ['waiting', 'a stopped asking for a decision']);
+  assert.deepEqual([asked?.state, asked?.why], ['waiting', 'a stopped asking for a decision: "Needs your decision: A or B."']);
   assert.equal(asksAPerson('Merged as #9. Should I also bump the version?'), true);
   assert.equal(asksAPerson('Done: merged as #9, nothing left.'), false);
 });
