@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BenchLock, BenchPriority, BenchQueueReport } from '../shared/types.ts';
-import { benchQueueDir, queueTickets } from './benchQueue.ts';
+import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 
 /** Where quiet_gate.sh keeps the lock: `$FF_WORKER_ROOT/tmp/bench.lock` (Git Bash's /f/ffw is F:\ffw). */
 export const benchLockDir = (root: string) => path.join(root, 'tmp', 'bench.lock');
@@ -86,6 +86,21 @@ export function writeBenchPriorities(root: string | undefined, sessions: Record<
   }
 }
 
+/**
+ * The timed run that holds this machine's bench lock now (w1829): the granted, unrevoked exclusive ticket whose helper
+ * lives and that is inside its hold bound (bench_queue.py timed_hold), with the time its bound ends; undefined when none.
+ * One past its bound no longer counts: the next waiter revokes it, and what it quieted comes back.
+ */
+export function timedHolder(root: string | undefined, now: number = Date.now(), alive: (pid: number) => boolean = pidAlive): (QueueTicket & { until: number }) | undefined {
+  if (!root) return undefined;
+  for (const t of queueTickets(benchLockDir(root), alive)) {
+    if (t.mode !== 'exclusive' || !t.granted || t.revoked) continue;
+    const until = t.granted.ts * 1000 + (t.maxMin ?? 60) * 60_000;
+    if (now < until) return { ...t, until };
+  }
+  return undefined;
+}
+
 const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16) + 'Z';
 
 /**
@@ -98,15 +113,12 @@ const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16) + 'Z';
  */
 export function foreignTimedHold(root: string | undefined, session: string | undefined, now: number = Date.now(), alive: (pid: number) => boolean = pidAlive): string | undefined {
   if (!root) return undefined;
-  for (const t of queueTickets(benchLockDir(root), alive)) {
-    if (t.mode !== 'exclusive' || !t.granted || t.revoked) continue;
+  const t = timedHolder(root, now, alive);
+  if (t) {
     if (session && t.session === session) return undefined;
-    const since = t.granted.ts * 1000;
-    const until = since + (t.maxMin ?? 60) * 60_000;
-    if (now >= until) continue; // past its bound: the next waiter revokes it
     const bits = [(t.requests ?? []).join(','), [t.host, t.sandbox].filter(Boolean).join('/'), t.what ? `"${t.what.slice(0, 120)}"` : ''].filter(Boolean);
     const who = t.session ? `worker ${t.session}` : `pid ${t.pid}`;
-    return `bench lock held by ${who}${bits.length ? ` (${bits.join(', ')})` : ''}, until ${hhmm(until)} at the latest (held since ${hhmm(since)})`;
+    return `bench lock held by ${who}${bits.length ? ` (${bits.join(', ')})` : ''}, until ${hhmm(t.until)} at the latest (held since ${hhmm(t.granted!.ts * 1000)})`;
   }
   const old = readBenchLock(root, now, alive);
   if (old && !/\[t\d{8}\]/.test(old.owner)) return `bench lock held by an old-style lock: ${old.owner} (seen since ${hhmm(Date.parse(old.since))}, 40 minutes at most)`;

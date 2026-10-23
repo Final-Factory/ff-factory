@@ -160,3 +160,32 @@ export function splitVia(text: string): { via?: string; text: string } {
   const m = VIA_LINE.exec(text);
   return m ? { via: m[1], text: text.slice(m[0].length) } : { text };
 }
+
+// ---------------------------------------------------------------- a reply sent straight to another person (w1831)
+
+/** The longest message one person sends another (message_person, and a reply from the bubble). */
+export const PERSON_MESSAGE_CHARS = 2000;
+
+/**
+ * Where FF Factory's note starts on a person's reply to another person's message, sent from the bubble over their message
+ * box (w1831): the words before it already reached that person as message_person sends them, with no turn of the
+ * orchestrator in between. The page shows it as a "Sent to <name>" tag; `inPersonWords` stops at it, as at HELD_MARK.
+ */
+export const SENT_MARK = '[FF Factory, not your person: already sent]';
+
+const SENT_LINE = /\n*\[FF Factory, not your person: already sent\] To (.+?) \(user id ([^)\s]+)\):[^\n]*/;
+
+/**
+ * What a person's own orchestrator reads when its person answered another person straight from the bubble: their words,
+ * the message they answered quoted (when the chat has it), and FF Factory's note that the words are delivered.
+ */
+export function sentText(words: string, to: { userId: string; displayName: string }, q?: Quoted): string {
+  const note = `${SENT_MARK} To ${to.displayName} (user id ${to.userId}): FF Factory delivered the words above as message_person does, from the Reply box on ${to.displayName}'s message, with no turn of yours. They are sent: never send them again. Take them as context, and answer in a line at most.`;
+  return `${q ? replyText(words, q) : words.trim()}\n\n${note}`;
+}
+
+/** A message's text without FF Factory's "already sent" note, and who it was sent to when it has one. */
+export function splitSent(text: string): { text: string; sentTo?: { userId: string; displayName: string } } {
+  const m = SENT_LINE.exec(text);
+  return m ? { text: text.slice(0, m.index) + text.slice(m.index + m[0].length), sentTo: { displayName: m[1], userId: m[2] } } : { text };
+}

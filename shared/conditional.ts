@@ -3,7 +3,7 @@
 // when the fact is met (server/blockerWatch.ts reads the pull requests; Orchestrators.carryOutConditional acts).
 // Conditions are checked facts only: a pull request merged, a pull request closed, a request closed as done.
 import { prRefOf } from './blockers.ts';
-import { REPLY_MARK } from './replies.ts';
+import { REPLY_MARK, SENT_MARK } from './replies.ts';
 import type { ConditionalDecision, WorkItem } from './types.ts';
 
 /** How long a decision waits for its fact by default, and at most (days). */
@@ -103,10 +103,11 @@ const norm = (s: string) =>
 
 /**
  * Whether `words` are a person's own, verbatim (case, quotes and spacing aside): found in one of their messages, before
- * FF Factory's own note in it (HELD_MARK), or the message they quoted in a reply (REPLY_MARK, w866). Outer quotes and end punctuation of `words` do not count.
+ * FF Factory's own note in it (HELD_MARK, or SENT_MARK on a reply sent straight to another person, w1831), or the message
+ * they quoted in a reply (REPLY_MARK, w866). Outer quotes and end punctuation of `words` do not count.
  */
 export function inPersonWords(words: string, messages: readonly string[]): boolean {
   const w = norm(words).replace(/^["'\s]+|["'\s.,;!]+$/g, '');
   if (w.length < 6) return false;
-  return messages.some((m) => norm(m.split(HELD_MARK)[0].split(REPLY_MARK)[0]).includes(w));
+  return messages.some((m) => norm(m.split(HELD_MARK)[0].split(SENT_MARK)[0].split(REPLY_MARK)[0]).includes(w));
 }
