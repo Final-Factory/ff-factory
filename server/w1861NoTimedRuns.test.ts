@@ -48,7 +48,7 @@ test('w1861: timed work never goes to a computer that takes none, even the small
   assert.equal(pickComputer([full(beast), full(loth), m5], undefined, {}, 'game', false, 'timed'), undefined);
   // Builds, editors, coding and tests still go there: lothsahn, "m5 stays open for all other work".
   assert.equal(pickComputer([full(beast), full(loth), m5], undefined, {}, 'game')!.pick.id, 'm5');
-  assert.equal(pickComputer([full(beast), full(loth), m5], undefined, {}, 'other')!.pick.id, 'm5');
+  assert.equal(pickComputer([full(beast), full(loth), m5], undefined, {}, 'agent')!.pick.id, 'm5');
 });
 
 test('w1861: the capacity lines\' "Next timed work" names another computer and says m5 takes none', () => {
@@ -81,7 +81,6 @@ test('w1861: the portal sends m5 its refusal with the machines that take timed r
   const rec = (id: string, o: Partial<Machine> = {}) => ({ id, host: id, purpose: 'unused', status: 'deployed', online: false, repoPath: '/r', home: '/h', portalUrl: 'http://p', sessionIds: [], createdAt: '2026-10-01T00:00:00Z', sandboxRoot: '/s', ...o }) as unknown as Machine;
   for (const m of [rec('m5'), rec('beast'), rec('lothdesktop'), rec('m3'), rec('ffbox', { sandboxRoot: undefined })]) store.putMachine(m);
   const machines = new MachineManager(cfg, store, new SessionManager(cfg, store));
-  t.after(() => machines.close?.());
   const msg = machines.benchPrioritiesMsg('m5', {});
   assert.deepEqual(msg.noTimedRuns, { why: NO_TIMED_RUNS.m5, elsewhere: ['beast', 'lothdesktop', 'm3'] }, 'machines with sandboxes only');
   assert.equal(machines.benchPrioritiesMsg('beast', {}).noTimedRuns, undefined);

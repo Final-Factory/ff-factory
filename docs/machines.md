@@ -819,6 +819,14 @@ exception is a worker that comes back much later: it releases its sandbox (below
 `list_sandboxes` lists each computer's sandboxes by status too: an agent mid-turn first, then one between turns, then Idle, then
 none live or unused, the most recent activity first within each.
 
+**A computer that takes no timed runs** (w1861; `Machine.noTimedRuns`, add_machine `no_timed_runs "<why>"`, `""` clears
+it; `server/machines.ts` `NO_TIMED_RUNS` makes m5 one by default, with lothsahn's words: "The m5 should not be used for
+timing runs because Ben runs stuff on it personally"). Placement never sends timed or exclusive-lock work there (its
+Capacity line says "no timed runs"), and a start pinned to it for such work is refused back to the caller. Its daemon writes
+`no_timed_runs` {why, elsewhere} into `<root>/tmp/bench.queue/priorities.json` (`machine/benchLock.ts`
+`writeBenchPriorities`), and the game repo's `scripts/bench/bench_queue.py` then refuses every exclusive ticket there,
+naming the computers that take them. Builds, editors, coding and tests go there as before (shared tickets).
+
 The dispatcher picks the computer for each request itself (`start_agent` with a sandbox id; there is no automatic
 placement), so FF Factory shows it each computer's room where it decides, names the computer the next piece of work
 should go to, and says so when it places work elsewhere. New game-repo work is **spread** across the computers with
@@ -1041,7 +1049,7 @@ LothDesktop and Beast, not just when BEAST is full").
   - Where: the Capacity block's "Next urgent release work (a quick or urgent release, w1639; …): beast (…)", from `config
     placement.build` (unset: `beast`, then `lothdesktop`, `DEFAULT_BUILD`), the first online one with room, never passed
     over for a timed leg in its bench queue (w1639; w1628 did), else the general placement. Timed work: "Next timed work", the smallest computer
-    with room on the platform it names, BEAST last (`pickTimed`, w1628).
+    with room on the platform it names, BEAST last, never a computer that takes no timed runs (m5; `timedRank`, `pickTimed`, w1628, w1861, w1872; docs/orchestrators.md "Timed and exclusive-lock work").
   - A build declared coming holds its computer for new work at once (`Agents.placement()` adds `BuildPlans.holds()`),
     and when due moves its workers between turns elsewhere, pauses the ones that cannot move and asks the ones mid-turn
     to pause at a safe point; `build_plan start` goes at once (w1656: the paused workers' editors are stopped and the release pre-empts the bench queue, docs/orchestrators.md); `done`

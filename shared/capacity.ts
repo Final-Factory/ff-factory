@@ -112,7 +112,7 @@ export function needsBuild(w: Pick<WorkItem, 'needs' | 'build' | 'title' | 'brie
  * Timed work named in words (w1628): a benchmark, a perf A/B or probe, a timed run or leg, frame times. Not "fps" alone
  * (60 fps clips are visual work) and not a bare "performance".
  */
-export const TIMED_WORDS = /\b(?:bench(?:mark)?(?:s|ed|ing)?|perf (?:a\/b|probe|test|run|fix|regression)s?|performance (?:a\/b|probe|test|run|regression|fix)s?|timed (?:runs?|legs?|a\/b)|probe_ab\w*|frame ?times?|a\/b (?:runs?|test|legs?))\b/i;
+export const TIMED_WORDS = /\b(?:bench(?:mark)?(?:s|ed|ing)?|perf (?:a\/b|probe|test|run|fix|regression)s?|performance (?:a\/b|probe|test|run|regression|fix)s?|timed (?:runs?|legs?|a\/b)|timing (?:runs?|legs?)|exclusive (?:bench )?(?:locks?|tickets?)|probe_ab\w*|frame ?times?|a\/b (?:runs?|test|legs?))\b/i;
 
 /**
  * Whether a request runs timed legs (w1628), and on what platform when its words name one: 'win32' ("Windows", "win
