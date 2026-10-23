@@ -6168,6 +6168,29 @@ body {
   white-space: nowrap;
 }
 
+.fl-bench {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.fl-bench-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fl-bench b {
+  font-weight: 600;
+}
+
+/* The board's cards have room to wrap a long line instead of cutting it (w1835). */
+.board-card .fl-bench-line {
+  white-space: normal;
+}
+
 .fl-places {
   display: flex;
   flex-direction: column;

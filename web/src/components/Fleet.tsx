@@ -3,6 +3,7 @@
 // sandbox and editor counts) and its sandboxes with their live agents (every worker runs in one, w536).
 import { useState, type ReactNode } from 'react';
 import type { AppState, HostHealth, Provider, SessionInfo, UserInfo } from '../../../shared/types';
+import { benchGlance } from '../../../shared/benchGlance';
 import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
 import { capacityLine, fleetOf, slotCall, type FleetComputer, type FleetSandbox, type PersonWait, type PlaceAgents, type SlotCall } from '../../../shared/fleet';
 import { useAttention } from '../attention';
@@ -167,7 +168,33 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
       <span className="fl-cap" data-testid="fl-capacity">
         {capacityLine(c)}
       </span>
+      <BenchLine c={c} now={now} />
     </>
+  );
+}
+
+/**
+ * Its bench queue (w1835; lothsahn: "Please display on FF factory's webpage for the machine view whether each machine is in
+ * shared or exclusive lock mode"): Exclusive, Shared or Free, who holds it and for how long, what waits, and the next timed
+ * leg; the hover lists every ticket. Nothing for an offline machine or a daemon that does not report it.
+ */
+function BenchLine({ c, now }: { c: FleetComputer; now: number }) {
+  const g = c.online ? benchGlance(c.bench, now) : undefined;
+  if (!g) return null;
+  // Two short lines, so the sidebar's width keeps both: who holds it, then its times and what waits.
+  const sub = [g.times, g.waiting, g.next].filter(Boolean).join(' · ');
+  return (
+    <span className="fl-bench" data-testid="fl-bench" data-mode={g.mode} title={g.hint}>
+      <span className="fl-bench-line">
+        Bench lock <b className={`tone-${g.tone}`}>{g.label}</b>
+        {g.detail && ` · ${g.detail}`}
+      </span>
+      {sub && (
+        <span className="fl-bench-line" data-testid="fl-bench-sub">
+          {sub}
+        </span>
+      )}
+    </span>
   );
 }
 

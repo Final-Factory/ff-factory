@@ -538,3 +538,87 @@ test("fleet: a worker that waits on someone else is listed with whom, and the sl
   await expect(sb2.getByTestId('fl-agent')).toContainText(/w1325.*waits on Somebody Else/);
   await expect(sb2.getByTestId('fl-call')).toHaveCount(0);
 });
+
+/**
+ * w1835 (lothsahn: "Please display on FF factory's webpage for the machine view whether each machine is in shared or
+ * exclusive lock mode"): each machine's bench queue, as its daemon's stats report it (machine/benchState.ts). BEAST holds
+ * a timed leg (Exclusive) with a build waiting, LothDesktop runs two shared tickets with a timed leg next, the M5 is free.
+ */
+function benchModes(s: AppState): AppState {
+  const f = fleet(s);
+  const t = (m: number) => new Date(NOW.getTime() + m * 60_000).toISOString();
+  const bench: Record<string, MachineStats['bench']> = {
+    beast: {
+      mode: 'exclusive',
+      running: [{ ticket: 't00000412', mode: 'exclusive', what: 'probe_ab.sh radius A round 2', session: '10d5850f4c2e', requests: ['w1243'], host: 'BEAST', sandbox: 'slot4', since: t(-12), until: t(18) }],
+      runningCount: 1,
+      waiting: 2,
+    },
+    lothdesktop: {
+      mode: 'shared',
+      running: [
+        { ticket: 't00000088', mode: 'shared', what: 'unity: build slot1', session: 'aa20a6a1ffff', requests: ['w1800'], since: t(-4), until: t(116) },
+        { ticket: 't00000089', mode: 'shared', what: 'editor boot slot3', since: t(-1), until: t(29) },
+      ],
+      runningCount: 2,
+      waiting: 1,
+      nextExclusive: { ticket: 't00000090', mode: 'exclusive', what: 'bench JustPlay1003', session: '17e0097f0000', requests: ['w1785'], since: t(-3), ahead: 0 },
+    },
+    m5: { mode: 'free', running: [], runningCount: 0, waiting: 0 },
+  };
+  const gpu = { name: 'NVIDIA GeForce RTX 5090', memTotalMiB: 32607, memUsedMiB: 14540, utilPct: 41 };
+  const ms = { ...f.machineStats, beast: stats(38, 71, 128, gpu) };
+  return { ...f, machineStats: Object.fromEntries(Object.entries(ms).map(([k, v]) => [k, bench[k] ? { ...v, bench: bench[k] } : v])) };
+}
+
+test('fleet: each machine says its bench lock mode, Exclusive, Shared or Free, with the holder and what waits (w1835)', async ({ page }) => {
+  await fixedFleet(page, '#/overview', benchModes);
+  const board = page.getByTestId('overview');
+  const beast = board.getByTestId('board-host').getByTestId('fl-bench');
+  await expect(beast).toHaveAttribute('data-mode', 'exclusive');
+  await expect(beast.locator('.fl-bench-line').first()).toHaveText('Bench lock Exclusive · w1243 · worker 10d5850f');
+  await expect(beast.getByTestId('fl-bench-sub')).toHaveText('held 12m, 18m left · 2 waiting');
+  await expect(beast).toHaveAttribute('title', /Bench queue: Exclusive\nexclusive t00000412 · w1243 · worker 10d5850f · BEAST\/slot4 · "probe_ab.sh radius A round 2" · held 12m, 18m left\n2 waiting/);
+  const loth = board.getByTestId('board-lothdesktop').getByTestId('fl-bench');
+  await expect(loth).toHaveAttribute('data-mode', 'shared');
+  await expect(loth.locator('.fl-bench-line').first()).toHaveText('Bench lock Shared · 2 tickets running');
+  await expect(loth.getByTestId('fl-bench-sub')).toHaveText('1 waiting · next timed: w1785 within 1h 56m');
+  const m5 = board.getByTestId('board-m5').getByTestId('fl-bench');
+  await expect(m5).toHaveAttribute('data-mode', 'free');
+  await expect(m5).toHaveText('Bench lock Free');
+  // The offline M3 says nothing about a queue it cannot report.
+  await expect(board.getByTestId('board-m3').getByTestId('fl-bench')).toHaveCount(0);
+  // The mode word carries the colour, as the states do elsewhere: no fill.
+  expect(await beast.locator('b').evaluate((e) => getComputedStyle(e).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+  // No line is cut on the board, nor runs past its card's edge.
+  const cut = await board.locator('.board-card').evaluateAll((cards) =>
+    cards.flatMap((card) => {
+      const edge = card.getBoundingClientRect().right;
+      return [...card.querySelectorAll('.fl-bench-line')].filter((e) => e.scrollWidth > e.clientWidth + 1 || e.getBoundingClientRect().right > edge).map((e) => e.textContent);
+    }),
+  );
+  expect(cut, 'bench lines cut short or past the card on the board').toEqual([]);
+  await proof(page, 'bench-overview');
+
+  // The sidebar shows the same, the full line in its hover when its width cuts it.
+  const sidebar = await openSidebar(page);
+  await expect(sidebar.getByTestId('fl-group-host').getByTestId('fl-bench')).toHaveAttribute('data-mode', 'exclusive');
+  await expect(sidebar.getByTestId('fl-group-lothdesktop').getByTestId('fl-bench')).toHaveAttribute('data-mode', 'shared');
+  await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-bench')).toHaveText('Bench lock Free');
+  // Both lines fit the sidebar's width whole (measured at 280 px).
+  if (!isMobile(page)) {
+    const sideCut = await sidebar.locator('.fl-bench-line').evaluateAll((els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent));
+    expect(sideCut, 'bench lines cut short in the sidebar').toEqual([]);
+  }
+  if (!isMobile(page)) await proof(page, 'bench-sidebar');
+
+  // The machine's own page says it in its details.
+  await page.goto('/#/machine/lothdesktop');
+  const row = page.getByTestId('machine-bench');
+  await expect(page.getByTestId('fl-group-host').or(page.locator('.sb-panel'))).not.toHaveCount(0);
+  if (!(await row.isVisible())) await page.getByRole('button', { name: 'Details', exact: true }).click();
+  await expect(row).toHaveAttribute('data-mode', 'shared');
+  await expect(row).toContainText('Bench lock Shared');
+  await expect(row).toContainText('2 tickets running · 1 waiting · next timed: w1785 within 1h 56m');
+  await proof(page, 'bench-machine-page');
+});

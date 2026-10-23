@@ -62,6 +62,7 @@ import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { readBenchLock, readBenchQueue, writeBenchPriorities } from './benchLock.ts';
 import { benchTicketFor } from './benchQueue.ts';
+import { readBenchState } from './benchState.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import { PauseKeeper, pauseFile } from './pause.ts';
 import { trayView } from './pauseRules.ts';
@@ -1334,7 +1335,9 @@ export class Daemon {
       const benchLock = readBenchLock(this.cfg.root);
       // Its timed legs, running or waiting (w1628): a release build goes to another build computer meanwhile.
       const benchQueue = readBenchQueue(this.cfg.root);
-      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}) });
+      // Its queue's mode, holders and waiters (w1835): the machine view shows them.
+      const bench = readBenchState(this.cfg.root);
+      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(bench ? { bench } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);
     }

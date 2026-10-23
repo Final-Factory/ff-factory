@@ -77,7 +77,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // ignores (it masks by SECRET_ENV names, as before); a newer daemon with an older portal has none and does the same.
 // w1746 (no bump): `live` op idleClose with `minutes`, sent only to a daemon whose hello offers `liveIdleClose` (an older
 // daemon would take an unknown op for a start), and MachineSandbox `idleClosed`, which an older portal ignores.
-const DECIDED = { protocol: 9, fingerprint: '8057e74ed6be0263' };
+// w1835 (no bump): `bench` on `stats`, the bench queue's mode, holders and waiters, which an older portal drops (it copies
+// the stats fields it knows); a newer portal with an older daemon gets none and shows no bench line.
+const DECIDED = { protocol: 9, fingerprint: 'd0adb1db438b98c1' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

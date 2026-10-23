@@ -2244,7 +2244,7 @@ export class MachineManager {
         return;
       }
       case 'stats': {
-        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), at: new Date().toISOString() };
+        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), ...(msg.bench ? { bench: msg.bench } : {}), at: new Date().toISOString() };
         this.stats.set(id, stats);
         emit({ type: 'machine_stats', id, stats });
         return;
