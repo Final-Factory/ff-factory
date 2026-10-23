@@ -63,6 +63,15 @@ Measured: every model call's context (input + cache read + cache write) and outp
 the sum of the differences between consecutive calls. Estimated: the split among sources, by characters ÷ 2.3 (the meter's
 calibration, docs/spend.md). Tests: `server/contextGrowth.test.ts`.
 
+**First reading, lothsahn's orchestrator, 2026-10-23 11:50Z to 16:30Z** (8 cycles, 7 complete, 157 turns): a cycle started
+at about 40,000 tokens (measured; estimated: system prompt and tools 23,600, of which the system prompt 14,900; summary
+6,000-8,500; re-attached files 2,100-6,300; MEMORY.md 2,800) and compacted at 98,000-109,000, after 20 turns (mean). It
+grew 2,886 tokens a turn (measured): its own output 26%, `list_work` list 15% (8,436 a call), `list_work` with id 13%
+(2,870 a call), `[worker update]` 10% (22% of it the relay paragraph each repeated), `system_status` 4%, `Read` 4%,
+`list_sandboxes` 3%, `[dispatch]` 3%; a person's turn 6,431 a turn (65% of all growth), a timer's 5,139, a `[dispatch]`'s 768
+(estimated, but for the totals). What it changed: the shorter list line (`LIST_LINE_TEXT`, `server/work.ts`), the relay
+paragraph no longer under every `[worker update]` (the brief already said it), ended timers shown for a day (`describeTimers`).
+
 A machine daemon's own log is **not** kept by the portal (it holds a daemon's clean-up passes, which `cleanup` shows, and
 nothing else of its log). It is `<app_dir>/logs/daemon.log` on that machine (`daemonLogPath` in `server/machines.ts`: the
 machine's `app_dir`, by default `~/.ff-factory`, `%USERPROFILE%\.ff-factory` on Windows). Where the `app_dir` is set
