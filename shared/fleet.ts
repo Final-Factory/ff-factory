@@ -6,6 +6,7 @@ import type { AppState, HostStats, LiveViewInfo, Machine, MachineSandbox, Machin
 import { AGENT_STATE_RANK, agentState, holdsSandbox, placeRank, sortAgents } from './agentState.ts';
 import { holdsOf, workLiveAll } from './workState.ts';
 import { newestFirst } from './blockers.ts';
+import { liveReady, type LiveReady } from './liveReady.ts';
 
 /**
  * Agents with a process (working, waiting on someone, idle), and stopped ones their wake_me or a queued message will
@@ -176,25 +177,39 @@ export interface SlotCall {
   /** The request it waits on, when the ledger says ("w1325"). */
   request?: string;
   label: string;
+  /**
+   * Whether its Live view can be used now (w1838, shared/liveReady.ts): the label says "Live view: go" only when it can, and
+   * otherwise what it waits on ("Live view: editor stopped"). Absent for "Asked you".
+   */
+  ready?: LiveReady;
 }
 
 export function slotCall(
   agents: Pick<PlaceAgents, 'shown' | 'older' | 'waits'>,
   views: readonly LiveViewInfo[] | undefined,
   me: { userId: string; displayName: string; role?: UserRole } | undefined,
+  /** The view's readiness with its sandbox's editor (the page's machines); without it, from the view alone (liveReady). */
+  readyOf: (view: LiveViewInfo, session: SessionInfo) => LiveReady = (v, s) => liveReady(v, { session: s }),
 ): SlotCall | undefined {
   if (!me) return undefined;
   const name = me.displayName.toLowerCase();
-  const streams = (s: SessionInfo) => !!views?.some((v) => v.sessionId === s.id && v.state !== 'stopped');
+  const viewOf = (s: SessionInfo) => views?.find((v) => v.sessionId === s.id && v.state !== 'stopped');
+  const streams = (s: SessionInfo) => !!viewOf(s);
+  // w1838 (Ben: "don't show the live view go sticker thing on the slot. Only show that when it's ready and can be used"):
+  // the label is the view's readiness, "Live view: go" only when frames flow.
+  const call = (kind: SlotCall['kind'], session: SessionInfo, request?: string): SlotCall => {
+    const ready = readyOf(viewOf(session)!, session);
+    return { kind, session, ...(request ? { request } : {}), label: ready.badge, ready };
+  };
   const mine = agents.waits.filter((x) => x.on.some((n) => n.toLowerCase() === name));
   const live = mine.find((x) => streams(x.session));
-  if (live) return { kind: 'live', session: live.session, request: live.request, label: 'Live view: go' };
+  if (live) return call('live', live.session, live.request);
   if (mine[0]) return { kind: 'asked', session: mine[0].session, request: mine[0].request, label: 'Asked you' };
   const asked = (s: SessionInfo) => [s.requestedBy, s.lastRequestedBy].some((r) => r?.userId.toLowerCase() === me.userId.toLowerCase());
   const idle = [...agents.shown, ...agents.older].find((s) => s.status !== 'running' && s.status !== 'starting' && streams(s) && asked(s));
-  if (idle) return { kind: 'live', session: idle, label: 'Live view: go' };
+  if (idle) return call('live', idle);
   const watch = [...agents.shown, ...agents.older].find((s) => streams(s) && (me.role === 'owner' || asked(s)));
-  return watch && { kind: 'watch', session: watch, label: 'Live view: go' };
+  return watch && call('watch', watch);
 }
 
 const waiting = (a: PlaceAgents) => a.live.reduce((n, s) => n + s.pendingPermissions.length, 0);

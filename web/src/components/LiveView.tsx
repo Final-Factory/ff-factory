@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AppState, LiveViewInfo, SessionInfo } from '../../../shared/types';
+import { liveReady } from '../../../shared/liveReady';
 import { sessionRoute } from '../attention';
 import { navigate } from '../util';
 import { LiveKnobs } from './LiveKnobs';
@@ -7,16 +8,8 @@ import { LiveStage } from './LiveStage';
 import { AttentionStrip } from './PanelChrome';
 import { SessionView } from './SessionView';
 import { Icon, StateText } from './ui';
-import type { Tone } from '../util';
 
 const TOAST_MS = 3000;
-
-const STATE: Record<LiveViewInfo['state'], { tone: Tone; label: string }> = {
-  live: { tone: 'green', label: 'Live' },
-  starting: { tone: 'amber', label: 'Starting' },
-  holding: { tone: 'amber', label: 'Holding' },
-  stopped: { tone: 'grey', label: 'Stopped' },
-};
 
 /**
  * A session's live view (docs/live-view.md): the game's own render of the asset, with the asset's knobs, beside the
@@ -44,7 +37,9 @@ export function LiveView({ app, session, view, wide }: { app: AppState; session:
     if (wide) setSheet(false);
   }, [wide]);
 
-  const st = STATE[view.state];
+  // w1838: what the view waits on, with its sandbox's editor (shared/liveReady.ts): the header, the stage and the knobs agree.
+  const sandbox = app.machines.find((m) => m.id === view.machineId)?.sandboxes?.find((s) => s.id === view.sandbox);
+  const ready = liveReady(view, { sandbox, session });
   const header = (
     <header className="ph" data-testid="live-header">
       <button className="btn btn-ghost btn-icon ph-btn" onClick={() => navigate(sessionRoute(session, app))} title="Back to the conversation's place" aria-label="Back">
@@ -55,7 +50,7 @@ export function LiveView({ app, session, view, wide }: { app: AppState; session:
           {session.title}
         </div>
         <div className="ph-sub">
-          <StateText tone={st.tone} label={st.label} pulse={view.state === 'live'} />
+          <StateText tone={ready.tone} label={ready.label} pulse={ready.ready} />
           <span className="ph-sep">·</span>
           <span className="mono ellipsis">
             {view.machineId}/{view.sandbox}
@@ -67,6 +62,7 @@ export function LiveView({ app, session, view, wide }: { app: AppState; session:
   const stage = (
     <LiveStage
       view={view}
+      ready={ready}
       compact={!wide}
       toast={
         toast ? (
@@ -88,9 +84,9 @@ export function LiveView({ app, session, view, wide }: { app: AppState; session:
             <section className="lv-card">
               <div className="lv-card-head">
                 <span className="lv-card-title">Knobs</span>
-                <span className="dim small">the material&rsquo;s own properties · drag to try, the agent sees what you set</span>
+                <span className="dim small">the material&rsquo;s own properties{ready.ready ? ' · drag to try, the agent sees what you set' : ''}</span>
               </div>
-              <LiveKnobs sessionId={session.id} liveNow={view.state === 'live'} onMoved={onMoved} />
+              <LiveKnobs sessionId={session.id} liveNow={ready.ready} materials={view.materials} onMoved={onMoved} />
             </section>
           </div>
         </section>
@@ -117,14 +113,14 @@ export function LiveView({ app, session, view, wide }: { app: AppState; session:
           </div>
           <div className="lv-sheet-head">
             <span className="lv-card-title">Knobs</span>
-            <span className="dim small ellipsis">drag to try, the agent sees what you set</span>
+            <span className="dim small ellipsis">{ready.ready ? 'drag to try, the agent sees what you set' : 'back when the view is live'}</span>
             <span className="spacer" />
             <button className="btn btn-ghost btn-icon ph-btn" onClick={() => setSheet(false)} aria-label="Close knobs">
               <Icon name="x" />
             </button>
           </div>
           <div className="lv-sheet-body">
-            <LiveKnobs sessionId={session.id} liveNow={view.state === 'live'} onMoved={onMoved} />
+            <LiveKnobs sessionId={session.id} liveNow={ready.ready} materials={view.materials} onMoved={onMoved} />
           </div>
         </div>
       )}

@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import type { AppState, LiveViewInfo, Machine, MachineSandbox, MachineStats, ServerEvent, SessionInfo, SystemStats, WorkItem } from '../shared/types.ts';
 import { expect, isMobile, openSidebar, settle, signIn, test } from './fixtures.ts';
+import { solidPng } from '../server/testLiveGame.ts';
 
 // The sidebar's computers and the Overview board (web/src/components/Fleet.tsx, shared/fleet.ts): BEAST, then
 // each machine with its sandboxes and their live agents (w536: none in a main clone). The page's WebSocket is intercepted and
@@ -493,6 +494,77 @@ test("fleet: an owner sees a quiet \"Live view: go\" on a slot whose view is for
   await proof(page, 'sidebar-slot-call-quiet');
   await sb1.getByTestId('fl-call').click();
   await expect(page).toHaveURL(/#\/live\/l-review$/);
+});
+
+test('fleet: the slot says "Live view: go" only when its view can be used, and the panel and knobs say what it waits on (w1838)', async ({ page }) => {
+  // Ben, 2026-10-23: "don't show the live view go sticker thing on the slot. Only show that when it's ready and can be used".
+  // His case: the w1466 view held for hours with its editor stopped, under a green "go", over red knobs.
+  test.setTimeout(240_000); // ten states, each a reload
+  const BUILD = 'building since 07:40Z (Urgent hotfix release after 1.0.0.9, the dispatcher for w1836; w1606): no new work until it is done';
+  const states: { name: string; view: Partial<LiveViewInfo>; unity: MachineSandbox['unity']; idleClosed?: MachineSandbox['idleClosed']; badge: string; title: RegExp }[] = [
+    { name: 'go', view: { state: 'live' }, unity: { state: 'running' }, badge: 'Live view: go', title: /^$/ },
+    { name: 'starting', view: { state: 'starting', detail: 'asking the game to stream' }, unity: { state: 'running' }, badge: 'Live view: starting', title: /Starting/ },
+    { name: 'editor-stopped', view: { state: 'holding', detail: 'the sandbox editor is not running' }, unity: { state: 'stopped' }, badge: 'Live view: editor stopped', title: /Editor stopped/ },
+    { name: 'held', view: { state: 'holding', detail: 'the sandbox editor is not running', hold: BUILD }, unity: { state: 'stopped' }, badge: 'Live view: paused for a build', title: /Paused/ },
+    { name: 'idle-closed', view: { state: 'holding', detail: 'editor closed: idle 15 min; reopens on resume' }, unity: { state: 'stopped' }, idleClosed: { at: '2026-10-23T06:52:00.000Z', minutes: 15 }, badge: 'Live view: editor closed', title: /Editor closed/ },
+    { name: 'queued', view: { state: 'holding', detail: 'the sandbox editor is not running' }, unity: { state: 'starting', detail: 'queued in the bench queue: 1 timed leg ahead (w1785 bench dev build)' }, badge: 'Live view: queued', title: /Queued/ },
+    { name: 'editor-starting', view: { state: 'holding', detail: 'the sandbox editor is not running' }, unity: { state: 'starting', detail: 'loading' }, badge: 'Live view: editor starting', title: /Editor starting/ },
+    { name: 'no-play', view: { state: 'holding', detail: 'the game is not in play mode (no agent channel)', wake: { at: '2026-10-23T07:50:00.000Z', who: 'Ben' } }, unity: { state: 'running' }, badge: 'Live view: not in play mode', title: /Not in play mode/ },
+    { name: 'stalled', view: { state: 'holding', detail: 'no frame from the game for 12 s (its editor may be busy, minimized or hung)' }, unity: { state: 'running' }, badge: 'Live view: no frames', title: /No frames/ },
+    { name: 'holding', view: { state: 'holding', detail: 'the game stopped streaming (left play mode, or a script reload); showing the last frame' }, unity: { state: 'running' }, badge: 'Live view: holding', title: /Holding/ },
+  ];
+  let st = states[0];
+  const shape = (s: AppState): AppState => {
+    const f = waitingInSb2({ live: true })(s);
+    return {
+      ...f,
+      live: f.live?.map((v) => ({ ...v, detail: '', ...st.view })),
+      machines: f.machines.map((m) => (m.id === 'lothdesktop' ? { ...m, sandboxes: m.sandboxes!.map((x) => (x.id === 'sb2' ? { ...x, unity: st.unity, ...(st.idleClosed ? { idleClosed: st.idleClosed } : {}) } : x)) } : m)),
+    };
+  };
+  // The game's knobs while it streams (this fleet has no daemon behind the view).
+  await page.route(/\/api\/live\/l-knob\/knobs/, (r) =>
+    r.fulfill({ json: [{ material: 'heatExchangerMaterial', shader: 'FF/Radiator', knobs: [{ name: '_FinColor', label: 'Fin colour', type: 'color', value: [0.32, 0.55, 0.78, 1] }, { name: '_Glow', label: 'Glow', type: 'range', value: 0.4, min: 0, max: 2 }] }] }),
+  );
+  // The worker is this fleet's own, not the server's: its "no session" toasts are the fixture's, not the view's.
+  await page.route(/\/api\/sessions\/l-knob\//, (r) => r.fulfill({ json: [] }));
+  await page.addInitScript(() => document.addEventListener('DOMContentLoaded', () => document.head.append(Object.assign(document.createElement('style'), { textContent: '.toasts { display: none; }' }))));
+  // The game's frames, as the portal passes them (a page draws the newest): a held view keeps the last one, dimmed.
+  const frame = solidPng(640, 360, 38, 58, 84);
+  await page.routeWebSocket(/\/live\/l-knob$/, (ws) => {
+    const t = setInterval(() => ws.send(frame), 100);
+    ws.onClose(() => clearInterval(t));
+  });
+  await fixedFleet(page, '#/', shape);
+  for (const next of states) {
+    st = next;
+    // A new socket gets the state again, shaped for this case.
+    await page.goto('/#/');
+    await page.reload();
+    const sidebar = await openSidebar(page);
+    const sb2 = sidebar.getByTestId('fl-sandbox-lothdesktop/sb2');
+    await expect(sb2.getByTestId('fl-call'), st.name).toHaveText(st.badge);
+    await expect(sb2.getByTestId('fl-call')).toHaveClass(st.name === 'go' ? /needs-you/ : /fl-call-quiet/);
+    await sb2.evaluate((el) => el.scrollIntoView({ block: 'start' }));
+    await proof(page, `live-ready-slot-${st.name}`);
+    await sb2.getByTestId('fl-call').click();
+    await expect(page).toHaveURL(/#\/live\/l-knob$/);
+    await expect(page.getByTestId('live-readout'), 'a frame is drawn').toBeVisible();
+    if (st.name === 'go') {
+      await expect(page.getByTestId('live-chip')).toHaveText(/live/i);
+      await expect(page.getByTestId('live-hold')).toHaveCount(0);
+    } else {
+      await expect(page.getByTestId('live-hold')).toHaveAttribute('data-ready', st.name === 'editor-stopped' ? 'editor-stopped' : st.name);
+      await expect(page.getByTestId('live-chip')).toHaveText(new RegExp(st.title.source, 'i'));
+      // Never the old promise, and no red knobs: one calm line names the materials.
+      await expect(page.getByTestId('live-hold')).not.toContainText(/knobs still work/);
+      if (!isMobile(page)) {
+        await expect(page.getByTestId('live-knobs-wait')).toContainText(/heatExchangerMaterial: its knobs come back when the view is live/);
+        await expect(page.locator('.lv-err')).toHaveCount(0);
+      }
+    }
+    await proof(page, `live-ready-panel-${st.name}`);
+  }
 });
 
 test("fleet: the request's card on the Dispatcher's Waiting tab opens the waiting worker's Live view too (w1430)", async ({ page }) => {

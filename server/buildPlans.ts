@@ -334,7 +334,8 @@ export class BuildPlans {
     // The Live views left open (w1639): their heavy work may start again.
     for (const k of p.kept) {
       if (!this.d.isLive(k.session) && !this.d.workersOn(p.machine).some((s) => s.id === k.session)) continue;
-      this.d.tell(k.session, `[FF Factory] The build on ${p.machine} is done (w1639): compiles, tests and builds may start again.`);
+      // w1838: its editor may have stopped meanwhile (it could not start beside the build), and its view holds until it is staged.
+      this.d.tell(k.session, `[FF Factory] The build on ${p.machine} is done (w1639): compiles, tests and builds may start again. If your Live view is not streaming (live_view status), start your editor (mcp__machine__unity start) and stage it again now: a person may be waiting to use it.`);
     }
     this.d.kick?.();
     this.d.log(`build: ${p.what} on ${p.machine} done (${why}); build ${took}; ${p.moved.length} moved, ${resumed.length} resumed, ${idleOf(p).length} paused between turns resume with their own next message`);

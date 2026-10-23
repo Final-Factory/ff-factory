@@ -5,6 +5,7 @@ import { useState, type ReactNode } from 'react';
 import type { AppState, HostHealth, Provider, SessionInfo, UserInfo } from '../../../shared/types';
 import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
 import { capacityLine, fleetOf, slotCall, type FleetComputer, type FleetSandbox, type PersonWait, type PlaceAgents, type SlotCall } from '../../../shared/fleet';
+import { liveReady } from '../../../shared/liveReady';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
 import { agentView, fmtBytes, fmtRelative, lsGet, lsSet, machineSandboxGlance, navigate, pauseGlance, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
@@ -233,21 +234,20 @@ function Agents({ agents, me, now, sel, variant, open }: { agents: PlaceAgents; 
  */
 function CallButton({ call, onGo }: { call: SlotCall; onGo: () => void }) {
   const what = call.session.waitingOn?.what;
+  const ready = call.ready;
+  // w1838: a view that cannot be used now says what it waits on, in the outlined chip with its state's dot; never the go pill.
+  const notReady = !!ready && !ready.ready;
   // w1599: a view up that waits on nobody here is the outlined chip of the board's free-slot line, not the amber pill.
-  const quiet = call.kind === 'watch';
+  const quiet = call.kind === 'watch' || notReady;
+  const asks = `${call.request && !call.session.title.startsWith(`${call.request}:`) ? `${call.request}: ` : ''}${call.session.title} waits on you${what ? `: ${what}` : ''}`;
+  const title = notReady
+    ? `${call.kind === 'watch' ? call.session.title : asks}\nLive view ${ready.label.toLowerCase()}: ${ready.why} ${ready.back}`
+    : call.kind === 'watch'
+      ? `${call.session.title}: its Live view is up, and you may watch it`
+      : `${asks}${what ? '' : ': its Live view is up for you to move the knobs'}`;
   return (
-    <button
-      type="button"
-      className={quiet ? 'fl-chip fl-call fl-call-quiet' : 'needs-you fl-call'}
-      onClick={onGo}
-      title={
-        quiet
-          ? `${call.session.title}: its Live view is up, and you may watch it`
-          : `${call.request ? `${call.request}: ` : ''}${call.session.title} waits on you${what ? `: ${what}` : ': its Live view is up for you to move the knobs'}`
-      }
-      data-testid="fl-call"
-    >
-      <span className="lv-rec" aria-hidden />
+    <button type="button" className={quiet ? 'fl-chip fl-call fl-call-quiet' : 'needs-you fl-call'} onClick={onGo} title={title} data-testid="fl-call" data-ready={ready?.kind}>
+      {notReady ? <Dot tone={ready.tone} /> : <span className="lv-rec" aria-hidden />}
       {call.label}
     </button>
   );
@@ -352,7 +352,8 @@ const viewerOf = (app: AppState): Viewer => ({ me: app.me, views: app.config.liv
 /** A computer's places: its sandboxes (free ones last). On the board, free sandboxes are one line of chips. */
 function Places({ c, viewer, now, sel, variant, go, onNewSandbox }: { c: FleetComputer; viewer: Viewer; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void; onNewSandbox?: () => void }) {
   // A free slot where a worker waits on the viewer stays a row, so its call shows (w1430).
-  const callOf = (sb: FleetSandbox) => slotCall(sb.agents, viewer.views, viewer.me);
+  // w1838: the badge reads the view with its sandbox's editor (shared/liveReady.ts), so it says "go" only when it can be used.
+  const callOf = (sb: FleetSandbox) => slotCall(sb.agents, viewer.views, viewer.me, (v, s) => liveReady(v, { sandbox: sb.machineSandbox, session: s }));
   const free = variant === 'board' ? c.sandboxes.filter((s) => s.free && !callOf(s)) : [];
   const shown = variant === 'board' ? c.sandboxes.filter((s) => !free.includes(s)) : c.sandboxes;
   return (
