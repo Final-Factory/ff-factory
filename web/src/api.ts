@@ -148,7 +148,8 @@ export const api = {
       { keepalive: !images?.length && text.length < 20_000 },
     ),
   /** Click option `choice` of a question with buttons (ask_person, w1397): sent as your own reply to it. Refused once it is answered. */
-  answer: (sessionId: string, seq: number, choice: number) => request<{ duplicate?: boolean }>('POST', `/api/sessions/${enc(sessionId)}/answer`, { seq, choice, clientId: crypto.randomUUID() }),
+  answer: (sessionId: string, seq: number, choice: number, attachments?: string[]) =>
+    request<{ duplicate?: boolean }>('POST', `/api/sessions/${enc(sessionId)}/answer`, { seq, choice, ...(attachments?.length ? { attachments } : {}), clientId: crypto.randomUUID() }),
   /** React to a message of your orchestrator chat with an emoji (w866), or take the reaction back (on: false). */
   react: (sessionId: string, seq: number, emoji: string, on = true) => request<{ changed: boolean }>('POST', `/api/sessions/${enc(sessionId)}/react`, { seq, emoji, on }),
   /** Compact an orchestrator's conversation now (w518): what `/compact [focus]` typed in its chat does. */

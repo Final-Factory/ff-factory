@@ -273,9 +273,10 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
   const asks = cq.asks.length ? cq.asks : (legacySteps(question) ?? []);
   const answerable = mine && (ask === 'answer' || (ask === 'check' && !!r && !r.answered));
   // A click on an answer and a typed answer send the same message (w1597; shared/questionCard.ts answerMessage).
-  const onAnswer = async (_text: string, answers: string[]) => {
+  // Files attached to the answer ride along as attachments of the message, so the orchestrator can hand them to the worker by id (w1912).
+  const onAnswer = async (_text: string, answers: string[], files: string[]) => {
     if (!app.orchestratorId) return false;
-    const ok = await attempt(api.sendMessage(app.orchestratorId, answerMessage(w, answersText(asks, answers))));
+    const ok = await attempt(api.sendMessage(app.orchestratorId, answerMessage(w, answersText(asks, answers)), undefined, files));
     if (ok === undefined) return false;
     toast(`Sent to your orchestrator: it records the answer on ${w.id}.`);
     setSent(true);
@@ -315,6 +316,7 @@ function WaitCard({ app, item, now }: { app: AppState; item: WaitingItem; now: n
       previews={r && !r.answered ? r.previews : []}
       {...(r?.worker ? { mediaSession: r.worker } : {})}
       mine={answerable}
+      attachable
       answeredBy={item.on.join(', ') || undefined}
       {...(answerable ? { onAnswer } : {})}
       {...(done ? { done } : {})}
@@ -344,9 +346,9 @@ function AskWaitCard({ app, item, now }: { app: AppState; item: AskItem; now: nu
     ),
     after: a.after ?? 'Your orchestrator carries on with your answer, as if you had clicked it in your chat.',
   };
-  const onAnswer = async (text: string) => {
+  const onAnswer = async (text: string, _answers: string[], files: string[]) => {
     const i = a.ask.options.findIndex((o) => o.label === text);
-    const ok = i >= 0 ? await attempt(api.answer(sessionId, a.seq, i)) : await attempt(api.sendMessage(sessionId, text, undefined, undefined, a.seq));
+    const ok = i >= 0 ? await attempt(api.answer(sessionId, a.seq, i, files)) : await attempt(api.sendMessage(sessionId, text, undefined, files, a.seq));
     if (ok === undefined) return false;
     toast('Sent to your orchestrator as your answer.');
     setSent(true);
@@ -378,6 +380,7 @@ function AskWaitCard({ app, item, now }: { app: AppState; item: AskItem; now: nu
       question=""
       previews={[]}
       mine
+      attachable
       onAnswer={onAnswer}
       {...(sent ? { done: <p className="small tone-green">Sent to your orchestrator. The card goes when it has your answer.</p> } : {})}
       details={details}

@@ -1335,7 +1335,9 @@ route('POST', '/api/sessions/([\\w-]+)/answer', async (req, [id]) => {
   const s = sessions.get(id);
   if (s.info.kind !== 'orchestrator') throw new HttpError(400, "questions with buttons are for the orchestrators' chats");
   mayDrive(req, s.info);
-  const { seq, choice, clientId } = await readJson<AnswerRequest>(req);
+  const { seq, choice, clientId, attachments: attachmentIds } = await readJson<AnswerRequest>(req);
+  // Files attached to the answer (w1912) were uploaded first, as for a message; refused before anything changes.
+  const files = attachments.resolve(attachmentIds);
   const sendKey = typeof clientId === 'string' && clientId && clientId.length <= 80 ? `${id}:${clientId}` : undefined;
   if (sendKey && takenSends.has(sendKey)) return { duplicate: true };
   let words: string;
@@ -1347,7 +1349,7 @@ route('POST', '/api/sessions/([\\w-]+)/answer', async (req, [id]) => {
   }
   agents.waker.cancel(id);
   agents.orchestrators.personWrote(id);
-  await agents.sendWithAttachments(id, words + agents.orchestrators.heldOffer(id), 'human', { images: [], attachments: [], requestedBy: requesterOf(req) });
+  await agents.sendWithAttachments(id, words + agents.orchestrators.heldOffer(id), 'human', { images: [], attachments: files, requestedBy: requesterOf(req) });
   if (sendKey) takenSends.set(sendKey, Date.now());
   return {};
 });

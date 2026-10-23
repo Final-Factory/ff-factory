@@ -4,10 +4,14 @@ import { cardMedia } from '../../../shared/questionCard';
 import { isVideoPath } from '../../../shared/imagePaths';
 import { holdReload } from '../freshness';
 import { useKeptState } from '../keep';
-import { openLightbox } from '../store';
+import { openLightbox, toast } from '../store';
+import { clearPending } from '../upload';
+import { fmtBytes } from '../util';
 import { useTextareaDictation } from '../voice/useTextareaDictation';
 import { DictationBar, MicButton } from './Mic';
 import { PreviewVideo } from './Images';
+import { PendingFileChips, useAnswerFiles } from './PendingFiles';
+import { Icon } from './ui';
 
 /** A still or a clip a card previews: an absolute path (the review folder's, or the asking worker's own). */
 export interface CardMedia {
@@ -80,8 +84,13 @@ export interface QuestionCardProps {
   mine: boolean;
   /** Who answers it, when it is not the viewer. */
   answeredBy?: string;
-  /** Answer it: the label picked or the words typed (several questions: each one's answer, in order). False when it failed. */
-  onAnswer?: (text: string, answers: string[]) => Promise<boolean>;
+  /**
+   * Answer it: the label picked or the words typed (several questions: each one's answer, in order), and the ids of the files
+   * attached to it (w1912; none unless `attachable`). False when it failed.
+   */
+  onAnswer?: (text: string, answers: string[], attachments: string[]) => Promise<boolean>;
+  /** The answer box takes files: a paperclip, paste and drop, uploaded as the chat box's are (w1912). The answer names them. */
+  attachable?: boolean;
   /** What the free box says (default "Or type your own answer"). */
   freeLabel?: string;
   /** Shown instead of the answer controls once answered (sent to the orchestrator, recorded). */
@@ -120,6 +129,11 @@ export function QuestionCard(p: QuestionCardProps) {
   })();
   const [typed, setTyped] = useKeptState(`qc.typed.${p.id}`, '');
   const [sending, setSending] = useState(false);
+  // Files attached to this card's answer (w1912): the chat box's uploader, kept per card.
+  const filesKey = `card:${p.id}`;
+  const attach = useAnswerFiles(filesKey);
+  const pickerRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
   // The same dictation as the chat box (w1817): the transcript lands in the box for the answer to be edited before Send.
   const freeBox = useRef<HTMLTextAreaElement>(null);
   const voice = useTextareaDictation({ value: typed, setValue: setTyped, ref: freeBox });
@@ -137,9 +151,15 @@ export function QuestionCard(p: QuestionCardProps) {
   const step = Math.min(answers.length, Math.max(n - 1, 0));
   const ask: Ask | undefined = p.asks[step];
   const live = p.mine && !!p.onAnswer && !p.done && !sending && !p.busy;
+  const attachments = p.attachable ? attach.files : [];
+  const waitingForFiles = attachments.some((f) => !f.ref && !f.error);
   const give = async (answer: string) => {
-    const text = answer.trim();
+    // Files alone are an answer: the words then point at them.
+    const text = answer.trim() || (attachments.length ? `See the attached ${attachments.length > 1 ? 'files' : 'file'}.` : '');
     if (!text || !live) return;
+    if (waitingForFiles) return;
+    if (attachments.some((f) => f.error)) return toast('An attachment did not upload: retry it or remove it', 'error');
+    const sentFiles = attachments;
     const next = n > 1 ? [...answers.slice(0, step), text] : [text];
     if (n > 1 && next.length < n) {
       setKept(JSON.stringify(next));
@@ -147,9 +167,10 @@ export function QuestionCard(p: QuestionCardProps) {
       return;
     }
     setSending(true);
-    const ok = await p.onAnswer!(text, next);
+    const ok = await p.onAnswer!(text, next, sentFiles.flatMap((f) => (f.ref ? [f.ref.id] : [])));
     setSending(false);
     if (ok) {
+      clearPending(filesKey, sentFiles);
       setKept('[]');
       setTyped('');
     } else if (n > 1) setKept(JSON.stringify(next.slice(0, -1)));
@@ -186,7 +207,8 @@ export function QuestionCard(p: QuestionCardProps) {
             type="button"
             className={`qc-opt${o.recommended ? ' qc-rec' : ''}${pickedHere === o.label ? ' qc-picked' : ''}`}
             data-testid="qc-option"
-            disabled={!live}
+            disabled={!live || waitingForFiles}
+            title={waitingForFiles ? 'Waiting for the attachments to upload' : undefined}
             onClick={() => void give(o.label)}
           >
             <span className="qc-opt-head">
@@ -205,9 +227,48 @@ export function QuestionCard(p: QuestionCardProps) {
     </div>
   );
   const freePrompt = p.freeLabel ?? (options.length ? 'Or type your own answer' : 'Your answer');
+  // Files pasted or dropped on the answer box (w1912): a screenshot from the clipboard, files copied in Finder or Explorer.
+  const takeFiles = (e: { dataTransfer?: DataTransfer | null; clipboardData?: DataTransfer | null; preventDefault: () => void }, from: 'drop' | 'paste') => {
+    const list = [...((from === 'drop' ? e.dataTransfer : e.clipboardData)?.files ?? [])];
+    if (!p.attachable || !list.length) return false;
+    e.preventDefault();
+    if (live) attach.add(list);
+    return true;
+  };
+  const attachButton = p.attachable && (
+    <>
+      <button type="button" className="btn btn-ghost btn-icon qc-attach" onClick={() => pickerRef.current?.click()} disabled={!live} title={`Attach images or files (up to ${fmtBytes(attach.limits.maxBytes)}; or paste / drop them)`} aria-label="Attach files" data-testid="qc-attach">
+        <Icon name="paperclip" size={16} />
+      </button>
+      <input
+        ref={pickerRef}
+        type="file"
+        multiple
+        hidden
+        data-picker="files"
+        onChange={(e) => {
+          if (e.target.files) attach.add(e.target.files);
+          e.target.value = '';
+        }}
+      />
+    </>
+  );
   const free = p.mine && p.onAnswer && !p.done && (
     <>
-      <div className="qc-free">
+      {p.attachable && <PendingFileChips ownerId={filesKey} files={attach.files} thumbs />}
+      <div
+        className={`qc-free${dragging ? ' dragging' : ''}`}
+        onDragOver={(e) => {
+          if (!p.attachable || !e.dataTransfer.types.includes('Files')) return;
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => {
+          setDragging(false);
+          takeFiles(e, 'drop');
+        }}
+      >
         <textarea
           ref={freeBox}
           data-kept
@@ -218,10 +279,22 @@ export function QuestionCard(p: QuestionCardProps) {
           value={typed}
           onChange={(e) => setTyped(e.target.value)}
           {...voice.textareaProps}
+          onPaste={(e) => {
+            // Text pastes as usual; files (a screenshot) are attachments.
+            takeFiles(e, 'paste');
+          }}
           onKeyDown={(e) => void voice.keyDown(e)}
         />
+        {attachButton}
         <MicButton d={voice.d} className="qc-mic" />
-        <button type="button" className={`btn btn-sm ${typed.trim() ? 'btn-primary' : 'btn-outline'}`} disabled={!live || !typed.trim()} onClick={() => void give(typed)} data-testid="qc-send">
+        <button
+          type="button"
+          className={`btn btn-sm ${typed.trim() || attachments.length ? 'btn-primary' : 'btn-outline'}`}
+          disabled={!live || waitingForFiles || (!typed.trim() && !attachments.length)}
+          title={waitingForFiles ? 'Waiting for the attachments to upload' : undefined}
+          onClick={() => void give(typed)}
+          data-testid="qc-send"
+        >
           {n > 1 && step < n - 1 ? 'Next' : 'Send'}
         </button>
       </div>

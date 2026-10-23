@@ -7866,6 +7866,20 @@ a.wc-pr:hover {
   resize: vertical;
 }
 
+/* Files on an answer (w1912): a dragged file lights the answer row as it does the chat box; a picture shows as its own thumbnail. */
+.qc-free.dragging .qc-free-text {
+  border-color: var(--accent);
+}
+
+.composer-file-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  margin: -2px 0 -2px -4px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+
 .qc-live {
   justify-self: start;
 }
