@@ -609,6 +609,12 @@ export interface BenchTicketGlance {
   exempt?: 'release' | 'nightly';
   /** The urgent release lane's own ticket (it pre-empts the holders, w1656). */
   preempt?: boolean;
+  /**
+   * w1860: it keeps the lock until it lets go, because only lower-priority work waits behind it (bench_queue.py keep.json;
+   * a shared group's priority is its highest running ticket's): since when, why, and the holder's (or group's) priority.
+   * No `until` then: no turn end applies until a ticket of its priority or higher waits.
+   */
+  keeps?: { since: string; why?: string; priority?: string };
 }
 
 /**

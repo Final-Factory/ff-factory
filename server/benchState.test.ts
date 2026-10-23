@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { benchLockDir } from '../machine/benchLock.ts';
+import { benchLockDir, foreignTimedHold, holdEnds, timedHolder } from '../machine/benchLock.ts';
+import { closedDetail } from '../machine/benchTurn.ts';
 import { BenchTicket, benchQueueDir, findBenchQueueScript } from '../machine/benchQueue.ts';
 import { BENCH_STATE_MAX_RUNNING, readBenchState } from '../machine/benchState.ts';
 import { benchGlance } from '../shared/benchGlance.ts';
@@ -317,4 +318,54 @@ test('w1835: against the real bench_queue.py, the mode follows the queue: Exclus
   } finally {
     for (const k of tickets) k.release();
   }
+});
+
+/** A holder's keep.json as bench_queue.py writes it (w1860); times in seconds. */
+function keep(root: string, name: string, k: object) {
+  fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), name, 'keep.json'), JSON.stringify(k));
+}
+
+test('w1860: a holder that keeps the lock (only lower-priority work waits) shows no countdown that would not fire; the next timed leg waits for it to let go', (t) => {
+  const root = tmp(t);
+  prios(root, { v: 2, single_worker: false, sessions: { hhhh1111: { priority: 'high', requests: ['w1900'] }, llll2222: { priority: 'normal', requests: ['w1785'] } } });
+  ticket(root, 't00000001', { mode: 'exclusive', what: 'probe A', session: 'hhhh1111', requests: ['w1900'], max_min: 60, turn_min: 30 }, sec(45));
+  ticket(root, 't00000002', { mode: 'exclusive', what: 'probe B', session: 'llll2222', requests: ['w1785'] });
+  keep(root, 't00000001', { since: sec(40), waiters: ['t00000002'], priority: 'high', why: 'only lower-priority work waits (normal probe B): it keeps the lock until it lets go (w1860)' });
+  const s = readBenchState(root, NOW, alive)!;
+  assert.equal(s.running[0].until, undefined, 'no turn end applies');
+  assert.equal(s.running[0].keeps?.since, new Date(sec(40) * 1000).toISOString());
+  assert.equal(s.running[0].keeps?.priority, 'high');
+  const g = benchGlance(s, NOW)!;
+  assert.equal(g.times, 'held 45m, keeps the lock: only lower-priority work waits');
+  assert.equal(g.next, 'next timed: w1785 when the higher-priority work lets go');
+  assert.match(g.hint, /keeps the lock: only lower-priority work waits · \(only lower-priority work waits \(normal probe B\)/);
+  // Its waiter left: keep.json lingers until the next look, and counts for nothing (the turn's own clock shows again).
+  fs.rmSync(path.join(benchQueueDir(benchLockDir(root)), 't00000002'), { recursive: true });
+  const gone = readBenchState(root, NOW, alive)!;
+  assert.equal(gone.running[0].keeps, undefined);
+  assert.equal(benchGlance(gone, NOW)!.times, 'held 45m, past its 30m turn: nobody waits');
+});
+
+test('w1860: a shared group that outranks the waiting timed leg says it keeps the lock', (t) => {
+  const root = tmp(t);
+  prios(root, { v: 2, single_worker: false, sessions: { hhhh1111: { priority: 'high', requests: ['w1900'] }, llll2222: { priority: 'normal', requests: ['w1785'] } } });
+  ticket(root, 't00000001', { mode: 'shared', what: 'unity: build', session: 'hhhh1111', requests: ['w1900'] }, sec(70));
+  ticket(root, 't00000002', { mode: 'exclusive', what: 'probe B', session: 'llll2222', requests: ['w1785'] });
+  keep(root, 't00000001', { since: sec(60), waiters: ['t00000002'], priority: 'high', why: 'only lower-priority work waits' });
+  const g = benchGlance(readBenchState(root, NOW, alive), NOW)!;
+  assert.equal(g.times, 'the group keeps the lock: only lower-priority work waits');
+  assert.equal(g.next, 'next timed: w1785 when the higher-priority work lets go');
+});
+
+test('w1860: a kept holder is no "at the latest" in the turn messages: timedHolder says kept, and the refusals say "when it lets go"', (t) => {
+  const root = tmp(t);
+  ticket(root, 't00000001', { mode: 'exclusive', what: 'probe A', session: 'hhhh1111', requests: ['w1900'], max_min: 60, turn_min: 30 }, sec(45));
+  keep(root, 't00000001', { since: sec(40), waiters: ['t00000002'], priority: 'high' });
+  const h = timedHolder(root, NOW, alive)!;
+  assert.equal(h.kept, true);
+  assert.match(foreignTimedHold(root, 'other', NOW, alive)!, /until it lets go \(only lower-priority work waits, so it keeps the lock, w1860\) \(held since 07:15Z\)/);
+  assert.match(closedDetail('a timed run', h.until, h.kept), /reopens when it ends \(when it lets go/);
+  assert.equal(holdEnds(Date.parse('2026-10-23T08:30:00Z')), 'by 08:30Z at the latest');
+  limit(root, 't00000001', { deadline: sec(-5), warned: sec(0), by: 't00000002' });
+  assert.equal(timedHolder(root, NOW, alive)!.kept, undefined, 'a deadline set by a same-or-higher waiter: no keep');
 });
