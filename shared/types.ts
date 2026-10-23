@@ -562,6 +562,15 @@ export interface BenchPriority {
 }
 
 /**
+ * A machine that takes no timed runs (w1861, Machine.noTimedRuns), as the portal sends it with the bench priorities: the
+ * reason, and the machines that take them (online first), for the bench queue's refusal to name.
+ */
+export interface NoTimedRuns {
+  why: string;
+  elsewhere: string[];
+}
+
+/**
  * A holder's turn warning (w1832): the game repo's bench_queue.py set a deadline on its ticket because another worker
  * waits, and warned it five minutes before (the ticket's limit.json). The daemon reports each with its stats; the portal
  * messages the worker once per deadline (server/benchWarnings.ts).
@@ -808,6 +817,11 @@ export interface Machine {
   librarySeedGB?: number;
   /** Its sandbox editors run at below-normal priority, so a game the user plays there wins every contest for the CPU. */
   unityBelowNormal?: boolean;
+  /**
+   * Why it takes no timed runs (w1861, add_machine no_timed_runs; server/machines.ts noTimedRunsOf): its bench queue refuses
+   * a timing ticket and placement sends timed work elsewhere. Unset: the default (NO_TIMED_RUNS: m5); "" clears it.
+   */
+  noTimedRuns?: string;
   /** Portal URL the daemon connects to. */
   portalUrl: string;
   sessionIds: string[];

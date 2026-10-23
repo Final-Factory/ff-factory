@@ -35,7 +35,7 @@ import { MachineRollout, timedRunText } from './machineRollout.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
-import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, parseSandboxRef, poolSettingsOf, sameCommit } from './machines.ts';
+import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, noTimedRunsOf, parseSandboxRef, poolSettingsOf, sameCommit } from './machines.ts';
 import { JOIN_TTL_MINUTES } from './machineJoin.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG, questionsShape } from './launch.ts';
@@ -2900,6 +2900,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         // Its timed legs, running or waiting (w1628): a release build goes to another build computer meanwhile.
         ...(st?.benchQueue ? { benchQueue: st.benchQueue } : {}),
         ...(m.platform ? { platform: m.platform } : {}),
+        // It takes no timed runs (w1861): timed work goes elsewhere.
+        ...(noTimedRunsOf(m) ? { noTimedRuns: noTimedRunsOf(m) } : {}),
       });
     }
     return out;
@@ -3911,6 +3913,7 @@ ${w.repo ?? ''}
           library_seed: z.string().optional().describe('Absolute path of a warm Library folder new sandboxes are seeded from first (else the main clone\'s, else a sandbox\'s). Omitted: kept; "": cleared.'),
           library_seed_copy: z.enum(['robocopy', 'clone']).optional().describe('How a Windows machine copies the seed: "clone" block-clones on a ReFS Dev Drive (seed and sandboxes on one volume), "robocopy" copies. Omitted: kept.'),
           unity_below_normal: z.boolean().optional().describe('Start its sandbox editors at below-normal priority, so a game played on that computer wins. Omitted: kept.'),
+          no_timed_runs: z.string().max(300).optional().describe('Why this computer takes no timed runs (w1861: benchmarks, perf A/Bs, probes), quoting who asked: its bench queue refuses a timing ticket and placement sends timed work elsewhere. "" clears it (m5 has one by default). Omitted: kept.'),
           local: z
             .boolean()
             .optional()
@@ -3976,6 +3979,7 @@ ${w.repo ?? ''}
             librarySeed: a.library_seed === '' ? '' : a.library_seed === undefined ? undefined : machineDir(a.library_seed, 'library_seed'),
             librarySeedCopy: a.library_seed_copy,
             unityBelowNormal: a.unity_below_normal,
+            noTimedRuns: a.no_timed_runs,
             local: a.local,
             force: a.force,
             workerInstall: a.worker_install,

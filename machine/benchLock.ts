@@ -4,7 +4,7 @@
 // (docs/live-view.md, "On BEAST first"): a streaming editor in play mode takes the CPU and GPU the run measures.
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BenchLock, BenchPriority, BenchQueueReport } from '../shared/types.ts';
+import type { BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns } from '../shared/types.ts';
 import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 
 /** Where quiet_gate.sh keeps the lock: `$FF_WORKER_ROOT/tmp/bench.lock` (Git Bash's /f/ffw is F:\ffw). */
@@ -70,9 +70,10 @@ export function readBenchQueue(root: string | undefined, alive: (pid: number) =>
  * {at, v, sessions: {<session id>: {priority, requests, exempt?}}, single_worker}, replaced whole (a reader never sees
  * half a file). A ticket whose FF_SESSION_ID is not in it counts as normal. v 2 (w1832) says the exempt marks and
  * single_worker are this daemon's: bench_queue.py then honours a pre-empt ticket only from the session marked release.
- * Errors are logged, never thrown: the queue then goes on in its old order.
+ * `no_timed_runs` {why, elsewhere} (w1861): this machine takes no timed runs, so bench_queue.py refuses every exclusive
+ * ticket here and names the machines in `elsewhere`. Errors are logged, never thrown: the queue then goes on in its old order.
  */
-export function writeBenchPriorities(root: string | undefined, sessions: Record<string, BenchPriority>, at = new Date(), singleWorker?: boolean): string | undefined {
+export function writeBenchPriorities(root: string | undefined, sessions: Record<string, BenchPriority>, at = new Date(), singleWorker?: boolean, noTimedRuns?: NoTimedRuns): string | undefined {
   if (!root) return undefined;
   const dir = benchQueueDir(benchLockDir(root));
   const file = path.join(dir, 'priorities.json');
@@ -82,7 +83,7 @@ export function writeBenchPriorities(root: string | undefined, sessions: Record<
     // w1832: `v: 2` (the release and nightly marks) only from a portal that sends them, which also sends `singleWorker`:
     // under v 2 the queue honours a pre-empt ticket only from a session marked release, so an older portal's file stays v 1
     const marks = typeof singleWorker === 'boolean' ? { v: 2, single_worker: singleWorker } : {};
-    fs.writeFileSync(tmp, JSON.stringify({ at: at.toISOString(), ...marks, sessions }));
+    fs.writeFileSync(tmp, JSON.stringify({ at: at.toISOString(), ...marks, ...(noTimedRuns ? { no_timed_runs: noTimedRuns } : {}), sessions }));
     fs.renameSync(tmp, file);
     return file;
   } catch (e) {

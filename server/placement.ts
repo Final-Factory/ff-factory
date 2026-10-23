@@ -59,6 +59,11 @@ export interface Computer {
   benchQueue?: BenchQueueReport;
   /** Its platform (win32, darwin, linux): timed work that names one stays on it (w1628). */
   platform?: string;
+  /**
+   * Why it takes no timed runs (w1861, server/machines.ts noTimedRunsOf; m5 by default): timed work never goes there, not
+   * even when no other computer has room, and its bench queue refuses every exclusive ticket.
+   */
+  noTimedRuns?: string;
 }
 
 
@@ -162,7 +167,7 @@ export function pickTimed(places: readonly Computer[], prefs: PlacementPrefs, t:
   const platform = t === 'timed' ? undefined : t.slice(6);
   const hold = holdOf(prefs);
   const avoid = avoidOf(prefs);
-  const ok = places.filter((p) => hasRoom(p) && !hold.has(p.id) && !avoid.has(p.id) && (!platform || p.platform === platform));
+  const ok = places.filter((p) => hasRoom(p) && !hold.has(p.id) && !avoid.has(p.id) && !p.noTimedRuns && (!platform || p.platform === platform));
   if (!ok.length) return undefined;
   const queued = (p: Computer) => p.benchQueue?.timed ?? 0;
   const key = (p: Computer) => [queued(p) ? 1 : 0, p.maxSandboxes, p.editors ?? 0, queued(p), p.live];
@@ -174,7 +179,7 @@ export function pickTimed(places: readonly Computer[], prefs: PlacementPrefs, t:
   const p = sorted[0];
   const size = `${p.maxSandboxes} sandboxes, ${p.editors ?? 0} Unity processes, ${p.live} live agents`;
   const q = queued(p) ? `every one with room ${platform ? `on ${platform} ` : ''}has timed runs queued; this one fewest (${queued(p)})` : 'no timed run queued there';
-  return { pick: p, why: `timed work goes to the smallest computer with room${platform ? ` on ${platform}` : ''} (w1628, lothsahn: "prefer boxes with a small number of slots and players for timed runs, not beast"): ${q}; ${size}` };
+  return { pick: p, why: `timed work goes to the smallest computer with room${platform ? ` on ${platform}` : ''} (w1628, lothsahn: "prefer boxes with a small number of slots and players for timed runs, not beast"): ${q}; ${size}${noTimedNote(places)}` };
 }
 
 /**
@@ -361,8 +366,9 @@ export function pickComputer(places: readonly Computer[], last?: string, prefs: 
   if (firstKind?.startsWith('timed') && kind === 'game') {
     const t = pickTimed(places, prefs, firstKind as TimedKind);
     if (t) return t;
-    const rest = pickComputer(places, last, prefs, kind, workflows);
-    return rest && { pick: rest.pick, why: `timed work, but no computer${firstKind === 'timed' ? '' : ` on ${firstKind.slice(6)}`} has room; so the general placement: ${rest.why}` };
+    // Never on a computer that takes no timed runs (w1861): with none other open the work waits.
+    const rest = pickComputer(places.filter((p) => !p.noTimedRuns), last, prefs, kind, workflows);
+    return rest && { pick: rest.pick, why: `timed work, but no computer${firstKind === 'timed' ? '' : ` on ${firstKind.slice(6)}`} has room; so the general placement: ${rest.why}${noTimedNote(places)}` };
   }
   if ((firstKind === 'live' || firstKind === 'build') && kind === 'game') {
     // Work that needs a Live view (w1600) or builds a player (w1606): the first computer in its list with room, else the general placement.
@@ -416,12 +422,18 @@ export function pickComputer(places: readonly Computer[], last?: string, prefs: 
   return { pick: s.pick, why: `only avoided computers have room (${s.pick.id}: ${avoid.get(s.pick.id)}); ${s.why}${tail}` };
 }
 
+/** "; never m5 (it takes no timed runs: ...)" (w1861), or "" when every computer takes them. */
+const noTimedNote = (places: readonly Computer[]) => {
+  const no = places.filter((p) => p.noTimedRuns);
+  return no.length ? `; never ${no.map((p) => `${p.id} (it takes no timed runs: ${p.noTimedRuns})`).join(', ')}` : '';
+};
+
 const avoidOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.avoid ?? {}).map(([k, v]) => [placeId(k), v]));
 
 const loadPart = (p: Computer) => {
   const pct = memPct(p);
   const ram = pct !== undefined ? `; RAM ${pct}% used` : '';
-  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}`;
+  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}${p.noTimedRuns ? '; no timed runs (w1861)' : ''}`;
 };
 
 /** "has 2 timed runs in its bench queue (the first: probe A round 3)" (w1628). */
