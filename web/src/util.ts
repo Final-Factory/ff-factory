@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { agentState, type AgentState, type WaitKind } from '../../shared/agentState.ts';
 import { ledgerGlance, workLiveAll, type WorkLive } from '../../shared/workState.ts';
-import type { AppState, BenchLock, AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+import type { AppState, BenchLock, AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, PersonPlayReport, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
+import { playGlance } from '../../shared/personPlay';
 import { updaterHealth } from '../../shared/updaterHealth';
 import { devRequestsHealth } from '../../shared/devRequestsHealth';
 
@@ -420,13 +421,15 @@ export function machineSandboxGlance(sb: MachineSandbox, sessions: SessionInfo[]
   return agentsGlance(sb.id, sessions, attention, sb.unity, sessions.length === 0);
 }
 
-export function machineGlance(m: Machine, sessions: SessionInfo[], now: number): Glance {
+export function machineGlance(m: Machine, sessions: SessionInfo[], now: number, play?: PersonPlayReport): Glance {
   const attention = sessions.reduce((n, s) => n + s.pendingPermissions.length, 0);
   if (m.status === 'deploying') return { tone: 'blue', label: 'Setting up', detail: m.statusDetail, attention, progress: true };
   if (m.status === 'error') return { tone: 'red', label: 'Error', detail: firstLine(m.statusDetail), attention };
   if (!m.online) return { tone: 'grey', label: 'Offline', detail: m.lastSeen ? `seen ${fmtRelative(m.lastSeen, now)}` : 'never connected', attention };
   // Paused from its tray app (w1532): it takes no work until it runs again; the detail says why and until when.
   if (m.pause?.paused) return { tone: 'amber', label: 'Paused', detail: m.pause.detail, attention };
+  // A person plays Final Factory there (w1894): its agents yield and it takes no new work until the grace after the game.
+  if (play) return { tone: 'amber', label: 'Playing', detail: playGlance(play), attention };
   const g = agentsGlance(displayName(m), sessions, attention, undefined, false);
   return g.label === 'Idle' || g.label === 'No agents' ? { ...g, tone: 'green', label: 'Online' } : g;
 }

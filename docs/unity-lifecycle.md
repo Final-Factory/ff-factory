@@ -365,6 +365,78 @@ machine (one exclusive ticket, then the waiting shared group, within a priority;
 Tests: `server/benchTurn.test.ts`, `server/benchBuilds.test.ts` (w1860), the w1829 cases in
 `server/machineSandboxes.test.ts` and `server/macUnity.test.ts`.
 
+## A person's game: the agents yield while a person plays (w1894)
+
+**Why** (item 1 of w1785's ranked list, filed for lothsahn: "Please file all of w1785s ranked list"). On LothDesktop one
+release build of the game ran at 27.4 fps on a quiet machine and at 12 to 15 fps while agents' players, editors and builds
+held 7.5 to 11.3 of its 16 threads (measured by w1785). Goal: while lothsahn plays there, the agents stop taking the game's
+CPU, and resume when the game stops.
+
+**How a person's game is told from an agent's** (`machine/leftovers.ts` `personGames`, fed to `machine/personPlay.ts`
+`PersonPlay` by each leftovers look, once a minute). Every game player the look sees (`gamePlayers`: FinalFactory.exe and
+its Mac and Linux twins) is a worker's when it carries `FF_SESSION_ID` in its environment (every worker shell and what it
+starts does), has a player slot lease for its pid (`player_slots.py launch`), or its command line names a worker's temp
+folder or a sandbox (a build an agent runs from there; a sandbox editor's Build And Run). The rest is a person's: Steam's
+launch of the game, or a build someone starts by hand, a slot player started by hand without a lease included (the
+reaper no longer counts that one an orphan to end where this is on). The game window in front was weighed and not used:
+a person alt-tabs to a guide or Discord while the game runs and still wants its frames, and an agent's player in front
+would count as the person's.
+
+**What the agents do meanwhile.** The game holds an exclusive turn (`machine/benchTurn.ts`, `Holder.person`, the
+daemon's `personHolder`) with no queue ticket, and the turn does what a timed run's does, with one difference:
+
+- every sandbox's editor closes (saved first, never killed; "The exclusive turn" above), every worker's game player is
+  asked to quit (its window's close), and Unity MCP calls into a closed editor are refused with who plays and when it
+  comes back;
+- a batch Unity (a build, a test run, a batch compile) is **dropped to idle priority and left to finish**, never ended:
+  it holds its shared ticket rightfully, since no exclusive ticket is in the queue. The daemon sets the idle class on its
+  tree at the turn's first look and every 30 s after (Windows: `PRIORITY_LOW` is `IDLE_PRIORITY_CLASS`, which the
+  processes it starts later inherit) and its workers hear it once;
+- nothing new starts: `unity start` is refused (the pool's `startGate`), `unity-slot run` waits before it takes a slot or
+  a ticket (`personHoldReason`), the guard refuses a game player (by its binary or `player_slots.py launch`) and a screen
+  grab (`checkPersonPlayLaunch`), and the portal sends `no_timed_runs` so the bench queue grants no timed leg there; a
+  timed leg already running finishes its turn, which closes nothing new;
+- the portal places no new work there (`Agents.placement()`, `playHolds` in `shared/personPlay.ts`): the Capacity block
+  reads `ROOM n% but HELD (lothsahn is playing Final Factory there since 19:00Z (w1894: agents yield there until 10 min
+  after the game closes))`. The workers already there resume as before: their shells, git and reasoning go on, and only
+  their Unity work waits.
+
+Why close and not only idle priority for editors and players: a lower priority leaves them the GPU (LothDesktop's Arc
+B580 renders an editor in play mode and every player beside the game) and the CPU's shared cache, which the game's
+simulation lives in on its 5800X3D. That is a guess, not a measurement (w1894's A/B on BEAST was stopped before its first
+leg, so as not to hold an exclusive ticket there for harness work); w1829 chose closing for timed runs on the same grounds.
+The live check on LothDesktop measures the result.
+
+**The grace** (`GRACE_MIN`, config `machines.personPlay.graceMinutes`, default 10, a guess): the turn lasts until 10 minutes
+after the game is first seen gone, so a restart of the game (a crash, a settings change, quitting to load another save)
+keeps it one turn. Then the editors reopen in the next shared turn, the idle-priority builds go back to normal
+(`restoreBuilds`: every sandbox batch Unity process at `PRIORITY_LOW`), and the hold lifts.
+
+**Nothing left stuck.** No process is suspended. The state is `<root>/tmp/bench.queue/person.json`, written at every look:
+the guard and `unity-slot run` hold only while it is fresh (`STALE_MS`, 5 minutes), so a daemon that is gone holds
+nothing. A daemon restart keeps a game seen just before it until its first look, reopens the editors marked closed
+(`benchClosed` in `sandboxes.json`, as after a timed run) and puts back to normal any build left at idle priority, at its
+first look. The portal's hold reads the daemon's stats (`MachineStats.personPlay`) and drops them when they are 3 minutes old
+(`PERSON_PLAY_STALE_MS`) or the machine is offline.
+
+**Where it is on** (config `machines.personPlay`, set with `set_app_config`, optional `machine`): `enabled` (default on at
+LothDesktop only, `PERSON_PLAY_DEFAULTS`: BEAST runs most of the agents, and a game started there for a test would close
+every editor on it), `graceMinutes`, and `who`, the name the messages use (default lothsahn at LothDesktop, else
+"someone"). The portal sends it with the bench priorities each minute; the daemon keeps it in `<app_dir>/person-play.json`.
+It needs the leftovers look (`daemon.json` `leftovers` not false).
+
+**Where it shows**: `list_machines` (`playing: …`, with the editors closed, players asked to quit and builds at idle
+priority), the Capacity block's `HELD (…)` (above), the machine page (an amber **Playing** state and row), the sandbox
+panel and `unity status` of each closed editor ("closed while lothsahn playing Final Factory on this PC; reopens when that
+ends, 10 min after the game closes"), and the portal journal (`portal_logs` grep "is playing Final Factory").
+
+**Checking it without a person.** Start a slot player with no worker in it: no `FF_SESSION_ID`, `FF_SANDBOX_ID` or
+`FF_MACHINE_ID` in its environment, not through `player_slots.py` (no lease), and no temp folder in its arguments (no
+`-logFile` there: the game writes its own Player.log), from your own sandbox's slot. A slot path keeps the Windows Firewall rule the install made for it; a new exe path raises the
+firewall prompt.
+
+Tests: `server/personPlay.test.ts`, the w1894 case in `server/leftovers.test.ts`.
+
 ## Orphaned and hung batch builds are ended (w791)
 
 **Why** (Ben, 2026-10-09: the harness learns from a repeated problem). Twice that day a sandbox's `-batchmode` build held a

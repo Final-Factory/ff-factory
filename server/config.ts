@@ -269,6 +269,18 @@ export interface Config {
       idleMinutes?: number | Record<string, number>;
     };
     /**
+     * A person playing Final Factory on a machine (w1894, docs/unity-lifecycle.md "A person's game"): its daemon tells their
+     * game from the agents' players, and while it runs (and `graceMinutes` after, default 10) the agents' editors close,
+     * their players quit, their builds drop to idle priority and the portal places nothing there. `enabled` defaults to
+     * PERSON_PLAY_DEFAULTS (LothDesktop, lothsahn's PC); `who` names the person in the messages (default there: lothsahn).
+     * Each a value for every machine or { "<machine id>": …, "*": … }.
+     */
+    personPlay?: {
+      enabled?: boolean | Record<string, boolean>;
+      graceMinutes?: number | Record<string, number>;
+      who?: string | Record<string, string>;
+    };
+    /**
      * After a portal deploy has verified, FF Factory runs the worker installer's update on every worker root machine
      * itself (server/machineRollout.ts, w887). On unless this is false: the kill switch, for when a machine must stay
      * on its commit.
@@ -840,6 +852,25 @@ export function machineActivityPause(cfg: Pick<Config, 'machines'>, id: string):
 }
 /** The activity pause's idle time when config sets none (machine/pauseRules.ts IDLE_MINUTES). */
 export const ACTIVITY_IDLE_MINUTES = 90;
+
+/**
+ * Where a person's game is looked for when config machines.personPlay sets nothing (w1894), and who plays there: lothsahn's
+ * PC, the one the request is about. Elsewhere it is off until turned on (BEAST runs most of the agents; a game Ben starts
+ * there for a test would close every editor on it).
+ */
+export const PERSON_PLAY_DEFAULTS: Readonly<Record<string, string>> = { lothdesktop: 'lothsahn' };
+/** Minutes of grace after the game closes (machine/personPlay.ts GRACE_MIN). */
+export const PERSON_PLAY_GRACE_MINUTES = 10;
+
+/** Machine `id`'s person play (config machines.personPlay, w1894): on at PERSON_PLAY_DEFAULTS' machines, 10 minutes of grace. */
+export function machinePersonPlay(cfg: Pick<Config, 'machines'>, id: string): { enabled: boolean; graceMinutes: number; who?: string } {
+  const p = cfg.machines?.personPlay;
+  const e = p?.enabled;
+  const on = typeof e === 'boolean' ? e : e ? (e[id] ?? e['*']) : undefined;
+  const w = p?.who;
+  const who = (typeof w === 'string' ? w : w ? (w[id] ?? w['*']) : undefined) ?? PERSON_PLAY_DEFAULTS[id];
+  return { enabled: on ?? id in PERSON_PLAY_DEFAULTS, graceMinutes: perMachine(p?.graceMinutes, id) ?? PERSON_PLAY_GRACE_MINUTES, ...(who ? { who } : {}) };
+}
 
 /** What machine `id`'s daemon runs its clean-up with (config machines.cleanup, else the defaults). */
 export function machineCleanupSettings(cfg: Pick<Config, 'machines'>, id: string): { everyMinutes: number; softFreeGB: number; staleOutput: StaleOutputSettings } {

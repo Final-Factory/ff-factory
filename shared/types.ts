@@ -542,6 +542,24 @@ export interface MachineStats extends HostStats {
   benchQueue?: BenchQueueReport;
   /** Its bench queue's mode, holders and waiters now (w1835, machine/benchState.ts); absent: a daemon before it. */
   bench?: BenchState;
+  /** A person plays Final Factory there now, or its grace after runs (w1894, machine/personPlay.ts); absent: nobody. */
+  personPlay?: PersonPlayReport;
+}
+
+/**
+ * A person playing Final Factory on a machine (w1894, machine/personPlay.ts), as its daemon reports it: who (config
+ * machines.personPlay.who), the game's pids (empty once it closed), since when, and once it closed when the grace ends; what
+ * the turn did for them. The portal holds the machine meanwhile (Agents.placement(), server/personPlay.ts).
+ */
+export interface PersonPlayReport {
+  who: string;
+  pids: number[];
+  since: string;
+  until?: string;
+  graceMinutes: number;
+  editorsClosed: number;
+  playersAsked: number;
+  buildsLowered: number;
 }
 
 /**

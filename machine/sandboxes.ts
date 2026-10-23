@@ -20,6 +20,7 @@ import { MacUnity, MacUnityWatch, realDeps, type Proc, type UnityDeps, type Unit
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
 import type { BenchTicket } from './benchQueue.ts';
 import type { IdleCloseResult } from './liveIdle.ts';
+import { isPersonTicket } from './personPlay.ts';
 import type { DiskLevel, GitStatus, MachineSandboxIdleClosed, MachineSandboxUnity, SandboxPoolSettings, SandboxStatus } from '../shared/types.ts';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -507,7 +508,7 @@ export class SandboxPool {
     const saved = c.saved?.length ? ` It saved ${c.saved.join(', ')} first.` : '';
     this.changed(r, {
       benchClosed: { ...c, pids: [], reopenAt: new Date(this.d.now()).toISOString() },
-      ...(first ? { benchNote: `[bench turn] Your sandbox's Unity editor was closed at ${c.at.slice(11, 16)}Z for ${c.by} (w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine).${saved} Its assets were saved too: check git status. Anything in play mode then is gone. It is starting again now (${text.slice(0, 200)}); mcp__machine__unity status says when it is up.` } : {}),
+      ...(first ? { benchNote: `[bench turn] Your sandbox's Unity editor was closed at ${c.at.slice(11, 16)}Z for ${c.by} (${isPersonTicket(c.ticket) ? 'w1894: while a person plays the game on this machine, the agents\' editors, players and builds yield to it' : "w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine"}).${saved} Its assets were saved too: check git status. Anything in play mode then is gone. It is starting again now (${text.slice(0, 200)}); mcp__machine__unity status says when it is up.` } : {}),
     });
     return text;
   }
