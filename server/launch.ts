@@ -6,6 +6,7 @@ import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
 import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchGate.ts';
 import { foreignTimedHold } from '../machine/benchLock.ts';
+import { closedRefusalFor } from '../machine/benchTurn.ts';
 import { standingGuard } from './standingGuard.ts';
 import { publicIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
@@ -353,6 +354,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       env: agentEnv,
       // w1750: no player or screen grab beside another worker's timed run; the worker's own session passes.
       ...(g.workerRoot ? { benchBusy: () => foreignTimedHold(g.workerRoot, agentEnv.FF_SESSION_ID) } : {}),
+      // w1829: no Unity MCP call into an editor another worker's timed run closed; it says why and when it comes back.
+      ...(g.workerRoot ? { benchClosed: () => closedRefusalFor(g.workerRoot, g.id) } : {}),
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];

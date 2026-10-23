@@ -202,6 +202,8 @@ export interface QueueTicket {
   host?: string;
   requests?: string[];
   maxMin?: number;
+  /** The process whose life the ticket follows (bench_queue.py owner_check_pid: a Git Bash script's Windows pid), w1829. */
+  ownerPid?: number;
 }
 
 /** The tickets in the queue whose helper process lives, in order (read only: the helpers' OS locks are the truth). */
@@ -224,7 +226,7 @@ export function queueTickets(lock: string, alive: (pid: number) => boolean): Que
   for (const n of names) {
     const info = read(path.join(dir, n, 'info.json'));
     if (!info || !Number.isInteger(info.pid) || !alive(info.pid)) continue;
-    out.push({ ticket: n, mode: info.mode === 'shared' ? 'shared' : 'exclusive', what: String(info.what ?? ''), pid: info.pid, sandbox: info.sandbox || undefined, cwd: info.cwd || undefined, created: info.created, granted: read(path.join(dir, n, 'granted')), revoked: read(path.join(dir, n, 'revoked')), session: info.session || undefined, host: info.host || undefined, requests: Array.isArray(info.requests) ? info.requests.map(String) : undefined, maxMin: typeof info.max_min === 'number' ? info.max_min : undefined });
+    out.push({ ticket: n, mode: info.mode === 'shared' ? 'shared' : 'exclusive', what: String(info.what ?? ''), pid: info.pid, sandbox: info.sandbox || undefined, cwd: info.cwd || undefined, created: info.created, granted: read(path.join(dir, n, 'granted')), revoked: read(path.join(dir, n, 'revoked')), session: info.session || undefined, host: info.host || undefined, requests: Array.isArray(info.requests) ? info.requests.map(String) : undefined, maxMin: typeof info.max_min === 'number' ? info.max_min : undefined, ownerPid: Number.isInteger(info.owner_check_pid) ? info.owner_check_pid : Number.isInteger(info.owner_pid) ? info.owner_pid : undefined });
   }
   return out;
 }

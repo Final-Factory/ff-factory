@@ -1590,18 +1590,24 @@ select.input {
 
 .pmsg-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--s-2);
+  column-gap: var(--s-2);
   min-height: 28px;
+}
+
+/* Show in chat, Reply and Clear (w1831): one group at the right, under the name when the row is too narrow for both. */
+.pmsg-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  margin-left: auto;
 }
 
 .pmsg-from {
   font-weight: 620;
   font-size: var(--fs-md);
-}
-
-.pmsg-spacer {
-  flex: 1;
+  white-space: nowrap;
 }
 
 .pmsg-text {
@@ -1639,6 +1645,70 @@ select.input {
   margin: 0;
   color: var(--text-3);
   font-size: var(--fs-xs);
+}
+
+/* The reply box under a message (w1831): the question cards' answer row (.qc-free), indented with the message's text. */
+.pmsg-reply {
+  margin: var(--s-2) 0 0 var(--s-3);
+}
+
+.pmsg-reply-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-2);
+}
+
+.pmsg-reply-text {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+}
+
+/* The mic and Send as tall as the box's one line, so the row reads as one control. */
+.pmsg-reply-row > .btn {
+  height: 38px;
+}
+
+.pmsg-reply-row > .btn-icon {
+  width: 38px;
+}
+
+/* "Sent to <name>" after a reply, on the line Clear's Undo uses (w1831). */
+.pmsg-sent > svg {
+  flex: none;
+  color: var(--green);
+}
+
+.pmsg-reply .dictation-bar {
+  margin: 6px 0 0;
+}
+
+/* A narrow phone: the box takes the whole width and the mic and Send sit under it, as in the chat's own message box. */
+@media (max-width: 520px) {
+  .pmsg-reply {
+    margin-left: 0;
+  }
+
+  .pmsg-reply-row {
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+  }
+
+  .pmsg-reply-text {
+    flex-basis: 100%;
+  }
+}
+
+/* Phones draw the box's text at 16 px (so iOS does not zoom into it): its one line is taller, and so are the mic and Send. */
+@media (max-width: 860px) {
+  .pmsg-reply-row > .btn {
+    height: 42px;
+  }
+
+  .pmsg-reply-row > .btn-icon {
+    width: 42px;
+  }
 }
 
 .pmsg-undo {
@@ -1913,6 +1983,13 @@ select.input {
   font-size: var(--fs-xs);
   color: var(--text-3);
   padding: 0 6px;
+}
+
+/* A reply sent straight to another person from the bubble over the message box (w1831). */
+.msg-sent {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .msg-side-time {

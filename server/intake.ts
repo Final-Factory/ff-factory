@@ -44,6 +44,8 @@ import {
   classifyBug,
   desyncTriage,
   ffboxDesyncSignal,
+  ffboxCrashSignal,
+  crashTriage,
   triageOf,
   cleanLine,
   ffboxReviewFrom,
@@ -515,12 +517,14 @@ export class IntakeManager {
     const draft = ffboxReviewFrom(c, s);
     if (!draft) return;
     const now = this.now();
-    const desync = this.desyncRoute({ key: c.key, title: c.title, opener: c.opener, source: c.source, agentClass: c.agentClass });
+    const route =
+      this.desyncRoute({ key: c.key, title: c.title, opener: c.opener, source: c.source, agentClass: c.agentClass }) ??
+      this.crashRoute({ key: c.key, title: c.title, opener: c.opener, source: c.source, agentClass: c.agentClass }, { pr: c.pr?.number, branch: c.branch, verdict: c.verdict });
     const res = this.d.orchestrators.fileIntake({
       ...draft,
-      triage: desync?.triage ?? triageOf(draft.source, c.opener === 'fff' ? 'system' : c.opener, { title: c.title, text: '' }),
+      triage: route?.triage ?? triageOf(draft.source, c.opener === 'fff' ? 'system' : c.opener, { title: c.title, text: '' }),
       requestedBy: this.d.identity.systemPayer(),
-      autoApprove: desync?.autoApprove ?? s.autoApprove,
+      autoApprove: route?.autoApprove ?? s.autoApprove,
       kinds: FFBOX_KINDS,
       lookbackDays: this.settings.lookbackDays,
       limit: () => capProblem(this.d.store.work.values(), FFBOX_KINDS, s.dailyCap, now),
@@ -542,6 +546,18 @@ export class IntakeManager {
     const d = this.settings.ffbox.desync;
     const why = d.enabled ? ffboxDesyncSignal(x) : undefined;
     return why ? { triage: desyncTriage(why), autoApprove: { enabled: true, maxPerDay: d.maxPerDay } } : undefined;
+  }
+
+  /**
+   * lothsahn's crash-fix policy (2026-10-23, w1827): an FFBox crash or hang diagnosis, or its ffbox/* PR, is approved at
+   * once into a request whose worker follows the policy (intakeRules.ts CRASH_FIX_POLICY), whatever the root cause and
+   * verdict, at most intake.ffbox.crash.maxPerDay a day; the daily caps and the duplicate checks still apply. Undefined
+   * when it is not one, or the policy is switched off (then the usual triage applies).
+   */
+  private crashRoute(x: Parameters<typeof ffboxCrashSignal>[0], facts: Parameters<typeof crashTriage>[1] = {}) {
+    const c = this.settings.ffbox.crash;
+    const why = c.enabled ? ffboxCrashSignal(x) : undefined;
+    return why ? { triage: crashTriage(why, facts), autoApprove: { enabled: true, maxPerDay: c.maxPerDay } } : undefined;
   }
 
   /** FFBox filed a request (the connector's "request" message); undefined while that is off. */
@@ -576,17 +592,18 @@ export class IntakeManager {
     const now = this.now();
     const title = cleanLine(`FFBox ${m.kind === 'review-branch' ? 'branch' : m.kind}: ${m.title}`, 120);
     // A desync diagnosis's branch or escalation goes under the desync PR policy (w358); an operator's dev work stays theirs.
-    const desync = m.kind === 'dev' ? undefined : this.desyncRoute({ key: m.key, title: m.title, opener: m.opener });
+    // A crash or hang's (w1827) by its board key only: a request's title is never ffintake's.
+    const route = m.kind === 'dev' ? undefined : (this.desyncRoute({ key: m.key, title: m.title, opener: m.opener }) ?? this.crashRoute({ key: m.key }, { pr: m.pr, branch: m.branch, verdict: m.verdict }));
     const res = this.d.orchestrators.fileIntake({
       title,
       brief,
       source,
       // An escalation is work FFBox cannot do (a GPU, the rig): a developer decides it. Anything else from a player is
       // their bug report, triaged by its words (w299).
-      triage: desync?.triage ?? triageOf(source, operator ? 'operator' : m.opener, m.kind === 'escalate' ? undefined : { title: m.title, text: m.brief }),
+      triage: route?.triage ?? triageOf(source, operator ? 'operator' : m.opener, m.kind === 'escalate' ? undefined : { title: m.title, text: m.brief }),
       requestedBy: operator ?? this.d.identity.systemPayer(),
       ...(operator ? { person: true } : {}),
-      autoApprove: desync?.autoApprove ?? s.autoApprove,
+      autoApprove: route?.autoApprove ?? s.autoApprove,
       kinds: FFBOX_KINDS,
       lookbackDays: this.settings.lookbackDays,
       limit: () => capProblem(this.d.store.work.values(), FFBOX_KINDS, s.dailyCap, now),
@@ -634,8 +651,8 @@ export class IntakeManager {
    * diagnoses from FFBox"): a player's desync or crash report diagnosed on FFBox, with or without a root cause or a fix.
    * It joins ledger work only on an exact key (a report id already on it, the same desync event, FFBox's own PR or
    * branch), among requests that came from a report; a shared signature is only a "maybe", noted on what it files.
-   * Otherwise it is filed: a desync with a PR or a found root cause under the desync PR policy (w358), anything else by
-   * the w299 triage. A resend of the same ref gets the same answer. `off` while intake.ffbox.escalations,
+   * Otherwise it is filed: a desync with a PR or a found root cause under the desync PR policy (w358), every crash or
+   * hang under the crash-fix policy (w1827), anything else by the w299 triage. A resend of the same ref gets the same answer. `off` while intake.ffbox.escalations,
    * intake.ffbox.diagnoses or intake.ffbox is off.
    */
   onDiagnosis(d: Diagnosis): EscalationAnswer {
@@ -712,15 +729,21 @@ export class IntakeManager {
       return { status: 'skipped', why };
     }
     const source = diagnosisSource(d);
-    // A desync with a fix pushed or a root cause found is a desync PR (w358); anything else is a player's report (w299).
-    const desync = d.report.kind === 'desync' && (d.pr || d.rootCause === 'found') ? this.desyncRoute({ key: source.key, title: d.title, opener: 'system', source: 'intake', agentClass: 'ffdiagnose' }) : undefined;
+    // A desync with a fix pushed or a root cause found is a desync PR (w358); every crash or hang goes under the
+    // crash-fix policy (w1827), a cause or not, NOT-A-BUG included; anything else is a player's report (w299).
+    const route =
+      d.report.kind === 'desync'
+        ? d.pr || d.rootCause === 'found'
+          ? this.desyncRoute({ key: source.key, title: d.title, opener: 'system', source: 'intake', agentClass: 'ffdiagnose' })
+          : undefined
+        : this.crashRoute({ reportKind: d.report.kind }, { pr: d.pr?.number, branch: d.pr?.branch, rootCause: d.rootCause, verdict: d.verdict });
     const res = o.fileIntake({
       title,
       brief: diagnosisBrief(d),
       source,
-      triage: desync?.triage ?? diagnosisTriage(d),
+      triage: route?.triage ?? diagnosisTriage(d),
       requestedBy: this.d.identity.systemPayer(),
-      autoApprove: desync?.autoApprove ?? s.ffbox.autoApprove,
+      autoApprove: route?.autoApprove ?? s.ffbox.autoApprove,
       kinds: FFBOX_KINDS,
       lookbackDays: s.lookbackDays,
       limit: () => capProblem(this.d.store.work.values(), FFBOX_KINDS, s.ffbox.dailyCap, now),
@@ -1835,6 +1858,7 @@ export class IntakeManager {
         dailyCap: s.ffbox.dailyCap,
         autoApprove: s.ffbox.autoApprove,
         desync: s.ffbox.desync,
+        crash: s.ffbox.crash,
       },
       release: { enabled: s.release.enabled, delayMinutes: s.release.delayMinutes, ...(this.data.lastVersion ? { lastVersion: this.data.lastVersion } : {}), ...(this.data.checkedAt ? { checkedAt: this.data.checkedAt } : {}) },
       nightly: {

@@ -88,6 +88,12 @@ Known causes, so a future failure can be named at once:
     socket after 5 s and Playwright's agent keeps its own forever; the e2e server waits 65 s.
   - `Test timeout of 30000ms exceeded` (4): passing WebKit tests took up to 30.2 s; the timeout is 60 s.
   - The browser install hung on the Ubuntu mirror until the job's 20 minutes (3 on 2026-10-22): see the first item.
+- **Two traps of a new e2e test** (w1831, PR #550):
+  - `page.goto('/#/x')` on a page already at `/` only changes the hash: no load, so a speech fake or any other
+    `addInitScript` added since never runs (w1831: the mic found no fake voice). `page.reload()` after it.
+  - Files run in parallel against one server, so a new file that messages the `tester` login from `teammate` sees the
+    unread marks and transcript lines of `orchestrators.spec.ts` doing the same: put such a test in that file (its tests
+    run in order), or give it logins of its own (e2e/server.ts), and match its own lines by a `uniq()` tag.
 - **The daily whole-suite Windows run was red every day 2026-10-11..22** (w1758, PR #533), never a flake: POSIX file modes
   and `/` paths asserted on Windows (`appConfig`, `configMigration`, `ask`: what BEAST's run showed), a `.cmd` encoder
   stand-in Node will not spawn (`videoPreview`), the runner's long temp path pushing a brief over its size budget

@@ -89,6 +89,11 @@ export function sandboxGuard(opts: {
    * refused then (checkBenchBusyLaunch). Absent: not checked.
    */
   benchBusy?: () => string | undefined;
+  /**
+   * w1829: while another worker's timed run keeps this sandbox's editor closed, the refusal for a Unity MCP call into it
+   * (machine/benchTurn.ts closedRefusalFor), else undefined. Absent: not checked.
+   */
+  benchClosed?: () => string | undefined;
 }): HookCallback {
   // Drive-letter paths are normalised textually so the guard behaves the same on any host OS.
   const norm = (p: string) => (/^[a-zA-Z]:[\\/]/.test(p) ? p : path.resolve(p)).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -159,6 +164,8 @@ export function sandboxGuard(opts: {
     }
 
     if (tool.toLowerCase().startsWith('mcp__unitymcp__')) {
+      const closed = opts.benchClosed?.();
+      if (closed) return deny(closed);
       const explain =
         `This sandbox's Unity editor is the instance named "${opts.sandboxId}@<hash>" (project path ${opts.sandboxPath}). ` +
         `Other editors on this machine belong to other sandboxes or to the live co-op game — never target them. ` +

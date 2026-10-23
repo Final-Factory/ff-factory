@@ -1353,6 +1353,37 @@ or cancel. A message sent mid-turn or during a compaction is already in the proc
 `server/sessions.ts`). The persisted send queue (`data/send-queue.json`) never holds an orchestrator's message
 (`SessionManager.fullFor`). Those messages show in the conversation as soon as they are sent.
 
+### Reply from the bubble (w1831)
+
+Ben, 2026-10-23: "give me a fast way to reply to him in there (including with voice) and replying in there sends the
+message to loth as normal". So each message in the bubble has **Reply**, next to Show in chat and Clear. It opens a box
+under the message with the chat box's mic (the same `useTextareaDictation`, `MicButton` and `DictationBar` as the chat
+and the question cards, `docs/voice.md`) and **Send**. The box follows the chat box's keys (`shared/keys.ts`
+`enterAction`): Enter sends, Shift+Enter is a new line, and a phone's own keyboard sends with the button; Esc closes it.
+On a phone under 520 px wide the box takes the whole width, with the mic and Send under it, as in the message box.
+
+- **Send delivers at once, with no turn of the orchestrator in between.** `POST /api/sessions/:id/person-messages/reply
+  {id, text, clientId}` (their own chat only, `mayDrive`) runs `Orchestrators.replyToPerson` (`server/orchestrators.ts`):
+  the words go through `messagePerson`, so the other person gets the same `[person message]`, unread mark and
+  notification as from their orchestrator's message_person. A repeat of one send (`clientId`, its answer lost) is taken
+  once.
+- **message_person's rules, for a person's own message.** At most `PERSON_MESSAGE_CHARS` (2000, `shared/replies.ts`),
+  never empty, to a person who exists. The person writing starts the counts again first (`personWrote`, as typing in the
+  chat does), so the count between non-owners never refuses their own reply, and the owners' hourly loop guard never
+  counts it (`messagePerson`'s `own`). A refused reply changes nothing.
+- **It lands in their own chat as their message.** `sentText` (`shared/replies.ts`) is their words, the answered
+  `[person message]` quoted under `REPLY_MARK` (when the last 500 events hold it), and FF Factory's note after
+  `SENT_MARK` that the words are delivered and must not be sent again. It opens a turn of theirs, so the orchestrator
+  has it in context and answers in a line. The page draws the words as their bubble, the quote above it, and a
+  "Sent to <name>" tag under it (`splitSent`, `Transcript.tsx`). `inPersonWords` stops at `SENT_MARK`, so FF Factory's
+  note is never taken for the person's own words. The answered message is read: it leaves the bubble, which says
+  "Sent to <name>: it is in your chat too." on its status line for 4 s (`SENT_MS`), where Clear's Undo shows (a toast
+  lay over the message box on a phone, w1831's first critic).
+- A message cleared or answered meanwhile (another tab, the phone) is refused with 409, and nothing is sent.
+
+Tests: `server/orchestrators.test.ts` ("reply from the bubble"), `server/replies.test.ts`, `e2e/orchestrators.spec.ts`
+(dictated reply, Enter, the 375 and 390 px phone widths).
+
 ## Evidence and labels
 
 In October 2026 an ad campaign went live on click caps nobody had researched, relayed to the person as recommendations,
