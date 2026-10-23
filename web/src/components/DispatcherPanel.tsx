@@ -35,6 +35,7 @@ export const triageLabel: Record<NonNullable<WorkItem['triage']>['class'], strin
   'follow-up': 'follow-up',
   regression: 'nightly regression',
   'ffbox-desync': 'FFBox desync PR',
+  'ffbox-crash': 'FFBox crash or hang',
 };
 
 /** What a pending intake request waits for, as its status reads. */
