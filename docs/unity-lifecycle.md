@@ -233,8 +233,16 @@ node cannot take the OS file locks the queue lives on):
   timed run). A run made inside a bench hold (`FF_BENCH_TICKET`) reuses it, and waits for a slot at most 2 minutes.
 - **`unity start`** of a sandbox editor checks the slot first, then takes a shared ticket. Not granted within 5 s, it
   answers `Queued (w1615)` and the pool starts the editor itself at its turn, checking the gates and the slot again
-  (none is waited for while it holds the ticket); `unity status` shows its place. The ticket goes once the editor's
-  MCP bridge is up, or after 30 minutes. A stop cancels a queued start.
+  (none is waited for while it holds the ticket); `unity status` shows its place. A stop cancels a queued start.
+  Since w1860 (lothsahn, 2026-10-23: "builds or any compute intensive job needs a lock"; yes to "running editors and game
+  players hold a shared ticket while they run") the ticket, `running editor <sandbox>`, is held for as long as the editor
+  runs, not only while it boots, and goes once the editor is gone. A running editor that lost its ticket (revoked at
+  the shared group's limit, its helper gone) or never had one (adopted, the queue unreachable at its start) takes a new
+  one within a minute (`EDITOR_TICKET_RETRY_MS`) and runs on meanwhile. The game repo's `bench_queue.py` lets the
+  editor's ticket of a timed leg's own sandbox ride along with it (`rides_along`); every other sandbox's editor holds a
+  timed leg back to the shared group's hour, warning first, and the exclusive turn below then closes it. So the machine
+  view's Free means nothing runs. Game players hold one too, for their whole life (the game repo's
+  `player_slots.py launch`, `hold_player_ticket`).
 - **`readBenchLock`** (`machine/benchLock.ts`): a holder whose owner line names a ticket (`[t00000042]`) counts while
   its helper process lives, however old; an old-style line keeps the 40-minute rule.
 
@@ -247,7 +255,16 @@ node cannot take the OS file locks the queue lives on):
   call used it). One gate per sandbox per process: a sandbox's agents share one editor.
 - **A batch Unity started straight from the shell** (`Unity -batchmode ...`, `"$UNITY" -batchmode ...`) is refused by
   the guard (`checkRawUnityBatch`, w1628) with the `unity-slot run` command to use instead, which takes a slot and a
-  ticket.
+  ticket. So is an editor opened on a project straight from the shell (`Unity -projectPath ...`, w1860): `mcp__machine__unity`
+  start, or `unity-slot run` for a peer run's second editor.
+- **The census** (`server/benchLaunchCensus.test.ts`, w1860; lothsahn: "Please make sure every build or CPU intensive
+  job scheduled by the portal takes a lock. Shared unless it's a performance sensitive job like a timing run") lists
+  every place FF Factory's own code starts a Unity or a game player, with the ticket it holds (today one: the sandbox
+  editor, `machine/unity.ts`). A new launch path fails it until it is listed with its ticket. Workers start everything
+  else through the game repo's launchers, each with its ticket: `unity-slot run` / `ff_unity_slot` / `unity_slot.py run`
+  / `build_player.sh` (shared; exclusive for a timed run), `player_slots.py launch` (shared, the player's life),
+  `quiet_gate.sh bench_lock` (exclusive), the nightly (`ffnightly.py --lock-night`, one shared ticket for the night) and
+  `urgent_release.py` (exclusive, pre-empting).
 
 A checkout without `bench_queue.py` (a branch from before w1615) takes its ticket with another sandbox's copy of the
 script (`sandboxBenchQueueScript`, w1628: the queue is its files, not its code); with none on the machine, or without
