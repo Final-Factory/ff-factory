@@ -31,7 +31,7 @@ import { readPortalLogs, realJournal, type PortalLogsInput } from './portalLogs.
 const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
 import { ROOT, claudeAiConnectorsFor, configPath, connectorEnv, ownerLine, pinnedVaultEntry, publicIdentityLine, publicIdentityOf, type Config, hostSoftFreeGB, type HostGuardConfig } from './config.ts';
 import { dryRun, refuseInDryRun } from './dryRun.ts';
-import { MachineRollout } from './machineRollout.ts';
+import { MachineRollout, timedRunText } from './machineRollout.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
@@ -770,6 +770,8 @@ export class Agents {
           if (to) void sessions.send(to, text, 'system', undefined, person ? { requestedBy: person } : undefined);
         },
         requesterOf: (at) => this.ops.deployRequester(at),
+        // w1861: a machine's update and tools publish wait while a timed run holds its bench queue (machine/benchState.ts).
+        timedRun: (id) => timedRunText(machines.statsOf(id)?.bench, Date.parse(machines.statsOf(id)?.at ?? '')),
       },
     });
     this.standing = new StandingAgents({

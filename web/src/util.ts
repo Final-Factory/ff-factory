@@ -254,7 +254,7 @@ export function fmtUntil(iso: string | undefined, now: number): string {
 const STATE_TONE: Record<AgentState, Tone> = { working: 'blue', needs_you: 'amber', between_turns: 'blue', idle: 'grey', error: 'red', stopped: 'grey' };
 const LABEL_TONE: Record<string, Tone> = { Queued: 'grey', Blocked: 'violet' };
 /** "06:10", "tomorrow 00:08" or a date: the browser's clock, with the day when it is not today (w509). */
-const localTime = (iso: string, now: number) => {
+export const localTime = (iso: string, now: number) => {
   const at = new Date(iso);
   const hm = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const day = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
