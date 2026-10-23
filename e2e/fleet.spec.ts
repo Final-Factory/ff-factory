@@ -320,6 +320,46 @@ test('fleet: the Overview board shows every computer as a card with its live age
   await expect(page.getByTestId('machine-sandbox-panel')).toBeVisible();
 });
 
+test('w1837: the Overview switches to one card per worker, keeps the choice across a reload, and a card opens its worker', async ({ page }) => {
+  await fixedFleet(page, '#/overview');
+  const board = page.getByTestId('overview');
+  await expect(board).toHaveAttribute('data-mode', 'machines');
+  await board.getByTestId('overview-mode-workers').click();
+  await expect(board).toHaveAttribute('data-mode', 'workers');
+  await expect(board.locator('.board-card')).toHaveCount(0);
+  const card = (title: string) => board.getByTestId('wc-card').filter({ hasText: title });
+  // The running worker reads Working where it runs; the idle one carries its request and person.
+  await expect(card('Nightly e2e: Windows leg').getByTestId('wc-status')).toHaveText('Working');
+  await expect(card('Nightly e2e: Windows leg')).toContainText('LothDesktop/sb1');
+  // Idle on an open request with nothing waiting on a person: its request is Stalled, red, as the Dispatcher says.
+  await expect(card('Review the nightly report').getByTestId('wc-status')).toHaveText('Stalled');
+  await expect(card('Review the nightly report')).toContainText(/w900\s*·?\s*Lothsahn/);
+  // Working before held up.
+  const titles = await board.getByTestId('wc-open').allTextContents();
+  expect(titles.indexOf('Nightly e2e: Windows leg')).toBeLessThan(titles.indexOf('Review the nightly report'));
+
+  // A status filter, remembered with the mode.
+  await board.getByTestId('wc-group-working').click();
+  await expect(card('Review the nightly report')).toHaveCount(0);
+  await page.reload();
+  await expect(board).toHaveAttribute('data-mode', 'workers');
+  await expect(board.getByTestId('wc-group-working')).toHaveAttribute('aria-pressed', 'true');
+  await expect(card('Review the nightly report')).toHaveCount(0);
+  await board.getByTestId('wc-clear').click();
+  await expect(card('Review the nightly report')).toHaveCount(1);
+  expect(await page.evaluate(() => localStorage.getItem('ffsb.overview.cardFilter'))).toBeNull();
+
+  // The card opens its worker's page.
+  await card('Nightly e2e: Windows leg').getByTestId('wc-open').click();
+  await expect(page).toHaveURL(/#\/machine\/lothdesktop\/sandbox\/sb1\/gallery1$/);
+
+  // Back to the machine view: nothing is stored for the default.
+  await page.goto('/#/overview');
+  await board.getByTestId('overview-mode-machines').click();
+  await expect(board.locator('.board-card')).toHaveCount(4);
+  expect(await page.evaluate(() => localStorage.getItem('ffsb.overview.mode'))).toBeNull();
+});
+
 test('fleet: a machine sandbox has its own page: agents as tabs, Unity with its log, and git', async ({ page, browserName }) => {
   await fixedFleet(page, '#/machine/lothdesktop/sandbox/sb1');
   const panel = page.getByTestId('machine-sandbox-panel');
