@@ -490,3 +490,9 @@ test('w1874: verdict: the owner limits; ownerOf looks through a unity-slot wrapp
   assert.equal(isSlotWrapper('/bin/bash scripts/build_player.sh'), false);
   assert.equal(isSlotWrapper(`${NODE} /x/machine/unitySlots.ts status`), false);
 });
+
+test('w1874: an owned build that writes no log file (stdout) is never ended for a silent log alone, only with an idle tree', () => {
+  const base: Judged = { ageMs: 40 * MIN, owner: { gone: false, why: 'x' }, orphanLooks: 0, stalledMs: 1 * MIN, logStalledMs: 40 * MIN, owned: true, logKnown: false };
+  assert.equal(verdict(base).kill, false, 'busy, its log unknown: kept');
+  assert.equal(verdict({ ...base, stalledMs: 10 * MIN }).kill, true, 'idle for 10 min: ended');
+});

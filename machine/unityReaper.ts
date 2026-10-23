@@ -158,13 +158,15 @@ export interface Judged {
   logStalledMs: number;
   /** The worker asking owns it (w1874): it may be ended as soon as it is stalled, whatever its age. */
   owned?: boolean;
+  /** It writes a -logFile whose time was read (false: stdout, or no file yet): only then does a silent log alone count. */
+  logKnown?: boolean;
 }
 
 export function verdict(j: Judged): { kill: boolean; why: string } {
   const min = (ms: number) => `${Math.round(ms / MIN)} min`;
   const state = `running ${min(j.ageMs)}, no log or CPU progress for ${min(j.stalledMs)}`;
   if (j.owned) {
-    if (j.logStalledMs >= REAP.OWNED_LOG_STALL_MS) return { kill: true, why: `stalled, and yours: its log has not grown for ${min(j.logStalledMs)} (a healthy build's log is silent ${min(REAP.OWNED_LOG_STALL_MS / 2)} at most, measured), running ${min(j.ageMs)}` };
+    if (j.logKnown !== false && j.logStalledMs >= REAP.OWNED_LOG_STALL_MS) return { kill: true, why: `stalled, and yours: its log has not grown for ${min(j.logStalledMs)} (a healthy build's log is silent ${min(REAP.OWNED_LOG_STALL_MS / 2)} at most, measured), running ${min(j.ageMs)}` };
     if (j.stalledMs >= REAP.OWNED_STALL_MS) return { kill: true, why: `stalled, and yours: ${state}` };
   }
   const ownNote = j.owned ? `; as it is yours it is ended once its log is silent for ${min(REAP.OWNED_LOG_STALL_MS)}, or log and CPU for ${min(REAP.OWNED_STALL_MS)} (now ${min(j.logStalledMs)} and ${min(j.stalledMs)})` : '';
@@ -358,7 +360,7 @@ export class UnityReaper {
       const logStalledMs = now - Math.min(now, logAt ?? s.firstSeen);
       const stalledMs = now - Math.min(now, Math.max(s.cpuAt, logAt ?? 0, s.firstSeen));
       const owned = this.ownedBy(asker, u, place, procs, runs);
-      const v = verdict({ ageMs: Math.max(0, now - born), owner, orphanLooks: s.orphanLooks, stalledMs, logStalledMs, owned });
+      const v = verdict({ ageMs: Math.max(0, now - born), owner, orphanLooks: s.orphanLooks, stalledMs, logStalledMs, owned, logKnown: logAt !== undefined });
       if (!v.kill) {
         out.push({ pid: u.pid, sandbox: place.id, killed: false, line: `${label}: ${v.why}` });
         continue;
