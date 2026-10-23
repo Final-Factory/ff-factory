@@ -270,7 +270,7 @@ export function QuestionCard(p: QuestionCardProps) {
     <>
       {p.attachable && <PendingFileChips ownerId={filesKey} files={attach.files} thumbs />}
       <div
-        className={`qc-free${dragging ? ' dragging' : ''}`}
+        className={`qc-free${p.attachable ? ' qc-free-files' : ''}${dragging ? ' dragging' : ''}`}
         onDragOver={(e) => {
           if (!p.attachable || !e.dataTransfer.types.includes('Files')) return;
           e.preventDefault();

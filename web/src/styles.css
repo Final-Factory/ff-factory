@@ -7871,6 +7871,19 @@ a.wc-pr:hover {
   border-color: var(--accent);
 }
 
+/* A narrow phone: with the paperclip too, the box takes the whole width and the buttons sit under it (as the chat's reply box does), so a dictated answer still shows whole. */
+@media (max-width: 520px) {
+  .qc-free-files {
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+  }
+
+  .qc-free-files > .qc-free-text {
+    flex-basis: 100%;
+  }
+}
+
 .composer-file-thumb {
   flex: none;
   width: 40px;
