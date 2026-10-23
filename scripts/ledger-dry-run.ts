@@ -2,7 +2,9 @@
  * What the ledger cleanup's merged-request rules would do now (w419; docs/orchestrators.md, "Ledger cleanup"), on a COPY
  * of a portal's data folder, changing nothing: which requests the pull-request rule would close (every linked PR merged,
  * nothing left after the merge), which ones it would ask its worker "Is it done?" about, and which it would stall as
- * follow-up unconfirmed, and which a worker's DONE, refused then, closes now (w515: Orchestrators.recheckDone). It uses
+ * follow-up unconfirmed, and which a worker's DONE, refused then, closes now (w515: Orchestrators.recheckDone). A request
+ * whose latest worker's last turn ended in an error or an interrupt, or whose last report is not a DONE, never closes
+ * (w1870): it waits for the cleanup to resume, escalate or place it, or asks. It uses
  * the PR states the copy has stored (no gh), the same rules as server/ledgerSweep.ts and its skip for a worker running on
  * the request.
  *
@@ -10,7 +12,7 @@
  *
  * at= runs the rules as of that time instead of now (the copy's sessions and PRs stay as they were).
  */
-import { afterMergeReason, doneProblem, followUpDecision, followUpDue, partOfReason } from '../server/ledgerRules.ts';
+import { afterMergeReason, doneProblem, followUpDecision, followUpDue, notDoneReason, partOfReason, turnTroubleOf } from '../server/ledgerRules.ts';
 import { servedBy } from '../shared/workState.ts';
 import { ledgerStates } from './ledger-states.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
@@ -38,6 +40,13 @@ export function dryRun(work: readonly WorkItem[], session: (id: string) => Sessi
       out.push({ id: w.id, does: 'wait', why: `a worker is running on it (${busy.map((s) => s.id).join(', ')})` });
       continue;
     }
+    // w1870: never on a last turn that ended in an error or an interrupt (read from the session alone: no transcript here).
+    const last = [...workers].sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))[0];
+    const trouble = last && !BUSY.has(last.status) ? turnTroubleOf(last, []) : undefined;
+    if (trouble) {
+      out.push({ id: w.id, does: 'wait', why: `not closed (w1870): its latest worker ${last.id}: ${trouble.reason}; the cleanup ${trouble.kind === 'interrupt' ? 'leaves it to the dispatcher to place again' : 'resumes or escalates it'}` });
+      continue;
+    }
     // A DONE refused while a PR was open (w515): it closes now when nothing is missing and nobody else is still on it.
     const said = Object.entries(w.done ?? {}).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
     const stillOn = workers.filter((s) => !w.done?.[s.id] && s.status !== 'stopped' && s.status !== 'error' && servedBy(s.id, work).has(w.id));
@@ -48,7 +57,8 @@ export function dryRun(work: readonly WorkItem[], session: (id: string) => Sessi
         continue;
       }
     }
-    const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
+    // w1870: nor without its worker's DONE: the follow-up asks for it instead.
+    const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? '')) ?? notDoneReason(w, workers);
     if (!reason) {
       if (!busy.length) out.push({ id: w.id, does: 'close', why: `every linked PR merged (${merged.map((p) => `#${p.number}`).join(', ')}) and nothing is left after the merge` });
       continue;
