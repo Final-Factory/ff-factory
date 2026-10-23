@@ -2557,6 +2557,8 @@ test('w1868: two questions on one request, the first answered: the second can st
   assert.match(second.text, /answers the \[needs you\] question/);
   assert.ok(store.work.get('w1')!.needsYou!.answered);
   assert.match(wakeOf(agents, id)!.note, /Frame look, verbatim[\s\S]*Station strip: "The whole strip comes up over the window"/);
+  // Nothing of this test fires after it ends.
+  agents.cancelWake(id);
 });
 
 test('w1868: every ask_person question is an open card until it is answered, asked again, closed or refused', async (t) => {
@@ -2607,7 +2609,7 @@ test('w1868: waiting_on_person refuses a still on the worker’s own machine; th
   );
   assert.equal(info.waitingOn, undefined, 'nothing recorded');
   const brief = (agents as unknown as { personalBrief(r: Requester): string }).personalBrief(LOTH);
-  assert.match(brief, /Ask every question to Lothsahn with ask_person, never in text only: each is a card on Lothsahn's Waiting on input tab/);
+  assert.match(brief, /Ask every question to Lothsahn with ask_person, never in text only \(w1868: each is a Waiting-tab card/);
 });
 
 test('w1812: no [needs you] when the answer is already logged after the question was raised, on its request or on another its worker holds; a new question still goes', async (t) => {

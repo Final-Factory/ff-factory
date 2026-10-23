@@ -113,6 +113,13 @@ test('w1868: every card of today’s real cases says what it is, who acts, the q
   await tab.getByTestId('wait-w1797').scrollIntoViewIfNeeded();
   if (process.env.WAITING_SHOTS) await tab.getByTestId('wait-w1797').screenshot({ path: path.join(process.env.WAITING_SHOTS, `w1797-card-${isMobile(page) ? 'narrow' : 'desktop'}.png`) });
   if (process.env.WAITING_SHOTS) await w1821.screenshot({ path: path.join(process.env.WAITING_SHOTS, `w1821-card-${isMobile(page) ? 'narrow' : 'desktop'}.png`) });
+  // The clip at a phone's width, in the engine that plays WebM (the portal sends Safari the clip's H.264 web preview).
+  if (process.env.WAITING_SHOTS && browserName === 'chromium' && !isMobile(page)) {
+    await page.setViewportSize({ width: 390, height: 1400 });
+    await settle(page);
+    await tab.getByTestId('wait-w1797').scrollIntoViewIfNeeded();
+    await tab.getByTestId('wait-w1797').screenshot({ path: path.join(process.env.WAITING_SHOTS, 'w1797-card-narrow-chromium.png') });
+  }
 });
 
 test('w1868: every open question of your orchestrator is a card: three requests and two on one make five, and a click answers each', async ({ authed: page }) => {

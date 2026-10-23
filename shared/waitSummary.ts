@@ -178,7 +178,7 @@ export function staleOf(w: Pick<WorkItem, 'log' | 'needsYou' | 'done'>, worker: 
 export function approveAsk(w: Pick<WorkItem, 'source'>, recommendation: string | undefined): Ask {
   const approveRec = !!recommendation?.startsWith('Approve');
   return {
-    question: `Should FF Factory work on this ${w.source?.kind === 'discord-bug' ? 'player’s bug report' : w.source?.kind?.startsWith('ffbox') ? 'FFBox work' : 'request'}?`,
+    question: w.source?.kind?.startsWith('ffbox') ? 'Should a worker review FFBox’s work on this and take it on?' : `Should FF Factory work on this ${w.source?.kind === 'discord-bug' ? 'player’s bug report' : 'request'}?`,
     options: [
       { label: APPROVE_LABEL, description: 'The dispatcher gets it and a worker starts at the next free sandbox: one worker session of Claude usage.', ...(approveRec ? { recommended: true } : {}) },
       { label: DECLINE_LABEL, description: 'It closes as declined, with your reason if you type one. The dispatcher never hears of it; nothing is spent.' },
