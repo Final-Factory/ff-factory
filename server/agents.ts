@@ -2317,10 +2317,14 @@ export class Agents {
     for (const info of this.store.sessions.values()) {
       if (info.kind !== 'worker' || info.machineId !== machineId) continue;
       const open = this.openWorkOf(info);
-      if (!open.length) continue;
+      // w1656: the builder of the release planned here takes the bench first, whatever its request's priority; a builder
+      // with no open request (build_plan takes `requests: []`) still gets its mark (w1832: else the queue caps its build)
+      const release = !!this.builds?.releaseBuilder(machineId, info.id);
+      if (!open.length && !release) continue;
       const top = open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority);
-      // w1656: the builder of the release planned here takes the bench first, whatever its request's priority.
-      out[info.id] = { priority: this.builds?.releaseBuilder(machineId, info.id) ? 'urgent' : top, requests: open.map((w) => w.id) };
+      // w1832: the urgent release lane's builder and the scheduled nightly's worker are never pre-empted by the turn limits.
+      const exempt = release ? 'release' : open.some((w) => w.source?.kind === 'nightly-run') ? 'nightly' : undefined;
+      out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}) };
     }
     return out;
   }

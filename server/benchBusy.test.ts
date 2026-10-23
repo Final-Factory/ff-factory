@@ -29,7 +29,7 @@ const T0 = Date.parse('2026-10-22T13:04:00Z');
 const live = () => true;
 const dead = () => false;
 
-test('w1750: foreignTimedHold names the worker and the end of its hold, passes its own session, and ignores dead, overdue, waiting and shared tickets', (t) => {
+test('w1750: foreignTimedHold names the worker and the end of its hold, passes its own session, and ignores dead, revoked, waiting and shared tickets', (t) => {
   const q = queue(t);
   const now = T0 + 16 * 60_000;
   assert.equal(foreignTimedHold(q.root, 'eb9aea37', now, live), undefined, 'an empty queue');
@@ -38,7 +38,8 @@ test('w1750: foreignTimedHold names the worker and the end of its hold, passes i
   assert.equal(msg, 'bench lock held by worker ab2f0f54 (w1739, beast/slot1, "cpu budget ffa-ab2f0f54-w1739-LifeSave"), until 14:04Z at the latest (held since 13:04Z)');
   assert.equal(foreignTimedHold(q.root, 'ab2f0f54', now, live), undefined, "the holder's own launches pass");
   assert.equal(foreignTimedHold(q.root, 'eb9aea37', now, dead), undefined, 'a dead holder (its helper gone) never blocks');
-  assert.equal(foreignTimedHold(q.root, 'eb9aea37', T0 + 61 * 60_000, live), undefined, 'past its 60-minute bound');
+  // w1832: a turn past its bound goes on while nobody waits, and still holds the machine (5 more minutes at the least)
+  assert.match(foreignTimedHold(q.root, 'eb9aea37', T0 + 61 * 60_000, live) ?? '', /until 14:10Z at the latest/, 'past its 60-minute bound');
   fs.writeFileSync(path.join(q.qdir, 't00000001', 'revoked'), JSON.stringify({ at: 'x', why: 'over the bound' }));
   assert.equal(foreignTimedHold(q.root, 'eb9aea37', now, live), undefined, 'a revoked hold');
   q.add('t00000002', { session: 'cc', mode: 'shared' }, T0 / 1000);
