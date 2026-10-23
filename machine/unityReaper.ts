@@ -216,15 +216,34 @@ export class UnityReaper {
     return [head, ...found.map((f) => `- ${f.line}`)].join('\n');
   }
 
+  /** The batch Unity runs of the daemon's sandboxes in a listing, with their sandbox (only those are ever touched). */
+  batches(procs: Proc[]): { u: UnityProcess; place: ReaperPlace }[] {
+    const d = this.d;
+    const places = d.places();
+    return unityProcesses(procs, d.platform)
+      .filter((u) => u.kind === 'batch' && u.project)
+      .map((u) => ({ u, place: places.find((p) => pathKey(p.path, d.platform) === pathKey(u.project!, d.platform)) }))
+      .filter((c): c is { u: UnityProcess; place: ReaperPlace } => !!c.place);
+  }
+
+  /**
+   * End one sandbox batch Unity now, whatever its progress (w1860: another worker's exclusive bench turn holds the machine),
+   * the way a stuck one is ended: its tree, children first, and the stale Temp/UnityLockfile. Answers what happened.
+   */
+  async endBatch(pid: number, why: string): Promise<string> {
+    const procs = await this.d.procs();
+    const c = this.batches(procs).find((x) => x.u.pid === pid);
+    if (!c) return 'gone already, or no batch Unity of a sandbox here';
+    const cmd = procs.find((p) => p.pid === pid)?.cmd ?? '';
+    const label = `batch Unity pid ${pid} of sandbox ${c.place.id}${methodOf(cmd) ? ` (${methodOf(cmd)})` : ''}`;
+    return (await this.kill(c.u, c.place, procs, why, label)).line;
+  }
+
   private async run(): Promise<Reaped[]> {
     const d = this.d;
     this.lastLook = d.now();
     const procs = await d.procs();
-    const places = d.places();
-    const cands = unityProcesses(procs, d.platform)
-      .filter((u) => u.kind === 'batch' && u.project)
-      .map((u) => ({ u, place: places.find((p) => pathKey(p.path, d.platform) === pathKey(u.project!, d.platform)) }))
-      .filter((c): c is { u: UnityProcess; place: ReaperPlace } => !!c.place);
+    const cands = this.batches(procs);
     if (!cands.length) {
       this.seen.clear();
       return [];

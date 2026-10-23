@@ -16,6 +16,15 @@
 // shared turn) and their workers are told. The marks live in the pool's state file, written before the quit is sent, and
 // stay until the editor runs again, so a daemon restart or a start not made is asked for again.
 //
+// w1860 (lothsahn, 2026-10-23: "Make the shutdown of builds for the exclusive lock urgent"): another sandbox's batch Unity
+// (a player build, a test run, a batch compile) is stopped too. No such run can hold a ticket beside the turn (a shared
+// ticket waits for an exclusive one), so one that runs has none: it started without a ticket, or its ticket was revoked
+// (the shared group's limit, an urgent release) and the run went on. A batch Unity has no window and nothing unsaved, so
+// it cannot be asked: its tree is ended (UnityReaper.endBatch) and its sandbox's workers are told to run it again after
+// the turn; the worktree's files are not touched. Never stopped: a build of the holder's own sandbox or one its ticket's
+// owner started, an exempt worker's (the urgent release builder, the nightly), and a Unity whose project is no sandbox of
+// this daemon (the main clone, a person's own).
+//
 // Never touched: the holder's own sandbox and what its ticket's owner started, its session's players, an editor the pool
 // does not own (a person's own project) and a player no worker started (no slot, no session: a person's game). A holder
 // with no session (a person's timed run) asks no player to quit: the players its script starts detached cannot be told
@@ -40,6 +49,12 @@ export interface TurnPlayer {
   session?: string;
   sandbox?: string;
   slot?: string;
+}
+
+/** A batch Unity of one of the daemon's sandboxes (w1860): a player build, a test run, a batch compile. */
+export interface TurnBuild {
+  pid: number;
+  sandbox: string;
 }
 
 export interface TurnClosed {
@@ -73,6 +88,14 @@ export interface BenchTurnDeps {
   closePlayer(pid: number): Promise<string>;
   /** The note for a player's worker, given at its next message. */
   notePlayer?(session: string, text: string): void;
+  /** w1860: the batch Unity runs of the daemon's sandboxes in a listing. Absent: builds are not looked at. */
+  builds?(procs: Proc[]): TurnBuild[];
+  /** w1860: whether a sandbox's worker is exempt work (the urgent release builder, the nightly): its builds are left. */
+  exemptSandbox?(id: string): boolean;
+  /** w1860: end a batch Unity and what it started (it has no window to ask), answering what happened. */
+  stopBuild?(pid: number, sandbox: string, why: string): Promise<string>;
+  /** w1860: the note for every worker in a sandbox, given at its next message. */
+  noteSandbox?(sandbox: string, text: string): void;
   /** The sandboxes closed now and why, for the guard's refusal of Unity MCP calls there; {} when no turn runs. */
   writeClosed(closed: Record<string, string>): void;
   log(text: string): void;
@@ -81,6 +104,12 @@ export interface BenchTurnDeps {
 
 /** A close that was skipped (compiling, an untitled scene) or a start that failed is tried again after this long. */
 export const TURN_RETRY_MS = 30_000;
+/**
+ * How often a turn looks for other sandboxes' batch Unity runs (w1860), after its first look at the grant. A guess: the
+ * process listing costs seconds of CPU on Windows, which a timed run measures, and a new run can only start without a
+ * ticket (unity-slot run waits for the turn when it has none), so a stray one is rare.
+ */
+export const BUILD_LOOK_MS = 30_000;
 /** Starts asked for a closed editor after its turn before it is left stopped (each takes a shared ticket of the queue). */
 export const REOPEN_TRIES = 3;
 /** A player asked to quit is asked again after this long if it still runs (never forced: then it is left and logged). */
@@ -136,6 +165,10 @@ export class BenchTurn {
   private written?: string;
   /** The turn's holder has no session, and that was logged. */
   private noPlayersSaid = false;
+  /** When this turn last looked for batch Unity runs (w1860). */
+  private buildsAt = 0;
+  /** Batch Unity runs being stopped now, by pid. */
+  private readonly stopping = new Set<number>();
 
   constructor(d: BenchTurnDeps) {
     this.d = d;
@@ -167,6 +200,7 @@ export class BenchTurn {
       this.current = h?.ticket;
       this.asked.clear();
       this.noPlayersSaid = false;
+      this.buildsAt = 0;
     }
     // Reopen every editor no turn keeps closed now: the turn that closed it ended, even when the next timed run was granted
     // before a look saw the lock free (its start then queues behind that run and comes back in the next shared turn), and
@@ -216,9 +250,32 @@ export class BenchTurn {
       this.noPlayersSaid = true;
       this.d.log(`bench turn: ${h.ticket} has no worker session: other players are left running (its own may have none to tell them apart by)`);
     }
-    // The process listing costs seconds on Windows: taken only when an editor or a player is to be handled.
-    const procs = editors.length || players.length ? await this.d.procs().catch(() => [] as Proc[]) : [];
+    // The process listing costs seconds on Windows: taken only when an editor or a player is to be handled, or for the
+    // builds' look (at the grant, then every BUILD_LOOK_MS).
+    const lookBuilds = !!this.d.builds && !!this.d.stopBuild && now - this.buildsAt >= BUILD_LOOK_MS;
+    const procs = editors.length || players.length || lookBuilds ? await this.d.procs().catch(() => [] as Proc[]) : [];
     const holderOwns = (pid: number | undefined) => pid !== undefined && descendsFrom(pid, h.ownerPid, procs);
+    if (lookBuilds) {
+      this.buildsAt = now;
+      for (const b of this.d.builds!(procs)) {
+        if (b.sandbox === h.sandbox || holderOwns(b.pid) || this.stopping.has(b.pid) || this.d.exemptSandbox?.(b.sandbox)) continue;
+        this.stopping.add(b.pid);
+        const why = `${by} holds this machine's exclusive bench ticket ${h.ticket} (w1860: no build or test run beside a timed run)`;
+        void this.d
+          .stopBuild!(b.pid, b.sandbox, why)
+          .then(
+            (text) => {
+              this.d.log(`bench turn: sandbox ${b.sandbox}: batch Unity pid ${b.pid}: ${text}`);
+              this.d.noteSandbox?.(
+                b.sandbox,
+                `[bench turn] Your batch Unity run (pid ${b.pid}: a build, a test run or a batch compile) was stopped at ${hhmm(now)} for ${by} (w1860: while another worker's exclusive bench ticket times a run, no build or test run runs beside it). It held no bench ticket: it started without one, or its ticket was revoked and it went on. Your files are as they were. Run it again under unity-slot run: it waits for its shared turn, after that run (by ${hhmm(h.until)} at the latest).`,
+              );
+            },
+            (err) => this.d.log(`bench turn: sandbox ${b.sandbox}: could not stop batch Unity pid ${b.pid}: ${(err as Error).message}`),
+          )
+          .finally(() => this.stopping.delete(b.pid));
+      }
+    }
     for (const e of editors) {
       if (holderOwns(e.pid)) continue;
       this.closing.add(e.id);

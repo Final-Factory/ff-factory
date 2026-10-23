@@ -197,22 +197,41 @@ test('a wrong key, a scoped key and a key without a login are refused; a key rea
   assert.deepEqual(userEvents(chat(LOTH).info.id)[0].requestedBy, LOTH);
 });
 
-test('over Funnel (or from an address outside the tailnet) the chat tools refuse, and nothing is sent', async (t) => {
+test('/mcp is tailnet-only: over Funnel or from outside the tailnet every tool is refused at the endpoint, old and new alike (w1865)', async (t) => {
   const { connect, keys, chat, userEvents, base } = await setup(t);
-  const outside: Record<string, string>[] = [{ 'tailscale-funnel-request': '?1' }, { 'x-forwarded-for': '203.0.113.9' }, { 'x-forwarded-for': '100.63.0.1' }];
+  const outside: Record<string, string>[] = [{ 'tailscale-funnel-request': '?1' }, { 'x-forwarded-for': '203.0.113.9' }, { 'x-forwarded-for': '100.63.0.1' }, { 'tailscale-funnel-request': '?1', 'x-forwarded-for': '100.101.102.103' }];
+  const rpc = (key: string, headers: Record<string, string>, name: string, args: Record<string, unknown>) =>
+    fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
+    });
   for (const headers of outside) {
-    const { call } = await connect(keys.ben, headers);
-    for (const [name, args] of [['orchestrator_send', { text: 'let me in' }], ['orchestrator_inbox', {}], ['orchestrator_attach', { name: 'a.txt', text: 'x' }], ['ask_orchestrator', { message: 'let me in' }], ['orchestrator_transcript', {}]] as const) {
-      const r = await call(name, args);
-      assert.equal(r.isError, true, `${name} ${JSON.stringify(headers)}`);
-      assert.match(r.text, /refused: .*tailnet-only|refused: this request/, name);
+    const h = JSON.stringify(headers);
+    // An older tool (list_sandboxes) and a chat tool, with a bound key and an unbound one: the same 403 before any tool runs.
+    for (const key of [keys.ben, keys.unbound]) {
+      for (const [name, args] of [['list_sandboxes', {}], ['orchestrator_send', { text: 'let me in' }], ['ask_orchestrator', { message: 'let me in' }]] as const) {
+        const res = await rpc(key, headers, name, args);
+        assert.equal(res.status, 403, `${name} ${h}`);
+        assert.match(((await res.json()) as { error: string }).error, /^refused: this request .*\/mcp is tailnet-only$/, `${name} ${h}`);
+      }
     }
+    // A bad key is refused the same way: from outside, the key is never read.
+    assert.equal((await rpc(`ffsb_${'x'.repeat(43)}`, headers, 'list_sandboxes', {})).status, 403, h);
+    // A real MCP client cannot even start a session.
+    await assert.rejects(connect(keys.ben, headers), Error, h);
     const up = await fetch(`${base}/mcp/upload?name=a.txt`, { method: 'PUT', headers: { authorization: `Bearer ${keys.ben}`, ...headers }, body: 'x' });
-    assert.equal(up.status, 403, JSON.stringify(headers));
+    assert.equal(up.status, 403, h);
   }
   assert.equal(userEvents(chat(BEN).info.id).length, 0);
-  // From a tailnet address, through the proxy, it works.
-  const ok = await connect(keys.ben, { 'x-forwarded-for': '100.101.102.103' });
+  // From the tailnet, through the proxy (a Tailscale address forwarded by Serve), the older tools and the chat tools work.
+  for (const key of [keys.ben, keys.unbound]) {
+    const { client, call } = await connect(key, { 'x-forwarded-for': '100.101.102.103' });
+    assert.ok((await client.listTools()).tools.some((x) => x.name === 'list_sandboxes'));
+    const old = await call('list_sandboxes');
+    assert.equal(old.isError, false, old.text);
+  }
+  const ok = await connect(keys.ben, { 'x-forwarded-for': 'fd7a:115c:a1e0::1' });
   assert.equal((await ok.call('orchestrator_inbox')).isError, false);
 });
 
