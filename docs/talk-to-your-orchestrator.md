@@ -99,3 +99,10 @@ it like a password and revoke it if a Mac is lost.
 scoped keys, one person's key never reaching another's orchestrator, Funnel and non-tailnet addresses refused at the endpoint
 for an older tool and a chat tool (and both working from a tailnet address), queueing behind a busy turn, uploads,
 progress notices, link rendering.
+
+**Checking it live (w1865).** A `Tailscale-Funnel-Request` header you send yourself from a tailnet machine proves nothing:
+Serve deletes it, so the request reaches the key check (401 without a key) exactly as a plain tailnet one does. To send a
+real Funnel request from a tailnet machine, resolve the name through public DNS and pin it:
+`curl --resolve fff.tailedfcad.ts.net:443:$(dig +short @1.1.1.1 fff.tailedfcad.ts.net A | tail -1) https://fff.tailedfcad.ts.net/mcp -d '{}'`
+answers 403 `refused: this request came in through Tailscale Funnel …; /mcp is tailnet-only` with or without a key (measured
+2026-10-23 on m3 after the b9c0c09 deploy; 401 `API key required` before it).

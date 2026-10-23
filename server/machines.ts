@@ -27,7 +27,7 @@ import { hostStartFailed } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { BenchPriority, BenchWarning, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { BenchPriority, BenchWarning, NoTimedRuns, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
@@ -102,7 +102,21 @@ export interface SandboxLimits {
 }
 
 /** A machine's pool extras (docs/beast-machine.md): the Library seed, editor priority and the folders never to touch. */
-export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'protectedPaths'>;
+export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'protectedPaths' | 'noTimedRuns'>;
+
+/**
+ * The machines that take no timed runs unless their record says otherwise (w1861). lothsahn, 2026-10-23, after Ben's
+ * speech-to-text ran on m5 inside w1780's timed A/B: "The m5 should not be used for timing runs because Ben runs stuff on
+ * it personally". add_machine no_timed_runs "" clears one; any other text replaces its reason.
+ */
+export const NO_TIMED_RUNS: Readonly<Record<string, string>> = {
+  m5: 'lothsahn, 2026-10-23: "The m5 should not be used for timing runs because Ben runs stuff on it personally"',
+};
+
+/** Why a machine takes no timed runs (w1861): its record's reason, else NO_TIMED_RUNS's; undefined when it takes them. */
+export function noTimedRunsOf(m: Pick<Machine, 'id' | 'noTimedRuns'>): string | undefined {
+  return m.noTimedRuns !== undefined ? m.noTimedRuns.trim() || undefined : NO_TIMED_RUNS[m.id];
+}
 
 /** The pool settings of a machine (its sandbox_root and limits, with defaults), or null when it has no sandbox_root. Exported for tests. */
 export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits & PoolExtras): SandboxPoolSettings | null {
@@ -683,8 +697,27 @@ export class MachineManager {
   pushBenchPriorities() {
     for (const id of this.links.keys()) {
       const sessions = this.benchPrioritiesFor?.(id);
-      if (sessions) this.post(id, { type: 'bench_priorities', sessions, singleWorker: this.singleWorker(id) }, false);
+      if (sessions) this.post(id, this.benchPrioritiesMsg(id, sessions), false);
     }
+  }
+
+  /** The bench_priorities message for one machine: its workers' priorities, whether it hosts one worker, and its timed-run refusal (w1861). */
+  benchPrioritiesMsg(id: string, sessions: Record<string, BenchPriority>): Extract<ToDaemon, { type: 'bench_priorities' }> {
+    const no = this.noTimedRuns(id);
+    return { type: 'bench_priorities', sessions, singleWorker: this.singleWorker(id), ...(no ? { noTimedRuns: no } : {}) };
+  }
+
+  /**
+   * Why a machine takes no timed runs and where they go instead (w1861, noTimedRunsOf): the other machines with sandboxes
+   * that take them, online first. Undefined when it takes them.
+   */
+  noTimedRuns(id: string): NoTimedRuns | undefined {
+    const m = this.store.machines.get(id);
+    const why = m && noTimedRunsOf(m);
+    if (!why) return undefined;
+    const others = this.list().filter((o) => o.id !== id && o.sandboxRoot && !noTimedRunsOf(o));
+    const elsewhere = [...others.filter((o) => this.isOnline(o.id)), ...others.filter((o) => !this.isOnline(o.id))].map((o) => o.id);
+    return { why, elsewhere };
   }
 
   /**
@@ -1329,6 +1362,7 @@ export class MachineManager {
       librarySeedCopy: opts.librarySeedCopy ?? prev?.librarySeedCopy,
       librarySeedGB: opts.librarySeedGB ?? prev?.librarySeedGB,
       unityBelowNormal: opts.unityBelowNormal ?? prev?.unityBelowNormal,
+      noTimedRuns: opts.noTimedRuns ?? prev?.noTimedRuns,
     };
     const { machine, token } = this.register({
       id,
@@ -1380,6 +1414,7 @@ export class MachineManager {
       ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
       ...(opts.librarySeedGB !== undefined ? { librarySeedGB: opts.librarySeedGB } : {}),
       ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
+      ...(opts.noTimedRuns !== undefined ? { noTimedRuns: opts.noTimedRuns } : {}),
     });
     this.store.putMachine(m);
     this.links.get(m.id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
@@ -1421,6 +1456,7 @@ export class MachineManager {
       ...(opts.librarySeed !== undefined ? { librarySeed: opts.librarySeed === '' ? undefined : opts.librarySeed } : {}),
       ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
       ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
+      ...(opts.noTimedRuns !== undefined ? { noTimedRuns: opts.noTimedRuns } : {}),
     };
     m.online = this.isOnline(id);
     this.store.putMachine(m);
@@ -1909,7 +1945,7 @@ export class MachineManager {
     const ctx = m.local ? undefined : this.cleanupContext?.();
     if (ctx) ws.send(JSON.stringify({ type: 'cleanup_context', context: ctx } satisfies ToDaemon));
     const prio = this.benchPrioritiesFor?.(id);
-    if (prio) ws.send(JSON.stringify({ type: 'bench_priorities', sessions: prio, singleWorker: this.singleWorker(id) } satisfies ToDaemon));
+    if (prio) ws.send(JSON.stringify(this.benchPrioritiesMsg(id, prio) satisfies ToDaemon));
     ws.send(JSON.stringify({ type: 'usage_config', config: { everyMinutes: this.cfg.usagePollMinutes ?? DEFAULT_USAGE_POLL_MINUTES } } satisfies ToDaemon));
     console.log(`machine ${id} connected`);
   }
