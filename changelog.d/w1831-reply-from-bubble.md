@@ -4,6 +4,6 @@
   Shift+Enter is a new line, as in the chat box). Send delivers the words at once, with no orchestrator turn in between,
   exactly as message_person does: the other person gets the same message, unread mark and notification. The reply shows in
   your chat as your own message, quoting the one it answers, with a "Sent to <name>" tag. Your orchestrator reads it there
-  and is told it is already sent. The answered message leaves the bubble. New route
+  and is told it is already sent. The answered message leaves the bubble, which says "Sent to <name>" for a few seconds. New route
   `POST /api/sessions/:id/person-messages/reply`. Docs: orchestrators.md ("Reply from the bubble"). Tests:
   `server/orchestrators.test.ts`, `server/replies.test.ts`, `e2e/orchestrators.spec.ts`.

@@ -5,7 +5,7 @@ import type { PersonMessageMark, SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import { holdReload } from '../freshness';
 import { useKeptState } from '../keep';
-import { attempt, focusEvent, hidePersonMessages, toast, useStore } from '../store';
+import { attempt, focusEvent, hidePersonMessages, useStore } from '../store';
 import { fmtClock, fmtRelative, useNow } from '../util';
 import { onScreenKeyboard } from '../viewport';
 import { useTextareaDictation } from '../voice/useTextareaDictation';
@@ -22,6 +22,9 @@ const idOf = (m: PersonMessageMark) => m.id ?? m.at;
 export function unreadHere(list: readonly PersonMessageMark[] | undefined, clearing: readonly string[] | undefined): PersonMessageMark[] {
   return (list ?? []).filter((m) => !clearing?.includes(idOf(m)));
 }
+
+/** How long "Sent to <name>" stays in the bubble after a reply (w1831). */
+export const SENT_MS = 4000;
 
 /** After Undo, Clear all comes back where Undo was: a second tap there in this time does nothing. */
 const UNDO_SETTLE_MS = 700;
@@ -45,6 +48,17 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
   const [open, setOpen] = useState(false);
   // The message whose reply box is open (w1831): one at a time.
   const [replying, setReplying] = useState<string | null>(null);
+  // Who a reply just went to: said in the bubble's own status line for a few seconds, where the person is looking (a toast
+  // lay over the message box on a phone), and the bubble stays for it when that message was the last one.
+  const [sent, setSent] = useState<string | null>(null);
+  const sentTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(sentTimer.current), []);
+  const replied = (name: string) => {
+    setReplying(null);
+    setSent(name);
+    clearTimeout(sentTimer.current);
+    sentTimer.current = setTimeout(() => setSent(null), SENT_MS);
+  };
   // The clear that can still be undone: those ids are hidden here, and sent when the time is up.
   const [undo, setUndo] = useState<{ ids: string[]; timer: ReturnType<typeof setTimeout> } | null>(null);
   const undoRef = useRef(undo);
@@ -113,7 +127,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
     if (!list.length) setOpen(false);
   }, [list.length]);
   const cleared = undo ? all.filter((m) => undo.ids.includes(idOf(m))).length : 0;
-  if (!list.length && !cleared) return null;
+  if (!list.length && !cleared && !sent) return null;
 
   const latest = list.at(-1);
   const clearAll = (
@@ -188,7 +202,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
                       </span>
                     </div>
                     <div className="pmsg-text">{m.text ? <Markdown text={m.text} /> : <p className="pmsg-old">Sent before this box kept the words: it is in the conversation above.</p>}</div>
-                    {replying === idOf(m) && <ReplyBox sessionId={session.id} mark={m} onClose={() => setReplying(null)} />}
+                    {replying === idOf(m) && <ReplyBox sessionId={session.id} mark={m} onClose={() => setReplying(null)} onSent={replied} />}
                   </li>
                 );
               })}
@@ -209,6 +223,12 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
             </button>
           </div>
         )}
+        {sent && (
+          <div className="pmsg-undo pmsg-sent" role="status" data-testid="people-messages-sent">
+            <Icon name="check" size={13} />
+            <span>Sent to {sent}: it is in your chat too.</span>
+          </div>
+        )}
       </section>
     </div>
   );
@@ -220,7 +240,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
  * the words straight to that person as message_person does (server Orchestrators.replyToPerson), with no turn of the
  * orchestrator in between. They show in this chat as the person's own message, and the message they answer is read.
  */
-function ReplyBox({ sessionId, mark, onClose }: { sessionId: string; mark: PersonMessageMark; onClose: () => void }) {
+function ReplyBox({ sessionId, mark, onClose, onSent }: { sessionId: string; mark: PersonMessageMark; onClose: () => void; onSent: (name: string) => void }) {
   const [text, setText] = useKeptState(`pmsg.reply.${idOf(mark)}`, '');
   const [sending, setSending] = useState(false);
   const box = useRef<HTMLTextAreaElement>(null);
@@ -235,8 +255,7 @@ function ReplyBox({ sessionId, mark, onClose }: { sessionId: string; mark: Perso
     if (ok === undefined) return;
     clientId.current = null;
     setText('');
-    toast(`Sent to ${mark.from.displayName}`);
-    onClose();
+    onSent(mark.from.displayName);
   };
   // "Send automatically after dictation" sends what was dictated, as in the chat box.
   const voice = useTextareaDictation({ value: text, setValue: setText, ref: box, onAutoSend: (t) => void send(t.trim()) });
@@ -296,7 +315,7 @@ function ReplyBox({ sessionId, mark, onClose }: { sessionId: string; mark: Perso
         <MicButton d={voice.d} className="pmsg-reply-mic" />
         <button
           type="button"
-          className={`btn btn-sm ${text.trim() ? 'btn-primary' : 'btn-outline'}`}
+          className={`btn pmsg-reply-send ${text.trim() ? 'btn-primary' : 'btn-outline'}`}
           disabled={!text.trim() || sending}
           onClick={() => void send()}
           data-testid="pmsg-reply-send"

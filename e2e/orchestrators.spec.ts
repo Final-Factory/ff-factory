@@ -416,6 +416,9 @@ test('Reply on a message from another person: dictated, sent straight to them as
     const input = box.getByLabel('Reply to Team Mate');
     await expect(input).toBeVisible();
     await expect(box.getByTestId('pmsg-reply-send')).toBeDisabled();
+    // One row: the box's one line, the mic and Send are the same height (within a pixel's rounding).
+    const heights = await box.evaluate((el) => ['textarea', '.btn-mic', '[data-testid="pmsg-reply-send"]'].map((q) => el.querySelector<HTMLElement>(q)!.getBoundingClientRect().height));
+    expect(Math.max(...heights) - Math.min(...heights), `box, mic and Send heights ${heights.join(', ')}`).toBeLessThanOrEqual(1);
     await shot(page, 'reply-open');
     await expectNoHorizontalOverflow(page);
 
@@ -440,8 +443,14 @@ test('Reply on a message from another person: dictated, sent straight to them as
     );
     expect((await appState(mateCtx.request)).sessions.find((s) => s.id === mateChat)?.personMessages?.map((m) => m.text)).toContain(words);
 
-    // The owner's chat: the message answered is read (the bubble goes), and the words are their own message, quoting it.
-    await expect(bubble).toHaveCount(0);
+    // The bubble says where it went, then goes: the message answered is read.
+    await expect(bubble.getByTestId('people-messages-sent')).toHaveText('Sent to Team Mate: it is in your chat too.');
+    await expect(bubble.getByTestId('people-message')).toHaveCount(0);
+    // The chat settles under the bubble that just shrank (a still at once caught WebKit mid-repaint, the chat blank).
+    await page.waitForTimeout(1000);
+    await shot(page, 'reply-just-sent');
+    await expect(bubble).toHaveCount(0, { timeout: 10_000 });
+    // The owner's chat: the words are their own message, quoting the one they answer.
     const sent = page.locator('.orch .msg-user', { hasText: words }).last();
     await expect(sent.getByTestId('msg-sent')).toHaveText('Sent to Team Mate');
     await expect(sent.getByTestId('reply-quote')).toContainText(asked);
@@ -461,7 +470,7 @@ test('Reply on a message from another person: dictated, sent straight to them as
     await bubble.getByRole('textbox', { name: 'Reply to Team Mate' }).fill(`Yes it does ${tag}-2`);
     await bubble.getByRole('textbox', { name: 'Reply to Team Mate' }).press('Enter');
     await expect.poll(() => heardFrom(mateCtx.request, mateChat, `Yes it does ${tag}-2`)).toHaveLength(1);
-    await expect(bubble).toHaveCount(0);
+    await expect(bubble).toHaveCount(0, { timeout: 10_000 });
     expect((await mateCtx.request.post(`/api/sessions/${mateChat}/person-messages/read`, { data: {} })).ok()).toBe(true);
   } finally {
     await mateCtx.close();

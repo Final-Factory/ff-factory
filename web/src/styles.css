@@ -1664,6 +1664,21 @@ select.input {
   resize: none;
 }
 
+/* The mic and Send as tall as the box's one line, so the row reads as one control. */
+.pmsg-reply-row > .btn {
+  height: 38px;
+}
+
+.pmsg-reply-row > .btn-icon {
+  width: 38px;
+}
+
+/* "Sent to <name>" after a reply, on the line Clear's Undo uses (w1831). */
+.pmsg-sent > svg {
+  flex: none;
+  color: var(--green);
+}
+
 .pmsg-reply .dictation-bar {
   margin: 6px 0 0;
 }
@@ -1682,6 +1697,17 @@ select.input {
 
   .pmsg-reply-text {
     flex-basis: 100%;
+  }
+}
+
+/* Phones draw the box's text at 16 px (so iOS does not zoom into it): its one line is taller, and so are the mic and Send. */
+@media (max-width: 860px) {
+  .pmsg-reply-row > .btn {
+    height: 42px;
+  }
+
+  .pmsg-reply-row > .btn-icon {
+    width: 42px;
   }
 }
 

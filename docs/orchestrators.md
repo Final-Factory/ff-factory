@@ -1353,7 +1353,9 @@ On a phone under 520 px wide the box takes the whole width, with the mic and Sen
   `SENT_MARK` that the words are delivered and must not be sent again. It opens a turn of theirs, so the orchestrator
   has it in context and answers in a line. The page draws the words as their bubble, the quote above it, and a
   "Sent to <name>" tag under it (`splitSent`, `Transcript.tsx`). `inPersonWords` stops at `SENT_MARK`, so FF Factory's
-  note is never taken for the person's own words. The answered message is read: it leaves the bubble.
+  note is never taken for the person's own words. The answered message is read: it leaves the bubble, which says
+  "Sent to <name>: it is in your chat too." on its status line for 4 s (`SENT_MS`), where Clear's Undo shows (a toast
+  lay over the message box on a phone, w1831's first critic).
 - A message cleared or answered meanwhile (another tab, the phone) is refused with 409, and nothing is sent.
 
 Tests: `server/orchestrators.test.ts` ("reply from the bubble"), `server/replies.test.ts`, `e2e/orchestrators.spec.ts`
