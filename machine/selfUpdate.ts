@@ -232,6 +232,41 @@ export function installOf(root: string): { service: string; platform?: string } 
   return m?.service ? { service: m.service, platform: m.platform } : undefined;
 }
 
+/** The spare copy of root.json in the daemon's folder (w1918): off the Dev Drive for a root on it, beside daemon.json. */
+export const rootBackupOf = (appDir: string) => path.join(appDir, 'root-backup.json');
+
+/**
+ * Keep root.json's spare copy fresh, and put root.json back from it when it is missing or unreadable (w1918, lothsahn: "Let's
+ * do the root.json backup and have the daemon be smart enough to automatically reinstall it in v: if the V: ever gets reset").
+ * LothLaptop's V: was reset to an empty drive: root.json went with it, and the daemon on D: refused every update over its link
+ * until it was written by hand. Only for a root on its Dev Drive (devDrive.rootOnDrive), whose daemon's folder is on the host
+ * volume: anywhere else the spare copy would go with the root. The root's folder is made again when its drive is there; a drive
+ * that is not attached cannot be written, and the next call tries again. Returns what it put back, for the log; never throws.
+ */
+export function keepRootJson(root: string, appDir: string): string | undefined {
+  const file = path.join(root, 'root.json');
+  const spare = rootBackupOf(appDir);
+  try {
+    const have = readJson<{ service?: string }>(file);
+    if (have?.service) {
+      const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+      if (!fs.existsSync(spare) || fs.readFileSync(spare, 'utf8') !== text) {
+        fs.mkdirSync(appDir, { recursive: true });
+        fs.writeFileSync(`${spare}.tmp`, text);
+        fs.renameSync(`${spare}.tmp`, spare);
+      }
+      return undefined;
+    }
+    const copy = readJson<{ service?: string; devDrive?: { rootOnDrive?: boolean } }>(spare);
+    if (!copy?.service || !copy.devDrive?.rootOnDrive) return undefined;
+    const was = fs.existsSync(file) ? 'unreadable' : 'missing';
+    writeJson(file, copy);
+    return `${file} was ${was}: put back from ${spare}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The job's command line: node (with the daemon's own TypeScript flags) on linkJob.ts in the install's checkout. */
 export function jobArgs(appDir: string, nodeArgs: string[]): string[] {
   const f = updateFiles(appDir);
@@ -303,7 +338,11 @@ export class SelfUpdater {
 
   /** The worker install it runs from, when it is one this can update: its root.json names the service. */
   private install() {
-    return this.deps.root ? installOf(this.deps.root) : undefined;
+    if (!this.deps.root) return undefined;
+    // Put back first (w1918): a reset drive took root.json, and the hello, an update or an unload would find no install.
+    const put = keepRootJson(this.deps.root, this.deps.appDir);
+    if (put) this.deps.log(`worker install record: ${put}`);
+    return installOf(this.deps.root);
   }
 
   private now() {
@@ -336,6 +375,12 @@ export class SelfUpdater {
     }
   }
 
+  /** Why there is no install to update: the refusal names the files, so the portal's report says what to fix (w1918). */
+  private noInstall(): string {
+    if (!this.deps.root) return 'this daemon is not a worker root install (daemon.json names no root)';
+    return `this daemon is not a worker root install whose root.json names its service: ${path.join(this.deps.root, 'root.json')} is missing or unreadable, and ${rootBackupOf(this.deps.appDir)} holds no copy to put back (a daemon from w1918 on keeps one; an install or update writes both)`;
+  }
+
   /** Whether the hello offers `selfUpdate`: a worker root install whose service is known. */
   offered(): boolean {
     return !!this.install();
@@ -360,7 +405,7 @@ export class SelfUpdater {
       this.answer({ type: 'self_update_ack', id: msg.id, ok: false, error });
     };
     const inst = this.install();
-    if (!inst) return refuse('this daemon is not a worker root install whose root.json names its service');
+    if (!inst) return refuse(this.noInstall());
     const why = selfUpdateProblem(msg);
     if (why) return refuse(why);
     const f = updateFiles(this.deps.appDir);
@@ -394,7 +439,7 @@ export class SelfUpdater {
       return;
     }
     const inst = this.install();
-    if (!inst) return answer(false, 'this daemon is not a worker root install whose root.json names its service');
+    if (!inst) return answer(false, this.noInstall());
     if (!fs.existsSync(path.join(updateFiles(this.deps.appDir).src, 'scripts', 'worker', 'linkJob.ts'))) return answer(false, "the install's checkout has no update job (scripts/worker/linkJob.ts): update it first");
     await this.removing;
     if (this.busy || jobInFlight(readJson<UpdateJob>(updateFiles(this.deps.appDir).job))) return answer(false, 'an update job of this machine is still running');
@@ -409,6 +454,8 @@ export class SelfUpdater {
 
   /** Send a result the portal has not had; once sent and the job's process is gone, remove the job's task or LaunchAgent. */
   async tick(): Promise<void> {
+    // The spare copy of root.json kept fresh, and root.json put back once a reset drive is there again (w1918).
+    this.install();
     const r = pendingReport(this.deps.appDir);
     if (r && this.deps.send({ type: 'self_update_report', report: r })) {
       markReported(this.deps.appDir, r.id);

@@ -355,6 +355,26 @@ credential; the bundle goes only to the machine it was offered to; the code is c
 gave and the commit git computes, before anything runs; the job runs as the daemon's own user, never elevated; nothing is
 printed or logged with a credential in it.
 
+**The install record has a spare copy, and a connected daemon is never sent to ssh** (w1918). LothLaptop's V: was reset to
+an empty drive on 2026-10-23. `V:\ffw\root.json` went with it, the daemon on D: offered no update in its hello, and
+machine_update and the rollout handed out ssh to a PC that joined without it: port 22 timed out, and nothing said why
+(lothsahn: "Make sure you can do updates over the machine protocol"; "Let's do the root.json backup and have the daemon be
+smart enough to automatically reinstall it in v: if the V: ever gets reset"). Now:
+
+- **The spare copy.** Every manifest write also writes `root-backup.json` in the daemon's folder (`worker.ts` `writeManifest`),
+  which for a root on its Dev Drive is the host folder (`D:\work\ffw\daemon`). The daemon also keeps that copy in step with
+  `root.json` every 10 s (`machine/selfUpdate.ts` `keepRootJson`), so an install from before this gets one at its first start.
+- **The put-back.** For a root on its Dev Drive (`devDrive.rootOnDrive`), the daemon puts `root.json` back from the spare
+  copy when it is missing or unreadable. It does so before its hello, before each update or unload over the link, and every
+  10 s once the drive is there again, making the root's folder again if needed. A drive that is not attached cannot be
+  written to, so the next look tries again. The repo and the sandboxes are made again afterwards: the next update clones the
+  repo, and the pool remakes each free sandbox whose folder is gone ("The whole root on the Dev Drive" below).
+- **No silent ssh.** A daemon that is connected but offers no update over its link (no `root.json` and no spare copy) is
+  neither updated nor handed to ssh. machine_update refuses, and the rollout marks it failed. Both name the file that is
+  missing and what to do (`server/machines.ts` `linkProblem`). ssh stays the way back only for a daemon that is not connected.
+- **`readManifest` ignores a UTF-8 byte order mark**, so a hand-written `root.json` saved by PowerShell 5.1's `Set-Content`
+  reads as JSON.
+
 **Tests**: `server/machineLink.test.ts` (a real daemon and portal over WebSockets: the update and its report, a second one
 refused while a job runs, a failed one put back, who may fetch the bundle, a wrong size, SHA-256 or commit refused, a
 restart, an unload, a daemon outside a worker root left to ssh), `scripts/worker/linkJob.test.ts` (the job: an update, a put
@@ -832,6 +852,22 @@ the root is there. The host guard still watches the host volume, because a dynam
 (BEAST, 2026-09-24), but it judges it by **whether the file can still grow to its maximum** (`hostGuard.devDriveVhdx`,
 `devDriveMaxGB`; `server/hostHealth.ts` `roomLevel`), not by a number of GB: with a 275 GB cap and a file at 250 GB, D: at
 39 GB free is fine; with the file at 200 GB it warns (no new editors or agents), and below `criticalFreeGB` it is critical.
+
+Three fixes from LothLaptop's reset V: (w1918, 2026-10-23):
+
+- **The maximum is the VHDX's own.** `devdrive.ps1 -Action status` reads it with `Get-DiskImage`, which needs no
+  administrator rights (measured on LothDesktop: 300 GB). An update over the link records that number in `devdrive.json`,
+  `root.json` and `daemon.json`'s `hostGuard.devDriveMaxGB` whenever it differs from the record. Before this, LothLaptop's
+  guard judged an 80 GB drive by a stale 1024 GB record.
+- **The disk line measures the clone's volume, else the sandboxes', else the root's.** When all three folders are gone, it
+  measures the root's drive (`V:\`), never the home folder's (`machine/daemon.ts` `diskPath`). Before this, LothLaptop's line
+  read "190 GB of 928 GB" (C:) while `V:\ffw\repo` was missing.
+- **A machine's clean-up soft threshold fits its drive.** It is at most a quarter of the fullest volume's size, and never
+  below the pool's 20 GB clean-up line (`server/cleanup.ts` `softFreeBytes`; the daemon's runner sets `fitSoftToVolume`).
+  The portal's one `machines.cleanup.softFreeGB` (80) is meant for big disks: an empty 80 GB V: with 76.9 GB free read as
+  low, and every 15 minutes the clean-up said it could not free enough. A drive the installer sizes (w1910's `defaultMaxGB`)
+  keeps 20 GB free at its fullest, so a quarter of it is crossed only once the drive is mostly full. The portal host keeps
+  the number set for it.
 
 **If the drive comes back empty** (it was reset or made again by hand: LothLaptop, 2026-10-23, w1918), what is on D: is
 intact, and the rest is made again by the update over the link and by the daemon: `machine_update` clones the repo again (the

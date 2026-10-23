@@ -643,6 +643,8 @@ export class Daemon {
     });
     this.cleaner = new CleanupRunner({
       settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
+      // The portal's one soft threshold for every machine, fitted to this one's drive (w1918: an empty 80 GB V: read as low).
+      fitSoftToVolume: true,
       // The temp folder apart: a RAM-backed one (a Linux tmpfs) is never the disk (w566).
       diskPaths: () => [HOME, cfg.repoPath, ...(this.sandboxRoot() && fs.existsSync(this.sandboxRoot()!) ? [this.sandboxRoot()!] : [])],
       tempPaths: () => [env.tmp],
@@ -773,6 +775,17 @@ export class Daemon {
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
   private sandboxRoot(): string | undefined {
     return this.currentPool()?.root;
+  }
+
+  /**
+   * The volume the machine's disk line measures: the clone's, else the sandboxes', else the root's (w1918, lothsahn: "Why does it
+   * show Disk 190G when the V: only has 80GB?"). LothLaptop's V: was reset, its clone was gone, and the line fell back to the home
+   * folder: C:. A worker root install whose folders are all gone measures its root's drive (V:\), never the home folder's; a
+   * drive that is not attached has no figure, and the host guard says the drive is gone.
+   */
+  private diskPath(): string {
+    for (const p of [this.cfg.repoPath, this.sandboxRoot(), this.cfg.root]) if (p && fs.existsSync(p)) return p;
+    return this.cfg.root ? path.parse(path.resolve(this.cfg.root)).root : HOME;
   }
 
   /** The pool settings in force: the portal's last welcome, else daemon.json's. */
@@ -1404,7 +1417,7 @@ export class Daemon {
     // The GPU Whisper gives its VRAM back to the editors even while the link is down (w615).
     if (this.ws?.readyState !== WebSocket.OPEN && !this.voice) return;
     try {
-      const stats = await this.probes.stats(fs.existsSync(this.cfg.repoPath) ? this.cfg.repoPath : HOME);
+      const stats = await this.probes.stats(this.diskPath());
       this.lastStats = { stats, at: Date.now() };
       this.voice?.onStats();
       if (this.ws?.readyState !== WebSocket.OPEN) return;

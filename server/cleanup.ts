@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import type { CleanupPolicy } from './config.ts';
-import type { CleanupSummary } from '../shared/types.ts';
+import { DISK_WARN_GB_DEFAULT, type CleanupSummary } from '../shared/types.ts';
 import type { StaleOutputSettings } from './staleOutput.ts';
 import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 
@@ -717,6 +717,19 @@ export function staleAtFile(dir: string): { load(): number | undefined; save(at:
 const GB = 1024 ** 3;
 /** While below the soft threshold, a pass at most this often (a pass that cannot help should not hammer the disk). */
 export const LOW_PASS_MINUTES = 15;
+
+/**
+ * The soft threshold a volume is judged by (w1918): the setting, but at most a quarter of the volume's size and never below the
+ * pool's clean-up line (DISK_WARN_GB_DEFAULT, 20 GB). LothLaptop's empty 80 GB Dev Drive had 76.9 GB free, under the 80 GB
+ * default, and its clean-up said every 15 minutes that it could not free enough, with nothing there to free. A Dev Drive sized
+ * by the installer (scripts/worker/devdrive.ts defaultMaxGB, w1910) keeps 20 GB free at its fullest, so a quarter of it is a
+ * line it crosses only once it is mostly full. Unknown size: the setting.
+ */
+export function softFreeBytes(softFreeGB: number, totalBytes: number | undefined): number {
+  const set = softFreeGB * GB;
+  if (!totalBytes || totalBytes <= 0) return set;
+  return Math.min(set, Math.max(DISK_WARN_GB_DEFAULT * GB, Math.floor(totalBytes / 4)));
+}
 /** A notice that clean-up cannot get above the soft threshold repeats at most this often while it stays so. */
 export const NOTICE_REPEAT_HOURS = 24;
 
@@ -767,6 +780,12 @@ export async function volumeStat(p: string): Promise<VolumeStat | undefined> {
 
 export interface CleanupRunnerDeps {
   settings(): CleanupSettings;
+  /**
+   * Judge each pass by softFreeBytes (w1918): the soft threshold at most a quarter of the fullest volume's size. A machine's
+   * daemon sets it (its threshold is the portal's one default for every machine, whatever its drive); the portal's own host
+   * keeps the number set for it.
+   */
+  fitSoftToVolume?: boolean;
   /**
    * The disk clean-up keys off: the volumes that hold the home folder, the data and whatever else is watched. The fullest
    * one is its free space, the soft threshold's and the low-space mode's measure; a RAM-backed one never counts (w566).
@@ -824,7 +843,7 @@ export class CleanupRunner {
   }
 
   /** The disk's free space (its fullest volume, RAM never), and the temp volumes apart from it. */
-  private async volumes(): Promise<{ free?: number; temp: NonNullable<CleanupSummary['temp']> }> {
+  private async volumes(): Promise<{ free?: number; total?: number; temp: NonNullable<CleanupSummary['temp']> }> {
     const disk: VolumeStat[] = [];
     const temp: NonNullable<CleanupSummary['temp']> = [];
     const read = (p: string) => this.d.statfs(p).catch(() => undefined);
@@ -842,17 +861,15 @@ export class CleanupRunner {
       if (!ram && disk.some((d) => (s.dev !== undefined && d.dev !== undefined ? d.dev === s.dev : d.total === s.total && d.free === s.free))) continue;
       if (!temp.some((t) => t.path === p)) temp.push({ path: p, freeBytes: s.free, totalBytes: s.total, ram });
     }
-    return { free: disk.length ? Math.min(...disk.map((d) => d.free)) : undefined, temp };
+    const fullest = disk.length ? disk.reduce((a, b) => (b.free < a.free ? b : a)) : undefined;
+    return { free: fullest?.free, total: fullest?.total, temp };
   }
 
-  private async minFree(): Promise<number | undefined> {
-    return (await this.volumes()).free;
-  }
 
   /** Whether a pass is due now: `everyMinutes` since the last one, or LOW_PASS_MINUTES while below the soft threshold. */
-  due(freeBytes: number | undefined, s = this.d.settings()): 'hourly' | 'low-space' | undefined {
+  due(freeBytes: number | undefined, s = this.d.settings(), totalBytes?: number): 'hourly' | 'low-space' | undefined {
     const since = (this.now() - this.lastPassAt) / 60_000;
-    if (freeBytes !== undefined && freeBytes < s.softFreeGB * GB && since >= LOW_PASS_MINUTES) return 'low-space';
+    if (freeBytes !== undefined && freeBytes < softFreeBytes(s.softFreeGB, totalBytes) && since >= LOW_PASS_MINUTES) return 'low-space';
     if (s.everyMinutes > 0 && since >= s.everyMinutes) return 'hourly';
     return undefined;
   }
@@ -860,7 +877,8 @@ export class CleanupRunner {
   /** The periodic look (the host guard's tick, the daemon's timer). */
   async tick(): Promise<CleanupSummary | undefined> {
     if (this.running) return undefined;
-    const trigger = this.due(await this.minFree());
+    const v = await this.volumes();
+    const trigger = this.due(v.free, undefined, this.d.fitSoftToVolume ? v.total : undefined);
     return trigger ? this.run(trigger) : undefined;
   }
 
@@ -874,8 +892,9 @@ export class CleanupRunner {
     try {
       const s = this.d.settings();
       const dryRun = !!opts.dryRun;
-      const before = await this.minFree();
-      const low = trigger === 'critical' || trigger === 'asked' || (before !== undefined && before < s.softFreeGB * GB);
+      const first = await this.volumes();
+      const before = first.free;
+      const low = trigger === 'critical' || trigger === 'asked' || (before !== undefined && before < softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? first.total : undefined));
       const st = s.staleOutput;
       const withStale = !!st && st.mode !== 'off' && (dryRun || low || staleDue(this.now(), this.lastStaleAt, st.everyHours, this.d.localHour?.(this.now())));
       if (!dryRun) {
@@ -888,7 +907,8 @@ export class CleanupRunner {
       const r = await this.d.pass(low, { stale: withStale, dryRun });
       const vols = await this.volumes();
       const after = vols.free;
-      const belowSoft = after !== undefined && after < s.softFreeGB * GB;
+      const soft = softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? vols.total : undefined);
+      const belowSoft = after !== undefined && after < soft;
       const summary: CleanupSummary = {
         at: new Date(this.now()).toISOString(),
         trigger,
@@ -896,7 +916,7 @@ export class CleanupRunner {
         freedBytes: r.bytes,
         failed: r.failed.length,
         freeBytes: after,
-        softFreeGB: s.softFreeGB,
+        softFreeGB: Math.round(soft / GB),
         ...(this.d.root?.() ? { root: this.d.root() } : {}),
         belowSoft,
         ...(vols.temp.length ? { temp: vols.temp } : {}),

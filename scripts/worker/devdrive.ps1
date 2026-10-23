@@ -113,7 +113,11 @@ try {
     'status' {
       $st = Read-State
       $own = if (Test-Path -LiteralPath $Vhdx) { Get-OwnLetter } else { '' }
-      Finish @{ exists = (Test-Path -LiteralPath $Vhdx); attached = [bool]$own; letter = $own; state = $st }
+      # The VHDX's own maximum (w1918): Get-DiskImage reads it without administrator rights (measured on LothDesktop, 2026-10-23:
+      # 300 GB), so an update over the link records the drive's real size, not a number in devdrive.json.
+      $real = 0
+      if (Test-Path -LiteralPath $Vhdx) { try { $real = [int][math]::Round((Get-DiskImage -ImagePath $Vhdx -ErrorAction Stop).Size / 1GB) } catch { } }
+      Finish @{ exists = (Test-Path -LiteralPath $Vhdx); attached = [bool]$own; letter = $own; maxGB = $real; state = $st }
     }
     'ensure' {
       if (-not (Test-Admin)) { throw 'the Dev Drive needs administrator rights (an elevated session, or the installer asks for them once)' }
