@@ -10,7 +10,7 @@ import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
 import { OPS_ID } from './opsWorker.ts';
-import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
+import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, type Orchestrators } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { handoverNote, requestAsFiled } from './work.ts';
@@ -4730,4 +4730,57 @@ test('w1863: a leg is dropped by decide_work queue drop_leg, refused without one
   assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'm5 only', needs: ['m5'] })).isError, false);
   assert.equal(store.work.get('w2')!.status, 'queued');
   assert.equal(store.work.get('w2')!.legs, undefined);
+});
+
+// w1872: lothsahn, 2026-10-23, "Have the dispatcher replace anything waiting on timing on m5". w1789's leg queued for m5 at
+// 06:46 still waited there after #572 (which refused only new pins): its worker's report said "still open: waiting for a
+// sandbox on m5 for the timed runs". Timed work is re-placed by "Next timed work", never queued on m5.
+const M5_NO = 'lothsahn, 2026-10-23: "The m5 should not be used for timing runs because Ben runs stuff on it personally"';
+const fixTimedFacts = (o: Orchestrators) => {
+  (o as unknown as { d: { timedFacts: () => { noTimed: Record<string, string>; takes: string[] } } }).d.timedFacts = () => ({ noTimed: { m5: M5_NO }, takes: ['lothdesktop', 'beast'] });
+};
+
+test('w1872: decide_work queue refuses timed work on m5, even when its worker named m5; other computers and untimed work queue as before', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, dispatcher, call } = env;
+  fixTimedFacts(o);
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1', title: 'Cut UI main-thread cost on the Just Play save', brief: 'Timed A/B: timing runs under an exclusive bench lock.' }, { id: 'w2', title: 'A Mac player build' }]);
+  await startedFor(env, 'w1');
+  agentsRoomFacts(agents, {});
+  const q = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'its worker asked for an m5 sandbox for the timed runs', needs: ['m5'] });
+  assert.equal(q.isError, true);
+  assert.match(q.text, /m5 takes no timed or exclusive-lock work \(lothsahn, 2026-10-23: .*; w1861\): w1 is timed work, so it does not wait there, even when its worker named it\. Place it by "Next timed work" \(w1872\): start it on the first of lothdesktop, beast with room/);
+  assert.equal(store.work.get('w1')!.legs, undefined);
+  // Named with another, still refused: the caller picks again (lothsahn: "that should go back to the orchestrator or worker").
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'm5 or lothdesktop', needs: ['m5', 'lothdesktop'] })).isError, true);
+  const ok = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'the timed leg waits for LothDesktop', needs: ['lothdesktop'] });
+  assert.equal(ok.isError, false, ok.text);
+  assert.deepEqual(store.work.get('w1')!.legs?.map((l) => l.needs), [['lothdesktop']]);
+  // Untimed work still waits on m5 (it stays open for builds, editors, coding, tests).
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'm5 only', needs: ['m5'] })).isError, false);
+  assert.deepEqual(store.work.get('w2')!.queuedFor?.needs, ['m5']);
+});
+
+test('w1872: w1789 as it happened: a timed leg and a Queued timed request already waiting on m5 are re-placed by "Next timed work", once, and the dispatcher is told; untimed waits on m5 stay', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, o, dispatcher, heard } = env;
+  fixTimedFacts(o);
+  const at = new Date(Date.now() - 9 * 3_600_000).toISOString();
+  putRequests(store, [
+    { id: 'w1', status: 'active', title: 'Cut UI main-thread cost on the Just Play save', brief: 'Its timing runs need a quiet machine.', legs: [{ at, needs: ['m5'], what: 'The m5 leg for the timed before/after runs is queued: m5 is full' }] },
+    { id: 'w2', status: 'queued', title: 'Perf A/B of the belt renderer', queuedFor: { at, needs: ['m5', 'm3'] } },
+    { id: 'w3', status: 'queued', title: 'A Mac player build', queuedFor: { at, needs: ['m5'] } },
+  ]);
+  dispatcher();
+  assert.deepEqual(o.replaceNoTimedWaits().sort(), ['w1', 'w2']);
+  const w = (id: string) => store.work.get(id)!;
+  assert.deepEqual(w('w1').legs?.map((l) => l.needs), [['lothdesktop', 'beast']], 'a leg left with no computer waits on the ranked ones');
+  assert.equal(w('w1').legs?.[0].at, at, 'it keeps its place in the queue');
+  assert.deepEqual(w('w2').queuedFor?.needs, ['m3'], 'm5 dropped, the other computer it named kept');
+  assert.deepEqual(w('w3').queuedFor?.needs, ['m5'], 'untimed work keeps m5');
+  assert.match(w('w1').log.join('\n'), /ledger: its timed work waited on m5, which takes no timed runs \(lothsahn, 2026-10-23: .*\); re-placed by "Next timed work" \(w1872\): it now waits on lothdesktop or beast/);
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[ledger] Re-placed timed work').length > 0);
+  assert.match(heard(dispatcher().info.id, '[ledger] Re-placed timed work')[0].text, /"Have the dispatcher replace anything waiting on timing on m5"\): w1 "Cut UI main-thread cost on the Just Play save"; w2 "Perf A\/B of the belt renderer"\. Start each on the first computer "Next timed work" names with room/);
+  assert.deepEqual(o.replaceNoTimedWaits(), [], 'nothing left on m5: no second notice');
 });

@@ -68,6 +68,8 @@ export interface WorkLive {
    * orchestrator is sent it as [needs you]; FFBox passes their answer on.
    */
   outside?: boolean;
+  /** Waiting on input on a worker's own words (w1868): its whole line, where `why` quotes it cut short. */
+  line?: string;
 }
 
 /**
@@ -449,6 +451,7 @@ const outsideLive = (worker: string, who: string, line: string): WorkLive => ({
   waitsOn: [who],
   worker,
   outside: true,
+  line,
 });
 
 /**

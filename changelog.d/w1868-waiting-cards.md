@@ -8,3 +8,5 @@
   orchestrator is a card of its own (a click answers it as the chat's does; `close_question` withdraws one). Two questions on
   one request keep their own answered state: answering the first no longer blocks or hides the second (w1821). Docs:
   orchestrators.md, "What a waiting card says". Tests: `waitSummary.test.ts`, `orchestrators.test.ts`, `e2e/waitingCards.spec.ts`.
+
+- After the deploy, the live list showed three slips, now fixed: a reporter's wait was cut mid-word (it now shows the worker's whole line), a brief that opens on a person's quote gave a half quote as "what it is" (the title is used instead), and "still open" counted as a visual question.

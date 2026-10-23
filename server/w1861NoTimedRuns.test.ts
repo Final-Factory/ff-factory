@@ -60,7 +60,9 @@ test('w1861: the capacity lines\' "Next timed work" names another computer and s
   const lines = capacityLines(places, undefined, {});
   assert.ok(lines.some((l) => l.startsWith('Next timed work') && !/\): m5 /.test(l)), lines.join('\n'));
   assert.ok(lines.some((l) => /^- m5\b.*no timed runs \(w1861\)/.test(l)), lines.join('\n'));
-  assert.equal(timedLine([box('beast', 8, 'win32', { freeSandboxes: 0, sandboxes: 8 }), m5]), 'No computer has room for timed work now.');
+  // w1872: with every computer full (live, 19:46 UTC: beast, lothdesktop, m5 and biscuit at 0 free), it still says where it goes next, never m5.
+  const busy = timedLine([box('beast', 8, 'win32', { freeSandboxes: 0, sandboxes: 8 }), box('lothdesktop', 6, 'win32', { freeSandboxes: 0, sandboxes: 6 }), m5]) ?? '';
+  assert.match(busy, /^No computer has room for timed work now\. When one frees, timed work goes to the first of: lothdesktop \(\d+ agent slots\) > beast \(\d+ agent slots\) \(w1872\); never m5 \(it takes no timed runs/);
 });
 
 test('w1861: the daemon writes the refusal into priorities.json beside the sessions; none when the machine takes timed runs', (t) => {
