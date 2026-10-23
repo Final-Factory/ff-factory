@@ -1,5 +1,5 @@
-import type { BenchLock, BenchQueueReport, WorkPriority } from '../shared/types.ts';
-import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, type MinPriority, type ReservedRoom } from '../shared/capacity.ts';
+import type { BenchLock, BenchQueueReport, WorkItem, WorkPriority } from '../shared/types.ts';
+import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, ROOM_STAND_MS, unfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
 
 /**
  * Where new work has room (w416, Lothsahn: "make sure jobs are getting scheduled on LothDesktop", then "Game work should
@@ -335,6 +335,13 @@ export interface RoomNow {
   reserved?: ReservedRoom[];
   /** Each computer with room, id to its numbers at this moment: a log line of a flag explains itself when it is read hours later. */
   detail?: Record<string, string>;
+  /** Each computer with room, id to what decides which work can run there (w1944, shared/capacity.ts unfitWhy). */
+  fit?: Record<string, RoomFit>;
+  /**
+   * Since when each computer has had room without a break, `${kind}:${id}` to epoch ms (w1944, Agents.roomFacts): room that
+   * freed a minute ago is not yet a wrong Queued, since the capacity ping takes its quiet spell and a dispatcher turn to act.
+   */
+  since?: Record<string, number>;
 }
 
 /** The holds a person or FF Factory set (placement.hold, paused machines, coming builds): they also stop resumes there. */
@@ -364,11 +371,12 @@ const holdOf = (prefs: PlacementPrefs) => {
 export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {}): RoomNow {
   const hold = holdOnly(prefs);
   const min = minOf(prefs);
-  const out: RoomNow = { game: [], agent: [], held: [], reserved: [], detail: {} };
+  const out: RoomNow = { game: [], agent: [], held: [], reserved: [], detail: {}, fit: {} };
   for (const p of places) {
     const kinds = (['game', 'agent'] as const).filter((k) => hasRoomFor(p, k));
     if (!kinds.length) continue;
     out.detail![p.id] = `${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free, ${p.live} live agents of ${p.maxAgents}, ${memPct(p) !== undefined ? `RAM ${memPct(p)}%` : 'RAM unknown'}`;
+    out.fit![p.id] = { ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}) };
     const why = hold.get(p.id);
     if (why !== undefined) {
       out.held.push({ id: p.id, why, for: kinds });
@@ -697,6 +705,26 @@ export const roomIds = (r: RoomNow, kind: NeedKind, priority?: WorkPriority): st
   // The reserved computers (w1643) the request's priority now reaches.
   ...(r.reserved ?? []).filter((x) => x.for.includes(kind) && admitsPriority(x.min, priority)).map((x) => x.id),
 ];
+
+/** The computers with room that `w` can take (w1944): roomIds for its kind and priority, within `needs`, less those it cannot run on, each with why. */
+export function roomForWork(r: RoomNow, w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes' | 'priority'>, needs?: readonly string[]): { ids: string[]; unfit: { id: string; why: string }[] } {
+  const want = needs?.map((n) => n.toLowerCase());
+  const ids: string[] = [];
+  const unfit: { id: string; why: string }[] = [];
+  for (const id of roomIds(r, w.needs ?? 'game', w.priority)) {
+    if (want?.length && !want.includes(id.toLowerCase())) continue;
+    const why = unfitWhy(w, id, r.fit);
+    if (why) unfit.push({ id, why });
+    else ids.push(id);
+  }
+  return { ids, unfit };
+}
+
+export { ROOM_STAND_MS };
+
+/** Of `ids`, those whose room has stood ROOM_STAND_MS (w1944); every one when nobody tracks since when (r.since absent). */
+export const roomStood = (r: Pick<RoomNow, 'since'>, kind: NeedKind, ids: readonly string[], now: number): string[] =>
+  r.since ? ids.filter((id) => now - (r.since![`${kind}:${id}`] ?? now) >= ROOM_STAND_MS) : [...ids];
 
 /** The held and reserved computers with room that work of `kind` and `priority` may not use, as a Queued reason says them. */
 export const unusableText = (r: RoomNow, kind: NeedKind, priority?: WorkPriority): string =>

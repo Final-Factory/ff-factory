@@ -49,7 +49,7 @@ import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, no
 import { answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, servedBy } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
-import { heldText, roomIds, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
+import { heldText, roomForWork, roomIds, roomStood, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
 import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
@@ -189,7 +189,7 @@ const GATHER_MS = 1500;
 /** Intake requests reach the dispatcher gathered this long, so a poll's reports arrive as one turn it can batch. */
 const INTAKE_GATHER_MS = 60_000;
 /** "Capacity may have freed" wakes of the dispatcher: after a quiet spell, at least this far apart, at most this many an hour. */
-const CAPACITY = { quietMs: 30_000, gapMs: 2 * 60_000, perHour: 20 };
+const CAPACITY = { quietMs: 30_000, gapMs: 2 * 60_000, perHour: 20, maxQuietMs: 2 * 60_000 };
 
 export interface OrchestratorsDeps {
   cfg: Config;
@@ -548,6 +548,8 @@ export class Orchestrators {
   /** Notices gathered for the dispatcher, per person they are about. */
   private readonly gathered = new Map<string, { by: Requester; texts: string[]; timer: NodeJS.Timeout }>();
   private capacityTimer?: NodeJS.Timeout;
+  /** When the first event of the capacity ping now waiting happened (w1944): a steady stream of events never holds it past CAPACITY.maxQuietMs. */
+  private capacityFirstAt?: number;
   private readonly capacityWakes: number[] = [];
 
   constructor(d: OrchestratorsDeps) {
@@ -2619,14 +2621,16 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if (noTimed) throw new Error(noTimed);
       const kind = needsOf(w);
       const facts = this.roomNow();
-      const room = roomIds(facts, kind, w.priority).filter((id) => !needs.length || needs.includes(id.toLowerCase()));
+      // w1944: room on a computer it cannot run on (a Mac for an MP scenario) does not refuse the queue.
+      const fitting = roomForWork(facts, w, needs);
+      const room = fitting.ids;
       if (room.length) {
         throw new Error(
           `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${kind === 'agent' ? 'an agent slot (it needs no editor and no game sandbox, w1098)' : 'room'} for ${w.id} now: start it there (start_agent with work_id "${w.id}"), or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
         );
       }
       // Held computers, and those placement.minPriority reserves above its priority (w1643), with room it may not use.
-      const held = unusableText({ ...facts, held: facts.held.filter((h) => !needs.length || needs.includes(h.id)), reserved: (facts.reserved ?? []).filter((r) => !needs.length || needs.includes(r.id)) }, kind, w.priority);
+      const held = [unusableText({ ...facts, held: facts.held.filter((h) => !needs.length || needs.includes(h.id)), reserved: (facts.reserved ?? []).filter((r) => !needs.length || needs.includes(r.id)) }, kind, w.priority), ...fitting.unfit.map((u) => `${u.id} has room but cannot take it: ${u.why}`)].filter(Boolean).join('; ');
       // w1863: a leg for named computers of a request whose own worker carries on elsewhere ("queued for capacity on m5 … I
       // start a timing worker there when a slot frees"). It was the request's status, so the next message to that worker
       // (linkWorker: active) dropped it, and w1789's and w1785's m5 legs waited 8 hours unseen. Now it is its own entry.
@@ -5249,8 +5253,8 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if (w.status !== 'queued') continue;
       const since = Date.parse(w.queuedFor?.at ?? w.updatedAt) || now;
       if (now - since < ROOM_GRACE_MS || now - (this.roomFlags.get(w.id) ?? 0) < 3_600_000) continue;
-      const needs = w.queuedFor?.needs?.map((n) => n.toLowerCase());
-      const on = roomIds(facts, needsOf(w), w.priority).filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
+      // w1944: only computers it can run on (no Mac for an MP scenario, no m5 for timed work), whose room has stood a while.
+      const on = roomStood(facts, needsOf(w), roomForWork(facts, w, w.queuedFor?.needs).ids, now);
       if (!on.length) continue;
       this.roomFlags.set(w.id, now);
       this.stamp(w, `flagged: queued for capacity while ${on.join(', ')} ${on.length > 1 ? 'have' : 'has'} ${needsOf(w) === 'agent' ? 'an agent slot' : 'room'} (${nums(on)} at this time)`);
@@ -5262,7 +5266,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if (!w.legs?.length || !isOpen(w) || w.status === 'queued') continue;
       if (now - (this.roomFlags.get(`${w.id}:leg`) ?? 0) < 3_600_000) continue;
       const late = w.legs.filter((l) => now - (Date.parse(l.at) || now) >= ROOM_GRACE_MS);
-      const on = [...new Set(late.flatMap((l) => roomIds(facts, needsOf(w), w.priority).filter((id) => l.needs.includes(id.toLowerCase()))))];
+      const on = roomStood(facts, needsOf(w), [...new Set(late.flatMap((l) => roomForWork(facts, w, l.needs).ids))], now);
       if (!on.length) continue;
       this.roomFlags.set(`${w.id}:leg`, now);
       this.stamp(w, `flagged: its ${legsName(late)} is queued for capacity while ${on.join(', ')} ${on.length > 1 ? 'have' : 'has'} ${needsOf(w) === 'agent' ? 'an agent slot' : 'room'} (${nums(on)} at this time)`);
@@ -5295,39 +5299,54 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    */
   capacityMayHaveFreed(what: string) {
     if (![...this.store.work.values()].some(waitsForRoom)) return;
-    this.capacityEvents = [...this.capacityEvents, { what, at: this.now().getTime() }].slice(-5);
+    const at = this.now().getTime();
+    this.capacityEvents = [...this.capacityEvents, { what, at }].slice(-5);
+    this.capacityFirstAt ??= at;
     clearTimeout(this.capacityTimer);
     const fire = () => {
       const now = this.now().getTime();
       while (this.capacityWakes.length && now - this.capacityWakes[0] > 3_600_000) this.capacityWakes.shift();
-      // Too soon after the last wake, or too many this hour: wait until one is allowed rather than dropping it.
-      const wait = Math.max((this.capacityWakes.at(-1) ?? 0) + CAPACITY.gapMs - now, this.capacityWakes.length >= CAPACITY.perHour ? this.capacityWakes[0] + 3_600_000 - now : 0);
-      if (wait > 0) {
+      // By priority, then oldest (ledgerOrder): the order the dispatcher should start them in (w1099: a high nightly run first).
+      const queued = [...this.store.work.values()].filter(waitsForRoom).sort(ledgerOrder);
+      // The room now, not the room when the event happened: only a queued request that a computer with room could take is worth
+      // a ping; w1944: one it can run on (no Mac for an MP scenario, no m5 for timed work).
+      const facts = this.roomNow();
+      const fit = (w: WorkItem) => roomForWork(facts, w, roomNeeds(w));
+      const usable = queued.filter((w) => fit(w).ids.length);
+      // Too soon after the last wake, or too many this hour: wait until one is allowed rather than dropping it. w1944: urgent
+      // work that fits is not held by the hourly cap, only by the gap.
+      const hourly = this.capacityWakes.length >= CAPACITY.perHour && !usable.some((w) => w.priority === 'urgent') ? this.capacityWakes[0] + 3_600_000 - now : 0;
+      const wait = Math.max((this.capacityWakes.at(-1) ?? 0) + CAPACITY.gapMs - now, hourly);
+      if (wait > 0 && usable.length) {
+        if (hourly > 0) console.log(`ledger: capacity ping waits ${Math.round(wait / 1000)} s: ${this.capacityWakes.length} this hour (at most ${CAPACITY.perHour}); fitting ${usable.map((w) => w.id).join(', ')}`);
         this.capacityTimer = setTimeout(fire, wait);
         this.capacityTimer.unref?.();
         return;
       }
-      // By priority, then oldest (ledgerOrder): the order the dispatcher should start them in (w1099: a high nightly run first).
-      const queued = [...this.store.work.values()].filter(waitsForRoom).sort(ledgerOrder);
       const events = this.capacityEvents;
       this.capacityEvents = [];
+      this.capacityFirstAt = undefined;
       if (!queued.length) return;
-      // The room now, not the room when the event happened: only a queued request that a computer with room could take is worth a ping.
-      const facts = this.roomNow();
-      const fits = (w: WorkItem) => roomIds(facts, needsOf(w), w.priority).some((id) => !roomNeeds(w)?.length || roomNeeds(w)!.some((n) => n.toLowerCase() === id.toLowerCase()));
-      const usable = queued.filter(fits);
       if (!usable.length) {
-        console.log(`ledger: no capacity ping: ${events.map((e) => e.what).join('; ')}, but no computer with room can take ${queued.map((w) => w.id).join(', ')} now`);
+        const unfit = queued.flatMap((w) => fit(w).unfit.map((u) => `${w.id}: ${u.why}`));
+        console.log(`ledger: no capacity ping: ${events.map((e) => e.what).join('; ')}, but no computer with room can take ${queued.map((w) => w.id).join(', ')} now${unfit.length ? ` (room it cannot use: ${clip(unfit.join('; '), 600)})` : ''}`);
         return;
       }
       this.capacityWakes.push(now);
+      console.log(`ledger: capacity ping: ${events.map((e) => e.what).join('; ')}; fitting ${usable.map((w) => w.id).join(', ')}`);
       const old = (e: { what: string; at: number }) => `${e.what}, ${Math.max(0, Math.round((now - e.at) / 60_000))} min ago`;
       const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${roomNeeds(w)?.length ? `; needs ${roomNeeds(w)!.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''}${w.status !== 'queued' ? `; a leg, its own worker elsewhere: ${clip(w.legs!.map((l) => l.what).join('; '), 120)}` : ''})`;
       const room = [facts.game.length ? `game work: ${facts.game.join(', ')}` : '', facts.agent.length ? `agent-slot work: ${facts.agent.join(', ')}` : '', facts.held.length ? heldText(facts.held) : '', ...(facts.reserved ?? []).map((r) => `${r.id} has room for ${minPriorityText(r.min)} (placement.minPriority)`)].filter(Boolean).join('; ');
       const rest = queued.filter((w) => !usable.includes(w));
-      this.toDispatcher(`[ledger] Capacity may have freed (${events.map(old).join('; ')}). Room now: ${room}. Queued for capacity and fitting it, by priority, then oldest: ${usable.map(line).join('; ')}.${rest.length ? ` Queued with no room for them now: ${rest.map((w) => w.id).join(', ')}.` : ''} Start what fits now (start_agent into a FREE sandbox: list_sandboxes marks them, and check the sandbox is still free); leave queued only what no computer with room can take, and block what waits on something else.`);
+      // w1944: why the room now is no room for one, when that is it ("w1941: m5 is a Mac, which refuses ...").
+      const restLine = (w: WorkItem) => {
+        const u = fit(w).unfit;
+        return u.length ? `${w.id} (${u.map((x) => x.why).join('; ')})` : w.id;
+      };
+      this.toDispatcher(`[ledger] Capacity may have freed (${events.map(old).join('; ')}). Room now: ${room}. Queued for capacity and fitting it, by priority, then oldest: ${usable.map(line).join('; ')}.${rest.length ? ` Queued with no room for them now: ${rest.map(restLine).join(', ')}.` : ''} Start what fits now (start_agent into a FREE sandbox: list_sandboxes marks them, and check the sandbox is still free); leave queued only what no computer with room can take, and block what waits on something else.`);
     };
-    this.capacityTimer = setTimeout(fire, CAPACITY.quietMs);
+    // w1944: the quiet spell, but never past CAPACITY.maxQuietMs after the first event, so a busy fleet still gets its ping.
+    this.capacityTimer = setTimeout(fire, Math.max(0, Math.min(CAPACITY.quietMs, this.capacityFirstAt + CAPACITY.maxQuietMs - at)));
     this.capacityTimer.unref?.();
   }
 }
