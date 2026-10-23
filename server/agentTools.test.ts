@@ -26,6 +26,8 @@ interface Machine {
   fetchCode?: number;
   mergeCode?: number;
   shCode?: number;
+  /** registerAgents.sh fails this many runs with shCode, then succeeds (w1895). */
+  shFails?: number;
   /** What registerAgents.sh leaves installed. */
   installs?: Record<string, string>;
   /** The checkout exists before the run (else the run clones it). */
@@ -33,6 +35,8 @@ interface Machine {
   /** publish-skills' marker before the run (a person's checkout). */
   marker?: string;
   claudeConfigDir?: boolean;
+  /** More of the environment `worker.ts tools` runs in. */
+  env?: NodeJS.ProcessEnv;
 }
 
 function machine(o: Machine = {}) {
@@ -78,12 +82,14 @@ function machine(o: Machine = {}) {
     if (cmd === 'sh') {
       // registerAgents.sh: records the checkout it ran from, refreshes the marketplace, updates every remembered plugin.
       fs.writeFileSync(marker, `${co}\n`);
-      fs.writeFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), JSON.stringify(installedJson(o.installs ?? { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2' })));
-      return { code: o.shCode ?? 0, stdout: "== Claude Code ==\nmarketplace 'final-factory-agents' already registered — refreshing from GitHub\nchecking 'ff-agents@final-factory-agents' for updates\n", stderr: o.shCode ? 'claude CLI not on PATH — skipping Claude Code' : '' };
+      const fails = o.shCode !== undefined && (o.shFails === undefined || calls.filter((c) => c.cmd === 'sh').length <= o.shFails);
+      if (!fails) fs.writeFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), JSON.stringify(installedJson(o.installs ?? { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2' })));
+      const code = fails ? o.shCode! : 0;
+      return { code, stdout: "== Claude Code ==\nmarketplace 'final-factory-agents' already registered — refreshing from GitHub\nchecking 'ff-agents@final-factory-agents' for updates\n", stderr: code ? 'claude CLI not on PATH — skipping Claude Code' : '' };
     }
     return { code: 1, stdout: '', stderr: `unexpected ${cmd}` };
   };
-  const env: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: home, ...(o.claudeConfigDir ? { CLAUDE_CONFIG_DIR: claudeDir } : {}) };
+  const env: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: home, ...(o.claudeConfigDir ? { CLAUDE_CONFIG_DIR: claudeDir } : {}), ...o.env };
   const run = (claude?: string) => publishAgentTools(root, { exec, say: (l) => lines.push(l), env, home, platform: 'linux' }, { claude });
   const read = (p: string) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : undefined);
   return { root, co, calls, lines, run, marker: () => read(marker), installed: () => installedVersions(JSON.parse(read(path.join(claudeDir, 'plugins', 'installed_plugins.json'))!)) };
@@ -159,6 +165,37 @@ test('a fetch or registerAgents.sh failure, or a plugin left behind master, fail
   const st = machine({ installs: { 'ff-agents': '1.29.20', 'ff-discord': '1.17.6' } });
   assert.equal(await st.run(), EXIT.failed);
   assert.match(st.lines.at(-1)!, /^FAILED: not on master's version after registerAgents\.sh: ff-speckit not installed \(master: 1\.0\.2\), ff-discord 1\.17\.6 \(master: 1\.17\.7\)\./);
+});
+
+test('w1895: registerAgents.sh fetches the marketplace over HTTPS only, and a failed run is run once more', async () => {
+  // m5, 2026-10-23: its HTTPS fetch failed, Claude Code fell back to SSH with a key no GitHub account holds, and the step
+  // reported only "Please make sure you have the correct access rights"; the next rollout's run passed.
+  const m = machine({ shCode: 1, shFails: 1 });
+  assert.equal(await m.run(), EXIT.ok);
+  const runs = ran(m, 'registerAgents.sh');
+  assert.equal(runs.length, 2);
+  for (const r of runs) {
+    assert.equal(r.env?.CLAUDE_CODE_PLUGIN_PREFER_HTTPS, '1', 'no SSH attempt, so no SSH fallback error');
+    assert.equal(r.env?.CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS, '300000');
+    assert.equal(r.env?.PATH, '/usr/bin', 'the rest of the environment is kept');
+    assert.equal(r.env?.GIT_TERMINAL_PROMPT, '0');
+  }
+  assert.ok(m.lines.includes('registerAgents.sh exited 1 (claude CLI not on PATH — skipping Claude Code); running it once more.'));
+  assert.equal(m.installed()['ff-agents'], '1.29.20');
+  assert.equal(m.lines.at(-1), 'Agent tools published: every installed plugin is on master. Running agents keep the version they started with; new sessions load these.');
+
+  const twice = machine({ shCode: 1 });
+  assert.equal(await twice.run(), EXIT.failed);
+  assert.equal(ran(twice, 'registerAgents.sh').length, 2, 'once more, not again and again');
+
+  const timedOut = machine({ shCode: -1 });
+  assert.equal(await timedOut.run(), EXIT.failed);
+  assert.equal(ran(timedOut, 'registerAgents.sh').length, 1, 'a run that used its whole timeout is not run again');
+  assert.match(timedOut.lines.at(-1)!, /^FAILED: registerAgents\.sh exited -1 \(timed out or could not start\)/);
+
+  const own = machine({ env: { CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS: '900000' } });
+  assert.equal(await own.run(), EXIT.ok);
+  assert.equal(ran(own, 'registerAgents.sh')[0].env?.CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS, '900000', "a machine's own value is kept");
 });
 
 test("CLAUDE_CONFIG_DIR is where Claude Code's plugins are read, as the workers' Claude Code reads them", async () => {
