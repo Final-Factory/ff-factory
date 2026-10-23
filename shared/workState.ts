@@ -34,7 +34,7 @@
 import type { BenchLock, BuildHold, SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
-import { admitsPriority, needsOf, reservedText, type ReservedRoom } from './capacity.ts';
+import { admitsPriority, needsOf, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
 
 export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'paused' | 'followup' | 'stalled';
 export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'waiting', 'queued', 'blocked', 'paused', 'followup', 'stalled'];
@@ -101,6 +101,10 @@ export interface WorkLiveFacts {
   heldRoom?: readonly { id: string; why: string; for: readonly ('game' | 'agent')[] }[];
   /** Computers with room that placement.minPriority reserves for higher work (w1643): room only for a request at that level now. */
   reservedRoom?: readonly ReservedRoom[];
+  /** Each computer with room, id to its platform and no-timed-runs reason (w1944, RoomNow.fit): work it cannot run is not WRONG beside it. */
+  roomFit?: Readonly<Record<string, RoomFit>>;
+  /** Since when each computer has had room, `${kind}:${id}` to epoch ms (w1944, RoomNow.since); absent: room counts at once. */
+  roomSince?: Readonly<Record<string, number>>;
   /** The urgent release build that paused this worker (w1841, server/buildPlans.ts pausedFor); undefined when none did. */
   buildHold?: (sessionId: string) => BuildHold | undefined;
   /** A machine's bench lock while a timed run holds it (w1841, MachineStats.benchLock); undefined when free or unknown. */
@@ -487,10 +491,21 @@ function queuedLive(w: WorkItem, f: WorkLiveFacts, wanted: readonly string[] | u
   const room = [...(known ?? []), ...reserved.filter((r) => admitsPriority(r.min, w.priority)).map((r) => r.id)].filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
   const what = `for capacity${needs?.length ? ` on ${needs.join(' or ')}` : ''}`;
   const slot = kind === 'agent' ? 'an agent slot' : 'room';
-  if (room.length) return { state: 'queued', why: `${head} ${what}, but ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${slot}: the dispatcher should ${start}`, roomOn: room };
+  // w1944: a computer it cannot run on (a Mac for an MP scenario, the m5 for timed work) is no room for it, and says why.
+  const unfit = room.map((id) => ({ id, why: unfitWhy(w, id, f.roomFit) })).filter((x): x is { id: string; why: string } => !!x.why);
+  const fits = room.filter((id) => !unfit.some((u) => u.id === id));
+  // w1944: and room that freed moments ago is the capacity ping's to bring, not yet a wrong Queued.
+  const age = (id: string) => (f.roomSince ? f.now - (f.roomSince[`${kind}:${id}`] ?? f.now) : Infinity);
+  const stood = fits.filter((id) => age(id) >= ROOM_STAND_MS);
+  const have = (ids: readonly string[]) => `${ids.join(', ')} ${ids.length > 1 ? 'have' : 'has'} ${slot}`;
+  if (stood.length) return { state: 'queued', why: `${head} ${what}, but ${have(stood)}: the dispatcher should ${start}`, roomOn: stood };
+  if (fits.length) {
+    const mins = Math.max(...fits.map((id) => Math.floor(age(id) / 60_000)));
+    return { state: 'queued', why: `${head} ${what}; ${have(fits)} since ${mins} min ago: the capacity ping brings it to the dispatcher` };
+  }
   const held = (f.heldRoom ?? []).filter((h) => h.for.includes(kind) && (!needs?.length || needs.includes(h.id.toLowerCase())));
   const reservedWhy = reservedText(reserved, kind, w.priority, slot);
-  const heldWhy = `${held.length ? `; ${held.map((h) => `${h.id} has ${slot} but is held (${h.why})`).join('; ')}` : ''}${reservedWhy ? `; ${reservedWhy}` : ''}`;
+  const heldWhy = `${held.length ? `; ${held.map((h) => `${h.id} has ${slot} but is held (${h.why})`).join('; ')}` : ''}${reservedWhy ? `; ${reservedWhy}` : ''}${unfit.length ? `; ${unfit.map((u) => `${u.id} has ${slot} but cannot take it: ${u.why}`).join('; ')}` : ''}`;
   return { state: 'queued', why: `${head} ${what}${known ? ': no computer that could take it has ' + slot : ''}${heldWhy}` };
 }
 

@@ -180,3 +180,45 @@ export const reservedText = (reserved: readonly ReservedRoom[] | undefined, kind
     .filter((r) => (!kind || r.for.includes(kind)) && !admitsPriority(r.min, priority))
     .map((r) => `${r.id} has ${slot} but takes ${minPriorityText(r.min)} (placement.minPriority; this is ${priority ?? 'normal'})`)
     .join('; ');
+
+/**
+ * Multiplayer work that runs every peer on one computer (w1944): a nightly MP scenario ("MP-W1020-camps-settle-join",
+ * "MP-tutorial-e2e-loth") reproduced with ffnightly.py starts a host and its clients side by side. A Mac refuses a
+ * multiplayer client (the game repo's scripts/nightly/player_slots.py require_mac_client_ok: w665's GPU page fault hangs the
+ * whole Mac), so such work cannot run on a Mac. Game work only, as needsTimed: a portal request that names a scenario does not.
+ */
+export const MP_SCENARIO_WORDS = /\bMP-[A-Za-z0-9][\w-]*\w/;
+export function needsMpPeers(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> | undefined, text = ''): boolean {
+  if (w && needsOf(w) === 'agent') return false;
+  return MP_SCENARIO_WORDS.test(`${w ? `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}\n` : ''}${text}`);
+}
+
+/**
+ * How long a computer must have had room before a request still Queued beside it is WRONG (w1944; a judgment): the capacity
+ * ping waits a 30 s quiet spell and up to its 2-minute gap, then the dispatcher needs a turn. At 22:13:31 UTC on 2026-10-23
+ * three sandboxes freed and list_work flagged 21 requests WRONG within seconds; the dispatcher had started three by 22:15.
+ */
+export const ROOM_STAND_MS = 5 * 60_000;
+
+/** What a computer with room is, for whether a request can run there (w1944, RoomNow.fit): its platform, and w1861's no-timed-runs reason. */
+export interface RoomFit {
+  platform?: string;
+  noTimedRuns?: string;
+}
+
+/**
+ * Why computer `id` cannot take `w` although it has room (w1944), or undefined when it can: timed work on a computer that
+ * takes no timed runs (m5, w1861/w1872) or on another platform than the one its words name (w1628), and an MP scenario on a
+ * Mac (needsMpPeers). w1944 (2026-10-23 22:13 UTC): list_work flagged w1941 and w1942, two urgent MP scenario fixes, "Queued
+ * [WRONG: biscuit, m5 have room]" while the m5, a Mac that takes no timed runs, could never run them, and the capacity ping
+ * listed them as fitting its room. Unknown facts fit: a computer whose platform nobody reported is not ruled out.
+ */
+export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'>, id: string, fit: Readonly<Record<string, RoomFit>> | undefined): string | undefined {
+  const f = fit?.[id];
+  if (!f) return undefined;
+  const timed = needsTimed(w);
+  if (timed && f.noTimedRuns) return `${id} takes no timed runs (${f.noTimedRuns})`;
+  if ((timed === 'win32' || timed === 'darwin') && f.platform && f.platform !== timed) return `${id} is not on ${timed === 'win32' ? 'Windows' : 'macOS'}, which its timed work names`;
+  if (f.platform === 'darwin' && needsMpPeers(w)) return `${id} is a Mac, which refuses the multiplayer client its MP scenario starts (w665)`;
+  return undefined;
+}

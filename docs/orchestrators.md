@@ -547,6 +547,25 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      work only (placement.minPriority; this is normal)", and the same request raised to urgent is WRONG while it waits, and
      `decide_work queue` is refused for it. A raise of a Queued request's priority wakes the capacity ping.
 
+   - **A computer the request cannot run on is no room for it, and says why** (w1944, lothsahn, 2026-10-23: "Dispatcher
+     leaves 21 requests queued while biscuit and m5 have room"). At 22:13:31 UTC three sandboxes freed (two on m5, one on
+     biscuit) and list_work flagged 21 queued requests `[WRONG: biscuit, m5 have room]`, w1941 and w1942 among them: two
+     urgent fixes of nightly MP scenarios (MP-W1020-camps-settle-join, MP-tutorial-e2e-loth). The m5 is a Mac, and a Mac
+     refuses the multiplayer client such a scenario starts (the game repo's `scripts/nightly/player_slots.py`
+     `require_mac_client_ok`, w665), so its room was never theirs; the dispatcher rightly put w1940 on biscuit and w1939 and
+     w1944 on m5. `unfitWhy` (`shared/capacity.ts`) rules a computer out for timed work where it takes no timed runs (w1861)
+     or is on another platform than the one the work names (w1628), and for an MP scenario (`MP-<name>` in the request's
+     words, game work only: `needsMpPeers`) on a Mac. `RoomNow.fit` carries each computer's platform and no-timed-runs
+     reason; `roomForWork` (`server/placement.ts`) applies it for the WRONG flag, the capacity ping and `decide_work queue`,
+     and `workLive` for list_work and the page. Such a request reads "queued for capacity: no computer that could take it has
+     room; m5 has room but cannot take it: m5 is a Mac, which refuses the multiplayer client its MP scenario starts (w665)",
+     the ping lists it under "Queued with no room for them now" with that reason, and `decide_work queue` takes it.
+   - **Room that freed a moment ago is not yet WRONG** (w1944): the 21 flags came within seconds of the releases, before the
+     ping (30 s quiet spell) had reached the dispatcher, which had started three by 22:15. `Agents.roomFacts` keeps since when
+     each computer has had room (`RoomNow.since`, read each minute by the blocker watch and at every page or list_work read); a
+     request is WRONG only beside room that has stood `ROOM_STAND_MS` (5 minutes, a judgment: the quiet spell, the 2-minute
+     gap and a dispatcher turn), and reads "m5 has room since 1 min ago: the capacity ping brings it to the dispatcher" before.
+
    **"Has room" is one test.** `roomNow` (`server/placement.ts`) returns the room for each kind of work and the held
    computers, built from the same `hasRoom` / `busyReasons` that print BUSY or ROOM in the Capacity block of
    `list_sandboxes` and `system_status`. `Agents.roomNow` / `roomFacts` (what `decide_work queue` refuses on, what the
@@ -568,7 +587,10 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      to the dispatcher 30 seconds after a worker's turn ends (`finished a turn`), a worker stops (`stopped`, agents.ts),
      or a sandbox is released and its worker placed again (`placeAgain.ts`); only while something is queued, at least 2
      minutes apart and 20 an hour at most (`CAPACITY`), a wake that is too soon waits its turn instead of being dropped.
-     The ping lists the queue in order; the dispatcher starts what fits.
+     The ping lists the queue in order; the dispatcher starts what fits. Since w1944: a stream of events never holds it
+     more than 2 minutes after the first (`maxQuietMs`), urgent work that fits is held by the 2-minute gap only, never by
+     the hourly cap, a daemon's hello is an event too (every daemon says hello after a portal restart, which drops a ping
+     still waiting), and the journal says each ping sent (`ledger: capacity ping: … fitting w…`) and each the cap holds.
    - **The ping is decided when it fires, from the room then** (w1089; 2026-10-12 ~05:50 UTC: "Capacity may have freed (sandbox
      lothdesktop/slot5 released)" reached the dispatcher while two agents were Working in slot5, and its `start_agent` there
      queued a third). The ping waits out its 30 s quiet spell and the 2-minute gap after the last, so it can arrive long after
