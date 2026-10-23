@@ -877,7 +877,8 @@ else origin's, else its base; `machine/sandboxes.ts` `remakeGone`, once per sand
 counts as gone: an agent placed there meanwhile makes its folder at its start, empty but for its own files (LothLaptop's slot1
 had the w1915 worker in it). The worktree is then added beside it and its `.git` moved in (`git worktree repair`), so the
 agent's files stay and it runs on in the checkout; a folder that holds a checkout's own files but no `.git` is left, as an
-error. Work never pushed went with the drive. While the drive is not attached there is no sandbox root, so nothing is remade
+error. A remake a daemon restart cuts off (an update landing mid-checkout) is made again by the next daemon from the worktree it
+had added (`Rec.remaking`); a plain create cut off still reads as an error. Work never pushed went with the drive. While the drive is not attached there is no sandbox root, so nothing is remade
 then.
 
 The maximum of an existing drive cannot be lowered in place (ReFS cannot shrink a volume, and `Optimize-VHD` needs the Hyper-V

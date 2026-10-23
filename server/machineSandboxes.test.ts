@@ -656,6 +656,39 @@ test('w1915: a free sandbox whose folder came back empty (a worker started in it
   assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/sb1');
 });
 
+test('w1918: a remake a daemon restart cut off (after its worktree was added, before the checkout) is made again by the next daemon, not left as an error', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const lines: string[] = [];
+  const first = pool(r, { log: (l) => lines.push(l) }).p;
+  await first.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(first, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  const tracked = r.git(dir, 'ls-tree', '--name-only', 'HEAD').split('\n')[0].trim();
+  r.git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+  // The drive was reset; the remake got as far as the worktree (a .git, nothing checked out) when an update restarted the
+  // daemon: sandboxes.json still says creating, with the remake's mark.
+  fs.rmSync(dir, { recursive: true, force: true });
+  r.git(r.main, 'worktree', 'prune');
+  r.git(r.main, 'worktree', 'add', '--no-checkout', dir, 'sandbox/sb1');
+  assert.equal(fs.existsSync(path.join(dir, tracked)), false);
+  const file = path.join(r.root, 'app', 'sandboxes.json');
+  const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
+  Object.assign(rows[0], { status: 'creating', remaking: true });
+  fs.writeFileSync(file, JSON.stringify(rows));
+
+  const { p } = pool(r, { log: (l) => lines.push(l) });
+  assert.equal(p.list()[0].status, 'ready');
+  await p.tick();
+  assert.equal(p.list()[0].status, 'creating');
+  await ready(p, 'sb1');
+  assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/sb1');
+  assert.ok(fs.existsSync(path.join(dir, tracked)), 'checked out');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8'))[0].remaking, undefined, 'the mark is cleared once it is ready');
+  // A plain create cut off still reads as an error (the restart test above).
+});
+
 // ---------------------------------------------------------------- pure parts
 
 test('machine sandboxes: only a direct child of the root named after it can be deleted, never the main clone', () => {
