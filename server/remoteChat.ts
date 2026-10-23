@@ -46,8 +46,8 @@ export function tailnetAddress(ip: string): boolean {
 }
 
 /**
- * Why a request may not use the orchestrator chat, or undefined when it came over the tailnet. Tailscale Serve puts
- * `Tailscale-Funnel-Request: ?1` on every request that came in through Funnel and deletes one the client sent itself
+ * Why a request may not use /mcp (routeMcp refuses it for every tool, w1865), or undefined when it came over the tailnet.
+ * Tailscale Serve puts `Tailscale-Funnel-Request: ?1` on every request that came in through Funnel and deletes one the client sent itself
  * (tailscale/ipn/ipnlocal/serve.go, addTailscaleIdentityHeaders), and sets X-Forwarded-For to the client's own address (the
  * proxy is a Rewrite, so a header the client sent is dropped). The header is the test; the address is a second one, so a
  * Funnel request is refused even if the header were ever missing. The forwarded address is read only from a connection
