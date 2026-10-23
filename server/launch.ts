@@ -169,10 +169,23 @@ export const CATALOG = {
     force: z.boolean().optional().describe('stop/restart: kill the editor at once instead of asking it to quit first (a frozen editor ignores that).'),
   },
   live_view: {
-    action: z.enum(['start', 'stop', 'status', 'knobs']),
+    action: z.enum(['start', 'stop', 'status', 'knobs', 'stage', 'restage']),
     materials: z.array(z.string()).optional().describe('start: the materials whose shader properties are the knobs, as the game names them (e.g. ["VfxComet"]).'),
     fps: z.number().optional().describe('start: frames a second, 1-30 (default 15).'),
     width: z.number().optional().describe('start: frame width in px, 320-1920 (default 960).'),
+    stage: z
+      .array(
+        z.object({
+          load: z.string().optional().describe('The save name to load (game.loadsolo); first step only.'),
+          ffauto: z.string().optional().describe('A game command ("ui.hide|true", "camera.focus|x|z|distance").'),
+          csharp: z.string().optional().describe('C# for the editor bridge.'),
+          until: z.string().optional().describe('csharp: text its answer must contain before the next step.'),
+          timeoutS: z.number().min(1).max(300).optional().describe('csharp with until: seconds to wait (default 30).'),
+        }),
+      )
+      .max(20)
+      .optional()
+      .describe('start, stage: the recipe that sets the view up again without your turn. One key per step: { "load": "<save name>" } first if any, then { "ffauto": "<command>" } or { "csharp": "<C# for the editor bridge>", "until"?: "<text its answer must contain>", "timeoutS"?: 1-300 }.'),
   },
   /** An urgent release's build on BEAST, else LothDesktop (w1606, w1628; the urgent lane's only since w1639, server/buildPlans.ts): coming, start, done. */
   build_plan: {

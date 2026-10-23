@@ -60,6 +60,7 @@ interface Knob {
   max?: number;
   hdr?: boolean;
   driven?: string;
+  moved?: boolean;
 }
 
 const DEFAULTS = (): Record<string, Knob[]> => ({
@@ -120,7 +121,14 @@ export function fakeLiveGame(opts: { fps?: number; width?: number; height?: numb
         if (!k) return bad(`'${p[1]}' has no knob '${p[2]}'`);
         const nums = String(p[3] ?? '').split(',').map(Number);
         k.value = k.type === 'color' ? [...nums, 1].slice(0, 4) : nums[0];
+        k.moved = true;
         return ok(JSON.stringify({ ...k, moved: true }));
+      }
+      case 'look.material.keep': {
+        // The editor-only command (game repo LiveLook): the knob as the list gives it, plus its material and .mat path.
+        const k = knobs[p[1]]?.find((x) => x.name === p[2]);
+        if (!k) return bad(`'${p[1]}' has no knob '${p[2]}'`);
+        return ok(JSON.stringify({ ...k, material: p[1], path: `Assets/Resources/Vfx/${p[1]}.mat` }));
       }
       case 'look.material.reset':
         knobs = DEFAULTS();

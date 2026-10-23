@@ -86,7 +86,12 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // tickets as before, and placement still sends timed work elsewhere); an older portal sends none.
 // w1874 (no bump): `session` on a `unity` clear_batch, the asking worker's, for the reaper's owner rules. An older daemon
 // ignores it and keeps the old rules; a newer daemon asked by an older portal gets none and does the same.
-const DECIDED = { protocol: 9, fingerprint: '283bb40338b60445' };
+// w1839 (no bump): `live` ops stage and restage with `stage`, and `stage` on a start, sent only to a daemon whose hello offers
+// `liveRestage` (an older daemon would take an unknown op for a start; one given a start with a `stage` ignores it), `stage` on
+// the views a hello lists, and the daemon's `live_staged`, which an older portal drops (no default case).
+// w1839 part 2 (no bump): `live` op keep with `material` and `name`, sent only to a daemon whose hello offers `liveKeep` (an older
+// daemon would take an unknown op for a start), and `liveKeep` in the hello, which an older portal ignores.
+const DECIDED = { protocol: 9, fingerprint: '8ee1c2bdacedac10' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

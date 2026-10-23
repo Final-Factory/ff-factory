@@ -37,6 +37,8 @@ import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
 import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveDeps } from './live.ts';
 import { idleCloseEditor, idleClosedDetail, idleReopenNote } from './liveIdle.ts';
+import { LIVE_MATERIAL_NAME, LIVE_PROPERTY_NAME, keepInMat, type MatKnobType } from './matText.ts';
+import { legsText, parseStage, restage, stageSummary, type LiveStageStep } from './liveStage.ts';
 import { FramePump, parseAck } from '../shared/framePump.ts';
 import { bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { hostStats } from '../server/system.ts';
@@ -279,6 +281,19 @@ const REAL_PROBES: Probes = {
 
 /** Builds a session; the real one is an AgentSession, tests pass a fake. */
 export type SessionFactory = (info: SessionInfo, sink: SessionSink, options: OptionsFactory, events: EventEmitter) => SessionHandle;
+
+/** A Live view this daemon runs (w1398); `stage` is its recipe (w1839) and `staging` is set while the daemon replays it. */
+interface LiveEntry {
+  s: LiveSession;
+  link?: WebSocket;
+  pump: FramePump;
+  sandbox: string;
+  sessionId: string;
+  materials: string[];
+  timer?: NodeJS.Timeout;
+  stage: LiveStageStep[];
+  staging?: boolean;
+}
 
 interface Entry {
   s: SessionHandle;
@@ -1317,6 +1332,8 @@ export class Daemon {
       // It streams a sandbox's running game for a live view (w1398, docs/live-view.md), and says which views run (w1509).
       liveView: true,
       liveIdleClose: true,
+      liveRestage: true,
+      liveKeep: true,
       liveViews: this.liveViews(),
       // It compacts an idle agent on request and says a compaction's turn end (w1469, the workers' automatic compaction).
       compact: true,
@@ -1613,11 +1630,11 @@ export class Daemon {
 
   /** Tests' fake game for a live view (server/testLiveGame.ts); the real one is the sandbox editor's (machine/live.ts). */
   private readonly liveDeps?: (sandbox: string) => LiveDeps;
-  private readonly lives = new Map<string, { s: LiveSession; link?: WebSocket; pump: FramePump; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout }>();
+  private readonly lives = new Map<string, LiveEntry>();
 
   /** The live views it runs, for the hello (w1509): a portal that restarted takes them back. */
   private liveViews(): DaemonLiveView[] {
-    return [...this.lives.entries()].map(([liveId, l]) => ({ liveId, sessionId: l.sessionId, sandbox: l.sandbox, fps: l.s.fps, width: l.s.width, materials: l.materials, ...l.s.state, frames: l.s.frames }));
+    return [...this.lives.entries()].map(([liveId, l]) => ({ liveId, sessionId: l.sessionId, sandbox: l.sandbox, fps: l.s.fps, width: l.s.width, materials: l.materials, ...l.s.state, frames: l.s.frames, ...(l.stage.length ? { stage: l.stage } : {}) }));
   }
   /** The last knob move per sandbox (ms): counted as activity, so its editor is not stopped as idle. */
   private readonly liveTouched = new Map<string, number>();
@@ -1631,7 +1648,62 @@ export class Daemon {
     if (!notes?.length) return text;
     this.liveNotes.delete(sessionId);
     this.liveLines.delete(sessionId);
-    return `[live view] Since your last message, in the live view:\n${notes.map((n) => `- ${n.text}`).join('\n')}\n(Not saved: keep a value by editing the .mat yourself.)\n\n${text}`;
+    return `[live view] Since your last message, in the live view:\n${notes.map((n) => `- ${n.text}`).join('\n')}\n(Moves are not saved until the person keeps them; a kept value is already in the .mat file on your branch: commit it with your work.)\n\n${text}`;
+  }
+
+  /** A line in the session's conversation about the view (a knob move, a kept value), held for the agent's next message; counts as activity. */
+  private noteLive(msg: Extract<ToDaemon, { type: 'live' }>, key: string, note: string) {
+    const now = Date.now();
+    this.liveTouched.set(msg.sandbox, now);
+    const text = `[live view] ${note}`;
+    const last = this.liveLines.get(msg.sessionId);
+    if (this.entries.has(msg.sessionId)) {
+      if (last && last.key === key && now - last.at < LIVE_LINE_MERGE_MS) {
+        this.sink().amend(msg.sessionId, last.seq, { text });
+        last.at = now;
+      } else {
+        const e = this.sink().append(msg.sessionId, { kind: 'system', text });
+        this.liveLines.set(msg.sessionId, { key, seq: e.seq, at: now });
+      }
+    }
+    const notes = (this.liveNotes.get(msg.sessionId) ?? []).filter((n) => n.key !== key);
+    notes.push({ key, text: note });
+    this.liveNotes.set(msg.sessionId, notes.slice(-20));
+  }
+
+  /**
+   * w1839 (docs/live-view.md "Keep"): the person kept a moved knob. The game drops that knob's original (look.material.keep), so
+   * leaving play mode keeps the value, and says which .mat it is; the daemon writes the value into that file as text, in the
+   * sandbox (machine/matText.ts). The editor never saves the asset itself: a play-mode save wrote m_ObjectHideFlags: 32 into
+   * three .mat files (w1066, w1323, w1393). Nothing is committed: the worker commits it with its work.
+   */
+  private async liveKeep(msg: Extract<ToDaemon, { type: 'live' }>, sandboxPath: string): Promise<string> {
+    const l = this.lives.get(msg.liveId);
+    if (!l) throw new Error('this live view is not running on the machine (a daemon restart ends it: start it again)');
+    const material = String(msg.material ?? '');
+    const name = String(msg.name ?? '');
+    if (!LIVE_MATERIAL_NAME.test(material)) throw new Error(`not a material name: ${material.slice(0, 60)}`);
+    if (!LIVE_PROPERTY_NAME.test(name)) throw new Error(`not a shader property name: ${name.slice(0, 60)}`);
+    const reply = await l.s.command(`look.material.keep|${material}|${name}`);
+    if (!reply.ok) {
+      if (/unknown[ _]command|no such command|unknown look\.material\.keep/i.test(`${reply.result} ${reply.reason ?? ''}`)) throw new Error("this sandbox's game has no look.material.keep yet: merge master into its branch");
+      throw new Error(reply.result || `the game answered ${reply.status}`);
+    }
+    let answer: { path?: unknown; name?: unknown; type?: unknown; value?: unknown };
+    try {
+      answer = JSON.parse(reply.result);
+    } catch {
+      throw new Error(`the game's answer to look.material.keep is not JSON: ${reply.result.slice(0, 120)}`);
+    }
+    const type = String(answer.type) as MatKnobType;
+    if (typeof answer.path !== 'string' || !['float', 'range', 'int', 'color', 'vector'].includes(type)) throw new Error(`the game's answer to look.material.keep has no path or type: ${reply.result.slice(0, 120)}`);
+    const value = answer.value as number | number[];
+    if (typeof value !== 'number' && !(Array.isArray(value) && value.every((x) => typeof x === 'number'))) throw new Error(`the game's answer to look.material.keep has no value: ${reply.result.slice(0, 120)}`);
+    const change = keepInMat(sandboxPath, answer.path, typeof answer.name === 'string' && LIVE_PROPERTY_NAME.test(answer.name) ? answer.name : name, type, value);
+    log(`live: view ${msg.liveId} (${msg.sandbox}): kept ${material} ${change} in ${answer.path}`);
+    if (msg.note) this.noteLive(msg, `keep|${material}|${name}|${Date.now()}`, `${msg.note}: ${change}, in ${answer.path} (written to the file on your branch, not committed)`);
+    else this.liveTouched.set(msg.sandbox, Date.now());
+    return JSON.stringify({ path: answer.path, change });
   }
 
   private async onLive(msg: Extract<ToDaemon, { type: 'live' }>): Promise<string> {
@@ -1657,37 +1729,34 @@ export class Daemon {
       const reply = await l.s.command(command);
       if (!reply.ok) throw new Error(reply.result || `the game answered ${reply.status}`);
       if (msg.note) {
-        const now = Date.now();
-        this.liveTouched.set(msg.sandbox, now);
         // The knob: material and property of a set; a reset is its own line.
         const parts = command.split('|');
-        const key = parts[0] === 'look.material.set' ? `${parts[1]}|${parts[2]}` : `${command}|${now}`;
-        const text = `[live view] ${msg.note}`;
-        const last = this.liveLines.get(msg.sessionId);
-        if (this.entries.has(msg.sessionId)) {
-          if (last && last.key === key && now - last.at < LIVE_LINE_MERGE_MS) {
-            this.sink().amend(msg.sessionId, last.seq, { text });
-            last.at = now;
-          } else {
-            const e = this.sink().append(msg.sessionId, { kind: 'system', text });
-            this.liveLines.set(msg.sessionId, { key, seq: e.seq, at: now });
-          }
-        }
-        const notes = (this.liveNotes.get(msg.sessionId) ?? []).filter((n) => n.key !== key);
-        notes.push({ key, text: msg.note });
-        this.liveNotes.set(msg.sessionId, notes.slice(-20));
+        this.noteLive(msg, parts[0] === 'look.material.set' ? `${parts[1]}|${parts[2]}` : `${command}|${Date.now()}`, msg.note);
       }
       return reply.result;
     }
+    if (msg.op === 'keep') return this.liveKeep(msg, sb.path);
     if (msg.op === 'idleClose') return this.liveIdleClose(msg, sb.path);
+    if (msg.op === 'stage') {
+      const l = this.lives.get(msg.liveId);
+      if (!l) throw new Error('this live view is not running on the machine (a daemon restart ends it: start it again)');
+      const parsed = parseStage(msg.stage);
+      if ('error' in parsed) throw new Error(parsed.error);
+      l.stage = parsed.steps;
+      return `recipe kept: ${stageSummary(l.stage)}`;
+    }
+    if (msg.op === 'restage') return this.liveRestage(msg, sb);
+    if (msg.op !== 'start') throw new Error('unknown live op');
     // start
     const old = this.lives.get(msg.liveId);
     if (old) return 'already running';
     const pidOf = () => this.pool.list().find((x) => x.id === msg.sandbox)?.unity?.pid;
-    const entry: { s: LiveSession; link?: WebSocket; pump: FramePump; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout } = {
+    const parsedStage = msg.stage === undefined ? undefined : parseStage(msg.stage);
+    const entry: LiveEntry = {
       sandbox: msg.sandbox,
       sessionId: msg.sessionId,
       materials: Array.isArray(msg.materials) ? msg.materials.map(String).slice(0, 8) : [],
+      stage: parsedStage && 'steps' in parsedStage ? parsedStage.steps : [],
     } as never;
     // Newest wins, kept to what the link to the portal carries (w1601, shared/framePump.ts).
     entry.pump = new FramePump({
@@ -1717,6 +1786,54 @@ export class Daemon {
     this.linkLive(msg.liveId);
     await entry.s.start();
     return `streaming ${sb.id}'s game when it is in play mode (port ${entry.s.listenPort})`;
+  }
+
+  /**
+   * w1839 (docs/live-view.md "Staged again without a turn"): set the view up again from its recipe with no worker turn. Answers
+   * at once; the replay runs on (machine/liveStage.ts restage) and ends with `live_staged`. The view's detail says how far it is.
+   */
+  private async liveRestage(msg: Extract<ToDaemon, { type: 'live' }>, sb: { id: string; path: string }): Promise<string> {
+    const liveId = msg.liveId;
+    const sandbox = msg.sandbox;
+    const entry = this.lives.get(liveId);
+    if (!entry) throw new Error('this live view is not running on the machine (a daemon restart ends it: start it again)');
+    if (entry.staging) return 'already setting it up again';
+    if (!entry.stage.length) throw new Error('this view has no stage recipe');
+    const steps = entry.stage;
+    entry.staging = true;
+    // The editor starts for this view: the idle close's "closed" note no longer holds.
+    for (const l of this.lives.values()) if (l.sandbox === sandbox) l.s.closedNote = undefined;
+    const over = this.liveDeps?.(sandbox) ?? {};
+    const pidOf = () => this.pool.list().find((x) => x.id === sandbox)?.unity?.pid;
+    const started = Date.now();
+    void restage(
+      {
+        editorPid: over.editorPid ?? pidOf,
+        startEditor: () => this.pool.unity(sandbox, 'start'),
+        bridge:
+          over.bridge ??
+          (async (code: string) => {
+            const port = bridgeInfo(sb.path).port;
+            return port ? bridgeExecute(port, code) : 'no bridge: none for this editor';
+          }),
+        channel: over.channel ?? ((pid) => readGameChannel(pid)),
+        command: over.command ?? ((ch, text) => gameCommand(ch, text)),
+        progress: (detail) => entry.s.setStaging(detail),
+        now: () => Date.now(),
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      },
+      steps,
+    ).then(
+      (res) => res,
+      (e) => ({ ok: false, detail: `the replay broke: ${(e as Error).message}`, ms: Date.now() - started, legs: {} as Record<string, number> }),
+    ).then((res) => {
+      entry.staging = false;
+      entry.s.setStaging(undefined);
+      this.liveTouched.set(sandbox, Date.now());
+      log(res.ok ? `live: view ${liveId} (${sandbox}): staged again in ${(res.ms / 1000).toFixed(1)} s (${legsText(res.legs)})` : `live: view ${liveId} (${sandbox}): could not be staged again: ${res.detail}`);
+      if (this.lives.get(liveId) === entry) this.send({ type: 'live_staged', liveId, ok: res.ok, detail: res.detail, ms: res.ms, legs: res.legs });
+    });
+    return `setting the view up again: ${stageSummary(steps)}`;
   }
 
   /** The view's frame socket to the portal (/machine/live/<liveId>), dialled again while the view runs. */

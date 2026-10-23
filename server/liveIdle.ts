@@ -91,6 +91,11 @@ export interface LiveIdleDeps {
   hold?(machineId: string): string | undefined;
   /** Its worker was asked to stage the view again for `who` (LiveHub.woken: the panel says so, w1838). */
   woke?(liveId: string, who: string): void;
+  /**
+   * Ask the daemon to set the view up again from its stage recipe, with no worker turn (w1839, LiveHub.restage): true when it
+   * is under way, false when it cannot (no recipe, an old daemon, one under way already), and the worker is woken as before.
+   */
+  restage?(liveId: string, who: string): Promise<boolean>;
   log(line: string): void;
   now(): number;
 }
@@ -120,7 +125,7 @@ export class LiveIdleCloser {
   }
 
   /** The sessions sharing a view's sandbox (its own first): an editor is a sandbox's, and up to two workers use it. */
-  private sessionsOf(v: LiveIdleView, sb: MachineSandbox | undefined): SessionInfo[] {
+  private sessionsOf(v: Pick<LiveIdleView, 'sessionId' | 'machineId' | 'sandbox'>, sb: MachineSandbox | undefined): SessionInfo[] {
     const ids = [v.sessionId, ...(sb?.sessionIds ?? []).filter((id) => id !== v.sessionId)];
     return ids.map((id) => this.d.session(id)).filter((s): s is SessionInfo => !!s && s.machineSandbox === v.sandbox && s.machineId === v.machineId);
   }
@@ -215,7 +220,7 @@ export class LiveIdleCloser {
    * A person opened a view (LiveHub.addViewer). Its editor closed idle: wake its worker, whose next turn starts the editor
    * (the daemon's send) and stages the view again; once per close.
    */
-  viewerOpened(v: Pick<LiveViewInfo, 'sessionId' | 'machineId' | 'sandbox'> & Partial<Pick<LiveViewInfo, 'liveId' | 'state' | 'detail'>>, who: string | undefined) {
+  viewerOpened(v: Pick<LiveViewInfo, 'sessionId' | 'machineId' | 'sandbox'> & Partial<Pick<LiveViewInfo, 'liveId' | 'state' | 'detail' | 'stage'>>, who: string | undefined) {
     const key = `${v.machineId}/${v.sandbox}`;
     const sb = this.d.sandbox(v.machineId, v.sandbox);
     if (!sb?.idleClosed) return this.nudge(v, sb, who);
@@ -223,14 +228,63 @@ export class LiveIdleCloser {
     const s = this.d.session(v.sessionId);
     if (s && BUSY.has(s.status)) return; // mid-turn: its turn already started the editor
     this.woken.add(key);
-    const text = `[live view] ${who ?? 'A person'} opened your Live view and is watching it now. Stage it again so they see your asset (above), say so in one line, then end your turn as before (declare waiting_on_person again if you still wait on them).`;
+    const wake = () => {
+      const text = `[live view] ${who ?? 'A person'} opened your Live view and is watching it now. Stage it again so they see your asset (above), say so in one line, then end your turn as before (declare waiting_on_person again if you still wait on them).${this.recipeHint(v)}`;
+      try {
+        this.d.send(v.sessionId, text);
+        if (v.liveId) this.d.woke?.(v.liveId, who ?? 'A person');
+        this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view: its worker is woken to start the editor and stage the view again`);
+      } catch (e) {
+        this.woken.delete(key);
+        this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view, and its worker could not be woken: ${(e as Error).message}`);
+      }
+    };
+    this.restageFirst(v, sb, who, 'its editor is closed (idle)', wake);
+  }
+
+  /** A short clause for the wake of a view that has no stage recipe (w1839); empty on a portal that cannot replay one. */
+  private recipeHint(v: { stage?: string }): string {
+    return this.d.restage && !v.stage ? ' (Give the view a stage recipe with live_view stage, so the daemon sets it up again by itself without your turn.)' : '';
+  }
+
+  /**
+   * w1839: before the worker is woken, the daemon sets the view up again from its stage recipe (no worker turn). Only when the
+   * view has a recipe the portal can use, nobody in the sandbox is mid-turn (their turn is on it) and the computer is not
+   * held; `wake` (today's message to the worker) runs when it does not. Not blocking: it runs after the daemon answered.
+   */
+  private restageFirst(v: Pick<LiveViewInfo, 'sessionId' | 'machineId' | 'sandbox'> & Partial<Pick<LiveViewInfo, 'liveId'>>, sb: MachineSandbox | undefined, who: string | undefined, why: string, wake: () => void) {
+    const key = `${v.machineId}/${v.sandbox}`;
+    if (!this.d.restage || !v.liveId || this.d.hold?.(v.machineId) || this.sessionsOf(v, sb).some((x) => BUSY.has(x.status))) return wake();
+    const name = who ?? 'A person';
+    this.d.restage(v.liveId, name).then(
+      (ok) => {
+        if (!ok) return wake();
+        this.d.woke?.(v.liveId!, name);
+        this.d.log(`live idle: ${key}: ${name} opened ${v.sessionId}'s Live view (${why}): the daemon sets it up again from its stage recipe (no worker turn)`);
+      },
+      (e) => {
+        this.d.log(`live idle: ${key}: the daemon was not asked to set ${v.sessionId}'s Live view up again: ${(e as Error).message}`);
+        wake();
+      },
+    );
+  }
+
+  /**
+   * The daemon could not set a view up again from its recipe (w1839, LiveHub.staged): the worker is asked to stage it, as a
+   * person's opening would have asked it, and to fix the recipe.
+   */
+  restageFailed(v: Pick<LiveViewInfo, 'sessionId' | 'machineId' | 'sandbox'> & Partial<Pick<LiveViewInfo, 'liveId'>>, detail: string) {
+    const key = `${v.machineId}/${v.sandbox}`;
+    const sb = this.d.sandbox(v.machineId, v.sandbox);
+    const editor = sb?.unity.state;
+    const why = editor === 'stopped' || editor === 'crashed' ? `its editor is ${editor}` : 'the game is not in play mode';
+    const start = editor === 'running' ? '' : 'start your editor (mcp__machine__unity start), ';
+    const text = `[live view] The daemon could not set your Live view up again from its stage recipe: ${detail}. A person opened it, and it is not streaming: ${why}. Now ${start}put the game in play mode with your asset on screen and the HUD hidden, as you staged it before (the view streams by itself; no live_view start needed while it is up), say so in one line, then end your turn as before (declare waiting_on_person again if you still wait on them). Fix the recipe (live_view stage) and test it (live_view restage).`;
     try {
       this.d.send(v.sessionId, text);
-      if (v.liveId) this.d.woke?.(v.liveId, who ?? 'A person');
-      this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view: its worker is woken to start the editor and stage the view again`);
+      this.d.log(`live idle: ${key}: the daemon could not set ${v.sessionId}'s Live view up again (${detail}): its worker is woken to stage it and fix the recipe`);
     } catch (e) {
-      this.woken.delete(key);
-      this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view, and its worker could not be woken: ${(e as Error).message}`);
+      this.d.log(`live idle: ${key}: the daemon could not set ${v.sessionId}'s Live view up again (${detail}), and its worker could not be told: ${(e as Error).message}`);
     }
   }
 
@@ -242,7 +296,7 @@ export class LiveIdleCloser {
    * once per stop (again after LIVE_WAKE_AGAIN_MS), unless it is mid-turn (on it already) or its computer is held (a release
    * build, a bench lock: its editor cannot start, and the hold's end tells it, server/buildPlans.ts done).
    */
-  private nudge(v: Pick<LiveViewInfo, 'sessionId' | 'machineId' | 'sandbox'> & Partial<Pick<LiveViewInfo, 'liveId' | 'state' | 'detail'>>, sb: MachineSandbox | undefined, who: string | undefined) {
+  private nudge(v: Pick<LiveViewInfo, 'sessionId' | 'machineId' | 'sandbox'> & Partial<Pick<LiveViewInfo, 'liveId' | 'state' | 'detail' | 'stage'>>, sb: MachineSandbox | undefined, who: string | undefined) {
     if (!v.liveId || !sb || v.state === 'live' || v.state === 'stopped') return;
     const editor = sb.unity.state;
     // Starting: someone started it (the worker, the hang watch), and the game is not up yet. A hold while the editor runs
@@ -259,15 +313,19 @@ export class LiveIdleCloser {
     if (last !== undefined && now - last < LIVE_WAKE_AGAIN_MS) return;
     this.nudged.set(v.liveId, now);
     const start = editor === 'running' ? '' : 'start your editor (mcp__machine__unity start), ';
-    const text = `[live view] ${who ?? 'A person'} opened your Live view, and it is not streaming: ${why}. Now ${start}put the game in play mode with your asset on screen and the HUD hidden, as you staged it before (the view streams by itself; no live_view start needed while it is up), say so in one line, then end your turn as before (declare waiting_on_person again if you still wait on them).`;
-    try {
-      this.d.send(v.sessionId, text);
-      this.d.woke?.(v.liveId, who ?? 'A person');
-      this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view (${why}): its worker is woken to stage it again`);
-    } catch (e) {
-      this.nudged.delete(v.liveId);
-      this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view (${why}), and its worker could not be woken: ${(e as Error).message}`);
-    }
+    const liveId = v.liveId;
+    const wake = () => {
+      const text = `[live view] ${who ?? 'A person'} opened your Live view, and it is not streaming: ${why}. Now ${start}put the game in play mode with your asset on screen and the HUD hidden, as you staged it before (the view streams by itself; no live_view start needed while it is up), say so in one line, then end your turn as before (declare waiting_on_person again if you still wait on them).${this.recipeHint(v)}`;
+      try {
+        this.d.send(v.sessionId, text);
+        this.d.woke?.(liveId, who ?? 'A person');
+        this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view (${why}): its worker is woken to stage it again`);
+      } catch (e) {
+        this.nudged.delete(liveId);
+        this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view (${why}), and its worker could not be woken: ${(e as Error).message}`);
+      }
+    };
+    this.restageFirst(v, sb, who, why, wake);
   }
 }
 

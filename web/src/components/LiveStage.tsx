@@ -185,7 +185,7 @@ export function LiveStage({ view, ready: given, toast, compact }: { view: LiveVi
   const stats = useLiveFrames(view.sessionId, !stopped, canvas);
   const holding = !stopped && !ready.ready;
   // Waiting on something that takes minutes (an editor, a build, a worker), not seconds: no spinner, the state's dot.
-  const slow = ready.kind !== 'starting' && ready.kind !== 'holding' && ready.kind !== 'stalled' && ready.kind !== 'editor-starting';
+  const slow = ready.kind !== 'starting' && ready.kind !== 'holding' && ready.kind !== 'stalled' && ready.kind !== 'editor-starting' && ready.kind !== 'setting-up';
   return (
     <div className={`lv-stage${holding ? ' lv-busy' : ''}${stopped ? ' lv-stopped' : ''}`} data-testid="live-stage" data-state={view.state}>
       <canvas ref={canvas} className="lv-frame" width={16} height={9} aria-label="The game's view of the asset, live" />
