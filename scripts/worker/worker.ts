@@ -425,9 +425,9 @@ export interface Facts {
   loggedOn?: boolean;
   /** Linux: the user's systemd manager has a desktop session's DISPLAY or WAYLAND_DISPLAY (Unity editors need one). */
   display?: boolean;
-  /** Windows: the file system of the volume the root is on (NTFS, ReFS), and that volume's size in GB, for the Dev Drive's size. */
+  /** Windows: the file system of the volume the root is on (NTFS, ReFS), and that volume's free GB, which caps the Dev Drive's maximum (w1910). */
   rootFileSystem?: string;
-  rootTotalGB?: number;
+  rootFreeGB?: number;
   /** Only looked at for --move-to-dev-drive: the agents that are in a sandbox now (the portal's view), and the Unity editors running from the root's sandboxes. */
   sandboxAgents?: string[];
   sandboxEditors?: number;
@@ -577,17 +577,17 @@ $n = @(Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" | Where-Object {
   return { sandboxAgents: agents, sandboxEditors: editors };
 }
 
-/** Windows: the file system and size of the volume the root is on (the Dev Drive is not needed on ReFS, and sized from this). */
-async function rootVolume(root: string): Promise<{ rootFileSystem?: string; rootTotalGB?: number }> {
+/** Windows: the file system and free space of the volume the root is on (the Dev Drive is not needed on ReFS, and its maximum is capped by this, w1910). */
+async function rootVolume(root: string): Promise<{ rootFileSystem?: string; rootFreeGB?: number }> {
   try {
     const out = await ps('looking at the root\'s volume', `$q = ([IO.Path]::GetPathRoot(${win.psq(path.resolve(root))})).Substring(0, 1)
 $v = Get-Volume -DriveLetter $q -ErrorAction SilentlyContinue
 "fs=$($v.FileSystem)"
-"totalGB=$([math]::Floor($v.Size / 1GB))"
+"freeGB=$([math]::Floor($v.SizeRemaining / 1GB))"
 `);
     const fsys = /^fs=(.*)$/m.exec(out)?.[1]?.trim();
-    const gb = Number(/^totalGB=(\d+)/m.exec(out)?.[1]);
-    return { ...(fsys ? { rootFileSystem: fsys } : {}), ...(gb > 0 ? { rootTotalGB: gb } : {}) };
+    const gb = Number(/^freeGB=(\d+)/m.exec(out)?.[1]);
+    return { ...(fsys ? { rootFileSystem: fsys } : {}), ...(gb > 0 ? { rootFreeGB: gb } : {}) };
   } catch {
     return {};
   }
@@ -971,6 +971,18 @@ async function devDriveEnsure(host: string, args: string[], action = 'ensure', s
   return JSON.parse(fs.readFileSync(path.join(host, `${stateName}.json`), 'utf8')) as DevDriveState;
 }
 
+/**
+ * A new drive's maximum: the flag's, else what the pool's sandboxes and agents need, capped by the host volume's free space
+ * (w1910, devdrive.ts defaultMaxGB), said in the install's log. Throws when the host cannot hold even Windows' 50 GB minimum.
+ */
+function newDriveMaxGB(o: Pick<InstallOptions, 'devDriveMaxGB' | 'maxSandboxes' | 'maxAgentsPerSandbox'>, f: Pick<Facts, 'rootFreeGB'>): number {
+  if (o.devDriveMaxGB !== undefined) return o.devDriveMaxGB;
+  const d = defaultMaxGB(o, f.rootFreeGB);
+  if (!d.gb) throw new Error(`no room for a Dev Drive: ${d.why}`);
+  say(`Dev Drive: its maximum is ${d.why}.${d.short ? ' (Less than the pool needs: its sandboxes fill the drive before they all run.)' : ''}`);
+  return d.gb;
+}
+
 /** Whether a folder is a real one (not a junction) with something in it. */
 const realAndUsed = (dir: string) => {
   try {
@@ -1007,7 +1019,7 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
     state.letter = now.letter;
   } else {
     // An existing drive keeps its maximum: a VHDX's cannot shrink in place (w1070), only a root move makes it again at a new one.
-    const maxGB = had?.maxGB || o.devDriveMaxGB || defaultMaxGB(f.rootTotalGB);
+    const maxGB = had?.maxGB || newDriveMaxGB(o, f);
     if (had && o.devDriveMaxGB !== undefined && o.devDriveMaxGB !== had.maxGB) say(`Dev Drive: its maximum stays ${had.maxGB} GB: a new maximum (${o.devDriveMaxGB} GB) means making the drive again, which --move-to-dev-drive does while the root moves onto it (w1070).`);
     const args = ['-Root', host, ...(host !== l.root ? ['-WorkerRoot', l.root, '-DaemonConfig', path.join(l.daemon, 'daemon.json')] : []), '-MaxGB', String(maxGB)];
     if (f.probe.user) args.push('-User', f.probe.user);
@@ -1506,7 +1518,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
       try {
         const host = home;
         fs.mkdirSync(host, { recursive: true });
-        const maxGB = o.devDriveMaxGB ?? defaultMaxGB(f.rootTotalGB);
+        const maxGB = newDriveMaxGB(o, f);
         const st = await devDriveEnsure(host, ['-Root', host, '-MaxGB', String(maxGB), '-NoTasks', ...(carry?.letter ? ['-Letter', carry.letter] : []), ...(f.probe.user ? ['-User', f.probe.user] : []), ...(f.probe.sid ? ['-UserSid', f.probe.sid] : []), ...(o.devDriveSkip ? ['-Skip', o.devDriveSkip] : [])]);
         const root = driveRootOf(st.letter);
         fs.mkdirSync(root, { recursive: true });
