@@ -320,7 +320,9 @@ test("w1918: a wanted Dev Drive maximum waits while an agent or editor is in a s
       return { action: a, ok, at: new Date(w.now).toISOString(), detail: ok ? 'grew F: from 80 to 112 GB' : 'diskpart: the file is in use' };
     },
   };
-  g = new MachineGuard({ ...SETTINGS, devDriveVhdx: 'D:/work/ffw/devdrive.vhdx' }, 'F:/ffsb', fx2, ports);
+  // The VHDX holds 60 GB on D:, so the room it can still take there is the maximum less that (w1947).
+  g = new MachineGuard({ ...SETTINGS, hostDiskPaths: ['C:/', 'D:/'], devDriveVhdx: 'D:/work/ffw/devdrive.vhdx', devDriveMaxGB: 80 }, 'F:/ffsb', { ...fx2, fileBytes: () => 60 * GB }, ports);
+  const growth = () => (g.health.disks.find((d) => d.path.startsWith('D'))?.growthBytes ?? 0) / GB;
   assert.deepEqual(g.pendingGrow(), { wantGB: 112, maxGB: 80 });
   assert.equal(read[0], path.join('D:/work/ffw', 'devdrive.json'));
 
@@ -329,6 +331,7 @@ test("w1918: a wanted Dev Drive maximum waits while an agent or editor is in a s
   await g.tick();
   assert.equal(w.log.filter((l) => l === 'helper grow').length, 0);
   assert.equal(w.reports.filter((r) => r === 'Dev Drive: grow pending').length, 1);
+  assert.equal(growth(), 20, 'judged by the 80 GB maximum before the grow');
   // An agent between turns still holds its sandbox.
   w.sandboxes = [{ id: 'mp-r2', unity: { state: 'stopped' } }] as unknown as Sandbox[];
   w.sessions = [{ id: 'a2', kind: 'worker', status: 'idle', sandboxId: 'slot-5' }] as unknown as SessionInfo[];
@@ -351,6 +354,7 @@ test("w1918: a wanted Dev Drive maximum waits while an agent or editor is in a s
   assert.equal(w.log.filter((l) => l === 'helper grow').length, 2);
   assert.ok(w.reports.includes('Dev Drive: grown'));
   assert.equal(g.pendingGrow(), undefined);
+  assert.equal(growth(), 52, 'and by the 112 GB one after it, before any update writes daemon.json again');
   await g.tick();
   assert.equal(w.log.filter((l) => l === 'helper grow').length, 2, 'nothing more to do');
 
