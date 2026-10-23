@@ -254,7 +254,8 @@ game repo's `quiet` gate never opened, workers timed with `NOGATE=1`, and one Ju
 to 15 fps busy.
 
 **What** (`machine/benchTurn.ts` `BenchTurn`, the daemon looks every 5 s). While a granted, unrevoked exclusive ticket whose
-helper lives is inside its hold bound (`machine/benchLock.ts` `timedHolder`), the daemon:
+helper lives holds the machine (`machine/benchLock.ts` `timedHolder`; past its 30-minute turn too while nobody waits,
+w1832), the daemon:
 
 - **closes every other sandbox's editor** that is up, the way an idle Live view's closes (`machine/liveIdle.ts`
   `idleCloseEditor`, w1746): it leaves play mode, saves the open scenes and the assets through the editor, then quits it.
@@ -285,7 +286,7 @@ script's peer editor or player), its session's players, an editor the pool does 
 main clone) and a player with no slot or session.
 
 **After the turn.** When the ticket goes (released, its holder killed, which ends its helper within a second or two,
-past its bound, or the next exclusive ticket granted before a look saw the lock free), every editor it closed starts
+revoked at its turn's deadline once a worker waits (w1832), or the next exclusive ticket granted before a look saw the lock free), every editor it closed starts
 again with `unity start`: it takes a shared ticket, so it comes back in the next shared turn, never beside the next
 timed leg, and the panel shows its place. The holder's own sandbox is never kept closed for its own run. The mark stays
 until the editor runs again, so a start that fails or is not made at its turn (no Unity slot, low disk) is asked for
