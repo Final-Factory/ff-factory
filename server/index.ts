@@ -51,7 +51,8 @@ import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './uni
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
-import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryRootOf, pruneMemoryTrash } from './orchestratorMemory.ts';
+import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryDirFor, memoryRootOf, pruneMemoryTrash } from './orchestratorMemory.ts';
+import { deleteLogin, serveLoginDeletes } from './loginDelete.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
 import { TokenSwitch, orchestratorOut, type RateLimitInfo } from './tokenSwitch.ts';
@@ -86,7 +87,7 @@ import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { clientAddress, originOf, tailnetOnly } from './remoteChat.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
-import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson } from '../shared/types.ts';
+import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
 import { SpendStore, buildReport } from './spend.ts';
 import { isCoordinatorRole, type SpendSummaryReply } from '../shared/spend.ts';
@@ -164,7 +165,12 @@ const loopWatch = new LoopWatch().start();
 const store = new Store(cfg.dataDir);
 // What each request costs (w859, docs/spend.md): fed by every transcript event, whether the session runs here or on a machine.
 const spend = new SpendStore(cfg.dataDir, { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: (id) => store.countResults(id), accountLabel: (i) => (i.account ? `account ${i.account}` : undefined) });
-store.onEvent = (sid, e) => spend.observe(sid, e);
+// And each person's open ask_person questions, the cards of their Waiting on input tab (w1868), once the orchestrators exist.
+let observeAsk: ((sid: string, e: TranscriptEvent) => void) | undefined;
+store.onEvent = (sid, e) => {
+  spend.observe(sid, e);
+  observeAsk?.(sid, e);
+};
 // Sessions from before w1161 learn the CLI's own total at their last result, so their next resume is not counted twice.
 if (seedSdkCost(store.sessions.values(), (id) => spend.session(id)?.lastCost)) store.save();
 // The orchestrators' memory (Claude Code writes it, so it cannot be written crash-safe): a file a crash damaged gets its
@@ -423,6 +429,7 @@ const auth = new Auth(cfg.dataDir, { trustProxy: cfg.trustProxy });
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);
+observeAsk = (sid, e) => agents.orchestrators.observeAsk(sid, e);
 // Each machine's bench queue orders tickets by their worker's request priority first (w1628): at connect and each minute.
 machines.benchPrioritiesFor = (id) => agents.benchPriorities(id);
 setInterval(() => machines.pushBenchPriorities(), 60_000).unref();
@@ -2810,6 +2817,35 @@ setInterval(() => {
   const req = parseRestartRequest(text);
   if (req === 'now') drainer.stopNow(plainStop('restart'));
   else agents.requestRestart!(req);
+}, 1000);
+
+// `fffctl user delete` (w1864, server/userCli.ts) hands a login's delete to the running portal, which holds its sessions, its
+// settings and its orchestrator in memory: data/login-delete/<id>.json in, <id>.result.json out (server/loginDelete.ts).
+setInterval(() => {
+  if (isDryRun) return;
+  try {
+    serveLoginDeletes(cfg.dataDir, (r) =>
+      deleteLogin(
+        {
+          auth,
+          settings: () => store.settings,
+          putSettings: (p) => store.putSettings(p),
+          personalOf: (u) => {
+            const h = agents.orchestrators.personalOf(u);
+            return h ? { id: h.info.id, status: h.info.status } : undefined;
+          },
+          removeSession: (id) => sessions.remove(id),
+          pushEndpoints: (u) => notifier.list(u).map((x) => x.endpoint),
+          unsubscribe: (e) => notifier.unsubscribe(e),
+          memoryRoot,
+          memoryDir: (u) => memoryDirFor(cfg, { orchestratorRole: 'personal', requestedBy: { userId: u, displayName: u } }, false),
+        },
+        r,
+      ),
+    );
+  } catch (e) {
+    console.warn('login delete:', (e as Error).message);
+  }
 }, 1000);
 
 // Local scripts that outlive a restart (scripts/republish-public.ps1) report to the orchestrator by dropping a

@@ -9,12 +9,13 @@ import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { HELD_MARK } from '../shared/conditional.ts';
-import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, QUESTION_CHARS, answerOf, askExcerpt, checkAsk, isAskTool, mediaMarkdown, questionOf, splitMedia } from '../shared/ask.ts';
+import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, QUESTION_CHARS, answerOf, askExcerpt, checkAsk, isAskTool, mediaMarkdown, questionOf, splitMedia } from '../shared/ask.ts';
 import { REPLY_MARK, replyText, splitReply } from '../shared/replies.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types.ts';
 import { useFakeVault } from './testVault.ts';
+import { z } from 'zod';
 
 // Every Claude process runs on a vault token (w1078): these tests start orchestrators.
 useFakeVault();
@@ -319,11 +320,63 @@ test('w1602: the brief tells the orchestrator a visual question carries its prev
   const env = setup(t);
   const ben = env.o.personalFor(BEN);
   const prompt = (env.agents.orchestratorOptions(ben.info) as { systemPrompt: { append: string } }).systemPrompt.append;
-  assert.match(prompt, /A visual question carries its stills and clips in the question field/);
+  assert.match(prompt, /A visual question carries its stills and clips in it as/);
 });
 
 test('w1602: a refused call is no question: its click is refused too, whatever its card shows', async (t) => {
   const env = await asked(t);
   env.store.append(env.id, { kind: 'tool_result', toolUseId: 'tu-ask', isError: true, text: 'Not shown yet: …' });
   assert.throws(() => env.o.answerWords(env.id, env.ask.seq, 0), /refused when it was asked/);
+});
+
+// ---------------------------------------------------------------- a label over the limit (w1869)
+
+const LONG_LABEL = 'Approve w5 and w6 together, then hold w7 until the belt fix from FFBox has been through a full release and the nightly passed twice';
+
+test('w1869: ask_person with a 120+ character label succeeds: the label is cut at a word, the full text is its description, and the result warns', async (t) => {
+  assert.ok(LONG_LABEL.length > 120);
+  const env = setup(t);
+  const ben = env.o.personalFor(BEN);
+  const args = { question: 'Approve w5?', options: [{ label: LONG_LABEL, description: 'Both go in.', recommended: true }, { label: 'Decline', description: '' }] };
+  const tool = env.agents.orchestratorBelt(ben.info).find((x) => x.name === ASK_TOOL)!;
+  assert.ok(z.object(tool.schema).safeParse(args).success, 'the schema lets it through to the handler');
+  const r = await env.call(ben.info, ASK_TOOL, args);
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /^Shown to Ben as 2 buttons, /);
+  assert.match(r.text, new RegExp(`WARNING: label 1 was ${LONG_LABEL.length} chars, shortened to \\d+; the full text is in its description`));
+  const ok = checkAsk(args);
+  assert.ok('ask' in ok);
+  if (!('ask' in ok)) return;
+  const [first] = ok.ask.options;
+  assert.ok(first.label.length <= LABEL_CHARS && first.label.endsWith('…'), first.label);
+  assert.ok(LONG_LABEL.startsWith(first.label.slice(0, -1)), 'cut at a word boundary');
+  assert.equal(LONG_LABEL[first.label.length - 1], ' ', 'a whole word ends it');
+  assert.equal(first.description, `${LONG_LABEL} - Both go in.`, 'the full text, then what the option said');
+  assert.equal(ok.ask.options[1].label, 'Decline');
+  const fits = checkAsk(QUESTION);
+  assert.ok('warnings' in fits && fits.warnings.length === 0, 'nothing to say about labels that fit');
+});
+
+test('w1869: a shortened label is what the buttons say and what a click sends back', async (t) => {
+  const env = setup(t);
+  const ben = env.o.personalFor(BEN);
+  const input = { question: 'Approve w5?', options: [{ label: LONG_LABEL, description: '' }, { label: 'Decline', description: '' }] };
+  const said = await env.call(ben.info, ASK_TOOL, input);
+  assert.equal(said.isError, false, said.text);
+  const ask = env.store.append(ben.info.id, { kind: 'tool_use', toolUseId: 'tu-long', name: `mcp__sandboxes__${ASK_TOOL}`, input });
+  const words = splitReply(env.o.answerWords(ben.info.id, ask.seq, 0), HELD_MARK).words;
+  assert.ok(words.length <= LABEL_CHARS && words.endsWith('…'), words);
+  assert.match(env.o.answerWords(ben.info.id, ask.seq, 1), /^Decline/);
+});
+
+test('w1869: a label with no space is cut hard; a label of exactly 90 characters is left alone; a label past 600 is still refused by the schema', async (t) => {
+  const none = checkAsk({ question: 'Q?', options: [{ label: 'x'.repeat(200), description: '' }, { label: 'B', description: '' }] });
+  assert.ok('ask' in none);
+  if ('ask' in none) assert.equal(none.ask.options[0].label, `${'x'.repeat(LABEL_CHARS - 1)}…`);
+  const exact = checkAsk({ question: 'Q?', options: [{ label: 'y'.repeat(LABEL_CHARS), description: '' }, { label: 'B', description: '' }] });
+  assert.ok('ask' in exact);
+  if ('ask' in exact) assert.deepEqual(exact.warnings, []);
+  const env = setup(t);
+  const tool = env.agents.orchestratorBelt(env.o.personalFor(BEN).info).find((x) => x.name === ASK_TOOL)!;
+  assert.equal(z.object(tool.schema).safeParse({ question: 'Q?', options: [{ label: 'z'.repeat(601), description: '' }, { label: 'B', description: '' }] }).success, false);
 });

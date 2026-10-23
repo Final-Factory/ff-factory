@@ -819,6 +819,14 @@ exception is a worker that comes back much later: it releases its sandbox (below
 `list_sandboxes` lists each computer's sandboxes by status too: an agent mid-turn first, then one between turns, then Idle, then
 none live or unused, the most recent activity first within each.
 
+**A computer that takes no timed runs** (w1861; `Machine.noTimedRuns`, add_machine `no_timed_runs "<why>"`, `""` clears
+it; `server/machines.ts` `NO_TIMED_RUNS` makes m5 one by default, with lothsahn's words: "The m5 should not be used for
+timing runs because Ben runs stuff on it personally"). Placement never sends timed or exclusive-lock work there (its
+Capacity line says "no timed runs"), and a start pinned to it for such work is refused back to the caller. Its daemon writes
+`no_timed_runs` {why, elsewhere} into `<root>/tmp/bench.queue/priorities.json` (`machine/benchLock.ts`
+`writeBenchPriorities`), and the game repo's `scripts/bench/bench_queue.py` then refuses every exclusive ticket there,
+naming the computers that take them. Builds, editors, coding and tests go there as before (shared tickets).
+
 The dispatcher picks the computer for each request itself (`start_agent` with a sandbox id; there is no automatic
 placement), so FF Factory shows it each computer's room where it decides, names the computer the next piece of work
 should go to, and says so when it places work elsewhere. New game-repo work is **spread** across the computers with
@@ -880,6 +888,24 @@ LothDesktop and Beast, not just when BEAST is full").
     included. The drain re-reads the hold every 30 seconds, delivers in order once `placement.hold` no longer names the computer,
     and never gives it up while the hold stands. A worker mid-turn there is not interrupted, and a message sent to a running turn
     (a stop-and-save request) still reaches it. Tests: `server/resumeRules.test.ts`.
+  - **A hold can let named requests through (w1863).** lothsahn, 2026-10-23: "stop all work on LothDesktop except w1785
+    until it's done". The plain hold set for it at 15:15 UTC also queued a message to w1785's own worker dec9a619
+    ("lothdesktop is on hold … nothing resumes there until the hold is lifted"), until the dispatcher swapped it for
+    `placement.avoid`. A hold's value may now be `{ "why": "…", "except": ["w1785"] }`:
+    `set_app_config placement.hold { "lothdesktop": { "why": "lothsahn: w1785 timing runs", "except": ["w1785"] } }`.
+    - A worker holding an open request the hold names resumes there (`holdReason` with the worker's open requests, from
+      `Agents.machineHold`): its check-ins, dispatches and messages go.
+    - Every other worker's message waits Blocked on the machine, as above. A plain-string hold lets nobody through, so
+      Ben's w1376 case ("dont use the m5 i need to shut it down") is unchanged.
+    - The hold's reason reads "…; except w1785" wherever it is shown (Capacity block, Queued reasons, the Blocked line).
+    - Stored split, so every reader of `placement.hold` still gets reasons: the reasons in `placement.hold`, the
+      exceptions in `placement.holdExcept` (`server/appConfig.ts` `splitHold`). Setting the hold again replaces both, and
+      `null` clears both.
+    - A machine paused from its tray app, or held for a coming build, lets nothing through (`Agents.placement()` drops the
+      exceptions for those computers).
+    - New placement on a held computer was never refused, only noted ("… is held …"), so `start_agent` for w1785 there
+      needs no exception.
+    - Tests: the w1863 cases in `server/resumeRules.test.ts` and `server/appConfig.test.ts`.
 - **A computer can be reserved for higher work** (w1643, lothsahn, 2026-10-20: "Instead of a single setting, let's make
   the setting the minimum priority work that can go to a machine. If normal (all work), if high, high and urgent, if
   urgent, urgent only"). `placement.minPriority`, set with `set_app_config` and kept across restarts, names each computer's
@@ -1041,7 +1067,7 @@ LothDesktop and Beast, not just when BEAST is full").
   - Where: the Capacity block's "Next urgent release work (a quick or urgent release, w1639; …): beast (…)", from `config
     placement.build` (unset: `beast`, then `lothdesktop`, `DEFAULT_BUILD`), the first online one with room, never passed
     over for a timed leg in its bench queue (w1639; w1628 did), else the general placement. Timed work: "Next timed work", the smallest computer
-    with room on the platform it names, BEAST last (`pickTimed`, w1628).
+    with room on the platform it names, BEAST last, never a computer that takes no timed runs (m5; `timedRank`, `pickTimed`, w1628, w1861, w1872; docs/orchestrators.md "Timed and exclusive-lock work").
   - A build declared coming holds its computer for new work at once (`Agents.placement()` adds `BuildPlans.holds()`),
     and when due moves its workers between turns elsewhere, pauses the ones that cannot move and asks the ones mid-turn
     to pause at a safe point; `build_plan start` goes at once (w1656: the paused workers' editors are stopped and the release pre-empts the bench queue, docs/orchestrators.md); `done`
@@ -1049,6 +1075,28 @@ LothDesktop and Beast, not just when BEAST is full").
     hold, so the builder and a running Live view go on. Details: [orchestrators.md](orchestrators.md), "Builds clear BEAST".
   - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators.test.ts`,
     `server/w1628Placement.test.ts`.
+- **A leg for a named computer is its own queue entry** (w1863, lothsahn, 2026-10-23: "Why did they hang if the m5 was
+  free?"). That morning the dispatcher queued three m5 timing legs (w1789, w1785, w1788) while each request's own worker
+  coded on BEAST or LothDesktop. The queue was the request's status (`queued`, `queuedFor`), and the next message to its
+  worker (`linkWorker`: `active`; `stamp` drops `queuedFor` off `queued`) wiped it: w1785's in the same minute (06:46),
+  w1789's at 07:10 (the journal's "no capacity ping" line named w1788 and w1789 at 07:10 UTC, only w1788 at 07:12). Neither
+  showed Queued or WRONG, nor counted in "Next timed work", for hours after w1788's leg finished at 09:41 (3 of 3 m5
+  sandboxes free at 15:15). Only w1788, which nobody messaged, stayed Queued; the WRONG flag caught it at 07:13.
+  - Now `decide_work queue` with `needs` on an **active** request that has a worker records a leg (`WorkItem.legs`:
+    since when, the computers, the note) and leaves the status alone. A request with no worker queues as before.
+  - A leg outlives messages to its worker, that worker's reports and its PRs merging (`afterMergeReason`: "its leg for m5
+    is queued and not started", so a merge does not close the request). It goes when a worker starts or is sent for the
+    request on a computer it names (`linkWorker`, by the session's machine), or with `decide_work queue` `drop_leg`, or
+    when the request closes (logged).
+  - Shown Queued (`shared/workState.ts` `legLive`). While a named computer has room it is `Queued [WRONG: m5 has room]`,
+    shown before every other state but mid-turn. Without room it comes after a person-wait, a bench wait or a gate, and
+    before Working between turns.
+  - `flagQueuedWithRoom` flags it after the same 10-minute grace, at most once an hour, telling the dispatcher to start a
+    worker in a FREE sandbox there. The capacity ping lists it beside Queued requests.
+  - The Capacity block names it on the computer's line ("the ledger holds a leg for it: w1789 (since 06:45Z)"). "Next
+    timed work" counts it as that computer's queued timed work (`pickTimed`) and lists every held leg, with "has ROOM:
+    start it now" where its computer has room.
+  - Tests: the two w1863 cases in `server/orchestrators.test.ts`.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
   computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it

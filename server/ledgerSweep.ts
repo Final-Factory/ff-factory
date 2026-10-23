@@ -29,6 +29,7 @@ import { afterReopen, doneOf, isOpen, settleByHand } from './work.ts';
 import {
   STALL_AFTER_MS,
   REPORT_QUIET_MS,
+  FOLLOW_UP_EVERY_MS,
   afterMergeReason,
   deployStep,
   partOfReason,
@@ -36,7 +37,15 @@ import {
   cleanupSettings,
   followUpDecision,
   cutOffOf,
+  doneCriteriaOf,
+  errorLinesOf,
   isRelease,
+  notDoneReason,
+  troubleDecision,
+  toolErrors,
+  turnEvidence,
+  turnTroubleOf,
+  type TurnTrouble,
   mergePrs,
   ownerAt,
   prUrlsIn,
@@ -49,7 +58,7 @@ import {
   type OpenedPr,
   type PrRecord,
 } from './ledgerRules.ts';
-import type { LedgerCleanupState, Requester, SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
+import type { LedgerCleanupState, Requester, SessionInfo, WorkErrorHandled, WorkItem, WorkPr } from '../shared/types.ts';
 import { holdsOf, servedBy } from '../shared/workState.ts';
 import { BLOCKER_STUCK_MS } from '../shared/blockers.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
@@ -100,10 +109,16 @@ interface Persisted {
   backfilledAt?: string;
   /** The one-time repair of stale PR states ran (w515): every PR held as open was read again, merged requests re-checked. */
   prRepairAt?: string;
+  /** The one-time check of the automatic closes before w1870 ran: which closed on an errored turn, and what happens now. */
+  errorCloseCheckAt?: string;
 }
 
-/** closed, resumed, asked and stalled are what a pass did; open: a merged request that stayed open, and why (told on the first pass only); note: a PR was closed without merging (always told, once). */
-type Kind = 'closed' | 'resumed' | 'asked' | 'stalled' | 'open' | 'note';
+/**
+ * closed, resumed, asked, stalled, escalated (w1870: an error a resume cannot fix, to a person) and replaced (w1870: a
+ * worker stopped on purpose, to the dispatcher) are what a pass did; open: a merged request that stayed open, and why
+ * (told on the first pass only); note: a PR was closed without merging (always told, once).
+ */
+type Kind = 'closed' | 'resumed' | 'asked' | 'stalled' | 'escalated' | 'replaced' | 'open' | 'note';
 interface Action {
   id: string;
   title: string;
@@ -227,12 +242,13 @@ export class LedgerSweep {
         const live = this.d.store.work.get(w.id);
         if (!live || !(isOpen(live) || live.status === 'stalled')) continue;
         if (live.approval?.state === 'pending') continue;
-        // A DONE refused while a PR was open, whose PRs are all merged or closed now (w515): it closes on that DONE.
-        if (Object.keys(doneOf(live)).length && !(live.prs ?? []).some((p) => p.state === 'open') && this.d.orchestrators.recheckDone(live.id, 'its PRs have merged or closed since')) {
+        const workers = live.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+        // A DONE refused while a PR was open, whose PRs are all merged or closed now (w515): it closes on that DONE, unless its
+        // latest worker's turn since ended in an error or was interrupted (w1870): that is handled below instead.
+        if (Object.keys(doneOf(live)).length && !(live.prs ?? []).some((p) => p.state === 'open') && !this.troubleOf(workers) && this.d.orchestrators.recheckDone(live.id, 'its PRs have merged or closed since')) {
           console.log(`ledger cleanup: closed ${live.id} on its refused DONE: its PRs have merged or closed since`);
           continue;
         }
-        const workers = live.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
         // A Waiting worker (w475: a running job, a queued message or a check-in ahead) will come back, and so will a stopped
         // one its check-in or a queued message resumes (w509): as good as busy here.
         const busy = workers.filter((s) => BUSY.has(s.status) || holdsItsPlace(s, this.now()));
@@ -251,13 +267,20 @@ export class LedgerSweep {
         try {
           if (prs && (await this.prStep(live, workers, prs, acts))) continue;
           if (!full) continue;
-          if (this.deliveredStep(live, workers, acts)) continue;
-          if (this.cutOffStep(live, workers, acts)) continue;
+          // An errored or interrupted turn acted on now ends the request's pass; one handled before still lets it be asked
+          // about or stall after its quiet day (it reaches its person), but never closes it.
+          const trouble = this.troubleStep(live, workers, acts);
+          if (trouble === 'acted') continue;
+          if (!trouble && this.deliveredStep(live, workers, acts)) continue;
           if (this.followUpStep(live, workers, acts)) continue;
           this.stallStep(live, workers, acts);
         } catch (e) {
           console.warn(`ledger cleanup: ${live.id}: ${(e as Error).message}`);
         }
+      }
+      if (!this.data.errorCloseCheckAt) {
+        this.errorCloseCheck();
+        this.data.errorCloseCheckAt = new Date(this.now()).toISOString();
       }
       if (repair && prs) {
         this.repairReport(acts);
@@ -265,7 +288,7 @@ export class LedgerSweep {
       }
       const notable = acts.filter((a) => a.kind !== 'open' || backfill || repair);
       // Each change in the server log too (w363), with whose request it is.
-      for (const a of acts) if (a.kind === 'closed' || a.kind === 'stalled' || a.kind === 'resumed' || a.kind === 'asked') console.log(`ledger cleanup: ${a.kind} ${a.id} (${a.who.map((r) => r.userId).join(', ')}): ${clip(oneLine(a.text), 200)}`);
+      for (const a of acts) if (a.kind !== 'open' && a.kind !== 'note') console.log(`ledger cleanup: ${a.kind} ${a.id} (${a.who.map((r) => r.userId).join(', ')}): ${clip(oneLine(a.text), 200)}`);
       this.tell(notable);
       if (full) {
         this.data.lastRunAt = new Date(this.now()).toISOString();
@@ -295,7 +318,7 @@ export class LedgerSweep {
         const list = mine.filter((a) => a.kind === kind);
         return list.length ? [`${label} ${list.length}: ${list.map((a) => `${a.id} "${clip(a.title, 60)}" (${a.text})`).join('; ')}`] : [];
       };
-      const text = [...part('closed', 'closed as done'), ...part('resumed', 'resumed'), ...part('asked', 'asked its worker whether it is done'), ...part('stalled', 'stalled, for you to close or reopen'), ...part('note', 'for your attention'), ...part('open', 'stayed open')].join('. ');
+      const text = [...part('closed', 'closed as done'), ...part('resumed', 'resumed'), ...part('escalated', 'escalated to you: its error needs a person'), ...part('replaced', 'stopped on purpose, the dispatcher places it again'), ...part('asked', 'asked its worker whether it is done'), ...part('stalled', 'stalled, for you to close or reopen'), ...part('note', 'for your attention'), ...part('open', 'stayed open')].join('. ');
       this.d.orchestrators.toPeople([who], `[ledger cleanup] ${text}.`);
     }
   }
@@ -510,7 +533,7 @@ export class LedgerSweep {
       const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
       const busy = workers.filter((s) => BUSY.has(s.status) || holdsItsPlace(s, this.now()));
       const reason =
-        w.question ? 'it waits on a question' : w.flag ? 'it waits on a design question' : busy.length ? `its worker ${busy.map((s) => s.id).join(', ')} is busy or waiting, so the cleanup leaves it alone` : (partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? '')) ?? 'nothing found left; the next pass closes it');
+        w.question ? 'it waits on a question' : w.flag ? (w.flag.kind === 'error' ? 'it waits on an escalated error' : 'it waits on a design question') : busy.length ? `its worker ${busy.map((s) => s.id).join(', ')} is busy or waiting, so the cleanup leaves it alone` : (partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? '')) ?? 'nothing found left; the next pass closes it');
       console.log(`ledger cleanup: PR repair: ${w.id} stays open: ${clip(oneLine(reason), 240)}`);
     }
   }
@@ -558,9 +581,26 @@ export class LedgerSweep {
     if (deployed) {
       // Its worker's own step after the deploy (w890: w889's "then I verify a live PR read and the health check") is not
       // done by the deploy: it is resumed to do it, and the request closes on its report.
+      const would = `${prMergedText(last)}; deployed since: ${deployed}`;
+      // Never on an errored or interrupted turn (w1870): resumed, placed again or escalated instead.
+      if (this.troubleStep(w, workers, acts, would)) return false;
+      // Nor on a report that is not a DONE (w1870): the deploy it waited for happened, so its worker carries on now.
       const after = postDeployStep(workers.map((s) => s.lastResult ?? ''));
       if (after && this.d.orchestrators.resumeAfterDeploy(w.id, deployed, after)) return false;
-      this.closeAsDone(w, { how: 'deploy', pr: last.number, sha: last.sha, mergedAt: last.at, text: `${prMergedText(last)}; deployed since: ${deployed}` }, acts);
+      const notDone = notDoneReason(w, workers);
+      if (notDone) {
+        // Once a day at most: a worker that answers without a DONE is not sent the same thing every pass.
+        const asked = Date.parse(w.followUp?.at ?? '') || 0;
+        const step = `check every done criterion of ${w.id}, finish what is left, and end with a line \`DONE: ${w.id}\` (or a \`${w.id}: still open:\` line saying what is left)`;
+        if (this.now() - asked >= FOLLOW_UP_EVERY_MS && this.d.orchestrators.resumeAfterDeploy(w.id, deployed, step)) {
+          const at = new Date(this.now()).toISOString();
+          this.d.orchestrators.ledgerEdit(w.id, `the ledger cleanup did not close it on the deploy (w1870): ${notDone}`, (x) => void (x.followUp = { at, sessionId: this.latest(workers)?.id ?? '' }), true);
+          acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'resumed', text: `deployed, but ${notDone}` });
+          return false;
+        }
+        return this.holdOpen(w, last, would, notDone, acts);
+      }
+      this.closeAsDone(w, { how: 'deploy', pr: last.number, sha: last.sha, mergedAt: last.at, text: would }, acts);
       return true;
     }
     if (reason) {
@@ -571,8 +611,28 @@ export class LedgerSweep {
       acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'open', text: `PR #${last.number} merged; ${reason}` });
       return false;
     }
+    // Merged PRs are not enough on their own (w1870): not on an errored or interrupted turn, nor without its worker's DONE.
+    if (this.troubleStep(w, workers, acts, prMergedText(last))) return false;
+    const notDone = notDoneReason(w, workers);
+    if (notDone) return this.holdOpen(w, last, prMergedText(last), notDone, acts);
     this.closeAsDone(w, { how: 'prs', pr: last.number, sha: last.sha, mergedAt: last.at, text: prMergedText(last) }, acts);
     return true;
+  }
+
+  /**
+   * A merged request the cleanup would have closed, kept open because its worker's last report is not a DONE (w1870),
+   * noted once per merged PR. Its worker is asked "Is it done?" after the follow-up's quiet time (followUpStep), and a
+   * report without a DONE or a still-open line is asked about a moment after its turn (server/orchestrators.ts). False:
+   * the request was not closed.
+   */
+  private holdOpen(w: WorkItem, last: WorkPr, would: string, why: string, acts: Action[]): false {
+    const key = 'held:not-done';
+    if (last.noted !== key) {
+      const prs = (w.prs ?? []).map((q) => (q.number === last.number && q.repo === last.repo ? { ...q, noted: key } : q));
+      this.d.orchestrators.ledgerEdit(w.id, `not closed by the ledger cleanup (${would}): ${why}; it closes on its worker's DONE (w1870)`, (x) => void (x.prs = prs), true);
+    }
+    acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'open', text: `${would}; not closed: ${why}` });
+    return false;
   }
 
   /**
@@ -710,25 +770,107 @@ export class LedgerSweep {
     if (reportVerdict(last.lastResult, release) !== 'delivered') return false;
     const reason = release ? undefined : afterMergeReason(w, [last.lastResult ?? '']);
     if (reason) return false;
+    // A report that reads as delivered is not a DONE (w1870): its worker is asked to say DONE, once a day, never closed on it.
+    if (notDoneReason(w, workers)) return this.askDone(w, last, 'its last report reads as delivered but has no DONE line for it', acts);
     this.closeAsDone(w, { how: 'report', text: `its worker's final report says it is delivered: "${clip(oneLine(last.lastResult ?? ''), 140)}"` }, acts);
     return true;
   }
 
-  /** A worker a limit, a restart or a refused tool stopped: resume it once, or stall the request with the reason. */
-  private cutOffStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[]): boolean {
-    // A blocked request waits on its blocker (w643), which resumes its worker when it clears: a worker a limit stopped with no
-    // token of its pool free is Blocked on that token's usage gate (w1745, server/tokenSwitch.ts), never stalled for it here.
-    if (!isOpen(w) || w.status === 'blocked' || !workers.length) return false;
+  /** The latest worker's last turn, when it ended in an error or an interrupt instead of a report (w1870), with its last error lines. */
+  private troubleOf(workers: readonly SessionInfo[]): { s: SessionInfo; t: TurnTrouble; lines: string[] } | undefined {
     const last = this.latest(workers);
-    if (!last) return false;
-    const evidence = this.d.store.readTranscript(last.id, 8).flatMap((e) => (e.kind === 'error' || e.kind === 'system' || e.kind === 'result' || e.kind === 'assistant' ? [e.text] : []));
-    const cut = cutOffOf(last, evidence);
-    if (!cut) return false;
-    const who = w.requesters;
-    const stall = (reason: string) => {
-      this.stall(w, 'cut-off', reason, acts);
-      return true;
+    if (!last || BUSY.has(last.status)) return undefined;
+    const events = this.d.store.readTranscript(last.id, 8);
+    const t = turnTroubleOf(last, turnEvidence(events), toolErrors(events));
+    return t ? { s: last, t, lines: errorLinesOf(events) } : undefined;
+  }
+
+  /**
+   * A request whose latest worker's last turn ended in an error or was interrupted (w1870, lothsahn: "Please fix the closing
+   * job so it doesn't close out jobs with errors. Those should be resumed to fix the error or escalated to an operator if
+   * the error can't be fixed"). Never closed on such a turn: an error is resumed with the error and the request's done
+   * criteria (a fresh worker through the dispatcher when the session cannot be resumed), and escalated to the request's
+   * person and an operator when that cannot fix it (troubleDecision); a usage limit waits for its reset as before (w363,
+   * w1076); an interrupt by the dispatcher or a person is no error: the dispatcher places it again. Each turn is handled
+   * once (WorkItem.errorHandled). `would`: what the cleanup would have closed it on. `acted` when it did something now,
+   * `held` when there is such a turn and nothing new to do (handled before, minutes old, waiting on a person), false when
+   * there is none: on either of the first two the caller must not close the request.
+   */
+  private troubleStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[], would?: string): 'acted' | 'held' | false {
+    const tr = this.troubleOf(workers);
+    if (!tr) return false;
+    // What waits on a person, or a request no longer open, is held but not acted on.
+    if (!isOpen(w) || w.question || w.flag) return 'held';
+    const { s, t, lines } = tr;
+    if (t.kind === 'error' && (t.cause === 'limit' || t.cause === 'restart') && !t.needs) {
+      // A blocked request waits on its blocker (w643), a usage gate included (w1745).
+      if (w.status === 'blocked') return 'held';
+      this.cutOffStep(w, s, { kind: t.cause, reason: t.reason }, acts);
+      return 'acted';
+    }
+    const prev = w.errorHandled?.[s.id];
+    const d = troubleDecision(w.status === 'blocked' ? { status: 'queued' } : w, t, prev, this.now());
+    if (d.do === 'none' || d.do === 'wait') return 'held';
+    const at = new Date(this.now()).toISOString();
+    const instead = would ? ` instead of closing it (${would})` : '';
+    const record = (how: WorkErrorHandled['how'], line: string, resumes = prev?.resumes ?? 0) =>
+      this.d.orchestrators.ledgerEdit(w.id, line, (x) => void (x.errorHandled = { ...(x.errorHandled ?? {}), [s.id]: { turnAt: t.turnAt, how, at, error: clip(t.reason, 300), resumes } }));
+    if (d.do === 'leave') {
+      record('left', `not closed by the ledger cleanup (w1870): worker ${s.id}: ${t.reason}; ${d.why}`);
+      acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'open', text: `${would ? `${would}; ` : ''}not closed: worker ${s.id}: ${t.reason}; ${d.why}` });
+      return 'acted';
+    }
+    if (d.do === 'replace') {
+      record('re-placed', `not closed by the ledger cleanup${instead}: worker ${s.id}: ${t.reason}`);
+      this.d.orchestrators.replaceStopped(w, s, `was stopped on purpose mid-turn (${t.reason})`);
+      acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'replaced', text: `worker ${s.id} was stopped on purpose mid-turn; not closed` });
+      return 'acted';
+    }
+    const tried = () => {
+      const n = prev?.resumes ?? 0;
+      return n ? `the ledger cleanup resumed worker ${s.id} ${n === 1 ? 'once' : `${n} times`} (last ${prev!.at.slice(0, 16).replace('T', ' ')} UTC, after: ${clip(prev!.error, 120)})` : 'nothing yet: a resume would not fix it';
     };
+    const escalate = (why: string, step: string): 'acted' => {
+      const to = this.d.orchestrators.escalateError(w.id, { worker: s.id, turnAt: t.turnAt, what: `${t.reason} (${why})`, lines, tried: tried(), step, ...(s.lastResult ? { report: s.lastResult } : {}) });
+      record('escalated', `the ledger cleanup escalated worker ${s.id}'s error${instead} to ${(to ?? []).map((r) => r.displayName).join(', ') || 'nobody (the request is not open)'}: ${why}`);
+      acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'escalated', text: `worker ${s.id}: ${clip(t.reason, 120)}; ${why}` });
+      return 'acted';
+    };
+    if (d.do === 'escalate') return escalate(d.why, d.step);
+    const criteria = doneCriteriaOf(w.brief);
+    const text = [
+      `[ledger cleanup] Your last turn on ${w.id} "${clip(w.title, 100)}" ended in an error, and the request is not closed: ${t.reason}.`,
+      lines.length ? `Its last error lines:\n${lines.map((l) => `- ${l}`).join('\n')}` : '',
+      criteria ? `What it is done when (from its brief):\n${criteria}` : `What is left: read_work ${w.id} for its brief and done criteria.`,
+      `Fix the error and finish the work, then end with a line \`DONE: ${w.id}\`. If the error needs a person (a login, a permission, a machine), call waiting_on_person and say what they must do.`,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    let sent = false;
+    try {
+      if (this.d.resume) {
+        this.d.resume(s.id, text);
+        sent = true;
+      }
+    } catch (e) {
+      console.warn(`ledger cleanup: ${w.id}: could not resume ${s.id}: ${(e as Error).message}`);
+    }
+    if (!sent) {
+      // The session cannot be resumed: a fresh worker, through the dispatcher, gets the error with the request.
+      record('re-placed', `not closed by the ledger cleanup${instead}: worker ${s.id}: ${t.reason}; its session cannot be resumed, so the dispatcher is told to start a fresh worker`);
+      this.d.orchestrators.replaceStopped(w, s, `ended its turn in an error (${t.reason}), and its session cannot be resumed`, true);
+      acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'replaced', text: `worker ${s.id}: ${clip(t.reason, 120)}; a fresh worker is to take it` });
+      return 'acted';
+    }
+    record('resumed', `the ledger cleanup resumed worker ${s.id}${instead} (w1870): ${t.reason}`, (prev?.resumes ?? 0) + 1);
+    acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'resumed', text: `worker ${s.id}: ${clip(t.reason, 160)}` });
+    return 'acted';
+  }
+
+  /** A worker a usage limit or a restart stopped: resume it once, or stall the request with the reason (w363, w1076). */
+  private cutOffStep(w: WorkItem, last: SessionInfo, cut: { kind: 'limit' | 'restart'; reason: string }, acts: Action[]) {
+    const who = w.requesters;
+    const stall = (reason: string) => this.stall(w, 'cut-off', reason, acts);
     // A limit of another person's account never holds this request (w1076): the worker is on another person's request too,
     // so the dispatcher gives this one a session of its own on its person's tokens instead of waiting for the reset.
     const clash = cut.kind === 'limit' ? this.d.orchestrators.accountClash(w, last.id) : undefined;
@@ -736,10 +878,9 @@ export class LedgerSweep {
     if (clash) {
       this.d.orchestrators.limitElsewhere(w, last, cut.reason, clash);
       acts.push({ id: w.id, title: w.title, who, kind: 'note', text: `its worker ${last.id} ${cut.reason}, on another person's account: it does not wait for that limit, the dispatcher gives it a session of its own (w1076)` });
-      return true;
+      return;
     }
     if (w.resumedBy?.[last.id]) return stall(`${cut.reason}; the cleanup resumed it once already (${w.resumedBy[last.id].slice(0, 10)}) and it was cut off again`);
-    if (cut.kind === 'refused') return stall(`${cut.reason}; resuming would be refused again`);
     // Its next process starts on another person's tokens than the account at its limit (a take-over, w1031): the limit is
     // not this request's to wait for, and the resume restarts it on theirs (SessionManager.accountMove, w1076).
     const next = this.d.orchestrators.sessionPersonOf(last.id) ?? last.requestedBy?.userId;
@@ -753,7 +894,49 @@ export class LedgerSweep {
     this.d.orchestrators.ledgerEdit(w.id, `ledger cleanup resumed worker ${last.id} once: ${cut.reason}`, (x) => void (x.resumedBy = { ...(x.resumedBy ?? {}), [last.id]: at }));
     this.d.resume(last.id, `[ledger cleanup] Your last turn on ${w.id} "${clip(w.title, 100)}" was cut off (${cut.reason}) and nobody resumed you. Carry on where you stopped. If the work is already done, say so in one line and stop.`);
     acts.push({ id: w.id, title: w.title, who, kind: 'resumed', text: `worker ${last.id}: ${cut.reason}` });
+  }
+
+  /** Ask a worker whose report reads as finished to say DONE (w1870), at most once a day; true when it asked. */
+  private askDone(w: WorkItem, last: SessionInfo, why: string, acts: Action[]): boolean {
+    const asked = Date.parse(w.followUp?.at ?? '') || 0;
+    if (!this.d.resume || this.now() - asked < FOLLOW_UP_EVERY_MS) return false;
+    const at = new Date(this.now()).toISOString();
+    this.d.orchestrators.ledgerEdit(w.id, `ledger cleanup asked worker ${last.id} whether it is done, instead of closing it (w1870): ${why}`, (x) => void (x.followUp = { at, sessionId: last.id }));
+    this.d.resume(
+      last.id,
+      `[ledger cleanup] Is ${w.id} "${clip(w.title, 100)}" done? Your last report on it reads as finished but has no \`DONE: ${w.id}\` line, and the ledger closes a request only on its worker's DONE. If every step is finished, reply with a line \`DONE: ${w.id}\` (and its \`Learned:\` line). Otherwise say in one line what is left. If you are on other work now, answer this in one line and carry on with it.`,
+    );
+    acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'asked', text: `worker ${last.id}: ${why}` });
     return true;
+  }
+
+  /**
+   * The one-time check after w1870 shipped, in the server log: each request an automatic close closed in the last 24 hours
+   * whose latest worker's last turn ended in an error or an interrupt, or whose last report is not a DONE, and what the
+   * cleanup does with it now. It changes nothing.
+   */
+  private errorCloseCheck() {
+    const since = this.now() - 24 * 3_600_000;
+    const closedAt = (w: WorkItem) => {
+      if (w.autoClosed?.at) return Date.parse(w.autoClosed.at) || 0;
+      // Reopened since (w1829): the log line, dated by the request's own updates around it.
+      return w.log.some((l) => /^\d\d:\d\d closed automatically by the ledger cleanup/.test(l)) ? Date.parse(w.updatedAt) || 0 : 0;
+    };
+    const list = [...this.d.store.work.values()].filter((w) => closedAt(w) >= since);
+    console.log(`ledger cleanup: w1870 check: ${list.length} request(s) closed automatically in the last 24 h`);
+    for (const w of list) {
+      const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+      const tr = this.troubleOf(workers);
+      const notDone = notDoneReason(w, workers);
+      let now: string;
+      if (tr) {
+        const d = troubleDecision(w.status === 'blocked' || w.status === 'done' ? { status: w.status === 'done' ? 'active' : 'queued' } : w, tr.t, undefined, this.now());
+        const what = tr.t.kind === 'error' && (tr.t.cause === 'limit' || tr.t.cause === 'restart') && !tr.t.needs ? 'resume it once when the limit has reset (else stall it, as before)' : d.do === 'resume' ? 'resume the worker with the error and the done criteria' : d.do === 'replace' ? 'tell the dispatcher to place it again (an interrupt, not an error)' : d.do === 'leave' ? `leave it to the dispatcher (${d.why})` : d.do === 'escalate' ? `escalate it to its person and an operator (${d.why})` : `wait (${d.do === 'wait' ? d.why : 'already handled'})`;
+        now = `its worker ${tr.s.id}'s last turn: ${tr.t.reason}; now: not closed; it would ${what}`;
+      } else if (notDone) now = `${notDone}; now: not closed; its worker is asked for its DONE`;
+      else now = "its worker's last report is a DONE (or no worker worked on it); now: closes as before";
+      console.log(`ledger cleanup: w1870 check: ${w.id} (${w.status}, ${w.requesters.map((r) => r.userId).join(', ')}) closed automatically ${new Date(closedAt(w)).toISOString().slice(0, 16)}Z: ${clip(oneLine(now), 400)}`);
+    }
   }
 
   private stall(w: WorkItem, kind: 'idle' | 'cut-off' | 'superseded' | 'unsure' | 'blocked', reason: string, acts: Action[], by?: string) {
@@ -776,7 +959,7 @@ export class LedgerSweep {
     if (!isOpen(w) || w.question || w.flag || w.status === 'blocked') return false;
     const prs = w.prs ?? [];
     if (!prs.some((p) => p.state === 'merged') || prs.some((p) => p.state === 'open')) return false;
-    const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
+    const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? '')) ?? notDoneReason(w, workers);
     if (!reason) return false;
     const all = [...this.d.store.work.values()];
     const d = followUpDecision(w, workers, reason, this.now(), (s) => servedBy(s.id, all).has(w.id), !!this.d.resume);
@@ -872,7 +1055,7 @@ export function handledAfterAutoClose(log: readonly string[]): boolean {
 
 export function summaryOf(acts: readonly { kind: Kind }[]): string {
   const n = (k: Kind) => acts.filter((a) => a.kind === k).length;
-  const parts = [n('closed') && `closed ${n('closed')}`, n('resumed') && `resumed ${n('resumed')}`, n('asked') && `asked ${n('asked')} whether done`, n('stalled') && `stalled ${n('stalled')}`, n('open') && `${n('open')} left open with a reason`].filter(Boolean);
+  const parts = [n('closed') && `closed ${n('closed')}`, n('resumed') && `resumed ${n('resumed')}`, n('escalated') && `escalated ${n('escalated')}`, n('replaced') && `${n('replaced')} sent to be placed again`, n('asked') && `asked ${n('asked')} whether done`, n('stalled') && `stalled ${n('stalled')}`, n('open') && `${n('open')} left open with a reason`].filter(Boolean);
   return parts.length ? parts.join(', ') : 'nothing to do';
 }
 

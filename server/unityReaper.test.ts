@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REAP, UnityReaper, inspectProcs, logFileOf, ownerOf, parsePsClock, verdict, type Judged, type ProcFacts, type ReaperDeps } from '../machine/unityReaper.ts';
+import { REAP, UnityReaper, inspectProcs, isSlotWrapper, logFileOf, ownerOf, parsePsClock, verdict, type Judged, type ProcFacts, type ReaperDeps } from '../machine/unityReaper.ts';
 import type { Proc, UnityPlatform } from '../machine/unity.ts';
 
 /**
@@ -353,4 +353,146 @@ test('w791: inspectProcs reads the real machine (this process: a start time in t
   assert.equal(f.pid, process.pid);
   assert.ok(f.startedAt && f.startedAt < Date.now() && f.startedAt > Date.now() - 24 * HOUR, `startedAt ${f.startedAt}`);
   assert.ok(f.cpuMs !== undefined && f.cpuMs >= 0);
+});
+
+// ---------------------------------------------------------------- w1874: the biscuit case
+
+const BISCUIT = '/home/u/ffw/sandboxes/slot1';
+const BLOG = '/home/u/ffw/tmp/ffa-cc1272a4/builds/A-dev.log';
+const NODE = '/home/u/.local/node/bin/node';
+const LUNITY = '/home/u/Unity/Hub/Editor/6000.3.19f1/Editor/Unity';
+
+/**
+ * biscuit, 2026-10-23: worker cc1272a4's build script ran `unity-slot run` from a background shell; the worker ended the
+ * shell, and the wrapper (node, pid 2460427) lived on under the user's systemd (pid 9212) with its batch Unity (pid
+ * 2460462), hung in a futex wait, its log silent since "Unloading 192 Unused Serialized files". Its tree used 50-80 ms of
+ * CPU a minute, with a burst of 2 s or more once. clear_batch kept it: "its parent node (pid 2460427) is alive".
+ */
+function biscuit(runs: { pid: number; session?: string }[] = []) {
+  const m = machine(
+    'linux',
+    [
+      { pid: 9212, ppid: 1, cmd: '/usr/lib/systemd/systemd --user --deserialize=22' },
+      { pid: 2460427, ppid: 9212, cmd: `${NODE} /home/u/ffw/app/machine/unitySlots.ts run --label w1789 bench build A-dev -- ${LUNITY} -batchmode -quit -projectPath ${BISCUIT}` },
+      { pid: 2460456, ppid: 2460427, cmd: `python3 ${BISCUIT}/scripts/bench/bench_queue.py --lock /home/u/ffw/tmp/bench.lock hold --mode shared --what unity: w1789 bench build A-dev --own` },
+      { pid: 2460462, ppid: 2460427, cmd: `${LUNITY} -batchmode -quit -projectPath ${BISCUIT} -buildTarget Linux64 -executeMethod Editor.ShaderBenchBuild.BuildLinux -logFile ${BLOG}` },
+      { pid: 2460769, ppid: 2460462, cmd: 'Unity.ILPP.Runner /tmp/ilpp.sock-222c6d51addfd74cf130e74be93e941e' },
+    ],
+    [
+      { id: 'slot1', path: BISCUIT },
+      { id: 'slot2', path: '/home/u/ffw/sandboxes/slot2' },
+    ],
+  );
+  const { st } = m;
+  st.born.set(9212, st.now - 100 * HOUR);
+  for (const p of [2460427, 2460456, 2460462, 2460769]) st.born.set(p, st.now - 22 * MIN);
+  st.cpu.set(2460462, 37_700);
+  st.mtimes.set(BLOG, st.now - 21 * MIN);
+  st.files.add(`${BISCUIT}/Temp/UnityLockfile`);
+  return { ...m, reaper: new UnityReaper({ ...m.deps, runs: () => runs }) };
+}
+
+/** The same build, its wrapper's caller (the build script) alive. */
+function biscuitAlive(runs: { pid: number; session?: string }[]) {
+  const m = biscuit(runs);
+  m.st.procs = m.st.procs.map((p) => (p.pid === 2460427 ? { ...p, ppid: 500 } : p)).concat({ pid: 500, ppid: 1, cmd: '/bin/bash build4.sh' });
+  m.st.born.set(500, m.st.now - HOUR);
+  return m;
+}
+
+test('w1874: a build under a unity-slot wrapper whose caller is gone is an orphan; idle CPU and a 2.5 s burst are not progress; it is ended with the wrapper', async () => {
+  const m = biscuit();
+  const { st } = m;
+  const first = await m.reaper.look();
+  assert.equal(first[0].killed, false);
+  assert.match(first[0].line, /its unity-slot wrapper \(pid 2460427\) is left with nobody: the wrapper's parent is systemd \(pid 9212\)/);
+  for (let i = 1; i <= 9; i++) {
+    st.now += MIN;
+    st.cpu.set(2460462, st.cpu.get(2460462)! + (i === 4 ? 2_500 : 70)); // 70 ms a minute, one 2.5 s burst
+    const r = await m.reaper.look();
+    assert.equal(r[0].killed, false, `minute ${i}: ${r[0].line}`);
+  }
+  st.now += MIN;
+  const r = await m.reaper.look();
+  assert.equal(r[0].killed, true, r[0].line);
+  assert.match(r[0].line, /orphaned: its unity-slot wrapper/);
+  assert.deepEqual(st.killed, [2460769, 2460462, 2460427], 'the build and its ILPP runner, then the wrapper left with nobody');
+  assert.match(r[0].line, /ended its unity-slot wrapper \(pid 2460427\), left with nobody/);
+  assert.equal(st.files.has(`${BISCUIT}/Temp/UnityLockfile`), false, 'the Library is unlocked');
+});
+
+test("w1874: the worker that owns a stalled build ends it at once, without the hour; another worker's ask keeps today's rules", async () => {
+  // The run recorded its session: only that session owns it, even from the same sandbox.
+  const other = biscuit([{ pid: 2460427, session: 'cc1272a4' }]);
+  assert.match(await other.reaper.check({ session: '4d46f2a4', sandbox: 'slot1' }), /No batch build is stuck/);
+  assert.deepEqual(other.st.killed, []);
+
+  const owner = biscuit([{ pid: 2460427, session: 'cc1272a4' }]);
+  const text = await owner.reaper.check({ session: 'cc1272a4', sandbox: 'slot1' });
+  assert.match(text, /Ended 1 stuck batch build/);
+  assert.match(text, /stalled, and yours: its log has not grown for 21 min/);
+  assert.deepEqual(owner.st.killed, [2460769, 2460462, 2460427]);
+
+  // A wrapper from before w1874 recorded no session: a worker of the build's sandbox owns it, one of another does not.
+  const old = biscuit([{ pid: 2460427 }]);
+  assert.match(await old.reaper.check({ session: 'zz', sandbox: 'slot2' }), /No batch build is stuck/);
+  assert.match(await old.reaper.check({ session: 'cc1272a4', sandbox: 'slot1' }), /Ended 1 stuck batch build/);
+});
+
+test('w1874: an owned build with a silent log but a busy tree (a Burst step) is kept until 20 min of silence; an idle one goes at 10 min', async () => {
+  const busy = biscuitAlive([{ pid: 2460427, session: 'w' }]);
+  busy.st.mtimes.set(BLOG, busy.st.now);
+  const ask = () => busy.reaper.check({ session: 'w', sandbox: 'slot1' });
+  for (let i = 0; i < 20; i++) {
+    busy.st.cpu.set(2460769, (busy.st.cpu.get(2460769) ?? 0) + 60_000); // a core busy
+    const t = await ask();
+    assert.match(t, /No batch build is stuck/, `minute ${i}: ${t}`);
+    busy.st.now += MIN;
+  }
+  busy.st.cpu.set(2460769, (busy.st.cpu.get(2460769) ?? 0) + 60_000);
+  assert.match(await ask(), /stalled, and yours: its log has not grown for 20 min/);
+
+  const idle = biscuitAlive([{ pid: 2460427, session: 'w' }]);
+  idle.st.mtimes.set(BLOG, idle.st.now - 2 * MIN);
+  const ask2 = () => idle.reaper.check({ session: 'w', sandbox: 'slot1' });
+  for (let i = 0; i < 10; i++) {
+    assert.match(await ask2(), /No batch build is stuck/, `minute ${i}`);
+    idle.st.now += MIN;
+  }
+  const t = await ask2();
+  assert.match(t, /stalled, and yours: running \d+ min, no log or CPU progress for 10 min/);
+  assert.deepEqual(idle.st.killed, [2460769, 2460462], 'the wrapper, whose caller is alive, ends by itself and tells it');
+  assert.match(t, /its unity-slot wrapper \(pid 2460427\) tells its caller/);
+});
+
+test('w1874: verdict: the owner limits; ownerOf looks through a unity-slot wrapper; isSlotWrapper', () => {
+  const base: Judged = { ageMs: 15 * MIN, owner: { gone: false, why: 'x' }, orphanLooks: 0, stalledMs: 0, logStalledMs: 0, owned: true };
+  const v = (o: Partial<Judged>) => verdict({ ...base, ...o });
+  assert.equal(v({ logStalledMs: 19 * MIN, stalledMs: 9 * MIN }).kill, false);
+  assert.equal(v({ logStalledMs: 20 * MIN }).kill, true);
+  assert.equal(v({ logStalledMs: 12 * MIN, stalledMs: 10 * MIN }).kill, true);
+  assert.equal(v({ logStalledMs: 25 * MIN, stalledMs: 25 * MIN, owned: false }).kill, false, "not the asker's: the hour rule");
+  assert.match(v({ logStalledMs: 5 * MIN }).why, /as it is yours it is ended once its log is silent for 20 min/);
+
+  const procs: Proc[] = [
+    { pid: 9212, ppid: 1, cmd: '/usr/lib/systemd/systemd --user' },
+    { pid: 600, ppid: 1, cmd: '/bin/bash build.sh' },
+    { pid: 700, ppid: 600, cmd: `${NODE} /x/machine/unitySlots.ts run --label a -- Unity -batchmode` },
+    { pid: 701, ppid: 9212, cmd: `${NODE} /x/machine/unitySlots.ts run --label a -- Unity -batchmode` },
+    { pid: 702, ppid: 9212, cmd: 'python3 scripts/unity_slot.py run --label b -- Unity -batchmode' },
+  ];
+  assert.equal(ownerOf({ pid: 20, ppid: 700 }, procs, new Map(), 'linux').gone, false);
+  assert.match(ownerOf({ pid: 20, ppid: 700 }, procs, new Map(), 'linux').why, /wrapper \(pid 700\) is there, and the wrapper's parent bash/);
+  assert.equal(ownerOf({ pid: 20, ppid: 701 }, procs, new Map(), 'linux').gone, true);
+  assert.equal(ownerOf({ pid: 20, ppid: 702 }, procs, new Map(), 'linux').gone, true);
+  assert.equal(isSlotWrapper('"C:\\node\\node.exe" "D:\\ffw\\app\\machine\\unitySlots.ts" run -- Unity.exe'), true);
+  assert.equal(isSlotWrapper('/bin/sh /home/u/.local/bin/unity-slot run --label x -- Unity'), true);
+  assert.equal(isSlotWrapper('/bin/bash scripts/build_player.sh'), false);
+  assert.equal(isSlotWrapper(`${NODE} /x/machine/unitySlots.ts status`), false);
+});
+
+test('w1874: an owned build that writes no log file (stdout) is never ended for a silent log alone, only with an idle tree', () => {
+  const base: Judged = { ageMs: 40 * MIN, owner: { gone: false, why: 'x' }, orphanLooks: 0, stalledMs: 1 * MIN, logStalledMs: 40 * MIN, owned: true, logKnown: false };
+  assert.equal(verdict(base).kill, false, 'busy, its log unknown: kept');
+  assert.equal(verdict({ ...base, stalledMs: 10 * MIN }).kill, true, 'idle for 10 min: ended');
 });

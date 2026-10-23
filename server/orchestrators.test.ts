@@ -27,6 +27,8 @@ import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, ty
 import { LIVE_HOLD_MS } from './placeAgain.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
+import { afterMergeReason } from './ledgerRules.ts';
+import { timedLine, type Computer } from './placement.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
 import { buildOptions } from './launch.ts';
 
@@ -2144,9 +2146,13 @@ test('w643: decide_work block records a structured blocker; the request reads Bl
 
   const watch = new BlockerWatch({ store, orchestrators: o });
   assert.equal((await watch.tick()).size, 0, 'w1 has not reported: still blocked');
-  // w1's worker reports (a turn ends after the block): w2 unblocks, back to the dispatcher, which is told to start it.
-  store.putSession({ id: 'k1', kind: 'worker', title: 'w1: timing table', status: 'idle', permissionMode: 'default', createdAt: T0, lastActivityAt: new Date(Date.now() + 1000).toISOString(), turns: 2, costUsd: 1, pendingPermissions: [], lastResult: 'Timing table in specs/633/timing.md.' });
+  // w1869: a progress report from w1's worker ("still open") leaves w2 blocked.
+  store.putSession({ id: 'k1', kind: 'worker', title: 'w1: timing table', status: 'idle', permissionMode: 'default', createdAt: T0, lastActivityAt: new Date(Date.now() + 1000).toISOString(), turns: 2, costUsd: 1, pendingPermissions: [], lastResult: 'Started the lab runs.\n\nw1: still open: the LothDesktop A/B is running, then the timing table' });
   store.work.get('w1')!.sessionIds = ['k1'];
+  assert.equal((await watch.tick()).size, 0, 'a progress report does not unblock it');
+  assert.equal(store.work.get('w2')!.status, 'blocked');
+  // w1's worker reports the table (a turn ends after the block): w2 unblocks, back to the dispatcher, which is told to start it.
+  store.putSession({ ...store.sessions.get('k1')!, lastActivityAt: new Date(Date.now() + 2000).toISOString(), lastResult: 'Timing table in specs/633/timing.md.' });
   const did = await watch.tick();
   assert.match(did.get('w2')!, /^clear: w1's worker reported/);
   assert.equal(store.work.get('w2')!.status, 'new');
@@ -2155,6 +2161,37 @@ test('w643: decide_work block records a structured blocker; the request reads Bl
   const told = heard(dispatcher().info.id, '[ledger] w2').map((e) => e.text).join('\n');
   assert.match(told, /\[ledger\] w2 "Speed up the nightly lab" \(Lothsahn, normal\) is unblocked: it waited on w1 reporting \(w1's timing table\), and w1's worker reported.*Start it now: start_agent with work_id "w2"/);
   await until("Lothsahn's orchestrator hears it unblocked", () => heard(chat(LOTH).info.id, '[dispatch] w2').some((e) => /unblocked: it waited on w1 reporting/.test(e.text)));
+});
+
+test("w1869: a request blocked on another's report: that request's worker is told what it waits for and how to mark it; its progress report leaves it blocked, the marked line unblocks it", async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', by: BEN }, { id: 'w2', by: BEN }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Time A vs A', title: 'w1: timing', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'It needs the timing.', blocker: { kind: 'request', ref: 'w1', on: 'report', what: "dec9a619's LothDesktop timing of A vs A" } });
+  assert.equal(r.isError, false, r.text);
+  const notice = () => store.readTranscript(id).filter((e) => e.kind === 'user' && /For w2: <the result, or where it is>/.test((e as { text: string }).text));
+  await until("w1's worker is told", () => notice().length === 1);
+  assert.match((notice()[0] as { text: string }).text, /w2 \("Request w2"\) is blocked until a report of yours on w1 carries: dec9a619's LothDesktop timing of A vs A\./);
+  assert.match(store.work.get('w1')!.log.join('\n'), new RegExp(`w2 waits on its report \\(dec9a619's LothDesktop timing of A vs A\\): told ${id}`));
+  await until('that turn ends', () => info.status === 'idle');
+  // The same gate again (the dispatcher re-blocks): not told twice.
+  await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'Still.', blocker: { kind: 'request', ref: 'w1', on: 'report', what: "dec9a619's LothDesktop timing of A vs A" } });
+  await new Promise((res) => setTimeout(res, 200));
+  assert.equal(notice().length, 1);
+
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  const report = (text: string, ms: number) => store.putSession({ ...store.sessions.get(id)!, status: 'idle', lastActivityAt: new Date(Date.now() + ms).toISOString(), lastResult: text });
+  report('B is building.\n\nw1: still open: the LothDesktop A/B is running…', 1000);
+  assert.equal((await watch.tick()).size, 0, 'a still-open progress report does not unblock w2');
+  assert.equal(store.work.get('w2')!.status, 'blocked');
+  report('A vs A on LothDesktop: 41.2 ms and 41.0 ms per frame.\n\nFor w2: the timing is in specs/w1/timing.md (A 41.2 ms, A 41.0 ms)\n\nw1: still open: the transform-walk PR', 2000);
+  assert.match((await watch.tick()).get('w2') ?? '', /^clear: w1's worker reported \(dec9a619's LothDesktop timing of A vs A\)/);
+  assert.notEqual(store.work.get('w2')!.status, 'blocked');
 });
 
 /** The computers with room, as the dispatcher's tools see them (Agents.roomNow, read by Orchestrators' `room`). */
@@ -2469,6 +2506,112 @@ test('w1812: one question from one worker on two requests is ONE [needs you]; th
   // The brief says it: look in the request's log and its worker's other requests before asking.
   const brief = (agents as unknown as { personalBrief(r: Requester): string }).personalBrief(BEN);
   assert.match(brief, /\*\*Never re-ask an answered question\*\* \(w1812\): first read the notes of the request and of its worker's other requests/);
+});
+
+// ---------------------------------------------------------------- w1868: each question its own card and its own answer
+
+/** w1821 as on 2026-10-23: one worker asked two questions (the frame look, the Station strip) on one request. */
+const FRAME_Q = { question: 'How solid should a window frame be where windows stack?', options: [{ label: 'Keep frames see-through over space, solid only over a window', recommended: true }, { label: 'Make every frame fully solid' }] };
+const STRIP_Q = { question: 'When a window covers the Station strip, what should come up over it?', options: [{ label: 'The whole strip comes up over the window', recommended: true }, { label: 'Only the Hide button comes up over the window' }] };
+const wakeOf = (agents: Agents, id: string) => (agents as unknown as { waker: { pending(id: string): { note: string } | undefined } }).waker.pending(id);
+
+test('w1868: two questions on one request, the first answered: the second can still be asked, its card stays, and the worker resumes once both are answered', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, sessions, agents, dispatcher, chat, call, heard } = env;
+  const loth = chat(LOTH).info;
+  await call(loth, 'request_work', { title: 'Stacked windows show the back text', brief: 'Fix the see-through frames and the covered Hide button.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: frames', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const h = env.machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  const declared = await h.waiting_on_person!({ who: 'Lothsahn', what: 'Pick the frame look and what comes up over the strip', questions: [FRAME_Q, STRIP_Q], about: 'Stacked game windows let the back window’s text show through.', after: 'I build the picked look and bring you its clips.' });
+  assert.match(String(declared), /with 2 questions as buttons/);
+  assert.equal(info.waitingOn?.about, 'Stacked game windows let the back window’s text show through.');
+  sessions.events.emit('turnEnd', sessions.get(id), 'Stills published.\n\nw1: still open: waiting on Lothsahn to pick the frame look and the strip');
+  await until('Lothsahn hears it', () => heard(loth.id, '[needs you]').length >= 1);
+  const msg = heard(loth.id, '[needs you]')[0].text;
+  assert.match(msg, /What it is: Stacked game windows let the back window’s text show through\./);
+  assert.match(msg, /After the answer: I build the picked look and bring you its clips\./);
+  assert.equal(store.work.get('w1')!.needsYou!.about, 'Stacked game windows let the back window’s text show through.');
+
+  // He answers the frame look: that question is answered, the strip question still waits on the card, the worker is not woken.
+  await until('that turn ends', () => chat(LOTH).info.status === 'idle');
+  chat(LOTH).lastFrom = 'human';
+  const first = await call(loth, 'update_work', { id: 'w1', note: 'Frame look, verbatim: "Keep frames see-through over space, solid only over a window".' });
+  assert.match(first.text, /answers question 1 of the 2 in its \[needs you\] \(w1868\); question 2 still waits on the card/);
+  const r = store.work.get('w1')!.needsYou!;
+  assert.deepEqual(r.answeredAsks, [0]);
+  assert.equal(r.answered, undefined);
+  assert.equal(agents.workLive().get('w1')?.state, 'waiting', 'it still waits on input');
+  assert.equal(wakeOf(agents, id), undefined, 'the worker waits for both');
+
+  // The strip question goes through (it was refused twice on 2026-10-23); the frame one again is refused, with his words.
+  const strip = await call(loth, 'ask_person', STRIP_Q);
+  assert.equal(strip.isError, false, strip.text);
+  const frame = await call(loth, 'ask_person', FRAME_Q);
+  assert.equal(frame.isError, true);
+  assert.match(frame.text, /Not asked: Lothsahn already answered this question on w1 .*in their words: "Frame look, verbatim/);
+
+  // The strip answer: both answered, and the worker resumes with both answers.
+  chat(LOTH).lastFrom = 'human';
+  const second = await call(loth, 'update_work', { id: 'w1', note: 'Station strip: "The whole strip comes up over the window".' });
+  assert.match(second.text, /answers the \[needs you\] question/);
+  assert.ok(store.work.get('w1')!.needsYou!.answered);
+  assert.match(wakeOf(agents, id)!.note, /Frame look, verbatim[\s\S]*Station strip: "The whole strip comes up over the window"/);
+  // Nothing of this test fires after it ends.
+  agents.cancelWake(id);
+});
+
+test('w1868: every ask_person question is an open card until it is answered, asked again, closed or refused', async (t) => {
+  const env = setup(t);
+  const { store, o, chat, call } = env;
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const loth = chat(LOTH);
+  const asked = (input: Record<string, unknown>, toolUseId: string, isError = false) => {
+    const ev = store.append(loth.info.id, { kind: 'tool_use', toolUseId, name: 'mcp__sandboxes__ask_person', input });
+    store.append(loth.info.id, { kind: 'tool_result', toolUseId, isError, text: isError ? 'refused' : 'Shown' });
+    return ev.seq;
+  };
+  const q = (n: number, request: string) => ({ question: `Question ${n} about ${request}: should it go ahead now?`, options: [{ label: `Go ahead with ${request} (${n})`, description: '', recommended: true }, { label: `Hold ${request} (${n})`, description: '' }], request });
+  const seqs = [asked(q(1, 'w11'), 'a1'), asked(q(2, 'w12'), 'a2'), asked(q(3, 'w13'), 'a3'), asked(q(4, 'w14'), 'a4'), asked(q(5, 'w14'), 'a5')];
+  const open = () => (o.personalOf('lothsahn')!.info.openAsks ?? []).map((a) => a.seq);
+  assert.deepEqual(open(), seqs, 'five questions, five cards, two of them about w14');
+  assert.equal(o.personalOf('lothsahn')!.info.openAsks![0].request, 'w11');
+  // A refused call was never shown: no card.
+  asked(q(6, 'w15'), 'a6', true);
+  assert.equal(open().length, 5);
+  // Asked again: one card, the newer.
+  const again = asked(q(2, 'w12'), 'a7');
+  assert.deepEqual(open(), [seqs[0], seqs[2], seqs[3], seqs[4], again]);
+  // A click (the person's reply quoting it) answers it: the card goes.
+  const words = o.answerWords(loth.info.id, seqs[0], 0);
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: words, requestedBy: LOTH });
+  assert.deepEqual(open(), [seqs[2], seqs[3], seqs[4], again]);
+  // The orchestrator closes one that events overtook.
+  const closed = await call(loth.info, 'close_question', { seq: seqs[2], why: 'w13 was cancelled' });
+  assert.equal(closed.isError, false, closed.text);
+  assert.deepEqual(open(), [seqs[3], seqs[4], again]);
+  const listed = await call(loth.info, 'close_question', { why: 'list' });
+  assert.match(listed.text, new RegExp(`${seqs[3]}: Question 4 about w14`));
+});
+
+test('w1868: waiting_on_person refuses a still on the worker’s own machine; the brief asks every question with ask_person', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, dispatcher, chat, call, agents } = env;
+  await call(chat(LOTH).info, 'request_work', { title: 'A look', brief: 'Pick a look.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: look', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const h = env.machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  await assert.rejects(
+    async () => h.waiting_on_person!({ who: 'Lothsahn', what: 'Pick a look', about: 'A look.', after: 'I build it.', questions: [{ question: 'Which look? ![A](<F:/ffw/tmp/ffa-1/a.png>)', options: [{ label: 'The first look, A', recommended: true }, { label: 'The second look, B' }] }] }),
+    /is on your machine, where the card cannot show it .*Publish it with publish_review/,
+  );
+  assert.equal(info.waitingOn, undefined, 'nothing recorded');
+  const brief = (agents as unknown as { personalBrief(r: Requester): string }).personalBrief(LOTH);
+  assert.match(brief, /Ask every question to Lothsahn with ask_person, never in text only \(w1868: each is a Waiting-tab card/);
 });
 
 test('w1812: no [needs you] when the answer is already logged after the question was raised, on its request or on another its worker holds; a new question still goes', async (t) => {
@@ -4510,7 +4653,81 @@ test('w1841: a worker on a real portal: a reporter wait is Waiting with no [need
   // (e) w1818: files another request's worker makes: blocked_on reports is a request gate that clears at that worker's report.
   const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
   assert.match(String(await h.blocked_on!({ reports: ['w1'], what: "w1's Calculations window stills" })), /^Recorded: w2 is Blocked on w1/);
+  // w1869: w1's workers are told what w2 waits for and how to mark the report that carries it (w1 has none here).
+  assert.doesNotMatch(String(store.work.get('w1')!.log.join('\n')), /w2 waits on its report/);
   const g = store.work.get('w2')!.blocked!;
   assert.deepEqual([g.kind, g.ref, g.on], ['request', 'w1', 'report']);
   assert.match(await live(), /Blocked on w1/);
+});
+
+test('w1863: w1789 as it happened: a leg queued for a full m5 beside the request’s own worker on another computer outlives a message to that worker, its report and its PRs merging; it shows Queued, counts in Next timed work, is flagged WRONG when m5 frees, and goes when a worker starts for it there', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, sessions, dispatcher, call, heard } = env;
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1', title: 'Cut UI main-thread cost on the Just Play save' }]);
+  // Its own worker (d80ca173 on BEAST, here on pc) codes on; m5 is full.
+  const a = await startedFor(env, 'w1');
+  assert.equal(store.work.get('w1')!.status, 'active');
+  agentsRoomFacts(agents, {});
+  const q = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'The m5 leg for the timed before/after runs is queued: m5 is full', needs: ['m5'] });
+  assert.equal(q.isError, false, q.text);
+  assert.match(q.text, /^w1 active: a leg queued for capacity on m5 \(its worker carries on/);
+  const w = () => store.work.get('w1')!;
+  assert.equal(w().status, 'active', 'its own worker still has it');
+  assert.deepEqual(w().legs?.map((l) => l.needs), [['m5']]);
+  const list = async () => (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
+  assert.match(await list(), /Queued \(its leg \(since \d\d:\d\d UTC; its own worker elsewhere\) queued for capacity on m5: no computer that could take it has room\)/);
+
+  // 07:10: the dispatcher passes lothsahn's answer to its worker. That made it active and dropped the queue before w1863.
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: a.id, text: 'lothsahn: "Yes, fix it"', work_id: 'w1' });
+  assert.equal(sent.isError, false, sent.text);
+  await until('the turn', () => a.info.status === 'idle');
+  // Its worker reports, and its PRs merge: the leg is work left, so the merge does not close it.
+  sessions.events.emit('turnEnd', sessions.get(a.id), 'PR merged.\n\nw1: still open: waiting for a sandbox on m5 for the timed runs');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(w().legs?.map((l) => l.needs), [['m5']], 'the leg outlived the message and the report');
+  assert.match(afterMergeReason(w(), ['Done.']) ?? '', /^its leg for m5 is queued and not started/);
+  assert.match(await list(), /Queued \(its leg/);
+
+  // Next timed work names it, and counts it as m5's queued timed work.
+  const m5: Computer = { id: 'm5', online: true, live: 0, midTurn: 0, maxAgents: 3, sandboxes: 3, maxSandboxes: 3, freeSandboxes: 3, editors: 0, maxEditors: 2, platform: 'darwin', legs: [{ id: 'w1', since: w().legs![0].at }] };
+  const big: Computer = { ...m5, id: 'beast', live: 4, sandboxes: 6, maxSandboxes: 6, freeSandboxes: 2, platform: 'win32', legs: undefined };
+  const timed = timedLine([m5, big]);
+  assert.match(timed ?? '', /Legs the ledger holds for a named computer \(w1863.*\): m5: w1 \(since \d\d:\d\dZ\) \(m5 has ROOM: start it now/);
+  assert.doesNotMatch(timed ?? '', /m5 \(timed work goes to the smallest computer with room .*no timed run queued there/);
+
+  // 15:15: m5 has 3 of 3 sandboxes free and nobody started it. Now: Queued [WRONG], and after the grace, flagged.
+  agentsRoomFacts(agents, { game: ['m5'] });
+  assert.match(await list(), /Queued \[WRONG: m5 has room\] \(its leg .*but m5 has room: the dispatcher should start a worker for it there/);
+  const later = Date.now() + 11 * 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(later);
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), ['w1']);
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), [], 'once an hour at most');
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[ledger] WRONG STATE').length > 0);
+  assert.match(heard(dispatcher().info.id, '[ledger] WRONG STATE')[0].text, /w1 "Cut UI main-thread cost on the Just Play save" \(Lothsahn, normal; room on m5; its leg there: The m5 leg for the timed/);
+  assert.match(w().log.join('\n'), /flagged: its leg for m5 is queued for capacity while m5 has room/);
+
+  // A timing worker starts for it on m5: the leg goes, and the request is not Queued any more.
+  o.linkWorker('w1', { id: 'e18e6c17', title: 'w1: m5 timed A/B', machineId: 'm5' }, 'started worker e18e6c17 in m5/slot1');
+  assert.equal(w().legs, undefined);
+  assert.match(w().log.join('\n'), /its leg for m5 started \(queued \d\d:\d\d UTC\)/);
+  assert.doesNotMatch((await list()).split('\n')[0], /Queued/);
+});
+
+test('w1863: a leg is dropped by decide_work queue drop_leg, refused without one; a request with no worker queues as before', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call } = env;
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  await startedFor(env, 'w1');
+  agentsRoomFacts(agents, {});
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'm5 leg', needs: ['m5'] })).isError, false);
+  const dropped = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'measured on LothDesktop instead', needs: ['m5'], drop_leg: true });
+  assert.match(dropped.text, /^w1 active: dropped its leg for m5/);
+  assert.equal(store.work.get('w1')!.legs, undefined);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'again', drop_leg: true })).isError, true);
+  // No worker: the request itself is Queued, as before.
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'm5 only', needs: ['m5'] })).isError, false);
+  assert.equal(store.work.get('w2')!.status, 'queued');
+  assert.equal(store.work.get('w2')!.legs, undefined);
 });

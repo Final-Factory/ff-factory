@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { AppState, IntakeSummary, WorkItem } from '../../../shared/types';
+import { FLAG_LABEL, type AppState, type IntakeSummary, type WorkItem } from '../../../shared/types';
 import { decisionOf } from '../../../shared/decision';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
@@ -18,7 +18,7 @@ import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu, ModelChip, ToggleChip } from './ui';
 import { TimersButton } from './Timers';
 import { IntakeApproveCard, WaitingTab } from './WaitingTab';
-import { waitingItems } from '../../../shared/waiting';
+import { orchestratorAsks, waitingItems } from '../../../shared/waiting';
 import { useKeepScroll } from '../scrollKeep';
 
 type Tab = 'requests' | 'waiting' | 'intake' | 'spend' | 'conversation';
@@ -92,7 +92,9 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   // Everything waiting on a person, in one queue (w1228): the tab, its count and the links to it count the same items.
   const reviewer = !!app.me && !!app.intake?.reviewerIds.some((id) => id.toLowerCase() === app.me!.userId.toLowerCase());
   const queue = app.me ? waitingItems(open, live, { userId: app.me.userId, displayName: app.me.displayName, reviewer }) : [];
-  const onMe = queue.filter((i) => i.mine).length;
+  // w1868: and the viewer's orchestrator's open questions, each a card of its own.
+  const asks = app.me ? orchestratorAsks(app.sessions, work, app.me) : [];
+  const onMe = queue.filter((i) => i.mine).length + asks.length;
   const account = session ? accountOf(app, session.id) : undefined;
   // Its context and last compaction (w535).
   const ctx = session ? contextGlance(session, now) : undefined;
@@ -185,7 +187,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
       </nav>
 
       {current === 'requests' && <Requests app={app} work={work} open={open} stalled={stalled} closed={closed} focus={focus} now={now} waiting={queue.length} onMe={onMe} />}
-      {current === 'waiting' && <WaitingTab app={app} items={queue} now={now} />}
+      {current === 'waiting' && <WaitingTab app={app} items={queue} asks={asks} now={now} />}
       {current === 'intake' && app.intake && <IntakeTab app={app} intake={app.intake} work={work} now={now} />}
       {current === 'spend' && <SpendTab />}
       {current === 'conversation' &&
@@ -591,7 +593,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             {isMine(w, app.me?.userId) ? <span className="tone-blue" data-testid="work-yours"> · yours</span> : null}
             {w.triage && w.triage.class !== 'needs-human' ? <span> · {triageLabel[w.triage.class]}</span> : null}
             {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : null}
-            {w.flag ? <span className="tone-amber"> · design question</span> : null}
+            {w.flag ? <span className="tone-amber"> · {FLAG_LABEL[w.flag.kind].toLowerCase()}</span> : null}
             <CostChip id={w.id} summary={spend} />
           </span>
         </span>
@@ -654,7 +656,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
           {w.constraints && <p className="dim small">Constraints: {w.constraints}</p>}
           {w.flag && (
             <p className="small tone-amber">
-              Design question for {w.flag.for.map((r) => r.displayName).join(', ')}: {w.flag.text}
+              {FLAG_LABEL[w.flag.kind]} for {w.flag.for.map((r) => r.displayName).join(', ')}: {w.flag.text}
             </p>
           )}
           {w.outcome && (

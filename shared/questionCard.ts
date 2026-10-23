@@ -37,10 +37,11 @@ export function wordsProblem(s: string, what: string): string | undefined {
  * wrong with them: 1 to MAX_ASKS, each one question of at most CARD_QUESTION_CHARS words with 2 to 4 answers (shared/ask.ts
  * checkAsk: the recommended one first), none naming a file path, a list of pull requests or a worker id.
  */
-export function checkAsks(input: unknown): { asks: Ask[] } | { problem: string } {
+export function checkAsks(input: unknown): { asks: Ask[]; warnings: string[] } | { problem: string } {
   if (!Array.isArray(input) || input.length < 1) return { problem: 'questions: at least one question with its 2 to 4 answers' };
   if (input.length > MAX_ASKS) return { problem: `questions: at most ${MAX_ASKS}; ask the rest after these are answered` };
   const asks: Ask[] = [];
+  const warnings: string[] = [];
   for (const [i, raw] of input.entries()) {
     const n = input.length > 1 ? `question ${i + 1}` : 'question';
     const c = checkAsk(raw);
@@ -49,8 +50,9 @@ export function checkAsks(input: unknown): { asks: Ask[] } | { problem: string }
     const bad = wordsProblem(c.ask.question, n) ?? c.ask.options.map((o, j) => wordsProblem(`${o.label} ${o.description ?? ""}`, `${n}, answer ${j + 1}`)).find(Boolean);
     if (bad) return { problem: bad };
     asks.push(c.ask);
+    warnings.push(...c.warnings.map((w) => (input.length > 1 ? `${n}: ${w}` : w)));
   }
-  return { asks };
+  return { asks, warnings };
 }
 
 /**
@@ -114,7 +116,9 @@ export interface CardQuestions {
 /** The question a request that waits on its person's answer asks (not an intake approval: the card asks that itself). */
 export function cardQuestions(w: Pick<WorkItem, 'needsYou' | 'question' | 'flag'>): CardQuestions {
   const r = w.needsYou && !w.needsYou.answered ? w.needsYou : undefined;
-  if (r?.asks?.length) return { asks: r.asks, text: '', ...(r.worker ? { worker: r.worker } : {}) };
+  // w1868: of several questions, the ones a note answered already are not asked again.
+  const open = (r?.asks ?? []).filter((_, i) => !(r?.answeredAsks ?? []).includes(i));
+  if (open.length) return { asks: open, text: '', ...(r?.worker ? { worker: r.worker } : {}) };
   if (w.question?.asks?.length && (!r || r.kind === 'question')) return { asks: w.question.asks, text: '' };
   // A worker's own words come first: the dispatcher's question folded into it is its restatement (Details).
   const raw = r && r.kind !== 'question' ? r.question : (w.question?.text ?? w.flag?.text ?? r?.question ?? '');
@@ -137,7 +141,7 @@ export function answersText(asks: readonly Ask[], answers: readonly string[]): s
  */
 export function answerMessage(w: Pick<WorkItem, 'id' | 'title' | 'question' | 'flag' | 'needsYou'>, text: string): string {
   const asked = w.needsYou?.asks?.length
-    ? w.needsYou.asks.map((a) => splitMedia(a.question).text).join(' / ')
+    ? w.needsYou.asks.filter((_, i) => !(w.needsYou?.answeredAsks ?? []).includes(i)).map((a) => splitMedia(a.question).text).join(' / ')
     : w.question?.asks?.length
       ? w.question.asks.map((a) => splitMedia(a.question).text).join(' / ')
       : (w.question?.text ?? w.flag?.text ?? w.needsYou?.question ?? '');

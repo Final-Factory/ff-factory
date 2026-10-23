@@ -319,7 +319,8 @@ test('the Waiting on input tab clears a request each way: approve, decline with 
   await typed.getByLabel('Or type your own answer').fill(`Newest save first ${tag}`);
   await typed.getByTestId('qc-send').click();
   await expect(typed).toContainText('Sent to your orchestrator');
-  const [one, two] = [bug, decline].map((w) => (x: string) => x.replaceAll(`${w.id} (${w.title})`, 'REQ').replaceAll(w.id, 'REQ'));
+  // A whole id only: the random tag can hold one ("waitmvl76euw6b7v" holds w6, which failed w1874's PR #574 once).
+  const [one, two] = [bug, decline].map((w) => (x: string) => x.replaceAll(`${w.id} (${w.title})`, 'REQ').replace(new RegExp(`\\b${w.id}\\b`, 'g'), 'REQ'));
   await expect.poll(async () => [(await sent(bug.id)).map(one), (await sent(decline.id)).map(two)]).toEqual([
     [`Answer on REQ. It asked: “Which save comes first ${tag}?”\n\nNewest save first ${tag}\n\nPlease put this on REQ as my answer (update_work note).`],
     [`Answer on REQ. It asked: “Which save comes first ${tag}?”\n\nNewest save first ${tag}\n\nPlease put this on REQ as my answer (update_work note).`],

@@ -269,7 +269,14 @@ export interface SessionInfo {
    * as Needs you. Kept by the portal, never by the daemon; gone with its next message (a new turn: it declares again if
    * it still waits). `request` limits it to one request when the worker serves several.
    */
-  waitingOn?: { who: string; what: string; at: string; request?: string; asks?: Ask[] };
+  waitingOn?: { who: string; what: string; at: string; request?: string; asks?: Ask[]; about?: string; after?: string };
+  /**
+   * A person's own orchestrator (w1868): its ask_person questions still open, each a card on its person's Waiting on input
+   * tab with one-click answers (lothsahn: "make sure that all pending questions that you have show up on the intake portal so
+   * that I can click through them quickly"). One goes when it is answered (a click or a reply to it), asked again, withdrawn
+   * (close_question) or its request closes. Server/orchestrators.ts observeAsk keeps it.
+   */
+  openAsks?: OpenAsk[];
   /**
    * Machine sessions (w691): a message to it found no agent host to run in ("could not start its agent host: …"). Nothing
    * runs for it whatever its status says (an older daemon went on reporting it mid-turn): the ledger shows its request
@@ -562,6 +569,15 @@ export interface BenchPriority {
 }
 
 /**
+ * A machine that takes no timed runs (w1861, Machine.noTimedRuns), as the portal sends it with the bench priorities: the
+ * reason, and the machines that take them (online first), for the bench queue's refusal to name.
+ */
+export interface NoTimedRuns {
+  why: string;
+  elsewhere: string[];
+}
+
+/**
  * A holder's turn warning (w1832): the game repo's bench_queue.py set a deadline on its ticket because another worker
  * waits, and warned it five minutes before (the ticket's limit.json). The daemon reports each with its stats; the portal
  * messages the worker once per deadline (server/benchWarnings.ts).
@@ -609,6 +625,12 @@ export interface BenchTicketGlance {
   exempt?: 'release' | 'nightly';
   /** The urgent release lane's own ticket (it pre-empts the holders, w1656). */
   preempt?: boolean;
+  /**
+   * w1860: it keeps the lock until it lets go, because only lower-priority work waits behind it (bench_queue.py keep.json;
+   * a shared group's priority is its highest running ticket's): since when, why, and the holder's (or group's) priority.
+   * No `until` then: no turn end applies until a ticket of its priority or higher waits.
+   */
+  keeps?: { since: string; why?: string; priority?: string };
 }
 
 /**
@@ -808,6 +830,11 @@ export interface Machine {
   librarySeedGB?: number;
   /** Its sandbox editors run at below-normal priority, so a game the user plays there wins every contest for the CPU. */
   unityBelowNormal?: boolean;
+  /**
+   * Why it takes no timed runs (w1861, add_machine no_timed_runs; server/machines.ts noTimedRunsOf): its bench queue refuses
+   * a timing ticket and placement sends timed work elsewhere. Unset: the default (NO_TIMED_RUNS: m5); "" clears it.
+   */
+  noTimedRuns?: string;
   /** Portal URL the daemon connects to. */
   portalUrl: string;
   sessionIds: string[];
@@ -1747,6 +1774,13 @@ export interface WorkOverlap {
   why: string;
 }
 
+/** A leg of a request queued for named computers (w1863, WorkItem.legs): since when, where, and what it is. */
+export interface QueuedLeg {
+  at: string;
+  needs: string[];
+  what: string;
+}
+
 /** A request for work that a person's orchestrator filed with the dispatcher, and what became of it. */
 export interface WorkItem {
   id: string;
@@ -1908,6 +1942,13 @@ export interface WorkItem {
   /** The computers the dispatcher said can take it when it queued it for capacity (decide_work queue `needs`, w643). */
   queuedFor?: { at: string; needs?: string[] };
   /**
+   * w1863: legs held for named computers while the request's own worker carries on elsewhere (decide_work queue with `needs`
+   * on a request that has a worker): "queued for capacity on m5, I start a timing worker there when a slot frees". Not its
+   * status: a leg outlives the request going active again (a message to its worker), that worker's reports and its PRs
+   * merging, and goes only when a worker starts or is sent for it on a computer it names, or the request closes.
+   */
+  legs?: QueuedLeg[];
+  /**
    * Its last hand-back (w1532, server/machinePause.ts): its worker's machine was paused, so it was taken off that worker and
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it
    * stopped) and the `message` that would have resumed it, in its handover.
@@ -1940,8 +1981,17 @@ export interface WorkItem {
   resumedBy?: Record<string, string>;
   /** Set when the intake closed it as done because its work already merged (docs/intake.md, "Closed when it merged"). */
   autoClosed?: WorkAutoClosed;
-  /** A question for people (a design decision) the worker raised instead of fixing; open until they answer. */
-  flag?: { kind: 'design'; text: string; at: string; for: Requester[] };
+  /**
+   * A question for people, open until they answer: a design decision the worker raised instead of fixing (`design`), or
+   * an error the ledger cleanup could not fix by resuming the worker, escalated to the request's person and an operator
+   * (`error`, w1870).
+   */
+  flag?: { kind: 'design' | 'error'; text: string; at: string; for: Requester[] };
+  /**
+   * What the ledger cleanup did about a worker's last turn that ended in an error or an interrupt instead of a report
+   * (w1870), by session id: never closed as done on such a turn, it is resumed, re-placed or escalated, once per turn.
+   */
+  errorHandled?: Record<string, WorkErrorHandled>;
   /** Handed to FFBox (docs/intake.md, "Ledger → FFBox"): the submit's id, and what FFBox said about it. */
   ffbox?: WorkFfbox;
   /**
@@ -1993,10 +2043,19 @@ export interface WorkNeedsYou {
    * it cleaned with a free answer box (shared/questionCard.ts).
    */
   asks?: Ask[];
+  /** What the request is, in one plain line, as its worker put it for the card (w1868, waiting_on_person about). */
+  about?: string;
+  /** What happens once it is answered, as its worker put it (w1868, waiting_on_person after). */
+  after?: string;
   /** Sent in the one-off digest of waits already open when w1378 shipped, or after a restart. */
   digest?: boolean;
   /** A person answered it with a note in their own turn: who and when, and on which request when not this one (w1812). */
   answered?: { by: string; at: string; on?: string };
+  /**
+   * Of several questions, the ones a person's note answered so far, by index into `asks` (w1868, w1821: the frame look was
+   * answered and the Station strip question still waited). The record is answered, and its worker resumes, once all are.
+   */
+  answeredAsks?: number[];
   /** When the worker raised it (its declaration, or its report), where known: an answer before it answers something else (w1812). */
   raisedAt?: string;
   /**
@@ -2006,6 +2065,18 @@ export interface WorkNeedsYou {
   sharedWith?: string;
   /** The other requests the one message named as carrying the same question (w1812). */
   also?: string[];
+}
+
+/** An ask_person question its person has not answered yet (w1868, SessionInfo.openAsks). */
+export interface OpenAsk {
+  /** The question's event in the orchestrator's chat: a click answers it there (POST /api/sessions/<id>/answer). */
+  seq: number;
+  at: string;
+  ask: Ask;
+  /** The request it is about, when it names one. */
+  request?: string;
+  /** What happens once it is answered, as the orchestrator put it. */
+  after?: string;
 }
 
 export interface WorkPr {
@@ -2109,6 +2180,22 @@ export interface HeldCheckIn {
   note: string;
   /** w1128: a gate's resume that came after the request was blocked again (Orchestrators.staleResume), not the worker's own check-in. */
   resume?: true;
+}
+
+/** What a request's flag (WorkItem.flag) is, as the ledger and the Waiting tab name it. */
+export const FLAG_LABEL: Record<'design' | 'error', string> = { design: 'Design question', error: 'Error escalated by the ledger cleanup' };
+
+/** The ledger cleanup's handling of one worker's errored or interrupted turn (w1870, WorkItem.errorHandled). */
+export interface WorkErrorHandled {
+  /** When that turn ended (the worker's lastResultAt): a later errored turn is a new one. */
+  turnAt: string;
+  /** What the cleanup did: resumed the worker, asked the dispatcher to place it again, escalated it, or left it to the dispatcher. */
+  how: 'resumed' | 're-placed' | 'escalated' | 'left';
+  at: string;
+  /** The error in one line (errorKey tells the same one again). */
+  error: string;
+  /** The cleanup's resumes of this worker for errors on this request so far. */
+  resumes: number;
 }
 
 /** Why a request is stalled, and what kind of stop it was. */

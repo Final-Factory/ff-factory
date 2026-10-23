@@ -216,7 +216,7 @@ The dispatcher then does one of these for each request:
 | start it | `start_agent` with `work_id`, or `message_agent` with `work_id` to a worker (a new session, or the worker's own when the request is related to what it did: [One session per request](#one-session-per-request)) | `active` |
 | merge it | `decide_work merge` into the open request it repeats; its people join that one | `merged` |
 | link it | `decide_work link` to workers already doing it (a worker with another request in hand takes only a related one) | `active` |
-| queue it | `decide_work queue`: capacity only, no computer that could take it has room (`needs`: the computers that can, when only some can); refused while one of them has room | `queued` |
+| queue it | `decide_work queue`: capacity only, no computer that could take it has room (`needs`: the computers that can, when only some can); refused while one of them has room. On an active request with a worker, `needs` queues a **leg** there instead (w1863, [machines.md](machines.md), "Placing work"): it stays active, the leg shows Queued and goes when a worker starts for it on one of those computers (`drop_leg` drops it) | `queued` (a leg: unchanged) |
 | block it | `decide_work block` with `blocker`: the thing it waits on (another request, a deploy, a machine, a usage limit, a lock, a time, CI); it starts by itself when that clears | `blocked` |
 | ask | `decide_work ask`, at most 3 questions per request: what only a person can answer or decide | `question` |
 | reject it, or close it | `decide_work reject` / `done`, saying why | `rejected` / `done` |
@@ -332,14 +332,27 @@ Then:
 One build at a time per computer. A worker off BEAST that declares a release build builds where it is (nothing is cleared
 there); its request is marked build work, so its next placement is BEAST first.
 
-**Timed work goes to small computers first** (w1628; lothsahn, 2026-10-20: "We should also prefer boxes with a small
-number of slots and players for timed runs, not beast since it's big"). Work whose words name a benchmark, a perf A/B or
-probe, a timed run or frame times (`shared/capacity.ts` `needsTimed`) goes where "Next timed work" says
-(`server/placement.ts` `pickTimed`): among the computers with room, not held or avoided, and on the platform its words name
-("Windows", `probe_ab_win`, BEAST or LothDesktop: Windows; "Mac", m3 or m5: macOS), first those with no timed leg in their
-bench queue, then the smallest (fewest sandboxes, then fewest Unity processes), then the fewest live agents; BEAST, the
-biggest, comes last. A timed A/B compares its legs on one computer, so a slower one gives as good an answer; work whose
-absolute numbers must come from one computer names it in its brief, and you keep it there.
+**Timed and exclusive-lock work goes to small computers first** (w1628, w1872; lothsahn, 2026-10-23: "favors placing
+jobs that need an exclusive lock or timing runs on machines that have a smaller number of editors or slots. This is to
+avoid locking out work because a machine that can handle a bunch of things but is locked down to one is less
+efficient"). Work whose words name a benchmark, a perf A/B or probe, a timed or timing run, an exclusive lock or frame
+times (`shared/capacity.ts` `needsTimed`) goes where "Next timed work" says (`server/placement.ts` `timedRank`, `pickTimed`).
+That line ranks the computers with room (online, not paused, held or avoided) that take timed runs, on the platform its
+words name ("Windows", `probe_ab_win`, BEAST or LothDesktop: Windows; "Mac", m3 or m5: macOS). The fewest agent slots come
+first, then the lowest editor limit, then the fewest live agents (the workers its exclusive turn would pause), then the
+fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks first; BEAST, the biggest, comes last.
+- **The ranking is the default, unless a machine is named** (lothsahn: "If a worker requests a specific machine for a
+  reason, it does need to follow the workers request or the orchestrator's request for that placement. In absence of any
+  preference, it should use this list"). Work whose brief or worker names a computer for a reason (a platform, a pairing, the
+  baseline machine of an A/B) goes there.
+- **A computer that takes no timed runs** (`Machine.noTimedRuns`, add_machine `no_timed_runs`; m5 by default, w1861:
+  "The m5 should not be used for timing runs because Ben runs stuff on it personally") never gets timed work. Its bench
+  queue refuses every exclusive ticket there. A pin to it is not moved either: start_agent and create_sandbox refuse it
+  back to you, with the computers that take it (lothsahn: "that should go back to the orchestrator or worker ... The
+  orchestrator worker then can pick a new machine or escalate to an operator if it is unable to pick a new machine").
+  Pick one of them, or ask an operator (waiting_on_person) when none fits.
+
+A timed A/B compares its legs on one computer, so a slower one gives as good an answer.
 
 **The bench queue's order** (w1628, the game repo's `scripts/bench/bench_queue.py`, `Documentation/Bench-Lock.md`): first
 by the priority of the worker's open requests (lothsahn: "Yes, the queue should first sort by priority, using the logic the
@@ -488,7 +501,9 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 
 1. **Waiting on input**: a PERSON must act (a reviewer's approval, the dispatcher's question, a design decision, a
    permission, a worker that stopped asking for a decision, a worker that declared it waits on a person). It always says on
-   whom.
+   whom, and what is asked: a worker that stopped asking names its question (w1868). `list_work` and the tab show its six
+   parts (what it is, who acts and since when, the question whole, its answers or the one step, its stills and clips, what
+   follows the answer): "What a waiting card says", below.
 2. **Queued**: capacity ONLY: no free computer, sandbox, editor or agent slot for it. `decide_work queue` is refused
    while a computer that could take it has room (all of them, or those its `needs` names), and a request left queued
    at least 10 minutes while one has room is a bug, flagged loudly: the line says `WRONG` with the computers that have
@@ -579,7 +594,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 
 | kind | `ref` | clears (it starts by itself) | stuck after (it stalls, saying so) |
 |---|---|---|---|
-| `request` | the request it waits on ("w633"); `on`: `done` (default) or `report` | that request closes as done; with `on: report`, also when a worker on it finishes a turn with a report. Merges are followed. Declined or cancelled: it asks its requester (Waiting on input). Stalled: it stalls too | never by time: it follows that request, which the cleanup stalls by itself when nothing works on it |
+| `request` | the request it waits on ("w633"); `on`: `done` (default) or `report` | that request closes as done; with `on: report`, also when a worker on it reports what it waits for (w1869, below). Merges are followed. Declined or cancelled: it asks its requester (Waiting on input). Stalled: it stalls too | never by time: it follows that request, which the cleanup stalls by itself when nothing works on it |
 | `deploy` | none for the portal; a machine id for that machine's daemon update | a different commit runs there than when it was blocked (`version.ts` `appVersion`, the daemon's) | 7 days |
 | `machine` | the machine | it is online | 3 days |
 | `usage` | the vault token ("vault-lothsahn-1" or "vault-lothsahn-1 …EAAA") or the person whose Claude pool it is ("lothsahn", "lothsahn's pool"); another account by its email or label. Kept as the token's label; a ref nothing answers to is refused (w1126). `until`: the hold's end, filled in from the pool's first reset | that pool can serve a worker again (looked at each minute and on each usage reading), or `until` passes, whichever comes first; the request's worker is resumed then (w1126); another account when its meters are under 90% | 8 days |
@@ -593,6 +608,21 @@ a day is a run that never ended; a machine away three days is down, not asleep; 
 days; a portal deploy follows a merge by itself (w1634, [ops-worker.md](ops-worker.md) "Automatic deploys"), so a week
 without one means it is off or failing, worth a person's look.
 
+- **A wait on a report clears on the result, not on progress** (w1869; lothsahn: "Analyze your recent tool failures and
+  make it so they don't happen in the future"). w1820 was blocked on "w1785 reporting (dec9a619's LothDesktop timing of A
+  vs A + PR #2268)"; w1785's worker ended a turn with "w1785: still open: the LothDesktop A/B is running…", the block
+  cleared on that, and w1820's worker resumed with no timing. A `request` gate with `on: report` (decide_work's, or a
+  worker's `blocked_on` reports) on wX set at time T now clears when wX closes as done, or when a worker on wX finishes a
+  turn after T whose report (`server/ledgerRules.ts` `reportDelivers`):
+  - has `DONE: wX` (even one the ledger refuses while a PR is open: the result is in it), or
+  - has a line `For <waiting request>: …`, or
+  - has no `wX: still open:` (or `NOT DONE`, `paused`) line for wX, and names wX or has no such line for any request.
+
+  A progress report (a still-open or paused line for wX) or one about another request only leaves it Blocked. So that the result can be told from progress, when such a
+  gate is set the workers on wX are sent what it waits for and asked to mark the report that carries it with
+  `For <waiting request>:` (`Orchestrators.tellReportWaited`; not a worker that waits on a person, whose declaration a
+  message would end). The gate's `what` is what they are told, so name the result there ("dec9a619's LothDesktop timing
+  of A vs A"), not "w1785 reporting". A lock's holder still frees it with any report.
 - **It unblocks by itself.** The blocker watch (`server/blockerWatch.ts`) looks at every blocked request each minute,
   and at once when one is blocked or the nightly lab reports. When the blocker clears, a worker whose check-in the block
   cancelled gets it back (below, "No poll is left behind") and the request is its again (`active`); otherwise the request
@@ -1079,7 +1109,13 @@ closes as done, logging "merged as #N (sha) on date", when all of this holds:
   worker's last report that says more is coming; or an open question.
 - the last PR to merge does not say `Part of: <id>` (`partOfReason`, w424). A worker marks a PR that is only one step of
   its request that way (a fix the real work needs first); the request stays open ("#N is one step of it … more
-  follows") until a `Request:` PR of it merges, its worker reports `DONE: <id>`, or the follow-up below asks.
+  follows") until a `Request:` PR of it merges, its worker reports `DONE: <id>`, or the follow-up below asks;
+- **its latest worker's last turn did not end in an error or an interrupt, and its last report is a DONE for it** (w1870,
+  lothsahn: "Merged PRs are not enough on their own"; `notDoneReason`, `turnTroubleOf`, `server/ledgerRules.ts`). A
+  request no worker ever worked on (a person's own PR with a `Request:` line) needs neither. An errored turn is resumed or
+  escalated, an interrupted one placed again ([Ledger cleanup](#ledger-cleanup), "Never on an errored turn"); a report
+  without the DONE leaves the request open with the log line "not closed by the ledger cleanup (merged as #N …): its
+  latest worker …'s last report is not a DONE for wNNN", once per PR, and the follow-up below asks its worker.
 
 A worker's last report counts by its end, where workers write `<id>: still open: …` or `DONE: <id>`: `lastResult` keeps
 a long report's first 400 and last 800 characters (`reportClip`, `server/sessions.ts`). It used to keep only the first
@@ -1099,6 +1135,11 @@ while nothing told the ledger). `deployStep` (`server/ledgerRules.ts`) sets asid
 - machine updates: every connected machine's daemon runs a commit that contains it (its hello's `machine/VERSION`,
   `MachineManager.daemonVersions`). A daemon whose version is not a commit, or a portal whose commit is unknown, closes
   nothing.
+
+The deploy is no DONE either (w1870: w1829 closed this way at 15:39 on 2026-10-23, its worker's last turn an error, the
+demo it was asked for never run). When the deploy has happened and the worker's last report is not a DONE, the worker is
+resumed (`resumeAfterDeploy`, at most once a day: `WorkItem.followUp`): "the deploy you waited for has happened … check
+every done criterion of wNNN, finish what is left, and end with a line `DONE: wNNN`". Its DONE then closes the request.
 
 A sentence that names another step too (an audit, a 2-peer run, a nightly, a soak, a release's notes) is never set aside,
 and a request that waits on a question, or is a release, is not a deploy-only one. A step done by hand that leaves no
@@ -1126,19 +1167,22 @@ touched**, and nothing waiting for a person (an open question, an intake request
 stalled. Ben's requests are included. In this order, the first that fits applies:
 
 1. **Merged.** The pull-request rule above for every request, and the intake's merged-branch rule for intake requests.
-2. **Delivered.** A request whose worker's final report (`lastResult`, at least an hour old) states plainly that the work
+2. **Errored or interrupted.** Its latest worker's last turn ended in an error or was stopped on purpose mid-turn: below,
+   "Never on an errored turn". A usage limit or an app restart keeps its own rule: the worker is resumed once (a message,
+   recorded in `resumedBy`): a limit only when the account it ran on has room again (no plan meter at 90% or more;
+   unknown counts as no); a limit that has not reset, and a worker cut off again after its one resume, make the request
+   **stalled** with the reason (w363, w1076).
+3. **Delivered.** A request whose worker's final report (`lastResult`, at least an hour old) states plainly that the work
    is done ("All done", "is delivered", "nothing more to do", "fully merged to master, so I'm idle", "is fixed and merged into
    master", "nothing is open or pending") and says nothing is left, waiting or asked, with no open PR
-   and no step after the merge, closes as done with that report quoted. A release's report must also link the patch
+   and no step after the merge, **is not closed on those words** (w1870): its worker is asked once a day "Is wNNN done? …
+   reply with a line `DONE: wNNN`", and the DONE closes it. Only a report that carries the request's `DONE:` line (one the
+   ledger refused at the turn's end) closes here, with that report quoted. A release's report must also link the patch
    notes and say it is live. When the report is not clear, nothing closes. A stalled request is read the same way when its
    worker's report came after the stall (w631: a worker that went back to it and finished it left it stalled).
-3. **Cut off.** A worker that stopped on a usage or rate limit (also one whose turn simply ended with Claude's "You've hit
-   your session/weekly limit" as its whole result), an app restart (its turn was still open) or a refused tool
-   and never resumed. A limit or restart is resumed once (a message to the worker, recorded in `resumedBy`): a limit only
-   when the account it ran on has room again (no plan meter at 90% or more; unknown counts as no). A refused tool, a
-   limit that has not reset, and a worker cut off again after its one resume make the request **stalled** with the reason.
 4. **Merged, asked.** A request whose PRs all merged but which stays open for a step after the merge (rule 1's reason:
-   a check or audit its brief asks for, a release's notes, a plan of PRs, a worker saying more is coming), with no word
+   a check or audit its brief asks for, a release's notes, a plan of PRs, a worker saying more is coming, or, w1870, a
+   last report that is not a DONE), with no word
    about it for **6 hours** (a report from a worker still on it, the merge, or the last question) gets one message to its
    most recent worker: "Is wNNN done? Reply `DONE: wNNN`, or say what's left" (w419). At most one a day per request
    (`WorkItem.followUp`). Its reply's `DONE: wNNN` closes it (below); any other reply stays as its latest line. A worker
@@ -1152,6 +1196,44 @@ stalled. Ben's requests are included. In this order, the first that fits applies
 6. **Stalled.** A new, queued or active request with no running worker and no activity for 24 hours (its last update, and
    its workers' last activity) is stalled with the reason: no worker ever started, its last worker's own status line
    ("its worker said: "w12: still open: the portal deploy"", w631), or its last worker ended and its report is not clear.
+
+**Never on an errored turn, nor without its DONE** (w1870, lothsahn, 2026-10-23: "Please fix the closing job so it
+doesn't close out jobs with errors. Those should be resumed to fix the error or escalated to an operator if the error
+can't be fixed"). The cleanup closed w1829 (the bench-lock demo) at 15:39 because its PRs #548 and #556 had merged and the
+portal ran them, while its worker 17e0097f's last turn had ended in `error_during_execution` partway through the demo
+(`server/ledgerSweep.fixtures.ts` keeps the case). The CLI ends such a turn with the result `stopped: error_during_execution`,
+which replaced the worker's last report ("w1829: still open: …"), so nothing said more was left. Now no automatic close
+(the merged-PR close and its deploy close, a refused DONE re-checked once its PRs merge, a report that reads as delivered,
+the dispatcher's `decide_work done`) closes a request whose latest worker's last turn ended in trouble, or whose latest
+worker's last report is not a `DONE` for it. `turnTroubleOf` (`server/ledgerRules.ts`) reads how the turn ended:
+
+- **an interrupt**: the turn ended in an error result while the worker was stopped on purpose (`interrupt_agent`,
+  `stop_agent`, the UI: `SessionInfo.stoppedOnPurpose`, or a host session's `Interrupted.` line). It is no error: when the
+  request is queued or blocked the dispatcher is already placing it, and the log says so once ("not closed by the ledger
+  cleanup (w1870): worker 17e0097f: its turn was interrupted on purpose (error_during_execution); the request is queued:
+  the dispatcher places it again"); otherwise, ten minutes after the interrupt, the dispatcher is told `RE-PLACE (w1870)`
+  with the worker and its sandbox, and the log records it (`replaceStopped`, `server/orchestrators.ts`);
+- **an error**: an error result (`error_during_execution`, `error_max_turns`, …), a refused tool, a usage or rate limit,
+  an app restart, or a failed session (status `error`). Ten minutes after it (the dispatcher or the worker's own check-in
+  may be on it), the worker is **resumed** with the error, its last error lines and the request's done criteria (the
+  brief's "Done when", `doneCriteriaOf`), to fix it, finish and end with `DONE: wNNN`; a session that cannot be resumed
+  goes to the dispatcher for a fresh worker with the error. It is **escalated** instead (`troubleDecision`) when a resume
+  cannot fix it: the same error after a resume (`errorKey`: the error's kind and first words, numbers aside), a different
+  error after `ERROR_RESUMES` (2) resumes, a refused tool (it would be refused again), or an error only a person can clear:
+  a login ("Not logged in", "/login", an expired token), a permission (a GitHub token without `workflows`, "Resource not
+  accessible by personal access token") or a machine (offline, disk full), read in its last events and failed tools.
+
+An escalation (`Orchestrators.escalateError`) makes the request wait on input for its person and an operator (one of
+`intake.reviewers` already on the request, else the first; the owner when none is set): a flag of kind `error`
+(`WorkItem.flag`, shown as "Error escalated by the ledger cleanup" on the Requests and Waiting tabs) and a `[needs you]`
+to both, saying what failed, the last error lines, what was tried and the one step needed. A note from either answers it
+like any question and goes to the worker. Each turn is handled once (`WorkItem.errorHandled`: per worker, the turn's end,
+what was done, the error, the resumes so far); each pass's line to the person names what was resumed, escalated or sent
+to be placed again (`ledger cleanup: <resumed|escalated|replaced> <id>` in the server log). A report that is not a DONE
+leaves the request open and its worker is asked (the follow-up, rule 4, and `askStatus` below). The dispatcher's
+`decide_work done` is refused with the reason while either holds; a person's own close (`update_work close`) is never
+held. The first pass after the deploy that shipped this logs, once, every request an automatic close closed in the 24
+hours before and what the cleanup would do with it now (`ledger cleanup: w1870 check: …`), changing nothing.
 
 **`DONE: wNNN`, the worker's word that a request is finished** (w419, asked by Lothsahn after w342 stayed open with its
 work done). Every worker brief for a request ends with the rule (`doneRule`, `server/work.ts`): when every step of a
@@ -1210,7 +1292,7 @@ reopen is the one that counts:
 - **PR rule** (`prsOf`, `server/ledgerRules.ts`): a PR created before `reopenedAt` is never the request's, whatever its
   `Request:` line says and whoever opened it, so it neither links, nor closes it, nor keeps it open. Only a PR created after
   the reopen that has merged closes it (and the usual after-the-merge rules apply to it).
-- **Delivered** (rule 2): the worker's report must come after the reopen (its `lastActivityAt`).
+- **Delivered** (rule 3): the worker's report must come after the reopen (its `lastActivityAt`).
 - **The intake's merged rules** (`mergedBy`, `linkedDone`, `server/mergedIntake.ts`): a merge or a linked done request from
   before the reopen is not evidence, and the branch already being in the base (`branchInBase`) is skipped.
 
@@ -1296,10 +1378,10 @@ person closes it (`update_work close`), or reopens it, or writes a note on it, w
 whose PRs later merge is closed by rule 1.
 
 Each action is logged on its request. Each person's orchestrator gets one `[ledger cleanup]` line per pass listing what
-closed, resumed, was asked about and stalled for them, and nothing when nothing changed. The first pass also lists the requests with a
+closed, resumed, escalated, sent to be placed again, was asked about and stalled for them, and nothing when nothing changed. The first pass also lists the requests with a
 merged PR that stayed open and why. The Requests tab shows when it last ran and what it did. Limits of the rules, all
-fixed code and no model: a worker's report is read by patterns, so an unclear one never closes anything, it only stalls
-the request after a day; a PR is linked only by the ways above, so an old request whose PRs carry no `Request:` line and
+fixed code and no model: a worker's report is read by patterns, and since w1870 only its `DONE:` line closes anything, an
+unclear one only stalls the request after a day; a PR is linked only by the ways above, so an old request whose PRs carry no `Request:` line and
 whose worker's branch has since moved on is not linked.
 
 ## People to people
@@ -2045,6 +2127,69 @@ permission cards stay on the card (they are the answer).
   `server/questionCard.test.ts`, `server/orchestrators.test.ts` ("w1597"), `e2e/intake.spec.ts` (a click and the same words
   typed send the same message).
 
+### What a waiting card says: six parts (w1868, w1871)
+
+lothsahn, 2026-10-23: "please update the dispatcher to provide a good summary of each waiting for input item with the clear
+decision or input needed from me. The existing cards are impossible to know what I need to answer", then "Sorry, I said
+dispatcher but I meant the 'waiting for input' tab on the portal", and "You asked me a bunch of questions that weren't showing
+as pending intake questions on the portal. Can we make sure that all pending questions that you have show up on the intake
+portal so that I can click through them quickly?" Ben, the same day, on a w1762 card: "You don't put the clip in this little
+intake waiting for input box, so I can't see it."
+
+What the cards said before (list_work and the tab, 2026-10-23): "17e0097f stopped asking for a decision" (w1829, no decision
+named), "Waiting on input on a reviewer" (w1853, w1842, nothing on what approving does), lines cut off with "…" (w1797, w1839,
+w1820), a question overtaken by events ("no m5 sandbox has come free" after timed runs stopped going to m5), and a second
+question on w1821 (the Station strip) refused twice by the w1812 guard once the first (the frame look) was answered.
+
+**The six parts** (`shared/waitSummary.ts` `waitSummary`, one function for the card, `list_work` and the `[needs you]` message):
+
+1. **What it is**, one plain line: the worker's `about`, else where it came from (`intakeWhat`: "A player's bug report from
+   Discord by …", "The nightly game tests of 2026-10-23: 6 scenarios failed on master …", "FFBox's diagnosis of a player's
+   report …"), else the first plain sentence of its brief (`briefSentence`), else the title. The title moves to the line under it.
+2. **Who acts, and how long it has waited**: "Ben must act · waiting 3 h" (amber past a day, red past three).
+3. **The question, whole**: never clipped. "Stopped asking for a decision" now names it (`workState.ts` `askingLine`: the last
+   line of the report that asks).
+4. **The answers**, the recommended one first and marked, each with what it does and costs; or, for an input with no answers
+   to pick, the one step ("Type your answer below"; a permission: "Allow or Deny the call shown below"). An intake card asks
+   "Should FF Factory work on this …?" with Approve ("a worker starts at the next free sandbox: one worker session of Claude
+   usage") and Decline ("closes as declined …; nothing is spent").
+5. **Its stills and clips, in the card**: the question's own, the review files the wait names (before w1868 those sat in
+   Details whenever the question had answers), and each answer's own under the answers. A clip plays in the card
+   (`QuestionCard.tsx` `Previews`, the web preview of `/api/image`; `.mov` counts as a clip now). A question about something
+   visual with no still or clip says so on the card (`visualWithoutMedia`). A worker's still or clip on its own machine
+   (`F:/ffw/...`) is replaced by its published review copy of the same name (`needsYou.ts` `asksWithCopies`,
+   `reviewMedia.ts` `publishedCopy`); `waiting_on_person` refuses one with no published copy ("Publish it with publish_review").
+6. **What happens after the answer**: the worker's `after`, else what FF Factory does (its worker resumes within a minute, or at
+   the next free sandbox; the dispatcher decides).
+
+**Stale.** A card says "May be out of date: …" when, after its `[needs you]` went out, the request's log shows a dispatcher
+decision, a reopen or someone's note, or the worker that asked is gone, failed or said DONE (`staleOf`). FF Factory's own
+bookkeeping lines (PR states read, follow-ups) are no change.
+
+**The worker's block.** `waiting_on_person` takes `about` and `after` beside `who`, `what` and `questions` (`server/launch.ts`,
+required in the schema; a daemon older than w1868 sends neither and the card derives them). They ride the declaration
+(`SessionInfo.waitingOn`), the wait and the record (`WorkNeedsYou.about`, `.after`) into the card and the `[needs you]` message
+("What it is: …", "After the answer: …").
+
+**Each question its own answered state (w1821).** A record with several questions keeps which ones a person's note answered
+(`WorkNeedsYou.answeredAsks`, `asksAnsweredBy`: the note quotes one of that question's answers). A note that answers some
+leaves the rest on the card and the request Waiting on input; the worker resumes once all are answered, with every answer. A
+note that quotes none answers all, as before. The w1812 guard weighs the one question asked again: of several, a question no
+note answered goes through (`answeredBefore`, `matchedAsk`); one answered is refused with the person's words.
+
+**Every orchestrator question is a card.** Each `ask_person` call that is shown (its tool answered without an error) is kept on
+the orchestrator as an open question (`SessionInfo.openAsks`, `Orchestrators.observeAsk`, fed by every transcript event) and is
+a card on its person's tab among their own requests (`waiting.ts` `orchestratorAsks`, `WaitingTab.tsx` `AskWaitCard`). A click
+on it is `POST /api/sessions/<id>/answer`, exactly the chat's click; typed words go as a reply to it. It leaves the tab when it is
+answered (a reply quoting it), asked again (one card, the newer), closed by the orchestrator (`close_question` with why), answered
+by the person's note on its request, or its request closes; one the request's own card already asks is that card. `ask_person`
+takes `request` and `after`, and the orchestrator's brief says to ask every question with it, never in text only.
+
+`list_work` shows each waiting request's six parts under its line (`Agents.waitSummaryOf`, `summaryText`). Tests:
+`server/waitSummary.test.ts` (today's cases in `server/fixtures/waitingCards.ts`), `server/orchestrators.test.ts` ("w1868"),
+`e2e/waitingCards.spec.ts` (the cards with a still and a playing clip, desktop and narrow; five orchestrator questions, each
+answered by a click).
+
 ## Review media inline, never a bare path (w1384)
 
 Ben, 2026-10-13: "you have to inline preview videos in this chat for me to verify them". Ben, 2026-10-15, after a
@@ -2401,8 +2546,9 @@ orchestrator asks every question to its person with **`ask_person`**, one at a t
 - **The tool** (`ask_person`, a person's orchestrator only, loaded in every call: `server/toolManifest.ts`): a `question`
   (one sentence, its context goes in the message above), 2 to 4 `options`, each a `label` (the complete answer in the person's
   voice, "Close w983 as handled", at most 90 characters) and a one-line `description`, and at most one marked `recommended`.
-  `shared/ask.ts` `checkAsk` refuses anything else (two picks, a duplicate label, the reserved "Chat more about this") and the
-  recommended option moves to the front. The tool answers "Shown to Ben as 3 buttons ... End your turn now": the orchestrator
+  A label over 90 is not refused (w1869): `checkAsk` cuts it at a word with "…", puts its full text in front of that option's
+  description and the answer carries a WARNING. `shared/ask.ts` `checkAsk` refuses anything else (two picks, a duplicate
+  label, the reserved "Chat more about this") and the recommended option moves to the front. The tool answers "Shown to Ben as 3 buttons ... End your turn now": the orchestrator
   writes its message, calls the tool and stops. The call stays in the transcript as a `tool_use`, and the page draws that event
   as the question (`web/src/components/AskCard.tsx`): the question, one button per option (the recommended one first, an amber
   "Recommended" chip) and a last, dashed "Chat more about this". It reuses what the chat has: the reply bar and `startReply` of w866 for "Chat more", the reply quote line for the answer, the `.chip` and the colour tokens (the same borders, accent and green as the rest of the page). The Intake tab's Approve and Decline (`DispatcherPanel.tsx`) are one-line `.btn` buttons in a table row, with no component to lift out, so the option buttons (`.ask-opt`) are two-line cards of the same radius and tokens.

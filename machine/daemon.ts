@@ -24,7 +24,7 @@ import type { TrimPolicy } from '../server/cacheTrim.ts';
 import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
-import { UnitySlots, gamePlayers, installShims, isAlive, slotsDir } from './unitySlots.ts';
+import { UnitySlots, gamePlayers, installShims, isAlive, runsIn, slotsDir } from './unitySlots.ts';
 import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
@@ -466,6 +466,7 @@ export class Daemon {
         this.send({ type: 'sandbox_event', text: `Unity batch build: ${text}` });
       },
       afterKill: () => this.slots.tick(),
+      runs: () => runsIn(this.slots.dir),
     };
     this.reaper = new UnityReaper(
       reaperDeps ??
@@ -1538,8 +1539,8 @@ export class Daemon {
     if (this.idleClosing.has(id)) return { closed: false, text: 'skipped: it is being closed already' };
     this.idleClosing.add(id);
     try {
-      const until = timedHolder(this.cfg.root)?.until;
-      const res = await this.pool.benchClose(id, by, ticket, closedDetail(by, until), () =>
+      const holder = timedHolder(this.cfg.root);
+      const res = await this.pool.benchClose(id, by, ticket, closedDetail(by, holder?.until, holder?.kept), () =>
         idleCloseEditor(
           { bridge: this.editorBridge(id, sbPath), editorPids: () => this.pool.editorPids(id), personInputAgoMs: () => undefined, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now() },
           0,
@@ -2140,7 +2141,7 @@ export class Daemon {
         return;
       case 'bench_priorities':
         // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.
-        writeBenchPriorities(this.cfg.root, msg.sessions, new Date(), msg.singleWorker);
+        writeBenchPriorities(this.cfg.root, msg.sessions, new Date(), msg.singleWorker, msg.noTimedRuns);
         this.benchMarks = msg.sessions;
         return;
       case 'cleanup_now':
@@ -2322,7 +2323,8 @@ export class Daemon {
           return;
         }
         if (msg.action === 'clear_batch') {
-          void this.reaper.check().then(
+          // A worker's own ask (its session, w1874): its own stalled builds are ended without the hour's wait.
+          void this.reaper.check(msg.session ? { session: msg.session, sandbox: msg.sandbox } : undefined).then(
             (text) => this.send({ type: 'unity_result', id: msg.id, ok: true, text }),
             (err) => this.send({ type: 'unity_result', id: msg.id, ok: false, text: `could not look for stuck batch builds: ${(err as Error).message}` }),
           );
