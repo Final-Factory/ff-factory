@@ -1466,7 +1466,9 @@ test('w830: a decision is dropped, never carried out, when its PR closes unmerge
 });
 
 test("w830: w824 as it happened: the filings limit refuses Lothsahn's 4th note in his own turn; it is held, offered back with his next message (not his words), and goes through then without asking him", async (t) => {
-  const { store, agents, o, call, work } = setup(t);
+  const { cfg, store, agents, o, call, work } = setup(t);
+  // As it happened: the filings limit was 3 then (20 since w1867).
+  cfg.orchestrator = { ...cfg.orchestrator, filingsPerMessage: 3 };
   const loth = o.personalFor(LOTH);
   loth.lastFrom = 'human';
   for (const [i, title] of ['One', 'Two', 'Three', 'Four'].entries()) putMine(store, `w${i + 1}`, title);
