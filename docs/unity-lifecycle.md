@@ -222,7 +222,11 @@ node cannot take the OS file locks the queue lives on):
 - **`unity start`** of a sandbox editor checks the slot first, then takes a shared ticket. Not granted within 5 s, it
   answers `Queued (w1615)` and the pool starts the editor itself at its turn, checking the gates and the slot again
   (none is waited for while it holds the ticket); `unity status` shows its place. The ticket goes once the editor's
-  MCP bridge is up, or after 30 minutes. A stop cancels a queued start.
+  MCP bridge is up, or after 30 minutes. A stop cancels a queued start. "Up" means this editor's own bridge wrote its
+  `~/.unity-mcp/unity-mcp-status-*.json` after it was launched (`server/unityHang.ts` `bridgeUpSince`, w1829): the
+  port file outlives every editor, so before this a boot's ticket went at the pool's first look, 12 s into a 199 s
+  first import on BEAST's slot5, and that import ran beside another worker's timed run. The sandbox shows `starting`
+  until then too.
 - **`readBenchLock`** (`machine/benchLock.ts`): a holder whose owner line names a ticket (`[t00000042]`) counts while
   its helper process lives, however old; an old-style line keeps the 40-minute rule.
 

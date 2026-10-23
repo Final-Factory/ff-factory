@@ -113,7 +113,7 @@ const until = async (what: string, cond: () => boolean, ms = 60_000) => {
 const repos = () => testRepos();
 
 /** Real git, copy and delete; a stand-in editor (no Unity), and free space the test sets. */
-function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?: number } = {}) {
+function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?: number; bridge?: (project: string, since: number | undefined, running: Set<string>) => boolean } = {}) {
   const running = new Set<string>();
   const d: PoolDeps = {
     git: (args, opts = {}) => run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }),
@@ -137,7 +137,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
         editors: () => (running.has(sb.path) ? [{ pid: 4242, ppid: 1, cmd: `Unity -projectPath ${sb.path}` }] : []),
       },
     }),
-    bridgeUp: (p) => running.has(p),
+    bridgeUp: (p, since) => (o.bridge ? o.bridge(p, since, running) : running.has(p)),
     gitStatus: readGitStatus,
     now: () => Date.now(),
   };
@@ -146,7 +146,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket']; warm?: string[] } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket']; warm?: string[]; bridge?: (project: string, since: number | undefined, running: Set<string>) => boolean } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
   /** The status of each sandbox at every change the portal would be sent, consecutive repeats dropped (w898: the cleanup state's order). */
   const statuses: string[] = [];
@@ -247,6 +247,48 @@ test('w1615: an editor start takes a shared bench ticket after its slot: queued 
   tickets[1].kind = 'granted';
   await new Promise((res) => setTimeout(res, 200));
   assert.equal(running.has(path.join(r.sbRoot, 'b')), false, 'a cancelled start never runs');
+});
+
+test('w1829: a boot keeps its bench ticket until the new editor\'s own bridge writes its status; one left by the editor before it does not count, and an editor running before the daemon is up at its first look', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const tickets: ReturnType<typeof fakeTicket>[] = [];
+  /** When each project's bridge last wrote its status file (bridgeUpSince's mtime). */
+  const status = new Map<string, number>();
+  const { p, running } = pool(r, {
+    settings: { maxUnity: 2 },
+    bootTicket: () => {
+      const k = fakeTicket();
+      k.kind = 'granted';
+      tickets.push(k);
+      return { ticket: k as unknown as BenchTicket };
+    },
+    bridge: (project, since, run) => run.has(project) && (since === undefined || (status.get(project) ?? -Infinity) >= since),
+  });
+  t.after(() => tickets.forEach((k) => k.release()));
+  for (const id of ['a', 'b']) await p.create({ id, branch: `sandbox/${id}`, base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'a');
+  await ready(p, 'b');
+  const pa = path.join(r.sbRoot, 'a');
+  const pb = path.join(r.sbRoot, 'b');
+  const state = (id: string) => p.list().find((s) => s.id === id)!.unity.state;
+  // b's editor already ran when this daemon started, its status written a minute ago: up at the first look.
+  running.add(pb);
+  status.set(pb, Date.now() - 60_000);
+  // a's last editor left its status a minute ago; a new one is launched now (BEAST slot5, 2026-10-23).
+  status.set(pa, Date.now() - 60_000);
+  assert.match(await p.unity('a', 'start'), /Started/);
+  assert.equal(running.has(pa), true);
+  await p.tick();
+  assert.equal(state('b'), 'running', 'an editor that ran before the daemon');
+  assert.equal(state('a'), 'starting', 'its first import still runs');
+  assert.equal(tickets.length, 1);
+  assert.equal(tickets[0].released, 0, 'the boot keeps its ticket: no timed run starts beside the import');
+  // Its own bridge comes up and writes its status.
+  status.set(pa, Date.now());
+  await p.tick();
+  assert.equal(state('a'), 'running');
+  assert.equal(tickets[0].released, 1, 'let go once this editor\'s bridge is up');
 });
 
 test('w1829: an editor closed for a timed run is marked before its quit, says why, keeps its mark across a daemon restart, starts again through the bench queue when the turn ends and stays marked until it runs, and its worker hears it once', async (t) => {
