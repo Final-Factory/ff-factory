@@ -127,9 +127,11 @@ test('w1628: the daemon reports the timed legs in its queue, running or waiting,
 
   const file = writeBenchPriorities(root, { s1: { priority: 'high', requests: ['w1628'] } }, new Date('2026-10-20T18:00:00Z'))!;
   assert.equal(file, path.join(q, 'priorities.json'));
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { at: '2026-10-20T18:00:00.000Z', v: 2, sessions: { s1: { priority: 'high', requests: ['w1628'] } }, single_worker: false });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { at: '2026-10-20T18:00:00.000Z', sessions: { s1: { priority: 'high', requests: ['w1628'] } } }, 'w1832: an older portal sends no singleWorker, so the file stays v 1 and the queue keeps its pre-empt rule');
+  writeBenchPriorities(root, { s1: { priority: 'high', requests: ['w1628'] } }, new Date('2026-10-20T18:00:00Z'), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { at: '2026-10-20T18:00:00.000Z', v: 2, single_worker: false, sessions: { s1: { priority: 'high', requests: ['w1628'] } } });
   // w1832: the exempt marks and the single-worker flag, which bench_queue.py reads (v 2)
   writeBenchPriorities(root, { s2: { priority: 'urgent', requests: ['w9'], exempt: 'release' } }, new Date('2026-10-23T08:00:00Z'), true);
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { at: '2026-10-23T08:00:00.000Z', v: 2, sessions: { s2: { priority: 'urgent', requests: ['w9'], exempt: 'release' } }, single_worker: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { at: '2026-10-23T08:00:00.000Z', v: 2, single_worker: true, sessions: { s2: { priority: 'urgent', requests: ['w9'], exempt: 'release' } } });
   assert.equal(writeBenchPriorities(undefined, {}), undefined);
 });

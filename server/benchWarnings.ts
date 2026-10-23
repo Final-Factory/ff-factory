@@ -46,13 +46,19 @@ export class BenchWarner {
       if (!w?.ticket || !w.session || typeof w.deadline !== 'number') continue;
       const key = `${machineId}:${w.ticket}:${w.deadline}`;
       if (this.sent.has(key)) continue;
-      this.sent.set(key, now);
       const info = this.d.session(w.session);
       if (!info) {
+        this.sent.set(key, now);
         this.d.log?.(`bench warning for ${w.ticket} on ${machineId}: no session ${w.session} here`);
         continue;
       }
-      this.d.send(w.session, benchWarningText(machineId, w, now));
+      try {
+        this.d.send(w.session, benchWarningText(machineId, w, now));
+      } catch (e) {
+        this.d.log?.(`bench warning for ${w.ticket} on ${machineId} not sent, tried again on the next report: ${(e as Error).message}`);
+        continue;
+      }
+      this.sent.set(key, now);
       this.d.log?.(`bench warning: told ${w.session} its ${w.mode} ticket ${w.ticket} on ${machineId} ends at ${hhmm(w.deadline)}`);
     }
   }

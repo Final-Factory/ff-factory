@@ -547,7 +547,9 @@ export interface BenchPriority {
    * The work the bench queue never pre-empts (w1832; lothsahn: "Let's avoid preempting urgent release builds and the
    * nightly"): `release`, the urgent release lane's builder (BuildPlans.releaseBuilder); `nightly`, the worker of the
    * scheduled nightly run (a request filed by the portal's nightly schedule, source kind nightly-run). Set by the portal
-   * only: the game repo's bench_queue.py reads it from priorities.json, so no worker can mark its own job.
+   * only: the game repo's bench_queue.py reads it from priorities.json, keyed by the session a ticket carries
+   * (FF_SESSION_ID, or FF_BENCH_SESSION for the nightly), so a worker has no flag to mark its own job; only a ticket
+   * taken under another session's id would carry that session's mark.
    */
   exempt?: 'release' | 'nightly';
 }

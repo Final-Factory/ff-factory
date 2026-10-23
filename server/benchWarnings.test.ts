@@ -30,7 +30,7 @@ function ticket(root: string, name: string, info: object, files: Record<string, 
   for (const [f, v] of Object.entries(files)) fs.writeFileSync(path.join(d, f), JSON.stringify(v));
 }
 
-test('w1832: the daemon reports only warned holders with a session, with their checkout state', (t) => {
+test('w1832: the daemon reports only warned holders with a session, with their checkout state read off the event loop', async (t) => {
   const root = tmp(t);
   const deadline = 1_800_000_300;
   ticket(root, 't00000001', { mode: 'exclusive', what: 'probe A round 2', pid: 1, session: 's1', cwd: '/w/slot1' }, { granted: { at: 'x', ts: 1_800_000_000 }, 'limit.json': { deadline, warned: 1_800_000_000, why: 'the 30-minute exclusive turn' } });
@@ -39,7 +39,9 @@ test('w1832: the daemon reports only warned holders with a session, with their c
   ticket(root, 't00000004', { mode: 'exclusive', what: 'revoked', pid: 1, session: 's4' }, { granted: { at: 'x', ts: 1 }, revoked: { at: 'x', why: 'limit' }, 'limit.json': { deadline, warned: 1 } });
   ticket(root, 't00000005', { mode: 'exclusive', what: 'its helper is gone', pid: 999, session: 's5' }, { granted: { at: 'x', ts: 1 }, 'limit.json': { deadline, warned: 1 } });
   const asked: (string | undefined)[] = [];
-  const state = (cwd: string | undefined) => (asked.push(cwd), { dirty: 3, unpushed: 1, branch: 'w1832-x' });
+  const state = async (cwd: string | undefined) => (asked.push(cwd), { dirty: 3, unpushed: 1, branch: 'w1832-x' });
+  assert.deepEqual(readBenchWarnings(root, (pid) => pid === 1, state), [], 'the first tick starts the git read and reports on the next');
+  await new Promise((r) => setImmediate(r));
   const got = readBenchWarnings(root, (pid) => pid === 1, state);
   assert.deepEqual(got, [{ ticket: 't00000001', session: 's1', mode: 'exclusive', what: 'probe A round 2', deadline: deadline * 1000, why: 'the 30-minute exclusive turn', dirty: 3, unpushed: 1, branch: 'w1832-x' }]);
   readBenchWarnings(root, (pid) => pid === 1, state);
@@ -47,16 +49,16 @@ test('w1832: the daemon reports only warned holders with a session, with their c
   assert.deepEqual(readBenchWarnings(undefined), []);
 });
 
-test('w1832: a checkout state from git, and none when git cannot say', () => {
-  const git = (args: string[]) => {
+test('w1832: a checkout state from git, and none when git cannot say', async () => {
+  const git = async (args: string[]) => {
     if (args[0] === 'status') return ' M a.cs\n?? b.cs\n';
     if (args[0] === 'rev-parse') return 'w1832-x\n';
     throw new Error('no upstream');
   };
-  assert.deepEqual(checkoutState('/w', git), { dirty: 2, branch: 'w1832-x' });
-  assert.equal(checkoutState(undefined), undefined);
+  assert.deepEqual(await checkoutState('/w', git), { dirty: 2, branch: 'w1832-x' });
+  assert.equal(await checkoutState(undefined), undefined);
   assert.equal(
-    checkoutState('/w', () => {
+    await checkoutState('/w', async () => {
       throw new Error('not a repo');
     }),
     undefined,
@@ -79,6 +81,13 @@ test('w1832: each warning goes to its worker once per deadline, and tells it to 
   assert.equal(sent.length, 2, 'a new deadline (a new waiter after a cancel) is a new warning');
   w.handle('m5', [{ ...warning, ticket: 't00000009', session: 'gone' }]);
   assert.equal(sent.length, 2, 'no message to a session the portal does not know');
+  let fail = true;
+  const flaky = new BenchWarner({ session: (id) => ({ id }) as SessionInfo, send: (id, text) => { if (fail) throw new Error('no session'); sent.push([id, text]); }, now: () => now });
+  flaky.handle('m5', [{ ...warning, ticket: 't00000010' }, { ...warning, ticket: 't00000011' }]);
+  assert.equal(sent.length, 2, 'a send that throws costs neither warning');
+  fail = false;
+  flaky.handle('m5', [{ ...warning, ticket: 't00000010' }, { ...warning, ticket: 't00000011' }]);
+  assert.equal(sent.length, 4, 'both go on the next report');
 });
 
 test('w1832: an urgent release warning says the release has no cap', () => {

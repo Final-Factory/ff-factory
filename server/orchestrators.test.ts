@@ -4256,6 +4256,9 @@ test('w1628: each worker\'s bench priority is the highest of its open requests, 
   assert.equal(agents.benchPriorities('pc')[a.id].priority, 'urgent', 'the release builder\'s tickets count as urgent');
   assert.equal(agents.benchPriorities('pc')[a.id].exempt, 'release', 'w1832: the urgent release lane is never pre-empted');
   assert.equal(agents.benchPriorities('pc')[b.id].exempt, undefined, 'any other worker is');
+  store.putWork({ ...store.work.get('w1')!, status: 'done' });
+  assert.deepEqual(agents.benchPriorities('pc')[a.id], { priority: 'urgent', requests: [], exempt: 'release' }, 'w1832: a builder with no open request keeps its mark');
+  store.putWork({ ...store.work.get('w1')!, status: 'active' });
   agents.builds.releaseBuilder = real;
   assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined);
   assert.equal(agents.benchPriorities('pc')[a.id].priority, 'high');
