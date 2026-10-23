@@ -260,6 +260,7 @@ export const api = {
   liveKnobs: (sessionId: string) => request<LiveMaterialKnobs[]>('GET', `/api/live/${enc(sessionId)}/knobs`),
   /** `knob`: the knob as the game now holds it, when the answer carries it. */
   liveKnob: (sessionId: string, req: LiveKnobRequest) => request<{ ok?: boolean; knob?: LiveKnob }>('POST', `/api/live/${enc(sessionId)}/knob`, req),
+  liveKeep: (sessionId: string, material: string) => request<{ ok?: boolean; kept: { name: string; path: string; change: string }[] }>('POST', `/api/live/${enc(sessionId)}/keep`, { material }),
   liveReset: (sessionId: string, material?: string) => request<{ ok?: boolean }>('POST', `/api/live/${enc(sessionId)}/reset`, material ? { material } : {}),
 };
 

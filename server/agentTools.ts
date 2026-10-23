@@ -18,7 +18,9 @@ import path from 'node:path';
  *   the script only has to run from an up-to-date copy. Its own checkout dirty, on another branch or diverged: nothing is
  *   overwritten, the run stops and says why.
  * - Runs `sh registerAgents.sh --claude` from it: the marketplace refreshed, every plugin the machine remembers updated (a
- *   bare run keeps the machine's set: ff-agents and ff-speckit everywhere, ff-discord where a person asked for it).
+ *   bare run keeps the machine's set: ff-agents and ff-speckit everywhere, ff-discord where a person asked for it). Claude
+ *   Code fetches the marketplace over HTTPS only, with a longer git timeout (REGISTER_ENV), and a failed run is run once
+ *   more (w1895).
  * - Puts back publish-skills' checkout marker (`~/.claude/final-factory-agents-checkout`, which `registerAgents.sh` points at
  *   the checkout it ran from), so a person's skill edits keep going to their own checkout.
  * - Reads the versions again and compares them with the checkout's marketplace.json: every installed plugin on master's
@@ -35,6 +37,17 @@ export const DEFAULT_AGENT_PLUGINS: readonly string[] = ['ff-agents', 'ff-specki
 export const BRANCH = 'master';
 /** The registerAgents.sh run: a marketplace clone and three plugin installs on a slow link. */
 export const REGISTER_TIMEOUT_MS = 10 * 60_000;
+/**
+ * What registerAgents.sh's `claude plugin` calls run with (w1895). Claude Code (2.1.309) fetches a github marketplace over
+ * SSH when `ssh -T git@github.com` authenticates, else over HTTPS, and falls back to the other transport when the first one
+ * fails, with a 120 s git timeout. m5's key is on no GitHub account, so whenever its HTTPS fetch failed (both failed runs
+ * on 2026-10-23 took about that timeout) the SSH fallback failed too, and the step reported only the SSH error ("Please make
+ * sure you have the correct access rights"); m3's key is bryding's, so its fetch goes over SSH. final-factory-agents is
+ * public, as FF Factory's own anonymous fetch of it says: HTTPS only on every machine (no person's ssh key in it, and a
+ * failure names the real HTTPS error), and five minutes for its git, the value Claude Code's own timeout message suggests.
+ * A value the environment already sets is kept.
+ */
+export const REGISTER_ENV = { CLAUDE_CODE_PLUGIN_PREFER_HTTPS: '1', CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS: String(5 * 60_000) } as const;
 
 export type Versions = Record<string, string | undefined>;
 
@@ -211,8 +224,19 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
   // registerAgents.sh records the checkout it ran from in $HOME/.claude for publish-skills; that stays the person's.
   const marker = path.join(d.env.HOME || d.home, '.claude', `${MARKETPLACE}-checkout`);
   const markerBefore = readText(marker);
-  const r = await d.exec(await shell(d), ['registerAgents.sh', '--claude'], { cwd: co, env, timeoutMs: REGISTER_TIMEOUT_MS });
-  for (const l of `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((x) => x.trim())) d.say(`  ${l.trimEnd()}`);
+  const sh = await shell(d);
+  const registerEnv: NodeJS.ProcessEnv = { ...REGISTER_ENV, ...env };
+  const register = async () => {
+    const x = await d.exec(sh, ['registerAgents.sh', '--claude'], { cwd: co, env: registerEnv, timeoutMs: REGISTER_TIMEOUT_MS });
+    for (const l of `${x.stdout}\n${x.stderr}`.split(/\r?\n/).filter((y) => y.trim())) d.say(`  ${l.trimEnd()}`);
+    return x;
+  };
+  let r = await register();
+  // Every step of it is safe to repeat (a marketplace refresh, plugin updates); a run that timed out is not run again.
+  if (r.code !== 0 && r.code !== -1) {
+    d.say(`registerAgents.sh exited ${r.code} (${tail(r)}); running it once more.`);
+    r = await register();
+  }
   if (markerBefore !== undefined && readText(marker) !== markerBefore) {
     fs.writeFileSync(marker, markerBefore);
     d.say(`publish-skills' checkout marker kept on ${markerBefore.trim()}.`);

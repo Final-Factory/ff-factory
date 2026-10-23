@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { benchGlance } from '../../../shared/benchGlance';
+import { playGlance } from '../../../shared/personPlay';
 import { machineKind, type AppState, type Machine } from '../../../shared/types';
 import { api, type JoinAnswer } from '../api';
 import { attempt, sessionsByIds, toast, upsertMachine } from '../store';
@@ -45,7 +46,9 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
   };
 
   const [details, setDetails] = useDetailsOpen('machine');
-  const glance = machineGlance(m, here, now);
+  // A person playing Final Factory there (w1894), as its daemon's last stats said.
+  const play = m.online ? app.machineStats?.[m.id]?.personPlay : undefined;
+  const glance = machineGlance(m, here, now, play);
   // Its bench queue (w1835): Exclusive, Shared or Free, as its daemon's last stats said.
   const bench = m.online ? benchGlance(app.machineStats?.[m.id]?.bench, now) : undefined;
 
@@ -152,6 +155,16 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
             <div className="unity-bar" data-testid="machine-bench" data-mode={bench.mode} title={bench.hint}>
               <Chip tone={bench.tone}>Bench lock {bench.label}</Chip>
               <span className="dim small bench-row-text">{[bench.short, bench.times, bench.waiting, bench.next, bench.closed].filter(Boolean).join(' · ') || 'no ticket held or waiting'}</span>
+            </div>
+          )}
+          {/* A person playing Final Factory there (w1894): no new work, the agents' editors closed, players quit, builds at idle priority. */}
+          {play && (
+            <div className="unity-bar" data-testid="machine-play">
+              <Chip tone="amber">Playing</Chip>
+              <span className="dim small ellipsis" title={`game pid ${play.pids.join(', ') || 'none now'}`}>
+                {playGlance(play)}: no new work goes there; {play.editorsClosed} editor(s) closed, {play.playersAsked} player(s) asked to quit, {play.buildsLowered} build(s) at idle priority
+                {play.until ? '' : `; work resumes ${play.graceMinutes} min after the game closes`}
+              </span>
             </div>
           )}
           {/* Its owner's pause (w1532): from its tray app, its schedule or a person's input; a paused machine takes no work. */}

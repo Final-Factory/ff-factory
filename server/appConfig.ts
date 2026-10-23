@@ -55,6 +55,11 @@ export const SETTABLE_KEYS = [
   // off), and the minutes without a key or click before work resumes (default 90).
   'machines.activityPause.enabled',
   'machines.activityPause.idleMinutes',
+  // A person playing Final Factory on a machine (w1894, docs/unity-lifecycle.md "A person's game"; optional `machine`): on or
+  // off (default on at LothDesktop only), the minutes of grace after the game closes (default 10), and who plays there.
+  'machines.personPlay.enabled',
+  'machines.personPlay.graceMinutes',
+  'machines.personPlay.who',
   // Whose Claude pool (and GitHub token) work nobody asked for by name runs on (w1289, docs/vault.md section 10): the intake's,
   // FFBox's without an operator, and the nightly run, review and regression sentry. Each a user id with a Claude pool in the
   // vault; null goes back to the default (lothsahn). The owner's only.
@@ -474,6 +479,20 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === false || value === 'false') return false;
       throw new Error("machines.activityPause.enabled is true (a person's key or click on that Windows machine pauses its work) or false (work goes on while someone uses it)");
     }
+    case 'machines.personPlay.enabled': {
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      throw new Error("machines.personPlay.enabled is true (a person's own Final Factory game on that machine makes its agents yield) or false (they work on beside it)");
+    }
+    case 'machines.personPlay.graceMinutes': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > 240) throw new Error(`${key} is a whole number of minutes from 1 to 240: how long after the game closes before the agents' work comes back`);
+      return n;
+    }
+    case 'machines.personPlay.who': {
+      if (typeof value !== 'string' || !/^[\w .'-]{1,40}$/.test(value.trim())) throw new Error(`${key} is a name of up to 40 letters, digits, spaces, dots, dashes or apostrophes: who plays there ("lothsahn")`);
+      return value.trim();
+    }
     case 'machines.activityPause.idleMinutes': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 1440) throw new Error(`${key} is a whole number of minutes from 1 to 1440: how long without a key or click before work resumes`);
@@ -827,8 +846,8 @@ const MACHINE_KEY = /^[a-z0-9][a-z0-9-]{0,23}$/;
  * survive a change of the rest, which is "*" once there are any: { "*": false, "m5": true }. Collapses back to a
  * plain value (or nothing) when it can.
  */
-export function nextPerMachine<T extends boolean | number>(cur: unknown, machine: string | undefined, v: T | undefined): T | Record<string, T> | undefined {
-  const obj: Record<string, T> = typeof cur === 'object' && cur !== null ? { ...(cur as Record<string, T>) } : typeof cur === 'boolean' || typeof cur === 'number' ? { '*': cur as T } : {};
+export function nextPerMachine<T extends boolean | number | string>(cur: unknown, machine: string | undefined, v: T | undefined): T | Record<string, T> | undefined {
+  const obj: Record<string, T> = typeof cur === 'object' && cur !== null ? { ...(cur as Record<string, T>) } : typeof cur === 'boolean' || typeof cur === 'number' || typeof cur === 'string' ? { '*': cur as T } : {};
   const at = machine ?? '*';
   if (v === undefined) delete obj[at];
   else obj[at] = v;
@@ -858,14 +877,14 @@ function splitHold(v: unknown): { hold?: Record<string, string>; except?: Record
 
 export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { machine?: string; users?: readonly string[] } = {}): { before: unknown; after: unknown } {
   if (!SETTABLE_KEYS.includes(key)) throw new Error(`${key} cannot be changed by an agent; allowed: ${SETTABLE_KEYS.join(', ')}`);
-  const perMachine = key === 'machines.githubFromVault' || key.startsWith('machines.activityPause.') || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
-  if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.githubFromVault, machines.activityPause.* and machines.cleanup.*, and is a machine id such as "m5"`);
+  const perMachine = key === 'machines.githubFromVault' || key.startsWith('machines.activityPause.') || key.startsWith('machines.personPlay.') || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
+  if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.githubFromVault, machines.activityPause.*, machines.personPlay.* and machines.cleanup.*, and is a machine id such as "m5"`);
   const v = normalizeSetting(key, value, cfg, opts.users);
   const text = fs.readFileSync(file, 'utf8');
   const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
   if (key === 'providers.ffbox.token') return setFfboxToken(file, cfg, raw, text, v as string | undefined);
   const before = getPath(raw, key);
-  const next = perMachine ? nextPerMachine(before, opts.machine, v as boolean | number | undefined) : v;
+  const next = perMachine ? nextPerMachine(before, opts.machine, v as boolean | number | string | undefined) : v;
   // w1863: a hold's { why, except } form is stored split, so every reader of placement.hold keeps getting reasons.
   if (key === 'placement.hold') {
     const split = splitHold(next);
@@ -986,6 +1005,11 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'machines.activityPause.enabled' || key === 'machines.activityPause.idleMinutes') {
     const field = key === 'machines.activityPause.enabled' ? 'enabled' : 'idleMinutes';
     cfg.machines = { ...cfg.machines, activityPause: { ...cfg.machines?.activityPause, [field]: next as never } };
+  }
+  // Live: sent with the next bench priorities (each minute, server/machines.ts benchPrioritiesMsg).
+  else if (key === 'machines.personPlay.enabled' || key === 'machines.personPlay.graceMinutes' || key === 'machines.personPlay.who') {
+    const field = key.slice('machines.personPlay.'.length) as 'enabled' | 'graceMinutes' | 'who';
+    cfg.machines = { ...cfg.machines, personPlay: { ...cfg.machines?.personPlay, [field]: next as never } };
   }
   else if (key === 'machines.cleanup.everyMinutes' || key === 'machines.cleanup.softFreeGB') {
     const field = key === 'machines.cleanup.everyMinutes' ? 'everyMinutes' : 'softFreeGB';

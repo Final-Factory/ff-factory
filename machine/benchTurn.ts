@@ -29,14 +29,27 @@
 // does not own (a person's own project) and a player no worker started (no slot, no session: a person's game). A holder
 // with no session (a person's timed run) asks no player to quit: the players its script starts detached cannot be told
 // from the others.
+//
+// w1894: a person playing Final Factory here (machine/personPlay.ts) holds a turn too, with no queue ticket: `person` names
+// them and says when it ends (a grace after the game closes). It closes every sandbox's editor and asks every worker's
+// player to quit, as a timed run's does, but a batch Unity run is dropped to idle priority and left to finish, not ended
+// (lowerBuild): it holds its shared ticket rightfully, as no exclusive ticket is in the queue. After the turn, and at the
+// daemon's first look, every sandbox batch Unity left at idle priority goes back to normal (restoreBuilds). Its marks are
+// kept whichever turn made them, so a timed run ending under it does not reopen what the person's turn keeps closed.
 import fs from 'node:fs';
 import path from 'node:path';
 import type { QueueTicket } from './benchQueue.ts';
 import { holdEnds } from './benchLock.ts';
+import { isPersonTicket } from './personPlay.ts';
 import type { Proc } from './unity.ts';
 import { run, type RunResult } from '../server/proc.ts';
 
-export type Holder = QueueTicket & { until: number; kept?: boolean };
+export type Holder = QueueTicket & {
+  until: number;
+  kept?: boolean;
+  /** w1894: a person's game holds the turn (machine/personPlay.ts): who plays, and when the turn ends, in words. */
+  person?: { who: string; ends: string };
+};
 
 export interface TurnEditor {
   id: string;
@@ -97,6 +110,10 @@ export interface BenchTurnDeps {
   stopBuild?(pid: number, sandbox: string, why: string): Promise<string>;
   /** w1860: the note for every worker in a sandbox, given at its next message. */
   noteSandbox?(sandbox: string, text: string): void;
+  /** w1894: drop a batch Unity and what it started to idle priority (a person's turn), answering what happened. */
+  lowerBuild?(pid: number, procs: Proc[]): string;
+  /** w1894: put every sandbox batch Unity left at idle priority back to normal, answering how many processes; after a person's turn. */
+  restoreBuilds?(procs: Proc[]): number;
   /** The sandboxes closed now and why, for the guard's refusal of Unity MCP calls there; {} when no turn runs. */
   writeClosed(closed: Record<string, string>): void;
   log(text: string): void;
@@ -111,6 +128,12 @@ export const TURN_RETRY_MS = 30_000;
  * ticket (unity-slot run waits for the turn when it has none), so a stray one is rare.
  */
 export const BUILD_LOOK_MS = 30_000;
+/**
+ * The same look during a person's turn (w1894). Longer: the listing takes the very CPU the person's game wants, no new Unity
+ * run starts in the turn (unity-slot run waits, the guard refuses a raw batch Unity), and what a build at idle priority
+ * starts inherits the idle class. A guess; it only bounds how long a build that slipped in runs at normal priority.
+ */
+export const PERSON_BUILD_LOOK_MS = 2 * 60_000;
 /** Starts asked for a closed editor after its turn before it is left stopped (each takes a shared ticket of the queue). */
 export const REOPEN_TRIES = 3;
 /** A player asked to quit is asked again after this long if it still runs (never forced: then it is left and logged). */
@@ -118,8 +141,9 @@ export const PLAYER_ASK_AGAIN_MS = 2 * 60_000;
 
 const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16) + 'Z';
 
-/** Who holds the turn, for people: "a timed run on lothdesktop/slot3 (w1785)". */
-export function holderText(h: Pick<QueueTicket, 'host' | 'sandbox' | 'requests' | 'session' | 'pid'>): string {
+/** Who holds the turn, for people: "a timed run on lothdesktop/slot3 (w1785)", or "lothsahn playing Final Factory on this PC". */
+export function holderText(h: Pick<Holder, 'host' | 'sandbox' | 'requests' | 'session' | 'pid' | 'person'>): string {
+  if (h.person) return `${h.person.who} playing Final Factory on this PC`;
   const where = [h.host, h.sandbox].filter(Boolean).join('/') || (h.session ? `worker ${h.session}` : `pid ${h.pid}`);
   return `a timed run on ${where}${h.requests?.length ? ` (${h.requests.join(', ')})` : ''}`;
 }
@@ -130,7 +154,14 @@ export function closedDetail(by: string, until?: number, kept?: boolean): string
 }
 
 /** What a worker hears when it calls its Unity editor while a turn keeps it closed (the guard's refusal). */
-export function closedRefusal(by: string, at: number, until: number, kept?: boolean): string {
+export function closedRefusal(by: string, at: number, until: number, kept?: boolean, person?: Holder['person']): string {
+  if (person)
+    return (
+      `Your sandbox's Unity editor was closed at ${hhmm(at)} for ${by} (w1894: while a person plays the game on this machine, ` +
+      `the agents' editors, players and builds yield to it). Its scenes and assets were saved first; anything in play mode is ` +
+      `gone. FF Factory starts it again when the turn ends, ${person.ends}, in the next shared turn. Do what needs no editor ` +
+      `meanwhile (your shell runs), or wake_me in 30 minutes; mcp__machine__unity status says when it is up.`
+    );
   return (
     `Your sandbox's Unity editor was closed at ${hhmm(at)} for ${by} (w1829: while another worker's exclusive bench ticket ` +
     `times a run, nothing else runs on this machine). Its scenes and assets were saved first; anything in play mode is gone. ` +
@@ -170,6 +201,10 @@ export class BenchTurn {
   private buildsAt = 0;
   /** Batch Unity runs being stopped now, by pid. */
   private readonly stopping = new Set<number>();
+  /** w1894: batch Unity runs a person's turn dropped to idle priority, by pid (logged and told once each). */
+  private readonly lowered = new Set<number>();
+  /** w1894: idle-priority builds are put back at the next look with no person's turn (true at start: a daemon restart). */
+  private restorePending = true;
 
   constructor(d: BenchTurnDeps) {
     this.d = d;
@@ -178,6 +213,11 @@ export class BenchTurn {
   /** The game players this turn asked to quit (w1835: the machine view shows them). */
   playersAsked(): number {
     return this.current ? this.asked.size : 0;
+  }
+
+  /** The batch Unity runs a person's turn dropped to idle priority (w1894). */
+  buildsLowered(): number {
+    return this.current ? this.lowered.size : 0;
   }
 
   async tick(): Promise<void> {
@@ -196,12 +236,19 @@ export class BenchTurn {
     const now = this.d.now();
     const h = this.d.holder();
     if (h?.ticket !== this.current) {
-      if (h) this.d.log(`bench turn: ${h.ticket} granted to ${holderText(h)}: closing the other editors and players here until it ends (${holdEnds(h.until, h.kept)})`);
+      if (h) this.d.log(`bench turn: ${h.ticket} ${h.person ? 'begins for' : 'granted to'} ${holderText(h)}: closing the other editors and players here until it ends (${h.person ? h.person.ends : holdEnds(h.until, h.kept)})`);
       if (this.current) this.d.log(`bench turn: ${this.current} ended: reopening the editors it closed`);
+      if (isPersonTicket(this.current)) this.restorePending = true;
       this.current = h?.ticket;
       this.asked.clear();
+      this.lowered.clear();
       this.noPlayersSaid = false;
       this.buildsAt = 0;
+    }
+    if (this.restorePending && !h?.person && this.d.restoreBuilds) {
+      this.restorePending = false;
+      const n = this.d.restoreBuilds(await this.d.procs().catch(() => [] as Proc[]));
+      if (n) this.d.log(`bench turn: ${n} process(es) of the sandboxes' batch Unity runs are back at normal priority (w1894)`);
     }
     // Reopen every editor no turn keeps closed now: the turn that closed it ended, even when the next timed run was granted
     // before a look saw the lock free (its start then queues behind that run and comes back in the next shared turn), and
@@ -209,7 +256,8 @@ export class BenchTurn {
     const closed = this.d.closed();
     for (const id of this.starts.keys()) if (!closed.some((c) => c.id === id)) this.starts.delete(id);
     for (const c of closed) {
-      if (h && c.id !== h.sandbox && c.ticket === h.ticket) continue;
+      // w1894: a person's turn keeps every mark, whichever turn made it.
+      if (h && c.id !== h.sandbox && (c.ticket === h.ticket || h.person)) continue;
       if (c.starting || (c.reopenAt !== undefined && now - c.reopenAt < TURN_RETRY_MS) || (this.retryAt.get(c.id) ?? 0) > now) continue;
       const tries = this.starts.get(c.id) ?? 0;
       if (tries >= REOPEN_TRIES && this.d.giveUp) {
@@ -235,31 +283,44 @@ export class BenchTurn {
     const by = holderText(h);
     // An editor already marked for this turn is closed or still quitting (its bridge's port file can outlive the quit):
     // it is not closed again, which would take a dead bridge for a skip and drop its mark.
-    const marked = new Set(closed.filter((c) => c.ticket === h.ticket).map((c) => c.id));
+    const marked = new Set(closed.filter((c) => c.ticket === h.ticket || !!h.person).map((c) => c.id));
     const editors = this.d.editors().filter((e) => e.id !== h.sandbox && e.running && !marked.has(e.id) && !this.closing.has(e.id) && (this.retryAt.get(e.id) ?? 0) <= now);
     // A holder with no worker session (a person's own timed run, from the main clone) cannot be told apart from the players
     // its script started with --detach (their parent is gone): no player is asked to quit then.
-    const players = h.session
-      ? this.d.players().filter((p) => {
-          if (!p.slot && !p.session) return false; // a person's own game
-          if ((h.sandbox && p.sandbox === h.sandbox) || p.session === h.session) return false;
-          const last = this.asked.get(p.pid);
-          return last === undefined || now - last >= PLAYER_ASK_AGAIN_MS;
-        })
-      : [];
-    if (!h.session && !this.noPlayersSaid) {
+    const players =
+      h.session || h.person
+        ? this.d.players().filter((p) => {
+            if (!p.slot && !p.session) return false; // a person's own game
+            if ((h.sandbox && p.sandbox === h.sandbox) || (h.session && p.session === h.session)) return false;
+            const last = this.asked.get(p.pid);
+            return last === undefined || now - last >= PLAYER_ASK_AGAIN_MS;
+          })
+        : [];
+    if (!h.session && !h.person && !this.noPlayersSaid) {
       this.noPlayersSaid = true;
       this.d.log(`bench turn: ${h.ticket} has no worker session: other players are left running (its own may have none to tell them apart by)`);
     }
     // The process listing costs seconds on Windows: taken only when an editor or a player is to be handled, or for the
     // builds' look (at the grant, then every BUILD_LOOK_MS).
-    const lookBuilds = !!this.d.builds && !!this.d.stopBuild && now - this.buildsAt >= BUILD_LOOK_MS;
+    const lookBuilds = !!this.d.builds && !!(h.person ? this.d.lowerBuild : this.d.stopBuild) && now - this.buildsAt >= (h.person ? PERSON_BUILD_LOOK_MS : BUILD_LOOK_MS);
     const procs = editors.length || players.length || lookBuilds ? await this.d.procs().catch(() => [] as Proc[]) : [];
     const holderOwns = (pid: number | undefined) => pid !== undefined && descendsFrom(pid, h.ownerPid, procs);
     if (lookBuilds) {
       this.buildsAt = now;
       for (const b of this.d.builds!(procs)) {
         if (b.sandbox === h.sandbox || holderOwns(b.pid) || this.stopping.has(b.pid) || this.d.exemptSandbox?.(b.sandbox)) continue;
+        if (h.person) {
+          // w1894: idle priority, again at each look for what it started since; never ended (it holds its shared ticket)
+          const text = this.d.lowerBuild!(b.pid, procs);
+          if (this.lowered.has(b.pid)) continue;
+          this.lowered.add(b.pid);
+          this.d.log(`bench turn: sandbox ${b.sandbox}: batch Unity pid ${b.pid}: ${text}`);
+          this.d.noteSandbox?.(
+            b.sandbox,
+            `[bench turn] Your batch Unity run (pid ${b.pid}: a build, a test run or a batch compile) was dropped to idle priority at ${hhmm(now)} for ${by} (w1894: while a person plays the game on this machine, the agents' work yields to it). It goes on with the CPU the game leaves, so it is slower: allow for that in any timeout. It is back at normal priority when the turn ends, ${h.person.ends}; no new Unity run starts meanwhile (unity-slot run waits).`,
+          );
+          continue;
+        }
         this.stopping.add(b.pid);
         const why = `${by} holds this machine's exclusive bench ticket ${h.ticket} (w1860: no build or test run beside a timed run)`;
         void this.d
@@ -304,10 +365,15 @@ export class BenchTurn {
       const who = [p.sandbox, p.session && `worker ${p.session}`, p.slot && `slot ${p.slot}`].filter(Boolean).join(', ');
       this.d.log(`bench turn: player pid ${p.pid} (${who}): ${last === undefined ? 'asked to quit' : 'still runs, asked to quit again'}: ${said}`);
       if (p.session && last === undefined)
-        this.d.notePlayer?.(p.session, `[bench turn] Your game player (pid ${p.pid}) was asked to quit at ${hhmm(now)} for ${by} (w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine). A single-player game normally saves as it quits; a multiplayer game and an automation run (-ffAutomationRole) do not, so a test or audit it was part of is void: run it again after that run (player_slots.py --bench-wait waits for it).`);
+        this.d.notePlayer?.(
+          p.session,
+          h.person
+            ? `[bench turn] Your game player (pid ${p.pid}) was asked to quit at ${hhmm(now)} for ${by} (w1894: while a person plays the game on this machine, the agents' editors, players and builds yield to it). A single-player game normally saves as it quits; a multiplayer game and an automation run (-ffAutomationRole) do not, so a test or audit it was part of is void: run it again once the turn ends, ${h.person.ends}, or hand it back to your orchestrator for another machine.`
+            : `[bench turn] Your game player (pid ${p.pid}) was asked to quit at ${hhmm(now)} for ${by} (w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine). A single-player game normally saves as it quits; a multiplayer game and an automation run (-ffAutomationRole) do not, so a test or audit it was part of is void: run it again after that run (player_slots.py --bench-wait waits for it).`,
+        );
     }
     const marks: Record<string, string> = {};
-    for (const c of this.d.closed()) if (c.id !== h.sandbox) marks[c.id] = closedRefusal(by, c.at, h.until, h.kept);
+    for (const c of this.d.closed()) if (c.id !== h.sandbox) marks[c.id] = closedRefusal(by, c.at, h.until, h.kept, h.person);
     this.write(marks);
   }
 

@@ -27,7 +27,7 @@ import { hostStartFailed } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { BenchPriority, BenchWarning, NoTimedRuns, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { BenchPriority, BenchWarning, NoTimedRuns, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
@@ -38,6 +38,8 @@ import type { GhAppToken } from '../shared/githubAppRoute.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
+/** w1894: a daemon's person-play report older than this holds nothing (its stats come every 15 s). */
+export const PERSON_PLAY_STALE_MS = 3 * 60_000;
 /**
  * A clip goes to a machine's GPU Whisper with a ping ahead of it (w615): no pong or message within this long and the
  * link is taken for dead, so the clip falls back at once instead of waiting out its timeout, and later clips skip that
@@ -511,6 +513,19 @@ export class MachineManager {
     return this.stats.get(id);
   }
 
+  /**
+   * A person playing Final Factory on machine `id` now, or its grace after (w1894, machine/personPlay.ts), as its daemon's
+   * stats said within PERSON_PLAY_STALE_MS while it is online; undefined otherwise (a daemon gone holds nothing).
+   */
+  personPlayOf(id: string, now = Date.now()): PersonPlayReport | undefined {
+    const s = this.stats.get(id);
+    if (!s?.personPlay || !this.isOnline(id) || now - Date.parse(s.at) > PERSON_PLAY_STALE_MS) return undefined;
+    return s.personPlay;
+  }
+
+  /** w1894: machine `id`'s config machines.personPlay, sent with its bench priorities (set by server/index.ts). */
+  personPlayFor?: (machineId: string) => { enabled: boolean; graceMinutes: number; who?: string };
+
   allStats(): Record<string, MachineStats> {
     return Object.fromEntries(this.stats);
   }
@@ -704,7 +719,8 @@ export class MachineManager {
   /** The bench_priorities message for one machine: its workers' priorities, whether it hosts one worker, and its timed-run refusal (w1861). */
   benchPrioritiesMsg(id: string, sessions: Record<string, BenchPriority>): Extract<ToDaemon, { type: 'bench_priorities' }> {
     const no = this.noTimedRuns(id);
-    return { type: 'bench_priorities', sessions, singleWorker: this.singleWorker(id), ...(no ? { noTimedRuns: no } : {}) };
+    const play = this.personPlayFor?.(id);
+    return { type: 'bench_priorities', sessions, singleWorker: this.singleWorker(id), ...(no ? { noTimedRuns: no } : {}), ...(play ? { personPlay: play } : {}) };
   }
 
   /**
@@ -713,7 +729,9 @@ export class MachineManager {
    */
   noTimedRuns(id: string): NoTimedRuns | undefined {
     const m = this.store.machines.get(id);
-    const why = m && noTimedRunsOf(m);
+    // w1894: no timed leg starts while a person plays there (it would time their game, and its turn would close nothing new)
+    const play = this.personPlayOf(id);
+    const why = (m && noTimedRunsOf(m)) || (play ? `${play.who} is playing Final Factory on it (w1894); timed runs go elsewhere until ${play.graceMinutes} min after the game closes` : undefined);
     if (!why) return undefined;
     const others = this.list().filter((o) => o.id !== id && o.sandboxRoot && !noTimedRunsOf(o));
     const elsewhere = [...others.filter((o) => this.isOnline(o.id)), ...others.filter((o) => !this.isOnline(o.id))].map((o) => o.id);
@@ -854,7 +872,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1822,6 +1840,8 @@ export class MachineManager {
   onLiveFrames?: (machineId: string, liveId: string, ws: WebSocket) => boolean;
   /** A daemon's live view state (server/live.ts). */
   onLiveState?: (machineId: string, msg: Extract<FromDaemon, { type: 'live_state' }>) => void;
+  /** A daemon set a live view up again from its stage recipe (w1839, server/live.ts staged). */
+  onLiveStaged?: (machineId: string, msg: Extract<FromDaemon, { type: 'live_staged' }>) => void;
   /** A daemon that streams live views said hello (w1509): the views it runs now, or undefined from an older one. */
   onLiveHello?: (machineId: string, running: DaemonLiveView[] | undefined) => void;
   private readonly liveWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
@@ -2032,7 +2052,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         if (!msg.guard) delete m.guard;
@@ -2241,6 +2261,9 @@ export class MachineManager {
       case 'live_state':
         this.onLiveState?.(id, msg);
         return;
+      case 'live_staged':
+        this.onLiveStaged?.(id, msg);
+        return;
       case 'gh_login': {
         // Names only (w1463): sanitizeGhLogin keeps an account, scope names and a source, so nothing else a daemon sends lands here.
         const gh = sanitizeGhLogin(msg.gh);
@@ -2293,7 +2316,10 @@ export class MachineManager {
         return;
       }
       case 'stats': {
-        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), ...(msg.bench ? { bench: msg.bench } : {}), at: new Date().toISOString() };
+        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), ...(msg.bench ? { bench: msg.bench } : {}), ...(msg.personPlay ? { personPlay: msg.personPlay } : {}), at: new Date().toISOString() };
+        // w1894: a person's game starting or ending there is logged once (portal_logs shows it)
+        const was = this.stats.get(id)?.personPlay;
+        if (!!was !== !!msg.personPlay) console.log(`machine ${id}: ${msg.personPlay ? `${msg.personPlay.who} is playing Final Factory there (pid ${(msg.personPlay.pids ?? []).join(', ')}): held, its agents yield (w1894)` : `the person's game there ended and its grace passed: it takes work again (w1894)`}`);
         this.stats.set(id, stats);
         emit({ type: 'machine_stats', id, stats });
         if (Array.isArray(msg.benchWarnings) && msg.benchWarnings.length) this.onBenchWarnings?.(id, msg.benchWarnings);
@@ -2569,6 +2595,16 @@ export class MachineManager {
   /** Whether a machine's daemon closes a Live view's idle editor on request (w1746: its hello offered `liveIdleClose`). */
   canLiveIdleClose(machineId: string): boolean {
     return this.canLive(machineId) && !!this.hellos.get(machineId)?.liveIdleClose;
+  }
+
+  /** Whether a machine's daemon sets a Live view up again from its stage recipe (w1839: its hello offered `liveRestage`). */
+  canLiveRestage(machineId: string): boolean {
+    return this.canLive(machineId) && !!this.hellos.get(machineId)?.liveRestage;
+  }
+
+  /** Whether a machine's daemon writes a kept Live view knob into the sandbox's .mat (w1839: its hello offered `liveKeep`). */
+  canLiveKeep(machineId: string): boolean {
+    return this.canLive(machineId) && !!this.hellos.get(machineId)?.liveKeep;
   }
 
   /** A live view operation on a machine (w1398, docs/live-view.md): its answer text, or the daemon's reason as an error. */

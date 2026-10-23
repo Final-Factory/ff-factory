@@ -3,7 +3,9 @@
 import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import { FramePump, parseAck } from '../shared/framePump.ts';
-import type { LiveKnobRequest, LiveMaterialKnobs, LiveViewInfo, Requester, SessionInfo, UserRole } from '../shared/types.ts';
+import type { LiveKnobRequest, LiveMaterialKnobs, LiveStageStep, LiveViewInfo, Requester, SessionInfo, UserRole } from '../shared/types.ts';
+import { legsText, parseStage, stageSummary } from '../machine/liveStage.ts';
+import { LIVE_MATERIAL_NAME as NAME, LIVE_PROPERTY_NAME as PROPERTY } from '../machine/matText.ts';
 import type { DaemonLiveView, FromDaemon, ToDaemon } from './machineProtocol.ts';
 import type { LiveIdleView } from './liveIdle.ts';
 
@@ -23,18 +25,16 @@ export const LIVE_PRESENT_MS = 90_000;
 export const LIVE_STALL_MS = 10_000;
 export const LIVE_FPS = { default: 15, max: 30 };
 export const LIVE_WIDTH = { default: 960, min: 320, max: 1920 };
-/**
- * A material as the game names it ("VfxComet") or its Resources path ("Vfx/VfxComet", loaded even before anything draws it),
- * and a shader property name ("_ComaColor"); nothing else reaches the game.
- */
-const NAME = /^[A-Za-z0-9_][A-Za-z0-9_ .()\/-]{0,79}$/;
-const PROPERTY = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
 export interface LiveHubDeps {
   enabled(): boolean;
   /** The machine link (server/machines.ts): its `live` call and whether its daemon offers it. */
   machines: {
     canLive(machineId: string): boolean;
+    /** Its daemon sets a view up again from a stage recipe (w1839: hello `liveRestage`). */
+    canRestage?(machineId: string): boolean;
+    /** Its daemon writes a kept knob into the sandbox's .mat (w1839: hello `liveKeep`). */
+    canKeep?(machineId: string): boolean;
     live(machineId: string, op: Omit<Extract<ToDaemon, { type: 'live' }>, 'type' | 'id'>, timeoutMs?: number): Promise<string>;
   };
   session(id: string): SessionInfo | undefined;
@@ -47,6 +47,8 @@ export interface LiveHubDeps {
   viewerOpened?(info: LiveViewInfo, who: string | undefined): void;
   /** Why its computer takes no work now (a release build, a bench lock, a pause), or undefined (w1838: LiveViewInfo.hold). */
   hold?(machineId: string): string | undefined;
+  /** The daemon could not set a view up again from its recipe (w1839): its worker is told (server/liveIdle.ts restageFailed). */
+  restageFailed?(info: LiveViewInfo, detail: string): void;
   /** The portal journal: each view's state changes, with how long the last state lasted (w1838). */
   log?(line: string): void;
   now?(): number;
@@ -70,6 +72,8 @@ interface View {
   stalled?: boolean;
   /** When it entered its state (ms), for the journal's timings (w1838). */
   stateAt?: number;
+  /** Its stage recipe (w1839): the daemon replays it with no worker turn. Empty while it has none. */
+  stage: LiveStageStep[];
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -161,7 +165,7 @@ export class LiveHub {
 
   private touch(v: View, patch: Partial<LiveViewInfo>) {
     Object.assign(v.info, patch, { updatedAt: iso(this.now()) });
-    if ('wake' in patch && !patch.wake) delete v.info.wake;
+    for (const k of Object.keys(patch) as (keyof LiveViewInfo)[]) if (patch[k] === undefined) delete v.info[k];
     this.deps.changed();
   }
 
@@ -176,7 +180,7 @@ export class LiveHub {
     if (!machineId || !sandbox) return 'A live view shows a sandbox editor\'s game: this session has no sandbox.';
     if (action === 'status') {
       const v = this.bySession(info.id);
-      return v ? statusLine(v.info) + viewersLine(v) : 'No live view for this session.';
+      return v ? statusLine(v.info) + stageLine(v) + viewersLine(v) : 'No live view for this session.';
     }
     if (action === 'stop') {
       const v = this.bySession(info.id);
@@ -188,7 +192,15 @@ export class LiveHub {
       const knobs = await this.knobs(info.id);
       return JSON.stringify(knobs);
     }
-    if (action !== 'start') return `Unknown action "${action}": start, stop, status or knobs.`;
+    if (action === 'stage') return this.stageTool(info, args);
+    if (action === 'restage') return this.restageTool(info);
+    if (action !== 'start') return `Unknown action "${action}": start, stop, status, knobs, stage or restage.`;
+    let stage: LiveStageStep[] = [];
+    if (args.stage !== undefined) {
+      const parsed = parseStage(args.stage);
+      if ('error' in parsed) return `The live view did not start: ${parsed.error}`;
+      stage = parsed.steps;
+    }
     if (!this.deps.machines.canLive(machineId)) return `${machineId}'s daemon has no live view yet (it is offline, or needs a daemon update).`;
     const fps = clamp(Number(args.fps ?? LIVE_FPS.default), 1, LIVE_FPS.max, LIVE_FPS.default);
     const width = clamp(Number(args.width ?? LIVE_WIDTH.default), LIVE_WIDTH.min, LIVE_WIDTH.max, LIVE_WIDTH.default);
@@ -201,17 +213,85 @@ export class LiveHub {
       viewers: new Map(),
       present: new Map(),
       stateAt: this.now(),
+      stage,
     };
+    if (stage.length) v.info.stage = stageSummary(stage);
     this.views.set(v.info.liveId, v);
     this.deps.changed();
     try {
-      const text = await this.deps.machines.live(machineId, { op: 'start', liveId: v.info.liveId, sessionId: info.id, sandbox, fps, width, materials });
-      return `Live view started (${fps} fps, ${width} px${materials.length ? `, knobs on ${materials.join(', ')}` : ', no knobs: pass materials'}): ${text}. People open it from your conversation's "Live view" button.`;
+      const text = await this.deps.machines.live(machineId, { op: 'start', liveId: v.info.liveId, sessionId: info.id, sandbox, fps, width, materials, ...(stage.length ? { stage } : {}) });
+      const recipe = !stage.length
+        ? ' Give it a stage recipe (live_view stage) so it comes back by itself, without your turn.'
+        : this.canRestage(machineId)
+          ? ` Its stage recipe is kept (${stageSummary(stage)}): the daemon sets the view up again by itself when a person opens it; test it with live_view restage.`
+          : " Its stage recipe is kept, but this machine's daemon needs an update before it can use it.";
+      return `Live view started (${fps} fps, ${width} px${materials.length ? `, knobs on ${materials.join(', ')}` : ', no knobs: pass materials'}): ${text}. People open it from your conversation's "Live view" button.${recipe}`;
     } catch (e) {
       this.views.delete(v.info.liveId);
       this.deps.changed();
       return `The live view did not start: ${(e as Error).message}`;
     }
+  }
+
+  private canRestage(machineId: string): boolean {
+    return !!this.deps.machines.canRestage?.(machineId);
+  }
+
+  /** live_view stage (w1839): give the running view a recipe, or replace it. */
+  private async stageTool(info: SessionInfo, args: Record<string, unknown>): Promise<string> {
+    const v = this.bySession(info.id);
+    if (!v) return 'No live view to give a recipe: live_view start first.';
+    const parsed = parseStage(args.stage);
+    if ('error' in parsed) return `The recipe was not kept: ${parsed.error}`;
+    if (!this.canRestage(v.info.machineId)) return `${v.info.machineId}'s daemon cannot set a view up again yet (it needs an update); the recipe was not kept.`;
+    try {
+      const text = await this.deps.machines.live(v.info.machineId, { op: 'stage', liveId: v.info.liveId, sessionId: v.info.sessionId, sandbox: v.info.sandbox, stage: parsed.steps });
+      v.stage = parsed.steps;
+      this.touch(v, { stage: parsed.steps.length ? stageSummary(parsed.steps) : undefined });
+      return parsed.steps.length ? `${text}. Test it with live_view restage, then live_view status.` : 'The stage recipe is cleared.';
+    } catch (e) {
+      return `The recipe was not kept: ${(e as Error).message}`;
+    }
+  }
+
+  /** live_view restage (w1839): how a worker tests its recipe. */
+  private async restageTool(info: SessionInfo): Promise<string> {
+    const v = this.bySession(info.id);
+    if (!v) return 'No live view to set up again: live_view start first.';
+    if (!v.stage.length) return 'This view has no stage recipe: give one with live_view stage.';
+    if (!this.canRestage(v.info.machineId)) return `${v.info.machineId}'s daemon cannot set a view up again yet (it needs an update).`;
+    if (!(await this.restage(v.info.liveId, 'its worker'))) return 'The daemon was not asked to set it up again (it is setting it up already, or the request failed: see the portal journal).';
+    return 'Setting it up again now from your recipe (editor, play mode, save, steps). live_view status shows how it went and how long each leg took.';
+  }
+
+  /**
+   * Ask the daemon to set a view up again from its recipe (w1839), with no worker turn. False when the view has none, its machine
+   * cannot, it is doing so already, or the request failed.
+   */
+  async restage(liveId: string, who: string): Promise<boolean> {
+    const v = this.views.get(liveId);
+    if (!v || !v.stage.length || !this.canRestage(v.info.machineId) || v.info.restaging) return false;
+    this.touch(v, { restaging: { at: iso(this.now()), who } });
+    try {
+      await this.deps.machines.live(v.info.machineId, { op: 'restage', liveId, sessionId: v.info.sessionId, sandbox: v.info.sandbox });
+      return true;
+    } catch (e) {
+      this.deps.log?.(`live view ${v.info.machineId}/${v.info.sandbox} (${v.info.sessionId}): the daemon was not asked to set it up again: ${(e as Error).message}`);
+      if (this.views.get(liveId) === v) this.touch(v, { restaging: undefined });
+      return false;
+    }
+  }
+
+  /** The daemon says how a replay of the recipe went (w1839). */
+  staged(machineId: string, msg: Extract<FromDaemon, { type: 'live_staged' }>) {
+    const v = this.views.get(msg.liveId);
+    if (!v || v.info.machineId !== machineId) return;
+    const legs = msg.legs && typeof msg.legs === 'object' ? msg.legs : {};
+    const detail = String(msg.detail ?? '');
+    this.touch(v, { staged: { at: iso(this.now()), ok: !!msg.ok, detail, ms: Number(msg.ms) || 0, legs }, restaging: undefined });
+    const where = `live view ${v.info.machineId}/${v.info.sandbox} (${v.info.sessionId})`;
+    this.deps.log?.(msg.ok ? `${where}: staged again by the daemon in ${((Number(msg.ms) || 0) / 1000).toFixed(1)} s (${legsText(legs)})` : `${where}: could not be staged again: ${detail}`);
+    if (!msg.ok) this.deps.restageFailed?.(v.info, detail);
   }
 
   private async stopView(v: View) {
@@ -247,7 +327,7 @@ export class LiveHub {
       const { liveId, sessionId, sandbox, fps, width, materials } = v.info;
       if (running) this.setState(v, 'starting', "the machine's daemon restarted: starting the stream again");
       try {
-        await this.deps.machines.live(machineId, { op: 'start', liveId, sessionId, sandbox, fps, width, materials });
+        await this.deps.machines.live(machineId, { op: 'start', liveId, sessionId, sandbox, fps, width, materials, ...(v.stage.length ? { stage: v.stage } : {}) });
       } catch (e) {
         if (this.views.get(liveId) === v) this.setState(v, 'holding', `the machine's daemon restarted and the view did not start again: ${(e as Error).message}`);
       }
@@ -261,11 +341,14 @@ export class LiveHub {
       }
       const at = iso(this.now());
       const materials = (Array.isArray(r.materials) ? r.materials : []).map(String).filter((m) => NAME.test(m)).slice(0, 8);
+      const parsed = r.stage === undefined ? undefined : parseStage(r.stage);
+      const stage = parsed && 'steps' in parsed ? parsed.steps : [];
       this.views.set(r.liveId, {
-        info: { liveId: r.liveId, sessionId: r.sessionId, machineId, sandbox: r.sandbox, state: r.state, detail: String(r.detail ?? ''), fps: clamp(r.fps, 1, LIVE_FPS.max, LIVE_FPS.default), width: clamp(r.width, LIVE_WIDTH.min, LIVE_WIDTH.max, LIVE_WIDTH.default), materials, startedAt: at, updatedAt: at, frames: 0 },
+        info: { liveId: r.liveId, sessionId: r.sessionId, machineId, sandbox: r.sandbox, state: r.state, detail: String(r.detail ?? ''), fps: clamp(r.fps, 1, LIVE_FPS.max, LIVE_FPS.default), width: clamp(r.width, LIVE_WIDTH.min, LIVE_WIDTH.max, LIVE_WIDTH.default), materials, startedAt: at, updatedAt: at, frames: 0, ...(stage.length ? { stage: stageSummary(stage) } : {}) },
         viewers: new Map(),
         present: new Map(),
         takenBack: true,
+        stage,
       });
       this.deps.changed();
     }
@@ -363,6 +446,37 @@ export class LiveHub {
     const v = this.require(sessionId);
     if (material !== undefined && !v.info.materials.includes(material)) throw new LiveError(400, `"${material}" is not one of this view's materials`);
     return this.command(v, `look.material.reset${material ? `|${material}` : ''}`, `${who.displayName} put back ${material ?? 'every'} knob${material ? 's' : ''} in the live view`);
+  }
+
+  /**
+   * Keep (w1839, docs/live-view.md "Keep"): write the moved knobs of one material into its .mat file on the worker's branch.
+   * The game says which file (look.material.keep) and the daemon writes it as text; nothing is committed.
+   */
+  async keep(sessionId: string, material: string, who: Requester): Promise<{ kept: { name: string; path: string; change: string }[] }> {
+    const v = this.require(sessionId);
+    if (!v.info.materials.includes(material)) throw new LiveError(400, `"${material}" is not one of this view's materials`);
+    if (!this.deps.machines.canKeep?.(v.info.machineId)) throw new LiveError(409, "this machine's daemon needs an update to keep values");
+    let list: { knobs?: LiveMaterialKnobs['knobs'] };
+    try {
+      list = JSON.parse(await this.command(v, `look.material.list|${material}`)) as { knobs?: LiveMaterialKnobs['knobs'] };
+    } catch (e) {
+      throw new LiveError(502, `could not read ${material}'s knobs: ${(e as Error).message}`);
+    }
+    const moved = (Array.isArray(list.knobs) ? list.knobs : []).filter((k) => k.moved && !k.driven && PROPERTY.test(k.name));
+    if (!moved.length) throw new LiveError(400, `nothing moved on ${material} to keep`);
+    v.touchedAt = this.now();
+    const kept: { name: string; path: string; change: string }[] = [];
+    for (const k of moved) {
+      try {
+        // The daemon finishes the note with the change and the file it wrote, and counts it as activity there.
+        const answer = JSON.parse(await this.deps.machines.live(v.info.machineId, { op: 'keep', liveId: v.info.liveId, sessionId: v.info.sessionId, sandbox: v.info.sandbox, material, name: k.name, note: `${who.displayName} kept ${material} ${k.name}` }, 30_000)) as { path: string; change: string };
+        kept.push({ name: k.name, path: answer.path, change: answer.change });
+      } catch (e) {
+        throw new LiveError(502, kept.length ? `kept ${kept.map((x) => x.name).join(', ')}, then ${k.name} failed: ${(e as Error).message}` : (e as Error).message);
+      }
+    }
+    this.deps.log?.(`live view ${v.info.machineId}/${v.info.sandbox} (${v.info.sessionId}): ${who.displayName} kept ${kept.length} value${kept.length === 1 ? '' : 's'} of ${material} in ${[...new Set(kept.map((x) => x.path))].join(', ')}`);
+    return { kept };
   }
 
   private command(v: View, command: string, note?: string) {
@@ -484,6 +598,17 @@ export function knobValue(v: unknown): string | undefined {
   }
   return undefined;
 }
+
+/** The recipe and the daemon's last replay of it (w1839), for live_view status. */
+function stageLine(v: View) {
+  const i = v.info;
+  let out = v.stage.length ? ` Stage recipe: ${i.stage ?? stageSummary(v.stage)}.` : ' Stage recipe: none (live_view stage gives one, so the view comes back by itself).';
+  if (i.restaging) out += ` The daemon is setting it up again now (opened by ${i.restaging.who} at ${hhmm(i.restaging.at)}).`;
+  if (i.staged) out += i.staged.ok ? ` Staged again ok at ${hhmm(i.staged.at)} in ${(i.staged.ms / 1000).toFixed(1)} s (${legsText(i.staged.legs)}).` : ` Staged again failed at ${hhmm(i.staged.at)}: ${i.staged.detail}.`;
+  return out;
+}
+
+const hhmm = (at: string) => `${at.slice(11, 16)}Z`;
 
 function statusLine(i: LiveViewInfo) {
   return `Live view ${i.state}${i.detail ? ` (${i.detail})` : ''}: ${i.fps} fps, ${i.width} px, ${i.frames} frames passed on, knobs on ${i.materials.join(', ') || 'no material'}.`;

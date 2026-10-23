@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import type { LiveKnob, LiveMaterialKnobs } from '../../../shared/types';
 import { api } from '../api';
-import { toastError } from '../store';
+import { toast, toastError } from '../store';
 
 type Value = number | number[];
 
@@ -247,6 +247,7 @@ export function LiveKnobs({ sessionId, liveNow, materials, onMoved }: { sessionI
   const [draft, setDraft] = useState<Record<string, Value>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [resetting, setResetting] = useState<string>();
+  const [keeping, setKeeping] = useState<string>();
   const matsRef = useRef<LiveMaterialKnobs[] | null>(null);
   matsRef.current = mats;
   const lanes = useRef(new Map<string, Lane>());
@@ -387,6 +388,21 @@ export function LiveKnobs({ sessionId, liveNow, materials, onMoved }: { sessionI
     }
   };
 
+  /** Keep (w1839): the moved values of this material go into its .mat file on the worker's branch (the worker commits them). */
+  const keep = async (material: string) => {
+    setKeeping(material);
+    try {
+      const r = await api.liveKeep(sessionId, material);
+      const paths = [...new Set(r.kept.map((k) => k.path))].join(', ');
+      toast(`Kept ${r.kept.length} value${r.kept.length === 1 ? '' : 's'} in ${paths}`);
+      await load();
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setKeeping(undefined);
+    }
+  };
+
   if (!liveNow) {
     return (
       <div className="lv-note" data-testid="live-knobs-wait">
@@ -425,6 +441,7 @@ export function LiveKnobs({ sessionId, liveNow, materials, onMoved }: { sessionI
       )}
       {mats.map((m) => {
         const anyMoved = m.knobs.some((k) => k.moved);
+        const keepable = m.knobs.some((k) => k.moved && !k.driven);
         return (
           <section className="lv-mat" key={m.material} data-testid="live-material">
             <div className="lv-mat-head">
@@ -439,6 +456,9 @@ export function LiveKnobs({ sessionId, liveNow, materials, onMoved }: { sessionI
               <span className="spacer" />
               <button className="btn btn-ghost btn-xs" disabled={resetting === m.material || (!anyMoved && !m.error)} onClick={() => void reset(m.material)} title="Put this material's knobs back to what the game loaded" data-testid="live-reset">
                 {resetting === m.material ? <span className="spinner spinner-sm" /> : null} Reset
+              </button>
+              <button className="btn btn-ghost btn-xs" disabled={keeping === m.material || !keepable} onClick={() => void keep(m.material)} title="Write the moved values into this material's .mat file on the worker's branch" data-testid="live-keep">
+                {keeping === m.material ? <span className="spinner spinner-sm" /> : null} Keep
               </button>
             </div>
             {m.error ? (

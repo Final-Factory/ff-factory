@@ -117,6 +117,38 @@ export function bridgeInfo(project: string, dir = path.join(os.homedir(), '.unit
 }
 
 /**
+ * The bridge of the editor that runs now is up (w1829): a port is known and a status file of the project was written at
+ * or after `since` (when this editor process was launched or first seen). The port file is written once and outlives
+ * every editor (BEAST's slot5 kept one from three days before), so it alone made a booting editor look up at once: its
+ * bench boot ticket went 12 s into a 199 s first import, which then ran beside another worker's timed run. The bridge
+ * writes the status file when it starts and again every ~5 s, never during the boot. No `since`: the port alone (an
+ * editor the daemon found running when it started).
+ */
+export function bridgeUpSince(project: string, since: number | undefined, dir = path.join(os.homedir(), '.unity-mcp')): boolean {
+  if (!bridgeInfo(project, dir).port) return false;
+  if (since === undefined) return true;
+  const want = normProject(project);
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return false;
+  }
+  for (const n of names) {
+    if (!/^unity-mcp-status-.+\.json$/.test(n)) continue;
+    try {
+      const f = path.join(dir, n);
+      if (fs.statSync(f).mtimeMs < since) continue;
+      const j = JSON.parse(fs.readFileSync(f, 'utf8')) as { project_path?: string };
+      if (j.project_path && normProject(j.project_path) === want) return true;
+    } catch {
+      // being written; next look
+    }
+  }
+  return false;
+}
+
+/**
  * Ping the editor's main thread through the bridge: connect, read the WELCOME line, send a framed
  * {"type":"ping"} (8-byte big-endian length, then UTF-8), expect "pong". Resolves true or false, never throws.
  */

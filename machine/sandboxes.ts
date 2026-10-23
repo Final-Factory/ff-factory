@@ -10,7 +10,7 @@ import { restoreCommittedBytes } from '../server/committedBytes.ts';
 import { saveWork, type SaveResult } from '../server/saveWork.ts';
 import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
-import { bridgeInfo } from '../server/unityHang.ts';
+import { bridgeUpSince } from '../server/unityHang.ts';
 import { copyTree, lowerPriority, removeTree, run, type RunResult } from '../server/proc.ts';
 import { LIBRARY_CACHES, staleUnityLibraries } from '../server/cleanup.ts';
 import { TRIM_DEFAULTS, projectOpen, trimLibraryCaches, type TrimPolicy, type TrimResult } from '../server/cacheTrim.ts';
@@ -20,6 +20,7 @@ import { MacUnity, MacUnityWatch, realDeps, type Proc, type UnityDeps, type Unit
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
 import type { BenchTicket } from './benchQueue.ts';
 import type { IdleCloseResult } from './liveIdle.ts';
+import { isPersonTicket } from './personPlay.ts';
 import type { DiskLevel, GitStatus, MachineSandboxIdleClosed, MachineSandboxUnity, SandboxPoolSettings, SandboxStatus } from '../shared/types.ts';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -86,8 +87,11 @@ export interface PoolDeps {
   freeBytes(p: string): Promise<number | undefined>;
   procs(): Promise<Proc[]>;
   editor(sb: { id: string; path: string }, logFile: string, report: (text: string, restarted: boolean) => void): SandboxEditor;
-  /** The Unity MCP bridge of a project: up once it has a port. */
-  bridgeUp(project: string): boolean;
+  /**
+   * The Unity MCP bridge of a project: up once it has a port and, given `since`, a status file written at or after it (the
+   * editor that runs now, not one before it: server/unityHang.ts bridgeUpSince, w1829).
+   */
+  bridgeUp(project: string, since?: number): boolean;
   gitStatus(dir: string): Promise<GitStatus | undefined>;
   now(): number;
   /** Below-normal priority for an editor (pool setting belowNormal: a game the user plays on this computer wins). */
@@ -303,7 +307,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
       const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };
     },
-    bridgeUp: (project) => !!bridgeInfo(project).port,
+    bridgeUp: (project, since) => bridgeUpSince(project, since),
     gitStatus: readGitStatus,
     now: () => Date.now(),
     lowerPriority,
@@ -316,6 +320,15 @@ export class SandboxPool {
   private settings?: SandboxPoolSettings;
   private recs = new Map<string, Rec>();
   private readonly unityState = new Map<string, MachineSandboxUnity & { startedAt?: number }>();
+  /**
+   * w1829: per sandbox, the editor process its bridge check is for and since when its bridge counts: its launch here, else
+   * when a look first saw it (a restart by its watch); none for an editor already running at the pool's first look.
+   */
+  private readonly bridgeSince = new Map<string, { pid: number; since?: number }>();
+  /** w1829: when launch() last started each sandbox's editor, until a look sees its process. */
+  private readonly launchedAt = new Map<string, number>();
+  /** A look has run (w1829: an editor seen at the first one was running before this daemon). */
+  private looked = false;
   private readonly editors = new Map<string, SandboxEditor>();
   private readonly git = new Map<string, GitStatus | undefined>();
   private readonly provisioning = new Map<string, AbortController>();
@@ -495,7 +508,7 @@ export class SandboxPool {
     const saved = c.saved?.length ? ` It saved ${c.saved.join(', ')} first.` : '';
     this.changed(r, {
       benchClosed: { ...c, pids: [], reopenAt: new Date(this.d.now()).toISOString() },
-      ...(first ? { benchNote: `[bench turn] Your sandbox's Unity editor was closed at ${c.at.slice(11, 16)}Z for ${c.by} (w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine).${saved} Its assets were saved too: check git status. Anything in play mode then is gone. It is starting again now (${text.slice(0, 200)}); mcp__machine__unity status says when it is up.` } : {}),
+      ...(first ? { benchNote: `[bench turn] Your sandbox's Unity editor was closed at ${c.at.slice(11, 16)}Z for ${c.by} (${isPersonTicket(c.ticket) ? 'w1894: while a person plays the game on this machine, the agents\' editors, players and builds yield to it' : "w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine"}).${saved} Its assets were saved too: check git status. Anything in play mode then is gone. It is starting again now (${text.slice(0, 200)}); mcp__machine__unity status says when it is up.` } : {}),
     });
     return text;
   }
@@ -1080,10 +1093,12 @@ export class SandboxPool {
     this.changed(r, { logPath: logFile });
     this.clearIdleClosed(r);
     this.unityState.set(id, { state: 'starting', detail: 'launching', logPath: logFile, startedAt: this.d.now() });
+    this.launchedAt.set(id, this.d.now());
     this.changed();
     try {
       out.push(await ed.unity.start());
     } catch (e) {
+      this.launchedAt.delete(id);
       this.unityState.set(id, { state: 'stopped', detail: `start failed: ${(e as Error).message}`, logPath: logFile });
       this.changed();
       throw e;
@@ -1169,6 +1184,17 @@ export class SandboxPool {
       const ed = this.editorFor(r);
       const pid = ed.unity.editors(procs)[0]?.pid;
       const prev = this.unityState.get(r.id) ?? { state: 'stopped' as const };
+      // w1829: the bridge counts only once this editor's own bridge wrote its status (bridgeUpSince); a port file left by
+      // an earlier editor marked a booting editor running 12 s into its 199 s first import, beside a timed run.
+      let bs = pid ? this.bridgeSince.get(r.id) : undefined;
+      if (pid && bs?.pid !== pid) {
+        const launched = this.launchedAt.get(r.id);
+        this.launchedAt.delete(r.id);
+        bs = { pid, since: launched ?? (this.looked ? now : undefined) };
+        this.bridgeSince.set(r.id, bs);
+      }
+      if (!pid) this.bridgeSince.delete(r.id);
+      const up = !!pid && this.d.bridgeUp(r.path, bs?.since);
       // w1860 (lothsahn, 2026-10-23: "running editors and game players hold a shared ticket while they run"): an editor's
       // shared ticket is held for as long as it runs, no longer only while it boots (w1615), and goes once it is gone (a
       // boot gets 2 minutes to show its process).
@@ -1202,7 +1228,7 @@ export class SandboxPool {
       // w1829: likewise an editor a timed run's turn closed (a later turn closes it again if it is still on).
       if (pid && r.benchClosed && !(r.benchClosed.pids ?? []).includes(pid)) this.changed(r, { benchClosed: undefined });
       let next: MachineSandboxUnity & { startedAt?: number };
-      if (pid) next = { ...prev, pid, state: this.d.bridgeUp(r.path) ? 'running' : 'starting', detail: this.d.bridgeUp(r.path) ? 'MCP bridge up' : (prev.detail ?? 'loading'), startedAt: prev.startedAt ?? now };
+      if (pid) next = { ...prev, pid, state: up ? 'running' : 'starting', detail: up ? 'MCP bridge up' : (prev.detail ?? 'loading'), startedAt: prev.startedAt ?? now };
       else next = { state: prev.state === 'crashed' ? 'crashed' : 'stopped', detail: prev.state === 'crashed' ? prev.detail : r.benchClosed ? (r.benchClosed.reopenAt ? `closed for ${r.benchClosed.by}, which ended; starting again` : `closed for ${r.benchClosed.by}; reopens when it ends`) : undefined, logPath: prev.logPath };
       if (JSON.stringify(next) !== JSON.stringify(prev)) {
         this.unityState.set(r.id, next);
@@ -1217,6 +1243,7 @@ export class SandboxPool {
         dirty = true;
       }
     }
+    this.looked = true;
     if (now - this.lastGitAt > 2 * 60_000) {
       this.lastGitAt = now;
       for (const r of this.recs.values()) {

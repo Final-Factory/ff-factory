@@ -37,6 +37,8 @@ import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
 import { DEV_TIER_SNIPPET, LiveSession, gameCommand, readGameChannel, type LiveDeps } from './live.ts';
 import { idleCloseEditor, idleClosedDetail, idleReopenNote } from './liveIdle.ts';
+import { LIVE_MATERIAL_NAME, LIVE_PROPERTY_NAME, keepInMat, type MatKnobType } from './matText.ts';
+import { legsText, parseStage, restage, stageSummary, type LiveStageStep } from './liveStage.ts';
 import { FramePump, parseAck } from '../shared/framePump.ts';
 import { bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { hostStats } from '../server/system.ts';
@@ -62,7 +64,8 @@ import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { readBenchLock, readBenchQueue, timedHolder, writeBenchPriorities } from './benchLock.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
-import { askPlayerToQuit, BenchTurn, closedDetail, writeClosedFile } from './benchTurn.ts';
+import { askPlayerToQuit, BenchTurn, closedDetail, writeClosedFile, type Holder } from './benchTurn.ts';
+import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
 import { benchTicketFor } from './benchQueue.ts';
 import { readBenchState } from './benchState.ts';
 import { attachmentLine } from '../shared/attachments.ts';
@@ -71,7 +74,7 @@ import { trayView } from './pauseRules.ts';
 import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
-import { machinePlatformOf, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { machinePlatformOf, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /**
@@ -280,6 +283,19 @@ const REAL_PROBES: Probes = {
 /** Builds a session; the real one is an AgentSession, tests pass a fake. */
 export type SessionFactory = (info: SessionInfo, sink: SessionSink, options: OptionsFactory, events: EventEmitter) => SessionHandle;
 
+/** A Live view this daemon runs (w1398); `stage` is its recipe (w1839) and `staging` is set while the daemon replays it. */
+interface LiveEntry {
+  s: LiveSession;
+  link?: WebSocket;
+  pump: FramePump;
+  sandbox: string;
+  sessionId: string;
+  materials: string[];
+  timer?: NodeJS.Timeout;
+  stage: LiveStageStep[];
+  staging?: boolean;
+}
+
 interface Entry {
   s: SessionHandle;
   spec?: LaunchSpec;
@@ -347,6 +363,12 @@ export class Daemon {
   readonly benchTurn: BenchTurn;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
+  /** w1894: a person playing Final Factory here (machine/personPlay.ts): fed by the leftovers' look, it holds a turn. */
+  readonly personPlay: PersonPlay;
+  /** w1894: this machine's machines.personPlay, as the portal last sent it (kept in person-play.json across restarts). */
+  private personSettings: PersonPlaySettings = { enabled: false, graceMinutes: GRACE_MIN };
+  /** w1894: the leftovers' look the person's watch was fed last (its `at`). */
+  private personLookAt?: string;
   /** w1860: the portal's bench marks per session (its last bench_priorities): an exempt worker's builds are never stopped. */
   private benchMarks: Record<string, BenchPriority> = {};
   /** The pending wake_me check-ins of this machine's sessions (ms), as the portal last said (welcome, `resumable`; w1196). */
@@ -479,6 +501,12 @@ export class Daemon {
     const real = !makeSession && !poolDeps;
     const unityHands = realUnityDeps(platform);
     const slotRoots = () => playerSlotRoots({ platform: process.platform, home: HOME, workerRoot: cfg.root, env: process.env });
+    try {
+      this.personSettings = { ...this.personSettings, ...JSON.parse(fs.readFileSync(path.join(appDirOfConfig(cfg), 'person-play.json'), 'utf8')) };
+    } catch {
+      // never sent yet: off until the portal says
+    }
+    this.personPlay = new PersonPlay({ root: cfg.root, settings: () => this.personSettings, now: () => Date.now(), log: (line) => log(line) });
     this.leftovers = new LeftoverReaper({
       platform,
       machineId: cfg.id,
@@ -506,10 +534,13 @@ export class Daemon {
       log: (line) => log(line),
       onEvent: (text) => this.send({ type: 'sandbox_event', text: `Leftover processes: ${text}` }),
       afterKill: () => this.slots.tick(),
+      personPlay: () => this.personSettings.enabled,
       ...leftoverDeps,
     });
     this.benchTurn = new BenchTurn({
-      holder: () => timedHolder(cfg.root),
+      // w1894: a timed run's turn first (it ends within its 30 minutes; no new one is granted while a person plays), then a
+      // person's game
+      holder: () => timedHolder(cfg.root) ?? this.personHolder(),
       editors: () => this.pool.list().filter((sb) => sb.status === 'ready').map((sb) => ({ id: sb.id, running: sb.unity.state === 'running', ...(sb.unity.pid ? { pid: sb.unity.pid } : {}) })),
       closed: () => this.pool.benchClosedList(),
       players: () => this.leftovers.report().players,
@@ -524,6 +555,16 @@ export class Daemon {
       builds: (procs) => this.reaper.batches(procs).map((c) => ({ pid: c.u.pid, sandbox: c.place.id })),
       exemptSandbox: (id) => [...this.entries].some(([sid, e]) => e.spec?.sandbox === id && !!this.benchMarks[sid]?.exempt),
       stopBuild: (pid, _sandbox, why) => this.reaper.endBatch(pid, why),
+      lowerBuild: (pid, procs) => {
+        const tree = treeOf(pid, procs);
+        const n = tree.filter((p) => setPriorityOf(p, os.constants.priority.PRIORITY_LOW)).length;
+        return `dropped to idle priority (${n} of ${tree.length} process(es) of its tree); it runs on, slower, and is not ended`;
+      },
+      restoreBuilds: (procs) => {
+        let n = 0;
+        for (const b of this.reaper.batches(procs)) for (const p of treeOf(b.u.pid, procs)) if (priorityOf(p) === os.constants.priority.PRIORITY_LOW && setPriorityOf(p, os.constants.priority.PRIORITY_NORMAL)) n++;
+        return n;
+      },
       noteSandbox: (id, text) => {
         for (const [sid, e] of this.entries) if (e.spec?.sandbox === id) this.benchPlayerNotes.set(sid, [this.benchPlayerNotes.get(sid), text].filter(Boolean).join('\n\n'));
       },
@@ -544,7 +585,8 @@ export class Daemon {
         warm: DEFAULT_BUILD.includes(cfg.id.toLowerCase()) ? [RELEASE_SANDBOX] : [],
         releaseSweep: (sandboxPath) => this.releaseSweep(sandboxPath),
         log,
-        startGate: () => this.guard?.blockReason('editor'),
+        // w1894: no editor starts while a person plays here (the turn closed the others; they reopen after its grace)
+        startGate: () => this.guard?.blockReason('editor') ?? this.personStartGate(),
         onChange: () => this.reportSandboxes(),
         onEvent: (e) => {
           log(`sandboxes: ${e.text}`);
@@ -960,7 +1002,8 @@ export class Daemon {
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
     this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
     // What stopped workers left running (w1196, w1197): looked at once a minute.
-    if (this.cfg.leftovers !== false) this.timers.push(setInterval(() => void this.leftovers.tick(), 15_000));
+    // w1894: each look also feeds the person's-game watch (machine/personPlay.ts)
+    if (this.cfg.leftovers !== false) this.timers.push(setInterval(() => void this.leftovers.tick().then(() => this.feedPersonPlay()), 15_000));
     // The ledger facts for a clean-up worker's deletes (w1379): written every 30 s, so a stale file means a daemon that is not running.
     this.timers.push(setInterval(() => this.writeCleanupFacts(), 30_000));
     this.writeCleanupFacts();
@@ -1317,6 +1360,8 @@ export class Daemon {
       // It streams a sandbox's running game for a live view (w1398, docs/live-view.md), and says which views run (w1509).
       liveView: true,
       liveIdleClose: true,
+      liveRestage: true,
+      liveKeep: true,
       liveViews: this.liveViews(),
       // It compacts an idle agent on request and says a compaction's turn end (w1469, the workers' automatic compaction).
       compact: true,
@@ -1375,7 +1420,9 @@ export class Daemon {
       const benchWarnings = readBenchWarnings(this.cfg.root);
       // Its queue's mode, holders and waiters (w1835): the machine view shows them.
       const bench = readBenchState(this.cfg.root, undefined, undefined, this.benchTurn.playersAsked());
-      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}) });
+      // A person playing here (w1894): the portal holds the machine and says why.
+      const personPlay = this.personPlayReport();
+      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);
     }
@@ -1535,20 +1582,59 @@ export class Daemon {
    * play mode at once (the timed run cannot wait for a person), scenes and assets saved through the editor, then quit;
    * skipped while it compiles or imports, or has an untitled dirty scene, and never killed.
    */
+  /** w1894: the turn a person's game holds while they play here (and through the grace after), or undefined. */
+  private personHolder(): Holder | undefined {
+    const s = this.personPlay.state();
+    if (!s) return undefined;
+    const grace = this.personSettings.graceMinutes;
+    return { ticket: personTicket(s.since), mode: 'exclusive', what: personHolderText(s.who), pid: s.pids[0] ?? 0, until: s.until ?? Date.now() + grace * 60_000, person: { who: s.who, ends: personEnds(s, grace) } };
+  }
+
+  /** w1894: why no editor starts now (a person plays here), or undefined. */
+  private personStartGate(): string | undefined {
+    const s = this.personPlay.state();
+    return s ? `${personHoldText(s, this.personSettings.graceMinutes)}; the editor starts again by itself after that if a turn closed it, else start it then` : undefined;
+  }
+
+  /** w1894: a new leftovers look feeds the person's-game watch once. */
+  private feedPersonPlay() {
+    const r = this.leftovers.report();
+    if (!r.at || r.at === this.personLookAt) return;
+    this.personLookAt = r.at;
+    this.personPlay.seen(r.persons);
+  }
+
+  /** w1894: the stats' person-play line, or undefined when nobody plays here. */
+  private personPlayReport(): PersonPlayReport | undefined {
+    const s = this.personPlay.state();
+    if (!s) return undefined;
+    return {
+      who: s.who,
+      pids: s.pids,
+      since: new Date(s.since).toISOString(),
+      ...(s.until ? { until: new Date(s.until).toISOString() } : {}),
+      graceMinutes: this.personSettings.graceMinutes,
+      editorsClosed: this.pool.benchClosedList().length,
+      playersAsked: this.benchTurn.playersAsked(),
+      buildsLowered: this.benchTurn.buildsLowered(),
+    };
+  }
+
   private async benchCloseEditor(id: string, by: string, ticket: string) {
     const sbPath = this.pool.pathOf(id);
     if (!sbPath) return { closed: false, text: 'skipped: no such sandbox' };
     if (this.idleClosing.has(id)) return { closed: false, text: 'skipped: it is being closed already' };
     this.idleClosing.add(id);
     try {
-      const holder = timedHolder(this.cfg.root);
-      const res = await this.pool.benchClose(id, by, ticket, closedDetail(by, holder?.until, holder?.kept), () =>
+      const holder: Holder | undefined = timedHolder(this.cfg.root) ?? this.personHolder();
+      const detail = holder?.person ? `closed while ${by}; reopens when that ends, ${holder.person.ends}` : closedDetail(by, holder?.until, holder?.kept);
+      const res = await this.pool.benchClose(id, by, ticket, detail, () =>
         idleCloseEditor(
           { bridge: this.editorBridge(id, sbPath), editorPids: () => this.pool.editorPids(id), personInputAgoMs: () => undefined, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now() },
           0,
         ),
       );
-      if (res.closed) this.send({ type: 'sandbox_event', sandbox: id, text: `Editor closed for ${by} (w1829); it reopens when that run ends (${res.text})` });
+      if (res.closed) this.send({ type: 'sandbox_event', sandbox: id, text: holder?.person ? `Editor closed while ${by} (w1894); it reopens when that ends, ${holder.person.ends} (${res.text})` : `Editor closed for ${by} (w1829); it reopens when that run ends (${res.text})` });
       return res;
     } finally {
       this.idleClosing.delete(id);
@@ -1613,11 +1699,11 @@ export class Daemon {
 
   /** Tests' fake game for a live view (server/testLiveGame.ts); the real one is the sandbox editor's (machine/live.ts). */
   private readonly liveDeps?: (sandbox: string) => LiveDeps;
-  private readonly lives = new Map<string, { s: LiveSession; link?: WebSocket; pump: FramePump; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout }>();
+  private readonly lives = new Map<string, LiveEntry>();
 
   /** The live views it runs, for the hello (w1509): a portal that restarted takes them back. */
   private liveViews(): DaemonLiveView[] {
-    return [...this.lives.entries()].map(([liveId, l]) => ({ liveId, sessionId: l.sessionId, sandbox: l.sandbox, fps: l.s.fps, width: l.s.width, materials: l.materials, ...l.s.state, frames: l.s.frames }));
+    return [...this.lives.entries()].map(([liveId, l]) => ({ liveId, sessionId: l.sessionId, sandbox: l.sandbox, fps: l.s.fps, width: l.s.width, materials: l.materials, ...l.s.state, frames: l.s.frames, ...(l.stage.length ? { stage: l.stage } : {}) }));
   }
   /** The last knob move per sandbox (ms): counted as activity, so its editor is not stopped as idle. */
   private readonly liveTouched = new Map<string, number>();
@@ -1631,7 +1717,62 @@ export class Daemon {
     if (!notes?.length) return text;
     this.liveNotes.delete(sessionId);
     this.liveLines.delete(sessionId);
-    return `[live view] Since your last message, in the live view:\n${notes.map((n) => `- ${n.text}`).join('\n')}\n(Not saved: keep a value by editing the .mat yourself.)\n\n${text}`;
+    return `[live view] Since your last message, in the live view:\n${notes.map((n) => `- ${n.text}`).join('\n')}\n(Moves are not saved until the person keeps them; a kept value is already in the .mat file on your branch: commit it with your work.)\n\n${text}`;
+  }
+
+  /** A line in the session's conversation about the view (a knob move, a kept value), held for the agent's next message; counts as activity. */
+  private noteLive(msg: Extract<ToDaemon, { type: 'live' }>, key: string, note: string) {
+    const now = Date.now();
+    this.liveTouched.set(msg.sandbox, now);
+    const text = `[live view] ${note}`;
+    const last = this.liveLines.get(msg.sessionId);
+    if (this.entries.has(msg.sessionId)) {
+      if (last && last.key === key && now - last.at < LIVE_LINE_MERGE_MS) {
+        this.sink().amend(msg.sessionId, last.seq, { text });
+        last.at = now;
+      } else {
+        const e = this.sink().append(msg.sessionId, { kind: 'system', text });
+        this.liveLines.set(msg.sessionId, { key, seq: e.seq, at: now });
+      }
+    }
+    const notes = (this.liveNotes.get(msg.sessionId) ?? []).filter((n) => n.key !== key);
+    notes.push({ key, text: note });
+    this.liveNotes.set(msg.sessionId, notes.slice(-20));
+  }
+
+  /**
+   * w1839 (docs/live-view.md "Keep"): the person kept a moved knob. The game drops that knob's original (look.material.keep), so
+   * leaving play mode keeps the value, and says which .mat it is; the daemon writes the value into that file as text, in the
+   * sandbox (machine/matText.ts). The editor never saves the asset itself: a play-mode save wrote m_ObjectHideFlags: 32 into
+   * three .mat files (w1066, w1323, w1393). Nothing is committed: the worker commits it with its work.
+   */
+  private async liveKeep(msg: Extract<ToDaemon, { type: 'live' }>, sandboxPath: string): Promise<string> {
+    const l = this.lives.get(msg.liveId);
+    if (!l) throw new Error('this live view is not running on the machine (a daemon restart ends it: start it again)');
+    const material = String(msg.material ?? '');
+    const name = String(msg.name ?? '');
+    if (!LIVE_MATERIAL_NAME.test(material)) throw new Error(`not a material name: ${material.slice(0, 60)}`);
+    if (!LIVE_PROPERTY_NAME.test(name)) throw new Error(`not a shader property name: ${name.slice(0, 60)}`);
+    const reply = await l.s.command(`look.material.keep|${material}|${name}`);
+    if (!reply.ok) {
+      if (/unknown[ _]command|no such command|unknown look\.material\.keep/i.test(`${reply.result} ${reply.reason ?? ''}`)) throw new Error("this sandbox's game has no look.material.keep yet: merge master into its branch");
+      throw new Error(reply.result || `the game answered ${reply.status}`);
+    }
+    let answer: { path?: unknown; name?: unknown; type?: unknown; value?: unknown };
+    try {
+      answer = JSON.parse(reply.result);
+    } catch {
+      throw new Error(`the game's answer to look.material.keep is not JSON: ${reply.result.slice(0, 120)}`);
+    }
+    const type = String(answer.type) as MatKnobType;
+    if (typeof answer.path !== 'string' || !['float', 'range', 'int', 'color', 'vector'].includes(type)) throw new Error(`the game's answer to look.material.keep has no path or type: ${reply.result.slice(0, 120)}`);
+    const value = answer.value as number | number[];
+    if (typeof value !== 'number' && !(Array.isArray(value) && value.every((x) => typeof x === 'number'))) throw new Error(`the game's answer to look.material.keep has no value: ${reply.result.slice(0, 120)}`);
+    const change = keepInMat(sandboxPath, answer.path, typeof answer.name === 'string' && LIVE_PROPERTY_NAME.test(answer.name) ? answer.name : name, type, value);
+    log(`live: view ${msg.liveId} (${msg.sandbox}): kept ${material} ${change} in ${answer.path}`);
+    if (msg.note) this.noteLive(msg, `keep|${material}|${name}|${Date.now()}`, `${msg.note}: ${change}, in ${answer.path} (written to the file on your branch, not committed)`);
+    else this.liveTouched.set(msg.sandbox, Date.now());
+    return JSON.stringify({ path: answer.path, change });
   }
 
   private async onLive(msg: Extract<ToDaemon, { type: 'live' }>): Promise<string> {
@@ -1657,37 +1798,34 @@ export class Daemon {
       const reply = await l.s.command(command);
       if (!reply.ok) throw new Error(reply.result || `the game answered ${reply.status}`);
       if (msg.note) {
-        const now = Date.now();
-        this.liveTouched.set(msg.sandbox, now);
         // The knob: material and property of a set; a reset is its own line.
         const parts = command.split('|');
-        const key = parts[0] === 'look.material.set' ? `${parts[1]}|${parts[2]}` : `${command}|${now}`;
-        const text = `[live view] ${msg.note}`;
-        const last = this.liveLines.get(msg.sessionId);
-        if (this.entries.has(msg.sessionId)) {
-          if (last && last.key === key && now - last.at < LIVE_LINE_MERGE_MS) {
-            this.sink().amend(msg.sessionId, last.seq, { text });
-            last.at = now;
-          } else {
-            const e = this.sink().append(msg.sessionId, { kind: 'system', text });
-            this.liveLines.set(msg.sessionId, { key, seq: e.seq, at: now });
-          }
-        }
-        const notes = (this.liveNotes.get(msg.sessionId) ?? []).filter((n) => n.key !== key);
-        notes.push({ key, text: msg.note });
-        this.liveNotes.set(msg.sessionId, notes.slice(-20));
+        this.noteLive(msg, parts[0] === 'look.material.set' ? `${parts[1]}|${parts[2]}` : `${command}|${Date.now()}`, msg.note);
       }
       return reply.result;
     }
+    if (msg.op === 'keep') return this.liveKeep(msg, sb.path);
     if (msg.op === 'idleClose') return this.liveIdleClose(msg, sb.path);
+    if (msg.op === 'stage') {
+      const l = this.lives.get(msg.liveId);
+      if (!l) throw new Error('this live view is not running on the machine (a daemon restart ends it: start it again)');
+      const parsed = parseStage(msg.stage);
+      if ('error' in parsed) throw new Error(parsed.error);
+      l.stage = parsed.steps;
+      return `recipe kept: ${stageSummary(l.stage)}`;
+    }
+    if (msg.op === 'restage') return this.liveRestage(msg, sb);
+    if (msg.op !== 'start') throw new Error('unknown live op');
     // start
     const old = this.lives.get(msg.liveId);
     if (old) return 'already running';
     const pidOf = () => this.pool.list().find((x) => x.id === msg.sandbox)?.unity?.pid;
-    const entry: { s: LiveSession; link?: WebSocket; pump: FramePump; sandbox: string; sessionId: string; materials: string[]; timer?: NodeJS.Timeout } = {
+    const parsedStage = msg.stage === undefined ? undefined : parseStage(msg.stage);
+    const entry: LiveEntry = {
       sandbox: msg.sandbox,
       sessionId: msg.sessionId,
       materials: Array.isArray(msg.materials) ? msg.materials.map(String).slice(0, 8) : [],
+      stage: parsedStage && 'steps' in parsedStage ? parsedStage.steps : [],
     } as never;
     // Newest wins, kept to what the link to the portal carries (w1601, shared/framePump.ts).
     entry.pump = new FramePump({
@@ -1717,6 +1855,54 @@ export class Daemon {
     this.linkLive(msg.liveId);
     await entry.s.start();
     return `streaming ${sb.id}'s game when it is in play mode (port ${entry.s.listenPort})`;
+  }
+
+  /**
+   * w1839 (docs/live-view.md "Staged again without a turn"): set the view up again from its recipe with no worker turn. Answers
+   * at once; the replay runs on (machine/liveStage.ts restage) and ends with `live_staged`. The view's detail says how far it is.
+   */
+  private async liveRestage(msg: Extract<ToDaemon, { type: 'live' }>, sb: { id: string; path: string }): Promise<string> {
+    const liveId = msg.liveId;
+    const sandbox = msg.sandbox;
+    const entry = this.lives.get(liveId);
+    if (!entry) throw new Error('this live view is not running on the machine (a daemon restart ends it: start it again)');
+    if (entry.staging) return 'already setting it up again';
+    if (!entry.stage.length) throw new Error('this view has no stage recipe');
+    const steps = entry.stage;
+    entry.staging = true;
+    // The editor starts for this view: the idle close's "closed" note no longer holds.
+    for (const l of this.lives.values()) if (l.sandbox === sandbox) l.s.closedNote = undefined;
+    const over = this.liveDeps?.(sandbox) ?? {};
+    const pidOf = () => this.pool.list().find((x) => x.id === sandbox)?.unity?.pid;
+    const started = Date.now();
+    void restage(
+      {
+        editorPid: over.editorPid ?? pidOf,
+        startEditor: () => this.pool.unity(sandbox, 'start'),
+        bridge:
+          over.bridge ??
+          (async (code: string) => {
+            const port = bridgeInfo(sb.path).port;
+            return port ? bridgeExecute(port, code) : 'no bridge: none for this editor';
+          }),
+        channel: over.channel ?? ((pid) => readGameChannel(pid)),
+        command: over.command ?? ((ch, text) => gameCommand(ch, text)),
+        progress: (detail) => entry.s.setStaging(detail),
+        now: () => Date.now(),
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      },
+      steps,
+    ).then(
+      (res) => res,
+      (e) => ({ ok: false, detail: `the replay broke: ${(e as Error).message}`, ms: Date.now() - started, legs: {} as Record<string, number> }),
+    ).then((res) => {
+      entry.staging = false;
+      entry.s.setStaging(undefined);
+      this.liveTouched.set(sandbox, Date.now());
+      log(res.ok ? `live: view ${liveId} (${sandbox}): staged again in ${(res.ms / 1000).toFixed(1)} s (${legsText(res.legs)})` : `live: view ${liveId} (${sandbox}): could not be staged again: ${res.detail}`);
+      if (this.lives.get(liveId) === entry) this.send({ type: 'live_staged', liveId, ok: res.ok, detail: res.detail, ms: res.ms, legs: res.legs });
+    });
+    return `setting the view up again: ${stageSummary(steps)}`;
   }
 
   /** The view's frame socket to the portal (/machine/live/<liveId>), dialled again while the view runs. */
@@ -2145,6 +2331,16 @@ export class Daemon {
         // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.
         writeBenchPriorities(this.cfg.root, msg.sessions, new Date(), msg.singleWorker, msg.noTimedRuns);
         this.benchMarks = msg.sessions;
+        // w1894: this machine's machines.personPlay, kept for a restart before the portal answers
+        if (msg.personPlay && JSON.stringify(msg.personPlay) !== JSON.stringify(this.personSettings)) {
+          this.personSettings = { enabled: !!msg.personPlay.enabled, graceMinutes: Number(msg.personPlay.graceMinutes) || GRACE_MIN, ...(msg.personPlay.who ? { who: String(msg.personPlay.who).slice(0, 40) } : {}) };
+          log(`person play: ${this.personSettings.enabled ? `on (${this.personSettings.who ?? 'someone'}, ${this.personSettings.graceMinutes} min of grace)` : 'off'} on this machine (machines.personPlay)`);
+          try {
+            fs.writeFileSync(path.join(appDirOfConfig(this.cfg), 'person-play.json'), JSON.stringify(this.personSettings));
+          } catch (e) {
+            log(`person play: could not keep its settings: ${(e as Error).message}`);
+          }
+        }
         return;
       case 'cleanup_now':
         void this.cleaner.run('asked', { dryRun: !!msg.dryRun }).then(

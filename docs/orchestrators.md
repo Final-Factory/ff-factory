@@ -606,7 +606,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 | kind | `ref` | clears (it starts by itself) | stuck after (it stalls, saying so) |
 |---|---|---|---|
 | `request` | the request it waits on ("w633"); `on`: `done` (default) or `report` | that request closes as done; with `on: report`, also when a worker on it reports what it waits for (w1869, below). Merges are followed. Declined or cancelled: it asks its requester (Waiting on input). Stalled: it stalls too | never by time: it follows that request, which the cleanup stalls by itself when nothing works on it |
-| `deploy` | none for the portal; a machine id for that machine's daemon update | a different commit runs there than when it was blocked (`version.ts` `appVersion`, the daemon's) | 7 days |
+| `deploy` | none for the portal; a machine id for that machine's daemon update | a different commit runs there than when it was blocked (`version.ts` `appVersion`, the daemon's). Any different one: not necessarily one that carries the merge it waits for (w1870 was woken on b9c0c09, cut one commit before its #571), so the worker checks `git merge-base --is-ancestor <its merge> <the running commit>` before its after-deploy check, and blocks again when it is not in | 7 days |
 | `machine` | the machine | it is online | 3 days |
 | `usage` | the vault token ("vault-lothsahn-1" or "vault-lothsahn-1 …EAAA") or the person whose Claude pool it is ("lothsahn", "lothsahn's pool"); another account by its email or label. Kept as the token's label; a ref nothing answers to is refused (w1126). `until`: the hold's end, filled in from the pool's first reset | that pool can serve a worker again (looked at each minute and on each usage reading), or `until` passes, whichever comes first; the request's worker is resumed then (w1126); another account when its meters are under 90% | 8 days |
 | `lock` | its name ("lab.lock"); `holder`: the request holding it; `until`: when to look again | the holder closes or reports, the nightly lab posts its next results (its run let go of the lock), or `until` passes | 1 day |
@@ -1233,6 +1233,10 @@ worker's last report is not a `DONE` for it. `turnTroubleOf` (`server/ledgerRule
   error after `ERROR_RESUMES` (2) resumes, a refused tool (it would be refused again), or an error only a person can clear:
   a login ("Not logged in", "/login", an expired token), a permission (a GitHub token without `workflows`, "Resource not
   accessible by personal access token") or a machine (offline, disk full), read in its last events and failed tools.
+  A result that is the API's own error line ("API Error: Can't reach the API server", w1733) is an error result too.
+  A turn that ended with a report, with no turn open since, is never one, whatever the report says: its own "refused" or
+  "limit" is not a refused tool or a cut-off (the live check after the deploy read w1867's "`ff-pr merge` reported #562
+  as refused" as a refused tool; `ledgerErrors.test.ts` keeps both cases).
 
 An escalation (`Orchestrators.escalateError`) makes the request wait on input for its person and an operator (one of
 `intake.reviewers` already on the request, else the first; the owner when none is set): a flag of kind `error`

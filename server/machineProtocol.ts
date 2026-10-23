@@ -8,7 +8,7 @@ import type { SessionOwner } from './resumable.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import type { GhLogin } from '../shared/ghLogin.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
-import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
+import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
  * Bumped when what the portal and a daemon send each other changes (machineProtocol.test.ts fails until someone
@@ -213,7 +213,7 @@ export type ToDaemon =
    * Each worker's request priority on this machine (w1628), for its bench queue: the daemon writes it to
    * <root>/tmp/bench.queue/priorities.json, which the game repo's scripts/bench/bench_queue.py reads at every decision.
    */
-  | { type: 'bench_priorities'; sessions: Record<string, BenchPriority>; singleWorker?: boolean; noTimedRuns?: NoTimedRuns }
+  | { type: 'bench_priorities'; sessions: Record<string, BenchPriority>; singleWorker?: boolean; noTimedRuns?: NoTimedRuns; personPlay?: { enabled: boolean; graceMinutes: number; who?: string } }
   /**
    * A clean-up pass now (the orchestrator asked); answered by a `cleanup` report. With `id`, also by a `cleanup_result`
    * carrying the pass's summary; `dryRun`: plan only, nothing removed (older daemons ignore both and run a real pass).
@@ -248,8 +248,14 @@ export type ToDaemon =
    * activity. Sent only to a daemon whose hello offered `liveView`, so an older daemon never gets one. idleClose (w1746, only
    * to a daemon whose hello offered `liveIdleClose`): the view sat idle `minutes`; save and quit the sandbox's editor, or
    * answer "skipped: <why>". The view stays; the editor starts again at the next message to a worker in that sandbox.
+   * stage and restage (w1839, only to a daemon whose hello offered `liveRestage`; an older daemon would take an unknown op
+   * for a start): stage replaces the view's stage recipe (`stage`, also given on start); restage sets the view up again from
+   * it with no worker turn, answers at once, and says how it went in `live_staged`.
+   * keep (w1839, only to a daemon whose hello offered `liveKeep`): write the moved value of `material`'s property `name` into
+   * the material's .mat file in the sandbox (the game's look.material.keep says which file), answering `{ path, change }`;
+   * `note` goes to the agent as a system line.
    */
-  | { type: 'live'; id: string; op: 'start' | 'stop' | 'command' | 'idleClose'; liveId: string; sessionId: string; sandbox: string; fps?: number; width?: number; materials?: string[]; command?: string; note?: string; minutes?: number }
+  | { type: 'live'; id: string; op: 'start' | 'stop' | 'command' | 'idleClose' | 'stage' | 'restage' | 'keep'; liveId: string; sessionId: string; sandbox: string; fps?: number; width?: number; materials?: string[]; command?: string; note?: string; minutes?: number; stage?: LiveStageStep[]; material?: string; name?: string }
   /**
    * Update this worker install (w1596, docs/worker-install.md "Updates over the daemon's link"): fetch the portal's code as
    * a git bundle (GET /machine/update/<sha256> with this machine's credential), check its SHA-256 and size and that it holds
@@ -277,6 +283,8 @@ export interface DaemonLiveView {
   state: 'starting' | 'live' | 'holding' | 'stopped';
   detail: string;
   frames: number;
+  /** Its stage recipe (w1839), absent while it has none. */
+  stage?: LiveStageStep[];
 }
 
 export type FromDaemon =
@@ -304,6 +312,10 @@ export type FromDaemon =
       liveView?: boolean;
       /** It closes a Live view's idle editor on request (w1746, `live` op idleClose) and reopens it at the next turn. An older portal ignores it. */
       liveIdleClose?: boolean;
+      /** It sets a Live view up again from its stage recipe on request (w1839, `live` ops stage and restage). An older portal ignores it. */
+      liveRestage?: boolean;
+      /** It writes a kept Live view knob into the sandbox's .mat on request (w1839, `live` op keep). An older portal ignores it. */
+      liveKeep?: boolean;
       /**
        * The live views it runs now (w1509): a portal that restarted takes them back, and one whose views are missing here
        * (this daemon restarted) starts them again. An older daemon sends none; an older portal ignores it.
@@ -361,7 +373,7 @@ export type FromDaemon =
    * `benchLock` (w1600): its bench lock while a timed run holds it (machine/benchLock.ts). `bench` (w1835): its bench
    * queue's mode, holders and waiters (machine/benchState.ts), for the machine view.
    */
-  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState }
+  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState; personPlay?: PersonPlayReport }
   /** The plan usage of the Mac's own Claude login (not the host token), every config usagePollMinutes and on usage_now (protocol 4+). */
   | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
   /** A clean-up pass finished; `notice` only when it could not get above the soft threshold (then the orchestrator is told). */
@@ -385,6 +397,8 @@ export type FromDaemon =
   | { type: 'gh_login'; gh: GhLogin }
   /** A live view's state when it changes (w1398): live, holding (detail says why), stopped. An older portal drops it. */
   | { type: 'live_state'; liveId: string; state: 'starting' | 'live' | 'holding' | 'stopped'; detail: string; frames: number }
+  /** A live view set up again from its recipe (w1839): whether it worked, why not, how long, and how long each leg took (ms). An older portal drops it. */
+  | { type: 'live_staged'; liveId: string; ok: boolean; detail: string; ms: number; legs: Record<string, number> }
   /** The update's bundle checked and its job started, or why not (w1596): nothing was changed then. */
   | { type: 'self_update_ack'; id: string; ok: boolean; error?: string }
   /** An update job ended (w1596): sent by the daemon that runs afterwards, on its link, until the portal has it. */

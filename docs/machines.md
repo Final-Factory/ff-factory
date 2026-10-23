@@ -567,6 +567,26 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   slot pool) stood in front, and while an elevated window is in front Windows drops injected mouse input (UIPI) after the hooks
   have seen it. An agent that drives the desktop with `mouse_event` gets nothing there until a person answers the prompt.
 
+## A person playing Final Factory on a machine (w1894)
+
+Where a person plays the game on a machine (default: LothDesktop, lothsahn's PC; config `machines.personPlay`), its agents
+yield until 10 minutes after the game closes. On LothDesktop one release build ran at 27.4 fps quiet and 12 to 15 fps beside
+agents' players, editors and builds (measured by w1785). Unlike a pause (above) nothing is handed back: the workers there
+keep their requests and their shells run on.
+
+- **The daemon** tells the person's game from the agents' players (no worker session in its environment, no slot lease, no
+  sandbox or worker temp folder in its command line) at each leftovers look, and holds an exclusive bench turn for it:
+  every sandbox editor closes (saved first), the workers' players are asked to quit, batch Unity runs go to idle priority
+  and finish, and no editor start, Unity run, player, clip or timed leg begins (docs/unity-lifecycle.md, "A person's game").
+- **The portal** holds the machine for new work (`Agents.placement()` merges `playHolds` from `shared/personPlay.ts`, read
+  from the daemon's stats, `MachineStats.personPlay`, fresh within 3 minutes): the Capacity block reads `ROOM n% but HELD
+  (lothsahn is playing Final Factory there since HH:MMZ (w1894: …))`, `list_machines` adds a `playing:` line with what the
+  turn did, the machine page shows an amber **Playing**, and its bench priorities carry `no_timed_runs` so timed legs go
+  elsewhere. Resumes of the workers already there are not held (unlike a pause or a coming release build).
+- **Settings**: `set_app_config` `machines.personPlay.enabled` (true/false), `machines.personPlay.graceMinutes` (1 to 240)
+  and `machines.personPlay.who` (a name), each with an optional `machine`; sent to the daemon with the bench priorities each
+  minute. Tests: `server/personPlay.test.ts`.
+
 ## Closing Firefox to free RAM
 
 A Windows PC's tray can close Firefox gracefully so its memory goes to agents and Unity editors (w1593, lothsahn,

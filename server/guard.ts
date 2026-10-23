@@ -93,6 +93,12 @@ export function sandboxGuard(opts: {
    */
   benchBusy?: () => string | undefined;
   /**
+   * w1894: while a person plays the game on this machine, why new work waits (machine/personPlay.ts personHoldReason), else
+   * undefined. A game player started by any route (its binary, player_slots.py launch) or an ffmpeg screen grab is refused
+   * then (checkPersonPlayLaunch). Absent: not checked.
+   */
+  personBusy?: () => string | undefined;
+  /**
    * w1829: while another worker's timed run keeps this sandbox's editor closed, the refusal for a Unity MCP call into it
    * (machine/benchTurn.ts closedRefusalFor), else undefined. Absent: not checked.
    */
@@ -135,6 +141,7 @@ export function sandboxGuard(opts: {
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
+        (opts.personBusy ? checkPersonPlayLaunch(cmd, opts.personBusy) : undefined) ??
         checkRawUnityBatch(cmd, cloneSpellings) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined) ??
         (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
@@ -292,6 +299,24 @@ export function checkBenchBusyLaunch(cmd: string, busy: () => string | undefined
     }
   }
   return undefined;
+}
+
+/**
+ * w1894: while a person plays the game on this machine (`busy`, machine/personPlay.ts personHoldReason), a command that starts
+ * a game player, by its binary or through the game repo's `player_slots.py launch` (which checks only the bench queue), or
+ * grabs the screen with ffmpeg is refused: the exclusive turn would ask the player to quit within a minute anyway, and both
+ * take the person's frames. `busy` is read only for such a command. Exported for tests.
+ */
+export function checkPersonPlayLaunch(cmd: string, busy: () => string | undefined): string | undefined {
+  const viaSlots = /player_slots\.py["']?\s+(?:\S+\s+)*?launch\b/i.test(cmd);
+  if (!viaSlots && !checkBenchBusyLaunch(cmd, () => 'x')) return undefined;
+  const held = busy();
+  if (!held) return undefined;
+  return (
+    `Refused (w1894): ${held}. No game player or screen capture starts on this machine while a person plays the game ` +
+    'here: it would take their frames. Hand the work back to your orchestrator for another machine, or do what needs no ' +
+    'player meanwhile; the hold ends by itself (list_machines says when).'
+  );
 }
 
 /** A Unity editor binary named in the program position: Unity.exe, a path ending in /Unity, the binary inside Unity.app. */

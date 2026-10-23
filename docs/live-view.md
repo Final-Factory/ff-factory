@@ -31,7 +31,7 @@ flowchart LR
   (`Assets/Scripts/Behaviours/Multiplayer/AgentControl/LiveLook.cs`, FinalFactory #1822). It provides four dev-tier
   `ffauto:` commands through the game's agent channel: `live.frames`, `look.material.list|set|reset`.
   - A knob changes the loaded material on this machine only.
-  - It is never saved: the original comes back on reset, on leaving play mode, on a script reload, and on quit.
+  - It is not saved: the original comes back on reset, on leaving play mode, on a script reload, and on quit, unless the person keeps it (Keep, w1839, below).
 - **The machine half** is `machine/live.ts`, and the daemon runs one `LiveSession` per view. It reads the game's
   `AgentControl/session-<pid>.json`, using the pid of the sandbox editor.
   - It gives the play session's channel the dev tier once, through the editor's MCP bridge (`DEV_TIER_SNIPPET`).
@@ -73,10 +73,12 @@ frames that pile up in socket buffers on a link slower than the stream.
 
 | Field | What it does |
 |---|---|
-| `action: "start"` | Starts a view of its sandbox's game. Optional: `materials` (names the game knows, e.g. `["VfxComet"]`), `fps` (default 15, at most 30) and `width` (default 960, 320 to 1920). |
+| `action: "start"` | Starts a view of its sandbox's game. Optional: `materials` (names the game knows, e.g. `["VfxComet"]`), `fps` (default 15, at most 30), `width` (default 960, 320 to 1920) and `stage` (a recipe, below). |
 | `action: "stop"` | Stops the view. |
 | `action: "status"` | Answers the view's state. |
 | `action: "knobs"` | Reads the current knob values, the same JSON the page reads. |
+| `action: "stage"` | Sets (or replaces) the view's stage recipe: `stage`, a list of steps ("Staged again without a turn" below). An empty list clears it. |
+| `action: "restage"` | Tests the recipe: the daemon sets the view up again now. `status` then shows how it went and how long each leg took. |
 
 - The editor must be in play mode with the asset on screen. Staging it is the agent's job, as for any capture.
 
@@ -99,6 +101,7 @@ frames that pile up in socket buffers on a link slower than the stream.
 | `GET /api/live/<sessionId>/knobs` | Answers `LiveMaterialKnobs[]`, one entry per material. |
 | `POST /api/live/<sessionId>/knob` | Takes `LiveKnobRequest` (`{ material, name, value }`) and answers `{ ok, knob }`. |
 | `POST /api/live/<sessionId>/reset` | Takes `{ material? }` and puts the knobs back. |
+| `POST /api/live/<sessionId>/keep` | Takes `{ material }` and writes its moved knobs into the material's `.mat` on the worker's branch ("Keep (w1839)" below). Answers `{ ok, kept: [{ name, path, change }] }`. |
 
 - `AppState.live` lists the views this person may watch. `{ type: 'live', views }` events keep the list current.
 - `AppState.config.live.enabled` says whether the switch is on.
@@ -109,8 +112,8 @@ frames that pile up in socket buffers on a link slower than the stream.
 1. It writes a system line into the agent's conversation, through the daemon that owns the session (its own seqs).
 2. The agent's next message from a person starts with the knob values set since then, so the agent knows them.
 3. It counts as activity in that sandbox, so the editor does not idle-stop while someone is tuning.
-4. The knob value itself is not kept. Keeping a value is the agent's edit of the `.mat`, committed like any other
-   change.
+4. The knob value itself is not kept until the person presses Keep on the material ("Keep (w1839)" below), which writes it into
+   the `.mat` file on the worker's branch; the worker commits it like any other change.
 
 **Knobs the game sets itself (w1509).** When the game can see that something else sets a property, it says why in the
 knob's `driven` field, and the page folds that knob away under "N more the game sets itself", with the reason in
@@ -158,6 +161,7 @@ close (above) woke the worker when a person opened the view.
   | idle-closed | Live view: editor closed | the idle close shut its editor |
   | queued | Live view: queued / waiting on a slot | its editor's start waits in the bench queue, or found no Unity slot |
   | editor-starting | Live view: editor starting | the editor is loading |
+  | setting-up | Live view: setting up | the daemon is staging the view again from its recipe (w1839, below) |
   | editor-stopped | Live view: editor stopped / editor crashed | the editor is not running, any other way |
   | no-play | Live view: not in play mode | the editor runs, the game is not in play mode |
   | stalled | Live view: no frames | it streamed, then no frame for `LIVE_STALL_MS` (10 s) with the socket open |
@@ -180,6 +184,81 @@ close (above) woke the worker when a person opened the view.
 - **Timings in the journal.** Each state change is logged with how long the last state lasted: `[live] live view
   beast/slot5 (<session>): holding -> live after 412.3 s` (`portal_logs` grep `live view`), so a click-to-first-frame or a
   resume can be read back.
+
+## Staged again without a turn (w1839)
+
+Ben, 2026-10-23: "Just make the current Unity stream faster and keep it warm." Opening a view whose editor had stopped woke its
+worker (above), and the worker's turn staged the view again. On the w1466 view that turn took 7.5 minutes: the portal journal
+has its editor up at 00:17:33Z on 2026-10-23 and the turn's end at 00:25:11Z, and most of the time between a click and the
+first frame was that turn. Now the worker records once how it staged the view, and the daemon replays it with no turn.
+
+- **The recipe** (`live_view` `stage`, on `start` or as its own action; `parseStage`, `machine/liveStage.ts`): up to 20 steps,
+  each with exactly one key.
+  - `{ "load": "<save name>" }`, the first step only: the save to load (`game.loadsolo`). Save the staged game first
+    (`ffauto game.save|ffa-<session>-live`) and load that.
+  - `{ "ffauto": "<command>" }`: a game command through the agent channel (`ui.hide|true`, `camera.focus|x|z|distance`).
+  - `{ "csharp": "<C#>", "until"?: "<text>", "timeoutS"?: 1-300 }`: C# for the editor bridge. With `until` it repeats
+    each second until its answer contains the text (30 s unless `timeoutS`); without, an answer from the bridge itself (an
+    error, "no bridge", a timeout) fails the step.
+  - The portal keeps the steps on the view (`LiveHub`), the daemon on its entry; a hello lists them (`DaemonLiveView.stage`),
+    so a daemon or portal restart keeps the recipe. `LiveViewInfo.stage` is its one-line summary.
+- **What the daemon does, in order** (`restage`, limits `STAGE_LIMITS`; each leg is timed and kept in `LiveViewInfo.staged.legs`):
+  1. **editor**: starts the sandbox's editor if it is not running (the pool's `unity start`: the Unity slot limit and the
+     bench queue apply) and waits for its MCP bridge to answer (up to 20 min).
+  2. **play**: enters play mode in `Assets/Scenes/main.unity` (3 min), unless it is playing already. An open scene with unsaved
+     changes is never thrown away: that fails the replay with "play mode was not entered: an open scene has unsaved changes".
+     Then it waits for the game's agent channel and gives it the dev tier.
+  3. **title**, **load** (a recipe with `load`): waits for the title screen (2 min), runs `game.loadsolo|<save>`, and waits until
+     the game is in the world (4 min).
+  4. **steps**: the remaining steps, in order. The first one that fails ends the replay with its number and the answer.
+  Meanwhile the view's `holding` detail is the progress ("setting the view up again: loading the save ..."), so the 1 s tick does not
+  overwrite it with "not in play mode", and the view reads `setting-up` (below). The streaming itself starts by itself once the game
+  is in play mode, as always.
+- **When it runs instead of the wake** (`LiveIdleCloser.viewerOpened`, `nudge`; `LiveHub.restage`): a person opens a view whose
+  editor is stopped, crashed or idle-closed, or whose game is not in play mode, and
+  - the view has a recipe, and its machine's daemon offers `liveRestage` (hello), and it is not replaying already;
+  - no worker of that sandbox is mid-turn (their turn is on it), and the computer is not held (a build plan, a bench lock,
+    a pause: the editor cannot start there).
+  The once-per-stop marks are the same. In every other case, today's wake goes to the worker, with a clause asking it to give the view
+  a recipe when it has none. A worker tests its recipe with `live_view` `restage`; `live_view status` shows the recipe, the
+  last replay, and how long each leg took.
+- **When it fails**: the daemon sends `live_staged` with the reason; the view shows it (`LiveViewInfo.staged`), and the worker gets
+  the wake text prefixed with "The daemon could not set your Live view up again from its stage recipe: <reason>." and ending with "Fix
+  the recipe (live_view stage) and test it (live_view restage)." (`LiveIdleCloser.restageFailed`).
+- **The badge**: `Live view: setting up` while `restaging` is set and the view is not live (`liveReady` kind `setting-up`): the
+  daemon's progress line, then "It streams by itself once the save has loaded, with no worker turn (usually 1 to 3 minutes; an
+  editor start can wait in the bench queue)". A hold still shows first; frames flowing show "go".
+- **Journal** (`portal_logs` grep `staged again`; the daemon's log has `live: view ...`): `live view beast/slot5 (<session>): staged again by the
+  daemon in 61.5 s (editor 20.0 s, play 8.0 s, title 4.0 s, load 29.0 s, steps 0.5 s)` or `... could not be staged again: <reason>`,
+  and `live idle: beast/slot5: Ben opened <session>'s Live view (its editor is stopped): the daemon sets it up again from its stage
+  recipe (no worker turn)`. The leg times above are an example of the format, not a measurement.
+- **Old daemons**: the ops `stage` and `restage` go only to a daemon whose hello offers `liveRestage` (an older one would take an
+  unknown op for a start); a `stage` on a start is ignored by it.
+
+## Keep (w1839)
+
+Ben, 2026-10-23: "Write it straight into the material file on the worker's branch." Before, a knob was never kept: the person's
+next message told the agent the values, and the agent edited the `.mat` itself.
+
+- **The page.** Each material's head has a Keep button after Reset (`data-testid="live-keep"`), enabled while a knob of that
+  material is moved and not driven by the game. It toasts "Kept N value(s) in <path>".
+- **The game** (FinalFactory #2322, `LiveLook`): `look.material.keep|<material>|<property>`, dev tier, editor only. It drops that knob's
+  original, so leaving play mode keeps the value, and answers the knob as `look.material.list` gives it plus `material` and
+  `path` (`Assets/....mat`).
+- **The portal** (`LiveHub.keep`, `POST /api/live/<sessionId>/keep`): reads the material's knobs, and for each one moved and not
+  driven asks the daemon (`live` op `keep`, only to a daemon whose hello offers `liveKeep`; an older one gets 409 "this machine's
+  daemon needs an update to keep values"). No moved knob: 400 "nothing moved on <material> to keep". The journal has `live view
+  m/s (session): <who> kept N value(s) of <material> in <path>`.
+- **The daemon** (`Daemon.liveKeep`, `machine/matText.ts`) writes the value into the `.mat` as text, in the sandbox: the property's
+  line in `m_Floats`, `m_Ints` or `m_Colors` under `m_SavedProperties` (added in name order if missing), floats as Unity writes
+  them, line endings kept, nothing else in the file touched. A path that is not `Assets/....mat` inside the sandbox is refused and
+  nothing is written. It answers `{ path, change }` ("_Intensity 1 -> 2.25").
+- **Why not a save from the editor.** A play-mode save wrote `m_ObjectHideFlags: 32` into three `.mat` files (w1066, w1323, w1393).
+- **Not committed.** The file changes on the worker's branch; the worker commits it with its work. The agent gets a line
+  ("Ben kept VfxComet _Intensity: _Intensity 1 -> 2.25, in Assets/Resources/Vfx/VfxComet.mat (written to the file on your branch,
+  not committed)"), and the next message from a person ends with "Moves are not saved until the person keeps them; a kept value
+  is already in the .mat file on your branch: commit it with your work."
+- **Older halves.** A game without the command: "this sandbox's game has no look.material.keep yet: merge master into its branch".
 
 ## While it waits on you (w1582)
 

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { HOST_ROLES, configPath, loadConfig, machineActivityPause, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
+import { HOST_ROLES, configPath, loadConfig, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus } from './store.ts';
 import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessions.ts';
@@ -367,6 +367,8 @@ machines.offlineAlert = (machineId, title, text) => {
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
 // The activity pause (w1574, docs/machines.md "Pausing a machine"): config machines.activityPause, per machine, off by default.
 machines.activityFor = (id) => machineActivityPause(cfg, id);
+// A person playing Final Factory on a machine (w1894): config machines.personPlay, on at LothDesktop by default.
+machines.personPlayFor = (id) => machinePersonPlay(cfg, id);
 /** Set machine `id`'s activity pause in config (its own entry) and log who did; the caller pushes it to the daemon. */
 function setActivityPause(id: string, a: { enabled?: boolean; idleMinutes?: number }, by: string) {
   const was = machineActivityPause(cfg, id);
@@ -439,7 +441,12 @@ machines.onBenchWarnings = (id, warnings) => benchWarner.handle(id, warnings);
 // The live view (w1398, docs/live-view.md): a sandbox's game streamed beside its agent's chat, behind config live.enabled.
 const liveHub = new LiveHub({
   enabled: () => cfg.live?.enabled === true,
-  machines,
+  machines: {
+    canLive: (machineId) => machines.canLive(machineId),
+    canRestage: (machineId) => machines.canLiveRestage(machineId),
+    canKeep: (machineId) => machines.canLiveKeep(machineId),
+    live: (machineId, op, timeoutMs) => machines.live(machineId, op, timeoutMs),
+  },
   session: (id) => store.sessions.get(id),
   roleOf: (userId) => identity.get(userId)?.role,
   changed: () => pushLive(),
@@ -448,6 +455,7 @@ const liveHub = new LiveHub({
     for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
   },
   viewerOpened: (info, who) => liveIdle.viewerOpened(info, who),
+  restageFailed: (info, detail) => liveIdle.restageFailed(info, detail),
   hold: (machineId) => liveHold(machineId),
   log: (line) => console.log(`[live] ${line}`),
 });
@@ -476,12 +484,14 @@ const liveIdle = new LiveIdleCloser({
   send: (sessionId, text) => sessions.send(sessionId, text, 'system'),
   hold: (machineId) => liveHold(machineId),
   woke: (liveId, who) => liveHub.woken(liveId, who),
+  restage: (liveId, who) => liveHub.restage(liveId, who),
   log: (line) => console.log(`[live] ${line}`),
   now: () => Date.now(),
 });
 setInterval(() => void liveIdle.sweep(), 60_000).unref();
 machines.onLiveFrames = (machineId, liveId, ws) => liveHub.attachFrames(machineId, liveId, ws);
 machines.onLiveState = (machineId, msg) => liveHub.onState(machineId, msg);
+machines.onLiveStaged = (machineId, msg) => liveHub.staged(machineId, msg);
 machines.onLiveHello = (machineId, running) => void liveHub.daemonHello(machineId, running);
 agents.attachments = attachments;
 agents.spend = spend;
@@ -1027,6 +1037,12 @@ route('POST', '/api/live/([\\w-]{1,80})/reset', async (req, [id]) => {
   const body = await readJson<{ material?: string }>(req, 16 * 1024);
   const text = await liveCall(() => liveFor(req, id).reset(id, typeof body.material === 'string' ? body.material : undefined, requesterOf(req)));
   return { ok: true, result: text };
+});
+// Keep (w1839): the person's moved knobs of one material go into its .mat file on the worker's branch.
+route('POST', '/api/live/([\\w-]{1,80})/keep', async (req, [id]) => {
+  const body = await readJson<{ material?: string }>(req, 16 * 1024);
+  const kept = await liveCall(() => liveFor(req, id).keep(id, String(body.material ?? ''), requesterOf(req)));
+  return { ok: true, ...kept };
 });
 route('GET', '/api/me', async (req) => {
   const u = auth.userInfo(auth.user(req));

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { bridgeInfo, bridgePing, editorVerdict, restartAllowed, type EditorObservation } from './unityHang.ts';
+import { bridgeInfo, bridgePing, bridgeUpSince, editorVerdict, restartAllowed, type EditorObservation } from './unityHang.ts';
 
 const NOW = Date.parse('2026-09-24T16:00:00Z');
 const min = 60_000;
@@ -79,4 +79,30 @@ test('unity bridge: status files by project, and a ping answered on the main thr
   const deadPort = (dead.address() as net.AddressInfo).port;
   dead.close();
   assert.equal(await bridgePing(deadPort, 3000), false);
+});
+
+test('w1829: the bridge is up for the editor that runs now only once its own status file is written: the port file and a status file left by an earlier editor do not count', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'unity-mcp-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const project = 'F:/ffw/sandboxes/slot5';
+  // BEAST's slot5, 2026-10-23: its port file was written 2026-10-20 and every editor since reused it.
+  const portFile = path.join(dir, 'unity-mcp-port-d00a03c3.json');
+  fs.writeFileSync(portFile, JSON.stringify({ unity_port: 6402, project_path: 'F:/ffw/sandboxes/slot5/Assets' }));
+  const launched = Date.now();
+  const old = new Date(launched - 3 * 24 * 3600_000);
+  fs.utimesSync(portFile, old, old);
+  assert.equal(bridgeUpSince(project, launched, dir), false, 'a port file alone is not this editor');
+  assert.equal(bridgeUpSince(project, undefined, dir), true, 'an editor found running when the daemon started: the port as before');
+  // A status file the last editor left (a crash) and another project's fresh one.
+  const status = path.join(dir, 'unity-mcp-status-d00a03c3.json');
+  fs.writeFileSync(status, JSON.stringify({ unity_port: 6402, reloading: false, reason: 'ready', project_path: 'F:/ffw/sandboxes/slot5/Assets' }));
+  const before = new Date(launched - 60_000);
+  fs.utimesSync(status, before, before);
+  fs.writeFileSync(path.join(dir, 'unity-mcp-status-d0ecefa5.json'), JSON.stringify({ unity_port: 6401, reloading: false, project_path: 'F:/ffw/sandboxes/slot1/Assets' }));
+  assert.equal(bridgeUpSince(project, launched, dir), false, 'a status file written before this editor started');
+  // This editor's bridge starts and writes its status (then every ~5 s).
+  const after = new Date(launched + 115_000);
+  fs.utimesSync(status, after, after);
+  assert.equal(bridgeUpSince(project, launched, dir), true);
+  assert.equal(bridgeUpSince('F:/ffw/sandboxes/slot4', launched, dir), false, 'no port for slot4');
 });
