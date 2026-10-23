@@ -2976,7 +2976,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             override_duplicate: z
               .string()
               .optional()
-              .describe("Only when the request's server check found a strong overlap still in flight (list_work shows it), or a crash request looks like one a worker is on (w1827): what makes this different work (for a crash, what in FFBox's findings differs). Refused without it then."),
+              .describe("Only when the request's server check found a strong overlap still in flight (list_work shows it): what makes this different work. Refused without it then."),
             override_gate: OVERRIDE_GATE,
             extra_agent: z.boolean().optional().describe("Dispatcher: true puts this request's worker beside another request's live agent in the sandbox on purpose (w1089): only for work that needs no editor and no game tree (FF Factory, FFBox, the plugin: it works in its own clone in its temp folder, w1098), and not past max_agents_per_sandbox. It never switches the sandbox's branch; game work beside a busy worker is refused even with it (w1607). Without it start_agent refuses a sandbox that is not FREE."),
           },
