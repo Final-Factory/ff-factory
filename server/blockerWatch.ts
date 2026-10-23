@@ -45,7 +45,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks'>>;
+    Partial<Pick<Orchestrators, 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks' | 'replaceNoTimedWaits'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** Whether a message to a session waits in the send queue (for a sandbox, a slot or its machine): its resume is on its way (w1094). */
@@ -213,6 +213,8 @@ export class BlockerWatch {
           did.set(c.id, `${v.state}: ${v.why}`);
         }
       }
+      // Timed work waiting on a computer that takes no timed runs (w1872): re-placed first, so the room flag below can start it.
+      for (const id of this.d.orchestrators.replaceNoTimedWaits?.() ?? []) did.set(id, 're-placed: timed work off a computer that takes no timed runs');
       // Queued with room (w643): the same room test the page and decide_work queue read, for game work and for agent-slot work (w1098).
       const room: RoomNow | undefined = this.d.roomFacts?.() ?? (this.d.room ? { game: this.d.room(), agent: [], held: [] } : undefined);
       if (room && (room.game.length || room.agent.length || room.reserved?.length)) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');

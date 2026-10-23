@@ -114,6 +114,26 @@ export function needsBuild(w: Pick<WorkItem, 'needs' | 'build' | 'title' | 'brie
  */
 export const TIMED_WORDS = /\b(?:bench(?:mark)?(?:s|ed|ing)?|perf (?:a\/b|probe|test|run|fix|regression)s?|performance (?:a\/b|probe|test|run|regression|fix)s?|timed (?:runs?|legs?|a\/b)|timing (?:runs?|legs?)|exclusive (?:bench )?(?:locks?|tickets?)|probe_ab\w*|frame ?times?|a\/b (?:runs?|test|legs?))\b/i;
 
+// A clause's last words that rule the timed word after them out ("no bench lock", "without a benchmark", "not a timed run").
+const NEGATED_BEFORE = /(?:\b(?:no|without|never|nor|none)\b(?:\s+\S+){0,3}|\bnot(?:\s+(?:a|an|any|the))?)\s*$/i;
+// Words after it that do ("bench lock not needed", "a benchmark isn't required").
+const NEGATED_AFTER = /^[^.;:,!?\n]{0,25}?(?:\bnot|n't)\s+(?:needed|required|necessary|wanted)\b/i;
+
+/**
+ * Whether `text` names timed work (TIMED_WORDS) other than to rule it out (w1872): w1900's "Constraints: no timing work,
+ * so no bench lock needed" kept a correctness hunt off the free m5. A mention counts unless its own clause (back to a
+ * comma or a stop) negates it just before, or says it is not needed just after.
+ */
+export function timedMention(text: string): boolean {
+  for (const m of text.matchAll(new RegExp(TIMED_WORDS.source, 'gi'))) {
+    const at = m.index ?? 0;
+    const before = text.slice(Math.max(0, at - 60), at).split(/[.;:,!?\n(]/).pop() ?? '';
+    const after = text.slice(at + m[0].length, at + m[0].length + 60);
+    if (!NEGATED_BEFORE.test(before) && !NEGATED_AFTER.test(after)) return true;
+  }
+  return false;
+}
+
 /**
  * Whether a request runs timed legs (w1628), and on what platform when its words name one: 'win32' ("Windows", "win
  * player", "probe_ab_win"), 'darwin' ("Mac"), else 'any'; false for no timed work. lothsahn, 2026-10-20: "We should also
@@ -123,9 +143,10 @@ export const TIMED_WORDS = /\b(?:bench(?:mark)?(?:s|ed|ing)?|perf (?:a\/b|probe|
 export function needsTimed(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'> | undefined, text = ''): false | 'any' | 'win32' | 'darwin' {
   if (w && needsOf(w) === 'agent') return false;
   const all = `${w ? `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}\n` : ''}${text}`;
-  if (!TIMED_WORDS.test(all)) return false;
+  if (!timedMention(all)) return false;
   const win = /\bwindows\b|\bwin(?:64)? (?:player|build)\b|probe_ab_win|\bbeast\b|\blothdesktop\b/i.test(all);
-  const mac = /\bmac(?:os)?\b|\bm[35]\b/i.test(all);
+  // Not m5 (w1872): it takes no timed runs, so a brief naming it ("queued for m5", w1789) asks for no Mac; m3 is the Mac that does.
+  const mac = /\bmac(?:os)?\b|\bm3\b/i.test(all);
   return win === mac ? 'any' : win ? 'win32' : 'darwin';
 }
 

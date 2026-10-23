@@ -46,7 +46,7 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomNow, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, pauseHolds } from './machinePause.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
@@ -421,7 +421,7 @@ export function mainCloneGrantBrief(c: { path: string; requests: string[]; by: s
 }
 
 /** needsTimed's answer as a placement kind (w1628). */
-const timedKind = (t: ReturnType<typeof needsTimed>): TimedKind | false => (t === false ? false : t === 'any' ? 'timed' : `timed:${t}`);
+const timedKind = timedKindOf;
 
 export class Agents {
   private readonly cfg: Config;
@@ -713,6 +713,7 @@ export class Agents {
       recentCommits: () => this.recentCommits,
       room: () => this.roomNow(),
       roomFacts: () => this.roomFacts(),
+      timedFacts: (t) => timedFacts(this.places(), this.placement(), t),
       machineOnline: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
       deploySha: (id) => (id ? this.daemonSha?.(id) : appVersion().sha),
       cancelWake: (id) => this.cancelWake(id),
@@ -2241,6 +2242,9 @@ export class Agents {
     // A move is new work there (w1643): every request it serves must reach the computer's placement.minPriority.
     const below = this.openWorkOf(info).filter((w) => reservedReason(target, this.placement(), w.priority));
     if (below.length) throw new Error(`${target} is ${reservedReason(target, this.placement(), lowestPriority(below))}: ${below.map((w) => `${w.id} (${w.priority})`).join(', ')} may not go there; ${sessionId} stays on ${from}. Move it elsewhere, or raise the request's priority first.`);
+    // A timed request is never moved to a computer that takes no timed runs (w1861, w1872): handed back, like a pin.
+    const timedPin = this.openWorkOf(info).map((w) => this.timedPinProblem(target, timedKind(needsTimed(w)))).find(Boolean);
+    if (timedPin) throw new Error(`${timedPin} ${sessionId} stays on ${from}.`);
     if (!hasRoom(place)) throw new Error(`${target} has no room for game work now (${busyReasons(place).join('; ')}): ${sessionId} stays on ${from}. Move it when list_sandboxes shows room there.`);
     if (isMidTurn(info) || info.pendingPermissions.length) throw new Error(`${sessionId} is mid-turn: move it once its turn ends (a move hands its requests to a new session, and a turn cut off loses its step)`);
     const reqs = this.openWorkOf(info);
