@@ -2373,8 +2373,9 @@ orchestrator asks every question to its person with **`ask_person`**, one at a t
 - **The tool** (`ask_person`, a person's orchestrator only, loaded in every call: `server/toolManifest.ts`): a `question`
   (one sentence, its context goes in the message above), 2 to 4 `options`, each a `label` (the complete answer in the person's
   voice, "Close w983 as handled", at most 90 characters) and a one-line `description`, and at most one marked `recommended`.
-  `shared/ask.ts` `checkAsk` refuses anything else (two picks, a duplicate label, the reserved "Chat more about this") and the
-  recommended option moves to the front. The tool answers "Shown to Ben as 3 buttons ... End your turn now": the orchestrator
+  A label over 90 is not refused (w1869): `checkAsk` cuts it at a word with "…", puts its full text in front of that option's
+  description and the answer carries a WARNING. `shared/ask.ts` `checkAsk` refuses anything else (two picks, a duplicate
+  label, the reserved "Chat more about this") and the recommended option moves to the front. The tool answers "Shown to Ben as 3 buttons ... End your turn now": the orchestrator
   writes its message, calls the tool and stops. The call stays in the transcript as a `tool_use`, and the page draws that event
   as the question (`web/src/components/AskCard.tsx`): the question, one button per option (the recommended one first, an amber
   "Recommended" chip) and a last, dashed "Chat more about this". It reuses what the chat has: the reply bar and `startReply` of w866 for "Chat more", the reply quote line for the answer, the `.chip` and the colour tokens (the same borders, accent and green as the rest of the page). The Intake tab's Approve and Decline (`DispatcherPanel.tsx`) are one-line `.btn` buttons in a table row, with no component to lift out, so the option buttons (`.ask-opt`) are two-line cards of the same radius and tokens.
