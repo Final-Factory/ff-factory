@@ -260,7 +260,7 @@ export function outsideWaitOf(line: string, team: readonly string[] = []): strin
 }
 /** A waiting_on_person declaration whose `who` is the reporter or a player, not one of the team (w1841). */
 export const outsideDeclared = (d: Pick<NonNullable<SessionInfo['waitingOn']>, 'who' | 'what'>, team: readonly string[] = []) =>
-  OUTSIDE_ROLE.test(d.who) || OUTSIDE_WAIT.test(d.what) || (/\b(?:discord|ffbox)\b/i.test(d.what) && !team.some((p) => personKey(p) === personKey(d.who)));
+  (OUTSIDE_ROLE.test(d.who) && !team.some((p) => personKey(p) === personKey(d.who))) || OUTSIDE_WAIT.test(d.what) || (/\b(?:discord|ffbox)\b/i.test(d.what) && !team.some((p) => personKey(p) === personKey(d.who)));
 
 /** w1841 (e): "needs the w1761 stills", "waiting for w1761's worker": the other request a line waits on (its words up to a ; or .). */
 const WAITS_ON_WORK = /\b(?:needs?|waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b([^;.]{0,140})/gi;

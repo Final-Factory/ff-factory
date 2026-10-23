@@ -71,7 +71,7 @@ test('w1868: the cases lothsahn named read as he asked', () => {
   const w1829 = sum('w1829');
   assert.match(w1829.question, /Should I run it on BEAST instead, or keep waiting for m5\?/);
   assert.match(w1829.stale ?? '', /changed since it was asked: .*timed runs no longer go to m5/);
-  assert.match(w1829.what, /^when a timed bench leg holds the exclusive ticket/i);
+  assert.match(w1829.what, /^When a timed bench leg holds the exclusive ticket/i);
   // w1820: the report line whole, though the ledger's line kept 160 characters.
   assert.match(sum('w1820').question, /or after w1785’s LothDesktop timing shows what it saves per frame$/);
   // w1821: the frame look is answered; the Station strip question is still asked, on its own, with its still.

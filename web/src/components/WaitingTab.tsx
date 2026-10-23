@@ -339,7 +339,7 @@ function AskWaitCard({ app, item, now }: { app: AppState; item: AskItem; now: nu
     what: w ? whatOf(w) : 'A question from your orchestrator, in your chat with it.',
     meta: (
       <span className={waitAge(a.at, now) === 'fresh' ? '' : `tone-${AGE_TONE[waitAge(a.at, now)]}`}>
-        {me} must act · waiting {waitedFor(a.at, now)} · asked by your orchestrator{w ? ` about ${w.id}` : ''}
+        {me} must act · waiting {waitedFor(a.at, now)} · asked by your orchestrator{a.request ? ` about ${a.request}` : ''}
       </span>
     ),
     after: a.after ?? 'Your orchestrator carries on with your answer, as if you had clicked it in your chat.',

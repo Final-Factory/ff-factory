@@ -85,9 +85,10 @@ export function briefSentence(brief: string): string | undefined {
   const m = /^(.+?[.!?])(?:\s|$)/.exec(flat);
   const s = (m?.[1] ?? flat).trim();
   if (s.length < 12 || s.length > WHAT_CHARS) return undefined;
+  const line = s.charAt(0).toUpperCase() + s.slice(1);
   // A brief that opens on its filing note ("ben acknowledged this report as a bug ...") is not what the work is.
   if (/^(?:\w+ acknowledged|FFBox finished|The nightly e2e lab)/i.test(s)) return undefined;
-  return s;
+  return line;
 }
 
 /** What an intake request is, from where it came (w1868: "Intake 'needs a reviewer' cards say what the item is"). */
