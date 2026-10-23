@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Requester } from '../shared/types.ts';
+import type { BenchState, Requester } from '../shared/types.ts';
 import { readJsonDurable, writeJsonDurable } from './durable.ts';
 import { daemonBehind } from './machines.ts';
 import { SAFE_ROOT, SAFE_TARGET, workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
@@ -28,6 +28,10 @@ import type { LinkUpdateReport } from './machineProtocol.ts';
  *   installer's tools form (workerToolsRemote, server/agentTools.ts) brings the final-factory-agents plugins to master. The
  *   report gives each plugin's version before and after. A failure there is reported, changes nothing about the daemon and
  *   rolls nothing back; the next machine carries on.
+ * - Neither runs beside a timed run (w1861: m5's update and tools job ran inside a timed A/B leg of w1780 on 2026-10-23,
+ *   13:19 to 13:22 UTC). While a timed run holds the machine's bench queue exclusively, or held it under benchQuietMs ago
+ *   (a timed script lets go between its legs for seconds), its update and its tools publish wait, for benchWaitMs at the
+ *   most; the report names the run they wait for.
  */
 
 /** The marker fff-update writes when a deploy verified, and where the rollout keeps its state (both in the data folder). */
@@ -46,6 +50,11 @@ export const ROLLOUT_LIMITS = {
   /** A verified marker older than this is retired without a rollout (stale, e.g. restored data). */
   staleMarkerMs: 24 * 3_600_000,
   tickMs: 30_000,
+  /** w1861: a machine's bench must be free this long before its update or tools publish (probe_ab.sh lets go for seconds between legs). */
+  benchQuietMs: 90_000,
+  /** w1861: a timed run holds a machine's update and tools back this long at the most (an exclusive turn is 30 minutes while
+   * anyone waits behind it, and goes on past them while nobody does). */
+  benchWaitMs: 45 * 60_000,
 };
 
 export interface RolloutMachine {
@@ -82,6 +91,9 @@ export interface RolloutHost {
   tell(person: Requester | undefined, text: string): void;
   /** Who asked for the deploy that verified at this time (epoch ms), if anyone did through the ops worker. */
   requesterOf(verifiedAt: number): Requester | undefined;
+  /** w1861: the timed run that holds its bench queue exclusively now, for people ("a timed run on m5/slot2 (w1780)"), from
+   * its daemon's last stats; undefined when none does (or its daemon does not say). */
+  timedRun?(id: string): string | undefined;
 }
 
 /** The agent tools publish on one machine (w1476). */
@@ -123,6 +135,8 @@ export interface MachineOutcome {
   told?: boolean;
   /** The agent tools publish after the daemon step (w1476). */
   tools?: ToolsOutcome;
+  /** w1861: its update or tools publish waits for a timed run on it (`note` says which); not settled meanwhile. */
+  held?: boolean;
 }
 
 export interface RolloutState {
@@ -148,6 +162,23 @@ export interface RolloutDeps {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   limits?: Partial<typeof ROLLOUT_LIMITS>;
+}
+
+/** Stats older than this say nothing about a machine's bench now (its daemon reports them every 15 s, machine/daemon.ts STATS_MS). */
+const BENCH_STATS_FRESH_MS = 3 * 60_000;
+
+/**
+ * w1861: the timed run holding a machine's bench queue exclusively, for people ("a timed run on m5/slot2 (w1780)"), from
+ * its daemon's last stats (`bench`, machine/benchState.ts, received at `at`), or undefined when none does, the stats are
+ * stale or its daemon is older than w1835. Exported for tests.
+ */
+export function timedRunText(bench: BenchState | undefined, at: number, now = Date.now()): string | undefined {
+  if (!bench || bench.mode !== 'exclusive' || !Number.isFinite(at) || now - at > BENCH_STATS_FRESH_MS) return undefined;
+  if (bench.legacy) return `an old-style timed run (${clip(bench.legacy.owner, 100)})`;
+  const t = bench.running.find((r) => r.mode === 'exclusive');
+  if (!t) return 'a timed run';
+  const where = [t.host, t.sandbox].filter(Boolean).join('/') || (t.session ? `worker ${t.session}` : '');
+  return `a timed run${where ? ` on ${where}` : ''}${t.requests?.length ? ` (${t.requests.join(', ')})` : ''}`;
 }
 
 const SHA = /^[0-9a-f]{7,40}$/i;
@@ -183,6 +214,8 @@ export class MachineRollout {
   state: RolloutState = { machines: {} };
   private busy = false;
   private timer?: NodeJS.Timeout;
+  /** w1861: per machine, since when a timed run holds its update back, when one was last seen, and what. */
+  private readonly benchSeen = new Map<string, { since: number; last: number; what: string; over?: boolean }>();
 
   constructor(d: RolloutDeps) {
     this.d = d;
@@ -232,6 +265,7 @@ export class MachineRollout {
     if (sha && SHA.test(sha) && sha !== this.state.sha && Number.isFinite(at) && this.now() - at <= this.lim.staleMarkerMs) {
       const by = this.d.host.requesterOf(at);
       const tools = this.d.tools?.() !== false;
+      this.benchSeen.clear();
       this.state = { sha, previous: v?.previous || undefined, verifiedAt: new Date(at).toISOString(), ...(by ? { by } : {}), ...(tools ? { tools } : {}), machines: {} };
       this.save();
       console.log(`machine rollout: portal ${sha.slice(0, 9)} verified${by ? ` (deploy asked for by ${by.userId})` : ''}; updating the machines' daemons${tools ? ' and agent tools' : ''}`);
@@ -278,6 +312,12 @@ export class MachineRollout {
         } else if (!this.needsUpdate(m.id, sha)) {
           Object.assign(o, { status: 'current', before: this.d.host.daemon(m.id), after: this.d.host.daemon(m.id), at: new Date(this.now()).toISOString() });
         } else {
+          const held = this.heldBack(m.id);
+          if (held) {
+            Object.assign(o, { note: held, held: true });
+            continue;
+          }
+          delete o.held;
           await this.updateOne(m, o, sha);
         }
         this.save();
@@ -410,7 +450,43 @@ export class MachineRollout {
       if (o.status === 'failed') o.tools = { status: 'skipped', note: 'the machine is offline after its failed daemon update' };
       return false;
     }
+    // w1861: the tools run (a marketplace pull, plugin installs) waits for a timed run on the machine, as its update does.
+    const held = this.heldBack(m.id);
+    if (held) {
+      Object.assign(o, { note: held, held: true });
+      return false;
+    }
+    if (o.held) {
+      delete o.held;
+      if (o.status !== 'failed') delete o.note;
+    }
     return true;
+  }
+
+  /**
+   * w1861: why a machine's update and tools publish wait now, or undefined. A timed run holds its bench queue exclusively
+   * (its daemon's stats), or held it under benchQuietMs ago: a timed script lets go between its legs for seconds
+   * (probe_ab.sh), and an update in that gap runs inside the next leg. At most benchWaitMs from the first sight, then the
+   * update goes ahead (logged), so a run that never lets go does not keep a machine on old code.
+   */
+  private heldBack(id: string): string | undefined {
+    const now = this.now();
+    const what = this.d.host.timedRun?.(id);
+    let h = this.benchSeen.get(id);
+    if (h?.over) return undefined;
+    if (what) this.benchSeen.set(id, (h = { since: h?.since ?? now, last: now, what }));
+    if (!h) return undefined;
+    if (now - h.since >= this.lim.benchWaitMs) {
+      h.over = true;
+      console.log(`machine rollout: ${id}: ${h.what} has held its bench for ${Math.round((now - h.since) / 60_000)} min; its update goes ahead`);
+      return undefined;
+    }
+    if (!what && now - h.last >= this.lim.benchQuietMs) {
+      this.benchSeen.delete(id);
+      return undefined;
+    }
+    const latest = new Date(h.since + this.lim.benchWaitMs).toISOString().slice(11, 16);
+    return `held back for ${h.what}${what ? '' : ', which let go moments ago (its next leg may follow)'}: an update beside a timed run spoils its numbers (w1861); it runs once the bench has been free for ${Math.round(this.lim.benchQuietMs / 1000)} s, by ${latest}Z at the latest`;
   }
 
   /** Publish the latest agent tools on one machine (w1476), never throwing: its outcome is recorded whatever happens. */
@@ -490,11 +566,13 @@ export class MachineRollout {
       : o.status === 'failed' ? `FAILED: ${o.note}.${commits}${limits}${agents}${o.rollback ? ` Rollback: ${o.rollback}.` : ''}`
       : o.status === 'skipped' ? `skipped: ${o.note}.`
       : o.status === 'updating' ? 'updating now.'
+      : o.held ? `waiting: ${o.note}.`
       : `waiting: ${o.note ?? 'not online'}. It is updated when it next comes online.`;
     const t = o.tools;
     const toolSums = t && (t.status === 'failed' || t.status === 'not-published') ? (t.summary ?? []).map((l) => `    tools: ${l}`) : [];
     const all = [...sums, ...toolSums];
-    return `- ${id}: ${head}${toolsLine(t)}${all.length ? `\n${all.join('\n')}` : ''}`;
+    const toolsHeld = o.held && o.status !== 'pending' && !t ? ` Its agent tools wait: ${o.note}.` : '';
+    return `- ${id}: ${head}${toolsLine(t)}${toolsHeld}${all.length ? `\n${all.join('\n')}` : ''}`;
   }
 
   /** The main report when every machine is settled (or only offline ones remain after the grace period), then follow-ups. */
@@ -502,7 +580,7 @@ export class MachineRollout {
     const s = this.state;
     if (!s.sha) return;
     const entries = Object.entries(s.machines);
-    const settled = (o: MachineOutcome) => o.status !== 'pending' && o.status !== 'updating' && o.tools?.status !== 'publishing';
+    const settled = (o: MachineOutcome) => o.status !== 'pending' && o.status !== 'updating' && o.tools?.status !== 'publishing' && !o.held;
     const open = entries.filter(([, o]) => !settled(o));
     const graceOver = this.now() - Date.parse(s.verifiedAt ?? '') >= this.lim.graceMs;
     const tail = 'The deploy approval covers these updates; nothing is needed from anyone unless a line above says FAILED, NOT PUBLISHED or OFFLINE. Tell the user in a line if it does.';
@@ -519,7 +597,7 @@ export class MachineRollout {
     }
     const fresh = entries.filter(([, o]) => !o.told && settled(o));
     if (!fresh.length) return;
-    this.send(`[machine updates] Follow-up for portal ${s.sha.slice(0, 9)}: ${fresh.length === 1 ? 'a machine that was offline' : 'machines that were offline'} now settled.\n${fresh.map(([id, o]) => this.line(id, o)).join('\n')}\n${tail}`);
+    this.send(`[machine updates] Follow-up for portal ${s.sha.slice(0, 9)}: ${fresh.length === 1 ? 'a machine that was offline or held back' : 'machines that were offline or held back'} now settled.\n${fresh.map(([id, o]) => this.line(id, o)).join('\n')}\n${tail}`);
     for (const [, o] of fresh) o.told = true;
     this.save();
   }
