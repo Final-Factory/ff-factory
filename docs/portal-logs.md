@@ -18,6 +18,7 @@ portal_logs {source: "cleanup", machine: "lothdesktop", grep: "slot5"}
 portal_logs {source: "update_result"}                             # how the last portal update ended
 portal_logs {source: "machine_rollout"}                           # how each machine's daemon followed it
 portal_logs {source: "auto_deploy"}                               # the automatic deploy (w1634): what it waits for, each deploy and its outcome
+portal_logs {source: "coordinator_context", grep: "lothsahn"}   # what fills Lothsahn's orchestrator between compactions (w1866)
 portal_logs {source: "journal", grep: "fff-ops", offset: 200}     # the next page
 ```
 
@@ -28,12 +29,39 @@ portal_logs {source: "journal", grep: "fff-ops", offset: 200}     # the next pag
 | `tailscaled` | the VM's Tailscale daemon (`tailscaled.service`, w1420): its control connection (`PollNetMap`, `dial plan`), link changes, DERP, Funnel hand-offs and the packet filter's `Drop:` lines; a Tailscale login link in it is masked | the same |
 | `cleanup` | one computer's clean-up passes as the portal keeps them (`data/cleanup/<machine>/cleanup-log.jsonl` and its rotated `.1`; no `machine`: this host's own `data/cleanup-log.jsonl`): one line per pass, then one per item removed, would-remove or kept for a person, with size and why, each starting with the pass's time | `since` / `until` on the pass's time |
 | `update_result`, `update_verified`, `update_prepared`, `update_verifying`, `machine_rollout`, `auto_deploy`, `unit_watchdog` | the JSON files of the same names (`update.result.json` …, `machine-rollout.json`, `auto-deploy.json`, `unit-watchdog.json`), pretty-printed, in order | the file as it is; `since` and `until` do not apply |
+| `coordinator_context` | how the coordinators' conversations (the dispatcher's and each person's orchestrator's) grow between compactions (w1866), computed from Claude Code's own transcripts of them as counts only, never their text: below | the last 8 cycles of each; `since` / `until` pick the cycles that overlap them (at most 30) |
 
 `grep` is a substring, any case. `regex` is any case too and refuses a quantified group, a backreference, a lookaround and
 more than 100 characters (the pattern runs on the portal). `limit` is 200 by default, 2000 at most, and a page stops at 48,000
 characters; the answer says `more: offset N for the next page`, how many lines the window held, whether it held more than
 one call reads (the journal read stops at 20,000 lines: narrow it with `since`, `until` or `grep`), and how many lines were
 left out. Lines are cut at 1,000 characters. The journal and the clean-up passes come newest first.
+
+### coordinator_context: what fills a coordinator's context (w1866)
+
+Lothsahn, w1866: "You have been compacting every few messages, going from ~30k to over 100k quickly. Can you figure out what
+is growing your context so quickly and a way to have that use less tokens?" Nobody could see it: the coordinators'
+transcripts are the portal's own (`/srv/fff/home/.claude/projects/-srv-fff-base/<session>.jsonl`), and their meter
+(docs/spend.md) sorts tokens into kinds of work, not tools and harness messages. `server/contextGrowth.ts` reads the last
+32 MB of each live coordinator's transcript (the server finds the files, `cliTranscriptPath`; a worker's text never names
+one) and prints, every line starting with the coordinator's name (so `grep` picks one):
+
+- **each cycle** (from one compaction to the next; a shrink with no marker counts too): its start, measured, and what that
+  start held, estimated: the compaction summary, the files Claude Code attached again (each by name), its instructions
+  (CLAUDE.md, MEMORY.md, each by name), its listings, the first message, and the rest: the system prompt and the tool
+  definitions (the system prompt alone too, when Claude Code recorded a snapshot of it); then its peak, its turns and calls,
+  and its growth (measured) a turn;
+- **the growth by source** over the cycles shown: the coordinator's own output (exact: each call's output tokens, which the
+  next call carries), each tool by name (`list_work` split into `list_work id` and `list_work list`), each kind of message by
+  its tag (`message: person`, `message: worker update`, `message: timer` …) and each kind of attachment, with how many, the
+  mean and the largest, and how much of it repeats a paragraph the same cycle already held; and what nothing visible
+  explains (`unseen`);
+- **the growth by the kind of message that started the turn** (a person's, a timer's, a `[dispatch]` …), with its top sources;
+- the means of the complete cycles: turns between compactions, start and peak.
+
+Measured: every model call's context (input + cache read + cache write) and output, from its own usage; a cycle's growth is
+the sum of the differences between consecutive calls. Estimated: the split among sources, by characters ÷ 2.3 (the meter's
+calibration, docs/spend.md). Tests: `server/contextGrowth.test.ts`.
 
 A machine daemon's own log is **not** kept by the portal (it holds a daemon's clean-up passes, which `cleanup` shows, and
 nothing else of its log). It is `<app_dir>/logs/daemon.log` on that machine (`daemonLogPath` in `server/machines.ts`: the

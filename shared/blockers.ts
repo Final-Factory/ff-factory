@@ -150,7 +150,7 @@ export const MAX_GATES = 6;
 
 /** What each kind waits on and when it clears, for the tool's description and the docs. */
 export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
-  request: 'another request (ref: its id, e.g. "w633"): clears when it closes as done, or with on "report" at its next report',
+  request: 'another request (ref: its id, "w633"): clears when it closes as done, or with on "report" when it reports its result',
   deploy: "a deploy (ref: a machine id for that machine's daemon update; none for the portal): clears when a different commit runs there",
   machine: 'a machine offline or asleep (ref: its id): clears when it is online',
   usage: "a Claude account's usage limit or pool hold (ref: the vault token's name as the pool shows it, \"vault-lothsahn-1\" or \"vault-lothsahn-1 …EAAA\", or the person whose pool it is, \"lothsahn\"; another account by its email or label; until: when the hold ends, optional, the pool's first reset is filled in): clears when that pool can serve a worker again or at until, whichever comes first, and the request's worker is resumed then (w1126)",
@@ -166,6 +166,12 @@ export interface BlockerFacts {
   work: (id: string) => WorkItem | undefined;
   /** Whether a worker on `w` finished a turn (reported) after `since` (ms). */
   reportedSince?: (w: WorkItem, since: number) => boolean;
+  /**
+   * Whether a worker on `w` reported after `since` (ms) with what `waiter` waits for (w1869): its DONE, a `For <waiter>:`
+   * line, or a report on `w` with no still-open or paused line for it (server/ledgerRules.ts `reportDelivers`). A
+   * progress report (`w1785: still open: the A/B is running`) is not one.
+   */
+  deliveredSince?: (w: WorkItem, since: number, waiter?: string) => boolean;
   /** The commit the portal runs now. */
   portalSha?: string;
   /** The commit a machine's daemon runs now, or undefined when unknown. */
@@ -204,8 +210,8 @@ function follow(id: string, f: BlockerFacts): WorkItem | undefined {
 
 const firstLine = (s: string | undefined) => (s ?? '').split('\n').map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
 
-/** Whether a blocker has cleared, is still open, or is stuck, and why. */
-export function blockerVerdict(b: WorkBlocker, f: BlockerFacts): BlockerVerdict {
+/** Whether a blocker has cleared, is still open, or is stuck, and why. `waiter`: the request it blocks. */
+export function blockerVerdict(b: WorkBlocker, f: BlockerFacts, waiter?: string): BlockerVerdict {
   const at = Date.parse(b.at) || f.now;
   const age = f.now - at;
   const since = (h: number) => (h < 2 * DAY ? `${Math.round(h / HOUR)} h` : `${Math.round(h / DAY)} days`);
@@ -221,7 +227,8 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts): BlockerVerdict 
       if (t.status === 'done') return { state: 'clear', why: `${name} closed as done${t.outcome ? `: ${firstLine(t.outcome)}` : ''}` };
       if (STATUS_DONE_WORDS[t.status]) return { state: 'decide', why: `${name} was ${STATUS_DONE_WORDS[t.status]} without delivering ${b.what}${t.outcome ? ` (${firstLine(t.outcome)})` : ''}` };
       if (t.status === 'stalled') return { state: 'stuck', why: `${name}, which it waits on, stalled${t.stalled ? `: ${firstLine(t.stalled.reason)}` : ''}` };
-      if (b.on === 'report' && f.reportedSince?.(t, at)) return { state: 'clear', why: `${name}'s worker reported${t.outcome ? `: ${firstLine(t.outcome)}` : ''}` };
+      if (b.on === 'report' && f.deliveredSince?.(t, at, waiter)) return { state: 'clear', why: `${name}'s worker reported (${b.what})` };
+      if (b.on === 'report' && f.reportedSince?.(t, at)) return { state: 'open', why: `${name}'s worker reported progress only, not yet ${b.what}` };
       return { state: 'open', why: `${name} is ${t.status === 'blocked' ? 'itself blocked' : t.status}` };
     }
     case 'deploy': {

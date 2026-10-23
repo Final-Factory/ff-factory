@@ -66,6 +66,8 @@ function times(t: BenchTicketGlance, now: number, singleWorker: boolean, waiting
     return `${held}, ${ends}`;
   }
   if (kind(t) || singleWorker) return `${held}, no turn limit`;
+  // w1860: only lower-priority work waits behind it: it keeps the lock until it lets go
+  if (t.keeps) return `${held}, keeps the lock: only lower-priority work waits`;
   if (!t.until) return held;
   const left = Date.parse(t.until) - now;
   const turn = t.turnMin ? `its ${t.turnMin}m turn` : 'its turn';
@@ -77,7 +79,8 @@ function times(t: BenchTicketGlance, now: number, singleWorker: boolean, waiting
 /** A shared group's end, once an exclusive ticket waits behind it: one deadline for every holder (bench_queue.py). */
 function groupTimes(b: BenchState, now: number): string {
   const d = b.running.find((t) => t.deadline);
-  if (!d?.deadline) return '';
+  // w1860: the group outranks every timed leg that waits (its priority is its highest running ticket's)
+  if (!d?.deadline) return b.running.some((t) => t.keeps) ? `the group keeps the lock: only lower-priority work waits` : '';
   return `${d.warned ? 'warned: ' : ''}the group ${endsIn(Date.parse(d.deadline), now)}`;
 }
 
@@ -92,6 +95,7 @@ function hintLine(t: BenchTicketGlance, now: number, singleWorker: boolean, wait
     t.what ? `"${t.what}"` : '',
     waiting ? (t.since ? `waiting ${benchMinutes(now - Date.parse(t.since))}` : 'waiting') : times(t, now, singleWorker, waiters),
     !waiting && t.deadline && t.why ? `(${t.why})` : '',
+    !waiting && t.keeps?.why ? `(${t.keeps.why})` : '',
   ];
   return bits.filter(Boolean).join(' · ');
 }
@@ -105,6 +109,8 @@ function startsWhen(b: BenchState, n: NonNullable<BenchState['nextExclusive']>, 
   // Exempt work runs on, whoever waits: the leg waits for it. An urgent release ends the holders' turns with its notice.
   const exempt = n.preempt ? undefined : b.running.find((t) => kind(t) && !t.deadline);
   if (exempt) return `after the ${kind(exempt)}`;
+  // w1860: a higher-priority holder keeps the lock until it lets go: no time can be promised
+  if (b.running.some((t) => t.keeps)) return 'when the higher-priority work lets go';
   // Each holder's deadline, which the queue sets at the waiter's first look; until then the running group's end.
   const ends = b.running.map((t) => (t.deadline ? Date.parse(t.deadline) : NaN)).filter(Number.isFinite);
   if (ends.length !== b.runningCount || !ends.length) return 'after the running group';
