@@ -579,7 +579,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 
 | kind | `ref` | clears (it starts by itself) | stuck after (it stalls, saying so) |
 |---|---|---|---|
-| `request` | the request it waits on ("w633"); `on`: `done` (default) or `report` | that request closes as done; with `on: report`, also when a worker on it finishes a turn with a report. Merges are followed. Declined or cancelled: it asks its requester (Waiting on input). Stalled: it stalls too | never by time: it follows that request, which the cleanup stalls by itself when nothing works on it |
+| `request` | the request it waits on ("w633"); `on`: `done` (default) or `report` | that request closes as done; with `on: report`, also when a worker on it reports what it waits for (w1869, below). Merges are followed. Declined or cancelled: it asks its requester (Waiting on input). Stalled: it stalls too | never by time: it follows that request, which the cleanup stalls by itself when nothing works on it |
 | `deploy` | none for the portal; a machine id for that machine's daemon update | a different commit runs there than when it was blocked (`version.ts` `appVersion`, the daemon's) | 7 days |
 | `machine` | the machine | it is online | 3 days |
 | `usage` | the vault token ("vault-lothsahn-1" or "vault-lothsahn-1 …EAAA") or the person whose Claude pool it is ("lothsahn", "lothsahn's pool"); another account by its email or label. Kept as the token's label; a ref nothing answers to is refused (w1126). `until`: the hold's end, filled in from the pool's first reset | that pool can serve a worker again (looked at each minute and on each usage reading), or `until` passes, whichever comes first; the request's worker is resumed then (w1126); another account when its meters are under 90% | 8 days |
@@ -593,6 +593,21 @@ a day is a run that never ended; a machine away three days is down, not asleep; 
 days; a portal deploy follows a merge by itself (w1634, [ops-worker.md](ops-worker.md) "Automatic deploys"), so a week
 without one means it is off or failing, worth a person's look.
 
+- **A wait on a report clears on the result, not on progress** (w1869; lothsahn: "Analyze your recent tool failures and
+  make it so they don't happen in the future"). w1820 was blocked on "w1785 reporting (dec9a619's LothDesktop timing of A
+  vs A + PR #2268)"; w1785's worker ended a turn with "w1785: still open: the LothDesktop A/B is running…", the block
+  cleared on that, and w1820's worker resumed with no timing. A `request` gate with `on: report` (decide_work's, or a
+  worker's `blocked_on` reports) on wX set at time T now clears when wX closes as done, or when a worker on wX finishes a
+  turn after T whose report (`server/ledgerRules.ts` `reportDelivers`):
+  - has `DONE: wX` (even one the ledger refuses while a PR is open: the result is in it), or
+  - has a line `For <waiting request>: …`, or
+  - has no `wX: still open:` (or `NOT DONE`, `paused`) line for wX, and names wX or has no such line for any request.
+
+  A progress report (a still-open or paused line for wX) or one about another request only leaves it Blocked. So that the result can be told from progress, when such a
+  gate is set the workers on wX are sent what it waits for and asked to mark the report that carries it with
+  `For <waiting request>:` (`Orchestrators.tellReportWaited`; not a worker that waits on a person, whose declaration a
+  message would end). The gate's `what` is what they are told, so name the result there ("dec9a619's LothDesktop timing
+  of A vs A"), not "w1785 reporting". A lock's holder still frees it with any report.
 - **It unblocks by itself.** The blocker watch (`server/blockerWatch.ts`) looks at every blocked request each minute,
   and at once when one is blocked or the nightly lab reports. When the blocker clears, a worker whose check-in the block
   cancelled gets it back (below, "No poll is left behind") and the request is its again (`active`); otherwise the request

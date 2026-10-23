@@ -497,6 +497,25 @@ export function pausedIn(text: string): Map<string, string> {
   return out;
 }
 
+/**
+ * Whether a report from a worker on request `ref` carries what `waiter`, blocked on `ref` reporting, waits for (w1869;
+ * lothsahn: a block on "w1785 reporting (dec9a619's LothDesktop timing …)" cleared on "w1785: still open: the LothDesktop
+ * A/B is running…", and w1820's worker resumed with no timing). It does when the report has `DONE: <ref>`, or a line
+ * `For <waiter>: …` (its worker is told to write one, Orchestrators.tellReportWaited), or has no still-open or paused line
+ * for `ref` and either names it or has no such line at all. A progress report, or one only about another request's
+ * progress, does not.
+ */
+export function reportDelivers(report: string | undefined, ref: string, waiter?: string): boolean {
+  if (!report) return false;
+  const id = ref.toLowerCase();
+  if (doneIdsIn(report).includes(id)) return true;
+  if (waiter && /^w\d+$/i.test(waiter) && new RegExp(`^[\\s*_>\`-]*for\\s+${waiter.toLowerCase()}\\b[*_\`]*\\s*[:—–-]`, 'im').test(report)) return true;
+  const open = stillOpenIn(report);
+  const paused = pausedIn(report);
+  if (open.has(id) || paused.has(id)) return false;
+  return (!open.size && !paused.size) || new RegExp(`\\b${id}\\b`, 'i').test(report);
+}
+
 /** The PRs the ledger holds as open that a worker's report says merged (w515: "PR #1089 was merged", ".../pull/1089 merged"). */
 export function mergedMentionsIn(text: string, prs: readonly WorkPr[]): WorkPr[] {
   if (!/\bmerged\b/i.test(text ?? '')) return [];

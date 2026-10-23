@@ -440,13 +440,14 @@ export interface Config {
    * Where new game-repo work goes first (w428, docs/machines.md "Placing work"): `prefer`, computers in order (machine
    * ids, or "this host"), and `avoid`, computers kept off unless nothing else has room, each with why. Set with
    * set_app_config placement.prefer / placement.avoid; null clears. `hold` (w1089): computers that take NO new work at all,
-   * each with who holds it and why ("Ben testing"); set with placement.hold. `live` (w1600): where work that needs a Live
+   * each with who holds it and why ("Ben testing"); set with placement.hold. `holdExcept` (w1863): per held computer, the requests
+   * whose workers it still resumes and takes, set by placement.hold's `{ why, except }` form. `live` (w1600): where work that needs a Live
    * view goes first, machine ids in order; unset: beast (placement.ts DEFAULT_LIVE). Set with placement.live. `build` (w1606): where builds run first and which computers a build declared coming
    * clears, machine ids in order; unset: beast (placement.ts DEFAULT_BUILD). Set with placement.build. `minPriority` (w1643):
    * machine id to the lowest priority of work it takes (high: high and urgent only; urgent: urgent only; a computer left out takes
    * all work). Set with placement.minPriority.
    */
-  placement?: { prefer?: string[]; avoid?: Record<string, string>; hold?: Record<string, string>; live?: string[]; build?: string[]; minPriority?: Record<string, MinPriority> };
+  placement?: { prefer?: string[]; avoid?: Record<string, string>; hold?: Record<string, string>; holdExcept?: Record<string, string[]>; live?: string[]; build?: string[]; minPriority?: Record<string, MinPriority> };
   /** Paths no sandbox agent may write to or mention in a shell command (e.g. the live co-op checkout). */
   protectedPaths: string[];
   limits: {

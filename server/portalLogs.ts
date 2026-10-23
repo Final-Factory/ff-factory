@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describeCleanup } from './cleanup.ts';
+import { contextCycles, contextReport } from './contextGrowth.ts';
 import { run } from './proc.ts';
 import { redactSecrets } from './secrets.ts';
 import type { CleanupSummary } from '../shared/types.ts';
@@ -16,7 +17,8 @@ import type { CleanupSummary } from '../shared/types.ts';
  *
  * Never listed, so never readable: state.json, send-queue.json, the vault, logins, sessions, keys and tokens, uploads,
  * transcripts, memory folders (ownerDataReads in server/secretGuard.ts lists what an orchestrator may read; this is
- * narrower).
+ * narrower). One source is computed from transcripts without showing them (w1866): coordinator_context reads the
+ * coordinators' own Claude Code transcripts, whose paths the server gives (never the worker), and answers counts only.
  */
 
 /** Bytes of a page: one answer to the worker (the same as FFBox's logs view). */
@@ -27,6 +29,11 @@ export const LINE_MAX = 1000;
 export const JOURNAL_SCAN_MAX = 20_000;
 /** A file is read from its end up to this many bytes (cleanup-log.jsonl is kept under about 5 MB). */
 export const FILE_READ_MAX = 8 * 1024 * 1024;
+/** coordinator_context reads a coordinator's transcript from its end up to this many bytes: several compaction cycles. */
+export const CONTEXT_READ_MAX = 32 * 1024 * 1024;
+/** coordinator_context shows this many of each coordinator's last cycles without since; at most CONTEXT_CYCLES_MAX with it. */
+const CONTEXT_CYCLES = 8;
+const CONTEXT_CYCLES_MAX = 30;
 /** A document (update.result.json …) larger than this is refused: none is, they are a few KB. */
 export const DOC_MAX = 512 * 1024;
 export const JOURNAL_TIMEOUT_MS = 20_000;
@@ -40,7 +47,8 @@ export const JOURNAL_UNITS = { portal: 'fff-portal.service', updater: 'fff-updat
 type SourceDef =
   | { kind: 'journal'; units: string[]; what: string }
   | { kind: 'cleanup'; what: string }
-  | { kind: 'doc'; file: string; what: string };
+  | { kind: 'doc'; file: string; what: string }
+  | { kind: 'context'; what: string };
 
 /** Everything portal_logs can read. A name outside this list is refused; nothing else in data/ or the VM is reachable. */
 export const LOG_SOURCES: Record<string, SourceDef> = {
@@ -58,6 +66,8 @@ export const LOG_SOURCES: Record<string, SourceDef> = {
   auto_deploy: { kind: 'doc', file: 'auto-deploy.json', what: "data/auto-deploy.json: the automatic portal deploy (w1634): what it waits for now, the deploy asked for, and the last 50 with their commit, pull requests, outcome and who was told" },
   machine_rollout: { kind: 'doc', file: 'machine-rollout.json', what: "data/machine-rollout.json: the update of every machine's daemon after a portal update, machine by machine" },
   unit_watchdog: { kind: 'doc', file: 'unit-watchdog.json', what: "data/unit-watchdog.json: every critical unit's state and the last 50 things the watchdog did (a restart and why)" },
+  // w1866: Lothsahn's orchestrator compacted every few messages and nobody could see what filled it.
+  coordinator_context: { kind: 'context', what: "how the coordinators' conversations (the dispatcher's and each person's orchestrator's) grow between compactions (w1866): per cycle the start size and what it held, then the tokens each tool, kind of harness message and the coordinator's own output added, and which kinds of turn added them; counts only, computed from Claude Code's own transcripts, never their text (since and until pick cycles; grep a coordinator's name)" },
 };
 export const LOG_SOURCE_NAMES = Object.keys(LOG_SOURCES);
 
@@ -85,6 +95,8 @@ export interface PortalLogsDeps {
   machine(id: string): { id: string; local: boolean } | undefined;
   machineIds(): string[];
   now(): number;
+  /** coordinator_context: each coordinator's label and its Claude Code transcript, as the server finds it (never a worker's text). */
+  coordinators?(): { label: string; file?: string }[];
 }
 
 // ---------------------------------------------------------------- redaction
@@ -307,6 +319,52 @@ function readDoc(d: PortalLogsDeps, p: Parsed & { def: Extract<SourceDef, { kind
   return { lines: text.split('\n'), order: 'in order', label: p.def.file, window: p.sinceMs !== undefined || p.untilMs !== undefined ? 'since and until do not apply to a document: shown whole' : undefined };
 }
 
+/** The tail of a coordinator's transcript, read-only, never through a link, never a file the server did not name. */
+function readTranscriptTail(file: string): { text: string; truncated: boolean; size: number } | undefined {
+  if (!file.endsWith('.jsonl')) return undefined;
+  try {
+    if (!fs.lstatSync(file).isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const start = Math.max(0, size - CONTEXT_READ_MAX);
+    const buf = Buffer.alloc(size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    return { text: buf.toString('utf8'), truncated: start > 0, size };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** coordinator_context (w1866): each coordinator's cycles as counts (server/contextGrowth.ts), in order. */
+function readContext(d: PortalLogsDeps, p: Parsed): Raw {
+  const lines: string[] = [];
+  const notes: string[] = [];
+  const mb = (b: number) => `${(b / 1024 ** 2).toFixed(1)} MB`;
+  for (const c of d.coordinators?.() ?? []) {
+    const r = c.file ? readTranscriptTail(c.file) : undefined;
+    if (!r) {
+      notes.push(`${c.label}: no transcript on this host`);
+      continue;
+    }
+    const cycles = contextCycles(r.text, r.truncated).filter(
+      (y) => (p.sinceMs === undefined || Date.parse(y.endedAt ?? y.startedAt ?? '') >= p.sinceMs) && (p.untilMs === undefined || Date.parse(y.startedAt ?? '') <= p.untilMs),
+    );
+    lines.push(`${c.label}: transcript ${mb(r.size)}${r.truncated ? `, its last ${mb(CONTEXT_READ_MAX)} read` : ', read whole'}`);
+    lines.push(...contextReport(c.label, cycles, p.sinceMs === undefined && p.untilMs === undefined ? CONTEXT_CYCLES : CONTEXT_CYCLES_MAX));
+  }
+  return {
+    lines,
+    order: 'in order',
+    label: "the coordinators' context between compactions",
+    window: p.sinceMs === undefined && p.untilMs === undefined ? `the last ${CONTEXT_CYCLES} cycles of each (since and until pick others)` : 'the cycles that overlap since..until',
+    ...(notes.length ? { note: notes.join('; ') } : {}),
+  };
+}
+
 /** Control characters out, a line cut at LINE_MAX. */
 const tidy = (l: string) => l.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, ' ').slice(0, LINE_MAX);
 
@@ -318,7 +376,8 @@ export async function readPortalLogs(d: PortalLogsDeps, input: PortalLogsInput):
   if (input.source === undefined || input.source === '') return describeSources(d);
   const p = parse(d, input);
   if (p.machine && p.def.kind !== 'cleanup') throw new Error(`machine: only the cleanup source takes one (${p.name} is the portal's own).`);
-  const raw = p.def.kind === 'journal' ? await readJournal(d, p as never) : p.def.kind === 'cleanup' ? readCleanup(d, p) : readDoc(d, p as never);
+  const raw =
+    p.def.kind === 'journal' ? await readJournal(d, p as never) : p.def.kind === 'cleanup' ? readCleanup(d, p) : p.def.kind === 'context' ? readContext(d, p) : readDoc(d, p as never);
 
   // Redact the whole text first (a private key spans lines), then filter: a pattern never sees a secret.
   const clean = redactLogText(raw.lines.join('\n')).split('\n');

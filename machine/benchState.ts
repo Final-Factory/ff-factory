@@ -89,7 +89,10 @@ function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Ma
   const turnMin = t.mode === 'exclusive' ? (t.turnMin ? Math.min(t.turnMin, TURN_MIN) : (t.maxMin ?? OLD_TURN_MIN)) : undefined;
   // bench_queue.py never_limited: an exempt ticket, the urgent release lane's or one on a single-worker machine has no turn
   const limited = !exempt && !preempt && !m.singleWorker;
-  const until = Number.isFinite(deadline) ? deadline : t.granted && limited && turnMin ? since + turnMin * 60_000 : NaN;
+  // w1860: a holder that outranks every waiter keeps the lock (keep.json), while one of those waiters still waits; no
+  // deadline and no turn's end apply then, so no countdown is shown that would not fire
+  const keep = t.granted && limited && !Number.isFinite(deadline) && t.keep && Array.isArray(t.keep.waiters) && t.keep.waiters.some((n) => live.has(n)) ? t.keep : undefined;
+  const until = Number.isFinite(deadline) ? deadline : t.granted && limited && turnMin && !keep ? since + turnMin * 60_000 : NaN;
   const out: BenchTicketGlance = {
     ticket: t.ticket,
     mode: t.mode,
@@ -114,6 +117,8 @@ function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Ma
   }
   if (exempt) out.exempt = exempt;
   if (preempt) out.preempt = true;
+  const ks = keep ? iso(typeof keep.since === 'number' ? keep.since * 1000 : since) : undefined;
+  if (keep && ks) out.keeps = { since: ks, ...(keep.why ? { why: String(keep.why).slice(0, 160) } : {}), ...(keep.priority ? { priority: String(keep.priority) } : {}) };
   return out;
 }
 
