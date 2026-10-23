@@ -9,10 +9,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, type MoveDeps, type PoolRec } from './worker/devdrive.ts';
+import { carryDevDrive, claudeSlug, decideDevDrive, DEV_DRIVE_SIZES, defaultMaxGB, devDriveDirs, devDriveNeedGB, devDriveGuard, linkRootFolders, moveSandboxes, parseDevDriveOutput, type MoveDeps, type PoolRec } from './worker/devdrive.ts';
 import { daemonJson, devDriveFlags, layoutOf, manifestFor, parseArgs, planUpdate, preflightProblems, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { saveWork } from '../server/saveWork.ts';
 import { fenceToRoot } from '../server/cleanup.ts';
+import { roomLevel } from '../server/hostHealth.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PWSH = process.env.FF_PWSH || 'pwsh';
@@ -221,12 +222,41 @@ test('the Dev Drive is on by default for a new Windows install, off for an updat
   for (const platform of ['darwin', 'linux'] as const) assert.equal(decideDevDrive({ platform, update: false, hasOne: false }).action, 'none');
 });
 
-test('the maximum size: 90 % of the root’s volume, between 100 GB and 1 TB, and a flag', () => {
-  assert.equal(defaultMaxGB(1000), 900);
-  assert.equal(defaultMaxGB(500), 450);
-  assert.equal(defaultMaxGB(2000), 1024);
-  assert.equal(defaultMaxGB(60), 100);
-  assert.equal(defaultMaxGB(undefined), 600);
+test('the maximum size: what the pool needs from the measured sizes, capped by the host volume’s free space (w1910), and a flag', () => {
+  const pool = (maxSandboxes: number, maxAgentsPerSandbox: number) => ({ maxSandboxes, maxAgentsPerSandbox });
+  // The safe minimum, LothLaptop's pool: 1 sandbox (44) + 1 agent (10) + shared (38) + the 20 GB clean-up room.
+  assert.equal(devDriveNeedGB(pool(1, 1)), 112);
+  assert.equal(DEV_DRIVE_SIZES.cleanupHeadroomGB, 20);
+  // LothLaptop's install: about 869 GB free on D: (841 free + 28 the file had taken, the guard's reading). The old rule gave 1024.
+  assert.deepEqual([defaultMaxGB(pool(1, 1), 869).gb, defaultMaxGB(pool(1, 1), 869).short], [112, undefined]);
+  assert.match(defaultMaxGB(pool(1, 1), 869).why, /^112 GB: 1 sandbox x 44 \+ 1 agent x 10 \+ 38 shared \+ 20 clean-up room$/);
+  // LothDesktop's pool (6 sandboxes, 2 agents each) wants 442; on its D: (186 GB free) it gets what D: holds less 30, and says so.
+  assert.equal(devDriveNeedGB(pool(6, 2)), 442);
+  const desk = defaultMaxGB(pool(6, 2), 186);
+  assert.deepEqual([desk.gb, desk.short], [156, true]);
+  assert.match(desk.why, /156 GB, the most the host volume holds \(186 GB free, 30 kept free\), where 6 sandboxes x 44 \+ 12 agents x 10/);
+  // A big volume keeps a tenth of its free space.
+  assert.equal(defaultMaxGB(pool(20, 6), 2000).gb, 1800);
+  // No room for Windows' 50 GB minimum: no drive.
+  assert.equal(defaultMaxGB(pool(1, 1), 79).gb, 0);
+  assert.equal(defaultMaxGB(pool(1, 1), 80).gb, 50);
+  // Free space unknown: the pool's need.
+  assert.equal(defaultMaxGB(pool(2, 2), undefined).gb, 38 + 88 + 40 + 20);
+  // Whatever the host and the pool, a new drive never starts with the host guard holding agents back (server/hostHealth.ts
+  // roomLevel: the host's free space against what the file can still grow), the LothLaptop failure, and the host keeps 30 GB.
+  const g = { criticalFreeGB: 10, hysteresisGB: 10 };
+  for (const free of [80, 100, 186, 300, 869, 1500, 4000]) {
+    for (const [s, a] of [[1, 1], [2, 2], [6, 2], [20, 6]]) {
+      const { gb } = defaultMaxGB(pool(s, a), free);
+      if (!gb) continue;
+      assert.ok(gb >= 50 && gb <= free - 30, `${free} GB free, ${s}x${a}: ${gb}`);
+      const fileGB = 0.4; // a new VHDX's file (docs/worker-install.md "The file": about 360 MB)
+      assert.equal(roomLevel(free - fileGB, gb - fileGB, 'ok', g), 'ok', `${free} GB free, ${s}x${a}: ${gb}`);
+    }
+  }
+  // The disk guard's own lines are not this rule's: 20 GB clean-up, 10 GB critical (lothsahn, w1910).
+  const guard = devDriveGuard('D:\\', {}, { path: 'D:\\ffw\\devdrive.vhdx', maxGB: 112 });
+  assert.deepEqual([guard.warnFreeGB, guard.criticalFreeGB, guard.devDriveMaxGB], [20, 10, 112]);
   const f = (...argv: string[]) => {
     const { opts, flags } = parseArgs(['update', ...argv]);
     return devDriveFlags(opts, flags);
