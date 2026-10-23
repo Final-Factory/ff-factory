@@ -126,6 +126,31 @@ Its `ssh`, `scp`, `sftp`, `fffctl` and `fff-machine-ssh` are wrappers on its PAT
 `list_sandboxes` and `system_status` (read only), its own `wake_me`, and its own timers (`set_timer`, `list_timers`,
 `update_timer`, `cancel_timer`; [Polls and waits](#polls-and-waits-timers-w1106)). `ops_worker status` lists its timers.
 
+## Git and GitHub jobs (w1869)
+
+lothsahn, 2026-10-23: "Analyze your recent tool failures and make it so they don't happen in the future." The job that
+deleted w1788's three branches first failed: the worker tried `gh` in the VM, its guard refused it ("no git here"), and it
+reported that the VM has no GitHub access. A follow-up from lothsahn's orchestrator had to name the route ("using a worker
+machine's own GitHub login over ssh is the intended route. First choice: m3 ... else beast").
+
+The VM keeps no git and no GitHub token of its own: its network reaches only Anthropic's API and the tailnet
+(`fff-ops@.service` `IPAddressDeny=any`), and a token there would be one more secret in a shell that people's
+orchestrators drive. The route is the machines' own logins, over the ssh the worker already has:
+
+- **Where**: m3 first (its gh login), else beast (Ben's gh login, docs/vault.md section 13); never a machine on hold or
+  one the job rules out. Check first: `ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh auth status 2>&1 | grep -v Token'`
+  and `gh api repos/OWNER/REPO --jq .permissions`. A Mac's non-interactive ssh shell has no Homebrew on its PATH, hence the
+  export.
+- **A branch delete** needs no clone: `gh api repos/OWNER/REPO/branches/BRANCH --jq .commit.sha` (it is there),
+  `gh api -X DELETE repos/OWNER/REPO/git/refs/heads/BRANCH`, then `git ls-remote --heads git@github.com:OWNER/REPO.git BRANCH`
+  prints nothing. This is the sequence the w1788 job ran (the portal's journal, 2026-10-23 15:16Z).
+- **A job that needs a clone** makes it in a new `mktemp -d` folder on the machine, never in a person's clone or a sandbox.
+- Only what the job names is deleted, closed or merged; no token is printed (`grep -v Token` on `gh auth status`).
+
+Where it is said: the worker's brief (`opsBrief`, `server/opsWorker.ts`), the guard's refusal of `git`, `gh` and `git-lfs`
+in the VM (`OPS_GITHUB_ROUTE`: it names the same route, so a worker that tries locally learns it at once), and the
+`ops_worker` tool's description. Test: `server/opsWorker.test.ts` (w1869).
+
 ## A new machine
 
 **The short way since w1592: a join code, and no job for this worker.** lothsahn: "I can connect to tailscale and then it

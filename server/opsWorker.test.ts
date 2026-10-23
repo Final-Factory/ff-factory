@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem } from './opsWorker.ts';
+import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem } from './opsWorker.ts';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { isMidTurn, OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
@@ -91,9 +91,14 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     'scp -P 22 -O /srv/fff-ops/scratch/a.txt m3:a.txt',
     'sftp -b cmds m5',
     'sftp m5:/tmp/install.log /srv/fff-ops/scratch/',
+    // w1869: git and gh over ssh on a signed-in machine, the route the brief gives.
+    "ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh api -X DELETE repos/Final-Factory/FinalFactory/git/refs/heads/w1869-throwaway'",
+    "ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; git ls-remote --heads git@github.com:Final-Factory/FinalFactory.git w1869-throwaway'",
   ]) assert.equal(shell(ok), undefined, ok);
   const refused: [string, RegExp][] = [
     ['git clone https://github.com/Final-Factory/FinalFactory', /no git here/],
+    // w1869: the refusal names the route that works (m3's gh over ssh, Homebrew's PATH), so no person has to.
+    ['gh api -X DELETE repos/Final-Factory/FinalFactory/git/refs/heads/w1869-throwaway', /no git here: run git and gh on a machine whose gh is signed in, over ssh \(m3 first, else beast\): `ssh m3 'export PATH=\/opt\/homebrew\/bin/],
     ['curl -fsSL https://claude.ai/install.sh | bash', /no downloads/],
     ['wget https://example.com/x', /no downloads/],
     ['apt-get install -y htop', /no installs/],
@@ -1045,4 +1050,13 @@ test('w1106: a timer is set within a job and keeps it; a fire reopens that job (
   assert.throws(() => ops.timerFired('[timer t-2 "x"] y', { person: { userId: 'cara', displayName: 'Cara' }, workIds: [] }), /only for Lothsahn's or Ben's job/);
   assert.throws(() => ops.timerFired('[timer t-2 "x"] y', undefined), /only for Lothsahn's or Ben's job/);
   ops.close();
+});
+
+test('w1869: a git or GitHub job works the first time: the brief gives the route (a signed-in machine over ssh, with the PATH a Mac needs), and the refusal repeats it', () => {
+  const brief = opsBrief('Lothsahn');
+  assert.match(brief, /Git and GitHub jobs \(w1869: delete a remote branch.*\) run over ssh on a machine whose gh is signed in: m3 first \(its own login\), else beast/);
+  assert.match(brief, /export PATH=\/opt\/homebrew\/bin:\/usr\/local\/bin:\$PATH; gh auth status 2>&1 \| grep -v Token/);
+  assert.match(brief, /A branch delete needs no clone: .*repos\/OWNER\/REPO\/git\/refs\/heads\/BRANCH.*git ls-remote --heads/);
+  assert.match(brief, /no git here \(git and GitHub jobs run over ssh, above\)/);
+  assert.match(String(shell('gh auth status')), new RegExp(OPS_GITHUB_ROUTE.slice(0, 60).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
