@@ -38,8 +38,13 @@ test('w643: a request blocker clears when that request closes as done, or report
   // on report: a worker on it finished a turn after the block.
   const r = { ...b, on: 'report' as const };
   const reported = (w: WorkItem, since: number) => w.id === 'w633' && since === Date.parse(b.at);
-  assert.equal(blockerVerdict(r, facts([item('w633')], { reportedSince: reported })).state, 'clear');
-  assert.equal(blockerVerdict(b, facts([item('w633')], { reportedSince: reported })).state, 'open', 'on done (the default) a report is not enough');
+  assert.equal(blockerVerdict(r, facts([item('w633')], { reportedSince: reported, deliveredSince: reported })).state, 'clear');
+  assert.equal(blockerVerdict(b, facts([item('w633')], { reportedSince: reported, deliveredSince: reported })).state, 'open', 'on done (the default) a report is not enough');
+  // w1869: a report that is progress only (reported, not delivered) leaves it open, and says so; the waiter is passed on.
+  let asked: string | undefined;
+  const progress = blockerVerdict(r, facts([item('w633')], { reportedSince: reported, deliveredSince: (_w, _s, waiter) => ((asked = waiter), false) }), 'w634');
+  assert.deepEqual(progress, { state: 'open', why: "w633's worker reported progress only, not yet w633's timing table" });
+  assert.equal(asked, 'w634');
   // Merged into another: that one decides.
   assert.match(blockerVerdict(b, facts([item('w633', { status: 'merged', mergedInto: 'w640' }), item('w640', { status: 'done' })])).why, /^w633 \(merged into w640\) closed as done/);
   // Open however long: the request it follows is what the cleanup stalls.

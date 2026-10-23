@@ -37,10 +37,11 @@ export function wordsProblem(s: string, what: string): string | undefined {
  * wrong with them: 1 to MAX_ASKS, each one question of at most CARD_QUESTION_CHARS words with 2 to 4 answers (shared/ask.ts
  * checkAsk: the recommended one first), none naming a file path, a list of pull requests or a worker id.
  */
-export function checkAsks(input: unknown): { asks: Ask[] } | { problem: string } {
+export function checkAsks(input: unknown): { asks: Ask[]; warnings: string[] } | { problem: string } {
   if (!Array.isArray(input) || input.length < 1) return { problem: 'questions: at least one question with its 2 to 4 answers' };
   if (input.length > MAX_ASKS) return { problem: `questions: at most ${MAX_ASKS}; ask the rest after these are answered` };
   const asks: Ask[] = [];
+  const warnings: string[] = [];
   for (const [i, raw] of input.entries()) {
     const n = input.length > 1 ? `question ${i + 1}` : 'question';
     const c = checkAsk(raw);
@@ -49,8 +50,9 @@ export function checkAsks(input: unknown): { asks: Ask[] } | { problem: string }
     const bad = wordsProblem(c.ask.question, n) ?? c.ask.options.map((o, j) => wordsProblem(`${o.label} ${o.description ?? ""}`, `${n}, answer ${j + 1}`)).find(Boolean);
     if (bad) return { problem: bad };
     asks.push(c.ask);
+    warnings.push(...c.warnings.map((w) => (input.length > 1 ? `${n}: ${w}` : w)));
   }
-  return { asks };
+  return { asks, warnings };
 }
 
 /**
