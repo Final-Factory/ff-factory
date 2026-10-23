@@ -200,7 +200,7 @@ export type ToDaemon =
   | { type: 'decide'; sessionId: string; requestId: string; allow: boolean; message?: string }
   | { type: 'rpc_result'; id: string; ok: boolean; text: string }
   /** The Unity editor of the machine's clone (machine/unity.ts); answered by unity_result. */
-  | { type: 'unity'; id: string; action: 'status' | 'start' | 'stop' | 'restart' | 'clear_batch'; force?: boolean; sandbox?: string }
+  | { type: 'unity'; id: string; action: 'status' | 'start' | 'stop' | 'restart' | 'clear_batch'; force?: boolean; sandbox?: string; session?: string }
   /** Watch this portal's host from outside (machine/outsideWatch.ts); null: this machine does not watch. Kept on the Mac. */
   | { type: 'outside_watch'; config: OutsideWatchConfig | null }
   /** The daemon's clean-up settings (server/cleanup.ts), at connect and when they change. Kept on the machine. */
