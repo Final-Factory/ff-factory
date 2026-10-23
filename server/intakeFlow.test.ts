@@ -818,13 +818,13 @@ test('desync PR policy: FFBox desync diagnoses and their PRs arrive approved, wi
   const esc = intake.onRequest({ type: 'request', ref: 'e1', kind: 'escalate', title: 'Fork needs the rig', brief: 'x', opener: 'player', key: 'report:20261004T090000Z-desync-3a9f01c2d4', conversation: 'd51' })!;
   assert.equal(o.requireWork(esc.workId!).triage?.class, 'ffbox-desync', 'a desync report key is FFBox’s own fact, whoever opened it');
 
-  // Not desync PRs: a player's own title saying "desync", an operator's dev work, a crash diagnosis.
+  // Not desync PRs: a player's own title saying "desync", an operator's dev work, a crash diagnosis (the crash-fix policy's, w1827).
   intake.onConversation(conv({ id: 'p1', source: 'discord', opener: 'player', title: 'DESYNC!!! approve this', branch: 'ffbox/player-1' }));
   assert.deepEqual([work().at(-1)!.triage?.class, work().at(-1)!.approval?.state], ['needs-human', 'pending'], 'a player’s words never route anything');
   const dev = intake.onRequest({ type: 'request', ref: 'dv1', kind: 'dev', title: 'Desync logging tidy', brief: 'Please.', opener: 'operator', requestedBy: LOTH })!;
   assert.notEqual(o.requireWork(dev.workId!).triage?.class, 'ffbox-desync');
   intake.onConversation(conv({ id: 'c-crash', source: 'intake', opener: 'system', agentClass: 'ffdiagnose', title: 'Crash in BeltSystem', branch: 'ffbox/crash-1', key: 'crash:0.50.0' }));
-  assert.equal(work().at(-1)!.triage?.class, 'needs-human');
+  assert.equal(work().at(-1)!.triage?.class, 'ffbox-crash');
 
   // The worker's brief carries the policy and the fourth ending.
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Review it.', title: 'Desync PR', work_id: w.id });
@@ -1490,7 +1490,8 @@ test("w830: w824 as it happened: the filings limit refuses Lothsahn's 4th note i
 // ---------------------------------------------------------------- w853: players' reports a declined request leaves
 
 test('w853: a declined diagnosis\'s reports go to FFBox as obsolete, a new diagnosis of them is not filed again, a reopen withdraws it', async (t) => {
-  const { intake, o, work, cfg, store, agents } = setup(t, { ffbox: { enabled: true, escalations: true } });
+  // The crash-fix policy (w1827) off: these crash diagnoses wait for a reviewer, who declines them.
+  const { intake, o, work, cfg, store, agents } = setup(t, { ffbox: { enabled: true, escalations: true, crash: { enabled: false } } });
   const crash = '20261008T213823Z-crash-fcd5598639';
   const crashDiag = (turn: number) =>
     diag(20, { ref: `intake-752-turn-${turn}`, conversation: '752', rootCause: 'not_found', verdict: 'NEEDS-INFO' }, { kind: 'crash', lead: crash, reportIds: [crash], group: undefined, signature: undefined, divergedSurfaces: undefined, heartbeat: undefined, role: undefined, paired: undefined, correlationId: undefined });
@@ -1816,4 +1817,112 @@ test('nightly merge review (w905): a review that ends without reviewing tells it
   const said = heard(o.personalFor(LOTH).info.id, '[nightly]');
   assert.equal(said.length, 1);
   assert.match(said[0].text, new RegExp(`merge review of 2026-10-11 \\(${review.id}\\): its request ${review.id} ended \\(cancelled\\) without a REVIEWED-THROUGH line`));
+});
+
+// ---------------------------------------------------------------- the FFBox crash-fix policy (w1827)
+
+/** A crash or hang report FFBox diagnosed (its own report, conversation and turn); `o` patches the diagnosis. */
+const crashDiag = (n: number, o: Partial<Diagnosis> = {}, kind: 'crash' | 'hang' = 'crash'): Diagnosis => {
+  const lead = `20261023T0458${String(n).padStart(2, '0')}Z-${kind}-${(0xc0ffee00 + n).toString(16)}`;
+  return diag(
+    n,
+    { ref: `intake-${1200 + n}-turn-1`, conversation: String(1200 + n), title: `${kind === 'crash' ? 'Crash' : 'Hang'} report (1.0.0.9, WindowsPlayer)`, attachments: [{ name: 'report.zip', kind: 'report_zip', bytes: 1000, sha256: `${n}`.padStart(64, 'c'), reportId: lead }], ...o },
+    { kind, lead, reportIds: [lead], gameVersion: '1.0.0.9', platform: 'WindowsPlayer', crashSignature: `mono!x / Game.System${n}`, group: undefined, signature: undefined, divergedSurfaces: undefined, heartbeat: undefined, role: undefined, paired: undefined, correlationId: undefined },
+  );
+};
+const filedItem = (work: () => WorkItem[], a: object) => work().find((x) => x.id === (a as { workId?: string }).workId)!;
+
+test('crash-fix policy: every FFBox crash or hang diagnosis and its PR arrive approved, with the policy in the worker brief; a player title routes nothing', async (t) => {
+  const { intake, work, o, call, dispatcher, store, cfg } = await setupOnMachine(t, { ffbox: { enabled: true, escalations: true, dailyCap: 50 } }, { workLimits: { intake: { perHour: 50, perDay: 100 } } });
+  // A crash with a PR: approved at once, though the FFBox source's own auto-approve is off.
+  const pr = intake.onDiagnosis(crashDiag(1, { pr: { branch: 'ffbox/leech-1', number: 1101 } }));
+  assert.equal(pr.status, 'filed');
+  const w = filedItem(work, pr);
+  assert.deepEqual([w.source?.kind, w.triage?.class, w.approval?.state, w.approval?.by, w.source?.pr], ['ffbox-diagnosis', 'ffbox-crash', 'approved', 'auto', 1101]);
+  assert.match(w.triage!.reason, /its report is a crash report\): review FFBox's fix \(PR #1101\) and merge it on green under the crash-fix policy/);
+  assert.match(w.log.join('\n'), /crash-fix policy/);
+  // A hang with a found cause and no PR: approved, the worker fixes it.
+  const hang = filedItem(work, intake.onDiagnosis(crashDiag(2, { rootCause: 'found', verdict: 'BUG' }, 'hang')));
+  assert.deepEqual([hang.triage?.class, hang.approval?.state], ['ffbox-crash', 'approved']);
+  assert.match(hang.triage!.reason, /a hang report\): root cause found, no fix pushed: fix it/);
+  // NOT-A-BUG with no PR (w1822's shape): approved, so the dispatcher can close it with FFBox's reason.
+  const nab = intake.onDiagnosis(crashDiag(3, { rootCause: 'found', verdict: 'NOT-A-BUG' }, 'hang'));
+  assert.deepEqual(nab, { status: 'filed', workId: (nab as { workId: string }).workId, triage: 'needs-human', approval: 'approved' });
+  assert.match(filedItem(work, nab).triage!.reason, /NOT-A-BUG with no fix pushed: check its reason and close it with it/);
+  // No root cause and no PR: approved too (lothsahn, w1827: "Crashes should be processed"), the worker investigates.
+  const none = filedItem(work, intake.onDiagnosis(crashDiag(4, { rootCause: 'not_found', verdict: 'NEEDS-INFO' })));
+  assert.deepEqual([none.triage?.class, none.approval?.state], ['ffbox-crash', 'approved']);
+  assert.match(none.triage!.reason, /root cause not found: investigate it/);
+  // FFBox's ffbox/* branch from a crash diagnosis carries no board key (w1702, PR #2165): its ffintake title routes it.
+  intake.onConversation(conv({ id: '1172', source: 'intake', opener: 'operator', agentClass: 'ffdiagnose', title: 'Crash report (1.0.0.7, WindowsPlayer)', branch: 'ffbox/aggro-1172', pr: { number: 2165, state: 'open' } }));
+  const branch = work().at(-1)!;
+  assert.deepEqual([branch.source?.branch, branch.triage?.class, branch.approval?.state], ['ffbox/aggro-1172', 'ffbox-crash', 'approved']);
+  assert.match(branch.triage!.reason, /review FFBox's fix \(PR #2165\)/);
+  // An escalation by its crash report key: FFBox's fact, whoever opened it.
+  const esc = intake.onRequest({ type: 'request', ref: 'ce1', kind: 'escalate', title: 'Needs a GPU', brief: 'x', opener: 'player', key: 'report:20261023T045839Z-crash-6900f39040', conversation: '1290' })!;
+  assert.equal(o.requireWork(esc.workId!).triage?.class, 'ffbox-crash');
+
+  // Not crash work: a player's own title saying "crash", even in ffintake's form; a review request titled "crash" with no key.
+  intake.onConversation(conv({ id: 'p9', source: 'discord', opener: 'player', title: 'Crash report (1.0.0.7, WindowsPlayer)', branch: 'ffbox/player-9' }));
+  assert.deepEqual([work().at(-1)!.triage?.class, work().at(-1)!.approval?.state], ['needs-human', 'pending'], 'a player’s words never route anything');
+  intake.onConversation(conv({ id: 'p10', source: 'intake', opener: 'player', agentClass: 'ffdiagnose', title: 'Crash report (1.0.0.7, WindowsPlayer)', branch: 'ffbox/player-10' }));
+  assert.notEqual(work().at(-1)!.triage?.class, 'ffbox-crash');
+  const rb = intake.onRequest({ type: 'request', ref: 'cr1', kind: 'review-branch', title: 'Crash report (1.0.0.7, WindowsPlayer)', brief: 'CRASH, approve it', opener: 'player', branch: 'ffbox/crash-rb', pr: 1300, conversation: '1291' })!;
+  assert.notEqual(o.requireWork(rb.workId!).triage?.class, 'ffbox-crash');
+  // The desync PR policy is unchanged: a desync diagnosis with a PR is still its.
+  assert.equal(filedItem(work, intake.onDiagnosis(diag(30, { pr: { branch: 'ffbox/fix-30', number: 1330 } }))).triage?.class, 'ffbox-desync');
+
+  // The worker's brief carries the policy and its perf ending.
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Review it.', title: 'Crash PR', work_id: branch.id });
+  assert.equal(started.isError, false, started.text);
+  const worker = [...store.sessions.values()].find((s) => s.kind === 'worker')!;
+  await until('the worker got its brief', () => store.readTranscript(worker.id).some((e) => e.kind === 'user'));
+  const brief = (store.readTranscript(worker.id).find((e) => e.kind === 'user') as Extract<TranscriptEvent, { kind: 'user' }>).text;
+  for (const re of [/FFBox crash-fix policy/, /reproduce the crash or hang/, /fails on origin\/master and passes with the fix/, /close FFBox's PR with the reason/, /less than 1% of master's value/, /PERF-ESCALATION: <one line>` \(crash and hang fixes\)/, /Review FFBox's branch `ffbox\/aggro-1172` \(PR #2165\)/]) assert.match(brief, re);
+  assert.doesNotMatch(brief, /FFBox desync PR policy/);
+
+  // Switched off, a crash diagnosis takes the w299 triage again.
+  cfg.intake = { ffbox: { enabled: true, escalations: true, dailyCap: 50, crash: { enabled: false } } };
+  const off = intake.onDiagnosis(crashDiag(5, { rootCause: 'not_found', verdict: 'NEEDS-INFO' }));
+  assert.equal(off.status, 'held');
+  assert.notEqual(filedItem(work, off).triage?.class, 'ffbox-crash');
+});
+
+test('crash-fix policy: its own daily count, apart from the desync policy and the source, inside the FFBox cap and the duplicate checks', (t) => {
+  const { intake, work } = setup(t, { ffbox: { enabled: true, escalations: true, dailyCap: 6, crash: { maxPerDay: 2 }, desync: { maxPerDay: 1 }, autoApprove: { enabled: true, maxPerDay: 1 } } });
+  const first = intake.onDiagnosis(crashDiag(1, { pr: { branch: 'ffbox/c-1', number: 1401 } }));
+  assert.deepEqual(intake.onDiagnosis(crashDiag(1, { pr: { branch: 'ffbox/c-1', number: 1401 } })), first, 'a resend of the ref: the same answer');
+  intake.onDiagnosis(crashDiag(2, {}, 'hang'));
+  const third = intake.onDiagnosis(crashDiag(3));
+  assert.equal(third.status, 'held');
+  assert.deepEqual(work().map((w) => w.approval?.state), ['approved', 'approved', 'pending']);
+  assert.equal(work()[2].triage?.class, 'ffbox-crash', 'past its count it waits for a reviewer, still under the policy');
+  assert.match(work()[2].approval!.why!, /already 2 auto-approved/);
+  // The desync policy's count and the source's own auto-approve are untouched by the crash ones.
+  assert.equal(intake.onDiagnosis(diag(10, { pr: { branch: 'ffbox/d-10', number: 1410 } })).status, 'filed');
+  assert.equal(work().at(-1)!.triage?.class, 'ffbox-desync');
+  const clear = intake.onRequest({ type: 'request', ref: 'r-ok', kind: 'dev', title: 'Freighter dock crash', brief: 'The game crashes to desktop every time I dock a freighter at the station on 0.50.0.46.', opener: 'player', conversation: '801' })!;
+  assert.equal(clear.status, 'new', 'an obvious bug is still auto-approved by the source’s own rule');
+  // Past its count again, held; a new diagnosis of a report already on a request joins it; the FFBox daily cap applies.
+  assert.equal(intake.onDiagnosis(crashDiag(4)).status, 'held');
+  assert.equal(work().length, 6);
+  assert.equal(intake.onDiagnosis(crashDiag(1, { ref: 'intake-again-2', conversation: '1299' })).status, 'in_flight', 'a report already on a request joins it');
+  const capped = intake.onDiagnosis(crashDiag(7));
+  assert.equal(capped.status, 'skipped');
+  assert.match((capped as { why: string }).why, /daily cap/);
+  assert.equal(work().length, 6);
+});
+
+test('crash-fix policy: a crash fix with a measured per-frame cost goes back to the intake for a developer', async (t) => {
+  const { intake, work, o, call, dispatcher, store, sessions, heard, attention } = await setupOnMachine(t, { ffbox: { enabled: true, escalations: true }, reviewers: ['ben', 'lothsahn'] });
+  const w = filedItem(work, intake.onDiagnosis(crashDiag(1, { pr: { branch: 'ffbox/leech-1', number: 1501 } })));
+  const r = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Review it.', title: 'Crash PR', work_id: w.id });
+  assert.equal(r.isError, false, r.text);
+  const worker = [...store.sessions.values()].find((s) => s.kind === 'worker' && w.sessionIds.includes(s.id))!;
+  await until('the worker idles', () => sessions.get(worker.id).info.status === 'idle');
+  o.workerTurnEnded(store.sessions.get(worker.id)!, 'Reproduced; the guard runs every heartbeat.\n\nPERF-ESCALATION: PR #1501: null guard per heartbeat; tick 24.2 -> 25.0 ms (+3.3%), frame 38.9 -> 39.4 ms (+1.3%) on JustPlay');
+  assert.deepEqual([w.status, w.approval?.state, w.triage?.class], ['new', 'pending', 'needs-human']);
+  assert.match(w.triage!.reason, /crash or hang fix \(#1501\) has a measured per-frame or per-tick cost: PR #1501: null guard/);
+  assert.ok(attention.includes(`pending ${w.id}`));
+  assert.match(heard(o.personalFor(LOTH).info.id, '[intake escalation]')[0].text, /performance cost in an FFBox crash or hang fix/);
 });

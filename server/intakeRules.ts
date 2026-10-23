@@ -55,6 +55,8 @@ export interface IntakeSettings {
     autoApprove: { enabled: boolean; maxPerDay: number };
     /** FFBox desync PRs: approved at once under the desync PR policy (DESYNC_PR_POLICY), at most maxPerDay a day. */
     desync: { enabled: boolean; maxPerDay: number };
+    /** FFBox crash and hang diagnoses and their PRs: approved at once under the crash-fix policy (CRASH_FIX_POLICY), at most maxPerDay a day. */
+    crash: { enabled: boolean; maxPerDay: number };
   };
   release: { enabled: boolean; delayMinutes: number };
   nightly: { enabled: boolean; autoApprove: { enabled: boolean; maxPerDay: number }; dailyCap: number; flakyNights: number; batchOver: number; run: NightlyRunSettings; review: NightlyReviewSettings };
@@ -141,6 +143,8 @@ export function intakeSettings(cfg: Pick<Config, 'intake' | 'providers'>): Intak
       autoApprove: { enabled: f.autoApprove?.enabled === true, maxPerDay: int(f.autoApprove?.maxPerDay, 3, 0, 100) },
       // On unless switched off: Lothsahn's standing policy, not a trial (w358).
       desync: { enabled: f.desync?.enabled !== false, maxPerDay: int(f.desync?.maxPerDay, 10, 0, 100) },
+      // On unless switched off too: lothsahn's standing policy (w1827).
+      crash: { enabled: f.crash?.enabled !== false, maxPerDay: int(f.crash?.maxPerDay, 10, 0, 100) },
     },
     release: { enabled: cfg.intake?.release?.enabled === true, delayMinutes: int(cfg.intake?.release?.delayMinutes, 60, 0, 24 * 60) },
     nightly: {
@@ -673,6 +677,74 @@ export function desyncTriage(why: string): WorkTriage {
   return { class: 'ffbox-desync', reason: `FFBox desync PR (${why}): review and merge under the desync PR policy (Lothsahn, 2026-10-04); the worker classifies it 1, 2 or 3 first` };
 }
 
+// ---------------------------------------------------------------- FFBox crash and hang diagnoses (w1827)
+
+/**
+ * lothsahn's standing policy for FFBox's crash and hang diagnoses and their PRs (2026-10-23, w1827: "Can we make it so
+ * ffbox crash fixes or desyncs get processed automatically?", then "Crashes should be processed and he ffbox branches
+ * merged after a review from a worker"). Every work request for one carries it (workerRules), the dispatcher's prompt
+ * names it, and the ff-agents evidence-gate skill has the checklist (checklists/ffbox-crash-pr.md). docs/intake.md,
+ * "FFBox crash and hang diagnoses".
+ */
+export const CRASH_FIX_POLICY = [
+  'FFBox crash-fix policy (lothsahn, 2026-10-23, w1827; docs/intake.md "FFBox crash and hang diagnoses"; the checklist with the commands is the ff-agents evidence-gate skill\'s checklists/ffbox-crash-pr.md, read it first). A hang is worked like a crash. Where it differs from the review line above, it wins.',
+  "1. FFBox's findings are a model's reading of a player's report: verify every claim against the code. Fetch the report (fetch_ffbox_report with the id in the brief) and read its stack, log and context yourself.",
+  '2. Show the cause: reproduce the crash or hang (a test, an editor or built-player run), or, where it cannot be reproduced, show the faulty code path step by step with file:line from the stack to the fault. Say which one you did.',
+  '3. The fix comes with a test that fails on origin/master and passes with the fix: run it on both and quote both results. A fix nothing can test (a platform or driver crash) says why and what it checked instead.',
+  "4. FFBox's PR or branch: review it like any pull request (correctness, CLAUDE.md's determinism, save-compatibility and localization rules). When FFBox's cause is wrong or its fix partial, fix it properly on your own branch and close FFBox's PR with the reason and a link to yours; when it is right, add what it lacks (the test) and merge it.",
+  "5. Cost: when the fix adds work that runs every frame or every heartbeat, measure tick time (the heartbeat's main-thread mean and p95) and frame time (the heartbeat-frame wall median) before (origin/master) and after (the branch) on the biggest save you can load, bench builds made the same way on the same machine, runs interleaved, at least 3 of each, and state the method with the numbers. Each rising by less than 1% of master's value (with a spread small enough to show it) is negligible: record it in the PR and merge. Above that, do not merge: leave the PR open and end your turn with `PERF-ESCALATION: PR #<n>: <the change in a phrase>; tick <before> -> <after> ms (+<x>%), frame <before> -> <after> ms (+<y>%) on <save>`; the request goes back to the intake for a developer.",
+  "6. Merge through the PR once CI is green (the game repo's required `Test in editmode` check; open one from the branch when FFBox opened none: a branch gets CI only through a PR). Its description carries the cause, how you showed it, the red and green test runs, one `Report: <report id>` line per report you confirmed it fixes, and an ## Evidence section (the evidence-gate skill's pr_evidence.py).",
+  "7. FFBox's verdict NOT-A-BUG, or a cause outside the game (Unity's own code with no game frame, a driver, the player's machine, a debug or test upload): check FFBox's reason against the report; when it holds, end with `RESOLVED: <FFBox's reason, checked>` and change nothing. No root cause found: investigate it as in 1-3; when the report holds too little to find one, end with `RESOLVED: needs more information: <what is missing>`.",
+].join('\n');
+
+/** The perf ending of a crash worker (CRASH_FIX_POLICY 5, a fix with a measured per-frame or per-tick cost). */
+const CRASH_END_RULE =
+  '- `PERF-ESCALATION: <one line>` (crash and hang fixes) when the fix has a measured per-frame or per-tick cost above 1%: the PR stays open and the request goes back to the intake for a developer, with your line.';
+
+/** A board key that names a crash or a hang: FFBox's signature (`crash:<x>`, `hang:<x>`), or a crash or hang report's id. */
+const CRASH_KEY = /^(?:crash:|hang:|(?:report|intake):\d{8}T\d{6}Z-(?:crash|hang)-)/i;
+
+/**
+ * The title ffintake builds for the FFBox conversation that diagnoses a crash or hang report, from the report's kind,
+ * game version and platform (each pattern-checked by ffintake; docs/ffbox-connector-contract.md), and nothing else:
+ * "Crash report (1.0.0.7, WindowsPlayer)". FFBox's crash diagnoses carry no board key (w1702's PR #2165 had none).
+ */
+const CRASH_REPORT_TITLE = /^(crash|hang) report \([A-Za-z0-9][A-Za-z0-9._+-]{0,63}, [A-Za-z0-9][A-Za-z0-9._+-]{0,63}\)$/i;
+
+/**
+ * Why FFBox work is a crash or hang diagnosis or its PR (the crash-fix policy applies), or undefined. Only FFBox's
+ * facts decide: the report kind ffintake gave a diagnosis, a board key that names a crash or hang report, or the exact
+ * fact-built title of an intake conversation FFBox's ffdiagnose ran. A title in any other form, or any title a player
+ * could have written (a Discord conversation, a player-opened one), routes nothing, whatever it says.
+ */
+export function ffboxCrashSignal(x: { reportKind?: string; key?: string; title?: string; opener?: string; source?: string; agentClass?: string }): string | undefined {
+  if (x.reportKind === 'crash' || x.reportKind === 'hang') return `its report is a ${x.reportKind} report`;
+  if (x.key && CRASH_KEY.test(x.key)) return `its board key ${cleanLine(x.key, 80)} names a ${/^hang:|Z-hang-/i.test(x.key) ? 'hang' : 'crash'}`;
+  const m = x.source === 'intake' && x.agentClass === 'ffdiagnose' && x.opener !== 'player' ? CRASH_REPORT_TITLE.exec((x.title ?? '').trim()) : null;
+  if (m) return `its ffdiagnose conversation is ffintake's ${m[1].toLowerCase()} report`;
+  return undefined;
+}
+
+/** The triage of an FFBox crash or hang diagnosis or PR, worked under CRASH_FIX_POLICY; `f` are the diagnosis's facts when known. */
+export function crashTriage(why: string, f: { pr?: number; branch?: string; rootCause?: string; verdict?: string } = {}): WorkTriage {
+  const fix = f.pr || f.branch;
+  const what = fix
+    ? `review FFBox's fix (${f.pr ? `PR #${f.pr}` : f.branch}) and merge it on green`
+    : f.verdict === 'NOT-A-BUG'
+      ? "FFBox's verdict is NOT-A-BUG with no fix pushed: check its reason and close it with it, no game worker needed"
+      : f.rootCause === 'found'
+        ? 'root cause found, no fix pushed: fix it'
+        : f.rootCause === 'not_found'
+          ? 'root cause not found: investigate it'
+          : 'work it';
+  return { class: 'ffbox-crash', reason: `FFBox crash or hang (${why}): ${what} under the crash-fix policy (lothsahn, 2026-10-23)` };
+}
+
+/** The triage classes that keep their own daily auto-approve count (w358, w1827); the rest share the source's. */
+export function ownApprovalCount(c: WorkTriage['class'] | undefined): string {
+  return c === 'ffbox-desync' || c === 'ffbox-crash' ? c : '';
+}
+
 /** FF Factory's own branches for work that came from FFBox; `ffbox/*` stays FFBox's containers' prefix (docs/ffbox.md, "Branch names"). */
 export const FACTORY_BRANCH_PREFIX = 'ffbox-f/';
 
@@ -773,9 +845,11 @@ export function workerRules(w: Pick<WorkItem, 'id' | 'source' | 'brief' | 'triag
       'Never post a "fixed" or "merged" notice to whoever reported it, in any Discord channel or as Max, when you merge or land the branch (a review/* rebase included): FFBox sees the merge and tells the thread itself.',
       branchRule(s, sandboxBranch),
       ...(w.triage?.class === 'ffbox-desync' ? ['', DESYNC_PR_POLICY] : []),
+      ...(w.triage?.class === 'ffbox-crash' ? ['', CRASH_FIX_POLICY] : []),
       '',
       END_RULES,
       ...(w.triage?.class === 'ffbox-desync' ? [DESYNC_END_RULE] : []),
+      ...(w.triage?.class === 'ffbox-crash' ? [CRASH_END_RULE] : []),
     ]
       .filter((l) => l !== '')
       .join('\n');
@@ -893,7 +967,7 @@ export function sourceTag(w: Pick<WorkItem, 'source' | 'approval' | 'triage' | '
   if (!s) return '';
   const where =
     s.kind === 'discord-bug' ? `Discord ${s.channel ?? 'bug report'}` : s.kind === 'discord-request' ? `Discord request from ${s.reporter ?? '?'}` : s.kind === 'release' ? 'release follow-up' : s.kind === 'nightly' ? `nightly e2e ${s.nightly?.date ?? ''}`.trim() : s.kind === 'nightly-run' ? `nightly run ${s.nightlyRun?.date ?? ''}`.trim() : s.kind === 'nightly-review' ? `nightly merge review ${s.nightlyReview?.date ?? ''}`.trim() : s.kind === 'master-batch' ? 'master batch red' : s.kind === 'ffbox-dev' ? `FFBox dev request from ${s.reporter ?? '?'}` : `FFBox ${s.kind === 'ffbox-diagnosis' ? 'diagnosis' : s.kind === 'ffbox-branch' ? 'branch' : 'request'}`;
-  const triage = w.triage?.class === 'obvious-bug' ? ', obvious bug' : w.triage?.class === 'ffbox-desync' ? ', desync PR policy' : w.triage?.class === 'regression' ? `, ${w.triage.reason.replace(/^nightly e2e: /, '')}` : '';
+  const triage = w.triage?.class === 'obvious-bug' ? ', obvious bug' : w.triage?.class === 'ffbox-desync' ? ', desync PR policy' : w.triage?.class === 'ffbox-crash' ? ', crash-fix policy' : w.triage?.class === 'regression' ? `, ${w.triage.reason.replace(/^nightly e2e: /, '')}` : '';
   const d = withDecision ? decisionOf(w) : undefined;
   const approval = d ? `, ${d.text}` : '';
   return `${where}${s.untrusted ? ', untrusted' : ''}${triage}${approval}`;

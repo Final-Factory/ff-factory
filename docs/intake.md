@@ -34,9 +34,9 @@ threads by default, and the ledger check both ways (provider protocol 2) is buil
 |---|---|---|---|
 | a new thread in a bug channel (`intake.discord.bugChannels`, default none; never `bug_reports` or `dev_bug_reports`), the in-game reporter's or a player's | "Discord bug: <title>" | the system payer (Ben) | obvious bug, or needs a human |
 | a message in a request channel (`requestChannels`, default `dev_chat`) that mentions Max or replies to it, from a Discord id in `intake.discord.trusted` | "Discord request: <first line>" | that person | a person's own request |
-| an FFBox conversation that left an unreviewed `ffbox/*` branch (a fix, a diagnosis) | "Review and merge ffbox/…" | the system payer | needs a human (a person's own when an operator opened it); a desync diagnosis or its PR is approved at once under the [desync PR policy](#ffbox-desync-prs) |
+| an FFBox conversation that left an unreviewed `ffbox/*` branch (a fix, a diagnosis) | "Review and merge ffbox/…" | the system payer | needs a human (a person's own when an operator opened it); a desync diagnosis or its PR is approved at once under the [desync PR policy](#ffbox-desync-prs), a crash or hang diagnosis's under the [crash-fix policy](#ffbox-crash-and-hang-diagnoses) |
 | a `request` FFBox's connector files (review, escalation, an operator's dev work) | "FFBox …: <title>" | the operator, else the system payer | the same |
-| a finished FFBox diagnosis of a player's desync, crash or hang report (`POST /api/intake/ffbox`, `source: "intake"`) | "FFBox diagnosis (root cause …): <title>", or joined to the request it exactly matches | the system payer | the [desync PR policy](#ffbox-desync-prs) for a desync with a PR or a found cause, else the w299 triage ([below](#intake-diagnoses-from-ffbox)) |
+| a finished FFBox diagnosis of a player's desync, crash or hang report (`POST /api/intake/ffbox`, `source: "intake"`) | "FFBox diagnosis (root cause …): <title>", or joined to the request it exactly matches | the system payer | the [desync PR policy](#ffbox-desync-prs) for a desync with a PR or a found cause, the [crash-fix policy](#ffbox-crash-and-hang-diagnoses) for every crash or hang, else the w299 triage ([below](#intake-diagnoses-from-ffbox)) |
 | a release (a `bundleVersion` bump on the base branch) that carries landed fixes with threads | "Tell reporters their fixes are live in 0.50.0.X" | the system payer | follow-up |
 | the nightly e2e lab's report: a new regression, a scenario still failing, or one flaky `flakyNights` nights running | "Nightly e2e: <scenario> fails on master <sha>" | the system payer | regression |
 
@@ -179,7 +179,8 @@ fix the bug"): an escalated bug, a request FFBox files for a player (its title a
 diagnosis from a player's conversation (its title) go through `classifyBug` like a Discord thread, the version read
 from their words when no field carries it (`versionIn`). An escalated design question or developer decision, and a
 request for work FFBox cannot do (`escalate`), always need a human, except an FFBox desync diagnosis or its PR, which
-goes under the [desync PR policy](#ffbox-desync-prs).
+goes under the [desync PR policy](#ffbox-desync-prs), and an FFBox crash or hang diagnosis or its PR, which goes under the
+[crash-fix policy](#ffbox-crash-and-hang-diagnoses).
 
 Why fixed rules are enough here: the triage only decides who looks first. A report worded to look like a bug gets,
 at most, a worker that investigates a defect under rules that forbid design, balance and gameplay changes and make it
@@ -282,6 +283,59 @@ sure you remember how to do this." It holds until he changes it; config can swit
   request and leaves the PR to people. The marker on any other request changes nothing.
 - The dispatcher's prompt has the same rule (`server/agents.ts`): it never merges a class 3 PR with a measured cost and
   never briefs a worker to skip the classification.
+
+## FFBox crash and hang diagnoses
+
+lothsahn's standing policy (2026-10-23, w1827): "Can we make it so ffbox crash fixes or desyncs get processed
+automatically?", then "Crashes should be processed and he ffbox branches merged after a review from a worker". Before
+it, each crash or hang diagnosis went through the w299 triage over its fact-built title ("FFBox diagnosis (root cause
+found): Hang report (1.0.0.9, WindowsPlayer)"), which reads as "too little to go on", so every one waited for a reviewer
+(w1822, w1566, w1442, w1373; FFBox's `ffbox/*` fix branches from crash reports, w1701 and w1702, were approved by hand).
+A hang is worked like a crash. The desync PR policy above and the Discord thread triage are unchanged.
+
+- **Which work.** An FFBox crash or hang diagnosis or its `ffbox/*` PR, from any FFBox door: a finished diagnosis
+  (`onDiagnosis`), a finished conversation with a branch (`onConversation`), a `review-branch` or `escalate` request
+  (`onRequest`; an operator's `dev` work stays theirs). `ffboxCrashSignal` (`server/intakeRules.ts`) decides from FFBox's
+  facts only: the report kind ffintake gave a diagnosis (`crash`, `hang`), a board key that names a crash or hang report
+  (`crash:<x>`, `hang:<x>`, `report:`/`intake:<id>-crash-…` or `-hang-…`), or the exact title ffintake builds for the
+  `ffdiagnose` conversation of an intake report, `Crash report (<version>, <platform>)` or `Hang report (…)`, from the
+  report's kind, version and platform alone (FFBox's crash conversations carry no board key: w1702's PR #2165 had none).
+  A player's title saying "crash" never routes anything, even in that exact form: a Discord or player-opened
+  conversation, a request's title and any other wording are ignored. Desync goes first: a desync diagnosis keeps the
+  desync policy's rules.
+- **Every one is approved at once** (triage `ffbox-crash`, tagged "crash-fix policy"), whatever FFBox found: lothsahn
+  (2026-10-23) widened the first brief, which had a diagnosis with no cause and no PR wait, to "Crashes should be
+  processed". The triage says what the worker does:
+  - **a PR or branch**: review FFBox's fix and merge it on green;
+  - **root cause found, no PR**: fix it;
+  - **root cause not found, no PR**: investigate it (a report with too little to find one ends `RESOLVED: needs more
+    information: …`);
+  - **verdict `NOT-A-BUG`, no PR** (w1822's shape): no game worker. The dispatcher reads FFBox's reason in the brief
+    and, when it holds, closes the request with `decide_work done` and that reason.
+- **Its own daily count**: at most `intake.ffbox.crash.maxPerDay` a day (default 10), apart from
+  `intake.ffbox.autoApprove` and from the desync policy's count (`ownApprovalCount`); past it, it waits for a reviewer,
+  still under the policy. The FFBox daily cap, `workLimits.intake` and the duplicate checks (the same conversation or
+  keys; a diagnosis joins a request already holding its report, PR or branch) apply as to any intake item.
+  `intake.ffbox.crash.enabled: false` gives it the usual triage again.
+- **The strong-overlap hold counts only a shared key for it.** Every crash diagnosis of one build has the same
+  fact-built title, so a similar title says nothing about the bug: a crash request is held as a possible repeat only for a
+  shared identity key (the same report, PR or branch; `Orchestrators.fileIntake`). Without that, w1827's own test
+  held the second hang diagnosis of one build behind the first ("it may repeat w2 …, in flight").
+- **The worker's brief** carries `CRASH_FIX_POLICY` (`workerRules`):
+  1. verify FFBox's findings against the code and read the report (`fetch_ffbox_report`) yourself;
+  2. reproduce the crash or hang, or show the faulty code path with file:line from the stack to the fault;
+  3. a test that fails on origin/master and passes with the fix, both runs quoted;
+  4. review FFBox's PR like any PR; a wrong cause or a partial fix is fixed properly on the worker's own branch and
+     FFBox's PR closed with the reason and a link;
+  5. a fix that adds per-frame or per-tick work: tick and frame time on the biggest save, master against the branch, as
+     the desync policy's class 3 measures them; under 1% on each, recorded and merged; above, the PR stays open and the
+     worker ends with `PERF-ESCALATION: PR #<n>: <change>; tick a -> b ms (+x%), frame c -> d ms (+y%) on <save>`, which
+     puts the request back in the intake for a developer exactly as for a desync PR;
+  6. merge through the PR on green CI, with the cause, the red and green runs, `Report: <id>` lines and an
+     `## Evidence` section;
+  7. `NOT-A-BUG` or a cause outside the game: check FFBox's reason and end `RESOLVED: <reason, checked>`.
+  The commands and the checklist are in the ff-agents `evidence-gate` skill, `checklists/ffbox-crash-pr.md`.
+- The dispatcher's prompt has the same rule (`server/agents.ts`), with the NOT-A-BUG close.
 
 ## Closed when it merged
 
@@ -459,11 +513,14 @@ format in docs/ffbox-connector-contract.md, "Intake diagnoses"). Filed by `Intak
 - **Routing a new request** (source `ffbox-diagnosis`, untrusted, for the system payer):
   - a **desync with a PR, or with its root cause found**: the [desync PR policy](#ffbox-desync-prs) (w358), approved at
     once; the worker classifies it 1, 2 or 3 and merges or escalates;
-  - **no PR, root cause not found** (and any crash): an investigation item, triaged by the w299 rules over its
+  - **any crash or hang**, a cause or not, a PR or not, `NOT-A-BUG` included: the
+    [crash-fix policy](#ffbox-crash-and-hang-diagnoses) (w1827), approved at once;
+  - **a desync with no PR and no root cause found**: an investigation item, triaged by the w299 rules over its
     fact-built title and game version (`diagnosisTriage`): held for a reviewer, or auto-approved when
-    `intake.ffbox.autoApprove` is on and it reads as an obvious bug.
+    `intake.ffbox.autoApprove` is on and it reads as an obvious bug. The same holds for a crash or hang while
+    `intake.ffbox.crash.enabled` is false.
 - **Caps**: `intake.ffbox.dailyCap` and `workLimits.intake` (answer `skipped` with why), the duplicate checks of every
-  intake item, and the desync policy's own daily count.
+  intake item, and the desync and crash-fix policies' own daily counts.
 - **The answer**: `filed` when approved, `held` while it waits for a reviewer, `in_flight`, `done` with `version`,
   `skipped`, `off`.
 - **The brief** lists the reports, ffintake's facts, the files with their fetch locators (`fetch_ffbox_report` for a
@@ -840,7 +897,7 @@ setting under the same guard as `intake.ffbox`, and it applies at once, with no 
     "perReporterPerDay": 2,
     "autoApprove": { "enabled": false, "maxPerDay": 3, "bugs": true, "requests": true }
   },
-  "ffbox": { "enabled": false, "branches": true, "diagnoses": true, "requests": true, "boardCheck": false, "match": { "high": 0.7, "medium": 0.45 }, "repo": "Final-Factory/FinalFactory", "dailyCap": 10, "autoApprove": { "enabled": false, "maxPerDay": 3 }, "desync": { "enabled": true, "maxPerDay": 10 } },
+  "ffbox": { "enabled": false, "branches": true, "diagnoses": true, "requests": true, "boardCheck": false, "match": { "high": 0.7, "medium": 0.45 }, "repo": "Final-Factory/FinalFactory", "dailyCap": 10, "autoApprove": { "enabled": false, "maxPerDay": 3 }, "desync": { "enabled": true, "maxPerDay": 10 }, "crash": { "enabled": true, "maxPerDay": 10 } },
   "release": { "enabled": false, "delayMinutes": 60 },
   "nightly": { "enabled": false, "autoApprove": { "enabled": false, "maxPerDay": 10 }, "dailyCap": 10, "flakyNights": 3, "batchOver": 4,
                "run": { "enabled": false, "time": "03:00", "tz": "America/New_York", "machine": "lothdesktop", "person": "lothsahn", "reportWithinHours": 5 } },

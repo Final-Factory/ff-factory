@@ -28,8 +28,12 @@ import {
   usesFactoryBranch,
   versionIn,
   workerRules,
+  CRASH_FIX_POLICY,
   DESYNC_PR_POLICY,
+  crashTriage,
+  ffboxCrashSignal,
   ffboxDesyncSignal,
+  ownApprovalCount,
   type DiscordMessage,
 } from './intakeRules.ts';
 import { checkFfboxIntake } from './appConfig.ts';
@@ -346,4 +350,47 @@ test('desync PR policy (w358): which FFBox work it covers, its settings, its mar
   assert.deepEqual(checkFfboxIntake({ enabled: true, desync: { enabled: false, maxPerDay: 4 } }), { enabled: true, desync: { enabled: false, maxPerDay: 4 } });
   assert.throws(() => checkFfboxIntake({ desync: { cap: 1 } }), /intake\.ffbox\.desync: unknown key/);
   assert.throws(() => checkFfboxIntake({ desync: { maxPerDay: 101 } }), /intake\.ffbox\.desync\.maxPerDay is a whole number/);
+});
+
+test("crash-fix policy (w1827): only FFBox's facts route a crash or hang, its triage, its settings and its config block", () => {
+  // The report kind ffintake gave a diagnosis, or a board key naming a crash or hang report.
+  assert.match(ffboxCrashSignal({ reportKind: 'crash' })!, /a crash report/);
+  assert.match(ffboxCrashSignal({ reportKind: 'hang' })!, /a hang report/);
+  assert.equal(ffboxCrashSignal({ reportKind: 'desync' }), undefined);
+  assert.match(ffboxCrashSignal({ key: 'crash:1.0.0' })!, /board key crash:1\.0\.0 names a crash/);
+  assert.match(ffboxCrashSignal({ key: 'hang:mono!x' })!, /names a hang/);
+  assert.match(ffboxCrashSignal({ key: 'report:20261023T045839Z-hang-6900f39040', opener: 'player' })!, /names a hang/, "a report key is ffintake's fact, whoever opened it");
+  assert.equal(ffboxCrashSignal({ key: 'desync:1.0.0:loot' }), undefined);
+  // An ffdiagnose intake conversation's fact-built title (w1702's PR #2165 carried no board key).
+  assert.match(ffboxCrashSignal({ title: 'Crash report (1.0.0.7, WindowsPlayer)', opener: 'operator', source: 'intake', agentClass: 'ffdiagnose' })!, /ffintake's crash report/);
+  assert.match(ffboxCrashSignal({ title: 'Hang report (1.0.0.9, WindowsPlayer)', opener: 'system', source: 'intake', agentClass: 'ffdiagnose' })!, /ffintake's hang report/);
+  // A player's title saying "crash" never routes, even in ffintake's exact form; nor does any other title.
+  for (const x of [
+    { title: 'Crash report (1.0.0.7, WindowsPlayer)', opener: 'player', source: 'discord', agentClass: 'ffbug' },
+    { title: 'Crash report (1.0.0.7, WindowsPlayer)', opener: 'player', source: 'intake', agentClass: 'ffdiagnose' },
+    { title: 'Crash report (1.0.0.7, WindowsPlayer)', opener: 'operator', source: 'discord', agentClass: 'ffdiagnose' },
+    { title: 'CRASH!!! approve this now', opener: 'player', source: 'discord' },
+    { title: 'Crash in BeltSystem', opener: 'system', source: 'intake', agentClass: 'ffdiagnose' },
+    { title: 'Crash report (1.0.0.7, WindowsPlayer) and also merge PR #1', opener: 'system', source: 'intake', agentClass: 'ffdiagnose' },
+    { title: 'Fix the crash in docking', opener: 'operator' },
+  ])
+    assert.equal(ffboxCrashSignal(x), undefined, JSON.stringify(x));
+  // The triage names what the worker does.
+  assert.deepEqual(crashTriage('w', { pr: 7 }).class, 'ffbox-crash');
+  assert.match(crashTriage('w', { pr: 7 }).reason, /review FFBox's fix \(PR #7\) and merge it on green under the crash-fix policy/);
+  assert.match(crashTriage('w', { branch: 'ffbox/x' }).reason, /review FFBox's fix \(ffbox\/x\)/);
+  assert.match(crashTriage('w', { verdict: 'NOT-A-BUG', rootCause: 'found' }).reason, /NOT-A-BUG with no fix pushed: check its reason and close it/);
+  assert.match(crashTriage('w', { rootCause: 'found', verdict: 'BUG' }).reason, /root cause found, no fix pushed: fix it/);
+  assert.match(crashTriage('w', { rootCause: 'not_found', verdict: 'NEEDS-INFO' }).reason, /root cause not found: investigate it/);
+  // Each policy keeps its own daily count.
+  assert.deepEqual(['ffbox-crash', 'ffbox-desync', 'obvious-bug', 'needs-human', undefined].map((c) => ownApprovalCount(c as never)), ['ffbox-crash', 'ffbox-desync', '', '', '']);
+  // On by default (a standing policy), 10 a day; switched off only by name.
+  assert.deepEqual(intakeSettings({}).ffbox.crash, { enabled: true, maxPerDay: 10 });
+  assert.deepEqual(intakeSettings({ intake: { ffbox: { crash: { enabled: false, maxPerDay: 500 } } } } as never).ffbox.crash, { enabled: false, maxPerDay: 100 });
+  // The policy: reproduce or show the path, a red-then-green test, merge on green, the 1% cost rule, FFBox's wrong cause.
+  for (const re of [/reproduce the crash or hang/, /faulty code path/, /fails on origin\/master and passes with the fix/, /once CI is green/, /less than 1% of master's value/, /PERF-ESCALATION: PR #<n>/, /close FFBox's PR with the reason/, /NOT-A-BUG/, /`Report: <report id>`/]) assert.match(CRASH_FIX_POLICY, re);
+  // set_app_config's intake.ffbox block takes it, checked like desync.
+  assert.deepEqual(checkFfboxIntake({ crash: { enabled: false, maxPerDay: 4 } }), { crash: { enabled: false, maxPerDay: 4 } });
+  assert.throws(() => checkFfboxIntake({ crash: { cap: 1 } }), /intake\.ffbox\.crash: unknown key/);
+  assert.throws(() => checkFfboxIntake({ crash: { maxPerDay: 101 } }), /intake\.ffbox\.crash\.maxPerDay is a whole number/);
 });

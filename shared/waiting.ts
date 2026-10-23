@@ -39,6 +39,7 @@ const APPROVE_CLASS: Partial<Record<NonNullable<WorkItem['triage']>['class'], st
   person: 'asked by a person',
   regression: 'a nightly regression',
   'ffbox-desync': 'an FFBox desync PR',
+  'ffbox-crash': 'an FFBox crash or hang diagnosis',
 };
 
 /** FF Factory's recommendation for a pending intake request: a possible repeat first, else its triage class; nothing when it is the person's call. */
