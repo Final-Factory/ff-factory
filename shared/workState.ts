@@ -35,6 +35,7 @@ import type { BenchLock, BuildHold, SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
 import { admitsPriority, needsOf, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
+import type { QueueWait } from './queueWaits.ts';
 
 export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'paused' | 'followup' | 'stalled';
 export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'waiting', 'queued', 'blocked', 'paused', 'followup', 'stalled'];
@@ -109,6 +110,11 @@ export interface WorkLiveFacts {
   buildHold?: (sessionId: string) => BuildHold | undefined;
   /** A machine's bench lock while a timed run holds it (w1841, MachineStats.benchLock); undefined when free or unknown. */
   benchLock?: (machineId: string) => BenchLock | undefined;
+  /**
+   * What workers wait for in their machines' queues now (w1949, shared/queueWaits.ts queueWaitsAll over the machines' stats):
+   * a bench ticket not granted yet, a Unity slot, a sandbox editor's queued start. Undefined when unknown.
+   */
+  queueWaits?: readonly QueueWait[];
   now: number;
 }
 
@@ -476,6 +482,32 @@ function benchedOf(workers: readonly SessionInfo[], lineOf: (s: SessionInfo) => 
   return undefined;
 }
 
+/**
+ * w1949: what worker `s` waits for in its machine's queues now: a bench ticket or a Unity slot of its own session, or, with
+ * `editor`, its sandbox editor's start queued in the bench queue (the daemon's ticket, which names the sandbox only).
+ */
+function queueWaitOf(s: SessionInfo, f: Pick<WorkLiveFacts, 'queueWaits'>, editor: boolean): QueueWait | undefined {
+  const waits = f.queueWaits;
+  if (!waits?.length) return undefined;
+  const own = waits.find((q) => q.session === s.id);
+  if (own || !editor) return own;
+  const [m, slot] = (s.machineId ?? '').split('/').map((x) => x.trim().toLowerCase());
+  const sandbox = (s.machineSandbox ?? slot)?.trim().toLowerCase();
+  return m && sandbox ? waits.find((q) => q.kind === 'editor' && q.machine.toLowerCase() === m && q.sandbox?.toLowerCase() === sandbox) : undefined;
+}
+
+/** Blocked on a queue (w1949): "Blocked on the exclusive bench lock on lothdesktop (held by w1908 / t00000911, 2 ahead in queue)". */
+function queueLive(s: SessionInfo, q: QueueWait): WorkLive {
+  const back = 'it shows Working again by itself once';
+  const why =
+    q.kind === 'slot'
+      ? `${s.id} waits on ${q.machine} for ${q.what}; ${back} the slot is granted`
+      : q.kind === 'editor'
+        ? `its sandbox ${q.sandbox}'s editor start waits in ${q.machine}'s bench queue for ${q.what}; the editor starts by itself at its turn, and ${s.id}'s check-in brings it back`
+        : `${s.id} waits in ${q.machine}'s bench queue for ${q.what}; ${back} the ticket is granted`;
+  return { state: 'blocked', why, waitsOn: [q.on] };
+}
+
 /** The live state of one request, or undefined once it is closed. */
 /**
  * Queued for capacity (w643), by the same room test as Capacity's ROOM/BUSY and decide_work queue (w1089), on what the
@@ -539,6 +571,10 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   // older daemon went on reporting it mid-turn, and nothing runs.
   const busy = mine.filter((s) => BUSY.has(s.status) && !s.hostFailure);
   if (busy.length) {
+    // w1949: mid-turn in a queue (`bench_queue.py run`, `unity-slot run`, its editor gate) is Blocked on it, by the queue's
+    // own state its daemon reports; Working again once it is granted. Working while any busy worker of it waits on nothing.
+    const queued = busy.map((s) => ({ s, q: queueWaitOf(s, f, false) }));
+    if (queued.every((x) => x.q)) return queueLive(queued[0].s, queued[0].q!);
     const tool = busy.find((s) => s.activeTool)?.activeTool;
     return withMachines({ state: 'working', why: `${busy.map((s) => s.id).join(', ')} ${busy[0].status === 'starting' ? 'starting' : 'mid-turn'}${tool ? `, in ${tool.name} since ${ago(tool.since, f.now)}` : ''}${sharedWith(busy)}` }, busy);
   }
@@ -639,6 +675,15 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
     const h = paused.h!;
     return { state: 'blocked', why: `${paused.s.id} paused for ${h.what} on ${h.machine}; ${h.told ? 'FF Factory tells it to carry on when the build is done' : 'what brings it back waits for the build'}`, waitsOn: [`the build on ${h.machine} (${h.what})`] };
   }
+
+  // w1949: between turns while its own ticket or Unity slot waits in its machine's queue (a run it left going), or, for work
+  // that needs an editor, while its sandbox editor's start waits there and a check-in brings it back: Blocked on that queue.
+  const comesBack = (s: SessionInfo) => {
+    const a = agentState(s, undefined, f.now);
+    return (a.state === 'between_turns' && a.kind !== 'queued') || !!a.resumes?.startsWith('check-in');
+  };
+  const inQueue = mine.map((s) => ({ s, q: queueWaitOf(s, f, needsOf(w) === 'game' && comesBack(s)) })).find((x) => x.q);
+  if (inQueue) return queueLive(inQueue.s, inQueue.q!);
 
   // w1841 (a): its report waits on a machine's bench lock, which a timed run holds now: Blocked on that lock. Its check-in
   // brings it back, or FF Factory tells it when the lock is free (Agents.resumeBenchWaits).
