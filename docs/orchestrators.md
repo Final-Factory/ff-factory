@@ -768,7 +768,7 @@ without one means it is off or failing, worth a person's look.
   to do for this slot, as you can see the session is not even active"). `personWaitSettled` drops a wait once, after it was
   said (the declaration's `at`; a report's `SessionInfo.lastResultAt`, else its last activity on a session older than that
   field), the person it names adds a note to the request (`notes[].by`) or answers its `[needs you]` (`needsYou.answered`),
-  or a pull request of the request that its line names (`#1699`, `/pull/1699`) merges, whichever comes first. A worker
+  or does either on another request the same worker holds with the same question (w1812, `sharedWaitSettled`), or a pull request of the request that its line names (`#1699`, `/pull/1699`) merges, whichever comes first. A worker
   whose resume waits behind a gate (w1243's 26d27a69) keeps its old report and declaration, so this is read from the
   request, not from the worker's next turn. And on a request Blocked on a thing, a wait counts only when it is newer than
   the newest gate: the gate set after it is what the request waits on now, so it shows **Blocked**. The slot's "Asked you"
@@ -1860,16 +1860,39 @@ page clears. Never answer it for them. …
   heartbeat or restart comes; a new declaration or a new line is a new question. A dispatcher question asked while a worker's
   wait is unanswered is that same wait: no second message, and `decide_work` says so. The record survives restarts (it is on
   the request in `state.json`).
+- **One question on several requests is one question** (w1812). Ben, 2026-10-22, after worker c28c5061 asked one set of
+  four design questions that showed on both w1767 and w1768, and he answered on w1767: "i already answered this why are you
+  asking me in the waiting on input for this still". Waits are the same question when they share `questionShareKey`
+  (`shared/workState.ts`): the same declaration of the same worker (one that names no request is on every request it holds),
+  or the same `still open` line of the same worker's report with the request ids left out. Such a wait goes once, on the
+  first request (`Orchestrators.needsYouAll` at a turn's end, the digest likewise), and the message says "The same question,
+  from the same worker, waits on w1768 … too: it is ONE question" (`needsYouRecord`'s `also`). The others keep the record
+  marked `sharedWith` and get no message. An answer on any of them (`update_work` note, a card button) marks all of them
+  answered (`answerNeedsYou`, `answered.on`), the worker resumes once with all their ids, and the live state reads the
+  answer on another request the same worker holds (`sharedWaitSettled`), so none of them stays Waiting on input. Different
+  questions keep their own keys and their own messages: a declaration for one request, or two different lines.
+- **An answer already in the log is not asked for** (w1812; w1182, 2026-10-15, the orchestrator re-asked a stale
+  `[needs you]` Ben had answered: "i already said it looks good and asked for the fog to be a blueish not just grey"). A
+  worker's wait carries when it was raised (`raisedAt`: the declaration's time, the report's). When the person named added a
+  note after that, on the request or on another request the same worker holds with the same question (`answerAfter`), no
+  `[needs you]` goes: the record is kept answered and the log says `[needs you] not sent: Ben already answered it on w1767 at
+  …`. An orchestrator's `ask_person`, and the dispatcher's `decide_work ask`, that repeat a question of a `[needs you]` the
+  person already answered (`asksSame`: the same words, or two of the same answers) are refused once with the person's words
+  (`Orchestrators.repeatRefusal`); the same call again goes through, for a new question that only looks the same. Tests:
+  `server/orchestrators.test.ts` ("w1812"), `server/workState.test.ts` ("w1812").
 - **The digest.** 3 minutes after the portal starts (`NEEDS_YOU_DIGEST_MS`, once the machines' workers have reported in),
   every wait on a person the ledger shows whose key was never sent goes as one `[needs you] digest` per person, and is
   recorded as sent. The first start after w1378 ships sends the waits already open; later starts find none unless something
   began waiting while the portal was down.
 
-**How an orchestrator answers it** (its brief, `personalBrief`): show the person the question in full, with its files and pull
-requests, and ask. When they answer in their own words, `update_work` on that request with their answer as the note. In their
+**How an orchestrator answers it** (its brief, `personalBrief`): first check that it is not answered already (w1812): read the
+request's log and notes (`list_work` with its id) and those of the other requests its worker holds. An answer of the person's
+given after the question was raised is the answer: pass it on, do not ask again. A question that "waits on wNNN too" is asked
+once. Otherwise show the person the question in full, with its files and pull requests, and ask. When they answer in their own words, `update_work` on that request with their answer as the note. In their
 own turn only (`humanAsked`): a note in a turn that is not theirs answers nothing. Then `answerNeedsYou`:
 
-- marks the question answered (`needsYou.answered`), clears the dispatcher's question (as any note does);
+- marks the question answered (`needsYou.answered`), and the same question on the worker's other requests with it (w1812),
+  and clears the dispatcher's question (as any note does);
 - resumes the waiting worker within a minute with `[answer] Ben answered on w1360 "…", in their own words: <note>`
   (`wakeNow`, the same path a cleared CI gate resumes it by). That message ends its `waiting_on_person`, so the request leaves
   Waiting on input and the card goes. A worker mid-turn, or gone, is named in the dispatcher's `[work update]` instead

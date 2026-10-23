@@ -1905,8 +1905,17 @@ export interface WorkNeedsYou {
   asks?: Ask[];
   /** Sent in the one-off digest of waits already open when w1378 shipped, or after a restart. */
   digest?: boolean;
-  /** A person answered it with a note in their own turn: who and when. */
-  answered?: { by: string; at: string };
+  /** A person answered it with a note in their own turn: who and when, and on which request when not this one (w1812). */
+  answered?: { by: string; at: string; on?: string };
+  /** When the worker raised it (its declaration, or its report), where known: an answer before it answers something else (w1812). */
+  raisedAt?: string;
+  /**
+   * The request whose `[needs you]` carries this same question (w1812): the same worker raised it on both, it went to the
+   * person once, there, and an answer on either answers both. Nothing was sent for this request.
+   */
+  sharedWith?: string;
+  /** The other requests the one message named as carrying the same question (w1812). */
+  also?: string[];
 }
 
 export interface WorkPr {
