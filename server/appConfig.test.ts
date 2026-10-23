@@ -9,6 +9,7 @@ import { FFBOX_HASH_FILE, ffboxTokenHash } from './configMigration.ts';
 import { tokenSha256 } from './providerProtocol.ts';
 import { autoCompactSettings } from './autoCompact.ts';
 import { machineActivityPause, type Config } from './config.ts';
+import { FILINGS_PER_MESSAGE, timerFilings } from './orchestrators.ts';
 
 const setup = (t: { after: (fn: () => void) => void }) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcfg-'));
@@ -152,6 +153,26 @@ test('app config: the orchestrators’ loop guards (w571), live, 1 to 100', (t) 
     for (const bad of ['0', '101', '2.5', 'many']) assert.throws(() => setAppConfig(file, full, key, bad), /is a whole number from 1 to 100/, `${key} ${bad}`);
   setAppConfig(file, full, 'orchestrator.messagesPerPerson', null);
   assert.equal(full.orchestrator.messagesPerPerson, undefined, 'null: back to the default (10)');
+});
+
+test("app config: orchestrator.timerFilingsPerMessage (w1867), per person, live, 1 to 100, the owner's only; a person not named has the filings limit", (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg, orchestrator: { model: 'opus', effort: 'medium', notifyOnWorkerEvents: true } } as unknown as Config;
+  const users = ['ben', 'lothsahn'];
+  assert.ok(OWNER_ONLY_KEYS.has('orchestrator.timerFilingsPerMessage'));
+  assert.equal(timerFilings(full, 'lothsahn'), FILINGS_PER_MESSAGE, 'not set: the filings limit');
+  setAppConfig(file, full, 'orchestrator.timerFilingsPerMessage', '{ "Lothsahn": 100 }', { users });
+  assert.deepEqual(full.orchestrator.timerFilingsPerMessage, { lothsahn: 100 }, 'applies at once, the login in lower case');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).orchestrator, { timerFilingsPerMessage: { lothsahn: 100 } });
+  assert.deepEqual([timerFilings(full, 'lothsahn'), timerFilings(full, 'Lothsahn'), timerFilings(full, 'ben')], [100, 100, FILINGS_PER_MESSAGE]);
+  setAppConfig(file, full, 'orchestrator.filingsPerMessage', 7);
+  assert.equal(timerFilings(full, 'ben'), 7, 'Ben, not named, follows the filings limit');
+  assert.throws(() => setAppConfig(file, full, 'orchestrator.timerFilingsPerMessage', { nobody: 5 }, { users }), /no login "nobody"; the logins are ben, lothsahn/);
+  for (const bad of [0, 101, 2.5, 'many']) assert.throws(() => setAppConfig(file, full, 'orchestrator.timerFilingsPerMessage', { lothsahn: bad }, { users }), /orchestrator\.timerFilingsPerMessage\.lothsahn is a whole number from 1 to 100/, String(bad));
+  assert.throws(() => setAppConfig(file, full, 'orchestrator.timerFilingsPerMessage', 100, { users }), /is an object/);
+  setAppConfig(file, full, 'orchestrator.timerFilingsPerMessage', null, { users });
+  assert.equal(full.orchestrator.timerFilingsPerMessage, undefined, 'null: removed');
+  assert.equal(timerFilings(full, 'lothsahn'), 7);
 });
 
 test('app config: usagePollMinutes, live, 5 to 240 minutes, default 15', (t) => {

@@ -1705,6 +1705,19 @@ A timer is a standing job (`server/timers.ts`):
   so. A runaway timer costs at most 96 short turns a day. `TIMER_LIMITS` in `server/timers.ts`.
 - **No authority.** The message is `system`, so a turn it starts is not a person's (`turnFrom`): the dispatcher's destructive
   and admin tools refuse it, as do approvals, and a personal orchestrator's per-message budgets do not reset.
+- **Timers and the filings limit** (w1867, lothsahn: "Let your timers go past the cap, with a limit of 100. Not a daily
+  limit. If you hit the 100 limit, file a bug to investigate why."). A turn a person's own orchestrator's timer started
+  (`Orchestrators.timerTurn`: the turn's opening message, `SessionHandle.turnId`, is the one the timers delivered,
+  `timerSent`) has its own filings limit, per person: config `orchestrator.timerFilingsPerMessage` (`{ "lothsahn": 100 }`,
+  an owner's only, each 1 to 100, `timerFilings`); a person not named there has `orchestrator.filingsPerMessage` (default
+  20) in their timers' turns too. It counts the same filings as the other limit and the same way: every filing since the
+  person last wrote, whatever turn made it, started again by their next message, not per day. So with 100, a timer turn
+  goes on where a worker's report or a dispatch would stop at 20, and stops at the 100th filing since the person wrote;
+  the 101st is held and offered back with their next message like any refused call ([Calls a gate refused](#calls-a-gate-refused-w830)).
+  Turns the person starts, dispatches, worker reports and every other harness turn keep `orchestrator.filingsPerMessage`.
+  Nothing else changes for a timer's turn: approvals, deletes, settings and closing a member's request still need the
+  person's own turn. At 100 filings FF Factory files a bug to look into why, by itself: see
+  [Loops, limits and safety](#loops-limits-and-safety).
 - **Who sees them.** Only the owning orchestrator (its tools take only its own ids) and, in the UI, its person: the
   Timers button in your chat's header, and the dispatcher's for owners (`GET /api/timers/<orchestrator id>`, `POST
   /api/timers/<orchestrator id>/<timer id> {action: pause|resume|cancel}`, guarded like writing to that chat). It lists
@@ -2189,14 +2202,29 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
 ## Loops, limits and safety
 
 - The dispatcher reaches people only through ledger decisions, one reply per decision.
-- A person's orchestrator files or updates at most 3 times, and follows up with one worker at most 3 times, between two
-  messages of its person (`orchestrator.filingsPerMessage`, `orchestrator.followUpsPerMessage`), counted per sender: an
+- A person's orchestrator files or updates at most 20 times, and follows up with one worker at most 3 times, between two
+  messages of its person (`orchestrator.filingsPerMessage`, `orchestrator.followUpsPerMessage`; filings were 3 until w1867,
+  lothsahn: "Let's increase orchestrator actions between turns to 20 from 3.", a default for every orchestrator), counted per sender: an
   owner's follow-ups to another owner's worker never use up that owner's own (w677). Harness messages alone
   (a worker's report, a timer, another orchestrator) cannot keep it going. A close (done or cancelled, their own request
   or, for an owner, another person's) in a turn the person started with their own message is not counted (w631:
   Lothsahn's one "close everything that's done" was refused after three closes); a close in a harness turn still is.
   A call the limit refuses is held and offered back with the person's next message, never turned into a question for
-  them ([Calls a gate refused](#calls-a-gate-refused-w830)), and recording a conditional decision is not counted.
+  them ([Calls a gate refused](#calls-a-gate-refused-w830)), and recording a conditional decision is not counted. In a
+  turn the person's own timer started the limit is theirs in `orchestrator.timerFilingsPerMessage` (Lothsahn's 100,
+  w1867; [Timers](#timers)), counted with the rest.
+- **At 100 filings FF Factory files an investigation bug itself** (w1867, lothsahn: "The bug filing should be allowed at
+  the 100 limit. It should be part of the harness for any turn. Any orchestrator that hits 100 in a turn should file an
+  investigation bug, the orchestrator should not have to do it."). Every filing a personal orchestrator makes is
+  tallied (`Orchestrators.tally`), those the limit does not count included (a close in the person's own turn): per turn,
+  and since the person last wrote. When either reaches `INVESTIGATE_AT` (100), in any kind of turn, for any person,
+  `fileInvestigation` files a request for that person on `Final-Factory/ff-factory` (`INVESTIGATE_REPO`, needs an agent
+  slot): "Investigate: <person>'s orchestrator made 100 filings in one turn" (or "since <person> last wrote"). Its brief
+  names the orchestrator's session with its transcript link, the stretch's start and end, the timers that started its
+  turns, and each turn with its starter, count and the requests it touched. It is filed once for that turn and that
+  stretch, counts against no limit and needs no approval: the dispatcher hears of it as of any request. The filing
+  that reached 100 answers with a `[FF Factory]` line naming it ("do not file it again; tell <person> in a line"), and a
+  later refusal of the limit names it too.
 - A person's orchestrator messages another person at most 10 times until its person or that person writes to their own
   orchestrator (`orchestrator.messagesPerPerson`). Two orchestrators answering each other with nobody writing stop
   there.
@@ -2208,8 +2236,8 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   minutes, while a conversation kept up for their people, one message a minute each way, never does. And every
   message is in both chats, unread, with a push notification to its recipient. The `ops_worker` follow-ups have no
   count either; [ops-worker.md](ops-worker.md) says what ends a run of them.
-- All three are config settings, whole numbers from 1 to 100, settable live (`set_app_config`); a person's own message
-  starts each again. The three are the same kind of guard: none caps what a person asks for, each stops a run of
+- All three are config settings, whole numbers from 1 to 100, settable live (`set_app_config`), as is the per-person
+  timer limit; a person's own message starts each again. The three are the same kind of guard: none caps what a person asks for, each stops a run of
   turns no person started (w571).
 - People are not capped per hour or per day (Ben, 2026-09-29): only the per-message budget above holds. Automated
   sources (standing agents, the Discord/FFBox intake, once they file here) get at most 10 requests an hour and 40 a

@@ -136,6 +136,8 @@ export const SETTABLE_KEYS = [
   'orchestrator.filingsPerMessage',
   'orchestrator.followUpsPerMessage',
   'orchestrator.messagesPerPerson',
+  // w1867: per person, the filings limit in turns their own timers started ({ "lothsahn": 100 }). The owner's only.
+  'orchestrator.timerFilingsPerMessage',
   // The coordinators' routine turns (w1158, server/turnModel.ts): their model ("off" keeps every turn on orchestrator.model)
   // and how long after a turn on orchestrator.model they stay on it.
   'orchestrator.routineModel',
@@ -147,7 +149,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
@@ -165,6 +167,23 @@ function objectOf(value: unknown, key: string, example: string): Record<string, 
   }
   if (typeof o !== 'object' || o === null || Array.isArray(o)) throw new Error(`${key} is an object, e.g. ${example}`);
   return o as Record<string, unknown>;
+}
+
+/**
+ * orchestrator.timerFilingsPerMessage (w1867): { <login>: <1-100> }, the whole map replaced; a login that exists (stored
+ * in lower case, as Orchestrators.timerFilings reads it), each value a whole number in LOOP_GUARD_RANGE.
+ */
+export function checkTimerFilings(value: unknown, users: readonly string[]): Record<string, number> {
+  const o = objectOf(value, 'orchestrator.timerFilingsPerMessage', '{ "lothsahn": 100 }');
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(o)) {
+    const login = users.find((u) => u.toLowerCase() === k.trim().toLowerCase());
+    if (!login) throw new Error(`orchestrator.timerFilingsPerMessage: no login ${JSON.stringify(k.slice(0, 40))}; the logins are ${users.join(', ') || '(none)'}`);
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < LOOP_GUARD_RANGE.min || n > LOOP_GUARD_RANGE.max) throw new Error(`orchestrator.timerFilingsPerMessage.${login} is a whole number from ${LOOP_GUARD_RANGE.min} to ${LOOP_GUARD_RANGE.max}`);
+    out[login.toLowerCase()] = n;
+  }
+  return out;
 }
 
 const NIGHTLY_RUN_KEYS = ['enabled', 'time', 'tz', 'machine', 'person', 'reportWithinHours'];
@@ -551,6 +570,8 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (!Number.isInteger(n) || n < LOOP_GUARD_RANGE.min || n > LOOP_GUARD_RANGE.max) throw new Error(`${key} is a whole number from ${LOOP_GUARD_RANGE.min} to ${LOOP_GUARD_RANGE.max}`);
       return n;
     }
+    case 'orchestrator.timerFilingsPerMessage':
+      return checkTimerFilings(value, users ?? []);
     case 'attachments.retentionDays': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 3650) throw new Error('attachments.retentionDays is a whole number of days from 1 to 3650');
@@ -952,6 +973,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'orchestrator.filingsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, filingsPerMessage: v as number | undefined };
   else if (key === 'orchestrator.followUpsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, followUpsPerMessage: v as number | undefined };
   else if (key === 'orchestrator.messagesPerPerson') cfg.orchestrator = { ...cfg.orchestrator, messagesPerPerson: v as number | undefined };
+  // Live: the filings limit reads it at every filing (orchestrators.ts timerFilings).
+  else if (key === 'orchestrator.timerFilingsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, timerFilingsPerMessage: v as Record<string, number> | undefined };
   else if (key === 'orchestrator.routineModel') cfg.orchestrator = { ...cfg.orchestrator, routineModel: v as string | undefined };
   else if (key === 'orchestrator.routineAfterMinutes') cfg.orchestrator = { ...cfg.orchestrator, routineAfterMinutes: v as number | undefined };
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
