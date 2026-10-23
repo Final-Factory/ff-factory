@@ -872,7 +872,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1840,6 +1840,8 @@ export class MachineManager {
   onLiveFrames?: (machineId: string, liveId: string, ws: WebSocket) => boolean;
   /** A daemon's live view state (server/live.ts). */
   onLiveState?: (machineId: string, msg: Extract<FromDaemon, { type: 'live_state' }>) => void;
+  /** A daemon set a live view up again from its stage recipe (w1839, server/live.ts staged). */
+  onLiveStaged?: (machineId: string, msg: Extract<FromDaemon, { type: 'live_staged' }>) => void;
   /** A daemon that streams live views said hello (w1509): the views it runs now, or undefined from an older one. */
   onLiveHello?: (machineId: string, running: DaemonLiveView[] | undefined) => void;
   private readonly liveWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
@@ -2050,7 +2052,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         if (!msg.guard) delete m.guard;
@@ -2258,6 +2260,9 @@ export class MachineManager {
       }
       case 'live_state':
         this.onLiveState?.(id, msg);
+        return;
+      case 'live_staged':
+        this.onLiveStaged?.(id, msg);
         return;
       case 'gh_login': {
         // Names only (w1463): sanitizeGhLogin keeps an account, scope names and a source, so nothing else a daemon sends lands here.
@@ -2590,6 +2595,16 @@ export class MachineManager {
   /** Whether a machine's daemon closes a Live view's idle editor on request (w1746: its hello offered `liveIdleClose`). */
   canLiveIdleClose(machineId: string): boolean {
     return this.canLive(machineId) && !!this.hellos.get(machineId)?.liveIdleClose;
+  }
+
+  /** Whether a machine's daemon sets a Live view up again from its stage recipe (w1839: its hello offered `liveRestage`). */
+  canLiveRestage(machineId: string): boolean {
+    return this.canLive(machineId) && !!this.hellos.get(machineId)?.liveRestage;
+  }
+
+  /** Whether a machine's daemon writes a kept Live view knob into the sandbox's .mat (w1839: its hello offered `liveKeep`). */
+  canLiveKeep(machineId: string): boolean {
+    return this.canLive(machineId) && !!this.hellos.get(machineId)?.liveKeep;
   }
 
   /** A live view operation on a machine (w1398, docs/live-view.md): its answer text, or the daemon's reason as an error. */

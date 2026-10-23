@@ -2654,7 +2654,19 @@ export interface LiveViewInfo {
   hold?: string;
   /** A person opened it while it was not streaming and its worker was asked to stage it again (w1838): who and when. */
   wake?: { at: string; who: string };
+  /** The one-line summary of its stage recipe (w1839: machine/liveStage.ts stageSummary), absent while it has none. */
+  stage?: string;
+  /** The daemon is setting it up again now from the recipe, because `who` opened it (w1839). */
+  restaging?: { at: string; who: string };
+  /** The daemon's last replay of the recipe (w1839): when, whether it worked, why not, and how long each leg took (ms). */
+  staged?: { at: string; ok: boolean; detail: string; ms: number; legs: Record<string, number> };
 }
+
+/**
+ * One step of a Live view's stage recipe (w1839, docs/live-view.md "Staged again without a turn"). `load` (a save name) comes
+ * first when present; the rest run in order once the game is in that save.
+ */
+export type LiveStageStep = { load: string } | { ffauto: string } | { csharp: string; until?: string; timeoutS?: number };
 
 /** One knob: a material's shader property (the game's look.material.list). */
 export interface LiveKnob {

@@ -18,6 +18,8 @@ export type LiveReadyKind =
   /** The editor's start waits its turn in the machine's bench queue, or for a free Unity slot. */
   | 'queued'
   | 'editor-starting'
+  /** The daemon is setting the view up again from its stage recipe (w1839): the editor, play mode, the save, the steps. No worker turn. */
+  | 'setting-up'
   /** The editor was closed because the view sat idle (w1746); opening the view wakes its worker. */
   | 'idle-closed'
   | 'editor-stopped'
@@ -70,7 +72,7 @@ function backByWake(view: Pick<LiveViewInfo, 'wake'>, ctx: LiveReadyContext, wha
 }
 
 /** Whether `view` can be used now and, if not, what it waits on (the header). */
-export function liveReady(view: Pick<LiveViewInfo, 'state' | 'detail' | 'hold' | 'wake'>, ctx: LiveReadyContext = {}): LiveReady {
+export function liveReady(view: Pick<LiveViewInfo, 'state' | 'detail' | 'hold' | 'wake' | 'restaging'>, ctx: LiveReadyContext = {}): LiveReady {
   // The panel's label is the badge's word (the w1838 critic: "paused for a build" on the slot, "Paused" on the panel read as two
   // states), and every sentence starts with a capital and ends with a full stop, whatever the daemon's detail looked like.
   const sentence = (t: string) => (t ? `${t[0].toUpperCase()}${t.slice(1)}${/[.!?)]$/.test(t) ? '' : '.'}` : t);
@@ -93,6 +95,8 @@ export function liveReady(view: Pick<LiveViewInfo, 'state' | 'detail' | 'hold' |
   // Unknown (no machine record): only the view's own state speaks.
   const down = !!unity && unity.state !== 'running';
   if (down && view.hold) return held(view.hold, r);
+  // The daemon replays the recipe (w1839): its progress line is the view's detail.
+  if (view.restaging) return r('setting-up', 'amber', 'setting up', detail || 'The daemon is setting the view up again', 'It streams by itself once the save has loaded, with no worker turn (usually 1 to 3 minutes; an editor start can wait in the bench queue)');
   if (down && ctx.sandbox?.idleClosed) {
     const c = ctx.sandbox.idleClosed;
     return r('idle-closed', 'grey', 'editor closed', `The sandbox editor closed after ${c.minutes} idle minutes (at ${hhmm(c.at)}), saved first`, backByWake(view, ctx, 'reopen the editor and set the view up'));

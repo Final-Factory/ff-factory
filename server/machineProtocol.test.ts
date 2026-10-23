@@ -89,7 +89,12 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w1894 (no bump): `personPlay` on `bench_priorities`, the machine's machines.personPlay (an older daemon drops it and looks
 // for no person's game), and `personPlay` on `stats`, a person playing there now, which an older portal drops (it copies the
 // stats fields it knows) and so holds nothing; a newer portal with an older daemon gets none and holds nothing either.
-const DECIDED = { protocol: 9, fingerprint: '3f38951f7f77d577' };
+// w1839 (no bump): `live` ops stage and restage with `stage`, and `stage` on a start, sent only to a daemon whose hello offers
+// `liveRestage` (an older daemon would take an unknown op for a start; one given a start with a `stage` ignores it), `stage` on
+// the views a hello lists, and the daemon's `live_staged`, which an older portal drops (no default case).
+// w1839 part 2 (no bump): `live` op keep with `material` and `name`, sent only to a daemon whose hello offers `liveKeep` (an older
+// daemon would take an unknown op for a start), and `liveKeep` in the hello, which an older portal ignores.
+const DECIDED = { protocol: 9, fingerprint: '54afa03675dba729' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

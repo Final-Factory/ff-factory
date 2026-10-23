@@ -150,6 +150,8 @@ export class LiveSession {
   frames = 0;
   /** Why the editor is not running when the daemon closed it (w1746: idle), shown instead of "not running" while it holds. */
   closedNote?: string;
+  /** The daemon is setting the view up again (w1839): every 'holding' report says this, so the tick does not overwrite the progress. */
+  stagingNote?: string;
   hello: Record<string, unknown> | undefined;
 
   readonly fps: number;
@@ -191,6 +193,12 @@ export class LiveSession {
   /** The state it last reported, for the daemon's hello (w1509): a portal that restarted learns it there. */
   get state(): { state: LiveState; detail: string } {
     return { state: this.lastState ?? 'starting', detail: this.lastDetail };
+  }
+
+  /** The progress of a stage replay (w1839), or undefined when it ends; reported at once unless frames flow. */
+  setStaging(note: string | undefined) {
+    this.stagingNote = note;
+    if (note && this.lastState !== 'live' && !this.stopped) this.report('holding', note);
   }
 
   /** A game command (a knob) through the current channel. */
@@ -279,6 +287,7 @@ export class LiveSession {
   }
 
   private report(state: LiveState, detail: string) {
+    if (state === 'holding' && this.stagingNote) detail = this.stagingNote;
     if (state === this.lastState && detail === this.lastDetail) return;
     this.lastState = state;
     this.lastDetail = detail;
