@@ -43,7 +43,7 @@ import {
   type Decision,
   type PoolEntry,
 } from './work.ts';
-import { autoApproveProblem, cleanBlock, cleanLine, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag } from './intakeRules.ts';
+import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, crashPeersBlock, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag, titleOnly } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, pausedIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
 import { answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, servedBy } from '../shared/workState.ts';
@@ -2210,6 +2210,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const mine = [...this.store.work.values()].filter((x) => x.id !== w.id && x.sessionIds.includes(sessionId));
     const text = [w.title, w.brief, w.constraints ?? ''].join(' ').toLowerCase();
     const why: string[] = [];
+    const crash = w.triage?.class === 'ffbox-crash';
     for (const m of mine) {
       const tag = `${m.id} "${clip(m.title, 60)}"`;
       if ((w.relatedIds ?? []).some((r) => same(r.trim(), m.id))) why.push(`it names ${tag} in related_ids`);
@@ -2218,10 +2219,15 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
         const head = pr.head?.trim().toLowerCase();
         if (head && head.length >= 6 && /[/\d-]/.test(head) && text.includes(head)) why.push(`it is about the branch ${pr.head}, which is ${tag}'s`);
       }
-      const o = w.overlaps.find((x) => x.score >= STRONG && x.kind === 'work' && x.ref === m.id);
+      // Two crash requests: FFBox's facts tie them, never their titles (ffintake gives a build's crashes one, w1827).
+      if (crash && m.triage?.class === 'ffbox-crash') {
+        const k = crashKinship(crashFacts(w, []), crashFacts(m, []));
+        if (k.same === 'yes') why.push(`${k.why} as ${tag}`);
+      }
+      const o = w.overlaps.find((x) => x.score >= STRONG && x.kind === 'work' && x.ref === m.id && !(crash && titleOnly(x)));
       if (o && !why.some((x) => x.includes(m.id))) why.push(`the overlap check calls it a match of ${tag} (${o.why})`);
     }
-    const sessionOverlap = w.overlaps.find((x) => x.score >= STRONG && x.kind === 'session' && x.ref === sessionId);
+    const sessionOverlap = w.overlaps.find((x) => x.score >= STRONG && x.kind === 'session' && x.ref === sessionId && !(crash && titleOnly(x)));
     if (sessionOverlap) why.push(`the overlap check calls it a match of this worker's work (${sessionOverlap.why})`);
     return { related: why.length > 0, why: why.length ? [...new Set(why)].join('; ') : `nothing ties it to what this worker did (no related_ids, PR or branch of its requests, and no strong overlap)` };
   }
@@ -2235,6 +2241,10 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   blockingOverlaps(w: WorkItem): WorkOverlap[] {
     return w.overlaps.filter((o) => {
       if (o.score < STRONG) return false;
+      // ffintake builds every crash or hang diagnosis's title from its kind, version and platform alone ("Crash report
+      // (1.0.0.9, WindowsPlayer)"), so for the crash-fix policy a similar title says nothing: only a shared key (the same
+      // report, PR or branch) holds it (w1827); crashPeers puts the look-alikes' findings before the dispatcher instead.
+      if (w.triage?.class === 'ffbox-crash' && titleOnly(o)) return false;
       if (o.kind === 'work') {
         const other = this.store.work.get(o.ref);
         const live = other?.status === 'merged' && other.mergedInto ? this.store.work.get(other.mergedInto) : other;
@@ -3485,10 +3495,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       }
       return { item: w, mergedInto: target.id };
     }
-    // ffintake builds every crash or hang diagnosis's title from its kind, version and platform alone ("Crash report
-    // (1.0.0.9, WindowsPlayer)"), so for the crash-fix policy a similar title says nothing: only a shared key (the same
-    // report, PR or branch) holds it (w1827).
-    const inFlight = this.blockingOverlaps(w).find((x) => f.triage.class !== 'ffbox-crash' || !x.why.includes('similar title'));
+    const inFlight = this.blockingOverlaps(w)[0];
     // Lothsahn's rule (2026-09-29): what is not an obvious bug, nor a reviewer's own request, waits for a reviewer.
     const why = f.approved
       ? undefined
@@ -3509,7 +3516,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     this.store.putWork(w);
     this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     if (why) this.onIntakeAttention?.(w, 'pending');
-    else this.gatherForDispatcher(w.requestedBy, requestNotice(w), 'intake');
+    else this.gatherForDispatcher(w.requestedBy, this.intakeNoticeOf(w), 'intake');
     return { item: w };
   }
 
@@ -3545,8 +3552,56 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     this.stamp(w, `approved by ${by.displayName}${w.triage?.class === 'needs-human' ? ` (triage at filing: ${clip(w.triage.reason, 160)})` : ''}`);
     this.takeOver(w, by, `${by.displayName} approved it`);
     this.store.putWork(w);
-    this.gatherForDispatcher(w.requestedBy, requestNotice(w), 'intake');
+    this.gatherForDispatcher(w.requestedBy, this.intakeNoticeOf(w), 'intake');
     return w;
+  }
+
+  /** An approved intake request's notice for the dispatcher, with the crash requests that look like it (w1827). */
+  private intakeNoticeOf(w: WorkItem): string {
+    const peers = this.crashPeers(w);
+    if (!peers.length) return requestNotice(w);
+    this.stamp(w, `crash requests that look like it: ${peers.map((p) => `${p.id} (${crashKinship(this.crashFactsOf(w), this.crashFactsOf(p)).why})`).join('; ')}; the dispatcher compares FFBox's findings and decides whether one worker takes them`);
+    this.store.putWork(w);
+    return `${requestNotice(w)}\n\n${this.crashPeersText(w, peers)}`;
+  }
+
+  private crashFactsOf(w: WorkItem) {
+    const live = w.sessionIds.filter((sid) => ['running', 'starting', 'waiting_permission', 'idle'].includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+    return crashFacts(w, live);
+  }
+
+  /**
+   * The crash or hang requests a crash request may be the same crash as (lothsahn, 2026-10-23, w1827: "No title hold back
+   * but the orchestrator should look at the findings and see if they should be sent to the same worker"): open or
+   * finished in the last 7 days, under the crash-fix policy, with a title the overlap check lists or FFBox's same stack
+   * signature or fix branch. At most 3, the ones FFBox's facts call the same first.
+   */
+  crashPeers(w: WorkItem): WorkItem[] {
+    if (w.triage?.class !== 'ffbox-crash') return [];
+    const now = this.now().getTime();
+    const mine = this.crashFactsOf(w);
+    const live = (x: WorkItem | undefined) => (x?.status === 'merged' && x.mergedInto ? this.store.work.get(x.mergedInto) : x);
+    const seen = new Set<string>([w.id]);
+    const out: { x: WorkItem; same: boolean }[] = [];
+    const consider = (x: WorkItem | undefined, listed: boolean) => {
+      if (!x || seen.has(x.id) || x.triage?.class !== 'ffbox-crash') return;
+      if (!isOpen(x) && now - Date.parse(x.updatedAt) > 7 * 86_400_000) return;
+      const k = crashKinship(mine, crashFacts(x, []));
+      if (!listed && k.same !== 'yes') return;
+      seen.add(x.id);
+      out.push({ x, same: k.same === 'yes' });
+    };
+    for (const x of this.store.work.values()) consider(live(x), false);
+    for (const o of w.overlaps) if (o.kind === 'work') consider(live(this.store.work.get(o.ref)), true);
+    return out
+      .sort((a, b) => Number(b.same) - Number(a.same))
+      .slice(0, 3)
+      .map((e) => e.x);
+  }
+
+  /** The dispatcher's side-by-side of FFBox's findings for a crash request and its look-alikes. */
+  crashPeersText(w: WorkItem, peers = this.crashPeers(w)): string {
+    return peers.length ? crashPeersBlock(this.crashFactsOf(w), peers.map((p) => this.crashFactsOf(p))) : '';
   }
 
   /** A person declined an intake request: closed as rejected; the dispatcher never hears of it. */

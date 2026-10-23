@@ -745,6 +745,88 @@ export function ownApprovalCount(c: WorkTriage['class'] | undefined): string {
   return c === 'ffbox-desync' || c === 'ffbox-crash' ? c : '';
 }
 
+/** The overlap check's title-only match (work.ts overlapOf): for crash requests it says nothing (CRASH_PEERS_RULE). */
+export const titleOnly = (o: { why: string }): boolean => o.why === 'similar title';
+
+/**
+ * lothsahn (2026-10-23, w1827): "No title hold back but the orchestrator should look at the findings and see if they
+ * should be sent to the same worker." ffintake gives every crash or hang report of a build the same title, so a title
+ * match neither holds a crash request nor ties it to another; the dispatcher compares FFBox's findings instead.
+ */
+export const CRASH_PEERS_RULE =
+  "Every crash or hang report of a build gets the same title, so the title says nothing: compare FFBox's findings, not the titles (the faulting stack or frame, the cause, the files the fix touches, the fix branch). The same crash or the same cause: send it to the worker already on the other (message_agent with this work_id to that worker; pass session \"same\" with session_reason naming what in the findings matches when the server reads it as unrelated). A different crash: its own worker (start_agent with this work_id and override_duplicate naming what in the findings differs). Your reason goes into the request's log either way.";
+
+/** FFBox's facts of a crash or hang request, for the dispatcher's side-by-side comparison (w1827). */
+export interface CrashFacts {
+  id: string;
+  status: string;
+  /** FFBox's stack signature (`crash:<x>`, `hang:<x>`): the diagnosis's crash signature, or a crash board key. */
+  signature?: string;
+  rootCause?: string;
+  verdict?: string;
+  branch?: string;
+  pr?: number;
+  reports?: string[];
+  /** The workers on it now. */
+  workers: string[];
+  /** FFBox's findings as its brief quotes them (untrusted). */
+  findings?: string;
+}
+
+export function crashFacts(w: Pick<WorkItem, 'id' | 'status' | 'source' | 'brief'>, workers: string[]): CrashFacts {
+  const s = w.source;
+  const findings = [...w.brief.matchAll(/~~~text\n([\s\S]*?)\n~~~/g)].at(-1)?.[1];
+  return {
+    id: w.id,
+    status: w.status,
+    ...(s?.key && /^(crash|hang):/i.test(s.key) ? { signature: s.key } : {}),
+    ...(s?.rootCause ? { rootCause: s.rootCause } : {}),
+    ...(s?.verdict ? { verdict: s.verdict } : {}),
+    ...(s?.branch ? { branch: s.branch } : {}),
+    ...(s?.pr ? { pr: s.pr } : {}),
+    ...(s?.reports?.length ? { reports: s.reports } : {}),
+    workers,
+    ...(findings ? { findings } : {}),
+  };
+}
+
+/** What FFBox's facts alone say of two crash requests: the same crash, different stacks, or nothing (read the findings). */
+export function crashKinship(a: CrashFacts, b: CrashFacts): { same: 'yes' | 'no' | 'unknown'; why: string } {
+  if (a.branch && a.branch === b.branch) return { same: 'yes', why: `the same fix branch ${a.branch}` };
+  if (a.signature && b.signature) {
+    return a.signature.toLowerCase() === b.signature.toLowerCase()
+      ? { same: 'yes', why: 'the same stack signature: the same crash' }
+      : { same: 'no', why: "different stack signatures: a different crash, unless the findings name the same cause or the same code" };
+  }
+  return { same: 'unknown', why: "FFBox's facts do not tell: read the findings" };
+}
+
+const factsLine = (f: CrashFacts) =>
+  [
+    f.signature ? `stack signature \`${cleanLine(f.signature, 160)}\`` : 'no stack signature',
+    f.rootCause ? `root cause ${f.rootCause === 'found' ? 'found' : 'not found'}` : '',
+    f.verdict ? `verdict ${f.verdict}` : '',
+    f.branch ? `fix ${f.branch}${f.pr ? ` (PR #${f.pr})` : ''}` : f.pr ? `PR #${f.pr}` : 'no fix pushed',
+    f.reports?.length ? `reports ${f.reports.slice(0, 3).join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join('; ');
+
+/** The dispatcher's comparison of a crash request with the crash requests that look like it (w1827). */
+export function crashPeersBlock(w: CrashFacts, peers: CrashFacts[]): string {
+  return [
+    `Crash or hang requests that look like ${w.id} (lothsahn, 2026-10-23, w1827: "No title hold back but the orchestrator should look at the findings and see if they should be sent to the same worker"). ${CRASH_PEERS_RULE}`,
+    `- ${w.id} (this one): ${factsLine(w)}. Its findings are in its brief.`,
+    ...peers.flatMap((p) => {
+      const k = crashKinship(w, p);
+      return [
+        `- ${p.id} (${p.status}${p.workers.length ? `, worker ${p.workers.join(', ')}` : ', no worker'}): ${factsLine(p)}. ${k.why[0].toUpperCase()}${k.why.slice(1)}.`,
+        ...(p.findings ? [`  ${p.id}'s findings (the start):`, quoteUntrusted(p.findings, 700)] : []),
+      ];
+    }),
+  ].join('\n');
+}
+
 /** FF Factory's own branches for work that came from FFBox; `ffbox/*` stays FFBox's containers' prefix (docs/ffbox.md, "Branch names"). */
 export const FACTORY_BRANCH_PREFIX = 'ffbox-f/';
 

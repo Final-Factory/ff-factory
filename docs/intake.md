@@ -319,8 +319,28 @@ A hang is worked like a crash. The desync PR policy above and the Discord thread
   `intake.ffbox.crash.enabled: false` gives it the usual triage again.
 - **The strong-overlap hold counts only a shared key for it.** Every crash diagnosis of one build has the same
   fact-built title, so a similar title says nothing about the bug: a crash request is held as a possible repeat only for a
-  shared identity key (the same report, PR or branch; `Orchestrators.fileIntake`). Without that, w1827's own test
-  held the second hang diagnosis of one build behind the first ("it may repeat w2 …, in flight").
+  shared identity key (the same report, PR or branch; `Orchestrators.blockingOverlaps`, which `fileIntake` and
+  `start_agent` both read). Without that, w1827's own test held the second hang diagnosis of one build behind the first
+  ("it may repeat w2 …, in flight"). Nor does a similar title tie it to another worker's request when the dispatcher
+  sends it on (`Orchestrators.relationTo` skips a title-only overlap for a crash request).
+- **Look-alikes: the dispatcher compares the findings, not the titles.** lothsahn (2026-10-23): "No title hold back but
+  the orchestrator should look at the findings and see if they should be sent to the same worker."
+  `Orchestrators.crashPeers` finds the crash or hang requests (open, or finished in the last 7 days) that the overlap
+  check lists by title, or that share FFBox's stack signature or fix branch, at most 3, the same ones first. The
+  dispatcher's notice for the new request then carries each one's FFBox facts side by side (`crashPeersBlock` in
+  `server/intakeRules.ts`: stack signature, root cause, verdict, fix branch and PR, reports, its workers) with the start
+  of its findings (untrusted), and what the facts alone say (`crashKinship`): the same fix branch or the same stack
+  signature is the same crash; two different signatures are a different crash unless the findings name the same cause
+  or code; no signature on one side says nothing. The dispatcher compares the faulting stack or frame, the cause, the
+  files the fix touches and the fix branch:
+  - **the same crash or the same cause**: it sends the new request to the worker already on the other (`message_agent`
+    with the work id). A shared stack signature or fix branch is a concrete signal for `relationTo`, so the server
+    already reads it as related; otherwise the dispatcher passes `session: "same"` with a `session_reason` from the
+    findings.
+  - **a different crash**: its own worker. `start_agent` refuses while a worker is on a look-alike unless
+    `override_duplicate` says what in the findings differs.
+  - Either way the choice and its reason are in the request's log (`noteSessionChoice`, or `started … (not a repeat:
+    …)`), beside the intake's own line naming the look-alikes.
 - **The worker's brief** carries `CRASH_FIX_POLICY` (`workerRules`):
   1. verify FFBox's findings against the code and read the report (`fetch_ffbox_report`) yourself;
   2. reproduce the crash or hang, or show the faulty code path with file:line from the stack to the fault;

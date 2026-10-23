@@ -34,6 +34,10 @@ import {
   ffboxCrashSignal,
   ffboxDesyncSignal,
   ownApprovalCount,
+  crashFacts,
+  crashKinship,
+  crashPeersBlock,
+  titleOnly,
   type DiscordMessage,
 } from './intakeRules.ts';
 import { checkFfboxIntake } from './appConfig.ts';
@@ -393,4 +397,26 @@ test("crash-fix policy (w1827): only FFBox's facts route a crash or hang, its tr
   assert.deepEqual(checkFfboxIntake({ crash: { enabled: false, maxPerDay: 4 } }), { crash: { enabled: false, maxPerDay: 4 } });
   assert.throws(() => checkFfboxIntake({ crash: { cap: 1 } }), /intake\.ffbox\.crash: unknown key/);
   assert.throws(() => checkFfboxIntake({ crash: { maxPerDay: 101 } }), /intake\.ffbox\.crash\.maxPerDay is a whole number/);
+});
+
+test('crash-fix policy (w1827): look-alike crash requests are compared by FFBox facts, never by title', () => {
+  const brief = (text: string) => `FFBox finished a diagnosis.\n${quoteUntrusted(text)}`;
+  const item = (id: string, key: string | undefined, o: Partial<WorkItem['source']> = {}, text = 'Null target in LeechSystem.cs:212') =>
+    ({ id, status: 'new', brief: brief(text), source: { kind: 'ffbox-diagnosis', untrusted: true, ...(key ? { key } : {}), ...o } }) as Pick<WorkItem, 'id' | 'status' | 'brief' | 'source'>;
+  const a = crashFacts(item('w1', 'crash:mono!x / Leech'), ['s1']);
+  assert.deepEqual([a.signature, a.findings, a.workers], ['crash:mono!x / Leech', 'Null target in LeechSystem.cs:212', ['s1']]);
+  assert.equal(crashKinship(a, crashFacts(item('w2', 'crash:MONO!x / leech'), [])).same, 'yes', 'the same stack signature');
+  assert.equal(crashKinship(a, crashFacts(item('w3', 'crash:mono!x / Belts'), [])).same, 'no', 'different stack signatures');
+  assert.equal(crashKinship(a, crashFacts(item('w4', undefined), [])).same, 'unknown', 'no signature: read the findings');
+  assert.equal(crashKinship(crashFacts(item('w5', undefined, { branch: 'ffbox/leech-1' }), []), crashFacts(item('w6', 'crash:y', { branch: 'ffbox/leech-1' }), [])).same, 'yes', 'the same fix branch');
+  // A desync key is no stack signature here.
+  assert.equal(crashFacts(item('w7', 'desync:0.50.0:belts'), []).signature, undefined);
+  assert.equal(titleOnly({ why: 'similar title' }), true);
+  assert.equal(titleOnly({ why: 'same PR #12' }), false);
+  const block = crashPeersBlock(crashFacts(item('w9', 'crash:mono!x / Leech'), []), [crashFacts(item('w1', 'crash:mono!x / Leech', { branch: 'ffbox/leech-1', pr: 2165 }), ['s1']), crashFacts(item('w3', 'crash:mono!x / Belts', {}, 'Index out of range in BeltRouter.cs:88'), [])]);
+  assert.match(block, /No title hold back but the orchestrator should look at the findings/);
+  assert.match(block, /- w1 \(new, worker s1\): stack signature `crash:mono!x \/ Leech`; fix ffbox\/leech-1 \(PR #2165\)\. The same stack signature: the same crash\./);
+  assert.match(block, /- w3 \(new, no worker\): [^\n]*Different stack signatures/);
+  assert.match(block, /BeltRouter\.cs:88/);
+  assert.ok(block.includes(UNTRUSTED_HEADER), "the look-alike's findings are quoted as untrusted");
 });

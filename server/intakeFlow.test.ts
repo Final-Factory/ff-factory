@@ -1926,3 +1926,49 @@ test('crash-fix policy: a crash fix with a measured per-frame cost goes back to 
   assert.ok(attention.includes(`pending ${w.id}`));
   assert.match(heard(o.personalFor(LOTH).info.id, '[intake escalation]')[0].text, /performance cost in an FFBox crash or hang fix/);
 });
+
+test('crash-fix policy: look-alike crash requests are never held by their title; different stacks get their own worker, the same stack goes to the same worker', async (t) => {
+  const { intake, work, o, call, dispatcher, store, sessions, heard } = await setupOnMachine(t, { ffbox: { enabled: true, escalations: true, dailyCap: 50 } }, { workLimits: { intake: { perHour: 50, perDay: 100 } } });
+  // Two crash diagnoses of one build: the same fact-built title, different stacks.
+  const a = filedItem(work, intake.onDiagnosis(crashDiag(1, { rootCause: 'found', verdict: 'BUG', findings: 'Null LeechTarget in LeechSystem.OnUpdate (LeechSystem.cs:212) after the target died.' })));
+  const b = filedItem(work, intake.onDiagnosis(crashDiag(2, { rootCause: 'found', verdict: 'BUG', findings: 'Index out of range in BeltRouter.Merge (BeltRouter.cs:88) on an empty lane.' })));
+  assert.equal(a.title, b.title, 'one title for both');
+  assert.deepEqual([a.approval?.state, b.approval?.state], ['approved', 'approved'], 'no title hold');
+  assert.deepEqual(o.blockingOverlaps(b), []);
+  await until('the dispatcher hears both', () => heard(dispatcher().info.id, '[work request]').some((e) => e.text.includes(`Crash or hang requests that look like ${b.id}`)));
+  const notice = heard(dispatcher().info.id, '[work request]').map((e) => e.text).join('\n');
+  assert.match(notice, /No title hold back but the orchestrator should look at the findings/);
+  assert.match(notice, new RegExp(`- ${a.id} \\(new, no worker\\): stack signature \`crash:mono!x / Game\\.System1\`; root cause found; verdict BUG; no fix pushed; reports [^.]+\\. Different stack signatures: a different crash, unless the findings name the same cause or the same code\\.`));
+  assert.match(notice, /LeechSystem\.cs:212/, "the look-alike's findings are beside the new one");
+  assert.match(b.log.join('\n'), new RegExp(`crash requests that look like it: ${a.id} \\(different stack signatures`));
+
+  // A's worker starts; B, a different stack, needs the dispatcher's reason from the findings, then gets its own worker.
+  const ra = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it.', title: 'Leech crash', work_id: a.id });
+  assert.equal(ra.isError, false, ra.text);
+  const aWorker = a.sessionIds[0];
+  await until("A's worker idles", () => sessions.get(aWorker).info.status === 'idle');
+  const refused = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/beta', prompt: 'Fix it.', title: 'Belt crash', work_id: b.id });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, new RegExp(`${b.id} may be the same crash as ${a.id}, which a worker is on`));
+  assert.match(refused.text, /override_duplicate naming what in the findings differs/);
+  const rb = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/beta', prompt: 'Fix it.', title: 'Belt crash', work_id: b.id, override_duplicate: 'different stacks: LeechSystem.OnUpdate null target vs BeltRouter.Merge index; different files' });
+  assert.equal(rb.isError, false, rb.text);
+  assert.equal(b.sessionIds.length, 1);
+  assert.notEqual(b.sessionIds[0], aWorker, 'separate workers');
+  assert.match(b.log.join('\n'), /not a repeat: different stacks: LeechSystem\.OnUpdate null target vs BeltRouter\.Merge index/);
+
+  // A third with A's stack signature: the same crash. The notice says so, and the dispatcher sends it to A's worker.
+  const same = crashDiag(3, { rootCause: 'found', verdict: 'BUG', findings: 'Null LeechTarget in LeechSystem.OnUpdate again.' });
+  same.report.crashSignature = crashDiag(1).report.crashSignature;
+  const c = filedItem(work, intake.onDiagnosis(same));
+  assert.equal(c.approval?.state, 'approved');
+  await until('the dispatcher hears the third', () => heard(dispatcher().info.id, '[work request]').some((e) => e.text.includes(`Crash or hang requests that look like ${c.id}`)));
+  const third = heard(dispatcher().info.id, '[work request]').find((e) => e.text.includes(`Crash or hang requests that look like ${c.id}`))!.text;
+  assert.match(third, new RegExp(`- ${a.id} \\([a-z]+, worker ${aWorker}\\):[^\\n]*The same stack signature: the same crash\\.`));
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: aWorker, text: 'The same Leech crash, a second report.', work_id: c.id, title: 'Leech crash' });
+  assert.equal(sent.isError, false, sent.text);
+  assert.match(sent.text, new RegExp(`Same session \\(related: the same stack signature: the same crash as ${a.id}`));
+  assert.deepEqual(c.sessionIds, [aWorker], 'one worker fixes both');
+  assert.match(c.log.join('\n'), /the same stack signature: the same crash/);
+  assert.equal(store.sessions.get(aWorker)?.kind, 'worker');
+});
