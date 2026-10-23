@@ -10,7 +10,7 @@ import * as win from './machineDeployWin.ts';
 import { bundle, daemonConfig, macControlScript, parseWinProbe, pickRepo, platformOfUname, probeSlug } from './machineDeploy.ts';
 import { SSH_REACHABLE_ARGS, daemonLogPath, machineForPath } from './machines.ts';
 import { checkShell } from './guard.ts';
-import { keepAwakeCommand } from '../machine/daemon.ts';
+import { DAEMON_YIELD_EXIT, keepAwakeCommand } from '../machine/daemon.ts';
 import { editorBinary, editorLogPath, editorTree, editorsFor, parseWinProcs, reportersFor, winLaunchScript } from '../machine/unity.ts';
 import { ROOT } from './config.ts';
 import { powershell } from './testPowershell.ts';
@@ -85,6 +85,8 @@ test('windows: the stop spares the Unity editor and Hub (the user\'s), and holds
   assert.ok(s.indexOf('Disable-ScheduledTask') < s.indexOf('Stop-Process -Id') && s.indexOf('Stop-Process -Id') < s.indexOf('Enable-ScheduledTask'), 'disabled while killing, so restart-on-failure cannot bring it back');
   assert.match(s, /'app\\machine\\daemon\.ts'/);
   assert.match(s, /run-daemon\.ps1/);
+  // w1918: a survivor fails the stop, naming it, so nothing new starts beside it (three daemons on LothLaptop).
+  assert.ok(s.indexOf('Enable-ScheduledTask') < s.indexOf('throw "the old daemon did not stop: pid(s)'), 'the task is on again before it throws');
 });
 
 test('windows (real PowerShell): the stop walks to real children only; a process whose dead parent\'s id was reused is not one (w906)', { skip: !powershell && 'no PowerShell here' }, () => {
@@ -154,6 +156,8 @@ test('windows: the supervisor finds its own folder, passes the config, restarts 
   assert.match(s, /-WindowStyle Hidden -PassThru -RedirectStandardOutput/);
   assert.match(s, /\$delay = \[Math\]::Min\(\$delay \* 2, 300\)/);
   assert.match(s, /\.prev/);
+  // w1918: a daemon that ended for a newer one of its machine (DAEMON_YIELD_EXIT) is not started again.
+  assert.match(s, new RegExp(`if \\(\\$proc\\.ExitCode -eq ${DAEMON_YIELD_EXIT}\\) \\{[^}]*; break \\}`));
 });
 
 test('windows: the probe output is parsed (CRLF too), and the shortest clone wins unless one was given', () => {

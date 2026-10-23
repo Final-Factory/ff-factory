@@ -499,7 +499,33 @@ test('unity slots: a second arbiter answering the same mailbox is reported once 
   await slots.tick();
   const told = events.filter((e) => e.startsWith('another process'));
   assert.equal(told.length, 1, 'once per arbiter');
-  assert.match(told[0], /another process \(pid \d+, machine "mx"\) is answering this machine's Unity slots mailbox .* too, so launches may be granted past the limit/);
+  assert.match(told[0], /another process \(pid \d+, machine "mx", started [^)]+\) is answering this machine's Unity slots mailbox .* too, so launches may be granted past the limit/);
+});
+
+test("w1918: of two daemons of one machine on one mailbox, the older ends for the newer (LothLaptop had three); another machine's or one that does not say when it started is only reported", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
+  const yielded: string[] = [];
+  const events: string[] = [];
+  const mk = (name: string, machine: string, startedAt?: number) =>
+    new UnitySlots({ dir, platform: 'win32', procs: async () => [], alive: () => true, now: () => Date.now(), limit: () => 1, places: () => [], ramPct: () => undefined, machine, ...(startedAt !== undefined ? { startedAt } : {}), onNewerTwin: (pid) => void yielded.push(`${name}:${pid}`), onEvent: (e) => void events.push(`${name}: ${e}`) });
+  const old = mk('old', 'lothlaptop', 1_000);
+  const fresh = mk('new', 'lothlaptop', 2_000);
+  for (let i = 0; i < 3; i++) {
+    await old.tick();
+    await fresh.tick();
+  }
+  assert.deepEqual(yielded, [`old:${process.pid}`], 'the older one ends, once; the newer one never');
+  assert.ok(events.some((e) => e.startsWith('new: another process') && /started 1970-01-01T00:00:01/.test(e)), events.join('\n'));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'arbiter.json'), 'utf8')).startedAt, new Date(2_000).toISOString(), 'the newer one keeps writing the mailbox');
+
+  // Another machine's daemon on this home folder: reported, nobody ends.
+  yielded.length = 0;
+  const other = mk('other', 'm3', 3_000);
+  await other.tick();
+  await fresh.tick();
+  assert.deepEqual(yielded, []);
+  assert.ok(events.some((e) => e.startsWith('new: another process') && /machine "m3"/.test(e)));
 });
 
 test('w1874: callerGone: Linux reads the parent live (reparented: gone); a Mac or Windows asks whether the caller is alive', () => {
