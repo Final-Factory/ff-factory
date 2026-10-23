@@ -2125,8 +2125,38 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     return out;
   }
 
+  /**
+   * w1869: a request newly blocked on another's report (on: report) clears only when that report carries what it waits for
+   * (ledgerRules `reportDelivers`), so the other request's workers are told what that is and how to mark it: a line
+   * `For <waiter>: …`, or their DONE. Not one that waits on a person: a message would end its declaration. Returns them.
+   */
+  private tellReportWaited(waiter: WorkItem, gates: readonly WorkBlocker[]): string[] {
+    const all = [...this.store.work.values()];
+    const out: string[] = [];
+    for (const g of gates) {
+      if (g.kind !== 'request' || g.on !== 'report' || !g.ref) continue;
+      const x = this.store.work.get(g.ref.toLowerCase());
+      if (!x || !isOpen(x)) continue;
+      for (const sid of x.sessionIds) {
+        const s = this.store.sessions.get(sid);
+        if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || s.waitingOn || !servedBy(sid, all).has(x.id) || out.includes(sid)) continue;
+        try {
+          this.sessions.send(sid, `[about ${x.id} "${clip(x.title, 80)}"]
+${waiter.id} ("${clip(waiter.title, 80)}") is blocked until a report of yours on ${x.id} carries: ${g.what}.
+When one does, put a line "For ${waiter.id}: <the result, or where it is>" in that report: that line, or your "DONE: ${x.id}", unblocks ${waiter.id}. A "${x.id}: still open:" progress line does not. Nothing else changes: carry on with your work (between turns, end this one with a line).`, 'system');
+          out.push(sid);
+        } catch {
+          // gone or at a limit: its DONE still clears the block
+        }
+      }
+      if (out.length) this.stamp(x, `${waiter.id} waits on its report (${g.what}): told ${out.join(', ')} to mark it "For ${waiter.id}:"`);
+    }
+    return out;
+  }
+
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
   decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; override_gate?: string; asks?: Ask[] }): string {
+    let keptBefore: WorkBlocker[] = [];
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
     const into = input.into ? this.requireWork(input.into) : undefined;
@@ -2201,6 +2231,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     } else if (input.action === 'block') {
       const now = this.now();
       const kept = gatesOf(w);
+      keptBefore = kept;
       const asked = input.blockers?.length ? input.blockers : input.blocker ? [input.blocker] : [];
       if (!asked.length && !kept.length) throw new Error('block needs blocker (or blockers, for several): what it waits for (kind, ref, what; until for a time). A person it waits on is ask; capacity is queue.');
       const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) };
@@ -2228,6 +2259,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     if (input.action === 'reject' || input.action === 'done') w.outcome = clip(note, 300);
     this.stamp(w, `dispatcher: ${what}: ${note}`);
     this.store.putWork(w);
+    if (input.action === 'block') this.tellReportWaited(w, gatesOf(w).filter((g) => !keptBefore.some((k) => sameGate(k, g))));
     // A question is for the person who asked, as [needs you] (w1378); the rest is news for everyone the request is for.
     if (input.action === 'ask') return `${w.id} ${w.status}: ${what}. ${this.askPerson(w)}`;
     this.toPeople(w.requesters, dispatchNotice(w, what, note));
@@ -2613,6 +2645,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       if (problem) throw new Error(problem);
     }
     const gates = asked.map((b) => this.makeGate(b, now.toISOString(), `worker ${sessionId}`)).filter((g, i, all) => all.findIndex((x) => sameGate(x, g)) === i);
+    const before = gatesOf(w);
     if (gates.length > MAX_GATES) throw new Error(`at most ${MAX_GATES} things at once`);
     w.blocked = gates[0];
     w.alsoBlocked = gates.length > 1 ? gates.slice(1) : undefined;
@@ -2624,7 +2657,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     this.stamp(w, `worker ${sessionId}: blocked on ${name} (${gates[0].what}); it ends its turn and is resumed when that clears${cancelled}`);
     this.store.putWork(w);
     this.toPeople(w.requesters, dispatchNotice(w, `blocked on ${name} (${gates[0].what}); its worker ${sessionId} stopped polling and is resumed when that clears`));
-    return `Recorded: ${w.id} is Blocked on ${name}. ${cancelled ? 'Your pending check-in is cancelled. ' : ''}End your turn now with your report (a line "${w.id}: still open: blocked on ${name}"). Do NOT set a wake_me to poll for it: when it clears, FF Factory resumes you with a message. Anything people add meanwhile is kept for you.`;
+    const told = this.tellReportWaited(w, gates.filter((g) => !before.some((k) => sameGate(k, g))));
+    return `Recorded: ${w.id} is Blocked on ${name}. ${cancelled ? 'Your pending check-in is cancelled. ' : ''}End your turn now with your report (a line "${w.id}: still open: blocked on ${name}"). Do NOT set a wake_me to poll for it: when it clears, FF Factory resumes you with a message. Anything people add meanwhile is kept for you.${told.length ? ` The worker${told.length > 1 ? 's' : ''} you wait on (${told.join(', ')}) ${told.length > 1 ? 'are' : 'is'} told to mark your result with a line "For ${w.id}:"; a progress report does not unblock you, that line or their DONE does.` : ''}`;
   }
 
   /**
