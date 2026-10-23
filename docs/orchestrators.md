@@ -332,14 +332,27 @@ Then:
 One build at a time per computer. A worker off BEAST that declares a release build builds where it is (nothing is cleared
 there); its request is marked build work, so its next placement is BEAST first.
 
-**Timed work goes to small computers first** (w1628; lothsahn, 2026-10-20: "We should also prefer boxes with a small
-number of slots and players for timed runs, not beast since it's big"). Work whose words name a benchmark, a perf A/B or
-probe, a timed run or frame times (`shared/capacity.ts` `needsTimed`) goes where "Next timed work" says
-(`server/placement.ts` `pickTimed`): among the computers with room, not held or avoided, and on the platform its words name
-("Windows", `probe_ab_win`, BEAST or LothDesktop: Windows; "Mac", m3 or m5: macOS), first those with no timed leg in their
-bench queue, then the smallest (fewest sandboxes, then fewest Unity processes), then the fewest live agents; BEAST, the
-biggest, comes last. A timed A/B compares its legs on one computer, so a slower one gives as good an answer; work whose
-absolute numbers must come from one computer names it in its brief, and you keep it there.
+**Timed and exclusive-lock work goes to small computers first** (w1628, w1872; lothsahn, 2026-10-23: "favors placing
+jobs that need an exclusive lock or timing runs on machines that have a smaller number of editors or slots. This is to
+avoid locking out work because a machine that can handle a bunch of things but is locked down to one is less
+efficient"). Work whose words name a benchmark, a perf A/B or probe, a timed or timing run, an exclusive lock or frame
+times (`shared/capacity.ts` `needsTimed`) goes where "Next timed work" says (`server/placement.ts` `timedRank`, `pickTimed`).
+That line ranks the computers with room (online, not paused, held or avoided) that take timed runs, on the platform its
+words name ("Windows", `probe_ab_win`, BEAST or LothDesktop: Windows; "Mac", m3 or m5: macOS). The fewest agent slots come
+first, then the lowest editor limit, then the fewest live agents (the workers its exclusive turn would pause), then the
+fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks first; BEAST, the biggest, comes last.
+- **The ranking is the default, unless a machine is named** (lothsahn: "If a worker requests a specific machine for a
+  reason, it does need to follow the workers request or the orchestrator's request for that placement. In absence of any
+  preference, it should use this list"). Work whose brief or worker names a computer for a reason (a platform, a pairing, the
+  baseline machine of an A/B) goes there.
+- **A computer that takes no timed runs** (`Machine.noTimedRuns`, add_machine `no_timed_runs`; m5 by default, w1861:
+  "The m5 should not be used for timing runs because Ben runs stuff on it personally") never gets timed work. Its bench
+  queue refuses every exclusive ticket there. A pin to it is not moved either: start_agent and create_sandbox refuse it
+  back to you, with the computers that take it (lothsahn: "that should go back to the orchestrator or worker ... The
+  orchestrator worker then can pick a new machine or escalate to an operator if it is unable to pick a new machine").
+  Pick one of them, or ask an operator (waiting_on_person) when none fits.
+
+A timed A/B compares its legs on one computer, so a slower one gives as good an answer.
 
 **The bench queue's order** (w1628, the game repo's `scripts/bench/bench_queue.py`, `Documentation/Bench-Lock.md`): first
 by the priority of the worker's open requests (lothsahn: "Yes, the queue should first sort by priority, using the logic the

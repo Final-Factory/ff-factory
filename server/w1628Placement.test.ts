@@ -58,14 +58,15 @@ test('w1628: timed work goes to the smallest computer with room and no timed leg
   assert.equal(pickTimed([beast, loth, m3], {}, 'timed')!.pick.id, 'm3', 'smallest first, whatever its live agents');
   assert.equal(pickTimed([beast, loth, m3], {}, 'timed:win32')!.pick.id, 'lothdesktop', 'a Windows run stays on Windows');
   assert.equal(pickTimed([beast, loth, m3], {}, 'timed:darwin')!.pick.id, 'm3');
-  // A computer whose queue already holds a timed leg comes after one with none: the leg would wait there.
-  assert.equal(pickTimed([beast, { ...loth, benchQueue: timed(1) }, m3], {}, 'timed:win32')!.pick.id, 'beast');
+  // w1872: size first, then live agents, then queued legs: a leg queued on the smaller computer waits there rather than
+  // locking BEAST (was w1628: a computer with a queued leg came after one with none).
+  assert.equal(pickTimed([beast, { ...loth, benchQueue: timed(1) }, m3], {}, 'timed:win32')!.pick.id, 'lothdesktop');
   // Busy, held or avoided computers are passed over; none left: the general placement, said so.
   assert.equal(pickTimed([beast, { ...loth, live: 8 }], {}, 'timed:win32')!.pick.id, 'beast');
   assert.equal(pickTimed([beast, loth], { hold: { lothdesktop: 'a build' } }, 'timed:win32')!.pick.id, 'beast');
   assert.equal(pickTimed([beast, loth], {}, 'timed:darwin'), undefined);
   assert.match(pickComputer([beast, loth], undefined, {}, 'game', false, 'timed:darwin')!.why, /^timed work, but no computer on darwin has room; so the general placement/);
-  assert.match(pickComputer([beast, loth, m3], undefined, {}, 'game', false, 'timed')!.why, /prefer boxes with a small number of slots and players for timed runs, not beast/);
+  assert.match(pickComputer([beast, loth, m3], undefined, {}, 'game', false, 'timed')!.why, /machines that have a smaller number of editors or slots"\): m3 \(4 agent slots, 2 editors, 1 live\) > lothdesktop .* > beast /);
   assert.ok(capacityLines([beast, loth, m3]).some((l) => /^Next timed work \(benchmarks, perf A\/Bs and probes; on the platform it names, w1628\): m3 /.test(l)));
 });
 

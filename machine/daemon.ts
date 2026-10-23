@@ -2140,7 +2140,7 @@ export class Daemon {
         return;
       case 'bench_priorities':
         // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.
-        writeBenchPriorities(this.cfg.root, msg.sessions, new Date(), msg.singleWorker);
+        writeBenchPriorities(this.cfg.root, msg.sessions, new Date(), msg.singleWorker, msg.noTimedRuns);
         this.benchMarks = msg.sessions;
         return;
       case 'cleanup_now':

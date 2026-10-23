@@ -290,6 +290,15 @@ export function merge(d: PrDeps, o: Opts): number {
   }
   const m = d.run('gh', ['pr', 'merge', String(pr.number), '--merge', '--match-head-commit', pr.headRefOid]);
   if (m.code !== 0) {
+    // w1867: a 502 from GitHub can come back on a merge it made ("Merge already in progress" on the retry, the PR page
+    // OPEN for minutes after): the base holding the head is the answer, not the error.
+    const landed =
+      git(d, ['fetch', '-q', 'origin', pr.baseRefName]).code === 0 &&
+      git(d, ['merge-base', '--is-ancestor', pr.headRefOid, `origin/${pr.baseRefName}`]).code === 0;
+    if (landed) {
+      d.write(`ff-pr: ${pr.url} merged at head ${pr.headRefOid.slice(0, 10)}: origin/${pr.baseRefName} holds it, though gh pr merge answered:\n${(m.err || m.out).trim()}\n(GitHub's PR page may show it open for a few minutes.)\n`);
+      return 0;
+    }
     d.write(`ff-pr: gh pr merge refused:\n${(m.err || m.out).trim()}\n`);
     return 1;
   }
