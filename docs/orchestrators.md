@@ -1767,7 +1767,7 @@ A timer is a standing job (`server/timers.ts`):
 
 - **Tools**, for each personal orchestrator and the dispatcher (a remote client's go to its person's own orchestrator):
   `set_timer {title, note, schedule, jitter_minutes?, until?, max_fires?, skip_if_busy?}` answers its id;
-  `list_timers`; `update_timer {id, …}` (any field, or `enabled` false to pause and true to resume, counting on from now
+  `list_timers` (an ended timer is listed with its note for a day, then only counted, w1866); `update_timer {id, …}` (any field, or `enabled` false to pause and true to resume, counting on from now
   with nothing owed for the pause); `cancel_timer {id}`. `schedule` is one of `at` (once, an ISO time), `every_minutes`
   (at least 5) or `daily` ("HH:MM", with an optional IANA `tz`, default the server's).
 - **Kept** in `data/timers.json` through the crash-safe writer (`server/durable.ts`), so a restart loses none. A person's

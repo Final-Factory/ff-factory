@@ -135,7 +135,7 @@ export function sandboxGuard(opts: {
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
-        checkRawUnityBatch(cmd) ??
+        checkRawUnityBatch(cmd, cloneSpellings) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined) ??
         (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
       if (reason) return deny(reason);
@@ -305,15 +305,29 @@ const UNITY_VARIABLE = /^\$\{?[A-Za-z0-9_]*unity[A-Za-z0-9_]*\}?$/i;
  * `unity-slot run`, the game repo's `ff_unity_slot`, `unity_slot.py run` or `build_player.sh` it takes both: their word
  * is the program, so they pass. Only the program position of a simple command counts. Exported for tests.
  */
-export function checkRawUnityBatch(cmd: string): string | undefined {
+export function checkRawUnityBatch(cmd: string, personProjects: string[] = []): string | undefined {
   for (const seg of cmd.split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
-    if (!/(?:^|\s)-batchmode(?:\s|$)/i.test(seg)) continue;
+    const batch = /(?:^|\s)-batchmode(?:\s|$)/i.test(seg);
+    // w1860 (lothsahn: "builds or any compute intensive job needs a lock"): an editor opened on a project straight from the
+    // shell takes no ticket either, and runs beside a timed leg until the turn closes it. Not a person's own editor
+    // reopened on the main clone a request was granted (w936; personProjects holds its spellings): the worker gives back
+    // what it closed there, and the daemon runs no ticket for a person's editor.
+    if (!batch && !/(?:^|\s)-projectpath(?:\s|$)/i.test(seg)) continue;
+    const project = /(?:^|\s)-projectpath\s+("[^"]*"|'[^']*'|\S+)/i.exec(seg)?.[1].replace(/^["']|["']$/g, '');
+    if (!batch && project && personProjects.includes(project.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase())) continue;
     const words = seg.trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
     for (const word of words) {
       const w = word.replace(/^["']|["']$/g, '');
       const lower = w.toLowerCase();
       if (LAUNCHERS.has(lower) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || /^-/.test(w) || w === '""' || w === '') continue;
       if (UNITY_BINARY.test(w.replace(/[\\/]+$/, '')) || UNITY_VARIABLE.test(w)) {
+        if (!batch)
+          return (
+            `Refused (w1860): ${w} -projectPath started straight from the shell opens an editor with no Unity slot and no ` +
+            "bench ticket, beside other sandboxes' timed legs. Start your sandbox's editor with mcp__machine__unity " +
+            '(action start: it takes a slot and a shared ticket, held while the editor runs), or for a second editor of ' +
+            'a peer run, `unity-slot run --count 2 --label "<what>" -- <the same command>`.'
+          );
         return (
           `Refused (w1628): ${w} -batchmode started straight from the shell takes no Unity slot and no bench ticket, so it ` +
           "can compile beside another sandbox's timed bench leg and spoil its numbers. Run it as " +

@@ -130,8 +130,11 @@ export interface BeltCtx {
 }
 
 /** list_timers' answer: one line per timer, soonest first, then the recently ended. */
-export function describeTimers(list: TimerView[], today: number): string {
+export function describeTimers(list: TimerView[], today: number, now = Date.now()): string {
   if (!list.length) return 'No timers. set_timer makes one.';
+  // w1866: ended timers stay listed for a day, each with its note, then only as a count.
+  const old = list.filter((t) => t.endedAt && now - Date.parse(t.endedAt) > ENDED_TIMERS_SHOWN_MS).length;
+  const shown = list.filter((t) => !t.endedAt || now - Date.parse(t.endedAt) <= ENDED_TIMERS_SHOWN_MS);
   const line = (t: TimerView) =>
     `- ${t.id} "${t.title}" [${t.state}] ${t.scheduleText}` +
     (t.state === 'active' ? `, next ${t.nextFireAt}` : '') +
@@ -143,8 +146,12 @@ export function describeTimers(list: TimerView[], today: number): string {
     (t.maxFires ? `, max ${t.maxFires} fires` : '') +
     (t.endedAt ? `, ended ${t.endedAt} (${t.endReason})` : '') +
     `\n  note: ${t.note.replace(/\s+/g, ' ').slice(0, 200)}`;
-  return [`${today} of ${TIMER_LIMITS.deliveriesPerDay} timer messages in the last 24 h.`, ...list.map(line)].join('\n');
+  const more = old ? [`${old} timer(s) that ended more than a day ago are not shown.`] : [];
+  return [`${today} of ${TIMER_LIMITS.deliveriesPerDay} timer messages in the last 24 h.`, ...shown.map(line), ...more].join('\n');
 }
+
+/** How long list_timers shows an ended timer with its note (w1866). */
+const ENDED_TIMERS_SHOWN_MS = 24 * 3_600_000;
 
 type ToolMaker = <S extends z.ZodRawShape>(name: string, description: string, schema: S, handler: (a: z.infer<z.ZodObject<S>>) => Promise<ToolResult>) => ToolSpec;
 
@@ -356,10 +363,6 @@ ${MERGE_RULES}`;
  * of how the instructions have changed."). The dispatcher's and every person's orchestrator's brief-writing rules carry it.
  */
 export const BRIEF_NOW_ONLY = `A brief says what to do now and why: no provenance ids, quoted past corrections, "was X, now Y" or dates of rule changes unless the worker needs one to act. The harness adds the request as filed unless your brief quotes it: quote or summarise, not both.`;
-
-/** What an orchestrator is told to do with a worker's final message (onWorkerTurnEnd). */
-export const WORKER_UPDATE_RELAY =
-  `Tell the user what matters in a line or two (or nothing, if it is routine progress you already reported). Say what every id is, every time: a request id like w293, a PR number, a commit, a worker or session id or a sandbox name always comes with what it is in plain English, "w293 (stopping people from chatting with the dispatcher)", on every appearance, not only the first (\`/ff-agents:evidence-gate\`, lessons/say-what-an-id-is.md). Keep the report's labels on any number or recommendation you pass on (measured, sourced, guess), and say what evidence it names: never call a fix done, or recommend a value, on a basis the report does not give. Follow up with the agent only if the user's original request clearly implies the next step; sending an unlabelled number or a guess back to be researched is such a step.`;
 
 /** The end of every worker's Reporting section: labels survive the trip up, and the start of a report is what is relayed. */
 export const REPORT_LABELS = `Label each number and recommendation as measured, sourced or a guess, and say what you saw yourself rather than what a title, a measurement table or a tool verdict implies. Put the result and anything the user must decide in the first lines: an orchestrator relays only the start of a long report.`;
@@ -1880,7 +1883,9 @@ export class Agents {
     if (by && !people.some((r) => r.userId.toLowerCase() === by.userId.toLowerCase())) people.push(by);
     this.notifyPeople(
       people,
-      `[worker update] ${this.label(s)} finished a turn. Its final message:\n\n${text.slice(0, 3000)}\n\n${WORKER_UPDATE_RELAY}`,
+      // The report alone (w1866): what to do with it is the brief's (its [worker update] and Evidence and labels lines);
+      // the paragraph that followed every report until then was 22% of what these messages added to lothsahn's orchestrator.
+      `[worker update] ${this.label(s)} finished a turn. Its final message:\n\n${text.slice(0, 3000)}`,
     );
   }
 
@@ -4903,7 +4908,9 @@ ${fp}`;
     const n = liveCounts(matching.flatMap((w) => live.get(w.id) ?? []));
     const counts = WORK_LIVE_STATES.filter((s) => n[s]).map((s) => `${n[s]} ${WORK_LIVE_LABEL[s].toLowerCase()}`);
     const tail = counts.length ? [`Now: ${counts.join(', ')}${matching.length > items.length ? ` (${items.length} of ${matching.length} shown)` : ''}.`] : [];
-    return [...items.map((w) => describeItem(w, (id) => o.workerState(id), live.get(w.id), costLine(this.spend, w.id), this.waitSummaryOf(w, live.get(w.id)))), ...tail].join('\n');
+    // A person's orchestrator reads the shorter line (w1866, LIST_LINE_TEXT); its cost and the rest are in list_work id.
+    const short = ctx.role !== 'dispatcher';
+    return [...items.map((w) => describeItem(w, (id) => o.workerState(id), live.get(w.id), short ? '' : costLine(this.spend, w.id), this.waitSummaryOf(w, live.get(w.id)), short)), ...tail].join('\n');
   }
 
   /**

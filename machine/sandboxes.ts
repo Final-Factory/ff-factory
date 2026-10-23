@@ -147,18 +147,18 @@ export interface PoolOptions {
   /** Every Unity editor of the machine, counted now, for `unity status`. */
   slotsStatus?(): Promise<string>;
   /**
-   * A shared ticket in the machine's bench queue for an editor boot (w1615, machine/benchQueue.ts): a boot never runs
-   * beside a timed bench leg. Taken after the Unity slot check and let go once the editor's MCP bridge is up (or
-   * BOOT_TICKET_MAX_MS). A ticket that is not granted at once queues the start, which the pool makes itself at its turn.
-   * Unset, or { why }: the editor starts without one.
+   * A shared ticket in the machine's bench queue for an editor (w1615, machine/benchQueue.ts): an editor never boots or
+   * runs beside a timed bench leg. Taken after the Unity slot check and held for as long as the editor runs (w1860; a
+   * running editor without one takes one). A ticket that is not granted at once queues the start, which the pool makes
+   * itself at its turn. Unset, or { why }: the editor starts without one.
    */
   bootTicket?(sb: { id: string; path: string }): { ticket?: BenchTicket; why?: string };
 }
 
 /** How long `unity start` waits for a boot's bench ticket before it answers "queued" (python's start-up is under 1 s). */
 export const BOOT_TICKET_ANSWER_MS = 5_000;
-/** A boot's ticket goes once the bridge is up, or after this long (a first import can take long; the queue revokes at 30). */
-export const BOOT_TICKET_MAX_MS = 30 * 60_000;
+/** w1860: a running editor with no live bench ticket asks for one again after this long (a lost ticket, a failed take). */
+export const EDITOR_TICKET_RETRY_MS = 60_000;
 
 /** Why `branch` cannot be a sandbox branch (the host's rules, plus git's), or undefined. Exported for tests. */
 export async function sandboxBranchProblem(branch: string, git: PoolDeps['git']): Promise<string | undefined> {
@@ -336,9 +336,11 @@ export class SandboxPool {
   private readonly trimming = new Map<string, Promise<TrimResult>>();
   /** Per sandbox: whether it had a live agent at the last look, so the moment the last one goes is seen. */
   private readonly occupied = new Map<string, boolean>();
-  /** w1615: editor starts queued in the bench queue, and the boot tickets of editors still loading. */
+  /** w1615: editor starts queued in the bench queue; w1860: the tickets of editors booting or running (held while they run). */
   private readonly queuedBoots = new Map<string, BenchTicket>();
   private readonly bootTickets = new Map<string, { ticket: BenchTicket; at: number }>();
+  /** w1860: when a running editor with no live ticket may ask for one again (after a failed take or a lost ticket). */
+  private readonly ticketRetryAt = new Map<string, number>();
   /** Released sandboxes still to trim (the editor was up when the last agent left). */
   private readonly pendingTrim = new Set<string>();
   private disk: { level: DiskLevel; freeBytes?: number } = { level: 'ok' };
@@ -1182,7 +1184,7 @@ export class SandboxPool {
       const pid = ed.unity.editors(procs)[0]?.pid;
       const prev = this.unityState.get(r.id) ?? { state: 'stopped' as const };
       // w1829: the bridge counts only once this editor's own bridge wrote its status (bridgeUpSince); a port file left by
-      // an earlier editor let a boot's bench ticket go 12 s into its 199 s first import, beside a timed run.
+      // an earlier editor marked a booting editor running 12 s into its 199 s first import, beside a timed run.
       let bs = pid ? this.bridgeSince.get(r.id) : undefined;
       if (pid && bs?.pid !== pid) {
         const launched = this.launchedAt.get(r.id);
@@ -1192,11 +1194,32 @@ export class SandboxPool {
       }
       if (!pid) this.bridgeSince.delete(r.id);
       const up = !!pid && this.d.bridgeUp(r.path, bs?.since);
-      // w1615: a boot's bench ticket goes once its bridge is up, its editor is gone, or BOOT_TICKET_MAX_MS passed.
+      // w1860 (lothsahn, 2026-10-23: "running editors and game players hold a shared ticket while they run"): an editor's
+      // shared ticket is held for as long as it runs, no longer only while it boots (w1615), and goes once it is gone (a
+      // boot gets 2 minutes to show its process).
       const boot = this.bootTickets.get(r.id);
-      if (boot && ((pid && up) || (!pid && now - boot.at > 2 * 60_000) || now - boot.at > BOOT_TICKET_MAX_MS)) {
+      if (boot && !pid && now - boot.at > 2 * 60_000) {
         boot.ticket.release();
         this.bootTickets.delete(r.id);
+      }
+      // A running editor whose ticket was lost (revoked at the shared group's limit, its helper gone) or that never had one
+      // (adopted, started by hand, or the queue was not reachable at its start) takes a new one; the editor runs on
+      // meanwhile, and the w1829 turn closes it if a timed run is granted first.
+      if (pid && !this.queuedBoots.has(r.id) && this.o.bootTicket) {
+        const cur = this.bootTickets.get(r.id);
+        if (cur && cur.ticket.state().kind === 'failed') {
+          this.o.log?.(`sandbox ${r.id}: its running editor's bench ticket ended (${cur.ticket.state().line}); it takes a new one (w1860)`);
+          cur.ticket.release();
+          this.bootTickets.delete(r.id);
+          this.ticketRetryAt.set(r.id, now + EDITOR_TICKET_RETRY_MS);
+        } else if (!cur && now >= (this.ticketRetryAt.get(r.id) ?? 0)) {
+          const t = this.o.bootTicket(r);
+          if (t.ticket) this.bootTickets.set(r.id, { ticket: t.ticket, at: now });
+          else {
+            this.ticketRetryAt.set(r.id, now + EDITOR_TICKET_RETRY_MS);
+            this.o.log?.(`sandbox ${r.id}: its running editor holds no bench ticket: ${t.why ?? 'none could be taken'}; asked again in ${EDITOR_TICKET_RETRY_MS / 60_000} min`);
+          }
+        }
       }
       if (!pid && this.queuedBoots.has(r.id)) continue; // its state says where it is in the queue
       // w1746: an editor closed idle that runs again (started by hand, or adopted) is no longer closed.

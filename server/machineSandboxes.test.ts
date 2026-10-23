@@ -17,7 +17,7 @@ import { describeCleanupItems } from './cleanup.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { UnitySlots } from '../machine/unitySlots.ts';
 import type { BenchTicket } from '../machine/benchQueue.ts';
-import { SandboxPool, type PoolOptions, deletable, idleSandboxEditors, lfsDedup, lfsDedupWords, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
+import { EDITOR_TICKET_RETRY_MS, SandboxPool, type PoolOptions, deletable, idleSandboxEditors, lfsDedup, lfsDedupWords, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
@@ -139,7 +139,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
     }),
     bridgeUp: (p, since) => (o.bridge ? o.bridge(p, since, running) : running.has(p)),
     gitStatus: readGitStatus,
-    now: () => Date.now(),
+    now: () => Date.now() + clockSkew.ms,
   };
   return { d, running };
 }
@@ -190,6 +190,9 @@ const ready = (p: SandboxPool, id: string) => until(`${id} ready`, () => {
 // ---------------------------------------------------------------- the pool, against real git (CI runs this on Windows too)
 
 /** A bench ticket the test grants or fails by hand (machine/benchQueue.ts BenchTicket's wait/release). */
+/** w1860: moves the pools' clock forward (a test that waits out EDITOR_TICKET_RETRY_MS); put back after each use. */
+const clockSkew = { ms: 0 };
+
 function fakeTicket() {
   const t = {
     kind: 'waiting' as 'waiting' | 'granted' | 'failed',
@@ -201,6 +204,9 @@ function fakeTicket() {
       while (t.kind === 'waiting' && Date.now() < until && !t.released) await new Promise((r) => setTimeout(r, 20));
       return t.kind === 'granted' ? { kind: 'granted' as const, ticket: 't00000002', line: 'granted t00000002' } : t.kind === 'failed' ? { kind: 'failed' as const, line: 'gave up' } : { kind: 'waiting' as const, line: t.line };
     },
+    state() {
+      return t.kind === 'granted' ? { kind: 'granted' as const, ticket: 't00000002', line: 'granted t00000002' } : t.kind === 'failed' ? { kind: 'failed' as const, line: 'revoked t00000002 at x: its turn is over' } : { kind: 'waiting' as const, line: t.line };
+    },
     release() {
       t.released++;
     },
@@ -208,7 +214,7 @@ function fakeTicket() {
   return t;
 }
 
-test('w1615: an editor start takes a shared bench ticket after its slot: queued while a timed run holds the lock, started at its turn, the ticket let go once its bridge is up; a stop cancels a queued start', async (t) => {
+test('w1615, w1860: an editor start takes a shared bench ticket after its slot: queued while a timed run holds the lock, started at its turn, the ticket held while the editor runs and taken again when it is lost; a stop cancels a queued start', async (t) => {
   const r = repos();
   t.after(r.cleanup);
   const tickets: ReturnType<typeof fakeTicket>[] = [];
@@ -237,7 +243,17 @@ test('w1615: an editor start takes a shared bench ticket after its slot: queued 
   assert.equal(tickets[0].released, 0, 'held while the editor loads');
   await p.tick();
   assert.equal(p.list().find((s) => s.id === 'a')!.unity.state, 'running');
-  assert.equal(tickets[0].released, 1, 'let go once the bridge is up');
+  assert.equal(tickets[0].released, 0, 'w1860: held while the editor runs, not only while it boots');
+  // w1860: its ticket revoked at the shared group's limit: the running editor takes a new one (after EDITOR_TICKET_RETRY_MS).
+  tickets[0].kind = 'failed';
+  await p.tick();
+  assert.equal(tickets[0].released, 1);
+  assert.equal(tickets.length, 1, 'not at once');
+  clockSkew.ms += EDITOR_TICKET_RETRY_MS;
+  t.after(() => (clockSkew.ms = 0));
+  await p.tick();
+  assert.equal(tickets.length, 2, 'a new ticket for the running editor');
+  assert.equal(running.size, 1, 'the editor ran on meanwhile');
   // A start that is granted at once runs at once; a stop of a queued start cancels it and lets its ticket go.
   const b = p.unity('b', 'start');
   tickets.length = 1;
@@ -249,7 +265,7 @@ test('w1615: an editor start takes a shared bench ticket after its slot: queued 
   assert.equal(running.has(path.join(r.sbRoot, 'b')), false, 'a cancelled start never runs');
 });
 
-test('w1829: a boot keeps its bench ticket until the new editor\'s own bridge writes its status; one left by the editor before it does not count, and an editor running before the daemon is up at its first look', async (t) => {
+test('w1829: a booting editor shows starting until its own bridge writes its status; one left by the editor before it does not count, and an editor running before the daemon is up at its first look', async (t) => {
   const r = repos();
   t.after(r.cleanup);
   const tickets: ReturnType<typeof fakeTicket>[] = [];
@@ -282,13 +298,12 @@ test('w1829: a boot keeps its bench ticket until the new editor\'s own bridge wr
   await p.tick();
   assert.equal(state('b'), 'running', 'an editor that ran before the daemon');
   assert.equal(state('a'), 'starting', 'its first import still runs');
-  assert.equal(tickets.length, 1);
   assert.equal(tickets[0].released, 0, 'the boot keeps its ticket: no timed run starts beside the import');
   // Its own bridge comes up and writes its status.
   status.set(pa, Date.now());
   await p.tick();
   assert.equal(state('a'), 'running');
-  assert.equal(tickets[0].released, 1, 'let go once this editor\'s bridge is up');
+  assert.equal(tickets[0].released, 0, 'a running editor keeps its ticket (w1860)');
 });
 
 test('w1829: an editor closed for a timed run is marked before its quit, says why, keeps its mark across a daemon restart, starts again through the bench queue when the turn ends and stays marked until it runs, and its worker hears it once', async (t) => {

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { Agents, BRIEF_NOW_ONLY, EVIDENCE_RULES, MERGE_RULES, REPORT_LABELS, WORKER_UPDATE_RELAY } from './agents.ts';
+import { Agents, BRIEF_NOW_ONLY, EVIDENCE_RULES, MERGE_RULES, REPORT_LABELS } from './agents.ts';
 import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
@@ -161,10 +161,10 @@ test('orchestrators: keep the labels, send a guess back to be researched, and do
   assert.match(dispatcher, /Done means merged: a worker merges its own PR once its verification is done and CI is green/);
   assert.match(dispatcher, /Do not write a brief that ends at an open PR waiting for a person/);
 
-  // What an orchestrator is told with every finished worker turn.
-  assert.match(WORKER_UPDATE_RELAY, /Keep the report's labels on any number or recommendation you pass on \(measured, sourced, guess\)/);
-  assert.match(WORKER_UPDATE_RELAY, /never call a fix done, or recommend a value, on a basis the report does not give/);
-  assert.match(WORKER_UPDATE_RELAY, /sending an unlabelled number or a guess back to be researched is such a step/);
+  // What an orchestrator does with a finished worker turn: said once in its brief, not under every report (w1866).
+  assert.match(personal, /`\[worker update\]` messages .* relay what matters in one or two lines, nothing if it is routine you already reported/);
+  assert.match(personal, /Keep those labels when you relay, and say what evidence a report names\. Never call a fix done from a PR title/);
+  assert.match(personal, /When Ben would act on a number or a recommendation that carries no basis, send it back to the worker to research/);
 
   // Lessons do not stay in a memory folder nobody else can read.
   for (const [who, text] of [['Ben', personal], ['the owner', dispatcher]] as const) {
@@ -200,7 +200,6 @@ test('every agent a person hears from is told to say what each id is, every time
   assert.match(EVIDENCE_RULES, rule, 'workers');
   assert.match(brief(agents.orchestrators.personalFor(BEN).info), rule, "a person's orchestrator");
   assert.match(brief(sessions.get(agents.dispatcherId!).info), rule, 'the dispatcher');
-  assert.match(WORKER_UPDATE_RELAY, rule, 'the relay of worker updates');
 });
 
 test('w741: every DONE says what it taught, and the orchestrator counts its person\'s corrections and files harness work on the second', async (t) => {
