@@ -128,6 +128,18 @@ test('merge: merges on green with --match-head-commit; running waits (exit 3); r
   assert.equal(prMain(['merge'], none), 3);
 });
 
+test('merge: an error from gh pr merge on a merge GitHub made anyway (a 502, w1867) is a merge when the base holds the head; else refused', () => {
+  const green = { 'gh pr view': ok(pr()), 'gh run list': ok(JSON.stringify([{ databaseId: 9, workflowName: 'ci', status: 'completed', conclusion: 'success' }])), 'gh pr merge': fail('non-200 OK status code: 502 Bad Gateway') };
+  const landed = fake({ ...green, 'git merge-base --is-ancestor': ok() });
+  assert.equal(prMain(['merge'], landed), 0);
+  assert.ok(landed.ran.includes('git fetch -q origin main'));
+  assert.ok(landed.ran.includes(`git merge-base --is-ancestor ${SHA} origin/main`));
+  assert.match(landed.said, /merged at head a{10}: origin\/main holds it, though gh pr merge answered:\nnon-200 OK status code: 502/);
+  const refused = fake({ ...green, 'git merge-base --is-ancestor': fail('') });
+  assert.equal(prMain(['merge'], refused), 1);
+  assert.match(refused.said, /^ff-pr: gh pr merge refused:\nnon-200 OK status code: 502/);
+});
+
 test('installPrShim writes ff-pr for sh and cmd, pointing at the script', () => {
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'ffpr-bin-'));
   installPrShim(bin, '/usr/bin/node', ['--experimental-strip-types'], '/app/machine/prFlow.ts');
