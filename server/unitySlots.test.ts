@@ -424,7 +424,7 @@ test('unity slots: the CLI: run waits, runs and releases; a second run waits for
   const job = (name: string) =>
     new Promise<number>((resolve) => {
       const body = `const fs=require('fs');fs.appendFileSync(${JSON.stringify(log)},'${name} start '+Date.now()+'\\n');const cap=Date.now()+60000;const i=setInterval(()=>{if(fs.existsSync(${JSON.stringify(go)})||Date.now()>cap){clearInterval(i);fs.appendFileSync(${JSON.stringify(log)},'${name} end '+Date.now()+'\\n')}},10)`;
-      const c = spawn(process.execPath, [script, 'run', '--label', name, '--', process.execPath, '-e', body], { env: { ...process.env, FF_UNITY_SLOTS: dir, FF_BENCH_TICKETS: 'off', FF_WORKER_ROOT: '' }, stdio: 'ignore' });
+      const c = spawn(process.execPath, [script, 'run', '--label', name, '--', process.execPath, '-e', body], { env: { ...process.env, FF_UNITY_SLOTS: dir, FF_BENCH_TICKETS: 'off', FF_WORKER_ROOT: '', FF_SESSION_ID: `sess-${name}` }, stdio: 'ignore' });
       c.on('exit', (code) => resolve(code ?? -1));
     });
   const a = job('first');
@@ -432,6 +432,9 @@ test('unity slots: the CLI: run waits, runs and releases; a second run waits for
   const b = job('second');
   await waitFor('the second run to wait', () => slots.report()?.waiting.some((w) => w.label === 'second') ?? false);
   assert.deepEqual(slots.report()!.granted.map((g) => g.label), ['first']);
+  // w1949: the waiting run names its worker's session and its place, so the ledger shows that worker's request Blocked.
+  const waiting = slots.report()!.waiting.find((w) => w.label === 'second')!;
+  assert.deepEqual([waiting.session, waiting.position], ['sess-second', 1]);
   fs.writeFileSync(go, '');
   assert.deepEqual(await Promise.all([a, b]), [0, 0]);
   const done = lines();

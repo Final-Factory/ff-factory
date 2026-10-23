@@ -182,6 +182,8 @@ export interface SlotRequest {
   label: string;
   /** Project folders its Unity processes open, for ones started where they are not its children (a detached launch). */
   projects?: string[];
+  /** The agent session that ran it (RequestFile.session): the ledger shows its request Blocked while it waits (w1949). */
+  session?: string;
   createdAt: number;
   /** When it was granted; undefined while it waits. */
   grantedAt?: number;
@@ -589,6 +591,7 @@ export class UnitySlots {
         pid: f.pid,
         label,
         projects: Array.isArray(f.projects) ? f.projects.filter((p): p is string => typeof p === 'string').slice(0, 8) : undefined,
+        ...(typeof f.session === 'string' && f.session ? { session: f.session.slice(0, 80) } : {}),
         createdAt: Date.parse(f.createdAt) || mtime,
         grantedAt: grant ? Date.parse(grant.grantedAt) || mtime : undefined,
         denied: deny?.why,
@@ -760,7 +763,7 @@ export class UnitySlots {
       ramLimitPct: this.d.ramLimitPct ?? UNITY_RAM_PCT,
       waiting: l.a.waiting.map((w) => {
         const r = byId.get(w.id)!;
-        return { label: r.label, count: r.count, holder: r.holder, since: iso(r.createdAt), why: w.why };
+        return { label: r.label, count: r.count, holder: r.holder, since: iso(r.createdAt), why: w.why, position: w.position, ...(r.session ? { session: r.session } : {}) };
       }),
       granted: l.reqs.filter((r) => r.grantedAt !== undefined && !r.denied).map((r) => ({ label: r.label, count: r.count, holder: r.holder, since: iso(r.grantedAt!) })),
       at: iso(l.at),

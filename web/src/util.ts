@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { agentState, type AgentState, type WaitKind } from '../../shared/agentState.ts';
 import { ledgerGlance, workLiveAll, type WorkLive } from '../../shared/workState.ts';
+import { queueWaitsAll, type QueueWait } from '../../shared/queueWaits.ts';
 import type { AppState, BenchLock, AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, PersonPlayReport, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
 import { playGlance } from '../../shared/personPlay';
@@ -320,6 +321,9 @@ export function useWorkLive(app: AppState, work: readonly WorkItem[], now: numbe
     }
     return m;
   }, [benchKey]);
+  // w1949: what workers wait for in the machines' queues, as list_work reads it; worked out again only when that changes.
+  const waitKey = useMemo(() => JSON.stringify(queueWaitsAll(app.machineStats)), [app.machineStats]);
+  const waits = useMemo(() => JSON.parse(waitKey) as QueueWait[], [waitKey]);
   return useMemo(() => {
     const byId = new Map(app.sessions.map((s) => [s.id, s]));
     // w1841: the workers a release build paused, as the server reads them.
@@ -334,9 +338,10 @@ export function useWorkLive(app: AppState, work: readonly WorkItem[], now: numbe
       ...(app.roomSince ? { roomSince: app.roomSince } : {}),
       ...(holds ? { buildHold: (id: string) => holds[id] } : {}),
       benchLock: (id: string) => locks.get(id),
+      queueWaits: waits,
       now,
     });
-  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, app.reservedRoom, app.roomFit, app.roomSince, app.buildHolds, locks, work, now]);
+  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, app.reservedRoom, app.roomFit, app.roomSince, app.buildHolds, locks, waits, work, now]);
 }
 
 /**
