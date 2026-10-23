@@ -601,6 +601,28 @@ test("w1918: a free sandbox whose folder is gone (its drive reset) is made again
   assert.equal(fs.existsSync(dir), false);
 });
 
+test('w1915: a free sandbox whose folder came back empty (a worker started in it after the drive reset) is made again in that folder', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const { p } = pool(r);
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  r.git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+  // A folder with files in it is a sandbox: left alone.
+  await p.tick();
+  assert.equal(p.list()[0].status, 'ready');
+
+  // The drive was reset and the folder made again empty (LothLaptop's slot1: the worker's own directory).
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir);
+  await p.tick();
+  assert.equal(p.list()[0].status, 'creating');
+  await ready(p, 'sb1');
+  assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/sb1');
+});
+
 // ---------------------------------------------------------------- pure parts
 
 test('machine sandboxes: only a direct child of the root named after it can be deleted, never the main clone', () => {

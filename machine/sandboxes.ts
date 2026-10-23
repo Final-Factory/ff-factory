@@ -236,6 +236,9 @@ function nonEmpty(dir: string): boolean {
   }
 }
 
+/** A sandbox folder that is missing or empty (remakeGone, w1915). */
+const isGone = (dir: string) => !nonEmpty(dir);
+
 /** Whether two paths name the same folder: case-insensitive with either slash on Windows. Exported for tests. */
 export function samePath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
   const P = platform === 'win32' ? path.win32 : path.posix;
@@ -700,13 +703,15 @@ export class SandboxPool {
    * attached has no sandbox root, so nothing is remade then. The branch comes from the clone (a bare clone of origin has every
    * pushed branch), else origin's, else its base, else the clone's default branch: work never pushed went with the drive.
    * Once per sandbox per daemon run: a remake that fails shows the error, and delete_sandbox then create_sandbox takes over.
+   * An empty folder counts as gone (w1915: LothLaptop's slot1 came back as an empty folder, the worker's own directory, so
+   * nothing remade it); git makes a worktree in an empty folder.
    */
   private remakeGone() {
     const s = this.settings;
     if (!s || !fs.existsSync(s.root)) return;
     if (!fs.existsSync(path.join(this.o.repoPath, 'HEAD')) && !fs.existsSync(path.join(this.o.repoPath, '.git'))) return;
     for (const r of this.recs.values()) {
-      if (r.status !== 'ready' || this.busy.has(r.id) || this.remade.has(r.id) || fs.existsSync(r.path)) continue;
+      if (r.status !== 'ready' || this.busy.has(r.id) || this.remade.has(r.id) || !isGone(r.path)) continue;
       if (!deletable(r.path, r.id, s.root, this.o.repoPath)) continue;
       this.remade.add(r.id);
       const live = this.o.liveAgents?.(r.id) ?? 0;
