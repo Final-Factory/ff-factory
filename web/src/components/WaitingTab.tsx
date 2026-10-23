@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Ask } from '../../../shared/ask';
 import { answerMessage, answersText, cardMedia, cardQuestions, legacySteps, namesForPaths, plainQuestion } from '../../../shared/questionCard';
-import type { AppState, WorkItem } from '../../../shared/types';
+import { FLAG_LABEL, type AppState, type WorkItem } from '../../../shared/types';
 import { intakeRecommendation, waitAge, type WaitingItem } from '../../../shared/waiting';
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { api } from '../api';
@@ -161,7 +161,7 @@ function CardDetails({ app, item, now }: { app: AppState; item: WaitingItem; now
           <span className="dim">The dispatcher’s words:</span> <Markdown text={namesForPaths(w.question.text)} />
         </div>
       )}
-      {w.flag && <DetailLine label="Design question">{namesForPaths(w.flag.text)}</DetailLine>}
+      {w.flag && <DetailLine label={FLAG_LABEL[w.flag.kind]}>{namesForPaths(w.flag.text)}</DetailLine>}
       {r && r.prs.length > 0 && (
         <p className="small" data-testid={`wait-prs-${w.id}`}>
           <span className="dim">Pull requests:</span>{' '}

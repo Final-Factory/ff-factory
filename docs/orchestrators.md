@@ -1079,7 +1079,13 @@ closes as done, logging "merged as #N (sha) on date", when all of this holds:
   worker's last report that says more is coming; or an open question.
 - the last PR to merge does not say `Part of: <id>` (`partOfReason`, w424). A worker marks a PR that is only one step of
   its request that way (a fix the real work needs first); the request stays open ("#N is one step of it … more
-  follows") until a `Request:` PR of it merges, its worker reports `DONE: <id>`, or the follow-up below asks.
+  follows") until a `Request:` PR of it merges, its worker reports `DONE: <id>`, or the follow-up below asks;
+- **its latest worker's last turn did not end in an error or an interrupt, and its last report is a DONE for it** (w1870,
+  lothsahn: "Merged PRs are not enough on their own"; `notDoneReason`, `turnTroubleOf`, `server/ledgerRules.ts`). A
+  request no worker ever worked on (a person's own PR with a `Request:` line) needs neither. An errored turn is resumed or
+  escalated, an interrupted one placed again ([Ledger cleanup](#ledger-cleanup), "Never on an errored turn"); a report
+  without the DONE leaves the request open with the log line "not closed by the ledger cleanup (merged as #N …): its
+  latest worker …'s last report is not a DONE for wNNN", once per PR, and the follow-up below asks its worker.
 
 A worker's last report counts by its end, where workers write `<id>: still open: …` or `DONE: <id>`: `lastResult` keeps
 a long report's first 400 and last 800 characters (`reportClip`, `server/sessions.ts`). It used to keep only the first
@@ -1099,6 +1105,11 @@ while nothing told the ledger). `deployStep` (`server/ledgerRules.ts`) sets asid
 - machine updates: every connected machine's daemon runs a commit that contains it (its hello's `machine/VERSION`,
   `MachineManager.daemonVersions`). A daemon whose version is not a commit, or a portal whose commit is unknown, closes
   nothing.
+
+The deploy is no DONE either (w1870: w1829 closed this way at 15:39 on 2026-10-23, its worker's last turn an error, the
+demo it was asked for never run). When the deploy has happened and the worker's last report is not a DONE, the worker is
+resumed (`resumeAfterDeploy`, at most once a day: `WorkItem.followUp`): "the deploy you waited for has happened … check
+every done criterion of wNNN, finish what is left, and end with a line `DONE: wNNN`". Its DONE then closes the request.
 
 A sentence that names another step too (an audit, a 2-peer run, a nightly, a soak, a release's notes) is never set aside,
 and a request that waits on a question, or is a release, is not a deploy-only one. A step done by hand that leaves no
@@ -1126,19 +1137,22 @@ touched**, and nothing waiting for a person (an open question, an intake request
 stalled. Ben's requests are included. In this order, the first that fits applies:
 
 1. **Merged.** The pull-request rule above for every request, and the intake's merged-branch rule for intake requests.
-2. **Delivered.** A request whose worker's final report (`lastResult`, at least an hour old) states plainly that the work
+2. **Errored or interrupted.** Its latest worker's last turn ended in an error or was stopped on purpose mid-turn: below,
+   "Never on an errored turn". A usage limit or an app restart keeps its own rule: the worker is resumed once (a message,
+   recorded in `resumedBy`): a limit only when the account it ran on has room again (no plan meter at 90% or more;
+   unknown counts as no); a limit that has not reset, and a worker cut off again after its one resume, make the request
+   **stalled** with the reason (w363, w1076).
+3. **Delivered.** A request whose worker's final report (`lastResult`, at least an hour old) states plainly that the work
    is done ("All done", "is delivered", "nothing more to do", "fully merged to master, so I'm idle", "is fixed and merged into
    master", "nothing is open or pending") and says nothing is left, waiting or asked, with no open PR
-   and no step after the merge, closes as done with that report quoted. A release's report must also link the patch
+   and no step after the merge, **is not closed on those words** (w1870): its worker is asked once a day "Is wNNN done? …
+   reply with a line `DONE: wNNN`", and the DONE closes it. Only a report that carries the request's `DONE:` line (one the
+   ledger refused at the turn's end) closes here, with that report quoted. A release's report must also link the patch
    notes and say it is live. When the report is not clear, nothing closes. A stalled request is read the same way when its
    worker's report came after the stall (w631: a worker that went back to it and finished it left it stalled).
-3. **Cut off.** A worker that stopped on a usage or rate limit (also one whose turn simply ended with Claude's "You've hit
-   your session/weekly limit" as its whole result), an app restart (its turn was still open) or a refused tool
-   and never resumed. A limit or restart is resumed once (a message to the worker, recorded in `resumedBy`): a limit only
-   when the account it ran on has room again (no plan meter at 90% or more; unknown counts as no). A refused tool, a
-   limit that has not reset, and a worker cut off again after its one resume make the request **stalled** with the reason.
 4. **Merged, asked.** A request whose PRs all merged but which stays open for a step after the merge (rule 1's reason:
-   a check or audit its brief asks for, a release's notes, a plan of PRs, a worker saying more is coming), with no word
+   a check or audit its brief asks for, a release's notes, a plan of PRs, a worker saying more is coming, or, w1870, a
+   last report that is not a DONE), with no word
    about it for **6 hours** (a report from a worker still on it, the merge, or the last question) gets one message to its
    most recent worker: "Is wNNN done? Reply `DONE: wNNN`, or say what's left" (w419). At most one a day per request
    (`WorkItem.followUp`). Its reply's `DONE: wNNN` closes it (below); any other reply stays as its latest line. A worker
@@ -1152,6 +1166,44 @@ stalled. Ben's requests are included. In this order, the first that fits applies
 6. **Stalled.** A new, queued or active request with no running worker and no activity for 24 hours (its last update, and
    its workers' last activity) is stalled with the reason: no worker ever started, its last worker's own status line
    ("its worker said: "w12: still open: the portal deploy"", w631), or its last worker ended and its report is not clear.
+
+**Never on an errored turn, nor without its DONE** (w1870, lothsahn, 2026-10-23: "Please fix the closing job so it
+doesn't close out jobs with errors. Those should be resumed to fix the error or escalated to an operator if the error
+can't be fixed"). The cleanup closed w1829 (the bench-lock demo) at 15:39 because its PRs #548 and #556 had merged and the
+portal ran them, while its worker 17e0097f's last turn had ended in `error_during_execution` partway through the demo
+(`server/ledgerSweep.fixtures.ts` keeps the case). The CLI ends such a turn with the result `stopped: error_during_execution`,
+which replaced the worker's last report ("w1829: still open: …"), so nothing said more was left. Now no automatic close
+(the merged-PR close and its deploy close, a refused DONE re-checked once its PRs merge, a report that reads as delivered,
+the dispatcher's `decide_work done`) closes a request whose latest worker's last turn ended in trouble, or whose latest
+worker's last report is not a `DONE` for it. `turnTroubleOf` (`server/ledgerRules.ts`) reads how the turn ended:
+
+- **an interrupt**: the turn ended in an error result while the worker was stopped on purpose (`interrupt_agent`,
+  `stop_agent`, the UI: `SessionInfo.stoppedOnPurpose`, or a host session's `Interrupted.` line). It is no error: when the
+  request is queued or blocked the dispatcher is already placing it, and the log says so once ("not closed by the ledger
+  cleanup (w1870): worker 17e0097f: its turn was interrupted on purpose (error_during_execution); the request is queued:
+  the dispatcher places it again"); otherwise, ten minutes after the interrupt, the dispatcher is told `RE-PLACE (w1870)`
+  with the worker and its sandbox, and the log records it (`replaceStopped`, `server/orchestrators.ts`);
+- **an error**: an error result (`error_during_execution`, `error_max_turns`, …), a refused tool, a usage or rate limit,
+  an app restart, or a failed session (status `error`). Ten minutes after it (the dispatcher or the worker's own check-in
+  may be on it), the worker is **resumed** with the error, its last error lines and the request's done criteria (the
+  brief's "Done when", `doneCriteriaOf`), to fix it, finish and end with `DONE: wNNN`; a session that cannot be resumed
+  goes to the dispatcher for a fresh worker with the error. It is **escalated** instead (`troubleDecision`) when a resume
+  cannot fix it: the same error after a resume (`errorKey`: the error's kind and first words, numbers aside), a different
+  error after `ERROR_RESUMES` (2) resumes, a refused tool (it would be refused again), or an error only a person can clear:
+  a login ("Not logged in", "/login", an expired token), a permission (a GitHub token without `workflows`, "Resource not
+  accessible by personal access token") or a machine (offline, disk full), read in its last events and failed tools.
+
+An escalation (`Orchestrators.escalateError`) makes the request wait on input for its person and an operator (one of
+`intake.reviewers` already on the request, else the first; the owner when none is set): a flag of kind `error`
+(`WorkItem.flag`, shown as "Error escalated by the ledger cleanup" on the Requests and Waiting tabs) and a `[needs you]`
+to both, saying what failed, the last error lines, what was tried and the one step needed. A note from either answers it
+like any question and goes to the worker. Each turn is handled once (`WorkItem.errorHandled`: per worker, the turn's end,
+what was done, the error, the resumes so far); each pass's line to the person names what was resumed, escalated or sent
+to be placed again (`ledger cleanup: <resumed|escalated|replaced> <id>` in the server log). A report that is not a DONE
+leaves the request open and its worker is asked (the follow-up, rule 4, and `askStatus` below). The dispatcher's
+`decide_work done` is refused with the reason while either holds; a person's own close (`update_work close`) is never
+held. The first pass after the deploy that shipped this logs, once, every request an automatic close closed in the 24
+hours before and what the cleanup would do with it now (`ledger cleanup: w1870 check: …`), changing nothing.
 
 **`DONE: wNNN`, the worker's word that a request is finished** (w419, asked by Lothsahn after w342 stayed open with its
 work done). Every worker brief for a request ends with the rule (`doneRule`, `server/work.ts`): when every step of a
@@ -1210,7 +1262,7 @@ reopen is the one that counts:
 - **PR rule** (`prsOf`, `server/ledgerRules.ts`): a PR created before `reopenedAt` is never the request's, whatever its
   `Request:` line says and whoever opened it, so it neither links, nor closes it, nor keeps it open. Only a PR created after
   the reopen that has merged closes it (and the usual after-the-merge rules apply to it).
-- **Delivered** (rule 2): the worker's report must come after the reopen (its `lastActivityAt`).
+- **Delivered** (rule 3): the worker's report must come after the reopen (its `lastActivityAt`).
 - **The intake's merged rules** (`mergedBy`, `linkedDone`, `server/mergedIntake.ts`): a merge or a linked done request from
   before the reopen is not evidence, and the branch already being in the base (`branchInBase`) is skipped.
 
@@ -1296,10 +1348,10 @@ person closes it (`update_work close`), or reopens it, or writes a note on it, w
 whose PRs later merge is closed by rule 1.
 
 Each action is logged on its request. Each person's orchestrator gets one `[ledger cleanup]` line per pass listing what
-closed, resumed, was asked about and stalled for them, and nothing when nothing changed. The first pass also lists the requests with a
+closed, resumed, escalated, sent to be placed again, was asked about and stalled for them, and nothing when nothing changed. The first pass also lists the requests with a
 merged PR that stayed open and why. The Requests tab shows when it last ran and what it did. Limits of the rules, all
-fixed code and no model: a worker's report is read by patterns, so an unclear one never closes anything, it only stalls
-the request after a day; a PR is linked only by the ways above, so an old request whose PRs carry no `Request:` line and
+fixed code and no model: a worker's report is read by patterns, and since w1870 only its `DONE:` line closes anything, an
+unclear one only stalls the request after a day; a PR is linked only by the ways above, so an old request whose PRs carry no `Request:` line and
 whose worker's branch has since moved on is not linked.
 
 ## People to people

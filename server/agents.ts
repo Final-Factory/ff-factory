@@ -48,7 +48,7 @@ import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLin
 import { MachinePauses, pauseHolds } from './machinePause.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
-import { WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
+import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
@@ -5164,7 +5164,7 @@ function intakeLines(w: WorkItem): string {
     w.triage ? `${decided ? 'Triage at filing' : 'Triage'}: ${w.triage.class} (${w.triage.reason})` : '',
     w.approval ? `Approval: ${w.approval.state}${approvedBy}${w.approval.why && w.approval.why !== w.triage?.reason ? ` (${w.approval.why})` : ''}` : '',
     w.autoClosed ? `Closed automatically: ${w.autoClosed.text}` : '',
-    w.flag ? `Design question for ${names(w.flag.for)}: ${w.flag.text}` : '',
+    w.flag ? `${FLAG_LABEL[w.flag.kind]} for ${names(w.flag.for)}: ${w.flag.text}` : '',
     delivery ? `Delivery: ${delivery}` : '',
     w.ffbox ? `FFBox: ${w.ffbox.state} (${w.ffbox.class}, request ${w.ffbox.requestId}${w.ffbox.conversation ? `, conversation ${w.ffbox.conversation}` : ''}${w.ffbox.branch ? `, branch ${w.ffbox.branch}` : ''}${w.ffbox.reason ? `, ${w.ffbox.reason}` : ''})` : '',
   ]
