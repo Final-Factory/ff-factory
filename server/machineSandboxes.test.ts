@@ -249,6 +249,49 @@ test('w1615: an editor start takes a shared bench ticket after its slot: queued 
   assert.equal(running.has(path.join(r.sbRoot, 'b')), false, 'a cancelled start never runs');
 });
 
+test('w1829: an editor closed for a timed run says why, keeps its mark across a daemon restart, starts again through the bench queue when the turn ends, and its worker hears it once', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const tickets: ReturnType<typeof fakeTicket>[] = [];
+  const bootTicket = () => {
+    const k = fakeTicket();
+    k.kind = 'granted';
+    tickets.push(k);
+    return { ticket: k as unknown as BenchTicket };
+  };
+  const { p, running } = pool(r, { bootTicket });
+  t.after(() => tickets.forEach((k) => k.release()));
+  await p.create({ id: 'a', branch: 'sandbox/a', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'a');
+  await p.unity('a', 'start');
+  await p.tick();
+  assert.equal(p.list()[0].unity.state, 'running');
+  const by = 'a timed run on lothdesktop/slot3 (w1785)';
+  // The close itself is the editor's own save and quit (machine/liveIdle.ts); here it quits the stand-in.
+  const res = await p.benchClose('a', by, `closed for ${by}; reopens when it ends (by 10:00Z at the latest)`, async () => {
+    running.clear();
+    return { closed: true, saved: ['Assets/Scenes/Look.unity'], text: 'closed (saved Assets/Scenes/Look.unity and the assets first)' };
+  });
+  assert.equal(res.closed, true);
+  assert.deepEqual(p.benchClosedList().map((c) => c.id), ['a']);
+  await p.tick();
+  const sb = p.list()[0];
+  assert.equal(sb.unity.state, 'stopped');
+  assert.match(sb.unity.detail ?? '', /^closed for a timed run on lothdesktop\/slot3 \(w1785\); reopens when it ends/, 'the panel and list_sandboxes say why, after a look too');
+  // A daemon restart: the mark is in sandboxes.json, so the next look without a turn reopens it.
+  const again = pool(r, { bootTicket });
+  assert.deepEqual(again.p.benchClosedList().map((c) => c.id), ['a']);
+  const said = await p.benchReopen('a');
+  assert.match(said, /Started \(fake\)/);
+  assert.equal(running.size, 1, 'started again');
+  assert.equal(tickets.length, 2, 'through a shared bench ticket, like any start');
+  assert.deepEqual(p.benchClosedList(), []);
+  const note = p.takeBenchNote('a');
+  assert.match(note ?? '', /^\[bench turn\] Your sandbox's Unity editor was closed at \d\d:\d\dZ for a timed run on lothdesktop\/slot3 \(w1785\).* It saved Assets\/Scenes\/Look\.unity first/);
+  assert.equal(p.takeBenchNote('a'), undefined, 'once');
+  assert.match(await p.benchReopen('a'), /^not closed$/);
+});
+
 test('w1615: a queued editor start whose slot is gone at its turn is not made, its ticket let go, and the worker told', async (t) => {
   const r = repos();
   t.after(r.cleanup);

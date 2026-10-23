@@ -60,7 +60,8 @@ import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from 
 import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
-import { readBenchLock, readBenchQueue, writeBenchPriorities } from './benchLock.ts';
+import { readBenchLock, readBenchQueue, timedHolder, writeBenchPriorities } from './benchLock.ts';
+import { askPlayerToQuit, BenchTurn, closedDetail, writeClosedFile } from './benchTurn.ts';
 import { benchTicketFor } from './benchQueue.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import { PauseKeeper, pauseFile } from './pause.ts';
@@ -340,6 +341,10 @@ export class Daemon {
   readonly reaper: UnityReaper;
   /** Ends what a stopped worker left running: game players, Xvfb, builds, servers (machine/leftovers.ts, w1196, w1197). */
   readonly leftovers: LeftoverReaper;
+  /** Closes the other editors and players while another worker's timed run holds the bench lock (machine/benchTurn.ts, w1829). */
+  readonly benchTurn: BenchTurn;
+  /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
+  private readonly benchPlayerNotes = new Map<string, string>();
   /** The pending wake_me check-ins of this machine's sessions (ms), as the portal last said (welcome, `resumable`; w1196). */
   private wakes = new Map<string, number>();
   /** The machine's gh login and its token's scopes, names only (w1463, machine/ghLogin.ts); none when the probes have no gh. */
@@ -497,6 +502,20 @@ export class Daemon {
       onEvent: (text) => this.send({ type: 'sandbox_event', text: `Leftover processes: ${text}` }),
       afterKill: () => this.slots.tick(),
       ...leftoverDeps,
+    });
+    this.benchTurn = new BenchTurn({
+      holder: () => timedHolder(cfg.root),
+      editors: () => this.pool.list().filter((sb) => sb.status === 'ready').map((sb) => ({ id: sb.id, running: sb.unity.state === 'running', ...(sb.unity.pid ? { pid: sb.unity.pid } : {}) })),
+      closed: () => this.pool.benchClosedList(),
+      players: () => this.leftovers.report().players,
+      procs: real ? () => pd.procs() : async () => [],
+      closeEditor: (id, by) => this.benchCloseEditor(id, by),
+      reopenEditor: (id) => this.pool.benchReopen(id),
+      closePlayer: (pid) => askPlayerToQuit(pid, platform),
+      notePlayer: (session, text) => this.benchPlayerNotes.set(session, text),
+      writeClosed: (marks) => cfg.root && writeClosedFile(cfg.root, marks, log),
+      log: (line) => log(line),
+      now: () => Date.now(),
     });
     this.pool = new SandboxPool(
       {
@@ -919,6 +938,8 @@ export class Daemon {
       log(`github apps: could not write the gh shim: ${(e as Error).message}`);
     }
     this.timers.push(setInterval(() => void this.slotTick(), 5_000));
+    // w1829: another worker's timed run holds the bench lock: the other editors and players close, and come back after.
+    this.timers.push(setInterval(() => void this.benchTurn.tick(), 5_000));
     void this.slotTick();
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
     this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
@@ -1478,6 +1499,42 @@ export class Daemon {
   /** Sandboxes whose editor is being closed idle now. */
   private readonly idleClosing = new Set<string>();
 
+  /** The bridge that runs C# in a sandbox's editor (the Live view's, else its MCP bridge's port). */
+  private editorBridge(id: string, sbPath: string) {
+    return (
+      this.liveDeps?.(id)?.bridge ??
+      (async (code: string, o?: { safetyChecks?: boolean }) => {
+        const port = bridgeInfo(sbPath).port;
+        return port ? bridgeExecute(port, code, 60_000, '127.0.0.1', o?.safetyChecks ?? true) : 'no MCP bridge for this editor';
+      })
+    );
+  }
+
+  /**
+   * w1829: close a sandbox's editor for another worker's timed run, the way an idle one closes (machine/liveIdle.ts): out of
+   * play mode at once (the timed run cannot wait for a person), scenes and assets saved through the editor, then quit;
+   * skipped while it compiles or imports, or has an untitled dirty scene, and never killed.
+   */
+  private async benchCloseEditor(id: string, by: string) {
+    const sbPath = this.pool.pathOf(id);
+    if (!sbPath) return { closed: false, text: 'skipped: no such sandbox' };
+    if (this.idleClosing.has(id)) return { closed: false, text: 'skipped: it is being closed already' };
+    this.idleClosing.add(id);
+    try {
+      const until = timedHolder(this.cfg.root)?.until;
+      const res = await this.pool.benchClose(id, by, closedDetail(by, until), () =>
+        idleCloseEditor(
+          { bridge: this.editorBridge(id, sbPath), editorPids: () => this.pool.editorPids(id), personInputAgoMs: () => undefined, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now() },
+          0,
+        ),
+      );
+      if (res.closed) this.send({ type: 'sandbox_event', sandbox: id, text: `Editor closed for ${by} (w1829); it reopens when that run ends (${res.text})` });
+      return res;
+    } finally {
+      this.idleClosing.delete(id);
+    }
+  }
+
   /**
    * The portal found the sandbox's Live view idle (server/liveIdle.ts): save and quit its editor through the editor, or say
    * why not (machine/liveIdle.ts). The view keeps running and holds, saying the editor is closed until the next turn.
@@ -1489,10 +1546,7 @@ export class Daemon {
     if (this.idleClosing.has(id)) return 'skipped: it is being closed already';
     this.idleClosing.add(id);
     try {
-      const bridge = this.liveDeps?.(id)?.bridge ?? (async (code: string, o?: { safetyChecks?: boolean }) => {
-        const port = bridgeInfo(sbPath).port;
-        return port ? bridgeExecute(port, code, 60_000, '127.0.0.1', o?.safetyChecks ?? true) : 'no MCP bridge for this editor';
-      });
+      const bridge = this.editorBridge(id, sbPath);
       const res = await this.pool.idleClose(id, minutes, () =>
         idleCloseEditor(
           {
@@ -2132,8 +2186,12 @@ export class Daemon {
             if (!e.s.live) prepare(msg.spec, this.cfg.tempDir);
             // w1746: its sandbox's editor was closed while its Live view sat idle: it starts again with this turn.
             const reopened = this.reopenIdle(msg.spec.sandbox, id);
+            // w1829: a timed run's turn closed its editor or asked its player to quit: said once, with the next message.
+            const bench = [this.pool.takeBenchNote(msg.spec.sandbox), this.benchPlayerNotes.get(id)];
+            this.benchPlayerNotes.delete(id);
             const text = this.withLiveNotes(id, msg.text);
-            e.s.send(reopened ? `${reopened}\n\n${text}` : text, msg.from, msg.uuid, msg.images, msg.requestedBy, attachments);
+            const notes = [reopened, ...bench].filter(Boolean).join('\n\n');
+            e.s.send(notes ? `${notes}\n\n${text}` : text, msg.from, msg.uuid, msg.images, msg.requestedBy, attachments);
           } catch (err) {
             this.out({ type: 'failed', sessionId: id, error: (err as Error).message });
           }

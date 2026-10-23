@@ -44,6 +44,10 @@ interface Rec {
   logPath?: string;
   /** Its editor was closed because its Live view sat idle (w1746); kept across daemon restarts so the next turn reopens it. */
   idleClosed?: MachineSandboxIdleClosed;
+  /** Its editor was closed for another worker's timed run (w1829, machine/benchTurn.ts); kept so a restart reopens it. */
+  benchClosed?: { at: string; by: string; saved?: string[] };
+  /** What its next worker message hears about that close, once the editor starts again (w1829). */
+  benchNote?: string;
 }
 
 /** The editor side of one sandbox: its MacUnity and hang/crash watch (a fake in tests). */
@@ -406,6 +410,53 @@ export class SandboxPool {
     this.unityState.set(id, { state: 'stopped', detail: `closed: Live view idle ${minutes} min; reopens on resume`, logPath: this.unityState.get(id)?.logPath });
     this.changed(r, { idleClosed: { at: new Date(this.d.now()).toISOString(), minutes, ...(res.saved.length ? { saved: res.saved } : {}) } });
     return res;
+  }
+
+  /**
+   * Close a sandbox's running editor for another worker's timed run (w1829, machine/benchTurn.ts): `close` saves and quits
+   * it through the editor (machine/liveIdle.ts idleCloseEditor). Closed: the sandbox is marked, the panel and list_sandboxes
+   * say why, and the turn's end starts it again. The crash watch is told first, so the quit is not restarted.
+   */
+  async benchClose(id: string, by: string, detail: string, close: () => Promise<IdleCloseResult>): Promise<IdleCloseResult> {
+    const r = this.require(id);
+    if (r.status !== 'ready') return { closed: false, saved: [], text: `skipped: the sandbox is ${r.status}` };
+    if (this.unityState.get(id)?.state !== 'running' || this.queuedBoots.has(id)) return { closed: false, saved: [], text: 'skipped: its editor is not up and running' };
+    const pids = await this.editorPids(id);
+    this.editorFor(r).watch?.expectExit(10 * 60_000);
+    const res = await close();
+    if (!res.closed) return res;
+    this.idleClosedPids.set(id, pids);
+    this.unityState.set(id, { state: 'stopped', detail, logPath: this.unityState.get(id)?.logPath });
+    this.changed(r, { benchClosed: { at: new Date(this.d.now()).toISOString(), by, ...(res.saved.length ? { saved: res.saved } : {}) } });
+    return res;
+  }
+
+  /** The sandboxes a timed run's turn closed that are not open again yet (w1829), and when. */
+  benchClosedList(): { id: string; at: number }[] {
+    return [...this.recs.values()].filter((r) => r.benchClosed).map((r) => ({ id: r.id, at: Date.parse(r.benchClosed!.at) }));
+  }
+
+  /**
+   * The turn that closed it ended (w1829): start its editor again (a shared ticket: it comes back in the next shared turn,
+   * or queues), then clear the mark and keep the note its worker's next message starts with. Throws when it cannot start.
+   */
+  async benchReopen(id: string): Promise<string> {
+    const r = this.require(id);
+    const c = r.benchClosed;
+    if (!c) return 'not closed';
+    const text = await this.unity(id, 'start');
+    const saved = c.saved?.length ? ` It saved ${c.saved.join(', ')} first (check git status).` : '';
+    this.idleClosedPids.delete(id);
+    this.changed(r, { benchClosed: undefined, benchNote: `[bench turn] Your sandbox's Unity editor was closed at ${c.at.slice(11, 16)}Z for ${c.by} (w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine).${saved} Anything in play mode then is gone. It is starting again now (${text.slice(0, 200)}); mcp__machine__unity status says when it is up.` });
+    return text;
+  }
+
+  /** The note about a timed run's close for the next message to a worker in this sandbox, once (w1829). */
+  takeBenchNote(id: string | undefined): string | undefined {
+    const r = id ? this.recs.get(id) : undefined;
+    const n = r?.benchNote;
+    if (r && n) this.changed(r, { benchNote: undefined });
+    return n;
   }
 
   /** Its Live view ended while its editor was closed idle (w1746): nothing is to reopen for it any more. */
@@ -1067,9 +1118,14 @@ export class SandboxPool {
       if (!pid && this.queuedBoots.has(r.id)) continue; // its state says where it is in the queue
       // w1746: an editor closed idle that runs again (started by hand, or adopted) is no longer closed.
       if (pid && r.idleClosed && !this.idleClosedPids.get(r.id)?.includes(pid)) this.clearIdleClosed(r);
+      // w1829: likewise an editor a timed run's turn closed (a later turn closes it again if it is still on).
+      if (pid && r.benchClosed && !this.idleClosedPids.get(r.id)?.includes(pid)) {
+        this.idleClosedPids.delete(r.id);
+        this.changed(r, { benchClosed: undefined });
+      }
       let next: MachineSandboxUnity & { startedAt?: number };
       if (pid) next = { ...prev, pid, state: this.d.bridgeUp(r.path) ? 'running' : 'starting', detail: this.d.bridgeUp(r.path) ? 'MCP bridge up' : (prev.detail ?? 'loading'), startedAt: prev.startedAt ?? now };
-      else next = { state: prev.state === 'crashed' ? 'crashed' : 'stopped', detail: prev.state === 'crashed' ? prev.detail : undefined, logPath: prev.logPath };
+      else next = { state: prev.state === 'crashed' ? 'crashed' : 'stopped', detail: prev.state === 'crashed' ? prev.detail : r.benchClosed ? `closed for ${r.benchClosed.by}; reopens when it ends` : undefined, logPath: prev.logPath };
       if (JSON.stringify(next) !== JSON.stringify(prev)) {
         this.unityState.set(r.id, next);
         dirty = true;
