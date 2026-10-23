@@ -30,6 +30,16 @@ test('w1870: turnTroubleOf tells an interrupt from an error, and an error a pers
   // A turn that ended with a report, and a worker stopped on purpose after a normal turn, are no trouble.
   assert.equal(turnTroubleOf(s({ lastResult: 'w1: still open: blocked on CI' }), []), undefined);
   assert.equal(turnTroubleOf(s({ status: 'stopped', stoppedOnPurpose: true, lastResult: 'Merged.\nDONE: w1' }), []), undefined);
+  // The live check after the deploy (2026-10-23 17:34Z): w1867's worker had stopped after a finished report that said
+  // "refused" in its own words, and was read as a refused tool to escalate. A report's words are no cut-off.
+  const w1867 = "**Lesson, merged:** after GitHub's 502, `ff-pr merge` reported #562 as refused, though GitHub had merged it.\nDONE: w1867";
+  assert.equal(turnTroubleOf(s({ status: 'stopped', lastResult: w1867 }), [w1867]), undefined);
+  assert.equal(turnTroubleOf(s({ status: 'stopped', lastResult: 'Hit the usage limit twice today, then merged.\nDONE: w1' }), []), undefined);
+  // But a turn still open when the session stopped (an app restart) is, whatever the last report said.
+  assert.equal((turnTroubleOf(s({ status: 'stopped', turnOpenSince: at(20), lastResult: 'w1: still open' }), []) as Extract<TurnTrouble, { kind: 'error' }>).cause, 'restart');
+  // w1733's worker ended on the API's own error line: an errored turn, resumed, not asked whether it is done.
+  const w1733 = turnTroubleOf(s({ lastResult: "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)" }), []) as Extract<TurnTrouble, { kind: 'error' }>;
+  assert.deepEqual([w1733.kind, w1733.cause, w1733.reason], ['error', 'error', "its last turn ended in an API error: API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"]);
 });
 
 test('w1870: troubleDecision resumes an error, escalates the same error after a resume, a refusal or a person-only error, and re-places an interrupt', () => {

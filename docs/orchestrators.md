@@ -1222,6 +1222,10 @@ worker's last report is not a `DONE` for it. `turnTroubleOf` (`server/ledgerRule
   error after `ERROR_RESUMES` (2) resumes, a refused tool (it would be refused again), or an error only a person can clear:
   a login ("Not logged in", "/login", an expired token), a permission (a GitHub token without `workflows`, "Resource not
   accessible by personal access token") or a machine (offline, disk full), read in its last events and failed tools.
+  A result that is the API's own error line ("API Error: Can't reach the API server", w1733) is an error result too.
+  A turn that ended with a report, with no turn open since, is never one, whatever the report says: its own "refused" or
+  "limit" is not a refused tool or a cut-off (the live check after the deploy read w1867's "`ff-pr merge` reported #562
+  as refused" as a refused tool; `ledgerErrors.test.ts` keeps both cases).
 
 An escalation (`Orchestrators.escalateError`) makes the request wait on input for its person and an operator (one of
 `intake.reviewers` already on the request, else the first; the owner when none is set): a flag of kind `error`
