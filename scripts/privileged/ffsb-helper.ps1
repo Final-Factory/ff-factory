@@ -11,8 +11,13 @@
 #   -WorkerRoot    <root>: its sandboxes\ and seed\ junctions, its repo\ (git worktree repair), daemon\sandboxes.json.
 #                  A root on the drive itself (w1070, V:\ffw) moves with the letter, and so does -DaemonConfig.
 #   -Skip          letters never to use
+#
+# grow (w1918) makes the VHDX's maximum the state file's wantGB, which the daemon writes: only larger (ReFS cannot shrink), at
+# most the size of the volume that holds the VHDX, never while an editor uses the drive. The daemon starts it only when no
+# agent or editor is in a sandbox; the drive is detached for it (diskpart expand vdisk needs that), then reattached and its
+# partition extended (ReFS grows online).
 param(
-  [Parameter(Mandatory)][ValidateSet('mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile', 'grow')][string]$Action,
   [Parameter(Mandatory)][string]$Vhdx,
   [Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')][string]$Letter,
   [Parameter(Mandatory)][string]$ResultDir,
@@ -104,6 +109,42 @@ try {
       $msg = "{0}: {1:N1} GB -> {2:N1} GB (reclaimed {3:N1} GB), {4}: reattached" -f $how, ($before / 1GB), ($after / 1GB), $freed, $Letter
       if ($freed -lt 1) { Done $false "compaction reclaimed nothing: $msg" }
       Done $true $msg
+    }
+    'grow' {
+      if (-not $StateFile -or -not (Test-Path -LiteralPath $StateFile)) { Done $false 'no state file (devdrive.json) says what size is wanted' }
+      $st = Get-Content -Raw -LiteralPath $StateFile | ConvertFrom-Json
+      if ($null -eq $st.wantGB) { Done $true 'devdrive.json wants no other size' }
+      $want = 0
+      if (-not [int]::TryParse("$($st.wantGB)", [ref]$want) -or $want -lt 1) { Done $false "devdrive.json's wantGB is not a whole number of GB: '$($st.wantGB)'" }
+      $have = [int][math]::Round((Get-DiskImage -ImagePath $Vhdx).Size / 1GB)
+      if ($want -le $have) { Done $true "the VHDX's maximum is already $have GB (wanted $want GB); it never shrinks" }
+      # At most the volume that holds the VHDX (an expandable VHDX takes room as it fills; the host guard watches that).
+      $hostGB = 2048
+      try { $hostGB = [int][math]::Floor((Get-Volume -DriveLetter (Split-Path -Qualifier $Vhdx).TrimEnd(':')).Size / 1GB) } catch { }
+      if ($want -gt $hostGB) { Done $false "refused: $want GB is more than the $hostGB GB volume that holds $Vhdx" }
+      $users = Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" | Where-Object { $_.CommandLine -match "(?i)$($Letter):[\\/]" }
+      if ($users) { Done $false "refused: $(@($users).Count) Unity editor(s) use $($Letter): (stop them first)" }
+      if ($Flex) { $own = Get-OwnLetter; if ($own) { $script:Letter = $own } }
+      if (Drive) { Write-VolumeCache -DriveLetter $Letter -ErrorAction SilentlyContinue }
+      if ((Get-DiskImage -ImagePath $Vhdx).Attached) { Dismount-DiskImage -ImagePath $Vhdx | Out-Null }
+      $out = ''
+      try {
+        $out = Run-Diskpart @("select vdisk file=`"$Vhdx`"", "expand vdisk maximum=$($want * 1024)")
+        Log "diskpart expand vdisk maximum=$($want * 1024): $out"
+      } finally {
+        Mount-DevDrive
+      }
+      $now = [int][math]::Round((Get-DiskImage -ImagePath $Vhdx).Size / 1GB)
+      if ($now -lt $want) { Done $false "the VHDX is still $now GB after diskpart expand vdisk ($out); $($Letter): is attached again" }
+      $part = Get-Partition -DriveLetter $Letter
+      $before = $part.Size
+      $max = (Get-PartitionSupportedSize -DriveLetter $Letter).SizeMax
+      if ($max -gt $before + 64MB) { Resize-Partition -DriveLetter $Letter -Size $max }
+      $after = (Get-Partition -DriveLetter $Letter).Size
+      $st.PSObject.Properties.Remove('wantGB')
+      $st | Add-Member -NotePropertyName maxGB -NotePropertyValue $want -Force
+      [IO.File]::WriteAllText($StateFile, ($st | ConvertTo-Json -Depth 8))
+      Done $true ("grew {0}: from {1} to {2} GB (its volume {3:N1} -> {4:N1} GB); devdrive.json says {2} GB" -f $Letter, $have, $want, ($before / 1GB), ($after / 1GB))
     }
     'detach' {
       # For the recovery self-test (host_recovery "selftest"): the drive goes away as it did on 2026-09-24, and the
