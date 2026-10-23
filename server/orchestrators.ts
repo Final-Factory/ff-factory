@@ -262,6 +262,10 @@ export interface IntakeFiling {
   limit?: () => string | undefined;
   /** Placement and other limits for the dispatcher (WorkItem.constraints): the nightly run's machine (w864). */
   constraints?: string;
+  /** An owner's own word in a bug thread (w1783, server/bugThreads.ts): a person's request, so no automated-source cap. */
+  uncapped?: boolean;
+  /** Who approved it, when `approved` (w1783: the owner whose reply in the thread is the approval); else "auto". */
+  approvedBy?: Requester;
 }
 
 /**
@@ -3273,7 +3277,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       this.store.putWork(repeat);
       return { item: repeat, repeat: true };
     }
-    const skipped = f.limit?.() ?? this.intakeCap(now.getTime(), f.source.kind);
+    const skipped = f.limit?.() ?? (f.uncapped ? undefined : this.intakeCap(now.getTime(), f.source.kind));
     if (skipped) return { skipped };
     const title = f.title.replace(/\s+/g, ' ').trim().slice(0, 120);
     const fromText = (f.source.untrusted ? textKeys(title) : textKeys(`${title}\n${f.brief}`, this.knownBranches())).filter((k) => !/^(work|session|delegation|pr|branch|discord|ffbox|release|nightly):/.test(k));
@@ -3346,7 +3350,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
             // The desync PR policy's daily count is its own, apart from the source's auto-approve (w358).
             (x) => (x.triage?.class === 'ffbox-desync') === (f.triage.class === 'ffbox-desync'),
           );
-    w.approval = why ? { state: 'pending', why } : { state: 'approved', by: 'auto', at: now.toISOString() };
+    w.approval = why ? { state: 'pending', why } : { state: 'approved', by: f.approved && f.approvedBy ? asRequester(f.approvedBy) : 'auto', at: now.toISOString() };
     this.stamp(w, `filed by the intake (${sourceTag(w)})${why ? `; waits for a person: ${why}` : ''}`);
     this.store.putWork(w);
     this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));

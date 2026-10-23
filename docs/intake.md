@@ -12,8 +12,11 @@ threads by default, and the ledger check both ways (provider protocol 2) is buil
   people** (Ben, Lothsahn, identified by Discord author id), and, later, **FFBox's fix branches and requests**. Work
   started from the dashboard, over `/mcp` or for a standing agent's delegation is recorded in it too.
 - **#bug-reports and dev_bug_reports belong to FFBox** (Lothsahn, 2026-09-30): its harness answers their threads and
-  reports a merged fix there. The intake never files work from them, whatever config.json says, and no worker posts in
-  or closes their threads; a worker that fixes one adds `Discord: <thread url>` to its PR ([below](#ffbox-owns-bug-reports)).
+  reports a merged fix there. The intake never files a player's new thread from them, whatever config.json says, and no
+  worker posts in or closes their threads; a worker that fixes one adds `Discord: <thread url>` to its PR
+  ([below](#ffbox-owns-bug-reports)). Since w1783 **every thread there has an owner**: an owner's reply that acknowledges
+  the bug files their own approved request, and an hourly check files each thread nothing owns for a reviewer, both
+  read-only ([below](#every-bug-thread-has-an-owner)).
 - **Players do not steer the game** (Lothsahn's rule). Fixed code classifies each report: an **obvious bug** (a clear
   defect, a game version, no design ask) may be worked without a person when auto-approve is on. Everything else
   **needs a human**: it waits, visible in `list_work` and the Intake tab, until a reviewer (Ben or Lothsahn) approves
@@ -52,7 +55,9 @@ been fixed' comments, and the FFBox harness is designed to see merged PRs and re
 
 - **Never an intake source.** `FFBOX_OWNED_CHANNELS` (`server/intakeRules.ts`) is dropped from `bugChannels` and
   `requestChannels` whatever config.json says, and a channel configured by id is skipped when its id is one of them
-  (`pollDiscord`). The Intake tab says so. The read-only Max panel (docs/max.md) still shows them, as context.
+  (`pollDiscord`). The Intake tab says so. The read-only Max panel (docs/max.md) still shows them, as context. The two
+  routes of [Every bug thread has an owner](#every-bug-thread-has-an-owner) (w1783) are apart from this poll: an owner's
+  own word, and a reviewer's card for a thread nothing owns; neither posts there.
 - **Workers read, never write there.** They may read a thread and download its files; the ffdiscord CLI refuses to post,
   reply, react, edit, rename or close in those channels and their threads (the ff-discord plugin, final-factory-agents).
   An intake request already filed from one gets worker rules that say so (`workerRules`), and no release follow-up
@@ -67,6 +72,73 @@ been fixed' comments, and the FFBox harness is designed to see merged PRs and re
   so its merge watcher announces that PR's merge on the thread; a request already done gets FFBox's merged notice with
   the release version. A worker whose fix lands on master is covered by the answer FF Factory pushes when the
   request turns done.
+
+## Every bug thread has an owner
+
+Ben corrected the same miss twice on 2026-10-22 (w1783): "I asked you to go through the bug reports and look at them and
+make sure you file a report for each of them or spawn a worker or whatever. Clearly you didn't do that" (a sweep had
+been scoped from thread titles an orchestrator picked), and "when I respond to a Discord thread and say, we'll fix, that
+means you're fixing it" (two threads had his "Will fix" and no request). Then: "it doesn't have to literally say, will
+fix. Like, any indication that I'm acknowledging it as a bug is sufficient. Like, you're supposed to be intelligent."
+So the server guarantees it, not an orchestrator's memory or timer: `BugThreadWatch` (`server/bugThreads.ts`), started in
+`server/index.ts`, on by default (`intake.bugThreads`, below), every `pollMinutes` (5). It reads #bug-reports and
+dev_bug_reports with Max's token, read-only (`max.ts` `activeThreads`, `archivedThreads`, `messagesAfter`), and posts,
+reacts and closes nothing: FFBox still owns those channels. These are its two routes from them into the ledger.
+
+**An owner's acknowledgement is a filed request.** Every new message in a thread of the window from an owner files
+nothing until a model has read it. Who an owner is comes from the author id Discord authenticates, never from what a
+message says: ben and lothsahn (and `intake.reviewers`) wherever `intake.discord.trusted` or the portal host's ffbox
+config `operators` block names their Discord id, plus `intake.bugThreads.owners`. The judge (`sdkJudge`: one tool-less
+Agent SDK turn, `judgeModel` default Haiku, on that owner's own vault pool) answers whether the message acknowledges
+the report as a real bug, in any words: "yeah that's a bug", "good catch", "oops", "thanks, looking into it",
+"confirmed", "I broke this in the last patch", a promise to fix. A question back to the reporter, "works as designed", "a
+feature request", "already fixed in 1.0.0.4" and chatter are not. The thread's text reaches the judge fenced as players'
+text; only the owner's message decides. What a yes becomes:
+
+| the thread already has | outcome |
+|---|---|
+| an open, approved request (its source, a thread merged into it, its `subjects` or listed `scope.threads`) | nothing filed and nothing judged: a second reply never duplicates it (`owned`) |
+| a request that is done | nothing filed (`owned`) |
+| a request waiting for a reviewer (one the coverage check filed) | approved in the owner's name (`approved`) |
+| nothing, but the ledger check's high band matches an open request by meaning | the thread joins it as a subject (`joined`) |
+| nothing | filed at once as the owner's own request, approved by that owner (`approval.by`), triage `person`, source `discord-bug` with the thread, so the worker gets the FFBox-owned channel's rules (`filed`) |
+
+The filing is the owner's own, so the automated-source cap does not apply (`IntakeFiling.uncapped`). An owner message
+older than `ackLookbackHours` (48) is not read on the first look at a thread; a judge that fails (the pool used up, the
+CLI down) leaves the cursor before that message, which is read again next pass. The last 200 outcomes, with the
+judge's reason, are in `<dataDir>/bug-threads.json` and the journal (`bug threads: Ben in thread … : filed w…`).
+
+**The coverage check files every thread nothing owns.** Every `coverage.everyMinutes` (60), every thread created or
+active in the last `windowDays` (7), active or archived, is checked against three owners: a request that names the
+thread (as above; any status but merged), a game-repo pull request, open or merged, whose description has its
+`Discord:` line (`gh pr list --search`, 45 days back), and an FFBox conversation on it with a PR open or merged. A broad
+request's window ("every thread since Oct 15") owns no thread it does not list: a sweep that picked titles is how the
+first miss happened. Each unowned thread is filed once through the intake for the system payer, `needs-human`, so it
+waits on the Waiting on input tab for a reviewer to approve (a fix) or decline with why (not a bug, a feature request,
+already fixed); the reason names what `classifyBug` reads it as. A thread the check filed counts as owned from then on,
+and an owner's acknowledgement there approves it. At most `coverage.perDay` (15) a day, inside `workLimits.intake`; with
+the game repo's PRs unreadable it files nothing that pass. Each pass logs `bug threads: coverage since <day>: N
+thread(s), M owned, K unowned` and one `bug threads: unowned: …` line per thread (`portal_logs` grep "bug threads").
+This replaces the orchestrators' hourly bug-thread timers.
+
+Why here and not in FFBox: FFBox's listener sees an operator's plain reply but declines it at the engage gate
+(#bug-reports is `engage: mention`; ffbox `scripts/ffwatch.py`, the gate around `gate_declines`), and its dev-request
+hand-over would put 👀 on Ben's message and run a container turn in the thread whenever FF Factory is unreachable. FF
+Factory already reads these threads with Max's token (the read-only Max panel), and holds the ledger, its de-duplication
+and the game repo's `Discord:` lines that the coverage check needs, so both routes live in one tested place, and FFBox
+is unchanged.
+
+Settings, all optional, read on every pass (`set_app_config`):
+
+```json
+"intake": { "bugThreads": { "enabled": true, "channels": ["bug_reports", "dev_bug_reports"], "owners": {},
+                            "pollMinutes": 5, "windowDays": 7, "ackLookbackHours": 48, "judgeModel": "haiku",
+                            "coverage": { "enabled": true, "everyMinutes": 60, "file": true, "perDay": 15 } } }
+```
+
+`coverage.file: false` lists and logs without filing. The judge's cases are `server/bugThreads.fixtures.ts`: the flow
+test files one request for each acknowledgement and none for the rest, and `scripts/ownerAckEval.ts` asks the real
+model the same cases (run it after changing the prompt or the model).
 
 **This differs from Ben's w39 framing** (the intake as the one route for #bug-reports, with FF Factory's human-approval
 triage in front of every player report). Open for Ben and Lothsahn to settle:

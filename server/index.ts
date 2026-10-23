@@ -17,6 +17,7 @@ import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationV
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
+import { BugThreadWatch } from './bugThreads.ts';
 import { setAppConfig, toggleNightly } from './appConfig.ts';
 import { LedgerSweep, slugOf } from './ledgerSweep.ts';
 import { AutoDeploy, ghAutoDeploy } from './autoDeploy.ts';
@@ -764,6 +765,16 @@ const intake = new IntakeManager({
     addSecretValues([key]);
     return key;
   },
+}).start();
+// Every bug thread has an owner (w1783, docs/intake.md): an owner's acknowledgement files their request, and the coverage
+// check files every thread nothing owns, for a reviewer. Read-only on Discord; on unless config intake.bugThreads says off.
+const bugThreads = new BugThreadWatch({
+  cfg,
+  store,
+  identity,
+  orchestrators: agents.orchestrators,
+  discord: max,
+  conversations: () => providers.conversations(500),
 }).start();
 agents.nightlyKeyFor = (ids, portalUrl) => intake.nightlyRunEnv(ids, portalUrl);
 // The nightly merge review's jobs (w905): filed from its worker's final message, as the Sentry's delegations were.
@@ -2302,6 +2313,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   providers.close();
   max.close();
   intake.close();
+  bugThreads.close();
   ledgerSweep.close();
   blockerWatch.close();
   masterBatch.close();
