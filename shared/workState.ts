@@ -516,7 +516,7 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   // Waiting on input: a person must approve, answer, decide or allow something.
   if (w.approval?.state === 'pending') return { state: 'waiting', why: 'an intake request waiting for a reviewer to approve or decline it', waitsOn: ['a reviewer'] };
   if (w.question) return { state: 'waiting', why: `the dispatcher's question: ${w.question.text}`, waitsOn: names([w.requestedBy]) };
-  if (w.flag) return { state: 'waiting', why: `a design question: ${w.flag.text}`, waitsOn: names(w.flag.for) };
+  if (w.flag) return { state: 'waiting', why: `${w.flag.kind === 'error' ? 'an error the ledger cleanup escalated' : 'a design question'}: ${w.flag.text}`, waitsOn: names(w.flag.for) };
   const asking = mine.find((s) => s.status === 'waiting_permission');
   if (asking) {
     const p = asking.pendingPermissions[0];

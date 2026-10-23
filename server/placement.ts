@@ -64,6 +64,11 @@ export interface Computer {
    * next place there, so they count as its queued timed work and the Capacity block names them.
    */
   legs?: { id: string; since: string }[];
+  /**
+   * Why it takes no timed runs (w1861, server/machines.ts noTimedRunsOf; m5 by default): timed work never goes there, not
+   * even when no other computer has room, and its bench queue refuses every exclusive ticket.
+   */
+  noTimedRuns?: string;
 }
 
 
@@ -160,33 +165,69 @@ const FIRST: Record<'live' | 'build', { of: (p: PlacementPrefs) => string[]; key
 };
 
 /**
- * Where timed work goes (w1628). lothsahn, 2026-10-20: "We should also prefer boxes with a small number of slots and
- * players for timed runs, not beast since it's big". Among the computers with room, not held or avoided, and on the
- * platform its words name: first those with no timed leg in their bench queue (a leg queued behind another waits, while
- * a computer with none runs it at once), then the smallest (fewest sandboxes, then fewest Unity processes: less else runs
- * beside the leg), then the fewest live agents. A timed A/B compares its legs on one computer, so a slower one gives as
- * good an answer; work whose absolute numbers must come from one computer names it, and the dispatcher keeps it there.
- * Undefined when none has room: the general placement then.
+ * Where timed or exclusive-lock work goes (w1628, w1872). An exclusive bench turn idles every other slot of its computer, so
+ * locking a big one wastes the most work. lothsahn, 2026-10-20: "We should also prefer boxes with a small number of slots
+ * and players for timed runs, not beast since it's big"; 2026-10-23 (w1872): "favors placing jobs that need an exclusive
+ * lock or timing runs on machines that have a smaller number of editors or slots. This is to avoid locking out work
+ * because a machine that can handle a bunch of things but is locked down to one is less efficient". Among the computers
+ * with room (online, under their limits), not held (a paused one is held) or avoided, that take timed runs (w1861: not
+ * m5) and on the platform its words name, ranked by `timedRank`: the fewest agent slots, then the lowest editor limit,
+ * then the fewest live agents (the workers its turn would pause), then the fewest timed legs queued, then
+ * placement.prefer's order. BEAST, the biggest, comes last. A one-worker computer (agent cap 1) ranks first: its bench
+ * queue never limits or pre-empts a turn there (w1832). A timed A/B compares its legs on one computer, so a slower one
+ * gives as good an answer; work whose absolute numbers must come from one computer names it, and the dispatcher keeps it
+ * there. Undefined when none has room: the general placement then (never a computer that takes no timed runs).
  */
 export function pickTimed(places: readonly Computer[], prefs: PlacementPrefs, t: TimedKind): { pick: Computer; why: string } | undefined {
   const platform = t === 'timed' ? undefined : t.slice(6);
+  const sorted = timedRank(places, prefs, platform);
+  if (!sorted.length) return undefined;
+  const p = sorted[0];
+  const ranked = sorted.map(timedSize).join(' > ');
+  const legs = p.legs?.length ? `; ${legsText(p.legs)}: start ${p.legs.length > 1 ? 'those' : 'that'} there first` : '';
+  return { pick: p, why: `timed or exclusive-lock work goes to the smallest computer with room${platform ? ` on ${platform}` : ''} (w1872, lothsahn: "machines that have a smaller number of editors or slots"): ${ranked}${legs}${noTimedNote(places)}` };
+}
+
+// Its bench queue's timed legs, and the ledger's legs held for it (w1863: w1789's and w1785's m5 legs went unnamed here).
+const queuedTimed = (p: Computer) => (p.benchQueue?.timed ?? 0) + (p.legs?.length ?? 0);
+
+/**
+ * The refusal for timed or exclusive-lock work pinned to a computer that takes none (w1861, w1872), else undefined. A pin
+ * wins over timedRank everywhere else (lothsahn: "If a worker requests a specific machine for a reason, it does need to
+ * follow the workers request or the orchestrator's request for that placement. In absence of any preference, it should
+ * use this list"), but not here: "that should go back to the orchestrator or worker ... The orchestrator worker then can
+ * pick a new machine or escalate to an operator if it is unable to pick a new machine". So nothing starts and nothing is
+ * moved: the caller gets why and the computers that do take it, ranked (with room first).
+ */
+export function timedPinRefusal(target: string, places: readonly Computer[], prefs: PlacementPrefs, t: TimedKind): string | undefined {
+  const here = places.find((p) => p.id === placeId(target));
+  if (!here?.noTimedRuns) return undefined;
+  const platform = t === 'timed' ? undefined : t.slice(6);
+  const ranked = timedRank(places, prefs, platform);
+  const rest = places.filter((p) => p.online && !p.noTimedRuns && (!platform || p.platform === platform) && !ranked.includes(p)).map((p) => `${p.id} (no room now)`);
+  const list = [...ranked.map(timedSize), ...rest];
+  return `${here.id} takes no timed or exclusive-lock work (${here.noTimedRuns}; w1861): this timed work was not started or moved. Pick another computer${platform ? ` on ${platform}` : ''} and start it there: ${list.length ? list.join(' > ') : 'none is online'} ("Next timed work" ranks them, w1872). If none of them can do it, ask an operator (waiting_on_person) instead of placing it.`;
+}
+
+/** "m3 (2 agent slots, 1 editor, 0 live)" (w1872): what timedRank compares. */
+const timedSize = (p: Computer) => `${p.id} (${p.maxAgents} agent slot${p.maxAgents === 1 ? '' : 's'}, ${p.maxEditors ?? '?'} editor${p.maxEditors === 1 ? '' : 's'}, ${p.live} live${queuedTimed(p) ? `, ${queuedTimed(p)} timed queued` : ''})`;
+
+/**
+ * The computers timed or exclusive-lock work may go to, best first (w1872, pickTimed's rule): with room, not held or
+ * avoided, taking timed runs, on `platform` when given. Exported for tests.
+ */
+export function timedRank(places: readonly Computer[], prefs: PlacementPrefs = {}, platform?: string): Computer[] {
   const hold = holdOf(prefs);
   const avoid = avoidOf(prefs);
-  const ok = places.filter((p) => hasRoom(p) && !hold.has(p.id) && !avoid.has(p.id) && (!platform || p.platform === platform));
-  if (!ok.length) return undefined;
-  // Its bench queue's timed legs, and the ledger's legs held for it (w1863: w1789's and w1785's m5 legs went unnamed here).
-  const queued = (p: Computer) => (p.benchQueue?.timed ?? 0) + (p.legs?.length ?? 0);
-  const key = (p: Computer) => [queued(p) ? 1 : 0, p.maxSandboxes, p.editors ?? 0, queued(p), p.live];
-  const sorted = [...ok].sort((a, b) => {
+  const prefer = (prefs.prefer ?? []).map(placeId);
+  const preferAt = (p: Computer) => (prefer.includes(p.id) ? prefer.indexOf(p.id) : prefer.length);
+  const ok = places.filter((p) => hasRoom(p) && !hold.has(p.id) && !avoid.has(p.id) && !p.noTimedRuns && (!platform || p.platform === platform));
+  const key = (p: Computer) => [p.maxAgents, p.maxEditors ?? Number.MAX_SAFE_INTEGER, p.live, queuedTimed(p), preferAt(p)];
+  return [...ok].sort((a, b) => {
     const [x, y] = [key(a), key(b)];
     for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] - y[i];
-    return 0;
+    return a.id.localeCompare(b.id);
   });
-  const p = sorted[0];
-  const size = `${p.maxSandboxes} sandboxes, ${p.editors ?? 0} Unity processes, ${p.live} live agents`;
-  const legs = p.legs?.length ? `; ${legsText(p.legs)}: start ${p.legs.length > 1 ? 'those' : 'that'} there first` : '';
-  const q = queued(p) ? `every one with room ${platform ? `on ${platform} ` : ''}has timed runs queued; this one fewest (${queued(p)}${legs})` : 'no timed run queued there';
-  return { pick: p, why: `timed work goes to the smallest computer with room${platform ? ` on ${platform}` : ''} (w1628, lothsahn: "prefer boxes with a small number of slots and players for timed runs, not beast"): ${q}; ${size}` };
 }
 
 /**
@@ -383,8 +424,9 @@ export function pickComputer(places: readonly Computer[], last?: string, prefs: 
   if (firstKind?.startsWith('timed') && kind === 'game') {
     const t = pickTimed(places, prefs, firstKind as TimedKind);
     if (t) return t;
-    const rest = pickComputer(places, last, prefs, kind, workflows);
-    return rest && { pick: rest.pick, why: `timed work, but no computer${firstKind === 'timed' ? '' : ` on ${firstKind.slice(6)}`} has room; so the general placement: ${rest.why}` };
+    // Never on a computer that takes no timed runs (w1861): with none other open the work waits.
+    const rest = pickComputer(places.filter((p) => !p.noTimedRuns), last, prefs, kind, workflows);
+    return rest && { pick: rest.pick, why: `timed work, but no computer${firstKind === 'timed' ? '' : ` on ${firstKind.slice(6)}`} has room; so the general placement: ${rest.why}${noTimedNote(places)}` };
   }
   if ((firstKind === 'live' || firstKind === 'build') && kind === 'game') {
     // Work that needs a Live view (w1600) or builds a player (w1606): the first computer in its list with room, else the general placement.
@@ -438,12 +480,18 @@ export function pickComputer(places: readonly Computer[], last?: string, prefs: 
   return { pick: s.pick, why: `only avoided computers have room (${s.pick.id}: ${avoid.get(s.pick.id)}); ${s.why}${tail}` };
 }
 
+/** "; never m5 (it takes no timed runs: ...)" (w1861), or "" when every computer takes them. */
+const noTimedNote = (places: readonly Computer[]) => {
+  const no = places.filter((p) => p.noTimedRuns);
+  return no.length ? `; never ${no.map((p) => `${p.id} (it takes no timed runs: ${p.noTimedRuns})`).join(', ')}` : '';
+};
+
 const avoidOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.avoid ?? {}).map(([k, v]) => [placeId(k), v]));
 
 const loadPart = (p: Computer) => {
   const pct = memPct(p);
   const ram = pct !== undefined ? `; RAM ${pct}% used` : '';
-  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}${p.legs?.length ? `; ${legsText(p.legs)}` : ''}`;
+  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}${p.noTimedRuns ? '; no timed runs (w1861)' : ''}${p.legs?.length ? `; ${legsText(p.legs)}` : ''}`;
 };
 
 /** "the ledger holds legs for it: w1789 (since 06:45Z), w1785 (since 06:46Z)" (w1863). */
@@ -505,7 +553,7 @@ export function timedLine(places: readonly Computer[], last?: string, prefs: Pla
   const hold = holdOf(prefs);
   const legs = places
     .filter((x) => x.legs?.length)
-    .map((x) => `${x.id}: ${legsText(x.legs!).replace(/^the ledger holds (legs|a leg) for it: /, '')}${hasRoom(x) && !hold.has(x.id) ? ` (${x.id} has ROOM: start ${x.legs!.length > 1 ? 'them' : 'it'} now, start_agent with its work_id in a FREE sandbox there)` : ''}`);
+    .map((x) => `${x.id}: ${legsText(x.legs!).replace(/^the ledger holds (legs|a leg) for it: /, '')}${hasRoom(x) && !hold.has(x.id) ? ` (${x.id} has ROOM: start ${x.legs!.length > 1 ? 'them' : 'it'} now, start_agent with its work_id in a FREE sandbox there)` : ''}${x.noTimedRuns ? ` (${x.id} takes no timed runs, w1861: a timed leg there goes elsewhere; drop_leg it and queue it for another)` : ''}`);
   const held = legs.length ? ` Legs the ledger holds for a named computer (w1863, decide_work queue with needs beside the request's own worker): ${legs.join('; ')}.` : '';
   if (!p) return `No computer has room for timed work now${heldNote(places, prefs, 'game')}.${held}`;
   return `Next timed work (benchmarks, perf A/Bs and probes; on the platform it names, w1628): ${p.pick.id} (${p.why}).${held}`;

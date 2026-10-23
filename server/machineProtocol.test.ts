@@ -82,7 +82,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // holder still sees the warning in its own command output).
 // w1835 (no bump): `bench` on `stats`, the bench queue's mode, holders and waiters, which an older portal drops (it copies
 // the stats fields it knows); a newer portal with an older daemon gets none and shows no bench line.
-const DECIDED = { protocol: 9, fingerprint: '49d4ce570a9a3d7b' };
+// w1861 (no bump): `noTimedRuns` on `bench_priorities` (an older daemon writes no no_timed_runs: its queue takes timed
+// tickets as before, and placement still sends timed work elsewhere); an older portal sends none.
+const DECIDED = { protocol: 9, fingerprint: 'ead2958b4d09e1fb' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
