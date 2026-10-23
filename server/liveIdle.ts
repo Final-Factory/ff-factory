@@ -8,7 +8,7 @@
 // why not). The view, the sandbox, its branch and the conversation stay. The editor starts again at the next message to a
 // worker there (the daemon's `send`); a person who opens the view wakes its worker, so it starts the editor and stages the
 // view again by itself.
-import type { MachineSandbox, SessionInfo } from '../shared/types.ts';
+import type { LiveViewInfo, MachineSandbox, SessionInfo } from '../shared/types.ts';
 
 export const LIVE_IDLE_DEFAULT_MINUTES = 15;
 const BUSY = new Set<SessionInfo['status']>(['running', 'starting', 'waiting_permission']);
@@ -19,6 +19,8 @@ const GONE = new Set<SessionInfo['status']>(['stopped', 'error']);
  * again (the daemon's send), as a check-in more than 30 minutes away already lets a sandbox take other work.
  */
 export const LIVE_IDLE_WAKE_HOLD_MS = 30 * 60_000;
+/** A view that is still not streaming this long after an opening woke its worker may wake it again (w1838). */
+export const LIVE_WAKE_AGAIN_MS = 20 * 60_000;
 
 /** One running view, as the idle close sees it (LiveHub.idleFacts). */
 export interface LiveIdleView {
@@ -26,6 +28,8 @@ export interface LiveIdleView {
   sessionId: string;
   machineId: string;
   sandbox: string;
+  /** The view's state (LiveViewInfo.state): a view streaming again ends the wake its opening sent (w1838). */
+  state?: LiveViewInfo['state'];
   startedAtMs: number;
   /** Pages looked at now: visible and focused, or touched, within LIVE_PRESENT_MS (server/live.ts). */
   viewers: number;
@@ -83,6 +87,10 @@ export interface LiveIdleDeps {
   close(v: LiveIdleView, minutes: number): Promise<string>;
   /** A system message to a worker (SessionManager.send), which starts it if it is stopped. */
   send(sessionId: string, text: string): void;
+  /** Why the computer takes no work now (a release build, a bench lock, a pause): an editor cannot start there (w1838). */
+  hold?(machineId: string): string | undefined;
+  /** Its worker was asked to stage the view again for `who` (LiveHub.woken: the panel says so, w1838). */
+  woke?(liveId: string, who: string): void;
   log(line: string): void;
   now(): number;
 }
@@ -95,6 +103,8 @@ export class LiveIdleCloser {
   private readonly closed = new Set<string>();
   /** Sandboxes whose worker a viewer already woke since the close. */
   private readonly woken = new Set<string>();
+  /** Views whose worker a viewer woke while it was not streaming for another reason (w1838), and when. */
+  private readonly nudged = new Map<string, number>();
   /** Why each view's editor stays open now ("machine/sandbox" → reason), for the log and system_status. */
   private readonly why = new Map<string, string>();
   private running = false;
@@ -178,6 +188,9 @@ export class LiveIdleCloser {
     }
     const live = new Set(views.map((v) => v.liveId));
     for (const id of [...this.tried.keys()]) if (!live.has(id)) this.tried.delete(id);
+    // A view that streams again (or is gone) is done with its wake: the next time it stops, an opening wakes its worker again.
+    const streaming = new Set(views.filter((v) => v.state === 'live').map((v) => v.liveId));
+    for (const id of [...this.nudged.keys()]) if (!live.has(id) || streaming.has(id)) this.nudged.delete(id);
     const keys = new Set(views.map((v) => `${v.machineId}/${v.sandbox}`));
     for (const key of [...this.why.keys()]) if (!keys.has(key)) this.why.delete(key);
   }
@@ -202,20 +215,58 @@ export class LiveIdleCloser {
    * A person opened a view (LiveHub.addViewer). Its editor closed idle: wake its worker, whose next turn starts the editor
    * (the daemon's send) and stages the view again; once per close.
    */
-  viewerOpened(v: Pick<LiveIdleView, 'sessionId' | 'machineId' | 'sandbox'>, who: string | undefined) {
+  viewerOpened(v: Pick<LiveViewInfo, 'sessionId' | 'machineId' | 'sandbox'> & Partial<Pick<LiveViewInfo, 'liveId' | 'state' | 'detail'>>, who: string | undefined) {
     const key = `${v.machineId}/${v.sandbox}`;
     const sb = this.d.sandbox(v.machineId, v.sandbox);
-    if (!sb?.idleClosed || this.woken.has(key)) return;
+    if (!sb?.idleClosed) return this.nudge(v, sb, who);
+    if (this.woken.has(key)) return;
     const s = this.d.session(v.sessionId);
     if (s && BUSY.has(s.status)) return; // mid-turn: its turn already started the editor
     this.woken.add(key);
     const text = `[live view] ${who ?? 'A person'} opened your Live view and is watching it now. Stage it again so they see your asset (above), say so in one line, then end your turn as before (declare waiting_on_person again if you still wait on them).`;
     try {
       this.d.send(v.sessionId, text);
+      if (v.liveId) this.d.woke?.(v.liveId, who ?? 'A person');
       this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view: its worker is woken to start the editor and stage the view again`);
     } catch (e) {
       this.woken.delete(key);
       this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view, and its worker could not be woken: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * w1838: a person opened a view that does not stream because its editor stopped some other way (its worker stopped it at
+   * its turn's end, a crash, a hang restart, a start that found no Unity slot) or the game left play mode. Before, only an idle
+   * close woke the worker, and the panel said "It comes back by itself" over a view that never did: the w1466 view on
+   * beast/slot5 held for hours on 2026-10-23 with its editor stopped since 07:07Z. Now its worker is asked to stage it again,
+   * once per stop (again after LIVE_WAKE_AGAIN_MS), unless it is mid-turn (on it already) or its computer is held (a release
+   * build, a bench lock: its editor cannot start, and the hold's end tells it, server/buildPlans.ts done).
+   */
+  private nudge(v: Pick<LiveViewInfo, 'sessionId' | 'machineId' | 'sandbox'> & Partial<Pick<LiveViewInfo, 'liveId' | 'state' | 'detail'>>, sb: MachineSandbox | undefined, who: string | undefined) {
+    if (!v.liveId || !sb || v.state === 'live' || v.state === 'stopped') return;
+    const editor = sb.unity.state;
+    // Starting: someone started it (the worker, the hang watch), and the game is not up yet. A hold while the editor runs
+    // in play mode (a script reload, a stall) comes back by itself.
+    const why = editor === 'stopped' || editor === 'crashed' ? `its editor is ${editor}` : editor === 'running' && /not in play mode|no agent channel/i.test(v.detail ?? '') ? 'the game is not in play mode' : undefined;
+    if (!why) return;
+    const key = `${v.machineId}/${v.sandbox}`;
+    const hold = this.d.hold?.(v.machineId);
+    if (hold) return this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view (${why}); its worker is not woken: ${v.machineId} is held (${hold})`);
+    const s = this.d.session(v.sessionId);
+    if (!s || BUSY.has(s.status)) return;
+    const now = this.d.now();
+    const last = this.nudged.get(v.liveId);
+    if (last !== undefined && now - last < LIVE_WAKE_AGAIN_MS) return;
+    this.nudged.set(v.liveId, now);
+    const start = editor === 'running' ? '' : 'start your editor (mcp__machine__unity start), ';
+    const text = `[live view] ${who ?? 'A person'} opened your Live view, and it is not streaming: ${why}. Now ${start}put the game in play mode with your asset on screen and the HUD hidden, as you staged it before (the view streams by itself; no live_view start needed while it is up), say so in one line, then end your turn as before (declare waiting_on_person again if you still wait on them).`;
+    try {
+      this.d.send(v.sessionId, text);
+      this.d.woke?.(v.liveId, who ?? 'A person');
+      this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view (${why}): its worker is woken to stage it again`);
+    } catch (e) {
+      this.nudged.delete(v.liveId);
+      this.d.log(`live idle: ${key}: ${who ?? 'a person'} opened ${v.sessionId}'s Live view (${why}), and its worker could not be woken: ${(e as Error).message}`);
     }
   }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { LiveViewInfo } from '../../../shared/types';
+import { liveReady, type LiveReady } from '../../../shared/liveReady';
 import { Icon } from './ui';
 
 /** What the page measured from the frames it received (the view's own `fps` is what the game was asked for). */
@@ -174,32 +175,35 @@ function useLiveFrames(sessionId: string, enabled: boolean, canvas: RefObject<HT
 
 /**
  * The game's view of the asset: a 16:9 frame with the view's state, the measured fps and size over it, and the toast for a
- * knob that just landed. While the game holds (it reloads scripts, restarts a play session) the last frame stays, dimmed,
- * with the reason on top.
+ * knob that just landed. While it cannot be used (w1838, shared/liveReady.ts: the editor stopped, a build holds the computer,
+ * the game left play mode, a script reload) the last frame stays, dimmed, with what it waits on and what brings it back.
  */
-export function LiveStage({ view, toast, compact }: { view: LiveViewInfo; toast?: ReactNode; compact?: boolean }) {
+export function LiveStage({ view, ready: given, toast, compact }: { view: LiveViewInfo; ready?: LiveReady; toast?: ReactNode; compact?: boolean }) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const ready = given ?? liveReady(view);
   const stopped = view.state === 'stopped';
   const stats = useLiveFrames(view.sessionId, !stopped, canvas);
-  const holding = view.state === 'starting' || view.state === 'holding';
+  const holding = !stopped && !ready.ready;
+  // Waiting on something that takes minutes (an editor, a build, a worker), not seconds: no spinner, the state's dot.
+  const slow = ready.kind !== 'starting' && ready.kind !== 'holding' && ready.kind !== 'stalled' && ready.kind !== 'editor-starting';
   return (
     <div className={`lv-stage${holding ? ' lv-busy' : ''}${stopped ? ' lv-stopped' : ''}`} data-testid="live-stage" data-state={view.state}>
       <canvas ref={canvas} className="lv-frame" width={16} height={9} aria-label="The game's view of the asset, live" />
       <div className="lv-ov lv-ov-tl">
-        {view.state === 'live' ? (
+        {ready.ready ? (
           <span className="chip chip-green lv-chip" data-testid="live-chip">
             <span className="lv-rec" /> LIVE
           </span>
         ) : holding ? (
-          <span className="chip chip-amber lv-chip" data-testid="live-chip">
-            HOLDING
+          <span className={`chip chip-${ready.tone} lv-chip`} data-testid="live-chip" data-ready={ready.kind}>
+            {ready.label.toUpperCase()}
           </span>
         ) : (
           <span className="chip lv-chip" data-testid="live-chip">
             STOPPED
           </span>
         )}
-        {view.state === 'live' && !stats.connected && (
+        {ready.ready && !stats.connected && (
           <span className="chip chip-amber lv-chip">
             <span className="spinner spinner-sm" /> Reconnecting
           </span>
@@ -207,17 +211,18 @@ export function LiveStage({ view, toast, compact }: { view: LiveViewInfo; toast?
       </div>
       {stats.hasFrame && (
         <div className="lv-ov lv-ov-tr mono" data-testid="live-readout">
-          {view.state === 'live' ? `${Math.round(stats.fps)} fps · ` : ''}{stats.width}×{stats.height}
+          {ready.ready ? `${Math.round(stats.fps)} fps · ` : ''}{stats.width}×{stats.height}
         </div>
       )}
       {!stats.hasFrame && !holding && !stopped && <div className="lv-empty">{stats.connected ? 'No frame yet' : 'Connecting…'}</div>}
       {holding && (
-        <div className={`lv-hold${compact ? ' lv-hold-compact' : ''}`} data-testid="live-hold">
+        <div className={`lv-hold lv-tone-${ready.tone}${compact ? ' lv-hold-compact' : ''}`} data-testid="live-hold" data-ready={ready.kind}>
+          {/* The chip and the header name the state; the card's headline says what is wrong, then what brings it back (the
+              w1838 critics: not the state's word a third time, nor one headline for every state). */}
           <div className="lv-hold-title">
-            <span className="spinner spinner-sm" /> {view.state === 'starting' ? 'Starting the view' : 'Holding the last frame'}
+            {slow ? <span className={`dot dot-${ready.tone}`} aria-hidden /> : <span className="spinner spinner-sm" />} {ready.why}
           </div>
-          {view.detail && <div className="lv-hold-note">{view.detail}</div>}
-          {!compact && <div className="lv-hold-note">It comes back by itself; knobs still work.</div>}
+          {ready.back && <div className="lv-hold-note">{ready.back}</div>}
         </div>
       )}
       {stopped && (

@@ -326,6 +326,11 @@ export interface SessionInfo {
    */
   placeReleased?: { at: string; sandbox: string; branch: string; why: string };
   /**
+   * w1856 (server/releaseHandBack.ts): its switch_branch put a sandbox on a release branch (urgent/<v>, release/<v>) from
+   * `from`; build_plan done switches the sandbox back to `from` if it is still on `to`, then this goes.
+   */
+  releaseSwitch?: { machine: string; sandbox: string; from: string; to: string; at: string };
+  /**
    * Its uncommitted work was committed on its branch before its sandbox was released (w656, server/saveWork.ts): its
    * next message says so, then this goes.
    */
@@ -528,6 +533,8 @@ export interface MachineStats extends HostStats {
   benchLock?: BenchLock;
   /** The timed legs in its bench queue, running or waiting (w1628, machine/benchLock.ts readBenchQueue); absent: none. */
   benchQueue?: BenchQueueReport;
+  /** Its bench queue's mode, holders and waiters now (w1835, machine/benchState.ts); absent: a daemon before it. */
+  bench?: BenchState;
 }
 
 /**
@@ -543,6 +550,87 @@ export interface MachineStats extends HostStats {
 export interface BenchPriority {
   priority: WorkPriority;
   requests: string[];
+  /**
+   * The work the bench queue never pre-empts (w1832; lothsahn: "Let's avoid preempting urgent release builds and the
+   * nightly"): `release`, the urgent release lane's builder (BuildPlans.releaseBuilder); `nightly`, the worker of the
+   * scheduled nightly run (a request filed by the portal's nightly schedule, source kind nightly-run). Set by the portal
+   * only: the game repo's bench_queue.py reads it from priorities.json, keyed by the session a ticket carries
+   * (FF_SESSION_ID, or FF_BENCH_SESSION for the nightly), so a worker has no flag to mark its own job; only a ticket
+   * taken under another session's id would carry that session's mark.
+   */
+  exempt?: 'release' | 'nightly';
+}
+
+/**
+ * A holder's turn warning (w1832): the game repo's bench_queue.py set a deadline on its ticket because another worker
+ * waits, and warned it five minutes before (the ticket's limit.json). The daemon reports each with its stats; the portal
+ * messages the worker once per deadline (server/benchWarnings.ts).
+ */
+export interface BenchWarning {
+  ticket: string;
+  session: string;
+  mode: 'shared' | 'exclusive';
+  what: string;
+  /** When its turn ends (epoch ms), and why (bench_queue.py's words). */
+  deadline: number;
+  why: string;
+  /** Set by an urgent release taking the machine (it cannot be waited out). */
+  release?: boolean;
+  /** Its checkout's state when the daemon read it: uncommitted files, commits not pushed (undefined: no upstream). */
+  dirty?: number;
+  unpushed?: number;
+  branch?: string;
+}
+
+/**
+ * One ticket in a machine's bench queue, as the machine view shows it (w1835): who took it, for what, and its times. `since`
+ * is when it was granted (a holder) or taken (a waiter); `until` a holder's hold bound (bench_queue.py max_min).
+ */
+export interface BenchTicketGlance {
+  ticket: string;
+  mode: 'shared' | 'exclusive';
+  what: string;
+  session?: string;
+  requests?: string[];
+  host?: string;
+  sandbox?: string;
+  since?: string;
+  /** When its turn ends: the deadline a waiter set (`deadline`), else an exclusive ticket's turn (granted + `turnMin`, which
+   * it outlasts while nobody waits); none for an exempt ticket or a shared one nothing waits behind (w1832). */
+  until?: string;
+  /** An exclusive ticket's turn in minutes (bench_queue.py turn_min, 30; a ticket from an older copy keeps its max_min). */
+  turnMin?: number;
+  /** The deadline a waiter set on its turn (limit.json, w1832), when it was warned, why, and whether an urgent release set it. */
+  deadline?: string;
+  warned?: string;
+  why?: string;
+  release?: boolean;
+  /** Work FF Factory exempts from the turn limits (priorities.json, w1832): the urgent release lane's builder or the nightly's worker. */
+  exempt?: 'release' | 'nightly';
+  /** The urgent release lane's own ticket (it pre-empts the holders, w1656). */
+  preempt?: boolean;
+}
+
+/**
+ * What a machine's bench queue does now (w1835; lothsahn, 2026-10-23: "Please display on FF factory's webpage for the
+ * machine view whether each machine is in shared or exclusive lock mode"): `exclusive` while a timed leg (or an old-style
+ * bench lock, `legacy`) holds it, `shared` while only shared tickets run (builds, compiles, editor boots), else `free`.
+ * `running` lists the holders (at most BENCH_STATE_MAX_RUNNING; `runningCount` counts them all), `waiting` the tickets not
+ * granted yet, and `nextExclusive` the first timed leg among them in the queue's own order, with `ahead` waiters before it.
+ */
+export interface BenchState {
+  mode: 'free' | 'shared' | 'exclusive';
+  running: BenchTicketGlance[];
+  runningCount: number;
+  waiting: number;
+  nextExclusive?: BenchTicketGlance & { ahead: number };
+  /** An old-style lock's owner line (quiet_gate.sh before w1615): no ticket, so no request or worker. */
+  legacy?: { owner: string; since: string };
+  /** A machine FF Factory runs one worker on (priorities.json single_worker): no turn limits, warnings or pre-emptions. */
+  singleWorker?: boolean;
+  /** What an exclusive turn closed for its run (w1829, machine/benchTurn.ts): the sandboxes whose editors it closed and the
+   * game players it asked to quit. */
+  closed?: { editors: string[]; players: number };
 }
 
 export interface BenchQueueReport {
@@ -2372,6 +2460,16 @@ export interface AppVersion {
   web?: string;
 }
 
+/**
+ * A worker an urgent release's build paused (w1841, server/buildPlans.ts): the build, its computer, and whether it was asked
+ * to pause mid-turn (told: the build's done tells it to carry on) or paused between turns (its own next message resumes it).
+ */
+export interface BuildHold {
+  what: string;
+  machine: string;
+  told: boolean;
+}
+
 export interface AppState {
   /** The running server's version; absent from a server older than 0.1.0. */
   app?: AppVersion;
@@ -2408,6 +2506,8 @@ export interface AppState {
   heldRoom?: { id: string; why: string; for: ('game' | 'agent')[] }[];
   /** Computers with room that placement.minPriority reserves for higher work (w1643), with their lowest priority: a request at that level may use them. */
   reservedRoom?: { id: string; min: 'normal' | 'high' | 'urgent'; for: readonly ('game' | 'agent')[] }[];
+  /** The workers an urgent release's build paused (w1841, server/buildPlans.ts pausedFor), by session id: their requests show Blocked on it. */
+  buildHolds?: Record<string, BuildHold>;
   /** Discord and FFBox intake into the ledger (docs/intake.md); absent from a server older than this field. */
   intake?: IntakeSummary;
   /** The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): its switches and its last run. */
@@ -2442,6 +2542,13 @@ export interface LiveViewInfo {
   updatedAt: string;
   /** Frames the portal has passed on since the view started. */
   frames: number;
+  /**
+   * Why its computer takes no work now, while it does (w1838): a release build, a timed run's bench lock, a pause. The
+   * editor of a view that is not streaming cannot start meanwhile (shared/liveReady.ts says so on the badge and the panel).
+   */
+  hold?: string;
+  /** A person opened it while it was not streaming and its worker was asked to stage it again (w1838): who and when. */
+  wake?: { at: string; who: string };
 }
 
 /** One knob: a material's shader property (the game's look.material.list). */

@@ -141,6 +141,11 @@ export class BenchTurn {
     this.d = d;
   }
 
+  /** The game players this turn asked to quit (w1835: the machine view shows them). */
+  playersAsked(): number {
+    return this.current ? this.asked.size : 0;
+  }
+
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;

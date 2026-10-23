@@ -6245,6 +6245,42 @@ body {
   white-space: nowrap;
 }
 
+.fl-bench {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+/* A long line wraps instead of cutting the time left or what waits: fonts differ in width by platform (w1835; the
+   sidebar's 280 px fits it whole on Windows and cut it on Linux). */
+.fl-bench-line {
+  overflow-wrap: anywhere;
+}
+
+.fl-bench b {
+  font-weight: 600;
+}
+
+/* The board card's bench row, under its head and level with the head's text (its 6px padding), the head's 3px gap
+   above it. Empty for an offline machine. */
+.board-bench {
+  margin-top: calc(3px - var(--s-2) - 6px);
+  padding: 0 6px 6px;
+}
+
+.board-bench:empty {
+  display: none;
+}
+
+/* The machine page's bench row: the text wraps beside its chip, whole, instead of dropping under it or being cut. */
+.bench-row-text {
+  flex: 1 1 16em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .fl-places {
   display: flex;
   flex-direction: column;
@@ -7186,6 +7222,31 @@ a.wc-pr:hover {
 
 .lv-stopped .lv-hold-title {
   color: var(--text-2);
+}
+
+/* w1838: a view that waits on a person's worker or an editor (grey: stopped, closed) reads quieter than one about to come back. */
+.lv-hold.lv-tone-grey {
+  border-color: var(--border-2);
+}
+
+.lv-hold.lv-tone-grey .lv-hold-title {
+  color: var(--text);
+}
+
+/* Since w1838 the title is a sentence that may wrap: its mark sits on the first line. */
+.lv-hold-title {
+  align-items: flex-start;
+  line-height: 1.4;
+}
+
+.lv-hold-title > .dot {
+  flex: none;
+  margin-top: calc((1.4em - 8px) / 2);
+}
+
+.lv-hold-title > .spinner {
+  flex: none;
+  margin-top: calc((1.4em - 12px) / 2);
 }
 
 .lv-hold-note {

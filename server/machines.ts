@@ -27,7 +27,7 @@ import { hostStartFailed } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { BenchPriority, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { BenchPriority, BenchWarning, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
@@ -683,9 +683,22 @@ export class MachineManager {
   pushBenchPriorities() {
     for (const id of this.links.keys()) {
       const sessions = this.benchPrioritiesFor?.(id);
-      if (sessions) this.post(id, { type: 'bench_priorities', sessions }, false);
+      if (sessions) this.post(id, { type: 'bench_priorities', sessions, singleWorker: this.singleWorker(id) }, false);
     }
   }
+
+  /**
+   * Whether a machine hosts a single worker (w1832; lothsahn: "If a machine has only one worker it always runs in exclusive
+   * mode and never gets preempted", "I mean a machine that only hosts a single worker"): its configured agent cap is 1.
+   * Its bench queue then applies no turn limit, warning or pre-emption.
+   */
+  singleWorker(id: string): boolean {
+    const m = this.store.machines.get(id);
+    return !!m && agentCap(m) === 1;
+  }
+
+  /** A daemon's turn warnings (w1832), for server/benchWarnings.ts to message their workers (set by server/index.ts). */
+  onBenchWarnings?: (machineId: string, warnings: BenchWarning[]) => void;
 
   /** Send every connected daemon the usage poll interval (config usagePollMinutes, after it changed). */
   pushUsageConfig() {
@@ -1896,7 +1909,7 @@ export class MachineManager {
     const ctx = m.local ? undefined : this.cleanupContext?.();
     if (ctx) ws.send(JSON.stringify({ type: 'cleanup_context', context: ctx } satisfies ToDaemon));
     const prio = this.benchPrioritiesFor?.(id);
-    if (prio) ws.send(JSON.stringify({ type: 'bench_priorities', sessions: prio } satisfies ToDaemon));
+    if (prio) ws.send(JSON.stringify({ type: 'bench_priorities', sessions: prio, singleWorker: this.singleWorker(id) } satisfies ToDaemon));
     ws.send(JSON.stringify({ type: 'usage_config', config: { everyMinutes: this.cfg.usagePollMinutes ?? DEFAULT_USAGE_POLL_MINUTES } } satisfies ToDaemon));
     console.log(`machine ${id} connected`);
   }
@@ -2244,9 +2257,10 @@ export class MachineManager {
         return;
       }
       case 'stats': {
-        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), at: new Date().toISOString() };
+        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), ...(msg.bench ? { bench: msg.bench } : {}), at: new Date().toISOString() };
         this.stats.set(id, stats);
         emit({ type: 'machine_stats', id, stats });
+        if (Array.isArray(msg.benchWarnings) && msg.benchWarnings.length) this.onBenchWarnings?.(id, msg.benchWarnings);
         return;
       }
       case 'usage':

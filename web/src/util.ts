@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { agentState, type AgentState, type WaitKind } from '../../shared/agentState.ts';
 import { ledgerGlance, workLiveAll, type WorkLive } from '../../shared/workState.ts';
-import type { AppState, AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+import type { AppState, BenchLock, AppVersion, CompactionTrigger, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
 import { updaterHealth } from '../../shared/updaterHealth';
 import { devRequestsHealth } from '../../shared/devRequestsHealth';
@@ -305,10 +305,35 @@ export const chatOwner = (s: SessionInfo | undefined) => (s?.kind === 'orchestra
  * computer has room is flagged from the server's room (w643). The one map every count on the page is made from (w1089).
  */
 export function useWorkLive(app: AppState, work: readonly WorkItem[], now: number): Map<string, WorkLive> {
+  // w1841: the machines' bench locks, as the server's list_work reads them. Keyed on the locks alone: machine stats come
+  // every few seconds, and the ledger's states are worked out again only when a lock is taken or freed.
+  const benchKey = Object.entries(app.machineStats ?? {})
+    .filter(([, st]) => st.benchLock)
+    .map(([id, st]) => `${id}\t${st.benchLock!.since}\t${st.benchLock!.owner}`)
+    .join('\n');
+  const locks = useMemo(() => {
+    const m = new Map<string, BenchLock>();
+    for (const l of benchKey ? benchKey.split('\n') : []) {
+      const [id, since, owner] = l.split('\t');
+      m.set(id, { since, owner });
+    }
+    return m;
+  }, [benchKey]);
   return useMemo(() => {
     const byId = new Map(app.sessions.map((s) => [s.id, s]));
-    return workLiveAll(work, { session: (id) => byId.get(id), ...(app.room ? { room: app.room } : {}), ...(app.agentRoom ? { agentRoom: app.agentRoom } : {}), ...(app.heldRoom ? { heldRoom: app.heldRoom } : {}), ...(app.reservedRoom ? { reservedRoom: app.reservedRoom } : {}), now });
-  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, app.reservedRoom, work, now]);
+    // w1841: the workers a release build paused, as the server reads them.
+    const holds = app.buildHolds;
+    return workLiveAll(work, {
+      session: (id) => byId.get(id),
+      ...(app.room ? { room: app.room } : {}),
+      ...(app.agentRoom ? { agentRoom: app.agentRoom } : {}),
+      ...(app.heldRoom ? { heldRoom: app.heldRoom } : {}),
+      ...(app.reservedRoom ? { reservedRoom: app.reservedRoom } : {}),
+      ...(holds ? { buildHold: (id: string) => holds[id] } : {}),
+      benchLock: (id: string) => locks.get(id),
+      now,
+    });
+  }, [app.sessions, app.room, app.agentRoom, app.heldRoom, app.reservedRoom, app.buildHolds, locks, work, now]);
 }
 
 /**

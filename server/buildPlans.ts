@@ -37,7 +37,7 @@
 //   work off the machine".
 // - build_plan done (or PLAN_MAX_MS past due, or its builder's requests all closed) ends it: the hold lifts, the queued
 //   resumes go, and each worker paused mid-turn is told to carry on.
-import type { BenchLock, BenchQueueReport, SessionInfo, WorkItem } from '../shared/types.ts';
+import type { BenchLock, BenchQueueReport, BuildHold, SessionInfo, WorkItem } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { benchText, timedText } from './placement.ts';
 import { gaveUpNotice, RELEASE_SANDBOX, SEAT_GIVE_UP_MS, seatedNotice, type Seat } from './releaseSeat.ts';
@@ -112,6 +112,11 @@ export interface BuildDeps {
    * empty slot1 of other game work, then move the builder there. Unset: builds run where their builder is.
    */
   seat?: (p: BuildPlan, builderId: string) => Promise<SeatResult>;
+  /**
+   * w1856: at done, put the sandboxes the build's workers switched to a release branch back on the branch they left
+   * (Agents.handBackRelease, server/releaseHandBack.ts), before the paused workers carry on there. One note per sandbox.
+   */
+  handBack?: (p: BuildPlan, caller?: string) => Promise<string[]>;
   /** The dispatcher's [ledger] line. */
   notify: (text: string) => void;
   /** The send queue looks again (a resume held for the build may go now). */
@@ -211,6 +216,26 @@ export class BuildPlans {
     return `${p.machine} is ${this.holdWhy(p).replace(/: no new work until it is done$/, '')}: this worker was paused for it and resumes when it is done (w1606)`;
   }
 
+  /**
+   * The build that paused this worker (w1841): its requests show Blocked on it (shared/workState.ts). From the clearing until
+   * done; told: asked to pause mid-turn, so done tells it to carry on.
+   */
+  pausedFor(sessionId: string): BuildHold | undefined {
+    return this.pausedAmong([sessionId])[sessionId];
+  }
+
+  /** pausedFor for each of these workers a build paused, by session id (the page's live states, AppState.buildHolds). */
+  pausedAmong(ids: Iterable<string>): Record<string, BuildHold> {
+    const out: Record<string, BuildHold> = {};
+    const plans = [...this.plans.values()].filter((p) => p.clearedAt).map((p) => ({ p, paused: new Set(p.paused) }));
+    if (!plans.length) return out;
+    for (const id of ids) {
+      const x = plans.find((y) => y.p.told[id] !== undefined || y.paused.has(id));
+      if (x) out[id] = { what: x.p.what, machine: x.p.machine, told: x.p.told[id] !== undefined };
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- the tool
 
   /** Mark a request as build work (WorkItem.build): it is placed on placement.build first from then on. */
@@ -296,28 +321,44 @@ export class BuildPlans {
     return `Go (w1606): ${p.machine} is cleared for ${p.what} (${p.moved.length} moved: ${p.moved.map((m) => `${m.session} to ${m.to}`).join(', ') || 'none'}; ${pausedOf(p).length} paused).${kept}${late}${ended} Build now through unity-slot run --label "${p.what}".${queued} When it is done (or failed), build_plan done at once: the paused work waits for it.`;
   }
 
-  /** build_plan done: the hold lifts, the held resumes go, and every worker paused mid-turn is told to carry on. */
-  done(machineId: string, why = 'its builder said it is done'): string {
+  /**
+   * build_plan done: the hold lifts, the release's sandbox goes back on its own branch (w1856), the held resumes go, and
+   * every worker paused mid-turn is told to carry on. `caller`: the worker that said it.
+   */
+  async done(machineId: string, why = 'its builder said it is done', caller?: string): Promise<string> {
     const p = this.plan(machineId);
     if (!p) return `No build is planned on ${machineId}.`;
     this.plans.delete(p.machine);
     this.save();
+    // w1856: before anyone paused in that sandbox carries on, so nobody commits on the release branch.
+    let handed: string[] = [];
+    if (this.d.handBack) {
+      try {
+        handed = await this.d.handBack(p, caller);
+      } catch (e) {
+        handed = [`the hand-back failed (${(e as Error).message}): no sandbox was switched back`];
+      }
+    }
+    const back = handed.length ? ` Hand-back (w1856): ${handed.join('; ')}.` : '';
     const took = p.startedAt ? `${mins(this.now() - p.startedAt)} min` : 'never started';
     const resumed: string[] = [];
     for (const id of Object.keys(p.told)) {
-      if (!this.d.isLive(id) && !this.d.workersOn(p.machine).some((s) => s.id === id)) continue;
+      // w1841: also one placed again on another computer since (its sandbox went to other work while it waited): it still
+      // holds the work it paused, and nothing else brings it back.
+      if (!this.d.isLive(id) && !this.d.workersOn(p.machine).some((s) => s.id === id) && !this.d.openRequestsOf(id).length) continue;
       this.d.tell(id, `[FF Factory] The build on ${p.machine} is done (w1606): carry on where you stopped, in this conversation and sandbox. Start your editor again if you need it (mcp__machine__unity start).`);
       resumed.push(id);
     }
     // The Live views left open (w1639): their heavy work may start again.
     for (const k of p.kept) {
       if (!this.d.isLive(k.session) && !this.d.workersOn(p.machine).some((s) => s.id === k.session)) continue;
-      this.d.tell(k.session, `[FF Factory] The build on ${p.machine} is done (w1639): compiles, tests and builds may start again.`);
+      // w1838: its editor may have stopped meanwhile (it could not start beside the build), and its view holds until it is staged.
+      this.d.tell(k.session, `[FF Factory] The build on ${p.machine} is done (w1639): compiles, tests and builds may start again. If your Live view is not streaming (live_view status), start your editor (mcp__machine__unity start) and stage it again now: a person may be waiting to use it.`);
     }
     this.d.kick?.();
-    this.d.log(`build: ${p.what} on ${p.machine} done (${why}); build ${took}; ${p.moved.length} moved, ${resumed.length} resumed, ${idleOf(p).length} paused between turns resume with their own next message`);
-    this.d.notify(`[ledger] BUILD DONE (w1606): ${p.what} on ${p.machine} (${why}; the build took ${took}). ${p.machine} takes new work again; ${resumed.length ? `${resumed.join(', ')} were told to carry on; ` : ''}${p.moved.length ? `moved earlier (place their Queued requests as usual): ${p.moved.map((m) => `${m.requests.join(', ')} to ${m.to}`).join('; ')}.` : 'nothing was moved.'}`);
-    return `Done (w1606): ${p.machine} takes work again; the build took ${took}. ${resumed.length} paused worker(s) told to carry on; ${idleOf(p).length} paused between turns resume with their own next message.`;
+    this.d.log(`build: ${p.what} on ${p.machine} done (${why}); build ${took}; ${p.moved.length} moved, ${resumed.length} resumed, ${idleOf(p).length} paused between turns resume with their own next message${back}`);
+    this.d.notify(`[ledger] BUILD DONE (w1606): ${p.what} on ${p.machine} (${why}; the build took ${took}). ${p.machine} takes new work again; ${resumed.length ? `${resumed.join(', ')} were told to carry on; ` : ''}${p.moved.length ? `moved earlier (place their Queued requests as usual): ${p.moved.map((m) => `${m.requests.join(', ')} to ${m.to}`).join('; ')}.` : 'nothing was moved.'}${back}`);
+    return `Done (w1606): ${p.machine} takes work again; the build took ${took}. ${resumed.length} paused worker(s) told to carry on; ${idleOf(p).length} paused between turns resume with their own next message.${back}`;
   }
 
   status(machineId?: string): string {
@@ -333,11 +374,11 @@ export class BuildPlans {
     const now = this.now();
     for (const p of [...this.plans.values()]) {
       if (now - p.dueAt > PLAN_MAX_MS.value) {
-        this.done(p.machine, `not ended ${mins(PLAN_MAX_MS.value)} min after it was due, so FF Factory ended it`);
+        await this.done(p.machine, `not ended ${mins(PLAN_MAX_MS.value)} min after it was due, so FF Factory ended it`);
         continue;
       }
       if (p.builder && !this.d.isLive(p.builder) && p.requests.length && p.requests.every((id) => !this.d.openRequestsOf(p.builder!).some((w) => w.id === id)) && !this.d.workersOn(p.machine).some((s) => s.id === p.builder)) {
-        this.done(p.machine, 'its builder is gone and its requests are no longer its');
+        await this.done(p.machine, 'its builder is gone and its requests are no longer its');
         continue;
       }
       if (!p.clearedAt && now >= p.dueAt) await this.clear(p);
@@ -447,6 +488,8 @@ export class BuildPlans {
           continue;
         }
         const live = this.d.isLive(s.id);
+        // w1841: a worker that ended long ago and holds no open request is nobody to pause (the 1.0.0.10 build listed 7819).
+        if (!live && !reqs.length) continue;
         if (live && (this.d.isMidTurn(s) || s.pendingPermissions?.length)) {
           p.told[s.id] = this.now();
           this.d.tell(s.id, pauseNotice(p, reqs.map((w) => w.id)));
@@ -509,4 +552,4 @@ export const NOT_RELEASE = 'Nothing to plan (w1628): build_plan is for release b
 
 /** The build_plan tool's description, the worker's and the dispatcher's (w1606). */
 export const BUILD_PLAN_DOC =
-  'The urgent release lane\'s build only (w1639; release builds only since w1628; lothsahn, 2026-10-20: "Ben\'s guidance was only supposed to be for release builds of the software, not all builds that workers do when making fixes"): a normal release is FFBox\'s and plans nothing here, and a worker\'s own player build (a fix, a clip, a playtest or MP check) needs no plan and clears nothing: build where you are through unity-slot run. A quick or urgent release builds on BEAST, else LothDesktop when BEAST is offline (w1639, placement.build), whatever timed legs wait in the bench queue (its exclusive tickets at its urgent priority go first after the leg running now): say it is coming (release: true), so FF Factory clears that computer for it; a Live view there stays open, and its worker is asked to start no compile, test or build meanwhile. action coming (release: true, minutes: lead time, what) holds it for new work at once, and when due moves the workers there between turns to other computers and pauses the rest at a safe point (never mid-edit); start (release: true) says go, or what it still waits for (workers finishing their step); done ends it and resumes the paused work; status. A worker declares its own release build (it runs where the worker is); the dispatcher one for a request (work_id).';
+  'The urgent release lane\'s build only (w1639; release builds only since w1628; lothsahn, 2026-10-20: "Ben\'s guidance was only supposed to be for release builds of the software, not all builds that workers do when making fixes"): a normal release is FFBox\'s and plans nothing here, and a worker\'s own player build (a fix, a clip, a playtest or MP check) needs no plan and clears nothing: build where you are through unity-slot run. A quick or urgent release builds on BEAST, else LothDesktop when BEAST is offline (w1639, placement.build), whatever timed legs wait in the bench queue (its exclusive tickets at its urgent priority go first after the leg running now): say it is coming (release: true), so FF Factory clears that computer for it; a Live view there stays open, and its worker is asked to start no compile, test or build meanwhile. action coming (release: true, minutes: lead time, what) holds it for new work at once, and when due moves the workers there between turns to other computers and pauses the rest at a safe point (never mid-edit); start (release: true) says go, or what it still waits for (workers finishing their step); done ends it, puts the release\'s sandbox back on the branch it left for urgent/<v> (w1856) and resumes the paused work; status. A worker declares its own release build (it runs where the worker is); the dispatcher one for a request (work_id).';

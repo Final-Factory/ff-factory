@@ -264,7 +264,7 @@ function queue(t: { after: (f: () => void) => void }) {
   return { root, qdir, add };
 }
 
-test('w1829: timedHolder: a granted exclusive ticket whose helper lives, inside its bound; a killed holder, a revoked or overdue one, a waiting or shared one is none', (t) => {
+test('w1829: timedHolder: a granted exclusive ticket whose helper lives, past its bound too; a killed holder, a revoked one, a waiting or shared one is none', (t) => {
   const q = queue(t);
   const now = T0 + 10 * 60_000;
   q.add('t00000001', { mode: 'shared', session: 'aa' }, T0 / 1000);
@@ -276,10 +276,20 @@ test('w1829: timedHolder: a granted exclusive ticket whose helper lives, inside 
   assert.equal(h?.ownerPid, 7001, "the Windows pid of a Git Bash script's owner");
   assert.equal(h?.until, T0 + 60 * 60_000);
   assert.equal(timedHolder(q.root, now, () => false), undefined, 'its holder killed: the helper dies with it, and the turn ends');
-  assert.equal(timedHolder(q.root, T0 + 60 * 60_000, () => true), undefined, 'past its bound');
+  assert.equal(timedHolder(q.root, T0 + 60 * 60_000, () => true)?.until, T0 + 65 * 60_000, 'past its bound it goes on while nobody waits (w1832)');
   fs.writeFileSync(path.join(q.qdir, 't00000002', 'revoked'), JSON.stringify({ at: 'x', why: 'over the bound' }));
   assert.equal(timedHolder(q.root, now, () => true), undefined, 'revoked');
   assert.equal(timedHolder(undefined, now, () => true), undefined, 'no worker root');
+});
+
+test('w1832: timedHolder ends a turn at the deadline a waiter set, else at its 30-minute turn, as bench_queue.py timed_hold does', (t) => {
+  const q = queue(t);
+  q.add('t00000001', { session: 'aa', max_min: 60, turn_min: 45 });
+  fs.writeFileSync(path.join(q.qdir, 't00000001', 'granted'), JSON.stringify({ at: 'x', ts: T0 / 1000 }));
+  assert.equal(timedHolder(q.root, T0 + 10 * 60_000, () => true)?.until, T0 + 30 * 60_000, 'a turn is 30 minutes at most');
+  assert.equal(timedHolder(q.root, T0 + 40 * 60_000, () => true)?.until, T0 + 45 * 60_000, 'past it, 5 more minutes at the least');
+  fs.writeFileSync(path.join(q.qdir, 't00000001', 'limit.json'), JSON.stringify({ deadline: T0 / 1000 + 33 * 60, warned: T0 / 1000 + 28 * 60 }));
+  assert.equal(timedHolder(q.root, T0 + 29 * 60_000, () => true)?.until, T0 + 33 * 60_000, "a waiter's deadline");
 });
 
 test('w1829: the guard refuses a Unity MCP call into an editor a turn keeps closed, with the reason, from the file the daemon writes', async (t) => {

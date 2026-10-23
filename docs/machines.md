@@ -768,6 +768,24 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   state and FREE chip and shows no "Asked you". A member who did not ask for the worker sees no button. A person asked a
   question by another worker in the same slot (no view) sees "Asked you" and no button.
 
+  **Each computer's bench lock** (w1835, lothsahn: "Please display on FF factory's webpage for the machine view whether
+  each machine is in shared or exclusive lock mode"): under its counts, the group and the board card say **Bench lock
+  Exclusive** (amber: a timed leg, or an old-style `quiet_gate.sh` lock, holds it; its requests and worker, how long it has
+  held and how much of its 30-minute turn is left, or that it is past it while nobody waits), **Shared** (blue: only shared
+  tickets run, builds, compiles, editor boots; how many) or **Free**, then how many tickets wait and the next timed leg:
+  within the holders' deadlines once the queue set them (w1832), else after the running group. Since w1829 and w1832 it
+  also says a warned turn first, in amber ("warned: ends in 4m", "for an urgent release" when the release set it); an
+  urgent release holding the machine, or the nightly in a shared group, which no turn limit ends (`exempt` in
+  `priorities.json`; the timed leg waits "after the urgent release" or "after the nightly"); a single-worker machine's
+  "no turn limit"; and what an exclusive turn closed ("for it: 2 editors closed, 1 player asked to quit": `closed.json`
+  and the players `BenchTurn` asked to quit). A deadline whose waiters all left counts for nothing (the queue drops it
+  only at the next waiter's look), and a waiting urgent release is the next leg, ahead of every other. On the board the
+  line is the card's own row, so it never moves the agent count; the sidebar keeps two short lines (the holder, its
+  times and how many wait). The hover lists every holder and the next one; the machine's page has the same row in its
+  details. The daemon reads the queue with each stats report, every 15 s (`readBenchState`,
+  `machine/benchState.ts`, in the queue's own order: priority, then place), and the page words it (`benchGlance`,
+  `shared/benchGlance.ts`); an offline machine, or a daemon from before it, shows no line.
+
 ![The sidebar grouped by computer](images/fleet-sidebar-desktop-chromium.png)
 ![The Overview board](images/fleet-overview-desktop-chromium.png)
 

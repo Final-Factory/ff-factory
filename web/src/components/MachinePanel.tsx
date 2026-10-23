@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { benchGlance } from '../../../shared/benchGlance';
 import { machineKind, type AppState, type Machine } from '../../../shared/types';
 import { api, type JoinAnswer } from '../api';
 import { attempt, sessionsByIds, toast, upsertMachine } from '../store';
@@ -45,6 +46,8 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
 
   const [details, setDetails] = useDetailsOpen('machine');
   const glance = machineGlance(m, here, now);
+  // Its bench queue (w1835): Exclusive, Shared or Free, as its daemon's last stats said.
+  const bench = m.online ? benchGlance(app.machineStats?.[m.id]?.bench, now) : undefined;
 
   return (
     <section className="sb-panel">
@@ -145,6 +148,12 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
               {m.statusDetail && m.status === 'ready' ? ` · ${m.statusDetail}` : ''}
             </span>
           </div>
+          {bench && (
+            <div className="unity-bar" data-testid="machine-bench" data-mode={bench.mode} title={bench.hint}>
+              <Chip tone={bench.tone}>Bench lock {bench.label}</Chip>
+              <span className="dim small bench-row-text">{[bench.short, bench.times, bench.waiting, bench.next, bench.closed].filter(Boolean).join(' · ') || 'no ticket held or waiting'}</span>
+            </div>
+          )}
           {/* Its owner's pause (w1532): from its tray app, its schedule or a person's input; a paused machine takes no work. */}
           {m.pause && (
             <div className="unity-bar" data-testid="machine-pause">

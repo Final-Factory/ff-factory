@@ -208,9 +208,10 @@ test('w1430: the slot calls the viewer to the Live view when the worker that wai
   const view = (state: LiveViewInfo['state'], sessionId = 'knob'): LiveViewInfo => ({ liveId: 'l1', sessionId, machineId: 'lothdesktop', sandbox: 'slot1', state, detail: '', fps: 15, width: 960, materials: ['heatExchangerMaterial'], startedAt: ago(12), updatedAt: ago(0), frames: 100 });
   const ben = { userId: 'ben', displayName: 'Ben' };
   const call = slotCall(place([wait(['Ben'])]), [view('live')], ben);
-  assert.deepEqual(call && { ...call, session: call.session.id }, { kind: 'live', session: 'knob', request: 'w1325', label: 'Live view: go' });
-  // A view that is holding (the game reloading scripts) still opens it, whatever the name's case; a stopped one does not.
-  assert.equal(slotCall(place([wait(['Ben'])]), [view('holding')], { userId: 'BEN', displayName: 'ben' })?.label, 'Live view: go');
+  assert.deepEqual(call && { kind: call.kind, session: call.session.id, request: call.request, label: call.label, ready: call.ready?.ready }, { kind: 'live', session: 'knob', request: 'w1325', label: 'Live view: go', ready: true });
+  // A view that is holding still opens it, whatever the name's case, but says so (w1838: "go" only when it can be used); a
+  // stopped one does not.
+  assert.equal(slotCall(place([wait(['Ben'])]), [view('holding')], { userId: 'BEN', displayName: 'ben' })?.label, 'Live view: holding');
   assert.equal(slotCall(place([wait(['Ben'])]), [view('stopped')], ben)?.label, 'Asked you');
   assert.equal(slotCall(place([wait(['Ben'])]), undefined, ben)?.kind, 'asked');
   // Someone else's wait, nobody signed in, or no wait and no view: no call.
@@ -224,7 +225,7 @@ test('w1430: a Live view up while its worker is between turns calls the person w
   const comet = session('comet', 'idle', { ...at('slot4'), requestedBy: BEN });
   const ben = { userId: 'ben', displayName: 'Ben' };
   const call = slotCall({ shown: [comet], older: [], waits: [] }, [view('comet')], ben);
-  assert.deepEqual(call && { ...call, session: call.session.id }, { kind: 'live', session: 'comet', label: 'Live view: go' });
+  assert.deepEqual(call && { kind: call.kind, session: call.session.id, label: call.label }, { kind: 'live', session: 'comet', label: 'Live view: go' });
   // Mid-turn, it is the worker's move: no amber call, only the quiet button (w1599); asked by someone else, it is theirs.
   assert.equal(slotCall({ shown: [{ ...comet, status: 'running' }], older: [], waits: [] }, [view('comet')], ben)?.kind, 'watch');
   assert.equal(slotCall({ shown: [comet], older: [], waits: [] }, [view('comet')], { userId: 'lothsahn', displayName: 'Lothsahn' }), undefined);
@@ -241,7 +242,7 @@ test("w1599: a Live view up shows everyone who may watch it a quiet button; only
   const stranger = { userId: 'zed', displayName: 'Zed', role: 'member' as const };
   // An owner, on someone else's request: the same label, kind 'watch' (the page draws it quiet).
   const watch = slotCall(place(), [view('comet')], lothsahn);
-  assert.deepEqual(watch && { ...watch, session: watch.session.id }, { kind: 'watch', session: 'comet', label: 'Live view: go' });
+  assert.deepEqual(watch && { kind: watch.kind, session: watch.session.id, label: watch.label }, { kind: 'watch', session: 'comet', label: 'Live view: go' });
   // The requester's call is unchanged: amber while the worker is between turns...
   assert.equal(slotCall(place(), [view('comet')], ben)?.kind, 'live');
   // ...and the requester's own view while the worker runs, or an owner's on a view that waits on the requester, is quiet.

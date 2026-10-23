@@ -3,8 +3,10 @@
 // sandbox and editor counts) and its sandboxes with their live agents (every worker runs in one, w536).
 import { useState, type ReactNode } from 'react';
 import type { AppState, HostHealth, Provider, SessionInfo, UserInfo } from '../../../shared/types';
+import { benchGlance } from '../../../shared/benchGlance';
 import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
 import { capacityLine, fleetOf, slotCall, type FleetComputer, type FleetSandbox, type PersonWait, type PlaceAgents, type SlotCall } from '../../../shared/fleet';
+import { liveReady } from '../../../shared/liveReady';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
 import { agentView, fmtBytes, fmtRelative, lsGet, lsSet, machineSandboxGlance, navigate, pauseGlance, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
@@ -124,7 +126,7 @@ function Meters({ c, health, now }: { c: FleetComputer; health?: HostHealth; now
 }
 
 /** A computer's name, state, load and counts. */
-function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth; now: number; fold?: boolean }) {
+function Head({ c, health, now, fold, bench = true }: { c: FleetComputer; health?: HostHealth; now: number; fold?: boolean; bench?: boolean }) {
   // The host with its own daemon (docs/beast-machine.md): its dot says whether that daemon, which runs its sandboxes, is up.
   const d = c.daemon;
   const tone: Tone = c.machine
@@ -169,7 +171,42 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
       <span className="fl-cap" data-testid="fl-capacity">
         {capacityLine(c)}
       </span>
+      {bench && <BenchLine c={c} now={now} compact={fold} />}
     </>
+  );
+}
+
+/**
+ * Its bench queue (w1835; lothsahn: "Please display on FF factory's webpage for the machine view whether each machine is in
+ * shared or exclusive lock mode"): Exclusive, Shared or Free, who holds it and for how long, what waits, and the next timed
+ * leg; the hover lists every ticket. Nothing for an offline machine or a daemon that does not report it.
+ */
+function BenchLine({ c, now, compact }: { c: FleetComputer; now: number; compact?: boolean }) {
+  const g = c.online ? benchGlance(c.bench, now) : undefined;
+  if (!g) return null;
+  // Two short lines, so the sidebar's width keeps both: who holds it, then its times, what waits and what its turn closed.
+  // A warned turn (w1832: it ends in 5 minutes) says so first, in the mode's colour.
+  // The sidebar's narrow column keeps two short lines: who holds it, its times and how many wait; the rest is in the hover.
+  const rest = (compact ? [g.waiting] : [g.waiting, g.next, g.closed]).filter(Boolean).join(' · ');
+  const sub = g.times || rest ? (
+    <>
+      {g.times && (g.warned ? <b className="tone-amber">{g.times}</b> : g.times)}
+      {g.times && rest && ' · '}
+      {rest}
+    </>
+  ) : null;
+  return (
+    <span className="fl-bench" data-testid="fl-bench" data-mode={g.mode} title={g.hint}>
+      <span className="fl-bench-line">
+        Bench lock <b className={`tone-${g.tone}`}>{g.label}</b>
+        {(compact ? g.short : g.detail) && ` · ${compact ? g.short : g.detail}`}
+      </span>
+      {sub && (
+        <span className="fl-bench-line" data-testid="fl-bench-sub">
+          {sub}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -235,21 +272,20 @@ function Agents({ agents, me, now, sel, variant, open }: { agents: PlaceAgents; 
  */
 function CallButton({ call, onGo }: { call: SlotCall; onGo: () => void }) {
   const what = call.session.waitingOn?.what;
+  const ready = call.ready;
+  // w1838: a view that cannot be used now says what it waits on, in the outlined chip with its state's dot; never the go pill.
+  const notReady = !!ready && !ready.ready;
   // w1599: a view up that waits on nobody here is the outlined chip of the board's free-slot line, not the amber pill.
-  const quiet = call.kind === 'watch';
+  const quiet = call.kind === 'watch' || notReady;
+  const asks = `${call.request && !call.session.title.startsWith(`${call.request}:`) ? `${call.request}: ` : ''}${call.session.title} waits on you${what ? `: ${what}` : ''}`;
+  const title = notReady
+    ? `${call.kind === 'watch' ? call.session.title : asks}\nLive view ${ready.label.toLowerCase()}: ${ready.why} ${ready.back}`
+    : call.kind === 'watch'
+      ? `${call.session.title}: its Live view is up, and you may watch it`
+      : `${asks}${what ? '' : ': its Live view is up for you to move the knobs'}`;
   return (
-    <button
-      type="button"
-      className={quiet ? 'fl-chip fl-call fl-call-quiet' : 'needs-you fl-call'}
-      onClick={onGo}
-      title={
-        quiet
-          ? `${call.session.title}: its Live view is up, and you may watch it`
-          : `${call.request ? `${call.request}: ` : ''}${call.session.title} waits on you${what ? `: ${what}` : ': its Live view is up for you to move the knobs'}`
-      }
-      data-testid="fl-call"
-    >
-      <span className="lv-rec" aria-hidden />
+    <button type="button" className={quiet ? 'fl-chip fl-call fl-call-quiet' : 'needs-you fl-call'} onClick={onGo} title={title} data-testid="fl-call" data-ready={ready?.kind}>
+      {notReady ? <Dot tone={ready.tone} /> : <span className="lv-rec" aria-hidden />}
       {call.label}
     </button>
   );
@@ -354,7 +390,8 @@ const viewerOf = (app: AppState): Viewer => ({ me: app.me, views: app.config.liv
 /** A computer's places: its sandboxes (free ones last). On the board, free sandboxes are one line of chips. */
 function Places({ c, viewer, now, sel, variant, go, onNewSandbox }: { c: FleetComputer; viewer: Viewer; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void; onNewSandbox?: () => void }) {
   // A free slot where a worker waits on the viewer stays a row, so its call shows (w1430).
-  const callOf = (sb: FleetSandbox) => slotCall(sb.agents, viewer.views, viewer.me);
+  // w1838: the badge reads the view with its sandbox's editor (shared/liveReady.ts), so it says "go" only when it can be used.
+  const callOf = (sb: FleetSandbox) => slotCall(sb.agents, viewer.views, viewer.me, (v, s) => liveReady(v, { sandbox: sb.machineSandbox, session: s }));
   const free = variant === 'board' ? c.sandboxes.filter((s) => s.free && !callOf(s)) : [];
   const shown = variant === 'board' ? c.sandboxes.filter((s) => !free.includes(s)) : c.sandboxes;
   return (
@@ -545,18 +582,23 @@ export function OverviewBoard({ app }: { app: AppState }) {
               <header className="board-head">
                 {c.machine ? (
                   <button className="board-head-link" onClick={() => go({ view: 'machine', machineId: c.machine!.id })} title={`Open ${c.name}`}>
-                    <Head c={c} now={now} />
+                    <Head c={c} now={now} bench={false} />
                   </button>
                 ) : c.daemon ? (
                   <button className="board-head-link" onClick={() => go({ view: 'machine', machineId: c.daemon!.id })} title={`Open ${c.name}'s daemon (${c.daemon.id})`}>
-                    <Head c={c} health={app.host?.health} now={now} />
+                    <Head c={c} health={app.host?.health} now={now} bench={false} />
                   </button>
                 ) : (
                   <div className="board-head-link">
-                    <Head c={c} health={app.host?.health} now={now} />
+                    <Head c={c} health={app.host?.health} now={now} bench={false} />
                   </div>
                 )}
               </header>
+              {/* The card's own row, at its full width (w1835): inside the head it would set the head's width, and with it
+                  where the agent count beside the name sits. */}
+              <div className="board-bench">
+                <BenchLine c={c} now={now} />
+              </div>
               <Places c={c} viewer={viewerOf(app)} now={now} sel={{}} variant="board" go={go} />
             </article>
           ))}

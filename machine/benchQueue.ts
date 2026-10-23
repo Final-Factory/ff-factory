@@ -202,6 +202,10 @@ export interface QueueTicket {
   host?: string;
   requests?: string[];
   maxMin?: number;
+  /** w1832: an exclusive ticket's turn in minutes (bench_queue.py turn_min; none from a copy older than w1832) and the
+   * deadline a waiter set on it (limit.json, epoch s). */
+  turnMin?: number;
+  limit?: { deadline?: number; warned?: number; why?: string };
   /** The process whose life the ticket follows (bench_queue.py owner_check_pid: a Git Bash script's Windows pid), w1829. */
   ownerPid?: number;
 }
@@ -226,7 +230,7 @@ export function queueTickets(lock: string, alive: (pid: number) => boolean): Que
   for (const n of names) {
     const info = read(path.join(dir, n, 'info.json'));
     if (!info || !Number.isInteger(info.pid) || !alive(info.pid)) continue;
-    out.push({ ticket: n, mode: info.mode === 'shared' ? 'shared' : 'exclusive', what: String(info.what ?? ''), pid: info.pid, sandbox: info.sandbox || undefined, cwd: info.cwd || undefined, created: info.created, granted: read(path.join(dir, n, 'granted')), revoked: read(path.join(dir, n, 'revoked')), session: info.session || undefined, host: info.host || undefined, requests: Array.isArray(info.requests) ? info.requests.map(String) : undefined, maxMin: typeof info.max_min === 'number' ? info.max_min : undefined, ownerPid: Number.isInteger(info.owner_check_pid) ? info.owner_check_pid : Number.isInteger(info.owner_pid) ? info.owner_pid : undefined });
+    out.push({ ticket: n, mode: info.mode === 'shared' ? 'shared' : 'exclusive', what: String(info.what ?? ''), pid: info.pid, sandbox: info.sandbox || undefined, cwd: info.cwd || undefined, created: info.created, granted: read(path.join(dir, n, 'granted')), revoked: read(path.join(dir, n, 'revoked')), session: info.session || undefined, host: info.host || undefined, requests: Array.isArray(info.requests) ? info.requests.map(String) : undefined, maxMin: typeof info.max_min === 'number' ? info.max_min : undefined, turnMin: typeof info.turn_min === 'number' ? info.turn_min : undefined, limit: read(path.join(dir, n, 'limit.json')), ownerPid: Number.isInteger(info.owner_check_pid) ? info.owner_check_pid : Number.isInteger(info.owner_pid) ? info.owner_pid : undefined });
   }
   return out;
 }

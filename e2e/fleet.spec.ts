@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import type { AppState, LiveViewInfo, Machine, MachineSandbox, MachineStats, ServerEvent, SessionInfo, SystemStats, WorkItem } from '../shared/types.ts';
 import { expect, isMobile, openSidebar, settle, signIn, test } from './fixtures.ts';
+import { solidPng } from '../server/testLiveGame.ts';
 
 // The sidebar's computers and the Overview board (web/src/components/Fleet.tsx, shared/fleet.ts): BEAST, then
 // each machine with its sandboxes and their live agents (w536: none in a main clone). The page's WebSocket is intercepted and
@@ -535,6 +536,77 @@ test("fleet: an owner sees a quiet \"Live view: go\" on a slot whose view is for
   await expect(page).toHaveURL(/#\/live\/l-review$/);
 });
 
+test('fleet: the slot says "Live view: go" only when its view can be used, and the panel and knobs say what it waits on (w1838)', async ({ page }) => {
+  // Ben, 2026-10-23: "don't show the live view go sticker thing on the slot. Only show that when it's ready and can be used".
+  // His case: the w1466 view held for hours with its editor stopped, under a green "go", over red knobs.
+  test.setTimeout(240_000); // ten states, each a reload
+  const BUILD = 'building since 07:40Z (Urgent hotfix release after 1.0.0.9, the dispatcher for w1836; w1606): no new work until it is done';
+  const states: { name: string; view: Partial<LiveViewInfo>; unity: MachineSandbox['unity']; idleClosed?: MachineSandbox['idleClosed']; badge: string; title: RegExp }[] = [
+    { name: 'go', view: { state: 'live' }, unity: { state: 'running' }, badge: 'Live view: go', title: /^$/ },
+    { name: 'starting', view: { state: 'starting', detail: 'asking the game to stream' }, unity: { state: 'running' }, badge: 'Live view: starting', title: /Starting/ },
+    { name: 'editor-stopped', view: { state: 'holding', detail: 'the sandbox editor is not running' }, unity: { state: 'stopped' }, badge: 'Live view: editor stopped', title: /Editor stopped/ },
+    { name: 'held', view: { state: 'holding', detail: 'the sandbox editor is not running', hold: BUILD }, unity: { state: 'stopped' }, badge: 'Live view: paused for a build', title: /Paused/ },
+    { name: 'idle-closed', view: { state: 'holding', detail: 'editor closed: idle 15 min; reopens on resume' }, unity: { state: 'stopped' }, idleClosed: { at: '2026-10-23T06:52:00.000Z', minutes: 15 }, badge: 'Live view: editor closed', title: /Editor closed/ },
+    { name: 'queued', view: { state: 'holding', detail: 'the sandbox editor is not running' }, unity: { state: 'starting', detail: 'queued in the bench queue: 1 timed leg ahead (w1785 bench dev build)' }, badge: 'Live view: queued', title: /Queued/ },
+    { name: 'editor-starting', view: { state: 'holding', detail: 'the sandbox editor is not running' }, unity: { state: 'starting', detail: 'loading' }, badge: 'Live view: editor starting', title: /Editor starting/ },
+    { name: 'no-play', view: { state: 'holding', detail: 'the game is not in play mode (no agent channel)', wake: { at: '2026-10-23T07:50:00.000Z', who: 'Ben' } }, unity: { state: 'running' }, badge: 'Live view: not in play mode', title: /Not in play mode/ },
+    { name: 'stalled', view: { state: 'holding', detail: 'no frame from the game for 12 s (its editor may be busy, minimized or hung)' }, unity: { state: 'running' }, badge: 'Live view: no frames', title: /No frames/ },
+    { name: 'holding', view: { state: 'holding', detail: 'the game stopped streaming (left play mode, or a script reload); showing the last frame' }, unity: { state: 'running' }, badge: 'Live view: holding', title: /Holding/ },
+  ];
+  let st = states[0];
+  const shape = (s: AppState): AppState => {
+    const f = waitingInSb2({ live: true })(s);
+    return {
+      ...f,
+      live: f.live?.map((v) => ({ ...v, detail: '', ...st.view })),
+      machines: f.machines.map((m) => (m.id === 'lothdesktop' ? { ...m, sandboxes: m.sandboxes!.map((x) => (x.id === 'sb2' ? { ...x, unity: st.unity, ...(st.idleClosed ? { idleClosed: st.idleClosed } : {}) } : x)) } : m)),
+    };
+  };
+  // The game's knobs while it streams (this fleet has no daemon behind the view).
+  await page.route(/\/api\/live\/l-knob\/knobs/, (r) =>
+    r.fulfill({ json: [{ material: 'heatExchangerMaterial', shader: 'FF/Radiator', knobs: [{ name: '_FinColor', label: 'Fin colour', type: 'color', value: [0.32, 0.55, 0.78, 1] }, { name: '_Glow', label: 'Glow', type: 'range', value: 0.4, min: 0, max: 2 }] }] }),
+  );
+  // The worker is this fleet's own, not the server's: its "no session" toasts are the fixture's, not the view's.
+  await page.route(/\/api\/sessions\/l-knob\//, (r) => r.fulfill({ json: [] }));
+  await page.addInitScript(() => document.addEventListener('DOMContentLoaded', () => document.head.append(Object.assign(document.createElement('style'), { textContent: '.toasts { display: none; }' }))));
+  // The game's frames, as the portal passes them (a page draws the newest): a held view keeps the last one, dimmed.
+  const frame = solidPng(640, 360, 38, 58, 84);
+  await page.routeWebSocket(/\/live\/l-knob$/, (ws) => {
+    const t = setInterval(() => ws.send(frame), 100);
+    ws.onClose(() => clearInterval(t));
+  });
+  await fixedFleet(page, '#/', shape);
+  for (const next of states) {
+    st = next;
+    // A new socket gets the state again, shaped for this case.
+    await page.goto('/#/');
+    await page.reload();
+    const sidebar = await openSidebar(page);
+    const sb2 = sidebar.getByTestId('fl-sandbox-lothdesktop/sb2');
+    await expect(sb2.getByTestId('fl-call'), st.name).toHaveText(st.badge);
+    await expect(sb2.getByTestId('fl-call')).toHaveClass(st.name === 'go' ? /needs-you/ : /fl-call-quiet/);
+    await sb2.evaluate((el) => el.scrollIntoView({ block: 'start' }));
+    await proof(page, `live-ready-slot-${st.name}`);
+    await sb2.getByTestId('fl-call').click();
+    await expect(page).toHaveURL(/#\/live\/l-knob$/);
+    await expect(page.getByTestId('live-readout'), 'a frame is drawn').toBeVisible();
+    if (st.name === 'go') {
+      await expect(page.getByTestId('live-chip')).toHaveText(/live/i);
+      await expect(page.getByTestId('live-hold')).toHaveCount(0);
+    } else {
+      await expect(page.getByTestId('live-hold')).toHaveAttribute('data-ready', st.name === 'editor-stopped' ? 'editor-stopped' : st.name);
+      await expect(page.getByTestId('live-chip')).toHaveText(new RegExp(st.title.source, 'i'));
+      // Never the old promise, and no red knobs: one calm line names the materials.
+      await expect(page.getByTestId('live-hold')).not.toContainText(/knobs still work/);
+      if (!isMobile(page)) {
+        await expect(page.getByTestId('live-knobs-wait')).toContainText(/heatExchangerMaterial: its knobs come back when the view is live/);
+        await expect(page.locator('.lv-err')).toHaveCount(0);
+      }
+    }
+    await proof(page, `live-ready-panel-${st.name}`);
+  }
+});
+
 test("fleet: the request's card on the Dispatcher's Waiting tab opens the waiting worker's Live view too (w1430)", async ({ page }) => {
   await fixedFleet(page, '#/dispatcher/waiting', waitingInSb2({ live: true }));
   const card = page.getByTestId('wait-w1325');
@@ -577,4 +649,135 @@ test("fleet: a worker that waits on someone else is listed with whom, and the sl
   const sb2 = (await openSidebar(page)).getByTestId('fl-sandbox-lothdesktop/sb2');
   await expect(sb2.getByTestId('fl-agent')).toContainText(/w1325.*waits on Somebody Else/);
   await expect(sb2.getByTestId('fl-call')).toHaveCount(0);
+});
+
+/**
+ * w1835 (lothsahn: "Please display on FF factory's webpage for the machine view whether each machine is in shared or
+ * exclusive lock mode"): each machine's bench queue, as its daemon's stats report it (machine/benchState.ts). BEAST holds
+ * a timed leg (Exclusive) warned its turn ends (w1832), with the editors and player its turn closed (w1829); LothDesktop
+ * runs two shared tickets, the nightly's among them, with a timed leg next; the M5 is free.
+ */
+function benchModes(s: AppState, over: Record<string, MachineStats['bench']> = {}): AppState {
+  const f = fleet(s);
+  const t = (m: number) => new Date(NOW.getTime() + m * 60_000).toISOString();
+  const bench: Record<string, MachineStats['bench']> = {
+    beast: {
+      mode: 'exclusive',
+      running: [{ ticket: 't00000412', mode: 'exclusive', what: 'probe_ab.sh radius A round 2', session: '10d5850f4c2e', requests: ['w1243'], host: 'BEAST', sandbox: 'slot4', since: t(-26), until: t(4), turnMin: 30, deadline: t(4), warned: t(-1), why: 'the 30-minute exclusive turn' }],
+      runningCount: 1,
+      waiting: 2,
+      closed: { editors: ['slot2', 'slot3'], players: 1 },
+    },
+    lothdesktop: {
+      mode: 'shared',
+      running: [
+        { ticket: 't00000088', mode: 'shared', what: 'nightly e2e: Windows leg', session: 'aa20a6a1ffff', since: t(-40), exempt: 'nightly' },
+        { ticket: 't00000089', mode: 'shared', what: 'editor boot slot3', since: t(-1) },
+      ],
+      runningCount: 2,
+      waiting: 1,
+      nextExclusive: { ticket: 't00000090', mode: 'exclusive', what: 'bench JustPlay1003', session: '17e0097f0000', requests: ['w1785'], since: t(-3), ahead: 0 },
+    },
+    m5: { mode: 'free', running: [], runningCount: 0, waiting: 0 },
+    ...over,
+  };
+  const gpu = { name: 'NVIDIA GeForce RTX 5090', memTotalMiB: 32607, memUsedMiB: 14540, utilPct: 41 };
+  const ms = { ...f.machineStats, beast: stats(38, 71, 128, gpu) };
+  return { ...f, machineStats: Object.fromEntries(Object.entries(ms).map(([k, v]) => [k, bench[k] ? { ...v, bench: bench[k] } : v])) };
+}
+
+test('fleet: each machine says its bench lock mode, Exclusive, Shared or Free, with the holder and what waits (w1835)', async ({ page }) => {
+  await fixedFleet(page, '#/overview', benchModes);
+  const board = page.getByTestId('overview');
+  const beast = board.getByTestId('board-host').getByTestId('fl-bench');
+  await expect(beast).toHaveAttribute('data-mode', 'exclusive');
+  await expect(beast.locator('.fl-bench-line').first()).toHaveText('Bench lock Exclusive · w1243 · worker 10d5850f');
+  // Warned (w1832): its turn ends in 4 minutes, said first and in the mode's colour; what its turn closed (w1829).
+  await expect(beast.getByTestId('fl-bench-sub')).toHaveText('held 26m, warned: ends in 4m · 2 waiting · for it: 2 editors closed, 1 player asked to quit');
+  await expect(beast.getByTestId('fl-bench-sub').locator('b.tone-amber')).toHaveText('held 26m, warned: ends in 4m');
+  await expect(beast).toHaveAttribute('title', /Bench queue: Exclusive\nexclusive t00000412 · w1243 · worker 10d5850f · BEAST\/slot4 · "probe_ab.sh radius A round 2" · held 26m, warned: ends in 4m · \(the 30-minute exclusive turn\)\neditors closed for the turn: slot2, slot3\ngame players asked to quit: 1\n2 waiting/);
+  const loth = board.getByTestId('board-lothdesktop').getByTestId('fl-bench');
+  await expect(loth).toHaveAttribute('data-mode', 'shared');
+  // The nightly runs on, whoever waits (w1832): the timed leg waits for it.
+  await expect(loth.locator('.fl-bench-line').first()).toHaveText('Bench lock Shared · 2 tickets running, the nightly among them');
+  await expect(loth.getByTestId('fl-bench-sub')).toHaveText('1 waiting · next timed: w1785 after the nightly');
+  const m5 = board.getByTestId('board-m5').getByTestId('fl-bench');
+  await expect(m5).toHaveAttribute('data-mode', 'free');
+  await expect(m5).toHaveText('Bench lock Free');
+  // The offline M3 says nothing about a queue it cannot report.
+  await expect(board.getByTestId('board-m3').getByTestId('fl-bench')).toHaveCount(0);
+  // The mode word carries the colour, as the states do elsewhere: no fill.
+  expect(await beast.locator('b').evaluateAll((els) => els.map((e) => getComputedStyle(e).backgroundColor))).toEqual(['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)']);
+  // No line is cut on the board, nor runs past its card's edge.
+  const cut = await board.locator('.board-card').evaluateAll((cards) =>
+    cards.flatMap((card) => {
+      const edge = card.getBoundingClientRect().right;
+      return [...card.querySelectorAll('.fl-bench-line')].filter((e) => e.scrollWidth > e.clientWidth + 1 || e.getBoundingClientRect().right > edge).map((e) => e.textContent);
+    }),
+  );
+  expect(cut, 'bench lines cut short or past the card on the board').toEqual([]);
+  // The lock line never widens a card's head: the agent count beside the name stays where it is without it (critic).
+  const countAt = () => board.locator('.board-card [data-testid="fl-agents-sum"]').evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().right)));
+  const withLine = await countAt();
+  await page.addStyleTag({ content: '.fl-bench { display: none !important; }' });
+  expect(withLine, 'the agent counts stay put beside a long bench line').toEqual(await countAt());
+  await page.addStyleTag({ content: '.fl-bench { display: flex !important; }' });
+  await proof(page, 'bench-overview');
+
+  // The sidebar shows the same, the full line in its hover when its width cuts it.
+  const sidebar = await openSidebar(page);
+  await expect(sidebar.getByTestId('fl-group-host').getByTestId('fl-bench')).toHaveAttribute('data-mode', 'exclusive');
+  await expect(sidebar.getByTestId('fl-group-lothdesktop').getByTestId('fl-bench')).toHaveAttribute('data-mode', 'shared');
+  await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-bench')).toHaveText('Bench lock Free');
+  // The sidebar keeps two short lines: the holder without its worker, its times and how many wait; the rest in the hover.
+  const sideBeast = sidebar.getByTestId('fl-group-host').getByTestId('fl-bench');
+  await expect(sideBeast.locator('.fl-bench-line').first()).toHaveText('Bench lock Exclusive · w1243');
+  await expect(sideBeast.getByTestId('fl-bench-sub')).toHaveText('held 26m, warned: ends in 4m · 2 waiting');
+  await expect(sidebar.getByTestId('fl-group-lothdesktop').getByTestId('fl-bench').locator('.fl-bench-line').first()).toHaveText('Bench lock Shared · 2 tickets running');
+  // No line is cut in the sidebar: a long one wraps (CI's Linux fonts cut one Windows fit whole at 280 px).
+  if (!isMobile(page)) {
+    const sideCut = await sidebar.locator('.fl-bench-line').evaluateAll((els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent));
+    expect(sideCut, 'bench lines cut short in the sidebar').toEqual([]);
+  }
+  if (!isMobile(page)) await proof(page, 'bench-sidebar');
+
+  // The machine's own page says it in its details.
+  await page.goto('/#/machine/lothdesktop');
+  const row = page.getByTestId('machine-bench');
+  await expect(page.getByTestId('fl-group-host').or(page.locator('.sb-panel'))).not.toHaveCount(0);
+  if (!(await row.isVisible())) await page.getByRole('button', { name: 'Details', exact: true }).click();
+  await expect(row).toHaveAttribute('data-mode', 'shared');
+  await expect(row).toContainText('Bench lock Shared');
+  // The short holder text: the pane above the sandboxes is short (the nightly is in "after the nightly" and the hover).
+  await expect(row).toContainText('2 tickets running · 1 waiting · next timed: w1785 after the nightly');
+  // Its text wraps whole beside the chip, and the sandboxes under it stay in view (critic).
+  expect(await row.locator('.bench-row-text').evaluate((e) => e.scrollWidth <= e.clientWidth + 1)).toBe(true);
+  await expect(page.locator('.fl-sb-links button').first()).toBeInViewport();
+  await proof(page, 'bench-machine-page');
+});
+
+test('fleet: an urgent release holding a machine says so, with no turn limit, and the timed leg waits for it (w1835 after w1832)', async ({ page }) => {
+  const t = (m: number) => new Date(NOW.getTime() + m * 60_000).toISOString();
+  await fixedFleet(page, '#/overview', (s) =>
+    benchModes(s, {
+      beast: {
+        mode: 'exclusive',
+        running: [{ ticket: 't00000420', mode: 'exclusive', what: 'urgent release 1.0.0.4', session: '5c945083aaaa', requests: ['w1900'], host: 'BEAST', sandbox: 'slot1', since: t(-3), turnMin: 30, exempt: 'release', preempt: true }],
+        runningCount: 1,
+        waiting: 1,
+        nextExclusive: { ticket: 't00000421', mode: 'exclusive', what: 'probe_ab.sh radius A round 3', session: '10d5850f4c2e', requests: ['w1243'], since: t(-2), ahead: 0 },
+        closed: { editors: ['slot2'], players: 0 },
+      },
+    }),
+  );
+  const beast = page.getByTestId('overview').getByTestId('board-host').getByTestId('fl-bench');
+  await expect(beast).toHaveAttribute('data-mode', 'exclusive');
+  await expect(beast.locator('.fl-bench-line').first()).toHaveText('Bench lock Exclusive · urgent release · w1900 · worker 5c945083');
+  await expect(beast.getByTestId('fl-bench-sub')).toHaveText('held 3m, no turn limit · 1 waiting · next timed: w1243 after the urgent release · for it: 1 editor closed');
+  if (!isMobile(page)) {
+    const side = (await openSidebar(page)).getByTestId('fl-group-host').getByTestId('fl-bench');
+    await expect(side.locator('.fl-bench-line').first()).toHaveText('Bench lock Exclusive · urgent release · w1900');
+    await expect(side.getByTestId('fl-bench-sub')).toHaveText('held 3m, no turn limit · 1 waiting');
+  }
+  await proof(page, 'bench-urgent-release');
 });

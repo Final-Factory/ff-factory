@@ -4254,11 +4254,20 @@ test('w1628: each worker\'s bench priority is the highest of its open requests, 
   const real = agents.builds.releaseBuilder.bind(agents.builds);
   agents.builds.releaseBuilder = (m: string, id: string) => m === 'pc' && id === a.id;
   assert.equal(agents.benchPriorities('pc')[a.id].priority, 'urgent', 'the release builder\'s tickets count as urgent');
+  assert.equal(agents.benchPriorities('pc')[a.id].exempt, 'release', 'w1832: the urgent release lane is never pre-empted');
+  assert.equal(agents.benchPriorities('pc')[b.id].exempt, undefined, 'any other worker is');
+  store.putWork({ ...store.work.get('w1')!, status: 'done' });
+  assert.deepEqual(agents.benchPriorities('pc')[a.id], { priority: 'urgent', requests: [], exempt: 'release' }, 'w1832: a builder with no open request keeps its mark');
+  store.putWork({ ...store.work.get('w1')!, status: 'active' });
   agents.builds.releaseBuilder = real;
+  assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined);
   assert.equal(agents.benchPriorities('pc')[a.id].priority, 'high');
   store.putWork({ ...store.work.get('w1')!, status: 'done' });
   assert.equal(agents.benchPriorities('pc')[a.id], undefined, 'no open request: its tickets count as normal');
   assert.deepEqual(agents.benchPriorities('elsewhere'), {});
+  // w1832: the worker of the scheduled nightly run (the portal's nightly schedule files it as source kind nightly-run).
+  store.putWork({ ...store.work.get('w2')!, source: { kind: 'nightly-run', untrusted: false, channel: 'nightly e2e', nightlyRun: { date: '2026-10-23', machine: 'pc' } } });
+  assert.equal(agents.benchPriorities('pc')[b.id].exempt, 'nightly');
 });
 
 // w1643, lothsahn: "let's make the setting the minimum priority work that can go to a machine. If normal (all work), if high,
@@ -4314,4 +4323,68 @@ test('w1643: a request below a reserved computer\'s level waits Queued with the 
   await call(chat(LOTH).info, 'update_work', { id: 'w1', priority: 'high' });
   assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Queued \[WRONG: beast has room\]/);
   assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), ['w1']);
+});
+
+// ---------------------------------------------------------------- w1841: Stalled is only what nothing will move
+
+test('w1841: a worker on a real portal: a reporter wait is Waiting with no [needs you]; an own-work wait on the orchestrator is answered at once, once; a free bench lock resumes a worker that waited on it; blocked_on reports waits for another request\'s worker', async (t) => {
+  const { store, machines, agents, sessions, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  const ben = chat(BEN).info;
+  putRequests(store, [{ id: 'w1', status: 'active', by: BEN }, { id: 'w2', by: BEN }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w2: fix it', work_id: 'w2' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const live = async () => (await call(dispatcher().info, 'list_work', { id: 'w2' })).text;
+  const spec = machines.hooks!.specFor(info, store.machines.get('pc')!);
+  // (d) Every worker's prompt says pair checks and builds are its own work, and how to wait on another request's worker.
+  assert.match(spec.append, /Two-machine and pair checks, builds, test runs and your own CI are your own work: run them, or ask the dispatcher only for a second machine's worker/);
+  assert.match(spec.append, /Files or results another request's worker makes for you: `blocked_on` with reports/);
+
+  // (b) w1778: a wait on the reporter is Waiting on input on them, and nobody's orchestrator is asked.
+  const reporter = 'w2: still open: waiting on the reporter Reteoteigam to answer in the Discord thread (when the asteroid vanished); FFBox passes the answer on.';
+  info.lastResult = reporter;
+  info.lastResultAt = new Date().toISOString();
+  sessions.events.emit('turnEnd', sessions.get(id), reporter);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.match(await live(), /Waiting on input on the reporter Reteoteigam/);
+  assert.equal(heard(ben.id, '[needs you]').length, 0, 'no [needs you] for a wait on the reporter');
+
+  // (d) w1685: "waiting on the orchestrator to run the two-machine check": told at once that it is its own work; once.
+  const own = 'w2: still open: waiting on the orchestrator to run the two-machine check `MP-W2-2p` on a Windows or Linux pair, then the merge of PR #2254';
+  info.lastResult = own;
+  sessions.events.emit('turnEnd', sessions.get(id), own);
+  await until('the notice reaches it', () => store.readTranscript(id).some((e) => e.kind === 'user' && /Two-machine and pair checks, builds, test runs and your own CI are your own work \(w1841\)/.test((e as { text: string }).text)));
+  assert.match(store.work.get('w2')!.log.join('\n'), new RegExp(`worker ${id} was told its wait on the orchestrator \\("w2: still open: waiting on the orchestrator to run the two-machine check`));
+  await until('that turn ends', () => info.status === 'idle');
+  const told = () => store.readTranscript(id).filter((e) => e.kind === 'user' && /your own work \(w1841\)/.test((e as { text: string }).text)).length;
+  info.lastResult = own;
+  sessions.events.emit('turnEnd', sessions.get(id), own);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(told(), 1, 'told once per request');
+
+  // (a) A report waiting on the machine's bench lock: Blocked on it while a timed run holds it; told once when it is free.
+  const ms = machines as unknown as { statsOf: (id: string) => unknown };
+  const statsOf = ms.statsOf.bind(machines);
+  let lock: { owner: string; since: string } | undefined = { owner: 'pc pid 4121 w1739 timed run (/f/ffw/sandboxes/beta)', since: new Date().toISOString() };
+  ms.statsOf = (m: string) => (m === 'pc' ? { ...((statsOf(m) as object) ?? {}), at: new Date().toISOString(), ...(lock ? { benchLock: lock } : {}) } : statsOf(m));
+  t.after(() => void (ms.statsOf = statsOf));
+  info.lastResult = "w2: still open: waiting on pc's bench lock (w1739's timed run) before the raid clips record";
+  info.lastResultAt = new Date(Date.now() + 1000).toISOString();
+  assert.match(await live(), /Blocked on pc's bench lock/);
+  assert.deepEqual(agents.resumeBenchWaits(), [], 'held: nothing to tell');
+  lock = undefined;
+  assert.deepEqual(agents.resumeBenchWaits(), [['w2', `told ${id} that pc's bench lock is free`]]);
+  assert.deepEqual(agents.resumeBenchWaits(), [], 'once per report');
+  await until('the bench notice reaches it', () => store.readTranscript(id).some((e) => e.kind === 'user' && /pc's bench lock is free now \(w1841\): carry on with w2/.test((e as { text: string }).text)));
+  await until('that turn ends', () => info.status === 'idle');
+
+  // (e) w1818: files another request's worker makes: blocked_on reports is a request gate that clears at that worker's report.
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  assert.match(String(await h.blocked_on!({ reports: ['w1'], what: "w1's Calculations window stills" })), /^Recorded: w2 is Blocked on w1/);
+  const g = store.work.get('w2')!.blocked!;
+  assert.deepEqual([g.kind, g.ref, g.on], ['request', 'w1', 'report']);
+  assert.match(await live(), /Blocked on w1/);
 });
