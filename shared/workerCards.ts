@@ -12,11 +12,13 @@ import { workLiveAll, type WorkLive } from './workState.ts';
 
 /**
  * A card's status. Needs you is a permission only (w1521: a question is answered in the orchestrator chat); Waiting is a
- * person's wait the ledger reads (waiting_on_person, a report that asks); Working includes a worker between turns on its
- * own job or check-in (w643); Queued is capacity and Blocked a thing (w643); Idle finished its turn; Stopped has no
- * process and nothing brings it back by itself.
+ * person's wait the ledger reads (waiting_on_person, a report that asks); Working is mid-turn, or between turns with a job
+ * of its own still running (CI, a build: w643); Due back waits for its own check-in and nothing else (the ledger counts it
+ * Working, the machine view Stopped or Idle: the card says neither, w1837's critic); Queued is capacity and Blocked a thing
+ * (w643); Stalled is its request's red state (nothing works on it and nothing waits on a person); Idle finished its turn;
+ * Stopped has no process and nothing brings it back by itself.
  */
-export type CardStatus = 'needs_you' | 'waiting' | 'working' | 'queued' | 'blocked' | 'error' | 'idle' | 'stopped';
+export type CardStatus = 'needs_you' | 'waiting' | 'working' | 'due_back' | 'queued' | 'blocked' | 'stalled' | 'error' | 'idle' | 'stopped';
 
 /** The dashboard's tones (web/src/util.ts Tone): the ledger's LIVE_TONE and the agent dots (DispatcherPanel.tsx, Fleet.tsx). */
 export type CardTone = 'amber' | 'blue' | 'grey' | 'violet' | 'red';
@@ -25,8 +27,10 @@ export const CARD_STATUS_TONE: Record<CardStatus, CardTone> = {
   needs_you: 'amber',
   waiting: 'amber',
   working: 'blue',
+  due_back: 'grey',
   queued: 'grey',
   blocked: 'violet',
+  stalled: 'red',
   error: 'red',
   idle: 'grey',
   stopped: 'grey',
@@ -38,12 +42,16 @@ export const CARD_STATUS_TONE: Record<CardStatus, CardTone> = {
  */
 export type CardGroup = 'person' | 'working' | 'held' | 'resting';
 export const CARD_GROUPS: readonly CardGroup[] = ['person', 'working', 'held', 'resting'];
-export const CARD_GROUP_LABEL: Record<CardGroup, string> = { person: 'Needs a person', working: 'Working', held: 'Queued or blocked', resting: 'Idle or stopped' };
+export const CARD_GROUP_LABEL: Record<CardGroup, string> = { person: 'Needs a person', working: 'Working', held: 'Held up', resting: 'Idle or stopped' };
 export const CARD_GROUP_TONE: Record<CardGroup, CardTone> = { person: 'amber', working: 'blue', held: 'violet', resting: 'grey' };
 
-const GROUP_OF: Record<CardStatus, CardGroup> = { needs_you: 'person', waiting: 'person', working: 'working', queued: 'held', blocked: 'held', error: 'held', idle: 'resting', stopped: 'resting' };
-/** Within a group: a permission before a question, blocked and failed before queued, idle before stopped. */
-const STATUS_RANK: Record<CardStatus, number> = { needs_you: 0, waiting: 1, working: 0, error: 0, blocked: 1, queued: 2, idle: 0, stopped: 1 };
+/** Held up: queued for capacity, blocked on a thing, due back at a check-in, stalled or failed. */
+const GROUP_OF: Record<CardStatus, CardGroup> = { needs_you: 'person', waiting: 'person', working: 'working', due_back: 'held', queued: 'held', blocked: 'held', stalled: 'held', error: 'held', idle: 'resting', stopped: 'resting' };
+/**
+ * Within a group: a permission before a question (a worker stands mid-turn on a permission), failed and stalled before
+ * blocked, then queued, then due back; idle before stopped.
+ */
+const STATUS_RANK: Record<CardStatus, number> = { needs_you: 0, waiting: 1, working: 0, error: 0, stalled: 1, blocked: 2, queued: 3, due_back: 4, idle: 0, stopped: 1 };
 
 export interface WorkerCard {
   /** The session id. */
@@ -58,6 +66,8 @@ export interface WorkerCard {
   group: CardGroup;
   /** What it is on now: the tool mid-turn, the job or check-in between turns, what a person must do, what blocks it. */
   doing?: string;
+  /** `doing` names the tool it is in mid-turn ("Bash", "run_tests"): the card marks it as one. */
+  tool?: boolean;
   /** Since when it has had this status (ISO): the card's "12m". */
   since: string;
   /** The machine's id, its display name, and the sandbox (the slot). */
@@ -118,13 +128,18 @@ export interface CardFacts {
 const lastSaid = (s: SessionInfo) => s.lastResultAt ?? s.lastActivityAt;
 
 /** A card's status, what it says, what it is on now (a sentence, or a tool's own name as it is) and since when. */
-export function cardStatus(s: SessionInfo, f: CardFacts): Pick<WorkerCard, 'status' | 'word' | 'doing' | 'since'> {
+export function cardStatus(s: SessionInfo, f: CardFacts): Pick<WorkerCard, 'status' | 'word' | 'doing' | 'since' | 'tool'> {
   const st = statusOf(s, f);
-  const tool = st.status === 'working' && !!s.activeTool && (s.status === 'running' || s.status === 'starting');
-  return st.doing && !tool ? { ...st, doing: st.doing.charAt(0).toUpperCase() + st.doing.slice(1) } : st;
+  return st.doing && !st.tool ? { ...st, doing: st.doing.charAt(0).toUpperCase() + st.doing.slice(1) } : st;
 }
 
-function statusOf(s: SessionInfo, f: CardFacts): Pick<WorkerCard, 'status' | 'word' | 'doing' | 'since'> {
+/** Its check-in's note in a few words, as the line under a "Back at …" status. */
+const noteOf = (s: SessionInfo) => {
+  const words = (s.wakeNote ?? '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  return words.length ? `Check-in: ${words.slice(0, 12).join(' ')}${words.length > 12 ? '…' : ''}` : 'Its own check-in';
+};
+
+function statusOf(s: SessionInfo, f: CardFacts): Pick<WorkerCard, 'status' | 'word' | 'doing' | 'since' | 'tool'> {
   const perm = s.pendingPermissions[0];
   if (perm || s.status === 'waiting_permission') return { status: 'needs_you', word: 'Needs you', doing: perm ? `Asks to use ${toolName(perm.toolName)}` : 'Asks for a permission', since: perm?.createdAt ?? s.lastActivityAt };
   const a = agentState(s, f.time, f.now);
@@ -134,7 +149,7 @@ function statusOf(s: SessionInfo, f: CardFacts): Pick<WorkerCard, 'status' | 'wo
     return {
       status: 'working',
       word: s.status === 'starting' ? 'Starting' : 'Working',
-      doing: tool ? `${toolName(tool.name)} · ${shortAge(tool.since, f.now)}` : s.status === 'starting' ? 'Starting up' : 'Thinking',
+      ...(tool ? { doing: toolName(tool.name), tool: true } : { doing: s.status === 'starting' ? 'Starting up' : 'Thinking' }),
       since: s.turnOpenSince ?? s.lastActivityAt,
     };
   }
@@ -153,19 +168,23 @@ function statusOf(s: SessionInfo, f: CardFacts): Pick<WorkerCard, 'status' | 'wo
     const at = gates.length ? new Date(Math.max(...gates.map((g) => Date.parse(g.at) || 0))).toISOString() : lastSaid(s);
     return { status: 'blocked', word: 'Blocked', doing: f.live.waitsOn?.length ? `Waits for ${f.live.waitsOn.join(' and ')}` : f.live.why, since: at };
   }
+  const time = f.time ?? ((iso: string) => iso.slice(11, 16));
+  const dueBack = () => ({ status: 'due_back' as const, word: `Back at ${time(s.wakeAt!, f.now)}`, doing: noteOf(s), since: lastSaid(s) });
   if (a.state === 'between_turns') {
     if (a.label === 'Queued') return { status: 'queued', word: 'Queued', doing: a.waitsOn, since: lastSaid(s) };
     if (a.label === 'Blocked') return { status: 'blocked', word: 'Blocked', doing: a.waitsOn, since: lastSaid(s) };
+    // A job of its own still runs (CI, a build): work goes on. Only a check-in ahead: it is due back then.
+    if (a.kind === 'timer' && s.wakeAt) return dueBack();
     return { status: 'working', word: 'Working', doing: a.waitsOn, since: lastSaid(s) };
   }
   if (f.live?.state === 'queued') return { status: 'queued', word: 'Queued', doing: f.live.why, since: lastSaid(s) };
+  if (a.state === 'stopped' && a.resumes?.startsWith('check-in') && s.wakeAt) return dueBack();
+  if (f.live?.state === 'stalled') return { status: 'stalled', word: 'Stalled', doing: `Its request is stalled: ${f.live.why}`, since: lastSaid(s) };
   if (a.state === 'stopped') {
-    // Stopped until its check-in: its work goes on (a build, CI), as the ledger says (Working, w509).
-    if (a.resumes?.startsWith('check-in')) return { status: 'working', word: 'Working', doing: `Stopped until its ${a.resumes}`, since: lastSaid(s) };
     if (a.resumes) return { status: 'queued', word: 'Queued', doing: `Resumes with ${a.resumes}`, since: lastSaid(s) };
     return { status: 'stopped', word: 'Stopped', doing: a.held ? `Kept for it: ${a.held}` : undefined, since: lastSaid(s) };
   }
-  return { status: 'idle', word: 'Idle', doing: f.live?.state === 'stalled' ? 'Its request is stalled' : undefined, since: lastSaid(s) };
+  return { status: 'idle', word: 'Idle', doing: f.live?.state === 'followup' ? 'Merged; its follow-up is pending' : undefined, since: lastSaid(s) };
 }
 
 /** The request's pull request worth a link: an open one first, else the newest. */
@@ -257,6 +276,15 @@ export function groupCounts(cards: readonly Pick<WorkerCard, 'group'>[]): Record
   const n = { person: 0, working: 0, held: 0, resting: 0 };
   for (const c of cards) n[c.group]++;
   return n;
+}
+
+/** The Overview's header line in Workers mode, counted from the same cards as the chips: "26 workers · 13 working · 5 need a person · 6 held up". */
+export function cardsSummary(cards: readonly Pick<WorkerCard, 'group'>[]): string {
+  const n = groupCounts(cards);
+  const parts = [`${cards.length} ${cards.length === 1 ? 'worker' : 'workers'}`, `${n.working} working`];
+  if (n.person) parts.push(`${n.person} ${n.person === 1 ? 'needs' : 'need'} a person`);
+  if (n.held) parts.push(`${n.held} held up`);
+  return parts.join(' · ');
 }
 
 /** The people and machines on the cards, for the filter menus: each once, sorted by name. */

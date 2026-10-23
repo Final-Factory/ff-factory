@@ -6498,13 +6498,17 @@ button.board-head-link:hover {
 }
 
 .wc-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s-2) var(--s-4);
+  margin: 0 calc(-1 * var(--s-6));
   padding: var(--s-3) var(--s-6);
   border-bottom: 1px solid var(--border);
-  flex: none;
+  background: var(--bg);
 }
 
 .wc-chips {
@@ -6532,7 +6536,7 @@ button.board-head-link:hover {
   display: flex;
   flex-direction: column;
   gap: var(--s-5);
-  padding: var(--s-4) var(--s-6) var(--s-6);
+  padding: 0 var(--s-6) var(--s-6);
 }
 
 .wc-group-head {
@@ -6718,9 +6722,24 @@ button.board-head-link:hover {
 }
 
 .wc-where {
+  display: inline-flex;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* The machine's name gives way before the slot, which says which sandbox. */
+.wc-machine {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.wc-tool {
+  color: var(--text);
+}
+
+.wc-hidden {
+  visibility: hidden;
 }
 
 .wc-live,
@@ -6729,19 +6748,11 @@ button.board-head-link:hover {
   z-index: 1;
 }
 
-.wc-live {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 1px 8px;
-  border: 1px solid rgba(60, 207, 138, 0.4);
-  border-radius: 999px;
-  background: var(--green-soft);
-  color: var(--green);
-  font: inherit;
+/* The machine view's quiet "Live view: go" chip, a size smaller. */
+.wc-card .wc-live {
+  height: 20px;
+  padding: 0 8px;
   font-size: var(--fs-xs);
-  font-weight: 650;
-  cursor: pointer;
 }
 
 .wc-pr {
@@ -6756,14 +6767,6 @@ a.wc-pr:hover {
   text-decoration: underline;
 }
 
-.wc-pr-open {
-  color: var(--green);
-}
-
-.wc-pr-merged {
-  color: var(--violet);
-}
-
 .wc-cost {
   flex: none;
   font-variant-numeric: tabular-nums;
@@ -6774,9 +6777,24 @@ a.wc-pr:hover {
 }
 
 @media (max-width: 860px) {
+  /* On a phone the filters scroll away with the cards, and the chips are one row that scrolls sideways. */
   .wc-bar {
+    position: static;
     gap: var(--s-2);
+    margin: 0 calc(-1 * var(--s-3));
     padding: var(--s-2) var(--s-3);
+  }
+
+  .wc-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    margin: 0 calc(-1 * var(--s-3));
+    padding: 0 var(--s-3);
+  }
+
+  .wc-chips .ledger-state {
+    flex: none;
   }
 
   .wc-selects {
@@ -6791,7 +6809,7 @@ a.wc-pr:hover {
 
   .wc-scroll {
     gap: var(--s-4);
-    padding: var(--s-3);
+    padding: 0 var(--s-3) var(--s-3);
   }
 
   .wc-grid {

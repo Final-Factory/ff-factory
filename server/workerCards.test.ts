@@ -4,6 +4,7 @@ import { fleetOf } from '../shared/fleet.ts';
 import type { Machine, MachineSandbox, SessionInfo, SessionStatus, WorkItem } from '../shared/types.ts';
 import {
   cardStatus,
+  cardsSummary,
   filterCards,
   filterChoices,
   groupCounts,
@@ -106,7 +107,7 @@ test('w1837: a card says Needs you for a permission, Working mid-turn with its t
   assert.deepEqual(perm, { status: 'needs_you', word: 'Needs you', doing: 'Asks to use unity', since: ago(3) });
 
   const busy = cardStatus(session('b', 'running', { turnOpenSince: ago(20), activeTool: { id: 't', name: 'Bash', since: ago(2) } }), { now: NOW });
-  assert.deepEqual(busy, { status: 'working', word: 'Working', doing: 'Bash · 2m', since: ago(20) });
+  assert.deepEqual(busy, { status: 'working', word: 'Working', doing: 'Bash', tool: true, since: ago(20) });
 
   const waits = session('c', 'stopped', { waitingOn: { who: 'Ben', what: 'approve the stills', at: ago(40) } });
   assert.deepEqual(cardStatus(waits, { waitsOn: ['Ben'], me: 'ben', now: NOW }), { status: 'waiting', word: 'Asked you', doing: 'Approve the stills', since: ago(40) });
@@ -120,7 +121,10 @@ test('w1837: between turns a card is Working on its job or check-in, Queued or B
   assert.equal(ci.since, ago(4));
 
   const checkIn = cardStatus(session('b', 'stopped', { wakeAt: new Date(NOW + 20 * 60_000).toISOString(), wakeNote: 'look at the build' }), { now: NOW, time: () => '12:20' });
-  assert.deepEqual([checkIn.status, checkIn.doing], ['working', 'Stopped until its check-in 12:20']);
+  // Its own check-in and nothing else: Back at, never Working (the ledger's word) nor Stopped (the machine view's), w1837's critic.
+  assert.deepEqual([checkIn.status, checkIn.word, checkIn.doing], ['due_back', 'Back at 12:20', 'Check-in: look at the build']);
+  const alive = cardStatus(session('b2', 'idle', { wakeAt: new Date(NOW + 5 * 60_000).toISOString() }), { now: NOW, time: () => '12:05' });
+  assert.deepEqual([alive.status, alive.word, alive.doing], ['due_back', 'Back at 12:05', 'Its own check-in']);
 
   assert.equal(cardStatus(session('c', 'idle', { queuedSend: 'waiting for a free agent slot', queuedOn: 'capacity' }), { now: NOW }).status, 'queued');
   assert.equal(cardStatus(session('d', 'idle', { queuedSend: 'its machine is offline', queuedOn: 'machine' }), { now: NOW }).status, 'blocked');
@@ -133,6 +137,9 @@ test('w1837: between turns a card is Working on its job or check-in, Queued or B
   assert.deepEqual([st.status, st.word, st.doing, st.since], ['blocked', 'Blocked', 'Waits for CI on Final-Factory/ff-factory#551', ago(25)]);
 
   assert.equal(cardStatus(session('g', 'idle'), { now: NOW }).status, 'idle');
+  // Its request is Stalled (nothing works on it, nothing waits on a person): the ledger's red state.
+  const stalled = cardStatus(session('g2', 'stopped'), { live: { state: 'stalled', why: 'g2 stopped 3h ago, nothing waits on a person' }, now: NOW });
+  assert.deepEqual([stalled.status, stalled.word, stalled.doing], ['stalled', 'Stalled', 'Its request is stalled: g2 stopped 3h ago, nothing waits on a person']);
   assert.equal(cardStatus(session('h', 'stopped'), { now: NOW }).status, 'stopped');
   assert.equal(cardStatus(session('i', 'error', { statusDetail: 'crashed' }), { now: NOW }).status, 'error');
 });
@@ -142,6 +149,8 @@ test('w1837: the board reads a person first, then working, then queued or blocke
   const order = sortCards([
     c('idle', 'idle', 'resting', 50),
     c('stop', 'stopped', 'resting', 500),
+    c('due', 'due_back', 'held', 300),
+    c('stall', 'stalled', 'held', 2),
     c('q', 'queued', 'held', 5),
     c('blk', 'blocked', 'held', 1),
     c('new-work', 'working', 'working', 2),
@@ -150,7 +159,7 @@ test('w1837: the board reads a person first, then working, then queued or blocke
     c('perm', 'needs_you', 'person', 1),
     c('tie-b', 'working', 'working', 90),
   ]).map((x) => x.id);
-  assert.deepEqual(order, ['perm', 'asked', 'old-work', 'tie-b', 'new-work', 'blk', 'q', 'idle', 'stop']);
+  assert.deepEqual(order, ['perm', 'asked', 'old-work', 'tie-b', 'new-work', 'stall', 'blk', 'q', 'due', 'idle', 'stop']);
 });
 
 test('w1837: filters by group, person (any case) and machine; counts and choices for the bar', () => {
@@ -233,5 +242,12 @@ test('w1837: one card per worker the machine view lists, with its request, perso
 
 test('w1837: a doing line is a sentence, but a tool keeps its own name', () => {
   assert.equal(cardStatus(session('a', 'idle', { queuedSend: 'waits for a free agent slot', queuedOn: 'capacity' }), { now: NOW }).doing, 'A queued message (waits for a free agent slot)');
-  assert.equal(cardStatus(session('b', 'running', { activeTool: { id: 't', name: 'mcp__machine__run_tests', since: ago(6) } }), { now: NOW }).doing, 'run_tests · 6m');
+  assert.equal(cardStatus(session('b', 'running', { activeTool: { id: 't', name: 'mcp__machine__run_tests', since: ago(6) } }), { now: NOW }).doing, 'run_tests');
+});
+
+test('w1837: the header counts the same cards as the chips', () => {
+  const g = (group: WorkerCard['group']) => ({ group });
+  assert.equal(cardsSummary([g('working'), g('working'), g('person'), g('held'), g('resting')]), '5 workers · 2 working · 1 needs a person · 1 held up');
+  assert.equal(cardsSummary([g('working')]), '1 worker · 1 working');
+  assert.equal(cardsSummary([]), '0 workers · 0 working');
 });

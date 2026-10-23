@@ -12,8 +12,8 @@ import { AttentionButton, DrawerButton } from './ShellButtons';
 import { describe, gpuPct, level, ramLvl, ramPct, type Lvl } from './SystemMeters';
 import { Dot, Icon } from './ui';
 import { useKeepScroll } from '../scrollKeep';
-import { OVERVIEW_MODE_KEY, readMode, writeMode, type OverviewMode } from '../../../shared/workerCards';
-import { WorkerBoard } from './WorkerCards';
+import { OVERVIEW_MODE_KEY, cardsSummary, readMode, writeMode, type OverviewMode } from '../../../shared/workerCards';
+import { WorkerBoard, useWorkerCards } from './WorkerCards';
 
 type Variant = 'side' | 'board';
 
@@ -516,6 +516,7 @@ export function OverviewBoard({ app }: { app: AppState }) {
     setModeState(m);
     lsSet(OVERVIEW_MODE_KEY, writeMode(m));
   };
+  const cards = useWorkerCards(app, fleet, now, mode === 'workers');
   const go = (r: Route) => navigate(r);
   return (
     <section className="overview" data-testid="overview" data-mode={mode}>
@@ -523,7 +524,7 @@ export function OverviewBoard({ app }: { app: AppState }) {
         <DrawerButton />
         <span className="page-title">Overview</span>
         <span className="overview-sum dim small">
-          {live} {live === 1 ? 'agent' : 'agents'} live · {busy} busy{waiting ? ` · ${waiting} waiting on you` : ''}
+          {mode === 'workers' ? cardsSummary(cards) : `${live} ${live === 1 ? 'agent' : 'agents'} live · ${busy} busy${waiting ? ` · ${waiting} waiting on you` : ''}`}
         </span>
         <span className="spacer" />
         <span className="ov-mode" role="group" aria-label="Show the Overview by" data-testid="overview-mode">
@@ -536,7 +537,7 @@ export function OverviewBoard({ app }: { app: AppState }) {
         <AttentionButton />
       </header>
       {mode === 'workers' ? (
-        <WorkerBoard app={app} fleet={fleet} now={now} scrollRef={keepCards} />
+        <WorkerBoard cards={cards} now={now} scrollRef={keepCards} />
       ) : (
         <div className="board" ref={keep}>
           {fleet.map((c) => (

@@ -50,34 +50,45 @@ function Card({ c, now }: { c: WorkerCard; now: number }) {
           {shortAge(c.since, now)}
         </span>
         <span className="spacer" />
+        {/* The machine view's quiet "Live view: go" chip (w1599), smaller: a view you may watch. */}
         {c.live && (
-          <button type="button" className="wc-live" onClick={() => navigate({ view: 'live', sessionId: c.id })} title="Its Live view is up: open it" data-testid="wc-live">
+          <button type="button" className="fl-chip fl-call-quiet wc-live" onClick={() => navigate({ view: 'live', sessionId: c.id })} title="Its Live view is up: open it" data-testid="wc-live">
             <span className="lv-rec" aria-hidden />
-            Live
+            Live view
           </button>
         )}
       </div>
       <button type="button" className="wc-open" onClick={open} title={hint} data-testid="wc-open">
         <span className="wc-title">{c.title}</span>
       </button>
-      <div className="wc-doing" title={c.doing}>
-        {c.doing ?? ' '}
+      <div className="wc-doing" title={c.tool ? `In the tool ${c.doing}` : c.doing}>
+        {c.tool ? (
+          <>
+            Using <span className="mono wc-tool">{c.doing}</span>
+          </>
+        ) : (
+          (c.doing ?? '\u00a0')
+        )}
       </div>
       <div className="wc-foot">
         <span className="wc-meta">
-          {c.request && <span className="mono wc-req">{c.request}</span>}
+          {/* Every card's foot reads alike: a dash where it serves no request. */}
+          <span className="mono wc-req" title={c.request ? undefined : 'Not on a request'}>
+            {c.request ?? '—'}
+          </span>
           {c.person && <span className="wc-person">{c.person}</span>}
+          {/* The machine's name gives way before the slot. */}
           <span className="wc-where" title={where}>
-            {where}
+            <span className="wc-machine">{c.machine}</span>/{c.sandbox}
           </span>
         </span>
         {c.pr &&
           (c.pr.url ? (
-            <a className={`wc-pr wc-pr-${c.pr.state}`} href={c.pr.url} target="_blank" rel="noreferrer" title={`${c.pr.repo}#${c.pr.number} (${c.pr.state})`} data-testid="wc-pr">
+            <a className="wc-pr" href={c.pr.url} target="_blank" rel="noreferrer" title={`${c.pr.repo}#${c.pr.number} (${c.pr.state})`} data-testid="wc-pr">
               #{c.pr.number}
             </a>
           ) : (
-            <span className={`wc-pr wc-pr-${c.pr.state}`} title={`${c.pr.repo}#${c.pr.number} (${c.pr.state})`}>
+            <span className="wc-pr" title={`${c.pr.repo}#${c.pr.number} (${c.pr.state})`}>
               #{c.pr.number}
             </span>
           ))}
@@ -129,27 +140,33 @@ function Filters({ cards, f, set }: { cards: WorkerCard[]; f: CardFilter; set: (
             </option>
           ))}
         </select>
-        {any && (
-          <button className="link-btn small" onClick={() => set({ groups: [] })} data-testid="wc-clear">
-            Clear
-          </button>
-        )}
+        {/* Kept in its place while hidden, so the menus do not move when it comes. */}
+        <button className={`link-btn small${any ? '' : ' wc-hidden'}`} onClick={() => set({ groups: [] })} aria-hidden={!any} tabIndex={any ? undefined : -1} data-testid="wc-clear">
+          Clear
+        </button>
       </div>
     </div>
   );
 }
 
-export function WorkerBoard({ app, fleet, now, scrollRef }: { app: AppState; fleet: FleetComputer[]; now: number; scrollRef: (el: HTMLDivElement | null) => void }) {
-  const [f, setF] = useCardFilter();
+/**
+ * The cards, once per change of what they read; empty while the Overview shows machines (`on` false), so the machine view
+ * computes nothing more. The page's header counts them in this mode (cardsSummary), so its numbers and the chips agree.
+ */
+export function useWorkerCards(app: AppState, fleet: FleetComputer[], now: number, on: boolean): WorkerCard[] {
   const views = app.config.live?.enabled ? app.live : undefined;
   const me = app.me?.displayName;
-  const cards = useMemo(() => workerCards(fleet, { work: app.work, views, me, now, time: localTime }), [fleet, app.work, views, me, now]);
+  return useMemo(() => (on ? workerCards(fleet, { work: app.work, views, me, now, time: localTime }) : []), [on, fleet, app.work, views, me, now]);
+}
+
+export function WorkerBoard({ cards, now, scrollRef }: { cards: WorkerCard[]; now: number; scrollRef: (el: HTMLDivElement | null) => void }) {
+  const [f, setF] = useCardFilter();
   const shown = filterCards(cards, f);
   const groups = CARD_GROUPS.map((g) => ({ g, list: shown.filter((c) => c.group === g) })).filter((x) => x.list.length);
   return (
     <div className="wc-board" data-testid="worker-board">
-      <Filters cards={cards} f={f} set={setF} />
       <div className="wc-scroll" ref={scrollRef}>
+        <Filters cards={cards} f={f} set={setF} />
         {groups.map(({ g, list }) => (
           <section key={g} className="wc-group" data-testid={`wc-section-${g}`}>
             <h3 className="wc-group-head">

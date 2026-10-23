@@ -327,12 +327,13 @@ test('w1837: the Overview switches to one card per worker, keeps the choice acro
   await expect(board).toHaveAttribute('data-mode', 'workers');
   await expect(board.locator('.board-card')).toHaveCount(0);
   const card = (title: string) => board.getByTestId('wc-card').filter({ hasText: title });
-  // The running worker reads Working where it runs; the idle one on its open request reads Idle, for its person.
+  // The running worker reads Working where it runs; the idle one carries its request and person.
   await expect(card('Nightly e2e: Windows leg').getByTestId('wc-status')).toHaveText('Working');
   await expect(card('Nightly e2e: Windows leg')).toContainText('LothDesktop/sb1');
-  await expect(card('Review the nightly report').getByTestId('wc-status')).toHaveText('Idle');
+  // Idle on an open request with nothing waiting on a person: its request is Stalled, red, as the Dispatcher says.
+  await expect(card('Review the nightly report').getByTestId('wc-status')).toHaveText('Stalled');
   await expect(card('Review the nightly report')).toContainText(/w900\s*·?\s*Lothsahn/);
-  // Working before Idle.
+  // Working before held up.
   const titles = await board.getByTestId('wc-open').allTextContents();
   expect(titles.indexOf('Nightly e2e: Windows leg')).toBeLessThan(titles.indexOf('Review the nightly report'));
 
@@ -365,14 +366,14 @@ test('fleet: a machine sandbox has its own page: agents as tabs, Unity with its 
   // The newest agent is selected, and its transcript loads.
   await expect(panel.locator('.msg-assistant').first()).toBeVisible();
   if (!isMobile(page)) {
-    await expect(panel.locator('.ph-facts')).toContainText('LothDesktop/sb1');
+    await expect(panel.locator('.ph-facts')).toContainText('lothdesktop/sb1');
     await expect(panel.locator('.ph-facts')).toContainText('feature/fleet-view');
     // Working first, then Idle (w475).
     await expect(panel.getByRole('tab')).toHaveText([/Nightly e2e: Windows leg/, /Review the nightly report\s*Lothsahn/]);
   }
   await panel.getByRole('button', { name: 'Details' }).click();
   const details = page.locator('.details-sheet');
-  await expect(details).toContainText('LothDesktop/sb1');
+  await expect(details).toContainText('lothdesktop/sb1');
   await expect(details.locator('.unity-bar')).toContainText('Unity running');
   await expect(details.getByRole('button', { name: 'Stop Unity' })).toBeEnabled();
   await expect(details).toContainText('Nightly: Windows runner');
