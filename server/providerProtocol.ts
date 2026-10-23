@@ -123,8 +123,8 @@ export const ProviderConversationSchema = z.object({
 });
 
 export const ProviderIntakeSchema = z.object({
-  reportId: z.string().regex(/^\d{8}T\d{6}Z-(crash|desync)-[0-9a-f]{6,32}$/),
-  kind: z.enum(['crash', 'desync']),
+  reportId: z.string().regex(/^\d{8}T\d{6}Z-(crash|desync|hang)-[0-9a-f]{6,32}$/),
+  kind: z.enum(['crash', 'desync', 'hang']),
   receivedAt: iso,
   gameVersion: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/),
   platform: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/),
@@ -382,7 +382,7 @@ const requestId = z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/);
 const conversationId = z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/);
 const gitRef = z.string().regex(/^[A-Za-z0-9._/+-]{1,200}$/);
 const boardKey = z.string().regex(/^[A-Za-z0-9_:#.+/-]{1,160}$/);
-const reportId = z.string().regex(/^\d{8}T\d{6}Z-(crash|desync)-[0-9a-f]{6,32}$/);
+const reportId = z.string().regex(/^\d{8}T\d{6}Z-(crash|desync|hang)-[0-9a-f]{6,32}$/);
 
 /** portal → connector: start a turn on FFBox (a new conversation, or the next turn of one it started). */
 export const SubmitSchema = z

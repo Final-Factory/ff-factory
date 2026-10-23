@@ -1,6 +1,6 @@
 // FFBox's page (docs/ffbox-integration.md): what its connector reports, read-only. The header shows the
 // connection and each container class (network, model, tier, free slots); the tabs list its conversations and
-// the crash/desync reports ffintake filed, newest first. Titles are FFBox's data and can quote players: they
+// the crash/desync/hang reports ffintake filed, newest first. Titles are FFBox's data and can quote players: they
 // are shown as plain text, never acted on.
 import { useEffect, useState, type ReactNode } from 'react';
 import type { IntakeGroups, Provider, ProviderClass, ProviderConversation, ProviderConversationView, ProviderIntakeEvent, ProviderTurn } from '../../../shared/types';
@@ -258,13 +258,13 @@ function Signatures({ groups, now }: { groups?: IntakeGroups; now: number }) {
           <Chip tone="grey">on FFBox</Chip>
         </div>
         <p className="small dim">
-          FFBox diagnoses crash and desync reports by itself when its <span className="mono">intake.auto</span> is on: a short wait after a report
+          FFBox diagnoses crash, desync and hang reports by itself when its <span className="mono">intake.auto</span> is on: a short wait after a report
           arrives, then an <span className="mono">ffdiagnose</span> conversation, under its own daily cap. FF Factory starts none of them. Its live
           setting and each recent report's conversation: <span className="mono">ffbox_activity show signatures</span>.
         </p>
       </div>
       {!groups.signatures.length ? (
-        <Empty text="No crash or desync reports yet." />
+        <Empty text="No crash, desync or hang reports yet." />
       ) : (
         <div className="run-list" data-testid="provider-signatures">
           {groups.signatures.map((g) => (
@@ -273,10 +273,10 @@ function Signatures({ groups, now }: { groups?: IntakeGroups; now: number }) {
                 <Dot tone={g.kind === 'desync' ? 'amber' : 'red'} title={g.kind} />
                 <span className="small">{g.kind}</span>
                 <span className="mono small">{g.versionLine}</span>
-                {g.trusted ? <Chip tone="green">trusted</Chip> : <Chip tone="grey">{g.kind === 'crash' ? 'no signature yet' : 'one sender'}</Chip>}
+                {g.trusted ? <Chip tone="green">trusted</Chip> : <Chip tone="grey">{g.kind !== 'desync' ? 'no signature yet' : 'one sender'}</Chip>}
                 <span className="dim small">last {fmtRelative(g.lastAt, now)}</span>
               </div>
-              <div className="pv-title mono">{g.surfaces ?? 'crash (signatures come in phase 6)'}</div>
+              <div className="pv-title mono">{g.surfaces ?? `${g.kind} (signatures come in phase 6)`}</div>
               <div className="pv-sig-counts small dim">
                 {g.reports} report{g.reports === 1 ? '' : 's'} · {g.events} event{g.events === 1 ? '' : 's'} · {g.senders} sender{g.senders === 1 ? '' : 's'}
                 {g.pair ? ' · host+client pair' : ''} · {g.platforms.join(', ')}
@@ -357,7 +357,7 @@ function Conversations({ list }: { list?: ProviderConversation[] }) {
 
 function Intake({ list }: { list?: ProviderIntakeEvent[] }) {
   if (!list) return <p className="dim small">Loading…</p>;
-  if (!list.length) return <Empty text="No crash or desync reports yet." />;
+  if (!list.length) return <Empty text="No crash, desync or hang reports yet." />;
   return (
     <div className="run-list" data-testid="provider-intake">
       {list.map((e) => (

@@ -205,14 +205,14 @@ export const CATALOG = {
   },
   /** docs/ffbox.md, "Release symbols and diagnosis files" (w1542). The portal asks FFBox; nothing on the machine is read. */
   list_ffbox_files: {
-    what: z.enum(['symbols', 'reports', 'diagnosis']).describe('symbols: the release symbol store (every version, or with version its files). reports: players\' crash and desync reports. diagnosis (needs id): the files FFBox\'s diagnosis of one report kept.'),
+    what: z.enum(['symbols', 'reports', 'diagnosis']).describe('symbols: the release symbol store (every version, or with version its files). reports: players\' crash, desync and hang reports. diagnosis (needs id): the files FFBox\'s diagnosis of one report kept.'),
     version: z.string().max(64).optional().describe('symbols: one release\'s files, e.g. "1.0.0.0". reports: that game version exactly.'),
     commit: z.string().max(40).optional().describe('symbols: the builds made from this commit (7 to 40 hex digits).'),
     name: z.string().max(128).optional().describe('symbols: files whose name holds this, any case (e.g. "burst"); searches every version without version.'),
     platform: z.string().max(64).optional().describe('symbols: WindowsPlayer, OSXPlayer or LinuxPlayer. reports: the platform, any case.'),
     app: z.string().max(16).optional().describe('symbols: main or demo.'),
     id: z.string().max(64).optional().describe('reports: only this report. diagnosis, required: the report id, e.g. 20261003T101500Z-crash-3a9f01c2d4.'),
-    kind: z.enum(['any', 'crash', 'desync']).optional().describe('reports only (default any).'),
+    kind: z.enum(['any', 'crash', 'desync', 'hang']).optional().describe('reports only (default any).'),
     since: z.string().max(40).optional().describe('reports only: received from this ISO time with a zone.'),
     until: z.string().max(40).optional().describe('reports only: received up to this ISO time with a zone.'),
     limit: z.number().int().min(1).max(500).optional().describe('How many (symbols default 200, reports default 20); a page also stops at about 40 KB.'),

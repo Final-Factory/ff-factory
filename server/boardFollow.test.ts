@@ -85,6 +85,7 @@ test('escalationCatchUp: escalated requests closed done in the last 14 days, one
 test('w502: reportLines reads a PR\'s `Report: <id>` lines only, each once', () => {
   const body = ['Fix the crash on load', '', 'Report: 20261005T035612Z-crash-6102d405dc', '- Report: `20261005T035747Z-crash-1216e47e7d`', '> report: 20261005T035612Z-crash-6102d405dc', 'Seen in 20261004T000000Z-desync-abcdef0123 too.', 'Report: not-a-report'].join('\r\n');
   assert.deepEqual(reportLines(body), ['20261005T035612Z-crash-6102d405dc', '20261005T035747Z-crash-1216e47e7d']);
+  assert.deepEqual(reportLines(['Report: 20261023T010203Z-hang-0123456789', 'Report: 20261023T010203Z-freeze-0123456789'].join('\n')), ['20261023T010203Z-hang-0123456789'], 'a hang report is claimed like a crash');
   assert.deepEqual(reportLines(undefined), []);
 });
 

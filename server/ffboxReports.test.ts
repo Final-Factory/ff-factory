@@ -75,6 +75,8 @@ test('reports: the args are checked here first; ids that are paths are refused',
   assert.deepEqual(ffboxReportsArgs({}), { args: { limit: 20, offset: 0 } });
   const a = ffboxReportsArgs({ id: RID, since: '2026-10-03T10:00:00Z', kind: 'desync', session: '0123456789abcdef0123456789abcdef', limit: 500 });
   assert.deepEqual(a, { args: { limit: 200, offset: 0, id: RID, since: 1791021600, kind: 'desync', session: '0123456789abcdef0123456789abcdef' } });
+  assert.deepEqual(ffboxReportsArgs({ id: '20261023T010203Z-hang-0123456789', kind: 'hang' }), { args: { limit: 20, offset: 0, id: '20261023T010203Z-hang-0123456789', kind: 'hang' } });
+  assert.match((ffboxReportsArgs({ kind: 'freeze' }) as { error: string }).error, /crash, desync, hang or any/);
   assert.match((ffboxReportsArgs({ id: '../../opt/ffreports' }) as { error: string }).error, /an FFBox report id/);
   assert.match((ffboxReportsArgs({ since: 'yesterday' }) as { error: string }).error, /ISO time/);
   assert.match((ffboxReportsArgs({ since: '2026-10-04T00:00:00Z', until: '2026-10-03T00:00:00Z' }) as { error: string }).error, /after until/);

@@ -23,6 +23,7 @@ test('intake: the coarse signature is the version line and the diverged surfaces
   assert.equal(signatureOf(desync({})), 'desync:0.50.0:minerBots+census');
   assert.equal(signatureOf({ ...desync({}), desync: {} }), 'desync:0.50.0:unknown');
   assert.equal(signatureOf({ ...desync({}), kind: 'crash', desync: undefined }), 'crash:0.50.0');
+  assert.equal(signatureOf({ ...desync({}), kind: 'hang', desync: undefined }), 'hang:0.50.0', 'a hang is grouped like a crash, apart from crashes');
 });
 
 test('intake: one item per signature across builds; trusted with 2 senders or a host+client pair', () => {

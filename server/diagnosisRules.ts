@@ -8,7 +8,7 @@ import { classifyBug, cleanBlock, cleanLine, quoteUntrusted } from './intakeRule
 import type { WorkItem, WorkReportFile, WorkSource, WorkTriage } from '../shared/types.ts';
 
 const oneLine = /^[^\u0000-\u001f]*$/;
-const reportId = z.string().regex(/^\d{8}T\d{6}Z-(crash|desync)-[0-9a-f]{6,32}$/, 'a report id');
+const reportId = z.string().regex(/^\d{8}T\d{6}Z-(crash|desync|hang)-[0-9a-f]{6,32}$/, 'a report id');
 const conversationId = z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/);
 const token = z.string().regex(/^[A-Za-z0-9._+-]{1,40}$/);
 /** The findings FFBox sends are cut at about 20,000 characters, with a marker: room for the marker. */
@@ -18,7 +18,7 @@ export const FINDINGS_IN_BRIEF = 5_000;
 
 const ReportSchema = z
   .object({
-    kind: z.enum(['desync', 'crash']),
+    kind: z.enum(['desync', 'crash', 'hang']),
     lead: reportId,
     reportIds: z.array(reportId).min(1).max(20),
     gameVersion: token,
@@ -32,7 +32,7 @@ const ReportSchema = z
     paired: z.boolean().optional(),
     correlationId: z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/).optional(),
     signature: z.string().regex(/^desync:\d{1,4}\.\d{1,4}\.\d{1,4}:[A-Za-z0-9_+,.-]{1,300}$/, 'desync:<x.y.z>:<surfaces>').optional(),
-    // A crash's, when it has one.
+    // A crash's or a hang's, when it has one (a hang's is the stack signature of the frozen thread).
     crashSignature: z.string().min(1).max(200).regex(/^[^\u0000-\u001f`<>]*$/, 'one line').optional(),
   })
   .strict()
@@ -40,7 +40,7 @@ const ReportSchema = z
     if (r.reportIds[0] !== r.lead) ctx.addIssue({ code: 'custom', path: ['reportIds'], message: 'the lead report first' });
     if (r.reportIds.some((id) => !id.includes(`-${r.kind}-`))) ctx.addIssue({ code: 'custom', path: ['reportIds'], message: `every report id is a ${r.kind} report` });
     const desyncOnly = ['group', 'divergedSurfaces', 'heartbeat', 'role', 'paired', 'correlationId', 'signature'] as const;
-    if (r.kind === 'crash') for (const k of desyncOnly) if (r[k] !== undefined) ctx.addIssue({ code: 'custom', path: [k], message: 'a desync field on a crash report' });
+    if (r.kind !== 'desync') for (const k of desyncOnly) if (r[k] !== undefined) ctx.addIssue({ code: 'custom', path: [k], message: `a desync field on a ${r.kind} report` });
     if (r.kind === 'desync' && r.crashSignature !== undefined) ctx.addIssue({ code: 'custom', path: ['crashSignature'], message: 'a crash field on a desync report' });
   });
 
@@ -122,7 +122,7 @@ export function diagnosisKeys(d: Diagnosis): string[] {
 
 /** The coarse signature a diagnosis shares with others of the same fork: only ever a "maybe" (w361). */
 export function diagnosisSignature(d: Diagnosis): string | undefined {
-  return d.report.kind === 'desync' ? d.report.signature : d.report.crashSignature ? `crash:${d.report.crashSignature}` : undefined;
+  return d.report.kind === 'desync' ? d.report.signature : d.report.crashSignature ? `${d.report.kind}:${d.report.crashSignature}` : undefined;
 }
 
 /** Whether a request came from a player's report (an FFBox diagnosis, or one that holds a report's key): the only pool a diagnosis matches against. */
@@ -224,7 +224,7 @@ export function diagnosisBrief(d: Diagnosis): string {
           ...(r.correlationId ? [`correlation ${r.correlationId}`] : []),
         ]
       : r.crashSignature
-        ? [`crash signature ${cleanLine(r.crashSignature, 200)}`]
+        ? [`${r.kind} signature ${cleanLine(r.crashSignature, 200)}`]
         : []),
   ];
   return [

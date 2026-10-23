@@ -215,6 +215,20 @@ test('not fatal: a value out of range is bad_message (counted), an unknown type 
   assert.equal(pm.intake().length, 0);
 });
 
+test('w1780: a hang report (a frozen game\'s watchdog report) is recorded like a crash', async (t) => {
+  const { connect, pm } = await setup(t);
+  const c = connect();
+  await c.hello();
+  const hang = { reportId: '20261023T010203Z-hang-0123456789', kind: 'hang' as const, receivedAt: '2026-10-23T01:02:03Z', gameVersion: '0.50.0.46', platform: 'WindowsPlayer', bytes: 90_000 };
+  c.intake(hang);
+  await until('the hang', () => pm.intake().length === 1);
+  assert.deepEqual(pm.intake().map((x) => [x.reportId, x.kind]), [[hang.reportId, 'hang']]);
+  // A kind outside crash, desync and hang is still refused.
+  c.send({ type: 'intake', cursor: 'y', event: { ...hang, kind: 'freeze' } });
+  assert.equal((await c.next('error')).code, 'bad_message');
+  assert.equal(pm.intake().length, 1);
+});
+
 test('fatal: not JSON, not an object, no string type, or a field of the wrong JSON type closes 4400 with the reason, logged and in the status line', async (t) => {
   const { connect, pm, remote } = await setup(t);
   const warns = t.mock.method(console, 'warn', () => undefined);

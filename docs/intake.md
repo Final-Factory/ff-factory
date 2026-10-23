@@ -36,7 +36,7 @@ threads by default, and the ledger check both ways (provider protocol 2) is buil
 | a message in a request channel (`requestChannels`, default `dev_chat`) that mentions Max or replies to it, from a Discord id in `intake.discord.trusted` | "Discord request: <first line>" | that person | a person's own request |
 | an FFBox conversation that left an unreviewed `ffbox/*` branch (a fix, a diagnosis) | "Review and merge ffbox/…" | the system payer | needs a human (a person's own when an operator opened it); a desync diagnosis or its PR is approved at once under the [desync PR policy](#ffbox-desync-prs) |
 | a `request` FFBox's connector files (review, escalation, an operator's dev work) | "FFBox …: <title>" | the operator, else the system payer | the same |
-| a finished FFBox diagnosis of a player's desync or crash report (`POST /api/intake/ffbox`, `source: "intake"`) | "FFBox diagnosis (root cause …): <title>", or joined to the request it exactly matches | the system payer | the [desync PR policy](#ffbox-desync-prs) for a desync with a PR or a found cause, else the w299 triage ([below](#intake-diagnoses-from-ffbox)) |
+| a finished FFBox diagnosis of a player's desync, crash or hang report (`POST /api/intake/ffbox`, `source: "intake"`) | "FFBox diagnosis (root cause …): <title>", or joined to the request it exactly matches | the system payer | the [desync PR policy](#ffbox-desync-prs) for a desync with a PR or a found cause, else the w299 triage ([below](#intake-diagnoses-from-ffbox)) |
 | a release (a `bundleVersion` bump on the base branch) that carries landed fixes with threads | "Tell reporters their fixes are live in 0.50.0.X" | the system payer | follow-up |
 | the nightly e2e lab's report: a new regression, a scenario still failing, or one flaky `flakyNights` nights running | "Nightly e2e: <scenario> fails on master <sha>" | the system payer | regression |
 
@@ -435,7 +435,7 @@ here too.
 
 ## Intake diagnoses from FFBox
 
-w361 (Lothsahn): when a player's game uploads a desync or crash report and a diagnosis of it finishes on FFBox
+w361 (Lothsahn): when a player's game uploads a desync, crash or hang report and a diagnosis of it finishes on FFBox
 (`ffdiagnose`), FFBox's host files it here, whether or not it found the root cause or opened a PR. Same endpoint, key,
 cap and answers as Max's escalations, with `source: "intake"` and no Discord fields (`server/diagnosisRules.ts`; the wire
 format in docs/ffbox-connector-contract.md, "Intake diagnoses"). Filed by `IntakeManager.onDiagnosis` while
@@ -473,7 +473,7 @@ format in docs/ffbox-connector-contract.md, "Intake diagnoses"). Filed by `Intak
 
 ## Players' reports a request fixed (w502)
 
-A player's crash or desync report stays open on FFBox (NEEDS-INFO, unfixed) until FFBox hears its fix shipped. Crash
+A player's crash, desync or hang report stays open on FFBox (NEEDS-INFO, unfixed) until FFBox hears its fix shipped. Crash
 reports 20261005T035612Z-crash-6102d405dc and 20261005T035747Z-crash-1216e47e7d (Build 76) were fixed by w414's PR #1064
 and still read NEEDS-INFO: their diagnoses finished before `fff.escalate.intake` was on, w414's brief only referenced
 them (no `report:` key), and FFBox links nothing for an intake filing.
@@ -927,6 +927,6 @@ built in the ffbox repo (the "provider protocol 2" PR), off; the box steps are:
 
 - The triage reads the report's words only, not its logs or saves (those stay for the worker, as untrusted input).
 - A declined request closes; its thread gets no reply from the intake. A reviewer may tell the reporter by hand.
-- A crash or desync report reaches the ledger only once FFBox has diagnosed it ([above](#intake-diagnoses-from-ffbox));
+- A crash, desync or hang report reaches the ledger only once FFBox has diagnosed it ([above](#intake-diagnoses-from-ffbox));
   undiagnosed reports reach only the FFBox page's signature counts (docs/ffbox-integration.md, phases 2 and 4).
 - Pending delegation requests are still not ledger items until their worker starts (docs/standing-agents.md).
