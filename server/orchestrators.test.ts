@@ -4685,7 +4685,8 @@ test('w1863: w1789 as it happened: a leg queued for a full m5 beside the request
   // 07:10: the dispatcher passes lothsahn's answer to its worker. That made it active and dropped the queue before w1863.
   const sent = await call(dispatcher().info, 'message_agent', { session_id: a.id, text: 'lothsahn: "Yes, fix it"', work_id: 'w1' });
   assert.equal(sent.isError, false, sent.text);
-  await until('the turn', () => a.info.status === 'idle');
+  // The worker's echo of the message ends its turn: idle alone can be read before that turn starts (w1944: red on CI).
+  await until('the turn', () => a.info.status === 'idle' && w().log.some((l) => /Echo: lothsahn/.test(l)));
   // Its worker reports, and its PRs merge: the leg is work left, so the merge does not close it.
   sessions.events.emit('turnEnd', sessions.get(a.id), 'PR merged.\n\nw1: still open: waiting for a sandbox on m5 for the timed runs');
   await new Promise((r) => setTimeout(r, 50));
