@@ -104,6 +104,12 @@ export interface IntakeConfig {
      * day; past that it waits for a reviewer. Default on, 10 a day, inside dailyCap and workLimits.intake.
      */
     desync?: { enabled?: boolean; maxPerDay?: number };
+    /**
+     * FFBox crash and hang diagnoses (lothsahn, 2026-10-23, w1827; docs/intake.md, "FFBox crash and hang diagnoses"):
+     * every one, and its ffbox/* PR, is approved at once into a request whose worker follows the crash-fix policy, at most
+     * maxPerDay a day; past that it waits for a reviewer. Default on, 10 a day, inside dailyCap and workLimits.intake.
+     */
+    crash?: { enabled?: boolean; maxPerDay?: number };
   };
   /**
    * The bug threads' owners (w1783, docs/intake.md "Every bug thread has an owner"), on by default and read-only on Discord:

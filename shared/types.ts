@@ -2255,9 +2255,11 @@ export interface NightlyRelease {
  * anything else from players or FFBox, which nobody works until a reviewer approves or answers; person: a reviewer or
  * operator asked for it themselves; follow-up: the server's own release follow-up; regression: a scripted oracle of
  * the team's own nightly e2e lab failed (no players' text); ffbox-desync: an FFBox desync diagnosis or its ffbox/* PR,
- * reviewed and merged under the desync PR policy (server/intakeRules.ts DESYNC_PR_POLICY; Lothsahn, 2026-10-04).
+ * reviewed and merged under the desync PR policy (server/intakeRules.ts DESYNC_PR_POLICY; Lothsahn, 2026-10-04);
+ * ffbox-crash: an FFBox crash or hang diagnosis or its ffbox/* PR, worked and merged under the crash-fix policy
+ * (CRASH_FIX_POLICY; lothsahn, 2026-10-23, w1827).
  */
-export type WorkTriageClass = 'obvious-bug' | 'needs-human' | 'person' | 'follow-up' | 'regression' | 'ffbox-desync';
+export type WorkTriageClass = 'obvious-bug' | 'needs-human' | 'person' | 'follow-up' | 'regression' | 'ffbox-desync' | 'ffbox-crash';
 
 export interface WorkTriage {
   class: WorkTriageClass;
@@ -2360,6 +2362,8 @@ export interface IntakeSummary {
     autoApprove: { enabled: boolean; maxPerDay: number };
     /** The FFBox desync PR policy (w358): such PRs are approved at once, at most maxPerDay a day. Optional for an older page. */
     desync?: { enabled: boolean; maxPerDay: number };
+    /** The FFBox crash-fix policy (w1827): crash and hang diagnoses are approved at once, at most maxPerDay a day. Optional for an older page. */
+    crash?: { enabled: boolean; maxPerDay: number };
   };
   release: { enabled: boolean; delayMinutes: number; lastVersion?: string; checkedAt?: string };
   /** The nightly e2e lab's regressions (config intake.nightly); optional for a page from before it existed. */

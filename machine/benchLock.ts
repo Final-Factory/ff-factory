@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BenchLock, BenchPriority, BenchQueueReport } from '../shared/types.ts';
-import { benchQueueDir, queueTickets } from './benchQueue.ts';
+import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 
 /** Where quiet_gate.sh keeps the lock: `$FF_WORKER_ROOT/tmp/bench.lock` (Git Bash's /f/ffw is F:\ffw). */
 export const benchLockDir = (root: string) => path.join(root, 'tmp', 'bench.lock');
@@ -88,27 +88,48 @@ export function writeBenchPriorities(root: string | undefined, sessions: Record<
   }
 }
 
+/**
+ * The timed run that holds this machine's bench lock now (w1829): the granted, unrevoked exclusive ticket whose helper
+ * lives (bench_queue.py timed_hold), with the time its turn ends at the earliest; undefined when none. A turn past its
+ * limit still counts while nobody waits (w1832): the queue revokes it at the deadline a waiter sets, and what it quieted
+ * comes back then.
+ */
+export function timedHolder(root: string | undefined, now: number = Date.now(), alive: (pid: number) => boolean = pidAlive): (QueueTicket & { until: number }) | undefined {
+  if (!root) return undefined;
+  for (const t of queueTickets(benchLockDir(root), alive)) {
+    if (t.mode !== 'exclusive' || !t.granted || t.revoked) continue;
+    // w1832 (bench_queue.py timed_hold): a turn past its limit goes on while nobody queues behind it, so it still holds
+    // the machine; its end is the deadline a waiter set, else its turn's end (or the 5-minute warning from now, past it)
+    const turnEnd = t.granted.ts * 1000 + turnMinOf(t) * 60_000;
+    const deadline = typeof t.limit?.deadline === 'number' ? t.limit.deadline * 1000 : undefined;
+    return { ...t, until: deadline ?? Math.max(turnEnd, now + BENCH_WARN_LEAD_MIN * 60_000) };
+  }
+  return undefined;
+}
+
+/** The game repo's bench_queue.py WARN_LEAD_MIN and turn_min (w1832): a turn of at most 30 minutes, and a ticket from a
+ * copy older than w1832 keeps the bound it was taken under (60 by default). */
+export const BENCH_WARN_LEAD_MIN = 5;
+const turnMinOf = (t: QueueTicket) => (t.turnMin ? Math.min(t.turnMin, 30) : (t.maxMin ?? 60));
+
 const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16) + 'Z';
 
 /**
  * w1750 (lothsahn, 2026-10-22, after a worker shot clips with a player on BEAST beside another worker's timed profile:
  * "Why is the game player running if the worker has an exclusive lock on beast?"): while another worker's timed run
  * holds this machine's bench lock, its message for a refused player launch or clip ("bench lock held by <worker>, until
- * <time>"), else undefined. A timed run is a granted, unrevoked exclusive ticket whose helper lives and that is inside
- * its hold bound (the game repo's bench_queue.py timed_hold, the same rules), or a live old-style lock. The worker's own
+ * <time>"), else undefined. A timed run is a granted, unrevoked exclusive ticket whose helper lives (timedHolder, the
+ * game repo's bench_queue.py timed_hold rules), or a live old-style lock. The worker's own
  * (the same session) never counts: its other shell calls belong to its own run.
  */
 export function foreignTimedHold(root: string | undefined, session: string | undefined, now: number = Date.now(), alive: (pid: number) => boolean = pidAlive): string | undefined {
   if (!root) return undefined;
-  for (const t of queueTickets(benchLockDir(root), alive)) {
-    if (t.mode !== 'exclusive' || !t.granted || t.revoked) continue;
+  const t = timedHolder(root, now, alive);
+  if (t) {
     if (session && t.session === session) return undefined;
-    const since = t.granted.ts * 1000;
-    const until = since + (t.maxMin ?? 60) * 60_000;
-    if (now >= until) continue; // past its bound: the next waiter revokes it
     const bits = [(t.requests ?? []).join(','), [t.host, t.sandbox].filter(Boolean).join('/'), t.what ? `"${t.what.slice(0, 120)}"` : ''].filter(Boolean);
     const who = t.session ? `worker ${t.session}` : `pid ${t.pid}`;
-    return `bench lock held by ${who}${bits.length ? ` (${bits.join(', ')})` : ''}, until ${hhmm(until)} at the latest (held since ${hhmm(since)})`;
+    return `bench lock held by ${who}${bits.length ? ` (${bits.join(', ')})` : ''}, until ${hhmm(t.until)} at the latest (held since ${hhmm(t.granted!.ts * 1000)})`;
   }
   const old = readBenchLock(root, now, alive);
   if (old && !/\[t\d{8}\]/.test(old.owner)) return `bench lock held by an old-style lock: ${old.owner} (seen since ${hhmm(Date.parse(old.since))}, 40 minutes at most)`;
