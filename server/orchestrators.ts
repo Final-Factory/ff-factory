@@ -78,6 +78,24 @@ const GATE_STATUSES: ReadonlySet<WorkItem['status']> = new Set(['blocked', 'ques
  */
 class GateRefused extends Error {}
 
+/** One turn's filings (w1867): when it started, what started it, how many, and what they were about. */
+interface TurnFilings {
+  id: string;
+  at: string;
+  by: string;
+  count: number;
+  refs: string[];
+  /** The investigation bug FF Factory filed for it. */
+  bug?: string;
+}
+/** A personal orchestrator's filings since its person last wrote, turn by turn (w1867). */
+interface FilingWindow {
+  since: string;
+  count: number;
+  turns: TurnFilings[];
+  bug?: string;
+}
+
 /** A call a gate refused, held for the person's next message (w830). */
 interface HeldCall {
   at: string;
@@ -102,8 +120,19 @@ const STATUS_ASK_EVERY_MS = 6 * 3_600_000;
  * message starts again, so harness messages alone (another orchestrator's, a worker's, a timer's) cannot keep an
  * orchestrator going; config `orchestrator.filingsPerMessage` / `followUpsPerMessage` / `messagesPerPerson` set them.
  */
-/** Filings (request_work, update_work) a personal orchestrator may make between two messages of its person. */
-export const FILINGS_PER_MESSAGE = 3;
+/**
+ * Filings (request_work, update_work) a personal orchestrator may make between two messages of its person. 3 until w1867
+ * (2026-10-23, lothsahn: "Let's increase orchestrator actions between turns to 20 from 3."), for every orchestrator.
+ */
+export const FILINGS_PER_MESSAGE = 20;
+/**
+ * At this many filings in one turn, or since its person last wrote, FF Factory files a bug of its own to look into why
+ * (w1867, lothsahn: "Any orchestrator that hits 100 in a turn should file an investigation bug, the orchestrator should
+ * not have to do it."): every person's orchestrator, every kind of turn. Its own filing counts against no limit.
+ */
+export const INVESTIGATE_AT = 100;
+/** The repository the investigation bug is filed for: FF Factory's own. */
+export const INVESTIGATE_REPO = 'Final-Factory/ff-factory';
 /** Follow-ups a personal orchestrator may send one worker between two messages of its person. */
 export const FOLLOW_UPS_PER_MESSAGE = 3;
 /**
@@ -137,6 +166,16 @@ export function loopGuards(cfg: Pick<Config, 'orchestrator'>): { filings: number
     followUps: n(cfg.orchestrator?.followUpsPerMessage, FOLLOW_UPS_PER_MESSAGE),
     messages: n(cfg.orchestrator?.messagesPerPerson, MESSAGES_PER_PERSON),
   };
+}
+/**
+ * Filings a personal orchestrator may make between two messages of its person in turns its own timers started (w1867,
+ * lothsahn: "Let your timers go past the cap, with a limit of 100. Not a daily limit."): config
+ * `orchestrator.timerFilingsPerMessage[<user id>]`, else the filings limit every other turn has. Counted with the rest:
+ * every filing since the person last wrote, whatever turn made it, so a timer's turn may go on where the others stop.
+ */
+export function timerFilings(cfg: Pick<Config, 'orchestrator'>, userId: string): number {
+  const own = cfg.orchestrator?.timerFilingsPerMessage?.[userId.toLowerCase()];
+  return Number.isInteger(own) && own! >= LOOP_GUARD_RANGE.min && own! <= LOOP_GUARD_RANGE.max ? own! : loopGuards(cfg).filings;
 }
 /** The longest message_person text (shared/replies.ts, so the reply box in the bubble stops there too, w1831). */
 export { PERSON_MESSAGE_CHARS };
@@ -472,6 +511,14 @@ export class Orchestrators {
   readonly now: () => Date;
   /** Per personal orchestrator: its filings since its person last wrote. */
   private readonly filed = new Map<string, number>();
+  /** w1867: the last message each orchestrator got from its timers, so a turn it opened is known, and which timers sent it. */
+  private readonly timerSends = new Map<string, { uuid: string; timers: { id: string; title: string }[] }>();
+  /** w1867: per personal orchestrator, its filings since its person last wrote (all of them, counted or not), turn by turn. */
+  private readonly tallies = new Map<string, FilingWindow>();
+  /** w1867: per personal orchestrator, its filings in its current turn (a person writing mid-turn does not start it again). */
+  private readonly turnTallies = new Map<string, TurnFilings>();
+  /** w1867: what a chat's next tool result says about the investigation bug FF Factory filed for it. */
+  private readonly bugNotes = new Map<string, string>();
   /** w830: calls a gate refused, per chat, offered back on the person's next message (heldOffer). In memory only. */
   private readonly held = new Map<string, HeldCall[]>();
   /** w1039: the person's 👍 ✅ 👎 ❌ on the orchestrator's own proposals, per chat, armed for GRANT_MS (reactionTurn). In memory only. */
@@ -617,6 +664,7 @@ export class Orchestrators {
     const old = this.personalOf(r.userId);
     if (old) this.sessions.remove(old.info.id);
     this.filed.delete(old?.info.id ?? '');
+    this.tallies.delete(old?.info.id ?? '');
     return this.personalFor(r);
   }
 
@@ -627,6 +675,7 @@ export class Orchestrators {
    */
   personWrote(sessionId: string) {
     this.filed.delete(sessionId);
+    this.tallies.delete(sessionId);
     for (const k of [...this.followUps.keys()]) if (k.startsWith(`${sessionId}:`)) this.followUps.delete(k);
     const owner = this.ownerOf(this.sessions.sessions.get(sessionId)?.info ?? { kind: 'worker' });
     const me = owner?.userId.toLowerCase();
@@ -1319,7 +1368,7 @@ export class Orchestrators {
    */
   file(chat: SessionHandle, input: WorkInput): string {
     try {
-      return this.fileNow(chat, input);
+      return this.withBugNote(chat, this.fileNow(chat, input));
     } catch (e) {
       throw this.refusedCall(chat, 'request_work', { title: input.title, brief: input.brief }, e);
     }
@@ -1344,7 +1393,7 @@ export class Orchestrators {
       if (confirmed) this.gatherForDispatcher(owner, updateNotice(repeat, owner, 'asked for it again in their own words'));
       return `Already filed as ${repeat.id} (${repeat.status}); the new text is in its log. To change what it asks for, use update_work with a note${cloneMachine ? ` (and main_clone: "${cloneMachine}" for the main-clone grant)` : ''}.`;
     }
-    this.spend(chat.info.id, owner);
+    this.spend(chat, owner, `new request "${clip(title, 50)}"`);
     const now = this.now();
     // A person filing through their own orchestrator is not capped; automated sources are (work.ts limitsFor).
     const limit = limitProblem(this.store.work.values(), owner, now.getTime(), limitsFor('person', this.d.cfg.workLimits));
@@ -1408,22 +1457,145 @@ export class Orchestrators {
     return `Filed ${id} with the dispatcher.${overlap} You get a [dispatch] message with its decision.`;
   }
 
-  /** Count a filing against the chat's budget, refusing it past loopGuards().filings since its person last wrote. */
-  private spend(chatId: string, owner: Requester) {
-    const n = this.filed.get(chatId) ?? 0;
-    const max = loopGuards(this.d.cfg).filings;
-    if (n >= max) throw new GateRefused(`${max} filings since ${owner.displayName} last wrote (a limit against loops)`);
-    this.filed.set(chatId, n + 1);
+  /**
+   * Count a filing against the chat's budget, refusing it past loopGuards().filings since its person last wrote; in a turn
+   * the person's own timers started, past timerFilings() (w1867). Both count the same filings: all since the person wrote.
+   */
+  private spend(chat: SessionHandle, owner: Requester, ref: string) {
+    const n = this.filed.get(chat.info.id) ?? 0;
+    const timers = this.timerTurn(chat);
+    const max = timers ? timerFilings(this.d.cfg, owner.userId) : loopGuards(this.d.cfg).filings;
+    if (n >= max) {
+      const bug = this.tallies.get(chat.info.id)?.bug;
+      const timerText = timers ? ` (in a turn their timer${timers.length > 1 ? 's' : ''} ${timers.map((t) => t.id).join(', ')} started: config orchestrator.timerFilingsPerMessage)` : '';
+      throw new GateRefused(`${max} filings since ${owner.displayName} last wrote${timerText} (a limit against loops)${bug ? `; FF Factory filed ${bug} to find out why so many` : ''}`);
+    }
+    this.filed.set(chat.info.id, n + 1);
+    this.tally(chat, owner, ref);
   }
 
   /**
    * Count an update_work against the budget, except a close (done or cancelled) in a turn its person started with their
    * own message (w631: Lothsahn's one "close everything that's done" was refused after three closes). The cap stops
-   * loops, which run on harness turns; a person asking to close their finished work is no loop.
+   * loops, which run on harness turns; a person asking to close their finished work is no loop. The investigation tally
+   * counts it all the same (w1867).
    */
-  private spendUpdate(chat: SessionHandle, owner: Requester, input: { close?: 'done' | 'cancelled' }) {
-    if (input.close && (chat.turnFrom ?? chat.lastFrom) === 'human') return;
-    this.spend(chat.info.id, owner);
+  private spendUpdate(chat: SessionHandle, owner: Requester, input: { close?: 'done' | 'cancelled' }, ref: string) {
+    if (input.close && (chat.turnFrom ?? chat.lastFrom) === 'human') return this.tally(chat, owner, ref);
+    this.spend(chat, owner, ref);
+  }
+
+  /** The timers delivered a message to an orchestrator (agents.ts): a turn it opens is theirs (w1867, timerTurn). */
+  timerSent(sessionId: string, uuid: string, timers: { id: string; title: string }[]) {
+    if (uuid && timers.length) this.timerSends.set(sessionId, { uuid, timers });
+  }
+
+  /** The timers whose message opened the chat's current turn (w1867); undefined for any other turn. */
+  timerTurn(chat: SessionHandle): { id: string; title: string }[] | undefined {
+    const sent = this.timerSends.get(chat.info.id);
+    return sent && (chat.turnFrom ?? chat.lastFrom) === 'system' && chat.turnId === sent.uuid ? sent.timers : undefined;
+  }
+
+  /**
+   * Count a filing toward the investigation bug (w1867): at INVESTIGATE_AT in one turn, or since its person last wrote,
+   * FF Factory files the bug itself, once for that turn and that stretch, in any kind of turn, for any person.
+   */
+  private tally(chat: SessionHandle, owner: Requester, ref: string) {
+    const id = chat.info.id;
+    const at = this.now().toISOString();
+    const turnId = chat.turnId ?? '';
+    const timers = this.timerTurn(chat);
+    const from = chat.turnFrom ?? chat.lastFrom;
+    const by = timers
+      ? timers.map((t) => `timer ${t.id} "${clip(t.title, 60)}"`).join(', ')
+      : from === 'human'
+        ? `${owner.displayName}'s own message`
+        : from === 'orchestrator'
+          ? 'another orchestrator'
+          : "a harness message (a worker's report, a dispatch, a check-in)";
+    const count = (t: TurnFilings) => {
+      t.count++;
+      if (!t.refs.includes(ref) && t.refs.length < 60) t.refs.push(ref);
+    };
+    let turn = this.turnTallies.get(id);
+    if (!turn || turn.id !== turnId) this.turnTallies.set(id, (turn = { id: turnId, at, by, count: 0, refs: [] }));
+    count(turn);
+    let win = this.tallies.get(id);
+    if (!win) this.tallies.set(id, (win = { since: at, count: 0, turns: [] }));
+    win.count++;
+    let inWin = win.turns.at(-1);
+    if (!inWin || inWin.id !== turnId) {
+      win.turns.push((inWin = { id: turnId, at, by, count: 0, refs: [] }));
+      if (win.turns.length > 200) win.turns.shift();
+    }
+    count(inWin);
+    const hit = turn.count === INVESTIGATE_AT && !turn.bug ? 'turn' : win.count === INVESTIGATE_AT && !win.bug ? 'stretch' : undefined;
+    if (!hit) return;
+    try {
+      const w = this.fileInvestigation(chat, owner, hit, turn, win);
+      turn.bug = win.bug = w.id;
+      const limit = timers ? `filings in turns your timers start stop at ${timerFilings(this.d.cfg, owner.userId)}` : `the filings limit is ${loopGuards(this.d.cfg).filings}`;
+      this.bugNotes.set(id, `[FF Factory] That was filing ${INVESTIGATE_AT} ${hit === 'turn' ? 'in this turn' : `since ${owner.displayName} last wrote`}: FF Factory filed ${w.id} "${w.title}" by itself to find out why (w1867). Do not file it again; tell ${owner.displayName} in a line. Until ${owner.displayName} writes, ${limit}.`);
+    } catch (e) {
+      console.warn(`orchestrators: the investigation bug for ${owner.displayName}'s orchestrator was not filed: ${(e as Error).message}`);
+    }
+  }
+
+  /** The note a chat's tool result carries after FF Factory filed an investigation bug for it (w1867). */
+  private withBugNote(chat: SessionHandle, text: string): string {
+    const note = this.bugNotes.get(chat.info.id);
+    if (!note) return text;
+    this.bugNotes.delete(chat.info.id);
+    return `${text}\n\n${note}`;
+  }
+
+  /**
+   * FF Factory's own bug request (w1867), for the orchestrator's person, on FF Factory's repo: what reached INVESTIGATE_AT,
+   * the turns with their starters, counts and requests, and the transcript's link. Counts against no limit.
+   */
+  private fileInvestigation(chat: SessionHandle, owner: Requester, hit: 'turn' | 'stretch', turn: TurnFilings, win: FilingWindow): WorkItem {
+    const now = this.now();
+    const link = `${(this.d.cfg.publicUrl ?? '').replace(/\/+$/, '')}/#/session/${chat.info.id}`;
+    const turns = hit === 'turn' ? [turn] : win.turns;
+    const shown = turns.slice(-40);
+    const timers = [...new Set(turns.map((t) => t.by).filter((b) => b.startsWith('timer ')))];
+    const title = clip(`Investigate: ${owner.displayName}'s orchestrator made ${INVESTIGATE_AT} filings ${hit === 'turn' ? 'in one turn' : `since ${owner.displayName} last wrote`}`, 120);
+    const brief = [
+      `FF Factory filed this by itself (w1867; lothsahn: "Any orchestrator that hits 100 in a turn should file an investigation bug, the orchestrator should not have to do it.").`,
+      `${owner.displayName}'s orchestrator (session ${chat.info.id}: ${link}) reached ${INVESTIGATE_AT} filings (request_work, update_work notes, closes, reopens) ${hit === 'turn' ? `in one turn, from ${turn.at} to ${now.toISOString()}, started by ${turn.by}` : `between ${win.since} and ${now.toISOString()}, with no message from ${owner.displayName} in between`}.`,
+      timers.length ? `Timers that started these turns: ${timers.join('; ')}.` : 'No timer started these turns.',
+      '',
+      `The turns (the times are in that transcript)${shown.length < turns.length ? `, the last ${shown.length} of ${turns.length}` : ''}:`,
+      ...shown.map((t) => `- ${t.at}: started by ${t.by}; ${t.count} filing${t.count === 1 ? '' : 's'}: ${t.refs.join(', ')}`),
+      '',
+      'Find out why: read those turns (agent_transcript on the session, or the link), say what made it file so many (a timer job working through a backlog, a loop, a refusal it kept retrying), and fix the harness or the brief if it ran away. Say whether the limits (orchestrator.filingsPerMessage, orchestrator.timerFilingsPerMessage) fit what it was doing.',
+    ].join('\n');
+    const placed = resolveNeeds({ needs: 'agent', repo: INVESTIGATE_REPO, title, brief }, repoSlug(this.d.cfg.repo.url));
+    const w: WorkItem = {
+      id: `w${++this.store.workSeq}`,
+      title,
+      brief: clip(brief, 8000),
+      priority: 'normal',
+      keys: textKeys(title, this.knownBranches()),
+      requestedBy: asRequester(owner),
+      requesters: [asRequester(owner)],
+      humanAsked: false,
+      status: 'new',
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      sessionIds: [],
+      needs: placed.needs,
+      repo: INVESTIGATE_REPO,
+      overlaps: [],
+      asks: 0,
+      log: [],
+    };
+    w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(w.id));
+    this.stamp(w, `filed by FF Factory for ${owner.displayName} (w1867): their orchestrator reached ${INVESTIGATE_AT} filings ${hit === 'turn' ? 'in one turn' : 'since they last wrote'}; counts against no limit; needs ${placed.needs === 'agent' ? 'an agent slot only' : 'a game sandbox'} (${placed.how})`);
+    this.store.putWork(w);
+    this.store.dropWork(pruneIds(this.store.work.values(), undefined, now.getTime()));
+    this.gatherForDispatcher(owner, requestNotice(w));
+    return w;
   }
 
   /** A requester hands a request to another person (w1511): it stays open and the same for everyone; they come off it, the other person is on it. */
@@ -1449,7 +1621,7 @@ export class Orchestrators {
   /** A requester's update (update_work): a note (an answer to a question reopens it), a priority, closing or reopening. */
   update(chat: SessionHandle, input: UpdateInput): string {
     try {
-      return this.updateNow(chat, input);
+      return this.withBugNote(chat, this.updateNow(chat, input));
     } catch (e) {
       throw this.refusedCall(chat, 'update_work', { ...input }, e);
     }
@@ -1503,7 +1675,7 @@ export class Orchestrators {
     if (!note && !input.priority && !input.close && !input.reopen && !input.assign_to) throw new Error('give a note, a priority, close, assign_to or reopen');
     const problem = updateProblem(w, input, this.now().getTime());
     if (problem) throw new Error(problem);
-    this.spendUpdate(chat, owner, input);
+    this.spendUpdate(chat, owner, input, w.id);
     // A HAND-OFF (w1511, Lothsahn: "If I've solved my part of it, I should just assign it to Ben ... it's not assigned to me"):
     // the request stays open and has the same state for everyone; it moves to the other person and comes off this one.
     // A close never does this: it closes the request for every requester (below).
@@ -2040,7 +2212,7 @@ export class Orchestrators {
     if (!note) throw new Error(`say why in a note: ${names(w.requesters)} will be told who ${input.close ? 'closed' : 'reopened'} ${w.id} and why`);
     const problem = updateProblem(w, input, this.now().getTime());
     if (problem) throw new Error(problem);
-    this.spendUpdate(chat, by, input);
+    this.spendUpdate(chat, by, input, w.id);
     const verb = input.reopen ? 'reopened' : input.close === 'done' ? 'closed as done' : 'cancelled';
     // Like a person's own close or reopen, it is final: no automatic-close mark survives it (w370).
     if (input.reopen) {
@@ -2081,7 +2253,7 @@ export class Orchestrators {
     if (!this.isOwnerRole(w.requestedBy.userId)) throw new Error(`${w.id} is ${whose} request, not ${by.displayName}'s: an owner adds notes only to another owner's request; for anything else, request_work (related_ids: ["${w.id}"])`);
     const problem = updateProblem(w, {}, this.now().getTime());
     if (problem) throw new Error(problem);
-    this.spend(chat.info.id, by);
+    this.spend(chat, by, `note on ${w.id}`);
     const own = (chat.turnFrom ?? chat.lastFrom) === 'human';
     w.notes = [...(w.notes ?? []), { at: this.now().toISOString(), by: by.displayName, text: note.slice(0, 2000) }].slice(-20);
     this.stamp(w, `note by ${by.displayName} (an owner, on ${whose} request)${own ? '' : ' (not in a turn of theirs)'}: ${note}`);

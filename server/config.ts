@@ -500,6 +500,11 @@ export interface Config {
      * person's orchestrator makes between two of their messages, default 3.
      */
     filingsPerMessage?: number;
+    /**
+     * w1867: per person (user id, lower case), the filings limit in turns their own orchestrator's timers started, counted
+     * with the rest since they last wrote; a person not named has filingsPerMessage there too. Each 1 to 100.
+     */
+    timerFilingsPerMessage?: Record<string, number>;
     /** Follow-ups (message_agent) to one worker between two of the person's messages, default 3. */
     followUpsPerMessage?: number;
     /** message_person messages to one person until the sender or the recipient writes to their own orchestrator, default 10. Not between the owners (w627, server/orchestrators.ts ownersPair). */
