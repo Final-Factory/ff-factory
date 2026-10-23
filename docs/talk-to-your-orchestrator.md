@@ -5,8 +5,8 @@ app, over the portal's `/mcp` endpoint (w1021, asked by Ben). It is the same con
 app, which keeps working as it was: what you send from here shows in the web chat with a small "via Claude Code or Desktop
 (your-key)" tag under it, and the orchestrator's replies show in both places.
 
-Tailnet only. `https://fff.tailedfcad.ts.net/mcp` is the address on the tailnet; the chat tools refuse a request that came in
-through Tailscale Funnel (see [Safety](#safety)). The claude.ai web and phone apps cannot reach a tailnet address and are
+Tailnet only. `https://fff.tailedfcad.ts.net/mcp` is the address on the tailnet; the whole `/mcp` endpoint, every tool and
+the upload, refuses a request that came in through Tailscale Funnel (w1865, see [Safety](#safety)). The claude.ai web and phone apps cannot reach a tailnet address and are
 not covered.
 
 ## Setup
@@ -56,7 +56,7 @@ it like a password and revoke it if a Mac is lost.
 | `orchestrator_inbox(since?, wait_seconds?)` | What the orchestrator said that you have not read: replies after a timeout, and what it sent on its own (dispatches, worker updates, heartbeats, a permission waiting for you in the web app). Without `since` it goes on from where this key last read (in memory: after a portal restart it starts from the last 15 messages); with `since` (a cursor an earlier call printed) from there. `wait_seconds` waits for something new and for a running turn to end. |
 | `orchestrator_attach(name, text \| data_base64)` | Stores a small file (at most 5 MB) and returns its `att_…` id for `orchestrator_send`'s `attachments`. |
 | `PUT /mcp/upload?name=<file>` | Any size up to the attachments limit (`attachments.maxMB`, default 200 MB), same key: `curl -T save.zip -H "Authorization: Bearer <YOUR-KEY>" "https://fff.tailedfcad.ts.net/mcp/upload?name=save.zip"` answers `{"id":"att_…"}`. Tell Claude the id. |
-| `ask_orchestrator`, `orchestrator_transcript` | The older pair: send and wait (default 180 s), and a condensed transcript. Unchanged except that they also refuse Funnel. |
+| `ask_orchestrator`, `orchestrator_transcript` | The older pair: send and wait (default 180 s), and a condensed transcript. Unchanged (Funnel is refused for every `/mcp` tool). |
 
 ## What counts as what
 
@@ -83,8 +83,11 @@ it like a password and revoke it if a Mac is lost.
   adds `Tailscale-Funnel-Request: ?1` to every request that came through Funnel and deletes one a client sent itself
   (`tailscale/ipn/ipnlocal/serve.go`, `addTailscaleIdentityHeaders`, read 2026-10-11); `tailnetOnly` in `server/remoteChat.ts`
   refuses on that header, and also on a forwarded client address (read only from the local proxy's connection) that is not a
-  Tailscale address (100.64.0.0/10 or fd7a:115c:a1e0::/48). The refusal covers the four orchestrator tools and the upload; the
-  other `/mcp` tools are as before. No new route is exposed: `/mcp/upload` is behind the same key check.
+  Tailscale address (100.64.0.0/10 or fd7a:115c:a1e0::/48). Since w1865 (asked by Lothsahn: "Please lockdown the older mcp
+  tools on the tailnet") `routeMcp` in `server/mcp.ts` makes that check first, for `/mcp` and `/mcp/upload` alike, before the
+  key is read: every tool, the older ones (sandboxes, agents, branches) and any added later, answers 403 `refused: this request
+  came in through Tailscale Funnel …; /mcp is tailnet-only` from outside. The chat tools keep their own check behind it. No new
+  route is exposed: `/mcp/upload` is behind the same checks.
 - **Keys.** 256 random bits, stored as a SHA-256, 10 bad keys from one address in 15 minutes answer 429 (`Auth.bearer`). A key
   without a login, or a scoped one (nightly, ffbox), cannot use the chat tools.
 - **No key in a log.** Nothing here prints a key or a header; the only log line is `bad API key from <address>` (`Auth.bearer`).
@@ -93,5 +96,6 @@ it like a password and revoke it if a Mac is lost.
 
 `server/remoteChat.test.ts`: a real MCP client over HTTP through `routeMcp` (the server's own `/mcp` routing) against a real
 `Agents` with the scripted fake SDK: send and reply, the timeout and the inbox, the person's turn, wrong and unbound and
-scoped keys, one person's key never reaching another's orchestrator, Funnel refused, queueing behind a busy turn, uploads,
+scoped keys, one person's key never reaching another's orchestrator, Funnel and non-tailnet addresses refused at the endpoint
+for an older tool and a chat tool (and both working from a tailnet address), queueing behind a busy turn, uploads,
 progress notices, link rendering.

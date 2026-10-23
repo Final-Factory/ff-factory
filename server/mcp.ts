@@ -57,11 +57,15 @@ export interface McpRouteDeps {
 }
 
 /**
- * /mcp and /mcp/upload, as the server routes them: machine clients authenticate with an API key, not a browser session
- * (no cookies, so no CSRF). A scoped key (nightly, ffbox) is for those reports only. A key bound to a login acts for that
- * person; an unbound one (made before keys had users) for the owner, and the orchestrator chat tools refuse it.
+ * /mcp and /mcp/upload, as the server routes them: tailnet only (w1865), then machine clients authenticate with an API
+ * key, not a browser session (no cookies, so no CSRF). A request that came through Tailscale Funnel, or from an address
+ * outside the tailnet, is refused here for every tool, before its key is read. A scoped key (nightly, ffbox) is for those
+ * reports only. A key bound to a login acts for that person; an unbound one (made before keys had users) for the owner,
+ * and the orchestrator chat tools refuse it.
  */
 export async function routeMcp(d: McpRouteDeps, req: http.IncomingMessage, res: http.ServerResponse, url: URL) {
+  const outside = tailnetOnly(req, '/mcp');
+  if (outside) return d.send(res, 403, { error: `refused: ${outside}` });
   const who = d.auth.bearer(req);
   if (!who.ok) return d.send(res, who.status, { error: who.status === 429 ? 'too many failures' : 'API key required' });
   if (who.scope) return d.send(res, 403, { error: `this key is for ${who.scope} reports only` });

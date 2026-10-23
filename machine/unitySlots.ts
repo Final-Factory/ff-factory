@@ -14,12 +14,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { benchLockPath, benchTicketFor, heldTicket, HELD_WAIT_CAP_MS, type BenchMode, type BenchTicket } from './benchQueue.ts';
 import type { UnitySlotsReport } from '../shared/types.ts';
+import { foreignTimedHold } from './benchLock.ts';
 
 /**
  * The pointer a worker-root install (w513, scripts/worker/worker.ts) leaves for scripts outside the daemon: its mailbox
@@ -848,7 +849,8 @@ const USAGE = `unity-slot: take Unity slots on this machine before launching Uni
 
   unity-slot run [--count N] [--label TEXT] [--project PATH]... [--timeout MIN] [--bench shared|exclusive] -- <command> [args...]
       wait for N slots (default 1), then for a ticket in the machine's bench queue (w1615: shared, the default, for a
-      build or batch compile; exclusive for a timed run), run the command, release both when it ends
+      build or batch compile; exclusive for a timed run), run the command, release both when it ends. A ticket revoked
+      under it ends the command and exits 75 (run it again); with no ticket it waits out another worker's timed run (w1860)
   unity-slot acquire [--count N] [--label TEXT] [--project PATH]... [--ttl MIN] [--timeout MIN]
       wait for N slots and hold them in the background (prints the slot id) until release or the ttl (default 120)
   unity-slot release <id>
@@ -908,6 +910,42 @@ export function parseCli(argv: string[]): { cmd: string; o: CliOpts } {
   return { cmd, o };
 }
 
+/** A run whose bench ticket was revoked exits with this (bench_queue.py EXIT_PREEMPTED, EX_TEMPFAIL: run it again). */
+export const EXIT_REVOKED = 75;
+/** How long a revoked run's tree has to end on SIGTERM before it is stopped hard (bench_queue.py PREEMPT_GRACE_S). */
+export const REVOKED_GRACE_MS = 20_000;
+
+/**
+ * End a process and everything it started (w1860): SIGTERM to the tree, then a hard stop of what is left after `graceMs`
+ * (the timer keeps this process up until then). The tree is listed before the signal, so a child its dying parent leaves
+ * behind is still found. Windows: taskkill /T /F at once; a batch Unity has no window to ask, and a soft taskkill of a
+ * wrapper that exits would leave its Unity orphaned where /T no longer finds it.
+ */
+export function stopTree(pid: number, platform: NodeJS.Platform, graceMs: number, sh: (cmd: string, args: string[]) => string = (c, a) => spawnSync(c, a, { encoding: 'utf8', windowsHide: true }).stdout ?? ''): void {
+  if (platform === 'win32') {
+    sh('taskkill', ['/T', '/F', '/PID', String(pid)]);
+    return;
+  }
+  const kids = new Map<number, number[]>();
+  for (const line of sh('ps', ['-A', '-o', 'pid=,ppid=']).split('\n')) {
+    const [c, p] = line.trim().split(/\s+/).map(Number);
+    if (c && p) kids.set(p, [...(kids.get(p) ?? []), c]);
+  }
+  const tree = [pid];
+  for (let i = 0; i < tree.length; i++) for (const c of kids.get(tree[i]) ?? []) if (!tree.includes(c)) tree.push(c);
+  const signal = (sig: NodeJS.Signals) => {
+    for (const p of tree) {
+      try {
+        process.kill(p, sig);
+      } catch {
+        // gone already
+      }
+    }
+  };
+  signal('SIGTERM');
+  setTimeout(() => signal('SIGKILL'), graceMs);
+}
+
 /** The label a run gets when none is given: the command, short. */
 const labelOf = (o: CliOpts) => o.label ?? (o.rest.map((a) => path.basename(a)).join(' ').slice(0, 80) || 'unity-slot');
 
@@ -949,6 +987,15 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
         }
       }
     }
+    // w1860: a run with no ticket of its own (none could be taken, or FF_BENCH_TICKETS=off) still never starts beside
+    // another worker's timed run: it waits for that turn to end, as its ticket would have.
+    if (!inside && !ticket && held < o.count && env.FF_WORKER_ROOT) {
+      let said = '';
+      for (let why = foreignTimedHold(env.FF_WORKER_ROOT, env.FF_SESSION_ID || undefined); why; why = foreignTimedHold(env.FF_WORKER_ROOT, env.FF_SESSION_ID || undefined)) {
+        if (why !== said) d.say(`waiting for another worker's timed run to end before this run starts (w1860: no build or test run beside it): ${(said = why)}`);
+        await d.sleep(15_000);
+      }
+    }
     const child = spawn(o.rest[0], o.rest.slice(1), {
       stdio: 'inherit',
       shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(o.rest[0]),
@@ -957,17 +1004,33 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     const forward = (sig: NodeJS.Signals) => () => child.kill(sig);
     process.on('SIGINT', forward('SIGINT'));
     process.on('SIGTERM', forward('SIGTERM'));
+    // w1860: a ticket revoked under the run (the shared group's turn limit while an exclusive ticket waits, or an urgent
+    // release) ends the run: its helper is a service owner and stops nothing itself, and a build that went on ran beside
+    // the timed run granted next (the bench_queue.py `run` does the same: SIGTERM to the tree, then a hard stop).
+    let revoked: string | undefined;
+    const watch = ticket
+      ? setInterval(() => {
+          const s = ticket!.state();
+          if (revoked || s.kind !== 'failed' || !/^revoked/.test(s.line) || child.exitCode !== null || !child.pid) return;
+          revoked = s.line;
+          d.say(`bench queue: ${s.line}`);
+          d.say(`stopping the run (w1860): its bench ticket was revoked, so it may not go on beside the next turn. Run it again: it queues for a new ticket.`);
+          stopTree(child.pid, process.platform, REVOKED_GRACE_MS);
+        }, 2_000)
+      : undefined;
     return new Promise<number>((resolve) => {
       child.on('error', (e) => {
+        if (watch) clearInterval(watch);
         d.say(`could not start ${o.rest[0]}: ${e.message}`);
         h?.stop();
         ticket?.release();
         resolve(127);
       });
       child.on('exit', (code, sig) => {
+        if (watch) clearInterval(watch);
         h?.stop();
         ticket?.release();
-        resolve(code ?? (sig ? 128 : 1));
+        resolve(revoked ? EXIT_REVOKED : (code ?? (sig ? 128 : 1)));
       });
     });
   }
