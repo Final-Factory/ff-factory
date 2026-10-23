@@ -2525,7 +2525,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * Blocked on them, its pending check-ins are cancelled, and the worker ends its turn: it is resumed by the dispatcher
    * when they clear (unblock). No polling.
    */
-  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; prs?: string[]; deploys?: string[]; what: string }): string {
+  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; what: string }): string {
     const items = [...this.store.work.values()];
     const byId = (id: string) => this.store.work.get(id);
     const serves = [...servedBy(sessionId, items)].map(byId).filter((x): x is WorkItem => !!x);
@@ -2545,6 +2545,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     const now = this.now();
     const asked: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[] = [];
     for (const id of a.requests ?? []) asked.push({ kind: 'request', ref: id.trim(), what: `${id.trim().toLowerCase()} finishing` });
+    // w1841 (w1818 needed w1761's stills): files or results another request's worker makes: its next report clears it.
+    for (const id of a.reports ?? []) asked.push({ kind: 'request', ref: id.trim(), on: 'report', what: `${id.trim().toLowerCase()}'s worker reporting` });
     for (const pr of a.prs ?? []) {
       // "ci:owner/repo#123" (w846): its checks finishing, green or red, not its merge.
       const ci = /^\s*ci:\s*/i.exec(pr);
@@ -2558,7 +2560,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       if (!ref) continue;
       asked.push(ref === 'portal' ? { kind: 'deploy', what: 'a portal deploy' } : { kind: 'deploy', ref, what: `${ref}'s daemon update` });
     }
-    if (!asked.length) throw new Error('name what it waits for: requests (ids), prs (owner/repo#123 or a github.com link) and/or deploys ("portal" or a machine id). A person is waiting_on_person; a time is wake_me');
+    if (!asked.length) throw new Error('name what it waits for: requests (ids), reports (ids of requests whose worker must report first), prs (owner/repo#123 or a github.com link) and/or deploys ("portal" or a machine id). A person is waiting_on_person; a time is wake_me');
     asked[0] = { ...asked[0], what: clip(what, 200) };
     const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) };
     for (const b of asked) {

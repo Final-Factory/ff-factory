@@ -627,6 +627,29 @@ without one means it is off or failing, worth a person's look.
   Where Actions runs are refused too (w889), the PR's merge state is read: `clean` after `unstable` on the same head commit
   is a green finish and clears the wait at once; a red one still waits `CI_UNREADABLE_MS`. Whether the portal can read CI
   at all is measured at start and every 30 minutes and said loudly when it cannot ([vault.md](vault.md) section 13.2).
+- **Stalled is only what nothing will move** (w1841; Ben, 2026-10-23, on six requests his Stalled filter showed: "why are
+  these stalled?"). `shared/workState.ts` `workLive` reads these before it says Stalled:
+  - a worker an urgent release's build paused (`server/buildPlans.ts` `pausedFor`: asked mid-turn, or paused between turns
+    with a check-in or a held message) is **Blocked on the build** ("the build on beast (…)"); the build's `done` tells each
+    worker it asked to pause to carry on, also one placed again on another computer since, and lets the held check-ins go.
+    w1475 and w1768 read Stalled while w1836's 1.0.0.10 build held BEAST. A clearing no longer pauses a worker that is not
+    live and holds no open request (the 1.0.0.10 clearing listed 7819);
+  - a report waiting on a machine's bench lock while a timed run holds it is **Blocked on that lock**; when the lock is free,
+    the blocker watch tells a worker with no check-in and no message on its way to carry on (`Agents.resumeBenchWaits`, once
+    per report);
+  - a wait on the bug's reporter or a player ("waiting on the reporter X to answer in the Discord thread", or a
+    `waiting_on_person` whose who is the reporter) is **Waiting on input on them** (`outside`), never sent to a person's
+    orchestrator as [needs you]: FFBox passes their answer on (w1778);
+  - a wait on a person counts whichever worker of the request said it: what each worker last said about the request is its
+    report's "still open" line, or else its last report on it in the request's log while nothing about it came after. A note
+    another worker took up (it reported after the note and this one did not) or that worker's answered [needs you] does not
+    settle it (w1782: Ben's notes on item 2 went to 8ef702f6 while ac694f80 still waited on his pick for item 3), and "Ben's
+    pick" reads as a wait on Ben;
+  - a wait on another request's worker ("needs the w1761 stills") is **Blocked on that request** (w1818); `blocked_on` with
+    `reports` (its id) records it as a `request` gate with `on: report`, so the worker is resumed when that worker reports;
+  - a worker that waits on the orchestrator stays Stalled and the line says so, adding "that is its own work" for a pair or
+    two-machine check, a build, a test run or its CI (w1685). Such a worker is told at its turn's end, once per request
+    (`Agents.ownWorkNudge`), and every worker's prompt says these are its own work.
 - **If the blocker fails, it is flagged.** What it waited on stalled, or did not clear in its time: the request stalls
   (`stalled.kind` `blocked`) with the reason, for its people to close or reopen. What it waited on was declined or
   cancelled without delivering: a person must decide now, so it becomes a question to its requester (Waiting on input).
