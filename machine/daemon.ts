@@ -554,7 +554,9 @@ export class Daemon {
         editorSlot: (id) => this.slots.startRefusal(`sandbox:${id}`),
         slotsStatus: () => this.slotsNow(),
         // w1615: an editor boot takes a shared ticket in the machine's bench queue (the game repo's bench_queue.py).
-        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `editor boot ${sb.id}`, checkouts: [sb.path], root: cfg.root, maxMin: 30 }),
+        // w1860: held for as long as the editor runs, named so the game repo's bench_queue.py lets it ride along with its
+        // own sandbox's timed leg (rides_along: "running editor <sandbox>", with the sandbox in the ticket)
+        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, env: { ...process.env, FF_SANDBOX_ID: sb.id } }),
       },
       pd,
     );

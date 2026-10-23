@@ -424,7 +424,7 @@ test('unity slots: the CLI: run waits, runs and releases; a second run waits for
   const job = (name: string) =>
     new Promise<number>((resolve) => {
       const body = `const fs=require('fs');fs.appendFileSync(${JSON.stringify(log)},'${name} start '+Date.now()+'\\n');const cap=Date.now()+60000;const i=setInterval(()=>{if(fs.existsSync(${JSON.stringify(go)})||Date.now()>cap){clearInterval(i);fs.appendFileSync(${JSON.stringify(log)},'${name} end '+Date.now()+'\\n')}},10)`;
-      const c = spawn(process.execPath, [script, 'run', '--label', name, '--', process.execPath, '-e', body], { env: { ...process.env, FF_UNITY_SLOTS: dir }, stdio: 'ignore' });
+      const c = spawn(process.execPath, [script, 'run', '--label', name, '--', process.execPath, '-e', body], { env: { ...process.env, FF_UNITY_SLOTS: dir, FF_BENCH_TICKETS: 'off', FF_WORKER_ROOT: '' }, stdio: 'ignore' });
       c.on('exit', (code) => resolve(code ?? -1));
     });
   const a = job('first');
