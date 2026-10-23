@@ -18,6 +18,9 @@ import { BlockerWatch } from './blockerWatch.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
+import { parseNotice } from '../shared/notices.ts';
+import { HELD_MARK } from '../shared/conditional.ts';
+import { splitReply, splitSent } from '../shared/replies.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
 import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
@@ -888,6 +891,80 @@ test('message_person: only a person’s own orchestrator sends, to someone else 
   assert.match((await call(loth, 'message_person', { to: 'ben', text: '   ' })).text, /^ERROR: the message is empty/);
   assert.throws(() => o.messagePerson(o.personalOf('lothsahn')!, { to: 'ben', text: 'x'.repeat(PERSON_MESSAGE_CHARS + 1) }), /keep it to 2000/);
   assert.throws(() => o.messagePerson(dispatcher(), { to: 'ben', text: 'hi' }), /only a person’s own orchestrator messages people/);
+});
+
+test('reply from the bubble (w1831): straight to the sender as message_person sends, and in his own chat as his message', async (t) => {
+  const { store, sessions, o, dispatcher, chat, call, heard } = setup(t);
+  const told: string[] = [];
+  o.onPersonMessage = (from, to, text) => told.push(`${from.userId}>${to.userId}: ${text}`);
+  const loth = chat(LOTH).info;
+  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'Can BEAST take the urgent build tonight?' })).isError, false);
+  const ben = o.personalOf('ben')!.info;
+  await until('Ben’s orchestrator answered', () => sessions.get(ben.id).info.status === 'idle');
+  const [mark] = ben.personMessages!;
+  const [asked] = heard(ben.id, '[person message]');
+  const lothBefore = heard(loth.id, '[person message]').length;
+  const { to, uuid } = o.replyToPerson(ben.id, mark.id!, '  Yes, after 9pm. I will leave it free.  ');
+  assert.deepEqual(to, LOTH);
+  // Lothsahn gets it as any message_person message from Ben: the same tagged text, unread mark and notification.
+  const got = heard(loth.id, '[person message]');
+  assert.equal(got.length, lothBefore + 1);
+  assert.deepEqual(got.at(-1)!.requestedBy, BEN);
+  assert.match(got.at(-1)!.text, /^\[person message\] From Ben's orchestrator \(user id ben\), written for Ben:\n\nYes, after 9pm\. I will leave it free\.\n\nThis is Ben's message to Lothsahn, relayed by their agent/);
+  assert.deepEqual(parseNotice(got.at(-1)!.text), { kind: 'person-message', summary: 'Ben: Yes, after 9pm. I will leave it free.', attention: true, body: 'Yes, after 9pm. I will leave it free.', fromName: 'Ben', fromUserId: 'ben' });
+  assert.deepEqual(store.sessions.get(loth.id)?.personMessages?.map((m) => [m.from.userId, m.text]), [['ben', 'Yes, after 9pm. I will leave it free.']]);
+  assert.deepEqual(told.at(-1), 'ben>lothsahn: Yes, after 9pm. I will leave it free.');
+  // Ben's chat has it as his own message (his turn), quoting the message it answers, with FF Factory's note that it is sent.
+  const mine = store.readTranscript(ben.id).find((e) => e.kind === 'user' && e.uuid === uuid);
+  assert.ok(mine && mine.kind === 'user');
+  assert.equal(mine.from, 'human');
+  assert.deepEqual(mine.requestedBy, BEN);
+  const sent = splitSent(mine.text);
+  assert.deepEqual(sent.sentTo, LOTH);
+  const { words, quote } = splitReply(sent.text, HELD_MARK);
+  assert.equal(words, 'Yes, after 9pm. I will leave it free.');
+  assert.equal(quote?.seq, asked.seq, 'the [person message] it answers');
+  assert.match(mine.text, /\[FF Factory, not your person: already sent\] To Lothsahn \(user id lothsahn\): FF Factory delivered the words above as message_person does.*never send them again/);
+  assert.equal(o.personalOf('ben')!.lastFrom, 'human', 'the turn it opens is Ben’s own');
+  // The message he answered is read; the dispatcher neither relays nor sees any of it.
+  assert.equal(store.sessions.get(ben.id)?.personMessages, undefined);
+  assert.equal(heard(dispatcher().info.id, '[person message]').length, 0);
+  // Answered already (or cleared): refused, and nothing goes out.
+  assert.throws(() => o.replyToPerson(ben.id, mark.id!, 'again'), /that message is not unread here any more/);
+  assert.equal(heard(loth.id, '[person message]').length, lothBefore + 1);
+});
+
+test('reply from the bubble (w1831): message_person’s rules for a person’s own message, and nothing changes when refused', async (t) => {
+  const { store, o, chat, call, heard, cfg } = setup(t, { people: WITH_CARA });
+  cfg.orchestrator = { ...cfg.orchestrator, messagesPerPerson: 1 };
+  const ben = chat(BEN);
+  const cara = chat(CARA).info;
+  const loth = chat(LOTH);
+  assert.equal((await call(cara, 'message_person', { to: 'ben', text: 'Can you look at my save?' })).isError, false);
+  const mark = () => store.sessions.get(ben.info.id)!.personMessages![0];
+  const before = store.readTranscript(ben.info.id).length;
+  // Empty, or longer than message_person takes: refused before anything is sent or recorded, and still unread.
+  assert.throws(() => o.replyToPerson(ben.info.id, mark().id!, '   '), /the message is empty/);
+  assert.throws(() => o.replyToPerson(ben.info.id, mark().id!, 'x'.repeat(PERSON_MESSAGE_CHARS + 1)), /keep it to 2000/);
+  assert.throws(() => o.replyToPerson(ben.info.id, 'pm-nope', 'hi'), /not unread here any more/);
+  assert.equal(store.readTranscript(ben.info.id).length, before);
+  assert.equal(heard(cara.id, '[person message]').length, 0);
+  // Ben's orchestrator already used its one message to Cara: his own reply is his writing, which starts the count again.
+  ben.lastFrom = 'system';
+  assert.equal((await call(ben.info, 'message_person', { to: 'cara', text: 'Looking now.' })).isError, false);
+  assert.match((await call(ben.info, 'message_person', { to: 'cara', text: 'More?' })).text, /^ERROR: 1 messages to Cara since/);
+  o.replyToPerson(ben.info.id, mark().id!, 'Found it: the belt loop on deck 3.');
+  assert.equal(heard(cara.id, '[person message]').length, 2);
+  // Between the owners, a reply is a person's own message: the hourly loop guard never counts it, so his orchestrator still
+  // has its whole hour's worth in turns no person started after it.
+  loth.lastFrom = 'system';
+  assert.equal((await call(loth.info, 'message_person', { to: 'ben', text: 'ping' })).isError, false);
+  ben.lastFrom = 'system';
+  o.replyToPerson(ben.info.id, store.sessions.get(ben.info.id)!.personMessages!.at(-1)!.id!, 'pong');
+  ben.lastFrom = 'system';
+  for (let i = 0; i < OWNER_LOOP_MESSAGES_PER_HOUR; i++) assert.equal((await call(ben.info, 'message_person', { to: 'lothsahn', text: `Ben's orchestrator ${i}` })).isError, false, `Ben's orchestrator ${i}`);
+  assert.match((await call(ben.info, 'message_person', { to: 'lothsahn', text: 'one too many' })).text, /^ERROR: 60 messages to Lothsahn in the last hour/);
+  assert.equal(heard(loth.info.id, '[person message]').length, OWNER_LOOP_MESSAGES_PER_HOUR + 1);
 });
 
 test('message_person: anyone but the two owners sends a few times until either writes, to and from an owner too', async (t) => {
@@ -4177,11 +4254,20 @@ test('w1628: each worker\'s bench priority is the highest of its open requests, 
   const real = agents.builds.releaseBuilder.bind(agents.builds);
   agents.builds.releaseBuilder = (m: string, id: string) => m === 'pc' && id === a.id;
   assert.equal(agents.benchPriorities('pc')[a.id].priority, 'urgent', 'the release builder\'s tickets count as urgent');
+  assert.equal(agents.benchPriorities('pc')[a.id].exempt, 'release', 'w1832: the urgent release lane is never pre-empted');
+  assert.equal(agents.benchPriorities('pc')[b.id].exempt, undefined, 'any other worker is');
+  store.putWork({ ...store.work.get('w1')!, status: 'done' });
+  assert.deepEqual(agents.benchPriorities('pc')[a.id], { priority: 'urgent', requests: [], exempt: 'release' }, 'w1832: a builder with no open request keeps its mark');
+  store.putWork({ ...store.work.get('w1')!, status: 'active' });
   agents.builds.releaseBuilder = real;
+  assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined);
   assert.equal(agents.benchPriorities('pc')[a.id].priority, 'high');
   store.putWork({ ...store.work.get('w1')!, status: 'done' });
   assert.equal(agents.benchPriorities('pc')[a.id], undefined, 'no open request: its tickets count as normal');
   assert.deepEqual(agents.benchPriorities('elsewhere'), {});
+  // w1832: the worker of the scheduled nightly run (the portal's nightly schedule files it as source kind nightly-run).
+  store.putWork({ ...store.work.get('w2')!, source: { kind: 'nightly-run', untrusted: false, channel: 'nightly e2e', nightlyRun: { date: '2026-10-23', machine: 'pc' } } });
+  assert.equal(agents.benchPriorities('pc')[b.id].exempt, 'nightly');
 });
 
 // w1643, lothsahn: "let's make the setting the minimum priority work that can go to a machine. If normal (all work), if high,
@@ -4237,4 +4323,68 @@ test('w1643: a request below a reserved computer\'s level waits Queued with the 
   await call(chat(LOTH).info, 'update_work', { id: 'w1', priority: 'high' });
   assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Queued \[WRONG: beast has room\]/);
   assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), ['w1']);
+});
+
+// ---------------------------------------------------------------- w1841: Stalled is only what nothing will move
+
+test('w1841: a worker on a real portal: a reporter wait is Waiting with no [needs you]; an own-work wait on the orchestrator is answered at once, once; a free bench lock resumes a worker that waited on it; blocked_on reports waits for another request\'s worker', async (t) => {
+  const { store, machines, agents, sessions, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  const ben = chat(BEN).info;
+  putRequests(store, [{ id: 'w1', status: 'active', by: BEN }, { id: 'w2', by: BEN }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'w2: fix it', work_id: 'w2' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const live = async () => (await call(dispatcher().info, 'list_work', { id: 'w2' })).text;
+  const spec = machines.hooks!.specFor(info, store.machines.get('pc')!);
+  // (d) Every worker's prompt says pair checks and builds are its own work, and how to wait on another request's worker.
+  assert.match(spec.append, /Two-machine and pair checks, builds, test runs and your own CI are your own work: run them, or ask the dispatcher only for a second machine's worker/);
+  assert.match(spec.append, /Files or results another request's worker makes for you: `blocked_on` with reports/);
+
+  // (b) w1778: a wait on the reporter is Waiting on input on them, and nobody's orchestrator is asked.
+  const reporter = 'w2: still open: waiting on the reporter Reteoteigam to answer in the Discord thread (when the asteroid vanished); FFBox passes the answer on.';
+  info.lastResult = reporter;
+  info.lastResultAt = new Date().toISOString();
+  sessions.events.emit('turnEnd', sessions.get(id), reporter);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.match(await live(), /Waiting on input on the reporter Reteoteigam/);
+  assert.equal(heard(ben.id, '[needs you]').length, 0, 'no [needs you] for a wait on the reporter');
+
+  // (d) w1685: "waiting on the orchestrator to run the two-machine check": told at once that it is its own work; once.
+  const own = 'w2: still open: waiting on the orchestrator to run the two-machine check `MP-W2-2p` on a Windows or Linux pair, then the merge of PR #2254';
+  info.lastResult = own;
+  sessions.events.emit('turnEnd', sessions.get(id), own);
+  await until('the notice reaches it', () => store.readTranscript(id).some((e) => e.kind === 'user' && /Two-machine and pair checks, builds, test runs and your own CI are your own work \(w1841\)/.test((e as { text: string }).text)));
+  assert.match(store.work.get('w2')!.log.join('\n'), new RegExp(`worker ${id} was told its wait on the orchestrator \\("w2: still open: waiting on the orchestrator to run the two-machine check`));
+  await until('that turn ends', () => info.status === 'idle');
+  const told = () => store.readTranscript(id).filter((e) => e.kind === 'user' && /your own work \(w1841\)/.test((e as { text: string }).text)).length;
+  info.lastResult = own;
+  sessions.events.emit('turnEnd', sessions.get(id), own);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(told(), 1, 'told once per request');
+
+  // (a) A report waiting on the machine's bench lock: Blocked on it while a timed run holds it; told once when it is free.
+  const ms = machines as unknown as { statsOf: (id: string) => unknown };
+  const statsOf = ms.statsOf.bind(machines);
+  let lock: { owner: string; since: string } | undefined = { owner: 'pc pid 4121 w1739 timed run (/f/ffw/sandboxes/beta)', since: new Date().toISOString() };
+  ms.statsOf = (m: string) => (m === 'pc' ? { ...((statsOf(m) as object) ?? {}), at: new Date().toISOString(), ...(lock ? { benchLock: lock } : {}) } : statsOf(m));
+  t.after(() => void (ms.statsOf = statsOf));
+  info.lastResult = "w2: still open: waiting on pc's bench lock (w1739's timed run) before the raid clips record";
+  info.lastResultAt = new Date(Date.now() + 1000).toISOString();
+  assert.match(await live(), /Blocked on pc's bench lock/);
+  assert.deepEqual(agents.resumeBenchWaits(), [], 'held: nothing to tell');
+  lock = undefined;
+  assert.deepEqual(agents.resumeBenchWaits(), [['w2', `told ${id} that pc's bench lock is free`]]);
+  assert.deepEqual(agents.resumeBenchWaits(), [], 'once per report');
+  await until('the bench notice reaches it', () => store.readTranscript(id).some((e) => e.kind === 'user' && /pc's bench lock is free now \(w1841\): carry on with w2/.test((e as { text: string }).text)));
+  await until('that turn ends', () => info.status === 'idle');
+
+  // (e) w1818: files another request's worker makes: blocked_on reports is a request gate that clears at that worker's report.
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  assert.match(String(await h.blocked_on!({ reports: ['w1'], what: "w1's Calculations window stills" })), /^Recorded: w2 is Blocked on w1/);
+  const g = store.work.get('w2')!.blocked!;
+  assert.deepEqual([g.kind, g.ref, g.on], ['request', 'w1', 'report']);
+  assert.match(await live(), /Blocked on w1/);
 });

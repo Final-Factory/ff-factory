@@ -1,9 +1,16 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { enterAction } from '../../../shared/keys';
+import { PERSON_MESSAGE_CHARS } from '../../../shared/replies';
 import type { PersonMessageMark, SessionInfo } from '../../../shared/types';
 import { api } from '../api';
+import { holdReload } from '../freshness';
+import { useKeptState } from '../keep';
 import { attempt, focusEvent, hidePersonMessages, useStore } from '../store';
 import { fmtClock, fmtRelative, useNow } from '../util';
+import { onScreenKeyboard } from '../viewport';
+import { useTextareaDictation } from '../voice/useTextareaDictation';
 import { Markdown } from './Markdown';
+import { DictationBar, MicButton } from './Mic';
 import { Icon } from './ui';
 
 /** How long a clear can be undone before the server hears of it. */
@@ -15,6 +22,9 @@ const idOf = (m: PersonMessageMark) => m.id ?? m.at;
 export function unreadHere(list: readonly PersonMessageMark[] | undefined, clearing: readonly string[] | undefined): PersonMessageMark[] {
   return (list ?? []).filter((m) => !clearing?.includes(idOf(m)));
 }
+
+/** How long "Sent to <name>" stays in the bubble after a reply (w1831). */
+export const SENT_MS = 4000;
 
 /** After Undo, Clear all comes back where Undo was: a second tap there in this time does nothing. */
 const UNDO_SETTLE_MS = 700;
@@ -36,6 +46,19 @@ export function senders(list: readonly PersonMessageMark[]): string {
 export const PeopleMessages = memo(function PeopleMessages({ session }: { session: SessionInfo }) {
   const all = session.personMessages ?? [];
   const [open, setOpen] = useState(false);
+  // The message whose reply box is open (w1831): one at a time.
+  const [replying, setReplying] = useState<string | null>(null);
+  // Who a reply just went to: said in the bubble's own status line for a few seconds, where the person is looking (a toast
+  // lay over the message box on a phone), and the bubble stays for it when that message was the last one.
+  const [sent, setSent] = useState<string | null>(null);
+  const sentTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(sentTimer.current), []);
+  const replied = (name: string) => {
+    setReplying(null);
+    setSent(name);
+    clearTimeout(sentTimer.current);
+    sentTimer.current = setTimeout(() => setSent(null), SENT_MS);
+  };
   // The clear that can still be undone: those ids are hidden here, and sent when the time is up.
   const [undo, setUndo] = useState<{ ids: string[]; timer: ReturnType<typeof setTimeout> } | null>(null);
   const undoRef = useRef(undo);
@@ -104,7 +127,7 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
     if (!list.length) setOpen(false);
   }, [list.length]);
   const cleared = undo ? all.filter((m) => undo.ids.includes(idOf(m))).length : 0;
-  if (!list.length && !cleared) return null;
+  if (!list.length && !cleared && !sent) return null;
 
   const latest = list.at(-1);
   const clearAll = (
@@ -156,17 +179,30 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
                       <time dateTime={m.at} title={fmtClock(m.at)}>
                         {fmtRelative(m.at, now)}
                       </time>
-                      <span className="pmsg-spacer" />
-                      {seq !== undefined && (
-                        <button type="button" className="btn btn-ghost btn-xs" onClick={() => focusEvent(session.id, seq)} title="Go to this message in the conversation">
-                          Show in chat
+                      {/* One group, kept whole: on a narrow phone it goes under the name rather than squeezing it (w1831). */}
+                      <span className="pmsg-actions">
+                        {seq !== undefined && (
+                          <button type="button" className="btn btn-ghost btn-xs" onClick={() => focusEvent(session.id, seq)} title="Go to this message in the conversation">
+                            Show in chat
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-xs"
+                          aria-expanded={replying === idOf(m)}
+                          onClick={() => setReplying((r) => (r === idOf(m) ? null : idOf(m)))}
+                          title={`Answer ${m.from.displayName} here: it goes straight to them, and shows in your chat`}
+                          aria-label={`Reply to ${m.from.displayName}`}
+                          data-testid="pmsg-reply">
+                          <Icon name="reply" size={13} /> Reply
                         </button>
-                      )}
-                      <button type="button" className="btn btn-ghost btn-xs" onClick={() => clear([idOf(m)])} title="Mark it read: it stays in the chat, and your orchestrator has it" aria-label={`Clear the message from ${m.from.displayName}`}>
-                        <Icon name="check" size={13} /> Clear
-                      </button>
+                        <button type="button" className="btn btn-ghost btn-xs" onClick={() => clear([idOf(m)])} title="Mark it read: it stays in the chat, and your orchestrator has it" aria-label={`Clear the message from ${m.from.displayName}`}>
+                          <Icon name="check" size={13} /> Clear
+                        </button>
+                      </span>
                     </div>
                     <div className="pmsg-text">{m.text ? <Markdown text={m.text} /> : <p className="pmsg-old">Sent before this box kept the words: it is in the conversation above.</p>}</div>
+                    {replying === idOf(m) && <ReplyBox sessionId={session.id} mark={m} onClose={() => setReplying(null)} onSent={replied} />}
                   </li>
                 );
               })}
@@ -187,7 +223,107 @@ export const PeopleMessages = memo(function PeopleMessages({ session }: { sessio
             </button>
           </div>
         )}
+        {sent && (
+          <div className="pmsg-undo pmsg-sent" role="status" data-testid="people-messages-sent">
+            <Icon name="check" size={13} />
+            <span>Sent to {sent}: it is in your chat too.</span>
+          </div>
+        )}
       </section>
     </div>
   );
 });
+
+/**
+ * The reply box under a message from another person (w1831, Ben: "give me a fast way to reply to him in there (including with
+ * voice) and replying in there sends the message to loth as normal"): the chat box's mic and Enter, and Send, which delivers
+ * the words straight to that person as message_person does (server Orchestrators.replyToPerson), with no turn of the
+ * orchestrator in between. They show in this chat as the person's own message, and the message they answer is read.
+ */
+function ReplyBox({ sessionId, mark, onClose, onSent }: { sessionId: string; mark: PersonMessageMark; onClose: () => void; onSent: (name: string) => void }) {
+  const [text, setText] = useKeptState(`pmsg.reply.${idOf(mark)}`, '');
+  const [sending, setSending] = useState(false);
+  const box = useRef<HTMLTextAreaElement>(null);
+  // One id per message written: a send repeated after an answer that never came is taken once (as the chat box's).
+  const clientId = useRef<string | null>(null);
+  const send = async (words = text.trim()) => {
+    if (!words || sending) return;
+    clientId.current ??= crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setSending(true);
+    const ok = await attempt(api.replyToPerson(sessionId, idOf(mark), words, clientId.current));
+    setSending(false);
+    if (ok === undefined) return;
+    clientId.current = null;
+    setText('');
+    onSent(mark.from.displayName);
+  };
+  // "Send automatically after dictation" sends what was dictated, as in the chat box.
+  const voice = useTextareaDictation({ value: text, setValue: setText, ref: box, onAutoSend: (t) => void send(t.trim()) });
+  useEffect(() => {
+    holdReload(`pmsg-reply:${idOf(mark)}`, sending);
+    return () => holdReload(`pmsg-reply:${idOf(mark)}`, false);
+  }, [sending]);
+  // Into the box at once, but not on a phone, where the keyboard would cover the message and the mic.
+  useEffect(() => {
+    if (!window.matchMedia('(pointer: coarse)').matches) box.current?.focus({ preventScroll: true });
+  }, []);
+  // The box grows with what is typed or dictated, a few lines at most, so it is read whole before Send (as w1817's).
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight + el.offsetHeight - el.clientHeight, 160)}px`;
+  }, [text]);
+  const label = `Reply to ${mark.from.displayName}`;
+  return (
+    <div className="pmsg-reply" data-testid="pmsg-reply-box">
+      <div className="pmsg-reply-row">
+        <textarea
+          ref={box}
+          data-kept
+          className="input pmsg-reply-text"
+          rows={1}
+          placeholder={label}
+          aria-label={label}
+          value={text}
+          maxLength={PERSON_MESSAGE_CHARS}
+          onChange={(e) => setText(e.target.value)}
+          {...voice.textareaProps}
+          onKeyDown={(e) => {
+            if (voice.keyDown(e)) return;
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              onClose();
+              return;
+            }
+            // The chat box's keys (Composer): Enter sends, Shift+Enter is a new line; with a phone's own keyboard, Send sends.
+            const touch = window.matchMedia('(pointer: coarse)').matches && onScreenKeyboard();
+            const act = enterAction(
+              { key: e.key, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode },
+              { touch, canSend: !!text.trim() },
+            );
+            if (act === 'default') return;
+            e.preventDefault();
+            if (act === 'send') void send();
+            if (act === 'newline') {
+              const el = e.currentTarget;
+              el.setRangeText('\n', el.selectionStart, el.selectionEnd, 'end');
+              setText(el.value);
+            }
+          }}
+        />
+        <MicButton d={voice.d} className="pmsg-reply-mic" />
+        <button
+          type="button"
+          className={`btn pmsg-reply-send ${text.trim() ? 'btn-primary' : 'btn-outline'}`}
+          disabled={!text.trim() || sending}
+          onClick={() => void send()}
+          data-testid="pmsg-reply-send"
+          title={`Send to ${mark.from.displayName} (Enter; Shift+Enter for a new line)`}>
+          {sending ? 'Sending…' : 'Send'}
+        </button>
+      </div>
+      <DictationBar d={voice.d} />
+    </div>
+  );
+}

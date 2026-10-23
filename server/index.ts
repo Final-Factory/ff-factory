@@ -13,6 +13,7 @@ import { Agents } from './agents.ts';
 import { MachineManager, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
 import { LiveError, LiveHub } from './live.ts';
 import { LIVE_IDLE_DEFAULT_MINUTES, LiveIdleCloser, liveIdleStatusLine } from './liveIdle.ts';
+import { BenchWarner } from './benchWarnings.ts';
 import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationView } from './providers.ts';
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
@@ -425,6 +426,9 @@ const agents = new Agents(cfg, store, sessions, machines, identity);
 // Each machine's bench queue orders tickets by their worker's request priority first (w1628): at connect and each minute.
 machines.benchPrioritiesFor = (id) => agents.benchPriorities(id);
 setInterval(() => machines.pushBenchPriorities(), 60_000).unref();
+// A holder warned that its bench turn ends (w1832, server/benchWarnings.ts): its worker is messaged once per deadline.
+const benchWarner = new BenchWarner({ session: (id) => store.sessions.get(id), send: (id, text) => void sessions.send(id, text, 'system'), log: (line) => console.log(`[bench] ${line}`) });
+machines.onBenchWarnings = (id, warnings) => benchWarner.handle(id, warnings);
 // The live view (w1398, docs/live-view.md): a sandbox's game streamed beside its agent's chat, behind config live.enabled.
 const liveHub = new LiveHub({
   enabled: () => cfg.live?.enabled === true,
@@ -824,6 +828,7 @@ const blockerWatch = new BlockerWatch({
   room: () => agents.roomNow(),
   roomFacts: () => agents.roomFacts(),
   queued: (id) => sessions.queued().some((q) => q.id === id),
+  benchResume: () => agents.resumeBenchWaits(),
   githubPerson: (w) => githubPersonOf(tokenPersonForWork(cfg, w), w, identity.systemPayer().userId),
 });
 agents.blockerWatch = blockerWatch;
@@ -1350,6 +1355,30 @@ route('POST', '/api/sessions/([\\w-]+)/person-messages/read', async (req, [id]) 
   const { ids } = await readJson<{ ids?: unknown }>(req);
   if (ids !== undefined && !(Array.isArray(ids) && ids.every((x) => typeof x === 'string'))) throw new HttpError(400, 'ids: a list of message ids, or none for all');
   return { cleared: agents.orchestrators.readPersonMessages(id, ids as string[] | undefined) };
+});
+// A person answers one of those messages straight from the bubble (w1831, docs/orchestrators.md "People to people"): the
+// words go to its sender as message_person sends them, with no turn of the orchestrator in between, and land in this chat
+// as the person's own message (Orchestrators.replyToPerson). Only their own chat (mayDrive); a send repeated after a lost
+// answer (`clientId`) is taken once.
+route('POST', '/api/sessions/([\\w-]+)/person-messages/reply', async (req, [id]) => {
+  const s = sessions.get(id);
+  if (!agents.orchestrators.ownerOf(s.info)) throw new HttpError(400, "replies to people are for a person's own orchestrator chat");
+  mayDrive(req, s.info);
+  const { id: markId, text, clientId } = await readJson<{ id?: unknown; text?: unknown; clientId?: unknown }>(req);
+  if (typeof markId !== 'string' || !markId) throw new HttpError(400, 'id: the message you answer');
+  const sendKey = typeof clientId === 'string' && clientId && clientId.length <= 80 ? `${id}:reply:${clientId}` : undefined;
+  if (sendKey && takenSends.has(sendKey)) return { duplicate: true };
+  let sent: { to: Requester };
+  try {
+    sent = agents.orchestrators.replyToPerson(id, markId, String(text ?? ''));
+  } catch (e) {
+    const m = (e as Error).message;
+    throw new HttpError(m.startsWith('that message is not unread') ? 409 : 400, m);
+  }
+  // A person wrote to their orchestrator: its own wake_me check-in is moot.
+  agents.waker.cancel(id);
+  if (sendKey) takenSends.set(sendKey, Date.now());
+  return { to: sent.to.displayName };
 });
 // Pages from before w1546 still say they were seen on opening the chat: that reads nothing now.
 route('POST', '/api/sessions/([\\w-]+)/seen', async (req, [id]) => {
