@@ -48,6 +48,7 @@ import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomNow, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, pauseHolds } from './machinePause.ts';
+import { playHolds, playLine } from '../shared/personPlay.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
 import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
@@ -2194,7 +2195,9 @@ export class Agents {
     const p = this.cfg.placement ?? {};
     // w1606: a computer a build is coming to or runs on takes no new work either (server/buildPlans.ts); its own workers'
     // resumes are held only for those the build paused (machineHold reads placement(false) and BuildPlans.resumeHold).
-    const paused = { ...(builds ? this.builds?.holds() : {}), ...pauseHolds(this.store.machines.values()) };
+    // w1894: a machine where a person plays Final Factory takes no new work either, until the grace after the game closes;
+    // its own workers resume as before (their shells run on; the turn there keeps their editors, players and builds off).
+    const paused = { ...(builds ? { ...this.builds?.holds(), ...playHolds(this.store.machines.values(), (id) => this.machines.personPlayOf(id)) } : {}), ...pauseHolds(this.store.machines.values()) };
     if (!Object.keys(paused).length) return p;
     // A pause or a coming build lets nothing through (w1863): a person's exceptions are for their own hold only.
     const except = Object.fromEntries(Object.entries(p.holdExcept ?? {}).filter(([id]) => !(id in paused)));
@@ -3714,7 +3717,7 @@ ${w.repo ?? ''}
             // An object (intake.ffbox) is a loose object, unknown keys kept for normalizeSetting to name: z.record breaks the
             // MCP SDK's tools/list for the whole belt (w224).
             value: z.union([z.string(), z.number(), z.boolean(), z.array(z.string()), z.array(z.object({ path: z.string(), olderThanDays: z.number() })), z.looseObject({}), z.null()]),
-            machine: z.string().optional().describe('For machines.githubFromVault, machines.activityPause.* and machines.cleanup.* only: the machine id to set (e.g. "m5"; "portal" for machines.githubFromVault\'s portal reads); absent: every machine not named.'),
+            machine: z.string().optional().describe('For machines.githubFromVault, machines.activityPause.*, machines.personPlay.* and machines.cleanup.* only: the machine id to set (e.g. "m5"; "portal" for machines.githubFromVault\'s portal reads); absent: every machine not named.'),
             user_asked: z.literal(true).describe('Must be true: the user asked for this change.'),
           },
           wrap(async (a) => {
@@ -3826,6 +3829,8 @@ ${w.repo ?? ''}
       `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
       ...(detail ? [`  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`] : []),
       sandboxes,
+      // A person playing Final Factory there (w1894): why it is busy and until when.
+      ...(this.machines.personPlayOf(m.id) ? [`  playing: ${playLine(this.machines.personPlayOf(m.id)!)}`] : []),
       // Reserved for higher work (w1643, config placement.minPriority): who may be placed here.
       ...(this.reservedLine(m.id) ? [this.reservedLine(m.id)!] : []),
       // Its main clone's git, from a daemon before w536 only (a current one reports none).

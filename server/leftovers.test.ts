@@ -31,7 +31,7 @@ interface Session {
 }
 
 /** A fake machine: processes with their environments, start times and CPU, sessions, leases and a clock. */
-function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[], o: { platform?: UnityPlatform; sessions?: Record<string, Session>; leases?: PlayerLease[]; ready?: boolean; known?: string[] } = {}) {
+function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[], o: { platform?: UnityPlatform; sessions?: Record<string, Session>; leases?: PlayerLease[]; ready?: boolean; known?: string[]; personPlay?: boolean } = {}) {
   const t0 = 1_000 * HOUR;
   for (const p of procs) p.born ??= t0 - 30 * HOUR;
   const st = {
@@ -77,6 +77,7 @@ function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[
     now: () => st.now,
     log: (l) => void st.logs.push(l),
     onEvent: (t) => void st.events.push(t),
+    personPlay: () => !!o.personPlay,
   };
   const reaper = new LeftoverReaper(deps);
   /** One look `min` minutes after the last. */
@@ -583,4 +584,28 @@ test('on a real Linux machine or Mac: a detached "player" and "Xvfb" of a stoppe
       }
     }
   }
+});
+
+// ---------------------------------------------------------------- w1894: a person's own game
+
+test("w1894: a game no worker started is a person's (Steam's, or a slot player with no lease and no worker in it); a worker's never is, and the person's is never ended", async () => {
+  const STEAM = { pid: 4242, ppid: 9000, cmd: '/home/u/.steam/steam/steamapps/common/Final Factory/FinalFactory.x86_64 -screen-fullscreen 1' };
+  const byHand = { pid: 4343, ppid: 9212, cmd: `${PLAYERS}/slot1-0/player/finalfactory.x86_64 -screen-fullscreen 0` };
+  const leased = { pid: 501, ppid: 9212, cmd: `${PLAYERS}/slot2-0/player/finalfactory.x86_64 -batchmode` };
+  const worker = { pid: 502, ppid: 9212, cmd: '/opt/x/finalfactory.x86_64 -ffAutomationRole solo', env: env('aaaa1111') };
+  const sandboxBuild = { pid: 503, ppid: 9212, cmd: `${ROOT}/sandboxes/slot3/Builds/finalfactory.x86_64` };
+  const tempBuild = { pid: 504, ppid: 9212, cmd: `${TMP}/ffa-bbbb2222/build/finalfactory.x86_64` };
+  const procs = () => [SYSTEMD, DAEMON, { ...STEAM }, { ...byHand }, { ...leased }, { ...worker }, { ...sandboxBuild }, { ...tempBuild }];
+  const leases: PlayerLease[] = [{ slot: 'slot2-0', pid: 501, host: 'biscuit', session: 'cccc3333', sandbox: `${ROOT}/sandboxes/slot2` }];
+  const on = machine(procs(), { personPlay: true, leases, sessions: { aaaa1111: { live: true }, cccc3333: { live: true } } });
+  await on.look(0);
+  assert.deepEqual(on.reaper.report().persons.sort(), [4242, 4343]);
+  assert.ok(!on.reaper.report().players.some((p) => p.pid === 4343), 'the slot player started by hand is no orphan of a worker');
+  for (let i = 0; i < 15; i++) await on.look(1);
+  assert.ok(on.alive(4242) && on.alive(4343), "a person's game is never ended");
+  // Off on the machine: no person is looked for, and a slot player nobody holds is an orphan as before (w1196).
+  const off = machine(procs(), { leases, sessions: { aaaa1111: { live: true }, cccc3333: { live: true } } });
+  await off.look(0);
+  assert.deepEqual(off.reaper.report().persons, []);
+  assert.equal(off.reaper.report().players.find((p) => p.pid === 4343)?.owner, 'orphan');
 });
