@@ -10,6 +10,8 @@ import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { BugThreadWatch, judgePrompt, ownerOfThread, parseVerdict, type AckInput, type BugThreadReader, type FixPr, type RawThread } from './bugThreads.ts';
 import { ACK_CASES } from './bugThreads.fixtures.ts';
+import { FFBOX_QUERIES_PER_PASS, FfboxBugThreads, type QueryAsker } from './ffboxBugThreads.ts';
+import type { QueryAnswer } from './providers.ts';
 import type { DiscordMessage } from './intakeRules.ts';
 import type { Config } from './config.ts';
 import type { ProviderConversation, Requester, UserInfo, WorkItem } from '../shared/types.ts';
@@ -91,7 +93,7 @@ function fixtureJudge(calls: AckInput[]) {
   };
 }
 
-function setup(t: { after: (fn: () => void | Promise<void>) => void }, bt: NonNullable<Config['intake']>['bugThreads'] = {}) {
+function setup(t: { after: (fn: () => void | Promise<void>) => void }, bt: NonNullable<Config['intake']>['bugThreads'] = {}, reader?: (d: FakeDiscord) => BugThreadReader) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-bugthreads-'));
   const cfg = {
     dataDir: dir,
@@ -126,7 +128,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, bt: NonNu
     store,
     identity: agents.identity,
     orchestrators: o,
-    discord,
+    discord: reader ? reader(discord) : discord,
     judge: fixtureJudge(calls),
     fixPrs: async () => (prsKnown ? prs : undefined),
     conversations: () => convs,
@@ -323,4 +325,93 @@ test("the judge's prompt fences the players' text; its answer must be JSON with 
   assert.deepEqual(parseVerdict('Here: {"acknowledged": true, "reason": "promises a fix"}'), { acknowledged: true, reason: 'promises a fix' });
   assert.throws(() => parseVerdict('yes'));
   assert.throws(() => parseVerdict({ acknowledged: 'yes' }));
+});
+
+/** FFBox's `bug_threads` and `thread_messages` answers (the ffbox README's rows), built from a FakeDiscord's threads. */
+class FakeFfbox implements QueryAsker {
+  asked: string[] = [];
+  live = true;
+  private readonly d: FakeDiscord;
+  constructor(d: FakeDiscord) {
+    this.d = d;
+  }
+  async query(what: string, args: Record<string, number | string> = {}): Promise<QueryAnswer> {
+    this.asked.push(what);
+    if (!this.live) return { what, live: false, ok: false, error: 'offline' };
+    const d = this.d;
+    const msgTime = (id: string) => Number((BigInt(id) >> 22n) + 1420070400000n);
+    if (what === 'bug_threads') {
+      const since = Number(args.since) * 1000;
+      const threads = [...d.active, ...Object.values(d.archived).flat()]
+        .filter((t) => msgTime(t.id) >= since || msgTime(t.last_message_id ?? t.id) >= since)
+        .map((t) => ({
+          id: t.id,
+          channel: t.parent_id === DEV_BUGS ? 'dev_bug_reports' : 'bug_reports',
+          channel_id: t.parent_id,
+          title: t.name,
+          link: `https://discord.com/channels/${GUILD}/${t.id}`,
+          opener: t.owner_id,
+          opener_bot: t.owner_id === d.botId,
+          messages: d.msgs[t.id]?.length ?? 0,
+          last_message: t.last_message_id,
+        }));
+      return { what, live: true, ok: true, data: { total: threads.length, threads, operators: { [BEN_ID]: 'Ben', [LOTH_ID]: 'lothsahn' } } };
+    }
+    if (what === 'thread_messages') {
+      const all = (d.msgs[String(args.thread)] ?? []).filter((m) => !args.after || BigInt(m.id) > BigInt(String(args.after)));
+      const limit = Number(args.limit ?? 50);
+      const messages = all.slice(0, limit).map((m) => ({ id: m.id, author_id: m.author?.id, author: m.author?.username, ...(m.author?.bot ? { bot: true } : {}), text: m.content }));
+      return { what, live: true, ok: true, data: { messages, ...(all.length > limit ? { more: true } : {}) } };
+    }
+    return { what, live: true, ok: false, error: 'unsupported' };
+  }
+}
+
+test("through FFBox (the portal has no Discord token): an owner's \"Will fix\" files one request, a second reply none, a bot's thread is no one's to own", async (t) => {
+  let ffbox!: FakeFfbox;
+  const { discord, watch, forThread, work, lines } = setup(t, {}, (d) => new FfboxBugThreads((ffbox = new FakeFfbox(d))));
+  const th = discord.thread(-60, 'Upgrade Tools - Mining T2 missing', 'The Mining T2 upgrade is not in the upgrade tools list after I researched it.');
+  discord.say(th, BEN_ID, 'Will fix', -30);
+  const bots = discord.thread(-50, "Bug Bot's crash report", 'runtime log attached');
+  discord.active.find((x) => x.id === bots)!.owner_id = discord.botId;
+  await watch.sweep({ coverage: false });
+  const filed = forThread(th);
+  assert.equal(filed.length, 1, 'one request for the thread');
+  assert.equal(filed[0].requestedBy.userId, 'ben', "Ben's own, known by FFBox's operators block");
+  assert.equal(filed[0].approval?.state, 'approved');
+  assert.match(filed[0].brief, /Upgrade Tools - Mining T2 missing|Mining T2 upgrade/);
+  assert.match(filed[0].source?.url ?? '', new RegExp(`discord.com/channels/${GUILD}/${th}`), "the guild comes from FFBox's link");
+
+  discord.say(th, LOTH_ID, 'Confirmed, I can reproduce it here.', -5, 3);
+  await watch.sweep({ coverage: false });
+  assert.equal(forThread(th).length, 1, 'no duplicate');
+
+  const cov = await watch.coverage(await watch.threads(Date.now() - 7 * 24 * 3_600_000), Date.now() - 7 * 24 * 3_600_000);
+  assert.deepEqual(cov.unowned.map((r) => r.threadId), [], "the owned thread is owned and the bot's thread is left out");
+  assert.equal(work().length, 1);
+  assert.ok(ffbox.asked.every((q) => q === 'bug_threads' || q === 'thread_messages'), 'only the two read-only queries');
+  assert.ok(!lines.some((l) => /no reader|no bot token/.test(l)), lines.join(' | '));
+});
+
+test('through FFBox: a pass sends at most FFBOX_QUERIES_PER_PASS queries and reads the rest next pass; FFBox down files nothing', async (t) => {
+  let ffbox!: FakeFfbox;
+  const { discord, watch, forThread, lines } = setup(t, {}, (d) => new FfboxBugThreads((ffbox = new FakeFfbox(d))));
+  const acks = ACK_CASES.filter((c) => c.ack).slice(0, 8);
+  const threads = acks.map((c, i) => {
+    const th = discord.thread(-300 + i * 10, c.title, c.report);
+    discord.say(th, BEN_ID, c.reply, -200 + i * 10);
+    return th;
+  });
+  ffbox.live = false;
+  await watch.sweep({ coverage: false });
+  assert.equal(threads.filter((th) => forThread(th).length).length, 0, 'nothing filed while FFBox cannot answer');
+  assert.match(lines.at(-1) ?? '', /FFBox could not answer "bug_threads": offline/);
+  ffbox.live = true;
+  for (let pass = 0; pass < 4; pass++) {
+    const before = ffbox.asked.length;
+    await watch.sweep({ coverage: false });
+    assert.ok(ffbox.asked.length - before <= FFBOX_QUERIES_PER_PASS, `pass ${pass}: ${ffbox.asked.length - before} queries`);
+  }
+  assert.ok(lines.some((l) => /queries are spent/.test(l)), 'the first pass ran out and said so');
+  assert.deepEqual(threads.map((th) => forThread(th).length), threads.map(() => 1), 'every acknowledged thread filed once, over the passes');
 });
