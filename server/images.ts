@@ -6,7 +6,7 @@ import type { ImageFile } from '../shared/types.ts';
 /** Image files an agent may show or a gallery may list (docs: README, Screenshots). */
 export const IMAGE_FILE = /\.(png|jpe?g|gif|webp|svg)$/i;
 /** Video files: streamed with HTTP Range (openVideo), not read whole. A Unity ".mp4.meta" is not one. */
-export const VIDEO_FILE = /\.(mp4|m4v|webm)$/i;
+export const VIDEO_FILE = /\.(mp4|m4v|webm|mov)$/i;
 export const MEDIA_TYPE: Record<string, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',
@@ -17,6 +17,7 @@ export const MEDIA_TYPE: Record<string, string> = {
   mp4: 'video/mp4',
   m4v: 'video/mp4',
   webm: 'video/webm',
+  mov: 'video/quicktime',
 };
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 

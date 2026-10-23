@@ -30,7 +30,7 @@ const now = { state: 'working', why: long('y') } as const;
 
 test('w1866: a person\'s list line leaves out cost, placement and gone workers, and cuts its free text shorter', () => {
   const full = describeItem(item(), worker, now, ' Cost so far: $5.31.');
-  const short = describeItem(item(), worker, now, '', true);
+  const short = describeItem(item(), worker, now, '', '', true);
   assert.match(full, /workers: s-old \(gone\), s-now \(running\)\./);
   assert.match(short, /workers: s-now \(running\), 1 gone\./);
   assert.match(full, /Cost so far/);

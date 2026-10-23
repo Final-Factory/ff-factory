@@ -27,7 +27,7 @@ export function localPath(url: string): string | undefined {
 }
 
 /** A video file by its name: shown in a player, not as an image. */
-export const isVideoPath = (p: string) => /\.(mp4|m4v|webm)$/i.test(p);
+export const isVideoPath = (p: string) => /\.(mp4|m4v|webm|mov)$/i.test(p);
 
 // Absolute image and video paths in agent text: Windows (C:\x\y.png, C:/x/y.mp4) or POSIX (/Users/x/y.png).
 const PATH_RE = /(?:[A-Za-z]:[\\/]|\/)(?:[^\s`'"()<>|*?,;]+[\\/])*[^\s`'"()<>|*?,;:\\/]+\.(?:png|jpe?g|gif|webp|svg|mp4|m4v|webm)\b/gi;

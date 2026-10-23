@@ -178,6 +178,21 @@ const NEEDS_PERSON =
 /** Whether a worker's last report ends asking a person to decide (its tail, as the cleanup reads reports). */
 export const asksAPerson = (report: string | undefined) => !!report && NEEDS_PERSON.test(report.trim().slice(-600));
 
+/**
+ * The line of a report's end that asks the person (w1868: "17e0097f stopped asking for a decision" never said which): the
+ * last line or sentence of its tail that asks, whole, without Markdown; undefined when none does on its own.
+ */
+export function askingLine(report: string | undefined): string | undefined {
+  if (!report) return undefined;
+  const tail = report.trim().slice(-1200);
+  const lines = tail
+    .split(/\n+/)
+    .flatMap((l) => l.split(/(?<=[.!?])\s+(?=[A-Z])/))
+    .map((l) => l.replace(/^[\s>*_#-]+|[*_`]+/g, '').trim())
+    .filter((l) => l.length > 3);
+  return lines.findLast((l) => NEEDS_PERSON.test(l));
+}
+
 /** Capitalised words after "waiting for" that are not a person. */
 const NOT_A_PERSON = new Set(['ci', 'steam', 'steamworks', 'unity', 'github', 'ffbox', 'claude', 'windows', 'mac', 'linux', 'discord', 'apple', 'xcode', 'metal', 'rosetta', 'tailscale', 'portal', 'beast', 'max', 'nightly', 'build', 'release', 'deploy', 'master', 'develop', 'main', 'the', 'this', 'that']);
 const WAITS = '(?:waiting (?:for|on)|waits (?:for|on)|blocked on|needs|requires)';
@@ -245,7 +260,7 @@ export function outsideWaitOf(line: string, team: readonly string[] = []): strin
 }
 /** A waiting_on_person declaration whose `who` is the reporter or a player, not one of the team (w1841). */
 export const outsideDeclared = (d: Pick<NonNullable<SessionInfo['waitingOn']>, 'who' | 'what'>, team: readonly string[] = []) =>
-  OUTSIDE_ROLE.test(d.who) || OUTSIDE_WAIT.test(d.what) || (/\b(?:discord|ffbox)\b/i.test(d.what) && !team.some((p) => personKey(p) === personKey(d.who)));
+  (OUTSIDE_ROLE.test(d.who) && !team.some((p) => personKey(p) === personKey(d.who))) || OUTSIDE_WAIT.test(d.what) || (/\b(?:discord|ffbox)\b/i.test(d.what) && !team.some((p) => personKey(p) === personKey(d.who)));
 
 /** w1841 (e): "needs the w1761 stills", "waiting for w1761's worker": the other request a line waits on (its words up to a ; or .). */
 const WAITS_ON_WORK = /\b(?:needs?|waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b([^;.]{0,140})/gi;
@@ -404,7 +419,9 @@ export function personWaitSettled(w: Pick<WorkItem, 'notes' | 'needsYou' | 'prs'
   const after = (iso: string | undefined) => (Date.parse(iso ?? '') || 0) > at;
   // w1841: on a request with several workers, a note another worker took up (it reported after the note, the waiting one did
   // not) answered that worker, not this one (w1782: Ben's notes on item 2 went to 8ef702f6; ac694f80 still waited on his pick).
-  const note = [...(w.notes ?? [])].reverse().find((n) => after(n.at) && people.has(personKey(n.by)) && !by?.elsewhere(Date.parse(n.at) || 0));
+  // w1868: a note that answered some of several questions leaves the rest waiting (needsYou.answeredAsks): only the record's answer settles it.
+  const partial = !!w.needsYou && !w.needsYou.answered && !!w.needsYou.answeredAsks?.length;
+  const note = partial ? undefined : [...(w.notes ?? [])].reverse().find((n) => after(n.at) && people.has(personKey(n.by)) && !by?.elsewhere(Date.parse(n.at) || 0));
   if (note) return `${note.by} answered it with a note at ${minute(note.at)}`;
   const a = w.needsYou?.answered;
   const theirs = !by || !w.needsYou?.worker || w.needsYou.worker === by.id;
@@ -453,6 +470,38 @@ function benchedOf(workers: readonly SessionInfo[], lineOf: (s: SessionInfo) => 
 }
 
 /** The live state of one request, or undefined once it is closed. */
+/**
+ * Queued for capacity (w643), by the same room test as Capacity's ROOM/BUSY and decide_work queue (w1089), on what the
+ * request needs (w1098): with a computer that could take it free, that is wrong, and says so (`roomOn`). `head` is what is
+ * queued: the request, or a leg of it held for named computers while its own worker works elsewhere (w1863).
+ */
+function queuedLive(w: WorkItem, f: WorkLiveFacts, wanted: readonly string[] | undefined, head: string, start = 'start it, or block it on what it waits for'): WorkLive {
+  const needs = wanted?.map((n) => n.toLowerCase());
+  const kind = needsOf(w);
+  const known = kind === 'game' ? f.room : f.agentRoom;
+  // A computer reserved for higher work (w1643) is room only for a request whose priority now reaches its level.
+  const reserved = (f.reservedRoom ?? []).filter((r) => r.for.includes(kind) && (!needs?.length || needs.includes(r.id.toLowerCase())));
+  const room = [...(known ?? []), ...reserved.filter((r) => admitsPriority(r.min, w.priority)).map((r) => r.id)].filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
+  const what = `for capacity${needs?.length ? ` on ${needs.join(' or ')}` : ''}`;
+  const slot = kind === 'agent' ? 'an agent slot' : 'room';
+  if (room.length) return { state: 'queued', why: `${head} ${what}, but ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${slot}: the dispatcher should ${start}`, roomOn: room };
+  const held = (f.heldRoom ?? []).filter((h) => h.for.includes(kind) && (!needs?.length || needs.includes(h.id.toLowerCase())));
+  const reservedWhy = reservedText(reserved, kind, w.priority, slot);
+  const heldWhy = `${held.length ? `; ${held.map((h) => `${h.id} has ${slot} but is held (${h.why})`).join('; ')}` : ''}${reservedWhy ? `; ${reservedWhy}` : ''}`;
+  return { state: 'queued', why: `${head} ${what}${known ? ': no computer that could take it has ' + slot : ''}${heldWhy}` };
+}
+
+/**
+ * A request's legs held for named computers (w1863, WorkItem.legs), as Queued, or undefined without one. Its own status is
+ * another matter (active: its worker works elsewhere), so this is read before the states a worker's turn would give it.
+ */
+function legLive(w: WorkItem, f: WorkLiveFacts): WorkLive | undefined {
+  if (!w.legs?.length || w.status === 'queued') return undefined;
+  const since = w.legs.map((l) => minute(l.at).slice(11)).join(', ');
+  const head = `its leg${w.legs.length > 1 ? 's' : ''} (since ${since} UTC; its own worker elsewhere) queued`;
+  return queuedLive(w, f, w.legs.flatMap((l) => l.needs), head, 'start a worker for it there');
+}
+
 export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string) => Holds): WorkLive | undefined {
   if (!live(w)) return undefined;
   const holds = holdsFor ?? ((sid: string) => holdsOf(sid, f.items));
@@ -476,6 +525,10 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
     return withMachines({ state: 'working', why: `${busy.map((s) => s.id).join(', ')} ${busy[0].status === 'starting' ? 'starting' : 'mid-turn'}${tool ? `, in ${tool.name} since ${ago(tool.since, f.now)}` : ''}${sharedWith(busy)}` }, busy);
   }
   if (w.ffbox && (w.ffbox.state === 'sent' || w.ffbox.state === 'accepted')) return { state: 'working', why: `on FFBox${w.ffbox.conversation ? ` (conversation ${w.ffbox.conversation})` : ''}` };
+
+  // w1863: a leg held for a named computer that has room now is wrong whatever else the request is doing: said first.
+  const leg = legLive(w, f);
+  if (leg?.roomOn) return leg;
 
   // Waiting on input: a person must approve, answer, decide or allow something.
   if (w.approval?.state === 'pending') return { state: 'waiting', why: 'an intake request waiting for a reviewer to approve or decline it', waitsOn: ['a reviewer'] };
@@ -579,10 +632,16 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   // polls moves a gate. A job it runs meanwhile (CI, a build) is still work.
   if (w.status === 'blocked' && gates.length && !(coming && coming.a.kind === 'job')) return blockedLive(gates, f.now);
 
+  // w1863: a leg waiting for its computer is Queued, also while the request's own worker is between turns elsewhere.
+  if (leg) return leg;
+
   if (coming) return withMachines({ state: 'working', why: `${coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}`}${sharedWith([coming.s])}` }, [coming.s]);
 
   const decide = serving.find((s) => asksAPerson(s.lastResult) && stands(reportAt(s), names(w.requesters), (s.lastResult ?? '').trim().slice(-600)));
-  if (decide) return { state: 'waiting', why: `${decide.id} stopped asking for a decision`, waitsOn: names(w.requesters), worker: decide.id };
+  if (decide) {
+    const line = askingLine(decide.lastResult);
+    return { state: 'waiting', why: `${decide.id} stopped asking for a decision${line ? `: "${line}"` : ''}`, waitsOn: names(w.requesters), worker: decide.id };
+  }
 
   // A message to one of its workers waits in the send queue: for a free slot (Queued) or for its machine (Blocked).
   const held = serving.map((s) => ({ s, why: f.queuedSend?.(s.id) ?? s.queuedSend, on: s.queuedOn })).find((x) => x.why);
@@ -597,22 +656,7 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   if (w.status === 'new') return { state: 'working', why: `the dispatcher has it to decide, since ${ago(w.updatedAt, f.now)}` };
 
   // Queued: capacity only. With a computer that could take it free, that is wrong, and says so (w643).
-  if (w.status === 'queued') {
-    const needs = w.queuedFor?.needs?.map((n) => n.toLowerCase());
-    // The same room test as Capacity's ROOM/BUSY and decide_work queue (w1089), by what the request needs (w1098).
-    const kind = needsOf(w);
-    const known = kind === 'game' ? f.room : f.agentRoom;
-    // A computer reserved for higher work (w1643) is room only for a request whose priority now reaches its level.
-    const reserved = (f.reservedRoom ?? []).filter((r) => r.for.includes(kind) && (!needs?.length || needs.includes(r.id.toLowerCase())));
-    const room = [...(known ?? []), ...reserved.filter((r) => admitsPriority(r.min, w.priority)).map((r) => r.id)].filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
-    const what = `for capacity${needs?.length ? ` on ${needs.join(' or ')}` : ''}`;
-    const slot = kind === 'agent' ? 'an agent slot' : 'room';
-    if (room.length) return { state: 'queued', why: `queued ${what}, but ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} ${slot}: the dispatcher should start it, or block it on what it waits for`, roomOn: room };
-    const held = (f.heldRoom ?? []).filter((h) => h.for.includes(kind) && (!needs?.length || needs.includes(h.id.toLowerCase())));
-    const reservedWhy = reservedText(reserved, kind, w.priority, slot);
-    const heldWhy = `${held.length ? `; ${held.map((h) => `${h.id} has ${slot} but is held (${h.why})`).join('; ')}` : ''}${reservedWhy ? `; ${reservedWhy}` : ''}`;
-    return { state: 'queued', why: `queued ${what}${known ? ': no computer that could take it has ' + slot : ''}${heldWhy}` };
-  }
+  if (w.status === 'queued') return queuedLive(w, f, w.queuedFor?.needs, 'queued');
 
   // Paused (w915): its worker wrote `<id>: paused: …`, set it aside for the request it is on first. Not Stalled: someone
   // decided to wait, and said on what.

@@ -145,7 +145,9 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // since w1159 gave list_work, list_sandboxes, list_machines and agent_transcript their output options. w1597 gave decide_work
   // its questions (one plain question per decision with its answers, as the person's card asks them; Ben, 2026-10-19: "just ask
   // the question clearly, give me the option selections and thats it"): the dispatcher's measured 24,348, so the cap moved to 24,500.
-  const ALWAYS_LOADED_MAX = 24_500;
+  // w1863 (lothsahn: "Why did they hang if the m5 was free?") gave decide_work queue its leg for a named computer beside the
+  // request's own worker, and drop_leg (trimmed from 450 characters to 170): the dispatcher's measured 24,672, so the cap moved to 24,700.
+  const ALWAYS_LOADED_MAX = 24_700;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;

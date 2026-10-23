@@ -60,7 +60,7 @@ const MIN = 60_000;
  *   time; a held Claude pool queues it); 10 min more covers a slow start. Once resumed the worker is live again.
  * - ORPHAN_GRACE_MS: a guess, as STOPPED_GRACE_MS: an orphan has no owner to come back for it.
  * - LOOKS: a process ends only once two looks (a minute apart) have seen it, so one odd listing never ends it.
- * - SERVER_IDLE_CPU_MS: as unityReaper.ts CPU_ADVANCE_MS: a compiler server serving a build uses seconds of CPU a minute.
+ * - SERVER_IDLE_CPU_MS: as unityReaper.ts did with its 2 s CPU_ADVANCE_MS (now CPU_BUSY_SHARE): a compiler server serving a build uses seconds of CPU a minute.
  * - TERM_WAIT_MS: a guess: a player or an Xvfb ends within a second of SIGTERM; what still runs 5 s later is killed.
  */
 export const LEFTOVER = {

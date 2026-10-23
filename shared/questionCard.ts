@@ -116,7 +116,9 @@ export interface CardQuestions {
 /** The question a request that waits on its person's answer asks (not an intake approval: the card asks that itself). */
 export function cardQuestions(w: Pick<WorkItem, 'needsYou' | 'question' | 'flag'>): CardQuestions {
   const r = w.needsYou && !w.needsYou.answered ? w.needsYou : undefined;
-  if (r?.asks?.length) return { asks: r.asks, text: '', ...(r.worker ? { worker: r.worker } : {}) };
+  // w1868: of several questions, the ones a note answered already are not asked again.
+  const open = (r?.asks ?? []).filter((_, i) => !(r?.answeredAsks ?? []).includes(i));
+  if (open.length) return { asks: open, text: '', ...(r?.worker ? { worker: r.worker } : {}) };
   if (w.question?.asks?.length && (!r || r.kind === 'question')) return { asks: w.question.asks, text: '' };
   // A worker's own words come first: the dispatcher's question folded into it is its restatement (Details).
   const raw = r && r.kind !== 'question' ? r.question : (w.question?.text ?? w.flag?.text ?? r?.question ?? '');
@@ -139,7 +141,7 @@ export function answersText(asks: readonly Ask[], answers: readonly string[]): s
  */
 export function answerMessage(w: Pick<WorkItem, 'id' | 'title' | 'question' | 'flag' | 'needsYou'>, text: string): string {
   const asked = w.needsYou?.asks?.length
-    ? w.needsYou.asks.map((a) => splitMedia(a.question).text).join(' / ')
+    ? w.needsYou.asks.filter((_, i) => !(w.needsYou?.answeredAsks ?? []).includes(i)).map((a) => splitMedia(a.question).text).join(' / ')
     : w.question?.asks?.length
       ? w.question.asks.map((a) => splitMedia(a.question).text).join(' / ')
       : (w.question?.text ?? w.flag?.text ?? w.needsYou?.question ?? '');

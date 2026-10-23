@@ -84,7 +84,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // the stats fields it knows); a newer portal with an older daemon gets none and shows no bench line.
 // w1861 (no bump): `noTimedRuns` on `bench_priorities` (an older daemon writes no no_timed_runs: its queue takes timed
 // tickets as before, and placement still sends timed work elsewhere); an older portal sends none.
-const DECIDED = { protocol: 9, fingerprint: 'ead2958b4d09e1fb' };
+// w1874 (no bump): `session` on a `unity` clear_batch, the asking worker's, for the reaper's owner rules. An older daemon
+// ignores it and keeps the old rules; a newer daemon asked by an older portal gets none and does the same.
+const DECIDED = { protocol: 9, fingerprint: '283bb40338b60445' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

@@ -7,7 +7,7 @@ import { useKeptState } from '../keep';
 import { openLightbox } from '../store';
 import { useTextareaDictation } from '../voice/useTextareaDictation';
 import { DictationBar, MicButton } from './Mic';
-import { previewSrc } from './Images';
+import { PreviewVideo } from './Images';
 
 /** A still or a clip a card previews: an absolute path (the review folder's, or the asking worker's own). */
 export interface CardMedia {
@@ -18,31 +18,49 @@ export interface CardMedia {
 /** /api/image for a path: the review folder needs no session; a worker's own file is read through its session. */
 const mediaSrc = (path: string, session?: string) => `/api/image?${new URLSearchParams({ ...(session ? { session } : {}), path })}`;
 
-/** The stills and clips as thumbnails; a click opens them full size (a clip plays there). */
+/**
+ * The stills as thumbnails (a click opens them full size) and the clips as players that play in the card (w1868, Ben on a
+ * w1762 card: "You don't put the clip in this little intake waiting for input box, so I can't see it").
+ */
 export function Previews({ media, session }: { media: CardMedia[]; session?: string }) {
   const [broken, setBroken] = useState<Set<string>>(new Set());
   const shown = media.filter((m) => !broken.has(m.url));
   if (!shown.length) return null;
   const items = shown.map((m) => ({ src: mediaSrc(m.url, session), name: m.alt || m.url.split(/[\\/]/).pop() || 'still', video: isVideoPath(m.url) }));
-  const thumb = (m: CardMedia, i: number) => (
-    <button key={m.url} type="button" className="qc-thumb" title={`${m.alt || items[i].name}: open full size`} aria-label={`Open ${m.alt || items[i].name} full size`} onClick={() => openLightbox(items, i)}>
-      {items[i].video ? (
-        <>
-          <video src={`${previewSrc(items[i].src)}#t=0.1`} muted playsInline preload="metadata" onError={() => setBroken(new Set([...broken, m.url]))} />
-          <span className="qc-play" aria-hidden>
-            ▶
-          </span>
-        </>
-      ) : (
-        <img src={items[i].src} alt={m.alt || items[i].name} loading="lazy" onError={() => setBroken(new Set([...broken, m.url]))} />
-      )}
-    </button>
-  );
+  const lost = (url: string) => setBroken((b) => new Set([...b, url]));
+  const clips = shown.map((m, i) => ({ m, it: items[i] })).filter((x) => x.it.video);
+  const stills = shown.map((m, i) => ({ m, it: items[i] })).filter((x) => !x.it.video);
   return (
     <div className="qc-media" data-testid="qc-media">
-      {shown.map((m, i) => thumb(m, i))}
+      {clips.map(({ m, it }) => (
+        <figure key={m.url} className="qc-clip" data-testid="qc-clip">
+          <PreviewVideo src={it.src} onBroken={() => lost(m.url)} />
+          <figcaption className="small dim">{it.name}</figcaption>
+        </figure>
+      ))}
+      {stills.map(({ m, it }, i) => (
+        <button key={m.url} type="button" className="qc-thumb" data-testid="qc-still" title={`${it.name}: open full size`} aria-label={`Open ${it.name} full size`} onClick={() => openLightbox(stills.map((x) => x.it), i)}>
+          <img src={it.src} alt={it.name} loading="lazy" onError={() => lost(m.url)} />
+        </button>
+      ))}
     </div>
   );
+}
+
+/** The six parts a waiting card says besides its question and answers (w1868, shared/waitSummary.ts). */
+export interface CardSummary {
+  /** 1. What it is, in one plain line. */
+  what: string;
+  /** 2. Who must act and how long it has waited. */
+  meta: ReactNode;
+  /** 4. For an input with no answers to pick: the one step. */
+  step?: string;
+  /** 6. What happens after the answer. */
+  after?: string;
+  /** What changed since it was asked. */
+  stale?: string;
+  /** A visual question with no still or clip. */
+  noMedia?: boolean;
 }
 
 export interface QuestionCardProps {
@@ -77,6 +95,8 @@ export interface QuestionCardProps {
   /** Everything else, behind one Details link. */
   details: ReactNode;
   busy?: boolean;
+  /** What it is, who acts and since when, and what follows the answer (w1868): shown in place of the title. */
+  summary?: CardSummary;
 }
 
 /**
@@ -215,13 +235,32 @@ export function QuestionCard(p: QuestionCardProps) {
     </details>
   );
   const others = !p.mine && <p className="small dim">{p.answeredBy ? `${p.answeredBy} answers this.` : 'Someone else answers this.'}</p>;
-  // Structured questions bring their own media; the review files a wait names are shown with a free-text question only (Details has them otherwise).
-  const media = cardMedia(ask, ask ? [] : p.previews);
+  // The question's own stills and clips first, then the review files the wait names (w1868: a clip that sat only in Details
+  // was never seen), then each answer's own under the answers.
+  const media = cardMedia(ask, p.previews);
+  const optionMedia = options.map((o) => ({ label: o.label, media: cardMedia(undefined, splitMedia(o.description ?? '').media.map((m) => m.url)) })).filter((x) => x.media.length);
+  const sum = p.summary;
   return (
     <article className={`qc${p.mine ? ' mine' : ''}`} data-testid={p.testId}>
-      <header className="qc-head">
-        <span className="qc-title">{p.title}</span>
-      </header>
+      {sum ? (
+        <header className="qc-head qc-head-sum">
+          <span className="qc-what" data-testid="qc-what">
+            {sum.what}
+          </span>
+          <span className="small dim qc-meta" data-testid="qc-meta">
+            {sum.meta}
+          </span>
+        </header>
+      ) : (
+        <header className="qc-head">
+          <span className="qc-title">{p.title}</span>
+        </header>
+      )}
+      {sum?.stale && (
+        <p className="small tone-amber qc-stale" data-testid="qc-stale">
+          May be out of date: {sum.stale}
+        </p>
+      )}
       {progress}
       <QuestionText q={q} legacy={!ask} />
       {p.note && (
@@ -230,15 +269,36 @@ export function QuestionCard(p: QuestionCardProps) {
         </p>
       )}
       <Previews media={media} session={p.mediaSession} />
+      {sum?.noMedia && (
+        <p className="small tone-amber" data-testid="qc-no-media">
+          It asks about something you have to see, but no still or clip came with it: ask for one before you answer.
+        </p>
+      )}
+      {sum?.step && (
+        <p className="small qc-step" data-testid="qc-step">
+          {sum.step}
+        </p>
+      )}
       {p.look}
       {p.done ?? (
         <>
           {optionButtons}
+          {optionMedia.map((x) => (
+            <div key={x.label} className="qc-opt-media" data-testid="qc-opt-media">
+              <span className="small dim">{x.label}:</span>
+              <Previews media={x.media} session={p.mediaSession} />
+            </div>
+          ))}
           {p.extra}
           {free}
         </>
       )}
       {p.done && p.extra}
+      {sum?.after && (
+        <p className="small qc-after" data-testid="qc-after">
+          <span className="dim">After you answer:</span> {sum.after}
+        </p>
+      )}
       {others}
       {details}
     </article>

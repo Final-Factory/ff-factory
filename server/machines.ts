@@ -2452,7 +2452,7 @@ export class MachineManager {
   maxEvent?: (machineId: string, line: string) => void;
 
   /** Status, start, stop or restart the Unity editor of a machine's sandbox, on the machine (machine/unity.ts). */
-  unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart' | 'clear_batch', force?: boolean, sandbox?: string) {
+  unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart' | 'clear_batch', force?: boolean, sandbox?: string, session?: string) {
     const m = this.require(machineId);
     if (!sandbox) throw new Error(MAIN_CLONE_NO_AGENTS);
     if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline`);
@@ -2472,7 +2472,7 @@ export class MachineManager {
       }, 3 * 60_000);
       this.unityCalls.set(id, { resolve, reject, timer });
       try {
-        this.post(m.id, { type: 'unity', id, action, force, sandbox: sb });
+        this.post(m.id, { type: 'unity', id, action, force, sandbox: sb, ...(action === 'clear_batch' && session ? { session } : {}) });
       } catch (e) {
         clearTimeout(timer);
         this.unityCalls.delete(id);
