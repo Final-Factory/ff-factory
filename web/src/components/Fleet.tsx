@@ -124,7 +124,7 @@ function Meters({ c, health, now }: { c: FleetComputer; health?: HostHealth; now
 }
 
 /** A computer's name, state, load and counts. */
-function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth; now: number; fold?: boolean }) {
+function Head({ c, health, now, fold, bench = true }: { c: FleetComputer; health?: HostHealth; now: number; fold?: boolean; bench?: boolean }) {
   // The host with its own daemon (docs/beast-machine.md): its dot says whether that daemon, which runs its sandboxes, is up.
   const d = c.daemon;
   const tone: Tone = c.machine
@@ -169,7 +169,7 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
       <span className="fl-cap" data-testid="fl-capacity">
         {capacityLine(c)}
       </span>
-      <BenchLine c={c} now={now} />
+      {bench && <BenchLine c={c} now={now} compact={fold} />}
     </>
   );
 }
@@ -179,16 +179,25 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
  * shared or exclusive lock mode"): Exclusive, Shared or Free, who holds it and for how long, what waits, and the next timed
  * leg; the hover lists every ticket. Nothing for an offline machine or a daemon that does not report it.
  */
-function BenchLine({ c, now }: { c: FleetComputer; now: number }) {
+function BenchLine({ c, now, compact }: { c: FleetComputer; now: number; compact?: boolean }) {
   const g = c.online ? benchGlance(c.bench, now) : undefined;
   if (!g) return null;
-  // Two short lines, so the sidebar's width keeps both: who holds it, then its times and what waits.
-  const sub = [g.times, g.waiting, g.next].filter(Boolean).join(' · ');
+  // Two short lines, so the sidebar's width keeps both: who holds it, then its times, what waits and what its turn closed.
+  // A warned turn (w1832: it ends in 5 minutes) says so first, in the mode's colour.
+  // The sidebar's narrow column keeps two short lines: who holds it, its times and how many wait; the rest is in the hover.
+  const rest = (compact ? [g.waiting] : [g.waiting, g.next, g.closed]).filter(Boolean).join(' · ');
+  const sub = g.times || rest ? (
+    <>
+      {g.times && (g.warned ? <b className="tone-amber">{g.times}</b> : g.times)}
+      {g.times && rest && ' · '}
+      {rest}
+    </>
+  ) : null;
   return (
     <span className="fl-bench" data-testid="fl-bench" data-mode={g.mode} title={g.hint}>
       <span className="fl-bench-line">
         Bench lock <b className={`tone-${g.tone}`}>{g.label}</b>
-        {g.detail && ` · ${g.detail}`}
+        {(compact ? g.short : g.detail) && ` · ${compact ? g.short : g.detail}`}
       </span>
       {sub && (
         <span className="fl-bench-line" data-testid="fl-bench-sub">
@@ -553,18 +562,23 @@ export function OverviewBoard({ app }: { app: AppState }) {
             <header className="board-head">
               {c.machine ? (
                 <button className="board-head-link" onClick={() => go({ view: 'machine', machineId: c.machine!.id })} title={`Open ${c.name}`}>
-                  <Head c={c} now={now} />
+                  <Head c={c} now={now} bench={false} />
                 </button>
               ) : c.daemon ? (
                 <button className="board-head-link" onClick={() => go({ view: 'machine', machineId: c.daemon!.id })} title={`Open ${c.name}'s daemon (${c.daemon.id})`}>
-                  <Head c={c} health={app.host?.health} now={now} />
+                  <Head c={c} health={app.host?.health} now={now} bench={false} />
                 </button>
               ) : (
                 <div className="board-head-link">
-                  <Head c={c} health={app.host?.health} now={now} />
+                  <Head c={c} health={app.host?.health} now={now} bench={false} />
                 </div>
               )}
             </header>
+            {/* The card's own row, at its full width (w1835): inside the head it would set the head's width, and with it
+                where the agent count beside the name sits. */}
+            <div className="board-bench">
+              <BenchLine c={c} now={now} />
+            </div>
             <Places c={c} viewer={viewerOf(app)} now={now} sel={{}} variant="board" go={go} />
           </article>
         ))}

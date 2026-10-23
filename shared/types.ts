@@ -590,7 +590,20 @@ export interface BenchTicketGlance {
   host?: string;
   sandbox?: string;
   since?: string;
+  /** When its turn ends: the deadline a waiter set (`deadline`), else an exclusive ticket's turn (granted + `turnMin`, which
+   * it outlasts while nobody waits); none for an exempt ticket or a shared one nothing waits behind (w1832). */
   until?: string;
+  /** An exclusive ticket's turn in minutes (bench_queue.py turn_min, 30; a ticket from an older copy keeps its max_min). */
+  turnMin?: number;
+  /** The deadline a waiter set on its turn (limit.json, w1832), when it was warned, why, and whether an urgent release set it. */
+  deadline?: string;
+  warned?: string;
+  why?: string;
+  release?: boolean;
+  /** Work FF Factory exempts from the turn limits (priorities.json, w1832): the urgent release lane's builder or the nightly's worker. */
+  exempt?: 'release' | 'nightly';
+  /** The urgent release lane's own ticket (it pre-empts the holders, w1656). */
+  preempt?: boolean;
 }
 
 /**
@@ -608,6 +621,11 @@ export interface BenchState {
   nextExclusive?: BenchTicketGlance & { ahead: number };
   /** An old-style lock's owner line (quiet_gate.sh before w1615): no ticket, so no request or worker. */
   legacy?: { owner: string; since: string };
+  /** A machine FF Factory runs one worker on (priorities.json single_worker): no turn limits, warnings or pre-emptions. */
+  singleWorker?: boolean;
+  /** What an exclusive turn closed for its run (w1829, machine/benchTurn.ts): the sandboxes whose editors it closed and the
+   * game players it asked to quit. */
+  closed?: { editors: string[]; players: number };
 }
 
 export interface BenchQueueReport {

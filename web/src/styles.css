@@ -6263,6 +6263,24 @@ body {
   font-weight: 600;
 }
 
+/* The board card's bench row, under its head and level with the head's text (its 6px padding), the head's 3px gap
+   above it. Empty for an offline machine. */
+.board-bench {
+  margin-top: calc(3px - var(--s-2) - 6px);
+  padding: 0 6px 6px;
+}
+
+.board-bench:empty {
+  display: none;
+}
+
+/* The machine page's bench row: the text wraps beside its chip, whole, instead of dropping under it or being cut. */
+.bench-row-text {
+  flex: 1 1 16em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .fl-places {
   display: flex;
   flex-direction: column;

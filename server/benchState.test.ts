@@ -35,6 +35,17 @@ function ticket(root: string, name: string, info: object, granted?: number, revo
 
 const alive = (pid: number) => pid === 555;
 
+/** A holder's limit.json as bench_queue.py writes it (w1832); times in seconds. */
+function limit(root: string, name: string, lim: object) {
+  fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), name, 'limit.json'), JSON.stringify(lim));
+}
+
+/** priorities.json as the daemon writes it (machine/benchLock.ts writeBenchPriorities). */
+function prios(root: string, f: object) {
+  fs.mkdirSync(benchQueueDir(benchLockDir(root)), { recursive: true });
+  fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'), JSON.stringify({ at: 'x', ...f }));
+}
+
 test('w1835: the mode shown is the queue\'s: Free, Shared while only shared tickets run, Exclusive while a timed leg holds it', (t) => {
   const root = tmp(t);
   assert.equal(readBenchState(undefined), undefined, 'no worker root: nothing to report');
@@ -63,8 +74,14 @@ test('w1835: the mode shown is the queue\'s: Free, Shared while only shared tick
   assert.equal(waits.nextExclusive?.ahead, 0);
   const wg = benchGlance(waits, NOW)!;
   assert.equal(wg.waiting, '1 waiting');
-  // t00000001 granted 5 min ago with a 120 min bound: 115 min left; t00000002 28 min.
-  assert.equal(wg.next, 'next timed: w1243 within 1h 55m');
+  // No deadline on the group yet (the queue sets one at the waiter's first look, w1832): it waits for the group.
+  assert.equal(wg.next, 'next timed: w1243 after the running group');
+  // The queue's deadline on the group, the same on each holder: the leg starts by then.
+  for (const n of ['t00000001', 't00000002']) limit(root, n, { deadline: sec(-55), why: 'the shared group turn' });
+  const wl = benchGlance(readBenchState(root, NOW, alive), NOW)!;
+  assert.equal(wl.next, 'next timed: w1243 within 55m');
+  assert.equal(wl.times, 'the group ends in 55m');
+  assert.equal(wl.warned, false);
   assert.match(wg.hint, /^Bench queue: Shared\n/);
   assert.match(wg.hint, /next: exclusive t00000003 · w1243 · worker cccc2222 · "probe A round 2" · waiting 30m/);
 
@@ -75,17 +92,18 @@ test('w1835: the mode shown is the queue\'s: Free, Shared while only shared tick
   const ex = readBenchState(root, NOW, alive)!;
   assert.equal(ex.mode, 'exclusive');
   assert.equal(ex.running[0].ticket, 't00000003');
-  assert.equal(ex.running[0].until, new Date(sec(12) * 1000 + 30 * 60_000).toISOString(), 'its hold bound from max_min');
+  assert.equal(ex.running[0].until, new Date(sec(12) * 1000 + 30 * 60_000).toISOString(), 'its turn: a ticket with no turn_min keeps its max_min');
+  assert.equal(ex.running[0].turnMin, 30);
   const eg = benchGlance(ex, NOW)!;
   assert.equal(eg.label, 'Exclusive');
   assert.equal(eg.tone, 'amber');
   assert.equal(eg.detail, 'w1243 · worker cccc2222');
-  assert.equal(eg.times, 'held 12m, 18m left');
+  assert.equal(eg.times, 'held 12m, 18m left of its 30m turn');
   assert.equal(eg.waiting, '1 waiting');
   assert.equal(eg.next, '', 'only a shared ticket waits');
 
-  // Over its bound until the next waiter revokes it; a revoked one counts for nothing.
-  assert.equal(benchGlance(readBenchState(root, NOW + 25 * 60_000, alive), NOW + 25 * 60_000)!.times, 'held 37m, 7m past its bound');
+  // Past its turn it goes on while nobody waits (w1832); a revoked one counts for nothing.
+  assert.equal(benchGlance(readBenchState(root, NOW + 25 * 60_000, alive), NOW + 25 * 60_000)!.times, 'held 37m, past its 30m turn: no deadline set', 'a build waits but the queue set no deadline (its own worker, or not looked yet)');
   fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), 't00000003', 'revoked'), JSON.stringify({ at: 'x', why: 'preempted' }));
   assert.equal(readBenchState(root, NOW, alive)!.mode, 'free', 'revoked holder gone, the build not granted yet');
 });
@@ -102,7 +120,9 @@ test('w1835: the queue\'s order picks the next timed leg (priority, then place),
   assert.equal(s.runningCount, 1, 'a ticket whose helper is gone is not listed');
   assert.equal(s.nextExclusive?.what, 'urgent leg', 'an urgent worker\'s leg goes first');
   assert.equal(s.nextExclusive?.ahead, 0);
-  assert.equal(benchGlance(s, NOW)!.next, 'next timed: urgent leg within 59m');
+  assert.equal(benchGlance(s, NOW)!.next, 'next timed: urgent leg after the running group', 'no deadline on the holder yet');
+  limit(root, 't00000001', { deadline: sec(-59) });
+  assert.equal(benchGlance(readBenchState(root, NOW, alive), NOW)!.next, 'next timed: urgent leg within 59m');
   // Behind a waiting shared group: its tickets, counted (review of #549).
   fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'), JSON.stringify({ at: 'x', sessions: {} }));
   ticket(root, 't00000005', { mode: 'shared', what: 'build a', pos: 1.5 });
@@ -144,6 +164,100 @@ test('w1835: an old-style lock (no ticket in its owner line) is Exclusive; a que
   assert.equal(q.runningCount, 1);
 });
 
+test('w1835 after w1832: a warned turn, an urgent release holding, the nightly in a shared group, a single-worker machine', (t) => {
+  // A holder another worker waits behind: the queue set its deadline and warned it 5 minutes before (limit.json).
+  const warned = tmp(t);
+  ticket(warned, 't00000001', { mode: 'exclusive', what: 'probe A', session: 'aaaa1111', requests: ['w1243'], max_min: 60, turn_min: 30 }, sec(26));
+  ticket(warned, 't00000002', { mode: 'exclusive', what: 'probe B', session: 'bbbb2222', requests: ['w1785'] });
+  limit(warned, 't00000001', { deadline: sec(-4), set: sec(10), warned: sec(1), why: 'the 30-minute exclusive turn', by: 't00000002' });
+  const w = readBenchState(warned, NOW, alive)!;
+  assert.equal(w.running[0].deadline, new Date(sec(-4) * 1000).toISOString());
+  assert.equal(w.running[0].until, w.running[0].deadline, 'the deadline is its end');
+  const wg = benchGlance(w, NOW)!;
+  assert.equal(wg.times, 'held 26m, warned: ends in 4m');
+  assert.equal(wg.warned, true);
+  assert.equal(wg.next, 'next timed: w1785 within 4m');
+  assert.match(wg.hint, /held 26m, warned: ends in 4m · \(the 30-minute exclusive turn\)/);
+  assert.equal(benchGlance(readBenchState(warned, NOW + 5 * 60_000, alive), NOW + 5 * 60_000)!.next, 'next timed: w1785 at the next look', 'past the deadline: revoked at the queue\'s next look');
+
+  // The waiter leaves: the deadline lingers in limit.json until the next waiter's look, and counts for nothing (review).
+  fs.rmSync(path.join(benchQueueDir(benchLockDir(warned)), 't00000002'), { recursive: true });
+  const gone = benchGlance(readBenchState(warned, NOW, alive), NOW)!;
+  assert.equal(gone.times, 'held 26m, 4m left of its 30m turn');
+  assert.equal(gone.warned, false);
+
+  // An urgent release waits behind it: its notice ends the turn in 5 minutes, and it goes first.
+  prios(warned, { v: 2, single_worker: false, sessions: { rrrr9999: { priority: 'urgent', requests: ['w1900'], exempt: 'release' } } });
+  ticket(warned, 't00000002', { mode: 'exclusive', what: 'probe B', session: 'bbbb2222', requests: ['w1785'] });
+  ticket(warned, 't00000009', { mode: 'exclusive', what: 'urgent release 1.0.0.4', session: 'rrrr9999', requests: ['w1900'], preempt: true, turn_min: 30 });
+  limit(warned, 't00000001', { deadline: sec(-5), warned: sec(0), by: 't00000009', release: 't00000009', why: 'an urgent release takes the machine: urgent release 1.0.0.4' });
+  const notice = readBenchState(warned, NOW, alive)!;
+  assert.equal(notice.nextExclusive?.ticket, 't00000009', 'a waiting urgent release goes ahead of every waiter');
+  assert.equal(notice.nextExclusive?.ahead, 0);
+  const ng0 = benchGlance(notice, NOW)!;
+  assert.equal(ng0.times, 'held 26m, warned: ends in 5m for an urgent release');
+  assert.equal(ng0.next, 'next timed: urgent release w1900 within 5m');
+  // A pre-empt ticket from a session the daemon did not mark release waits like any other (bench_queue.py is_urgent_release).
+  prios(warned, { v: 2, single_worker: false, sessions: {} });
+  assert.equal(readBenchState(warned, NOW, alive)!.nextExclusive?.preempt, undefined);
+  assert.equal(readBenchState(warned, NOW, alive)!.nextExclusive?.ticket, 't00000002');
+
+  // The urgent release holds the machine: its pre-empt ticket, its builder marked release (priorities.json v 2).
+  const rel = tmp(t);
+  prios(rel, { v: 2, single_worker: false, sessions: { rrrr9999: { priority: 'urgent', requests: ['w1900'], exempt: 'release' } } });
+  ticket(rel, 't00000001', { mode: 'exclusive', what: 'urgent release 1.0.0.4', session: 'rrrr9999', requests: ['w1900'], preempt: true, turn_min: 30 }, sec(2));
+  ticket(rel, 't00000002', { mode: 'exclusive', what: 'probe B', session: 'bbbb2222', requests: ['w1785'] });
+  const r = readBenchState(rel, NOW, alive)!;
+  assert.equal(r.running[0].preempt, true);
+  assert.equal(r.running[0].exempt, 'release');
+  assert.equal(r.running[0].until, undefined, 'no turn limit ends it');
+  const rg = benchGlance(r, NOW)!;
+  assert.equal(rg.detail, 'urgent release · w1900 · worker rrrr9999');
+  assert.equal(rg.times, 'held 2m, no turn limit');
+  assert.equal(rg.next, 'next timed: w1785 after the urgent release');
+
+  // The nightly's shared ticket: exempt, so a timed leg waits for it; an older daemon's file (no v 2) marks nothing.
+  const night = tmp(t);
+  prios(night, { v: 2, single_worker: false, sessions: { nnnn7777: { priority: 'normal', requests: [], exempt: 'nightly' } } });
+  ticket(night, 't00000001', { mode: 'shared', what: 'nightly e2e: Windows leg', session: 'nnnn7777', max_min: 120 }, sec(40));
+  ticket(night, 't00000002', { mode: 'exclusive', what: 'probe B', session: 'bbbb2222', requests: ['w1785'] });
+  const ng = benchGlance(readBenchState(night, NOW, alive), NOW)!;
+  assert.equal(ng.detail, '1 ticket running: the nightly');
+  assert.equal(ng.next, 'next timed: w1785 after the nightly');
+  assert.match(ng.hint, /shared t00000001 · nightly · worker nnnn7777/);
+  ticket(night, 't00000003', { mode: 'shared', what: 'unity: build slot1' }, sec(5));
+  assert.equal(benchGlance(readBenchState(night, NOW, alive), NOW)!.detail, '2 tickets running, the nightly among them');
+  prios(night, { sessions: { nnnn7777: { priority: 'normal', exempt: 'nightly' } } });
+  assert.equal(readBenchState(night, NOW, alive)!.running.find((x) => x.ticket === 't00000001')?.exempt, undefined, 'v 1: the marks are not this daemon\'s');
+
+  // A warned shared group: one deadline on every holder.
+  limit(night, 't00000003', { deadline: sec(-3), warned: sec(2), why: 'the shared group turn' });
+  assert.equal(benchGlance(readBenchState(night, NOW, alive), NOW)!.times, 'warned: the group ends in 3m');
+
+  // One worker on the machine: no turn limits at all.
+  const one = tmp(t);
+  prios(one, { v: 2, single_worker: true, sessions: {} });
+  ticket(one, 't00000001', { mode: 'exclusive', what: 'probe A', session: 'aaaa1111', requests: ['w1243'], turn_min: 30 }, sec(45));
+  const og = benchGlance(readBenchState(one, NOW, alive), NOW)!;
+  assert.equal(og.times, 'held 45m, no turn limit');
+  assert.match(og.hint, /one worker on this machine: no turn limits/);
+});
+
+test('w1835 after w1829: an exclusive turn says what it closed, the editors (closed.json) and the players asked to quit', (t) => {
+  const root = tmp(t);
+  ticket(root, 't00000001', { mode: 'exclusive', what: 'probe A', session: 'aaaa1111', requests: ['w1243'], sandbox: 'slot1', turn_min: 30 }, sec(3));
+  fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), 'closed.json'), JSON.stringify({ slot3: 'closed for w1243', slot2: 'closed for w1243' }));
+  const s = readBenchState(root, NOW, alive, 1)!;
+  assert.deepEqual(s.closed, { editors: ['slot2', 'slot3'], players: 1 });
+  const g = benchGlance(s, NOW)!;
+  assert.equal(g.closed, 'for it: 2 editors closed, 1 player asked to quit');
+  assert.match(g.hint, /editors closed for the turn: slot2, slot3\ngame players asked to quit: 1/);
+  assert.equal(benchGlance(readBenchState(root, NOW, alive, 0), NOW)!.closed, 'for it: 2 editors closed');
+  // Shared: no turn closes anything, whatever a stale file says.
+  fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), 't00000001', 'info.json'), JSON.stringify({ ticket: 't00000001', pid: 555, mode: 'shared', what: 'build' }));
+  assert.equal(readBenchState(root, NOW, alive, 1)!.closed, undefined);
+});
+
 test('w1835: a daemon before it reports no queue: the view shows no bench line', () => {
   assert.equal(benchGlance(undefined, NOW), undefined);
 });
@@ -156,15 +270,41 @@ test('w1835: against the real bench_queue.py, the mode follows the queue: Exclus
   const env: NodeJS.ProcessEnv = { ...process.env, BENCH_POLL_S: '0.1', BENCH_LEGACY_GRACE_S: '0' };
   delete env.FF_BENCH_TICKET;
   assert.equal(readBenchState(root)!.mode, 'free');
-  const ex = new BenchTicket({ script, lock, mode: 'exclusive', what: 'probe A', tempDir: root, env }).take();
+  const tickets: BenchTicket[] = [];
+  // Every helper lets go however the test ends: a live one keeps this process running.
+  const take = (o: ConstructorParameters<typeof BenchTicket>[0]) => {
+    const k = new BenchTicket(o).take();
+    tickets.push(k);
+    return k;
+  };
+  try {
+  const ex = take({ script, lock, mode: 'exclusive', what: 'probe A', tempDir: root, env });
   assert.equal((await ex.wait(15_000)).kind, 'granted');
-  const sh = new BenchTicket({ script, lock, mode: 'shared', what: 'unity: build', tempDir: root, env }).take();
+  const sh = take({ script, lock, mode: 'shared', what: 'unity: build', tempDir: root, env });
   assert.equal((await sh.wait(1500)).kind, 'waiting');
   const held = readBenchState(root)!;
   assert.equal(held.mode, 'exclusive');
   assert.equal(held.legacy, undefined, 'the holder\'s own lock dir carries its ticket');
   assert.equal(held.waiting, 1);
   assert.equal(benchGlance(held, Date.now())!.label, 'Exclusive');
+  // w1832's turn rules (a copy with turn_min): another worker's timed leg waits, and the queue sets the holder's deadline,
+  // the end of its 30-minute turn, which the view counts down.
+  const turns = held.running[0].turnMin !== undefined && held.running[0].turnMin < 60;
+  if (turns) {
+    const ex2 = take({ script, lock, mode: 'exclusive', what: 'probe B', tempDir: root, env: { ...env, FF_SESSION_ID: 'w1835-other-worker' } });
+    assert.equal((await ex2.wait(1500)).kind, 'waiting');
+    const by = Date.now() + 10_000;
+    while (!readBenchState(root)!.running[0]?.deadline && Date.now() < by) await new Promise((r) => setTimeout(r, 100));
+    const lim = readBenchState(root)!;
+    assert.ok(lim.running[0].deadline, 'the queue set the holder a deadline');
+    const lg = benchGlance(lim, Date.now())!;
+    assert.match(lg.times, /^held 0m, ends in (29|30)m$/);
+    // The build waits ahead of it (an older ticket); the deadline is what frees the machine for both.
+    assert.equal(lg.next, 'next timed: probe B after 1 ticket ahead');
+    ex2.release();
+    const left = Date.now() + 15_000;
+    while (readBenchState(root)!.waiting > 1 && Date.now() < left) await new Promise((r) => setTimeout(r, 100));
+  }
   ex.release();
   assert.equal((await sh.wait(15_000)).kind, 'granted');
   const until = Date.now() + 10_000;
@@ -174,4 +314,7 @@ test('w1835: against the real bench_queue.py, the mode follows the queue: Exclus
   const gone = Date.now() + 15_000;
   while (readBenchState(root)!.mode !== 'free' && Date.now() < gone) await new Promise((r) => setTimeout(r, 100));
   assert.equal(readBenchState(root)!.mode, 'free');
+  } finally {
+    for (const k of tickets) k.release();
+  }
 });
