@@ -89,8 +89,11 @@ export interface TimerHost {
   exists(sessionId: string): boolean;
   /** It is mid-turn (running, starting, waiting on a permission). */
   busy(sessionId: string): boolean;
-  /** Send it a harness message (starts it when it is stopped), for `authority`'s job when the timers carry one. Throws when it cannot take one now (the agent limit). */
-  deliver(sessionId: string, text: string, authority?: TimerAuthority): void;
+  /**
+   * Send it a harness message (starts it when it is stopped), for `authority`'s job when the timers carry one. Throws when
+   * it cannot take one now (the agent limit). `timers`: the ones it carries (w1867: the turn it opens is theirs).
+   */
+  deliver(sessionId: string, text: string, authority?: TimerAuthority, timers?: { id: string; title: string }[]): void;
 }
 
 /**
@@ -378,7 +381,7 @@ export class Timers {
         : 'A timer is the harness reminding you, not your person: it carries no one\'s authority. Anything that needs their own words still needs them to write.',
     ].join('\n\n');
     try {
-      this.host.deliver(owner, text, authority);
+      this.host.deliver(owner, text, authority, due.map((t) => ({ id: t.id, title: t.title })));
     } catch (e) {
       console.warn(`timers: could not wake ${owner} now (${(e as Error).message}); trying again on the next tick`);
       return;
