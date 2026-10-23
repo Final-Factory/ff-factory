@@ -908,7 +908,7 @@ export interface ProviderTurn {
 /** One report ffintake filed: only the facts ffintake computed or pattern-checked; never the report's own text. */
 export interface ProviderIntakeEvent {
   reportId: string;
-  kind: 'crash' | 'desync';
+  kind: 'crash' | 'desync' | 'hang';
   receivedAt: string;
   gameVersion: string;
   platform: string;
@@ -1044,9 +1044,9 @@ export interface Provider {
 
 /** FFBox's intake reports grouped by their coarse signature (shared/intake.ts, docs/ffbox-integration.md section 6). */
 export interface IntakeSignature {
-  /** `desync:<major.minor.patch>:<diverged surfaces>`, or `crash:<major.minor.patch>` (crashes get a real signature in phase 6). */
+  /** `desync:<major.minor.patch>:<diverged surfaces>`, `crash:<major.minor.patch>` or `hang:<major.minor.patch>` (crashes and hangs get a real signature in phase 6). */
   signature: string;
-  kind: 'crash' | 'desync';
+  kind: 'crash' | 'desync' | 'hang';
   versionLine: string;
   surfaces?: string;
   reports: number;

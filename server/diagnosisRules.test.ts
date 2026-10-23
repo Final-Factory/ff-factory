@@ -81,6 +81,28 @@ test('diagnosis body: accepted only with source "intake", every field pattern-ch
   assert.ok('diagnosis' in parseEscalation({ ...DIAGNOSIS, rootCause: 'not_found', verdict: 'NEEDS-INFO', report: { kind: 'crash', lead: crash, reportIds: [crash], gameVersion: '0.50.0.46', platform: 'X', crashSignature: 'NullReferenceException at BeltSystem.OnUpdate' }, pr: undefined }));
 });
 
+test('w1780: a hang diagnosis is a crash diagnosis with its own kind: crashSignature allowed, desync fields refused, ids must be -hang-', () => {
+  const hang = '20261023T010203Z-hang-0123456789';
+  const report = { kind: 'hang', lead: hang, reportIds: [hang], gameVersion: '0.50.0.46', platform: 'WindowsPlayer', crashSignature: 'main thread waits on MinerBotSystem.OnUpdate' };
+  const body = { ...DIAGNOSIS, rootCause: 'not_found', verdict: 'NEEDS-INFO', report, pr: undefined, attachments: undefined };
+  const parsed = parseEscalation(body) as { diagnosis?: Diagnosis; error?: string };
+  assert.ok(parsed.diagnosis, parsed.error ?? 'a diagnosis');
+  const d = parsed.diagnosis!;
+  assert.equal(diagnosisSource(d).key, 'hang:main thread waits on MinerBotSystem.OnUpdate', 'a hang signature is its own, apart from a crash');
+  assert.deepEqual(diagnosisKeys(d), [`report:${hang}`]);
+  assert.match(diagnosisBrief(d), /a player's hang report/);
+  assert.match(diagnosisBrief(d), /hang signature main thread waits on MinerBotSystem\.OnUpdate/);
+  assert.match(diagnosisTriage(d).reason, /FFBox hang diagnosis/);
+  assert.equal(diagnosisSource({ ...d, report: { ...d.report, kind: 'crash', lead: hang.replace('hang', 'crash'), reportIds: [hang.replace('hang', 'crash')] } }).key, 'crash:main thread waits on MinerBotSystem.OnUpdate', 'a crash keeps its crash: key');
+  assert.equal(diagnosisSource({ ...d, report: { ...d.report, crashSignature: undefined } }).key, undefined, 'no signature, no key');
+  const bad = (r: Record<string, unknown>) => err({ ...body, report: { ...report, ...r } });
+  assert.match(bad({ group: 'abcdef' }), /report\.group: a desync field on a hang report/);
+  assert.match(bad({ signature: 'desync:0.50.0:belts' }), /report\.signature: a desync field on a hang report/);
+  assert.match(bad({ heartbeat: 3 }), /report\.heartbeat: a desync field on a hang report/);
+  assert.match(bad({ lead: LEAD, reportIds: [LEAD] }), /every report id is a hang report/, 'a desync id is no hang report');
+  assert.match(bad({ kind: 'freeze' }), /^report\.kind:/);
+});
+
 test('diagnosis matching: exact keys join, a signature alone is a maybe, only work that came from a report', () => {
   assert.deepEqual(diagnosisKeys(DIAGNOSIS), [`report:${LEAD}`, `report:${PARTNER}`, 'desync-group:fc5620980cd46738', 'branch:ffbox/miner-census-812', 'pr:990']);
   assert.equal(diagnosisMatch(item([`report:${PARTNER}`], {}), DIAGNOSIS)?.kind, 'exact');

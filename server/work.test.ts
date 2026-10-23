@@ -75,6 +75,7 @@ test('keys: a Discord thread by its link or bare id is discord:<thread>, never a
   assert.deepEqual(textKeys(`posted in #dev-chat (${DEV})`, [], channels), [], 'the channel itself is not a piece of work');
   assert.deepEqual(textKeys('build 12345678901234 and sha abc1554582984567562253def'), [], 'not a snowflake: too short, or inside a word');
   assert.deepEqual(textKeys('report 20260927T090000Z-desync-3a9f01c2d4 again'), ['report:20260927T090000Z-desync-3a9f01c2d4']);
+  assert.deepEqual(textKeys('hang 20261023T010203Z-hang-0123456789 and 20261023T010203Z-freeze-0123456789'), ['report:20261023T010203Z-hang-0123456789'], 'a hang report id is a report key too');
   // Shared, they are the same work.
   assert.equal(overlapOf({ keys: ['discord:1554582984567562253'], title: 'x' }, { ref: 'w50', kind: 'work', title: 'y', keys: ['discord:1554582984567562253'] })?.score, 1);
 });

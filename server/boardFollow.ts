@@ -55,7 +55,7 @@ export function fixLearnable(w: WorkItem): boolean {
 
 // ---------------------------------------------------------------- players' reports a request fixed (w502)
 
-const REPORT_ID = String.raw`\d{8}T\d{6}Z-(?:crash|desync)-[0-9a-f]{6,32}`;
+const REPORT_ID = String.raw`\d{8}T\d{6}Z-(?:crash|desync|hang)-[0-9a-f]{6,32}`;
 
 /** The player reports a request claims: its `report:<id>` keys (its subjects, or an intake diagnosis that joined it). */
 export function reportIdsOf(w: Pick<WorkItem, 'keys'>): string[] {
@@ -68,7 +68,7 @@ export function reportIdsOf(w: Pick<WorkItem, 'keys'>): string[] {
  */
 export function reportLines(text: string | undefined): string[] {
   const out = new Set<string>();
-  for (const m of (text ?? '').matchAll(/^[ \t>*-]*Report:[ \t]*`?(\d{8}T\d{6}Z-(?:crash|desync)-[0-9a-f]{6,32})`?[ \t]*\r?$/gim)) {
+  for (const m of (text ?? '').matchAll(/^[ \t>*-]*Report:[ \t]*`?(\d{8}T\d{6}Z-(?:crash|desync|hang)-[0-9a-f]{6,32})`?[ \t]*\r?$/gim)) {
     out.add(m[1]);
     if (out.size === 20) break;
   }

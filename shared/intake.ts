@@ -10,10 +10,10 @@ export function versionLine(v: string): string {
   return parts.length > 3 ? parts.slice(0, 3).join('.') : v.trim() || '?';
 }
 
-/** The coarse signature: `desync:<version line>:<diverged surfaces>`; a crash has none yet, so its version line stands in. */
+/** The coarse signature: `desync:<version line>:<diverged surfaces>`; a crash or a hang has none yet, so its version line stands in. */
 export function signatureOf(e: ProviderIntakeEvent): string {
   const line = versionLine(e.gameVersion);
-  if (e.kind === 'crash') return `crash:${line}`;
+  if (e.kind !== 'desync') return `${e.kind}:${line}`;
   return `desync:${line}:${e.desync?.divergedSurfaces?.trim() || 'unknown'}`;
 }
 

@@ -77,7 +77,7 @@ export function textKeys(text: string, knownBranches: readonly string[] = [], no
   }
   // A bare snowflake ("thread 1554582984567562253"), not part of a link or a longer word.
   for (const m of text.matchAll(/(?<![\w/@])(\d{17,20})(?![\w/])/g)) thread(m[1]);
-  for (const m of text.matchAll(/(?<![\w-])(\d{8}T\d{6}Z-(?:crash|desync)-[0-9a-f]{6,32})(?![\w-])/g)) keys.add(`report:${m[1]}`);
+  for (const m of text.matchAll(/(?<![\w-])(\d{8}T\d{6}Z-(?:crash|desync|hang)-[0-9a-f]{6,32})(?![\w-])/g)) keys.add(`report:${m[1]}`);
   const spec = (n: string) => keys.add(`spec:${String(Number(n)).padStart(3, '0')}`);
   for (const m of text.matchAll(/\bspecs?[\s#/-]*(\d{2,4})\b/gi)) spec(m[1]);
   // A spec's folder or branch: "098-belt-splitter".

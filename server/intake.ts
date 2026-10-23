@@ -794,7 +794,7 @@ export class IntakeManager {
       if ((x = /^issue#(\d+)$/.exec(l))) return [`ref:${Number(x[1])}`];
       // Exact keys, as FFBox sends them for its bug_report and suggestion turns and its intake diagnoses.
       if ((x = /^discord:(\d{15,25})$/.exec(l))) return [`discord:${x[1]}`];
-      if ((x = /^report:(\d{8}t\d{6}z-(?:crash|desync)-[0-9a-f]{6,32})$/.exec(l))) return [`report:${x[1].replace(/t/, 'T').replace(/z-/, 'Z-')}`];
+      if ((x = /^report:(\d{8}t\d{6}z-(?:crash|desync|hang)-[0-9a-f]{6,32})$/.exec(l))) return [`report:${x[1].replace(/t/, 'T').replace(/z-/, 'Z-')}`];
       if (/^(branch|ffbox|pr|spec|ref):/.test(l)) return [l];
       return [l, `ffbox:${l}`];
     });

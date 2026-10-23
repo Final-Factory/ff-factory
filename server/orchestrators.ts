@@ -313,7 +313,7 @@ const RESTORE_SUBJECTS: readonly [string, string][] = [
 
 /** Whether a title names this report by its whole id, its time stamp ("20261002T043752Z") or its hash ("3fad4b829b"). */
 export function titleNamesReport(title: string, id: string): boolean {
-  const m = /^(\d{8}T\d{6}Z)-(?:crash|desync)-([0-9a-f]{6,32})$/.exec(id);
+  const m = /^(\d{8}T\d{6}Z)-(?:crash|desync|hang)-([0-9a-f]{6,32})$/.exec(id);
   if (!m) return false;
   const words = new Set(title.toLowerCase().split(/[^0-9a-z-]+/).flatMap((w) => [w, ...w.split('-')]));
   return [id.toLowerCase(), m[1].toLowerCase(), m[2]].some((x) => words.has(x));
@@ -443,7 +443,7 @@ export function devKeys(keys: readonly string[]): string[] {
     if ((m = /^discord:(\d{15,25})$/.exec(k))) out.add(`discord:${m[1]}`);
     else if ((m = /^branch:([A-Za-z0-9._/+-]{1,200})$/.exec(k))) out.add(`branch:${m[1].toLowerCase()}`);
     else if ((m = /^pr:#?(\d{1,6})$/i.exec(k))) out.add(`pr:${Number(m[1])}`);
-    else if ((m = /^report:(\d{8}T\d{6}Z-(?:crash|desync)-[0-9a-f]{6,32})$/.exec(k))) out.add(`report:${m[1]}`);
+    else if ((m = /^report:(\d{8}T\d{6}Z-(?:crash|desync|hang)-[0-9a-f]{6,32})$/.exec(k))) out.add(`report:${m[1]}`);
   }
   return [...out];
 }
