@@ -82,13 +82,20 @@ means you're fixing it" (two threads had his "Will fix" and no request). Then: "
 fix. Like, any indication that I'm acknowledging it as a bug is sufficient. Like, you're supposed to be intelligent."
 So the server guarantees it, not an orchestrator's memory or timer: `BugThreadWatch` (`server/bugThreads.ts`), started in
 `server/index.ts`, on by default (`intake.bugThreads`, below), every `pollMinutes` (5). It reads #bug-reports and
-dev_bug_reports with Max's token, read-only (`max.ts` `activeThreads`, `archivedThreads`, `messagesAfter`), and posts,
-reacts and closes nothing: FFBox still owns those channels. These are its two routes from them into the ledger.
+dev_bug_reports from FFBox's stored copy (`server/ffboxBugThreads.ts`: FFBox's read-only `bug_threads` and
+`thread_messages` queries, [ffbox-connector-contract.md](ffbox-connector-contract.md#read-only-queries-protocol-2)), at
+most `FFBOX_QUERIES_PER_PASS` (12) queries a pass out of the portal's 30 a minute, the rest next pass. The portal holds no
+Discord token: its first live pass (17be58f, 2026-10-23T00:57Z) logged `bug threads: no bot token`, so the threads come
+from FFBox, which holds the bot and stores every message of those threads, an operator's plain reply included (its engage
+gate only marks one it does not answer, `gate='none'`). The watch can also read Discord itself with a token (`max.ts`
+`activeThreads`, `archivedThreads`, `messagesAfter`) where a fork has one. It posts, reacts and closes nothing: FFBox
+still owns those channels. These are its two routes from them into the ledger.
 
 **An owner's acknowledgement is a filed request.** Every new message in a thread of the window from an owner files
 nothing until a model has read it. Who an owner is comes from the author id Discord authenticates, never from what a
-message says: ben and lothsahn (and `intake.reviewers`) wherever `intake.discord.trusted` or the portal host's ffbox
-config `operators` block names their Discord id, plus `intake.bugThreads.owners`. The judge (`sdkJudge`: one tool-less
+message says: ben and lothsahn (and `intake.reviewers`) wherever FFBox's `operators` block (in each `bug_threads`
+answer), `intake.discord.trusted` or the portal host's ffbox config names their Discord id, plus
+`intake.bugThreads.owners`. The judge (`sdkJudge`: one tool-less
 Agent SDK turn, `judgeModel` default Haiku, on that owner's own vault pool) answers whether the message acknowledges
 the report as a real bug, in any words: "yeah that's a bug", "good catch", "oops", "thanks, looking into it",
 "confirmed", "I broke this in the last patch", a promise to fix. A question back to the reporter, "works as designed", "a
@@ -124,9 +131,8 @@ This replaces the orchestrators' hourly bug-thread timers.
 Why here and not in FFBox: FFBox's listener sees an operator's plain reply but declines it at the engage gate
 (#bug-reports is `engage: mention`; ffbox `scripts/ffwatch.py`, the gate around `gate_declines`), and its dev-request
 hand-over would put 👀 on Ben's message and run a container turn in the thread whenever FF Factory is unreachable. FF
-Factory already reads these threads with Max's token (the read-only Max panel), and holds the ledger, its de-duplication
-and the game repo's `Discord:` lines that the coverage check needs, so both routes live in one tested place, and FFBox
-is unchanged.
+Factory holds the ledger, its de-duplication and the game repo's `Discord:` lines that the coverage check needs, so both
+routes live in one tested place; FFBox only answers two read-only queries over what it already stored (ffbox 42c6c64).
 
 Settings, all optional, read on every pass (`set_app_config`):
 

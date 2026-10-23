@@ -417,10 +417,11 @@ FFBox reports it, and FFBox refuses a "fixed" or "merged" post in a thread it al
   login: the page reads only what the connector answers.
   `send_to_ffbox` hands a ledger request to FFBox once `providers.ffbox.sendWork` is on and the
   connector takes submits.
-- **The bug threads' owners** (w1783). FF Factory reads #bug-reports and dev_bug_reports itself, read-only with Max's token:
-  an operator's plain reply there that acknowledges the bug (FFBox's gate declines it, `engage: mention`) files that
-  person's approved request, and an hourly check files each thread nothing owns, an FFBox conversation's PR included as an
-  owner ([intake.md](intake.md#every-bug-thread-has-an-owner)). Nothing changed on FFBox, and nothing posts.
+- **The bug threads' owners** (w1783). FF Factory reads #bug-reports and dev_bug_reports through FFBox's read-only
+  `bug_threads` and `thread_messages` queries (ffbox 42c6c64; the portal holds no Discord token): an operator's plain reply
+  there that acknowledges the bug (FFBox's gate declines it, `engage: mention`, but stores it) files that person's
+  approved request, and an hourly check files each thread nothing owns, an FFBox conversation's PR included as an owner
+  ([intake.md](intake.md#every-bug-thread-has-an-owner)). Nothing posts.
 - **Dev requests.** An operator's ffdev turn comes to FF Factory instead of a container on FFBox, with its files, and
   is filed at once as the request of the person the operator is (the login of the same name), deduplicated
   against the ledger; the operator's follow-ups in that thread reach their orchestrator, which answers with
