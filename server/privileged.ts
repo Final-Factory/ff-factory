@@ -18,6 +18,8 @@ export const HELPERS = {
   detach: 'ffsb-helper-detach',
   /** Controlled reboot in 2 minutes; refuses unless automatic logon is set up (else the app would not come back). */
   reboot: 'ffsb-helper-reboot',
+  /** Grow the Dev Drive's maximum to devdrive.json's wantGB (detach, expand, reattach, extend); never smaller (w1918). */
+  grow: 'ffsb-helper-grow',
 } as const;
 export type HelperAction = keyof typeof HELPERS;
 

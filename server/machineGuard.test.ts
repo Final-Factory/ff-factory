@@ -302,3 +302,59 @@ test('machine guard: the sandbox volume is judged by the pool\'s disk_warn_gb, n
   await d.tick();
   assert.equal(d.health.disks.find((x) => x.path.startsWith('D'))?.level, 'warn');
 });
+
+test("w1918: a wanted Dev Drive maximum waits while an agent or editor is in a sandbox, says so once, then grows through ffsb-helper-grow with new work held; a failed grow is tried again after 30 min", async () => {
+  const { w, fx, ports } = world();
+  let state: Record<string, unknown> = { letter: 'F', maxGB: 80, wantGB: 112 };
+  const read: string[] = [];
+  const blocked: (string | undefined)[] = [];
+  let ok = false;
+  let g!: MachineGuard;
+  const fx2: MachineGuardEffects = {
+    ...fx,
+    readJson: (p) => (read.push(p), state),
+    runHelper: async (a) => {
+      w.log.push(`helper ${a}`);
+      blocked.push(g.blockReason('agent'));
+      if (ok) state = { letter: 'F', maxGB: 112 };
+      return { action: a, ok, at: new Date(w.now).toISOString(), detail: ok ? 'grew F: from 80 to 112 GB' : 'diskpart: the file is in use' };
+    },
+  };
+  g = new MachineGuard({ ...SETTINGS, devDriveVhdx: 'D:/work/ffw/devdrive.vhdx' }, 'F:/ffsb', fx2, ports);
+  assert.deepEqual(g.pendingGrow(), { wantGB: 112, maxGB: 80 });
+  assert.equal(read[0], path.join('D:/work/ffw', 'devdrive.json'));
+
+  // An editor up and an agent mid-turn: it waits, and says so once.
+  await g.tick();
+  await g.tick();
+  assert.equal(w.log.filter((l) => l === 'helper grow').length, 0);
+  assert.equal(w.reports.filter((r) => r === 'Dev Drive: grow pending').length, 1);
+  // An agent between turns still holds its sandbox.
+  w.sandboxes = [{ id: 'mp-r2', unity: { state: 'stopped' } }] as unknown as Sandbox[];
+  w.sessions = [{ id: 'a2', kind: 'worker', status: 'idle', sandboxId: 'slot-5' }] as unknown as SessionInfo[];
+  await g.tick();
+  assert.equal(w.log.filter((l) => l === 'helper grow').length, 0);
+
+  // Nothing in the sandboxes: it grows, holding new agents meanwhile; the helper fails, so it waits 30 min.
+  w.sessions = [{ id: 'a2', kind: 'worker', status: 'stopped', sandboxId: 'slot-5' }] as unknown as SessionInfo[];
+  await g.tick();
+  assert.equal(w.log.filter((l) => l === 'helper grow').length, 1);
+  assert.match(blocked[0] ?? '', /Dev Drive is being grown to 112 GB/);
+  assert.equal(g.blockReason('agent'), undefined, 'free again once the helper is done');
+  assert.ok(w.reports.includes('Dev Drive: grow failed'));
+  w.now += 10 * MIN;
+  await g.tick();
+  assert.equal(w.log.filter((l) => l === 'helper grow').length, 1, 'not again within 30 min');
+  w.now += 25 * MIN;
+  ok = true;
+  await g.tick();
+  assert.equal(w.log.filter((l) => l === 'helper grow').length, 2);
+  assert.ok(w.reports.includes('Dev Drive: grown'));
+  assert.equal(g.pendingGrow(), undefined);
+  await g.tick();
+  assert.equal(w.log.filter((l) => l === 'helper grow').length, 2, 'nothing more to do');
+
+  // No VHDX (a machine without a Dev Drive): never pending.
+  const none = new MachineGuard(SETTINGS, 'F:/ffsb', fx2, ports);
+  assert.equal(none.pendingGrow(), undefined);
+});

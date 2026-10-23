@@ -11,6 +11,7 @@
 # It runs the real helper with the real library and prints one JSON object: what was called, the result file, the files.
 param([Parameter(Mandatory)][string]$Helper, [Parameter(Mandatory)][string]$Work, [Parameter(Mandatory)][string]$Scenario, [string]$Letter = 'V', [string[]]$Skip = @(), [string]$Action = 'mount', [switch]$NoFlex)
 $ErrorActionPreference = 'Stop'
+if (-not $env:TEMP) { $env:TEMP = [IO.Path]::GetTempPath() }
 $sc = $Scenario | ConvertFrom-Json
 $global:Calls = New-Object System.Collections.ArrayList
 $global:Sc = $sc
@@ -21,12 +22,23 @@ $global:Gave = ''
 # The Windows cmdlets the library calls. Functions win over cmdlets of the same name. The helper runs elevated, where an
 # attached image carries its disk Number (Get-OwnLetter reads it, w1633).
 function global:Start-Sleep { [CmdletBinding()] param($Seconds, $Milliseconds) }
-function global:Get-DiskImage { [CmdletBinding()] param([string]$ImagePath) [pscustomobject]@{ ImagePath = $ImagePath; Attached = $global:Attached; Number = $(if ($global:Attached) { 7 } else { $null }); DevicePath = $(if ($global:Attached) { '\\.\PhysicalDrive7' } else { '' }) } }
+function global:Get-DiskImage { [CmdletBinding()] param([string]$ImagePath) [pscustomobject]@{ ImagePath = $ImagePath; Attached = $global:Attached; Size = [int64]$global:SizeGB * 1GB; Number = $(if ($global:Attached) { 7 } else { $null }); DevicePath = $(if ($global:Attached) { '\\.\PhysicalDrive7' } else { '' }) } }
+# grow (w1918): "sizeGB" the VHDX's maximum, "hostGB" the volume that holds it, "unity" editors on the drive, "expandFails".
+$global:SizeGB = [int]$(if ($sc.sizeGB) { $sc.sizeGB } else { 80 })
+$global:PartGB = $global:SizeGB
+function global:Dismount-DiskImage { [CmdletBinding()] param([string]$ImagePath) [void]$global:Calls.Add('Dismount-DiskImage'); $global:Attached = $false; $global:Held = '' }
+function global:Write-VolumeCache { [CmdletBinding()] param($DriveLetter) }
+function global:diskpart { $lines = Get-Content $args[1]; $e = $lines | Where-Object { $_ -match '^expand vdisk maximum=(\d+)' }
+  if ($e) { [void]$global:Calls.Add("expand $($Matches[1])"); if ($global:Attached) { return 'Virtual Disk Service error: The virtual disk is already attached.' }; if ($global:Sc.expandFails) { return 'DiskPart has encountered an error' }; $global:SizeGB = [int]($Matches[1] / 1024); return 'DiskPart successfully expanded the virtual disk file.' }
+  return 'DiskPart succeeded' }
+function global:Get-Volume { [CmdletBinding()] param($DriveLetter) [pscustomobject]@{ Size = [int64]$(if ($global:Sc.hostGB) { $global:Sc.hostGB } else { 1000 }) * 1GB } }
+function global:Get-PartitionSupportedSize { [CmdletBinding()] param($DriveLetter) [pscustomobject]@{ SizeMin = 1GB; SizeMax = [int64]$global:SizeGB * 1GB } }
+function global:Resize-Partition { [CmdletBinding()] param($DriveLetter, $Size) [void]$global:Calls.Add("Resize-Partition $DriveLetter $([int]($Size / 1GB))"); $global:PartGB = [int]($Size / 1GB) }
 function global:Mount-DiskImage { [CmdletBinding()] param([string]$ImagePath) [void]$global:Calls.Add('Mount-DiskImage'); $global:Attached = $true; $global:Held = [string]$global:Sc.autoLetter }
 function global:Get-Disk { [CmdletBinding()] param([Parameter(ValueFromPipeline)]$In) process { [pscustomobject]@{ Number = 7; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT' } } }
 function global:Set-Disk { [CmdletBinding()] param($Number, $IsOffline, $IsReadOnly) }
-function global:Get-Partition { [CmdletBinding()] param([int]$DiskNumber, [Parameter(ValueFromPipeline)]$In)
-  process { if ($global:Attached) { [pscustomobject]@{ Type = 'Basic'; Size = 900GB; DriveLetter = $(if ($global:Held) { [char]$global:Held } else { [char]0 }); PartitionNumber = 2 } } } }
+function global:Get-Partition { [CmdletBinding()] param([int]$DiskNumber, $DriveLetter, [Parameter(ValueFromPipeline)]$In)
+  process { if ($global:Attached) { [pscustomobject]@{ Type = 'Basic'; Size = $(if ($DriveLetter) { [int64]$global:PartGB * 1GB } else { 900GB }); DriveLetter = $(if ($global:Held) { [char]$global:Held } else { [char]0 }); PartitionNumber = 2 } } } }
 function global:Set-Partition { [CmdletBinding()] param([int]$DiskNumber, [int]$PartitionNumber, [string]$NewDriveLetter)
   [void]$global:Calls.Add("Set-Partition $NewDriveLetter"); $global:Held = $NewDriveLetter.ToUpper(); $global:Gave = $NewDriveLetter.ToUpper() }
 function global:Test-Path { [CmdletBinding()] param([string]$Path, [string]$LiteralPath, $PathType)
@@ -38,7 +50,8 @@ function global:Test-Path { [CmdletBinding()] param([string]$Path, [string]$Lite
 function global:Get-PSDrive { [CmdletBinding()] param($PSProvider)
   foreach ($l in @($global:Sc.inUse) + $(if ($global:Held) { @($global:Held) } else { @() })) { [pscustomobject]@{ Name = $l } } }
 function global:Get-CimInstance { [CmdletBinding()] param([Parameter(Position = 0)]$ClassName, $Filter)
-  if ($ClassName -eq 'Win32_LogicalDisk') { foreach ($l in @($global:Sc.mapped)) { [pscustomobject]@{ DeviceID = "${l}:" } } } }
+  if ($ClassName -eq 'Win32_LogicalDisk') { foreach ($l in @($global:Sc.mapped)) { [pscustomobject]@{ DeviceID = "${l}:" } } }
+  if ($ClassName -eq 'Win32_Process') { foreach ($c in @($global:Sc.unity)) { if ($c) { [pscustomobject]@{ CommandLine = $c } } } } }
 function global:Get-Item { [CmdletBinding()] param([Parameter(Position = 0)]$Path, $LiteralPath, [switch]$Force)
   if ($Path -like 'HKLM:*MountedDevices') {
     $o = [pscustomobject]@{}
@@ -58,7 +71,7 @@ if (-not $NoFlex) { $args2.Flex = $true }
 if ($Skip.Count) { $args2.Skip = $Skip }
 try { & $Helper @args2 } catch { $global:Thrown = $_.Exception.Message }
 
-$res = Join-Path $Work 'results/mount.json'
+$res = Join-Path $Work "results/$Action.json"
 $out = [ordered]@{
   calls  = @($global:Calls)
   held   = $global:Held

@@ -964,20 +964,51 @@ async function devDriveStatus(host: string): Promise<{ exists: boolean; attached
 }
 
 /** Run devdrive.ps1 (-Action ensure by default): in this process when it is elevated, else in an elevated copy (one UAC prompt). `host`: the folder that holds the VHDX. */
-async function devDriveEnsure(host: string, args: string[], action = 'ensure', stateName = 'devdrive'): Promise<DevDriveState> {
+async function devDriveEnsure(host: string, args: string[], action = 'ensure', stateName = 'devdrive', promptTimeoutMs?: number): Promise<DevDriveState> {
   const psArgs = devDrivePsArgs(['-Action', action, ...args]);
   let text: string;
   if (elevated()) {
     const r = await exec('powershell.exe', psArgs, { timeoutMs: 30 * 60_000 });
     text = r.stdout;
     if (r.code !== 0) throw new Error(`the Dev Drive could not be set up: ${(text.split('\n').find((x) => x.startsWith('FAILED:')) ?? r.stderr ?? text).trim().slice(-500)}`);
-  } else text = await elevatedSteps([{ kind: 'dev-drive', args: psArgs }]);
+  } else text = await elevatedSteps([{ kind: 'dev-drive', args: psArgs }], promptTimeoutMs);
   for (const line of text.split('\n')) if (line && !line.startsWith('FFW-DEVDRIVE')) say(`  ${line.trim()}`);
   const out = parseDevDriveOutput(text);
   if (out?.letter) return out as DevDriveState;
   if (action !== 'ensure') return (out ?? {}) as DevDriveState;
   // The elevated copy's log may be cut short: the state file is what the script wrote last.
   return JSON.parse(fs.readFileSync(path.join(host, `${stateName}.json`), 'utf8')) as DevDriveState;
+}
+
+/** This process has a desktop to show an administrator prompt on (an ssh session runs in session 0, which has none). */
+async function hasDesktop(): Promise<boolean> {
+  const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${process.pid}).SessionId`], { timeoutMs: 30_000 });
+  return r.code === 0 && Number(r.stdout.trim()) > 0;
+}
+
+/**
+ * A larger maximum asked of an existing drive (dev_drive_max_gb, w1918): devdrive.json's wantGB, which the daemon's host guard
+ * grows the drive to through ffsb-helper-grow once no agent or editor is in a sandbox (machine/hostGuard.ts growIfIdle). A drive
+ * made before that task existed gets it from the one administrator step (devdrive.ps1 ensure registers the helpers again): a
+ * prompt on the PC's desktop, waited for 5 minutes; a session without a desktop (ssh) says so instead. The want is written after
+ * that step, which writes the state file again.
+ */
+async function wantDevDriveGrow(host: string, wantGB: number, haveGB: number, ensureArgs: string[]) {
+  if ((await exec('schtasks', ['/query', '/tn', 'ffsb-helper-grow'], { timeoutMs: 30_000 })).code !== 0) {
+    if (!elevated() && !(await hasDesktop())) say('Dev Drive: the grow task (ffsb-helper-grow) is not installed, and this session has no desktop for the administrator prompt that installs it: the grow waits until an update from the PC or the installer installs it.');
+    else {
+      say('Dev Drive: installing the grow task (ffsb-helper-grow): one administrator prompt on this PC (waited for 5 minutes)...');
+      try {
+        await devDriveEnsure(host, ensureArgs, 'ensure', 'devdrive', 5 * 60_000);
+      } catch (e) {
+        say(`Dev Drive: the grow task was not installed (${(e as Error).message}); the grow waits for it.`);
+      }
+    }
+  }
+  const file = devDriveFile(host);
+  const st = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) as Record<string, unknown>;
+  fs.writeFileSync(file, JSON.stringify({ ...st, wantGB }, null, 2));
+  say(`Dev Drive: ${haveGB} GB now, ${wantGB} GB asked: the daemon grows it in place (ffsb-helper-grow) once no agent or editor is in a sandbox, holding new ones for the minute or two it takes.`);
 }
 
 /**
@@ -1012,6 +1043,14 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
   say(`Dev Drive: ${dec.why}.`);
   const had = m.devDrive;
   const host = hostDirOf(had, l.root);
+  const ensureArgs = (maxGB: number) => {
+    const args = ['-Root', host, ...(host !== l.root ? ['-WorkerRoot', l.root, '-DaemonConfig', path.join(l.daemon, 'daemon.json')] : []), '-MaxGB', String(maxGB)];
+    if (f.probe.user) args.push('-User', f.probe.user);
+    if (f.probe.sid) args.push('-UserSid', f.probe.sid);
+    if (had?.letter) args.push('-Letter', had.letter);
+    if (o.devDriveSkip) args.push('-Skip', o.devDriveSkip);
+    return args;
+  };
   let state: DevDriveState;
   if (!elevated() && !process.stdin.isTTY && o.update) {
     // Nobody can answer an administrator prompt here (an ssh session that is not elevated): only an existing, attached drive can be used.
@@ -1032,16 +1071,13 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
       state.maxGB = now.maxGB;
     }
   } else {
-    // An existing drive keeps its maximum: a VHDX's cannot shrink in place (w1070), only a root move makes it again at a new one.
+    // An existing drive keeps its maximum here: a larger one is grown by the daemon (below), a smaller one cannot be (ReFS does
+    // not shrink), and only a root move makes the drive again at a new one (w1070).
     const maxGB = had?.maxGB || newDriveMaxGB(o, f);
-    if (had && o.devDriveMaxGB !== undefined && o.devDriveMaxGB !== had.maxGB) say(`Dev Drive: its maximum stays ${had.maxGB} GB: a new maximum (${o.devDriveMaxGB} GB) means making the drive again, which --move-to-dev-drive does while the root moves onto it (w1070).`);
-    const args = ['-Root', host, ...(host !== l.root ? ['-WorkerRoot', l.root, '-DaemonConfig', path.join(l.daemon, 'daemon.json')] : []), '-MaxGB', String(maxGB)];
-    if (f.probe.user) args.push('-User', f.probe.user);
-    if (f.probe.sid) args.push('-UserSid', f.probe.sid);
-    if (had?.letter) args.push('-Letter', had.letter);
-    if (o.devDriveSkip) args.push('-Skip', o.devDriveSkip);
-    state = await devDriveEnsure(host, args);
+    if (had && o.devDriveMaxGB !== undefined && o.devDriveMaxGB < had.maxGB) say(`Dev Drive: its maximum stays ${had.maxGB} GB: ReFS cannot shrink, so a smaller maximum (${o.devDriveMaxGB} GB) means making the drive again, which --move-to-dev-drive does while the root moves onto it (w1070).`);
+    state = await devDriveEnsure(host, ensureArgs(maxGB));
   }
+  if (had && o.devDriveMaxGB !== undefined && o.devDriveMaxGB > state.maxGB) await wantDevDriveGrow(host, o.devDriveMaxGB, state.maxGB, ensureArgs(state.maxGB));
   say(`Dev Drive: ${state.created ? 'created' : 'reused'} ${state.vhdx} as ${state.letter}: (${state.fileSystem || 'ReFS'}${state.devDrive ? ', Dev Drive' : ', not a Dev Drive format'}, block clone ${state.blockClone ? 'yes' : 'not reported'}, up to ${state.maxGB} GB).`);
   if (state.letterChangedFrom) say(`Dev Drive: its letter was ${state.letterChangedFrom}: and is taken, so it is ${state.letter}: now.`);
   const room = { vhdx: state.vhdx || path.join(host, 'devdrive.vhdx'), maxGB: state.maxGB || had?.maxGB || 0 };
@@ -1080,7 +1116,7 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
     use = true;
   }
   m.devDrive = { vhdx: state.vhdx, letter: state.letter, maxGB: state.maxGB, inUse: use };
-  if (!m.outside.some((x) => x.kind === 'dev-drive')) noteOutside(m, { kind: 'dev-drive', name: state.vhdx, note: 'the Dev Drive: a VHDX in the root, mounted at a drive letter, and the SYSTEM tasks ffsb-helper-mount, -trim and -compact' });
+  if (!m.outside.some((x) => x.kind === 'dev-drive')) noteOutside(m, { kind: 'dev-drive', name: state.vhdx, note: 'the Dev Drive: a VHDX in the root, mounted at a drive letter, and the SYSTEM tasks ffsb-helper-mount, -trim, -compact and -grow' });
   writeManifest(l.root, m);
   if (!use) {
     return void say(`Dev Drive: ready as ${state.letter}:, but ${l.sandboxes} still holds this install's sandboxes, so they stay where they are and daemon.json keeps its paths. Move them with --move-to-dev-drive (-MoveToDevDrive) when no worker is in them.`);
@@ -1357,7 +1393,7 @@ function firewallArgs(action: 'add' | 'remove', l: Layout, slots: number, editor
 export type ElevatedStep = { kind: 'firewall'; args: string[] } | { kind: 'authorize-key'; file: string; line: string } | { kind: 'revoke-key'; file: string; blob: string } | { kind: 'dev-drive'; args: string[] };
 
 /** Run the steps in this process when it is elevated, else in an elevated copy of this script (one prompt). Returns its log. */
-async function elevatedSteps(steps: ElevatedStep[]): Promise<string> {
+async function elevatedSteps(steps: ElevatedStep[], timeoutMs?: number): Promise<string> {
   if (!steps.length) return '';
   const tag = `${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
   const log = path.join(os.tmpdir(), `ff-worker-elevated-${tag}.log`);
@@ -1371,7 +1407,7 @@ async function elevatedSteps(steps: ElevatedStep[]): Promise<string> {
       // Start-Process -Verb RunAs takes one argument string; it reaches PowerShell through the environment, unquoted by no shell.
       const args = [...process.execArgv, path.join(SRC, 'scripts', 'worker', 'worker.ts'), 'elevated', '--steps', file, '--log', log];
       const line = args.map((a) => (/[\s;]/.test(a) ? `"${a}"` : a)).join(' ');
-      const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$p = Start-Process $env:FFW_NODE -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList $env:FFW_ARGS; exit $p.ExitCode'], { env: { ...process.env, FFW_NODE: process.execPath, FFW_ARGS: line } });
+      const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$p = Start-Process $env:FFW_NODE -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList $env:FFW_ARGS; exit $p.ExitCode'], { env: { ...process.env, FFW_NODE: process.execPath, FFW_ARGS: line }, ...(timeoutMs ? { timeoutMs } : {}) });
       code = r.code ?? 1;
       out = `${r.stderr}${r.stdout}`;
     }
@@ -1482,7 +1518,7 @@ function notePinnedDrive(m: Manifest, rec: DevDriveRecord) {
   m.devDrive = rec;
   const host = rec.host!;
   m.outside = m.outside.filter((x) => x.kind !== 'dev-drive');
-  noteOutside(m, { kind: 'dev-drive', name: rec.vhdx, note: `the Dev Drive that holds this root: a VHDX in ${host}, mounted at ${rec.letter}:, and the SYSTEM tasks ffsb-helper-mount, -trim and -compact` });
+  noteOutside(m, { kind: 'dev-drive', name: rec.vhdx, note: `the Dev Drive that holds this root: a VHDX in ${host}, mounted at ${rec.letter}:, and the SYSTEM tasks ffsb-helper-mount, -trim, -compact and -grow` });
   noteOutside(m, { kind: 'file', name: path.join(host, 'daemon'), note: 'the daemon\'s folder, off the drive it remounts (w1070, as BEAST\'s C:\\ffw-anchor)' });
   noteOutside(m, { kind: 'file', name: path.join(host, 'secrets'), note: 'the machine credential, with the daemon' });
   noteOutside(m, { kind: 'file', name: path.join(host, 'moved.json'), note: 'where the root is, for anyone given the folder it was installed into' });
