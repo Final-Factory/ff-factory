@@ -623,7 +623,8 @@ ledger request, or a line on the request already fixing it.
 - **What becomes work** (`IntakeManager.onNightly`): every `new` and `still` result, and a `flaky` one flaky
   `intake.nightly.flakyNights` nights running (default 3). For each, in order:
   1. an **open** request with the key `nightly:<scenario>` takes it: one log line per night and scenario (a resent report
-     adds nothing), urgent once the failing code shipped, and a worker on it is told (`Orchestrators.attachNightly`);
+     adds nothing), raised to urgent once the failing code shipped (a nightly request was filed urgent already; this lifts a person's
+     own request, or one a person lowered), and a worker on it is told (`Orchestrators.attachNightly`);
   2. else an open request whose title or brief names the scenario id as a whole word (a person filed the fix by hand,
      like w84 triaging the 2026-09-30 night) takes it the same way, and gets the key so later nights find it at once;
   3. else a still-failing scenario whose nightly request a reviewer **declined** within `lookbackDays` is skipped;
@@ -632,16 +633,22 @@ ledger request, or a line on the request already fixing it.
   More to file in one night than `intake.nightly.batchOver` (default 4) become **one request for the night**, keyed by
   every scenario: many at once usually share a cause (a broken build, the lab).
 - **The request.** Title `Nightly e2e: <scenario> fails on master <sha9>` (`… (shipped in 0.50.0.53)` when it did);
-  priority **urgent when the failing code is in a release, high otherwise**; triage `regression`; billed to the system
+  priority **urgent** (`intake.nightly.regressionPriority`, below); triage `regression`; billed to the system
   payer. The brief carries the commit tested, the scenario and its file, the oracle's verdict, the last green and first
   red nights and the compare link, the release line, the regression-ledger entries, the evidence folder on the lab, the
   report's paths on the lab and on BEAST, the repro command, "reproduce first, then fix the bug or fix the test", and
   "determinism-critical: start its worker on Opus". The worker rules (`workerRules`) repeat the method, forbid hiding a
   regression (a loosened oracle, an allowlist line, a quarantine: Ben's call), require the scenario red before and green
   after, and end with the usual markers.
+- **Every nightly regression is filed urgent** (lothsahn, 2026-10-23, w1943: "Make all nightly regressions urgent"): one
+  scenario, a batch over `intake.nightly.batchOver`, and a broken night's request (`nightlyDraft`, `brokenNightDraft`), shipped
+  or not. Until then it was urgent only when the failing code shipped and high otherwise (Ben, 2026-09-30). The key is
+  `intake.nightly.regressionPriority` (`low`, `normal`, `high` or `urgent`; default urgent), read from the config file like
+  `batchOver`. The nightly run and the nightly merge review ([The nightly run](#the-nightly-run), [The nightly merge
+  review](#the-nightly-merge-review)) are not regressions and stay high priority (w1099); the jobs the review files keep theirs.
 - **Shipped or not** comes from the lab, which has the clone: a release is a commit on `origin/master` that changes `bundleVersion` (ff-agents `ci-release`: the version bump is the release). `yes` when a
   release contains the first failing night's commit, `maybe` when a release lies between the last green and the first
-  red night (bisect to tell; high, not urgent), `no` otherwise, with the newest release named. The night's report.md says
+  red night (bisect to tell), `no` otherwise, with the newest release named. The night's report.md says
   the same for the commit it tested.
 - **Approval and caps.** `intake.nightly.autoApprove` (default off, 10 a day) as for the other sources: off, each
   request waits on the Intake tab for a reviewer; on, it goes to the dispatcher at once unless a strong overlap is in

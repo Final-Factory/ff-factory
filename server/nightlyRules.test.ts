@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { intakeSettings, identityKeys, workerRules } from './intakeRules.ts';
-import { mentionsScenario, NIGHTLY_JOBS_MAX, nightlyDraft, nightStatus, parseNightlyJobs, nightlyPriority, nightlySkip, parseNightlyReport, releaseLine, type NightlyReport } from './nightlyRules.ts';
+import { mentionsScenario, NIGHTLY_JOBS_MAX, brokenNightDraft, nightlyDraft, nightlyReviewDraft, nightlyRunDraft, nightStatus, parseNightlyJobs, nightlySkip, parseNightlyReport, releaseLine, type NightlyReport } from './nightlyRules.ts';
 
 /** The nightly e2e lab's report, checked and turned into requests (docs/intake.md, "Nightly e2e regressions"). */
 
@@ -91,29 +91,26 @@ test('nightly: which results become work, and how urgent', () => {
   assert.equal(nightlySkip({ scenario: 'x', class: 'still' }, s), undefined);
   assert.match(nightlySkip({ scenario: 'x', class: 'flaky', flakyNights: 2 }, s)!, /flaky 2 night/);
   assert.equal(nightlySkip({ scenario: 'x', class: 'flaky', flakyNights: 3 }, s), undefined);
-  assert.equal(
-    nightlyPriority([
-      {
-        scenario: 'x',
-        class: 'new',
-        release: { shipped: 'yes', version: '0.50.0.53' },
-      },
-    ]),
-    'urgent',
-  );
-  assert.equal(
-    nightlyPriority([
-      {
-        scenario: 'x',
-        class: 'new',
-        release: { shipped: 'maybe', version: '0.50.0.53' },
-      },
-    ]),
-    'high',
-  );
-  assert.equal(nightlyPriority([{ scenario: 'x', class: 'new' }]), 'high');
   assert.match(releaseLine({ shipped: 'no', latest: '0.50.0.53' }), /no release yet \(newest release 0\.50\.0\.53\)/);
   assert.match(releaseLine(undefined), /unknown/);
+});
+
+test('nightly: every regression the lab files is urgent, shipped or not; the run and the review keep their priority (w1943)', () => {
+  const s = intakeSettings({ intake: { nightly: { enabled: true } } }).nightly;
+  assert.equal(s.regressionPriority, 'urgent', 'the default');
+  assert.equal(intakeSettings({ intake: { nightly: { regressionPriority: 'high' } } }).nightly.regressionPriority, 'high', 'a value in the config file is kept');
+  assert.equal(intakeSettings({ intake: { nightly: { regressionPriority: 'soon' as never } } }).nightly.regressionPriority, 'urgent', 'an unknown value falls back to urgent');
+  for (const release of [undefined, { shipped: 'no' as const, latest: '0.50.0.53' }, { shipped: 'maybe' as const, version: '0.50.0.53' }, { shipped: 'yes' as const, version: '0.50.0.53' }]) {
+    const rep = parse(body([{ scenario: 'A1-x', class: 'new', reason: 'broke', ...(release ? { release } : {}) }]));
+    assert.equal(nightlyDraft(rep, rep.results).priority, 'urgent', `one scenario, shipped: ${release?.shipped ?? 'unknown'}`);
+    assert.equal(brokenNightDraft({ ...rep, ...(release ? { release } : {}), status: 'broken', cause: 'the build failed' }).priority, 'urgent', `a broken night, shipped: ${release?.shipped ?? 'unknown'}`);
+  }
+  const rep = parse(body([{ scenario: 'A1-x', class: 'new' }]));
+  assert.equal(nightlyDraft(rep, rep.results, 'high').priority, 'high', 'the setting is what the draft gets');
+  assert.equal(brokenNightDraft(rep, undefined, 'normal').priority, 'normal');
+  const job = { date: '2026-10-11', machine: 'lothdesktop', time: '06:00', tz: 'America/New_York' };
+  assert.equal(nightlyRunDraft({ ...job, time: '03:00', dueBy: '2026-10-11T08:00:00Z' }).priority, 'high', 'the run is not a regression (w1099)');
+  assert.equal(nightlyReviewDraft(job).priority, 'high', 'nor is the merge review (w1099)');
 });
 
 test('nightly draft: one scenario, with the commit, oracle, ledger entry, links, release and the brief; keys and worker rules', () => {
@@ -194,7 +191,7 @@ test('nightly draft: a batch names every scenario and keys each, so a later nigh
   assert.equal(d.title, 'Nightly e2e 2026-09-30: 3 regressions on master aaaaaaaaa');
   assert.deepEqual(identityKeys(d.source), ['nightly:a1-x', 'nightly:a2-y', 'nightly:a3-z']);
   for (const s of ['A1-x broke', 'A2-y broke', 'A3-z broke']) assert.ok(d.brief.includes(s));
-  assert.equal(d.priority, 'high');
+  assert.equal(d.priority, 'urgent', 'a batch of regressions is urgent too (lothsahn, w1943)');
 });
 
 test("a person's request names a scenario only by its whole id", () => {

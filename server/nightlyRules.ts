@@ -195,10 +195,12 @@ export function nightlySkip(r: NightlyResult, s: IntakeSettings['nightly']): str
   return n >= s.flakyNights ? undefined : `flaky ${n} night(s) running, under the ${s.flakyNights} that file it`;
 }
 
-/** Urgent when the failing code shipped to players; high otherwise (Ben, 2026-09-30). */
-export function nightlyPriority(results: readonly NightlyResult[]): WorkPriority {
-  return results.some((r) => r.release?.shipped === 'yes') ? 'urgent' : 'high';
-}
+/**
+ * What a regression request the lab files gets unless intake.nightly.regressionPriority says otherwise. It was urgent only
+ * when the failing code shipped and high otherwise (Ben, 2026-09-30), until lothsahn, w1943: "Make all nightly regressions
+ * urgent". The run and the merge review jobs are not regressions and keep their own priority (high, w1099).
+ */
+export const NIGHTLY_REGRESSION_PRIORITY: WorkPriority = 'urgent';
 
 const short = (sha: string) => sha.slice(0, 9);
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -263,7 +265,7 @@ function header(rep: NightlyReport): string[] {
 export const nightlyKey = (scenario: string) => `nightly:${scenario.toLowerCase()}`;
 
 /** The request for one scenario, or for a night's batch when more fail at once than intake.nightly.batchOver. */
-export function nightlyDraft(rep: NightlyReport, results: readonly NightlyResult[]): IntakeDraft & { priority: WorkPriority; triage: WorkTriage } {
+export function nightlyDraft(rep: NightlyReport, results: readonly NightlyResult[], priority: WorkPriority = NIGHTLY_REGRESSION_PRIORITY): IntakeDraft & { priority: WorkPriority; triage: WorkTriage } {
   const batch = results.length > 1;
   const release = results.find((r) => r.release?.shipped === 'yes')?.release ?? results.find((r) => r.release?.shipped === 'maybe')?.release ?? rep.release;
   const title = batch
@@ -283,7 +285,7 @@ export function nightlyDraft(rep: NightlyReport, results: readonly NightlyResult
   return {
     title,
     brief: clip(brief, 7800),
-    priority: nightlyPriority(results),
+    priority,
     triage: {
       class: 'regression',
       reason: `nightly e2e: ${batch ? `${results.length} scenarios` : what(results[0])} on master ${short(rep.sha)}, ${release?.shipped === 'yes' ? `shipped in ${release.version}` : release?.shipped === 'maybe' ? `may have shipped in ${release.version}` : 'not released yet'}`,
@@ -320,7 +322,7 @@ export function nightStatus(rep: NightlyReport): 'passed' | 'failed' | 'broken' 
 export const NIGHT_BROKEN = 'night-broken';
 
 /** The one request for a broken night (w864): find the cause, the game or the lab, instead of N regressions. */
-export function brokenNightDraft(rep: NightlyReport, runId?: string): IntakeDraft & { priority: WorkPriority; triage: WorkTriage } {
+export function brokenNightDraft(rep: NightlyReport, runId?: string, priority: WorkPriority = NIGHTLY_REGRESSION_PRIORITY): IntakeDraft & { priority: WorkPriority; triage: WorkTriage } {
   const at = rep.sha ? ` on master ${short(rep.sha)}` : '';
   return {
     title: clip(`Nightly e2e ${rep.date}: the night broke${at}: ${rep.cause ?? 'no reason given'}`, 120),
@@ -337,7 +339,7 @@ export function brokenNightDraft(rep: NightlyReport, runId?: string): IntakeDraf
       ].join('\n'),
       7800,
     ),
-    priority: rep.release?.shipped === 'yes' ? 'urgent' : 'high',
+    priority,
     triage: { class: 'regression', reason: `nightly e2e: the night ${rep.date} broke${at}` },
     source: {
       kind: 'nightly',

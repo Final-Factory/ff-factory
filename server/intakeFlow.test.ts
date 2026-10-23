@@ -628,6 +628,24 @@ test('nightly: a new regression is filed once, urgent when it shipped; later nig
   assert.deepEqual(intake.summary().nightly?.last && [intake.summary().nightly!.last!.date, intake.summary().nightly!.last!.attached], ['2026-10-01', 1]);
 });
 
+test('nightly: a new regression that did not ship is filed urgent too, and so is a broken night (lothsahn, w1943: "Make all nightly regressions urgent")', (t) => {
+  const { intake, work } = setup(t, { nightly: { enabled: true } });
+  intake.onNightly(night('2026-09-30', NSHA('a'), [fail('MP-slow-client-catchup', { release: { shipped: 'no', latest: '0.50.0.53' } })]));
+  intake.onNightly(night('2026-09-30', NSHA('a'), [fail('S4-rejoin-dwell')]));
+  assert.deepEqual(work().map((w) => [w.title, w.priority]), [
+    ['Nightly e2e: MP-slow-client-catchup fails on master aaaaaaaaa', 'urgent'],
+    ['Nightly e2e: S4-rejoin-dwell fails on master aaaaaaaaa', 'urgent'],
+  ]);
+  const out = intake.onNightly({ ...night('2026-10-01', NSHA('b'), []), status: 'broken', cause: 'the win build failed' })!;
+  assert.equal(work().find((w) => w.id === out[0].workId)!.priority, 'urgent');
+});
+
+test('nightly: intake.nightly.regressionPriority sets what the lab files', (t) => {
+  const { intake, work } = setup(t, { nightly: { enabled: true, regressionPriority: 'high' } });
+  intake.onNightly(night('2026-09-30', NSHA('a'), [fail('MP-slow-client-catchup', { release: { shipped: 'yes', version: '0.50.0.53' } })]));
+  assert.equal(work()[0].priority, 'high');
+});
+
 test('nightly: a person\'s open request that names the scenario takes it (w84 triaging by hand), and becomes urgent once it shipped', (t) => {
   const { intake, work, store } = setup(t, { nightly: { enabled: true } });
   const now = new Date().toISOString();
@@ -668,7 +686,7 @@ test('nightly: many at once become one batched request; flaky N nights running i
   assert.deepEqual(new Set(out.map((r) => r.workId)).size, 1);
   const [batch] = work();
   assert.equal(batch.title, 'Nightly e2e 2026-09-30: 3 regressions on master aaaaaaaaa');
-  assert.deepEqual([batch.approval?.state, batch.approval?.by, batch.priority], ['approved', 'auto', 'high']);
+  assert.deepEqual([batch.approval?.state, batch.approval?.by, batch.priority], ['approved', 'auto', 'urgent']);
   await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request]').length === 1);
   // A later night: one of them again goes to the batch.
   assert.deepEqual(intake.onNightly(night('2026-10-01', NSHA('b'), [fail('A2-y', { class: 'still' })]))!.map((r) => [r.action, r.workId]), [['attached', batch.id]]);
@@ -1777,6 +1795,7 @@ test('nightly merge review (w905): its worker\'s jobs are filed as the Sentry\'s
   clock.now = NY_0600_EDT + 60_000;
   intake.checkNightlyReview();
   const review = work().find((w) => w.source?.kind === 'nightly-review')!;
+  assert.equal(review.priority, 'high', 'the merge review is not a regression (w1099, kept by w1943)');
   intake.onNightlyWorkerTurn(['w9999'], REVIEW_REPORT);
   assert.equal(work().filter((w) => w.delegation).length, 0, 'not from a worker that is not on the review');
   intake.onNightlyWorkerTurn([review.id], REVIEW_REPORT);

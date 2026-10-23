@@ -1268,7 +1268,7 @@ export class IntakeManager {
     }
     const groups = toFile.length > s.nightly.batchOver ? [toFile] : toFile.map((r) => [r]);
     for (const g of groups) {
-      const draft = nightlyDraft(rep, g);
+      const draft = nightlyDraft(rep, g, s.nightly.regressionPriority);
       const res = this.d.orchestrators.fileIntake({
         ...draft,
         requestedBy: this.d.identity.systemPayer(),
@@ -1308,7 +1308,7 @@ export class IntakeManager {
       out = { scenario: NIGHT_BROKEN, action: 'attached', workId: target.id, why: added ? `added to ${target.id}, open on a broken night` : `already on ${target.id} for ${rep.date}` };
     } else {
       const run = this.data.nights?.find((n) => n.date === rep.date)?.workId ?? rep.request;
-      const draft = brokenNightDraft(rep, run);
+      const draft = brokenNightDraft(rep, run, s.nightly.regressionPriority);
       const res = this.d.orchestrators.fileIntake({
         ...draft,
         requestedBy: this.d.identity.systemPayer(),

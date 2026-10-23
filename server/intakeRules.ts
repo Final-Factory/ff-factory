@@ -6,7 +6,7 @@ import { thresholdsOf } from './boardMatch.ts';
 import type { Config } from './config.ts';
 import { redactSecrets } from './secrets.ts';
 import { decisionOf } from '../shared/decision.ts';
-import type { ProviderConversation, WorkItem, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { ProviderConversation, WorkItem, WorkPriority, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const DAY = 24 * 3600_000;
 
@@ -59,7 +59,7 @@ export interface IntakeSettings {
     crash: { enabled: boolean; maxPerDay: number };
   };
   release: { enabled: boolean; delayMinutes: number };
-  nightly: { enabled: boolean; autoApprove: { enabled: boolean; maxPerDay: number }; dailyCap: number; flakyNights: number; batchOver: number; run: NightlyRunSettings; review: NightlyReviewSettings };
+  nightly: { enabled: boolean; autoApprove: { enabled: boolean; maxPerDay: number }; dailyCap: number; flakyNights: number; batchOver: number; regressionPriority: WorkPriority; run: NightlyRunSettings; review: NightlyReviewSettings };
   reviewers: string[];
   lookbackDays: number;
 }
@@ -153,6 +153,8 @@ export function intakeSettings(cfg: Pick<Config, 'intake' | 'providers'>): Intak
       dailyCap: int(n.dailyCap, 10, 0, 100),
       flakyNights: int(n.flakyNights, 3, 1, 30),
       batchOver: int(n.batchOver, 4, 1, 50),
+      // lothsahn, w1943: "Make all nightly regressions urgent". A value in the file other than these four is ignored.
+      regressionPriority: (['low', 'normal', 'high', 'urgent'] as const).find((p) => p === n.regressionPriority) ?? 'urgent',
       run: {
         enabled: n.run?.enabled === true,
         time: typeof n.run?.time === 'string' && HHMM.test(n.run.time) ? n.run.time : '03:00',

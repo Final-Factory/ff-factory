@@ -145,6 +145,8 @@ export interface IntakeConfig {
     flakyNights?: number;
     /** More new requests than this from one night become one batched request for the night (default 4). */
     batchOver?: number;
+    /** The priority every regression request the lab files gets: a scenario, a batch and a broken night alike (w1943; default urgent). */
+    regressionPriority?: 'low' | 'normal' | 'high' | 'urgent';
     /**
      * The portal's nightly schedule (w864; docs/intake.md, "The nightly run"): every day at `time` in `tz` it files a
      * request to run the lab on `machine`, for `person` (a user id; they hear when a night is missing or broken). No
