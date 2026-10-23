@@ -72,6 +72,15 @@ grew 2,886 tokens a turn (measured): its own output 26%, `list_work` list 15% (8
 (estimated, but for the totals). What it changed: the shorter list line (`LIST_LINE_TEXT`, `server/work.ts`), the relay
 paragraph no longer under every `[worker update]` (the brief already said it), ended timers shown for a day (`describeTimers`).
 
+**After reading, the same orchestrator, 2026-10-23 17:31Z to 18:18Z** (#575 deployed 17:31Z; 3 cycles, the one wholly after
+the deploy 17:43Z-18:03Z): 17 turns, start 34,462, peak 112,517, 4,591 a turn (measured); over all 48 turns 3,057 a turn
+against 2,886 before. The trims held where they act (`[worker update]` 1,220 a message, 12% repeated, against 1,452 and
+22%), but did not show in the totals: growth per turn swings 1,260-9,881 between cycles with the turn mix (a person's turn
+15,130 here), far more than the 8-10% the trims could take. And a `list_work` list call's size cannot be compared across
+readings: it rose to 11,845 a call (3 calls) while the dispatcher's unfiltered list went from 12,675 to 21,208 at its
+largest, so the ledger itself grew, and the reader records no call's filter (`state`, `mine`). Judge a trim by its own
+source's per-item size, not by growth per turn; the large levers are the orchestrator's own habits and its settings.
+
 A machine daemon's own log is **not** kept by the portal (it holds a daemon's clean-up passes, which `cleanup` shows, and
 nothing else of its log). It is `<app_dir>/logs/daemon.log` on that machine (`daemonLogPath` in `server/machines.ts`: the
 machine's `app_dir`, by default `~/.ff-factory`, `%USERPROFILE%\.ff-factory` on Windows). Where the `app_dir` is set
