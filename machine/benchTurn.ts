@@ -8,13 +8,18 @@
 // So while another worker's exclusive ticket holds the machine's lock, the daemon closes every other sandbox's editor the
 // way w1746 closes an idle one (machine/liveIdle.ts idleCloseEditor: out of play mode, scenes and assets saved through the
 // editor, then quit; one compiling, importing or with an untitled dirty scene is left and tried again), and asks every
-// other worker's game player to quit (its window's close, or SIGTERM: the game saves a running single-player game first,
-// SaveGameManager.WaitForSaveBeforeQuit). Nothing is ever killed. When the ticket goes, by its release, its holder's death
-// or the end of its hold bound, the editors it closed start again (a start takes a shared ticket, so they come back in the
-// next shared turn) and their workers are told. The marks live in the pool's state file, so a daemon restart reopens them.
+// other worker's game player to quit (its window's close, or SIGTERM: a single-player game normally saves as it quits,
+// SaveGameManager.WaitForSaveBeforeQuit; a multiplayer game and an automation run do not, QuitAutosave.Decide, so their
+// workers are told the run is void). Nothing is ever killed, and the editor watch leaves an editor that is quitting alone
+// (machine/unity.ts expectExit). When the ticket goes, by its release, its holder's death, the end of its hold bound or the
+// next ticket's grant, the editors it closed start again (a start takes a shared ticket, so they come back in the next
+// shared turn) and their workers are told. The marks live in the pool's state file, written before the quit is sent, and
+// stay until the editor runs again, so a daemon restart or a start not made is asked for again.
 //
-// Never touched: the holder's own sandbox and what its ticket's owner started, an editor the pool does not own (a person's
-// own project) and a player no worker started (no slot, no session: a person's game).
+// Never touched: the holder's own sandbox and what its ticket's owner started, its session's players, an editor the pool
+// does not own (a person's own project) and a player no worker started (no slot, no session: a person's game). A holder
+// with no session (a person's timed run) asks no player to quit: the players its script starts detached cannot be told
+// from the others.
 import fs from 'node:fs';
 import path from 'node:path';
 import type { QueueTicket } from './benchQueue.ts';
@@ -37,17 +42,30 @@ export interface TurnPlayer {
   slot?: string;
 }
 
+export interface TurnClosed {
+  id: string;
+  at: number;
+  ticket: string;
+  reopenAt?: number;
+  starting: boolean;
+}
+
 export interface BenchTurnDeps {
   /** The timed run holding the lock now (machine/benchLock.ts timedHolder), or undefined. */
   holder(): Holder | undefined;
   editors(): TurnEditor[];
-  /** The sandboxes whose editor a turn closed and that are not open again yet, and when (kept across daemon restarts). */
-  closed(): { id: string; at: number }[];
+  /**
+   * The sandboxes whose editor a turn closed and that do not run again yet (kept across daemon restarts): when, the ticket
+   * whose turn closed it, when its start was asked for, and whether that start is queued or booting now.
+   */
+  closed(): TurnClosed[];
   players(): TurnPlayer[];
   procs(): Promise<Proc[]>;
-  /** Save and quit a sandbox's editor through the editor, and mark the sandbox closed for `by` (never a kill). */
-  closeEditor(id: string, by: string): Promise<{ closed: boolean; text: string }>;
-  /** Start a closed sandbox's editor again (it queues for its shared turn) and clear its mark; throws when it cannot. */
+  /** Whether `pid` in a fresh listing is still a game player (the players' list can be a minute old: a pid is reused). */
+  isPlayer?(pid: number, procs: Proc[]): boolean;
+  /** Save and quit a sandbox's editor through the editor, and mark the sandbox closed for `by`'s `ticket` (never a kill). */
+  closeEditor(id: string, by: string, ticket: string): Promise<{ closed: boolean; text: string }>;
+  /** Start a closed sandbox's editor again (it queues for its shared turn); the mark stays until it runs. Throws when it cannot. */
   reopenEditor(id: string): Promise<string>;
   /** Ask a player to quit (its window's close, SIGTERM); never forced. Answers what happened. */
   closePlayer(pid: number): Promise<string>;
@@ -61,7 +79,7 @@ export interface BenchTurnDeps {
 
 /** A close that was skipped (compiling, an untitled scene) or a start that failed is tried again after this long. */
 export const TURN_RETRY_MS = 30_000;
-/** A player asked to quit is asked again after this long if it still runs (the game saves first; then it is left and logged). */
+/** A player asked to quit is asked again after this long if it still runs (never forced: then it is left and logged). */
 export const PLAYER_ASK_AGAIN_MS = 2 * 60_000;
 
 const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16) + 'Z';
@@ -110,6 +128,8 @@ export class BenchTurn {
   private readonly asked = new Map<number, number>();
   /** What the guard's file says now, as JSON, so it is written only when it changes. */
   private written?: string;
+  /** The turn's holder has no session, and that was logged. */
+  private noPlayersSaid = false;
 
   constructor(d: BenchTurnDeps) {
     this.d = d;
@@ -132,35 +152,56 @@ export class BenchTurn {
     const h = this.d.holder();
     if (h?.ticket !== this.current) {
       if (h) this.d.log(`bench turn: ${h.ticket} granted to ${holderText(h)}: closing the other editors and players here until it ends (by ${hhmm(h.until)} at the latest)`);
-      else this.d.log(`bench turn: ${this.current} ended: reopening the editors it closed`);
+      if (this.current) this.d.log(`bench turn: ${this.current} ended: reopening the editors it closed`);
       this.current = h?.ticket;
       this.asked.clear();
+      this.noPlayersSaid = false;
+    }
+    // Reopen every editor no turn keeps closed now: the turn that closed it ended, even when the next timed run was granted
+    // before a look saw the lock free (its start then queues behind that run and comes back in the next shared turn), and
+    // the holder's own sandbox (closed by an earlier turn) is never kept closed for its own run.
+    const closed = this.d.closed();
+    for (const c of closed) {
+      if (h && c.id !== h.sandbox && c.ticket === h.ticket) continue;
+      if (c.starting || (c.reopenAt !== undefined && now - c.reopenAt < TURN_RETRY_MS) || (this.retryAt.get(c.id) ?? 0) > now) continue;
+      try {
+        const text = await this.d.reopenEditor(c.id);
+        this.retryAt.delete(c.id);
+        this.d.log(`bench turn: sandbox ${c.id}: its editor ${c.reopenAt === undefined ? 'starts again' : 'did not run yet: its start is asked for again'}: ${text}`);
+      } catch (e) {
+        this.retryAt.set(c.id, now + TURN_RETRY_MS);
+        this.d.log(`bench turn: sandbox ${c.id}: its editor could not start again yet (tried again in ${TURN_RETRY_MS / 1000} s): ${(e as Error).message}`);
+      }
     }
     if (!h) {
       this.write({});
-      for (const { id } of this.d.closed()) {
-        if ((this.retryAt.get(id) ?? 0) > now) continue;
-        try {
-          const text = await this.d.reopenEditor(id);
-          this.retryAt.delete(id);
-          this.d.log(`bench turn: sandbox ${id}: its editor starts again: ${text}`);
-        } catch (e) {
-          this.retryAt.set(id, now + TURN_RETRY_MS);
-          this.d.log(`bench turn: sandbox ${id}: its editor could not start again yet (tried again in ${TURN_RETRY_MS / 1000} s): ${(e as Error).message}`);
-        }
-      }
       return;
     }
     const by = holderText(h);
-    const procs = await this.d.procs().catch(() => [] as Proc[]);
+    const editors = this.d.editors().filter((e) => e.id !== h.sandbox && e.running && !this.closing.has(e.id) && (this.retryAt.get(e.id) ?? 0) <= now);
+    // A holder with no worker session (a person's own timed run, from the main clone) cannot be told apart from the players
+    // its script started with --detach (their parent is gone): no player is asked to quit then.
+    const players = h.session
+      ? this.d.players().filter((p) => {
+          if (!p.slot && !p.session) return false; // a person's own game
+          if ((h.sandbox && p.sandbox === h.sandbox) || p.session === h.session) return false;
+          const last = this.asked.get(p.pid);
+          return last === undefined || now - last >= PLAYER_ASK_AGAIN_MS;
+        })
+      : [];
+    if (!h.session && !this.noPlayersSaid) {
+      this.noPlayersSaid = true;
+      this.d.log(`bench turn: ${h.ticket} has no worker session: other players are left running (its own may have none to tell them apart by)`);
+    }
+    // The process listing costs seconds on Windows: taken only when an editor or a player is to be handled.
+    const procs = editors.length || players.length ? await this.d.procs().catch(() => [] as Proc[]) : [];
     const holderOwns = (pid: number | undefined) => pid !== undefined && descendsFrom(pid, h.ownerPid, procs);
-    for (const e of this.d.editors()) {
-      if (e.id === h.sandbox || !e.running || this.closing.has(e.id) || holderOwns(e.pid)) continue;
-      if ((this.retryAt.get(e.id) ?? 0) > now) continue;
+    for (const e of editors) {
+      if (holderOwns(e.pid)) continue;
       this.closing.add(e.id);
       // Each close runs on its own: one leaving play mode takes up to 90 s, and the others need not wait for it.
       void this.d
-        .closeEditor(e.id, by)
+        .closeEditor(e.id, by, h.ticket)
         .then(
           (r) => {
             this.d.log(`bench turn: sandbox ${e.id}: editor ${r.text}`);
@@ -173,20 +214,19 @@ export class BenchTurn {
         )
         .finally(() => this.closing.delete(e.id));
     }
-    for (const p of this.d.players()) {
-      if (!p.slot && !p.session) continue; // a person's own game
-      if ((h.sandbox && p.sandbox === h.sandbox) || (h.session && p.session === h.session) || holderOwns(p.pid)) continue;
+    const isPlayer = this.d.isPlayer ?? ((pid: number, ps: Proc[]) => ps.some((p) => p.pid === pid));
+    for (const p of players) {
+      if (holderOwns(p.pid) || !isPlayer(p.pid, procs)) continue; // the holder's, or gone (its pid may be another program's now)
       const last = this.asked.get(p.pid);
-      if (last !== undefined && now - last < PLAYER_ASK_AGAIN_MS) continue;
       this.asked.set(p.pid, now);
       const said = await this.d.closePlayer(p.pid).catch((err) => `could not be asked to quit: ${(err as Error).message}`);
       const who = [p.sandbox, p.session && `worker ${p.session}`, p.slot && `slot ${p.slot}`].filter(Boolean).join(', ');
       this.d.log(`bench turn: player pid ${p.pid} (${who}): ${last === undefined ? 'asked to quit' : 'still runs, asked to quit again'}: ${said}`);
       if (p.session && last === undefined)
-        this.d.notePlayer?.(p.session, `[bench turn] Your game player (pid ${p.pid}) was asked to quit at ${hhmm(now)} for ${by} (w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine). A running single-player game saves first. Start it again after that run (player_slots.py --bench-wait waits for it).`);
+        this.d.notePlayer?.(p.session, `[bench turn] Your game player (pid ${p.pid}) was asked to quit at ${hhmm(now)} for ${by} (w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine). A single-player game normally saves as it quits; a multiplayer game and an automation run (-ffAutomationRole) do not, so a test or audit it was part of is void: run it again after that run (player_slots.py --bench-wait waits for it).`);
     }
     const marks: Record<string, string> = {};
-    for (const c of this.d.closed()) marks[c.id] = closedRefusal(by, c.at, h.until);
+    for (const c of this.d.closed()) if (c.id !== h.sandbox) marks[c.id] = closedRefusal(by, c.at, h.until);
     this.write(marks);
   }
 

@@ -27,10 +27,16 @@ function harness(o: { editors: TurnEditor[]; players?: TurnPlayer[]; procs?: { p
     now: T0,
     editors: o.editors,
     players: o.players ?? [],
-    closed: new Map<string, number>(),
+    closed: new Map<string, { at: number; ticket: string; reopenAt?: number }>(),
     /** What the next close of each sandbox answers. */
     closeAnswer: new Map<string, { closed: boolean; text: string }>(),
     reopenFails: new Set<string>(),
+    /** Sandboxes whose start is asked for but whose editor does not run yet (the mark stays), and those queued or booting. */
+    reopenStays: new Set<string>(),
+    starting: new Set<string>(),
+    /** Players gone from a fresh listing (their pid may be another program's now). */
+    gone: new Set<number>(),
+    procCalls: 0,
     calls: [] as string[],
     marks: [] as Record<string, string>[],
     notes: [] as [string, string][],
@@ -39,14 +45,17 @@ function harness(o: { editors: TurnEditor[]; players?: TurnPlayer[]; procs?: { p
   const d: BenchTurnDeps = {
     holder: () => s.holder,
     editors: () => s.editors,
-    closed: () => [...s.closed].map(([id, at]) => ({ id, at })),
+    closed: () => [...s.closed].map(([id, c]) => ({ id, ...c, starting: s.starting.has(id) })),
     players: () => s.players,
-    procs: async () => (o.procs ?? []).map((p) => ({ ...p, cmd: '' })),
-    closeEditor: async (id, by) => {
+    procs: async () => {
+      s.procCalls++;
+      return [...(o.procs ?? []), ...s.players.filter((p) => !s.gone.has(p.pid)).map((p) => ({ pid: p.pid, ppid: 1 }))].map((p) => ({ ...p, cmd: '' }));
+    },
+    closeEditor: async (id, by, ticket) => {
       s.calls.push(`close ${id} for ${by}`);
       const a = s.closeAnswer.get(id) ?? { closed: true, text: 'closed (nothing unsaved in its scenes; assets saved)' };
       if (a.closed) {
-        s.closed.set(id, s.now);
+        s.closed.set(id, { at: s.now, ticket });
         s.editors = s.editors.map((e) => (e.id === id ? { ...e, running: false, pid: undefined } : e));
       }
       return a;
@@ -54,7 +63,8 @@ function harness(o: { editors: TurnEditor[]; players?: TurnPlayer[]; procs?: { p
     reopenEditor: async (id) => {
       s.calls.push(`reopen ${id}`);
       if (s.reopenFails.has(id)) throw new Error('not started: disk space is low');
-      s.closed.delete(id);
+      if (s.reopenStays.has(id)) s.closed.set(id, { ...s.closed.get(id)!, reopenAt: s.now });
+      else s.closed.delete(id); // the next look sees it run
       return 'Queued (w1615): ...';
     },
     closePlayer: async (pid) => {
@@ -173,9 +183,49 @@ test('w1829: when the ticket goes, every editor the turn closed starts again; a 
 
 test('w1829: a daemon restarted with editors still marked closed and no turn reopens them at its first look', async () => {
   const { s, turn } = harness({ editors: [{ id: 'slot1', running: false }] });
-  s.closed.set('slot1', T0 - 60_000); // kept in sandboxes.json across the restart
+  s.closed.set('slot1', { at: T0 - 60_000, ticket: 't00000041' }); // kept in sandboxes.json across the restart
   await turn.tick();
   assert.deepEqual(s.calls, ['reopen slot1']);
+});
+
+test('w1829: the next timed run granted before a look saw the lock free ends the last turn: its editors are reopened (queued behind it), and the new holder own sandbox is never kept closed for its own run', async () => {
+  const { s, turn } = harness({ editors: [{ id: 'slot1', running: true, pid: 101 }, { id: 'slot2', running: true, pid: 102 }] });
+  s.holder = holder(); // A, on slot3
+  await turn.tick();
+  await settle();
+  assert.deepEqual([...s.closed.keys()].sort(), ['slot1', 'slot2']);
+  s.reopenStays.add('slot1').add('slot2'); // their starts queue behind B: not running yet
+  s.holder = holder({ ticket: 't00000043', sandbox: 'slot1', session: 'bb22', requests: ['w1900'], ownerPid: 810 }); // B, slot1's own run
+  s.calls.length = 0;
+  await turn.tick();
+  await settle();
+  assert.deepEqual(s.calls, ['reopen slot1', 'reopen slot2']);
+  assert.deepEqual(Object.keys(s.marks.at(-1)!), ['slot2'], "B's holder can call its own editor; slot2 stays refused until it runs");
+  assert.match(s.marks.at(-1)!.slot2, /for a timed run on lothdesktop\/slot1 \(w1900\)/);
+  // Queued: not asked again while it waits; a start not made (no longer queued, still not running) is asked again.
+  s.starting.add('slot2');
+  s.calls.length = 0;
+  s.now += TURN_RETRY_MS + 1;
+  await turn.tick();
+  assert.deepEqual(s.calls.filter((c) => c.startsWith('reopen')), ['reopen slot1'], 'slot1 (not queued in this stand-in) is asked again; queued slot2 is not');
+  s.starting.delete('slot2');
+  s.calls.length = 0;
+  s.now += TURN_RETRY_MS + 1;
+  await turn.tick();
+  assert.deepEqual(s.calls.sort(), ['reopen slot1', 'reopen slot2']);
+});
+
+test('w1829: a holder with no worker session asks no player to quit (its own were started detached); a player gone from a fresh listing is not asked; nothing to handle lists no processes', async () => {
+  const { s, turn } = harness({ editors: [], players: [{ pid: 201, session: 'aa11', sandbox: 'slot1', slot: 'slot1-0' }, { pid: 206, slot: 'repo-0' }] });
+  s.holder = holder({ session: undefined, sandbox: undefined, host: 'lothdesktop' });
+  await turn.tick();
+  assert.deepEqual(s.calls, []);
+  assert.equal(s.procCalls, 0, 'no editor and no player to handle: no process listing beside the timed run');
+  assert.ok(s.log.some((l) => /has no worker session: other players are left running/.test(l)));
+  s.holder = holder({ ticket: 't00000044' });
+  s.gone.add(201);
+  await turn.tick();
+  assert.deepEqual(s.calls, ['quit player 206'], 'pid 201 is no game player any more');
 });
 
 function queue(t: { after: (f: () => void) => void }) {

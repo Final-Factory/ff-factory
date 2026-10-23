@@ -24,7 +24,7 @@ import type { TrimPolicy } from '../server/cacheTrim.ts';
 import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
-import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
+import { UnitySlots, gamePlayers, installShims, isAlive, slotsDir } from './unitySlots.ts';
 import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
@@ -509,7 +509,8 @@ export class Daemon {
       closed: () => this.pool.benchClosedList(),
       players: () => this.leftovers.report().players,
       procs: real ? () => pd.procs() : async () => [],
-      closeEditor: (id, by) => this.benchCloseEditor(id, by),
+      isPlayer: (pid, procs) => gamePlayers(procs.filter((p) => p.pid === pid), platform).length > 0,
+      closeEditor: (id, by, ticket) => this.benchCloseEditor(id, by, ticket),
       reopenEditor: (id) => this.pool.benchReopen(id),
       closePlayer: (pid) => askPlayerToQuit(pid, platform),
       notePlayer: (session, text) => this.benchPlayerNotes.set(session, text),
@@ -1515,14 +1516,14 @@ export class Daemon {
    * play mode at once (the timed run cannot wait for a person), scenes and assets saved through the editor, then quit;
    * skipped while it compiles or imports, or has an untitled dirty scene, and never killed.
    */
-  private async benchCloseEditor(id: string, by: string) {
+  private async benchCloseEditor(id: string, by: string, ticket: string) {
     const sbPath = this.pool.pathOf(id);
     if (!sbPath) return { closed: false, text: 'skipped: no such sandbox' };
     if (this.idleClosing.has(id)) return { closed: false, text: 'skipped: it is being closed already' };
     this.idleClosing.add(id);
     try {
       const until = timedHolder(this.cfg.root)?.until;
-      const res = await this.pool.benchClose(id, by, closedDetail(by, until), () =>
+      const res = await this.pool.benchClose(id, by, ticket, closedDetail(by, until), () =>
         idleCloseEditor(
           { bridge: this.editorBridge(id, sbPath), editorPids: () => this.pool.editorPids(id), personInputAgoMs: () => undefined, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now() },
           0,

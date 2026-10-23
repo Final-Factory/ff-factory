@@ -249,7 +249,7 @@ test('w1615: an editor start takes a shared bench ticket after its slot: queued 
   assert.equal(running.has(path.join(r.sbRoot, 'b')), false, 'a cancelled start never runs');
 });
 
-test('w1829: an editor closed for a timed run says why, keeps its mark across a daemon restart, starts again through the bench queue when the turn ends, and its worker hears it once', async (t) => {
+test('w1829: an editor closed for a timed run is marked before its quit, says why, keeps its mark across a daemon restart, starts again through the bench queue when the turn ends and stays marked until it runs, and its worker hears it once', async (t) => {
   const r = repos();
   t.after(r.cleanup);
   const tickets: ReturnType<typeof fakeTicket>[] = [];
@@ -267,8 +267,10 @@ test('w1829: an editor closed for a timed run says why, keeps its mark across a 
   await p.tick();
   assert.equal(p.list()[0].unity.state, 'running');
   const by = 'a timed run on lothdesktop/slot3 (w1785)';
-  // The close itself is the editor's own save and quit (machine/liveIdle.ts); here it quits the stand-in.
-  const res = await p.benchClose('a', by, `closed for ${by}; reopens when it ends (by 10:00Z at the latest)`, async () => {
+  // The close itself is the editor's own save and quit (machine/liveIdle.ts); here it quits the stand-in. The mark is in
+  // sandboxes.json before the quit is sent: a daemon restart in the middle of it still reopens the editor.
+  const res = await p.benchClose('a', by, 't00000042', `closed for ${by}; reopens when it ends (by 10:00Z at the latest)`, async () => {
+    assert.deepEqual(pool(r, { bootTicket }).p.benchClosedList().map((c) => [c.id, c.ticket]), [['a', 't00000042']], 'marked before the quit');
     running.clear();
     return { closed: true, saved: ['Assets/Scenes/Look.unity'], text: 'closed (saved Assets/Scenes/Look.unity and the assets first)' };
   });
@@ -278,18 +280,26 @@ test('w1829: an editor closed for a timed run says why, keeps its mark across a 
   const sb = p.list()[0];
   assert.equal(sb.unity.state, 'stopped');
   assert.match(sb.unity.detail ?? '', /^closed for a timed run on lothdesktop\/slot3 \(w1785\); reopens when it ends/, 'the panel and list_sandboxes say why, after a look too');
-  // A daemon restart: the mark is in sandboxes.json, so the next look without a turn reopens it.
+  // A daemon restart: the mark is in sandboxes.json, so the restarted daemon reopens it when no turn keeps it closed.
   const again = pool(r, { bootTicket });
   assert.deepEqual(again.p.benchClosedList().map((c) => c.id), ['a']);
-  const said = await p.benchReopen('a');
+  const said = await again.p.benchReopen('a');
   assert.match(said, /Started \(fake\)/);
-  assert.equal(running.size, 1, 'started again');
+  assert.equal(again.running.size, 1, 'started again');
   assert.equal(tickets.length, 2, 'through a shared bench ticket, like any start');
-  assert.deepEqual(p.benchClosedList(), []);
-  const note = p.takeBenchNote('a');
-  assert.match(note ?? '', /^\[bench turn\] Your sandbox's Unity editor was closed at \d\d:\d\dZ for a timed run on lothdesktop\/slot3 \(w1785\).* It saved Assets\/Scenes\/Look\.unity first/);
-  assert.equal(p.takeBenchNote('a'), undefined, 'once');
-  assert.match(await p.benchReopen('a'), /^not closed$/);
+  assert.ok(again.p.benchClosedList()[0]?.reopenAt, 'still marked until a look sees it run (a start not made is asked for again)');
+  await again.p.tick();
+  assert.deepEqual(again.p.benchClosedList(), [], 'running again: the mark goes');
+  const note = again.p.takeBenchNote('a');
+  assert.match(note ?? '', /^\[bench turn\] Your sandbox's Unity editor was closed at \d\d:\d\dZ for a timed run on lothdesktop\/slot3 \(w1785\).* It saved Assets\/Scenes\/Look\.unity first\. Its assets were saved too: check git status/);
+  assert.equal(again.p.takeBenchNote('a'), undefined, 'once');
+  assert.match(await again.p.benchReopen('a'), /^not closed$/);
+  // A close skipped (compiling) leaves no mark; one that took the quit and still runs keeps it, its pid with it.
+  await again.p.benchClose('a', by, 't00000043', 'x', async () => ({ closed: false, saved: [], text: 'skipped: it is compiling or importing' }));
+  assert.deepEqual(again.p.benchClosedList(), []);
+  await again.p.benchClose('a', by, 't00000043', 'x', async () => ({ closed: false, quitting: true, saved: [], text: 'skipped: asked to quit (...), it still runs after 180 s; left running, never killed' }));
+  await again.p.tick();
+  assert.deepEqual(again.p.benchClosedList().map((c) => c.id), ['a'], 'it may yet go: the turn reopens it then');
 });
 
 test('w1615: a queued editor start whose slot is gone at its turn is not made, its ticket let go, and the worker told', async (t) => {
