@@ -130,6 +130,10 @@ claude mcp add --transport http -s user ffsb https://<host>.<tailnet>.ts.net/mcp
 
 Then, in any Claude Code session: "spin up a sandbox for spec 093".
 
+`/mcp` is tailnet-only (w1865): a request that came through Tailscale Funnel (the `Tailscale-Funnel-Request` header) or from
+an address outside the tailnet is refused with 403 for every tool, so use the tailnet address from a machine on the tailnet
+([docs/talk-to-your-orchestrator.md](docs/talk-to-your-orchestrator.md#safety)).
+
 To chat with your own orchestrator from Claude Code or Claude Desktop (the web app's conversation, tailnet only), bind the
 key to your login (`--user <login>`) and see [docs/talk-to-your-orchestrator.md](docs/talk-to-your-orchestrator.md).
 
