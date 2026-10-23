@@ -1,10 +1,12 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { splitMedia, type Ask } from '../../../shared/ask';
 import { cardMedia } from '../../../shared/questionCard';
 import { isVideoPath } from '../../../shared/imagePaths';
 import { holdReload } from '../freshness';
 import { useKeptState } from '../keep';
 import { openLightbox } from '../store';
+import { useTextareaDictation } from '../voice/useTextareaDictation';
+import { DictationBar, MicButton } from './Mic';
 import { previewSrc } from './Images';
 
 /** A still or a clip a card previews: an absolute path (the review folder's, or the asking worker's own). */
@@ -98,6 +100,16 @@ export function QuestionCard(p: QuestionCardProps) {
   })();
   const [typed, setTyped] = useKeptState(`qc.typed.${p.id}`, '');
   const [sending, setSending] = useState(false);
+  // The same dictation as the chat box (w1817): the transcript lands in the box for the answer to be edited before Send.
+  const freeBox = useRef<HTMLTextAreaElement>(null);
+  const voice = useTextareaDictation({ value: typed, setValue: setTyped, ref: freeBox });
+  // A dictated answer is a sentence or more: the box grows to show it all for review (up to a few lines), instead of cutting it off in its one-line box.
+  useLayoutEffect(() => {
+    const el = freeBox.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight + el.offsetHeight - el.clientHeight, 160)}px`;
+  }, [typed, kept]);
   useEffect(() => {
     holdReload(`qc:${p.id}`, sending);
     return () => holdReload(`qc:${p.id}`, false);
@@ -174,20 +186,27 @@ export function QuestionCard(p: QuestionCardProps) {
   );
   const freePrompt = p.freeLabel ?? (options.length ? 'Or type your own answer' : 'Your answer');
   const free = p.mine && p.onAnswer && !p.done && (
-    <div className="qc-free">
-      <textarea
-        data-kept
-        className="input qc-free-text"
-        rows={options.length ? 1 : 2}
-        placeholder={freePrompt}
-        aria-label={freePrompt}
-        value={typed}
-        onChange={(e) => setTyped(e.target.value)}
-      />
-      <button type="button" className={`btn btn-sm ${typed.trim() ? 'btn-primary' : 'btn-outline'}`} disabled={!live || !typed.trim()} onClick={() => void give(typed)} data-testid="qc-send">
-        {n > 1 && step < n - 1 ? 'Next' : 'Send'}
-      </button>
-    </div>
+    <>
+      <div className="qc-free">
+        <textarea
+          ref={freeBox}
+          data-kept
+          className="input qc-free-text"
+          rows={options.length ? 1 : 2}
+          placeholder={freePrompt}
+          aria-label={freePrompt}
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          {...voice.textareaProps}
+          onKeyDown={(e) => void voice.keyDown(e)}
+        />
+        <MicButton d={voice.d} className="qc-mic" />
+        <button type="button" className={`btn btn-sm ${typed.trim() ? 'btn-primary' : 'btn-outline'}`} disabled={!live || !typed.trim()} onClick={() => void give(typed)} data-testid="qc-send">
+          {n > 1 && step < n - 1 ? 'Next' : 'Send'}
+        </button>
+      </div>
+      <DictationBar d={voice.d} />
+    </>
   );
   const details = (
     <details className="qc-details" data-testid="qc-details">

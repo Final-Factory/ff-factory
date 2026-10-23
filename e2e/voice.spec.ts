@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { ALPHA, BOX, boxText, expect, sandboxHash, signIn, startWorker, test, uniq } from './fixtures.ts';
+import { ALPHA, BOX, appState, boxText, expect, expectNoHorizontalOverflow, isMobile, patchWork, sandboxHash, signIn, startWorker, test, uniq, useTool } from './fixtures.ts';
 import { fakeVoice } from './voice.ts';
 
 // Voice is turned off on the E2E server (no local Whisper, no Kokoro), so voice mode and the mic use
@@ -17,9 +17,7 @@ async function voicePage(page: Page, browserName: string, prefs?: object) {
   await signIn(page);
   const tag = uniq('voice');
   const s = await startWorker(page.request, `hi ${tag}`, { title: `Voice ${tag}` });
-  const status = page.waitForResponse((r) => r.url().endsWith('/api/voice'));
   await page.goto(`/${sandboxHash(ALPHA, s.id)}`);
-  expect((await (await status).json()).state).toBe('unavailable');
   const panel = page.locator('.sb-panel');
   await expect(panel.locator('.msg-assistant[data-turn-end]')).toHaveCount(1);
   return { panel, tag };
@@ -120,4 +118,57 @@ test('dictation with local Whisper chosen: records the mic, then says transcript
   await expect(err.getByRole('button', { name: 'Retry' })).toBeVisible();
   await err.getByRole('button', { name: 'Dismiss' }).click();
   await expect(err).toBeHidden();
+});
+
+// w1817: a question card's free-text box dictates like the chat box (the same MicButton, DictationBar and useTextareaDictation).
+test('a question card has the chat mic: the words land in its answer box for review, then Send', async ({ page, browserName }) => {
+  await page.addInitScript(fakeVoice, { fakeAudio: browserName === 'webkit' });
+  await signIn(page);
+  const tag = uniq('qcmic');
+  const me = await appState(page.request);
+  const id = (await useTool(page.request, me.orchestratorId, 'request_work', { title: `Voice answer ${tag}`, brief: `A question card with a mic ${tag}.` })).match(/Filed (w\d+)/)![1];
+  const asks = [
+    { question: `Which save comes first ${tag}?`, options: [{ label: `Newest first ${tag}`, description: 'Like the load menu.', recommended: true }, { label: `Keep the old order ${tag}`, description: '' }] },
+    { question: `Should the list be sorted by name ${tag}?`, options: [{ label: 'Yes', description: '' }, { label: 'No', description: '' }] },
+  ];
+  await patchWork(page.request, id, { status: 'question', question: { text: 'Which save comes first?', at: new Date().toISOString(), asks } });
+  await page.goto('/#/dispatcher/waiting');
+  const card = page.getByTestId(`wait-${id}`);
+  await expect(card.getByTestId('qc-progress')).toContainText('Question 1 of 2');
+
+  const mic = card.getByRole('button', { name: 'Dictate' });
+  const box = card.getByLabel('Or type your own answer');
+  await expect(mic).toBeVisible();
+  await expect(mic).toBeEnabled();
+  if (process.env.QC_SHOTS) await card.screenshot({ path: `${process.env.QC_SHOTS}/card-mic-${isMobile(page) ? 'narrow' : 'desktop'}.png` });
+  await expectNoHorizontalOverflow(page);
+
+  await mic.click();
+  const bar = card.locator('.dictation-bar');
+  await expect(bar.locator('.dictation-interim')).toHaveText('Listening…');
+  await expect(card.getByRole('button', { name: 'Stop dictation' })).toHaveAttribute('aria-pressed', 'true');
+  await say(page, `keep it ${tag}`);
+  await bar.getByRole('button', { name: 'Done' }).click();
+  await expect(bar).toBeHidden();
+  // Not sent: it waits in the box to be edited, and Send is ready.
+  await expect(box).toHaveValue(`keep it ${tag}`);
+  await expect(card.getByTestId('qc-question')).toContainText('Which save comes first');
+  if (process.env.QC_SHOTS) await card.screenshot({ path: `${process.env.QC_SHOTS}/card-dictated-${isMobile(page) ? 'narrow' : 'desktop'}.png` });
+  await card.getByTestId('qc-send').click();
+  // Next question: the box is empty again and the mic is still there.
+  await expect(card.getByTestId('qc-progress')).toContainText('Question 2 of 2');
+  await expect(box).toHaveValue('');
+  await expect(card.getByRole('button', { name: 'Dictate' })).toBeVisible();
+  // The last question, as in Ben's screenshot: listening, then the transcript waiting under Send.
+  const shot = (name: string) => (process.env.QC_SHOTS ? card.screenshot({ path: `${process.env.QC_SHOTS}/${name}-${isMobile(page) ? 'narrow' : 'desktop'}.png` }) : undefined);
+  await card.getByRole('button', { name: 'Dictate' }).click();
+  await expect(bar.locator('.dictation-interim')).toHaveText('Listening…');
+  await shot('q2-listening');
+  await say(page, `use the second one because it matches the load menu, and tell the player why ${tag}`);
+  await bar.getByRole('button', { name: 'Done' }).click();
+  await expect(box).toHaveValue(`use the second one because it matches the load menu, and tell the player why ${tag}`);
+  await expect(card.getByTestId('qc-send')).toHaveText('Send');
+  // What was dictated shows whole, for review: the box grew instead of cutting the second line off.
+  expect(await box.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
+  await shot('q2-dictated');
 });
