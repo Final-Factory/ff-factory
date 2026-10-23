@@ -1362,7 +1362,7 @@ export class Daemon {
       // Holders warned that their turn ends (w1832): the portal messages each worker once per deadline.
       const benchWarnings = readBenchWarnings(this.cfg.root);
       // Its queue's mode, holders and waiters (w1835): the machine view shows them.
-      const bench = readBenchState(this.cfg.root);
+      const bench = readBenchState(this.cfg.root, undefined, undefined, this.benchTurn.playersAsked());
       this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);

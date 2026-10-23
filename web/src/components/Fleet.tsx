@@ -182,8 +182,16 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
 function BenchLine({ c, now }: { c: FleetComputer; now: number }) {
   const g = c.online ? benchGlance(c.bench, now) : undefined;
   if (!g) return null;
-  // Two short lines, so the sidebar's width keeps both: who holds it, then its times and what waits.
-  const sub = [g.times, g.waiting, g.next].filter(Boolean).join(' · ');
+  // Two short lines, so the sidebar's width keeps both: who holds it, then its times, what waits and what its turn closed.
+  // A warned turn (w1832: it ends in 5 minutes) says so first, in the mode's colour.
+  const rest = [g.waiting, g.next, g.closed].filter(Boolean).join(' · ');
+  const sub = g.times || rest ? (
+    <>
+      {g.times && (g.warned ? <b className="tone-amber">{g.times}</b> : g.times)}
+      {g.times && rest && ' · '}
+      {rest}
+    </>
+  ) : null;
   return (
     <span className="fl-bench" data-testid="fl-bench" data-mode={g.mode} title={g.hint}>
       <span className="fl-bench-line">

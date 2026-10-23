@@ -771,10 +771,15 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   **Each computer's bench lock** (w1835, lothsahn: "Please display on FF factory's webpage for the machine view whether
   each machine is in shared or exclusive lock mode"): under its counts, the group and the board card say **Bench lock
   Exclusive** (amber: a timed leg, or an old-style `quiet_gate.sh` lock, holds it; its requests and worker, how long it has
-  held and how long its hold bound leaves), **Shared** (blue: only shared tickets run, builds, compiles, editor boots; how
-  many) or **Free**, then how many tickets wait and the next timed leg, which starts within the running tickets' longest
-  bound at the latest when nothing is ahead of it. The hover lists every holder and the next one; the machine's page has the
-  same row in its details. The daemon reads the queue with each stats report, every 15 s (`readBenchState`,
+  held and how much of its 30-minute turn is left, or that it is past it while nobody waits), **Shared** (blue: only shared
+  tickets run, builds, compiles, editor boots; how many) or **Free**, then how many tickets wait and the next timed leg:
+  within the holders' deadlines once the queue set them (w1832), else after the running group. Since w1829 and w1832 it
+  also says a warned turn first, in amber ("warned: ends in 4m", "for an urgent release" when the release set it); an
+  urgent release holding the machine, or the nightly in a shared group, which no turn limit ends (`exempt` in
+  `priorities.json`; the timed leg waits "after the urgent release" or "after the nightly"); a single-worker machine's
+  "no turn limit"; and what an exclusive turn closed ("closed for it: 2 editors, 1 player": `closed.json` and the players
+  `BenchTurn` asked to quit). The hover lists every holder and the next one; the machine's page has the same row in its
+  details. The daemon reads the queue with each stats report, every 15 s (`readBenchState`,
   `machine/benchState.ts`, in the queue's own order: priority, then place), and the page words it (`benchGlance`,
   `shared/benchGlance.ts`); an offline machine, or a daemon from before it, shows no line.
 

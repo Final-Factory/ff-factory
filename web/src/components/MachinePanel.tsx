@@ -151,7 +151,7 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
           {bench && (
             <div className="unity-bar" data-testid="machine-bench" data-mode={bench.mode} title={bench.hint}>
               <Chip tone={bench.tone}>Bench lock {bench.label}</Chip>
-              <span className="dim small ellipsis">{[bench.detail, bench.times, bench.waiting, bench.next].filter(Boolean).join(' · ') || 'no ticket held or waiting'}</span>
+              <span className="dim small ellipsis">{[bench.detail, bench.times, bench.waiting, bench.next, bench.closed].filter(Boolean).join(' · ') || 'no ticket held or waiting'}</span>
             </div>
           )}
           {/* Its owner's pause (w1532): from its tray app, its schedule or a person's input; a paused machine takes no work. */}
