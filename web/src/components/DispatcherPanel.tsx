@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { AppState, IntakeSummary, WorkItem } from '../../../shared/types';
+import { FLAG_LABEL, type AppState, type IntakeSummary, type WorkItem } from '../../../shared/types';
 import { decisionOf } from '../../../shared/decision';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
@@ -593,7 +593,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
             {isMine(w, app.me?.userId) ? <span className="tone-blue" data-testid="work-yours"> · yours</span> : null}
             {w.triage && w.triage.class !== 'needs-human' ? <span> · {triageLabel[w.triage.class]}</span> : null}
             {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : null}
-            {w.flag ? <span className="tone-amber"> · design question</span> : null}
+            {w.flag ? <span className="tone-amber"> · {FLAG_LABEL[w.flag.kind].toLowerCase()}</span> : null}
             <CostChip id={w.id} summary={spend} />
           </span>
         </span>
@@ -656,7 +656,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
           {w.constraints && <p className="dim small">Constraints: {w.constraints}</p>}
           {w.flag && (
             <p className="small tone-amber">
-              Design question for {w.flag.for.map((r) => r.displayName).join(', ')}: {w.flag.text}
+              {FLAG_LABEL[w.flag.kind]} for {w.flag.for.map((r) => r.displayName).join(', ')}: {w.flag.text}
             </p>
           )}
           {w.outcome && (

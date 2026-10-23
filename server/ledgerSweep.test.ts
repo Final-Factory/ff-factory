@@ -15,6 +15,7 @@ import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { workLiveAll } from '../shared/workState.ts';
 import { useFakeVault } from './testVault.ts';
+import { W1829_AT, W1829_MERGES, W1829_PORTAL, W1829_PRS, W1829_REQUEST, W1829_WORKER } from './ledgerSweep.fixtures.ts';
 
 // Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
 useFakeVault();
@@ -46,7 +47,7 @@ async function until(what: string, cond: () => boolean, ms = 5000) {
   }
 }
 
-function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: Config['ledger'] = {}) {
+function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: Config['ledger'] = {}, now = NOW) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ledger-'));
   const cfg = {
     dataDir: dir,
@@ -86,7 +87,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: C
     portalSha: () => world.portal,
     daemons: () => world.daemons,
     contains: async (sha, head) => world.ancestors.has(`${sha}:${head}`),
-    now: () => NOW,
+    now: () => now,
   });
   t.after(async () => {
     sweep.close();
@@ -154,10 +155,10 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: C
   return { dir, cfg, store, sessions, agents, o, sweep, world, request, worker, pr, opened, heard, get };
 }
 
-test('one linked PR merged closes the request, logs how, starts nothing, and its person hears one line', async (t) => {
+test('one linked PR merged closes the request (its worker said DONE), logs how, starts nothing, and its person hears one line', async (t) => {
   const { request, worker, pr, world, sweep, get, heard, store } = setup(t);
   request('w1', { sessionIds: ['s1'] });
-  worker('s1');
+  worker('s1', { lastResult: 'The belts are fixed; PR #11 is up.\nDONE: w1' });
   world.prs = [pr(11, { body: 'Fix the belts\n\nRequest: w1' })];
   assert.deepEqual(await sweep.checkPrs(), ['w1']);
   const w = get('w1');
@@ -175,7 +176,7 @@ test('one linked PR merged closes the request, logs how, starts nothing, and its
 test('a PR is linked when the request’s own worker opened it (its gh pr create) after the request was filed, not when a report merely mentions it', async (t) => {
   const { request, worker, pr, world, sweep, get, opened } = setup(t);
   request('w1', { sessionIds: ['s1'] });
-  worker('s1', { lastResult: `Related: https://github.com/${REPO}/pull/5 and the plan.` });
+  worker('s1', { lastResult: `Related: https://github.com/${REPO}/pull/5 and the plan.\nDONE: w1` });
   opened('s1', 6, ago(50));
   world.prs = [pr(5, { head: 'sandbox/alpha', createdAt: ago(60), mergedAt: ago(55) }), pr(6, { head: 'sandbox/alpha', createdAt: ago(50) })];
   await sweep.checkPrs();
@@ -202,7 +203,7 @@ test('a worker that does two requests in sequence: each PR goes to the request t
   const { request, worker, pr, world, sweep, get, opened } = setup(t);
   request('w314', { createdAt: ago(60), updatedAt: ago(20), sessionIds: ['s1'] });
   request('w324', { createdAt: ago(30), updatedAt: ago(1), sessionIds: ['s1'] });
-  worker('s1', { lastActivityAt: ago(1), lastResult: 'Now on the next request.' });
+  worker('s1', { lastActivityAt: ago(1), lastResult: 'Both are merged.\nDONE: w314\nDONE: w324' });
   opened('s1', 985, ago(50));
   opened('s1', 1005, ago(20));
   world.prs = [pr(985, { head: 'sandbox/shared', createdAt: ago(50), mergedAt: ago(45) }), pr(1005, { head: 'sandbox/shared', createdAt: ago(20), mergedAt: ago(15) })];
@@ -268,7 +269,7 @@ test('w340: the w50 and w312 shapes are reopened at the first pass after a start
 test('two PRs, one merged: the request stays open and the log says why, once', async (t) => {
   const { request, worker, pr, world, sweep, get, heard } = setup(t);
   request('w1', { sessionIds: ['s1'] });
-  worker('s1');
+  worker('s1', { lastResult: 'Both PRs are up; each merges on green.\nDONE: w1' });
   world.prs = [pr(11, { body: 'Request: w1' }), pr(12, { body: 'Request: w1', state: 'open', mergedAt: undefined })];
   assert.deepEqual(await sweep.checkPrs(), []);
   assert.equal(get('w1').status, 'active');
@@ -304,7 +305,7 @@ test('a release closes once its worker reports it live with the notes posted (th
   world.prs = [pr(21, { body: 'Request: w1' })];
   await sweep.run();
   assert.equal(get('w1').status, 'active', 'merged, but the notes are not posted');
-  worker('s1', { lastActivityAt: ago(2), lastResult: 'Release 0.50.0.60 is live on development. Notes posted: https://discord.com/channels/530867164866150410/1069745561672106015/1290000000000000001. Done.' });
+  worker('s1', { lastActivityAt: ago(2), lastResult: 'Release 0.50.0.60 is live on development. Notes posted: https://discord.com/channels/530867164866150410/1069745561672106015/1290000000000000001. Done.\nDONE: w1' });
   await sweep.run();
   assert.equal(get('w1').status, 'done');
   assert.ok(['prs', 'report'].includes(get('w1').autoClosed!.how));
@@ -345,18 +346,24 @@ test('a request with a running worker is never touched, merged PR or not, quiet 
   assert.equal(get('w2').status, 'active');
 });
 
-test('finished but unclosed: a final report that plainly says delivered closes it; one that says more, or nothing clear, does not', async (t) => {
-  const { request, worker, sweep, get } = setup(t);
-  for (const [id, text] of [['w1', 'All done. The copy is in Screenshots.'], ['w2', 'Done with step one. Next steps: the second part.'], ['w3', 'I found three causes of the belt bug.']] as const) {
+test('finished but unclosed (w1870): a report that plainly says delivered gets its worker asked for its DONE, once a day, never a close; with a DONE it closes; more, or nothing clear, neither', async (t) => {
+  const { request, worker, sweep, get, world } = setup(t);
+  for (const [id, text] of [['w1', 'All done. The copy is in Screenshots.'], ['w2', 'Done with step one. Next steps: the second part.'], ['w3', 'I found three causes of the belt bug.'], ['w5', 'All done. The copy is in Screenshots.\nDONE: w5']] as const) {
     request(id, { sessionIds: [`s-${id}`], updatedAt: ago(5) });
     worker(`s-${id}`, { lastResult: text, lastActivityAt: ago(5) });
   }
   request('w4', { sessionIds: ['s-w4'], updatedAt: ago(0.2) });
   worker('s-w4', { lastResult: 'All done.', lastActivityAt: ago(0.2) });
   await sweep.run();
-  assert.equal(get('w1').status, 'done');
-  assert.equal(get('w1').autoClosed?.how, 'report');
-  assert.match(get('w1').outcome!, /final report says it is delivered/);
+  assert.equal(get('w1').status, 'active', 'a report that reads as delivered is not a DONE');
+  assert.deepEqual(world.resumed.map((r) => r.id), ['s-w1']);
+  assert.match(world.resumed[0].text, /^\[ledger cleanup\] Is w1 "Fix w1" done\? Your last report on it reads as finished but has no `DONE: w1` line/);
+  assert.match(get('w1').log.at(-1)!, /ledger cleanup asked worker s-w1 whether it is done, instead of closing it \(w1870\)/);
+  await sweep.run();
+  assert.equal(world.resumed.length, 1, 'asked once a day');
+  assert.equal(get('w5').status, 'done');
+  assert.equal(get('w5').autoClosed?.how, 'report');
+  assert.match(get('w5').outcome!, /final report says it is delivered/);
   assert.equal(get('w2').status, 'active');
   assert.equal(get('w3').status, 'active', 'not 24 hours quiet yet');
   assert.equal(get('w4').status, 'active', 'the report is minutes old: the person may still be talking to it');
@@ -395,7 +402,7 @@ test('cut off by a limit: resumed once when the account has room, else stalled w
   assert.match(get('w3').stalled!.reason, /whether the limit has reset is unknown/);
 });
 
-test('cut off by a restart is resumed once; by a refused tool, stalled', async (t) => {
+test('cut off by a restart is resumed once; by a refused tool, escalated (w1870): it would be refused again', async (t) => {
   const { request, worker, world, sweep, get } = setup(t);
   request('w1', { sessionIds: ['s1'], updatedAt: ago(8) });
   worker('s1', { status: 'stopped', turnOpenSince: ago(8), lastActivityAt: ago(8) });
@@ -404,8 +411,9 @@ test('cut off by a restart is resumed once; by a refused tool, stalled', async (
   await sweep.run();
   assert.deepEqual(world.resumed.map((r) => r.id), ['s1']);
   assert.equal(get('w1').status, 'active');
-  assert.equal(get('w2').status, 'stalled');
-  assert.match(get('w2').stalled!.reason, /refused tool.*refused again/);
+  assert.equal(get('w2').status, 'question');
+  assert.equal(get('w2').flag?.kind, 'error');
+  assert.match(get('w2').flag!.text, /refused tool.*refused again/);
 });
 
 test('stalled: no worker running and 24 hours quiet; never closed, and not for what waits on a person', async (t) => {
@@ -496,7 +504,7 @@ test('gh down: the pull-request rule waits, the rest of the cleanup still runs',
   assert.equal(get('w1').status, 'stalled');
 });
 
-test('w363: a full pass that starts while a PR pass runs waits for it, then closes, resumes and stalls every category, and logs each', async (t) => {
+test('w363: a full pass that starts while a PR pass runs waits for it, then asks, resumes and stalls every category, and logs each', async (t) => {
   const { request, worker, world, sweep, get } = setup(t);
   const lines: string[] = [];
   t.mock.method(console, 'log', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
@@ -537,15 +545,15 @@ test('w363: a full pass that starts while a PR pass runs waits for it, then clos
   assert.notEqual(summary, 'a cleanup is already running', 'it waited instead of skipping');
   assert.ok(sweep.state().lastRunAt, 'and recorded the run');
 
-  assert.deepEqual(['w92', 'w157', 'w122', 'w89'].map((id) => get(id).status), ['done', 'done', 'done', 'done']);
-  assert.match(get('w92').outcome ?? '', /final report says it is delivered/);
+  // w1870: a report that reads as finished is asked for its DONE, not closed.
+  assert.deepEqual(['w92', 'w157', 'w122', 'w89'].map((id) => get(id).status), ['active', 'active', 'active', 'active']);
+  assert.match(get('w92').log.at(-1) ?? '', /asked worker s-w92 whether it is done, instead of closing it/);
   assert.notEqual(get('w95').status, 'done', 'waiting on CI is not finished');
-  assert.equal(world.resumed.length, 1, 'the limit-cut worker is resumed once (its limit has reset)');
-  assert.equal(world.resumed[0].id, 's-w17');
+  assert.deepEqual(world.resumed.map((r) => r.id).sort(), ['s-w122', 's-w157', 's-w17', 's-w89', 's-w92'], 'the limit-cut worker is resumed once (its limit has reset), the finished ones asked');
   assert.deepEqual([get('w10').status, get('w10').stalled?.kind], ['stalled', 'idle']);
   assert.deepEqual([get('w83').status, get('w83').stalled?.kind, get('w83').stalled?.by], ['stalled', 'superseded', 'w300']);
   assert.equal(get('w200').status, 'active', 'a running worker is never touched');
-  for (const re of [/^ledger cleanup: closed w92 \(ben\): /, /^ledger cleanup: resumed w17 \(ben\): /, /^ledger cleanup: stalled w10 \(ben\): /, /^ledger cleanup: stalled w83 \(ben\): probably superseded by w300/, /^ledger cleanup: full pass: closed 4, resumed 1, stalled/]) {
+  for (const re of [/^ledger cleanup: asked w92 \(ben\): /, /^ledger cleanup: resumed w17 \(ben\): /, /^ledger cleanup: stalled w10 \(ben\): /, /^ledger cleanup: stalled w83 \(ben\): probably superseded by w300/, /^ledger cleanup: full pass: resumed 1, asked 4 whether done, stalled/]) {
     assert.ok(lines.some((l) => re.test(l)), `${re}\n${lines.join('\n')}`);
   }
 });
@@ -894,7 +902,7 @@ test('w515: a PR closed without merging and its merged replacement: the DONE clo
   assert.deepEqual(get('w1').prs?.map((p) => [p.number, p.state]), [[1081, 'closed'], [1087, 'merged']]);
   // The same in the 5-minute pass: the list has both, the request is closed as merged, the closed one is not a blocker.
   request('w2', { sessionIds: ['s2'], prs: [{ repo: REPO, number: 2081, state: 'open', via: 'line' }, { repo: REPO, number: 2087, state: 'open', via: 'line' }] });
-  worker('s2');
+  worker('s2', { lastResult: 'The fix is up as #2087.\nDONE: w2' });
   world.prs = [pr(2081, { body: 'Request: w2', state: 'closed', mergedAt: undefined, closedAt: ago(3) }), pr(2087, { body: 'Request: w2', mergedAt: ago(1) })];
   assert.deepEqual(await sweep.checkPrs(), ['w2']);
   assert.equal(get('w2').autoClosed?.pr, 2087);
@@ -979,7 +987,7 @@ test('w643: a Blocked request whose blocker is open and progressing is never sta
   worker('s642', { lastActivityAt: ago(10) });
   // A blocked request whose PR merged with nothing left closes as done, like any other.
   request('w650', { status: 'blocked', sessionIds: ['s650'], blocked: { kind: 'machine', ref: 'm5', what: 'the M5 asleep', at: ago(5), by: 'dispatcher' } });
-  worker('s650', { lastActivityAt: ago(4), lastResult: 'Done: PR #65 merged and verified.' });
+  worker('s650', { lastActivityAt: ago(4), lastResult: 'PR #65 merged and verified.\nDONE: w650' });
   world.prs = [pr(64, { body: 'Request: w642', mergedAt: ago(8) }), pr(65, { body: 'Request: w650', mergedAt: ago(3) })];
   await sweep.run();
   assert.equal(get('w634').status, 'blocked', 'its blocker w633 is being worked');
@@ -992,8 +1000,10 @@ test('w643: a Blocked request whose blocker is open and progressing is never sta
 
 // ---------------------------------------------------------------- w631: finished requests close themselves
 
-test('w631: a request whose only step left after the merge is a portal deploy closes once the portal runs the merge, not before', async (t) => {
-  const { request, worker, pr, world, sweep, get, heard } = setup(t);
+test('w631: a request whose only step left after the merge is a portal deploy closes once the portal runs the merge, not before; w1870: on its worker’s DONE', async (t) => {
+  const { request, worker, pr, world, sweep, get, heard, o } = setup(t);
+  const woke: { id: string; note: string }[] = [];
+  (o as unknown as { d: { restoreWake: (id: string, note: string) => boolean } }).d.restoreWake = (id, note) => (woke.push({ id, note }), true);
   // w605 on 2026-10-07: merged, its worker waiting on the portal deploy, which the ops worker then did.
   request('w1', { sessionIds: ['s1'], title: 'Portal update no longer blocks the workers' });
   worker('s1', { lastResult: "Merged as #193. Waiting on the portal deploy, which needs lothsahn's own words." });
@@ -1006,11 +1016,20 @@ test('w631: a request whose only step left after the merge is a portal deploy cl
   // Deployed: the running portal contains the merge.
   world.portal = 'c1c1c1c';
   world.ancestors.add(`${'a'.repeat(40)}:c1c1c1c`);
+  // w1870: its worker's report is not a DONE, so the deploy resumes it to finish and say DONE; nothing closes.
+  assert.deepEqual(await sweep.checkPrs(), []);
+  assert.equal(get('w1').status, 'active');
+  assert.deepEqual(woke.map((x) => x.id), ['s1']);
+  assert.match(woke[0].note, /^w1: the deploy you waited for has happened \(the portal runs c1c1c1c\)\. Your report put a step after it: "check every done criterion of w1, finish what is left, and end with a line `DONE: w1`/);
+  assert.deepEqual(await sweep.checkPrs(), [], 'resumed once, not every pass');
+  assert.equal(woke.length, 1);
+  worker('s1', { lastActivityAt: ago(0.1), lastResult: 'The portal runs it; the queue no longer blocks.\nDONE: w1' });
   assert.deepEqual(await sweep.checkPrs(), ['w1']);
   const w = get('w1');
   assert.equal(w.status, 'done');
-  assert.equal(w.autoClosed?.how, 'deploy');
-  assert.match(w.autoClosed!.text, /^merged as #193 \(aaaaaaaaaaaa\) on 2026-10-0\d; deployed since: the portal runs c1c1c1c$/);
+  // Its DONE leaves no step after the merge: closed as merged, on that DONE.
+  assert.equal(w.autoClosed?.how, 'prs');
+  assert.match(w.autoClosed!.text, /^merged as #193 \(aaaaaaaaaaaa\) on 2026-10-0\d$/);
   await until('its person hears', () => heard().some((h) => /closed as done 1: w1/.test(h.text)));
 });
 
@@ -1041,7 +1060,7 @@ test("w890: w889 as it happened: its report puts a check of its own after the de
 });
 
 test('w631: the deploy re-check is strict: another step left, a game-repo PR, a Part of: PR, machines not updated, or an unknown portal keep it open', async (t) => {
-  const { request, worker, pr, world, sweep, get } = setup(t);
+  const { request, worker, pr, world, sweep, get, o } = setup(t);
   const sha = (n: number) => String(n).padStart(2, '0').repeat(20);
   world.portal = 'feedfee';
   for (const n of [11, 12, 13, 14, 15]) world.ancestors.add(`${sha(n)}:feedfee`);
@@ -1057,6 +1076,8 @@ test('w631: the deploy re-check is strict: another step left, a game-repo PR, a 
   // Machine updates: each connected daemon must run it.
   request('w4', { sessionIds: ['s4'] });
   worker('s4', { lastResult: 'Merged as #14. Still to do: update the worker machines (beast, lothdesktop).' });
+  const woke: string[] = [];
+  (o as unknown as { d: { restoreWake: (id: string, note: string) => boolean } }).d.restoreWake = (id) => (woke.push(id), true);
   world.daemons = [{ id: 'beast', sha: 'beefbee' }, { id: 'lothdesktop', sha: 'd00d00d' }];
   world.ancestors.add(`${sha(14)}:beefbee`);
   world.prs = [pr(11, { repo: APP, body: 'Request: w1' }), pr(12, { body: 'Request: w2' }), pr(13, { repo: APP, body: 'Part of: w3' }), pr(14, { repo: APP, body: 'Request: w4' })];
@@ -1067,8 +1088,13 @@ test('w631: the deploy re-check is strict: another step left, a game-repo PR, a 
   // The last machine updates: w4 closes, naming each daemon.
   world.daemons = [{ id: 'beast', sha: 'beefbee' }, { id: 'lothdesktop', sha: 'e0e0e0e' }];
   world.ancestors.add(`${sha(14)}:e0e0e0e`);
+  // w1870: its worker is resumed on the update first, and the request closes on its DONE.
+  assert.deepEqual(await sweep.checkPrs(), []);
+  assert.deepEqual(woke, ['s4']);
+  worker('s4', { lastActivityAt: ago(0.1), lastResult: 'Both machines run it.\nDONE: w4' });
   assert.deepEqual(await sweep.checkPrs(), ['w4']);
-  assert.match(get('w4').autoClosed!.text, /deployed since: each connected machine's daemon runs it \(beast beefbee, lothdesktop e0e0e0e\)$/);
+  assert.match(get('w4').autoClosed!.text, /^merged as #14 /);
+  assert.match(get('w4').log.join('\n'), /the deploy happened \(each connected machine's daemon runs it \(beast beefbee, lothdesktop e0e0e0e\)\); its worker s4 resumes/);
   // A portal whose commit is unknown (no git, no FFSB_GIT_SHA) closes nothing.
   request('w5', { sessionIds: ['s5'] });
   worker('s5', { lastResult: 'Merged. Waiting on the portal deploy.' });
@@ -1154,11 +1180,11 @@ test("w631: the ops worker's DONE closes the requests its job was sent for, and 
   assert.equal(get('w3').status, 'active');
 });
 
-test('w631: the backlog: a stalled request whose PRs name it only in their titles closes on the next pass; a step-only title keeps it open', async (t) => {
+test('w631: the backlog: a stalled request whose PRs name it only in their titles closes on the next pass (on its worker’s DONE, w1870); a step-only title keeps it open', async (t) => {
   const { request, worker, pr, world, sweep, get } = setup(t);
   // Ben's w165 on 2026-10-07: every PR merged on 10-02 (no Request: line then), stalled as "unsure" for days.
   request('w165', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'its last report does not say it is done' }, sessionIds: ['s1'], createdAt: ago(130) });
-  worker('s1', { status: 'stopped', lastActivityAt: ago(100), lastResult: 'Riders, Bats and beams are drawn on the ship; the two PRs are merged.' });
+  worker('s1', { status: 'stopped', lastActivityAt: ago(100), lastResult: 'Riders, Bats and beams are drawn on the ship; the two PRs are merged.\nDONE: w165' });
   request('w170', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'x' }, createdAt: ago(130) });
   request('w186', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'x' }, createdAt: ago(130) });
   world.prs = [
@@ -1175,16 +1201,20 @@ test('w631: the backlog: a stalled request whose PRs name it only in their title
   assert.match(get('w186').log.join('\n'), /PR #903 merged; still open: PR #903 is one step of it/);
 });
 
-test('w631: a stalled request whose worker reported it delivered after the stall closes; one whose report predates the stall stays', async (t) => {
+test('w631: a stalled request whose worker reported it delivered after the stall is asked for its DONE (w1870), or closes on it; one whose report predates the stall stays', async (t) => {
   const { request, worker, world, sweep, get } = setup(t);
   request('w1', { status: 'stalled', stalled: { at: ago(48), kind: 'idle', reason: 'no activity' }, sessionIds: ['s1'], updatedAt: ago(48) });
   worker('s1', { status: 'stopped', lastActivityAt: ago(10), lastResult: 'Picked it up again: the fix is merged into develop and the fast suite is green. Nothing more to do.' });
   request('w2', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'unclear' }, sessionIds: ['s2'], updatedAt: ago(48) });
   worker('s2', { status: 'stopped', lastActivityAt: ago(60), lastResult: 'The fix is merged into develop. Nothing more to do.' });
+  request('w3', { status: 'stalled', stalled: { at: ago(48), kind: 'idle', reason: 'no activity' }, sessionIds: ['s3'], updatedAt: ago(48) });
+  worker('s3', { status: 'stopped', lastActivityAt: ago(10), lastResult: 'Picked it up again: the fix is merged into develop. Nothing more to do.\nDONE: w3' });
   world.prs = [];
   await sweep.run();
-  assert.equal(get('w1').status, 'done');
-  assert.match(get('w1').autoClosed!.text, /its worker's final report says it is delivered/);
+  assert.equal(get('w1').status, 'stalled', 'a report without a DONE closes nothing');
+  assert.deepEqual(world.resumed.map((r) => r.id), ['s1'], 'its worker is asked for its DONE');
+  assert.equal(get('w3').status, 'done');
+  assert.match(get('w3').autoClosed!.text, /its worker's final report says it is delivered/);
   assert.equal(get('w2').status, 'stalled', 'its report was read before it stalled: a person decides');
 });
 
@@ -1272,7 +1302,7 @@ test('w731: a reopened request closes on a PR opened after the reopen that merge
   // The worker opens the colour fix's PR and it merges; the old PR is still listed.
   const now = new Date().toISOString();
   world.prs = [pr(1, { body: 'Request: w1', createdAt: ago(50), mergedAt: ago(40) }), pr(2, { body: 'Request: w1', createdAt: now, mergedAt: now })];
-  worker('s1', { status: 'idle', lastResult: 'Merged the colour fix.' });
+  worker('s1', { status: 'idle', lastActivityAt: now, lastResult: 'Merged the colour fix.\nDONE: w1' });
   assert.deepEqual(await sweep.checkPrs(), ['w1']);
   const w = get('w1');
   assert.equal(w.status, 'done');
@@ -1285,7 +1315,7 @@ test('w731: a request reopened twice counts only what came after its latest reop
   await reopen();
   const first = new Date().toISOString();
   world.prs = [pr(2, { body: 'Request: w1', createdAt: first, mergedAt: first })];
-  worker('s1', { status: 'idle' });
+  worker('s1', { status: 'idle', lastActivityAt: first, lastResult: 'Fixed.\nDONE: w1' });
   assert.deepEqual(await sweep.checkPrs(), ['w1'], 'the first reopen: its new PR closes it');
   await new Promise((r) => setTimeout(r, 5));
   const ben = o.personalFor(BEN);
@@ -1300,7 +1330,7 @@ test('w731: a request reopened twice counts only what came after its latest reop
   // A PR after the second reopen closes it.
   const later = new Date().toISOString();
   world.prs.push(pr(3, { body: 'Request: w1', createdAt: later, mergedAt: later }));
-  worker('s1', { status: 'idle' });
+  worker('s1', { status: 'idle', lastActivityAt: later, lastResult: 'Fixed on the Deck too.\nDONE: w1' });
   assert.deepEqual(await sweep.checkPrs(), ['w1']);
   assert.deepEqual(get('w1').prs?.map((p) => p.number), [3]);
 });
@@ -1366,4 +1396,181 @@ test('w1076: a request taken over by another person is resumed at once when its 
   await sweep.run();
   assert.equal(get('w2').status, 'stalled');
   assert.match(get('w2').stalled!.reason, /limit has not reset yet/);
+});
+
+// ---------------------------------------------------------------- w1870: never closed on an errored turn
+
+/** Events at the end of a worker's transcript (its last turn), as the store keeps them. */
+function lastTurn(dir: string, sessionId: string, at: string, events: { kind: 'error' | 'system' | 'result' | 'tool_result'; text: string }[]) {
+  const file = path.join(dir, 'transcripts', `${sessionId}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const lines = events.map((e, i) =>
+    e.kind === 'result' ? { seq: 5000 + i, t: at, kind: 'result', ok: false, text: e.text, costUsd: 0, turns: 1, durationMs: 1 } : e.kind === 'tool_result' ? { seq: 5000 + i, t: at, kind: 'tool_result', toolUseId: `x${i}`, isError: true, text: e.text } : { seq: 5000 + i, t: at, ...e },
+  );
+  fs.appendFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+}
+
+test('w1870: the w1829 case (a fixture): the dispatcher interrupted its worker and queued it for BEAST; its merged, deployed PRs no longer close it, and its placing is left to the dispatcher', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t, {}, Date.parse(W1829_AT.closed));
+  request('w1829', { ...W1829_REQUEST, requestedBy: LOTH, requesters: [LOTH] });
+  worker('17e0097f', { ...W1829_WORKER, requestedBy: LOTH });
+  world.prs = W1829_PRS.map((p) => pr(p.number, { repo: p.repo, body: 'Request: w1829', createdAt: '2026-10-23T07:00:00.000Z', mergedAt: p.at, sha: p.sha }));
+  world.portal = W1829_PORTAL;
+  for (const sha of Object.values(W1829_MERGES)) world.ancestors.add(`${sha}:${W1829_PORTAL}`);
+  assert.deepEqual(await sweep.checkPrs(), [], 'not closed: before w1870 this pass closed it, "merged as #556 …; deployed since: the portal runs 3f30ecd"');
+  const w = get('w1829');
+  assert.equal(w.status, 'queued');
+  assert.equal(w.autoClosed, undefined);
+  assert.deepEqual(world.resumed, [], 'an interrupt is no error: nothing resumes it on LothDesktop');
+  assert.equal(w.errorHandled?.['17e0097f']?.how, 'left');
+  assert.match(w.log.join('\n'), /not closed by the ledger cleanup \(w1870\): worker 17e0097f: its turn was interrupted on purpose \(error_during_execution\); the request is queued: the dispatcher places it again/);
+  const lines = w.log.length;
+  await sweep.checkPrs();
+  await sweep.run();
+  assert.equal(get('w1829').status, 'queued');
+  assert.equal(get('w1829').log.filter((l) => /w1870/.test(l)).length, 1, 'recorded once');
+  assert.ok(get('w1829').log.length <= lines + 1);
+});
+
+test('w1870: the merged-PR close and the deploy close, on an errored last turn: not closed, the worker resumed with the error and the done criteria, then escalated to its person and an operator on the same error', async (t) => {
+  const { dir, request, worker, pr, world, sweep, get, store } = setup(t);
+  const brief = 'Make the belts fast.\n\nDone when:\n- the belt test passes\n- a clip shows it';
+  request('w1', { sessionIds: ['s1'], brief, requestedBy: LOTH, requesters: [LOTH] });
+  worker('s1', { lastResult: 'stopped: error_during_execution', lastResultAt: ago(1), lastActivityAt: ago(1), requestedBy: LOTH });
+  lastTurn(dir, 's1', ago(1), [{ kind: 'error', text: 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}' }, { kind: 'result', text: 'stopped: error_during_execution' }]);
+  // The deploy close: the same with this app's PR and a portal that runs it.
+  request('w2', { sessionIds: ['s2'], brief: 'Fix the queue, then deploy the portal.', requestedBy: LOTH, requesters: [LOTH] });
+  worker('s2', { lastResult: 'stopped: error_during_execution', lastResultAt: ago(1), lastActivityAt: ago(1), requestedBy: LOTH });
+  world.prs = [pr(11, { body: 'Request: w1' }), pr(12, { repo: APP, body: 'Request: w2', sha: 'c'.repeat(40) })];
+  world.portal = 'd0d0d0d';
+  world.ancestors.add(`${'c'.repeat(40)}:d0d0d0d`);
+  assert.deepEqual(await sweep.checkPrs(), []);
+  for (const id of ['w1', 'w2']) assert.notEqual(get(id).status, 'done', id);
+  assert.deepEqual(world.resumed.map((r) => r.id).sort(), ['s1', 's2']);
+  const msg = world.resumed.find((r) => r.id === 's1')!.text;
+  assert.match(msg, /^\[ledger cleanup\] Your last turn on w1 "Fix w1" ended in an error, and the request is not closed: its last turn ended in error_during_execution: API Error: 500/);
+  assert.match(msg, /What it is done when \(from its brief\):\n- the belt test passes\n- a clip shows it/);
+  assert.match(msg, /then end with a line `DONE: w1`/);
+  assert.equal(get('w1').errorHandled?.s1?.resumes, 1);
+  assert.match(get('w1').log.at(-1)!, /the ledger cleanup resumed worker s1 instead of closing it \(merged as #11 /);
+  // Nothing more while that turn is the latest.
+  await sweep.checkPrs();
+  assert.equal(world.resumed.length, 2);
+  // The resumed turn ends in the same error: escalated, not resumed again.
+  store.putSession({ ...store.sessions.get('s1')!, lastResultAt: ago(0.5), lastActivityAt: ago(0.5) });
+  lastTurn(dir, 's1', ago(0.5), [{ kind: 'error', text: 'API Error: 500 Internal server error' }, { kind: 'result', text: 'stopped: error_during_execution' }]);
+  assert.deepEqual(await sweep.checkPrs(), []);
+  assert.equal(world.resumed.length, 2, 'not resumed a second time for the same error');
+  const w = get('w1');
+  assert.equal(w.status, 'question', 'waiting on input');
+  assert.equal(w.flag?.kind, 'error');
+  assert.deepEqual(w.flag?.for.map((r) => r.userId), ['lothsahn', 'ben'], 'its person and an operator');
+  assert.match(w.flag!.text, /What failed: its last turn ended in error_during_execution.*the same error came back after the cleanup resumed it/);
+  assert.match(w.flag!.text, /Last error lines:\n(- .*\n)*- API Error: 500 Internal server error\n/);
+  assert.match(w.flag!.text, /What was tried: the ledger cleanup resumed worker s1 once/);
+  assert.match(w.flag!.text, /The one step needed: /);
+  assert.deepEqual([...(w.needsYou?.to ?? [])].sort(), ['ben', 'lothsahn'], 'both get it as [needs you]');
+  assert.equal(workLiveAll([w], { session: (id) => store.sessions.get(id), now: NOW }).get('w1')?.state, 'waiting');
+  // Still not closed on later passes, and not escalated twice.
+  await sweep.checkPrs();
+  await sweep.run();
+  assert.equal(get('w1').status, 'question');
+  assert.equal(get('w1').log.filter((l) => /escalated by the ledger cleanup/.test(l)).length, 1);
+});
+
+test('w1870: an error only a person can clear (a permission) is escalated at once; a refused DONE whose worker errored since is not closed on the merge', async (t) => {
+  const { dir, request, worker, pr, world, sweep, get } = setup(t);
+  request('w1', { sessionIds: ['s1'] });
+  worker('s1', { lastResult: 'stopped: error_during_execution', lastResultAt: ago(2), lastActivityAt: ago(2) });
+  lastTurn(dir, 's1', ago(2), [{ kind: 'tool_result', text: 'remote: Permission to Final-Factory/ff-factory.git denied: refusing to allow a Personal Access Token to create or update workflow without `workflows` permission' }, { kind: 'result', text: 'stopped: error_during_execution' }]);
+  // A DONE refused while its PR was open; the PR merged since, but the worker's later turn errored.
+  request('w2', { sessionIds: ['s2'], done: { s2: { at: ago(6), report: 'DONE: w2' } }, prs: [{ repo: REPO, number: 22, state: 'open', via: 'line' }] });
+  worker('s2', { lastResult: 'stopped: error_during_execution', lastResultAt: ago(2), lastActivityAt: ago(2) });
+  world.prs = [pr(21, { body: 'Request: w1' }), pr(22, { body: 'Request: w2' })];
+  assert.deepEqual(await sweep.checkPrs(), []);
+  assert.equal(get('w1').flag?.kind, 'error');
+  assert.match(get('w1').flag!.text, /it needs a permission, which only a person can give/);
+  assert.deepEqual(world.resumed.map((r) => r.id), ['s2'], `w1 is not resumed into the same refusal; w2 is resumed\n${get('w2').log.join('\n')}`);
+  assert.notEqual(get('w2').status, 'done');
+});
+
+test('w1870: the full pass and "worker reported delivered" on an errored turn, and the dispatcher\'s close: none closes; the dispatcher\'s close also waits for the DONE', async (t) => {
+  const { request, worker, sweep, get, o, world } = setup(t);
+  request('w1', { sessionIds: ['s1'], updatedAt: ago(5) });
+  worker('s1', { lastResult: 'stopped: error_max_turns', lastResultAt: ago(5), lastActivityAt: ago(5) });
+  await sweep.run();
+  assert.equal(get('w1').status, 'active');
+  assert.deepEqual(world.resumed.map((r) => r.id), ['s1']);
+  assert.throws(() => o.decide({ id: 'w1', action: 'done', note: 'looks finished' }), /w1 is not closed as done: its latest worker s1's last turn ended in an error: its last turn ended in error_max_turns/);
+  request('w2', { sessionIds: ['s2'] });
+  worker('s2', { lastResult: 'All done, the PR merged.' });
+  assert.throws(() => o.decide({ id: 'w2', action: 'done', note: 'merged' }), /its latest worker s2's last report is not a DONE for w2/);
+  worker('s2', { lastResult: 'All done, the PR merged.\nDONE: w2' });
+  o.decide({ id: 'w2', action: 'done', note: 'merged' });
+  assert.equal(get('w2').status, 'done');
+  // A request no worker worked on still closes on the dispatcher's word.
+  request('w3');
+  o.decide({ id: 'w3', action: 'done', note: 'nothing to do' });
+  assert.equal(get('w3').status, 'done');
+});
+
+test('w1870: an interrupt on a request nobody placed again goes to the dispatcher to place, once; a fresh error is left a few minutes; a session that cannot resume gets a fresh worker', async (t) => {
+  const { request, worker, pr, world, sweep, get, o } = setup(t);
+  const told: string[] = [];
+  t.mock.method(o, 'toDispatcher', (text: string) => void told.push(text));
+  request('w1', { sessionIds: ['s1'] });
+  worker('s1', { lastResult: 'stopped: error_during_execution', lastResultAt: ago(1), lastActivityAt: ago(1), stoppedOnPurpose: true, machineId: 'm3', machineSandbox: 'slot1' });
+  request('w2', { sessionIds: ['s2'] });
+  worker('s2', { lastResult: 'stopped: error_during_execution', lastResultAt: ago(0.05), lastActivityAt: ago(0.05) });
+  world.prs = [pr(11, { body: 'Request: w1' }), pr(12, { body: 'Request: w2' })];
+  assert.deepEqual(await sweep.checkPrs(), []);
+  assert.deepEqual(world.resumed, [], 'neither is resumed: an interrupt is placed by the dispatcher, a fresh error waits');
+  assert.equal(get('w1').errorHandled?.s1?.how, 're-placed');
+  assert.match(get('w1').log.join('\n'), /worker s1 on m3\/slot1 was stopped on purpose mid-turn .*; the dispatcher is told to place it again/);
+  await until('the dispatcher hears', () => told.some((x) => /RE-PLACE \(w1870\): worker s1 on m3\/slot1 was stopped on purpose mid-turn/.test(x)), 5000);
+  assert.equal(get('w2').errorHandled, undefined);
+  await sweep.checkPrs();
+  assert.equal(get('w1').log.filter((l) => /the dispatcher is told to place it again/.test(l)).length, 1, 'once');
+  // A session that cannot be resumed: a fresh worker through the dispatcher.
+  request('w3', { sessionIds: ['s3'] });
+  worker('s3', { lastResult: 'stopped: error_during_execution', lastResultAt: ago(1), lastActivityAt: ago(1) });
+  world.prs.push(pr(13, { body: 'Request: w3' }));
+  (sweep as unknown as { d: { resume: () => void } }).d.resume = () => {
+    throw new Error('no such session');
+  };
+  await sweep.checkPrs();
+  assert.equal(get('w3').errorHandled?.s3?.how, 're-placed');
+  assert.match(get('w3').log.join('\n'), /its session cannot be resumed, so the dispatcher is told to start a fresh worker/);
+  assert.notEqual(get('w3').status, 'done');
+});
+
+test('w1870: an escalation is answered like any question: a note clears it and the request is open for its worker again', async (t) => {
+  const { dir, request, worker, pr, world, sweep, get, o } = setup(t);
+  request('w1', { sessionIds: ['s1'] });
+  worker('s1', { lastResult: 'stopped: error_during_execution', lastResultAt: ago(2), lastActivityAt: ago(2) });
+  lastTurn(dir, 's1', ago(2), [{ kind: 'error', text: 'Not logged in · Please run /login' }]);
+  world.prs = [pr(11, { body: 'Request: w1' })];
+  await sweep.checkPrs();
+  assert.equal(get('w1').flag?.kind, 'error');
+  assert.match(get('w1').flag!.text, /it needs a login/);
+  const ben = o.personalFor(BEN);
+  ben.lastFrom = 'human';
+  o.update(ben, { id: 'w1', note: 'Logged in again on m3.' });
+  assert.equal(get('w1').flag, undefined);
+  assert.notEqual(get('w1').status, 'question');
+  assert.notEqual(get('w1').status, 'done');
+});
+
+test('w1870: the last worker ending after another said DONE (w434) does not close the request when its own last turn ended in an error', async (t) => {
+  const { request, worker, get, o } = setup(t);
+  request('w1', { sessionIds: ['s1', 's2'], done: { s1: { at: ago(3), report: 'DONE: w1' } } });
+  worker('s1', { status: 'stopped', lastResult: 'My part is in.\nDONE: w1', lastResultAt: ago(3), lastActivityAt: ago(3) });
+  worker('s2', { status: 'stopped', lastResult: 'stopped: error_during_execution', lastResultAt: ago(1), lastActivityAt: ago(1) });
+  o.workerEnded({ id: 's2' });
+  assert.equal(get('w1').status, 'active');
+  assert.match(get('w1').log.at(-1)!, /worker s2 ended; its other workers said DONE, but it stays open: its own last turn ended in an error \(its last turn ended in error_during_execution\) \(w1870\)/);
+  // Ending after a normal turn still closes it on the other worker's DONE.
+  worker('s2', { status: 'stopped', lastResult: 'Looked at the docs; nothing to add.', lastResultAt: ago(0.5), lastActivityAt: ago(0.5) });
+  o.workerEnded({ id: 's2' });
+  assert.equal(get('w1').status, 'done');
 });

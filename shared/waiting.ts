@@ -1,7 +1,7 @@
 // The requests that wait on a person (w1228), for the Dispatcher page's "Waiting on input" tab: what each one is, what is
 // asked, whose move it is, how long it has waited, and FF Factory's read of it. A pure function over the ledger and the
 // live states (shared/workState.ts), so the sidebar, the phone's bell and the tab all count the same items.
-import { WORK_OPEN, type OpenAsk, type SessionInfo, type WorkItem } from './types.ts';
+import { FLAG_LABEL, WORK_OPEN, type OpenAsk, type SessionInfo, type WorkItem } from './types.ts';
 import { openAsksOf, sameAsk, sameWords } from './waitSummary.ts';
 import type { WorkLive } from './workState.ts';
 
@@ -64,7 +64,7 @@ export function describe(w: WorkItem, live: WorkLive): { ask: WaitingAsk; text: 
     };
   }
   if (w.question) return { ask: 'answer', text: `The dispatcher asks: ${w.question.text}`, since: w.question.at };
-  if (w.flag) return { ask: 'answer', text: `A design question: ${w.flag.text}`, since: w.flag.at };
+  if (w.flag) return { ask: 'answer', text: `${FLAG_LABEL[w.flag.kind]}: ${w.flag.text}`, since: w.flag.at };
   return { ask: 'check', text: live.why, since: w.updatedAt };
 }
 

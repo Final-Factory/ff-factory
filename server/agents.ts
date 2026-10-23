@@ -36,7 +36,7 @@ import { MachineRollout, timedRunText } from './machineRollout.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
-import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, parseSandboxRef, poolSettingsOf, sameCommit } from './machines.ts';
+import { MAIN_CLONE_NO_AGENTS, agentCap, machineDir, noTimedRunsOf, parseSandboxRef, poolSettingsOf, sameCommit } from './machines.ts';
 import { JOIN_TTL_MINUTES } from './machineJoin.ts';
 import { searchTranscripts } from './search.ts';
 import { CATALOG, questionsShape } from './launch.ts';
@@ -46,11 +46,11 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomNow, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, forPriority, hasRoom, holdReason, liveOf, lowestPriority, minOf, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomNow, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, pauseHolds } from './machinePause.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager, type TurnEndMeta } from './sessions.ts';
-import { WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
+import { FLAG_LABEL, WORK_BLOCKER_KINDS, WORK_OPEN, WORK_PRIORITIES, type WorkBlockerKind, type WorkSource, type BenchPriority, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import { REVIEW_DEFAULTS, type ReviewStore } from './review.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
@@ -2937,6 +2937,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         // Its timed legs, running or waiting (w1628): a release build goes to another build computer meanwhile.
         ...(st?.benchQueue ? { benchQueue: st.benchQueue } : {}),
         ...(m.platform ? { platform: m.platform } : {}),
+        // It takes no timed runs (w1861): timed work goes elsewhere.
+        ...(noTimedRunsOf(m) ? { noTimedRuns: noTimedRunsOf(m) } : {}),
       });
     }
     return out;
@@ -2998,6 +3000,11 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   private placeNote(on: string | undefined, kind: NeedKind = 'game', workflows?: { person: string | undefined }, live: boolean | FirstKind = false, priority?: WorkPriority): string {
     // Read for the request's priority now (w1643): a computer placement.minPriority reserves above it counts as held for it.
     return on ? (placementHint(on, workflows ? this.placesFor(workflows.person) : this.places(), this.lastPlaced, forPriority(this.placement(), priority), this.review?.root, kind, !!workflows, live) ?? '') : '';
+  }
+
+  /** The refusal for timed or exclusive-lock work pinned to a computer that takes none (w1861, w1872; placement.ts timedPinRefusal). */
+  private timedPinProblem(on: string | undefined, t: TimedKind | false): string | undefined {
+    return on && t ? timedPinRefusal(on, this.places(), this.placement(), t) : undefined;
   }
 
   /** places() for one person's work (w1463): a machine where their runs get a vault GitHub token counts as able to push workflow files. */
@@ -3110,6 +3117,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             const branch = sandboxBranchFor(w?.source, a.name, a.branch);
             const on = a.machine ?? this.defaultSandboxMachine();
             if (!on) throw new Error('give machine: the portal holds no sandboxes of its own (w510); list_machines shows the machines with a sandbox_root');
+            const timedPin = this.timedPinProblem(on.toLowerCase(), timedKind(needsTimed(w)));
+            if (timedPin) throw new Error(timedPin);
             // Read before it is made: the new sandbox would count as in use (w416).
             const hint = this.placeNote(on.toLowerCase(), w?.needs ?? 'game', undefined, needsLive(w) ? 'live' : needsBuild(w) ? 'build' : timedKind(needsTimed(w)), w?.priority);
             const made = await this.machines.createSandbox(on, { name: a.name, branch, base: a.base, startUnity: a.start_unity, seedLibrary: a.seed_library });
@@ -3213,6 +3222,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             // A computer reserved for higher work (w1643, placement.minPriority) takes no new work below its level.
             const reserved = this.reservedProblem(this.machineOf(a.sandbox, a.machine), w);
             if (reserved) throw new Error(reserved);
+            // Timed or exclusive-lock work pinned to a computer that takes none goes back to the caller (w1861, w1872).
+            const timedPin = this.timedPinProblem(this.machineOf(a.sandbox, a.machine), timedKind(needsTimed(w, a.prompt)));
+            if (timedPin) throw new Error(timedPin);
             // The title is the job (w575): "wNNN: <description>", checked before anything starts. Without a work_id the
             // start is recorded as the next request, so its id is known now too.
             if (ctx.role === 'dispatcher' && !a.title?.trim()) throw new Error(TITLE_HELP);
@@ -3948,6 +3960,7 @@ ${w.repo ?? ''}
           library_seed: z.string().optional().describe('Absolute path of a warm Library folder new sandboxes are seeded from first (else the main clone\'s, else a sandbox\'s). Omitted: kept; "": cleared.'),
           library_seed_copy: z.enum(['robocopy', 'clone']).optional().describe('How a Windows machine copies the seed: "clone" block-clones on a ReFS Dev Drive (seed and sandboxes on one volume), "robocopy" copies. Omitted: kept.'),
           unity_below_normal: z.boolean().optional().describe('Start its sandbox editors at below-normal priority, so a game played on that computer wins. Omitted: kept.'),
+          no_timed_runs: z.string().max(300).optional().describe('Why this computer takes no timed runs (w1861: benchmarks, perf A/Bs, probes), quoting who asked: its bench queue refuses a timing ticket and placement sends timed work elsewhere. "" clears it (m5 has one by default). Omitted: kept.'),
           local: z
             .boolean()
             .optional()
@@ -4013,6 +4026,7 @@ ${w.repo ?? ''}
             librarySeed: a.library_seed === '' ? '' : a.library_seed === undefined ? undefined : machineDir(a.library_seed, 'library_seed'),
             librarySeedCopy: a.library_seed_copy,
             unityBelowNormal: a.unity_below_normal,
+            noTimedRuns: a.no_timed_runs,
             local: a.local,
             force: a.force,
             workerInstall: a.worker_install,
@@ -4960,7 +4974,7 @@ ${this.worldBrief(true)}
 - One session per request (w740, Lothsahn and Ben): related work stays in the session that did the earlier work, unrelated work gets a fresh one (workers have no auto-compaction; stale context costs on every turn). start_agent always starts a NEW session, into a FREE sandbox (w1089: refused for a sandbox another request's agent occupies, and past max_agents_per_sandbox; a \`[ledger] Capacity may have freed\` ping can be minutes old, so look again just before you start; work that needs no editor and no game tree may sit beside another agent on purpose with extra_agent: true, which never switches its branch, w1607). message_agent with a work_id for a worker not on that request: the server sends a RELATED request (it names one of the worker's requests in related_ids, is about its PR or branch, or the overlap check calls it a match: a fix for a regression it just shipped, its feature's next step, a correction to its PR) to that session, and starts a NEW session in the same sandbox for an unrelated one (the default when nothing ties them), whose first message carries the brief, the request as filed, the branch state and the related requests (read with read_work); the old session stops once it has nothing in hand, never mid-turn. When it is ambiguous, pass session "same" or "new" with session_reason (one plain line; recorded in the reply and the log). Updates to a request (notes, answers, follow-ups, resumes) go to the session already on it: message_agent with the same work_id, never a new session. decide_work merge is for a duplicate; link is for a direct follow-up of what a worker is on, refused for an unrelated request while it has another in hand. **One person per session** (w1076: lothsahn's w1072, sent into Ben's worker, ran on Ben's Claude pool and stopped on Ben's limit): a request never goes into a session holding another person's open request, because a session runs on its requests' person's tokens; message_agent then starts a new session there (even with session "same"), a request already in such a session moves out on its next message_agent, and link is refused. To restart a request somewhere fresh (its session stopped on a usage limit, say), message_agent with its work_id, session "new" and a session_reason.
 - Titles (w575): each time you hand a worker a request, give \`title\`: the job in a few plain words for a person scanning the dashboard ("LothDesktop fresh install, sandboxes slot1..6"), not the request's title cut short; the request id goes in front by itself. start_agent always takes one; message_agent with a work_id needs one when the worker is not on that request yet; decide_work link takes one for the workers it links. set_agent_title renames a worker otherwise.
 - Sandbox labels are their names (slot1..N on a worker root) and never change; nobody sets them. A sandbox is free when list_sandboxes marks it FREE; what it is doing is its agents' titles. A worker stopped with its check-in more than ${RELEASE_AFTER_MS / 60_000} min away, its request over, ${HOLD_PLACE_MS / 60_000} min after its daemon restarted under it, or by FF Factory after ${RELEASE_AFTER_MS / 60_000} min Idle with nothing pending releases a clean sandbox (w640, w656): it shows FREE and the worker's line says "its sandbox is released"; new work there is switched to a fresh branch first, and the worker is placed again when it resumes (its own sandbox if still free, else another free one on its machine, on its branch). A sandbox "spoken for" is a resuming worker's: never new work there.
-- Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the Capacity block's last line (list_sandboxes, system_status) says, "Next new game-repo work: <computer> (why)", even when a sandbox elsewhere is free. That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Every worker runs in a sandbox (w536): start_agent with a machine alone is refused, and a machine without a sandbox_root takes no workers. Posting as Max does not pin a computer (post_as_max, w901). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. **Work that needs no Unity editor goes by agent slot alone** (w1098, lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): a request on another repo than the game's (FF Factory, FFBox, the ff-agents plugin; its list_work line says "needs an agent slot only", set at filing from its repo) goes where the Capacity block's "Next non-game work: <computer> (why)" says, in any sandbox with an agent seat (a free one first, else beside another request's agent with start_agent extra_agent: true, never past max_agents_per_sandbox: it works in its own clone in its temp folder), whatever the editors or RAM. It still respects the computer's agent cap, the person's own Claude pool (a held pool queues the worker's first prompt) and holds and avoids, and one queued while an allowed computer has an agent slot is flagged WRONG like game work; check the guessed repo in the log of one whose repo was not set. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. Live view, urgent release and timed work go by "Next Live view work" / "Next urgent release work" / "Next timed work" (w1600, w1606, w1628: a worker's own build gets no BEAST preference; timed work: small computers first, BEAST last); stop_agent move_to moves a waiting one there; build_plan clears one for an urgent release. start_agent and create_sandbox add a note when new work goes elsewhere than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / avoid / live / build / minPriority (null clears).
+- Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the Capacity block's last line (list_sandboxes, system_status) says, "Next new game-repo work: <computer> (why)", even when a sandbox elsewhere is free. That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Every worker runs in a sandbox (w536): start_agent with a machine alone is refused, and a machine without a sandbox_root takes no workers. Posting as Max does not pin a computer (post_as_max, w901). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. **Work that needs no Unity editor goes by agent slot alone** (w1098, lothsahn, 2026-10-12: "FFBox and FF Factory updates don't need unity editors"): a request on another repo than the game's (FF Factory, FFBox, the ff-agents plugin; its list_work line says "needs an agent slot only", set at filing from its repo) goes where the Capacity block's "Next non-game work: <computer> (why)" says, in any sandbox with an agent seat (a free one first, else beside another request's agent with start_agent extra_agent: true, never past max_agents_per_sandbox: it works in its own clone in its temp folder), whatever the editors or RAM. It still respects the computer's agent cap, the person's own Claude pool (a held pool queues the worker's first prompt) and holds and avoids, and one queued while an allowed computer has an agent slot is flagged WRONG like game work; check the guessed repo in the log of one whose repo was not set. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. Live view, urgent release and timed work go by "Next Live view work" / "Next urgent release work" / "Next timed work" (w1600, w1606, w1628: a worker's own build gets no BEAST preference; timed or exclusive-lock work, w1872: that line's ranking is the default, unless a machine is named: smallest first, BEAST last, never a computer that takes no timed runs (m5), where a pin is refused back to you: pick another, or ask an operator); stop_agent move_to moves a waiting one there; build_plan clears one for an urgent release. start_agent and create_sandbox add a note when new work goes elsewhere than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / avoid / live / build / minPriority (null clears).
 - Machines are fixed by the harness, never by a person: \`read_rules machines\` before you act on a request for work in a machine's main clone (w936: never handed back to a person, and the grant is a field, never brief text), on a machine change that needs its installer rerun or a daemon update (w855: never a question for a person; w605: never a drain or a wait; after a verified deploy FF Factory updates the daemons itself, w887), or on low disk (w626, w896: machine_cleanup, then a clean-up worker that deletes only inside the worker install folder; never ask anyone to free space).
 - Nobody reads this chat by default: do not write status reports for people. Act, and let the tools record it. When the owner writes here, answer with a one-line plain-language TL;DR, then detail only if useful, with request, sandbox and session ids. Your messages render as Markdown: \`![what it shows](<absolute path>)\` shows an image from a sandbox or a machine inline, and a \`\`\`mermaid block renders as a diagram.
 `.trim();
@@ -5222,7 +5236,7 @@ function intakeLines(w: WorkItem): string {
     w.triage ? `${decided ? 'Triage at filing' : 'Triage'}: ${w.triage.class} (${w.triage.reason})` : '',
     w.approval ? `Approval: ${w.approval.state}${approvedBy}${w.approval.why && w.approval.why !== w.triage?.reason ? ` (${w.approval.why})` : ''}` : '',
     w.autoClosed ? `Closed automatically: ${w.autoClosed.text}` : '',
-    w.flag ? `Design question for ${names(w.flag.for)}: ${w.flag.text}` : '',
+    w.flag ? `${FLAG_LABEL[w.flag.kind]} for ${names(w.flag.for)}: ${w.flag.text}` : '',
     delivery ? `Delivery: ${delivery}` : '',
     w.ffbox ? `FFBox: ${w.ffbox.state} (${w.ffbox.class}, request ${w.ffbox.requestId}${w.ffbox.conversation ? `, conversation ${w.ffbox.conversation}` : ''}${w.ffbox.branch ? `, branch ${w.ffbox.branch}` : ''}${w.ffbox.reason ? `, ${w.ffbox.reason}` : ''})` : '',
   ]
