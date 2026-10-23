@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { answerAfter, asksAPerson, holdsOf, liveCounts, personWaitIn, personWaitSettled, questionShareKey, reportWaitKey, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
+import { answerAfter, asksAPerson, benchWaitOf, holdsOf, lastOpenLine, liveCounts, outsideWaitOf, ownWorkWait, personWaitIn, personWaitSettled, questionShareKey, reportWaitKey, requestWaitOf, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
 import type { Requester, SessionInfo, WorkItem } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-05T06:00:00Z');
@@ -511,4 +511,135 @@ test('w1812: questionShareKey: one declaration is one key; report lines are one 
   const [a, b] = circuits({ notes: [BEN_ANSWER] }, { notes: [{ ...BEN_ANSWER, at: ago(0.5), text: 'and L on the keyboard' }] });
   assert.deepEqual(answerAfter([a, b], Date.parse(ago(6)), ['Ben']), { on: 'w1768', by: 'Ben', at: ago(0.5), note: 'and L on the keyboard' });
   assert.equal(answerAfter([a, b], Date.parse(ago(0.2)), ['Ben']), undefined);
+});
+
+// ---------------------------------------------------------------- w1841: Stalled is only what nothing will move
+// Ben, 2026-10-23, on six requests his Stalled filter showed: "why are these stalled?". Each case below is one of them, with
+// the words its worker wrote.
+
+const BENCH: WorkLiveFacts['benchLock'] = (m) => (m === 'beast' ? { owner: 'beast pid 4121 lothsahn w1739 timed run (/f/ffw/sandboxes/slot2)', since: ago(0.5) } : undefined);
+
+test('w1841 (a): a worker an urgent release build paused is Blocked on that build, not Stalled; one paused between turns with nothing to bring it back is left as it was', () => {
+  // w1475 and w1768 while w1836's 1.0.0.10 build held BEAST: told to pause mid-turn, they ended their turn with no status line.
+  const w = item('w1475', { sessionIds: ['83aa4ecd'], prs: [{ repo: 'Final-Factory/FinalFactory', number: 1924, state: 'open' }] });
+  const s = session('83aa4ecd', { status: 'idle', lastActivityAt: ago(0.2), lastResult: "I've paused for the urgent release build on BEAST (w1606, the dispatcher's hotfix build after 1.0.0.9 for w1836).", machineId: 'beast', machineSandbox: 'slot4' });
+  const hold = { what: 'the 1.0.0.10 urgent release (Build 10, w1836)', machine: 'beast', told: true };
+  assert.equal(one(w, [s])?.state, 'stalled', 'the bug: no hold known, Stalled');
+  const l = workLive(w, { ...facts([w], [s]), buildHold: (id: string) => (id === '83aa4ecd' ? hold : undefined) })!;
+  assert.deepEqual([l.state, l.waitsOn], ['blocked', ['the build on beast (the 1.0.0.10 urgent release (Build 10, w1836))']]);
+  assert.match(l.why, /^83aa4ecd paused for the 1\.0\.0\.10 urgent release .* on beast; FF Factory tells it to carry on when the build is done$/);
+  // Paused between turns (not told) with a check-in: Blocked too, as the build holds the check-in. With nothing: as before.
+  const between = { ...hold, told: false };
+  const withCheckIn = session('83aa4ecd', { status: 'idle', machineId: 'beast', wakeAt: new Date(NOW + 20 * 60_000).toISOString(), wakeNote: 'record the clips' });
+  assert.equal(workLive(w, { ...facts([w], [withCheckIn]), buildHold: () => between })?.state, 'blocked');
+  assert.equal(workLive(w, { ...facts([w], [s]), buildHold: () => between })?.state, 'stalled', 'nothing brings it back: the build is not what it waits on');
+  // Mid-turn it is Working, build or not.
+  assert.equal(workLive(w, { ...facts([w], [session('83aa4ecd', { status: 'running' })]), buildHold: () => hold })?.state, 'working');
+});
+
+test('w1841 (a): a report that waits on a bench lock a timed run holds is Blocked on that lock, check-in or not; a free lock is no wait', () => {
+  const report = "w1475: still open: waiting on BEAST's bench lock (w1739's timed runs) for the player builds; then raid clip take 13, the UI tour and the balance runs.";
+  assert.equal(benchWaitOf(report), 'beast');
+  assert.equal(benchWaitOf('w1: still open: the editor waits on the bench lock'), '');
+  assert.equal(benchWaitOf('w1: still open: waiting on Ben to look'), undefined);
+  const w = item('w1475', { sessionIds: ['83aa4ecd'] });
+  const idle = session('83aa4ecd', { status: 'idle', lastResult: report, machineId: 'beast' });
+  const l = workLive(w, { ...facts([w], [idle]), benchLock: BENCH })!;
+  assert.deepEqual([l.state, l.waitsOn], ['blocked', ["beast's bench lock"]]);
+  assert.match(l.why, /^83aa4ecd waits on beast's bench lock \(held since 30 min ago: beast pid 4121 lothsahn w1739 timed run/);
+  // Its check-in does not make it Working while the lock is held (a gate, w754); a free lock leaves it to its check-in.
+  const polling = session('83aa4ecd', { status: 'idle', lastResult: report, machineId: 'beast', wakeAt: new Date(NOW + 30 * 60_000).toISOString(), wakeNote: 'bench' });
+  assert.equal(workLive(w, { ...facts([w], [polling]), benchLock: BENCH })?.state, 'blocked');
+  assert.equal(workLive(w, { ...facts([w], [polling]), benchLock: () => undefined })?.state, 'working');
+  assert.equal(workLive(w, { ...facts([w], [idle]), benchLock: () => undefined })?.state, 'stalled', 'a free lock: Agents.resumeBenchWaits tells it');
+  // A line naming no machine is read on the worker's own.
+  const w2 = item('w2', { sessionIds: ['a'] });
+  const own = session('a', { status: 'idle', lastResult: 'w2: still open: waiting for the bench lock before the timed leg', machineId: 'beast/slot2' });
+  assert.equal(workLive(w2, { ...facts([w2], [own]), benchLock: BENCH })?.state, 'blocked');
+});
+
+test('w1841 (b): a wait on the reporter or a player through FFBox is Waiting on input on them, marked outside, not Stalled', () => {
+  // w1778 as it was: worker d373b21a stopped 3 h ago with this line.
+  const line = 'w1778: still open: waiting on the reporter Reteoteigam to answer in the Discord thread (when the asteroid vanished, whether rejoining brings it back); FFBox passes the answer on.';
+  assert.equal(outsideWaitOf(line), 'the reporter Reteoteigam');
+  assert.equal(outsideWaitOf('w1: still open: waiting on the player to send their save'), 'the player');
+  assert.equal(outsideWaitOf('w1: still open: waiting on Ben to answer in the Discord thread', ['Ben']), undefined, 'a person of the team named first is a person');
+  assert.equal(outsideWaitOf('w1: still open: waiting on Reteoteigam to answer in the Discord thread', ['Ben']), 'Reteoteigam');
+  const notes = [{ at: ago(2.5), by: 'Ben', text: 'Ask the reporter through FFBox when it vanished and whether rejoining brings it back.' }];
+  const w = item('w1778', { sessionIds: ['5abef826', 'd373b21a'], requestedBy: BEN, requesters: [BEN], notes });
+  const first = session('5abef826', { status: 'stopped', lastActivityAt: ago(4), lastResult: 'w1778: still open: d373b21a runs the Linux (RADV) catch-up test on biscuit.' });
+  const second = session('d373b21a', { status: 'stopped', lastActivityAt: ago(2), lastResultAt: ago(2), lastResult: `Asked FFBox to post the question.\n\n${line}` });
+  const l = one(w, [first, second])!;
+  assert.deepEqual([l.state, l.waitsOn, l.outside, l.worker], ['waiting', ['the reporter Reteoteigam'], true, 'd373b21a']);
+  assert.match(l.why, /^d373b21a waits on the reporter Reteoteigam to answer through FFBox and Discord/);
+  // A declaration naming the reporter is outside too; one on Ben stays a person's.
+  const declared = session('d373b21a', { status: 'idle', waitingOn: { who: 'Reteoteigam (the reporter)', what: 'answer in the Discord thread when the asteroid vanished', at: ago(1) } });
+  assert.deepEqual([one(w, [first, declared])?.state, one(w, [first, declared])?.outside], ['waiting', true]);
+  assert.equal(one(w, [first, session('d373b21a', { status: 'idle', waitingOn: { who: 'Ben', what: 'pick a fix', at: ago(1) } })])?.outside, undefined);
+});
+
+test('w1841 (c): a wait on a person counts whichever worker of the request said it; a note another worker took up does not settle it', () => {
+  // w1782 as it was: ac694f80 asked Ben to pick item 3's fix; Ben's later notes went to 8ef702f6 (item 2, the reopen), which
+  // reported after them. The ledger said "Stalled (8ef702f6 stopped 2 h ago, nothing waits on a person)".
+  const notes = [
+    { at: ago(2.2), by: 'Ben', text: "Ben's answer on the Japanese recipe tooltip (PR #2239): merge it and make red counts easier to read." },
+    { at: ago(1.1), by: 'Ben', text: "Reopened. Item 3 is still open: worker ac694f80 is waiting on Ben's pick of fix." },
+  ];
+  const w = item('w1782', { sessionIds: ['8ef702f6', 'ac694f80'], requestedBy: BEN, requesters: [BEN], notes });
+  const asker = session('ac694f80', { status: 'stopped', lastActivityAt: ago(3.8), lastResultAt: ago(3.8), lastResult: 'w1782: still open: waiting on Ben to pick the Stay Separate fix (item 3)' });
+  const otherLine = "Done on my side.\n\nw1782: still open: item 3 (the Stay Separate stations) is with worker ac694f80, waiting on Ben's pick; items 1, 2, 5 and 6 are finished on my side.";
+  const other = session('8ef702f6', { status: 'stopped', lastActivityAt: ago(0.5), lastResultAt: ago(0.5), lastResult: otherLine });
+  assert.deepEqual([one(w, [other, asker])?.state, one(w, [other, asker])?.waitsOn], ['waiting', ['Ben']]);
+  // "Ben's pick" reads as a wait on Ben; and with 8ef702f6 silent on it, ac694f80's own wait stands.
+  assert.equal(personWaitIn(otherLine, 'w1782', ['Ben'])?.who, 'Ben');
+  const quiet = session('8ef702f6', { status: 'stopped', lastActivityAt: ago(0.5), lastResultAt: ago(0.5), lastResult: 'Done on my side.' });
+  assert.equal(one(w, [quiet, asker])?.worker, 'ac694f80');
+  // Another worker's answered [needs you] does not settle it either.
+  const answered: WorkItem = { ...w, needsYou: { key: 'report:8ef702f6:x', kind: 'report', question: 'OK the tooltip', who: ['Ben'], to: ['ben'], at: ago(3), worker: '8ef702f6', previews: [], prs: [], answered: { by: 'Ben', at: ago(2.2) } } };
+  assert.equal(one(answered, [quiet, asker])?.worker, 'ac694f80');
+  // One worker alone: a note after its question still settles it (w1504).
+  const alone = item('w9', { sessionIds: ['ac694f80'], requestedBy: BEN, requesters: [BEN], notes });
+  assert.notEqual(one(alone, [session('ac694f80', { ...asker, lastResult: 'w9: still open: waiting on Ben to pick the fix' })])?.state, 'waiting');
+});
+
+test('w1841 (c): a worker that went on to other work keeps what it last said about this request, read from the log', () => {
+  const log = [
+    '02:13 wrap-up from worker ac694f80: w1782: still open: waiting on Ben to pick the Stay Separate fix (item 3); PR #2245 (item 4) to merge on green CI',
+    '02:15 worker ac694f80: w1782: still open: waiting on Ben to pick the Stay Separate fix (item 3)',
+    "02:15 [needs you] sent to ben's orchestrator: pick how to fix pasted mobile stations",
+  ];
+  const w = item('w1782', { sessionIds: ['ac694f80'], requestedBy: BEN, requesters: [BEN], log });
+  const moved = session('ac694f80', { status: 'idle', lastResult: 'w1796: still open: CI on PR #2280' });
+  assert.deepEqual(lastOpenLine(w, moved, NOW), { line: 'w1782: still open: waiting on Ben to pick the Stay Separate fix (item 3)', logged: true, at: Date.parse('2026-10-05T02:15:00Z') });
+  const l = one(w, [moved])!;
+  assert.deepEqual([l.state, l.waitsOn, l.worker], ['waiting', ['Ben'], 'ac694f80']);
+  assert.match(l.why, /^ac694f80's last report on it says a person must act/);
+  // Anything about that worker after it in the log (a message sent to it, an answer passed on) supersedes it.
+  const later = item('w1782', { ...w, log: [...log, '03:50 ben: note: picked B; answers the [needs you] question: sent to its worker ac694f80, which resumes with it'] });
+  assert.equal(lastOpenLine(later, moved, NOW), undefined);
+  assert.notEqual(one(later, [moved])?.state, 'waiting');
+});
+
+test('w1841 (d): a worker waiting on the orchestrator for its own work stays Stalled, and the line says it is its own work', () => {
+  const line = 'w1685: still open: waiting on the orchestrator to run the two-machine check `MP-W1685-black-hole-swallow-2p` (black-hole swallow, two peers) on a Windows or Linux pair, then the merge of PR #2254';
+  assert.equal(ownWorkWait(line), true);
+  assert.equal(ownWorkWait('w1: still open: waiting on the dispatcher to start a worker on biscuit for the RADV run'), false, "a second machine's worker is the dispatcher's");
+  assert.equal(ownWorkWait('w1: still open: waiting on Ben to run the check'), false);
+  const w = item('w1685', { sessionIds: ['d582a5da'], prs: [{ repo: 'Final-Factory/FinalFactory', number: 2254, state: 'open' }] });
+  const l = one(w, [session('d582a5da', { status: 'idle', lastResult: line })])!;
+  assert.equal(l.state, 'stalled');
+  assert.match(l.why, /^d582a5da says it waits on the orchestrator: ".*"; that is its own work \(pair and two-machine checks, builds, its CI\): tell it to run it$/);
+});
+
+test("w1841 (e): a worker waiting on files from another request's worker is Blocked on that request while it is open", () => {
+  const line = "w1818: still open: needs the w1761 Calculations window stills with their census files, and a reference window's still and census, as attachments; then the proof run, the PR and the merge";
+  assert.equal(requestWaitOf(line, 'w1818'), 'w1761');
+  assert.equal(requestWaitOf('w1818: still open: the proof run, then the PR', 'w1818'), undefined);
+  assert.equal(requestWaitOf('w1818: still open: needs w1818 stills', 'w1818'), undefined, 'not itself');
+  const w = item('w1818', { sessionIds: ['b45c63e0'] });
+  const s = session('b45c63e0', { status: 'stopped', lastResult: line });
+  const l = one(w, [s], [item('w1761')])!;
+  assert.deepEqual([l.state, l.waitsOn], ['blocked', ['w1761']]);
+  assert.match(l.why, /^b45c63e0 waits on w1761: "w1818: still open: needs the w1761 Calculations window stills/);
+  assert.equal(one(w, [s], [item('w1761', { status: 'done' })])?.state, 'stalled', 'a closed request is no blocker');
 });

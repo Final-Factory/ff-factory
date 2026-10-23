@@ -1006,8 +1006,13 @@ LothDesktop and Beast, not just when BEAST is full").
     minutes is a killed run's and does not count) and the Capacity line shows "its bench lock is held since HH:MMZ (owner):
     a timed run". While it is held, a worker on Live view work there is refused `unity start`/`restart` and `live_view
     start` with "Not now (w1600)" and waits (wake_me) for the lock: a Live view editor in play mode takes CPU and GPU the
-    run measures, and a lower process priority would still share the GPU, so it waits rather than run lower. Other editors
-    are the bench's own quiet gate's business.
+    run measures, and a lower process priority would still share the GPU, so it waits rather than run lower.
+  - **The exclusive turn closes the rest** (w1829, lothsahn: "When the exclusive lock is held, only that worker should
+    be running. Players, editors, and other work should shutdown to allow for proper timing"). While another worker's
+    exclusive ticket holds the lock, the daemon closes every other sandbox's editor (saved through the editor, never
+    killed) and asks every other worker's player to quit, refuses Unity MCP calls into a closed editor with why, and
+    starts the editors again in the next shared turn when the ticket goes, also when its holder is killed or overdue
+    (`machine/benchTurn.ts`; docs/unity-lifecycle.md, "The exclusive turn").
   - **No players or clips beside a timed run** (w1750, lothsahn: "Why is the game player running if the worker has an
     exclusive lock on beast?"). While another worker's granted exclusive ticket holds a machine's lock, the shell guard
     refuses a command that starts a built player by its slot path or grabs the screen with ffmpeg, naming the holder and

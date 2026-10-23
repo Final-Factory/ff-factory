@@ -180,6 +180,33 @@ held up. Tests: `server/unitySlots.test.ts`, the w469 tests in `server/machineSa
 can't deadlock"). On BEAST a player build ran beside a held bench lock and its holder's quiet gate never passed, a worker
 took over a live 40-minute-old lock, and waiters polled with no order.
 
+**Turn limits** (w1832, enforced by the queue itself, `bench_queue.py` `Queue._enforce_limits`, "TURN LIMITS"; lothsahn,
+2026-10-23: "The harness should let workers run with the exclusive lock for at most 30 minutes. They should get a warning
+at 25 minutes"; "Both preemptions should be controlled in the worker harness, not in memory, and should not occur if
+there's no other workers waiting in line"; "When exclusive lock work shows up, it should get scheduled 1 hour after the
+last shared lock work started... And if that was a long time ago, all workers should always get a 5 minute warning"):
+
+- An exclusive turn lasts 30 minutes while another worker's ticket waits behind it; with nobody waiting it goes on. A
+  waiter arriving past the 30 minutes gives it 5 more. Once a timed leg waits, the running shared group ends an hour after
+  its newest ticket started (5 minutes from then at the soonest). A worker's own waiting ticket never ends its own turn.
+- Every holder is warned 5 minutes before: its helper prints it in the holder's command output, and the daemon reports it
+  with its stats (`machine/benchWarnings.ts`, `benchWarnings`) so the portal messages the worker once per deadline
+  (`server/benchWarnings.ts`), with its checkout's uncommitted files and unpushed commits and the ask to commit and push
+  its work-in-progress branch now (lothsahn: "Workers should be encouraged to push their uncommitted work at the warning
+  threshold so they can be scheduled on other machines"). At the deadline the ticket is revoked and the script, command
+  and players under it are stopped; a re-request goes to the back of the queue. A waiter that leaves drops the deadline.
+- Exempt, by marks only the portal writes in `priorities.json` (`BenchPriority.exempt`, `Agents.benchPriorities`): the
+  urgent release lane's builder (`release`, `BuildPlans.releaseBuilder`) and the scheduled nightly's worker (`nightly`, a
+  request of source kind `nightly-run`). A machine whose agent cap is 1 (`Machines.singleWorker`, `agentCap`; lothsahn:
+  "If a machine has only one worker it always runs in exclusive mode and never gets preempted", "I mean a machine that
+  only hosts a single worker") gets `single_worker` and no limits at all. The file carries `v: 2`; a queue reading an
+  older daemon's file honours a pre-empt ticket as before.
+- An urgent release warns every holder, the nightly included (lothsahn: "Yes, an urgent release kicks the nightly off
+  too; it reruns later"), takes them off 5 minutes later, goes ahead of the whole queue and has no cap.
+- Exclusive only for exact timings or the whole machine (lothsahn: "request an exclusive lock if and only if they need
+  the machine or exact timings. Otherwise they should use a shared lock"): an exclusive ticket names its reason
+  (`bench_lock --timing|--machine`, `--reason`, `unity-slot run --bench exclusive --bench-reason`); shared is the default.
+
 The queue is the game repo's `scripts/bench/bench_queue.py` (its `Documentation/Bench-Lock.md` has the design, the
 deadlock rules and a test per case). A timed bench leg takes an `exclusive` ticket; a build, a batch compile or an
 editor boot a `shared` one, which runs beside other shared ones but never beside an exclusive one. The order (w1628):
@@ -214,9 +241,67 @@ A checkout without `bench_queue.py` (a branch from before w1615) takes its ticke
 script (`sandboxBenchQueueScript`, w1628: the queue is its files, not its code); with none on the machine, or without
 python, it goes ahead without a ticket and logs why.
 
-**Still not covered** (w1628): an editor's own refresh when its window gets focus (Unity's Auto Refresh), play mode
-started from the editor, and scripts that start Unity inside a script file the guard does not read. The game repo's
-`quiet` gate waits for them before a leg starts, but one that starts mid-leg can still spoil it.
+**Not covered by the tickets alone** (w1628): an editor's own refresh when its window gets focus (Unity's Auto Refresh),
+play mode started from the editor, and an editor or player that was already running. The exclusive turn below closes them.
+
+## The exclusive turn: nothing else runs beside a timed run (w1829)
+
+**Why** (lothsahn, 2026-10-23: "When the exclusive lock is held, only that worker should be running. Players, editors, and
+other work should shutdown to allow for proper timing"; "The locking should be a positive control that manages the worker
+and it's slots"). The tickets kept new builds, boots, compiles and tests out of a timed leg, but editors already open in
+other sandboxes kept going: on LothDesktop, w1785's legs (worker dec9a619) saw two of them use 5.9 and 2.7 cores, so the
+game repo's `quiet` gate never opened, workers timed with `NOGATE=1`, and one Just Play exe measured 27.4 fps quiet and 12
+to 15 fps busy.
+
+**What** (`machine/benchTurn.ts` `BenchTurn`, the daemon looks every 5 s). While a granted, unrevoked exclusive ticket whose
+helper lives holds the machine (`machine/benchLock.ts` `timedHolder`; past its 30-minute turn too while nobody waits,
+w1832), the daemon:
+
+- **closes every other sandbox's editor** that is up, the way an idle Live view's closes (`machine/liveIdle.ts`
+  `idleCloseEditor`, w1746): it leaves play mode, saves the open scenes and the assets through the editor, then quits it.
+  One that compiles or imports, or has an untitled scene with unsaved changes, is left and tried again every 30 s; one
+  that does not quit is left running. Nothing is killed, and the editor watch never takes an editor it told to quit for
+  hung while it goes quiet (`machine/unity.ts` `expectExit`, kept per editor pid). One that comes up during the turn (a
+  start that did not queue) is closed too. The sandbox is marked (`benchClosed` in `sandboxes.json`, with the ticket and
+  the editor's pids) before the quit is sent, and its line in `list_sandboxes`, `unity status` and the sandbox panel says
+  `closed for a timed run on <machine>/<sandbox> (<request>); reopens when it ends (by HH:MMZ at the latest)`.
+- **asks every other worker's game player to quit**, the way a person closes it: `taskkill /PID` without `/F` on
+  Windows (its window's close; a window-less player cannot be asked and is left), SIGTERM elsewhere. A single-player
+  game normally saves as it quits (the game repo's `SaveGameManager.WaitForSaveBeforeQuit`); a multiplayer game and an
+  automation run (`-ffAutomationRole`) do not (`QuitAutosave.Decide`), so the worker is told the test it was part of is
+  void. One still running is asked again after 2 minutes, never forced. A player is a worker's when it has a player
+  slot or a worker session (`machine/leftovers.ts`); a person's own game has neither and is left. Each pid is checked
+  in a fresh process listing right before it is asked (the leftovers' list can be a minute old). A holder with no
+  worker session (a person's own timed run) asks no player to quit: the bench scripts start the measured player with
+  `--detach`, so it has no parent to tell it from the others by.
+- **refuses Unity MCP calls into a closed editor** (the guard, `benchClosed`, from `<root>/tmp/bench.queue/closed.json`)
+  with why and when it comes back, so a worker mid-turn knows instead of waiting on a bridge that is gone. Its shell and
+  other tools keep running. A worker whose player was asked to quit, or whose editor came back, hears it at the start of
+  its next message (`[bench turn] ...`).
+- **holds the rest as before**: `unity start` queues (a shared ticket), builds, batch compiles and the editor's compiles,
+  imports and tests wait for their shared turn, and the guard refuses new players and screen grabs (w1750).
+
+Never touched: the holder's own sandbox (its ticket's `FF_SANDBOX_ID`), any process under the ticket's owner (its
+script's peer editor or player), its session's players, an editor the pool does not own (a person's own project, the
+main clone) and a player with no slot or session.
+
+**After the turn.** When the ticket goes (released, its holder killed, which ends its helper within a second or two,
+revoked at its turn's deadline once a worker waits (w1832), or the next exclusive ticket granted before a look saw the lock free), every editor it closed starts
+again with `unity start`: it takes a shared ticket, so it comes back in the next shared turn, never beside the next
+timed leg, and the panel shows its place. The holder's own sandbox is never kept closed for its own run. The mark stays
+until the editor runs again, so a start that fails or is not made at its turn (no Unity slot, low disk) is asked for
+again every 30 s; after 3 starts that never ran (an editor that crashes at boot) it is left stopped and its worker told.
+A `unity stop` asked for is the last word: the turn does not start that editor again. An editor still quitting under
+the turn keeps its mark and is not closed a second time. The marks survive a daemon restart, which reopens them at its
+first look.
+
+**Keep the turn short.** Every other sandbox's editor closes and reopens around each exclusive ticket, so a timed leg
+takes it only around the timing itself: build, stage and warm up under a shared ticket (or none), take the exclusive
+one right before the measured part, and give it back as soon as the numbers are written. The queue alternates on a busy
+machine (one exclusive ticket, then the waiting shared group, within a priority; the game repo's
+`scripts/tests/test_bench_queue_order.py`), and the editors closed for one ticket come back in the shared turn after it, so a long A/B of many short tickets interleaves with the others' work.
+
+Tests: `server/benchTurn.test.ts`, the w1829 cases in `server/machineSandboxes.test.ts` and `server/macUnity.test.ts`.
 
 ## Orphaned and hung batch builds are ended (w791)
 

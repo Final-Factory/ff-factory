@@ -545,6 +545,36 @@ export interface MachineStats extends HostStats {
 export interface BenchPriority {
   priority: WorkPriority;
   requests: string[];
+  /**
+   * The work the bench queue never pre-empts (w1832; lothsahn: "Let's avoid preempting urgent release builds and the
+   * nightly"): `release`, the urgent release lane's builder (BuildPlans.releaseBuilder); `nightly`, the worker of the
+   * scheduled nightly run (a request filed by the portal's nightly schedule, source kind nightly-run). Set by the portal
+   * only: the game repo's bench_queue.py reads it from priorities.json, keyed by the session a ticket carries
+   * (FF_SESSION_ID, or FF_BENCH_SESSION for the nightly), so a worker has no flag to mark its own job; only a ticket
+   * taken under another session's id would carry that session's mark.
+   */
+  exempt?: 'release' | 'nightly';
+}
+
+/**
+ * A holder's turn warning (w1832): the game repo's bench_queue.py set a deadline on its ticket because another worker
+ * waits, and warned it five minutes before (the ticket's limit.json). The daemon reports each with its stats; the portal
+ * messages the worker once per deadline (server/benchWarnings.ts).
+ */
+export interface BenchWarning {
+  ticket: string;
+  session: string;
+  mode: 'shared' | 'exclusive';
+  what: string;
+  /** When its turn ends (epoch ms), and why (bench_queue.py's words). */
+  deadline: number;
+  why: string;
+  /** Set by an urgent release taking the machine (it cannot be waited out). */
+  release?: boolean;
+  /** Its checkout's state when the daemon read it: uncommitted files, commits not pushed (undefined: no upstream). */
+  dirty?: number;
+  unpushed?: number;
+  branch?: string;
 }
 
 /**
@@ -2262,9 +2292,11 @@ export interface NightlyRelease {
  * anything else from players or FFBox, which nobody works until a reviewer approves or answers; person: a reviewer or
  * operator asked for it themselves; follow-up: the server's own release follow-up; regression: a scripted oracle of
  * the team's own nightly e2e lab failed (no players' text); ffbox-desync: an FFBox desync diagnosis or its ffbox/* PR,
- * reviewed and merged under the desync PR policy (server/intakeRules.ts DESYNC_PR_POLICY; Lothsahn, 2026-10-04).
+ * reviewed and merged under the desync PR policy (server/intakeRules.ts DESYNC_PR_POLICY; Lothsahn, 2026-10-04);
+ * ffbox-crash: an FFBox crash or hang diagnosis or its ffbox/* PR, worked and merged under the crash-fix policy
+ * (CRASH_FIX_POLICY; lothsahn, 2026-10-23, w1827).
  */
-export type WorkTriageClass = 'obvious-bug' | 'needs-human' | 'person' | 'follow-up' | 'regression' | 'ffbox-desync';
+export type WorkTriageClass = 'obvious-bug' | 'needs-human' | 'person' | 'follow-up' | 'regression' | 'ffbox-desync' | 'ffbox-crash';
 
 export interface WorkTriage {
   class: WorkTriageClass;
@@ -2367,6 +2399,8 @@ export interface IntakeSummary {
     autoApprove: { enabled: boolean; maxPerDay: number };
     /** The FFBox desync PR policy (w358): such PRs are approved at once, at most maxPerDay a day. Optional for an older page. */
     desync?: { enabled: boolean; maxPerDay: number };
+    /** The FFBox crash-fix policy (w1827): crash and hang diagnoses are approved at once, at most maxPerDay a day. Optional for an older page. */
+    crash?: { enabled: boolean; maxPerDay: number };
   };
   release: { enabled: boolean; delayMinutes: number; lastVersion?: string; checkedAt?: string };
   /** The nightly e2e lab's regressions (config intake.nightly); optional for a page from before it existed. */
@@ -2401,6 +2435,16 @@ export interface AppVersion {
   sha?: string;
   /** The web UI build the server serves now (server/webStatic.ts); a page that loaded another reloads. Absent from older servers. */
   web?: string;
+}
+
+/**
+ * A worker an urgent release's build paused (w1841, server/buildPlans.ts): the build, its computer, and whether it was asked
+ * to pause mid-turn (told: the build's done tells it to carry on) or paused between turns (its own next message resumes it).
+ */
+export interface BuildHold {
+  what: string;
+  machine: string;
+  told: boolean;
 }
 
 export interface AppState {
@@ -2439,6 +2483,8 @@ export interface AppState {
   heldRoom?: { id: string; why: string; for: ('game' | 'agent')[] }[];
   /** Computers with room that placement.minPriority reserves for higher work (w1643), with their lowest priority: a request at that level may use them. */
   reservedRoom?: { id: string; min: 'normal' | 'high' | 'urgent'; for: readonly ('game' | 'agent')[] }[];
+  /** The workers an urgent release's build paused (w1841, server/buildPlans.ts pausedFor), by session id: their requests show Blocked on it. */
+  buildHolds?: Record<string, BuildHold>;
   /** Discord and FFBox intake into the ledger (docs/intake.md); absent from a server older than this field. */
   intake?: IntakeSummary;
   /** The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): its switches and its last run. */
@@ -2473,6 +2519,13 @@ export interface LiveViewInfo {
   updatedAt: string;
   /** Frames the portal has passed on since the view started. */
   frames: number;
+  /**
+   * Why its computer takes no work now, while it does (w1838): a release build, a timed run's bench lock, a pause. The
+   * editor of a view that is not streaming cannot start meanwhile (shared/liveReady.ts says so on the badge and the panel).
+   */
+  hold?: string;
+  /** A person opened it while it was not streaming and its worker was asked to stage it again (w1838): who and when. */
+  wake?: { at: string; who: string };
 }
 
 /** One knob: a material's shader property (the game's look.material.list). */

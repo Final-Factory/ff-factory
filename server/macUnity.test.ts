@@ -143,6 +143,36 @@ test('mac unity: a restart never takes a game player, another project, Unity Hub
   assert.match(out, /left running what it started that is not part of it: the FinalFactory app \(pid 13\)/);
 });
 
+test('w1829: unity watch: an editor told to quit (a bench turn or idle close) is never taken for hung and restarted while it goes quiet', async () => {
+  const { world, editor, u } = fakeMac();
+  const reports: string[] = [];
+  let up = true;
+  const w = new MacUnityWatch(u, (t) => reports.push(t), {
+    logStat: () => ({ size: 1, mtimeMs: 0 }),
+    logTail: () => '',
+    bridge: () => ({ port: 6400, reloading: false }),
+    ping: async () => up,
+    now: () => world.now,
+    displayAsleep: async () => false,
+    listDialogs: async () => ({ dialogs: [] }),
+  });
+  editor(100);
+  assert.equal(await w.tick(), 'ok');
+  w.expectExit(10 * 60_000); // the save and quit is sent; its bridge goes silent as it exits
+  up = false;
+  for (let i = 0; i < 9; i++) {
+    world.now += 60_000;
+    assert.equal(await w.tick(), 'ok');
+  }
+  assert.deepEqual(reports, []);
+  assert.equal(world.killed.length, 0, 'never stopped by force');
+  // Past the expected window, the same silent editor is judged again (its silence counted from then).
+  world.now += 2 * 60_000;
+  assert.equal(await w.tick(), 'ok');
+  world.now += 11 * 60_000;
+  assert.equal(await w.tick(), 'restarted');
+});
+
 test('mac unity watch: an idle or throttled editor is not hung; App Nap is turned off at launch', async () => {
   const { world, editor, u } = fakeMac();
   const reports: string[] = [];

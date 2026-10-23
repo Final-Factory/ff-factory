@@ -81,6 +81,8 @@ export interface IdleCloseResult {
   saved: string[];
   /** What happened, for the log and the portal: "closed ..." or "skipped: ...". */
   text: string;
+  /** Not closed yet, but it took the save and quit and is still going (w1829: it may yet go, so its mark stays). */
+  quitting?: boolean;
 }
 
 /** How long it waits for play mode to end, and for the process to go after the quit (never a kill after either). */
@@ -123,7 +125,7 @@ export async function idleCloseEditor(d: IdleCloseDeps, minutes: number): Promis
   const savedText = saved.length ? `saved ${saved.join(', ')} and the assets first` : 'nothing unsaved in its scenes; assets saved';
   const until = d.now() + QUIT_WAIT_MS;
   while ((await d.editorPids()).length) {
-    if (d.now() >= until) return { closed: false, saved, text: `skipped: asked to quit (${savedText}), it still runs after ${QUIT_WAIT_MS / 1000} s; left running, never killed` };
+    if (d.now() >= until) return { closed: false, quitting: true, saved, text: `skipped: asked to quit (${savedText}), it still runs after ${QUIT_WAIT_MS / 1000} s; left running, never killed` };
     await d.sleep(2000);
   }
   return { closed: true, saved, text: `closed (${savedText})` };

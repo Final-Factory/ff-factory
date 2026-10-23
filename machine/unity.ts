@@ -596,6 +596,8 @@ export class MacUnityWatch {
   private logSize = -1;
   private logGrewAt = 0;
   private expectedUntil = 0;
+  /** The editor told to quit (expectExit): it is never judged hung or restarted while it quits (w1829). */
+  private expectedPid = 0;
   private restarts: { at: string }[] = [];
   private gaveUpAt = 0;
   private busy = false;
@@ -684,6 +686,7 @@ export class MacUnityWatch {
   /** A stop or restart asked for through the tool: the editor going away is not a crash. */
   expectExit(ms = 5 * 60_000) {
     this.expectedUntil = this.d.now() + ms;
+    this.expectedPid = this.pid;
   }
 
   /** One look. Returns what it did (for tests); never throws. */
@@ -728,6 +731,12 @@ export class MacUnityWatch {
       this.safeModeClosed = undefined;
     }
     const dialogOpen = await this.dialogs(pid, now);
+    // w1829: an editor told to quit (a bench turn's or an idle close's save and quit, a stop) goes quiet as it exits; a
+    // restart then would stop it by force and start another, so it is left to quit.
+    if (pid === this.expectedPid && now < this.expectedUntil) {
+      this.dialogRestart = undefined;
+      return 'ok';
+    }
     if (this.dialogRestart) {
       const why = this.dialogRestart;
       this.dialogRestart = undefined;

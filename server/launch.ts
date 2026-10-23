@@ -6,6 +6,7 @@ import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
 import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchGate.ts';
 import { foreignTimedHold } from '../machine/benchLock.ts';
+import { closedRefusalFor } from '../machine/benchTurn.ts';
 import { standingGuard } from './standingGuard.ts';
 import { publicIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
@@ -145,6 +146,7 @@ export const CATALOG = {
   /** docs/orchestrators.md, "Waiting, Queued, Blocked" (w754): the worker says its request waits only on other requests or pull requests. */
   blocked_on: {
     requests: z.array(z.string().max(16)).max(6).optional().describe('Requests ("w727") that must close as done first. A request often closes later than its pull request merges: to wait for a merge, name the pull request in prs.'),
+    reports: z.array(z.string().max(16)).max(6).optional().describe('Requests ("w1761") whose worker must report first: files, stills or results it makes for you (w1841). Clears when that worker reports next, or when the request closes.'),
     prs: z.array(z.string().max(200)).max(6).optional().describe('Pull requests that must MERGE first: "owner/repo#123" or the github.com link.'),
     head: z.string().max(64).optional().describe('With a ci: pull request (w907): the commit you just pushed (git rev-parse HEAD). FF Factory refuses the wait when the pull request\'s head is another commit (your push did not land) or the pull request conflicts with its base (CI cannot run).'),
     deploys: z.array(z.string().max(40)).max(2).optional().describe('Deploys that must happen first (w890): "portal" for a portal deploy, or a machine id for that machine\'s daemon update. It clears when a different commit runs there; you are resumed then, in any free sandbox, for the check that comes after it.'),
@@ -352,6 +354,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       env: agentEnv,
       // w1750: no player or screen grab beside another worker's timed run; the worker's own session passes.
       ...(g.workerRoot ? { benchBusy: () => foreignTimedHold(g.workerRoot, agentEnv.FF_SESSION_ID) } : {}),
+      // w1829: no Unity MCP call into an editor another worker's timed run closed; it says why and when it comes back.
+      ...(g.workerRoot ? { benchClosed: () => closedRefusalFor(g.workerRoot, g.id) } : {}),
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];

@@ -6833,6 +6833,31 @@ button.board-head-link:hover {
   color: var(--text-2);
 }
 
+/* w1838: a view that waits on a person's worker or an editor (grey: stopped, closed) reads quieter than one about to come back. */
+.lv-hold.lv-tone-grey {
+  border-color: var(--border-2);
+}
+
+.lv-hold.lv-tone-grey .lv-hold-title {
+  color: var(--text);
+}
+
+/* Since w1838 the title is a sentence that may wrap: its mark sits on the first line. */
+.lv-hold-title {
+  align-items: flex-start;
+  line-height: 1.4;
+}
+
+.lv-hold-title > .dot {
+  flex: none;
+  margin-top: calc((1.4em - 8px) / 2);
+}
+
+.lv-hold-title > .spinner {
+  flex: none;
+  margin-top: calc((1.4em - 12px) / 2);
+}
+
 .lv-hold-note {
   font-size: var(--fs-sm);
   color: var(--text-2);

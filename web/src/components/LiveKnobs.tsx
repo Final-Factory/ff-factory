@@ -237,9 +237,11 @@ interface Lane {
  * final value; one request is in flight per knob, so an answer never lands behind a newer one and a stale value is never
  * queued: while it flies, only the newest value waits. The slider follows the hand at once (draft) and settles on what the
  * game answered; a refused move shows its reason under the knob and snaps back. `liveNow`: the view streams; a new play
- * session (it goes live again) reads the knobs again.
+ * session (it goes live again) reads the knobs again. While it is not live (w1838) nothing is read: the game cannot answer, and
+ * each material showed in red "Could not read this material: the game is not running in play mode" over a view whose editor
+ * was stopped; the panel says once, calmly, that the knobs come back with the view.
  */
-export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; liveNow: boolean; onMoved?: (text: string) => void }) {
+export function LiveKnobs({ sessionId, liveNow, materials, onMoved }: { sessionId: string; liveNow: boolean; materials?: string[]; onMoved?: (text: string) => void }) {
   const [mats, setMats] = useState<LiveMaterialKnobs[] | null>(null);
   const [loadError, setLoadError] = useState<string>();
   const [draft, setDraft] = useState<Record<string, Value>>({});
@@ -261,11 +263,9 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
     }
   }, [sessionId]);
 
-  const first = useRef(true);
   useEffect(() => {
-    // A view that is holding cannot answer: read once when the page opens, then again each time it goes live.
-    if (!first.current && !liveNow) return;
-    first.current = false;
+    // A view that is not live cannot answer: read each time it goes live (and when the page opens on a live one).
+    if (!liveNow) return;
     lanes.current.forEach((l) => clearTimeout(l.timer));
     lanes.current.clear();
     setDraft({});
@@ -292,10 +292,10 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
   // A material the game cannot read yet (it loads when first drawn) is read again until it answers.
   const unreadable = !!mats?.some((m) => m.error);
   useEffect(() => {
-    if (!unreadable) return;
+    if (!unreadable || !liveNow) return;
     const t = setInterval(() => void load(), REREAD_MS);
     return () => clearInterval(t);
-  }, [unreadable, load]);
+  }, [unreadable, liveNow, load]);
 
   const find = (material: string, name: string) => matsRef.current?.find((m) => m.material === material)?.knobs.find((k) => k.name === name);
 
@@ -387,6 +387,19 @@ export function LiveKnobs({ sessionId, liveNow, onMoved }: { sessionId: string; 
     }
   };
 
+  if (!liveNow) {
+    return (
+      <div className="lv-note" data-testid="live-knobs-wait">
+        {materials?.length ? (
+          <>
+            <span className="mono">{materials.join(', ')}</span>: {materials.length > 1 ? 'their' : 'its'} knobs come back when the view is live (the game reads them).
+          </>
+        ) : (
+          'The knobs come back when the view is live (the game reads them).'
+        )}
+      </div>
+    );
+  }
   if (!mats) {
     return loadError ? (
       <div className="lv-note lv-err" role="alert">

@@ -37,7 +37,7 @@
 //   work off the machine".
 // - build_plan done (or PLAN_MAX_MS past due, or its builder's requests all closed) ends it: the hold lifts, the queued
 //   resumes go, and each worker paused mid-turn is told to carry on.
-import type { BenchLock, BenchQueueReport, SessionInfo, WorkItem } from '../shared/types.ts';
+import type { BenchLock, BenchQueueReport, BuildHold, SessionInfo, WorkItem } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { benchText, timedText } from './placement.ts';
 import { gaveUpNotice, RELEASE_SANDBOX, SEAT_GIVE_UP_MS, seatedNotice, type Seat } from './releaseSeat.ts';
@@ -211,6 +211,26 @@ export class BuildPlans {
     return `${p.machine} is ${this.holdWhy(p).replace(/: no new work until it is done$/, '')}: this worker was paused for it and resumes when it is done (w1606)`;
   }
 
+  /**
+   * The build that paused this worker (w1841): its requests show Blocked on it (shared/workState.ts). From the clearing until
+   * done; told: asked to pause mid-turn, so done tells it to carry on.
+   */
+  pausedFor(sessionId: string): BuildHold | undefined {
+    return this.pausedAmong([sessionId])[sessionId];
+  }
+
+  /** pausedFor for each of these workers a build paused, by session id (the page's live states, AppState.buildHolds). */
+  pausedAmong(ids: Iterable<string>): Record<string, BuildHold> {
+    const out: Record<string, BuildHold> = {};
+    const plans = [...this.plans.values()].filter((p) => p.clearedAt).map((p) => ({ p, paused: new Set(p.paused) }));
+    if (!plans.length) return out;
+    for (const id of ids) {
+      const x = plans.find((y) => y.p.told[id] !== undefined || y.paused.has(id));
+      if (x) out[id] = { what: x.p.what, machine: x.p.machine, told: x.p.told[id] !== undefined };
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- the tool
 
   /** Mark a request as build work (WorkItem.build): it is placed on placement.build first from then on. */
@@ -305,14 +325,17 @@ export class BuildPlans {
     const took = p.startedAt ? `${mins(this.now() - p.startedAt)} min` : 'never started';
     const resumed: string[] = [];
     for (const id of Object.keys(p.told)) {
-      if (!this.d.isLive(id) && !this.d.workersOn(p.machine).some((s) => s.id === id)) continue;
+      // w1841: also one placed again on another computer since (its sandbox went to other work while it waited): it still
+      // holds the work it paused, and nothing else brings it back.
+      if (!this.d.isLive(id) && !this.d.workersOn(p.machine).some((s) => s.id === id) && !this.d.openRequestsOf(id).length) continue;
       this.d.tell(id, `[FF Factory] The build on ${p.machine} is done (w1606): carry on where you stopped, in this conversation and sandbox. Start your editor again if you need it (mcp__machine__unity start).`);
       resumed.push(id);
     }
     // The Live views left open (w1639): their heavy work may start again.
     for (const k of p.kept) {
       if (!this.d.isLive(k.session) && !this.d.workersOn(p.machine).some((s) => s.id === k.session)) continue;
-      this.d.tell(k.session, `[FF Factory] The build on ${p.machine} is done (w1639): compiles, tests and builds may start again.`);
+      // w1838: its editor may have stopped meanwhile (it could not start beside the build), and its view holds until it is staged.
+      this.d.tell(k.session, `[FF Factory] The build on ${p.machine} is done (w1639): compiles, tests and builds may start again. If your Live view is not streaming (live_view status), start your editor (mcp__machine__unity start) and stage it again now: a person may be waiting to use it.`);
     }
     this.d.kick?.();
     this.d.log(`build: ${p.what} on ${p.machine} done (${why}); build ${took}; ${p.moved.length} moved, ${resumed.length} resumed, ${idleOf(p).length} paused between turns resume with their own next message`);
@@ -447,6 +470,8 @@ export class BuildPlans {
           continue;
         }
         const live = this.d.isLive(s.id);
+        // w1841: a worker that ended long ago and holds no open request is nobody to pause (the 1.0.0.10 build listed 7819).
+        if (!live && !reqs.length) continue;
         if (live && (this.d.isMidTurn(s) || s.pendingPermissions?.length)) {
           p.told[s.id] = this.now();
           this.d.tell(s.id, pauseNotice(p, reqs.map((w) => w.id)));
