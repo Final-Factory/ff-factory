@@ -1795,7 +1795,8 @@ export class Orchestrators {
     const missing = this.previewsMissing(chat.info.id, checked.ask, owner.displayName);
     if (missing) throw new Error(missing);
     const pick = checked.ask.options[0].recommended ? `, ${checked.ask.options[0].label} recommended` : '';
-    return `Shown to ${owner.displayName} as ${checked.ask.options.length} buttons${pick}, and a last "Chat more about this" that only opens their reply box. End your turn now. Their click arrives as their own message (their words are the label, your question quoted under the reply mark), in their own turn; they may also just type. Do not ask it again in text.`;
+    const shown = `Shown to ${owner.displayName} as ${checked.ask.options.length} buttons${pick}, and a last "Chat more about this" that only opens their reply box. End your turn now. Their click arrives as their own message (their words are the label, your question quoted under the reply mark), in their own turn; they may also just type. Do not ask it again in text.`;
+    return checked.warnings.length ? `${shown} WARNING: ${checked.warnings.join('; ')}.` : shown;
   }
 
   /** Questions refused once for their missing previews (w1602), by chat and question: the same call again goes through. */
