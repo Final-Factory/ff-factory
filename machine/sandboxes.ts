@@ -236,6 +236,12 @@ function nonEmpty(dir: string): boolean {
   }
 }
 
+/**
+ * A sandbox folder that is missing, empty (remakeGone, w1915), or holds no .git: an agent placed there makes its folder at its
+ * start and may write its own files (an Inbox) before the remake (w1918). provision refuses one holding a checkout's files.
+ */
+const isGone = (dir: string) => !nonEmpty(dir) || !fs.existsSync(path.join(dir, '.git'));
+
 /** Whether two paths name the same folder: case-insensitive with either slash on Windows. Exported for tests. */
 export function samePath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
   const P = platform === 'win32' ? path.win32 : path.posix;
@@ -643,6 +649,17 @@ export class SandboxPool {
         await must(['fetch', '--prune', 'origin'], 15 * 60_000);
         // A remade sandbox (remakeGone): the clone may still list the old folder as a worktree, which would refuse the add.
         if (remake) await this.d.git(['worktree', 'prune'], { signal });
+        // An agent's folder (remakeGone): git adds a worktree only into a missing or empty folder, and a folder an agent
+        // runs in cannot be moved on Windows. The worktree is added beside it and its .git moved in (git worktree repair);
+        // what the agent put there stays. A folder holding a checkout's own files is left as it is.
+        let into = r.path;
+        if (remake && fs.existsSync(r.path) && fs.readdirSync(r.path).length) {
+          const tracked = new Set((await must(['ls-tree', '--name-only', 'HEAD'], 60_000)).stdout.split('\n').map((x) => x.trim().toLowerCase()).filter(Boolean));
+          const clash = fs.readdirSync(r.path).filter((n) => tracked.has(n.toLowerCase()));
+          if (clash.length) throw new Error(`${r.path} has no .git but holds a checkout's files (${clash.slice(0, 5).join(', ')}): left as it is; delete_sandbox, then create_sandbox`);
+          into = `${r.path}.remake`;
+          fs.rmSync(into, { recursive: true, force: true });
+        }
         step(`creating worktree on ${r.branch}`);
         const local = await this.d.git(['rev-parse', '--verify', '--quiet', `refs/heads/${r.branch}`], { signal });
         const remote = await this.d.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${r.branch}`], { signal });
@@ -650,11 +667,16 @@ export class SandboxPool {
         if (remake && local.code !== 0 && remote.code !== 0 && (await this.d.git(['rev-parse', '--verify', '--quiet', `${r.base}^{commit}`], { signal })).code !== 0) r.base = 'HEAD';
         step();
         // --no-checkout keeps the lock short; the checkout below touches only this worktree.
-        if (local.code === 0) await must(['worktree', 'add', '--no-checkout', r.path, r.branch], 10 * 60_000);
+        if (local.code === 0) await must(['worktree', 'add', '--no-checkout', into, r.branch], 10 * 60_000);
         else if (remote.code === 0) {
-          await must(['worktree', 'add', '--no-checkout', '--track', '-b', r.branch, r.path, `origin/${r.branch}`], 10 * 60_000);
+          await must(['worktree', 'add', '--no-checkout', '--track', '-b', r.branch, into, `origin/${r.branch}`], 10 * 60_000);
           r.base = `origin/${r.branch}`;
-        } else await must(['worktree', 'add', '--no-checkout', '--no-track', '-b', r.branch, r.path, r.base], 10 * 60_000);
+        } else await must(['worktree', 'add', '--no-checkout', '--no-track', '-b', r.branch, into, r.base], 10 * 60_000);
+        if (into !== r.path) {
+          fs.renameSync(path.join(into, '.git'), path.join(r.path, '.git'));
+          await must(['worktree', 'repair', r.path], 60_000);
+          fs.rmSync(into, { recursive: true, force: true });
+        }
       });
       step(`checking out ${r.branch}`);
       const co = await this.d.git(['-C', r.path, 'reset', '--hard', '--quiet'], { timeoutMs: 60 * 60_000, signal });
@@ -700,17 +722,20 @@ export class SandboxPool {
    * attached has no sandbox root, so nothing is remade then. The branch comes from the clone (a bare clone of origin has every
    * pushed branch), else origin's, else its base, else the clone's default branch: work never pushed went with the drive.
    * Once per sandbox per daemon run: a remake that fails shows the error, and delete_sandbox then create_sandbox takes over.
+   * An empty folder counts as gone (w1915: LothLaptop's slot1 came back as an empty folder, the worker's own directory, so
+   * nothing remade it); git makes a worktree in an empty folder.
    */
   private remakeGone() {
     const s = this.settings;
     if (!s || !fs.existsSync(s.root)) return;
     if (!fs.existsSync(path.join(this.o.repoPath, 'HEAD')) && !fs.existsSync(path.join(this.o.repoPath, '.git'))) return;
     for (const r of this.recs.values()) {
-      if (r.status !== 'ready' || this.busy.has(r.id) || this.remade.has(r.id) || fs.existsSync(r.path)) continue;
+      if (r.status !== 'ready' || this.busy.has(r.id) || this.remade.has(r.id) || !isGone(r.path)) continue;
       if (!deletable(r.path, r.id, s.root, this.o.repoPath)) continue;
       this.remade.add(r.id);
       const live = this.o.liveAgents?.(r.id) ?? 0;
-      const text = `sandbox ${r.id}: its folder ${r.path} is gone (the drive was reset or emptied); making its worktree again on ${r.branch}${live ? ` (${live} agent(s) there now: they run on in the new folder once it is ready)` : ''}`;
+      const what = fs.existsSync(r.path) ? `its folder ${r.path} has no checkout (the drive was reset or emptied; an agent start made the folder again)` : `its folder ${r.path} is gone (the drive was reset or emptied)`;
+      const text = `sandbox ${r.id}: ${what}; making its worktree again on ${r.branch}${live ? ` (${live} agent(s) there now: they run on in it once it is ready)` : ''}`;
       this.o.log?.(text);
       this.o.onEvent({ text, sandbox: r.id });
       this.git.delete(r.id);
