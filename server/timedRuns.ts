@@ -1,0 +1,337 @@
+// timed_run on the portal (w1946; docs/machines.md, "A play-only timing machine"). lothsahn, 2026-10-23: "Can the portal
+// do builds on one machine and then use this other with an exclusive lock for benchmarks?", then "File it: play-only
+// timing machine, builds elsewhere, exclusive lock there", within "I don't want a unilateral way into machines... just
+// build scoped commands for the functionality needed".
+//
+// Three named steps and nothing else: the worker's daemon asks for a plan (which pieces of its builds the portal lacks;
+// machine/timedRunPack.ts) and sends those as attachments over its own link; `go` hands the run, as data, to a play-only
+// computer's daemon (`timed_run`, machine/timedRunner.ts), which plays the fixed legs under its own exclusive bench ticket;
+// its logs come back as one attachment, which goes to the worker with the table in a message. No command, script or path
+// of the worker's reaches the timing machine: the order names pieces by hash, a save, -ff switches and bounded numbers.
+import { randomBytes } from 'node:crypto';
+import path from 'node:path';
+import type { AttachmentStore } from './attachments.ts';
+import { publicRef } from './attachments.ts';
+import { readJsonDurable, writeJsonDurable } from './durable.ts';
+import type { AttachmentRef, Machine } from '../shared/types.ts';
+import { legOrder, MAX_VARIANTS, PIECE_MAX_BYTES, runBoundMinutes, timedArgsProblem, timedSettingsOf, variantNameProblem, type LegSummary, type Piece, type TimedRunOrder, type TimedSettings, type TimedVariant } from '../shared/timedRun.ts';
+
+export type TimedRunState = 'uploading' | 'queued' | 'sent' | 'running' | 'done' | 'failed';
+
+export interface TimedRunRecord {
+  id: string;
+  session: string;
+  requests: string[];
+  what: string;
+  /** The worker's computer, which sends the pieces. */
+  from: string;
+  /** The play-only computer that runs it. */
+  machine: string;
+  state: TimedRunState;
+  /** What its daemon last said ("fetching 12 of 40 pieces", "holds the exclusive bench ticket t00000003"). */
+  line?: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Until it is done: what the timing machine gets. */
+  order?: TimedRunOrder;
+  /** Each upload the plan opened, by its id: the piece's SHA-256. */
+  uploads?: Record<string, string>;
+  sentBytes?: number;
+  totalBytes?: number;
+  legs?: LegSummary[];
+  summary?: string;
+  result?: string;
+  error?: string;
+}
+
+export interface TimedRunDeps {
+  dataDir: string;
+  store: AttachmentStore;
+  machines: () => Machine[];
+  isOnline: (id: string) => boolean;
+  /** Whether its daemon's hello offered timed runs. */
+  offers: (id: string) => boolean;
+  post: (id: string, msg: unknown) => boolean;
+  /** Message the worker (the table, and the logs as an attachment when there are some). */
+  deliver: (session: string, text: string, files: AttachmentRef[]) => Promise<void>;
+  log?: (line: string) => void;
+  now?: () => number;
+}
+
+/** A piece nobody used for this long leaves the portal's store (the timing machine keeps its own copies). */
+export const PIECE_KEEP_MS = 3 * 86_400_000;
+/** Runs kept on record after they ended. */
+const KEEP_RUNS = 50;
+const SHA = /^[0-9a-f]{64}$/;
+
+/** Whether a computer is play-only (w1946): it takes timed runs and no worker. */
+export const isPlayOnly = (m: Pick<Machine, 'playOnly'>) => !!m.playOnly?.trim();
+
+interface Saved {
+  runs: TimedRunRecord[];
+  /** Each piece the portal holds: its attachment id and when a run last used it. */
+  pieces: Record<string, { id: string; usedAt: string }>;
+}
+
+/** Why a variant from the worker's daemon is refused, or undefined (the timing machine checks the paths again). */
+export function variantProblem(v: TimedVariant): string | undefined {
+  const name = variantNameProblem(v?.name);
+  if (name) return name;
+  const args = timedArgsProblem(v.args);
+  if (args) return `${v.name}: ${args}`;
+  if (!Array.isArray(v.files) || !v.files.length || !Array.isArray(v.pieces) || !v.pieces.length) return `${v.name}: no files`;
+  const sizes = new Map<string, number>();
+  for (const f of v.files) {
+    const p = String(f?.path ?? '');
+    if (!p || p.length > 240 || p.startsWith('/') || /(^|\/)\.\.?(\/|$)|\\|:|\0/.test(p) || !Number.isSafeInteger(f.size) || f.size < 0) return `${v.name}: a bad file entry (${p.slice(0, 60)})`;
+    sizes.set(p, f.size);
+  }
+  if (!sizes.has('finalfactory.exe')) return `${v.name}: no finalfactory.exe at the build's top`;
+  const covered = new Map<string, number>();
+  for (const pc of v.pieces as Piece[]) {
+    if (!SHA.test(String(pc?.sha256)) || !Number.isSafeInteger(pc.size) || pc.size <= 0 || pc.size > PIECE_MAX_BYTES || !Array.isArray(pc.parts)) return `${v.name}: a bad piece`;
+    let sum = 0;
+    for (const part of pc.parts) {
+      const size = sizes.get(String(part?.path));
+      if (size === undefined || !Number.isSafeInteger(part.offset) || !Number.isSafeInteger(part.length) || part.offset < 0 || part.length < 0 || part.offset + part.length > size) return `${v.name}: a piece names a file outside the build or past its end`;
+      sum += part.length;
+      covered.set(part.path, (covered.get(part.path) ?? 0) + part.length);
+    }
+    if (sum !== pc.size) return `${v.name}: a piece's parts do not add up to its size`;
+  }
+  for (const [p, size] of sizes) if ((covered.get(p) ?? 0) !== size) return `${v.name}: ${p} is not wholly in its pieces`;
+  return undefined;
+}
+
+export class TimedRuns {
+  private readonly file: string;
+  private readonly d: TimedRunDeps;
+  private readonly runs = new Map<string, TimedRunRecord>();
+  private pieces: Saved['pieces'] = {};
+
+  constructor(d: TimedRunDeps) {
+    this.d = d;
+    this.file = path.join(d.dataDir, 'timed-runs.json');
+    const saved = readJsonDurable<Saved>(this.file);
+    for (const r of saved?.runs ?? []) this.runs.set(r.id, r);
+    this.pieces = saved?.pieces ?? {};
+  }
+
+  private now = () => (this.d.now ?? Date.now)();
+  private iso = () => new Date(this.now()).toISOString();
+
+  private save() {
+    const ended = [...this.runs.values()].filter((r) => r.state === 'done' || r.state === 'failed').sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    for (const r of ended.slice(KEEP_RUNS)) this.runs.delete(r.id);
+    writeJsonDurable(this.file, { runs: [...this.runs.values()], pieces: this.pieces } satisfies Saved, { indent: 1 });
+  }
+
+  get(id: string) {
+    return this.runs.get(id);
+  }
+
+  list(): TimedRunRecord[] {
+    return [...this.runs.values()];
+  }
+
+  /** The play-only computers, for the Capacity block and the tool: each with its state and the runs it holds. */
+  targets(): { id: string; online: boolean; offers: boolean; runs: TimedRunRecord[]; why: string }[] {
+    return this.d
+      .machines()
+      .filter(isPlayOnly)
+      .map((m) => ({ id: m.id, online: this.d.isOnline(m.id), offers: this.d.offers(m.id), why: m.playOnly!.trim(), runs: this.list().filter((r) => r.machine === m.id && r.state !== 'done' && r.state !== 'failed') }));
+  }
+
+  /** Where a run goes: the computer named, else the online play-only Windows one with the fewest runs ahead. */
+  private target(named: unknown): string {
+    const all = this.targets();
+    if (named !== undefined && named !== '') {
+      const t = all.find((x) => x.id.toLowerCase() === String(named).toLowerCase());
+      if (!t) throw new Error(`${String(named)} is not a play-only timing machine (w1946); the play-only ones: ${all.map((x) => x.id).join(', ') || 'none yet'}`);
+      return t.id;
+    }
+    const windows = all.filter((x) => this.d.machines().find((m) => m.id === x.id)?.platform !== 'darwin');
+    const up = windows.filter((x) => x.online && x.offers).sort((a, b) => a.runs.length - b.runs.length || a.id.localeCompare(b.id));
+    if (up[0]) return up[0].id;
+    if (windows[0]) return windows[0].id; // offline: the run waits for it, and the answer says so
+    throw new Error('there is no play-only timing machine yet (w1946: add_machine play_only on a computer that only plays the game); time on your own computer with the bench queue instead (scripts/bench/probe_ab_win.sh)');
+  }
+
+  /** The plan step: check the builds, open an upload for each piece the portal lacks. Answers JSON for the daemon. */
+  plan(from: string, who: { session: string; requests: string[]; what: string; uploadedBy?: string }, a: Record<string, unknown>): string {
+    const variants = (Array.isArray(a.variants) ? a.variants : []) as TimedVariant[];
+    if (!variants.length || variants.length > MAX_VARIANTS) throw new Error(`builds: 1 to ${MAX_VARIANTS}`);
+    for (const v of variants) {
+      const why = variantProblem(v);
+      if (why) throw new Error(`builds: ${why}`);
+    }
+    if (new Set(variants.map((v) => v.name)).size !== variants.length) throw new Error('builds: each name once');
+    const settings = timedSettingsOf(a);
+    if (typeof settings === 'string') throw new Error(settings);
+    const s = a.save as { name?: unknown; size?: unknown; sha256?: unknown } | undefined;
+    if (!s || !SHA.test(String(s.sha256)) || !Number.isSafeInteger(s.size) || Number(s.size) <= 0 || Number(s.size) > PIECE_MAX_BYTES) throw new Error('save: a .zip save of at most 64 MB');
+    const machine = this.target(a.machine);
+    const id = `tr_${randomBytes(5).toString('hex')}`;
+    const need = new Map<string, number>();
+    for (const v of variants) for (const p of v.pieces) need.set(p.sha256, p.size);
+    need.set(String(s.sha256), Number(s.size));
+    const uploads: Record<string, string> = {};
+    const out: { sha256: string; uploadId: string; chunkBytes: number }[] = [];
+    let total = 0;
+    for (const [sha, size] of need) {
+      total += size;
+      const have = this.pieces[sha];
+      if (have && this.d.store.get(have.id)?.sha256 === sha) continue;
+      const u = this.d.store.begin({ name: `timed-piece-${sha.slice(0, 16)}`, size, sha256: sha, machineId: from, source: `timed run ${id} (${who.what})`, ...(who.uploadedBy ? { uploadedBy: who.uploadedBy } : {}) });
+      uploads[u.uploadId] = sha;
+      out.push({ sha256: sha, uploadId: u.uploadId, chunkBytes: u.chunkBytes });
+    }
+    const order: TimedRunOrder = { id, what: who.what, requests: who.requests, session: who.session, variants: variants.map((v) => ({ name: v.name, args: v.args ?? [], files: v.files, pieces: v.pieces })), save: { id: '', name: String(s.name ?? 'save.zip').slice(0, 120), size: Number(s.size), sha256: String(s.sha256) }, pieceIds: {}, settings };
+    this.runs.set(id, { id, session: who.session, requests: who.requests, what: who.what, from, machine, state: 'uploading', createdAt: this.iso(), updatedAt: this.iso(), order, uploads, totalBytes: total });
+    this.save();
+    this.d.log?.(`timed run ${id}: ${who.what} from ${from} for ${machine}: ${variants.length} builds, ${out.length} of ${need.size} pieces to send`);
+    return JSON.stringify({ runId: id, machine, uploads: out });
+  }
+
+  /** The go step: every piece is in the store; hand the run to its machine (or queue it until that one is online). */
+  go(session: string, a: Record<string, unknown>): string {
+    const r = this.runs.get(String(a.runId ?? ''));
+    if (!r || r.session !== session) throw new Error('no such timed run of yours (plan it again: call timed_run)');
+    if (r.state !== 'uploading' || !r.order) throw new Error(`timed run ${r.id} is ${r.state} already`);
+    const uploaded = (a.uploaded ?? {}) as Record<string, unknown>;
+    for (const sha of Object.values(r.uploads ?? {})) {
+      const rec = this.d.store.get(String(uploaded[sha] ?? ''));
+      if (rec?.sha256 !== sha) throw new Error(`timed run ${r.id}: piece ${sha.slice(0, 12)}… did not arrive; call timed_run again`);
+      this.pieces[sha] = { id: rec.id, usedAt: this.iso() };
+    }
+    const o = r.order;
+    const shas = new Set([...o.variants.flatMap((v) => v.pieces.map((p) => p.sha256))]);
+    for (const sha of shas) {
+      const have = this.pieces[sha];
+      if (!have || this.d.store.get(have.id)?.sha256 !== sha) throw new Error(`timed run ${r.id}: piece ${sha.slice(0, 12)}… is not on the portal; call timed_run again`);
+      o.pieceIds[sha] = have.id;
+      have.usedAt = this.iso();
+    }
+    const save = this.pieces[o.save.sha256];
+    if (!save || this.d.store.get(save.id)?.sha256 !== o.save.sha256) throw new Error(`timed run ${r.id}: the save did not arrive; call timed_run again`);
+    o.save.id = save.id;
+    save.usedAt = this.iso();
+    r.sentBytes = Number(a.sentBytes) || 0;
+    delete r.uploads;
+    this.set(r, 'queued', 'waiting for its machine');
+    this.dispatch(r);
+    const legs = legOrder(o.variants.map((v) => v.name), o.settings.rounds).length;
+    const bound = runBoundMinutes(o.settings, o.variants.length);
+    const mb = (n: number) => `${(n / 1024 ** 2).toFixed(0)} MB`;
+    const where = (r.state as TimedRunState) === 'sent' ? `handed to ${r.machine}` : `queued for ${r.machine}, which is ${this.d.isOnline(r.machine) ? 'connected but not on a daemon that runs timed runs yet (it is updated by itself once idle)' : 'offline'}: it starts when ${r.machine} is back`;
+    return `Timed run ${r.id} ${where}: ${o.variants.map((v) => v.name).join(' vs ')}, ${legs} legs of ${o.settings.settleS} s settle + ${o.settings.sampleS} s sample on ${o.settings.res}, under ${r.machine}'s exclusive bench ticket. Sent ${mb(r.sentBytes)} of ${mb(r.totalBytes ?? 0)} (the rest was on the portal from earlier runs). FF Factory messages you with the table and the logs (timed-${r.id}.tar.gz in your Inbox: probe_ab_win.sh's layout, so scripts/bench/probe_table.py and ab_stop.py read it) when it ends; its bound is about ${bound} min. End your turn now with a wake_me check-in of ${bound + 15} minutes as the fallback; do not wait in the foreground.`;
+  }
+
+  private set(r: TimedRunRecord, state: TimedRunState, line?: string) {
+    r.state = state;
+    if (line !== undefined) r.line = line;
+    r.updatedAt = this.iso();
+    this.save();
+  }
+
+  /** Send a queued run to its machine when it is online and runs timed runs. */
+  private dispatch(r: TimedRunRecord) {
+    if (r.state !== 'queued' || !r.order || !this.d.isOnline(r.machine) || !this.d.offers(r.machine)) return;
+    this.d.store.grant(r.machine, [...Object.values(r.order.pieceIds), r.order.save.id]);
+    if (this.d.post(r.machine, { type: 'timed_run', order: r.order })) this.set(r, 'sent', `sent to ${r.machine}`);
+  }
+
+  /** A daemon said hello: what it runs now; runs sent to it before and not among them are sent again (it restarted). */
+  onHello(machineId: string, active: string[] | undefined) {
+    for (const r of this.runs.values()) {
+      if (r.machine !== machineId) continue;
+      if ((r.state === 'sent' || r.state === 'running') && !(active ?? []).includes(r.id)) this.set(r, 'queued', `${machineId}'s daemon restarted: sent again`);
+      if (r.state === 'queued') this.dispatch(r);
+    }
+  }
+
+  /** What a timing machine's daemon reports of a run. */
+  onReport(machineId: string, m: { type: string; id?: string; state?: string; line?: string; ok?: boolean; error?: string; summary?: string; legs?: LegSummary[]; result?: { name?: string; size?: number; sha256?: string }; attachmentId?: string }) {
+    const r = this.runs.get(String(m.id ?? ''));
+    if (!r || r.machine !== machineId || r.state === 'done' || r.state === 'failed') return;
+    if (m.type === 'timed_run_status') {
+      this.set(r, m.state === 'running' ? 'running' : r.state === 'queued' ? 'sent' : r.state, String(m.line ?? '').slice(0, 300));
+      return;
+    }
+    if (m.type === 'timed_run_done') {
+      r.legs = Array.isArray(m.legs) ? m.legs.slice(0, 200) : [];
+      r.summary = String(m.summary ?? '').slice(0, 20_000);
+      if (m.error) r.error = String(m.error).slice(0, 500);
+      const res = m.result;
+      if (res && SHA.test(String(res.sha256)) && Number.isSafeInteger(res.size) && Number(res.size) > 0) {
+        try {
+          const u = this.d.store.begin({ name: `timed-${r.id}.tar.gz`, size: res.size, sha256: res.sha256, machineId, source: `timed run ${r.id} on ${machineId}` });
+          this.d.post(machineId, { type: 'timed_run_upload', id: r.id, uploadId: u.uploadId, chunkBytes: u.chunkBytes });
+          this.set(r, 'running', 'sending its logs');
+          return;
+        } catch (e) {
+          r.error = `its logs could not come back: ${(e as Error).message}`;
+        }
+      }
+      void this.finish(r, m.ok === true ? 'done' : 'failed');
+      return;
+    }
+    if (m.type === 'timed_run_result') {
+      const rec = m.attachmentId ? this.d.store.get(String(m.attachmentId)) : undefined;
+      if (rec && rec.name === `timed-${r.id}.tar.gz`) r.result = rec.id;
+      else r.error = [r.error, `its logs did not come back${m.error ? `: ${String(m.error).slice(0, 200)}` : ''}`].filter(Boolean).join('; ');
+      void this.finish(r, r.legs?.some((l) => l.ok) ? 'done' : 'failed');
+    }
+  }
+
+  /** Tell the worker how it went, with the logs. */
+  private async finish(r: TimedRunRecord, state: 'done' | 'failed') {
+    const o = r.order;
+    delete r.order;
+    this.set(r, state);
+    const legs = r.legs ?? [];
+    const ok = legs.filter((l) => l.ok).length;
+    const rec = r.result ? this.d.store.get(r.result) : undefined;
+    const text = [
+      `[timed run ${r.id} on ${r.machine}] ${state === 'done' ? 'done' : 'FAILED'}: ${ok} of ${legs.length} legs with numbers${r.error ? `; ${r.error}` : ''}.`,
+      ...(r.summary ? ['', r.summary] : []),
+      '',
+      rec
+        ? `The logs are in your Inbox as timed-${r.id}.tar.gz: tar -xzf it into $TMPDIR, then python scripts/bench/probe_table.py "$TMPDIR/${r.id}"/*/round* (probe_ab_win.sh's layout; ab_stop.py reads it too). contention.txt has each leg's start load; run.json the machine and settings. Numbers are from ${r.machine} alone: compare them only with ${r.machine}'s own.`
+        : 'No logs came back.',
+      `It ran under ${r.machine}'s exclusive bench ticket${o ? ` (${o.settings.rounds} rounds, order flipped on even rounds)` : ''}. If you set a wake_me check-in for it, cancel_wake it now.`,
+    ].join('\n');
+    try {
+      await this.d.deliver(r.session, text, rec ? [publicRef(rec)] : []);
+    } catch (e) {
+      this.d.log?.(`timed run ${r.id}: could not tell worker ${r.session}: ${(e as Error).message}`);
+    }
+  }
+
+  /** Every few minutes: give up on a run far past its bound, and let old pieces go from the portal's store. */
+  tick() {
+    const now = this.now();
+    for (const r of this.runs.values()) {
+      if (r.state === 'done' || r.state === 'failed') continue;
+      const s: TimedSettings | undefined = r.order?.settings;
+      const bound = (s ? runBoundMinutes(s, r.order!.variants.length) : 60) + (r.state === 'uploading' ? 60 : 120);
+      if (now - Date.parse(r.updatedAt) > bound * 60_000) {
+        r.error = r.state === 'uploading' ? 'its pieces never all arrived' : `nothing heard from ${r.machine} for ${bound} min (${r.line ?? r.state})`;
+        void this.finish(r, 'failed');
+      }
+    }
+    const old = Object.entries(this.pieces).filter(([, p]) => now - Date.parse(p.usedAt) > PIECE_KEEP_MS);
+    if (old.length) {
+      this.d.store.forget(old.map(([, p]) => p.id));
+      for (const [sha] of old) delete this.pieces[sha];
+      this.save();
+    }
+  }
+
+  /** The Capacity block's line: each play-only computer and the runs it holds. */
+  capacityLine(): string | undefined {
+    const t = this.targets();
+    if (!t.length) return undefined;
+    return `Play-only timing machines (w1946: no workers; timed A/B legs go there with timed_run, built anywhere): ${t.map((x) => `${x.id} (${x.online ? (x.offers ? 'online' : 'online, daemon too old for timed runs') : 'offline'}${x.runs.length ? `; ${x.runs.length} run(s): ${x.runs.map((r) => `${r.id} ${r.state}`).join(', ')}` : '; free'})`).join(', ')}.`;
+  }
+}

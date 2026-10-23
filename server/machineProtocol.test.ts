@@ -94,7 +94,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // the views a hello lists, and the daemon's `live_staged`, which an older portal drops (no default case).
 // w1839 part 2 (no bump): `live` op keep with `material` and `name`, sent only to a daemon whose hello offers `liveKeep` (an older
 // daemon would take an unknown op for a start), and `liveKeep` in the hello, which an older portal ignores.
-const DECIDED = { protocol: 9, fingerprint: '54afa03675dba729' };
+// w1946 (no bump): `timedRuns` and `timedActive` in the hello (an older portal ignores them), `timed_run` and `timed_run_upload`,
+// sent only to a daemon whose hello offered `timedRuns` (an older daemon never gets one), and the daemon's `timed_run_status`,
+// `timed_run_done` and `timed_run_result`, which an older portal never asked for and drops (no default case).
+const DECIDED = { protocol: 9, fingerprint: 'e62608da93cd1ecd' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

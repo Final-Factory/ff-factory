@@ -859,6 +859,53 @@ Capacity line says "no timed runs"), and a start pinned to it for such work is r
 `writeBenchPriorities`), and the game repo's `scripts/bench/bench_queue.py` then refuses every exclusive ticket there,
 naming the computers that take them. Builds, editors, coding and tests go there as before (shared tickets).
 
+**A play-only timing machine** (w1946, lothsahn, 2026-10-23: "I have a desktop with 16GB ram. Windows takes 12G so there's
+not enough room for an editor. However, it could play the game and potentially be useful for benchmarks... Can the portal do
+builds on one machine and then use this other with an exclusive lock for benchmarks?", then "File it: play-only timing machine,
+builds elsewhere, exclusive lock there"). `Machine.playOnly` (add_machine `play_only "<why>"`, `""` clears it) makes a computer
+that only plays the game. It has no pool, so it gets no sandbox, no worker and no standing agent (`poolSettingsOf` is null and
+`agentCap` 0, `server/machines.ts`), whatever its installer's daemon.json says. Placement never sees it: the Capacity block
+lists it on a line of its own ("Play-only timing machines ...", `TimedRuns.capacityLine`). It joins by the usual join
+([worker-install.md](worker-install.md)): `add_machine join_code` with `play_only` gives the installer's smallest limits (one
+sandbox's player-slot pair, `slot1-0` and `slot1-1`, whose firewall rules the install makes; the bare repo clone of about 1.3 GB;
+no Unity). Within lothsahn's rule ("I don't want a unilateral way into machines... just build scoped commands for the
+functionality needed"), it takes one named operation and nothing else:
+
+1. **A worker's `timed_run`** (builds `[{name, path, args?}]`, save, rounds, sample_s, settle_s, res, machine). Its own daemon
+   (`machine/timedRunPack.ts`) reads each build folder (a Windows player in the sandbox, the session's temp folder or the
+   worker install; `.pdb` files and `*_DoNotShip` folders are left out) and cuts it into pieces named by their SHA-256 (a file
+   of 8 MB or more in pieces of at most 64 MB, smaller files grouped up to 16 MB; `shared/timedRun.ts planPieces`). The portal's
+   plan (`server/timedRuns.ts`) answers an attachment upload for each piece it lacks. The daemon sends those over its own link,
+   the same way `publish_attachment` does, and says `go`. The same bytes are one piece wherever they come from, so the second
+   build of an A/B and every later run send only what changed. On 2026-10-23 the two big `.resS` files (1.19 GB of a 1.86 GB
+   player) were the same in four of five BEAST builds from different branches (measured). The portal drops a piece unused for
+   3 days (`PIECE_KEEP_MS`, `AttachmentStore.forget`).
+2. **The timing machine's daemon** gets the run as data (`timed_run`: pieces by hash, the save, the variants' `-ff` switches,
+   bounded numbers; `machine/timedRunner.ts`). It refuses an order whose switches, numbers or names fail the shared checks, and
+   any file path that would leave the player folder. It fetches the pieces it lacks (checked against their SHA-256; it keeps up
+   to 8 GB of them between runs) and lays each distinct build out in a player slot. It copies the save into the game's saves
+   folder as `ffa-timed-<run>.zip` and removes it afterwards. Once no other live ticket is in its bench queue and nobody plays
+   there (w1894), it holds the machine's exclusive ticket for the whole run. It writes that ticket in the queue's own format
+   (`tNNNNNNNN/info.json`, `granted`, `bench.lock/owner`), held by the daemon's own process: a play-only machine has no checkout
+   or python for `bench_queue.py`, so the bench row and `readBenchLock` show it like any other ticket. Each leg is the game
+   repo's `scripts/bench/probe_ab_win.sh` leg with its fixed arguments (`legArgs`: solo, the save, the perf probe after the
+   settle, quit after the dwell). Before a leg it waits up to 2 minutes for the rest of the machine to drop below 25% CPU, and
+   it samples the CPU every 2 s during the leg. A leg that runs past its bound is ended. A leg during which a person used the
+   computer (the tray's last input) carries a note. The legs run in probe_ab_win.sh's order, flipped on even rounds. The daemon's
+   own clean-up waits while a run plays.
+3. **The logs come back** as one `timed-<run>.tar.gz` (ustar, gzipped) in probe_ab_win.sh's layout
+   (`<run>/<variant>/round<R>/player.log`, `cpu.csv`, `launch.txt`; `summary.tsv`, `contention.txt`, `run.json`). The portal
+   delivers it to the worker's Inbox with the table (frameAvgMs per leg, each variant's mean ± SD), cancelling the worker's
+   check-in (`Agents.timedRunDelivered`). The worker ends its turn after `timed_run` answers, with a wake_me check-in of the
+   run's bound as the fallback. A run far past its bound is failed and its worker told (`TimedRuns.tick`). A daemon that
+   restarted mid-run gets the run again from its hello (`timedActive`).
+
+Only play-only computers take a `timed_run`, picked by name or as the online one with the fewest runs ahead. Every worker
+install's daemon offers `timedRuns`, but the portal sends none elsewhere. What the timing machine runs is the build's own
+`finalfactory.exe` from its player slot, as the daemon's user, one leg at a time. That is the game a worker built, so treat
+a play-only machine like any computer that runs workers' builds. Its numbers compare only with its own. Tests:
+`server/timedRuns.test.ts` (an in-process run end to end over the real upload and fetch routes, with a fake player).
+
 The dispatcher picks the computer for each request itself (`start_agent` with a sandbox id; there is no automatic
 placement), so FF Factory shows it each computer's room where it decides, names the computer the next piece of work
 should go to, and says so when it places work elsewhere. New game-repo work is **spread** across the computers with

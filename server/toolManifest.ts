@@ -91,6 +91,7 @@ export const TOOL_MANIFEST = {
   host_recovery: { group: 'machines', kinds: [D, R] },
   ops_worker: { group: 'machines', kinds: [P] },
   portal_logs: { group: 'machines', kinds: [W] },
+  timed_run: { group: 'machines', kinds: [W] },
   // timers
   wake_me: { group: 'timers', kinds: [D, P, R, O, W], always: [D, P, O] },
   set_timer: { group: 'timers', kinds: [D, P, R, O], always: [O] },

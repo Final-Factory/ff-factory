@@ -870,6 +870,12 @@ export interface Machine {
    * a timing ticket and placement sends timed work elsewhere. Unset: the default (NO_TIMED_RUNS: m5); "" clears it.
    */
   noTimedRuns?: string;
+  /**
+   * Why it is play-only (w1946, add_machine play_only; docs/machines.md "A play-only timing machine"): it takes no workers,
+   * no standing agents and no sandbox, and runs the timed A/B legs other computers build (timed_run, server/timedRuns.ts)
+   * under its own exclusive bench ticket. Unset or "": an ordinary computer.
+   */
+  playOnly?: string;
   /** Portal URL the daemon connects to. */
   portalUrl: string;
   sessionIds: string[];

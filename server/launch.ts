@@ -195,6 +195,29 @@ export const CATALOG = {
     minutes: z.number().int().min(0).max(240).optional().describe('coming: lead time in minutes until the build starts (0: now).'),
     what: z.string().max(160).optional().describe('coming: what it builds ("Windows player for the w1475 clip").'),
   },
+  /**
+   * w1946 (docs/machines.md, "A play-only timing machine"). On a machine the daemon reads and sends the builds itself: the
+   * portal plans (which pieces it lacks) and hands the run to a play-only computer; the worker hears the result in a message.
+   */
+  timed_run: {
+    builds: z
+      .array(
+        z.object({
+          name: z.string().max(24).describe('The variant name in the table, e.g. "base" or "fix" (letters, digits, - and _).'),
+          path: z.string().max(400).describe('The built Windows player folder (finalfactory.exe beside finalfactory_Data), in your sandbox, your temp folder or the worker install of this computer.'),
+          args: z.array(z.string().max(64)).max(8).optional().describe('Its own -ff switches after the fixed arguments (e.g. ["-ffNoHangWatchdog"]); one build may be listed twice with different switches.'),
+        }),
+      )
+      .min(1)
+      .max(4)
+      .describe('The players to compare: usually two, the build before your change and the build with it, each built where you are.'),
+    save: z.string().max(400).describe('The save every leg loads (.zip, at most 64 MB), copied into your working folder or temp folder.'),
+    rounds: z.number().int().min(1).max(20).optional().describe('Rounds (default 4; even, so each variant runs first as often). Each round runs every variant once, the order reversed on even rounds.'),
+    sample_s: z.number().int().min(5).max(300).optional().describe('Seconds the perf probe samples each leg (default 20).'),
+    settle_s: z.number().int().min(5).max(300).optional().describe('Seconds after the save is ready before the sample (default 25).'),
+    res: z.enum(['1920x1080', '1280x720', '1280x800', '2560x1440']).optional().describe('Window size (default 1920x1080).'),
+    machine: z.string().max(40).optional().describe('A play-only machine by id; default the online one with the fewest runs ahead.'),
+  },
   switch_branch: {
     branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),
     create_from: z.string().optional().describe('Base for a branch that exists neither here nor on origin. Default origin/master.'),
