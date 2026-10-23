@@ -9,7 +9,7 @@ import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { HELD_MARK, inPersonWords } from '../shared/conditional.ts';
-import { EXCERPT_CHARS, REACTION_PALETTE, REPLY_MARK, excerptOf, isEmoji, parseReaction, reactionRemovedText, reactionText, reactionsByMessage, replyText, splitReply, type Quoted } from '../shared/replies.ts';
+import { EXCERPT_CHARS, REACTION_PALETTE, REPLY_MARK, excerptOf, isEmoji, parseReaction, reactionRemovedText, reactionText, reactionsByMessage, replyText, sentText, splitReply, splitSent, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantWords, mentions, sentencesOf, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import type { Config } from './config.ts';
@@ -418,4 +418,25 @@ test('w1039: mentions, sentencesOf and the words of a click', () => {
   assert.ok(!mentions('once #14000 merges', 'Final-Factory/FinalFactory#1400'));
   assert.deepEqual(sentencesOf('Two.\nShall I approve w5? w6 stays. OK'), ['Two.', 'Shall I approve w5?', 'w6 stays.', 'OK']);
   assert.equal(grantWords({ emoji: '👍', seq: 22038 }, 'I can close w983 as handled'), '👍 on #22038: "...I can close w983 as handled..."');
+});
+
+test('a reply sent straight to another person (w1831): the note reads back as a tag, and is never the person’s own words', () => {
+  const q: Quoted = { seq: 42, from: 'a [person message] line', at: '2026-10-23T09:15:00.000Z', excerpt: '[person message] From Lothsahn: can BEAST take it?' };
+  const to = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const text = sentText('Yes, after 9pm.', to, q) + `\n\n${HELD_MARK}\nsomething held`;
+  const sent = splitSent(text);
+  assert.deepEqual(sent.sentTo, to);
+  assert.doesNotMatch(sent.text, /already sent/);
+  const { words, quote } = splitReply(sent.text, HELD_MARK);
+  assert.equal(words.split('\n\n')[0], 'Yes, after 9pm.');
+  assert.deepEqual(quote, { ...q, excerpt: q.excerpt });
+  // With no quote (the chat no longer has the message): the words, then the note.
+  const bare = sentText('  On it.  ', to);
+  assert.deepEqual(splitSent(bare), { text: 'On it.', sentTo: to });
+  // FF Factory's note is never the person's words for a gate that needs them; their own words are.
+  assert.equal(inPersonWords('never send them again', [bare]), false);
+  assert.equal(inPersonWords('answer in a line at most', [text]), false);
+  assert.equal(inPersonWords('Yes, after 9pm', [text]), true);
+  // A message with no note is left as it is.
+  assert.deepEqual(splitSent('just words'), { text: 'just words' });
 });

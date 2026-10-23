@@ -180,6 +180,9 @@ export const api = {
   renameSession: (sessionId: string, title: string) => request<{ title: string }>('POST', `/api/sessions/${enc(sessionId)}/title`, { title }),
   /** Mark messages from other people read in your own chat (w1546): these ids (never "all", which could take one that just came). */
   readPersonMessages: (sessionId: string, ids: string[]) => request<{ cleared: number }>('POST', `/api/sessions/${enc(sessionId)}/person-messages/read`, { ids }),
+  /** Answer one of them straight to its sender (w1831): sent as message_person sends, and shown in your chat as your message. */
+  replyToPerson: (sessionId: string, id: string, text: string, clientId: string) =>
+    request<{ to?: string; duplicate?: true }>('POST', `/api/sessions/${enc(sessionId)}/person-messages/reply`, { id, text, clientId }),
   interrupt: (sessionId: string) => request<unknown>('POST', `/api/sessions/${enc(sessionId)}/interrupt`),
   permission: (sessionId: string, requestId: string, allow: boolean, message?: string) =>
     request<unknown>('POST', `/api/sessions/${enc(sessionId)}/permission`, { requestId, allow, message }),
