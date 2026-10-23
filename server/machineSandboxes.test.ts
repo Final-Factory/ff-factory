@@ -563,6 +563,44 @@ test('machine sandboxes: the idle-editor stop and a restarted daemon', async (t)
   assert.match(after.list()[0].statusDetail ?? '', /interrupted while creating/);
 });
 
+test("w1918: a free sandbox whose folder is gone (its drive reset) is made again on its branch; one whose sandbox root is gone (the drive not attached) is left", async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const lines: string[] = [];
+  const { p, events } = pool(r, { log: (l) => lines.push(l) });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  fs.writeFileSync(path.join(dir, 'work.txt'), 'pushed');
+  r.git(dir, 'add', 'work.txt');
+  r.git(dir, 'commit', '-q', '-m', 'sb1 work');
+  r.git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+  // The drive is not attached: no sandbox root, so nothing is made (the host guard reattaches it).
+  fs.renameSync(r.sbRoot, `${r.sbRoot}-away`);
+  await p.tick();
+  assert.equal(p.list()[0].status, 'ready');
+  assert.equal(fs.existsSync(r.sbRoot), false, 'no sandbox root made on the bare volume');
+  fs.renameSync(`${r.sbRoot}-away`, r.sbRoot);
+
+  // The drive was reset: the root is there, the sandbox folder is not (and the clone still lists it as a worktree).
+  fs.rmSync(dir, { recursive: true, force: true });
+  await p.tick();
+  assert.equal(p.list()[0].status, 'creating');
+  await ready(p, 'sb1');
+  assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/sb1');
+  assert.equal(fs.readFileSync(path.join(dir, 'work.txt'), 'utf8'), 'pushed', 'its committed work, on its branch');
+  assert.equal(p.list()[0].git?.branch, 'sandbox/sb1', 'git status is read again');
+  assert.ok(lines.some((l) => /sandbox sb1: its folder .* is gone .*making its worktree again on sandbox\/sb1/.test(l)), lines.join('\n'));
+  assert.ok(events.some((e) => /is gone/.test(e.text)));
+
+  // Once per daemon run: gone again, it is left to a delete and a create.
+  fs.rmSync(dir, { recursive: true, force: true });
+  await p.tick();
+  assert.equal(p.list()[0].status, 'ready');
+  assert.equal(fs.existsSync(dir), false);
+});
+
 // ---------------------------------------------------------------- pure parts
 
 test('machine sandboxes: only a direct child of the root named after it can be deleted, never the main clone', () => {
