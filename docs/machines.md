@@ -1049,6 +1049,28 @@ LothDesktop and Beast, not just when BEAST is full").
     hold, so the builder and a running Live view go on. Details: [orchestrators.md](orchestrators.md), "Builds clear BEAST".
   - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators.test.ts`,
     `server/w1628Placement.test.ts`.
+- **A leg for a named computer is its own queue entry** (w1863, lothsahn, 2026-10-23: "Why did they hang if the m5 was
+  free?"). That morning the dispatcher queued three m5 timing legs (w1789, w1785, w1788) while each request's own worker
+  coded on BEAST or LothDesktop. The queue was the request's status (`queued`, `queuedFor`), and the next message to its
+  worker (`linkWorker`: `active`; `stamp` drops `queuedFor` off `queued`) wiped it: w1785's in the same minute (06:46),
+  w1789's at 07:10 (the journal's "no capacity ping" line named w1788 and w1789 at 07:10 UTC, only w1788 at 07:12). Neither
+  showed Queued or WRONG, nor counted in "Next timed work", for hours after w1788's leg finished at 09:41 (3 of 3 m5
+  sandboxes free at 15:15). Only w1788, which nobody messaged, stayed Queued; the WRONG flag caught it at 07:13.
+  - Now `decide_work queue` with `needs` on an **active** request that has a worker records a leg (`WorkItem.legs`:
+    since when, the computers, the note) and leaves the status alone. A request with no worker queues as before.
+  - A leg outlives messages to its worker, that worker's reports and its PRs merging (`afterMergeReason`: "its leg for m5
+    is queued and not started", so a merge does not close the request). It goes when a worker starts or is sent for the
+    request on a computer it names (`linkWorker`, by the session's machine), or with `decide_work queue` `drop_leg`, or
+    when the request closes (logged).
+  - Shown Queued (`shared/workState.ts` `legLive`). While a named computer has room it is `Queued [WRONG: m5 has room]`,
+    shown before every other state but mid-turn. Without room it comes after a person-wait, a bench wait or a gate, and
+    before Working between turns.
+  - `flagQueuedWithRoom` flags it after the same 10-minute grace, at most once an hour, telling the dispatcher to start a
+    worker in a FREE sandbox there. The capacity ping lists it beside Queued requests.
+  - The Capacity block names it on the computer's line ("the ledger holds a leg for it: w1789 (since 06:45Z)"). "Next
+    timed work" counts it as that computer's queued timed work (`pickTimed`) and lists every held leg, with "has ROOM:
+    start it now" where its computer has room.
+  - Tests: the two w1863 cases in `server/orchestrators.test.ts`.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
   computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it

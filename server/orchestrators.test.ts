@@ -27,6 +27,8 @@ import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, ty
 import { LIVE_HOLD_MS } from './placeAgain.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
+import { afterMergeReason } from './ledgerRules.ts';
+import { timedLine, type Computer } from './placement.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
 import { buildOptions } from './launch.ts';
 
@@ -4387,4 +4389,76 @@ test('w1841: a worker on a real portal: a reporter wait is Waiting with no [need
   const g = store.work.get('w2')!.blocked!;
   assert.deepEqual([g.kind, g.ref, g.on], ['request', 'w1', 'report']);
   assert.match(await live(), /Blocked on w1/);
+});
+
+test('w1863: w1789 as it happened: a leg queued for a full m5 beside the request’s own worker on another computer outlives a message to that worker, its report and its PRs merging; it shows Queued, counts in Next timed work, is flagged WRONG when m5 frees, and goes when a worker starts for it there', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o, sessions, dispatcher, call, heard } = env;
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1', title: 'Cut UI main-thread cost on the Just Play save' }]);
+  // Its own worker (d80ca173 on BEAST, here on pc) codes on; m5 is full.
+  const a = await startedFor(env, 'w1');
+  assert.equal(store.work.get('w1')!.status, 'active');
+  agentsRoomFacts(agents, {});
+  const q = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'The m5 leg for the timed before/after runs is queued: m5 is full', needs: ['m5'] });
+  assert.equal(q.isError, false, q.text);
+  assert.match(q.text, /^w1 active: a leg queued for capacity on m5 \(its worker carries on/);
+  const w = () => store.work.get('w1')!;
+  assert.equal(w().status, 'active', 'its own worker still has it');
+  assert.deepEqual(w().legs?.map((l) => l.needs), [['m5']]);
+  const list = async () => (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
+  assert.match(await list(), /Queued \(its leg \(since \d\d:\d\d UTC; its own worker elsewhere\) queued for capacity on m5: no computer that could take it has room\)/);
+
+  // 07:10: the dispatcher passes lothsahn's answer to its worker. That made it active and dropped the queue before w1863.
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: a.id, text: 'lothsahn: "Yes, fix it"', work_id: 'w1' });
+  assert.equal(sent.isError, false, sent.text);
+  await until('the turn', () => a.info.status === 'idle');
+  // Its worker reports, and its PRs merge: the leg is work left, so the merge does not close it.
+  sessions.events.emit('turnEnd', sessions.get(a.id), 'PR merged.\n\nw1: still open: waiting for a sandbox on m5 for the timed runs');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(w().legs?.map((l) => l.needs), [['m5']], 'the leg outlived the message and the report');
+  assert.match(afterMergeReason(w(), ['Done.']) ?? '', /^its leg for m5 is queued and not started/);
+  assert.match(await list(), /Queued \(its leg/);
+
+  // Next timed work names it, and counts it as m5's queued timed work.
+  const m5: Computer = { id: 'm5', online: true, live: 0, midTurn: 0, maxAgents: 3, sandboxes: 3, maxSandboxes: 3, freeSandboxes: 3, editors: 0, maxEditors: 2, platform: 'darwin', legs: [{ id: 'w1', since: w().legs![0].at }] };
+  const big: Computer = { ...m5, id: 'beast', live: 4, sandboxes: 6, maxSandboxes: 6, freeSandboxes: 2, platform: 'win32', legs: undefined };
+  const timed = timedLine([m5, big]);
+  assert.match(timed ?? '', /Legs the ledger holds for a named computer \(w1863.*\): m5: w1 \(since \d\d:\d\dZ\) \(m5 has ROOM: start it now/);
+  assert.doesNotMatch(timed ?? '', /m5 \(timed work goes to the smallest computer with room .*no timed run queued there/);
+
+  // 15:15: m5 has 3 of 3 sandboxes free and nobody started it. Now: Queued [WRONG], and after the grace, flagged.
+  agentsRoomFacts(agents, { game: ['m5'] });
+  assert.match(await list(), /Queued \[WRONG: m5 has room\] \(its leg .*but m5 has room: the dispatcher should start a worker for it there/);
+  const later = Date.now() + 11 * 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(later);
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), ['w1']);
+  assert.deepEqual(o.flagQueuedWithRoom(agents.roomFacts()), [], 'once an hour at most');
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[ledger] WRONG STATE').length > 0);
+  assert.match(heard(dispatcher().info.id, '[ledger] WRONG STATE')[0].text, /w1 "Cut UI main-thread cost on the Just Play save" \(Lothsahn, normal; room on m5; its leg there: The m5 leg for the timed/);
+  assert.match(w().log.join('\n'), /flagged: its leg for m5 is queued for capacity while m5 has room/);
+
+  // A timing worker starts for it on m5: the leg goes, and the request is not Queued any more.
+  o.linkWorker('w1', { id: 'e18e6c17', title: 'w1: m5 timed A/B', machineId: 'm5' }, 'started worker e18e6c17 in m5/slot1');
+  assert.equal(w().legs, undefined);
+  assert.match(w().log.join('\n'), /its leg for m5 started \(queued \d\d:\d\d UTC\)/);
+  assert.doesNotMatch((await list()).split('\n')[0], /Queued/);
+});
+
+test('w1863: a leg is dropped by decide_work queue drop_leg, refused without one; a request with no worker queues as before', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call } = env;
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  await startedFor(env, 'w1');
+  agentsRoomFacts(agents, {});
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'm5 leg', needs: ['m5'] })).isError, false);
+  const dropped = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'measured on LothDesktop instead', needs: ['m5'], drop_leg: true });
+  assert.match(dropped.text, /^w1 active: dropped its leg for m5/);
+  assert.equal(store.work.get('w1')!.legs, undefined);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'again', drop_leg: true })).isError, true);
+  // No worker: the request itself is Queued, as before.
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'm5 only', needs: ['m5'] })).isError, false);
+  assert.equal(store.work.get('w2')!.status, 'queued');
+  assert.equal(store.work.get('w2')!.legs, undefined);
 });

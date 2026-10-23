@@ -2862,9 +2862,12 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const out: Computer[] = [];
     const all = [...this.sessions.sessions.values()].filter((s) => s.info.kind !== 'orchestrator');
     const mem = this.hostMem();
+    // w1863: the legs requests hold for named computers (decide_work queue with needs beside the request's own worker).
+    const legs = [...this.store.work.values()].filter((w) => isOpen(w) && w.status !== 'queued' && w.legs?.length).sort(ledgerOrder);
     for (const m of this.machines.list()) {
       const pool = poolSettingsOf(m);
       if (!pool) continue;
+      const legsHere = legs.filter((w) => w.legs!.some((l) => l.needs.includes(m.id.toLowerCase()))).map((w) => ({ id: w.id, since: w.legs!.find((l) => l.needs.includes(m.id.toLowerCase()))!.at }));
       const sbs = m.sandboxes ?? [];
       const mine = all.filter((s) => s.info.machineId === m.id && s.info.machineSandbox);
       // Its daemon reports its load; this host's own daemon's is this host's.
@@ -2898,6 +2901,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         // Its timed legs, running or waiting (w1628): a release build goes to another build computer meanwhile.
         ...(st?.benchQueue ? { benchQueue: st.benchQueue } : {}),
         ...(m.platform ? { platform: m.platform } : {}),
+        ...(legsHere.length ? { legs: legsHere } : {}),
       });
     }
     return out;
@@ -4580,7 +4584,8 @@ ${w.repo ?? ''}
           questions: questionsShape(true).optional().describe('ask: required. A plain question per decision, 2-4 answers, one recommended.'),
           into: z.string().optional().describe('merge: the open request it repeats.'),
           session_ids: z.array(z.string()).optional().describe('link: the workers already doing it.'),
-          needs: z.array(z.string()).max(12).optional().describe('queue: the computers (machine ids) that can take it, when only some can (a Mac, BEAST); queue is refused while any of them (any computer, without needs) has room.'),
+          needs: z.array(z.string()).max(12).optional().describe('queue: the computers (machine ids) that can take it, when only some can (a Mac, BEAST); queue is refused while any of them (any computer, without needs) has room. On an active request with a worker: a leg there, kept until a worker starts for it there (w1863).'),
+          drop_leg: z.boolean().optional().describe('queue: drop its leg for needs.'),
           blockers: z.array(BLOCKER_SHAPE).max(6).optional().describe(`block: SEVERAL things it waits on (a request waiting for w727's PR and w752's fix has two). It starts only when ALL have cleared. Replaces what it waited on. Same shape as blocker.`),
           add_blocker: z.boolean().optional().describe('block with a single blocker on a request that is already blocked: add it to the gates it has, instead of replacing them.'),
           override_gate: z

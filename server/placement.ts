@@ -59,6 +59,11 @@ export interface Computer {
   benchQueue?: BenchQueueReport;
   /** Its platform (win32, darwin, linux): timed work that names one stays on it (w1628). */
   platform?: string;
+  /**
+   * The legs requests hold for it in the ledger (w1863, WorkItem.legs), by priority then oldest: work already promised the
+   * next place there, so they count as its queued timed work and the Capacity block names them.
+   */
+  legs?: { id: string; since: string }[];
 }
 
 
@@ -164,7 +169,8 @@ export function pickTimed(places: readonly Computer[], prefs: PlacementPrefs, t:
   const avoid = avoidOf(prefs);
   const ok = places.filter((p) => hasRoom(p) && !hold.has(p.id) && !avoid.has(p.id) && (!platform || p.platform === platform));
   if (!ok.length) return undefined;
-  const queued = (p: Computer) => p.benchQueue?.timed ?? 0;
+  // Its bench queue's timed legs, and the ledger's legs held for it (w1863: w1789's and w1785's m5 legs went unnamed here).
+  const queued = (p: Computer) => (p.benchQueue?.timed ?? 0) + (p.legs?.length ?? 0);
   const key = (p: Computer) => [queued(p) ? 1 : 0, p.maxSandboxes, p.editors ?? 0, queued(p), p.live];
   const sorted = [...ok].sort((a, b) => {
     const [x, y] = [key(a), key(b)];
@@ -173,7 +179,8 @@ export function pickTimed(places: readonly Computer[], prefs: PlacementPrefs, t:
   });
   const p = sorted[0];
   const size = `${p.maxSandboxes} sandboxes, ${p.editors ?? 0} Unity processes, ${p.live} live agents`;
-  const q = queued(p) ? `every one with room ${platform ? `on ${platform} ` : ''}has timed runs queued; this one fewest (${queued(p)})` : 'no timed run queued there';
+  const legs = p.legs?.length ? `; ${legsText(p.legs)}: start ${p.legs.length > 1 ? 'those' : 'that'} there first` : '';
+  const q = queued(p) ? `every one with room ${platform ? `on ${platform} ` : ''}has timed runs queued; this one fewest (${queued(p)}${legs})` : 'no timed run queued there';
   return { pick: p, why: `timed work goes to the smallest computer with room${platform ? ` on ${platform}` : ''} (w1628, lothsahn: "prefer boxes with a small number of slots and players for timed runs, not beast"): ${q}; ${size}` };
 }
 
@@ -421,8 +428,11 @@ const avoidOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.avoid ??
 const loadPart = (p: Computer) => {
   const pct = memPct(p);
   const ram = pct !== undefined ? `; RAM ${pct}% used` : '';
-  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}`;
+  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}${p.legs?.length ? `; ${legsText(p.legs)}` : ''}`;
 };
+
+/** "the ledger holds legs for it: w1789 (since 06:45Z), w1785 (since 06:46Z)" (w1863). */
+export const legsText = (legs: readonly { id: string; since: string }[]) => `the ledger holds ${legs.length > 1 ? 'legs' : 'a leg'} for it: ${legs.map((l) => `${l.id} (since ${l.since.slice(11, 16)}Z)`).join(', ')}`;
 
 /** "has 2 timed runs in its bench queue (the first: probe A round 3)" (w1628). */
 export const timedText = (q: BenchQueueReport) => `has ${q.timed} timed run${q.timed === 1 ? '' : 's'} in its bench queue, running or waiting${q.first ? ` (the first: ${q.first})` : ''}`;
@@ -476,8 +486,14 @@ export function liveLine(places: readonly Computer[], last?: string, prefs: Plac
 export function timedLine(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
   if (places.length < 2) return undefined;
   const p = pickComputer(places, last, prefs, 'game', false, 'timed');
-  if (!p) return `No computer has room for timed work now${heldNote(places, prefs, 'game')}.`;
-  return `Next timed work (benchmarks, perf A/Bs and probes; on the platform it names, w1628): ${p.pick.id} (${p.why}).`;
+  // w1863: legs promised a named computer come before new timed work there, and are said whichever computer is next.
+  const hold = holdOf(prefs);
+  const legs = places
+    .filter((x) => x.legs?.length)
+    .map((x) => `${x.id}: ${legsText(x.legs!).replace(/^the ledger holds (legs|a leg) for it: /, '')}${hasRoom(x) && !hold.has(x.id) ? ` (${x.id} has ROOM: start ${x.legs!.length > 1 ? 'them' : 'it'} now, start_agent with its work_id in a FREE sandbox there)` : ''}`);
+  const held = legs.length ? ` Legs the ledger holds for a named computer (w1863, decide_work queue with needs beside the request's own worker): ${legs.join('; ')}.` : '';
+  if (!p) return `No computer has room for timed work now${heldNote(places, prefs, 'game')}.${held}`;
+  return `Next timed work (benchmarks, perf A/Bs and probes; on the platform it names, w1628): ${p.pick.id} (${p.why}).${held}`;
 }
 
 export function buildLine(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
