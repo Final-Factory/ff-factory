@@ -26,6 +26,7 @@ import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 import { ghRunner } from './githubTokens.ts';
 import { poolRunEnv } from './secrets.ts';
+import { QueryBudgetSpent } from './ffboxBugThreads.ts';
 import type { ProviderConversation, Requester, WorkItem, WorkSourceKind } from '../shared/types.ts';
 
 /** A thread as Discord lists it (/guilds/<id>/threads/active, /channels/<id>/threads/archived/public). */
@@ -37,10 +38,16 @@ export interface RawThread {
   message_count?: number;
   last_message_id?: string | null;
   thread_metadata?: { archived?: boolean; archive_timestamp?: string };
+  /** A bot opened it (FFBox says so; from Discord the owner_id is compared with the bot's id). */
+  by_bot?: boolean;
 }
 
-/** What server/max.ts gives this watch: reads only, the token stays there. */
+/**
+ * What this watch reads the threads through: FFBox's stored copy (server/ffboxBugThreads.ts, what the portal uses: it
+ * holds no Discord token), or Discord itself with a token (server/max.ts). Reads only.
+ */
 export interface BugThreadReader {
+  /** Whether it can read at all (max.ts: a bot token; FFBox: always, its answers say when it cannot). */
   hasToken: boolean;
   guildId: string | undefined;
   botId?: string;
@@ -50,6 +57,10 @@ export interface BugThreadReader {
   archivedThreads(channelId: string, before?: string): Promise<{ threads: RawThread[]; hasMore: boolean }>;
   message(channelId: string, messageId: string): Promise<unknown>;
   messagesAfter(channelId: string, after?: string): Promise<{ id: string }[]>;
+  /** The threads of `channels` opened or written in since `since` in one list, when the reader has one (FFBox). */
+  listThreads?(since: number, channels: string[]): Promise<(RawThread & { channel: string })[]>;
+  /** A pass starts (FFBox: its query budget, FFBOX_QUERIES_PER_PASS). */
+  beginPass?(): void;
 }
 
 /** One owner message to judge, with the thread around it. The report and the other messages are players' text. */
@@ -397,7 +408,8 @@ export class BugThreadWatch {
     this.running = true;
     try {
       const dc = this.d.discord;
-      if (!dc?.hasToken) throw new Error('no bot token (server/max.ts reads it from the ffbox config)');
+      if (!dc?.hasToken) throw new Error('no reader: server/max.ts has no bot token (it reads it from the ffbox config)');
+      dc.beginPass?.();
       const s = this.settings;
       const since = this.now() - s.windowDays * DAY_MS;
       const threads = await this.threads(since);
@@ -418,6 +430,10 @@ export class BugThreadWatch {
   /** The bug channels' threads created or active since `since`, active and archived, oldest first. */
   async threads(since: number): Promise<(RawThread & { channel: string })[]> {
     const dc = this.d.discord!;
+    const lastAt = (t: RawThread) => timeOf(t.last_message_id && /^\d+$/.test(t.last_message_id) ? t.last_message_id : t.id);
+    const inWindow = (list: (RawThread & { channel: string })[]) =>
+      list.filter((t) => timeOf(t.id) >= since || lastAt(t) >= since).sort((a, b) => (newer(a.id, b.id) ? 1 : -1));
+    if (dc.listThreads) return inWindow(await dc.listThreads(since, this.settings.channels));
     const ids = new Map<string, string>();
     for (const alias of this.settings.channels) {
       const id = dc.channelIdOf(alias);
@@ -436,8 +452,7 @@ export class BugThreadWatch {
         before = oldest;
       }
     }
-    const lastAt = (t: RawThread) => timeOf(t.last_message_id && /^\d+$/.test(t.last_message_id) ? t.last_message_id : t.id);
-    return [...seen.values()].filter((t) => timeOf(t.id) >= since || lastAt(t) >= since).sort((a, b) => (newer(a.id, b.id) ? 1 : -1));
+    return inWindow([...seen.values()]);
   }
 
   // ---------------------------------------------------------------- the owners' word
@@ -471,6 +486,10 @@ export class BugThreadWatch {
           if (msgs.length < 50) break;
         }
       } catch (e) {
+        if (e instanceof QueryBudgetSpent) {
+          this.log(`bug threads: ${e.message} (thread ${t.id} on)`);
+          break;
+        }
         // The message that failed (the judge, a read) is read again next pass: the cursor stays before it.
         this.log(`bug threads: thread ${t.id}: ${(e as Error).message}; again next pass`);
       }
@@ -505,7 +524,9 @@ export class BugThreadWatch {
     let starter: DiscordMessage | undefined;
     try {
       starter = (await dc.message(t.id, t.id)) as DiscordMessage;
-    } catch {
+    } catch (e) {
+      // The pass's FFBox queries are spent: judge it next pass, with its report (the cursor stays before it).
+      if (e instanceof QueryBudgetSpent) throw e;
       // no starter readable: the title still makes a report
     }
     const r = parseBugThread(t, starter, { guildId: dc.guildId, channel: `#${t.channel.replace(/_/g, '-')}` });
@@ -572,7 +593,7 @@ export class BugThreadWatch {
     const dc = this.d.discord!;
     const named = namedThreads(this.d.store.work.values());
     const rows: ThreadRow[] = threads
-      .filter((t) => !(dc.botId && t.owner_id === dc.botId))
+      .filter((t) => !(t.by_bot || (dc.botId && t.owner_id === dc.botId)))
       .map((t) => ({
         threadId: t.id,
         channel: t.channel,
@@ -596,7 +617,11 @@ export class BugThreadWatch {
         let starter: DiscordMessage | undefined;
         try {
           starter = (await dc.message(t.id, t.id)) as DiscordMessage;
-        } catch {
+        } catch (e) {
+          if (e instanceof QueryBudgetSpent) {
+            notes.push(`${(e as Error).message}: the other unowned threads are filed next pass`);
+            break;
+          }
           // the title still makes a report
         }
         const r = parseBugThread(t, starter, { guildId: dc.guildId, channel: `#${t.channel.replace(/_/g, '-')}` });

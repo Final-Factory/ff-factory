@@ -18,6 +18,7 @@ import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
 import { BugThreadWatch } from './bugThreads.ts';
+import { FfboxBugThreads } from './ffboxBugThreads.ts';
 import { setAppConfig, toggleNightly } from './appConfig.ts';
 import { LedgerSweep, slugOf } from './ledgerSweep.ts';
 import { AutoDeploy, ghAutoDeploy } from './autoDeploy.ts';
@@ -767,13 +768,14 @@ const intake = new IntakeManager({
   },
 }).start();
 // Every bug thread has an owner (w1783, docs/intake.md): an owner's acknowledgement files their request, and the coverage
-// check files every thread nothing owns, for a reviewer. Read-only on Discord; on unless config intake.bugThreads says off.
+// check files every thread nothing owns, for a reviewer. Read from FFBox's stored copy (the portal holds no Discord token;
+// FFBox's bug_threads and thread_messages queries); nothing reaches Discord. On unless config intake.bugThreads says off.
 const bugThreads = new BugThreadWatch({
   cfg,
   store,
   identity,
   orchestrators: agents.orchestrators,
-  discord: max,
+  discord: new FfboxBugThreads(providers),
   conversations: () => providers.conversations(500),
 }).start();
 agents.nightlyKeyFor = (ids, portalUrl) => intake.nightlyRunEnv(ids, portalUrl);

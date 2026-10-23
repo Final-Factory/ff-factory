@@ -7,3 +7,7 @@
   of the last 7 days that no request, no game-repo PR's `Discord:` line and no FFBox PR owns; a sweep's window owns no
   thread it does not list. Nothing posts to Discord; FFBox is unchanged. On by default (`intake.bugThreads`). Docs:
   intake.md, "Every bug thread has an owner". Tests: `bugThreads.test.ts`; the real judge: `scripts/ownerAckEval.ts`.
+- **The bug-thread watch reads through FFBox** (w1783). Its first live pass logged `bug threads: no bot token`: the portal
+  holds no Discord token. FFBox's new read-only `bug_threads` and `thread_messages` queries (ffbox 42c6c64) hand it the
+  threads and messages FFBox already stores, an operator's plain reply included, with FFBox's operators block naming the
+  owners (`server/ffboxBugThreads.ts`); at most 12 queries a pass, the rest next pass.
