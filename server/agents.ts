@@ -1,3 +1,4 @@
+import { untimedText } from '../shared/benchGlance.ts';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -307,7 +308,8 @@ Disk space on this computer is shared and runs out: then new agents and editors 
  * (machine/leftovers.ts). Biscuit, 2026-10-13: two headless players of closed requests ran 27 h and 34 h on about 6 cores.
  */
 export const PROCESS_HYGIENE = `## Processes you start
-Nothing you start may outlive your work: a game player left running holds a machine's cores and fans for days. Give every game player you start a way to end by itself (\`-ffSoloQuitAfterSeconds <n>\` or \`timeout -s TERM <n>\` around its launch). Before you report DONE, and before you end a turn that leaves no check-in (wake_me) for a run still going, run \`ff-leftovers list\`, then \`ff-leftovers end\`: it ends what your session started that still runs (players, Xvfb and its window manager, ffmpeg, background jobs and scripts, batch builds, servers), never your own editor, claude's tools or another worker's processes; say in your report what it ended, or that nothing was left. FF Factory ends the rest by itself: everything your session started, 2 minutes after your process stops once no request waits for you, 10 minutes after it stops while one still does, and never before a pending check-in is due plus 10 minutes; a game player nobody owns 10 minutes after it is first seen so. A run you need to keep while you are stopped needs a check-in (wake_me) set for when you will look at it.`;
+Nothing you start may outlive your work: a game player left running holds a machine's cores and fans for days. Give every game player you start a way to end by itself (\`-ffSoloQuitAfterSeconds <n>\` or \`timeout -s TERM <n>\` around its launch). Before you report DONE, and before you end a turn that leaves no check-in (wake_me) for a run still going, run \`ff-leftovers list\`, then \`ff-leftovers end\`: it ends what your session started that still runs (players, Xvfb and its window manager, ffmpeg, background jobs and scripts, batch builds, servers), never your own editor, claude's tools or another worker's processes; say in your report what it ended, or that nothing was left. FF Factory ends the rest by itself: everything your session started, 2 minutes after your process stops once no request waits for you, 10 minutes after it stops while one still does, and never before a pending check-in is due plus 10 minutes; a game player nobody owns 10 minutes after it is first seen so. A run you need to keep while you are stopped needs a check-in (wake_me) set for when you will look at it.
+Every timing measurement holds an exclusive bench ticket on its machine, not only bench scripts' legs: a snippet that reads a clock in your editor (\`execute_code\` or \`unity-bridge.py eval\`: Stopwatch, ProfilerRecorder, realtimeSinceStartup, in-job counters), a Performance test run by name, a profiler capture you take numbers from. Across tool calls, run the game repo's \`python scripts/bench/bench_queue.py timed --what "<what>" --minutes 20\` in the background, time once it prints \`granted\`, then \`bench_queue.py timed --release\`; one call: \`unity-bridge.py ... --timed "<what>"\`. Without one the harness refuses the call.`;
 
 /**
  * Shell steps that never wait for a person (w1097, lothsahn, 2026-10-12: "Why did it do that, and how do we allow it to do
@@ -2952,6 +2954,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ...(st?.benchLock ? { benchLock: st.benchLock } : {}),
         // Its timed legs, running or waiting (w1628): a release build goes to another build computer meanwhile.
         ...(st?.benchQueue ? { benchQueue: st.benchQueue } : {}),
+        // Its timing calls outside an exclusive ticket in the last hour (w1923): the orchestrators' bench audit sees them.
+        ...(untimedText(st?.bench) ? { untimed: untimedText(st?.bench) } : {}),
         ...(m.platform ? { platform: m.platform } : {}),
         ...(legsHere.length ? { legs: legsHere } : {}),
         // It takes no timed runs (w1861): timed work goes elsewhere.

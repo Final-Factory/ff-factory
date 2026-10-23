@@ -4,7 +4,7 @@
 // Since w1829 and w1832 also each turn's deadline and warning, the release and nightly marks, and what a turn closed.
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BenchState, BenchTicketGlance } from '../shared/types.ts';
+import type { BenchState, BenchTicketGlance, UntimedTiming } from '../shared/types.ts';
 import { benchLockDir, pidAlive, readBenchLock } from './benchLock.ts';
 import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 import { closedFile } from './benchTurn.ts';
@@ -122,6 +122,57 @@ function glance(t: QueueTicket, info: Record<string, unknown> | undefined, m: Ma
   return out;
 }
 
+/** w1923: the untimed timing calls the state lists by name, and how far back it looks. */
+export const BENCH_STATE_MAX_UNTIMED = 5;
+export const UNTIMED_WINDOW_MS = 60 * 60_000;
+/** Only the log's tail is read: a line is about 300 bytes, and an hour of refusals is far fewer than this holds. */
+const UNTIMED_TAIL_BYTES = 256 * 1024;
+
+/**
+ * w1923: the timing calls of the last hour made outside an exclusive ticket, newest first: lines of the queue's
+ * timing.jsonl (the game repo's scripts/bench/timing_gate.py log and server/timingGuard.ts logTiming) whose outcome is
+ * `refused` or `not-timing`.
+ */
+export function readUntimed(qdir: string, now: number = Date.now()): UntimedTiming[] {
+  let text = '';
+  try {
+    const f = path.join(qdir, 'timing.jsonl');
+    const size = fs.statSync(f).size;
+    const fd = fs.openSync(f, 'r');
+    try {
+      const n = Math.min(size, UNTIMED_TAIL_BYTES);
+      const buf = Buffer.alloc(n);
+      fs.readSync(fd, buf, 0, n, size - n);
+      text = buf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return [];
+  }
+  const out: UntimedTiming[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    let r: Record<string, unknown>;
+    try {
+      r = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const ts = Number(r.ts) * 1000;
+    if (!(now - ts <= UNTIMED_WINDOW_MS) || (r.outcome !== 'refused' && r.outcome !== 'not-timing')) continue;
+    out.push({
+      at: new Date(ts).toISOString().slice(0, 19) + 'Z',
+      via: String(r.via ?? '').slice(0, 120),
+      outcome: r.outcome,
+      ...(r.session ? { session: String(r.session) } : {}),
+      ...(r.sandbox ? { sandbox: String(r.sandbox) } : {}),
+      ...(Array.isArray(r.markers) && r.markers.length ? { markers: r.markers.slice(0, 4).map(String) } : {}),
+      ...(r.why ? { why: String(r.why).slice(0, 160) } : {}),
+    });
+  }
+  return out.reverse();
+}
+
 /** The sandboxes an exclusive turn keeps closed (w1829: its guard's file, machine/benchTurn.ts writeClosedFile). */
 function closedEditors(root: string): string[] {
   return Object.keys(readJson(closedFile(root)) ?? {}).sort();
@@ -155,6 +206,7 @@ export function readBenchState(root: string | undefined, now: number = Date.now(
   const editors = mode === 'exclusive' ? closedEditors(root) : [];
   const players = mode === 'exclusive' ? playersClosed : 0;
   const g = (t: QueueTicket) => glance(t, infos.get(t.ticket), m, waiters);
+  const untimed = readUntimed(qdir, now);
   return {
     mode,
     running: running.slice(0, BENCH_STATE_MAX_RUNNING).map(g),
@@ -164,5 +216,6 @@ export function readBenchState(root: string | undefined, now: number = Date.now(
     ...(legacy ? { legacy } : {}),
     ...(m.singleWorker ? { singleWorker: true } : {}),
     ...(editors.length || players ? { closed: { editors, players } } : {}),
+    ...(untimed.length ? { untimed: untimed.slice(0, BENCH_STATE_MAX_UNTIMED), untimedCount: untimed.length } : {}),
   };
 }
