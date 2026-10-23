@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { hasLocalWork, neverDelete, norm, sessionRelaxed, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
+import { hasLocalWork, neverDelete, norm, sessionRelaxed, sizeOf, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
 import { CONTEXT_MAX_AGE_HOURS, requestIdsIn, type StaleContext, type StalePlan } from './staleOutput.ts';
 import { mentions } from './ownLeftovers.ts';
 import { gitIgnores } from './cleanupFolders.ts';
@@ -278,6 +278,9 @@ export async function idleCachesIn(dir: string, depth = 1, out: IdleCache[] = []
   return out;
 }
 
+/** "12 min", "5.2 h" or "3.1 days". */
+const agoText = (ms: number) => (ms < 2 * HOUR ? `${Math.max(0, Math.round(ms / 60_000))} min` : ms < 2 * DAY ? `${(ms / HOUR).toFixed(1)} h` : `${(ms / DAY).toFixed(1)} days`);
+
 const sizeIs = async (p: string) => (await fs.promises.lstat(p).catch(() => undefined))?.size ?? 0;
 
 /**
@@ -286,7 +289,7 @@ const sizeIs = async (p: string) => (await fs.promises.lstat(p).catch(() => unde
  * which a build or an editor touches), and a repo's object store not at all: w1719 walked every entry up to 200,000, so a
  * folder holding a few game clones always looked active and kept its caches for good.
  */
-export async function newestWrite(dir: string, stopAfter: number, caches: Set<string>, budget = ACTIVITY_BUDGET): Promise<number | 'too-big'> {
+export async function newestWrite(dir: string, stopAfter: number, caches: Set<string>, budget = ACTIVITY_BUDGET, found: { path?: string; unreadable?: boolean } = {}): Promise<number | 'too-big'> {
   const stack: { p: string; shallow: boolean }[] = [{ p: dir, shallow: false }];
   let newest = 0;
   let seen = 0;
@@ -294,7 +297,7 @@ export async function newestWrite(dir: string, stopAfter: number, caches: Set<st
     const { p, shallow } = stack.pop()!;
     const st = await fs.promises.lstat(p).catch(() => undefined);
     if (!st) continue;
-    newest = Math.max(newest, st.mtimeMs);
+    if (st.mtimeMs > newest) [newest, found.path] = [st.mtimeMs, p];
     if (newest > stopAfter) return newest;
     if (++seen > budget) return 'too-big';
     if (!st.isDirectory() || shallow) continue;
@@ -306,6 +309,7 @@ export async function newestWrite(dir: string, stopAfter: number, caches: Set<st
     try {
       names = await fs.promises.readdir(p);
     } catch {
+      [found.path, found.unreadable] = [p, true];
       return Number.POSITIVE_INFINITY; // unreadable inside: not ours to judge
     }
     for (const n of names) stack.push({ p: path.join(p, n), shallow: top });
@@ -377,6 +381,8 @@ export async function planInstallLeftovers(o: {
   scope?: 'all' | 'sandboxes';
   /** Free space is below the soft threshold (or a person asked for a pass): stopped sessions' caches go after lowCacheSettleMinutes (w1813). */
   low?: boolean;
+  /** A low pass says which check kept a temp folder's rebuildable caches once they reach this size (plan.held; default 256 MiB). */
+  heldMinBytes?: number;
 }): Promise<InstallPlan> {
   const plan: InstallPlan = { items: [], listed: [], strays: [] };
   if (!o.root) return plan; // not a worker-root install: nothing here is the install folder
@@ -386,6 +392,7 @@ export async function planInstallLeftovers(o: {
   const localWork = o.localWork ?? ((d: string) => hasLocalWork(d, 60_000));
   const items = new Map<string, CleanupItem>();
   const listed = new Map<string, string>();
+  const held: NonNullable<InstallPlan['held']> = [];
   const ctx = o.ctx && now - Date.parse(o.ctx.at) < CONTEXT_MAX_AGE_HOURS * HOUR ? o.ctx : undefined;
   const open = new Set(ctx?.open ?? []);
   const relaxed = (base: string): CleanupGuard => ({ ...o.guard, keep: o.guard.keep.filter((k) => !(norm(base) === norm(k) || norm(base).startsWith(norm(k) + '/'))) });
@@ -497,29 +504,49 @@ export async function planInstallLeftovers(o: {
    * Nothing git holds goes: an item inside a repo's work tree only when git ignores it, never one holding a repo.
    */
   const idleCaches = async (session: string, t: string) => {
-    if (live(session) || !within(session, root)) return;
+    if (!within(session, root)) return;
     const quickOn = !!o.low && s.lowCacheSettleMinutes > 0;
     if (!s.idleCacheHours && !quickOn) return;
-    if ((o.procs ?? []).some((p) => mentions(p.cmd, session))) return;
+    // A live session's caches are its worker's: only a low pass looks at them, to say so (w1813).
+    const isLive = live(session);
+    if (isLive && !o.low) return;
+    const named = (o.procs ?? []).find((p) => mentions(p.cmd, session));
+    if (named && !o.low) return;
     const projectOpen = (d: string) => !o.procs || o.procs.some((p) => mentions(p.cmd, d));
     const full = s.idleCacheHours ? await idleCachesIn(session, 1, [], { projectOpen }) : [];
     const quick = quickOn ? await idleCachesIn(session, 1, [], { projectOpen, quick: true }) : [];
     if (!full.length && !quick.length) return;
+    const keep = (why: string) => hold(session, quickOn ? quick : full, why);
+    if (isLive) return keep('its worker runs: a live session (a stopped one whose request resumed it counts too)');
+    if (named) return keep(`a running process names it (pid ${named.pid}: ${named.cmd.slice(0, 160)})`);
     const ageCut = now - s.idleCacheHours * HOUR;
     const settleCut = now - s.lowCacheSettleMinutes * 60_000;
-    const last = await newestWrite(session, quickOn ? Math.max(settleCut, ageCut) : ageCut, new Set([...full, ...quick].map((c) => norm(c.path))));
-    if (last === 'too-big') return;
+    const found: { path?: string; unreadable?: boolean } = {};
+    const last = await newestWrite(session, quickOn ? Math.max(settleCut, ageCut) : ageCut, new Set([...full, ...quick].map((c) => norm(c.path))), ACTIVITY_BUDGET, found);
+    if (last === 'too-big') return keep(`its last write cannot be judged: more than ${ACTIVITY_BUDGET.toLocaleString('en-US')} entries outside its caches`);
     let caches: IdleCache[];
     let after: string;
     if (s.idleCacheHours && last <= ageCut) [caches, after] = [full, `with no activity for ${s.idleCacheHours} h`];
     else if (quickOn && last <= settleCut) [caches, after] = [quick, `with no activity for ${s.lowCacheSettleMinutes} min while disk is low`];
-    else return;
+    else if (found.unreadable) return keep(`a folder in it cannot be read (${found.path}), so its last write cannot be judged`);
+    else return keep(`written ${agoText(now - last)} ago (${found.path}), within the ${quickOn ? `${s.lowCacheSettleMinutes} min` : `${s.idleCacheHours} h`} it must stay unwritten`);
     const g = sessionRelaxed(session, relaxed(t));
     for (const c of caches) {
-      if (items.has(c.path) || !within(c.path, root) || neverDelete(c.path, g)) continue;
-      if (await gitHolds(c.path, session)) continue;
-      items.set(c.path, { path: c.path, rule: 'session-idle-cache', why: `${c.what}, in a worker's temp folder ${after} (rebuildable)`, base: t, inSession: session });
+      if (items.has(c.path) || !within(c.path, root)) continue;
+      const no = neverDelete(c.path, g) ?? (await gitHolds(c.path, session));
+      if (no) await hold(c.path, [c], no);
+      else items.set(c.path, { path: c.path, rule: 'session-idle-cache', why: `${c.what}, in a worker's temp folder ${after} (rebuildable)`, base: t, inSession: session });
     }
+  };
+  /**
+   * What a low pass kept and why (w1813: LothDesktop's ffa-409f9363 kept 15.6 GB with nothing in the log to say which check
+   * held it): the caches of `at` (a session's folder, or one cache the guard or git holds), measured, once past heldMinBytes.
+   */
+  const hold = async (at: string, caches: IdleCache[], why: string) => {
+    if (!o.low) return;
+    let bytes = 0;
+    for (const c of caches) bytes += await sizeOf(c.path, 300_000);
+    if (bytes >= (o.heldMinBytes ?? 256 * 1024 ** 2)) held.push({ path: at, bytes, why: `${caches.length} rebuildable cache(s) kept: ${why}` });
   };
   /** The entries of `dir`, newest first (by last activity). */
   const newestFirst = async (dir: string, only?: (e: fs.Dirent) => boolean) => {
@@ -586,6 +613,7 @@ export async function planInstallLeftovers(o: {
       await oldBuilds(dir, t);
       if (live(dir)) {
         for (const b of big) listed.set(b.file, `a task output of a LIVE session past ${s.outputCapGB} GB (${(b.bytes / GB).toFixed(1)} GB): kept, someone should look`);
+        await idleCaches(dir, t);
         continue;
       }
       await idleCaches(dir, t);
@@ -608,6 +636,9 @@ export async function planInstallLeftovers(o: {
   for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
   plan.items = [...items.values()];
   plan.listed = [...listed].map(([p, why]) => ({ path: p, why }));
+  // A folder that goes whole (its session stopped long enough) is not also said to be kept.
+  const kept = held.filter((h) => !plan.items.some((i) => within(h.path, i.path)));
+  if (kept.length) plan.held = kept;
   return plan;
 }
 
@@ -617,5 +648,5 @@ export function mergePlans(a: StalePlan, b: InstallPlan): InstallPlan {
   for (const it of [...a.items, ...b.items]) items.set(it.path, it);
   const listed = new Map<string, string>();
   for (const l of [...a.listed, ...b.listed]) if (![...items.keys()].some((p) => within(l.path, p))) listed.set(l.path, l.why);
-  return { items: [...items.values()], listed: [...listed].map(([path, why]) => ({ path, why })), strays: b.strays };
+  return { items: [...items.values()], listed: [...listed].map(([path, why]) => ({ path, why })), strays: b.strays, ...(b.held ? { held: b.held } : {}) };
 }

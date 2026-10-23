@@ -526,3 +526,42 @@ test("w1813: below the soft threshold a stopped worker's caches go after 15 min,
     assert.ok(fs.existsSync(path.join(s, ...keep.split('/'))), `${keep} stays`);
   }
 });
+
+test('w1813: a low pass says which check kept a worker folder\'s rebuildable caches, measured', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-held-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tmp = path.join(root, 'tmp');
+  const s = path.join(tmp, 'ffa-409f9363');
+  releaseSession(s);
+  ageAll(tmp, 2);
+  const home = path.join(root, 'home');
+  const held = async (o: { low?: boolean; inUse?: string[]; procs?: ProcLite[]; heldMinBytes?: number } = {}) =>
+    (await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard: { keep: [], inUse: o.inUse ?? [], resumable: [s], home }, procs: o.procs ?? [], settings, now: NOW, low: o.low ?? true, heldMinBytes: o.heldMinBytes ?? 0 })).held ?? [];
+  const one = async (o: Parameters<typeof held>[0]) => {
+    const h = await held(o);
+    assert.equal(h.length, 1, JSON.stringify(h));
+    assert.equal(h[0]!.path, s);
+    assert.ok(h[0]!.bytes >= 1024 ** 2, `measured: the tar alone is 1 MiB (${h[0]!.bytes})`);
+    return h[0]!.why;
+  };
+  assert.match(await one({ inUse: [s] }), /8 rebuildable cache\(s\) kept: its worker runs/);
+  assert.match(await one({ procs: [{ pid: 7, ppid: 1, cmd: `steamcmd +run ${path.join(s, 'urgent-1.0.0.8', 'vdf')}` }] }), /a running process names it \(pid 7: steamcmd/);
+  const edited = path.join(s, 'report.md');
+  fs.writeFileSync(edited, 'edited');
+  fs.utimesSync(edited, (NOW - 5 * 60_000) / 1000, (NOW - 5 * 60_000) / 1000);
+  assert.match(await one({}), /written 5 min ago \(.*report\.md\), within the 15 min/);
+  // Hourly passes stay as they were (nothing said), and so does a small folder below the floor.
+  assert.deepEqual(await held({ low: false, inUse: [s] }), []);
+  assert.deepEqual(await held({ inUse: [s], heldMinBytes: 1024 ** 3 }), []);
+  // The pass hands them on to its log, a dry run too: each is a "kept" line with its size and reason.
+  const guard: CleanupGuard = { keep: [], inUse: [s], resumable: [s], home };
+  const p = await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs: [], settings, now: NOW, low: true, heldMinBytes: 0 });
+  for (const dryRun of [true, false]) {
+    const r = await cleanupPass({ opts: { stale: true, dryRun }, guard, mode: 'on', regular: async () => [], stale: async () => mergePlans({ items: [], listed: [] }, p) });
+    assert.equal(r.held?.length, 1);
+    assert.match(r.held![0]!.why, /its worker runs/);
+  }
+  // Taken: nothing is said to be kept.
+  ageAll(tmp, 2);
+  assert.deepEqual(await held({}), []);
+});

@@ -235,7 +235,7 @@ function readInData(d: PortalLogsDeps, file: string, maxBytes: number): { text: 
 }
 
 /** One clean-up pass as lines: its summary, then each item removed, planned or kept, each starting with the pass's time. */
-function passLines(e: CleanupSummary & { removedAll?: { path: string; bytes: number; rule: string; why?: string }[] }): string[] {
+function passLines(e: CleanupSummary & { removedAll?: { path: string; bytes: number; rule: string; why?: string }[]; heldAll?: { path: string; bytes: number; why: string }[] }): string[] {
   const gb = (b: number) => (b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GB` : `${(b / 1024 ** 2).toFixed(0)} MB`);
   const tag = `[${e.at}]`;
   const out = [`${tag} ${describeCleanup(e)}`];
@@ -243,6 +243,7 @@ function passLines(e: CleanupSummary & { removedAll?: { path: string; bytes: num
   if (!e.dryRun) for (const x of [...(e.removedAll ?? e.top ?? [])].sort((a, b) => b.bytes - a.bytes)) out.push(item('removed', x));
   for (const x of e.planned ?? []) out.push(item(e.dryRun ? 'would remove' : 'would remove (dry-run mode)', x));
   for (const x of e.listed ?? []) out.push(item('kept for a person', x));
+  for (const x of e.heldAll ?? e.held ?? []) out.push(item('kept', x));
   return out;
 }
 

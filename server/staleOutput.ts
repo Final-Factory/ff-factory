@@ -128,6 +128,8 @@ export interface StalePlan {
   listed: { path: string; why: string }[];
   /** Processes still writing into a stopped session's folder (server/installLeftovers.ts, w899): ended before the items go. */
   strays?: { pid: number; cmd: string; dir: string; why: string }[];
+  /** Rebuildable caches a low pass saw and kept, measured, with the check that kept them (installLeftovers.ts, w1813). */
+  held?: { path: string; bytes: number; why: string }[];
 }
 
 const DAY = 86_400_000;
@@ -316,7 +318,9 @@ export async function cleanupPass(o: {
   const onDrive = (p: string) => !roots.length || roots.some((r) => onInstallDrive(p, r));
   for (const l of [...plan.listed, ...own.listed, ...outside]) if (onDrive(l.path)) listed.push({ ...l, bytes: await sizeOf(l.path, 300_000) });
   listed.sort((a, b) => b.bytes - a.bytes);
-  if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await sizePlan([...regular, ...plan.items, ...own.items]), listed };
+  const held = (plan.held ?? []).filter((h) => onDrive(h.path)).sort((a, b) => b.bytes - a.bytes);
+  const kept = held.length ? { held } : {};
+  if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await sizePlan([...regular, ...plan.items, ...own.items]), listed, ...kept };
   const live = o.mode === 'on' ? plan.items : [];
   if (o.mode === 'on' && plan.strays?.length && o.endStrays) await o.endStrays(plan.strays).catch(() => undefined);
   const r = await runCleanup([...regular, ...live], o.guard);
@@ -326,7 +330,7 @@ export async function cleanupPass(o: {
     r.failed.push(...r2.failed);
     r.bytes += r2.bytes;
   }
-  return { ...r, ...(o.mode === 'dry-run' && plan.items.length ? { planned: await sizePlan(plan.items) } : {}), listed };
+  return { ...r, ...(o.mode === 'dry-run' && plan.items.length ? { planned: await sizePlan(plan.items) } : {}), listed, ...kept };
 }
 
 const norm = (p: string) => path.resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
