@@ -259,6 +259,15 @@ export interface DelegationFiling {
 
 /** How long a request may sit queued while a computer has room before it is flagged (w643; a judgment: two dispatcher turns). */
 export const ROOM_GRACE_MS = 10 * 60_000;
+/** At most this many legs a request holds for named computers at once (w1863; a judgment: one per machine it needs). */
+const MAX_LEGS = 4;
+const sameNeeds = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((x) => b.includes(x));
+/** Waiting for room: Queued, or an open request holding a leg for named computers (w1863: the capacity ping names both). */
+const waitsForRoom = (w: WorkItem) => w.status === 'queued' || (isOpen(w) && !!w.legs?.length);
+/** The computers it waits for: a Queued request's `needs`, else its legs' (w1863). */
+const roomNeeds = (w: WorkItem): string[] | undefined => (w.status === 'queued' ? w.queuedFor?.needs : w.legs?.flatMap((l) => l.needs));
+/** "leg for m5", "legs for m5 and m3": the legs a request holds (w1863). */
+const legsName = (legs: readonly { needs: string[] }[]) => `leg${legs.length > 1 ? 's' : ''} for ${legs.map((l) => l.needs.join(' or ')).join(' and ')}`;
 /** How many times the sweep resumes a worker again before it tells the dispatcher (w1094). */
 const RESUME_TRIES = 3;
 
@@ -1151,6 +1160,12 @@ export class Orchestrators {
       }
     }
     if (w.status !== 'queued' && w.queuedFor) w.queuedFor = undefined;
+    // A leg (w1863) is not its status: it goes only when its worker starts, or the request closes (stalled keeps it).
+    if (w.legs && !isOpen(w) && w.status !== 'stalled') {
+      const gone = w.legs;
+      w.legs = undefined;
+      w.log = [...w.log, logLine(this.now(), `its ${legsName(gone)} never started; dropped as it closed (${w.status})`)].slice(-40);
+    }
   }
 
   /**
@@ -2399,7 +2414,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; override_gate?: string; asks?: Ask[] }): string {
+  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; drop_leg?: boolean; override_gate?: string; asks?: Ask[] }): string {
     let keptBefore: WorkBlocker[] = [];
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
@@ -2411,6 +2426,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     if (hold) throw new Error(`${w.id} is not closed as done: ${hold} (w1870: no automatic close on an errored turn, or without its worker's DONE). Resume its worker (message_agent) with the error and what is left, so it finishes and says DONE: ${w.id}; place it again if it was stopped on purpose. A person who says it is done closes it through their own orchestrator (update_work close: done).`);
     const note = input.note.trim();
     let what = '';
+    let legOnly = false;
     if (input.action === 'merge') {
       const t = into!;
       for (const r of w.requesters) if (!isFor(t, r.userId)) t.requesters.push(r);
@@ -2457,6 +2473,15 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       w.asks++;
       w.question = { text: clip(note, 1000), at: this.now().toISOString(), ...(input.asks?.length ? { asks: input.asks } : {}) };
       what = 'a question';
+    } else if (input.action === 'queue' && input.drop_leg) {
+      // w1863: a leg nobody needs any more (its worker measured elsewhere, the person changed the plan).
+      const needs = [...new Set((input.needs ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean))];
+      const gone = (w.legs ?? []).filter((l) => !needs.length || l.needs.some((n) => needs.includes(n)));
+      if (!gone.length) throw new Error(`${w.id} has no leg queued${needs.length ? ` for ${needs.join(' or ')}` : ''}${w.legs?.length ? ` (it has its ${legsName(w.legs)})` : ''}`);
+      const rest = (w.legs ?? []).filter((l) => !gone.includes(l));
+      w.legs = rest.length ? rest : undefined;
+      legOnly = true;
+      what = `dropped its ${legsName(gone)}`;
     } else if (input.action === 'queue') {
       // A gated request is not waiting for capacity (w754): queueing it would drop the gates.
       const gated = this.gateProblem(w, input.override_gate);
@@ -2473,8 +2498,19 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       }
       // Held computers, and those placement.minPriority reserves above its priority (w1643), with room it may not use.
       const held = unusableText({ ...facts, held: facts.held.filter((h) => !needs.length || needs.includes(h.id)), reserved: (facts.reserved ?? []).filter((r) => !needs.length || needs.includes(r.id)) }, kind, w.priority);
-      w.queuedFor = { at: this.now().toISOString(), ...(needs.length ? { needs } : {}) };
-      what = `queued for capacity${needs.length ? ` on ${needs.join(' or ')}` : ''}${held ? `; ${held}` : ''}`;
+      // w1863: a leg for named computers of a request whose own worker carries on elsewhere ("queued for capacity on m5 … I
+      // start a timing worker there when a slot frees"). It was the request's status, so the next message to that worker
+      // (linkWorker: active) dropped it, and w1789's and w1785's m5 legs waited 8 hours unseen. Now it is its own entry.
+      const worker = w.status === 'active' && w.sessionIds.some((sid) => this.store.sessions.get(sid));
+      if (needs.length && worker) {
+        const at = this.now().toISOString();
+        w.legs = [...(w.legs ?? []).filter((l) => !sameNeeds(l.needs, needs)), { at, needs, what: clip(note, 200) }].slice(-MAX_LEGS);
+        legOnly = true;
+        what = `a leg queued for capacity on ${needs.join(' or ')} (its worker carries on; the leg stays Queued, and is flagged WRONG when ${needs.length > 1 ? 'one of them has' : 'it has'} room, until a worker starts for it there: start_agent with work_id "${w.id}" in a FREE sandbox on ${needs.join(' or ')})${held ? `; ${held}` : ''}`;
+      } else {
+        w.queuedFor = { at: this.now().toISOString(), ...(needs.length ? { needs } : {}) };
+        what = `queued for capacity${needs.length ? ` on ${needs.join(' or ')}` : ''}${held ? `; ${held}` : ''}`;
+      }
     } else if (input.action === 'block') {
       const now = this.now();
       const kept = gatesOf(w);
@@ -2499,8 +2535,10 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     else what = 'done';
     // The dispatcher's decision is a hand close or reopen too (w370: w339, closed by it at 02:26, reopened by the
     // re-check at 05:30 on the stale mark of an earlier automatic close).
-    if (statusAfter(input.action) !== w.status) settleByHand(w);
-    w.status = statusAfter(input.action);
+    if (!legOnly) {
+      if (statusAfter(input.action) !== w.status) settleByHand(w);
+      w.status = statusAfter(input.action);
+    }
     // Out of stalled by a decision (w643: block, a stalled request found to wait on something): no stale stall reason.
     if (isOpen(w)) w.stalled = undefined;
     if (input.action === 'reject' || input.action === 'done') w.outcome = clip(note, 300);
@@ -2949,7 +2987,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
   }
 
   /** A worker was started, messaged or approved for a request: link it, mark the request active, tell its requesters. */
-  linkWorker(workId: string, s: Pick<SessionInfo, 'id' | 'title'>, what: string, opts: { reply?: boolean; overrideGate?: string } = {}) {
+  linkWorker(workId: string, s: Pick<SessionInfo, 'id' | 'title' | 'machineId'>, what: string, opts: { reply?: boolean; overrideGate?: string } = {}) {
     const w = this.requireWork(workId);
     const problem = startProblem(w);
     if (problem) throw new Error(problem);
@@ -2961,6 +2999,14 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'sent' } };
     // Started or sent to a worker: whatever held it is over (stamp drops a blocker or a capacity note).
     const was = w.blocked ? ` (it was blocked on ${gatesName(gatesOf(w))})` : '';
+    // w1863: a worker on a computer a leg names is that leg starting; one anywhere else (its own worker, messaged) leaves it.
+    const machine = (s.machineId ?? this.store.sessions.get(s.id)?.machineId)?.toLowerCase();
+    const started = machine ? (w.legs ?? []).filter((l) => l.needs.includes(machine)) : [];
+    if (started.length) {
+      const rest = (w.legs ?? []).filter((l) => !started.includes(l));
+      w.legs = rest.length ? rest : undefined;
+      what += `; its ${legsName(started)} started (queued ${started.map((l) => l.at.slice(11, 16)).join(', ')} UTC)`;
+    }
     w.status = 'active';
     this.stamp(w, `dispatcher: ${what}${was}`);
     this.store.putWork(w);
@@ -5010,7 +5056,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
     // The room the page and decide_work queue read (this.roomNow()); a bare list is the game room, nothing held.
     const facts: RoomNow = Array.isArray(room) ? { game: [...room], agent: [], held: [] } : (room as RoomNow);
     const now = this.now().getTime();
-    const flagged: { w: WorkItem; on: string[] }[] = [];
+    const flagged: { w: WorkItem; on: string[]; leg?: string }[] = [];
     const nums = (ids: readonly string[]) => ids.map((id) => `${id}: ${facts.detail?.[id] ?? 'room'}`).join('; ');
     for (const w of this.store.work.values()) {
       if (w.status !== 'queued') continue;
@@ -5024,11 +5070,23 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       this.store.putWork(w);
       flagged.push({ w, on });
     }
+    // w1863: a leg held for named computers, whatever the request's own status (its worker works elsewhere).
+    for (const w of this.store.work.values()) {
+      if (!w.legs?.length || !isOpen(w) || w.status === 'queued') continue;
+      if (now - (this.roomFlags.get(`${w.id}:leg`) ?? 0) < 3_600_000) continue;
+      const late = w.legs.filter((l) => now - (Date.parse(l.at) || now) >= ROOM_GRACE_MS);
+      const on = [...new Set(late.flatMap((l) => roomIds(facts, needsOf(w), w.priority).filter((id) => l.needs.includes(id.toLowerCase()))))];
+      if (!on.length) continue;
+      this.roomFlags.set(`${w.id}:leg`, now);
+      this.stamp(w, `flagged: its ${legsName(late)} is queued for capacity while ${on.join(', ')} ${on.length > 1 ? 'have' : 'has'} ${needsOf(w) === 'agent' ? 'an agent slot' : 'room'} (${nums(on)} at this time)`);
+      this.store.putWork(w);
+      flagged.push({ w, on, leg: late.map((l) => l.what).join('; ') });
+    }
     if (!flagged.length) return [];
     flagged.sort((a, b) => ledgerOrder(a.w, b.w)); // by priority, then oldest (w1099)
     console.warn(`ledger: queued while a computer has room: ${flagged.map((f) => `${f.w.id} (${f.on.join(', ')})`).join('; ')}`);
     this.toDispatcher(
-      `[ledger] WRONG STATE: queued for capacity while a computer that could take it has room: ${flagged.map((f) => `${f.w.id} "${clip(f.w.title, 80)}" (${names(f.w.requesters)}, ${f.w.priority}; ${needsOf(f.w) === 'agent' ? 'an agent slot (it needs no editor)' : 'room'} on ${f.on.join(', ')})`).join('; ')}. Queued means no free place. Start each now (start_agent with its work_id), or decide_work block it on what it really waits for (another request, a deploy, a machine, a lock, a time, CI), or queue it again with needs naming the only computers that can take it.`,
+      `[ledger] WRONG STATE: queued for capacity while a computer that could take it has room: ${flagged.map((f) => `${f.w.id} "${clip(f.w.title, 80)}" (${names(f.w.requesters)}, ${f.w.priority}; ${needsOf(f.w) === 'agent' ? 'an agent slot (it needs no editor)' : 'room'} on ${f.on.join(', ')}${f.leg ? `; its leg there: ${clip(f.leg, 160)}` : ''})`).join('; ')}. Queued means no free place. Start each now (start_agent with its work_id${flagged.some((f) => f.leg) ? '; for a leg, in a FREE sandbox on the computer named, while its own worker carries on' : ''}), or decide_work block it on what it really waits for (another request, a deploy, a machine, a lock, a time, CI), or queue it again with needs naming the only computers that can take it${flagged.some((f) => f.leg) ? ' (a leg nobody needs: decide_work queue with drop_leg and its needs)' : ''}.`,
     );
     return flagged.map((f) => f.w.id);
   }
@@ -5049,7 +5107,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    * ping says how old each event is and where there is room now, so a stale "released" is never read as current.
    */
   capacityMayHaveFreed(what: string) {
-    if (![...this.store.work.values()].some((w) => w.status === 'queued')) return;
+    if (![...this.store.work.values()].some(waitsForRoom)) return;
     this.capacityEvents = [...this.capacityEvents, { what, at: this.now().getTime() }].slice(-5);
     clearTimeout(this.capacityTimer);
     const fire = () => {
@@ -5063,13 +5121,13 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
         return;
       }
       // By priority, then oldest (ledgerOrder): the order the dispatcher should start them in (w1099: a high nightly run first).
-      const queued = [...this.store.work.values()].filter((w) => w.status === 'queued').sort(ledgerOrder);
+      const queued = [...this.store.work.values()].filter(waitsForRoom).sort(ledgerOrder);
       const events = this.capacityEvents;
       this.capacityEvents = [];
       if (!queued.length) return;
       // The room now, not the room when the event happened: only a queued request that a computer with room could take is worth a ping.
       const facts = this.roomNow();
-      const fits = (w: WorkItem) => roomIds(facts, needsOf(w), w.priority).some((id) => !w.queuedFor?.needs?.length || w.queuedFor.needs.some((n) => n.toLowerCase() === id.toLowerCase()));
+      const fits = (w: WorkItem) => roomIds(facts, needsOf(w), w.priority).some((id) => !roomNeeds(w)?.length || roomNeeds(w)!.some((n) => n.toLowerCase() === id.toLowerCase()));
       const usable = queued.filter(fits);
       if (!usable.length) {
         console.log(`ledger: no capacity ping: ${events.map((e) => e.what).join('; ')}, but no computer with room can take ${queued.map((w) => w.id).join(', ')} now`);
@@ -5077,7 +5135,7 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       }
       this.capacityWakes.push(now);
       const old = (e: { what: string; at: number }) => `${e.what}, ${Math.max(0, Math.round((now - e.at) / 60_000))} min ago`;
-      const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${w.queuedFor?.needs?.length ? `; needs ${w.queuedFor.needs.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''})`;
+      const line = (w: WorkItem) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${roomNeeds(w)?.length ? `; needs ${roomNeeds(w)!.join(' or ')}` : ''}${needsOf(w) === 'agent' ? '; needs only an agent slot' : ''}${w.status !== 'queued' ? `; a leg, its own worker elsewhere: ${clip(w.legs!.map((l) => l.what).join('; '), 120)}` : ''})`;
       const room = [facts.game.length ? `game work: ${facts.game.join(', ')}` : '', facts.agent.length ? `agent-slot work: ${facts.agent.join(', ')}` : '', facts.held.length ? heldText(facts.held) : '', ...(facts.reserved ?? []).map((r) => `${r.id} has room for ${minPriorityText(r.min)} (placement.minPriority)`)].filter(Boolean).join('; ');
       const rest = queued.filter((w) => !usable.includes(w));
       this.toDispatcher(`[ledger] Capacity may have freed (${events.map(old).join('; ')}). Room now: ${room}. Queued for capacity and fitting it, by priority, then oldest: ${usable.map(line).join('; ')}.${rest.length ? ` Queued with no room for them now: ${rest.map((w) => w.id).join(', ')}.` : ''} Start what fits now (start_agent into a FREE sandbox: list_sandboxes marks them, and check the sandbox is still free); leave queued only what no computer with room can take, and block what waits on something else.`);

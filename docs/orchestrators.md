@@ -216,7 +216,7 @@ The dispatcher then does one of these for each request:
 | start it | `start_agent` with `work_id`, or `message_agent` with `work_id` to a worker (a new session, or the worker's own when the request is related to what it did: [One session per request](#one-session-per-request)) | `active` |
 | merge it | `decide_work merge` into the open request it repeats; its people join that one | `merged` |
 | link it | `decide_work link` to workers already doing it (a worker with another request in hand takes only a related one) | `active` |
-| queue it | `decide_work queue`: capacity only, no computer that could take it has room (`needs`: the computers that can, when only some can); refused while one of them has room | `queued` |
+| queue it | `decide_work queue`: capacity only, no computer that could take it has room (`needs`: the computers that can, when only some can); refused while one of them has room. On an active request with a worker, `needs` queues a **leg** there instead (w1863, [machines.md](machines.md), "Placing work"): it stays active, the leg shows Queued and goes when a worker starts for it on one of those computers (`drop_leg` drops it) | `queued` (a leg: unchanged) |
 | block it | `decide_work block` with `blocker`: the thing it waits on (another request, a deploy, a machine, a usage limit, a lock, a time, CI); it starts by itself when that clears | `blocked` |
 | ask | `decide_work ask`, at most 3 questions per request: what only a person can answer or decide | `question` |
 | reject it, or close it | `decide_work reject` / `done`, saying why | `rejected` / `done` |

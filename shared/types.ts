@@ -1767,6 +1767,13 @@ export interface WorkOverlap {
   why: string;
 }
 
+/** A leg of a request queued for named computers (w1863, WorkItem.legs): since when, where, and what it is. */
+export interface QueuedLeg {
+  at: string;
+  needs: string[];
+  what: string;
+}
+
 /** A request for work that a person's orchestrator filed with the dispatcher, and what became of it. */
 export interface WorkItem {
   id: string;
@@ -1927,6 +1934,13 @@ export interface WorkItem {
   conditional?: ConditionalDecision[];
   /** The computers the dispatcher said can take it when it queued it for capacity (decide_work queue `needs`, w643). */
   queuedFor?: { at: string; needs?: string[] };
+  /**
+   * w1863: legs held for named computers while the request's own worker carries on elsewhere (decide_work queue with `needs`
+   * on a request that has a worker): "queued for capacity on m5, I start a timing worker there when a slot frees". Not its
+   * status: a leg outlives the request going active again (a message to its worker), that worker's reports and its PRs
+   * merging, and goes only when a worker starts or is sent for it on a computer it names, or the request closes.
+   */
+  legs?: QueuedLeg[];
   /**
    * Its last hand-back (w1532, server/machinePause.ts): its worker's machine was paused, so it was taken off that worker and
    * Queued for another computer, whose worker picks it up from `branch` with `note` (the worker's own line, or where it

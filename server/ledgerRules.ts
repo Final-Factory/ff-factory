@@ -191,8 +191,10 @@ export const isRelease = (w: Pick<WorkItem, 'title' | 'brief'>) => RELEASE_TITLE
  * its build is live and its notes are posted; a request that asks for a check after the merge (a 2-peer run) or plans
  * several PRs is not done by one; nor is one whose worker's last report says more is coming or waits on someone.
  */
-export function afterMergeReason(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'question' | 'flag'>, reports: readonly string[]): string | undefined {
+export function afterMergeReason(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'question' | 'flag' | 'legs'>, reports: readonly string[]): string | undefined {
   if (w.question) return 'it waits on a question';
+  // w1863: w1789 merged two PRs while its m5 timing leg waited; the leg is work left, not a report's words.
+  if (w.legs?.length) return `its leg${w.legs.length > 1 ? 's' : ''} for ${w.legs.map((l) => l.needs.join(' or ')).join(' and ')} ${w.legs.length > 1 ? 'are' : 'is'} queued and not started`;
   if (w.flag) return w.flag.kind === 'error' ? 'it waits on an escalated error' : 'it waits on a design question';
   const brief = `${w.title}\n${w.brief}\n${w.constraints ?? ''}`;
   if (isRelease(w)) return 'a release ends when the build is live and the patch notes are posted';
@@ -223,8 +225,8 @@ const sentences = (t: string) => t.split(/(?<=[.!?;])\s+|\n+/).filter((s) => s.t
  * something besides a deploy is (afterMergeReason still finds a reason once the sentences about deploying are set aside).
  * `portal`: this app's portal must run the merge; `machines`: every connected worker machine's daemon too.
  */
-export function deployStep(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'question' | 'flag'>, reports: readonly string[]): { portal: boolean; machines: boolean } | undefined {
-  if (w.question || w.flag || isRelease(w)) return undefined;
+export function deployStep(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'question' | 'flag' | 'legs'>, reports: readonly string[]): { portal: boolean; machines: boolean } | undefined {
+  if (w.question || w.flag || w.legs?.length || isRelease(w)) return undefined;
   if (!afterMergeReason(w, reports)) return undefined;
   const aside: string[] = [];
   const strip = (t: string) =>
