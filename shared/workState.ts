@@ -302,6 +302,24 @@ export const orchestratorWaitIn = (line: string) => ORCHESTRATOR_WAIT.test(line)
 const OWN_WORK = /\bto (?:run|do|start|kick off|trigger|launch|finish|make) (?:the |a |my |its |our )?[^;.]{0,60}?\b(?:check|build|ci|tests?|audit|run|clips?|playtest|capture)\b/i;
 export const ownWorkWait = (line: string) => ORCHESTRATOR_WAIT.test(line) && OWN_WORK.test(line) && !/\b(?:worker|sandbox|place|move)\b/i.test(line);
 
+/** "waiting on a Windows or Linux pair worker", "waits for another worker": a worker only the dispatcher can start (w1944). */
+const WORKER_WAIT = /\b(?:waiting|waits|wait) (?:for|on) (?:a|an|the|another|its|my)\b[^;.]{0,60}?\bworker\b/i;
+
+/**
+ * What a worker's still-open line says it waits on when that is another request, the orchestrator or the dispatcher, or a
+ * worker they must start (w1944), else undefined: nothing it can do in its sandbox until a message brings it back, so the
+ * sandbox may go at once, as for a declared block (w890). 2026-10-23 21:57 to 22:45 UTC: d558ba14 held the m3's only
+ * sandbox idle for 29 minutes with "w665: still open: waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair`
+ * for PR #2340", called no blocked_on, and 18 requests waited Queued until its idle release.
+ */
+export function otherWorkWait(line: string, selfId: string): string | undefined {
+  const id = requestWaitOf(line, selfId);
+  if (id) return id;
+  if (ORCHESTRATOR_WAIT.test(line)) return 'the orchestrator';
+  if (WORKER_WAIT.test(line)) return 'a worker the dispatcher starts';
+  return undefined;
+}
+
 /**
  * The newest "still open" line worker `s` wrote about request `w` (w1841): its last report's, or else its last report on it
  * in the request's log ("hh:mm worker <id>: w12: still open: …", or a wrap-up), while nothing about that worker came after
