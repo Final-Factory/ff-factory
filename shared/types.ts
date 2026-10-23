@@ -1946,8 +1946,17 @@ export interface WorkItem {
   resumedBy?: Record<string, string>;
   /** Set when the intake closed it as done because its work already merged (docs/intake.md, "Closed when it merged"). */
   autoClosed?: WorkAutoClosed;
-  /** A question for people (a design decision) the worker raised instead of fixing; open until they answer. */
-  flag?: { kind: 'design'; text: string; at: string; for: Requester[] };
+  /**
+   * A question for people, open until they answer: a design decision the worker raised instead of fixing (`design`), or
+   * an error the ledger cleanup could not fix by resuming the worker, escalated to the request's person and an operator
+   * (`error`, w1870).
+   */
+  flag?: { kind: 'design' | 'error'; text: string; at: string; for: Requester[] };
+  /**
+   * What the ledger cleanup did about a worker's last turn that ended in an error or an interrupt instead of a report
+   * (w1870), by session id: never closed as done on such a turn, it is resumed, re-placed or escalated, once per turn.
+   */
+  errorHandled?: Record<string, WorkErrorHandled>;
   /** Handed to FFBox (docs/intake.md, "Ledger → FFBox"): the submit's id, and what FFBox said about it. */
   ffbox?: WorkFfbox;
   /**
@@ -2115,6 +2124,22 @@ export interface HeldCheckIn {
   note: string;
   /** w1128: a gate's resume that came after the request was blocked again (Orchestrators.staleResume), not the worker's own check-in. */
   resume?: true;
+}
+
+/** What a request's flag (WorkItem.flag) is, as the ledger and the Waiting tab name it. */
+export const FLAG_LABEL: Record<'design' | 'error', string> = { design: 'Design question', error: 'Error escalated by the ledger cleanup' };
+
+/** The ledger cleanup's handling of one worker's errored or interrupted turn (w1870, WorkItem.errorHandled). */
+export interface WorkErrorHandled {
+  /** When that turn ended (the worker's lastResultAt): a later errored turn is a new one. */
+  turnAt: string;
+  /** What the cleanup did: resumed the worker, asked the dispatcher to place it again, escalated it, or left it to the dispatcher. */
+  how: 'resumed' | 're-placed' | 'escalated' | 'left';
+  at: string;
+  /** The error in one line (errorKey tells the same one again). */
+  error: string;
+  /** The cleanup's resumes of this worker for errors on this request so far. */
+  resumes: number;
 }
 
 /** Why a request is stalled, and what kind of stop it was. */

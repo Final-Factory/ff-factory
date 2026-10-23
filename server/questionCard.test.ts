@@ -88,3 +88,16 @@ test('legacySteps: a free-text list of decisions is asked one decision at a time
   assert.ok(steps!.every((a) => a.options.length === 0));
   assert.equal(legacySteps('Should the save menu keep its old order, or show the newest first?'), undefined, 'a question that is no list stays one');
 });
+
+test('w1869: checkAsks shortens an answer over 90 characters, keeps the full text in its description and returns a warning naming the question', () => {
+  const label = 'Put the vision speed-up in now, on development first, and let the nightly run twice before it goes to master';
+  const one = checkAsks([{ question: 'Should it go in?', options: [{ label }, { label: 'Leave it out' }] }]);
+  assert.ok('asks' in one);
+  if ('asks' in one) {
+    assert.ok(one.asks[0].options[0].label.length <= 90 && one.asks[0].options[0].label.endsWith('…'));
+    assert.equal(one.asks[0].options[0].description, label);
+    assert.deepEqual(one.warnings, [`label 1 was ${label.length} chars, shortened to ${one.asks[0].options[0].label.length}; the full text is in its description`]);
+  }
+  const two = checkAsks([{ question: 'One?', options: [{ label: 'A' }, { label: 'B' }] }, { question: 'Two?', options: [{ label: 'A' }, { label }] }]);
+  assert.ok('asks' in two && two.warnings[0].startsWith('question 2: label 2 was '), JSON.stringify(two));
+});

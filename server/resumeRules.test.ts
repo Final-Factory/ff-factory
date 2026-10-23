@@ -262,3 +262,36 @@ test('w1376: the queued resume goes once the hold is lifted, and the check-in th
   assert.match(h.sent[0], /\[wake_me\] Time is up.*check CI/);
   assert.equal(sessions.queued().length, 0);
 });
+
+// ---------------------------------------------------------------- w1863: a hold may let named requests through
+
+// lothsahn, 2026-10-23: "stop all work on LothDesktop except w1785 until it's done". The hold set for it at 15:15 queued a
+// message to w1785's own worker dec9a619 ("lothdesktop is on hold … nothing resumes there until the hold is lifted").
+const LOTH_HOLD = { lothdesktop: "lothsahn: w1785 timing runs, \"stop all work on LothDesktop except w1785 until it's done\"" };
+const workOn = (id: string, session: string) => ({ id, title: `Request ${id}`, brief: 'Do it.', priority: 'normal' as const, keys: [], requestedBy: PEOPLE[0], requesters: [PEOPLE[0]], humanAsked: true, status: 'active' as const, createdAt: iso(NOW), updatedAt: iso(NOW), sessionIds: [session], overlaps: [], asks: 0, log: [] });
+
+test('w1863: holdReason lets a request the hold names through, and nothing else; a plain hold still holds everyone (w1376)', () => {
+  const prefs = { hold: LOTH_HOLD, holdExcept: { lothdesktop: ['w1785'] } };
+  assert.equal(holdReason('lothdesktop', prefs, ['w1785']), undefined);
+  assert.equal(holdReason('LothDesktop', prefs, ['W1785', 'w1826']), undefined, 'any request of its worker the hold names');
+  assert.match(holdReason('lothdesktop', prefs, ['w1826']) ?? '', /^lothdesktop is on hold \(lothsahn: w1785 timing runs, .*; except w1785\): nothing resumes there/);
+  assert.match(holdReason('lothdesktop', prefs) ?? '', /on hold/);
+  assert.match(holdReason('lothdesktop', { hold: LOTH_HOLD }, ['w1785']) ?? '', /on hold/, 'without except, w1376 as before');
+});
+
+test('w1863: on a computer held except w1785, a message to w1785’s own worker goes, one to another worker there waits Blocked on the machine', (t) => {
+  const { sessions, store, add } = world(t, { hold: LOTH_HOLD, holdExcept: { lothdesktop: ['w1785'] } });
+  store.putWork(workOn('w1785', 'dec9a619'));
+  store.putWork(workOn('w1826', 'd0ea49a2'));
+  const own = add(info('dec9a619', { machineId: 'lothdesktop', status: 'idle', account: KEY2 }));
+  const other = add(info('d0ea49a2', { machineId: 'lothdesktop', status: 'idle', account: KEY2 }));
+  for (const [opts, from] of [[undefined, 'orchestrator'], [{ ops: 'wake' as const }, 'system']] as const) {
+    sessions.send('dec9a619', 'carry on with the A/B', from, undefined, opts);
+    sessions.send('d0ea49a2', 'carry on', from, undefined, opts);
+  }
+  assert.equal(own.sent.length, 2, "w1785's worker gets its dispatch and its check-in");
+  assert.equal(other.sent.length, 0);
+  const q = sessions.queued().filter((x) => x.id === 'd0ea49a2');
+  assert.equal(q.length, 2);
+  assert.ok(q.every((x) => x.on === 'machine' && /^lothdesktop is on hold \(.*except w1785\)/.test(x.why)));
+});

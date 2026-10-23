@@ -1,10 +1,10 @@
 // The ledger cleanup's rules (docs/orchestrators.md, "Ledger cleanup"): which pull requests belong to a request, when a
 // merge ends it, what a worker's final report says, how a worker was cut off, and which requests have gone quiet. All
 // pure: server/ledgerSweep.ts gathers the facts and applies the result.
-import type { SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
+import type { SessionInfo, TranscriptEvent, WorkErrorHandled, WorkItem, WorkPr } from '../shared/types.ts';
 import type { Config } from './config.ts';
 import { mergedText } from './mergedIntake.ts';
-import { afterReopen } from './work.ts';
+import { afterReopen, doneOf } from './work.ts';
 
 export interface CleanupSettings {
   enabled: boolean;
@@ -193,7 +193,7 @@ export const isRelease = (w: Pick<WorkItem, 'title' | 'brief'>) => RELEASE_TITLE
  */
 export function afterMergeReason(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'question' | 'flag'>, reports: readonly string[]): string | undefined {
   if (w.question) return 'it waits on a question';
-  if (w.flag) return 'it waits on a design question';
+  if (w.flag) return w.flag.kind === 'error' ? 'it waits on an escalated error' : 'it waits on a design question';
   const brief = `${w.title}\n${w.brief}\n${w.constraints ?? ''}`;
   if (isRelease(w)) return 'a release ends when the build is live and the patch notes are posted';
   if (PEER_CHECK.test(brief)) return 'its brief asks for a step after the merge (a check, an audit, a verification)';
@@ -322,6 +322,142 @@ export function cutOffOf(s: Pick<SessionInfo, 'status' | 'statusDetail' | 'turnO
   return undefined;
 }
 
+// ---------------------------------------------------------------- a last turn that ended in an error (w1870)
+
+/** A turn the CLI ended with an error subtype instead of a report: its result reads "stopped: error_during_execution". */
+const STOPPED_RESULT = /^stopped: (error_[a-z_]+)/;
+/**
+ * A tool the harness or a person refused, in the words Claude Code and the hooks use. Narrower than REFUSED: a failed
+ * tool's own output ("connection refused") is no refusal, and a refusal is escalated at once (it would be refused again).
+ */
+const REFUSED_TOOL = /\bpermission (to use \S+ )?(was |has been )?denied\b|\bwas denied\b|\bdenied by\b|\bblocked by (the )?(guard|hook|rule)\b|\bguard:|\bhook error\b|\btool use was rejected\b/i;
+/** The system line an interrupt leaves in a host session's transcript (AgentSession.interrupt). */
+const INTERRUPTED = /^interrupted\.?$/i;
+/** Errors only a person can clear, and what each needs (w1870, lothsahn: "escalated to an operator if the error can't be fixed"). */
+const NEEDS_PERSON: readonly [RegExp, string][] = [
+  [/\bnot logged in\b|\bplease run \/login\b|\binvalid api key\b|\bauthentication_error\b|\b(oauth|login) token (has )?expired\b|\bgh auth login\b/i, 'a login'],
+  [/\bresource not accessible by (personal access|integration) token\b|\bwithout `?workflows?`? permission\b|\bpermission to \S+ denied to\b|\bmust have admin rights\b/i, 'a permission'],
+  [/\b(machine|computer|daemon|agent host) (\S+ )?(is )?(offline|unreachable|not connected)\b|\bno agent host\b|\bdisk (is )?full\b|\bno space left on device\b/i, 'a machine'],
+];
+
+/**
+ * How a worker's last turn ended, when not with a report (w1870): `interrupt`, stopped mid-turn on purpose by the
+ * dispatcher or a person (interrupt_agent, stop_agent, the UI: SessionInfo.stoppedOnPurpose), which is no error; or
+ * `error`: its turn ended in an error result (error_during_execution and the like), a usage or rate limit, an app restart,
+ * a refused tool (cutOffOf), or the session itself failed. `needs` names what only a person can give (a login, a
+ * permission, a machine), read in its failed tools' output (`tools`, toolErrors) too. `turnAt` tells one errored turn from
+ * the next. Undefined for a turn that ended with a report.
+ */
+export type TurnTrouble =
+  | { kind: 'interrupt'; reason: string; turnAt: string }
+  | { kind: 'error'; cause: 'error' | 'limit' | 'restart' | 'refused' | 'crash'; reason: string; turnAt: string; needs?: string };
+
+export function turnTroubleOf(
+  s: Pick<SessionInfo, 'status' | 'statusDetail' | 'turnOpenSince' | 'stoppedOnPurpose' | 'lastActivityAt' | 'lastResultAt'> & { lastResult?: string },
+  evidence: readonly string[],
+  tools: readonly string[] = [],
+): TurnTrouble | undefined {
+  const result = (s.lastResult ?? '').trim();
+  const stopped = STOPPED_RESULT.exec(result)?.[1];
+  const turnAt = s.lastResultAt ?? s.lastActivityAt;
+  const text = [s.statusDetail ?? '', ...tools, ...evidence, result].join('\n');
+  const needs = NEEDS_PERSON.find(([re]) => re.test(text))?.[1];
+  const onPurpose = !!s.stoppedOnPurpose || evidence.some((e) => INTERRUPTED.test(e.trim()));
+  if (stopped && onPurpose) return { kind: 'interrupt', reason: `its turn was interrupted on purpose (${stopped})`, turnAt };
+  const cut = cutOffOf(s, evidence);
+  if (cut) return { kind: 'error', cause: cut.kind, reason: cut.reason, turnAt, ...(needs ? { needs } : {}) };
+  if (stopped) {
+    const cause = LIMIT.test(text) ? 'limit' : REFUSED_TOOL.test(text) ? 'refused' : 'error';
+    // The newest such line: the last few events can reach back into an earlier turn.
+    const line = text.split('\n').findLast((l) => (cause === 'limit' ? LIMIT : cause === 'refused' ? REFUSED_TOOL : /\S/).test(l) && !STOPPED_RESULT.test(l.trim()));
+    return { kind: 'error', cause, reason: `its last turn ended in ${stopped}${line ? `: ${line.replace(/\s+/g, ' ').trim().slice(0, 160)}` : ''}`, turnAt, ...(needs ? { needs } : {}) };
+  }
+  if (s.status === 'error') return { kind: 'error', cause: 'crash', reason: `its session failed${s.statusDetail ? `: ${s.statusDetail.replace(/\s+/g, ' ').trim().slice(0, 160)}` : ''}`, turnAt, ...(needs ? { needs } : {}) };
+  return undefined;
+}
+
+/** The text of a worker's last few transcript events that can say how its turn ended (its errors, system lines, results, words). */
+export const turnEvidence = (events: readonly TranscriptEvent[]) => events.flatMap((e) => (e.kind === 'error' || e.kind === 'system' || e.kind === 'result' || e.kind === 'assistant' ? [e.text] : []));
+/** Its failed tools' output: what a person may have to give (a login, a permission), never a cut-off by itself. */
+export const toolErrors = (events: readonly TranscriptEvent[]) => events.flatMap((e) => (e.kind === 'tool_result' && e.isError ? [e.text] : []));
+
+/** The last error lines of a worker's transcript, for an escalation (w1870): its errors, system lines, failed tools and results. */
+export const errorLinesOf = (events: readonly TranscriptEvent[], n = 3) =>
+  events
+    .filter((e) => e.kind === 'error' || e.kind === 'system' || (e.kind === 'result' && !e.ok && !STOPPED_RESULT.test(e.text.trim())) || (e.kind === 'tool_result' && e.isError))
+    .slice(-n)
+    .map((e) => (e as { text: string }).text.replace(/\s+/g, ' ').trim().slice(0, 240))
+    .filter(Boolean);
+
+/** Resumes for errors one worker gets on one request before the cleanup escalates instead (a different error each time). */
+export const ERROR_RESUMES = 2;
+/** An errored turn this fresh is left alone for now: the dispatcher or the worker's own check-in may be on it already. */
+export const ERROR_SETTLE_MS = 10 * 60_000;
+
+/** An error in a few words, to tell the same error again from a new one: no numbers, ids or times. */
+export const errorKey = (reason: string) => {
+  const [head, ...rest] = reason.toLowerCase().split(':');
+  const words = rest.join(':').replace(/\b[0-9a-f]{7,}\b|\d+/g, '#').match(/[a-z_#]+/g) ?? [];
+  return `${head.trim()}: ${words.slice(0, 3).join(' ')}`;
+};
+
+export type TroubleDecision =
+  | { do: 'none' }
+  | { do: 'wait'; why: string }
+  | { do: 'leave'; why: string }
+  | { do: 'replace' }
+  | { do: 'resume' }
+  | { do: 'escalate'; why: string; step: string };
+
+/**
+ * What the cleanup does about a request whose latest worker's turn ended in trouble instead of a report (w1870), given
+ * what it did before for that worker (`prev`, WorkItem.errorHandled): nothing for a turn it already handled; an interrupt
+ * is re-placed (left to the dispatcher when it queued or blocked the request itself); an error is resumed, at most
+ * ERROR_RESUMES times, and escalated to a person when that cannot fix it: the same error after a resume, a refused tool
+ * (it would be refused again), or what only a person can give. A usage limit is not decided here (cutOffStep's wait).
+ */
+export function troubleDecision(w: Pick<WorkItem, 'status'>, t: TurnTrouble, prev: WorkErrorHandled | undefined, now: number): TroubleDecision {
+  if (prev && prev.turnAt === t.turnAt) return { do: 'none' };
+  const fresh = now - (Date.parse(t.turnAt) || 0) < ERROR_SETTLE_MS;
+  if (t.kind === 'interrupt') {
+    if (w.status === 'queued' || w.status === 'blocked') return { do: 'leave', why: `the request is ${w.status}: the dispatcher places it again` };
+    return fresh ? { do: 'wait', why: 'it was interrupted minutes ago: the dispatcher may be placing it now' } : { do: 'replace' };
+  }
+  if (t.needs) return { do: 'escalate', why: `it needs ${t.needs}, which only a person can give`, step: `give the worker ${t.needs} (${t.reason.slice(0, 120)}), then add a note to the request: the worker resumes with it` };
+  if (t.cause === 'refused') return { do: 'escalate', why: 'a refused tool would be refused again on a resume', step: 'allow what was refused, or say in a note how the worker should do it instead: it resumes with your note' };
+  const again = prev && prev.how === 'resumed' && errorKey(prev.error) === errorKey(t.reason);
+  if (again) return { do: 'escalate', why: `the same error came back after the cleanup resumed it (${prev.at.slice(0, 16).replace('T', ' ')} UTC)`, step: 'read the error lines and say in a note what the worker should do differently, or fix what fails (a tool, a machine, a setting): it resumes with your note' };
+  if (prev && prev.resumes >= ERROR_RESUMES) return { do: 'escalate', why: `it ended in an error again after ${prev.resumes} resumes by the cleanup`, step: 'read the error lines and say in a note what the worker should do differently: it resumes with your note' };
+  if (fresh) return { do: 'wait', why: 'its errored turn ended minutes ago' };
+  if (w.status === 'queued') return { do: 'leave', why: 'the request is queued: its next worker gets the error with the request' };
+  return { do: 'resume' };
+}
+
+/** The "Done when" part of a request's brief (the request's done criteria), clipped; undefined when the brief has none. */
+export function doneCriteriaOf(brief: string): string | undefined {
+  const m = /(?:^|\n)[\s*_#>-]*done when[*_]*:?[*_]*[ \t]*\n?([^]*?)(?=\n\s*\n\s*(?:\*\*|#|---|[A-Z][\w ]{2,40}:)|$)/i.exec(brief ?? '');
+  const text = m?.[1]?.trim();
+  return text ? (text.length > 900 ? `${text.slice(0, 899).trimEnd()}…` : text) : undefined;
+}
+
+/**
+ * Why a request whose PRs merged must not close yet on its worker's word (w1870, lothsahn: "Merged PRs are not enough on
+ * their own"): its latest worker's last report is not a DONE for it (a `DONE: wNNN` line, or the DONE the ledger
+ * recorded from that report). Undefined when it is, or when no worker ever worked on it (a person's own PR).
+ */
+export function notDoneReason(w: Pick<WorkItem, 'id' | 'done' | 'reopenedAt'>, workers: readonly SessionInfo[]): string | undefined {
+  const last = [...workers].sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))[0];
+  if (!last) return undefined;
+  const report = last.lastResult ?? '';
+  // A DONE from before a reopen says nothing about the reopened work (w731).
+  if (doneIdsIn(report).includes(w.id.toLowerCase()) && afterReopen(w, last.lastResultAt ?? last.lastActivityAt)) return undefined;
+  const said = doneOf(w)[last.id];
+  const reportAt = Date.parse(last.lastResultAt ?? '') || 0;
+  if (said && (Date.parse(said.at) || 0) >= reportAt - 60_000) return undefined;
+  const line = report.replace(/\s+/g, ' ').trim();
+  return `its latest worker ${last.id}'s last report is not a DONE for ${w.id}${line ? ` ("${line.length > 120 ? `${line.slice(0, 119)}…` : line}")` : ''}`;
+}
+
 // ---------------------------------------------------------------- DONE: wNNN (w419)
 
 /**
@@ -359,6 +495,25 @@ export function pausedIn(text: string): Map<string, string> {
     if (!out.has(id)) out.set(id, m[0].replace(/^[\s*_>`-]+/, '').trim());
   }
   return out;
+}
+
+/**
+ * Whether a report from a worker on request `ref` carries what `waiter`, blocked on `ref` reporting, waits for (w1869;
+ * lothsahn: a block on "w1785 reporting (dec9a619's LothDesktop timing …)" cleared on "w1785: still open: the LothDesktop
+ * A/B is running…", and w1820's worker resumed with no timing). It does when the report has `DONE: <ref>`, or a line
+ * `For <waiter>: …` (its worker is told to write one, Orchestrators.tellReportWaited), or has no still-open or paused line
+ * for `ref` and either names it or has no such line at all. A progress report, or one only about another request's
+ * progress, does not.
+ */
+export function reportDelivers(report: string | undefined, ref: string, waiter?: string): boolean {
+  if (!report) return false;
+  const id = ref.toLowerCase();
+  if (doneIdsIn(report).includes(id)) return true;
+  if (waiter && /^w\d+$/i.test(waiter) && new RegExp(`^[\\s*_>\`-]*for\\s+${waiter.toLowerCase()}\\b[*_\`]*\\s*[:—–-]`, 'im').test(report)) return true;
+  const open = stillOpenIn(report);
+  const paused = pausedIn(report);
+  if (open.has(id) || paused.has(id)) return false;
+  return (!open.size && !paused.size) || new RegExp(`\\b${id}\\b`, 'i').test(report);
 }
 
 /** The PRs the ledger holds as open that a worker's report says merged (w515: "PR #1089 was merged", ".../pull/1089 merged"). */

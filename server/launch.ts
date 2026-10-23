@@ -14,8 +14,9 @@ import type { StandingToolGroup } from '../shared/types.ts';
 import { WORK_LIVE_STATES, type WorkLiveState } from '../shared/workState.ts';
 import type { SecretRules } from './secretGuard.ts';
 import { WORKER_RULE_TOPICS } from './workerRules.ts';
-import { DESCRIPTION_CHARS, LABEL_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS } from '../shared/ask.ts';
+import { DESCRIPTION_CHARS, LABEL_INPUT_CHARS, MAX_OPTIONS, MEDIA_CHARS, MIN_OPTIONS } from '../shared/ask.ts';
 import { CARD_QUESTION_CHARS, MAX_ASKS } from '../shared/questionCard.ts';
+import { rangedNumber } from './forgiving.ts';
 
 /**
  * Questions for a person as their card asks them (w1597, Ben: "just ask the question clearly, give me the option selections
@@ -31,12 +32,12 @@ export const questionsShape = (bare = false) => {
     return what ? t.describe(what) : t;
   };
   const words = d('ONE plain question, readable without opening anything; no file paths, PR lists or ids. A still: ![what](<absolute path>).');
-  const label = d('A full-sentence answer in their voice, sent as their words; never just "Yes".');
+  const label = d('A full-sentence answer in their voice, sent as their words; never just "Yes". Over 90 characters it is shortened and the full text goes in its description.');
   const desc = d('One line: what it means.');
   const rec = d('true on the ONE you recommend.');
   const options = z.array(
     z.object({
-      label: str(LABEL_CHARS, 1, label),
+      label: str(LABEL_INPUT_CHARS, 1, label),
       description: str(DESCRIPTION_CHARS + MEDIA_CHARS, 0, desc).optional(),
       recommended: rec ? z.boolean().optional().describe(rec) : z.boolean().optional(),
     }),
@@ -146,7 +147,7 @@ export const CATALOG = {
   /** docs/orchestrators.md, "Waiting, Queued, Blocked" (w754): the worker says its request waits only on other requests or pull requests. */
   blocked_on: {
     requests: z.array(z.string().max(16)).max(6).optional().describe('Requests ("w727") that must close as done first. A request often closes later than its pull request merges: to wait for a merge, name the pull request in prs.'),
-    reports: z.array(z.string().max(16)).max(6).optional().describe('Requests ("w1761") whose worker must report first: files, stills or results it makes for you (w1841). Clears when that worker reports next, or when the request closes.'),
+    reports: z.array(z.string().max(16)).max(6).optional().describe('Requests ("w1761") whose worker must report first: files, stills or results it makes for you (w1841). Clears when its report carries them (its worker is told to mark that report "For <your request>:"; a still-open progress report does not, w1869), or when the request closes.'),
     prs: z.array(z.string().max(200)).max(6).optional().describe('Pull requests that must MERGE first: "owner/repo#123" or the github.com link.'),
     head: z.string().max(64).optional().describe('With a ci: pull request (w907): the commit you just pushed (git rev-parse HEAD). FF Factory refuses the wait when the pull request\'s head is another commit (your push did not land) or the pull request conflicts with its base (CI cannot run).'),
     deploys: z.array(z.string().max(40)).max(2).optional().describe('Deploys that must happen first (w890): "portal" for a portal deploy, or a machine id for that machine\'s daemon update. It clears when a different commit runs there; you are resumed then, in any free sandbox, for the check that comes after it.'),
@@ -217,8 +218,8 @@ export const CATALOG = {
     kind: z.enum(['any', 'crash', 'desync', 'hang']).optional().describe('reports only (default any).'),
     since: z.string().max(40).optional().describe('reports only: received from this ISO time with a zone.'),
     until: z.string().max(40).optional().describe('reports only: received up to this ISO time with a zone.'),
-    limit: z.number().int().min(1).max(500).optional().describe('How many (symbols default 200, reports default 20); a page also stops at about 40 KB.'),
-    offset: z.number().int().min(0).max(100000).optional().describe('Skip this many, for the next page (the answer says it).'),
+    limit: rangedNumber(1, 500, 'How many (symbols default 200, reports default 20); a page also stops at about 40 KB.').optional(),
+    offset: rangedNumber(0, 100000, 'Skip this many, for the next page (the answer says it).').optional(),
   },
   /** docs/ffbox.md, "Release symbols and diagnosis files" (w1542). The portal fetches the parts from FFBox; the daemon the file. */
   fetch_ffbox_symbols: {
@@ -272,8 +273,8 @@ export const CATALOG = {
       .optional()
       .describe('Only requests in these live states: working (mid-turn, or between turns with its own work going), waiting (on input: a person must act), queued (capacity only), blocked (on a thing: another request, a deploy, a machine, a usage limit, a lock, a time, CI), paused (its worker set it aside for another request), followup (merged, follow-up pending), stalled.'),
     person: z.string().max(64).optional().describe('Only the requests of this person (user id or display name).'),
-    offset: z.number().int().min(0).optional().describe('Skip this many matching requests (the next page).'),
-    limit: z.number().int().min(1).max(50).optional().describe('Requests per page, default 20, at most 50; a page also stops at 40,000 characters.'),
+    offset: rangedNumber(0, undefined, 'Skip this many matching requests (the next page).').optional(),
+    limit: rangedNumber(1, 50, 'Requests per page, default 20; a page also stops at 40,000 characters.').optional(),
   },
   /** docs/portal-logs.md (w920). Read-only: the portal answers from a fixed list of sources (server/portalLogs.ts). */
   portal_logs: {
@@ -283,8 +284,8 @@ export const CATALOG = {
     until: z.string().max(40).optional().describe('journal and cleanup: an ISO time with a zone. Default: now.'),
     grep: z.string().max(200).optional().describe('Only lines containing this text, any case.'),
     regex: z.string().max(100).optional().describe('Only lines matching this pattern, any case (no quantified group, backreference or lookaround).'),
-    limit: z.number().int().min(1).max(2000).optional().describe('Lines per page, default 200, at most 2000; a page also stops at 48,000 characters.'),
-    offset: z.number().int().min(0).optional().describe('Matching lines to skip (the next page: the answer says which offset).'),
+    limit: rangedNumber(1, 2000, 'Lines per page, default 200; a page also stops at 48,000 characters.').optional(),
+    offset: rangedNumber(0, undefined, 'Matching lines to skip (the next page: the answer says which offset).').optional(),
   },
 } satisfies Record<string, z.ZodRawShape>;
 

@@ -45,7 +45,7 @@ import {
 } from './work.ts';
 import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, crashPeersBlock, identityKeys, ownApprovalCount, parseMarkers, quoteUntrusted, sourceTag, titleOnly } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
-import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, pausedIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
+import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, servedBy } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
@@ -1277,6 +1277,77 @@ export class Orchestrators {
     );
   }
 
+  /**
+   * Why `w` may not be closed as done by anything automatic (w1870), or undefined: its latest worker's last turn ended in
+   * an error or was interrupted (ledgerRules turnTroubleOf), or that worker's last report is not a DONE for it
+   * (notDoneReason). A request no worker worked on has nothing to hold it. A person's own close is never held.
+   */
+  closeHold(w: WorkItem): string | undefined {
+    const tr = this.lastTurnTrouble(w);
+    if (tr) return `its latest worker ${tr.sid}'s last turn ${tr.t.kind === 'interrupt' ? 'was interrupted, and it was not placed again' : 'ended in an error'}: ${tr.t.reason}`;
+    return notDoneReason(w, this.workersOf(w));
+  }
+
+  private workersOf(w: WorkItem): SessionInfo[] {
+    return w.sessionIds.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker');
+  }
+
+  /** Its latest worker's last turn, when it ended in an error or an interrupt instead of a report (w1870), and which worker. */
+  private lastTurnTrouble(w: WorkItem): { sid: string; t: TurnTrouble } | undefined {
+    const last = [...this.workersOf(w)].sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))[0];
+    if (!last || BUSY.includes(last.status)) return undefined;
+    const events = this.store.readTranscript(last.id, 8);
+    const t = turnTroubleOf(last, turnEvidence(events), toolErrors(events));
+    return t ? { sid: last.id, t } : undefined;
+  }
+
+  /**
+   * The ledger cleanup could not fix a worker's errored turn by resuming it (w1870, lothsahn: "escalated to an operator if
+   * the error can't be fixed"): the request waits on input, for its person and an operator (config intake.reviewers: one
+   * of them already on the request, else the first), as an `error` flag they both see in Waiting, and each gets it as
+   * `[needs you]`. It says what failed, the last error lines, what was tried and the one step needed; a note from either
+   * answers it and resumes the worker with their words. Returns whom it went to, or undefined when the request is not open.
+   */
+  escalateError(id: string, e: { worker: string; turnAt: string; what: string; lines: readonly string[]; tried: string; step: string; report?: string }): Requester[] | undefined {
+    const w = this.store.work.get(id);
+    if (!w || !isOpen(w)) return undefined;
+    const ops = this.reviewers();
+    const op = ops.find((r) => w.requesters.some((q) => same(q.userId, r.userId))) ?? ops[0];
+    const to = [...w.requesters.filter((r) => same(r.userId, w.requestedBy.userId)), ...(op && !same(op.userId, w.requestedBy.userId) ? [op] : [])];
+    const people = to.length ? to : [w.requestedBy];
+    for (const r of people) if (!isFor(w, r.userId)) w.requesters.push(r);
+    const lines = e.lines.length ? e.lines.map((l) => `- ${clip(l, 240)}`).join('\n') : '- (no error lines in its transcript)';
+    const text = `Worker ${e.worker}'s last turn on ${w.id} ended in an error the ledger cleanup could not fix by resuming it, so it is not closed. What failed: ${e.what}.\nLast error lines:\n${lines}\nWhat was tried: ${e.tried}.\nThe one step needed: ${e.step}.`;
+    const at = this.now().toISOString();
+    w.flag = { kind: 'error', text: clip(text, 1800), at, for: people };
+    w.status = 'question';
+    w.stalled = undefined;
+    w.outcome = clip(`Escalated: ${e.what}`, 300);
+    this.stamp(w, `escalated by the ledger cleanup to ${names(people)} (w1870): ${clip(e.what, 200)}; tried: ${clip(e.tried, 160)}; step needed: ${clip(e.step, 160)}`);
+    this.store.putWork(w);
+    this.needsYou(w, { kind: 'question', key: `error:${e.worker}:${e.turnAt}`, question: text, names: people.map((r) => r.displayName), worker: e.worker, ...(e.report ? { report: e.report } : {}) });
+    return people;
+  }
+
+  /**
+   * A worker the dispatcher or a person stopped mid-turn on purpose (interrupt_agent, stop_agent, the UI) holds a request
+   * nobody placed again (w1870): that is no error and no reason to close it. The dispatcher is told to place it again
+   * (message_agent to resume that worker where it may run, or start_agent for a fresh one), and the request's log says so.
+   * `fresh`: the session cannot be resumed, so the next worker is a new one and gets `why` with the request.
+   */
+  replaceStopped(w: WorkItem, s: Pick<SessionInfo, 'id' | 'machineId' | 'machineSandbox'>, why: string, fresh = false) {
+    const place = s.machineId ? `${s.machineId}${s.machineSandbox ? `/${s.machineSandbox}` : ''}` : 'its sandbox';
+    this.ledgerEdit(w.id, `not closed by the ledger cleanup (w1870): worker ${s.id} on ${place} ${why}; the dispatcher is told to place it again${fresh ? ' with a fresh worker' : ''}`, () => {});
+    this.gatherForDispatcher(
+      w.requestedBy,
+      updateNotice(
+        w,
+        w.requestedBy,
+        `RE-PLACE (w1870): worker ${s.id} on ${place} ${why}, and nothing placed ${w.id} again; it is not closed. ${fresh ? `That session cannot be resumed: start_agent with work_id "${w.id}" for a fresh worker, and give it this.` : `Place it again: message_agent with session_id "${s.id}" and work_id "${w.id}" where it may run, or start_agent with its work_id elsewhere; if it was stopped to keep it off a computer, queue it for the right one.`}`,
+      ),
+    );
+  }
+
   /** takeOver for a request by id, saved (a caller outside this class: FFBox's operator messages). */
   actedOn(id: string, by: Requester, why: string): void {
     const w = this.store.work.get(id.toLowerCase());
@@ -1689,7 +1760,7 @@ export class Orchestrators {
     // ACTING (w1031): their own words in this turn, never a harness message or a worker's report relayed to their chat.
     if (w.humanAsked) {
       const answers = !!note && (w.status === 'question' || !!w.question || !!w.flag);
-      const acted = input.reopen ? 'reopened it' : answers ? `answered ${w.flag ? 'the design question' : 'the question'} on it` : note ? 'added a note' : input.priority && input.priority !== w.priority ? `changed its priority to ${input.priority}` : undefined;
+      const acted = input.reopen ? 'reopened it' : answers ? `answered ${w.flag ? (w.flag.kind === 'error' ? 'the escalated error' : 'the design question') : 'the question'} on it` : note ? 'added a note' : input.priority && input.priority !== w.priority ? `changed its priority to ${input.priority}` : undefined;
       if (acted) this.takeOver(w, owner, `${owner.displayName} ${acted}`);
     }
     if (input.reopen) {
@@ -1722,7 +1793,7 @@ export class Orchestrators {
         what.push(`still blocked on ${gatesName(gatesOf(w), this.now().getTime())}: a lifted hold does not lift a gate, it starts by itself when they clear`);
       }
       if (w.flag) {
-        what.push(`answers the design question "${clip(w.flag.text, 120)}"`);
+        what.push(`answers the ${w.flag.kind === 'error' ? 'escalated error' : 'design question'} "${clip(w.flag.text, 120)}"`);
         w.flag = undefined;
       }
       // w1378: a person's own answer to a [needs you] question goes to the worker that waits on it.
@@ -1795,7 +1866,8 @@ export class Orchestrators {
     const missing = this.previewsMissing(chat.info.id, checked.ask, owner.displayName);
     if (missing) throw new Error(missing);
     const pick = checked.ask.options[0].recommended ? `, ${checked.ask.options[0].label} recommended` : '';
-    return `Shown to ${owner.displayName} as ${checked.ask.options.length} buttons${pick}, and a last "Chat more about this" that only opens their reply box. End your turn now. Their click arrives as their own message (their words are the label, your question quoted under the reply mark), in their own turn; they may also just type. Do not ask it again in text.`;
+    const shown = `Shown to ${owner.displayName} as ${checked.ask.options.length} buttons${pick}, and a last "Chat more about this" that only opens their reply box. End your turn now. Their click arrives as their own message (their words are the label, your question quoted under the reply mark), in their own turn; they may also just type. Do not ask it again in text.`;
+    return checked.warnings.length ? `${shown} WARNING: ${checked.warnings.join('; ')}.` : shown;
   }
 
   /** Questions refused once for their missing previews (w1602), by chat and question: the same call again goes through. */
@@ -2297,13 +2369,46 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     return out;
   }
 
+  /**
+   * w1869: a request newly blocked on another's report (on: report) clears only when that report carries what it waits for
+   * (ledgerRules `reportDelivers`), so the other request's workers are told what that is and how to mark it: a line
+   * `For <waiter>: …`, or their DONE. Not one that waits on a person: a message would end its declaration. Returns them.
+   */
+  private tellReportWaited(waiter: WorkItem, gates: readonly WorkBlocker[]): string[] {
+    const all = [...this.store.work.values()];
+    const out: string[] = [];
+    for (const g of gates) {
+      if (g.kind !== 'request' || g.on !== 'report' || !g.ref) continue;
+      const x = this.store.work.get(g.ref.toLowerCase());
+      if (!x || !isOpen(x)) continue;
+      for (const sid of x.sessionIds) {
+        const s = this.store.sessions.get(sid);
+        if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || s.waitingOn || !servedBy(sid, all).has(x.id) || out.includes(sid)) continue;
+        try {
+          this.sessions.send(sid, `[about ${x.id} "${clip(x.title, 80)}"]
+${waiter.id} ("${clip(waiter.title, 80)}") is blocked until a report of yours on ${x.id} carries: ${g.what}.
+When one does, put a line "For ${waiter.id}: <the result, or where it is>" in that report: that line, or your "DONE: ${x.id}", unblocks ${waiter.id}. A "${x.id}: still open:" progress line does not. Nothing else changes: carry on with your work (between turns, end this one with a line).`, 'system');
+          out.push(sid);
+        } catch {
+          // gone or at a limit: its DONE still clears the block
+        }
+      }
+      if (out.length) this.stamp(x, `${waiter.id} waits on its report (${g.what}): told ${out.join(', ')} to mark it "For ${waiter.id}:"`);
+    }
+    return out;
+  }
+
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
   decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; override_gate?: string; asks?: Ask[] }): string {
+    let keptBefore: WorkBlocker[] = [];
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
     const into = input.into ? this.requireWork(input.into) : undefined;
     const problem = decisionProblem(w, input.action, into);
     if (problem) throw new Error(problem);
+    // w1870 (lothsahn: "doesn't close out jobs with errors"): not on a worker's errored or interrupted turn, nor without its DONE.
+    const hold = input.action === 'done' ? this.closeHold(w) : undefined;
+    if (hold) throw new Error(`${w.id} is not closed as done: ${hold} (w1870: no automatic close on an errored turn, or without its worker's DONE). Resume its worker (message_agent) with the error and what is left, so it finishes and says DONE: ${w.id}; place it again if it was stopped on purpose. A person who says it is done closes it through their own orchestrator (update_work close: done).`);
     const note = input.note.trim();
     let what = '';
     if (input.action === 'merge') {
@@ -2373,6 +2478,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     } else if (input.action === 'block') {
       const now = this.now();
       const kept = gatesOf(w);
+      keptBefore = kept;
       const asked = input.blockers?.length ? input.blockers : input.blocker ? [input.blocker] : [];
       if (!asked.length && !kept.length) throw new Error('block needs blocker (or blockers, for several): what it waits for (kind, ref, what; until for a time). A person it waits on is ask; capacity is queue.');
       const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) };
@@ -2400,6 +2506,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     if (input.action === 'reject' || input.action === 'done') w.outcome = clip(note, 300);
     this.stamp(w, `dispatcher: ${what}: ${note}`);
     this.store.putWork(w);
+    if (input.action === 'block') this.tellReportWaited(w, gatesOf(w).filter((g) => !keptBefore.some((k) => sameGate(k, g))));
     // A question is for the person who asked, as [needs you] (w1378); the rest is news for everyone the request is for.
     if (input.action === 'ask') return `${w.id} ${w.status}: ${what}. ${this.askPerson(w)}`;
     this.toPeople(w.requesters, dispatchNotice(w, what, note));
@@ -2785,6 +2892,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       if (problem) throw new Error(problem);
     }
     const gates = asked.map((b) => this.makeGate(b, now.toISOString(), `worker ${sessionId}`)).filter((g, i, all) => all.findIndex((x) => sameGate(x, g)) === i);
+    const before = gatesOf(w);
     if (gates.length > MAX_GATES) throw new Error(`at most ${MAX_GATES} things at once`);
     w.blocked = gates[0];
     w.alsoBlocked = gates.length > 1 ? gates.slice(1) : undefined;
@@ -2796,7 +2904,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     this.stamp(w, `worker ${sessionId}: blocked on ${name} (${gates[0].what}); it ends its turn and is resumed when that clears${cancelled}`);
     this.store.putWork(w);
     this.toPeople(w.requesters, dispatchNotice(w, `blocked on ${name} (${gates[0].what}); its worker ${sessionId} stopped polling and is resumed when that clears`));
-    return `Recorded: ${w.id} is Blocked on ${name}. ${cancelled ? 'Your pending check-in is cancelled. ' : ''}End your turn now with your report (a line "${w.id}: still open: blocked on ${name}"). Do NOT set a wake_me to poll for it: when it clears, FF Factory resumes you with a message. Anything people add meanwhile is kept for you.`;
+    const told = this.tellReportWaited(w, gates.filter((g) => !before.some((k) => sameGate(k, g))));
+    return `Recorded: ${w.id} is Blocked on ${name}. ${cancelled ? 'Your pending check-in is cancelled. ' : ''}End your turn now with your report (a line "${w.id}: still open: blocked on ${name}"). Do NOT set a wake_me to poll for it: when it clears, FF Factory resumes you with a message. Anything people add meanwhile is kept for you.${told.length ? ` The worker${told.length > 1 ? 's' : ''} you wait on (${told.join(', ')}) ${told.length > 1 ? 'are' : 'is'} told to mark your result with a line "For ${w.id}:"; a progress report does not unblock you, that line or their DONE does.` : ''}`;
   }
 
   /**
@@ -3112,7 +3221,12 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       const done = doneOf(w);
       if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id] || this.stillOn(w).length) continue;
       const [sid, last] = Object.entries(done).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
-      const problem = doneProblem(w, last.report);
+      // w1870: a worker whose last turn ended in an error or an interrupt did not finish its part: the cleanup resumes,
+      // escalates or places it, and the request stays open.
+      const ended = this.store.sessions.get(s.id);
+      const events = ended ? this.store.readTranscript(s.id, 8) : [];
+      const trouble = ended ? turnTroubleOf(ended, turnEvidence(events), toolErrors(events)) : undefined;
+      const problem = trouble && (Date.parse(trouble.turnAt) || 0) > (Date.parse(last.at) || 0) ? `its own last turn ${trouble.kind === 'interrupt' ? 'was interrupted' : 'ended in an error'} (${trouble.reason}) (w1870)` : doneProblem(w, last.report);
       if (problem) {
         this.stamp(w, `worker ${s.id} ended; its other workers said DONE, but it stays open: ${problem}`);
         this.store.putWork(w);
@@ -3270,6 +3384,9 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     if (w.sessionIds.some((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped') && servedBy(sid, all).has(w.id))) return false;
     const [sid, last] = Object.entries(doneOf(w)).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
     if (doneProblem(w, last.text ?? last.report)) return false;
+    // A worker turn that ended in an error or an interrupt after that DONE (w1870): the ledger cleanup resumes or escalates it.
+    const tr = this.lastTurnTrouble(w);
+    if (tr && (Date.parse(tr.t.turnAt) || 0) > (Date.parse(last.at) || 0)) return false;
     this.closeOnDone(w, sid, last.report, `worker ${sid} said DONE at ${last.at.slice(11, 16)} UTC and was refused then; ${why}`);
     return true;
   }
@@ -4534,7 +4651,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     if (!w || w.status !== 'question') return undefined;
     const note = clip(text.replace(/\s+/g, ' ').trim(), 1000);
     const what = [`note: ${note}`];
-    if (w.flag) what.push(`answers the design question "${clip(w.flag.text, 120)}"`);
+    if (w.flag) what.push(`answers the ${w.flag.kind === 'error' ? 'escalated error' : 'design question'} "${clip(w.flag.text, 120)}"`);
     else if (w.question) what.push(`answers "${clip(w.question.text, 120)}"`);
     w.status = 'new';
     w.flag = undefined;

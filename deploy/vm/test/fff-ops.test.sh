@@ -404,4 +404,20 @@ else
   kpriv apikey revoke w1021-m3 >/dev/null || fail "priv: apikey revoke failed"
   [ "$(cat "$klib/fffctl.log")" = "$(printf 'apikey list\napikey revoke w1021-m3')" ] || fail "priv: list and revoke: $(cat "$klib/fffctl.log")"
   echo "ok: fff-ops-priv apikey refuses ben, lothsahn, bad names, paths and options before anything runs, writes the key only into a 0600 file on the machine, revokes a key it could not write, and never prints it"
+  # ---- user (w1864): list, and delete a member login for the person whose job it is, always with --members-only.
+  for bad in 'user' 'user list extra' 'user delete' 'user delete w1021-test' 'user delete w1021-test --by carol' 'user delete w1021-test --by Ben' \
+    'user delete ben --by lothsahn' 'user delete LOTHSAHN --by ben' 'user delete a;id --by ben' 'user delete w1021-test --by ben --members-only' \
+    'user delete w1021-test --by ben extra' 'user delete w1021-test --as ben' 'user remove w1021-test' 'user add x'; do
+    clear_logs
+    rc=0
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(kpriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    [ -z "$(klogs)" ] || fail "priv: '$bad' reached fffctl: $(klogs)"
+  done
+  clear_logs
+  kpriv user list >/dev/null || fail "priv: user list failed"
+  kpriv user delete w1021-test --by lothsahn >/dev/null || fail "priv: user delete failed"
+  [ "$(cat "$klib/fffctl.log")" = "$(printf 'user list\nuser delete w1021-test --by lothsahn --members-only')" ] || fail "priv: user list and delete: $(cat "$klib/fffctl.log")"
+  echo "ok: fff-ops-priv user passes list, and delete only for a member login, --by ben or lothsahn, with --members-only; it refuses ben, lothsahn and every other word"
 fi
