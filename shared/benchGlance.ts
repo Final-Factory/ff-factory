@@ -74,7 +74,19 @@ export function benchGlance(b: BenchState | undefined, now: number): BenchGlance
     // The latest end of what runs now: each holder's bound. Only a leg with nobody ahead of it starts then.
     const ends = b.running.map((t) => (t.until ? Date.parse(t.until) : NaN)).filter(Number.isFinite);
     const by = n.ahead === 0 && ends.length === b.runningCount && ends.length ? Math.max(...ends) - now : undefined;
-    const when = n.ahead > 0 ? `after ${n.ahead} ahead` : by !== undefined ? (by > 0 ? `within ${benchMinutes(by)}` : 'at the next look') : !b.runningCount ? 'starting' : 'after the running group';
+    // An old-style lock has no bound the queue keeps (quiet_gate.sh's own age rule): the leg waits for it, however long.
+    const when =
+      n.ahead > 0
+        ? `after ${n.ahead} ${n.ahead === 1 ? 'ticket' : 'tickets'} ahead`
+        : b.legacy
+          ? 'after the old-style lock'
+          : by !== undefined
+            ? by > 0
+              ? `within ${benchMinutes(by)}`
+              : 'at the next look'
+            : !b.runningCount
+              ? 'starting'
+              : 'after the running group';
     next = `next timed: ${who(n)} ${when}`;
   }
   const lines = [

@@ -103,6 +103,11 @@ test('w1835: the queue\'s order picks the next timed leg (priority, then place),
   assert.equal(s.nextExclusive?.what, 'urgent leg', 'an urgent worker\'s leg goes first');
   assert.equal(s.nextExclusive?.ahead, 0);
   assert.equal(benchGlance(s, NOW)!.next, 'next timed: urgent leg within 59m');
+  // Behind a waiting shared group: its tickets, counted (review of #549).
+  fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), 'priorities.json'), JSON.stringify({ at: 'x', sessions: {} }));
+  ticket(root, 't00000005', { mode: 'shared', what: 'build a', pos: 1.5 });
+  ticket(root, 't00000006', { mode: 'shared', what: 'build b', pos: 1.5 });
+  assert.equal(benchGlance(readBenchState(root, NOW, alive), NOW)!.next, 'next timed: normal leg after 2 tickets ahead');
 
   const big = tmp(t);
   for (let i = 1; i <= BENCH_STATE_MAX_RUNNING + 2; i++) ticket(big, `t0000000${i}`, { mode: 'shared', what: `build ${i}` }, sec(1));
@@ -124,6 +129,11 @@ test('w1835: an old-style lock (no ticket in its owner line) is Exclusive; a que
   assert.equal(s.legacy?.owner, 'BEAST pid 4121 worker 21:04:10 probe A (/f/ffw/sandboxes/slot4)');
   assert.equal(benchGlance(s, now)!.detail, 'old-style lock');
   assert.equal(benchGlance(s, now)!.times, 'held 5m');
+
+  // A timed leg waits for it: no bound to count down from (review of #549).
+  ticket(root, 't00000005', { mode: 'exclusive', what: 'probe B', requests: ['w1300'] });
+  assert.equal(benchGlance(readBenchState(root, now, alive), now)!.next, 'next timed: w1300 after the old-style lock');
+  fs.rmSync(path.join(benchQueueDir(lock), 't00000005'), { recursive: true });
 
   fs.writeFileSync(path.join(lock, 'owner'), 'BEAST pid 4121 worker 21:04:10 probe A [t00000001] (/f/ffw/sandboxes/slot4)\n');
   assert.equal(readBenchState(root, now, alive)!.mode, 'free', 'a ticket line without its live ticket: nobody holds it');
