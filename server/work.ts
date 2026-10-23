@@ -323,22 +323,36 @@ export const logLine = (now: Date, text: string) => `${now.toISOString().slice(1
  * A live state as the lists say it: "Waiting on input on Ben (…)", "Blocked on w633 finishing (…)", and a Queued
  * request while a computer that could take it has room flagged loudly (w643).
  */
-export const liveLine = (now: WorkLive) =>
-  `${WORK_LIVE_LABEL[now.state]}${now.waitsOn?.length ? ` on ${now.waitsOn.join(', ')}` : ''}${now.roomOn?.length ? ` [WRONG: ${now.roomOn.join(', ')} ${now.roomOn.length > 1 ? 'have' : 'has'} room]` : ''} (${clip(oneLine(now.why), 200)})`;
+export const liveLine = (now: WorkLive, why = 200) =>
+  `${WORK_LIVE_LABEL[now.state]}${now.waitsOn?.length ? ` on ${now.waitsOn.join(', ')}` : ''}${now.roomOn?.length ? ` [WRONG: ${now.roomOn.join(', ')} ${now.roomOn.length > 1 ? 'have' : 'has'} room]` : ''} (${clip(oneLine(now.why), why)})`;
 
-/** One line per item for list_work: id, status, priority, title, whose, workers, outcome. */
-export function describeItem(w: WorkItem, workerLine: (id: string) => string, now?: WorkLive, cost = ''): string {
+/**
+ * How long a list line's free text runs (w1866). The dispatcher's list keeps all of it. A person's orchestrator's list
+ * leaves out what only placement and spend need (the placement notes, the cost) and the workers that are gone, and
+ * shortens the why and the latest word: list_work list was 15% of what filled lothsahn's orchestrator's context, about
+ * 8,400 tokens a call (measured, 2026-10-23); list_work with id still shows it all.
+ */
+export const LIST_LINE_TEXT = { full: 200, short: 120 } as const;
+
+/**
+ * One line per item for list_work: id, status, priority, title, whose, workers, outcome. `short` is a person's
+ * orchestrator's list (LIST_LINE_TEXT): no placement notes, no workers that are gone, shorter free text.
+ */
+export function describeItem(w: WorkItem, workerLine: (id: string) => string, now?: WorkLive, cost = '', short = false): string {
+  const text = short ? LIST_LINE_TEXT.short : LIST_LINE_TEXT.full;
   const who = names(w.requesters);
-  const workers = w.sessionIds.length ? ` workers: ${w.sessionIds.map(workerLine).join(', ')}.` : '';
+  const shown = w.sessionIds.map(workerLine).filter((l) => !short || !l.endsWith('(gone)'));
+  const gone = w.sessionIds.length - shown.length;
+  const workers = shown.length || gone ? ` workers: ${[...shown, ...(gone ? [`${gone} gone`] : [])].join(', ')}.` : '';
   const merged = w.mergedInto ? ` → ${w.mergedInto}` : '';
   const tag = sourceTag(w) || (w.recorded ? 'recorded: started outside the ledger' : '');
-  const stalled = w.stalled ? ` Stalled (${w.stalled.kind}): ${clip(oneLine(w.stalled.reason), 200)}.` : '';
+  const stalled = w.stalled ? ` Stalled (${w.stalled.kind}): ${clip(oneLine(w.stalled.reason), text)}.` : '';
   const prs = w.prs?.length ? ` PRs: ${w.prs.map((p) => `#${p.number} ${p.state}`).join(', ')}.` : '';
-  const state = now ? ` ${liveLine(now)}:` : '';
+  const state = now ? ` ${liveLine(now, text)}:` : '';
   const runs = w.runsFor ? ` Runs for ${w.runsFor.displayName} (${clip(oneLine(w.runsFor.why), 120)}): their Claude pool and GitHub token.` : '';
   // w1600: placed by the Capacity block's "Next Live view work" line (BEAST first), not the general one.
-  const live = needsLive(w) ? ` Needs a Live view${w.liveView ? ` (its worker started one on ${w.liveView.machine})` : ''}: place it by "Next Live view work".` : needsBuild(w) ? ` An urgent release${w.build ? ` (its worker declared its build on ${w.build.machine})` : ''}: place it by "Next urgent release work" (w1639: BEAST, else LothDesktop when BEAST is offline).` : needsTimed(w) ? ` Timed work${needsTimed(w) === 'any' ? '' : ` on ${needsTimed(w)}`}: place it by "Next timed work" (w1628).` : '';
-  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${runs}${live}${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
+  const live = short ? '' : needsLive(w) ? ` Needs a Live view${w.liveView ? ` (its worker started one on ${w.liveView.machine})` : ''}: place it by "Next Live view work".` : needsBuild(w) ? ` An urgent release${w.build ? ` (its worker declared its build on ${w.build.machine})` : ''}: place it by "Next urgent release work" (w1639: BEAST, else LothDesktop when BEAST is offline).` : needsTimed(w) ? ` Timed work${needsTimed(w) === 'any' ? '' : ` on ${needsTimed(w)}`}: place it by "Next timed work" (w1628).` : '';
+  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${runs}${live}${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), text)}` : ''}`;
 }
 
 /**
