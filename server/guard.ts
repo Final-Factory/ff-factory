@@ -3,6 +3,7 @@ import { repoIsPublic } from './publicGit.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
 import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
+import { checkTiming } from './timingGuard.ts';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
@@ -49,6 +50,8 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     Get-ChildItem -Recurse / dir /s either that scans a path off the install folder's drive, C: above all (checkOffDriveScan;
  *     w1755, lothsahn: "You need to only look at v:.  Stop messing with my c:").
  *   - Unity MCP: refused until the session pins its own editor ("<id>@<hash>"), and never another.
+ *   - timing (w1923): an editor snippet that reads a clock (MCP execute_code, unity-bridge.py eval/eval_file), a run of a
+ *     Performance test, or a profiler capture, while the session holds no exclusive bench ticket (server/timingGuard.ts).
  *   - batch Unity (w1628): `Unity -batchmode` started straight from the shell is refused; under `unity-slot run`,
  *     `ff_unity_slot` or `build_player.sh` it takes a Unity slot and a bench ticket (checkRawUnityBatch).
  *   - public repos (config publicGitIdentity, default this app's own repo, and any other GitHub repo that
@@ -103,6 +106,14 @@ export function sandboxGuard(opts: {
    * (machine/benchTurn.ts closedRefusalFor), else undefined. Absent: not checked.
    */
   benchClosed?: () => string | undefined;
+  /**
+   * w1923: the exclusive bench ticket this worker's session holds on this machine (machine/benchLock.ts ownTimedHold), else
+   * undefined. A timing measurement without one is refused (server/timingGuard.ts checkTiming). Absent: not checked.
+   */
+  timingHold?: () => string | undefined;
+  /** w1923: who the timing log names (the worker's session, this machine). */
+  session?: string;
+  host?: string;
 }): HookCallback {
   // Drive-letter paths are normalised textually so the guard behaves the same on any host OS.
   const norm = (p: string) => (/^[a-zA-Z]:[\\/]/.test(p) ? p : path.resolve(p)).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -124,6 +135,10 @@ export function sandboxGuard(opts: {
   const deny = (reason: string) => ({
     hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: reason },
   });
+  const timing = (tool: string, args: Record<string, unknown>, cwd: string) =>
+    opts.timingHold
+      ? checkTiming(tool, args, { project: opts.sandboxPath, cwd, env: opts.env, root: opts.workerRoot, session: opts.session, sandbox: opts.sandboxId, host: opts.host, ownHold: opts.timingHold })
+      : undefined;
 
   return async (input) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
@@ -143,6 +158,7 @@ export function sandboxGuard(opts: {
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
         (opts.personBusy ? checkPersonPlayLaunch(cmd, opts.personBusy) : undefined) ??
         checkRawUnityBatch(cmd, cloneSpellings) ??
+        timing(tool, args, input.cwd || opts.sandboxPath) ??
         (opts.workerRoot ? checkOutsideRootDelete(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath], saveTag }) : undefined) ??
         (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath] }) : undefined);
       if (reason) return deny(reason);
@@ -192,6 +208,8 @@ export function sandboxGuard(opts: {
         // possibly the co-op game's. Refuse until this session has pinned its own editor.
         return deny(`Pin your editor first. ${explain}`);
       }
+      const timed = timing(tool, args, input.cwd || opts.sandboxPath);
+      if (timed) return deny(timed);
     }
     return {};
   };

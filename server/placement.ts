@@ -57,6 +57,8 @@ export interface Computer {
   benchLock?: BenchLock;
   /** The timed legs in its bench queue, running or waiting (w1628, MachineStats.benchQueue): a release build goes elsewhere. */
   benchQueue?: BenchQueueReport;
+  /** w1923: its timing calls of the last hour outside an exclusive ticket, in a line (shared/benchGlance.ts untimedText). */
+  untimed?: string;
   /** Its platform (win32, darwin, linux): timed work that names one stays on it (w1628). */
   platform?: string;
   /**
@@ -518,7 +520,7 @@ const avoidOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.avoid ??
 const loadPart = (p: Computer) => {
   const pct = memPct(p);
   const ram = pct !== undefined ? `; RAM ${pct}% used` : '';
-  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}${p.noTimedRuns ? '; no timed runs (w1861)' : ''}${p.legs?.length ? `; ${legsText(p.legs)}` : ''}`;
+  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}${p.benchLock ? `; ${benchText(p.benchLock)}` : ''}${p.noTimedRuns ? '; no timed runs (w1861)' : ''}${p.untimed ? `; ${p.untimed} (w1923)` : ''}${p.legs?.length ? `; ${legsText(p.legs)}` : ''}`;
 };
 
 /** "the ledger holds legs for it: w1789 (since 06:45Z), w1785 (since 06:46Z)" (w1863). */

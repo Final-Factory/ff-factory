@@ -806,6 +806,18 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   `machine/benchState.ts`, in the queue's own order: priority, then place), and the page words it (`benchGlance`,
   `shared/benchGlance.ts`); an offline machine, or a daemon from before it, shows no line.
 
+  **Timing outside an exclusive ticket** (w1923, lothsahn: "How do we make sure workers aren't timing things without
+  exclusive locks?"): every timing measurement holds an exclusive ticket, editor snippets and Performance tests included.
+  The worker guard (`server/timingGuard.ts`) refuses a Unity MCP `execute_code` whose code reads a clock, a `run_tests`
+  selecting a Performance test, a `manage_profiler` capture or timing read, and a shell `unity-bridge.py eval`/`eval_file`
+  or Performance `-runTests` without a ticket, unless the worker's session holds a granted exclusive one
+  (`machine/benchLock.ts` `ownTimedHold`); the game repo's `unity-bridge.py` and `unity_slot.py` check the same
+  (`scripts/bench/timing_gate.py`, its `Documentation/Bench-Lock.md`). Each check is a line in the queue's `timing.jsonl`.
+  The refused calls and those let through by a `// ff-not-timing:` comment in the last hour are the bench row's
+  "N timing calls outside an exclusive ticket in the last hour" (and one line each in the hover), and the machine's line
+  in `system_status` and `list_machines` ends with the same words (`BenchState.untimed`, `readUntimed`), so an
+  orchestrator's bench audit sees them.
+
 ![The sidebar grouped by computer](images/fleet-sidebar-desktop-chromium.png)
 ![The Overview board](images/fleet-overview-desktop-chromium.png)
 
