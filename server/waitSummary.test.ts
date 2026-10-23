@@ -45,7 +45,8 @@ test('w1868: every card of today’s real cases renders the six parts', () => {
     assert.ok(picks || !!s.step, `${id}: answers or a step`);
     if (picks) assert.ok(s.asks.every((a) => a.options.filter((o) => o.recommended).length <= 1), `${id}: one recommended at most`);
     // 5. Media: a visual question carries its stills and clips, or is flagged.
-    const visual = /clip|still|frame|look/i.test(words);
+    // A question about a look (not "still open", nor "what it saves per frame": w1820).
+    const visual = /\bclips?\b|\bstills\b|\bthe still\b|\bframe look\b|\blooks? right\b/i.test(words);
     if (visual) assert.ok(mediaCount(s.asks, s.previews) > 0 || s.noMedia, `${id}: media shown, or flagged`);
     // 6. What happens after the answer.
     assert.ok(s.after.length > 20, `${id}: what follows`);
@@ -178,4 +179,30 @@ test('w1868: the orchestrator’s open questions are cards: three requests and t
   // A closed request's question goes.
   const closed = work.map((w) => (w.id === 'w1829' ? { ...w, status: 'done' as const } : w));
   assert.equal(orchestratorAsks([orch], closed, { userId: 'lothsahn' }).length, 4);
+});
+
+test('w1868: the live cards after the deploy: a reporter’s wait shown whole, a quoted brief not cut mid-quote, "still open" not visual', () => {
+  const cases = waitingCases(NOW);
+  const base = cases.find((x) => x.w.id === 'w1797')!;
+  // w1778 as list_work showed it live: the reporter's wait, its line cut at 160 characters ("FFBox pas").
+  const line = 'w1778: still open: waiting on the reporter Reteoteigam to answer in the Discord thread (when the asteroid vanished, whether rejoining brings it back); FFBox passes the answer on.';
+  const w1778 = { ...base.w, id: 'w1778', needsYou: undefined, brief: 'Goal: fix a multiplayer bug for the next patch. Ben asked for it.' } as WorkItem;
+  const outside = { state: 'waiting' as const, why: `d373b21a waits on the reporter Reteoteigam to answer through FFBox and Discord: "${line.slice(0, 160)}"`, line, waitsOn: ['the reporter Reteoteigam'], worker: 'd373b21a', outside: true };
+  const a = waitSummary(waitingItemOf(w1778, outside), facts(cases));
+  assert.equal(a.question, 'Waiting on the reporter Reteoteigam to answer in the Discord thread (when the asteroid vanished, whether rejoining brings it back); FFBox passes the answer on.');
+  // w1588: a brief that opens on Ben's quote, and a status line that says "still open".
+  const report = 'w1588: still open: waiting on Ben to finish testing Build 111 on pre-release and set it live on default (then I post the patch notes)';
+  const w1588 = {
+    ...base.w,
+    id: 'w1588',
+    source: undefined,
+    title: 'Research: is the pre-1.0 branch ready as the final pre-1.0 release on Steam default, and what from master to include',
+    brief: 'Ben, in his own words: "i want to do one final release for the pre-1.0 build. whats on the pre 1.0 release branch right now"\n\nBackground: master is 1.0.',
+    needsYou: { ...base.w.needsYou!, question: report, previews: [], asks: undefined, about: undefined, after: undefined },
+  } as WorkItem;
+  const b = waitSummary(waitingItemOf(w1588, base.live), facts(cases));
+  assert.equal(b.what, 'The request “Research: is the pre-1.0 branch ready as the final pre-1.0 release on Steam default, and what from master to include”.');
+  assert.equal(b.question, 'Waiting on Ben to finish testing Build 111 on pre-release and set it live on default (then I post the patch notes)');
+  assert.equal(b.noMedia, undefined, '"still open" is not a still');
+  assert.equal(briefSentence('Ben said, verbatim: ship it now.'), undefined);
 });

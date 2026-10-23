@@ -66,6 +66,11 @@ export const WAIT_LINE_CHARS = 240;
 export const WHAT_CHARS = 240;
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+/** A worker's status line as a question's words: no "w1588: still open:" lead, its first letter capitalised (w1868). */
+export function asWords(q: string): string {
+  const t = q.replace(/^(?:"|“)?w\d+: still open:\s*/i, '').replace(/^(?:"|“)(.*)(?:"|”)$/, '$1');
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
 /** A title without the intake's tag ("Discord bug: Belts stop" is "Belts stop"). */
 const untagged = (t: string) => t.replace(/^(?:Discord (?:bug|request)|FFBox (?:branch|diagnosis|request)|Nightly e2e [\d-]+|Release follow-up)\s*:\s*/i, '').trim();
 const quoted = (t: string) => `“${clip(untagged(t), 140)}”`;
@@ -85,6 +90,9 @@ export function briefSentence(brief: string): string | undefined {
   const m = /^(.+?[.!?])(?:\s|$)/.exec(flat);
   const s = (m?.[1] ?? flat).trim();
   if (s.length < 12 || s.length > WHAT_CHARS) return undefined;
+  // A quote cut at its first full stop (w1868: the live w1588 card read 'Ben, in his own words: "i want to do one final
+  // release for the pre-1.0 build.'): a person's words are the evidence, not what the work is; the title says it better.
+  if ((s.match(/["“”]/g) ?? []).length % 2 === 1 || /\b(?:in (?:his|her|their) own words|verbatim)\b/i.test(s)) return undefined;
   const line = s.charAt(0).toUpperCase() + s.slice(1);
   // A brief that opens on its filing note ("ben acknowledged this report as a bug ...") is not what the work is.
   if (/^(?:\w+ acknowledged|FFBox finished|The nightly e2e lab)/i.test(s)) return undefined;
@@ -135,7 +143,9 @@ export function whatOf(w: Pick<WorkItem, 'id' | 'title' | 'brief' | 'source' | '
 }
 
 /** Words that make a question about something a person has to see. */
-const VISUAL = /\b(?:clips?|stills?|screenshots?|videos?|looks?|render(?:ed|s)?|frames?|colou?rs?|shaders?|vfx|animations?|pictures?|images?|watch)\b/i;
+// A question about how something looks: its media words, or asking to watch it or judge a look. Not a bare "still" (w1868: the
+// live w1588 card was flagged for "still open") or "look" ("look at the log"), which plain status lines use.
+const VISUAL = /\b(?:clips?|stills|screenshots?|videos?|footage|render(?:ed|s|ing)?|shaders?|vfx|animations?|pictures?|images?)\b|\b(?:the|a|this|that|each|new) still\b|\b(?:watch|see|view) (?:the|this|a|it|how)\b|\b(?:the|which|a|this|that|new|its) (?:[\w-]+ )?look\b|\blooks? (?:right|good|wrong|better|ok|off|like)\b/i;
 
 /** Whether a question's words are about something visual while no still or clip goes with it (w1871: flag it). */
 export function visualWithoutMedia(texts: readonly string[], media: number): boolean {
@@ -214,7 +224,7 @@ export function waitSummary(item: { w: WorkItem; live: WorkLive; ask: WaitingAsk
   const stale = staleOf(w, worker, facts);
   const what = whatOf(w);
   if (live.outside) {
-    return { kind: 'outside', what, who, since: item.since, asks: [], question: plainQuestion(live.why), previews: [], after: 'FFBox passes their answer on to its worker; nothing for the team to do.', ...(worker ? { worker } : {}) };
+    return { kind: 'outside', what, who, since: item.since, asks: [], question: asWords(plainQuestion(live.line ?? live.why)), previews: [], after: 'FFBox passes their answer on to its worker; nothing for the team to do.', ...(worker ? { worker } : {}) };
   }
   // A worker's permission: the one step is to allow or deny the call shown under it.
   const s = worker ? facts.session?.(worker) : undefined;
@@ -236,7 +246,7 @@ export function waitSummary(item: { w: WorkItem; live: WorkLive; ask: WaitingAsk
   const asks = r?.asks?.length ? openAsksOf(r) : w.question?.asks?.length && (!r || r.kind === 'question') ? w.question.asks : [];
   // The question in words: the worker's, else the dispatcher's, else the design question, else what the ledger reads.
   const raw = r && r.kind !== 'question' ? r.question : (w.question?.text ?? w.flag?.text ?? r?.question ?? item.text);
-  const question = asks.length ? '' : plainQuestion(raw);
+  const question = asks.length ? '' : asWords(plainQuestion(raw));
   const steps = asks.length ? asks : (legacySteps(question) ?? []);
   const previews = r?.previews ?? [];
   const noMedia = visualWithoutMedia([...steps.map((a) => a.question), question, r?.about ?? ''], mediaCount(steps, previews));
