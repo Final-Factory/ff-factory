@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { needsTimed } from '../shared/capacity.ts';
-import { pickComputer, pickTimed, placementHint, timedLine, timedPinRefusal, timedRank, type Computer } from './placement.ts';
+import { pickComputer, pickTimed, placementHint, timedFacts, timedLine, timedPinRefusal, timedRank, type Computer } from './placement.ts';
 import type { WorkItem } from '../shared/types.ts';
 
 const GB = 1024 ** 3;
@@ -77,4 +77,28 @@ test('w1872: work that asks for an exclusive lock or timing runs is timed work',
   assert.equal(needsTimed(work('w1780: timing runs on the Mac')), 'darwin');
   assert.equal(needsTimed(work('Fix the bench_lock --timing refusal text', 'exclusive bench tickets')), 'any');
   for (const t of ['Fix the belt stall', 'Lock the research tree while exclusive content loads']) assert.equal(needsTimed(work(t)), false, t);
+});
+
+test('w1872: "Next timed work" also names the computers without room, smallest first, so a one-computer line still shows the ranking', () => {
+  // Live, 2026-10-23: "lothdesktop (10 agent slots, 3 editors, 5 live); never m5" with m3 and BEAST full.
+  const full = (c: Computer) => ({ ...c, freeSandboxes: 0, sandboxes: c.maxSandboxes });
+  const [beast, loth, m3, m5] = fleet();
+  const p = pickTimed([full(beast), loth, full(m3), m5], {}, 'timed')!;
+  assert.equal(p.pick.id, 'lothdesktop');
+  assert.match(p.why, /: lothdesktop \(8 agent slots, 3 editors, 2 live\); no room now: m3 \(4 agent slots\), beast \(12 agent slots\); never m5 /);
+  // A held or offline computer is not "no room now".
+  const q = pickTimed([full(beast), loth, { ...m3, online: false }, m5], { hold: { beast: 'paused' } }, 'timed')!;
+  assert.doesNotMatch(q.why, /no room now/);
+});
+
+test('w1872: timedFacts gives the ledger m5 and why, and the computers that take the work, ranked ones first; naming m5 asks for no Mac', () => {
+  const full = (c: Computer) => ({ ...c, freeSandboxes: 0, sandboxes: c.maxSandboxes });
+  const [beast, loth, m3, m5] = fleet();
+  const f = timedFacts([beast, full(loth), m3, m5], {}, 'timed');
+  assert.deepEqual(f.noTimed, { m5: NO });
+  assert.deepEqual(f.takes, ['m3', 'beast', 'lothdesktop'], 'with room in timedRank order, then the full one');
+  assert.deepEqual(timedFacts(fleet(), {}, 'timed:darwin').takes, ['m3']);
+  // w1789's worker: "waiting for a sandbox on m5 for the timed runs". Before, \bm5\b made it Mac work, so only m3 took it.
+  assert.equal(needsTimed(work('w1789: UI main-thread cost', 'still open: waiting for a sandbox on m5 for the timed runs')), 'any');
+  assert.equal(needsTimed(work('Timed A/B of the Mac player on m3')), 'darwin');
 });

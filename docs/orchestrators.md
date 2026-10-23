@@ -338,7 +338,7 @@ avoid locking out work because a machine that can handle a bunch of things but i
 efficient"). Work whose words name a benchmark, a perf A/B or probe, a timed or timing run, an exclusive lock or frame
 times (`shared/capacity.ts` `needsTimed`) goes where "Next timed work" says (`server/placement.ts` `timedRank`, `pickTimed`).
 That line ranks the computers with room (online, not paused, held or avoided) that take timed runs, on the platform its
-words name ("Windows", `probe_ab_win`, BEAST or LothDesktop: Windows; "Mac", m3 or m5: macOS). The fewest agent slots come
+words name ("Windows", `probe_ab_win`, BEAST or LothDesktop: Windows; "Mac" or m3: macOS; naming m5 asks for no Mac, since it takes no timed runs). The fewest agent slots come
 first, then the lowest editor limit, then the fewest live agents (the workers its exclusive turn would pause), then the
 fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks first; BEAST, the biggest, comes last.
 - **The ranking is the default, unless a machine is named** (lothsahn: "If a worker requests a specific machine for a
@@ -351,6 +351,13 @@ fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks f
   back to you, with the computers that take it (lothsahn: "that should go back to the orchestrator or worker ... The
   orchestrator worker then can pick a new machine or escalate to an operator if it is unable to pick a new machine").
   Pick one of them, or ask an operator (waiting_on_person) when none fits.
+- **Nothing timed waits on it either** (w1872, lothsahn: "Have the dispatcher replace anything waiting on timing on m5").
+  decide_work queue refuses timed work whose needs name it, even when its worker asked for it by name. A leg or a Queued
+  request that already waits there is re-placed by the ledger's watch (`Orchestrators.replaceNoTimedWaits`): that computer
+  drops out of its needs, and one left with none waits on the computers "Next timed work" ranks. The dispatcher is told
+  once, and the queued-with-room flag then starts it. stop_agent move_to refuses to move timed work there.
+- **The line shows the whole ranking**: after the computers with room come those online without it, smallest first
+  ("lothdesktop (10 agent slots, 3 editors, 5 live); no room now: m3 (4 agent slots), beast (12 agent slots); never m5").
 
 A timed A/B compares its legs on one computer, so a slower one gives as good an answer.
 

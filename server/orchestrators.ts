@@ -47,9 +47,9 @@ import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, cr
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, servedBy } from '../shared/workState.ts';
-import { capacityBlockProblem, capacityWaitIn, needsOf, resolveNeeds } from '../shared/capacity.ts';
+import { capacityBlockProblem, capacityWaitIn, needsOf, needsTimed, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
-import { heldText, roomIds, unusableText, type RoomNow } from './placement.ts';
+import { heldText, roomIds, timedKindOf, unusableText, type RoomNow, type TimedFacts, type TimedKind } from './placement.ts';
 import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
@@ -209,6 +209,8 @@ export interface OrchestratorsDeps {
    * Capacity block and the page read (server/placement.ts roomNow). Without it, `room` is the game room and nothing is held.
    */
   roomFacts?: () => RoomNow;
+  /** The computers that take no timed runs, and those that take timed work of kind `t`, best first (w1872, placement.ts timedFacts). */
+  timedFacts?: (t: TimedKind) => TimedFacts;
   /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
   machineOnline?: (id: string) => boolean | undefined;
   /** The commit the portal runs (no id), or a machine's daemon (w643: a deploy blocker clears when it changes). */
@@ -2612,6 +2614,9 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
       if (gated) throw new Error(`${gated} It waits for those, not for capacity: leave it blocked.`);
       // Queued is capacity only (w643): with a computer that could take it free, it is started or blocked, not queued.
       const needs = [...new Set((input.needs ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean))];
+      // w1872: timed work never waits on a computer that takes no timed runs (m5), even when its worker asked for it by name.
+      const noTimed = this.noTimedIn(w, needs);
+      if (noTimed) throw new Error(noTimed);
       const kind = needsOf(w);
       const facts = this.roomNow();
       const room = roomIds(facts, kind, w.priority).filter((id) => !needs.length || needs.includes(id.toLowerCase()));
@@ -5166,6 +5171,64 @@ When one does, put a line "For ${waiter.id}: <the result, or where it is>" in th
    */
   roomNow(): RoomNow {
     return this.d.roomFacts?.() ?? { game: this.d.room?.() ?? [], agent: [], held: [] };
+  }
+
+  /** The timed facts for `w`'s kind (w1872), or undefined when it is not timed work or the portal gives none. */
+  private timedOf(w: WorkItem): { t: TimedKind; f: TimedFacts } | undefined {
+    const t = timedKindOf(needsTimed(w));
+    const f = t ? this.d.timedFacts?.(t) : undefined;
+    return t && f ? { t, f } : undefined;
+  }
+
+  /** decide_work queue's refusal for timed work whose needs name a computer that takes no timed runs (w1872), else undefined. */
+  private noTimedIn(w: WorkItem, needs: readonly string[]): string | undefined {
+    const timed = this.timedOf(w);
+    const bad = timed ? needs.filter((n) => timed.f.noTimed[n]) : [];
+    if (!timed || !bad.length) return undefined;
+    const takes = timed.f.takes.length ? timed.f.takes.join(', ') : 'none';
+    return `${bad.map((n) => `${n} takes no timed or exclusive-lock work (${timed.f.noTimed[n]}; w1861)`).join('; ')}: ${w.id} is timed work, so it does not wait there, even when its worker named it. Place it by "Next timed work" (w1872): start it on the first of ${takes} with room, or queue it with needs naming those. If none of them can do it, ask an operator.`;
+  }
+
+  /**
+   * Re-places timed work that waits on a computer taking no timed runs (w1872, lothsahn: "Have the dispatcher replace
+   * anything waiting on timing on m5"): w1789's leg queued for m5 at 06:46 still waited there after #572, which refuses only
+   * new pins. Each such leg, and a Queued request's needs, drop those computers; one left with none waits on the computers
+   * that take it, in "Next timed work"'s order. The dispatcher is told once, so the queued-with-room flag then starts it.
+   * Returns the ids re-placed.
+   */
+  replaceNoTimedWaits(): string[] {
+    const done: string[] = [];
+    for (const w of this.store.work.values()) {
+      if (!isOpen(w) || (!w.legs?.length && !w.queuedFor?.needs?.length)) continue;
+      const timed = this.timedOf(w);
+      if (!timed) continue;
+      const off = (needs: readonly string[]) => needs.filter((n) => timed.f.noTimed[n.toLowerCase()]);
+      const swap = (needs: string[]) => {
+        const kept = needs.filter((n) => !timed.f.noTimed[n.toLowerCase()]);
+        return kept.length ? kept : [...timed.f.takes];
+      };
+      const was: string[] = [];
+      if (w.legs?.some((l) => off(l.needs).length)) {
+        w.legs = w.legs.map((l) => (off(l.needs).length ? (was.push(...off(l.needs)), { ...l, needs: swap(l.needs) }) : l));
+        this.roomFlags.delete(`${w.id}:leg`);
+      }
+      if (w.status === 'queued' && w.queuedFor?.needs && off(w.queuedFor.needs).length) {
+        was.push(...off(w.queuedFor.needs));
+        w.queuedFor = { ...w.queuedFor, needs: swap(w.queuedFor.needs) };
+        this.roomFlags.delete(w.id);
+      }
+      if (!was.length) continue;
+      const from = [...new Set(was.map((n) => n.toLowerCase()))];
+      this.stamp(w, `ledger: its timed work waited on ${from.join(', ')}, which take${from.length > 1 ? '' : 's'} no timed runs (${from.map((n) => timed.f.noTimed[n]).join('; ')}); re-placed by "Next timed work" (w1872): it now waits on ${timed.f.takes.join(' or ') || 'no computer that takes it'}`);
+      this.store.putWork(w);
+      done.push(w.id);
+    }
+    if (!done.length) return [];
+    console.log(`ledger: re-placed timed work off computers that take no timed runs: ${done.join(', ')}`);
+    this.toDispatcher(
+      `[ledger] Re-placed timed work that waited on a computer that takes no timed runs (w1872, lothsahn: "Have the dispatcher replace anything waiting on timing on m5"): ${done.map((id) => `${id} "${clip(this.store.work.get(id)?.title ?? '', 80)}"`).join('; ')}. Start each on the first computer "Next timed work" names with room (start_agent with its work_id; for a leg, in a FREE sandbox there while its own worker carries on), and tell its worker where it runs now. If none can do it, ask an operator.`,
+    );
+    return done;
   }
 
   /** When each request was last flagged Queued while a computer had room (at most once an hour each). */

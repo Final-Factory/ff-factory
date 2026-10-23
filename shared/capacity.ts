@@ -125,7 +125,8 @@ export function needsTimed(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'note
   const all = `${w ? `${w.title}\n${w.brief}\n${(w.notes ?? []).map((n) => n.text).join('\n')}\n` : ''}${text}`;
   if (!TIMED_WORDS.test(all)) return false;
   const win = /\bwindows\b|\bwin(?:64)? (?:player|build)\b|probe_ab_win|\bbeast\b|\blothdesktop\b/i.test(all);
-  const mac = /\bmac(?:os)?\b|\bm[35]\b/i.test(all);
+  // Not m5 (w1872): it takes no timed runs, so a brief naming it ("queued for m5", w1789) asks for no Mac; m3 is the Mac that does.
+  const mac = /\bmac(?:os)?\b|\bm3\b/i.test(all);
   return win === mac ? 'any' : win ? 'win32' : 'darwin';
 }
 

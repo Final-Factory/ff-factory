@@ -185,7 +185,12 @@ export function pickTimed(places: readonly Computer[], prefs: PlacementPrefs, t:
   const p = sorted[0];
   const ranked = sorted.map(timedSize).join(' > ');
   const legs = p.legs?.length ? `; ${legsText(p.legs)}: start ${p.legs.length > 1 ? 'those' : 'that'} there first` : '';
-  return { pick: p, why: `timed or exclusive-lock work goes to the smallest computer with room${platform ? ` on ${platform}` : ''} (w1872, lothsahn: "machines that have a smaller number of editors or slots"): ${ranked}${legs}${noTimedNote(places)}` };
+  // The online ones without room now, smallest first, so the line shows the whole ranking (w1872: "lothdesktop (…); never m5").
+  const full = places
+    .filter((x) => x.online && !x.noTimedRuns && (!platform || x.platform === platform) && !sorted.includes(x) && !holdOf(prefs).has(x.id) && !avoidOf(prefs).has(x.id))
+    .sort((a, b) => a.maxAgents - b.maxAgents || (a.maxEditors ?? 0) - (b.maxEditors ?? 0) || a.id.localeCompare(b.id));
+  const later = full.length ? `; no room now: ${full.map((x) => `${x.id} (${x.maxAgents} agent slot${x.maxAgents === 1 ? '' : 's'})`).join(', ')}` : '';
+  return { pick: p, why: `timed or exclusive-lock work goes to the smallest computer with room${platform ? ` on ${platform}` : ''} (w1872, lothsahn: "machines that have a smaller number of editors or slots"): ${ranked}${later}${legs}${noTimedNote(places)}` };
 }
 
 // Its bench queue's timed legs, and the ledger's legs held for it (w1863: w1789's and w1785's m5 legs went unnamed here).
@@ -207,6 +212,28 @@ export function timedPinRefusal(target: string, places: readonly Computer[], pre
   const rest = places.filter((p) => p.online && !p.noTimedRuns && (!platform || p.platform === platform) && !ranked.includes(p)).map((p) => `${p.id} (no room now)`);
   const list = [...ranked.map(timedSize), ...rest];
   return `${here.id} takes no timed or exclusive-lock work (${here.noTimedRuns}; w1861): this timed work was not started or moved. Pick another computer${platform ? ` on ${platform}` : ''} and start it there: ${list.length ? list.join(' > ') : 'none is online'} ("Next timed work" ranks them, w1872). If none of them can do it, ask an operator (waiting_on_person) instead of placing it.`;
+}
+
+/** needsTimed's answer (shared/capacity.ts) as a placement kind (w1628). */
+export const timedKindOf = (t: false | 'any' | 'win32' | 'darwin'): TimedKind | false => (t === false ? false : t === 'any' ? 'timed' : `timed:${t}`);
+
+/** The computers that take no timed runs, with why, and those that take `t`, best first (w1872): what the ledger re-places a wait by. */
+export interface TimedFacts {
+  noTimed: Record<string, string>;
+  takes: string[];
+}
+
+/**
+ * TimedFacts for the ledger (w1872, lothsahn: "Have the dispatcher replace anything waiting on timing on m5"): `takes` is
+ * timedRank's order (with room), then the other computers on the platform that take timed runs, online and small first.
+ */
+export function timedFacts(places: readonly Computer[], prefs: PlacementPrefs, t: TimedKind): TimedFacts {
+  const platform = t === 'timed' ? undefined : t.slice(6);
+  const ranked = timedRank(places, prefs, platform);
+  const rest = places
+    .filter((p) => !p.noTimedRuns && (!platform || p.platform === platform) && !ranked.includes(p))
+    .sort((a, b) => Number(b.online) - Number(a.online) || a.maxAgents - b.maxAgents || a.id.localeCompare(b.id));
+  return { noTimed: Object.fromEntries(places.filter((p) => p.noTimedRuns).map((p) => [p.id, p.noTimedRuns as string])), takes: [...ranked, ...rest].map((p) => p.id) };
 }
 
 /** "m3 (2 agent slots, 1 editor, 0 live)" (w1872): what timedRank compares. */
