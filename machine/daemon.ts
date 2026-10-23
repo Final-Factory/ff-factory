@@ -595,7 +595,9 @@ export class Daemon {
                 guard,
                 ctx: this.staleCtx,
                 procs: await this.procs().catch(() => undefined),
-                                self: [process.pid, process.ppid],
+                self: [process.pid, process.ppid],
+                // Below the soft threshold (or asked), stopped sessions' caches go after minutes, not a day (w1813).
+                low,
               }),
             ),
           endStrays: async (strays) => {
