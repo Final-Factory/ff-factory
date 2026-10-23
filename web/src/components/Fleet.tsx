@@ -12,6 +12,8 @@ import { AttentionButton, DrawerButton } from './ShellButtons';
 import { describe, gpuPct, level, ramLvl, ramPct, type Lvl } from './SystemMeters';
 import { Dot, Icon } from './ui';
 import { useKeepScroll } from '../scrollKeep';
+import { OVERVIEW_MODE_KEY, readMode, writeMode, type OverviewMode } from '../../../shared/workerCards';
+import { WorkerBoard } from './WorkerCards';
 
 type Variant = 'side' | 'board';
 
@@ -502,14 +504,21 @@ ${disksHint(m)}` }] : []),
 
 export function OverviewBoard({ app }: { app: AppState }) {
   const keep = useKeepScroll('overview');
+  const keepCards = useKeepScroll('overview:workers');
   const now = useNow(15_000);
   const fleet = fleetFor(app);
   const live = fleet.reduce((n, c) => n + c.live, 0);
   const busy = fleet.reduce((n, c) => n + c.busy, 0);
   const waiting = useAttention(app).length;
+  // The machine view, or one card per worker (w1837); remembered in this browser.
+  const [mode, setModeState] = useState<OverviewMode>(() => readMode(lsGet(OVERVIEW_MODE_KEY)));
+  const setMode = (m: OverviewMode) => {
+    setModeState(m);
+    lsSet(OVERVIEW_MODE_KEY, writeMode(m));
+  };
   const go = (r: Route) => navigate(r);
   return (
-    <section className="overview" data-testid="overview">
+    <section className="overview" data-testid="overview" data-mode={mode}>
       <header className="page-head">
         <DrawerButton />
         <span className="page-title">Overview</span>
@@ -517,30 +526,41 @@ export function OverviewBoard({ app }: { app: AppState }) {
           {live} {live === 1 ? 'agent' : 'agents'} live · {busy} busy{waiting ? ` · ${waiting} waiting on you` : ''}
         </span>
         <span className="spacer" />
+        <span className="ov-mode" role="group" aria-label="Show the Overview by" data-testid="overview-mode">
+          {(['machines', 'workers'] as const).map((m) => (
+            <button key={m} type="button" className={`ov-mode-btn${mode === m ? ' on' : ''}`} aria-pressed={mode === m} onClick={() => setMode(m)} title={m === 'machines' ? 'One column per machine, with its sandboxes' : 'One card per worker: what it is doing and where'} data-testid={`overview-mode-${m}`}>
+              {m === 'machines' ? 'Machines' : 'Workers'}
+            </button>
+          ))}
+        </span>
         <AttentionButton />
       </header>
-      <div className="board" ref={keep}>
-        {fleet.map((c) => (
-          <article key={c.key} className="board-card" data-testid={`board-${c.key}`}>
-            <header className="board-head">
-              {c.machine ? (
-                <button className="board-head-link" onClick={() => go({ view: 'machine', machineId: c.machine!.id })} title={`Open ${c.name}`}>
-                  <Head c={c} now={now} />
-                </button>
-              ) : c.daemon ? (
-                <button className="board-head-link" onClick={() => go({ view: 'machine', machineId: c.daemon!.id })} title={`Open ${c.name}'s daemon (${c.daemon.id})`}>
-                  <Head c={c} health={app.host?.health} now={now} />
-                </button>
-              ) : (
-                <div className="board-head-link">
-                  <Head c={c} health={app.host?.health} now={now} />
-                </div>
-              )}
-            </header>
-            <Places c={c} viewer={viewerOf(app)} now={now} sel={{}} variant="board" go={go} />
-          </article>
-        ))}
-      </div>
+      {mode === 'workers' ? (
+        <WorkerBoard app={app} fleet={fleet} now={now} scrollRef={keepCards} />
+      ) : (
+        <div className="board" ref={keep}>
+          {fleet.map((c) => (
+            <article key={c.key} className="board-card" data-testid={`board-${c.key}`}>
+              <header className="board-head">
+                {c.machine ? (
+                  <button className="board-head-link" onClick={() => go({ view: 'machine', machineId: c.machine!.id })} title={`Open ${c.name}`}>
+                    <Head c={c} now={now} />
+                  </button>
+                ) : c.daemon ? (
+                  <button className="board-head-link" onClick={() => go({ view: 'machine', machineId: c.daemon!.id })} title={`Open ${c.name}'s daemon (${c.daemon.id})`}>
+                    <Head c={c} health={app.host?.health} now={now} />
+                  </button>
+                ) : (
+                  <div className="board-head-link">
+                    <Head c={c} health={app.host?.health} now={now} />
+                  </div>
+                )}
+              </header>
+              <Places c={c} viewer={viewerOf(app)} now={now} sel={{}} variant="board" go={go} />
+            </article>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

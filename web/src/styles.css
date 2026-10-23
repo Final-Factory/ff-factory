@@ -6457,6 +6457,357 @@ button.board-head-link:hover {
   }
 }
 
+/* The Overview's Workers mode (w1837): the Machines / Workers switch in the page's header, the filter bar, then one
+   compact card per worker in groups (WorkerCards.tsx). The card's colours are the dashboard's status tones. */
+.ov-mode {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+  background: var(--bg-2);
+  flex: none;
+}
+
+.ov-mode-btn {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ov-mode-btn:hover {
+  color: var(--text);
+}
+
+.ov-mode-btn.on {
+  background: var(--panel-3);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--border-2);
+}
+
+.wc-board {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wc-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2) var(--s-4);
+  padding: var(--s-3) var(--s-6);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.wc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+
+.wc-selects {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-left: auto;
+}
+
+.wc-select {
+  width: auto;
+  min-width: 140px;
+}
+
+.wc-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5);
+  padding: var(--s-4) var(--s-6) var(--s-6);
+}
+
+.wc-group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  color: var(--text-2);
+}
+
+.wc-group-n {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.wc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--s-3);
+}
+
+.wc-card {
+  --c: var(--grey);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px var(--s-3) 10px 15px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+/* The status, as a bar down the card's left edge: the eye finds the colours before it reads a word. */
+.wc-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--c);
+}
+
+.wc-card:hover {
+  background: var(--panel);
+  border-color: var(--border-2);
+}
+
+.wc-amber { --c: var(--amber); }
+.wc-blue { --c: var(--blue); }
+.wc-violet { --c: var(--violet); }
+.wc-red { --c: var(--red); }
+.wc-grey { --c: var(--grey); }
+
+/* A person must act: the one card that is tinted, so it stands out among thirty. */
+.wc-card.wc-amber {
+  border-color: rgba(255, 176, 32, 0.32);
+  background: rgba(255, 176, 32, 0.045);
+}
+
+.wc-card.wc-amber:hover {
+  background: rgba(255, 176, 32, 0.08);
+}
+
+.wc-top {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+  min-height: 20px;
+}
+
+.wc-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+}
+
+.wc-status.tone-grey {
+  color: var(--text-2);
+}
+
+.wc-word {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wc-age {
+  flex: none;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The card is one link to the worker's page (the title's button stretched over it); the Live and PR links sit above it. */
+.wc-open {
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wc-open::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.wc-open:focus-visible {
+  outline: none;
+}
+
+.wc-card:has(.wc-open:focus-visible) {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+
+.wc-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: var(--fs-base);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.wc-quiet .wc-title {
+  color: var(--text-2);
+}
+
+.wc-doing {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wc-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+  margin-top: auto;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.wc-meta {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.wc-meta > span + span::before {
+  content: '·';
+  margin: 0 6px;
+  color: var(--text-3);
+}
+
+.wc-req {
+  color: var(--text-2);
+}
+
+.wc-where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wc-live,
+.wc-pr {
+  position: relative;
+  z-index: 1;
+}
+
+.wc-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border: 1px solid rgba(60, 207, 138, 0.4);
+  border-radius: 999px;
+  background: var(--green-soft);
+  color: var(--green);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.wc-pr {
+  flex: none;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+}
+
+a.wc-pr:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.wc-pr-open {
+  color: var(--green);
+}
+
+.wc-pr-merged {
+  color: var(--violet);
+}
+
+.wc-cost {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.wc-empty {
+  padding: var(--s-6) 0;
+}
+
+@media (max-width: 860px) {
+  .wc-bar {
+    gap: var(--s-2);
+    padding: var(--s-2) var(--s-3);
+  }
+
+  .wc-selects {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .wc-select {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .wc-scroll {
+    gap: var(--s-4);
+    padding: var(--s-3);
+  }
+
+  .wc-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-2);
+  }
+
+  .ov-mode-btn {
+    min-height: 32px;
+  }
+
+  .wc-chips .ledger-state {
+    min-height: 32px;
+  }
+}
+
 /* Orchestrator timers (Timers.tsx) */
 .timers-btn { gap: 4px; width: auto; min-width: 34px; padding: 0 8px; }
 .timers-count { font-size: 12px; font-variant-numeric: tabular-nums; }
