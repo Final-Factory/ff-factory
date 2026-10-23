@@ -285,3 +285,31 @@ test('w1668: a builder placed on the computer after its clearing still gets slot
   assert.match(await t.plans.start('late', 'beast'), /^Not yet \(w1668\)/);
   assert.equal(t.plans.plan('beast')!.seat?.sandbox, 'slot1');
 });
+
+test('w1841 (a): the workers a build paused are known until done (their requests show Blocked on it), done tells one told to pause even after it was placed on another computer, and a dead worker with nothing open is not paused', async () => {
+  // w1475 and w1768 read Stalled while w1836's 1.0.0.10 build held BEAST; its clearing listed 7819 paused (every worker ever there).
+  const t = world([
+    { id: 'builder', machine: 'beast', midTurn: true, requests: ['w1836'] },
+    { id: '83aa4ecd', machine: 'beast', midTurn: true, requests: ['w1475'] },
+    { id: 'idle', machine: 'beast', requests: ['w1501'] },
+    { id: 'old', machine: 'beast', live: false, requests: [] },
+  ]);
+  t.plans.declare({ machine: 'beast', minutes: 30, what: 'the 1.0.0.10 urgent release', builder: 'builder', requests: ['w1836'], by: 'the dispatcher' });
+  assert.equal(t.plans.pausedFor('83aa4ecd'), undefined, 'declared, not cleared yet: nobody is paused');
+  await t.plans.start('builder', 'beast');
+  assert.deepEqual(t.plans.pausedFor('83aa4ecd'), { what: 'the 1.0.0.10 urgent release', machine: 'beast', told: true });
+  assert.deepEqual(t.plans.pausedFor('idle'), { what: 'the 1.0.0.10 urgent release', machine: 'beast', told: false });
+  assert.equal(t.plans.pausedFor('builder'), undefined, 'not the builder');
+  assert.equal(t.plans.pausedFor('old'), undefined, 'a dead worker holding nothing is nobody to pause');
+  assert.deepEqual(Object.keys(t.plans.pausedAmong(['83aa4ecd', 'idle', 'old', 'nobody'])).sort(), ['83aa4ecd', 'idle']);
+  // Its turn ends with its pause line; its sandbox goes to other work and it is placed again on lothdesktop, not live.
+  const w = t.ws.find((x) => x.id === '83aa4ecd')!;
+  w.midTurn = false;
+  await t.plans.tick();
+  w.machine = 'lothdesktop';
+  w.live = false;
+  t.at(60);
+  t.plans.done('beast');
+  assert.ok(t.told.some((x) => x.id === '83aa4ecd' && /The build on beast is done \(w1606\): carry on where you stopped/.test(x.text)), 'it is told to carry on wherever it is');
+  assert.equal(t.plans.pausedFor('83aa4ecd'), undefined, 'done: no hold');
+});

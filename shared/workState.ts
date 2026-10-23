@@ -23,7 +23,15 @@
 // again on w1768: "i already answered this why are you asking me in the waiting on input for this still"): one question from
 // one worker on several requests is one wait. The person's answer on any of them, given after it was raised, settles it on
 // all of them (sharedWaitSettled).
-import type { SessionInfo, WorkItem } from './types.ts';
+//
+// w1841 (Ben's Stalled filter showed six requests that were not stalled: "why are these stalled?"): Stalled is only what
+// nothing will move. A worker an urgent release's build paused is Blocked on that build, and one whose report waits on a
+// machine's bench lock is Blocked on that lock (both resume by themselves). A wait on the bug's reporter or a player
+// (through FFBox and Discord) is Waiting, on them, and never goes to a person's orchestrator as [needs you]. A wait on a
+// person counts whichever worker of the request said it, also one that went on to other work since (its last report on
+// the request, read from the log). A worker that waits on another request's worker (its files, its results) is Blocked on
+// that request. And a worker that says it waits on the orchestrator for its own work says so in the Stalled line.
+import type { BenchLock, BuildHold, SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
 import { admitsPriority, needsOf, reservedText, type ReservedRoom } from './capacity.ts';
@@ -55,6 +63,11 @@ export interface WorkLive {
   worker?: string;
   /** Working (w1104): the machines its working workers run on, each once, in the workers' order ("lothdesktop", "beast"); absent when none is known. */
   machines?: string[];
+  /**
+   * Waiting on input on someone outside the team (w1841): the bug's reporter or a player, through FFBox and Discord. Nobody's
+   * orchestrator is sent it as [needs you]; FFBox passes their answer on.
+   */
+  outside?: boolean;
 }
 
 /**
@@ -86,6 +99,10 @@ export interface WorkLiveFacts {
   heldRoom?: readonly { id: string; why: string; for: readonly ('game' | 'agent')[] }[];
   /** Computers with room that placement.minPriority reserves for higher work (w1643): room only for a request at that level now. */
   reservedRoom?: readonly ReservedRoom[];
+  /** The urgent release build that paused this worker (w1841, server/buildPlans.ts pausedFor); undefined when none did. */
+  buildHold?: (sessionId: string) => BuildHold | undefined;
+  /** A machine's bench lock while a timed run holds it (w1841, MachineStats.benchLock); undefined when free or unknown. */
+  benchLock?: (machineId: string) => BenchLock | undefined;
   now: number;
 }
 
@@ -164,7 +181,7 @@ export const asksAPerson = (report: string | undefined) => !!report && NEEDS_PER
 /** Capitalised words after "waiting for" that are not a person. */
 const NOT_A_PERSON = new Set(['ci', 'steam', 'steamworks', 'unity', 'github', 'ffbox', 'claude', 'windows', 'mac', 'linux', 'discord', 'apple', 'xcode', 'metal', 'rosetta', 'tailscale', 'portal', 'beast', 'max', 'nightly', 'build', 'release', 'deploy', 'master', 'develop', 'main', 'the', 'this', 'that']);
 const WAITS = '(?:waiting (?:for|on)|waits (?:for|on)|blocked on|needs|requires)';
-const WHAT_THEY_GIVE = "(?:decision|input|approval|answer|call|go-?ahead|ok|confirmation|reply|choice|login|password|code|key)";
+const WHAT_THEY_GIVE = "(?:decision|input|approval|answer|call|go-?ahead|ok|confirmation|reply|choice|pick|verdict|sign-?off|login|password|code|key)";
 /** "(a person)", "needs a person", "a human must …": a person, not named. */
 const A_PERSON = /\(\s*(?:a|the) (?:person|human)\s*\)|\b(?:needs?|requires?|waiting (?:for|on)|waits (?:for|on)|blocked on) (?:a|the) (?:person|human)\b|\b(?:a|the) (?:person|human) (?:must|needs to|has to|should|will need to)\b|\bhuman action\b/i;
 /** "waiting for Ben to …", "needs Lothsahn's approval": a capitalised first name. */
@@ -201,6 +218,94 @@ export function personWaitIn(report: string | undefined, workId: string, people:
   if (named && !NOT_A_PERSON.has(named.toLowerCase())) return { who: named, line };
   if (A_PERSON.test(line)) return { line };
   return undefined;
+}
+
+/** w1841 (b): a wait on the bug's reporter or a player: "waiting on the reporter X to answer", "FFBox passes the answer on". */
+const OUTSIDE_WAIT =
+  /\b(?:waiting|waits|wait) (?:for|on) (?:the |a |our |that )?(?:bug )?(?:reporter|player|players|tester)\b|\b(?:waiting|waits) (?:for|on) [^;]{0,80}?\b(?:answer|reply|respond)[^;]{0,20}\b(?:in|on) (?:the |their )?(?:discord|bug) thread\b|\bffbox (?:passes|relays|forwards|brings) (?:the|their|its) (?:answer|reply)\b/i;
+const OUTSIDE_NAMED = /\b(reporter|player|tester)\s+(?!(?:to|in|on|and|or|answers?|replies|says)\b)([\w.-]{2,32})/i;
+const OUTSIDE_ROLE = /\b(reporter|players?|tester)\b/i;
+/** Who outside the team a line waits on: "the reporter Reteoteigam", "the player", "the reporter". */
+export function outsideWho(text: string): string {
+  const n = OUTSIDE_NAMED.exec(text);
+  if (n) return `the ${n[1].toLowerCase()} ${n[2]}`;
+  return `the ${OUTSIDE_ROLE.exec(text)?.[1].toLowerCase() ?? 'reporter'}`;
+}
+const WAITED_ON = /\b(?:waiting|waits|wait) (?:for|on) (?:the )?([A-Z][\w.-]{1,31})\b/;
+/**
+ * A still-open line that waits on the reporter or a player (w1841): who, or undefined. A line that names one of `team` (the
+ * request's people) as the one it waits on ("waiting on Ben to answer in the Discord thread") is a person's wait.
+ */
+export function outsideWaitOf(line: string, team: readonly string[] = []): string | undefined {
+  if (!OUTSIDE_WAIT.test(line)) return undefined;
+  const named = WAITED_ON.exec(line)?.[1];
+  if (named && team.some((p) => personKey(p) === personKey(named))) return undefined;
+  if (OUTSIDE_ROLE.test(line)) return outsideWho(line);
+  return named && !NOT_A_PERSON.has(named.toLowerCase()) ? named : 'the reporter';
+}
+/** A waiting_on_person declaration whose `who` is the reporter or a player, not one of the team (w1841). */
+export const outsideDeclared = (d: Pick<NonNullable<SessionInfo['waitingOn']>, 'who' | 'what'>, team: readonly string[] = []) =>
+  OUTSIDE_ROLE.test(d.who) || OUTSIDE_WAIT.test(d.what) || (/\b(?:discord|ffbox)\b/i.test(d.what) && !team.some((p) => personKey(p) === personKey(d.who)));
+
+/** w1841 (e): "needs the w1761 stills", "waiting for w1761's worker": the other request a line waits on (its words up to a ; or .). */
+const WAITS_ON_WORK = /\b(?:needs?|waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b([^;.]{0,140})/gi;
+export function requestWaitOf(line: string, selfId: string): string | undefined {
+  const body = line.replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '');
+  for (const m of body.matchAll(WAITS_ON_WORK)) {
+    const id = /\b(w\d+)\b/i.exec(m[1])?.[1]?.toLowerCase();
+    if (id && id !== selfId.toLowerCase()) return id;
+  }
+  return undefined;
+}
+
+/** w1841 (a): "waiting on BEAST's bench lock", "waits on the beast timed-run lock": the machine named, or '' for its own. */
+const BENCH_WAIT = /\b(?:waiting|waits|wait) (?:for|on) (?:the |a )?(?:(\w+)(?:'s)? )?(?:bench(?:[- ]lock| queue)|timed[- ]runs?(?:[- ]lock)?)\b/i;
+export function benchWaitOf(line: string): string | undefined {
+  const m = BENCH_WAIT.exec(line);
+  return m ? (m[1] ?? '').toLowerCase() : undefined;
+}
+
+/** w1841 (d): "waiting on the orchestrator to run the two-machine check": a wait on the orchestrator or the dispatcher. */
+const ORCHESTRATOR_WAIT = /\b(?:waiting|waits|wait) (?:for|on) (?:the |my |its |ben'?s |lothsahn'?s )?(?:orchestrator|dispatcher)\b/i;
+export const orchestratorWaitIn = (line: string) => ORCHESTRATOR_WAIT.test(line);
+/**
+ * Work a worker does itself (w1841, w1685: "waiting on the orchestrator to run the two-machine check"): a pair or two-machine
+ * check, a build, its CI, a test or audit run. Not a second machine's worker, which only the dispatcher starts.
+ */
+const OWN_WORK = /\bto (?:run|do|start|kick off|trigger|launch|finish|make) (?:the |a |my |its |our )?[^;.]{0,60}?\b(?:check|build|ci|tests?|audit|run|clips?|playtest|capture)\b/i;
+export const ownWorkWait = (line: string) => ORCHESTRATOR_WAIT.test(line) && OWN_WORK.test(line) && !/\b(?:worker|sandbox|place|move)\b/i.test(line);
+
+/**
+ * The newest "still open" line worker `s` wrote about request `w` (w1841): its last report's, or else its last report on it
+ * in the request's log ("hh:mm worker <id>: w12: still open: …", or a wrap-up), while nothing about that worker came after
+ * it there (a message sent to it, an answer passed on, a DONE, a block). A worker that went on to other work keeps what it
+ * last said about this one.
+ */
+export function lastOpenLine(w: Pick<WorkItem, 'id' | 'log'>, s: Pick<SessionInfo, 'id' | 'lastResult'>, now: number): OpenLine | undefined {
+  const own = s.lastResult ? stillOpenLine(s.lastResult.trim().slice(-2000), w.id) : undefined;
+  if (own) return { line: own, logged: false };
+  for (let i = w.log.length - 1; i >= 0; i--) {
+    const l = w.log[i];
+    if (!l.includes(s.id)) continue;
+    const m = /^(\d\d):(\d\d) (?:wrap-up from )?worker (\S+): (.*)$/.exec(l);
+    if (!m || m[3] !== s.id) return undefined;
+    const line = stillOpenLine(m[4], w.id);
+    if (!line) return undefined;
+    // The log says only hh:mm (UTC): the last such time not after now.
+    const d = new Date(now);
+    d.setUTCHours(Number(m[1]), Number(m[2]), 0, 0);
+    const at = d.getTime() > now ? d.getTime() - 86_400_000 : d.getTime();
+    return { line, logged: true, at };
+  }
+  return undefined;
+}
+
+/** A worker's newest "still open" line on a request (lastOpenLine): from its last report, or from the request's log, with when. */
+export interface OpenLine {
+  line: string;
+  logged: boolean;
+  /** When a logged line was written (from its hh:mm); a report's own time is its session's (reportAt). */
+  at?: number;
 }
 
 /**
@@ -282,19 +387,28 @@ export function answerAfter(items: readonly Pick<WorkItem, 'id' | 'notes' | 'nee
   return best;
 }
 
+/** The worker whose wait is weighed (w1841): its id, and whether another worker of the request took up what came at a time. */
+export interface WaitingWorker {
+  id: string;
+  elsewhere: (at: number) => boolean;
+}
+
 /**
  * Whether a wait on a person, said at `at`, is settled since (w1504): one of `who` (display names, as WorkLive.waitsOn
  * says them) added a note to the request or answered its [needs you] after it, or a pull request of the request that
  * `line` names merged after it. Why, or undefined while the wait stands. A pull request not linked to the request is not
  * read: its state is not known here.
  */
-export function personWaitSettled(w: Pick<WorkItem, 'notes' | 'needsYou' | 'prs'>, at: number, who: readonly string[], line: string): string | undefined {
+export function personWaitSettled(w: Pick<WorkItem, 'notes' | 'needsYou' | 'prs'>, at: number, who: readonly string[], line: string, by?: WaitingWorker): string | undefined {
   const people = new Set(who.map(personKey));
   const after = (iso: string | undefined) => (Date.parse(iso ?? '') || 0) > at;
-  const note = [...(w.notes ?? [])].reverse().find((n) => after(n.at) && people.has(personKey(n.by)));
+  // w1841: on a request with several workers, a note another worker took up (it reported after the note, the waiting one did
+  // not) answered that worker, not this one (w1782: Ben's notes on item 2 went to 8ef702f6; ac694f80 still waited on his pick).
+  const note = [...(w.notes ?? [])].reverse().find((n) => after(n.at) && people.has(personKey(n.by)) && !by?.elsewhere(Date.parse(n.at) || 0));
   if (note) return `${note.by} answered it with a note at ${minute(note.at)}`;
   const a = w.needsYou?.answered;
-  if (a && after(a.at) && people.has(personKey(a.by))) return `${a.by} answered it at ${minute(a.at)}`;
+  const theirs = !by || !w.needsYou?.worker || w.needsYou.worker === by.id;
+  if (a && theirs && after(a.at) && people.has(personKey(a.by))) return `${a.by} answered it at ${minute(a.at)}`;
   const named = prsNamedIn(line);
   const pr = (w.prs ?? []).find((p) => p.state === 'merged' && named.has(p.number) && after(p.at));
   if (pr) return `PR #${pr.number}, which it names, merged at ${minute(pr.at!)}`;
@@ -309,6 +423,33 @@ function blockedLive(gates: readonly NonNullable<WorkItem['blocked']>[], now: nu
   const read = gates.find((g) => g.kind === 'ci' && g.read)?.read;
   const ci = read ? `; last read: ${read.text} (${ago(read.at, now)})` : '';
   return { state: 'blocked', why: `${first.what}${more} (since ${ago(first.at, now)}, set by ${first.by})${ci}`, waitsOn: gates.map((g) => gatesName([g], now)) };
+}
+
+/** Waiting on someone outside the team (w1841 (b)): the reporter or a player, through FFBox and Discord. */
+const outsideLive = (worker: string, who: string, line: string): WorkLive => ({
+  state: 'waiting',
+  why: `${worker} waits on ${who} to answer through FFBox and Discord: "${line.slice(0, 160)}"`,
+  waitsOn: [who],
+  worker,
+  outside: true,
+});
+
+/**
+ * Blocked on a bench lock (w1841 (a)): the first of `workers` whose line (`lineOf`) waits on a bench lock that a timed run
+ * holds now, on the machine it names or its own. A lock that is free is no wait: it is resumed (Agents.resumeBenchWaits).
+ */
+function benchedOf(workers: readonly SessionInfo[], lineOf: (s: SessionInfo) => string | undefined, f: Pick<WorkLiveFacts, 'benchLock' | 'now'>): WorkLive | undefined {
+  if (!f.benchLock) return undefined;
+  for (const s of workers) {
+    const line = lineOf(s);
+    const named = line !== undefined ? benchWaitOf(line) : undefined;
+    if (named === undefined) continue;
+    const machine = named || s.machineId?.split('/')[0].trim().toLowerCase();
+    const lock = machine ? f.benchLock(machine) : undefined;
+    if (!machine || !lock) continue;
+    return { state: 'blocked', why: `${s.id} waits on ${machine}'s bench lock (held since ${ago(lock.since, f.now)}: ${lock.owner.slice(0, 120)}); its check-in, or FF Factory when the lock is free, brings it back`, waitsOn: [`${machine}'s bench lock`] };
+  }
+  return undefined;
 }
 
 /** The live state of one request, or undefined once it is closed. */
@@ -356,8 +497,11 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   const gates = gatesOf(w);
   const gatedAt = w.status === 'blocked' && gates.length ? Math.max(...gates.map((g) => Date.parse(g.at) || 0)) : undefined;
   // w1812: and until that person answers the same question on another request the same worker holds (`others`).
-  const stands = (at: number, who: readonly string[], line: string, others: readonly WorkItem[] = [], share?: string) =>
-    (gatedAt === undefined || at > gatedAt) && !personWaitSettled(w, at, who, line) && !sharedWaitSettled(others, at, who, share);
+  const stands = (at: number, who: readonly string[], line: string, others: readonly WorkItem[] = [], share?: string, by?: WaitingWorker) =>
+    (gatedAt === undefined || at > gatedAt) && !personWaitSettled(w, at, who, line, by) && !sharedWaitSettled(others, at, who, share);
+  // w1841: another worker of the request reported after a time and this one did not: what came then went to that one.
+  const waiting = (s: SessionInfo): WaitingWorker => ({ id: s.id, elsewhere: (t) => reportAt(s) <= t && workers.some((o) => o.id !== s.id && reportAt(o) > t) });
+  const team = [...new Set([w.requestedBy, ...w.requesters].map((r) => r.displayName))];
   const heldWith = (s: SessionInfo) => f.items.filter((x) => x.id !== w.id && live(x) && x.sessionIds.includes(s.id) && !x.done?.[s.id]);
 
   // Waiting on a person, declared (w691): the worker says only a person can move it on, and who. A check-in it set as
@@ -371,11 +515,13 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
     (s) =>
       s.waitingOn &&
       (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === w.id.toLowerCase()) &&
-      stands(Date.parse(s.waitingOn.at) || 0, whoOf(s.waitingOn), s.waitingOn.what, s.waitingOn.request ? [] : heldWith(s), `declared:${s.id}:${s.waitingOn.at}`),
+      stands(Date.parse(s.waitingOn.at) || 0, whoOf(s.waitingOn), s.waitingOn.what, s.waitingOn.request ? [] : heldWith(s), `declared:${s.id}:${s.waitingOn.at}`, waiting(s)),
   );
   if (declared) {
     const d = declared.waitingOn!;
-    return { state: 'waiting', why: `${declared.id} waits on ${d.who}: ${d.what} (since ${ago(d.at, f.now)})`, waitsOn: whoOf(d), worker: declared.id };
+    // w1841 (b): the reporter or a player, outside the team: FFBox passes their answer on; nobody's orchestrator is asked.
+    const outside = outsideDeclared(d, team);
+    return { state: 'waiting', why: `${declared.id} waits on ${d.who}${outside ? ' (through FFBox and Discord)' : ''}: ${d.what} (since ${ago(d.at, f.now)})`, waitsOn: whoOf(d), worker: declared.id, ...(outside ? { outside: true } : {}) };
   }
 
   // Working, between turns (w475, w643): a worker on it has its own work still going (a background job such as CI or a
@@ -384,20 +530,49 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   const coming = mine.map((s) => ({ s, a: agentState(s, undefined, f.now) })).find((x) => (x.a.state === 'between_turns' && x.a.kind !== 'queued') || x.a.resumes?.startsWith('check-in'));
   // Its last report says a person must act (w691, the backstop): the check-in it set does not make it Working. A job
   // still running (CI, a build) does: work goes on meanwhile.
-  const people = [...new Set([w.requestedBy, ...w.requesters].map((r) => r.displayName))];
+  const people = team;
   const said = mine
     .map((s) => ({ s, p: personWaitIn(s.lastResult, w.id, people) }))
     .find((x) => {
-      if (!x.p) return false;
+      // w1841: a line that waits on the reporter or a player is theirs (outsider, below), not a person's of the team.
+      if (!x.p || outsideWaitOf(x.p.line, people)) return false;
       // w1812: the same line on another request this worker holds is the same question.
       const share = questionShareKey(reportWaitKey(x.s.id, x.p.line));
       const others = heldWith(x.s).filter((o) => {
         const l = personWaitIn(x.s.lastResult, o.id, people)?.line;
         return !!l && questionShareKey(reportWaitKey(x.s.id, l)) === share;
       });
-      return stands(reportAt(x.s), x.p.who ? [x.p.who] : names(w.requesters), x.p.line, others, share);
+      return stands(reportAt(x.s), x.p.who ? [x.p.who] : names(w.requesters), x.p.line, others, share, waiting(x.s));
     });
   if (said && !(coming && coming.a.kind === 'job')) return { state: 'waiting', why: `${said.s.id}'s report says a person must act: "${said.p!.line.slice(0, 160)}"`, waitsOn: said.p!.who ? [said.p!.who] : names(w.requesters), worker: said.s.id };
+
+  // w1841 (b): its report waits on the bug's reporter or a player (w1778: "waiting on the reporter Reteoteigam to answer in
+  // the Discord thread ... FFBox passes the answer on"). Waiting, on them, check-in or not; never sent as [needs you].
+  const outsider = mine
+    .map((s) => {
+      const line = s.lastResult ? stillOpenLine(s.lastResult.trim().slice(-2000), w.id) : undefined;
+      const who = line ? outsideWaitOf(line, team) : undefined;
+      return who && line && stands(reportAt(s), [], line) ? { s, who, line } : undefined;
+    })
+    .find((x) => !!x);
+  if (outsider && !(coming && coming.a.kind === 'job')) return outsideLive(outsider.s.id, outsider.who, outsider.line);
+
+  // w1841 (a): a worker an urgent release's build paused (w1475 and w1768 for w1836 on BEAST) is Blocked on that build. One
+  // asked to pause mid-turn is told to carry on when it is done (server/buildPlans.ts done); one paused between turns comes
+  // back by its own check-in or held message, which the build holds until then. One with nothing to bring it back is left
+  // to the lines below.
+  const paused = mine
+    .map((s) => ({ s, h: f.buildHold?.(s.id) }))
+    .find((x) => x.h && (x.h.told || x.s.id === coming?.s.id || !!(f.queuedSend?.(x.s.id) ?? x.s.queuedSend)));
+  if (paused) {
+    const h = paused.h!;
+    return { state: 'blocked', why: `${paused.s.id} paused for ${h.what} on ${h.machine}; ${h.told ? 'FF Factory tells it to carry on when the build is done' : 'what brings it back waits for the build'}`, waitsOn: [`the build on ${h.machine} (${h.what})`] };
+  }
+
+  // w1841 (a): its report waits on a machine's bench lock, which a timed run holds now: Blocked on that lock. Its check-in
+  // brings it back, or FF Factory tells it when the lock is free (Agents.resumeBenchWaits).
+  const benched = benchedOf(mine, (s) => (s.lastResult ? stillOpenLine(s.lastResult.trim().slice(-2000), w.id) : undefined), f);
+  if (benched && !(coming && coming.a.kind === 'job')) return benched;
 
   // Blocked on its gates (w754): a request that waits on other requests or pull requests is Blocked, whatever check-ins its
   // worker left behind (w750 showed "Working" for an hour while its worker polled gh every 20 minutes). Nothing a worker
@@ -450,6 +625,37 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   // The cleanup stalled it: its own reason, which says more than anything derived here (w418: kept as it is).
   if (w.stalled) return { state: 'stalled', why: `${w.stalled.kind}: ${w.stalled.reason}` };
 
+  // w1841: what each of its workers last said about it, also one that went on to other work since (its last report on it in
+  // the log). (c) A wait on a person stands whichever worker said it (w1782: item 3 waited on Ben's pick through ac694f80
+  // while 8ef702f6 was idle); (b) one on the reporter or a player; (e) one on another request's worker (w1818 needs w1761's
+  // stills) is Blocked on that request; (a) one on a bench lock that a timed run holds.
+  const lines = workers
+    .filter((s) => !w.done?.[s.id])
+    .map((s) => ({ s, l: lastOpenLine(w, s, f.now) }))
+    .filter((x): x is { s: SessionInfo; l: OpenLine } => !!x.l);
+  const atOf = (x: (typeof lines)[number]) => x.l.at ?? reportAt(x.s);
+  // The reports of the workers that hold it were weighed above (`said`, `outsider`, with w1812's shared questions).
+  const weighed = (x: (typeof lines)[number]) => !x.l.logged && mine.includes(x.s);
+  for (const x of lines.filter((y) => !weighed(y))) {
+    const p = personWaitIn(x.l.line, w.id, people);
+    if (p && !outsideWaitOf(p.line, team) && stands(atOf(x), p.who ? [p.who] : names(w.requesters), p.line, [], undefined, waiting(x.s))) {
+      return { state: 'waiting', why: `${x.s.id}'s ${x.l.logged ? 'last report on it' : 'report'} says a person must act: "${p.line.slice(0, 160)}"`, waitsOn: p.who ? [p.who] : names(w.requesters), worker: x.s.id };
+    }
+  }
+  for (const x of lines.filter((y) => !weighed(y))) {
+    const who = outsideWaitOf(x.l.line, team);
+    if (who && stands(atOf(x), [], x.l.line)) return outsideLive(x.s.id, who, x.l.line);
+  }
+  for (const x of lines) {
+    const id = requestWaitOf(x.l.line, w.id);
+    const other = id ? f.items.find((o) => o.id.toLowerCase() === id && live(o)) : undefined;
+    if (other && stands(atOf(x), [], x.l.line)) {
+      return { state: 'blocked', why: `${x.s.id} waits on ${other.id}: "${x.l.line.slice(0, 160)}" (blocked_on with requests or reports resumes it by itself)`, waitsOn: [other.id] };
+    }
+  }
+  const benchedLate = benchedOf(lines.map((x) => x.s), (s) => lines.find((x) => x.s === s)?.l.line, f);
+  if (benchedLate) return benchedLate;
+
   // Merged, follow-up pending: its pull requests merged, none is open, and the request is still open.
   const prs = w.prs ?? [];
   if (prs.some((p) => p.state === 'merged') && !prs.some((p) => p.state === 'open')) {
@@ -467,6 +673,13 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
     return { state: 'stalled', why: `its worker ${s.id} moved on${now ? ` to ${now}` : ''}` };
   }
   if (!workers.length) return { state: 'stalled', why: 'its workers are gone' };
+  // w1841 (d): its worker says it waits on the orchestrator (w1685: "waiting on the orchestrator to run the two-machine
+  // check"): Stalled, as nothing moves it, and the line says what to tell it.
+  const orch = lines.find((x) => orchestratorWaitIn(x.l.line));
+  if (orch) {
+    const own = ownWorkWait(orch.l.line);
+    return { state: 'stalled', why: `${orch.s.id} says it waits on the orchestrator: "${orch.l.line.slice(0, 160)}"${own ? '; that is its own work (pair and two-machine checks, builds, its CI): tell it to run it' : ''}` };
+  }
   const last = [...mine].sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))[0];
   return { state: 'stalled', why: `${last.id} ${last.status === 'error' ? 'failed' : last.status === 'idle' ? 'finished its turn' : 'stopped'} ${ago(last.lastActivityAt, f.now)}${pr}, nothing waits on a person` };
 }

@@ -45,6 +45,8 @@ export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
     Partial<Pick<Orchestrators, 'noteCiRead' | 'sweepResumes' | 'requeueCapacityBlocks'>>;
+  /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
+  benchResume?: () => [string, string][];
   /** Whether a message to a session waits in the send queue (for a sandbox, a slot or its machine): its resume is on its way (w1094). */
   queued?: (sessionId: string) => boolean;
   /** The commit the portal runs. */
@@ -195,6 +197,8 @@ export class BlockerWatch {
       // w1094: a worker a gate's clearing resumed that never took the message is resumed again (Orchestrators.sweepResumes).
       const swept = this.d.orchestrators.sweepResumes?.((sid) => this.d.queued?.(sid) ?? false);
       if (swept) for (const [id, what] of swept) did.set(id, `sweep: ${what}`);
+      // w1841: a worker whose report waits on a machine's bench lock, with nothing else to bring it back, is told it is free.
+      for (const [id, what] of this.d.benchResume?.() ?? []) did.set(id, `bench: ${what}`);
       // Conditional decisions (w830): a person's "close it once #1314 merges", carried out or dropped when the fact is met.
       const decided = [...this.d.store.work.values()].filter((w) => w.conditional?.length);
       for (const w of decided) for (const c of w.conditional!) if (c.when.kind !== 'request_done' && !pr.has(c.when.ref)) pr.set(c.when.ref, await this.prOf(c.when.ref));
