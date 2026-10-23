@@ -9,7 +9,7 @@ watch of its own. The dialog watchdog (modal dialogs, recovery prompts) is separ
 
 | Who | Tool | Actions |
 |---|---|---|
-| worker in a machine sandbox (a Mac, a Windows PC, BEAST) | `mcp__machine__unity` | `status`, `start`, `stop`, `restart` of its sandbox's editor; `force: true` kills a frozen editor at once; `clear_batch` ends the machine's orphaned or hung batch builds ([below](#orphaned-and-hung-batch-builds-are-ended-w791)) |
+| worker in a machine sandbox (a Mac, a Windows PC, BEAST) | `mcp__machine__unity` | `status`, `start`, `stop`, `restart` of its sandbox's editor; `force: true` kills a frozen editor at once; `clear_batch` ends the machine's orphaned or hung batch builds, and the asking worker's own stalled ones within 10-20 min ([below](#orphaned-and-hung-batch-builds-are-ended-w791)) |
 | orchestrator | `unity` with `sandbox` (`<machine>/<name>`, or `machine` plus a bare name) | the same, and `log`; a machine alone (its main clone) is refused (w536) |
 
 A normal stop asks the editor to quit, then kills it after 30 s. A forced one
@@ -131,6 +131,17 @@ unity-slot status
 `run` waits its turn, runs the command and frees the slot when it ends (its exit code is passed on). Launches inside a
 `run` pass straight through (`FF_UNITY_SLOT_HELD`), so a script that wraps itself does not ask twice. Without a slot
 arbiter on the machine (no FF Factory daemon, or one from before w469) it runs at once and says so.
+
+**A `run` dies with whatever started it** (w1874). On biscuit, 2026-10-23, a worker ended the background shell that ran a
+build script; its `unity-slot run` (pid 2460427) got no signal, lived on under the user's systemd, and kept its hung batch
+Unity (pid 2460462) holding a slot and the sandbox's Library. Now `run` looks every 2 s (`CALLER_WATCH_MS`) whether its
+caller is still there (Linux: its parent pid read live from `/proc/self/stat`, since node's `process.ppid` is the value
+at start; a Mac or Windows: whether the caller's pid is alive), and SIGTERM or SIGHUP ends the run too. Either way it
+stops the command's whole tree: SIGTERM, then a hard stop 20 s later (`stopTree`; a hung Unity ignores the polite signal).
+So `nohup unity-slot run … &` from a shell that then exits is not a way to keep a build going: the run ends with its
+caller. A run also records its agent's session (`FF_SESSION_ID`) in its request file, which tells the reaper whose build
+it is (below). Tests: `server/unitySlots.test.ts` (`callerGone`, a real wrapper whose caller is SIGKILLed ends its command,
+`runsIn`).
 
 **The queue** (`assess`):
 
@@ -342,20 +353,24 @@ says `prepare-failed`, 209 min), and m5 pid 81390, a worker's `BuildMacMultiplay
 `-batchmode` Unity whose `-projectPath` is one of the daemon's sandboxes is ever judged: never an interactive editor (the
 `unity` tool and the watch own those), never the main clone or a person's own checkout. Per build the reaper reads its start
 time and its tree's CPU time (CIM on Windows, `ps -o etime,time` on a Mac and Linux) and the write time of its `-logFile`
-(none when the log is stdout), and counts **progress** as the log growing or the tree using at least 2 s of CPU between
-looks (a long Burst compile is silent in the log but busy). The owner is the build's parent process: gone when its pid is
-missing from the listing (Windows keeps a dead parent's pid), when it is launchd/init/a user's systemd (pid 1), or when a
-process with that pid started after the build did (a reused pid).
+(none when the log is stdout), and counts **progress** as the log growing or the tree using CPU at 10% of one core or more
+between looks (`CPU_BUSY_SHARE`; a long Burst compile is silent in the log but busy). The owner is the build's parent process:
+gone when its pid is missing from the listing (Windows keeps a dead parent's pid), when it is launchd/init/a user's systemd
+(pid 1), or when a process with that pid started after the build did (a reused pid). When the parent is a `unity-slot run`
+wrapper (the daemon's `unitySlots.ts run` or the game repo's `unity_slot.py run`), the owner is the wrapper's own parent
+(w1874): a wrapper left under init with nobody makes its build an orphan.
 
 | The build | Ended when |
 |---|---|
 | owner gone (seen by two looks in a row) | no progress for 10 min, or running 90 min whatever it does |
 | owner alive | running 60 min and no progress for 30 min |
 | owner alive, only the log is silent | running 6 h and the log silent for 30 min (a hang that burns CPU) |
+| the asker's own (`clear_batch`, w1874), whatever its age or owner | log silent for 20 min, or no progress (log and CPU) for 10 min |
 
 Anything else is kept, and the report says why. Ending a build kills its tree (children first, with what an editor restart
 spares: game players, another project's editor, Unity Hub, node/claude), removes the sandbox's `Temp/UnityLockfile` when no Unity
-still has the project open, looks at the slots again at once (the dead owner's request is freed by the arbiter already, so
+still has the project open, ends a `unity-slot run` wrapper still there whose caller is gone (one whose caller is alive
+ends by itself and tells its caller the exit), looks at the slots again at once (the dead owner's request is freed by the arbiter already, so
 the next waiting launch is granted), logs `unity reaper: ended batch Unity pid …` and tells the orchestrator
 (`Unity batch build: …`).
 
@@ -366,12 +381,32 @@ that measurement, chosen wide; the owner test (parent gone) is sourced from how 
 dead parent's pid stays in `ParentProcessId`; a POSIX child is re-parented to pid 1 or a user's systemd). All of them are in
 `REAP` and the table above. A daemon restart forgets what it saw, which only delays a kill (progress counts from first sight). Builds are told apart by pid and command line (w1196): a Mac's and Linux's start time is now minus `ps`'s elapsed seconds and moved by up to a second between looks (715 ms measured on biscuit), so until w1196 no build there was ever seen by two looks and none was ended.
 
+**Why 2 s of CPU became 10% of a core** (w1874, measured). biscuit pid 2460462, hung in a futex wait after "Unloading 192
+Unused Serialized files" (its log silent from 09:51:30), used 50-80 ms of CPU a minute across its tree (sampled 10:20-10:23),
+yet `clear_batch` said "last progress 3 min ago" at 10:10 and "12 min ago" at 10:20 with the daemon up since 09:49: one burst
+of 2 s or more around 10:07 restarted its stall clock. (`ps` showed it at "~3% CPU": that is its lifetime average, mostly
+its start, not what it used while hung.) That a working build's silent phases keep a core busy is a guess.
+
 **A worker that waits** on a slot a stuck build holds calls `mcp__machine__unity` with `action: "clear_batch"`: the same look
 at once, for the whole machine, answered with what was ended or, for every build kept, why (no limit is lowered on request).
+**Its own builds go by the owner rules** (w1874; lothsahn: jobs that hang or jam should be unjammed). The portal sends the
+asking worker's session with the action, and a build is the asker's when the `unity-slot run` above it recorded that session,
+or recorded none (a wrapper from before w1874, the game repo's `unity_slot.py`, no wrapper) and the build is of the asker's
+sandbox. A build another session started stays under the rules above, as does every build when the orchestrator asks. The
+asker's own build is ended once its log has been silent for 20 min (`OWNED_LOG_STALL_MS`), or log and CPU for 10 min
+(`OWNED_STALL_MS`). Measured: of 690 healthy batch build logs on biscuit (2026-10-14..23, every `-logFile` under the sandboxes
+and temp folders that ended in success), the longest silence was 592 s, Bee's `GenerateNativePluginsForAssemblies` (Burst AOT
+of the player) printing nothing between `[497/500 10s]` and `[498/500 602s]`; next 469 s (the same step) and 266 s
+(`BuildPlayerDataGenerator`). Unity's log has no clock, so Bee's own clock in its progress lines bounds each silence. 10 min
+of silent log with an idle tree is past that, and a Burst step keeps its CPU busy; 20 min (2x) covers a slower machine's Burst
+and a hang that spins. The log rule reads the log's write time, so a daemon restart does not delay it; the 10 min rule counts
+from the daemon's first sight. Windows and Mac build logs were not measured (none on biscuit).
 Daemons of protocol 9 and later (`BATCH_CLEAR_PROTOCOL`); the portal refuses it for an older one, which would take an unknown
 action for a start of the editor. Tests: `server/unityReaper.test.ts` (the two cases of 2026-10-09 end; an interactive editor,
-a non-sandbox project, an alive and progressing owner, a busy-but-silent build, a young build and a progressing orphan stay),
-and `machineSandboxes.test.ts` (the tool reaches the daemon).
+a non-sandbox project, an alive and progressing owner, a busy-but-silent build, a young build and a progressing orphan stay;
+the w1874 biscuit case: an orphaned wrapper's build, idle with a 2.5 s burst, ends at 10 min with its wrapper; its owner ends
+it at once, another session cannot; an owned busy build stays to 20 min, an owned idle one goes at 10), and
+`machineSandboxes.test.ts` (the tool reaches the daemon).
 
 ## Each sandbox's Unity MCP reaches only its editor
 

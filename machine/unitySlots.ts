@@ -414,7 +414,27 @@ export interface RequestFile {
   count: number;
   label: string;
   projects?: string[];
+  /** The agent session that ran it (FF_SESSION_ID), so the reaper knows whose build it is (w1874). */
+  session?: string;
   createdAt: string;
+}
+
+/** The run requests in a mailbox with the session each recorded (w1874: the reaper's owner rule). Reads only. */
+export function runsIn(dir: string): { pid: number; session?: string }[] {
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out: { pid: number; session?: string }[] = [];
+  for (const n of names) {
+    const m = /^req-(.+)\.json$/.exec(n);
+    if (!m || !ID.test(m[1])) continue;
+    const f = readJson<RequestFile>(path.join(dir, n));
+    if (f && Number.isInteger(f.pid) && f.pid > 0) out.push({ pid: f.pid, ...(typeof f.session === 'string' && f.session ? { session: f.session.slice(0, 64) } : {}) });
+  }
+  return out;
 }
 
 /** What the arbiter writes for clients and people: the counts, the queue, the grants. */
@@ -774,7 +794,7 @@ export class SlotRefused extends Error {}
  */
 export async function acquire(
   d: ClientDeps,
-  opts: { count: number; label: string; holder?: string; projects?: string[]; timeoutMs?: number; arbiterGraceMs?: number; heartbeatMs?: number; pollMs?: number },
+  opts: { count: number; label: string; holder?: string; projects?: string[]; session?: string; timeoutMs?: number; arbiterGraceMs?: number; heartbeatMs?: number; pollMs?: number },
 ): Promise<Held> {
   const none = (why: string): Held => ({ count: opts.count, ungated: why, stop: () => undefined });
   if (!arbiterNow(d.dir, d.now())) {
@@ -784,7 +804,7 @@ export async function acquire(
   }
   const id = `${d.now().toString(36)}-${d.pid}-${randomBytes(3).toString('hex')}`;
   const file = reqFile(d.dir, id);
-  const body: RequestFile = { v: 1, id, pid: d.pid, holder: opts.holder || `pid:${d.pid}`, count: opts.count, label: opts.label.slice(0, 120), ...(opts.projects?.length ? { projects: opts.projects } : {}), createdAt: new Date(d.now()).toISOString() };
+  const body: RequestFile = { v: 1, id, pid: d.pid, holder: opts.holder || `pid:${d.pid}`, count: opts.count, label: opts.label.slice(0, 120), ...(opts.projects?.length ? { projects: opts.projects } : {}), ...(opts.session ? { session: opts.session } : {}), createdAt: new Date(d.now()).toISOString() };
   writeAtomic(file, JSON.stringify(body));
   const touch = () => {
     try {
@@ -946,6 +966,32 @@ export function stopTree(pid: number, platform: NodeJS.Platform, graceMs: number
   setTimeout(() => signal('SIGKILL'), graceMs);
 }
 
+/** How often a run looks whether its caller is still there (w1874). */
+export const CALLER_WATCH_MS = 2_000;
+
+/** The parent pid as it is now: Linux reads it live (process.ppid is the one at start); elsewhere undefined. */
+export function livePpid(): number | undefined {
+  try {
+    const st = fs.readFileSync('/proc/self/stat', 'utf8');
+    const ppid = Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[1]);
+    return Number.isInteger(ppid) && ppid >= 0 ? ppid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the process that ran `unity-slot run` (pid `caller`) is gone (w1874). On biscuit a worker ended the background
+ * shell that ran a build script; the wrapper (pid 2460427) lived on under systemd, its hung Unity with it, holding a Unity
+ * slot and the sandbox's Library with nobody to use the result. Linux: the parent changed (reparented to init or a
+ * subreaper); a Mac or Windows: the caller's pid is no longer alive. A run started by init itself has nothing to watch.
+ */
+export function callerGone(caller: number, platform: NodeJS.Platform, readPpid: () => number | undefined = livePpid, alive: (pid: number) => boolean = isAlive): boolean {
+  if (caller <= 1) return false;
+  const now = platform === 'linux' ? readPpid() : undefined;
+  return now !== undefined ? now !== caller : !alive(caller);
+}
+
 /** The label a run gets when none is given: the command, short. */
 const labelOf = (o: CliOpts) => o.label ?? (o.rest.map((a) => path.basename(a)).join(' ').slice(0, 80) || 'unity-slot');
 
@@ -968,7 +1014,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
       d.say(`this process holds the bench lock (${inside.ticket} ${inside.mode}): a Unity slot is waited for at most ${HELD_WAIT_CAP_MS / 1000} s under it (w1615). Take the slot before bench_lock instead.`);
     }
     if (held >= o.count) d.say(`inside a run that holds ${held} slot(s): no new slot`);
-    else h = await acquire(d, { count: o.count, label: labelOf(o), holder, projects: o.projects, timeoutMs });
+    else h = await acquire(d, { count: o.count, label: labelOf(o), holder, projects: o.projects, session: env.FF_SESSION_ID || undefined, timeoutMs });
     // Then the bench ticket (slot first, ticket second: the queue's deadlock rule). A nested run reuses its parent's.
     let ticket: BenchTicket | undefined;
     let ticketName = inside?.ticket;
@@ -1001,9 +1047,26 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
       shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(o.rest[0]),
       env: { ...env, FF_UNITY_SLOT_HELD: String(Math.max(held, o.count)), ...(h?.id ? { FF_UNITY_SLOT_ID: h.id } : {}), ...(ticketName ? { FF_BENCH_TICKET: ticketName } : {}) },
     });
-    const forward = (sig: NodeJS.Signals) => () => child.kill(sig);
-    process.on('SIGINT', forward('SIGINT'));
-    process.on('SIGTERM', forward('SIGTERM'));
+    process.on('SIGINT', () => child.kill('SIGINT'));
+    // w1874: the run dies with whatever started it. SIGTERM or SIGHUP (a task or terminal ended) ends the whole tree, hard
+    // after a grace (a hung Unity ignores a polite signal), and a caller that vanished without a signal does the same:
+    // otherwise the wrapper lives on under init with its Unity, holding a slot no one will free.
+    let stopping = false;
+    const stopRun = (why: string) => {
+      if (stopping || child.exitCode !== null || child.signalCode !== null || !child.pid) return;
+      stopping = true;
+      stopTree(child.pid, process.platform, REVOKED_GRACE_MS);
+      d.say(why);
+    };
+    // A caller that is gone took the read end of our stdout and stderr with it: a write there must not end this process
+    // before its tree is stopped.
+    for (const out of [process.stdout, process.stderr]) out.on('error', () => undefined);
+    process.on('SIGTERM', () => stopRun('stopped (SIGTERM): ending the run and what it started (w1874)'));
+    process.on('SIGHUP', () => stopRun('stopped (SIGHUP: its terminal or task ended): ending the run and what it started (w1874)'));
+    const caller = process.ppid;
+    const callerWatch = setInterval(() => {
+      if (callerGone(caller, process.platform)) stopRun(`its caller (pid ${caller}) is gone, so nobody will use the result: ending the run and what it started (w1874)`);
+    }, CALLER_WATCH_MS);
     // w1860: a ticket revoked under the run (the shared group's turn limit while an exclusive ticket waits, or an urgent
     // release) ends the run: its helper is a service owner and stops nothing itself, and a build that went on ran beside
     // the timed run granted next (the bench_queue.py `run` does the same: SIGTERM to the tree, then a hard stop).
@@ -1020,6 +1083,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
       : undefined;
     return new Promise<number>((resolve) => {
       child.on('error', (e) => {
+        clearInterval(callerWatch);
         if (watch) clearInterval(watch);
         d.say(`could not start ${o.rest[0]}: ${e.message}`);
         h?.stop();
@@ -1027,6 +1091,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
         resolve(127);
       });
       child.on('exit', (code, sig) => {
+        clearInterval(callerWatch);
         if (watch) clearInterval(watch);
         h?.stop();
         ticket?.release();

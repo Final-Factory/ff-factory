@@ -10,6 +10,7 @@ import {
   acquire,
   arbiterFile,
   assess,
+  callerGone,
   countsLine,
   denyFile,
   gamePlayers,
@@ -17,6 +18,7 @@ import {
   isUnityBinary,
   parseCli,
   reqFile,
+  runsIn,
   shimScripts,
   slotsDir,
   slotsPointer,
@@ -498,4 +500,71 @@ test('unity slots: a second arbiter answering the same mailbox is reported once 
   const told = events.filter((e) => e.startsWith('another process'));
   assert.equal(told.length, 1, 'once per arbiter');
   assert.match(told[0], /another process \(pid \d+, machine "mx"\) is answering this machine's Unity slots mailbox .* too, so launches may be granted past the limit/);
+});
+
+test('w1874: callerGone: Linux reads the parent live (reparented: gone); a Mac or Windows asks whether the caller is alive', () => {
+  assert.equal(callerGone(500, 'linux', () => 500, () => false), false, 'the same parent: there');
+  assert.equal(callerGone(500, 'linux', () => 1, () => true), true, 'reparented to init');
+  assert.equal(callerGone(500, 'linux', () => 9212, () => true), true, 'reparented to a user systemd (biscuit pid 2460427)');
+  assert.equal(callerGone(500, 'linux', () => undefined, () => false), true, 'no /proc: falls back to the pid');
+  assert.equal(callerGone(500, 'darwin', () => 1, () => true), false, 'a Mac never reads /proc');
+  assert.equal(callerGone(500, 'win32', () => undefined, () => false), true);
+  assert.equal(callerGone(1, 'linux', () => 1, () => true), false, 'started by init itself: nothing to watch');
+});
+
+test('w1874: a run records its session in the mailbox, read back by runsIn', async (t) => {
+  const { dir, slots } = arbiter(t, { limit: () => 2 });
+  await slots.tick();
+  const timer = setInterval(() => void slots.tick(), 40);
+  t.after(() => clearInterval(timer));
+  const d = { dir, pid: process.pid, now: () => Date.now(), sleep: async (ms: number) => void (await settle(ms)), say: () => undefined };
+  const h = await acquire(d, { count: 1, label: 'w1789 bench build A-dev', session: 'cc1272a4', pollMs: 20 });
+  t.after(() => h.stop());
+  assert.deepEqual(runsIn(dir), [{ pid: process.pid, session: 'cc1272a4' }]);
+  const h2 = await acquire({ ...d, pid: process.pid + 1 }, { count: 1, label: 'no session', pollMs: 20 }).catch(() => undefined);
+  t.after(() => h2?.stop());
+  assert.deepEqual(runsIn(dir).sort((a, b) => a.pid - b.pid), [{ pid: process.pid, session: 'cc1272a4' }, { pid: process.pid + 1 }]);
+  assert.deepEqual(runsIn(path.join(dir, 'missing')), []);
+});
+
+test('w1874: a run whose caller is killed ends its command (the biscuit wrapper that outlived its worker\'s shell; real processes)', { timeout: 60_000, skip: process.platform === 'win32' ? 'Windows ends the tree with the task' : false }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-orphan-'));
+  const script = path.join(import.meta.dirname, '..', 'machine', 'unitySlots.ts');
+  const jobPid = path.join(dir, 'job.pid');
+  const callerPid = path.join(dir, 'caller.pid');
+  // The command stands in for a batch Unity: it runs until killed (60 s at most, should the test fail first).
+  const body = `require('fs').writeFileSync(${JSON.stringify(jobPid)},String(process.pid));setTimeout(()=>{},60000)`;
+  const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('FF_')));
+  env.FF_BENCH_TICKETS = 'off';
+  // No arbiter in the mailbox: the run goes ungated at once.
+  const callerBody = `const c=require('child_process').spawn(process.execPath,${JSON.stringify([script, 'run', '--dir', dir, '--', process.execPath, '-e', body])},{stdio:'ignore'});require('fs').writeFileSync(${JSON.stringify(callerPid)},String(process.pid));setTimeout(()=>{},60000)`;
+  const caller = spawn(process.execPath, ['-e', callerBody], { stdio: 'ignore', env });
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const waitFor = async (what: string, cond: () => boolean, ms: number) => {
+    const end = Date.now() + ms;
+    while (!cond()) {
+      if (Date.now() > end) assert.fail(`timed out waiting for ${what}`);
+      await settle(50);
+    }
+  };
+  try {
+    await waitFor('the command to start', () => fs.existsSync(jobPid) && fs.readFileSync(jobPid, 'utf8').length > 0, 30_000);
+    const job = Number(fs.readFileSync(jobPid, 'utf8'));
+    assert.ok(alive(job));
+    caller.kill('SIGKILL'); // no signal reaches the wrapper: it is left under init, as on biscuit
+    await waitFor('the command to end once its caller is gone', () => !alive(job), 15_000);
+  } finally {
+    caller.kill('SIGKILL');
+    if (fs.existsSync(jobPid)) {
+      const job = Number(fs.readFileSync(jobPid, 'utf8'));
+      if (job && alive(job)) process.kill(job, 'SIGKILL');
+    }
+  }
 });
