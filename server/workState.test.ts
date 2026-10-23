@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { asksAPerson, holdsOf, liveCounts, personWaitIn, personWaitSettled, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
+import { answerAfter, asksAPerson, holdsOf, liveCounts, personWaitIn, personWaitSettled, questionShareKey, reportWaitKey, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
 import type { Requester, SessionInfo, WorkItem } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-05T06:00:00Z');
@@ -455,4 +455,60 @@ test('w1504: a session from before lastResultAt reads its report time from its l
   const old = (activity: string) => [session('26d27a69', { status: 'stopped', lastResult: W1243_OLD, lastActivityAt: activity })];
   assert.notEqual(one(w1243({ sessionIds: ['26d27a69'], notes: [BENS_NOTE] }), old(ago(80)))?.state, 'waiting');
   assert.equal(one(w1243({ sessionIds: ['26d27a69'], notes: [BENS_NOTE] }), old(ago(10)))?.state, 'waiting');
+});
+
+// ---- w1812: one question from one worker on several requests is one wait; an answer on any of them settles all ----
+
+/** Worker c28c5061 as on 2026-10-22: one waiting_on_person (no request named) while it held w1767 and w1768. */
+const C28 = (o: Partial<SessionInfo['waitingOn']> = {}) =>
+  session('c28c5061', { status: 'stopped', waitingOn: { who: 'Ben', what: 'Pick a direction for marking circuit structures, and one for the circuit view', at: ago(6), ...o } });
+const circuits = (o: Partial<WorkItem> = {}, p: Partial<WorkItem> = {}) => [
+  item('w1767', { ...BEN_ONLY, sessionIds: ['c28c5061'], links: { c28c5061: { at: ago(7), how: 'sent' } }, ...o }),
+  item('w1768', { ...BEN_ONLY, sessionIds: ['c28c5061'], links: { c28c5061: { at: ago(7), how: 'linked' } }, ...p }),
+];
+const BEN_ANSWER = { at: ago(1), by: 'Ben', text: 'Go with B: the trace, with held-off structures powered down.' };
+
+test('w1812: one declaration on two requests: Ben\'s note on one settles both; an older note, or another person\'s, settles neither', () => {
+  const both = (o: Partial<WorkItem> = {}, p: Partial<WorkItem> = {}, s = C28()) => {
+    const [a, b] = circuits(o, p);
+    return [one(a, [s], [b])?.state, one(b, [s], [a])?.state];
+  };
+  // Before any answer: both wait on Ben (the declaration names no request, so it is on both).
+  assert.deepEqual(both(), ['waiting', 'waiting']);
+  // Ben answers on w1767: w1768 no longer waits on input either (what showed him the same questions again).
+  const after = both({ notes: [BEN_ANSWER] });
+  assert.ok(after.every((s) => s !== 'waiting'), String(after));
+  // A note older than the question, or by someone else, answers nothing.
+  assert.deepEqual(both({ notes: [{ ...BEN_ANSWER, at: ago(8) }] }), ['waiting', 'waiting']);
+  assert.deepEqual(both({ notes: [{ ...BEN_ANSWER, by: 'Lothsahn' }] }), ['waiting', 'waiting']);
+  // An answer to w1767's [needs you] of the same question settles w1768 too.
+  const needsYou = { key: 'declared:c28c5061:' + ago(6), kind: 'declared' as const, question: 'Pick', who: ['Ben'], to: ['ben'], at: ago(6), previews: [], prs: [], answered: { by: 'Ben', at: ago(1) } };
+  assert.ok(both({ needsYou }).every((s) => s !== 'waiting'));
+});
+
+test('w1812: different questions on different requests stay apart: a declaration for one request, or another "still open" line, is not answered by a note on the other', () => {
+  // The declaration names w1768 only: Ben's note on w1767 is about w1767, and w1768 still waits.
+  const s = C28({ request: 'w1768' });
+  const [a, b] = circuits({ notes: [BEN_ANSWER] });
+  assert.equal(one(b, [s], [a])?.state, 'waiting');
+  // A report with two different "still open" lines: Ben's note on w1767 leaves w1768's own question standing.
+  const report = 'Mocks done.\n\nw1767: still open: waiting on Ben to pick a marker direction\nw1768: still open: waiting on Ben to pick which green lines to calm';
+  const r = session('c28c5061', { status: 'stopped', lastResult: report, lastResultAt: ago(6) });
+  const [x, y] = circuits({ notes: [BEN_ANSWER] });
+  assert.equal(one(y, [r], [x])?.state, 'waiting');
+  // The same line on both (the ids left out) is one question: the note on w1767 settles w1768.
+  const same = 'Mocks done.\n\nw1767: still open: waiting on Ben to pick the circuit view direction\nw1768: still open: waiting on Ben to pick the circuit view direction';
+  const r2 = session('c28c5061', { status: 'stopped', lastResult: same, lastResultAt: ago(6) });
+  assert.notEqual(one(y, [r2], [x])?.state, 'waiting');
+});
+
+test('w1812: questionShareKey: one declaration is one key; report lines are one key with the request ids left out; a dispatcher question is never shared', () => {
+  assert.equal(questionShareKey('declared:c28c5061:2026-10-22T21:44:00Z'), 'declared:c28c5061:2026-10-22T21:44:00Z');
+  assert.equal(questionShareKey(reportWaitKey('c28c5061', 'w1767: still open: waiting on Ben to pick')), questionShareKey(reportWaitKey('c28c5061', 'w1768: still open: waiting on Ben to pick')));
+  assert.notEqual(questionShareKey(reportWaitKey('c28c5061', 'w1767: still open: waiting on Ben to pick')), questionShareKey(reportWaitKey('aa11bb22', 'w1768: still open: waiting on Ben to pick')));
+  assert.equal(questionShareKey('question:2026-10-22T21:44:00Z'), undefined);
+  // answerAfter: the newest answer of that person after the time, and where.
+  const [a, b] = circuits({ notes: [BEN_ANSWER] }, { notes: [{ ...BEN_ANSWER, at: ago(0.5), text: 'and L on the keyboard' }] });
+  assert.deepEqual(answerAfter([a, b], Date.parse(ago(6)), ['Ben']), { on: 'w1768', by: 'Ben', at: ago(0.5), note: 'and L on the keyboard' });
+  assert.equal(answerAfter([a, b], Date.parse(ago(0.2)), ['Ben']), undefined);
 });

@@ -18,6 +18,11 @@
 // report named had merged; Ben: "i dont know what it needs me to do for this slot"): a person-wait counts only until that
 // person answers the request (a note, or a [needs you] answer) or a pull request it names merges, whichever comes first
 // (personWaitSettled), and a request Blocked on a thing shows Blocked unless the person-wait is newer than its gates.
+//
+// w1812 (worker c28c5061 asked one set of questions, raised on both w1767 and w1768; Ben answered on w1767 and was asked
+// again on w1768: "i already answered this why are you asking me in the waiting on input for this still"): one question from
+// one worker on several requests is one wait. The person's answer on any of them, given after it was raised, settles it on
+// all of them (sharedWaitSettled).
 import type { SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
@@ -226,6 +231,57 @@ const prsNamedIn = (line: string) => new Set([...line.matchAll(/(?:#|\/pull\/)(\
 const personKey = (name: string) => name.trim().toLowerCase().split(/[\s(,]/)[0];
 const minute = (iso: string) => iso.slice(0, 16).replace('T', ' ');
 
+/** The key of a worker's "still open" line as a wait on a person (server/needsYou.ts keys; one message per key). */
+export const reportWaitKey = (sessionId: string, line: string) => `report:${sessionId}:${line.replace(/\s+/g, ' ').trim().slice(0, 300)}`;
+
+/**
+ * What makes waits on several requests ONE question (w1812): the same declaration of the same worker (its key names the
+ * worker and when it declared), or the same "still open" line of the same worker's report with the request ids left out
+ * ("w1767: still open: waiting on Ben to pick" and "w1768: still open: waiting on Ben to pick"). A dispatcher's question is
+ * its request's own: undefined, never shared. Questions that differ keep their own keys and their own messages.
+ */
+export function questionShareKey(key: string): string | undefined {
+  if (key.startsWith('declared:')) return key;
+  if (key.startsWith('report:')) return key.replace(/\bw\d+\b:?/gi, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return undefined;
+}
+
+/**
+ * Whether a wait on a person, said at `at`, was answered on another request that carries the same question (w1812): one of
+ * `who` added a note to it after `at`, or answered its [needs you] of the same question (`share`, questionShareKey) after
+ * `at`. `others` are the requests held by the same worker that carry it. Why, or undefined.
+ */
+export function sharedWaitSettled(others: readonly Pick<WorkItem, 'id' | 'notes' | 'needsYou'>[], at: number, who: readonly string[], share: string | undefined): string | undefined {
+  if (!share) return undefined;
+  const a = answerAfter(others, at, who, share);
+  return a && `${a.by} answered it on ${a.on}${a.note ? ' with a note' : ''} at ${minute(a.at)}`;
+}
+
+/**
+ * The newest answer one of `who` gave after `at` on any of `items` (w1812): a note they added, or their answer to its
+ * [needs you] (of the question `share` names, when given). Where, by whom, when, and the note's words.
+ */
+export function answerAfter(items: readonly Pick<WorkItem, 'id' | 'notes' | 'needsYou'>[], at: number, who: readonly string[], share?: string): { on: string; by: string; at: string; note?: string } | undefined {
+  const people = new Set(who.map(personKey));
+  const after = (iso: string | undefined) => (Date.parse(iso ?? '') || 0) > at;
+  let best: { on: string; by: string; at: string; note?: string } | undefined;
+  const take = (c: NonNullable<typeof best>) => {
+    if (!best || Date.parse(c.at) > Date.parse(best.at)) best = c;
+  };
+  for (const x of items) {
+    const note = [...(x.notes ?? [])].reverse().find((n) => after(n.at) && people.has(personKey(n.by)));
+    if (note) take({ on: x.id, by: note.by, at: note.at, note: note.text });
+    const a = x.needsYou?.answered;
+    if (a && (!share || questionShareKey(x.needsYou!.key) === share) && after(a.at) && people.has(personKey(a.by))) {
+      // Its words: the note it was answered with, on the request it was answered on (kept a moment before the answer).
+      const on = items.find((i) => i.id === (a.on ?? x.id));
+      const words = [...(on?.notes ?? [])].reverse().find((n) => after(n.at) && Date.parse(n.at) <= Date.parse(a.at) && people.has(personKey(n.by)));
+      take({ on: a.on ?? x.id, by: a.by, at: a.at, ...(words ? { note: words.text } : {}) });
+    }
+  }
+  return best;
+}
+
 /**
  * Whether a wait on a person, said at `at`, is settled since (w1504): one of `who` (display names, as WorkLive.waitsOn
  * says them) added a note to the request or answered its [needs you] after it, or a pull request of the request that
@@ -299,7 +355,10 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   // request Blocked on a thing, only while it is newer than the newest gate: a gate set after it is what it waits on now.
   const gates = gatesOf(w);
   const gatedAt = w.status === 'blocked' && gates.length ? Math.max(...gates.map((g) => Date.parse(g.at) || 0)) : undefined;
-  const stands = (at: number, who: readonly string[], line: string) => (gatedAt === undefined || at > gatedAt) && !personWaitSettled(w, at, who, line);
+  // w1812: and until that person answers the same question on another request the same worker holds (`others`).
+  const stands = (at: number, who: readonly string[], line: string, others: readonly WorkItem[] = [], share?: string) =>
+    (gatedAt === undefined || at > gatedAt) && !personWaitSettled(w, at, who, line) && !sharedWaitSettled(others, at, who, share);
+  const heldWith = (s: SessionInfo) => f.items.filter((x) => x.id !== w.id && live(x) && x.sessionIds.includes(s.id) && !x.done?.[s.id]);
 
   // Waiting on a person, declared (w691): the worker says only a person can move it on, and who. A check-in it set as
   // well does not make it Working: no wake-up moves a person.
@@ -307,7 +366,13 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
     const who = d.who.split(/\s*(?:,|&|\band\b)\s*/i).map((x) => x.trim()).filter(Boolean);
     return who.length ? who : names(w.requesters);
   };
-  const declared = mine.find((s) => s.waitingOn && (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === w.id.toLowerCase()) && stands(Date.parse(s.waitingOn.at) || 0, whoOf(s.waitingOn), s.waitingOn.what));
+  // A declaration that names no request is on every request its worker holds: one question (w1812).
+  const declared = mine.find(
+    (s) =>
+      s.waitingOn &&
+      (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === w.id.toLowerCase()) &&
+      stands(Date.parse(s.waitingOn.at) || 0, whoOf(s.waitingOn), s.waitingOn.what, s.waitingOn.request ? [] : heldWith(s), `declared:${s.id}:${s.waitingOn.at}`),
+  );
   if (declared) {
     const d = declared.waitingOn!;
     return { state: 'waiting', why: `${declared.id} waits on ${d.who}: ${d.what} (since ${ago(d.at, f.now)})`, waitsOn: whoOf(d), worker: declared.id };
@@ -322,7 +387,16 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   const people = [...new Set([w.requestedBy, ...w.requesters].map((r) => r.displayName))];
   const said = mine
     .map((s) => ({ s, p: personWaitIn(s.lastResult, w.id, people) }))
-    .find((x) => x.p && stands(reportAt(x.s), x.p.who ? [x.p.who] : names(w.requesters), x.p.line));
+    .find((x) => {
+      if (!x.p) return false;
+      // w1812: the same line on another request this worker holds is the same question.
+      const share = questionShareKey(reportWaitKey(x.s.id, x.p.line));
+      const others = heldWith(x.s).filter((o) => {
+        const l = personWaitIn(x.s.lastResult, o.id, people)?.line;
+        return !!l && questionShareKey(reportWaitKey(x.s.id, l)) === share;
+      });
+      return stands(reportAt(x.s), x.p.who ? [x.p.who] : names(w.requesters), x.p.line, others, share);
+    });
   if (said && !(coming && coming.a.kind === 'job')) return { state: 'waiting', why: `${said.s.id}'s report says a person must act: "${said.p!.line.slice(0, 160)}"`, waitsOn: said.p!.who ? [said.p!.who] : names(w.requesters), worker: said.s.id };
 
   // Blocked on its gates (w754): a request that waits on other requests or pull requests is Blocked, whatever check-ins its

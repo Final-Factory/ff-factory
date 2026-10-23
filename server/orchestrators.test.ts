@@ -2195,6 +2195,103 @@ test('w1597: a worker asks with questions: refused with a path, a PR list or no 
   assert.equal(store.work.get('w1')!.needsYou!.answered!.by, 'Ben');
 });
 
+/** w1767 and w1768 as on 2026-10-22: one worker, c28c5061, held both and asked one set of questions without naming either. */
+async function twoRequestsOneWorker(t: Parameters<typeof setupOnMachine>[0]) {
+  const env = await setupOnMachine(t);
+  const { store, machines, dispatcher, chat, call } = env;
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Circuit markers in normal view', brief: 'Design and mocks.' });
+  await call(ben, 'request_work', { title: 'Circuit alt mode', brief: 'Design and mocks, one visual family with w1.', related_ids: ['w1'] });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: Circuit markers in normal view', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const linked = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'link', note: 'One designer for both.', session_ids: [id], title: 'w1 and w2: circuit design and mocks' });
+  assert.equal(linked.isError, false, linked.text);
+  const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
+  return { ...env, ben, id, info, h };
+}
+const CIRCUIT_QUESTIONS = [
+  { question: 'Which way should structures with circuit conditions be marked in normal view?', options: [{ label: 'Go with B: the trace, with held-off structures powered down', recommended: true }, { label: 'Go with A: a small badge on each one' }] },
+  { question: 'Which key turns the circuit view on?', options: [{ label: 'Use L, and a long press of D-pad up on a pad', recommended: true }, { label: 'Cycle the alt modes with Alt' }] },
+];
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+test('w1812: one question from one worker on two requests is ONE [needs you]; the answer on either answers both, and nothing asks Ben again', async (t) => {
+  const { store, sessions, agents, dispatcher, chat, call, heard, ben, id, h } = await twoRequestsOneWorker(t);
+  await h.waiting_on_person!({ who: 'Ben', what: 'Pick a direction for marking circuit structures, and one for the circuit view', questions: CIRCUIT_QUESTIONS });
+  const report = 'Mocks published.\n\nw1: still open: waiting on Ben to pick the circuit view direction\nw2: still open: waiting on Ben to pick the circuit view direction';
+  sessions.events.emit('turnEnd', sessions.get(id), report);
+  await until('Ben hears it', () => heard(ben.id, '[needs you]').length >= 1);
+  await sleep(300);
+  // One message, on the first, naming the other; the other keeps the same question as shared, sent nowhere.
+  assert.equal(heard(ben.id, '[needs you]').length, 1, 'one message for the one question');
+  const msg = heard(ben.id, '[needs you]')[0].text;
+  assert.match(msg, /^\[needs you\] w1 "Circuit markers in normal view"/);
+  assert.match(msg, /The same question, from the same worker, waits on w2 "Circuit alt mode" too: it is ONE question\. Ask it once; the answer recorded on w1 answers it on both/);
+  assert.equal(store.work.get('w2')!.needsYou!.sharedWith, 'w1');
+  assert.deepEqual(store.work.get('w1')!.needsYou!.also, ['w2']);
+  assert.match(store.work.get('w2')!.log.join('\n'), /\[needs you\] not sent again: the same question from worker \w+ is with Ben as w1's \[needs you\]/);
+  assert.deepEqual(['w1', 'w2'].map((x) => agents.workLive().get(x)?.state), ['waiting', 'waiting']);
+
+  // Nothing sends it again: not the digest, not another turn end.
+  assert.equal(agents.orchestrators.needsYouDigest(agents.personWaits()), 0);
+  sessions.events.emit('turnEnd', sessions.get(id), report);
+  await sleep(300);
+  assert.equal(heard(ben.id, '[needs you]').length, 1);
+
+  // Ben answers on w2 (where he was asked again on 2026-10-22): it answers w1 too, and the worker resumes once.
+  await until('that turn ends', () => chat(BEN).info.status === 'idle');
+  chat(BEN).lastFrom = 'human';
+  const r = await call(ben, 'update_work', { id: 'w2', note: '1. Go with B: the trace, with held-off structures powered down. 2. Use L, and a long press of D-pad up on a pad.' });
+  assert.match(r.text, new RegExp(`answers the \\[needs you\\] question \\(the same question on w1: answered there too\\): sent to its worker ${id}, which resumes with it`));
+  const a1 = store.work.get('w1')!.needsYou!.answered!;
+  assert.deepEqual({ by: a1.by, on: a1.on }, { by: 'Ben', on: 'w2' });
+  const pending = (agents as unknown as { waker: { pending(id: string): { note: string } | undefined } }).waker.pending(id);
+  assert.match(pending!.note, /which you asked on w2 and w1: it answers it on all of them\. Carry on with it\./);
+  assert.ok(['w1', 'w2'].every((x) => agents.workLive().get(x)?.state !== 'waiting'), 'neither waits on input');
+
+  // Ben's orchestrator asks it again anyway (w1182's re-ask): refused once, with his answer; the same call again goes through.
+  const again = await call(ben, 'ask_person', CIRCUIT_QUESTIONS[0]);
+  assert.equal(again.isError, true);
+  assert.match(again.text, /Not asked: Ben already answered this question on w2 \(the same question from the same worker as w1\) at [\d-]+ [\d:]+ UTC, in their words: "1\. Go with B/);
+  assert.equal((await call(ben, 'ask_person', CIRCUIT_QUESTIONS[0])).isError, false, 'a new question that only looks the same goes through on a repeat');
+  // And the dispatcher's question: refused the same way, nothing recorded.
+  Object.assign(store.work.get('w1')!, { status: 'new' });
+  const asked = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Ben, which key?', questions: [CIRCUIT_QUESTIONS[1]] });
+  assert.equal(asked.isError, true, asked.text);
+  assert.match(asked.text, /Not asked: Ben already answered this question on w2/);
+  assert.equal(store.work.get('w1')!.question, undefined, 'nothing recorded by the refused ask');
+  // The brief says it: look in the request's log and its worker's other requests before asking.
+  const brief = (agents as unknown as { personalBrief(r: Requester): string }).personalBrief(BEN);
+  assert.match(brief, /\*\*Never ask Ben what they already answered\*\* \(w1812[^\n]*read the request's log and notes \(list_work with its id\) and those of the other requests its worker holds/);
+});
+
+test('w1812: no [needs you] when the answer is already logged after the question was raised, on its request or on another its worker holds; a new question still goes', async (t) => {
+  const { store, sessions, agents, chat, call, heard, ben, id, h } = await twoRequestsOneWorker(t);
+  await h.waiting_on_person!({ who: 'Ben', what: 'Pick a direction for marking circuit structures, and one for the circuit view', questions: CIRCUIT_QUESTIONS });
+  await sleep(5);
+  // Ben answers on w1 before the worker's turn has ended (he read its report in the Live view): his note is in w1's log.
+  chat(BEN).lastFrom = 'human';
+  await call(ben, 'update_work', { id: 'w1', note: 'Go with B, and use L' });
+  sessions.events.emit('turnEnd', sessions.get(id), 'Mocks published.');
+  await until('both recorded as answered', () => !!store.work.get('w1')!.needsYou?.answered && !!store.work.get('w2')!.needsYou?.answered);
+  await sleep(300);
+  assert.equal(heard(ben.id, '[needs you]').length, 0, 'not asked: the answer is in the log');
+  assert.match(store.work.get('w1')!.log.join('\n'), /\[needs you\] not sent: Ben already answered it at [\d:]+ UTC, after the question was raised/);
+  assert.match(store.work.get('w2')!.log.join('\n'), /\[needs you\] not sent: Ben already answered it on w1 at [\d:]+ UTC/);
+  assert.ok(['w1', 'w2'].every((x) => agents.workLive().get(x)?.state !== 'waiting'), 'neither waits on input');
+
+  // A different question later, for w2 alone, is asked: an answer given before it was raised does not answer it.
+  await sleep(5);
+  await h.waiting_on_person!({ who: 'Ben', what: 'OK the built-game clip of the circuit view', request: 'w2', questions: [{ question: 'Does the circuit view clip look right?', options: [{ label: 'Yes, build it', recommended: true }, { label: 'No, calmer lines first' }] }] });
+  sessions.events.emit('turnEnd', sessions.get(id), 'Clip published.');
+  await until('the new question goes', () => heard(ben.id, '[needs you]').length === 1);
+  assert.match(heard(ben.id, '[needs you]')[0].text, /^\[needs you\] w2 "Circuit alt mode"/);
+  assert.doesNotMatch(heard(ben.id, '[needs you]')[0].text, /The same question, from the same worker/);
+});
+
 test('w1378: waits on a person already open when it ships go once, as one [needs you] digest per person', async (t) => {
   const { store, agents, chat, call, heard } = setup(t);
   const ben = chat(BEN).info;

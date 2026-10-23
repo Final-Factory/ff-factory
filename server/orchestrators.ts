@@ -46,7 +46,7 @@ import {
 import { autoApproveProblem, cleanBlock, cleanLine, identityKeys, parseMarkers, quoteUntrusted, sourceTag } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, pausedIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
-import { asksAPerson, holdsOf, servedBy } from '../shared/workState.ts';
+import { answerAfter, asksAPerson, holdsOf, personWaitIn, questionShareKey, reportWaitKey, servedBy } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, needsOf, resolveNeeds } from '../shared/capacity.ts';
 import type { HandBack } from './machinePause.ts';
 import { heldText, roomIds, unusableText, type RoomNow } from './placement.ts';
@@ -58,7 +58,7 @@ import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionTe
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
 import { mediaLine, previewsOf, reviewRootOf } from './reviewMedia.ts';
-import { alreadySent, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
+import { alreadySent, asksSame, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
@@ -469,7 +469,7 @@ export class PermissionAnswerRefused extends Error {
 
 export class Orchestrators {
   private readonly d: OrchestratorsDeps;
-  private readonly now: () => Date;
+  readonly now: () => Date;
   /** Per personal orchestrator: its filings since its person last wrote. */
   private readonly filed = new Map<string, number>();
   /** w830: calls a gate refused, per chat, offered back on the person's next message (heldOffer). In memory only. */
@@ -727,13 +727,96 @@ export class Orchestrators {
    * and pull requests, and keep it on the request (the page shows it whole). Once per question: a wait whose key was sent
    * already is not sent again, whatever turn, heartbeat or restart comes. Returns the people told ([] when sent before).
    */
-  needsYou(w: WorkItem, wait: NeedsYouWait): Requester[] {
-    if (!isOpen(w) || alreadySent(w, wait.key)) return [];
-    const to = whoOf(wait.names, this.d.identity.list(), wait.kind === 'question' ? [w.requestedBy] : w.requesters);
-    const r = needsYouRecord(w, wait, to, this.now().toISOString(), { reviewRoot: reviewRootOf(this.d.cfg) });
-    this.keepNeedsYou(w, r);
-    for (const p of to) this.toPeople([p], needsYouText(w, r, p.displayName));
+  needsYou(w: WorkItem, wait: NeedsYouWait, also: readonly WorkItem[] = []): Requester[] {
+    const placed = this.placeNeedsYou(w, wait, { also });
+    if (!placed) return [];
+    const { r, to } = placed;
+    for (const p of to) this.toPeople([p], needsYouText(w, r, p.displayName, this.titleOf));
     return to;
+  }
+
+  /**
+   * Several waits at once (a turn's end): the same question from the same worker on several requests (w1812, worker
+   * c28c5061's one declaration on both w1767 and w1768) goes once, on the first, naming the others. Different questions go
+   * as before, one each.
+   */
+  needsYouAll(waits: readonly { w: WorkItem; wait: NeedsYouWait }[]): void {
+    const groups = new Map<string, { w: WorkItem; wait: NeedsYouWait }[]>();
+    for (const x of waits) {
+      const share = x.wait.worker ? questionShareKey(x.wait.key) : undefined;
+      const k = share ? `${x.wait.worker}\n${share}` : `${x.w.id}\n${x.wait.key}`;
+      groups.set(k, [...(groups.get(k) ?? []), x]);
+    }
+    for (const g of groups.values()) {
+      const [first, ...rest] = g;
+      this.needsYou(first.w, first.wait, rest.map((x) => x.w));
+      for (const x of rest) this.placeNeedsYou(x.w, x.wait, {});
+    }
+  }
+
+  private readonly titleOf = (id: string) => this.store.work.get(id.toLowerCase())?.title;
+
+  /**
+   * The other open requests worker `worker` holds that carry the same question as `wait` (w1812): their `[needs you]` is of
+   * the same question, or (no record yet) its declaration names no request, or its report's "still open" line for them is
+   * the same line.
+   */
+  private carriers(w: WorkItem, wait: Pick<NeedsYouWait, 'key' | 'kind' | 'worker' | 'report'>): WorkItem[] {
+    const share = questionShareKey(wait.key);
+    const sid = wait.worker;
+    if (!share || !sid) return [];
+    const s = this.store.sessions.get(sid);
+    const everywhere = wait.kind === 'declared' && !!s?.waitingOn && `declared:${sid}:${s.waitingOn.at}` === wait.key && !s.waitingOn.request;
+    return [...this.store.work.values()].filter((x) => {
+      if (x.id === w.id || !isOpen(x) || !x.sessionIds.includes(sid) || x.done?.[sid]) return false;
+      if (x.needsYou?.worker === sid && questionShareKey(x.needsYou.key) === share) return true;
+      if (everywhere) return true;
+      const line = wait.kind === 'report' ? personWaitIn(wait.report, x.id)?.line : undefined;
+      return !!line && questionShareKey(reportWaitKey(sid, line)) === share;
+    });
+  }
+
+  /**
+   * Record a wait on its request, or say why nothing goes (w1378, w1812). Undefined, with nothing to send, when this wait was
+   * sent already; when the person already answered it, after it was raised, in this request's log or in the log of another
+   * request the same worker holds with the same question (recorded as answered, not sent: Ben, w1768: "i already answered
+   * this why are you asking me in the waiting on input for this still"); or when another request already carries it to the
+   * person (recorded as shared with that one). Otherwise the record, kept, and whom to send it to.
+   */
+  private placeNeedsYou(w: WorkItem, wait: NeedsYouWait, opts: { also?: readonly WorkItem[]; digest?: boolean; at?: string }): { r: WorkNeedsYou; to: Requester[] } | undefined {
+    if (!isOpen(w) || alreadySent(w, wait.key)) return undefined;
+    const to = whoOf(wait.names, this.d.identity.list(), wait.kind === 'question' ? [w.requestedBy] : w.requesters);
+    const at = opts.at ?? this.now().toISOString();
+    const r = needsYouRecord(w, wait, to, at, { reviewRoot: reviewRootOf(this.d.cfg), digest: opts.digest, also: (opts.also ?? []).filter((a) => a !== w).map((a) => a.id) });
+    const carriers = this.carriers(w, wait);
+    const raised = Date.parse(wait.raisedAt ?? '');
+    if (wait.kind !== 'question' && raised) {
+      const who = to.map((p) => p.displayName);
+      const a = answerAfter([w, ...carriers], raised, who, questionShareKey(wait.key));
+      if (a) {
+        r.answered = { by: a.by, at: a.at, ...(a.on !== w.id ? { on: a.on } : {}) };
+        w.needsYou = r;
+        this.stamp(w, `[needs you] not sent: ${a.by} already answered it${a.on !== w.id ? ` on ${a.on}` : ''} at ${a.at.slice(11, 16)} UTC, after the question was raised (w1812): it is not asked again`);
+        this.store.putWork(w);
+        console.log(`ledger: [needs you] ${w.id} not sent: ${a.by} already answered it on ${a.on}`);
+        return undefined;
+      }
+    }
+    const holder = carriers.find((x) => x.needsYou && !x.needsYou.sharedWith && x.needsYou.key === wait.key) ?? carriers.find((x) => x.needsYou && !x.needsYou.sharedWith && questionShareKey(x.needsYou.key) === questionShareKey(wait.key));
+    if (holder) {
+      const h = holder.needsYou!;
+      w.needsYou = { ...r, sharedWith: holder.id, ...(h.answered ? { answered: { ...h.answered, on: h.answered.on ?? holder.id } } : {}) };
+      this.stamp(w, `[needs you] not sent again: the same question from worker ${wait.worker} is with ${h.who.join(', ')} as ${holder.id}'s [needs you]${h.answered ? `, answered by ${h.answered.by}` : ''}; an answer on either answers both (w1812)`);
+      this.store.putWork(w);
+      if (!(h.also ?? []).includes(w.id)) {
+        h.also = [...(h.also ?? []), w.id];
+        this.store.putWork(holder);
+      }
+      console.log(`ledger: [needs you] ${w.id} shared with ${holder.id} (worker ${wait.worker}): not sent again`);
+      return undefined;
+    }
+    this.keepNeedsYou(w, r);
+    return { r, to };
   }
 
   /**
@@ -744,11 +827,20 @@ export class Orchestrators {
     const at = this.now().toISOString();
     const per = new Map<string, { p: Requester; items: { w: WorkItem; r: WorkNeedsYou }[] }>();
     let n = 0;
+    // w1812: the same question from the same worker on several requests is one item, on the first, naming the others.
+    const firsts = new Map<string, WorkItem[]>();
+    const firstOf = new Map<string, WorkItem>();
     for (const { w, wait } of waits) {
-      if (!isOpen(w) || alreadySent(w, wait.key)) continue;
-      const to = whoOf(wait.names, this.d.identity.list(), wait.kind === 'question' ? [w.requestedBy] : w.requesters);
-      const r = needsYouRecord(w, wait, to, at, { reviewRoot: reviewRootOf(this.d.cfg), digest: true });
-      this.keepNeedsYou(w, r);
+      const share = wait.worker ? questionShareKey(wait.key) : undefined;
+      if (!share) continue;
+      const k = `${wait.worker}\n${share}`;
+      if (!firstOf.has(k)) firstOf.set(k, w);
+      else firsts.set(firstOf.get(k)!.id, [...(firsts.get(firstOf.get(k)!.id) ?? []), w]);
+    }
+    for (const { w, wait } of waits) {
+      const placed = this.placeNeedsYou(w, wait, { digest: true, at, also: firsts.get(w.id) ?? [] });
+      if (!placed) continue;
+      const { r, to } = placed;
       n++;
       for (const p of to) {
         const k = p.userId.toLowerCase();
@@ -757,7 +849,7 @@ export class Orchestrators {
         per.set(k, e);
       }
     }
-    for (const { p, items } of per.values()) this.toPeople([p], needsYouDigestText(items, p.displayName));
+    for (const { p, items } of per.values()) this.toPeople([p], needsYouDigestText(items, p.displayName, this.titleOf));
     return n;
   }
 
@@ -797,14 +889,63 @@ export class Orchestrators {
     const r = w.needsYou!;
     r.answered = { by: by.displayName, at: this.now().toISOString() };
     const sid = r.worker;
+    // w1812: the same question from the same worker on other requests is answered by this too: none of them waits on input
+    // any more, and none is asked again (Ben, w1768: "i already answered this why are you asking me ... still").
+    const share = questionShareKey(r.key);
+    const also = share && sid
+      ? [...this.store.work.values()].filter((x) => x !== w && isOpen(x) && x.needsYou && !x.needsYou.answered && x.needsYou.worker === sid && questionShareKey(x.needsYou.key) === share)
+      : [];
+    for (const x of also) {
+      x.needsYou!.answered = { ...r.answered, on: w.id };
+      this.stamp(x, `[needs you] answered by ${by.displayName} on ${w.id}: the same question from worker ${sid}, not asked again (w1812)`);
+      this.store.putWork(x);
+    }
+    const both = also.length ? ` (the same question on ${also.map((x) => x.id).join(', ')}: answered there too)` : '';
     const s = sid ? this.store.sessions.get(sid) : undefined;
-    if (!sid || !s) return `answers the [needs you] question${sid ? ` (its worker ${sid} is gone: start the work with it)` : ''}`;
-    if (BUSY.includes(s.status)) return `answers the [needs you] question; its worker ${sid} is mid-turn: pass it on with message_agent`;
+    if (!sid || !s) return `answers the [needs you] question${both}${sid ? ` (its worker ${sid} is gone: start the work with it)` : ''}`;
+    if (BUSY.includes(s.status)) return `answers the [needs you] question${both}; its worker ${sid} is mid-turn: pass it on with message_agent`;
     const text =
       `[answer] ${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\n` +
-      `It answers what you waited on: "${clip(r.question, 300)}". Carry on with it.`;
-    if (!this.wakeNow(sid, text, w.id)) return `answers the [needs you] question; its worker ${sid} could not be resumed: pass it on with message_agent`;
-    return `answers the [needs you] question: sent to its worker ${sid}, which resumes with it (nothing for you to pass on)`;
+      `It answers what you waited on: "${clip(r.question, 300)}"${also.length ? `, which you asked on ${[w, ...also].map((x) => x.id).join(' and ')}: it answers it on all of them` : ''}. Carry on with it.`;
+    if (!this.wakeNow(sid, text, w.id)) return `answers the [needs you] question${both}; its worker ${sid} could not be resumed: pass it on with message_agent`;
+    return `answers the [needs you] question${both}: sent to its worker ${sid}, which resumes with it (nothing for you to pass on)`;
+  }
+
+  /**
+   * w1812 (w1182, 2026-10-15: an orchestrator re-asked a stale [needs you] Ben had answered; Ben: "i already said it looks
+   * good and asked for the fog to be a blueish not just grey"): a question `person` already answered. A `[needs you]` to them
+   * that asked the same (needsYou.asksSame), answered after it was raised: its own answer, a note of theirs on its request,
+   * or on another request its worker holds with the same question. Where, when and their words, or undefined.
+   */
+  answeredBefore(person: Requester, ask: { question: string; options?: readonly { label: string }[] }, among?: readonly WorkItem[]): { id: string; on: string; at: string; note?: string } | undefined {
+    for (const x of among ?? this.store.work.values()) {
+      const r = x.needsYou;
+      if (!r || !isOpen(x) || !r.to.some((u) => same(u, person.userId)) || !asksSame(ask, r)) continue;
+      const raised = Date.parse(r.raisedAt ?? r.at) || 0;
+      const share = questionShareKey(r.key);
+      const others = share && r.worker ? [...this.store.work.values()].filter((o) => o !== x && o.sessionIds.includes(r.worker!) && o.needsYou?.worker === r.worker && questionShareKey(o.needsYou!.key) === share) : [];
+      const a = answerAfter([x, ...others], raised, [person.displayName], share);
+      if (a) return { id: x.id, on: a.on, at: a.at, ...(a.note ? { note: a.note } : {}) };
+    }
+    return undefined;
+  }
+
+  /** Repeats refused once by answeredBefore (w1812), by who asks and the question: the same call again goes through. */
+  private readonly askRepeats = new Set<string>();
+
+  /** The refusal of a question already answered (w1812), once per asker and question; undefined to let it through. */
+  private repeatRefusal(asker: string, person: Requester, ask: { question: string; options?: readonly { label: string }[] }, among?: readonly WorkItem[], call = 'ask_person'): string | undefined {
+    const prior = this.answeredBefore(person, ask, among);
+    if (!prior) return undefined;
+    const key = `${asker}\n${JSON.stringify([ask.question, (ask.options ?? []).map((o) => o.label)])}`;
+    if (this.askRepeats.has(key)) return undefined;
+    this.askRepeats.add(key);
+    const where = prior.on === prior.id ? prior.id : `${prior.on} (the same question from the same worker as ${prior.id})`;
+    return (
+      `Not asked: ${person.displayName} already answered this question on ${where} at ${prior.at.slice(0, 16).replace('T', ' ')} UTC${prior.note ? `, in their words: "${clip(prior.note, 400)}"` : ''}. ` +
+      `Asking a person again what they already answered is what w1812 stops (Ben: "i already answered this why are you asking me"). Use that answer: it went to the worker already. ` +
+      `If this really is a new question, call ${call} again with it and it goes through.`
+    );
   }
 
   /** Send each of these people's own orchestrators a harness message (made if missing). */
@@ -1441,6 +1582,9 @@ export class Orchestrators {
     if (!owner) throw new Error('only a person’s own orchestrator asks with buttons');
     const checked = checkAsk(input);
     if ('problem' in checked) throw new Error(checked.problem);
+    // w1812: a question this person already answered is not asked again (refused once; a repeat goes through).
+    const again = this.repeatRefusal(chat.info.id, owner, checked.ask);
+    if (again) throw new Error(again);
     const missing = this.previewsMissing(chat.info.id, checked.ask, owner.displayName);
     if (missing) throw new Error(missing);
     const pick = checked.ask.options[0].recommended ? `, ${checked.ask.options[0].label} recommended` : '';
@@ -1992,6 +2136,12 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       w.links = { ...w.links, ...Object.fromEntries(ids.map((sid) => [sid, { at, how: 'linked' as const }])) };
       what = `linked to ${ids.map((sid) => this.workerLine(sid)).join(', ')}, already on it`;
     } else if (input.action === 'ask') {
+      // w1812: the filer already answered this, on this request or on another its worker holds with the same question.
+      const holders = [w, ...[...this.store.work.values()].filter((x) => x !== w && x.sessionIds.some((sid) => w.sessionIds.includes(sid)))];
+      for (const a of input.asks?.length ? input.asks : [{ question: note }]) {
+        const again = this.repeatRefusal('dispatcher', w.requestedBy, a, holders, 'decide_work ask');
+        if (again) throw new Error(again);
+      }
       w.asks++;
       w.question = { text: clip(note, 1000), at: this.now().toISOString(), ...(input.asks?.length ? { asks: input.asks } : {}) };
       what = 'a question';
