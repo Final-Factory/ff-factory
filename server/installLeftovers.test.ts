@@ -468,6 +468,9 @@ function releaseSession(base: string) {
   w('urgent-1.0.0.8/stage/linux/release.main.tar', tarOf([{ name: 'finalfactory_Data/data.unity3d', data: big }, { name: 'UnityPlayer.so', data: Buffer.from('x') }]));
   w('urgent-1.0.0.8/stage/linux/other.tar', tarOf([{ name: 'saves/a.zip', data: big }]));
   w('urgent-1.0.0.8/workers/linux-main/release/player/UnityPlayer.so');
+  // A Mac player: build-release.sh's release/player holds the .app beside its Localization, six levels down (w1813).
+  w('urgent-1.0.0.8/workers/osx-main/release/player/finalfactory.app/Contents/Frameworks/UnityPlayer.dylib');
+  w('urgent-1.0.0.8/workers/osx-main/release/player/Localization/en.json');
   w('urgent-1.0.0.8/symbols/linux-main.zip');
   w('urgent-1.0.0.8/run.json');
   w('proj/ProjectSettings/ProjectVersion.txt');
@@ -503,6 +506,7 @@ test("w1813: below the soft threshold a stopped worker's caches go after 15 min,
     'proj/obj',
     'urgent-1.0.0.8/stage/linux/release.main.tar',
     'urgent-1.0.0.8/workers/linux-main/release/player',
+    'urgent-1.0.0.8/workers/osx-main/release/player/finalfactory.app',
   ];
   assert.deepEqual(await run({ low: true }), quick, 'low disk: everything rebuildable but the Library import');
   // Not while it runs, while a process names it, or when it was written within the settle time.
@@ -514,7 +518,7 @@ test("w1813: below the soft threshold a stopped worker's caches go after 15 min,
   assert.deepEqual(await run({ low: true }), []);
   // A day later the whole Library goes too, low or not.
   const later = NOW + 30 * HOUR;
-  const full = ['proj/Library', 'proj/Logs', 'proj/Temp', 'proj/obj', 'urgent-1.0.0.8/stage/linux/release.main.tar', 'urgent-1.0.0.8/workers/linux-main/release/player'];
+  const full = ['proj/Library', 'proj/Logs', 'proj/Temp', 'proj/obj', 'urgent-1.0.0.8/stage/linux/release.main.tar', 'urgent-1.0.0.8/workers/linux-main/release/player', 'urgent-1.0.0.8/workers/osx-main/release/player/finalfactory.app'];
   assert.deepEqual(await run({ now: later }), full);
   assert.deepEqual(await run({ now: later, low: true }), full);
   // The pass removes them and keeps the sources, the symbols, the other tar, the clip and the report.
@@ -522,7 +526,7 @@ test("w1813: below the soft threshold a stopped worker's caches go after 15 min,
   const p = await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs: [], settings, now: later });
   const r = await runCleanup(p.items, guard);
   assert.equal(r.removed.length, full.length);
-  for (const keep of ['proj/Assets/a.cs', 'proj/ProjectSettings/ProjectVersion.txt', 'urgent-1.0.0.8/symbols/linux-main.zip', 'urgent-1.0.0.8/run.json', 'urgent-1.0.0.8/stage/linux/other.tar', 'review/takeover.mp4', 'report.md']) {
+  for (const keep of ['proj/Assets/a.cs', 'proj/ProjectSettings/ProjectVersion.txt', 'urgent-1.0.0.8/symbols/linux-main.zip', 'urgent-1.0.0.8/run.json', 'urgent-1.0.0.8/stage/linux/other.tar', 'urgent-1.0.0.8/workers/osx-main/release/player/Localization/en.json', 'review/takeover.mp4', 'report.md']) {
     assert.ok(fs.existsSync(path.join(s, ...keep.split('/'))), `${keep} stays`);
   }
 });
@@ -544,7 +548,7 @@ test('w1813: a low pass says which check kept a worker folder\'s rebuildable cac
     assert.ok(h[0]!.bytes >= 1024 ** 2, `measured: the tar alone is 1 MiB (${h[0]!.bytes})`);
     return h[0]!.why;
   };
-  assert.match(await one({ inUse: [s] }), /8 rebuildable cache\(s\) kept: its worker runs/);
+  assert.match(await one({ inUse: [s] }), /9 rebuildable cache\(s\) kept: its worker runs/);
   assert.match(await one({ procs: [{ pid: 7, ppid: 1, cmd: `steamcmd +run ${path.join(s, 'urgent-1.0.0.8', 'vdf')}` }] }), /a running process names it \(pid 7: steamcmd/);
   const edited = path.join(s, 'report.md');
   fs.writeFileSync(edited, 'edited');

@@ -135,8 +135,12 @@ const NEVER_SEGMENT = /^(library|assets|projectsettings|packages|usersettings|in
 const FIXTURE_REPO = /^(ffbox-test-|ffsb-e2e-|build-player-restore-|w\d+-lostlines-|w\d+-lines-)/i;
 /** How deep a stopped session's folder is taken apart when it cannot go whole. */
 const SPLIT_DEPTH = 3;
-/** How deep a session's folder is searched for player builds. */
-const BUILD_DEPTH = 5;
+/**
+ * How deep a session's folder is searched for player builds: six levels, since a Mac player of an urgent release sits at
+ * `urgent-<v>/workers/osx-main/release/player/finalfactory.app` (w1813: at five, LothDesktop's ffa-409f9363 lost its
+ * Windows and Linux players to the clean-up and kept both Mac ones, which nothing saw).
+ */
+const BUILD_DEPTH = 6;
 /**
  * How far below an item its git repos are looked for (w1575): a worker's legs nest clones deeper than one level
  * (`demo-222946/portal/base`), and an entry taken alone must not take a repo with work inside it.
@@ -145,7 +149,7 @@ const REPO_DEPTH = 4;
 /** Not looked into for repos: a repo's own insides, dependencies, Unity's caches. */
 const NO_REPO_LOOK = /^(\.git|node_modules|library)$/i;
 /** How deep an idle session's folder is searched for rebuildable caches (w1719): as deep as for player builds. */
-const CACHE_DEPTH = 5;
+const CACHE_DEPTH = BUILD_DEPTH;
 /** A Unity project's folders the editor rebuilds on open (beside its ProjectSettings/ProjectVersion.txt); Logs since w1813. */
 const UNITY_CACHE = /^(library|temp|obj|logs)$/i;
 /**
