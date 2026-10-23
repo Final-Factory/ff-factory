@@ -553,6 +553,12 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
    daemon's Claude Code (`daemon.json` `claude`) first on PATH: the marketplace pulled, every plugin the machine remembers
    updated. That is ff-agents and ff-speckit everywhere, and ff-discord only where a person ran `--plugin ff-discord`
    (registerAgents.sh's `~/.claude/final-factory-agents-plugins`); a bare run never adds it. Codex is not touched.
+   Claude Code fetches the marketplace over HTTPS only (`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`) with a five-minute git
+   timeout (`CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS=300000`), and a run that fails (but did not time out) is run once more
+   (w1895, `REGISTER_ENV` in `server/agentTools.ts`). Without that, Claude Code picks SSH wherever `ssh -T git@github.com`
+   authenticates (m3: bryding's key) and HTTPS elsewhere, falling back to the other one: on m5, whose key is on no GitHub
+   account, a failed HTTPS fetch fell back to SSH and the step said only "Please make sure you have the correct access
+   rights" (2 of 14 rollouts on 2026-10-23).
 5. Puts back publish-skills' marker `~/.claude/final-factory-agents-checkout` if `registerAgents.sh` pointed it at the
    tools checkout, so a person's skill edits keep going to their own checkout. With no marker before, the new one stays
    and the output says so.
