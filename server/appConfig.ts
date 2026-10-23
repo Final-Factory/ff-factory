@@ -150,7 +150,7 @@ const NO_HOST = '; "this host" is no place for work any more (w510): name this h
 export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
-const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync'];
+const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
 const GITHUB_REPO = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 
 /** A value given as an object or its JSON text. */
@@ -348,10 +348,12 @@ export function checkFfboxIntake(value: unknown): NonNullable<IntakeConfig['ffbo
   if (r.autoApprove !== undefined) out.autoApprove = enabledPerDay('autoApprove', r.autoApprove, '{ "enabled": false, "maxPerDay": 3 }');
   // The FFBox desync PR policy (w358): on unless switched off.
   if (r.desync !== undefined) out.desync = enabledPerDay('desync', r.desync, '{ "enabled": true, "maxPerDay": 10 }');
+  // The FFBox crash-fix policy (w1827): on unless switched off.
+  if (r.crash !== undefined) out.crash = enabledPerDay('crash', r.crash, '{ "enabled": true, "maxPerDay": 10 }');
   return out;
 }
 
-/** An intake.ffbox sub-block of the form { enabled, maxPerDay } (autoApprove, desync), checked. */
+/** An intake.ffbox sub-block of the form { enabled, maxPerDay } (autoApprove, desync, crash), checked. */
 function enabledPerDay(name: string, a: unknown, example: string): { enabled?: boolean; maxPerDay?: number } {
   if (typeof a !== 'object' || a === null || Array.isArray(a)) throw new Error(`intake.ffbox.${name} is an object: ${example}`);
   const aa = a as Record<string, unknown>;
