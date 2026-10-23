@@ -230,12 +230,12 @@ test('budgets and limits: a few filings per message of the person; a person’s 
   for (let i = 0; i < FILINGS_PER_MESSAGE; i++) assert.equal((await call(ben, 'request_work', { title: `Task ${i} of many`, brief: 'x' })).isError, false);
   const over = await call(ben, 'request_work', { title: 'One more thing', brief: 'x' });
   assert.equal(over.isError, true);
-  assert.match(over.text, /3 filings since Ben last wrote/);
+  assert.match(over.text, new RegExp(`${FILINGS_PER_MESSAGE} filings since Ben last wrote`));
   o.personWrote(ben.id);
   assert.equal((await call(ben, 'request_work', { title: 'One more thing', brief: 'x' })).isError, false);
 });
 
-test('no hourly or daily cap on a person: past the old 10 an hour, each message of theirs files 3 more', async (t) => {
+test('no hourly or daily cap on a person: past the old 10 an hour, each message of theirs files FILINGS_PER_MESSAGE more', async (t) => {
   const { o, store, chat, call } = setup(t);
   const ben = chat(BEN).info;
   for (let i = 0; i < 15; i++) {
@@ -1483,10 +1483,136 @@ test("w631: closes a person asks for in their own turn do not count toward the f
   // Notes in the same turn still count: the cap holds for anything but a close.
   for (let i = 0; i < FILINGS_PER_MESSAGE; i++) assert.equal((await call(ben.info, 'request_work', { title: `New thing ${i}`, brief: 'x' })).isError, false);
   const later = [...store.work.values()].filter((w) => w.requestedBy.userId === 'ben' && w.status === 'new').map((w) => w.id);
-  assert.match((await call(ben.info, 'update_work', { id: later[0], note: 'one more detail' })).text, /3 filings since Ben last wrote/);
+  assert.match((await call(ben.info, 'update_work', { id: later[0], note: 'one more detail' })).text, new RegExp(`${FILINGS_PER_MESSAGE} filings since Ben last wrote`));
   // A close in a harness turn (a check-in, a relayed report) counts as before.
   ben.lastFrom = 'system';
-  assert.match((await call(ben.info, 'update_work', { id: later[0], close: 'done', note: 'x' })).text, /3 filings since Ben last wrote/);
+  assert.match((await call(ben.info, 'update_work', { id: later[0], close: 'done', note: 'x' })).text, new RegExp(`${FILINGS_PER_MESSAGE} filings since Ben last wrote`));
+});
+
+// ---------------------------------------------------------------- w1867: timers' own filings limit, and the investigation bug
+
+/** Fire a fresh timer on `sid` now, through the timers' own delivery (agents.ts), and answer its id. */
+async function fireTimer(agents: Agents, store: Store, sid: string, title: string, createdBy: string, minutesAhead: number): Promise<string> {
+  // A fire waits for the end of a turn in progress (timers.ts flush): fire it once the chat is idle.
+  await until('the chat is idle', () => !['running', 'starting'].includes(store.sessions.get(sid)!.status));
+  const timer = agents.timers.create(sid, { title, note: `${title}.`, schedule: { every_minutes: 240 } }, createdBy);
+  const real = agents.timers.now;
+  agents.timers.now = () => Date.now() + minutesAhead * 60_000;
+  agents.timers.tick();
+  agents.timers.now = real;
+  return timer.id;
+}
+
+/** The requests FF Factory filed by itself to look into an orchestrator's filings. */
+const investigations = (store: Store) => [...store.work.values()].filter((w) => w.title.startsWith('Investigate: '));
+
+test("w1867: in a turn lothsahn's own timer started, his orchestrator files past the cap up to his limit of 100; the 101st is held; FF Factory files one bug; his message starts it again", async (t) => {
+  const { cfg, o, store, agents, chat, call } = setup(t);
+  cfg.orchestrator = { ...cfg.orchestrator, timerFilingsPerMessage: { lothsahn: 100 } };
+  const loth = chat(LOTH);
+  const timer = await fireTimer(agents, store, loth.info.id, 'close finished requests and unjam stuck ones', 'lothsahn', 241);
+  assert.deepEqual(o.timerTurn(loth)?.map((x) => x.id), [timer], 'the turn its message opened is the timer\'s');
+  const results: string[] = [];
+  for (let i = 0; i < 100; i++) {
+    const r = await call(loth.info, 'request_work', { title: `Unjam stuck request number ${i}`, brief: 'x' });
+    assert.equal(r.isError, false, `filing ${i + 1}: ${r.text}`);
+    results.push(r.text);
+  }
+  assert.ok(results.length > FILINGS_PER_MESSAGE, 'past the limit every other turn has');
+  // The 100th: FF Factory filed its bug, and the orchestrator is told so in that result.
+  const bugs = investigations(store);
+  assert.equal(bugs.length, 1);
+  const bug = bugs[0];
+  assert.match(results[99], new RegExp(`\\[FF Factory\\] That was filing 100 in this turn: FF Factory filed ${bug.id} .*by itself to find out why \\(w1867\\)\\. Do not file it again`));
+  assert.ok(!results.slice(0, 99).some((x) => x.includes('[FF Factory]')));
+  assert.equal(bug.title, "Investigate: Lothsahn's orchestrator made 100 filings in one turn");
+  assert.deepEqual([bug.requestedBy.userId, bug.repo, bug.needs, bug.humanAsked, bug.status], ['lothsahn', 'Final-Factory/ff-factory', 'agent', false, 'new']);
+  assert.match(bug.brief, new RegExp(`session ${loth.info.id}: /#/session/${loth.info.id}\\) reached 100 filings .* in one turn, from \\S+ to \\S+, started by timer ${timer} "close finished requests and unjam stuck ones"`));
+  assert.match(bug.brief, new RegExp(`Timers that started these turns: timer ${timer} `));
+  assert.match(bug.brief, /- \S+: started by timer t-\w+ .*; 100 filings: new request "Unjam stuck request number 0", /);
+  assert.match(bug.log.at(-1)!, /filed by FF Factory for Lothsahn \(w1867\).*counts against no limit/);
+  // The 101st is held, as the cap's refusals are, and names the bug; asking again files no second bug.
+  for (let i = 0; i < 2; i++) {
+    const over = await call(loth.info, 'request_work', { title: `One more stuck request ${i}`, brief: 'x' });
+    assert.equal(over.isError, true);
+    assert.match(over.text, new RegExp(`^ERROR: 100 filings since Lothsahn last wrote \\(in a turn their timer ${timer} started: config orchestrator\\.timerFilingsPerMessage\\) \\(a limit against loops\\); FF Factory filed ${bug.id} to find out why so many\\. Held: FF Factory offers this call back`));
+  }
+  assert.equal(investigations(store).length, 1, 'filed once per hit');
+  // His message starts the count again: the next timer turn files again.
+  o.personWrote(loth.info.id);
+  await fireTimer(agents, store, loth.info.id, 'second timer', 'lothsahn', 2 * 241);
+  assert.equal((await call(loth.info, 'request_work', { title: 'One more stuck request again', brief: 'x' })).isError, false);
+  assert.equal(investigations(store).length, 1);
+});
+
+test('w1867: turns a person starts, worker reports and dispatches keep the filings limit, whatever their timers may do; a person not named keeps it in timer turns too', async (t) => {
+  const { cfg, o, store, sessions, agents, chat, call } = setup(t);
+  cfg.orchestrator = { ...cfg.orchestrator, timerFilingsPerMessage: { lothsahn: 100 } };
+  const loth = chat(LOTH);
+  const file = (who: SessionInfo, title: string) => call(who, 'request_work', { title, brief: 'x' });
+  const fill = async (who: SessionInfo, tag: string) => {
+    for (let i = 0; i < FILINGS_PER_MESSAGE; i++) assert.equal((await file(who, `${tag} task ${i}`)).isError, false);
+  };
+  // His own turn.
+  o.personWrote(loth.info.id);
+  loth.lastFrom = 'human';
+  await fill(loth.info, 'Own turn');
+  const own = await file(loth.info, 'Own turn one too many');
+  assert.match(own.text, new RegExp(`^ERROR: ${FILINGS_PER_MESSAGE} filings since Lothsahn last wrote \\(a limit against loops\\)\\. Held`));
+  // A worker's report: a harness message, not a timer's.
+  o.personWrote(loth.info.id);
+  sessions.send(loth.info.id, '[worker update] w5: done', 'system');
+  assert.equal(o.timerTurn(loth), undefined);
+  await fill(loth.info, 'Report turn');
+  assert.match((await file(loth.info, 'Report turn one too many')).text, new RegExp(`^ERROR: ${FILINGS_PER_MESSAGE} filings since Lothsahn last wrote \\(a limit against loops\\)`));
+  // The timer's own turn goes on where they stopped, counted with them.
+  await fireTimer(agents, store, loth.info.id, 'ledger sweep', 'lothsahn', 241);
+  assert.equal((await file(loth.info, 'Timer turn goes on')).isError, false);
+  // Ben has no setting: his timers' turns have the filings limit.
+  const ben = chat(BEN);
+  const benTimer = await fireTimer(agents, store, ben.info.id, 'Ben ledger sweep', 'ben', 241);
+  assert.deepEqual(o.timerTurn(ben)?.map((x) => x.id), [benTimer]);
+  await fill(ben.info, 'Ben timer');
+  assert.match((await file(ben.info, 'Ben timer one too many')).text, new RegExp(`^ERROR: ${FILINGS_PER_MESSAGE} filings since Ben last wrote \\(in a turn their timer ${benTimer} started: config orchestrator\\.timerFilingsPerMessage\\) \\(a limit against loops\\)\\. Held`));
+  const told = (agents as unknown as { personalBrief(r: Requester): string }).personalBrief(LOTH);
+  assert.match(told, /A timer's turn is not Lothsahn's: what needs their own words still does, and it may file up to 100 times since Lothsahn wrote \(w1867\)\./);
+  assert.match((agents as unknown as { personalBrief(r: Requester): string }).personalBrief(BEN), new RegExp(`it may file up to ${FILINGS_PER_MESSAGE} times since Ben wrote`));
+  assert.match(agents.orchestratorBelt(loth.info).find((x) => x.name === 'request_work')!.description, new RegExp(`At most ${FILINGS_PER_MESSAGE} filings between two messages of your person, 100 when turns your own timers started made them \\(counted with the rest\\)\\. At 100 in one turn FF Factory files a bug`));
+});
+
+test("w1867: FF Factory files the investigation bug for any person's orchestrator at 100 filings in one turn that no timer started (Ben's, in his own turn): once, against no limit", async (t) => {
+  const { cfg, o, store, sessions, chat, call, heard, dispatcher } = setup(t);
+  // A person's own turn holds closes uncounted (w631) and here a raised limit; 100 filings in it are still looked into.
+  cfg.orchestrator = { ...cfg.orchestrator, filingsPerMessage: 100 };
+  const ben = chat(BEN);
+  o.personWrote(ben.info.id);
+  ben.lastFrom = 'human';
+  let last = '';
+  for (let i = 0; i < 100; i++) {
+    const r = await call(ben.info, 'request_work', { title: `Ben's own task number ${i}`, brief: 'x' });
+    assert.equal(r.isError, false, `filing ${i + 1}: ${r.text}`);
+    last = r.text;
+  }
+  const bugs = investigations(store);
+  assert.equal(bugs.length, 1);
+  assert.equal(bugs[0].title, "Investigate: Ben's orchestrator made 100 filings in one turn");
+  assert.equal(bugs[0].requestedBy.userId, 'ben');
+  assert.match(bugs[0].brief, /in one turn, from \S+ to \S+, started by Ben's own message\./);
+  assert.match(bugs[0].brief, /No timer started these turns\./);
+  assert.match(last, new RegExp(`That was filing 100 in this turn: FF Factory filed ${bugs[0].id} `));
+  // Against no limit: the filings count stays at 100 (FF Factory's own filing took none of it), and the 101st is the limit's.
+  assert.match((await call(ben.info, 'request_work', { title: 'Ben one more', brief: 'x' })).text, /^ERROR: 100 filings since Ben last wrote \(a limit against loops\); FF Factory filed w\d+ to find out why so many/);
+  // Closes he asks for in his own turn count toward it too, though the limit does not count them (w631): his next
+  // message opens a new turn, and its 100th close is a new hit, so one more bug.
+  o.personWrote(ben.info.id);
+  sessions.send(ben.info.id, 'close everything that is done', 'human', undefined, { requestedBy: BEN });
+  const mine = [...store.work.values()].filter((w) => w.title.startsWith("Ben's own task")).map((w) => w.id);
+  for (const id of mine) assert.equal((await call(ben.info, 'update_work', { id, close: 'done', note: 'finished' })).isError, false, id);
+  const after = investigations(store);
+  assert.equal(after.length, 2, 'one bug per hit: a new turn');
+  assert.match(after[1].brief, /in one turn, .* started by Ben's own message\.[\s\S]*100 filings: w\d+, w\d+/);
+  // The dispatcher hears of FF Factory's bugs as of any request.
+  await until('the dispatcher hears of the bug', () => heard(dispatcher().info.id, '[work request]').some((e) => e.text.includes(`${bugs[0].id} `)));
 });
 
 test("w402: a member cannot close or reopen another person's request, even in their own turn", async (t) => {
@@ -2020,9 +2146,13 @@ test('w643: decide_work block records a structured blocker; the request reads Bl
 
   const watch = new BlockerWatch({ store, orchestrators: o });
   assert.equal((await watch.tick()).size, 0, 'w1 has not reported: still blocked');
-  // w1's worker reports (a turn ends after the block): w2 unblocks, back to the dispatcher, which is told to start it.
-  store.putSession({ id: 'k1', kind: 'worker', title: 'w1: timing table', status: 'idle', permissionMode: 'default', createdAt: T0, lastActivityAt: new Date(Date.now() + 1000).toISOString(), turns: 2, costUsd: 1, pendingPermissions: [], lastResult: 'Timing table in specs/633/timing.md.' });
+  // w1869: a progress report from w1's worker ("still open") leaves w2 blocked.
+  store.putSession({ id: 'k1', kind: 'worker', title: 'w1: timing table', status: 'idle', permissionMode: 'default', createdAt: T0, lastActivityAt: new Date(Date.now() + 1000).toISOString(), turns: 2, costUsd: 1, pendingPermissions: [], lastResult: 'Started the lab runs.\n\nw1: still open: the LothDesktop A/B is running, then the timing table' });
   store.work.get('w1')!.sessionIds = ['k1'];
+  assert.equal((await watch.tick()).size, 0, 'a progress report does not unblock it');
+  assert.equal(store.work.get('w2')!.status, 'blocked');
+  // w1's worker reports the table (a turn ends after the block): w2 unblocks, back to the dispatcher, which is told to start it.
+  store.putSession({ ...store.sessions.get('k1')!, lastActivityAt: new Date(Date.now() + 2000).toISOString(), lastResult: 'Timing table in specs/633/timing.md.' });
   const did = await watch.tick();
   assert.match(did.get('w2')!, /^clear: w1's worker reported/);
   assert.equal(store.work.get('w2')!.status, 'new');
@@ -2031,6 +2161,37 @@ test('w643: decide_work block records a structured blocker; the request reads Bl
   const told = heard(dispatcher().info.id, '[ledger] w2').map((e) => e.text).join('\n');
   assert.match(told, /\[ledger\] w2 "Speed up the nightly lab" \(Lothsahn, normal\) is unblocked: it waited on w1 reporting \(w1's timing table\), and w1's worker reported.*Start it now: start_agent with work_id "w2"/);
   await until("Lothsahn's orchestrator hears it unblocked", () => heard(chat(LOTH).info.id, '[dispatch] w2').some((e) => /unblocked: it waited on w1 reporting/.test(e.text)));
+});
+
+test("w1869: a request blocked on another's report: that request's worker is told what it waits for and how to mark it; its progress report leaves it blocked, the marked line unblocks it", async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', by: BEN }, { id: 'w2', by: BEN }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Time A vs A', title: 'w1: timing', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'It needs the timing.', blocker: { kind: 'request', ref: 'w1', on: 'report', what: "dec9a619's LothDesktop timing of A vs A" } });
+  assert.equal(r.isError, false, r.text);
+  const notice = () => store.readTranscript(id).filter((e) => e.kind === 'user' && /For w2: <the result, or where it is>/.test((e as { text: string }).text));
+  await until("w1's worker is told", () => notice().length === 1);
+  assert.match((notice()[0] as { text: string }).text, /w2 \("Request w2"\) is blocked until a report of yours on w1 carries: dec9a619's LothDesktop timing of A vs A\./);
+  assert.match(store.work.get('w1')!.log.join('\n'), new RegExp(`w2 waits on its report \\(dec9a619's LothDesktop timing of A vs A\\): told ${id}`));
+  await until('that turn ends', () => info.status === 'idle');
+  // The same gate again (the dispatcher re-blocks): not told twice.
+  await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'Still.', blocker: { kind: 'request', ref: 'w1', on: 'report', what: "dec9a619's LothDesktop timing of A vs A" } });
+  await new Promise((res) => setTimeout(res, 200));
+  assert.equal(notice().length, 1);
+
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  const report = (text: string, ms: number) => store.putSession({ ...store.sessions.get(id)!, status: 'idle', lastActivityAt: new Date(Date.now() + ms).toISOString(), lastResult: text });
+  report('B is building.\n\nw1: still open: the LothDesktop A/B is running…', 1000);
+  assert.equal((await watch.tick()).size, 0, 'a still-open progress report does not unblock w2');
+  assert.equal(store.work.get('w2')!.status, 'blocked');
+  report('A vs A on LothDesktop: 41.2 ms and 41.0 ms per frame.\n\nFor w2: the timing is in specs/w1/timing.md (A 41.2 ms, A 41.0 ms)\n\nw1: still open: the transform-walk PR', 2000);
+  assert.match((await watch.tick()).get('w2') ?? '', /^clear: w1's worker reported \(dec9a619's LothDesktop timing of A vs A\)/);
+  assert.notEqual(store.work.get('w2')!.status, 'blocked');
 });
 
 /** The computers with room, as the dispatcher's tools see them (Agents.roomNow, read by Orchestrators' `room`). */
@@ -4386,6 +4547,8 @@ test('w1841: a worker on a real portal: a reporter wait is Waiting with no [need
   // (e) w1818: files another request's worker makes: blocked_on reports is a request gate that clears at that worker's report.
   const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
   assert.match(String(await h.blocked_on!({ reports: ['w1'], what: "w1's Calculations window stills" })), /^Recorded: w2 is Blocked on w1/);
+  // w1869: w1's workers are told what w2 waits for and how to mark the report that carries it (w1 has none here).
+  assert.doesNotMatch(String(store.work.get('w1')!.log.join('\n')), /w2 waits on its report/);
   const g = store.work.get('w2')!.blocked!;
   assert.deepEqual([g.kind, g.ref, g.on], ['request', 'w1', 'report']);
   assert.match(await live(), /Blocked on w1/);

@@ -80,6 +80,11 @@ export interface PlacementPrefs {
    */
   hold?: Record<string, string>;
   /**
+   * The requests a hold lets through (w1863, lothsahn: "stop all work on LothDesktop except w1785 until it's done"): per held
+   * computer, request ids whose workers there still resume (Agents.machineHold), and the hold's reason names them.
+   */
+  holdExcept?: Record<string, string[]>;
+  /**
    * Where work that needs a Live view goes first (w1600), machine ids in order: config placement.live, else DEFAULT_LIVE.
    * Those without room, held or avoided are skipped, and the rest of the work's placement is the general one.
    */
@@ -263,7 +268,14 @@ export interface RoomNow {
 }
 
 /** The holds a person or FF Factory set (placement.hold, paused machines, coming builds): they also stop resumes there. */
-const holdOnly = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.hold ?? {}).map(([k, v]) => [placeId(k), v]));
+const holdOnly = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.hold ?? {}).map(([k, v]) => [placeId(k), `${v}${exceptText(exceptOf(prefs, k))}`]));
+
+/** The requests the hold of computer `id` lets through (w1863), lower case. */
+export const exceptOf = (prefs: PlacementPrefs, id: string): string[] => {
+  const key = Object.keys(prefs.holdExcept ?? {}).find((k) => placeId(k) === placeId(id));
+  return key ? prefs.holdExcept![key].map((x) => x.trim().toLowerCase()) : [];
+};
+const exceptText = (ids: readonly string[]) => (ids.length ? `; except ${ids.join(', ')}` : '');
 
 /**
  * The computers new work of prefs.priority may not go to, id to why: the holds, and those placement.minPriority reserves for
@@ -306,10 +318,13 @@ export function roomNow(places: readonly Computer[], prefs: PlacementPrefs = {})
  * Why the computer `id` takes no work now: its hold (prefs.hold, w1089) with who and why, or undefined. For a message to an
  * agent already on it (w1376): a hold also stops resumes there, not only new placements.
  */
-export function holdReason(id: string, prefs: PlacementPrefs = {}): string | undefined {
+export function holdReason(id: string, prefs: PlacementPrefs = {}, requests: readonly string[] = []): string | undefined {
   // Not placement.minPriority (w1643): a worker already there goes on, whatever its request's priority.
   const why = holdOnly(prefs).get(placeId(id));
   if (why === undefined) return undefined;
+  // w1863: a worker on a request the hold lets through resumes (w1785's own worker, held at 15:15 by the hold kept for it).
+  const except = exceptOf(prefs, id);
+  if (except.length && requests.some((r) => except.includes(r.toLowerCase()))) return undefined;
   // A machine paused from its tray app (w1532, server/machinePause.ts) is held the same way until it runs again.
   if (why.startsWith('paused from its tray app')) return `${id} is ${why}: nothing resumes there until it runs again (its tray's Unpause, its schedule, or 90 minutes without input)`;
   return `${id} is on hold (${why}): nothing resumes there until the hold is lifted (placement.hold)`;

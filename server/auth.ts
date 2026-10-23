@@ -159,6 +159,26 @@ export class Auth {
     this.writeUsers(all.map((u) => (u === old ? { ...u, ...p } : u)));
   }
 
+  /**
+   * Remove a login with its API keys and its sessions (w1864; the rest of what a login leaves, its pool entry and its
+   * orchestrator, is server/userDelete.ts's). Refused for a missing login and for the last owner. Returns the names of the
+   * keys it removed (never a key: only their hashes are kept) and how many sessions it ended.
+   */
+  deleteUser(username: string): { keys: string[]; sessions: number } {
+    const all = this.users();
+    const old = all.find((u) => u.username === username);
+    if (!old) throw new Error(`no login "${username}"`);
+    if ((old.role ?? 'owner') === 'owner' && all.filter((u) => (u.role ?? 'owner') === 'owner').length < 2) throw new Error(`"${username}" is the last owner login: make another login an owner first`);
+    const keys = this.keys();
+    const theirs = keys.filter((k) => k.user === username).map((k) => k.name);
+    if (theirs.length) writeJsonDurable(this.keysFile, keys.filter((k) => k.user !== username), { indent: 2 });
+    this.writeUsers(all.filter((u) => u !== old));
+    let sessions = 0;
+    for (const [id, s] of this.sessions) if (s.username === username && this.sessions.delete(id)) sessions++;
+    if (sessions) this.persistSessions();
+    return { keys: theirs, sessions };
+  }
+
   private writeUsers(users: UserRecord[]) {
     writeJsonDurable(this.usersFile, users, { indent: 2 });
   }

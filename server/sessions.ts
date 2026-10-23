@@ -180,6 +180,8 @@ export interface SessionHandle {
    * (docs/orchestrators.md, "Loops, limits and safety").
    */
   readonly turnFrom?: 'human' | 'orchestrator' | 'system';
+  /** The uuid of the message that opened the current turn, as turnFrom's sender; without a turn, the last message's (w1867: a timer's turn). */
+  readonly turnId?: string;
   /**
    * `requestedBy`: the person who wrote it, or for whom the orchestrator or the harness sends it (docs/identity.md).
    * `attachments` (docs/attachments.md): files that come with it, with where this agent's copy is; on a machine, the
@@ -357,6 +359,8 @@ export class AgentSession implements SessionHandle {
   private readonly pending = new Map<string, { resolve: (r: PermissionResult) => void; seq: number; input: Record<string, unknown> }>();
   /** Who sent the message that started the current turn; the orchestrator only hears about turns it started. */
   lastFrom: 'human' | 'orchestrator' | 'system' = 'human';
+  /** The last message's uuid (turnId without a turn, w1867). */
+  private lastUuid?: string;
   private costBase = 0;
   /** Set once the CLI has sent a session_state_changed; until then `result` doubles as turn end. */
   private stateEvents = false;
@@ -418,6 +422,10 @@ export class AgentSession implements SessionHandle {
     return this.turnStarter?.from ?? this.lastFrom;
   }
 
+  get turnId(): string | undefined {
+    return this.turnStarter?.uuid ?? this.lastUuid;
+  }
+
   /** The turn is over: nothing is waiting for an answer, and the next message starts a turn of its own. */
   private clearOutstanding() {
     this.outstanding.clear();
@@ -445,6 +453,7 @@ export class AgentSession implements SessionHandle {
     // The message that opens a turn decides whose it is (w607); one sent while it runs joins it without changing that.
     if (opensTurn) this.turnStarter = { uuid, from };
     this.lastFrom = from;
+    this.lastUuid = uuid;
     this.stoppedOnPurpose = false;
     clearTimeout(this.graceTimer);
     this.outstanding.set(uuid, { text, from, ...(requestedBy ? { requestedBy } : {}) });

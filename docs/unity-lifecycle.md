@@ -195,6 +195,18 @@ last shared lock work started... And if that was a long time ago, all workers sh
   its work-in-progress branch now (lothsahn: "Workers should be encouraged to push their uncommitted work at the warning
   threshold so they can be scheduled on other machines"). At the deadline the ticket is revoked and the script, command
   and players under it are stopped; a re-request goes to the back of the queue. A waiter that leaves drops the deadline.
+- **The priority hold** (w1860; lothsahn, 2026-10-23: "If a higher priority job holds the lock and all jobs below it are
+  lower priority, it should retain the lock until done. If this is a shared lock, existing shared lock jobs should join it
+  directly instead of queuing behind the exclusive lock"). Only a waiter of the same or higher request priority than the
+  holder counts above. A shared group's priority is its highest running ticket's (`bench_queue.py` `group_rank`). With
+  only lower-priority work waiting, the holder keeps the lock until it lets go: no deadline, no warning, no revoke, and
+  its ticket folder's `keep.json` says so. A same-or-higher waiter seen later sets the deadline from then by the rules
+  above, warning first. While a shared group runs, a new shared ticket joins it past waiting exclusive tickets ranked
+  below the group and not above itself (`_join_running_group`); one of the group's priority or higher keeps the order.
+  The machine view shows a kept holder as "keeps the lock: only lower-priority work waits" with no countdown, the next
+  timed leg as starting "when the higher-priority work lets go" (`machine/benchState.ts` `keeps`,
+  `shared/benchGlance.ts`), and the turn's messages say "when it lets go" for it, not "by HH:MM at the latest"
+  (`machine/benchLock.ts` `holdEnds`, timedHolder `kept`).
 - Exempt, by marks only the portal writes in `priorities.json` (`BenchPriority.exempt`, `Agents.benchPriorities`): the
   urgent release lane's builder (`release`, `BuildPlans.releaseBuilder`) and the scheduled nightly's worker (`nightly`, a
   request of source kind `nightly-run`). A machine whose agent cap is 1 (`Machines.singleWorker`, `agentCap`; lothsahn:
@@ -278,8 +290,22 @@ w1832), the daemon:
   with why and when it comes back, so a worker mid-turn knows instead of waiting on a bridge that is gone. Its shell and
   other tools keep running. A worker whose player was asked to quit, or whose editor came back, hears it at the start of
   its next message (`[bench turn] ...`).
+- **stops every other sandbox's batch Unity** (w1860; lothsahn, 2026-10-23: "Make the shutdown of builds for the
+  exclusive lock urgent"): a player build, a test run or a batch compile whose `-projectPath` is one of the daemon's
+  sandboxes. None of them can hold a ticket beside the turn (a shared ticket waits for an exclusive one), so one that
+  runs has none: it started without a ticket, or its ticket was revoked (the shared group's limit, an urgent release)
+  and it went on. A batch Unity has no window and nothing unsaved, so it is not asked: its tree is ended the way a stuck
+  build is (`UnityReaper.endBatch`, children first, then the stale `Temp/UnityLockfile`), the orchestrator hears it, and
+  the sandbox's workers hear at their next message to run it again under `unity-slot run`. The worktree's files are not
+  touched. Looked for at the grant, then every 30 s (`BUILD_LOOK_MS`: the process listing costs CPU the run measures).
+  Left: the holder's sandbox and its owner's tree, an exempt worker's sandbox (the urgent release builder, the nightly:
+  `BenchPriority.exempt`), and a Unity whose project is no sandbox (the main clone, a person's own).
 - **holds the rest as before**: `unity start` queues (a shared ticket), builds, batch compiles and the editor's compiles,
   imports and tests wait for their shared turn, and the guard refuses new players and screen grabs (w1750).
+  `unity-slot run` with no ticket of its own (none could be taken, `FF_BENCH_TICKETS=off`) waits for another worker's
+  timed run to end before it starts (`foreignTimedHold`, w1860), and a run whose ticket is revoked under it ends its
+  command (SIGTERM to the tree, a hard stop 20 s later; `taskkill /T /F` on Windows) and exits 75: its helper is a
+  service owner that stops nothing itself, and until w1860 the build went on beside the timed run granted next.
 
 Never touched: the holder's own sandbox (its ticket's `FF_SANDBOX_ID`), any process under the ticket's owner (its
 script's peer editor or player), its session's players, an editor the pool does not own (a person's own project, the
@@ -301,7 +327,8 @@ one right before the measured part, and give it back as soon as the numbers are 
 machine (one exclusive ticket, then the waiting shared group, within a priority; the game repo's
 `scripts/tests/test_bench_queue_order.py`), and the editors closed for one ticket come back in the shared turn after it, so a long A/B of many short tickets interleaves with the others' work.
 
-Tests: `server/benchTurn.test.ts`, the w1829 cases in `server/machineSandboxes.test.ts` and `server/macUnity.test.ts`.
+Tests: `server/benchTurn.test.ts`, `server/benchBuilds.test.ts` (w1860), the w1829 cases in
+`server/machineSandboxes.test.ts` and `server/macUnity.test.ts`.
 
 ## Orphaned and hung batch builds are ended (w791)
 

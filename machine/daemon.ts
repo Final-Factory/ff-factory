@@ -71,7 +71,7 @@ import { trayView } from './pauseRules.ts';
 import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
-import { machinePlatformOf, type AttachmentRef, type CompactionTrigger, type HostHealth, type HostStats, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { machinePlatformOf, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /**
@@ -347,6 +347,8 @@ export class Daemon {
   readonly benchTurn: BenchTurn;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
+  /** w1860: the portal's bench marks per session (its last bench_priorities): an exempt worker's builds are never stopped. */
+  private benchMarks: Record<string, BenchPriority> = {};
   /** The pending wake_me check-ins of this machine's sessions (ms), as the portal last said (welcome, `resumable`; w1196). */
   private wakes = new Map<string, number>();
   /** The machine's gh login and its token's scopes, names only (w1463, machine/ghLogin.ts); none when the probes have no gh. */
@@ -517,6 +519,13 @@ export class Daemon {
       giveUp: (id, tries) => this.pool.benchGiveUp(id, tries),
       closePlayer: (pid) => askPlayerToQuit(pid, platform),
       notePlayer: (session, text) => this.benchPlayerNotes.set(session, text),
+      // w1860: the other sandboxes' builds, test runs and batch compiles stop too (the reaper's way of ending one)
+      builds: (procs) => this.reaper.batches(procs).map((c) => ({ pid: c.u.pid, sandbox: c.place.id })),
+      exemptSandbox: (id) => [...this.entries].some(([sid, e]) => e.spec?.sandbox === id && !!this.benchMarks[sid]?.exempt),
+      stopBuild: (pid, _sandbox, why) => this.reaper.endBatch(pid, why),
+      noteSandbox: (id, text) => {
+        for (const [sid, e] of this.entries) if (e.spec?.sandbox === id) this.benchPlayerNotes.set(sid, [this.benchPlayerNotes.get(sid), text].filter(Boolean).join('\n\n'));
+      },
       writeClosed: (marks) => cfg.root && writeClosedFile(cfg.root, marks, log),
       log: (line) => log(line),
       now: () => Date.now(),
@@ -1529,8 +1538,8 @@ export class Daemon {
     if (this.idleClosing.has(id)) return { closed: false, text: 'skipped: it is being closed already' };
     this.idleClosing.add(id);
     try {
-      const until = timedHolder(this.cfg.root)?.until;
-      const res = await this.pool.benchClose(id, by, ticket, closedDetail(by, until), () =>
+      const holder = timedHolder(this.cfg.root);
+      const res = await this.pool.benchClose(id, by, ticket, closedDetail(by, holder?.until, holder?.kept), () =>
         idleCloseEditor(
           { bridge: this.editorBridge(id, sbPath), editorPids: () => this.pool.editorPids(id), personInputAgoMs: () => undefined, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now() },
           0,
@@ -2132,6 +2141,7 @@ export class Daemon {
       case 'bench_priorities':
         // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.
         writeBenchPriorities(this.cfg.root, msg.sessions, new Date(), msg.singleWorker);
+        this.benchMarks = msg.sessions;
         return;
       case 'cleanup_now':
         void this.cleaner.run('asked', { dryRun: !!msg.dryRun }).then(

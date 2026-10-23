@@ -9,6 +9,7 @@ import { FFBOX_HASH_FILE, ffboxTokenHash } from './configMigration.ts';
 import { tokenSha256 } from './providerProtocol.ts';
 import { autoCompactSettings } from './autoCompact.ts';
 import { machineActivityPause, type Config } from './config.ts';
+import { FILINGS_PER_MESSAGE, timerFilings } from './orchestrators.ts';
 
 const setup = (t: { after: (fn: () => void) => void }) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcfg-'));
@@ -152,6 +153,26 @@ test('app config: the orchestrators’ loop guards (w571), live, 1 to 100', (t) 
     for (const bad of ['0', '101', '2.5', 'many']) assert.throws(() => setAppConfig(file, full, key, bad), /is a whole number from 1 to 100/, `${key} ${bad}`);
   setAppConfig(file, full, 'orchestrator.messagesPerPerson', null);
   assert.equal(full.orchestrator.messagesPerPerson, undefined, 'null: back to the default (10)');
+});
+
+test("app config: orchestrator.timerFilingsPerMessage (w1867), per person, live, 1 to 100, the owner's only; a person not named has the filings limit", (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg, orchestrator: { model: 'opus', effort: 'medium', notifyOnWorkerEvents: true } } as unknown as Config;
+  const users = ['ben', 'lothsahn'];
+  assert.ok(OWNER_ONLY_KEYS.has('orchestrator.timerFilingsPerMessage'));
+  assert.equal(timerFilings(full, 'lothsahn'), FILINGS_PER_MESSAGE, 'not set: the filings limit');
+  setAppConfig(file, full, 'orchestrator.timerFilingsPerMessage', '{ "Lothsahn": 100 }', { users });
+  assert.deepEqual(full.orchestrator.timerFilingsPerMessage, { lothsahn: 100 }, 'applies at once, the login in lower case');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).orchestrator, { timerFilingsPerMessage: { lothsahn: 100 } });
+  assert.deepEqual([timerFilings(full, 'lothsahn'), timerFilings(full, 'Lothsahn'), timerFilings(full, 'ben')], [100, 100, FILINGS_PER_MESSAGE]);
+  setAppConfig(file, full, 'orchestrator.filingsPerMessage', 7);
+  assert.equal(timerFilings(full, 'ben'), 7, 'Ben, not named, follows the filings limit');
+  assert.throws(() => setAppConfig(file, full, 'orchestrator.timerFilingsPerMessage', { nobody: 5 }, { users }), /no login "nobody"; the logins are ben, lothsahn/);
+  for (const bad of [0, 101, 2.5, 'many']) assert.throws(() => setAppConfig(file, full, 'orchestrator.timerFilingsPerMessage', { lothsahn: bad }, { users }), /orchestrator\.timerFilingsPerMessage\.lothsahn is a whole number from 1 to 100/, String(bad));
+  assert.throws(() => setAppConfig(file, full, 'orchestrator.timerFilingsPerMessage', 100, { users }), /is an object/);
+  setAppConfig(file, full, 'orchestrator.timerFilingsPerMessage', null, { users });
+  assert.equal(full.orchestrator.timerFilingsPerMessage, undefined, 'null: removed');
+  assert.equal(timerFilings(full, 'lothsahn'), 7);
 });
 
 test('app config: usagePollMinutes, live, 5 to 240 minutes, default 15', (t) => {
@@ -472,4 +493,21 @@ test('set_app_config: placement.minPriority (w1643) sets each computer\'s lowest
   setAppConfig(file, cfg, 'placement.minPriority', null);
   assert.deepEqual(cfg.placement, { hold: { m5: 'Ben testing' } });
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement, { hold: { m5: 'Ben testing' } });
+});
+
+test('set_app_config: placement.hold { why, except } (w1863) keeps the reason where every reader takes it and the exceptions beside it; a plain hold or null drops them', (t) => {
+  const { file, cfg } = setup(t);
+  const why = "lothsahn: w1785 timing runs, \"stop all work on LothDesktop except w1785 until it's done\"";
+  assert.deepEqual(setAppConfig(file, cfg, 'placement.hold', { LothDesktop: { why, except: ['W1785'] }, m5: 'Ben testing' }).after, { lothdesktop: { why, except: ['w1785'] }, m5: 'Ben testing' });
+  assert.deepEqual(cfg.placement, { hold: { lothdesktop: why, m5: 'Ben testing' }, holdExcept: { lothdesktop: ['w1785'] } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement.holdExcept, { lothdesktop: ['w1785'] });
+  assert.throws(() => setAppConfig(file, cfg, 'placement.hold', { lothdesktop: { why, except: ['PR 2268'] } }), /placement\.hold\.lothdesktop\.except: a list of request ids/);
+  assert.throws(() => setAppConfig(file, cfg, 'placement.hold', { lothdesktop: { why: '', except: ['w1785'] } }), /say who holds it and why/);
+  assert.throws(() => setAppConfig(file, cfg, 'placement.hold', { lothdesktop: { why, until: 'tomorrow' } }), /only "why" and "except"/);
+  setAppConfig(file, cfg, 'placement.hold', { lothdesktop: why });
+  assert.deepEqual(cfg.placement, { hold: { lothdesktop: why } }, 'the whole hold is replaced, its exceptions too');
+  setAppConfig(file, cfg, 'placement.hold', { lothdesktop: { why, except: 'w1785, w1820' } });
+  assert.deepEqual(cfg.placement?.holdExcept, { lothdesktop: ['w1785', 'w1820'] });
+  setAppConfig(file, cfg, 'placement.hold', null);
+  assert.deepEqual(cfg.placement, {});
 });

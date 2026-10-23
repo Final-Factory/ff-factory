@@ -44,6 +44,7 @@ const discovered: Record<string, string[]> = {
   ],
   'machine-credential': [...file('server/vaultCli.ts').matchAll(/sub === '([a-z-]+)'/g)].map((m) => m[1]),
   apikey: [...file('server/memberKeyCli.ts').matchAll(/sub === '([a-z-]+)'/g)].map((m) => m[1]),
+  user: [...file('server/userCli.ts').matchAll(/sub === '([a-z-]+)'/g)].map((m) => m[1]),
   migrate: [...file('scripts/fff-migrate.ts').matchAll(/'(--[a-z-]+)': '[a-z-]+'/g)].map((m) => m[1]).concat(file('scripts/fff-migrate.ts').includes("case '--help'") ? ['--help'] : []),
 };
 
@@ -75,7 +76,7 @@ test("the server's guard lets through every allowed form and refuses every chang
     }
     for (const a of f.allowed) assert.equal(shell(`fffctl ${cmd} ${a === 'N' ? '300' : a}`.trim()), undefined, `fffctl ${cmd} ${a}`);
     for (const o of f.ops ?? []) assert.equal(shell(`fffctl ${cmd} ${o}`), undefined, `fffctl ${cmd} ${o}`);
-    if (['vault', 'machine-credential', 'migrate', 'apikey'].includes(cmd)) {
+    if (['vault', 'machine-credential', 'migrate', 'apikey', 'user'].includes(cmd)) {
       for (const c of f.changes.filter((x) => !(f.ops ?? []).includes(x))) assert.match(shell(`fffctl ${cmd} ${c}`) ?? '', /a person's/, `fffctl ${cmd} ${c}`);
     }
   }
