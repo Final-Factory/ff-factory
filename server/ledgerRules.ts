@@ -328,6 +328,8 @@ export function cutOffOf(s: Pick<SessionInfo, 'status' | 'statusDetail' | 'turnO
 
 /** A turn the CLI ended with an error subtype instead of a report: its result reads "stopped: error_during_execution". */
 const STOPPED_RESULT = /^stopped: (error_[a-z_]+)/;
+/** A turn the API ended: its whole result is Claude Code's error line (w1733: "API Error: Can't reach the API server …"). */
+const API_ERROR_RESULT = /^API Error\b/i;
 /**
  * A tool the harness or a person refused, in the words Claude Code and the hooks use. Narrower than REFUSED: a failed
  * tool's own output ("connection refused") is no refusal, and a refusal is escalated at once (it would be refused again).
@@ -360,13 +362,18 @@ export function turnTroubleOf(
   tools: readonly string[] = [],
 ): TurnTrouble | undefined {
   const result = (s.lastResult ?? '').trim();
-  const stopped = STOPPED_RESULT.exec(result)?.[1];
+  const stopped = STOPPED_RESULT.exec(result)?.[1] ?? (API_ERROR_RESULT.test(result) ? 'an API error' : undefined);
   const turnAt = s.lastResultAt ?? s.lastActivityAt;
+  // A turn that ended with a report, and no turn open since, is no trouble whatever its words say: the report's own
+  // "refused" or "limit" is not a refused tool or a cut-off (w1867's "`ff-pr merge` reported #562 as refused"). Only a
+  // failed session is.
+  const reported = !!result && !stopped && !LIMIT_END.test(result) && !s.turnOpenSince;
+  if (reported && s.status !== 'error') return undefined;
   const text = [s.statusDetail ?? '', ...tools, ...evidence, result].join('\n');
   const needs = NEEDS_PERSON.find(([re]) => re.test(text))?.[1];
   const onPurpose = !!s.stoppedOnPurpose || evidence.some((e) => INTERRUPTED.test(e.trim()));
   if (stopped && onPurpose) return { kind: 'interrupt', reason: `its turn was interrupted on purpose (${stopped})`, turnAt };
-  const cut = cutOffOf(s, evidence);
+  const cut = reported ? undefined : cutOffOf(s, evidence);
   if (cut) return { kind: 'error', cause: cut.kind, reason: cut.reason, turnAt, ...(needs ? { needs } : {}) };
   if (stopped) {
     const cause = LIMIT.test(text) ? 'limit' : REFUSED_TOOL.test(text) ? 'refused' : 'error';
