@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { cleanupPass, type StaleContext } from './staleOutput.ts';
 import type { CleanupGuard } from './cleanup.ts';
-import { descendants, installLeftoverSettings, mergePlans, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
+import { descendants, installLeftoverSettings, mergePlans, newestWrite, planInstallLeftovers, tarOfPlayer, type ProcLite } from './installLeftovers.ts';
 import { runCleanup, touchedWhy } from './cleanup.ts';
 
 /**
@@ -381,9 +381,148 @@ test('w1719: no cache goes from a folder that is live, written within 24 h, name
   const items = await run({ keep: [], inUse: [live], resumable: [fresh, named, open], home });
   const sessions = new Set(items.map((i) => path.basename(i.inSession!)));
   assert.deepEqual([...sessions], ['ffa-44444444'], 'only the folder with no activity has caches taken');
-  assert.ok(!items.some((i) => /ff-rawreader[\\/](Library|Temp)$/.test(i.path)), "a Unity project open in an editor or a build keeps its Library and Temp");
+  // w1813: a lockfile no process names was left by a crashed editor and holds nothing; without the process list it holds.
+  assert.ok(items.some((i) => /ff-rawreader[\\/]Library$/.test(i.path)) && items.some((i) => /ff-rawreader[\\/]Temp$/.test(i.path)), "a crashed editor's lockfile keeps nothing");
+  const blind = (await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard: { keep: [], inUse: [live], resumable: [fresh, named, open], home }, settings, now: NOW })).items.filter((i) => i.inSession === open);
+  assert.ok(blind.length && !blind.some((i) => /ff-rawreader[\\/](Library|Temp)$/.test(i.path)), 'a Unity project that may be open in an editor or a build keeps its Library and Temp');
   // Before the portal's welcome the whole temp root is resumable: nothing goes.
   assert.deepEqual(await run({ keep: [], inUse: [], resumable: [tmp], home }), []);
   // idleCacheHours 0 turns the rule off.
   assert.deepEqual((await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard: { keep: [], inUse: [], resumable: [open], home }, settings: { ...settings, idleCacheHours: 0 }, now: NOW })).items.filter((i) => i.rule === 'session-idle-cache'), []);
+});
+
+/** A tar as Python's tarfile writes one (ustar headers; `pax` puts each name in a pax header, as tarfile does for a long one). */
+function tarOf(entries: { name: string; data: Buffer }[], pax = false): Buffer {
+  const header = (name: string, size: number, type = '0') => {
+    const h = Buffer.alloc(512);
+    h.write(name.slice(0, 100), 0);
+    h.write(size.toString(8).padStart(11, '0'), 124);
+    h.write(type, 156);
+    h.write('ustar\0', 257);
+    return h;
+  };
+  const pad = (b: Buffer) => Buffer.concat([b, Buffer.alloc((512 - (b.length % 512)) % 512)]);
+  const out: Buffer[] = [];
+  for (const e of entries) {
+    if (pax) {
+      const rec = ` path=${e.name}\n`;
+      let n = rec.length + 2;
+      while (`${n}${rec}`.length !== n) n = `${n}${rec}`.length;
+      const data = Buffer.from(`${n}${rec}`);
+      out.push(header('././@PaxHeader', data.length, 'x'), pad(data));
+    }
+    out.push(header(e.name, e.data.length), pad(e.data));
+  }
+  out.push(Buffer.alloc(1024));
+  return Buffer.concat(out);
+}
+
+test('w1813: tarOfPlayer finds a player packed into a release tar by its headers, plain or pax-named', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-tar-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }));
+  const big = Buffer.alloc(1024 ** 2);
+  const put = (name: string, b: Buffer) => (fs.writeFileSync(path.join(dir, name), b), path.join(dir, name));
+  assert.equal(await tarOfPlayer(put('linux.tar', tarOf([{ name: 'finalfactory_Data/data.unity3d', data: big }, { name: 'UnityPlayer.so', data: Buffer.from('x') }]))), true);
+  const deep = `${'release/'.repeat(14)}player/UnityPlayer.dll`;
+  assert.ok(deep.length > 100);
+  assert.equal(await tarOfPlayer(put('win.tar', tarOf([{ name: 'a.bin', data: big }, { name: deep, data: Buffer.from('x') }], true))), true);
+  assert.equal(await tarOfPlayer(put('saves.tar', tarOf([{ name: 'saves/w797.zip', data: big }, { name: 'notes/UnityPlayer.dll.txt', data: Buffer.from('x') }]))), false);
+  assert.equal(await tarOfPlayer(put('junk.tar', Buffer.from('not a tar at all'))), false);
+});
+
+test('w1813: the last write of a folder of game clones is judged past 200,000 entries, and a cache or a Library only by its top, git objects not at all', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-newest-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const w = (rel: string) => {
+    const p = path.join(root, ...rel.split('/'));
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, 'x');
+    return p;
+  };
+  for (const f of ['game/Assets/a.cs', 'game/.git/HEAD', 'game/.git/objects/ab/cdef', 'game/Library/Artifacts/00/aa', 'build/player/finalfactory_Data/sub/x', 'build/player/UnityPlayer.dll']) w(f);
+  ageAll(root, 30);
+  const fresh = (rel: string) => fs.utimesSync(w(rel), (NOW - HOUR) / 1000, (NOW - HOUR) / 1000);
+  // Deep inside a Library, a repo's objects or a cache: an editor reopened or a git gc, not the worker's own work.
+  fresh('game/Library/Artifacts/00/bb');
+  fresh('game/.git/objects/ab/0123');
+  fresh('build/player/finalfactory_Data/sub/y');
+  const cut = NOW - 24 * HOUR;
+  const caches = new Set([path.join(root, 'build', 'player').replace(/\\/g, '/').toLowerCase()]);
+  const last = await newestWrite(root, cut, caches);
+  assert.ok(typeof last === 'number' && last <= cut, `nothing but cache insides changed (${last})`);
+  // A source file the worker wrote counts.
+  fresh('game/Assets/b.cs');
+  const after = await newestWrite(root, cut, caches);
+  assert.ok(typeof after === 'number' && after > cut);
+  assert.equal(await newestWrite(root, NOW, caches, 3), 'too-big');
+});
+
+/** A stopped urgent-release worker's folder, as beast's ffa-6cf9fea3 and LothDesktop's ffa-409f9363 were on 2026-10-22. */
+function releaseSession(base: string) {
+  const w = (rel: string, data: string | Buffer = 'x') => {
+    const p = path.join(base, ...rel.split('/'));
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, data);
+  };
+  const big = Buffer.alloc(1024 ** 2);
+  w('urgent-1.0.0.8/stage/linux/release.main.tar', tarOf([{ name: 'finalfactory_Data/data.unity3d', data: big }, { name: 'UnityPlayer.so', data: Buffer.from('x') }]));
+  w('urgent-1.0.0.8/stage/linux/other.tar', tarOf([{ name: 'saves/a.zip', data: big }]));
+  w('urgent-1.0.0.8/workers/linux-main/release/player/UnityPlayer.so');
+  w('urgent-1.0.0.8/symbols/linux-main.zip');
+  w('urgent-1.0.0.8/run.json');
+  w('proj/ProjectSettings/ProjectVersion.txt');
+  w('proj/Assets/a.cs');
+  for (const d of ['Bee', 'BurstCache', 'BuildCache', 'Artifacts']) w(`proj/Library/${d}/x`);
+  w('proj/Library/ArtifactDB');
+  for (const d of ['Temp', 'obj', 'Logs']) w(`proj/${d}/x`);
+  w('review/takeover.mp4');
+  w('report.md');
+}
+
+test("w1813: below the soft threshold a stopped worker's caches go after 15 min, a whole Library only after the idle age", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-low-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const tmp = path.join(root, 'tmp');
+  const s = path.join(tmp, 'ffa-6cf9fea3');
+  releaseSession(s);
+  ageAll(tmp, 2);
+  const home = path.join(root, 'home');
+  const run = async (o: { low?: boolean; inUse?: string[]; now?: number; procs?: ProcLite[] } = {}) =>
+    (await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard: { keep: [], inUse: o.inUse ?? [], resumable: [s], home }, procs: o.procs ?? [], settings, now: o.now ?? NOW, low: o.low })).items
+      .filter((i) => i.rule === 'session-idle-cache')
+      .map((i) => rel(s, i.path))
+      .sort();
+  // Written two hours ago: without low disk nothing goes until the folder was idle a day.
+  assert.deepEqual(await run(), []);
+  const quick = [
+    'proj/Library/Bee',
+    'proj/Library/BuildCache',
+    'proj/Library/BurstCache',
+    'proj/Logs',
+    'proj/Temp',
+    'proj/obj',
+    'urgent-1.0.0.8/stage/linux/release.main.tar',
+    'urgent-1.0.0.8/workers/linux-main/release/player',
+  ];
+  assert.deepEqual(await run({ low: true }), quick, 'low disk: everything rebuildable but the Library import');
+  // Not while it runs, while a process names it, or when it was written within the settle time.
+  assert.deepEqual(await run({ low: true, inUse: [s] }), []);
+  assert.deepEqual(await run({ low: true, procs: [{ pid: 7, ppid: 1, cmd: `tar -cf x ${path.join(s, 'urgent-1.0.0.8', 'stage')}` }] }), []);
+  const edited = path.join(s, 'report.md');
+  fs.writeFileSync(edited, 'edited');
+  fs.utimesSync(edited, (NOW - 5 * 60_000) / 1000, (NOW - 5 * 60_000) / 1000);
+  assert.deepEqual(await run({ low: true }), []);
+  // A day later the whole Library goes too, low or not.
+  const later = NOW + 30 * HOUR;
+  const full = ['proj/Library', 'proj/Logs', 'proj/Temp', 'proj/obj', 'urgent-1.0.0.8/stage/linux/release.main.tar', 'urgent-1.0.0.8/workers/linux-main/release/player'];
+  assert.deepEqual(await run({ now: later }), full);
+  assert.deepEqual(await run({ now: later, low: true }), full);
+  // The pass removes them and keeps the sources, the symbols, the other tar, the clip and the report.
+  const guard: CleanupGuard = { keep: [], inUse: [], resumable: [s], home };
+  const p = await planInstallLeftovers({ root, sandboxes: [], tempRoots: [tmp], guard, procs: [], settings, now: later });
+  const r = await runCleanup(p.items, guard);
+  assert.equal(r.removed.length, full.length);
+  for (const keep of ['proj/Assets/a.cs', 'proj/ProjectSettings/ProjectVersion.txt', 'urgent-1.0.0.8/symbols/linux-main.zip', 'urgent-1.0.0.8/run.json', 'urgent-1.0.0.8/stage/linux/other.tar', 'review/takeover.mp4', 'report.md']) {
+    assert.ok(fs.existsSync(path.join(s, ...keep.split('/'))), `${keep} stays`);
+  }
 });
