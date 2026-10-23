@@ -726,6 +726,9 @@ without one means it is off or failing, worth a person's look.
     pick" reads as a wait on Ben;
   - a wait on another request's worker ("needs the w1761 stills") is **Blocked on that request** (w1818); `blocked_on` with
     `reports` (its id) records it as a `request` gate with `on: report`, so the worker is resumed when that worker reports;
+  - a check on several computers at once (a two-machine determinism check) is the worker's `request_pair` (w1945): one pair
+    request whose legs the dispatcher starts together, and the asking request **Blocked on its report**, so the worker's
+    sandbox is released while it waits ([machines.md](machines.md), "Pair runs are placed as one unit");
   - a worker that waits on the orchestrator stays Stalled and the line says so, adding "that is its own work" for a pair or
     two-machine check, a build, a test run or its CI (w1685). Such a worker is told at its turn's end, once per request
     (`Agents.ownWorkNudge`), and every worker's prompt says these are its own work.

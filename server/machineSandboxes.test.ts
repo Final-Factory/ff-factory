@@ -101,6 +101,35 @@ test('w890: the whole loop: a worker that ends its turn waiting on a deploy free
   await until('both stopped', () => !n.live && !w.live);
 });
 
+test('w1945: a worker that asks for a pair run with request_pair frees its sandbox as its turn ends: stopped, released FREE on its branch, and placed again when the pair reports', async (t) => {
+  const { r, store, sessions, mm, agents, path1, gitNow } = await twoSandboxes(t);
+  // w665's case (2026-10-23): its worker held m3's only sandbox while the two-machine run of its PR waited for a pair.
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w665 work', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  fs.writeFileSync(path.join(path1, 'pin.txt'), 'no collider');
+  r.git(path1, 'add', 'pin.txt');
+  r.git(path1, 'commit', '-q', '-m', 'w665 pin');
+  r.git(path1, 'push', '-q', '-u', 'origin', 'HEAD');
+  const by = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const item: WorkItem = { id: 'w665', title: 'Low-ore pin collider', brief: 'Do it.', priority: 'urgent', keys: [], requestedBy: by, requesters: [], humanAsked: true, status: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), sessionIds: [w.info.id], overlaps: [], asks: 0, log: [] };
+  store.putWork(item);
+  store.workSeq = Math.max(store.workSeq, 665);
+  const o = agents.orchestrators;
+  const out = o.filePair(w.info.id, { what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on the branch; 400 heartbeats compared, none diverged.' });
+  const id = /^Filed (w\d+)/.exec(out)![1];
+  assert.equal(item.status, 'blocked');
+  assert.equal(store.work.get(id)!.pair?.for, 'w665');
+  await gitNow('sb1');
+  (agents.placeAgain as unknown as { d: { soon?: () => void } }).d.soon = () => undefined;
+  assert.match(agents.placeAgain.tick().join('\n'), new RegExp(`stopped .*\\(it waits on w665: ${id}`));
+  await until('w stopped', () => !w.live && w.info.status === 'stopped');
+  await gitNow('sb1');
+  assert.match(agents.placeAgain.tick().join('\n'), new RegExp(`released pc/sb1 of .* \\(it waits on w665: ${id}`));
+  assert.equal(w.info.placeReleased?.branch, 'feature/w1');
+  assert.match(agents.describeAllSandboxes(), /pc\/sb1 FREE/);
+});
+
 const until = async (what: string, cond: () => boolean, ms = 60_000) => {
   const end = Date.now() + ms;
   while (!cond()) {

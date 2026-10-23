@@ -147,7 +147,11 @@ test('w1158: what a coordinator carries in every call stays within its budget', 
   // the question clearly, give me the option selections and thats it"): the dispatcher's measured 24,348, so the cap moved to 24,500.
   // w1863 (lothsahn: "Why did they hang if the m5 was free?") gave decide_work queue its leg for a named computer beside the
   // request's own worker, and drop_leg (trimmed from 450 characters to 170): the dispatcher's measured 24,672, so the cap moved to 24,700.
-  const ALWAYS_LOADED_MAX = 24_700;
+  // w1945 (lothsahn: "Can we make the dispatcher smart enough so it queues work properly that requires running together across
+  // multiple machines and doesn't waste slots?") gave start_agent pair_sandboxes, a pair run's legs started together (trimmed from
+  // three parameters and 950 characters to one and 216; the rule itself is in read_rules machines): the dispatcher's measured
+  // 24,888, so the cap moved to 24,900.
+  const ALWAYS_LOADED_MAX = 24_900;
   await withCoordinators((agents, kinds) => {
     for (const [kind, info] of kinds) {
       const prompt = asOnLinuxCi(promptOf(agents, info)).length;

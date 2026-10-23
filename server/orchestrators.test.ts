@@ -4613,7 +4613,9 @@ test('w1841: a worker on a real portal: a reporter wait is Waiting with no [need
   const live = async () => (await call(dispatcher().info, 'list_work', { id: 'w2' })).text;
   const spec = machines.hooks!.specFor(info, store.machines.get('pc')!);
   // (d) Every worker's prompt says pair checks and builds are its own work, and how to wait on another request's worker.
-  assert.match(spec.append, /Two-machine and pair checks, builds, test runs and your own CI are your own work: run them, or ask the dispatcher only for a second machine's worker/);
+  assert.match(spec.append, /Two-machine and pair checks, builds, test runs and your own CI are your own work: run them; never end a turn waiting on the orchestrator for them\. A check that needs two or more computers at once \(a host and a client on two machines\) is `mcp__machine__request_pair`/);
+  // w1945: and never holds its sandbox for a second machine's worker.
+  assert.match(spec.append, /Never hold your sandbox waiting for a second machine's worker\./);
   assert.match(spec.append, /Files or results another request's worker makes for you: `blocked_on` with reports/);
 
   // (b) w1778: a wait on the reporter is Waiting on input on them, and nobody's orchestrator is asked.
@@ -4878,4 +4880,143 @@ test('w1944: the capacity ping names the room a queued request cannot use, lets 
   assert.equal(pings().length, 3, 'the first event was two minutes old: it went while events still came');
   assert.match(pings()[2], /Capacity may have freed \(worker w1 finished a turn, 2 min ago; .*worker w5 finished a turn, 0 min ago\)/);
   t.mock.timers.reset();
+});
+
+// ---------------------------------------------------------------- w1945: pair runs placed as one unit
+
+// lothsahn, 2026-10-23: "Can we make the dispatcher smart enough so it queues work properly that requires running together
+// across multiple machines and doesn't waste slots?" w665's worker d558ba14 held m3's only sandbox while the two-machine run
+// of its PR #2340 (w1936) sat Queued; w1940's client leg on biscuit waited on w1898's host leg placed separately.
+
+test('w1945: request_pair files one pair request and blocks the asking worker on its report, so its sandbox is released at once (w890 waitOn); asked again, it waits on the same one', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w665', by: BEN }]);
+  const a = await startedFor(env, 'w665');
+  await assert.rejects(async () => a.h.request_pair!({ what: 'x', brief: 'y', legs: 1 }), /legs is 2 to 4/);
+  const out = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair on PR #2340', brief: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider; pass: 400 heartbeats compared, none diverged.' }));
+  assert.match(out, /^Filed (w\d+), a pair run of 2 legs, on computers that are not Macs, for w665\. The dispatcher starts its legs together/);
+  assert.match(out, /Recorded: w665 is Blocked on /);
+  assert.match(out, /your sandbox is then released at once for other work/);
+  const id = /^Filed (w\d+)/.exec(out)![1];
+  const p = store.work.get(id)!;
+  assert.deepEqual(p.pair, { legs: 2, for: 'w665', forSession: a.id });
+  assert.equal(p.needs, 'game');
+  assert.equal(p.priority, 'normal');
+  assert.deepEqual(p.requesters, [BEN]);
+  assert.deepEqual(p.relatedIds, ['w665']);
+  assert.equal(p.title, 'Pair run for w665: MP-lowore-pin-pair on PR #2340');
+  assert.match(p.brief, /the host leg \(leg 1\) reports the result with a line "For w665:"/);
+  assert.equal(p.overlaps.some((o) => o.ref === 'w665'), false, 'the request it is for is no repeat of it');
+  const w = store.work.get('w665')!;
+  assert.equal(w.status, 'blocked');
+  assert.equal(w.blocked?.kind, 'request');
+  assert.equal(w.blocked?.ref, id);
+  assert.equal(w.blocked?.on, 'report');
+  // The w890 release reads this: its sandbox frees at once (server/placeAgain.test.ts, "w890: a worker that ends its turn
+  // waiting on request frees its sandbox at once").
+  (agents as unknown as { waitLive?: unknown }).waitLive = undefined;
+  assert.match(agents.waitOn(a.info) ?? '', new RegExp(`^it waits on w665: ${id}`));
+  const again = String(await a.h.request_pair!({ what: 'MP-lowore-pin-pair again', brief: 'Same.' }));
+  assert.ok(again.startsWith(`w665 already has an open pair run, ${id} (new: `), again);
+  assert.equal([...store.work.values()].filter((x) => x.pair).length, 1);
+});
+
+/** Two Windows computers, pc (alpha) and beast (slot1), both with room (w1945). */
+async function twoComputers(t: Parameters<typeof setupOnMachine>[0]) {
+  const env = await setupOnMachine(t);
+  const beast = await startTestMachine(env.machines, { id: 'beast', sandboxes: ['slot1'] });
+  env.closers.push(() => beast.stop());
+  for (const id of ['pc', 'beast']) env.store.putMachine({ ...env.store.machines.get(id)!, platform: 'win32' });
+  agentsRoom(env.agents, ['pc', 'beast']);
+  return env;
+}
+
+test('w1945: a pair request starts both legs together, each on its own computer, never one leg alone; a Mac is no client; message_pair reaches the other leg', async (t) => {
+  const env = await twoComputers(t);
+  const { store, machines, dispatcher, call } = env;
+  putRequests(store, [{ id: 'w2', by: BEN, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 2 } }]);
+  const start = (extra: Record<string, unknown>) => call(dispatcher().info, 'start_agent', { work_id: 'w2', prompt: 'Run MP-lowore-pin-pair on branch w665-lowore-pin-no-collider.', title: 'MP-lowore-pin-pair', sandbox: 'pc/alpha', ...extra });
+  const nothing = () => assert.deepEqual(store.work.get('w2')!.sessionIds, [], 'nothing was started');
+  const one = await start({});
+  assert.equal(one.isError, true);
+  assert.match(one.text, /w2 is a pair run of 2 legs, on computers that are not Macs: start every leg together, sandbox for leg 1 \(the host\) and pair_sandboxes for the others/);
+  nothing();
+  assert.match((await start({ pair_sandboxes: ['pc/alpha'] })).text, /two legs on pc: each leg of a pair run goes on its own computer/);
+  store.putMachine({ ...store.machines.get('beast')!, platform: 'darwin' });
+  assert.match((await start({ pair_sandboxes: ['beast/slot1'] })).text, /leg 2 on beast\/slot1: beast is a Mac, and a Mac refuses a multiplayer client \(w665\).*Nothing was started\./);
+  nothing();
+  store.putMachine({ ...store.machines.get('beast')!, platform: 'win32' });
+
+  const ok = await start({ pair_sandboxes: ['beast/slot1'] });
+  assert.equal(ok.isError, false, ok.text);
+  assert.match(ok.text, /^Started w2's 2 legs together, requested by Ben: leg 1 \(host\): agent \w+ in pc\/alpha.*; leg 2: agent \w+ in beast\/slot1/);
+  const w = store.work.get('w2')!;
+  assert.equal(w.status, 'active');
+  assert.equal(w.sessionIds.length, 2);
+  assert.deepEqual(w.pair!.started!.legs.map((l) => l.sandbox), ['pc/alpha', 'beast/slot1']);
+  assert.match(w.log.join('\n'), /its 2 legs started together \(w1945\): leg 1 \(host\) \w+ in pc\/alpha, leg 2 \w+ in beast\/slot1/);
+  const [l1, l2] = w.pair!.started!.legs.map((l) => store.sessions.get(l.session)!);
+  assert.equal(l1.machineId, 'pc');
+  assert.equal(l2.machineId, 'beast');
+  await until('both legs end their first turn', () => l1.status === 'idle' && l2.status === 'idle');
+  const said = (id: string) => JSON.stringify(store.readTranscript(id));
+  assert.match(said(l1.id), /You are leg 1 of 2, the host/);
+  assert.match(said(l2.id), /You are leg 2 of 2, a client/);
+  const h1 = machines.hooks!.handlersFor(l1, store.machines.get('pc')!);
+  assert.equal(String(await h1.message_pair!({ text: 'host listens at 100.74.97.12:7890 on 1a2b3c4' })), `Sent to leg 2 ${l2.id}.`);
+  await until('leg 2 hears it', () => said(l2.id).includes('[pair w2, from leg 1 (host)'));
+  // A worker that is no leg of a pair has no one to tell.
+  putRequests(store, [{ id: 'w3', by: BEN }]);
+  const other = await call(dispatcher().info, 'start_agent', { work_id: 'w3', prompt: 'Fix it', title: 'fix', sandbox: 'pc/alpha', extra_agent: true });
+  const o = store.sessions.get(/Started agent (\w+)/.exec(other.text)![1])!;
+  await assert.rejects(async () => machines.hooks!.handlersFor(o, store.machines.get('pc')!).message_pair!({ text: 'hi' }), /you are no leg of an open pair run/);
+});
+
+
+test('w1945: an older Queued pair run holds a computer’s last free sandbox from newer single work of no higher priority; urgent work goes first', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, dispatcher, call } = env;
+  putRequests(store, [{ id: 'w2', by: BEN, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 2 } }, { id: 'w3', by: BEN }]);
+  const start = (extra: Record<string, unknown> = {}) => call(dispatcher().info, 'start_agent', { work_id: 'w3', prompt: 'Fix it', title: 'fix', sandbox: 'pc/alpha', ...extra });
+  const held = await start();
+  assert.equal(held.isError, true);
+  assert.match(held.text, /pc's last free sandbox is held for w2 "Request w2" \(normal, Queued since 09:00 UTC\), a pair run of 2 legs, on computers that are not Macs, which starts only when that many computers have room at once \(w1945\): it can start now, start its legs first\. Start w3 on another computer; work of higher priority than the pair/);
+  assert.deepEqual(store.work.get('w3')!.sessionIds, []);
+  // Urgent single work goes first; so does work on a computer the pair does not fit.
+  store.work.get('w3')!.priority = 'urgent';
+  assert.equal(agents.pairHoldProblem('pc', store.work.get('w3')), undefined);
+  store.work.get('w3')!.priority = 'normal';
+  store.putMachine({ ...store.machines.get('pc')!, platform: 'darwin' });
+  assert.equal(agents.pairHoldProblem('pc', store.work.get('w3')), undefined, 'a Mac is no leg of this pair, so nothing is held there for it');
+  store.putMachine({ ...store.machines.get('pc')!, platform: 'win32' });
+  // A person's "Start now" makes it urgent: it starts.
+  store.work.get('w3')!.priority = 'urgent';
+  const ok = await start();
+  assert.equal(ok.isError, false, ok.text);
+});
+
+test('w1945: the WRONG flag and decide_work queue count a pair as room only with a computer per leg', async (t) => {
+  const env = await twoComputers(t);
+  const { store, agents, o, dispatcher, call } = env;
+  putRequests(store, [{ id: 'w2', by: BEN, status: 'new', pair: { legs: 2 } }]);
+  const fit = { pc: { platform: 'win32' }, beast: { platform: 'win32' } };
+  const one: RoomNow = { game: ['pc'], agent: ['pc'], held: [], fit };
+  const both: RoomNow = { ...one, game: ['pc', 'beast'] };
+  const facts = (r: RoomNow) => {
+    agents.roomNow = () => r.game;
+    agents.roomFacts = () => r;
+  };
+  facts(one);
+  const q = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'one computer has room' });
+  assert.equal(q.isError, false, q.text);
+  assert.match(store.work.get('w2')!.log.join('\n'), /queued for capacity; a pair run of 2 legs needs 2 computers with room at once, and only pc has room it fits/);
+  store.work.get('w2')!.queuedFor = { at: '2026-01-01T00:00:00.000Z' };
+  assert.deepEqual(o.flagQueuedWithRoom(one), [], 'one free computer is no room for two legs');
+  assert.deepEqual(o.flagQueuedWithRoom(both), ['w2']);
+  store.work.get('w2')!.status = 'new';
+  facts(both);
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'two have room' });
+  assert.match(refused.text, /start its 2 legs together \(start_agent with work_id "w2", sandbox for leg 1, the host, and pair_sandboxes for the others/);
 });
