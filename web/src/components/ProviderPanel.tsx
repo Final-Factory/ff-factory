@@ -225,7 +225,7 @@ function Setup({ p }: { p: Provider }) {
   return (
     <div className="pv-setup" data-testid="provider-setup">
       <p className="pv-setup-lead">
-        FFBox is not connected yet. Once it is, this page shows its container classes and free slots, the model each kind of requester gets, its conversations, and the crash, desync and hang reports players upload, grouped the way automatic investigations will use them (at most 20 a day).
+        FFBox is not connected yet. Once it is, this page shows its container classes and free slots, the model each kind of requester gets, its conversations, and the crash and desync reports players upload, grouped the way automatic investigations will use them (at most 20 a day).
       </p>
       <ol className="pv-steps">
         {steps.map((st) => (
