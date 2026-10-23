@@ -66,6 +66,8 @@ interface Rec {
   benchClosed?: MachineSandboxBenchClosed;
   /** What its next worker message hears about that close, once the editor starts again (w1829). */
   benchNote?: string;
+  /** remakeGone is making it again: kept so a daemon restart that cuts the remake off (an update) makes it again (w1918). */
+  remaking?: boolean;
 }
 
 /** The editor side of one sandbox: its MacUnity and hang/crash watch (a fake in tests). */
@@ -388,8 +390,11 @@ export class SandboxPool {
       this.o.onEvent({ text: `could not read ${this.o.stateFile}: ${(e as Error).message}` });
     }
     for (const r of rows ?? []) {
+      // A remake a daemon restart cut off (LothLaptop's slot1, w1918: the update that followed the fix landed mid-checkout):
+      // ready again, so remakeGone makes it again in this run, picking up the worktree it had added.
+      if (r.status === 'creating' && r.remaking) Object.assign(r, { status: 'ready', statusDetail: undefined });
       // A create or delete a daemon restart cut off: say so; delete_sandbox finishes it.
-      if (r.status === 'creating' || r.status === 'deleting') Object.assign(r, { status: 'error', statusDetail: `interrupted while ${r.status} (the daemon restarted); delete it and create it again` });
+      else if (r.status === 'creating' || r.status === 'deleting') Object.assign(r, { status: 'error', statusDetail: `interrupted while ${r.status} (the daemon restarted); delete it and create it again` });
       // A trim a restart cut off: the caches are intact or partly trimmed, both fine; the sandbox is free again.
       else if (r.status === 'cleanup') Object.assign(r, { status: 'ready', statusDetail: undefined });
       this.recs.set(r.id, r);
@@ -647,19 +652,29 @@ export class SandboxPool {
       await withBaseRepoLock(async () => {
         step('fetching origin');
         await must(['fetch', '--prune', 'origin'], 15 * 60_000);
+        // A remake a daemon restart cut off: the worktree it added is there (repaired, in case the cut came before the repair),
+        // so only the checkout below is left to do. A .git that no longer leads to the clone is dropped and added again.
+        let added = false;
+        if (remake && fs.existsSync(path.join(r.path, '.git'))) {
+          await this.d.git(['worktree', 'repair', r.path], { signal });
+          added = (await this.d.git(['-C', r.path, 'rev-parse', '--verify', '--quiet', 'HEAD'], { signal })).code === 0;
+          if (!added) fs.rmSync(path.join(r.path, '.git'), { recursive: true, force: true });
+          fs.rmSync(`${r.path}.remake`, { recursive: true, force: true });
+        }
         // A remade sandbox (remakeGone): the clone may still list the old folder as a worktree, which would refuse the add.
         if (remake) await this.d.git(['worktree', 'prune'], { signal });
         // An agent's folder (remakeGone): git adds a worktree only into a missing or empty folder, and a folder an agent
         // runs in cannot be moved on Windows. The worktree is added beside it and its .git moved in (git worktree repair);
         // what the agent put there stays. A folder holding a checkout's own files is left as it is.
         let into = r.path;
-        if (remake && fs.existsSync(r.path) && fs.readdirSync(r.path).length) {
+        if (remake && !added && fs.existsSync(r.path) && fs.readdirSync(r.path).length) {
           const tracked = new Set((await must(['ls-tree', '--name-only', 'HEAD'], 60_000)).stdout.split('\n').map((x) => x.trim().toLowerCase()).filter(Boolean));
           const clash = fs.readdirSync(r.path).filter((n) => tracked.has(n.toLowerCase()));
           if (clash.length) throw new Error(`${r.path} has no .git but holds a checkout's files (${clash.slice(0, 5).join(', ')}): left as it is; delete_sandbox, then create_sandbox`);
           into = `${r.path}.remake`;
           fs.rmSync(into, { recursive: true, force: true });
         }
+        if (added) return;
         step(`creating worktree on ${r.branch}`);
         const local = await this.d.git(['rev-parse', '--verify', '--quiet', `refs/heads/${r.branch}`], { signal });
         const remote = await this.d.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${r.branch}`], { signal });
@@ -707,11 +722,11 @@ export class SandboxPool {
       }
       step();
       this.git.set(r.id, await this.d.gitStatus(r.path));
-      this.changed(r, { status: 'ready', statusDetail: undefined });
+      this.changed(r, { status: 'ready', statusDetail: undefined, remaking: undefined });
       if (startUnity) await this.unity(r.id, 'start').catch((e) => this.changed(r, { statusDetail: `ready, but Unity did not start: ${(e as Error).message}` }));
     } catch (e) {
       if (signal.aborted) return; // remove() owns it now
-      this.changed(r, { status: 'error', statusDetail: (e as Error).message });
+      this.changed(r, { status: 'error', statusDetail: (e as Error).message, remaking: undefined });
     }
   }
 
@@ -723,14 +738,15 @@ export class SandboxPool {
    * pushed branch), else origin's, else its base, else the clone's default branch: work never pushed went with the drive.
    * Once per sandbox per daemon run: a remake that fails shows the error, and delete_sandbox then create_sandbox takes over.
    * An empty folder counts as gone (w1915: LothLaptop's slot1 came back as an empty folder, the worker's own directory, so
-   * nothing remade it); git makes a worktree in an empty folder.
+   * nothing remade it); git makes a worktree in an empty folder. A remake a daemon restart cut off is made again in the next run
+   * (Rec.remaking), from the worktree it had added.
    */
   private remakeGone() {
     const s = this.settings;
     if (!s || !fs.existsSync(s.root)) return;
     if (!fs.existsSync(path.join(this.o.repoPath, 'HEAD')) && !fs.existsSync(path.join(this.o.repoPath, '.git'))) return;
     for (const r of this.recs.values()) {
-      if (r.status !== 'ready' || this.busy.has(r.id) || this.remade.has(r.id) || !isGone(r.path)) continue;
+      if (r.status !== 'ready' || this.busy.has(r.id) || this.remade.has(r.id) || (!isGone(r.path) && !r.remaking)) continue;
       if (!deletable(r.path, r.id, s.root, this.o.repoPath)) continue;
       this.remade.add(r.id);
       const live = this.o.liveAgents?.(r.id) ?? 0;
@@ -739,7 +755,7 @@ export class SandboxPool {
       this.o.log?.(text);
       this.o.onEvent({ text, sandbox: r.id });
       this.git.delete(r.id);
-      this.changed(r, { status: 'creating', statusDetail: 'its folder was gone: making it again' });
+      this.changed(r, { status: 'creating', statusDetail: 'its folder was gone: making it again', remaking: true });
       const abort = new AbortController();
       this.provisioning.set(r.id, abort);
       this.busy.add(r.id);

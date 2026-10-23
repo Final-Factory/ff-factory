@@ -3629,7 +3629,7 @@ ${w.repo ?? ''}
             max_unity: z.number().int().min(1).max(16).optional().describe('action machine_update: set its Unity editor limit. Omitted: kept.'),
             dev_drive: z.boolean().optional().describe('action machine_update, a Windows PC (w900): make its Dev Drive (a VHDX in the install folder, mounted at the first free letter from V: down) if it has none. An update makes none on its own. The sandboxes stay where they are.'),
             move_to_dev_drive: z.boolean().optional().describe('action machine_update, a Windows PC (w900): also re-create its sandboxes and the Library seed on the Dev Drive (work saved on each branch first). Refused by the installer, naming them, while an agent is in a sandbox or a Unity editor runs from one.'),
-            dev_drive_max_gb: z.number().int().min(50).max(65536).optional().describe('action machine_update with dev_drive or move_to_dev_drive: the VHDX maximum in GB (default 90 % of the root volume, 100 to 1024).'),
+            dev_drive_max_gb: z.number().int().min(50).max(65536).optional().describe("action machine_update (Windows): the Dev Drive's maximum in GB, 50 to 65536. A new drive is made at it (default: what the pool needs, capped by the root volume's free space). An existing drive is grown to a larger one by its daemon once no agent or editor is in a sandbox (the first time, one administrator prompt on the PC installs the grow task); a smaller one is refused, since ReFS cannot shrink (w1918)."),
           },
           wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;

@@ -125,19 +125,55 @@ interface Scenario {
   reserved?: string[];
   state?: Record<string, unknown> | null;
   files?: Record<string, unknown>;
+  /** grow (w1918): the VHDX's maximum, the volume that holds it, editors' command lines, diskpart failing. */
+  sizeGB?: number;
+  hostGB?: number;
+  unity?: string[];
+  expandFails?: boolean;
 }
 
 /** Run the real ffsb-helper.ps1 mount against a faked PC; returns what it called and wrote. */
-function boot(sc: Scenario, o: { letter?: string; flex?: boolean; skip?: string[] } = {}) {
+function boot(sc: Scenario, o: { letter?: string; flex?: boolean; skip?: string[]; action?: string } = {}) {
   const work = tmp('boot');
   const args = ['-NoProfile', '-File', path.join(HERE, 'worker', 'test', 'devdrive-scenario.ps1'), '-Helper', path.join(HERE, 'privileged', 'ffsb-helper.ps1'), '-Work', work, '-Scenario', JSON.stringify({ autoLetter: '', inUse: ['C', 'D'], mapped: [], reserved: [], state: null, files: {}, ...sc }), '-Letter', o.letter ?? 'V'];
   if (o.flex === false) args.push('-NoFlex');
   if (o.skip) args.push('-Skip', o.skip.join(','));
+  if (o.action) args.push('-Action', o.action);
   const out = execFileSync(PWSH, args, { encoding: 'utf8', env: { ...process.env, DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: '1' } });
   fs.rmSync(work, { recursive: true, force: true });
   if (process.env.DEVDRIVE_DEBUG) console.log('boot scenario', JSON.stringify(sc), '=>', out);
   return JSON.parse(out) as { log: string; calls: string[]; held: string; result: { ok: boolean; detail: string } | null; state: { letter: string } | null; daemon: any; pool: PoolRec[] | null };
 }
+
+test("grow (w1918): the VHDX is detached, expanded to devdrive.json's wantGB, reattached at its letter and its volume extended; the state file then says the new maximum", { skip: needFake }, () => {
+  const g = boot({ attached: true, autoLetter: 'V', state: { letter: 'V', maxGB: 80, wantGB: 112 }, sizeGB: 80, hostGB: 900 }, { action: 'grow' });
+  assert.equal(g.result?.ok, true, JSON.stringify(g));
+  assert.deepEqual(g.calls, ['Dismount-DiskImage', 'expand 114688', 'Mount-DiskImage', 'Resize-Partition V 112']);
+  assert.match(g.result!.detail, /grew V: from 80 to 112 GB/);
+  assert.equal((g.state as Record<string, unknown>).maxGB, 112);
+  assert.equal('wantGB' in (g.state as Record<string, unknown>), false, 'the want is cleared once it is met');
+  assert.equal(g.held, 'V', 'attached again at its letter');
+});
+
+test('grow (w1918): never smaller, never past the host volume, never under an editor, and a failed expand still reattaches the drive', { skip: needFake }, () => {
+  const same = boot({ attached: true, autoLetter: 'V', state: { letter: 'V', maxGB: 112, wantGB: 80 }, sizeGB: 112 }, { action: 'grow' });
+  assert.equal(same.result?.ok, true);
+  assert.match(same.result!.detail, /already 112 GB .*never shrinks/);
+  assert.deepEqual(same.calls, [], 'nothing detached');
+  const huge = boot({ attached: true, autoLetter: 'V', state: { letter: 'V', maxGB: 80, wantGB: 5000 }, sizeGB: 80, hostGB: 900 }, { action: 'grow' });
+  assert.equal(huge.result?.ok, false);
+  assert.match(huge.result!.detail, /refused: 5000 GB is more than the/);
+  assert.deepEqual(huge.calls, []);
+  const ed = boot({ attached: true, autoLetter: 'V', state: { letter: 'V', maxGB: 80, wantGB: 112 }, sizeGB: 80, unity: ['"C:\\Unity\\Unity.exe" -projectPath V:\\ffw\\sandboxes\\slot1'] }, { action: 'grow' });
+  assert.equal(ed.result?.ok, false);
+  assert.match(ed.result!.detail, /refused: 1 Unity editor\(s\) use V:/);
+  assert.deepEqual(ed.calls, []);
+  const bad = boot({ attached: true, autoLetter: 'V', state: { letter: 'V', maxGB: 80, wantGB: 112 }, sizeGB: 80, expandFails: true }, { action: 'grow' });
+  assert.equal(bad.result?.ok, false);
+  assert.match(bad.result!.detail, /still 80 GB after diskpart expand vdisk/);
+  assert.deepEqual(bad.calls, ['Dismount-DiskImage', 'expand 114688', 'Mount-DiskImage'], 'reattached all the same');
+  assert.equal((bad.state as Record<string, unknown>).wantGB, 112, 'the want stays for the next try');
+});
 
 test('boot mount: a detached drive is attached and gets its letter back; an attached one is left alone', { skip: needFake }, () => {
   const a = boot({ attached: false, autoLetter: '', state: { letter: 'V' } });

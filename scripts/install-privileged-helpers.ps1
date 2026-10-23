@@ -5,7 +5,7 @@
 #   .\install-privileged-helpers.ps1 -PagefileGB 48        # also offer a fixed-pagefile action
 #   .\install-privileged-helpers.ps1 -Uninstall
 #   .\install-privileged-helpers.ps1 -Vhdx D:\work\ffw\devdrive.vhdx -Letter V -Flex -StateFile D:\work\ffw\devdrive.json `
-#       -DaemonConfig D:\work\ffw\daemon\daemon.json -WorkerRoot D:\work\ffw -Actions mount,trim,compact
+#       -DaemonConfig D:\work\ffw\daemon\daemon.json -WorkerRoot D:\work\ffw -Actions mount,trim,compact,grow
 #                                                          # a worker install's Dev Drive (w900, scripts/worker/devdrive.ps1 runs this)
 #
 # What it does: copies scripts\privileged\ffsb-helper.ps1 to %ProgramData%\ffsb-helpers (writable only by
