@@ -1538,8 +1538,8 @@ export class Daemon {
     if (this.idleClosing.has(id)) return { closed: false, text: 'skipped: it is being closed already' };
     this.idleClosing.add(id);
     try {
-      const until = timedHolder(this.cfg.root)?.until;
-      const res = await this.pool.benchClose(id, by, ticket, closedDetail(by, until), () =>
+      const holder = timedHolder(this.cfg.root);
+      const res = await this.pool.benchClose(id, by, ticket, closedDetail(by, holder?.until, holder?.kept), () =>
         idleCloseEditor(
           { bridge: this.editorBridge(id, sbPath), editorPids: () => this.pool.editorPids(id), personInputAgoMs: () => undefined, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now() },
           0,

@@ -126,6 +126,31 @@ Its `ssh`, `scp`, `sftp`, `fffctl` and `fff-machine-ssh` are wrappers on its PAT
 `list_sandboxes` and `system_status` (read only), its own `wake_me`, and its own timers (`set_timer`, `list_timers`,
 `update_timer`, `cancel_timer`; [Polls and waits](#polls-and-waits-timers-w1106)). `ops_worker status` lists its timers.
 
+## Git and GitHub jobs (w1869)
+
+lothsahn, 2026-10-23: "Analyze your recent tool failures and make it so they don't happen in the future." The job that
+deleted w1788's three branches first failed: the worker tried `gh` in the VM, its guard refused it ("no git here"), and it
+reported that the VM has no GitHub access. A follow-up from lothsahn's orchestrator had to name the route ("using a worker
+machine's own GitHub login over ssh is the intended route. First choice: m3 ... else beast").
+
+The VM keeps no git and no GitHub token of its own: its network reaches only Anthropic's API and the tailnet
+(`fff-ops@.service` `IPAddressDeny=any`), and a token there would be one more secret in a shell that people's
+orchestrators drive. The route is the machines' own logins, over the ssh the worker already has:
+
+- **Where**: m3 first (its gh login), else beast (Ben's gh login, docs/vault.md section 13); never a machine on hold or
+  one the job rules out. Check first: `ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh auth status 2>&1 | grep -v Token'`
+  and `gh api repos/OWNER/REPO --jq .permissions`. A Mac's non-interactive ssh shell has no Homebrew on its PATH, hence the
+  export.
+- **A branch delete** needs no clone: `gh api repos/OWNER/REPO/branches/BRANCH --jq .commit.sha` (it is there),
+  `gh api -X DELETE repos/OWNER/REPO/git/refs/heads/BRANCH`, then `git ls-remote --heads git@github.com:OWNER/REPO.git BRANCH`
+  prints nothing. This is the sequence the w1788 job ran (the portal's journal, 2026-10-23 15:16Z).
+- **A job that needs a clone** makes it in a new `mktemp -d` folder on the machine, never in a person's clone or a sandbox.
+- Only what the job names is deleted, closed or merged; no token is printed (`grep -v Token` on `gh auth status`).
+
+Where it is said: the worker's brief (`opsBrief`, `server/opsWorker.ts`), the guard's refusal of `git`, `gh` and `git-lfs`
+in the VM (`OPS_GITHUB_ROUTE`: it names the same route, so a worker that tries locally learns it at once), and the
+`ops_worker` tool's description. Test: `server/opsWorker.test.ts` (w1869).
+
 ## A new machine
 
 **The short way since w1592: a join code, and no job for this worker.** lothsahn: "I can connect to tailscale and then it
@@ -221,8 +246,33 @@ fffctl apikey revoke <key name>        # a member login's key; the login stays
   a missing login without `--create-member`, a key name that the owner's key, a scoped key (`nightly`, `ffbox`) or another
   login's key holds, an existing `--out` file, any option not listed (there is no `--role`). `revoke` refuses the same keys.
   Those stay a person's: `node server/apikey.ts` in the release.
-- Re-issuing a name for the same login replaces its key (a rerun after a failed write). Removing the login itself is not
-  here: a member login with a password nobody knows and no key cannot be used.
+- Re-issuing a name for the same login replaces its key (a rerun after a failed write). Removing the login itself, with
+  its keys: `fffctl user delete` below.
+
+## Deleting a member login (w1864)
+
+lothsahn, 2026-10-23, w1864: "the portal has no way to remove a login. Add one, then use it to delete the throwaway member
+login `w1021-test`".
+
+```bash
+fffctl user list                               # the logins: id, role, display name (never a hash)
+fffctl user delete w1021-test --by lothsahn    # --by: the person whose job this is (ben or lothsahn)
+```
+
+- `fff-ops-priv` passes `user delete ID --by ben|lothsahn` and adds `--members-only`; it refuses `ben` and `lothsahn` as the
+  ID and any other word. `fffctl user delete` (`server/userCli.ts`, as the portal's account) drops a request into
+  `data/login-delete/` and waits up to 30 s for the running portal's answer; a portal that does not answer leaves nothing
+  deleted (the request is taken back). The portal does the delete itself (`server/loginDelete.ts`), because it holds the
+  login's sessions, settings and orchestrator in memory.
+- In one step: the login (`users.json`), its API keys, its sessions, its pool entry (w1717) and its own `heartbeat` and
+  `dismissedEvents` settings, its push subscriptions, its own orchestrator (the session, its process stopped) and that
+  orchestrator's memory folder (moved to the memory trash, kept 30 days). Everything is checked first.
+- Refused, nothing touched: a missing login (or one that differs only in case), the login it is run as or for (`--by`), the
+  last owner, an owner login in this form (`--members-only`), and a login another person's pool setting names (set that
+  back to self first: the delete changes no other login).
+- It prints what went: key names and counts, never a key or a password (only their hashes were ever kept). A person runs
+  `sudo fffctl user delete ID --by LOGIN` for any login but the last owner and their own.
+
 
 ## How it runs
 
@@ -281,6 +331,7 @@ process of the portal: it would get the portal's account and everything that acc
 | pin a new machine's host key (w676) | `fff-machine-ssh --pin USER@HOST FINGERPRINT`, the same way. As `fff`, it writes the key into the portal account's `~/.ssh/known_hosts` and `~/.ssh/fff-pins.ssh` (0600 `fff`, which `fff-ops` cannot read or write) and the alias into the managed block of `~/.ssh/config`, only when the key HOST shows over the tailnet now is FINGERPRINT and nothing pins HOST yet (`machines.ssh`, an earlier pin, `known_hosts` or `known_hosts2`). `fff-ops-priv` passes only `--check`, `--key` and `--pin` with exactly two words: never `--fix` or `--data` (a file of the worker's would be pinned) |
 | issue a machine credential | `fffctl credential issue ID --to TARGET`: as root, it checks that TARGET answers ssh first (an issued credential replaces the machine's old one) and that the portal has a record for ID (w676: `state.json`, read as root), issues to a root-only temp file, pipes it over ssh into `~/.ff-factory/machine-credential-ID` on the machine (Windows: `%USERPROFILE%\.ff-factory\`), and prints only that path and the last four characters. The token never passes through the worker, the transcript or chat |
 | mint, list and revoke an API key for a member login (w1415) | `fffctl apikey issue NAME --user ID [--create-member [--display-name TEXT]] --machine TARGET --path FILE`, `fffctl apikey list` and `fffctl apikey revoke NAME` (`fff-ops-priv apikey`; `FFFCTL_FORMS.apikey` in `server/opsWorker.ts`, whose `ops` forms the guard lets through). `fff-ops-priv` refuses `ben` and `lothsahn`, bad names and paths and any other option before anything runs, checks the machine answers ssh, and writes the key only into a 0600 file there; `server/memberKeys.ts` refuses owner logins and keys that act for the owner, have a scope or belong to another login. [API keys for a member login](#api-keys-for-a-member-login-w1415) |
+| list the logins and delete a member login (w1864) | `fffctl user list` and `fffctl user delete ID --by ben\|lothsahn` (`fff-ops-priv user`; `FFFCTL_FORMS.user` in `server/opsWorker.ts`, whose `ops` form the guard lets through). `fff-ops-priv` refuses `ben` and `lothsahn`, any other `--by` and any other word, and adds `--members-only`; `server/loginDelete.ts` refuses an owner, the last owner, the `--by` login itself and a login another person's pool names. [Deleting a member login](#deleting-a-member-login-w1864) |
 | write notes and scripts | its scratch folder `/srv/fff-ops/scratch` (the guard), on its own file system (the OS) |
 
 | It may not | Enforced by |
@@ -299,7 +350,8 @@ The unit's sandbox (`fff-ops@.service`, written by `deploy/vm/guest/install.sh`)
 
 - `ProtectSystem=strict`, with `ReadWritePaths` limited to its scratch and to `/srv/fff`. `fff-ops` itself cannot
   enter `/srv/fff`. It stays writable only for what sudo runs as root there: issuing a credential writes the portal's
-  machine-token file, and `fffctl apikey` its `users.json` and `api-keys.json` (w1415).
+  machine-token file, `fffctl apikey` its `users.json` and `api-keys.json` (w1415), and `fffctl user delete` its
+  `data/login-delete/` request (w1864).
 - `ProtectHome=tmpfs`.
 - A private 64 MB `/tmp`, 16 MB `/var/tmp` and 16 MB `/dev/shm`.
 - `IPAddressDeny=any` with the allowlist above.

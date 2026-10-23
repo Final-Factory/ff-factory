@@ -87,6 +87,13 @@
 #                                       it to FILE (0600), never the screen, and --create-member makes the login first (a member,
 #                                       a random password nobody sees). Never an owner's login, never ben's or lothsahn's, never a
 #                                       key that acts for the owner or has a scope (node server/apikey.ts; docs/ops-worker.md)
+#   fffctl user list | delete ID --by LOGIN [--members-only]
+#                                       the portal's logins (w1864): list shows id, role and display name (never a hash); delete
+#                                       removes a login with its API keys, sessions, pool entry and other settings, push
+#                                       subscriptions and its own orchestrator (session and memory, the memory to its trash),
+#                                       done by the running portal in one step. --by is the login it is run as or for, never the
+#                                       one deleted; the last owner is refused; --members-only refuses an owner. Prints what it
+#                                       removed (key names, counts), never a key or a password (node server/userCli.ts)
 #   fffctl scrub-secrets [--dry-run]    mask every vault value and token shape already on disk (w1584): the data folder (transcripts,
 #                                       saved generations of state.json and work.json, logs) and the portal account's Claude Code
 #                                       transcripts. Prints paths and counts, never a value; the last line is "remaining: N", and
@@ -467,6 +474,13 @@ scrub_cli() {
 apikey_cli() {
   [ -e "$CURRENT/server/memberKeyCli.ts" ] || die "the current release has no server/memberKeyCli.ts (fffctl update first)"
   as_fff_in "$CURRENT" env FFSB_CONFIG="$FFF_ROOT/config/config.json" node server/memberKeyCli.ts "$@"
+}
+
+# Logins (w1864): list reads users.json; delete hands the running portal a request in its data folder and prints its answer
+# (server/userCli.ts, server/loginDelete.ts), as the portal's account.
+user_cli() {
+  [ -e "$CURRENT/server/userCli.ts" ] || die "the current release has no server/userCli.ts (fffctl update first)"
+  as_fff_in "$CURRENT" env FFSB_CONFIG="$FFF_ROOT/config/config.json" node server/userCli.ts "$@"
 }
 
 # vault_add_claude PERSON [NAME]:one Claude token into a person's pool (docs/vault.md, section 12). The pool's entries are named
@@ -900,6 +914,7 @@ case "${1:-status}" in
   vault) shift; cmd_vault "$@" ;;
   machine-credential) shift; vault_cli machine-credential "$@" ;;
   apikey) shift; apikey_cli "$@" ;;
+  user) shift; user_cli "$@" ;;
   scrub-secrets) shift; case "${1:-}" in '' | --dry-run) [ $# -le 1 ] || die "fffctl scrub-secrets [--dry-run]"; scrub_cli "$@" ;; *) die "fffctl scrub-secrets [--dry-run]" ;; esac ;;
   -h | --help | help) sed -n '2,/^set -o/{/^#/p}' "$0" ;;
   *) die "unknown command $1 (fffctl help)" ;;

@@ -50,6 +50,11 @@
 #                                      lothsahn, a NAME held by another login's, the owner's or a scoped key. TARGET must
 #                                      answer ssh first; a key that cannot be written there is revoked again.
 #   fffctl apikey revoke NAME          revoke a key that acts for a member login (the login stays)
+#   fffctl user list                   the portal's logins: id, role, display name (never a hash)
+#   fffctl user delete ID --by LOGIN   delete member login ID (w1864) with its API keys, sessions, pool entry, settings, push
+#                                      subscriptions and its own orchestrator, in the running portal; LOGIN is the person whose
+#                                      job this is (ben or lothsahn). Refused: an owner login, ben and lothsahn. Prints what
+#                                      went (key names, counts), never a key
 #   fffctl conf [get [KEY]]            fff.conf's settings (w1537), each with its value; a credential, key, secret or another
 #                                      setting that is a person's shows as <redacted>
 #   fffctl conf set KEY VALUE          change one fff.conf setting (fffctl conf: not a credential, key or secret, not the deploy's
@@ -315,6 +320,21 @@ case "${1:-help}" in
         exec "$FFFCTL" apikey revoke "$3"
         ;;
       *) refuse "apikey list | apikey issue NAME --user ID [--create-member [--display-name TEXT]] --machine TARGET --path FILE | apikey revoke NAME (an owner's key, a scoped one or one for ben or lothsahn is a person's: node server/apikey.ts)" ;;
+    esac
+    ;;
+  user)
+    # w1864: a member login only, for the person whose job it is (fffctl user delete --members-only and server/loginDelete.ts
+    # refuse an owner, the last owner and the login it runs for). list passes exactly its word.
+    case "${2:-}" in
+      list) [ $# -eq 2 ] || refuse "user list takes nothing more"; exec "$FFFCTL" user list ;;
+      delete)
+        [ $# -eq 5 ] && [ "$4" = --by ] || refuse "user delete ID --by LOGIN (LOGIN: ben or lothsahn, whose job this is)"
+        [[ $3 =~ ^[A-Za-z0-9._-]{2,32}$ ]] || refuse "not a login id: '${3:0:40}'"
+        case "${3,,}" in ben | lothsahn) refuse "'$3' is a person's own login (Ben's or Lothsahn's): deleting it is a person's, never yours" ;; esac
+        case "$5" in ben | lothsahn) ;; *) refuse "--by is ben or lothsahn, whose job this is (not '${5:0:40}')" ;; esac
+        exec "$FFFCTL" user delete "$3" --by "$5" --members-only
+        ;;
+      *) refuse "user list | user delete ID --by LOGIN (an owner login, ben's or lothsahn's is a person's: sudo fffctl user delete)" ;;
     esac
     ;;
   conf)

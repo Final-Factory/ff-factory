@@ -276,6 +276,14 @@ case "$modes" in "600 fff "[0-7][0-7][0-7]" fff "[0-7][0-7][0-7]" fff ") ;; *) f
 printf '%s' "$out" | matches -E '^ci-key +ci-member ' || fail "fffctl apikey list does not show the key: $out"
 printf '%s' "$out" | matches -F 'revoked ci-key' || fail "fffctl apikey revoke: $out"
 if printf '%s' "$out" | matches 'ffsb_[A-Za-z0-9_-]{20}'; then fail "fffctl apikey printed the key"; fi
+# Deleting a login (w1864): the running portal takes the request from fffctl user delete and removes the login with its key.
+out=$(g 'sudo fffctl apikey issue ci-key3 --user ci-member --out /tmp/ci-key3 && sudo fffctl apikey issue ci-key4 --user ci-by --create-member --out /tmp/ci-key4 && sudo fffctl user delete ci-member --by ci-by && sudo fffctl user list; sudo rm -f /tmp/ci-key3 /tmp/ci-key4')
+echo "$out"
+printf '%s' "$out" | matches -F 'deleted the login ci-member' || fail "fffctl user delete: $out"
+printf '%s' "$out" | matches -x -F 'API keys: ci-key3' || fail "fffctl user delete did not remove the login's key: $out"
+if printf '%s' "$out" | matches -E '^ci-member +member'; then fail "fffctl user list still shows the deleted login: $out"; fi
+printf '%s' "$out" | matches -E '^ci-by +member' || fail "fffctl user list does not show the other login: $out"
+if printf '%s' "$out" | matches 'ffsb_[A-Za-z0-9_-]{20}'; then fail "fffctl user delete printed a key"; fi
 echo "ok: the vault key is root's and loaded by the portal; values and credentials never printed"
 # Whose tokens (w512, docs/vault.md): a person's tokens kept on the host go into the vault with fff-vm vault-sync, never
 # printed; a classic GitHub token is refused; a second sync changes nothing; a removed file removes its entry; the key's

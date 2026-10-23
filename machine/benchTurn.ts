@@ -32,10 +32,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { QueueTicket } from './benchQueue.ts';
+import { holdEnds } from './benchLock.ts';
 import type { Proc } from './unity.ts';
 import { run, type RunResult } from '../server/proc.ts';
 
-export type Holder = QueueTicket & { until: number };
+export type Holder = QueueTicket & { until: number; kept?: boolean };
 
 export interface TurnEditor {
   id: string;
@@ -124,16 +125,16 @@ export function holderText(h: Pick<QueueTicket, 'host' | 'sandbox' | 'requests' 
 }
 
 /** The sandbox line's and the panel's detail for an editor a turn closed. */
-export function closedDetail(by: string, until?: number): string {
-  return `closed for ${by}; reopens when it ends${until ? ` (by ${hhmm(until)} at the latest)` : ''}`;
+export function closedDetail(by: string, until?: number, kept?: boolean): string {
+  return `closed for ${by}; reopens when it ends${until ? ` (${holdEnds(until, kept)})` : ''}`;
 }
 
 /** What a worker hears when it calls its Unity editor while a turn keeps it closed (the guard's refusal). */
-export function closedRefusal(by: string, at: number, until: number): string {
+export function closedRefusal(by: string, at: number, until: number, kept?: boolean): string {
   return (
     `Your sandbox's Unity editor was closed at ${hhmm(at)} for ${by} (w1829: while another worker's exclusive bench ticket ` +
     `times a run, nothing else runs on this machine). Its scenes and assets were saved first; anything in play mode is gone. ` +
-    `FF Factory starts it again when that run ends, by ${hhmm(until)} at the latest, in the next shared turn. Do what needs no ` +
+    `FF Factory starts it again when that run ends, ${holdEnds(until, kept)}, in the next shared turn. Do what needs no ` +
     `editor meanwhile, or wake_me in 10 minutes; mcp__machine__unity status says when it is up.`
   );
 }
@@ -195,7 +196,7 @@ export class BenchTurn {
     const now = this.d.now();
     const h = this.d.holder();
     if (h?.ticket !== this.current) {
-      if (h) this.d.log(`bench turn: ${h.ticket} granted to ${holderText(h)}: closing the other editors and players here until it ends (by ${hhmm(h.until)} at the latest)`);
+      if (h) this.d.log(`bench turn: ${h.ticket} granted to ${holderText(h)}: closing the other editors and players here until it ends (${holdEnds(h.until, h.kept)})`);
       if (this.current) this.d.log(`bench turn: ${this.current} ended: reopening the editors it closed`);
       this.current = h?.ticket;
       this.asked.clear();
@@ -268,7 +269,7 @@ export class BenchTurn {
               this.d.log(`bench turn: sandbox ${b.sandbox}: batch Unity pid ${b.pid}: ${text}`);
               this.d.noteSandbox?.(
                 b.sandbox,
-                `[bench turn] Your batch Unity run (pid ${b.pid}: a build, a test run or a batch compile) was stopped at ${hhmm(now)} for ${by} (w1860: while another worker's exclusive bench ticket times a run, no build or test run runs beside it). It held no bench ticket: it started without one, or its ticket was revoked and it went on. Your files are as they were. Run it again under unity-slot run: it waits for its shared turn, after that run (by ${hhmm(h.until)} at the latest).`,
+                `[bench turn] Your batch Unity run (pid ${b.pid}: a build, a test run or a batch compile) was stopped at ${hhmm(now)} for ${by} (w1860: while another worker's exclusive bench ticket times a run, no build or test run runs beside it). It held no bench ticket: it started without one, or its ticket was revoked and it went on. Your files are as they were. Run it again under unity-slot run: it waits for its shared turn, after that run (${holdEnds(h.until, h.kept)}).`,
               );
             },
             (err) => this.d.log(`bench turn: sandbox ${b.sandbox}: could not stop batch Unity pid ${b.pid}: ${(err as Error).message}`),
@@ -306,7 +307,7 @@ export class BenchTurn {
         this.d.notePlayer?.(p.session, `[bench turn] Your game player (pid ${p.pid}) was asked to quit at ${hhmm(now)} for ${by} (w1829: while another worker's exclusive bench ticket times a run, nothing else runs on this machine). A single-player game normally saves as it quits; a multiplayer game and an automation run (-ffAutomationRole) do not, so a test or audit it was part of is void: run it again after that run (player_slots.py --bench-wait waits for it).`);
     }
     const marks: Record<string, string> = {};
-    for (const c of this.d.closed()) if (c.id !== h.sandbox) marks[c.id] = closedRefusal(by, c.at, h.until);
+    for (const c of this.d.closed()) if (c.id !== h.sandbox) marks[c.id] = closedRefusal(by, c.at, h.until, h.kept);
     this.write(marks);
   }
 

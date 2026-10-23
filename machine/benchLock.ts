@@ -98,7 +98,7 @@ export function writeBenchPriorities(root: string | undefined, sessions: Record<
  * limit still counts while nobody waits (w1832): the queue revokes it at the deadline a waiter sets, and what it quieted
  * comes back then.
  */
-export function timedHolder(root: string | undefined, now: number = Date.now(), alive: (pid: number) => boolean = pidAlive): (QueueTicket & { until: number }) | undefined {
+export function timedHolder(root: string | undefined, now: number = Date.now(), alive: (pid: number) => boolean = pidAlive): (QueueTicket & { until: number; kept?: boolean }) | undefined {
   if (!root) return undefined;
   for (const t of queueTickets(benchLockDir(root), alive)) {
     if (t.mode !== 'exclusive' || !t.granted || t.revoked) continue;
@@ -106,7 +106,9 @@ export function timedHolder(root: string | undefined, now: number = Date.now(), 
     // the machine; its end is the deadline a waiter set, else its turn's end (or the 5-minute warning from now, past it)
     const turnEnd = t.granted.ts * 1000 + turnMinOf(t) * 60_000;
     const deadline = typeof t.limit?.deadline === 'number' ? t.limit.deadline * 1000 : undefined;
-    return { ...t, until: deadline ?? Math.max(turnEnd, now + BENCH_WARN_LEAD_MIN * 60_000) };
+    // w1860: with no deadline and keep.json, only lower-priority work waits: it keeps the lock until it lets go
+    const kept = deadline === undefined && !!t.keep;
+    return { ...t, until: deadline ?? Math.max(turnEnd, now + BENCH_WARN_LEAD_MIN * 60_000), ...(kept ? { kept } : {}) };
   }
   return undefined;
 }
@@ -117,6 +119,10 @@ export const BENCH_WARN_LEAD_MIN = 5;
 const turnMinOf = (t: QueueTicket) => (t.turnMin ? Math.min(t.turnMin, 30) : (t.maxMin ?? 60));
 
 const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16) + 'Z';
+
+/** When a timed hold ends, for people (w1860): "by 10:00Z at the latest", or for a holder that keeps the lock because
+ * only lower-priority work waits (timedHolder `kept`), "when it lets go": no time can be promised then. */
+export const holdEnds = (until: number, kept?: boolean) => (kept ? 'when it lets go (only lower-priority work waits, so it keeps the lock, w1860)' : `by ${hhmm(until)} at the latest`);
 
 /**
  * w1750 (lothsahn, 2026-10-22, after a worker shot clips with a player on BEAST beside another worker's timed profile:
@@ -133,7 +139,7 @@ export function foreignTimedHold(root: string | undefined, session: string | und
     if (session && t.session === session) return undefined;
     const bits = [(t.requests ?? []).join(','), [t.host, t.sandbox].filter(Boolean).join('/'), t.what ? `"${t.what.slice(0, 120)}"` : ''].filter(Boolean);
     const who = t.session ? `worker ${t.session}` : `pid ${t.pid}`;
-    return `bench lock held by ${who}${bits.length ? ` (${bits.join(', ')})` : ''}, until ${hhmm(t.until)} at the latest (held since ${hhmm(t.granted!.ts * 1000)})`;
+    return `bench lock held by ${who}${bits.length ? ` (${bits.join(', ')})` : ''}, ${t.kept ? 'until it lets go (only lower-priority work waits, so it keeps the lock, w1860)' : `until ${hhmm(t.until)} at the latest`} (held since ${hhmm(t.granted!.ts * 1000)})`;
   }
   const old = readBenchLock(root, now, alive);
   if (old && !/\[t\d{8}\]/.test(old.owner)) return `bench lock held by an old-style lock: ${old.owner} (seen since ${hhmm(Date.parse(old.since))}, 40 minutes at most)`;

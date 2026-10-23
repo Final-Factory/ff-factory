@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, pausedIn, ownerAt, partOfIdsIn, partOfReason, postDeployStep, prsOf, prUrlsIn, reportDelivers, reportVerdict, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -277,4 +277,18 @@ test('w915: pausedIn reads a worker\'s set-aside lines, by request, as written; 
   const text = 'On w911 now.\n\n**w909**: paused: the runner group needs an admin\n- w910 - set aside until w911 lands\nIt says w912: paused somewhere in a sentence.\nw913: still open: the audit';
   assert.deepEqual([...pausedIn(text)], [['w909', 'w909**: paused: the runner group needs an admin'], ['w910', 'w910 - set aside until w911 lands']]);
   assert.equal(pausedIn('').size, 0);
+});
+
+test('w1869: a report delivers what a request blocked on it waits for only with DONE, a "For <waiter>:" line, or no progress line for it', () => {
+  // w1820 waited on w1785's timing; this progress line cleared it.
+  assert.equal(reportDelivers('B building.\n\nw1785: still open: the LothDesktop A/B is running…', 'w1785', 'w1820'), false);
+  assert.equal(reportDelivers('**w1785: paused:** w1790 first', 'w1785', 'w1820'), false);
+  assert.equal(reportDelivers('NOT DONE: w1785 the A/B', 'w1785', 'w1820'), false);
+  assert.equal(reportDelivers('Timing: 41 ms.\n\n**For w1820:** A 41.2 ms, A 41.0 ms\n\nw1785: still open: the PR', 'w1785', 'w1820'), true);
+  assert.equal(reportDelivers('For w1821: something else\n\nw1785: still open: the PR', 'w1785', 'w1820'), false, 'addressed to another request');
+  assert.equal(reportDelivers('Learned: nothing new\nDONE: w1785', 'w1785', 'w1820'), true);
+  assert.equal(reportDelivers('Timing table in specs/633/timing.md.', 'w1785'), true, 'no status line at all: as before');
+  assert.equal(reportDelivers('w1790: still open: the clips', 'w1785', 'w1820'), false, "only another request's progress");
+  assert.equal(reportDelivers('w1785 timing is in timing.md.\nw1790: still open: the clips', 'w1785', 'w1820'), true);
+  assert.equal(reportDelivers(undefined, 'w1785', 'w1820'), false);
 });

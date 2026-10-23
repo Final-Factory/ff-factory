@@ -592,7 +592,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 
 | kind | `ref` | clears (it starts by itself) | stuck after (it stalls, saying so) |
 |---|---|---|---|
-| `request` | the request it waits on ("w633"); `on`: `done` (default) or `report` | that request closes as done; with `on: report`, also when a worker on it finishes a turn with a report. Merges are followed. Declined or cancelled: it asks its requester (Waiting on input). Stalled: it stalls too | never by time: it follows that request, which the cleanup stalls by itself when nothing works on it |
+| `request` | the request it waits on ("w633"); `on`: `done` (default) or `report` | that request closes as done; with `on: report`, also when a worker on it reports what it waits for (w1869, below). Merges are followed. Declined or cancelled: it asks its requester (Waiting on input). Stalled: it stalls too | never by time: it follows that request, which the cleanup stalls by itself when nothing works on it |
 | `deploy` | none for the portal; a machine id for that machine's daemon update | a different commit runs there than when it was blocked (`version.ts` `appVersion`, the daemon's) | 7 days |
 | `machine` | the machine | it is online | 3 days |
 | `usage` | the vault token ("vault-lothsahn-1" or "vault-lothsahn-1 …EAAA") or the person whose Claude pool it is ("lothsahn", "lothsahn's pool"); another account by its email or label. Kept as the token's label; a ref nothing answers to is refused (w1126). `until`: the hold's end, filled in from the pool's first reset | that pool can serve a worker again (looked at each minute and on each usage reading), or `until` passes, whichever comes first; the request's worker is resumed then (w1126); another account when its meters are under 90% | 8 days |
@@ -606,6 +606,21 @@ a day is a run that never ended; a machine away three days is down, not asleep; 
 days; a portal deploy follows a merge by itself (w1634, [ops-worker.md](ops-worker.md) "Automatic deploys"), so a week
 without one means it is off or failing, worth a person's look.
 
+- **A wait on a report clears on the result, not on progress** (w1869; lothsahn: "Analyze your recent tool failures and
+  make it so they don't happen in the future"). w1820 was blocked on "w1785 reporting (dec9a619's LothDesktop timing of A
+  vs A + PR #2268)"; w1785's worker ended a turn with "w1785: still open: the LothDesktop A/B is running…", the block
+  cleared on that, and w1820's worker resumed with no timing. A `request` gate with `on: report` (decide_work's, or a
+  worker's `blocked_on` reports) on wX set at time T now clears when wX closes as done, or when a worker on wX finishes a
+  turn after T whose report (`server/ledgerRules.ts` `reportDelivers`):
+  - has `DONE: wX` (even one the ledger refuses while a PR is open: the result is in it), or
+  - has a line `For <waiting request>: …`, or
+  - has no `wX: still open:` (or `NOT DONE`, `paused`) line for wX, and names wX or has no such line for any request.
+
+  A progress report (a still-open or paused line for wX) or one about another request only leaves it Blocked. So that the result can be told from progress, when such a
+  gate is set the workers on wX are sent what it waits for and asked to mark the report that carries it with
+  `For <waiting request>:` (`Orchestrators.tellReportWaited`; not a worker that waits on a person, whose declaration a
+  message would end). The gate's `what` is what they are told, so name the result there ("dec9a619's LothDesktop timing
+  of A vs A"), not "w1785 reporting". A lock's holder still frees it with any report.
 - **It unblocks by itself.** The blocker watch (`server/blockerWatch.ts`) looks at every blocked request each minute,
   and at once when one is blocked or the nightly lab reports. When the blocker clears, a worker whose check-in the block
   cancelled gets it back (below, "No poll is left behind") and the request is its again (`active`); otherwise the request
@@ -1718,6 +1733,19 @@ A timer is a standing job (`server/timers.ts`):
   so. A runaway timer costs at most 96 short turns a day. `TIMER_LIMITS` in `server/timers.ts`.
 - **No authority.** The message is `system`, so a turn it starts is not a person's (`turnFrom`): the dispatcher's destructive
   and admin tools refuse it, as do approvals, and a personal orchestrator's per-message budgets do not reset.
+- **Timers and the filings limit** (w1867, lothsahn: "Let your timers go past the cap, with a limit of 100. Not a daily
+  limit. If you hit the 100 limit, file a bug to investigate why."). A turn a person's own orchestrator's timer started
+  (`Orchestrators.timerTurn`: the turn's opening message, `SessionHandle.turnId`, is the one the timers delivered,
+  `timerSent`) has its own filings limit, per person: config `orchestrator.timerFilingsPerMessage` (`{ "lothsahn": 100 }`,
+  an owner's only, each 1 to 100, `timerFilings`); a person not named there has `orchestrator.filingsPerMessage` (default
+  20) in their timers' turns too. It counts the same filings as the other limit and the same way: every filing since the
+  person last wrote, whatever turn made it, started again by their next message, not per day. So with 100, a timer turn
+  goes on where a worker's report or a dispatch would stop at 20, and stops at the 100th filing since the person wrote;
+  the 101st is held and offered back with their next message like any refused call ([Calls a gate refused](#calls-a-gate-refused-w830)).
+  Turns the person starts, dispatches, worker reports and every other harness turn keep `orchestrator.filingsPerMessage`.
+  Nothing else changes for a timer's turn: approvals, deletes, settings and closing a member's request still need the
+  person's own turn. At 100 filings FF Factory files a bug to look into why, by itself: see
+  [Loops, limits and safety](#loops-limits-and-safety).
 - **Who sees them.** Only the owning orchestrator (its tools take only its own ids) and, in the UI, its person: the
   Timers button in your chat's header, and the dispatcher's for owners (`GET /api/timers/<orchestrator id>`, `POST
   /api/timers/<orchestrator id>/<timer id> {action: pause|resume|cancel}`, guarded like writing to that chat). It lists
@@ -2202,14 +2230,29 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
 ## Loops, limits and safety
 
 - The dispatcher reaches people only through ledger decisions, one reply per decision.
-- A person's orchestrator files or updates at most 3 times, and follows up with one worker at most 3 times, between two
-  messages of its person (`orchestrator.filingsPerMessage`, `orchestrator.followUpsPerMessage`), counted per sender: an
+- A person's orchestrator files or updates at most 20 times, and follows up with one worker at most 3 times, between two
+  messages of its person (`orchestrator.filingsPerMessage`, `orchestrator.followUpsPerMessage`; filings were 3 until w1867,
+  lothsahn: "Let's increase orchestrator actions between turns to 20 from 3.", a default for every orchestrator), counted per sender: an
   owner's follow-ups to another owner's worker never use up that owner's own (w677). Harness messages alone
   (a worker's report, a timer, another orchestrator) cannot keep it going. A close (done or cancelled, their own request
   or, for an owner, another person's) in a turn the person started with their own message is not counted (w631:
   Lothsahn's one "close everything that's done" was refused after three closes); a close in a harness turn still is.
   A call the limit refuses is held and offered back with the person's next message, never turned into a question for
-  them ([Calls a gate refused](#calls-a-gate-refused-w830)), and recording a conditional decision is not counted.
+  them ([Calls a gate refused](#calls-a-gate-refused-w830)), and recording a conditional decision is not counted. In a
+  turn the person's own timer started the limit is theirs in `orchestrator.timerFilingsPerMessage` (Lothsahn's 100,
+  w1867; [Timers](#timers)), counted with the rest.
+- **At 100 filings FF Factory files an investigation bug itself** (w1867, lothsahn: "The bug filing should be allowed at
+  the 100 limit. It should be part of the harness for any turn. Any orchestrator that hits 100 in a turn should file an
+  investigation bug, the orchestrator should not have to do it."). Every filing a personal orchestrator makes is
+  tallied (`Orchestrators.tally`), those the limit does not count included (a close in the person's own turn): per turn,
+  and since the person last wrote. When either reaches `INVESTIGATE_AT` (100), in any kind of turn, for any person,
+  `fileInvestigation` files a request for that person on `Final-Factory/ff-factory` (`INVESTIGATE_REPO`, needs an agent
+  slot): "Investigate: <person>'s orchestrator made 100 filings in one turn" (or "since <person> last wrote"). Its brief
+  names the orchestrator's session with its transcript link, the stretch's start and end, the timers that started its
+  turns, and each turn with its starter, count and the requests it touched. It is filed once for that turn and that
+  stretch, counts against no limit and needs no approval: the dispatcher hears of it as of any request. The filing
+  that reached 100 answers with a `[FF Factory]` line naming it ("do not file it again; tell <person> in a line"), and a
+  later refusal of the limit names it too.
 - A person's orchestrator messages another person at most 10 times until its person or that person writes to their own
   orchestrator (`orchestrator.messagesPerPerson`). Two orchestrators answering each other with nobody writing stop
   there.
@@ -2221,8 +2264,8 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   minutes, while a conversation kept up for their people, one message a minute each way, never does. And every
   message is in both chats, unread, with a push notification to its recipient. The `ops_worker` follow-ups have no
   count either; [ops-worker.md](ops-worker.md) says what ends a run of them.
-- All three are config settings, whole numbers from 1 to 100, settable live (`set_app_config`); a person's own message
-  starts each again. The three are the same kind of guard: none caps what a person asks for, each stops a run of
+- All three are config settings, whole numbers from 1 to 100, settable live (`set_app_config`), as is the per-person
+  timer limit; a person's own message starts each again. The three are the same kind of guard: none caps what a person asks for, each stops a run of
   turns no person started (w571).
 - People are not capped per hour or per day (Ben, 2026-09-29): only the per-message budget above holds. Automated
   sources (standing agents, the Discord/FFBox intake, once they file here) get at most 10 requests an hour and 40 a

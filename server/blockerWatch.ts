@@ -22,6 +22,7 @@ import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
 import { blockerVerdict, CI_REF, gatesOf, RESUME_SWEEP_MS, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner } from './githubTokens.ts';
+import { reportDelivers } from './ledgerRules.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 
@@ -157,7 +158,7 @@ export class BlockerWatch {
           if (!live || live.status !== 'blocked' || !live.blocked) continue;
           // Every gate (w754): the request starts only when all have cleared. One that is stuck or closed without delivering
           // decides it at once; the cleared ones are dropped as they clear.
-          const gates = gatesOf(live).map((g) => ({ g, v: blockerVerdict(g, facts) }));
+          const gates = gatesOf(live).map((g) => ({ g, v: blockerVerdict(g, facts, live.id) }));
           const bad = gates.find((x) => x.v.state === 'stuck') ?? gates.find((x) => x.v.state === 'decide');
           const cleared = gates.filter((x) => x.v.state === 'clear');
           if (bad?.v.state === 'stuck') this.d.orchestrators.blockerStuck(live.id, bad.v.why, bad.g);
@@ -236,6 +237,11 @@ export class BlockerWatch {
         w.sessionIds.some((sid) => {
           const s = store.sessions.get(sid);
           return !!s && !BUSY.has(s.status) && !!s.lastResult && (Date.parse(s.lastActivityAt) || 0) > since;
+        }),
+      deliveredSince: (w: WorkItem, since: number, waiter?: string) =>
+        w.sessionIds.some((sid) => {
+          const s = store.sessions.get(sid);
+          return !!s && !BUSY.has(s.status) && (Date.parse(s.lastActivityAt) || 0) > since && reportDelivers(s.lastResult, w.id, waiter);
         }),
       portalSha: this.d.portalSha?.(),
       ...(this.d.daemonSha ? { daemonSha: this.d.daemonSha } : {}),
