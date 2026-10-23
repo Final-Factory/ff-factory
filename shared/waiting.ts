@@ -1,8 +1,11 @@
 // The requests that wait on a person (w1228), for the Dispatcher page's "Waiting on input" tab: what each one is, what is
 // asked, whose move it is, how long it has waited, and FF Factory's read of it. A pure function over the ledger and the
 // live states (shared/workState.ts), so the sidebar, the phone's bell and the tab all count the same items.
-import { FLAG_LABEL, type WorkItem } from './types.ts';
+import { FLAG_LABEL, WORK_OPEN, type OpenAsk, type SessionInfo, type WorkItem } from './types.ts';
+import { openAsksOf, sameAsk, sameWords } from './waitSummary.ts';
 import type { WorkLive } from './workState.ts';
+
+const OPEN = new Set<string>(WORK_OPEN);
 
 /** What is asked: approve or decline an intake request, answer a question, or check something (a worker's permission or report). */
 export type WaitingAsk = 'approve' | 'answer' | 'check';
@@ -51,7 +54,7 @@ export function intakeRecommendation(w: WorkItem): string | undefined {
   return undefined;
 }
 
-function describe(w: WorkItem, live: WorkLive): { ask: WaitingAsk; text: string; since: string; recommendation?: string } {
+export function describe(w: WorkItem, live: WorkLive): { ask: WaitingAsk; text: string; since: string; recommendation?: string } {
   if (w.approval?.state === 'pending') {
     return {
       ask: 'approve',
@@ -90,6 +93,42 @@ export function waitingItems(work: readonly WorkItem[], live: ReadonlyMap<string
     out.push({ w, live: l, ...d, mine: isMyMove(w, l, d.ask, me), on: l.waitsOn ?? [] });
   }
   return out.sort((a, b) => Number(b.mine) - Number(a.mine) || a.since.localeCompare(b.since));
+}
+
+/** A request's place on the tab with no viewer (list_work, the [needs you] message): what is asked, on whom, since when. */
+export function waitingItemOf(w: WorkItem, live: WorkLive): Omit<WaitingItem, 'mine'> {
+  const d = describe(w, live);
+  return { w, live, ...d, on: d.ask === 'approve' ? ['a reviewer'] : (live.waitsOn ?? []) };
+}
+
+/** An open ask_person question of the viewer's own orchestrator, as a card of its own (w1868). */
+export interface AskItem {
+  /** The orchestrator chat it was asked in: a click answers it there. */
+  sessionId: string;
+  a: OpenAsk;
+  /** The request it is about, when it names an open one. */
+  w?: WorkItem;
+}
+
+/**
+ * The viewer's orchestrator's open questions (SessionInfo.openAsks), each its own card on the tab (w1868, lothsahn: "make
+ * sure that all pending questions that you have show up on the intake portal so that I can click through them quickly"),
+ * oldest first. Left out: one about a request that is closed, and one its request's own card already asks (the same
+ * question in its [needs you]): one question, one card.
+ */
+export function orchestratorAsks(sessions: readonly Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'requestedBy' | 'openAsks'>[], work: readonly WorkItem[], me: Pick<WaitingViewer, 'userId'>): AskItem[] {
+  const out: AskItem[] = [];
+  for (const s of sessions) {
+    if (s.kind !== 'orchestrator' || s.orchestratorRole !== 'personal' || !same(s.requestedBy?.userId, me.userId)) continue;
+    for (const a of s.openAsks ?? []) {
+      const w = a.request ? work.find((x) => x.id === a.request) : undefined;
+      if (a.request && w && !OPEN.has(w.status)) continue;
+      const r = w?.needsYou && !w.needsYou.answered ? w.needsYou : undefined;
+      if (r && (openAsksOf(r).some((q) => sameAsk(a.ask, q)) || (!r.asks?.length && sameWords(a.ask.question, r.question)))) continue;
+      out.push({ sessionId: s.id, a, ...(w && OPEN.has(w.status) ? { w } : {}) });
+    }
+  }
+  return out.sort((x, y) => x.a.at.localeCompare(y.a.at));
 }
 
 /** How stale a wait is: past a day it is "old", past three days "stale". */

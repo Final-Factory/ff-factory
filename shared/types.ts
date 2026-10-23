@@ -269,7 +269,14 @@ export interface SessionInfo {
    * as Needs you. Kept by the portal, never by the daemon; gone with its next message (a new turn: it declares again if
    * it still waits). `request` limits it to one request when the worker serves several.
    */
-  waitingOn?: { who: string; what: string; at: string; request?: string; asks?: Ask[] };
+  waitingOn?: { who: string; what: string; at: string; request?: string; asks?: Ask[]; about?: string; after?: string };
+  /**
+   * A person's own orchestrator (w1868): its ask_person questions still open, each a card on its person's Waiting on input
+   * tab with one-click answers (lothsahn: "make sure that all pending questions that you have show up on the intake portal so
+   * that I can click through them quickly"). One goes when it is answered (a click or a reply to it), asked again, withdrawn
+   * (close_question) or its request closes. Server/orchestrators.ts observeAsk keeps it.
+   */
+  openAsks?: OpenAsk[];
   /**
    * Machine sessions (w691): a message to it found no agent host to run in ("could not start its agent host: …"). Nothing
    * runs for it whatever its status says (an older daemon went on reporting it mid-turn): the ledger shows its request
@@ -2036,10 +2043,19 @@ export interface WorkNeedsYou {
    * it cleaned with a free answer box (shared/questionCard.ts).
    */
   asks?: Ask[];
+  /** What the request is, in one plain line, as its worker put it for the card (w1868, waiting_on_person about). */
+  about?: string;
+  /** What happens once it is answered, as its worker put it (w1868, waiting_on_person after). */
+  after?: string;
   /** Sent in the one-off digest of waits already open when w1378 shipped, or after a restart. */
   digest?: boolean;
   /** A person answered it with a note in their own turn: who and when, and on which request when not this one (w1812). */
   answered?: { by: string; at: string; on?: string };
+  /**
+   * Of several questions, the ones a person's note answered so far, by index into `asks` (w1868, w1821: the frame look was
+   * answered and the Station strip question still waited). The record is answered, and its worker resumes, once all are.
+   */
+  answeredAsks?: number[];
   /** When the worker raised it (its declaration, or its report), where known: an answer before it answers something else (w1812). */
   raisedAt?: string;
   /**
@@ -2049,6 +2065,18 @@ export interface WorkNeedsYou {
   sharedWith?: string;
   /** The other requests the one message named as carrying the same question (w1812). */
   also?: string[];
+}
+
+/** An ask_person question its person has not answered yet (w1868, SessionInfo.openAsks). */
+export interface OpenAsk {
+  /** The question's event in the orchestrator's chat: a click answers it there (POST /api/sessions/<id>/answer). */
+  seq: number;
+  at: string;
+  ask: Ask;
+  /** The request it is about, when it names one. */
+  request?: string;
+  /** What happens once it is answered, as the orchestrator put it. */
+  after?: string;
 }
 
 export interface WorkPr {

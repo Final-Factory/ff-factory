@@ -320,7 +320,7 @@ test('w1602: the brief tells the orchestrator a visual question carries its prev
   const env = setup(t);
   const ben = env.o.personalFor(BEN);
   const prompt = (env.agents.orchestratorOptions(ben.info) as { systemPrompt: { append: string } }).systemPrompt.append;
-  assert.match(prompt, /A visual question carries its stills and clips in the question field/);
+  assert.match(prompt, /A visual question carries its stills and clips in it as/);
 });
 
 test('w1602: a refused call is no question: its click is refused too, whatever its card shows', async (t) => {

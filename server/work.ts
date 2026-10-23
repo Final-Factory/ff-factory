@@ -327,7 +327,7 @@ export const liveLine = (now: WorkLive) =>
   `${WORK_LIVE_LABEL[now.state]}${now.waitsOn?.length ? ` on ${now.waitsOn.join(', ')}` : ''}${now.roomOn?.length ? ` [WRONG: ${now.roomOn.join(', ')} ${now.roomOn.length > 1 ? 'have' : 'has'} room]` : ''} (${clip(oneLine(now.why), 200)})`;
 
 /** One line per item for list_work: id, status, priority, title, whose, workers, outcome. */
-export function describeItem(w: WorkItem, workerLine: (id: string) => string, now?: WorkLive, cost = ''): string {
+export function describeItem(w: WorkItem, workerLine: (id: string) => string, now?: WorkLive, cost = '', waits = ''): string {
   const who = names(w.requesters);
   const workers = w.sessionIds.length ? ` workers: ${w.sessionIds.map(workerLine).join(', ')}.` : '';
   const merged = w.mergedInto ? ` → ${w.mergedInto}` : '';
@@ -338,7 +338,7 @@ export function describeItem(w: WorkItem, workerLine: (id: string) => string, no
   const runs = w.runsFor ? ` Runs for ${w.runsFor.displayName} (${clip(oneLine(w.runsFor.why), 120)}): their Claude pool and GitHub token.` : '';
   // w1600: placed by the Capacity block's "Next Live view work" line (BEAST first), not the general one.
   const live = needsLive(w) ? ` Needs a Live view${w.liveView ? ` (its worker started one on ${w.liveView.machine})` : ''}: place it by "Next Live view work".` : needsBuild(w) ? ` An urgent release${w.build ? ` (its worker declared its build on ${w.build.machine})` : ''}: place it by "Next urgent release work" (w1639: BEAST, else LothDesktop when BEAST is offline).` : needsTimed(w) ? ` Timed work${needsTimed(w) === 'any' ? '' : ` on ${needsTimed(w)}`}: place it by "Next timed work" (w1872: the default unless a machine is named; a computer that takes no timed runs refuses it).` : '';
-  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${runs}${live}${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
+  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${runs}${live}${workers}${prs}${stalled}${cost}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}${waits ? `\n${waits}` : ''}`;
 }
 
 /**

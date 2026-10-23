@@ -178,6 +178,21 @@ const NEEDS_PERSON =
 /** Whether a worker's last report ends asking a person to decide (its tail, as the cleanup reads reports). */
 export const asksAPerson = (report: string | undefined) => !!report && NEEDS_PERSON.test(report.trim().slice(-600));
 
+/**
+ * The line of a report's end that asks the person (w1868: "17e0097f stopped asking for a decision" never said which): the
+ * last line or sentence of its tail that asks, whole, without Markdown; undefined when none does on its own.
+ */
+export function askingLine(report: string | undefined): string | undefined {
+  if (!report) return undefined;
+  const tail = report.trim().slice(-1200);
+  const lines = tail
+    .split(/\n+/)
+    .flatMap((l) => l.split(/(?<=[.!?])\s+(?=[A-Z])/))
+    .map((l) => l.replace(/^[\s>*_#-]+|[*_`]+/g, '').trim())
+    .filter((l) => l.length > 3);
+  return lines.findLast((l) => NEEDS_PERSON.test(l));
+}
+
 /** Capitalised words after "waiting for" that are not a person. */
 const NOT_A_PERSON = new Set(['ci', 'steam', 'steamworks', 'unity', 'github', 'ffbox', 'claude', 'windows', 'mac', 'linux', 'discord', 'apple', 'xcode', 'metal', 'rosetta', 'tailscale', 'portal', 'beast', 'max', 'nightly', 'build', 'release', 'deploy', 'master', 'develop', 'main', 'the', 'this', 'that']);
 const WAITS = '(?:waiting (?:for|on)|waits (?:for|on)|blocked on|needs|requires)';
@@ -245,7 +260,7 @@ export function outsideWaitOf(line: string, team: readonly string[] = []): strin
 }
 /** A waiting_on_person declaration whose `who` is the reporter or a player, not one of the team (w1841). */
 export const outsideDeclared = (d: Pick<NonNullable<SessionInfo['waitingOn']>, 'who' | 'what'>, team: readonly string[] = []) =>
-  OUTSIDE_ROLE.test(d.who) || OUTSIDE_WAIT.test(d.what) || (/\b(?:discord|ffbox)\b/i.test(d.what) && !team.some((p) => personKey(p) === personKey(d.who)));
+  (OUTSIDE_ROLE.test(d.who) && !team.some((p) => personKey(p) === personKey(d.who))) || OUTSIDE_WAIT.test(d.what) || (/\b(?:discord|ffbox)\b/i.test(d.what) && !team.some((p) => personKey(p) === personKey(d.who)));
 
 /** w1841 (e): "needs the w1761 stills", "waiting for w1761's worker": the other request a line waits on (its words up to a ; or .). */
 const WAITS_ON_WORK = /\b(?:needs?|waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b([^;.]{0,140})/gi;
@@ -404,7 +419,9 @@ export function personWaitSettled(w: Pick<WorkItem, 'notes' | 'needsYou' | 'prs'
   const after = (iso: string | undefined) => (Date.parse(iso ?? '') || 0) > at;
   // w1841: on a request with several workers, a note another worker took up (it reported after the note, the waiting one did
   // not) answered that worker, not this one (w1782: Ben's notes on item 2 went to 8ef702f6; ac694f80 still waited on his pick).
-  const note = [...(w.notes ?? [])].reverse().find((n) => after(n.at) && people.has(personKey(n.by)) && !by?.elsewhere(Date.parse(n.at) || 0));
+  // w1868: a note that answered some of several questions leaves the rest waiting (needsYou.answeredAsks): only the record's answer settles it.
+  const partial = !!w.needsYou && !w.needsYou.answered && !!w.needsYou.answeredAsks?.length;
+  const note = partial ? undefined : [...(w.notes ?? [])].reverse().find((n) => after(n.at) && people.has(personKey(n.by)) && !by?.elsewhere(Date.parse(n.at) || 0));
   if (note) return `${note.by} answered it with a note at ${minute(note.at)}`;
   const a = w.needsYou?.answered;
   const theirs = !by || !w.needsYou?.worker || w.needsYou.worker === by.id;
@@ -621,7 +638,10 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
   if (coming) return withMachines({ state: 'working', why: `${coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}`}${sharedWith([coming.s])}` }, [coming.s]);
 
   const decide = serving.find((s) => asksAPerson(s.lastResult) && stands(reportAt(s), names(w.requesters), (s.lastResult ?? '').trim().slice(-600)));
-  if (decide) return { state: 'waiting', why: `${decide.id} stopped asking for a decision`, waitsOn: names(w.requesters), worker: decide.id };
+  if (decide) {
+    const line = askingLine(decide.lastResult);
+    return { state: 'waiting', why: `${decide.id} stopped asking for a decision${line ? `: "${line}"` : ''}`, waitsOn: names(w.requesters), worker: decide.id };
+  }
 
   // A message to one of its workers waits in the send queue: for a free slot (Queued) or for its machine (Blocked).
   const held = serving.map((s) => ({ s, why: f.queuedSend?.(s.id) ?? s.queuedSend, on: s.queuedOn })).find((x) => x.why);

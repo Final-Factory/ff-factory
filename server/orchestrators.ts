@@ -54,17 +54,18 @@ import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
 import { askExcerpt, answerOf, checkAsk, isAskTool, splitMedia, type Ask } from '../shared/ask.ts';
-import { excerptOf, isEmoji, PERSON_MESSAGE_CHARS, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, sentText, type Quoted } from '../shared/replies.ts';
+import { excerptOf, isEmoji, PERSON_MESSAGE_CHARS, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, sentText, splitReply, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
 import { mediaLine, previewsOf, reviewRootOf } from './reviewMedia.ts';
-import { alreadySent, asksSame, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
+import { alreadySent, asksSame, matchedAsk, needsYouDigestText, needsYouRecord, needsYouText, whoOf, type NeedsYouWait } from './needsYou.ts';
+import { asksAnsweredBy, sameAsk, WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
 import { isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
-import type { AttachmentRef, ConditionalDecision, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, ConditionalDecision, OpenAsk, WorkNeedsYou, GateResume, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -980,6 +981,25 @@ export class Orchestrators {
    */
   private answerNeedsYou(w: WorkItem, by: Requester, note: string): string {
     const r = w.needsYou!;
+    // w1868 (w1821): of several questions, a note that answers some of them (it quotes their answers) leaves the others on
+    // the card, each with its own answered state; the worker resumes once all are answered, with every answer.
+    const asks = r.asks ?? [];
+    if (asks.length > 1) {
+      const before = r.answeredAsks ?? [];
+      const open = asks.map((_, i) => i).filter((i) => !before.includes(i));
+      const hit = asksAnsweredBy(asks, note).filter((i) => open.includes(i));
+      if (hit.length && hit.length < open.length) {
+        r.answeredAsks = [...before, ...hit].sort((a, b) => a - b);
+        const left = open.filter((i) => !hit.includes(i));
+        return `answers question ${hit.map((i) => i + 1).join(' and ')} of the ${asks.length} in its [needs you] (w1868); question ${left.map((i) => i + 1).join(' and ')} still waits on the card, and its worker resumes once ${left.length > 1 ? 'they are' : 'it is'} answered`;
+      }
+      if (before.length) {
+        // The last of them: the worker hears every answer given since it asked, not only this one.
+        const raised = Date.parse(r.raisedAt ?? r.at) || 0;
+        const words = (w.notes ?? []).filter((n) => (Date.parse(n.at) || 0) > raised && same(n.by, by.displayName)).map((n) => n.text);
+        if (words.length > 1) note = words.join('\n\n');
+      }
+    }
     r.answered = { by: by.displayName, at: this.now().toISOString() };
     const sid = r.worker;
     // w1812: the same question from the same worker on other requests is answered by this too: none of them waits on input
@@ -1015,8 +1035,20 @@ export class Orchestrators {
       const r = x.needsYou;
       if (!r || !isOpen(x) || !r.to.some((u) => same(u, person.userId)) || !asksSame(ask, r)) continue;
       const raised = Date.parse(r.raisedAt ?? r.at) || 0;
+      // w1868 (w1821: the frame look was answered, and the Station strip question on the same request was refused twice):
+      // of several questions, only the one asked again counts. It is answered when the record says so, or when a note of
+      // theirs after it was raised quotes one of its answers; an answer to another question of the record is not its answer.
       const share = questionShareKey(r.key);
       const others = share && r.worker ? [...this.store.work.values()].filter((o) => o !== x && o.sessionIds.includes(r.worker!) && o.needsYou?.worker === r.worker && questionShareKey(o.needsYou!.key) === share) : [];
+      const j = matchedAsk(ask, r);
+      if (j >= 0 && (r.asks?.length ?? 0) > 1) {
+        const quoting = [x, ...others]
+          .flatMap((o) => (o.notes ?? []).map((n) => ({ on: o.id, n })))
+          .filter(({ n }) => (Date.parse(n.at) || 0) > raised && same(n.by, person.displayName) && asksAnsweredBy([r.asks![j]], n.text).length)
+          .sort((p, q) => q.n.at.localeCompare(p.n.at))[0];
+        if (quoting) return { id: x.id, on: quoting.on, at: quoting.n.at, note: quoting.n.text };
+        if (!r.answered && !(r.answeredAsks ?? []).includes(j)) continue;
+      }
       const a = answerAfter([x, ...others], raised, [person.displayName], share);
       if (a) return { id: x.id, on: a.on, at: a.at, ...(a.note ? { note: a.note } : {}) };
     }
@@ -1813,6 +1845,8 @@ export class Orchestrators {
       }
       // w1378: a person's own answer to a [needs you] question goes to the worker that waits on it.
       if (w.humanAsked && w.needsYou && !w.needsYou.answered) what.push(this.answerNeedsYou(w, owner, note));
+      // w1868: and the open question cards about it that the note answers leave the person's Waiting on input tab.
+      if (w.humanAsked) this.closeAsksAnsweredBy(owner, w, note);
     }
     if (input.close) {
       // A PERSON'S CLOSE IS FINAL (w370): no automatic-close mark or loose PR link survives it for the cleanup's
@@ -1883,6 +1917,96 @@ export class Orchestrators {
     const pick = checked.ask.options[0].recommended ? `, ${checked.ask.options[0].label} recommended` : '';
     const shown = `Shown to ${owner.displayName} as ${checked.ask.options.length} buttons${pick}, and a last "Chat more about this" that only opens their reply box. End your turn now. Their click arrives as their own message (their words are the label, your question quoted under the reply mark), in their own turn; they may also just type. Do not ask it again in text.`;
     return checked.warnings.length ? `${shown} WARNING: ${checked.warnings.join('; ')}.` : shown;
+  }
+
+  // ---------------------------------------------------------------- open questions on the Waiting on input tab (w1868)
+
+  /** ask_person calls seen and not yet answered by their tool's result, by tool-use id: the call's chat, event and input. */
+  private readonly askCalls = new Map<string, { sid: string; seq: number; at: string; input: unknown }>();
+
+  /**
+   * Every transcript event (the store's onEvent): keeps each person's open ask_person questions on their orchestrator
+   * (SessionInfo.openAsks), so every question shows as a card on their Waiting on input tab (w1868, lothsahn: "make sure
+   * that all pending questions that you have show up on the intake portal so that I can click through them quickly"). A
+   * call becomes open when its tool answers without an error (a refused question was never shown); a reply of the person's
+   * to it (a click, or words that quote it) answers it.
+   */
+  observeAsk(sid: string, e: TranscriptEvent) {
+    if (e.kind === 'tool_use' && isAskTool(e.name)) {
+      this.askCalls.set(e.toolUseId, { sid, seq: e.seq, at: e.t, input: e.input });
+      if (this.askCalls.size > 200) this.askCalls.delete(this.askCalls.keys().next().value!);
+      return;
+    }
+    if (e.kind === 'tool_result') {
+      const call = this.askCalls.get(e.toolUseId);
+      if (!call) return;
+      this.askCalls.delete(e.toolUseId);
+      if (!e.isError) this.openAsk(call);
+      return;
+    }
+    if (e.kind === 'user' && e.from === 'human') {
+      const seq = splitReply(e.text, HELD_MARK).quote?.seq;
+      if (seq !== undefined) this.closeAsks(sid, (a) => a.seq === seq);
+    }
+  }
+
+  /** At most this many open questions per chat: the oldest go first. */
+  static readonly OPEN_ASKS_KEPT = 12;
+
+  private openAsk(call: { sid: string; seq: number; at: string; input: unknown }) {
+    const info = this.sessions.sessions.get(call.sid)?.info ?? this.store.sessions.get(call.sid);
+    if (!info || !this.isPersonal(info)) return;
+    const checked = checkAsk(call.input);
+    if ('problem' in checked) return;
+    const raw = (call.input ?? {}) as { request?: unknown; after?: unknown };
+    const named = typeof raw.request === 'string' && /^w\d+$/i.test(raw.request.trim()) ? raw.request.trim().toLowerCase() : undefined;
+    // A question that names one request in its words is about it.
+    const ids = [...new Set([checked.ask.question, ...checked.ask.options.map((o) => `${o.label} ${o.description}`)].flatMap((t) => [...t.matchAll(/\bw\d+\b/gi)].map((m) => m[0].toLowerCase())))];
+    const request = named ?? (ids.length === 1 ? ids[0] : undefined);
+    const after = typeof raw.after === 'string' && raw.after.trim() ? raw.after.replace(/\s+/g, ' ').trim().slice(0, WAIT_LINE_CHARS) : undefined;
+    // The same question asked again is one card: the newer one.
+    const kept = (info.openAsks ?? []).filter((a) => !sameAsk(checked.ask, a.ask));
+    info.openAsks = [...kept, { seq: call.seq, at: call.at, ask: checked.ask, ...(request ? { request } : {}), ...(after ? { after } : {}) }].slice(-Orchestrators.OPEN_ASKS_KEPT);
+    this.store.putSession(info);
+  }
+
+  /** Close the open questions of chat `sid` that `which` picks; returns how many went. */
+  private closeAsks(sid: string, which: (a: OpenAsk) => boolean): number {
+    const info = this.sessions.sessions.get(sid)?.info ?? this.store.sessions.get(sid);
+    const before = info?.openAsks ?? [];
+    const kept = before.filter((a) => !which(a));
+    if (!info || kept.length === before.length) return 0;
+    info.openAsks = kept.length ? kept : undefined;
+    this.store.putSession(info);
+    return before.length - kept.length;
+  }
+
+  /**
+   * A person's note on request `w` (their answer, update_work) closes their orchestrator's open questions about it that it
+   * answers: the one that quotes one of its answers, or the only one open about it.
+   */
+  private closeAsksAnsweredBy(person: Requester, w: WorkItem, note: string) {
+    const chat = this.personalOf(person.userId);
+    if (!chat) return;
+    const about = (chat.info.openAsks ?? []).filter((a) => a.request === w.id);
+    const hit = about.filter((a) => asksAnsweredBy([a.ask], note).length);
+    const go = hit.length ? hit : about.length === 1 ? about : [];
+    if (go.length) this.closeAsks(chat.info.id, (a) => go.includes(a));
+  }
+
+  /** The orchestrator's close_question (w1868): a question it asked that no longer needs an answer leaves the tab. */
+  closeQuestion(chat: SessionHandle, input: { seq?: unknown; why?: unknown }): string {
+    if (!this.isPersonal(chat.info)) throw new Error('only a person’s own orchestrator asks and closes questions');
+    const open = chat.info.openAsks ?? [];
+    const seq = typeof input.seq === 'number' ? input.seq : undefined;
+    const why = typeof input.why === 'string' ? input.why.trim().slice(0, 200) : '';
+    if (!why) throw new Error('why: in a line, why it no longer needs an answer');
+    if (seq === undefined) {
+      if (!open.length) return 'No question of yours is open.';
+      return `Open questions (seq: question): ${open.map((a) => `${a.seq}: ${clip(splitMedia(a.ask.question).text, 100)}`).join('; ')}. Call close_question with the seq of the one to close.`;
+    }
+    if (!this.closeAsks(chat.info.id, (a) => a.seq === seq)) throw new Error(`#${seq} is not an open question of yours (${open.map((a) => a.seq).join(', ') || 'none open'})`);
+    return `Closed #${seq} (${why}): it left the Waiting on input tab.`;
   }
 
   /** Questions refused once for their missing previews (w1602), by chat and question: the same call again goes through. */

@@ -501,7 +501,9 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 
 1. **Waiting on input**: a PERSON must act (a reviewer's approval, the dispatcher's question, a design decision, a
    permission, a worker that stopped asking for a decision, a worker that declared it waits on a person). It always says on
-   whom.
+   whom, and what is asked: a worker that stopped asking names its question (w1868). `list_work` and the tab show its six
+   parts (what it is, who acts and since when, the question whole, its answers or the one step, its stills and clips, what
+   follows the answer): "What a waiting card says", below.
 2. **Queued**: capacity ONLY: no free computer, sandbox, editor or agent slot for it. `decide_work queue` is refused
    while a computer that could take it has room (all of them, or those its `needs` names), and a request left queued
    at least 10 minutes while one has room is a bug, flagged loudly: the line says `WRONG` with the computers that have
@@ -2124,6 +2126,69 @@ permission cards stay on the card (they are the answer).
   (update_work note).", which records it in their turn, and `answerNeedsYou` resumes the waiting worker. Tests:
   `server/questionCard.test.ts`, `server/orchestrators.test.ts` ("w1597"), `e2e/intake.spec.ts` (a click and the same words
   typed send the same message).
+
+### What a waiting card says: six parts (w1868, w1871)
+
+lothsahn, 2026-10-23: "please update the dispatcher to provide a good summary of each waiting for input item with the clear
+decision or input needed from me. The existing cards are impossible to know what I need to answer", then "Sorry, I said
+dispatcher but I meant the 'waiting for input' tab on the portal", and "You asked me a bunch of questions that weren't showing
+as pending intake questions on the portal. Can we make sure that all pending questions that you have show up on the intake
+portal so that I can click through them quickly?" Ben, the same day, on a w1762 card: "You don't put the clip in this little
+intake waiting for input box, so I can't see it."
+
+What the cards said before (list_work and the tab, 2026-10-23): "17e0097f stopped asking for a decision" (w1829, no decision
+named), "Waiting on input on a reviewer" (w1853, w1842, nothing on what approving does), lines cut off with "…" (w1797, w1839,
+w1820), a question overtaken by events ("no m5 sandbox has come free" after timed runs stopped going to m5), and a second
+question on w1821 (the Station strip) refused twice by the w1812 guard once the first (the frame look) was answered.
+
+**The six parts** (`shared/waitSummary.ts` `waitSummary`, one function for the card, `list_work` and the `[needs you]` message):
+
+1. **What it is**, one plain line: the worker's `about`, else where it came from (`intakeWhat`: "A player's bug report from
+   Discord by …", "The nightly game tests of 2026-10-23: 6 scenarios failed on master …", "FFBox's diagnosis of a player's
+   report …"), else the first plain sentence of its brief (`briefSentence`), else the title. The title moves to the line under it.
+2. **Who acts, and how long it has waited**: "Ben must act · waiting 3 h" (amber past a day, red past three).
+3. **The question, whole**: never clipped. "Stopped asking for a decision" now names it (`workState.ts` `askingLine`: the last
+   line of the report that asks).
+4. **The answers**, the recommended one first and marked, each with what it does and costs; or, for an input with no answers
+   to pick, the one step ("Type your answer below"; a permission: "Allow or Deny the call shown below"). An intake card asks
+   "Should FF Factory work on this …?" with Approve ("a worker starts at the next free sandbox: one worker session of Claude
+   usage") and Decline ("closes as declined …; nothing is spent").
+5. **Its stills and clips, in the card**: the question's own, the review files the wait names (before w1868 those sat in
+   Details whenever the question had answers), and each answer's own under the answers. A clip plays in the card
+   (`QuestionCard.tsx` `Previews`, the web preview of `/api/image`; `.mov` counts as a clip now). A question about something
+   visual with no still or clip says so on the card (`visualWithoutMedia`). A worker's still or clip on its own machine
+   (`F:/ffw/...`) is replaced by its published review copy of the same name (`needsYou.ts` `asksWithCopies`,
+   `reviewMedia.ts` `publishedCopy`); `waiting_on_person` refuses one with no published copy ("Publish it with publish_review").
+6. **What happens after the answer**: the worker's `after`, else what FF Factory does (its worker resumes within a minute, or at
+   the next free sandbox; the dispatcher decides).
+
+**Stale.** A card says "May be out of date: …" when, after its `[needs you]` went out, the request's log shows a dispatcher
+decision, a reopen or someone's note, or the worker that asked is gone, failed or said DONE (`staleOf`). FF Factory's own
+bookkeeping lines (PR states read, follow-ups) are no change.
+
+**The worker's block.** `waiting_on_person` takes `about` and `after` beside `who`, `what` and `questions` (`server/launch.ts`,
+required in the schema; a daemon older than w1868 sends neither and the card derives them). They ride the declaration
+(`SessionInfo.waitingOn`), the wait and the record (`WorkNeedsYou.about`, `.after`) into the card and the `[needs you]` message
+("What it is: …", "After the answer: …").
+
+**Each question its own answered state (w1821).** A record with several questions keeps which ones a person's note answered
+(`WorkNeedsYou.answeredAsks`, `asksAnsweredBy`: the note quotes one of that question's answers). A note that answers some
+leaves the rest on the card and the request Waiting on input; the worker resumes once all are answered, with every answer. A
+note that quotes none answers all, as before. The w1812 guard weighs the one question asked again: of several, a question no
+note answered goes through (`answeredBefore`, `matchedAsk`); one answered is refused with the person's words.
+
+**Every orchestrator question is a card.** Each `ask_person` call that is shown (its tool answered without an error) is kept on
+the orchestrator as an open question (`SessionInfo.openAsks`, `Orchestrators.observeAsk`, fed by every transcript event) and is
+a card on its person's tab among their own requests (`waiting.ts` `orchestratorAsks`, `WaitingTab.tsx` `AskWaitCard`). A click
+on it is `POST /api/sessions/<id>/answer`, exactly the chat's click; typed words go as a reply to it. It leaves the tab when it is
+answered (a reply quoting it), asked again (one card, the newer), closed by the orchestrator (`close_question` with why), answered
+by the person's note on its request, or its request closes; one the request's own card already asks is that card. `ask_person`
+takes `request` and `after`, and the orchestrator's brief says to ask every question with it, never in text only.
+
+`list_work` shows each waiting request's six parts under its line (`Agents.waitSummaryOf`, `summaryText`). Tests:
+`server/waitSummary.test.ts` (today's cases in `server/fixtures/waitingCards.ts`), `server/orchestrators.test.ts` ("w1868"),
+`e2e/waitingCards.spec.ts` (the cards with a still and a playing clip, desktop and narrow; five orchestrator questions, each
+answered by a click).
 
 ## Review media inline, never a bare path (w1384)
 

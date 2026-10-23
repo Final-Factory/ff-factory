@@ -8,8 +8,9 @@
 // anything. The person's answer, given in their own turn, is a note on the request (update_work); FF Factory resumes the
 // waiting worker with it (Orchestrators.updateNow). The pure parts are here; docs/orchestrators.md, "Questions for a person".
 import { askExcerpt, splitMedia, type Ask } from '../shared/ask.ts';
+import { sameAsk, sameWords } from '../shared/waitSummary.ts';
 import type { Requester, UserInfo, WorkItem, WorkNeedsYou } from '../shared/types.ts';
-import { absoluteTargets, mediaLine, mediaNamed, MEDIA_FILE, PORTAL_REVIEW_ROOT } from './reviewMedia.ts';
+import { absoluteTargets, mediaLine, mediaNamed, MEDIA_FILE, PORTAL_REVIEW_ROOT, publishedCopy } from './reviewMedia.ts';
 
 /** The tag of the message, at the start of its first line. */
 export const NEEDS_YOU_TAG = '[needs you]';
@@ -35,6 +36,9 @@ export interface NeedsYouWait {
   asks?: Ask[];
   /** When the worker raised it (its declaration, or its report): an answer given after it answers it (w1812). */
   raisedAt?: string;
+  /** What the request is and what happens after the answer, as the worker put them for the card (w1868). */
+  about?: string;
+  after?: string;
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -89,14 +93,6 @@ export function whoOf(names: readonly string[], people: readonly UserInfo[], fal
 /** Whether `w` already had this wait sent: one message per question, never one per heartbeat or turn. */
 export const alreadySent = (w: Pick<WorkItem, 'needsYou'>, key: string) => w.needsYou?.key === key;
 
-/** A question's words for comparing two asks: no media, no punctuation, lower case. */
-const askWords = (s: string) => splitMedia(s).text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-const sameWords = (a: string, b: string) => {
-  const [x, y] = [askWords(a), askWords(b)];
-  if (!x || !y) return false;
-  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
-  return short === long || (short.length >= 24 && long.includes(short));
-};
 
 /**
  * Whether a question about to be asked (an orchestrator's ask_person, the dispatcher's decide_work ask) is one this
@@ -105,8 +101,28 @@ const sameWords = (a: string, b: string) => {
  */
 export function asksSame(ask: { question: string; options?: readonly { label: string }[] }, r: Pick<WorkNeedsYou, 'question' | 'asks'>): boolean {
   if (sameWords(ask.question, r.question)) return true;
-  const labels = new Set((ask.options ?? []).map((o) => askWords(o.label)).filter(Boolean));
-  return (r.asks ?? []).some((a) => sameWords(ask.question, a.question) || a.options.filter((o) => labels.has(askWords(o.label))).length >= 2);
+  return matchedAsk(ask, r) >= 0;
+}
+
+/** Which of a record's questions `ask` is (w1868: the guard weighs that one question, not the whole request), or -1. */
+export function matchedAsk(ask: { question: string; options?: readonly { label: string }[] }, r: Pick<WorkNeedsYou, 'asks'>): number {
+  return (r.asks ?? []).findIndex((a) => sameAsk(ask, a));
+}
+
+/**
+ * The questions with each still or clip a worker named by a path on its own machine replaced by its published copy in the
+ * review folder (w1871), so the card shows it whoever runs the worker now. One with no published copy stays as written.
+ */
+export function asksWithCopies(asks: readonly Ask[], o: { root: string; ids?: readonly string[] }): Ask[] {
+  const swap = (t: string) => {
+    let out = t;
+    for (const m of splitMedia(t).media) {
+      const copy = publishedCopy(m.url, o);
+      if (copy && copy !== m.url) out = out.split(m.url).join(copy);
+    }
+    return out;
+  };
+  return asks.map((a) => ({ question: swap(a.question), options: a.options.map((x) => ({ ...x, description: swap(x.description ?? '') })) }));
 }
 
 /** The record kept on the request when its wait is sent. */
@@ -128,7 +144,9 @@ export function needsYouRecord(w: Pick<WorkItem, 'prs'> & { id?: string }, wait:
     // The full report first: the kept tail can cut a file name off mid-word (w1241's "glow_800_closeup.jp").
     previews: previewsIn([question, ...(wait.asks ?? []).flatMap((a) => [a.question, ...a.options.map((o) => o.description)]), wait.report ?? report], root, ids),
     prs: prsIn([question, report], w),
-    ...(wait.asks?.length ? { asks: wait.asks } : {}),
+    ...(wait.asks?.length ? { asks: asksWithCopies(wait.asks, { root, ids }) } : {}),
+    ...(wait.about ? { about: wait.about } : {}),
+    ...(wait.after ? { after: wait.after } : {}),
     ...(opts.digest ? { digest: true } : {}),
     ...(wait.raisedAt ? { raisedAt: wait.raisedAt } : {}),
     ...(opts.also?.length ? { also: [...opts.also] } : {}),
@@ -160,11 +178,13 @@ function asker(r: WorkNeedsYou): string {
 /** The lines one question takes in a message: the question, the files, the pull requests, the report's end. */
 function block(w: Pick<WorkItem, 'id' | 'title'>, r: WorkNeedsYou, opts: { report: boolean; titles?: (id: string) => string | undefined }): string {
   // Paragraphs apart: the page shows the message as Markdown, where single line breaks run together.
-  const parts = [`Question (${asker(r)} ${r.who.join(', ')}):\n\n${r.question}`];
+  // w1868: what the request is first, so the question is answered without opening anything; what follows the answer last.
+  const parts = [...(r.about ? [`What it is: ${r.about}`] : []), `Question (${asker(r)} ${r.who.join(', ')}):\n\n${r.question}`];
   const also = alsoLine(w, r, opts.titles ?? (() => undefined));
   if (also) parts.push(also);
   // The questions as the card asks them (w1597): ask each with ask_person, these answers as its buttons.
   if (r.asks?.length) parts.push(`${r.asks.length === 1 ? 'Ask it' : `Ask these ${r.asks.length} one at a time`} with ask_person, these answers as the buttons (the first is the recommended one when marked):\n\n${r.asks.map((a, i) => `${r.asks!.length > 1 ? `Q${i + 1}. ` : ''}${askExcerpt(a)}`).join('\n\n')}`);
+  if (r.after) parts.push(`After the answer: ${r.after}`);
   if (r.previews.length) parts.push(`Look at:\n\n${r.previews.map(previewLine).join('\n')}`);
   if (r.prs.length) parts.push(`Pull requests: ${r.prs.join(', ')}`);
   if (opts.report && r.report && r.report.trim() !== r.question.trim()) parts.push(`The end of its last report:\n\n${r.report}`);
