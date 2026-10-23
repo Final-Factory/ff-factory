@@ -54,7 +54,7 @@ import { minPriorityText } from '../shared/capacity.ts';
 import { repoSlug } from './ciReadHealth.ts';
 import { actionName, CONDITIONAL_DAYS, CONDITIONAL_MAX_DAYS, CONDITIONAL_PER_REQUEST, conditionalLine, conditionName, HELD_MARK, inPersonWords, parseCondition, type ConditionInput } from '../shared/conditional.ts';
 import { askExcerpt, answerOf, checkAsk, isAskTool, splitMedia, type Ask } from '../shared/ask.ts';
-import { excerptOf, isEmoji, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, type Quoted } from '../shared/replies.ts';
+import { excerptOf, isEmoji, PERSON_MESSAGE_CHARS, reactionRemovedText, reactionsByMessage, reactionText, REPLY_MARK, replyText, sentText, type Quoted } from '../shared/replies.ts';
 import { grantCovers, grantKey, grantWords, GRANT_MS, isNo, isYes, PROPOSAL_MAX_AGE_MS, proposalText, type GateNeed, type ReactionGrant } from '../shared/reactionGrant.ts';
 import { NOTICE_TAG } from '../shared/notices.ts';
 import { mediaLine, previewsOf, reviewRootOf } from './reviewMedia.ts';
@@ -138,8 +138,8 @@ export function loopGuards(cfg: Pick<Config, 'orchestrator'>): { filings: number
     messages: n(cfg.orchestrator?.messagesPerPerson, MESSAGES_PER_PERSON),
   };
 }
-/** The longest message_person text. */
-export const PERSON_MESSAGE_CHARS = 2000;
+/** The longest message_person text (shared/replies.ts, so the reply box in the bubble stops there too, w1831). */
+export { PERSON_MESSAGE_CHARS };
 /** Unread messages from people kept per chat (w1546): older ones are still in the transcript. */
 export const PERSON_MESSAGES_KEPT = 20;
 /** A mark's id; one saved before w1546 has none, and its time stands in. */
@@ -657,8 +657,9 @@ export class Orchestrators {
    * chat. At most loopGuards().messages to one person until the sender or that person writes to their own
    * orchestrator: a person relaying their own words is not held back, two orchestrators answering each other are.
    * Between the owners (ownersPair, w627) there is no count; only OWNER_LOOP_MESSAGES_PER_HOUR in turns no person started.
+   * `own`: the person sent it themselves (replyToPerson, w1831), which no loop guard's hourly rate counts, as in their own turn.
    */
-  messagePerson(chat: SessionHandle, input: { to: string; text: string }): string {
+  messagePerson(chat: SessionHandle, input: { to: string; text: string }, own = false): string {
     const owner = this.ownerOf(chat.info);
     if (!owner) throw new Error('only a person’s own orchestrator messages people');
     const to = this.d.identity.get(input.to.trim());
@@ -671,7 +672,7 @@ export class Orchestrators {
     const now = this.now().getTime();
     const owners = ownersPair(owner.userId, to.userId);
     // Between owners only turns no person started count, and only within the hour (w627).
-    const loop = owners && chat.turnFrom !== 'human' ? (this.ownerLoop.get(key) ?? []).filter((at) => now - at < 3_600_000) : undefined;
+    const loop = owners && !own && chat.turnFrom !== 'human' ? (this.ownerLoop.get(key) ?? []).filter((at) => now - at < 3_600_000) : undefined;
     if (loop && loop.length >= OWNER_LOOP_MESSAGES_PER_HOUR) {
       throw new Error(
         `${OWNER_LOOP_MESSAGES_PER_HOUR} messages to ${to.displayName} in the last hour in turns no person started (a [person message], a report, a timer): the loop guard between ${owner.displayName}'s and ${to.displayName}'s orchestrators (w627). ` +
@@ -691,6 +692,40 @@ export class Orchestrators {
     this.store.putSession(target.info);
     this.onPersonMessage?.(asRequester(owner), asRequester(to), text);
     return `Sent to ${to.displayName}'s orchestrator, which shows it to them; ${to.displayName} decides what to do with it. An answer comes back as a [person message].`;
+  }
+
+  /**
+   * Its person answers a message from another person straight from the bubble over their message box (w1831, Ben: "give me a
+   * fast way to reply to him in there (including with voice) and replying in there sends the message to loth as normal").
+   * The words reach that person as message_person sends them (the same [person message], unread mark and notification), with
+   * no turn of the orchestrator in between, under message_person's rules for a person's own message: briefly, to someone
+   * else who exists, never counted by the owners' hourly loop guard, and after the person's writing started the count again.
+   * Then they land in this chat as the person's own message, the answered one quoted and FF Factory's note that they are
+   * sent (shared/replies.ts sentText), so the orchestrator knows what was said; that message is read. Throws when the
+   * message is not unread here any more. Returns who it went to and the uuid of the message in this chat.
+   */
+  replyToPerson(sessionId: string, markId: string, words: string): { to: Requester; uuid: string } {
+    const chat = this.sessions.get(sessionId);
+    const mark = chat.info.personMessages?.find((m) => personMessageId(m) === markId);
+    if (!mark) throw new Error('that message is not unread here any more: answer it in the chat');
+    const text = words.trim();
+    // message_person's own checks first, so a refused reply changes nothing (not even the person's budgets).
+    if (!text) throw new Error('the message is empty');
+    if (text.length > PERSON_MESSAGE_CHARS) throw new Error(`the message is ${text.length} characters; keep it to ${PERSON_MESSAGE_CHARS}`);
+    this.personWrote(sessionId);
+    this.messagePerson(chat, { to: mark.from.userId, text }, true);
+    const to = asRequester(this.d.identity.get(mark.from.userId)!);
+    const seq = this.personMessageSeq(sessionId, mark.text);
+    const said = sentText(text, to, seq === undefined ? undefined : this.quoteOf(sessionId, seq));
+    const uuid = this.sessions.send(sessionId, said + this.heldOffer(sessionId), 'human', undefined, { requestedBy: this.ownerOf(chat.info) });
+    this.readPersonMessages(sessionId, [markId]);
+    return { to, uuid };
+  }
+
+  /** The [person message] in this chat's recent transcript that carries `text` (the bubble's mark), newest first. */
+  private personMessageSeq(sessionId: string, text: string | undefined): number | undefined {
+    if (!text) return undefined;
+    return this.store.readTranscript(sessionId, 500).findLast((e) => e.kind === 'user' && e.from === 'system' && e.text.startsWith('[person message]') && e.text.includes(text))?.seq;
   }
 
   // ---------------------------------------------------------------- who hears what

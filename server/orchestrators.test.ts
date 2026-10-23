@@ -18,6 +18,9 @@ import { BlockerWatch } from './blockerWatch.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
+import { parseNotice } from '../shared/notices.ts';
+import { HELD_MARK } from '../shared/conditional.ts';
+import { splitReply, splitSent } from '../shared/replies.ts';
 import type { PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
 import { benchLockIn, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkItem } from '../shared/types.ts';
@@ -888,6 +891,80 @@ test('message_person: only a person’s own orchestrator sends, to someone else 
   assert.match((await call(loth, 'message_person', { to: 'ben', text: '   ' })).text, /^ERROR: the message is empty/);
   assert.throws(() => o.messagePerson(o.personalOf('lothsahn')!, { to: 'ben', text: 'x'.repeat(PERSON_MESSAGE_CHARS + 1) }), /keep it to 2000/);
   assert.throws(() => o.messagePerson(dispatcher(), { to: 'ben', text: 'hi' }), /only a person’s own orchestrator messages people/);
+});
+
+test('reply from the bubble (w1831): straight to the sender as message_person sends, and in his own chat as his message', async (t) => {
+  const { store, sessions, o, dispatcher, chat, call, heard } = setup(t);
+  const told: string[] = [];
+  o.onPersonMessage = (from, to, text) => told.push(`${from.userId}>${to.userId}: ${text}`);
+  const loth = chat(LOTH).info;
+  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'Can BEAST take the urgent build tonight?' })).isError, false);
+  const ben = o.personalOf('ben')!.info;
+  await until('Ben’s orchestrator answered', () => sessions.get(ben.id).info.status === 'idle');
+  const [mark] = ben.personMessages!;
+  const [asked] = heard(ben.id, '[person message]');
+  const lothBefore = heard(loth.id, '[person message]').length;
+  const { to, uuid } = o.replyToPerson(ben.id, mark.id!, '  Yes, after 9pm. I will leave it free.  ');
+  assert.deepEqual(to, LOTH);
+  // Lothsahn gets it as any message_person message from Ben: the same tagged text, unread mark and notification.
+  const got = heard(loth.id, '[person message]');
+  assert.equal(got.length, lothBefore + 1);
+  assert.deepEqual(got.at(-1)!.requestedBy, BEN);
+  assert.match(got.at(-1)!.text, /^\[person message\] From Ben's orchestrator \(user id ben\), written for Ben:\n\nYes, after 9pm\. I will leave it free\.\n\nThis is Ben's message to Lothsahn, relayed by their agent/);
+  assert.deepEqual(parseNotice(got.at(-1)!.text), { kind: 'person-message', summary: 'Ben: Yes, after 9pm. I will leave it free.', attention: true, body: 'Yes, after 9pm. I will leave it free.', fromName: 'Ben', fromUserId: 'ben' });
+  assert.deepEqual(store.sessions.get(loth.id)?.personMessages?.map((m) => [m.from.userId, m.text]), [['ben', 'Yes, after 9pm. I will leave it free.']]);
+  assert.deepEqual(told.at(-1), 'ben>lothsahn: Yes, after 9pm. I will leave it free.');
+  // Ben's chat has it as his own message (his turn), quoting the message it answers, with FF Factory's note that it is sent.
+  const mine = store.readTranscript(ben.id).find((e) => e.kind === 'user' && e.uuid === uuid);
+  assert.ok(mine && mine.kind === 'user');
+  assert.equal(mine.from, 'human');
+  assert.deepEqual(mine.requestedBy, BEN);
+  const sent = splitSent(mine.text);
+  assert.deepEqual(sent.sentTo, LOTH);
+  const { words, quote } = splitReply(sent.text, HELD_MARK);
+  assert.equal(words, 'Yes, after 9pm. I will leave it free.');
+  assert.equal(quote?.seq, asked.seq, 'the [person message] it answers');
+  assert.match(mine.text, /\[FF Factory, not your person: already sent\] To Lothsahn \(user id lothsahn\): FF Factory delivered the words above as message_person does.*never send them again/);
+  assert.equal(o.personalOf('ben')!.lastFrom, 'human', 'the turn it opens is Ben’s own');
+  // The message he answered is read; the dispatcher neither relays nor sees any of it.
+  assert.equal(store.sessions.get(ben.id)?.personMessages, undefined);
+  assert.equal(heard(dispatcher().info.id, '[person message]').length, 0);
+  // Answered already (or cleared): refused, and nothing goes out.
+  assert.throws(() => o.replyToPerson(ben.id, mark.id!, 'again'), /that message is not unread here any more/);
+  assert.equal(heard(loth.id, '[person message]').length, lothBefore + 1);
+});
+
+test('reply from the bubble (w1831): message_person’s rules for a person’s own message, and nothing changes when refused', async (t) => {
+  const { store, o, chat, call, heard, cfg } = setup(t, { people: WITH_CARA });
+  cfg.orchestrator = { ...cfg.orchestrator, messagesPerPerson: 1 };
+  const ben = chat(BEN);
+  const cara = chat(CARA).info;
+  const loth = chat(LOTH);
+  assert.equal((await call(cara, 'message_person', { to: 'ben', text: 'Can you look at my save?' })).isError, false);
+  const mark = () => store.sessions.get(ben.info.id)!.personMessages![0];
+  const before = store.readTranscript(ben.info.id).length;
+  // Empty, or longer than message_person takes: refused before anything is sent or recorded, and still unread.
+  assert.throws(() => o.replyToPerson(ben.info.id, mark().id!, '   '), /the message is empty/);
+  assert.throws(() => o.replyToPerson(ben.info.id, mark().id!, 'x'.repeat(PERSON_MESSAGE_CHARS + 1)), /keep it to 2000/);
+  assert.throws(() => o.replyToPerson(ben.info.id, 'pm-nope', 'hi'), /not unread here any more/);
+  assert.equal(store.readTranscript(ben.info.id).length, before);
+  assert.equal(heard(cara.id, '[person message]').length, 0);
+  // Ben's orchestrator already used its one message to Cara: his own reply is his writing, which starts the count again.
+  ben.lastFrom = 'system';
+  assert.equal((await call(ben.info, 'message_person', { to: 'cara', text: 'Looking now.' })).isError, false);
+  assert.match((await call(ben.info, 'message_person', { to: 'cara', text: 'More?' })).text, /^ERROR: 1 messages to Cara since/);
+  o.replyToPerson(ben.info.id, mark().id!, 'Found it: the belt loop on deck 3.');
+  assert.equal(heard(cara.id, '[person message]').length, 2);
+  // Between the owners, a reply is a person's own message: the hourly loop guard never counts it, so his orchestrator still
+  // has its whole hour's worth in turns no person started after it.
+  loth.lastFrom = 'system';
+  assert.equal((await call(loth.info, 'message_person', { to: 'ben', text: 'ping' })).isError, false);
+  ben.lastFrom = 'system';
+  o.replyToPerson(ben.info.id, store.sessions.get(ben.info.id)!.personMessages!.at(-1)!.id!, 'pong');
+  ben.lastFrom = 'system';
+  for (let i = 0; i < OWNER_LOOP_MESSAGES_PER_HOUR; i++) assert.equal((await call(ben.info, 'message_person', { to: 'lothsahn', text: `Ben's orchestrator ${i}` })).isError, false, `Ben's orchestrator ${i}`);
+  assert.match((await call(ben.info, 'message_person', { to: 'lothsahn', text: 'one too many' })).text, /^ERROR: 60 messages to Lothsahn in the last hour/);
+  assert.equal(heard(loth.info.id, '[person message]').length, OWNER_LOOP_MESSAGES_PER_HOUR + 1);
 });
 
 test('message_person: anyone but the two owners sends a few times until either writes, to and from an owner too', async (t) => {
