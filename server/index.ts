@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { HOST_ROLES, configPath, loadConfig, machineActivityPause, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
+import { HOST_ROLES, configPath, loadConfig, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus } from './store.ts';
 import { SessionManager, compactCommand, seedSdkCost, snapshotOf } from './sessions.ts';
@@ -367,6 +367,8 @@ machines.offlineAlert = (machineId, title, text) => {
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
 // The activity pause (w1574, docs/machines.md "Pausing a machine"): config machines.activityPause, per machine, off by default.
 machines.activityFor = (id) => machineActivityPause(cfg, id);
+// A person playing Final Factory on a machine (w1894): config machines.personPlay, on at LothDesktop by default.
+machines.personPlayFor = (id) => machinePersonPlay(cfg, id);
 /** Set machine `id`'s activity pause in config (its own entry) and log who did; the caller pushes it to the daemon. */
 function setActivityPause(id: string, a: { enabled?: boolean; idleMinutes?: number }, by: string) {
   const was = machineActivityPause(cfg, id);

@@ -21,6 +21,7 @@ import { unitySlotsLine } from '../shared/fleet.ts';
 import { benchLockPath, benchTicketFor, heldTicket, HELD_WAIT_CAP_MS, type BenchMode, type BenchTicket } from './benchQueue.ts';
 import type { UnitySlotsReport } from '../shared/types.ts';
 import { foreignTimedHold } from './benchLock.ts';
+import { personHoldReason } from './personPlay.ts';
 
 /**
  * The pointer a worker-root install (w513, scripts/worker/worker.ts) leaves for scripts outside the daemon: its mailbox
@@ -1018,6 +1019,15 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     if (inside && held < o.count) {
       timeoutMs = Math.min(timeoutMs ?? Infinity, HELD_WAIT_CAP_MS);
       d.say(`this process holds the bench lock (${inside.ticket} ${inside.mode}): a Unity slot is waited for at most ${HELD_WAIT_CAP_MS / 1000} s under it (w1615). Take the slot before bench_lock instead.`);
+    }
+    // w1894: no new Unity run while a person plays the game on this machine (machine/personPlay.ts): it waits, before it
+    // takes a slot or a ticket, until the hold's grace after the game closes. A run nested in one already going is left.
+    if (!inside && held < o.count && env.FF_WORKER_ROOT) {
+      let said = '';
+      for (let why = personHoldReason(env.FF_WORKER_ROOT); why; why = personHoldReason(env.FF_WORKER_ROOT)) {
+        if (why !== said) d.say(`waiting: no new Unity run starts while a person plays here (w1894): ${(said = why)}. Hand the work back to your orchestrator for another machine if it cannot wait.`);
+        await d.sleep(30_000);
+      }
     }
     if (held >= o.count) d.say(`inside a run that holds ${held} slot(s): no new slot`);
     else h = await acquire(d, { count: o.count, label: labelOf(o), holder, projects: o.projects, session: env.FF_SESSION_ID || undefined, timeoutMs });

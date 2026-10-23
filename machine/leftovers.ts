@@ -140,6 +140,11 @@ export interface LeftoverDeps {
   onEvent(text: string): void;
   /** After an end: the Unity slots look again (a killed batch build frees one). */
   afterKill?(): Promise<unknown>;
+  /**
+   * w1894: a person's game is looked for here (machines.personPlay): a slot player with no lease and no worker in its
+   * environment is then a person's (a game started by hand from a slot folder), not an orphan to end. Absent: off.
+   */
+  personPlay?(): boolean;
 }
 
 // ---------------------------------------------------------------- the pure decisions
@@ -216,6 +221,25 @@ export function tempSessionInArgs(cmd: string, tempRoot: string | undefined, pla
 export const slotSandbox = (slot: string | undefined) => /^(slot\d+)-[01]$/i.exec(slot ?? '')?.[1];
 
 /** The sandbox id of a lease's folder: <root>/sandboxes/<id>/... -> id. */
+/**
+ * The game players no worker started (w1894, machine/personPlay.ts): not one of the look's candidates (a worker's by its
+ * environment, lease, temp folder or arguments, or a slot player with a lease), no FF_SESSION_ID in its environment (a
+ * worker of another machine's), not the daemon, and no sandbox or worker temp folder in its command line (an agent's build,
+ * a sandbox editor's Build And Run, whose environment is the editor's). What is left is a person's game: Steam's launch, or
+ * one started by hand.
+ */
+export function personGames(procs: Proc[], cands: { p: Proc }[], env: Map<number, ProcEnv>, o: { platform: UnityPlatform; self: Set<number>; places: string[]; tempRoot?: string }): number[] {
+  const taken = new Set(cands.map((c) => c.p.pid));
+  const folders = [...o.places, ...(o.tempRoot ? [o.tempRoot] : [])].filter(Boolean).map((f) => names(key(f, o.platform)));
+  return gamePlayers(procs, o.platform)
+    .filter((p) => p.pid > 0 && !taken.has(p.pid) && !o.self.has(p.pid) && !env.get(p.pid)?.session)
+    .filter((p) => {
+      const c = o.platform === 'win32' ? posix(p.cmd).toLowerCase() : p.cmd;
+      return !folders.some((re) => re.test(c));
+    })
+    .map((p) => p.pid);
+}
+
 export const leaseSandbox = (folder: string | undefined) => /[/\\]sandboxes[/\\]([^/\\]+)/.exec(folder ?? '')?.[1];
 
 /** Whether a lease still holds its slot (player_slots.py Pool._live): a remote holder only by its age. */
@@ -328,6 +352,8 @@ export class LeftoverReaper {
   private busy?: Promise<Ended[]>;
   private lastLook = 0;
   private players: PlayerLine[] = [];
+  /** w1894: the game players of the last look that no worker started (a person's: machine/personPlay.ts). */
+  private persons: number[] = [];
   private others = 0;
   private lastAt?: number;
 
@@ -346,8 +372,8 @@ export class LeftoverReaper {
   }
 
   /** The game players of the last look, with their owner and age (list_sandboxes, the dashboard). */
-  report(): { players: PlayerLine[]; others: number; at?: string } {
-    return { players: this.players, others: this.others, ...(this.lastAt ? { at: new Date(this.lastAt).toISOString() } : {}) };
+  report(): { players: PlayerLine[]; others: number; persons: number[]; at?: string } {
+    return { players: this.players, others: this.others, persons: this.persons, ...(this.lastAt ? { at: new Date(this.lastAt).toISOString() } : {}) };
   }
 
   private async run(): Promise<Ended[]> {
@@ -384,6 +410,7 @@ export class LeftoverReaper {
     const env = await d.envOf(procs.map((p) => p.pid).filter((pid) => pid > 0 && !spared.has(pid)));
     const leases = d.leases();
     const now = d.now();
+    const personOn = !!d.personPlay?.();
     const cands: Candidate[] = [];
     for (const p of procs) {
       if (spared.has(p.pid) || p.pid <= 0) continue;
@@ -410,7 +437,7 @@ export class LeftoverReaper {
         else if (fromPath) c = { p, kind, session: fromPath, via: 'path', slot };
         else if (fromArg) c = { p, kind, session: fromArg, via: 'arg', slot };
         else if (kind === 'unity-worker') c = { p, kind };
-        else if (kind === 'player' && slot) c = { p, kind, slot, sandbox: leaseSandbox(lease?.sandbox) ?? slotSandbox(slot) };
+        else if (kind === 'player' && slot && !(personOn && !leases.some((l) => l.slot === slot && (Number(l.pid) === p.pid || String(l.host ?? '').toLowerCase() !== d.host.toLowerCase())))) c = { p, kind, slot, sandbox: leaseSandbox(lease?.sandbox) ?? slotSandbox(slot) };
       }
       if (c) cands.push(c);
     }
@@ -473,6 +500,7 @@ export class LeftoverReaper {
     for (const s of [...this.stopped.keys()]) if (!sessions.has(s)) this.stopped.delete(s);
     this.players = players;
     this.others = others;
+    this.persons = personOn ? personGames(procs, cands, env, { platform: d.platform, self, places: d.places().map((x) => x.path), tempRoot: d.tempRoot() }) : [];
     this.lastAt = now;
     const out: Ended[] = [];
     for (const [group, items] of toEnd) out.push(await this.end(group, items, procs));

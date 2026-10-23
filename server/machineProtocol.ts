@@ -8,7 +8,7 @@ import type { SessionOwner } from './resumable.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import type { GhLogin } from '../shared/ghLogin.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
-import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
+import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, MachineSandbox, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
  * Bumped when what the portal and a daemon send each other changes (machineProtocol.test.ts fails until someone
@@ -213,7 +213,7 @@ export type ToDaemon =
    * Each worker's request priority on this machine (w1628), for its bench queue: the daemon writes it to
    * <root>/tmp/bench.queue/priorities.json, which the game repo's scripts/bench/bench_queue.py reads at every decision.
    */
-  | { type: 'bench_priorities'; sessions: Record<string, BenchPriority>; singleWorker?: boolean; noTimedRuns?: NoTimedRuns }
+  | { type: 'bench_priorities'; sessions: Record<string, BenchPriority>; singleWorker?: boolean; noTimedRuns?: NoTimedRuns; personPlay?: { enabled: boolean; graceMinutes: number; who?: string } }
   /**
    * A clean-up pass now (the orchestrator asked); answered by a `cleanup` report. With `id`, also by a `cleanup_result`
    * carrying the pass's summary; `dryRun`: plan only, nothing removed (older daemons ignore both and run a real pass).
@@ -361,7 +361,7 @@ export type FromDaemon =
    * `benchLock` (w1600): its bench lock while a timed run holds it (machine/benchLock.ts). `bench` (w1835): its bench
    * queue's mode, holders and waiters (machine/benchState.ts), for the machine view.
    */
-  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState }
+  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState; personPlay?: PersonPlayReport }
   /** The plan usage of the Mac's own Claude login (not the host token), every config usagePollMinutes and on usage_now (protocol 4+). */
   | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
   /** A clean-up pass finished; `notice` only when it could not get above the soft threshold (then the orchestrator is told). */

@@ -86,7 +86,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // tickets as before, and placement still sends timed work elsewhere); an older portal sends none.
 // w1874 (no bump): `session` on a `unity` clear_batch, the asking worker's, for the reaper's owner rules. An older daemon
 // ignores it and keeps the old rules; a newer daemon asked by an older portal gets none and does the same.
-const DECIDED = { protocol: 9, fingerprint: '283bb40338b60445' };
+// w1894 (no bump): `personPlay` on `bench_priorities`, the machine's machines.personPlay (an older daemon drops it and looks
+// for no person's game), and `personPlay` on `stats`, a person playing there now, which an older portal drops (it copies the
+// stats fields it knows) and so holds nothing; a newer portal with an older daemon gets none and holds nothing either.
+const DECIDED = { protocol: 9, fingerprint: '3f38951f7f77d577' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
