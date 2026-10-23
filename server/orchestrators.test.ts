@@ -4790,6 +4790,34 @@ test('w1872: w1789 as it happened: a timed leg and a Queued timed request alread
   assert.deepEqual(o.replaceNoTimedWaits(), [], 'nothing left on m5: no second notice');
 });
 
+test('w1944: a worker whose still-open line waits on another request, the orchestrator or a worker they start gives up its sandbox at once, as for a declared block; one with its own work left keeps it', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }, { id: 'w4' }]);
+  const waitOn = (i: SessionInfo) => {
+    (agents as unknown as { waitLive?: unknown }).waitLive = undefined;
+    return agents.waitOn(i);
+  };
+  const said = (s: { info: SessionInfo }, line: string) => Object.assign(s.info, { status: 'idle', lastResult: `Done the low-ore pin.\n\n${line}`, lastResultAt: new Date().toISOString() });
+  // d558ba14 on w665, 2026-10-23 21:57 UTC: idle on the m3's only sandbox for 29 minutes with this line and no blocked_on.
+  const a = await startedFor(env, 'w1');
+  said(a, 'w1: still open: waiting on a Windows or Linux pair worker to run `MP-lowore-pin-pair` for PR #2340 (CI is green, the merge is held for that run), and on Ben\'s Intel Mac tester report');
+  assert.match(waitOn(a.info) ?? '', /^it waits on w1: a worker the dispatcher starts \(its report: "w1: still open: waiting on a Windows or Linux pair worker/);
+  const b = await startedFor(env, 'w2', { override_duplicate: 'another request' });
+  said(b, 'w2: still open: waiting for w3 to report its stills');
+  assert.match(waitOn(b.info) ?? '', /^it waits on w2: w3 \(its report/);
+  const c = await startedFor(env, 'w3', { override_duplicate: 'another request' });
+  said(c, 'w3: still open: waiting on the orchestrator to start the Windows client leg');
+  assert.match(waitOn(c.info) ?? '', /^it waits on w3: the orchestrator/);
+  // Work of its own left, or no line at all: it keeps the sandbox.
+  const d = await startedFor(env, 'w4', { override_duplicate: 'another request' });
+  said(d, 'w4: still open: I re-run the scenario after the fix');
+  assert.equal(waitOn(d.info), undefined);
+  Object.assign(d.info, { lastResult: 'Done for now.' });
+  assert.equal(waitOn(d.info), undefined);
+});
+
 // ---------------------------------------------------------------- w1944: queued work and the room it can really use
 
 /** A queued request, as decide_work queue leaves it. */
