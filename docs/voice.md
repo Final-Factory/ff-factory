@@ -1,7 +1,9 @@
 # Voice
 
 Two ways to talk to agents, in every message box (the orchestrator chat, session views; the mic
-also sits in the new-agent prompt and a standing agent's charter):
+also sits in the new-agent prompt, a standing agent's charter and the answer box of every question card on the
+Waiting and Intake tabs, w1817; `QuestionCard.tsx` is the one component for all of them. The
+"Chat more about this" button of an `ask_person` card has no box of its own: it opens the chat's reply box, which has the mic):
 
 - **Dictation** (the mic, the default): speech becomes text in the box for the user to check and edit.
   It is sent only when the user presses Send, unless "Send automatically after dictation" is on.
