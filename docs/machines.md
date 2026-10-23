@@ -777,8 +777,11 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   also says a warned turn first, in amber ("warned: ends in 4m", "for an urgent release" when the release set it); an
   urgent release holding the machine, or the nightly in a shared group, which no turn limit ends (`exempt` in
   `priorities.json`; the timed leg waits "after the urgent release" or "after the nightly"); a single-worker machine's
-  "no turn limit"; and what an exclusive turn closed ("closed for it: 2 editors, 1 player": `closed.json` and the players
-  `BenchTurn` asked to quit). The hover lists every holder and the next one; the machine's page has the same row in its
+  "no turn limit"; and what an exclusive turn closed ("for it: 2 editors closed, 1 player asked to quit": `closed.json`
+  and the players `BenchTurn` asked to quit). A deadline whose waiters all left counts for nothing (the queue drops it
+  only at the next waiter's look), and a waiting urgent release is the next leg, ahead of every other. On the board the
+  line is the card's own row, so it never moves the agent count; the sidebar keeps two short lines (the holder, its
+  times and how many wait). The hover lists every holder and the next one; the machine's page has the same row in its
   details. The daemon reads the queue with each stats report, every 15 s (`readBenchState`,
   `machine/benchState.ts`, in the queue's own order: priority, then place), and the page words it (`benchGlance`,
   `shared/benchGlance.ts`); an offline machine, or a daemon from before it, shows no line.

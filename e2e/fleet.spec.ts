@@ -653,7 +653,7 @@ test('fleet: each machine says its bench lock mode, Exclusive, Shared or Free, w
   await expect(beast).toHaveAttribute('data-mode', 'exclusive');
   await expect(beast.locator('.fl-bench-line').first()).toHaveText('Bench lock Exclusive · w1243 · worker 10d5850f');
   // Warned (w1832): its turn ends in 4 minutes, said first and in the mode's colour; what its turn closed (w1829).
-  await expect(beast.getByTestId('fl-bench-sub')).toHaveText('held 26m, warned: ends in 4m · 2 waiting · closed for it: 2 editors, 1 player');
+  await expect(beast.getByTestId('fl-bench-sub')).toHaveText('held 26m, warned: ends in 4m · 2 waiting · for it: 2 editors closed, 1 player asked to quit');
   await expect(beast.getByTestId('fl-bench-sub').locator('b.tone-amber')).toHaveText('held 26m, warned: ends in 4m');
   await expect(beast).toHaveAttribute('title', /Bench queue: Exclusive\nexclusive t00000412 · w1243 · worker 10d5850f · BEAST\/slot4 · "probe_ab.sh radius A round 2" · held 26m, warned: ends in 4m · \(the 30-minute exclusive turn\)\neditors closed for the turn: slot2, slot3\ngame players asked to quit: 1\n2 waiting/);
   const loth = board.getByTestId('board-lothdesktop').getByTestId('fl-bench');
@@ -676,6 +676,12 @@ test('fleet: each machine says its bench lock mode, Exclusive, Shared or Free, w
     }),
   );
   expect(cut, 'bench lines cut short or past the card on the board').toEqual([]);
+  // The lock line never widens a card's head: the agent count beside the name stays where it is without it (critic).
+  const countAt = () => board.locator('.board-card [data-testid="fl-agents-sum"]').evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().right)));
+  const withLine = await countAt();
+  await page.addStyleTag({ content: '.fl-bench { display: none !important; }' });
+  expect(withLine, 'the agent counts stay put beside a long bench line').toEqual(await countAt());
+  await page.addStyleTag({ content: '.fl-bench { display: flex !important; }' });
   await proof(page, 'bench-overview');
 
   // The sidebar shows the same, the full line in its hover when its width cuts it.
@@ -683,6 +689,11 @@ test('fleet: each machine says its bench lock mode, Exclusive, Shared or Free, w
   await expect(sidebar.getByTestId('fl-group-host').getByTestId('fl-bench')).toHaveAttribute('data-mode', 'exclusive');
   await expect(sidebar.getByTestId('fl-group-lothdesktop').getByTestId('fl-bench')).toHaveAttribute('data-mode', 'shared');
   await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-bench')).toHaveText('Bench lock Free');
+  // The sidebar keeps two short lines: the holder without its worker, its times and how many wait; the rest in the hover.
+  const sideBeast = sidebar.getByTestId('fl-group-host').getByTestId('fl-bench');
+  await expect(sideBeast.locator('.fl-bench-line').first()).toHaveText('Bench lock Exclusive · w1243');
+  await expect(sideBeast.getByTestId('fl-bench-sub')).toHaveText('held 26m, warned: ends in 4m · 2 waiting');
+  await expect(sidebar.getByTestId('fl-group-lothdesktop').getByTestId('fl-bench').locator('.fl-bench-line').first()).toHaveText('Bench lock Shared · 2 tickets running');
   // No line is cut in the sidebar: a long one wraps (CI's Linux fonts cut one Windows fit whole at 280 px).
   if (!isMobile(page)) {
     const sideCut = await sidebar.locator('.fl-bench-line').evaluateAll((els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent));
@@ -697,7 +708,11 @@ test('fleet: each machine says its bench lock mode, Exclusive, Shared or Free, w
   if (!(await row.isVisible())) await page.getByRole('button', { name: 'Details', exact: true }).click();
   await expect(row).toHaveAttribute('data-mode', 'shared');
   await expect(row).toContainText('Bench lock Shared');
-  await expect(row).toContainText('2 tickets running, the nightly among them · 1 waiting · next timed: w1785 after the nightly');
+  // The short holder text: the pane above the sandboxes is short (the nightly is in "after the nightly" and the hover).
+  await expect(row).toContainText('2 tickets running · 1 waiting · next timed: w1785 after the nightly');
+  // Its text wraps whole beside the chip, and the sandboxes under it stay in view (critic).
+  expect(await row.locator('.bench-row-text').evaluate((e) => e.scrollWidth <= e.clientWidth + 1)).toBe(true);
+  await expect(page.locator('.fl-sb-links button').first()).toBeInViewport();
   await proof(page, 'bench-machine-page');
 });
 
@@ -718,6 +733,11 @@ test('fleet: an urgent release holding a machine says so, with no turn limit, an
   const beast = page.getByTestId('overview').getByTestId('board-host').getByTestId('fl-bench');
   await expect(beast).toHaveAttribute('data-mode', 'exclusive');
   await expect(beast.locator('.fl-bench-line').first()).toHaveText('Bench lock Exclusive · urgent release · w1900 · worker 5c945083');
-  await expect(beast.getByTestId('fl-bench-sub')).toHaveText('held 3m, no turn limit · 1 waiting · next timed: w1243 after the urgent release · closed for it: 1 editor');
+  await expect(beast.getByTestId('fl-bench-sub')).toHaveText('held 3m, no turn limit · 1 waiting · next timed: w1243 after the urgent release · for it: 1 editor closed');
+  if (!isMobile(page)) {
+    const side = (await openSidebar(page)).getByTestId('fl-group-host').getByTestId('fl-bench');
+    await expect(side.locator('.fl-bench-line').first()).toHaveText('Bench lock Exclusive · urgent release · w1900');
+    await expect(side.getByTestId('fl-bench-sub')).toHaveText('held 3m, no turn limit · 1 waiting');
+  }
   await proof(page, 'bench-urgent-release');
 });

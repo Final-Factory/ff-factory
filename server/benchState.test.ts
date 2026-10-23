@@ -103,7 +103,7 @@ test('w1835: the mode shown is the queue\'s: Free, Shared while only shared tick
   assert.equal(eg.next, '', 'only a shared ticket waits');
 
   // Past its turn it goes on while nobody waits (w1832); a revoked one counts for nothing.
-  assert.equal(benchGlance(readBenchState(root, NOW + 25 * 60_000, alive), NOW + 25 * 60_000)!.times, 'held 37m, past its 30m turn: nobody waits');
+  assert.equal(benchGlance(readBenchState(root, NOW + 25 * 60_000, alive), NOW + 25 * 60_000)!.times, 'held 37m, past its 30m turn: no deadline set', 'a build waits but the queue set no deadline (its own worker, or not looked yet)');
   fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), 't00000003', 'revoked'), JSON.stringify({ at: 'x', why: 'preempted' }));
   assert.equal(readBenchState(root, NOW, alive)!.mode, 'free', 'revoked holder gone, the build not granted yet');
 });
@@ -180,9 +180,27 @@ test('w1835 after w1832: a warned turn, an urgent release holding, the nightly i
   assert.match(wg.hint, /held 26m, warned: ends in 4m · \(the 30-minute exclusive turn\)/);
   assert.equal(benchGlance(readBenchState(warned, NOW + 5 * 60_000, alive), NOW + 5 * 60_000)!.next, 'next timed: w1785 at the next look', 'past the deadline: revoked at the queue\'s next look');
 
-  // An urgent release waits behind it: its notice ends the turn in 5 minutes.
-  limit(warned, 't00000001', { deadline: sec(-5), warned: sec(0), release: 't00000009', why: 'an urgent release takes the machine: urgent release 1.0.0.4' });
-  assert.equal(benchGlance(readBenchState(warned, NOW, alive), NOW)!.times, 'held 26m, warned: ends in 5m for an urgent release');
+  // The waiter leaves: the deadline lingers in limit.json until the next waiter's look, and counts for nothing (review).
+  fs.rmSync(path.join(benchQueueDir(benchLockDir(warned)), 't00000002'), { recursive: true });
+  const gone = benchGlance(readBenchState(warned, NOW, alive), NOW)!;
+  assert.equal(gone.times, 'held 26m, 4m left of its 30m turn');
+  assert.equal(gone.warned, false);
+
+  // An urgent release waits behind it: its notice ends the turn in 5 minutes, and it goes first.
+  prios(warned, { v: 2, single_worker: false, sessions: { rrrr9999: { priority: 'urgent', requests: ['w1900'], exempt: 'release' } } });
+  ticket(warned, 't00000002', { mode: 'exclusive', what: 'probe B', session: 'bbbb2222', requests: ['w1785'] });
+  ticket(warned, 't00000009', { mode: 'exclusive', what: 'urgent release 1.0.0.4', session: 'rrrr9999', requests: ['w1900'], preempt: true, turn_min: 30 });
+  limit(warned, 't00000001', { deadline: sec(-5), warned: sec(0), by: 't00000009', release: 't00000009', why: 'an urgent release takes the machine: urgent release 1.0.0.4' });
+  const notice = readBenchState(warned, NOW, alive)!;
+  assert.equal(notice.nextExclusive?.ticket, 't00000009', 'a waiting urgent release goes ahead of every waiter');
+  assert.equal(notice.nextExclusive?.ahead, 0);
+  const ng0 = benchGlance(notice, NOW)!;
+  assert.equal(ng0.times, 'held 26m, warned: ends in 5m for an urgent release');
+  assert.equal(ng0.next, 'next timed: urgent release w1900 within 5m');
+  // A pre-empt ticket from a session the daemon did not mark release waits like any other (bench_queue.py is_urgent_release).
+  prios(warned, { v: 2, single_worker: false, sessions: {} });
+  assert.equal(readBenchState(warned, NOW, alive)!.nextExclusive?.preempt, undefined);
+  assert.equal(readBenchState(warned, NOW, alive)!.nextExclusive?.ticket, 't00000002');
 
   // The urgent release holds the machine: its pre-empt ticket, its builder marked release (priorities.json v 2).
   const rel = tmp(t);
@@ -232,9 +250,9 @@ test('w1835 after w1829: an exclusive turn says what it closed, the editors (clo
   const s = readBenchState(root, NOW, alive, 1)!;
   assert.deepEqual(s.closed, { editors: ['slot2', 'slot3'], players: 1 });
   const g = benchGlance(s, NOW)!;
-  assert.equal(g.closed, 'closed for it: 2 editors, 1 player');
+  assert.equal(g.closed, 'for it: 2 editors closed, 1 player asked to quit');
   assert.match(g.hint, /editors closed for the turn: slot2, slot3\ngame players asked to quit: 1/);
-  assert.equal(benchGlance(readBenchState(root, NOW, alive, 0), NOW)!.closed, 'closed for it: 2 editors');
+  assert.equal(benchGlance(readBenchState(root, NOW, alive, 0), NOW)!.closed, 'for it: 2 editors closed');
   // Shared: no turn closes anything, whatever a stale file says.
   fs.writeFileSync(path.join(benchQueueDir(benchLockDir(root)), 't00000001', 'info.json'), JSON.stringify({ ticket: 't00000001', pid: 555, mode: 'shared', what: 'build' }));
   assert.equal(readBenchState(root, NOW, alive, 1)!.closed, undefined);

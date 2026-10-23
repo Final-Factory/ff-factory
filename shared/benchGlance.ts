@@ -14,6 +14,8 @@ export interface BenchGlance {
   tone: 'amber' | 'blue' | 'grey';
   /** After the label: the holder (its requests and worker), or the shared group's size; empty when free. */
   detail: string;
+  /** The sidebar's shorter detail: the holder without its worker, the group's size without the nightly (both in the hover). */
+  short: string;
   /** The holder's or group's times ("held 12m, 18m left of its 30m turn", "warned: ends in 4m"), or empty. */
   times: string;
   /** Whether a holder was warned its turn ends: the line says it first. */
@@ -22,7 +24,7 @@ export interface BenchGlance {
   waiting: string;
   /** The next timed leg and when it starts at the latest, or empty. */
   next: string;
-  /** What the exclusive turn closed ("closed for it: 2 editors, 1 player"), or empty. */
+  /** What the exclusive turn closed ("for it: 2 editors closed, 1 player asked to quit"), or empty. */
   closed: string;
   /** Every holder and waiter, one per line, for the hover. */
   hint: string;
@@ -56,7 +58,7 @@ const endsIn = (at: number, now: number) => (at > now ? `ends in ${benchMinutes(
  * release set it), else its turn ("18m left of its 30m turn", or "past its 30m turn: nobody waits", which it may outlast),
  * else none ("no turn limit": exempt work, a single-worker machine).
  */
-function times(t: BenchTicketGlance, now: number, singleWorker: boolean): string {
+function times(t: BenchTicketGlance, now: number, singleWorker: boolean, waiting = 0): string {
   if (!t.since) return '';
   const held = `held ${benchMinutes(now - Date.parse(t.since))}`;
   if (t.deadline) {
@@ -67,7 +69,9 @@ function times(t: BenchTicketGlance, now: number, singleWorker: boolean): string
   if (!t.until) return held;
   const left = Date.parse(t.until) - now;
   const turn = t.turnMin ? `its ${t.turnMin}m turn` : 'its turn';
-  return left >= 0 ? `${held}, ${benchMinutes(left)} left of ${turn}` : `${held}, past ${turn}: nobody waits`;
+  // Past its turn the queue limits it only once another worker's ticket waits behind it (bench_queue.py _blocked_by): a
+  // leg of its own worker's, or one an exempt holder also keeps waiting, sets no deadline.
+  return left >= 0 ? `${held}, ${benchMinutes(left)} left of ${turn}` : `${held}, past ${turn}: ${waiting ? 'no deadline set' : 'nobody waits'}`;
 }
 
 /** A shared group's end, once an exclusive ticket waits behind it: one deadline for every holder (bench_queue.py). */
@@ -77,7 +81,7 @@ function groupTimes(b: BenchState, now: number): string {
   return `${d.warned ? 'warned: ' : ''}the group ${endsIn(Date.parse(d.deadline), now)}`;
 }
 
-function hintLine(t: BenchTicketGlance, now: number, singleWorker: boolean, waiting = false): string {
+function hintLine(t: BenchTicketGlance, now: number, singleWorker: boolean, waiting = false, waiters = 0): string {
   const where = [t.host, t.sandbox].filter(Boolean).join('/');
   const bits = [
     `${t.mode} ${t.ticket}`,
@@ -86,7 +90,7 @@ function hintLine(t: BenchTicketGlance, now: number, singleWorker: boolean, wait
     t.session ? `worker ${t.session.slice(0, 8)}` : '',
     where,
     t.what ? `"${t.what}"` : '',
-    waiting ? (t.since ? `waiting ${benchMinutes(now - Date.parse(t.since))}` : 'waiting') : times(t, now, singleWorker),
+    waiting ? (t.since ? `waiting ${benchMinutes(now - Date.parse(t.since))}` : 'waiting') : times(t, now, singleWorker, waiters),
     !waiting && t.deadline && t.why ? `(${t.why})` : '',
   ];
   return bits.filter(Boolean).join(' · ');
@@ -98,8 +102,8 @@ function startsWhen(b: BenchState, n: NonNullable<BenchState['nextExclusive']>, 
   // An old-style lock has no bound the queue keeps (quiet_gate.sh's own age rule): the leg waits for it, however long.
   if (b.legacy) return 'after the old-style lock';
   if (!b.runningCount) return 'starting';
-  // Exempt work runs on, whoever waits: the leg waits for it (an urgent release ends the nightly's turn itself).
-  const exempt = b.running.find((t) => kind(t) && !t.deadline);
+  // Exempt work runs on, whoever waits: the leg waits for it. An urgent release ends the holders' turns with its notice.
+  const exempt = n.preempt ? undefined : b.running.find((t) => kind(t) && !t.deadline);
   if (exempt) return `after the ${kind(exempt)}`;
   // Each holder's deadline, which the queue sets at the waiter's first look; until then the running group's end.
   const ends = b.running.map((t) => (t.deadline ? Date.parse(t.deadline) : NaN)).filter(Number.isFinite);
@@ -114,27 +118,31 @@ export function benchGlance(b: BenchState | undefined, now: number): BenchGlance
   const single = b.singleWorker === true;
   const lead = b.running[0];
   let detail = '';
+  let short = '';
   let held = '';
   if (b.mode === 'exclusive') {
     if (lead?.mode === 'exclusive') {
       detail = [kind(lead), who(lead), lead.session ? `worker ${lead.session.slice(0, 8)}` : ''].filter(Boolean).join(' · ');
-      held = times(lead, now, single);
+      short = [kind(lead), who(lead)].filter(Boolean).join(' · ');
+      held = times(lead, now, single, b.waiting);
     } else if (b.legacy) {
-      detail = 'old-style lock';
+      detail = short = 'old-style lock';
       held = `held ${benchMinutes(now - Date.parse(b.legacy.since))}`;
     }
   } else if (b.mode === 'shared') {
     const nightly = b.running.some((t) => t.exempt === 'nightly');
-    detail = `${plural(b.runningCount, 'ticket')} running${nightly ? (b.runningCount === 1 ? ': the nightly' : ', the nightly among them') : ''}`;
+    short = `${plural(b.runningCount, 'ticket')} running`;
+    detail = `${short}${nightly ? (b.runningCount === 1 ? ': the nightly' : ', the nightly among them') : ''}`;
     held = groupTimes(b, now);
   }
   const n = b.nextExclusive;
-  const next = n ? `next timed: ${who(n)} ${startsWhen(b, n, now)}` : '';
+  const next = n ? `next timed: ${[kind(n), who(n)].filter(Boolean).join(' ')} ${startsWhen(b, n, now)}` : '';
   const c = b.closed;
-  const closedBits = c ? [c.editors.length ? plural(c.editors.length, 'editor') : '', c.players ? plural(c.players, 'player') : ''].filter(Boolean) : [];
-  const closed = closedBits.length ? `closed for it: ${closedBits.join(', ')}` : '';
+  // A player is asked to quit, and may be left running (machine/benchTurn.ts askPlayerToQuit): said as asked.
+  const closedBits = c ? [c.editors.length ? `${plural(c.editors.length, 'editor')} closed` : '', c.players ? `${plural(c.players, 'player')} asked to quit` : ''].filter(Boolean) : [];
+  const closed = closedBits.length ? `for it: ${closedBits.join(', ')}` : '';
   const lines = [
-    ...b.running.map((t) => hintLine(t, now, single)),
+    ...b.running.map((t) => hintLine(t, now, single, false, b.waiting)),
     ...(b.runningCount > b.running.length ? [`and ${b.runningCount - b.running.length} more running`] : []),
     ...(b.legacy ? [`old-style lock: ${b.legacy.owner}`] : []),
     ...(c?.editors.length ? [`editors closed for the turn: ${c.editors.join(', ')}`] : []),
@@ -148,6 +156,7 @@ export function benchGlance(b: BenchState | undefined, now: number): BenchGlance
     label: BENCH_LABEL[b.mode],
     tone: TONE[b.mode],
     detail,
+    short,
     times: held,
     warned: b.running.some((t) => t.warned),
     waiting: b.waiting ? `${b.waiting} waiting` : '',
