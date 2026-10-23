@@ -6791,15 +6791,23 @@ a.wc-pr:hover {
     scrollbar-width: none;
     margin: 0 calc(-1 * var(--s-3));
     padding: 0 var(--s-3);
+    /* The row fades at its right edge: there is more to scroll to. */
+    mask-image: linear-gradient(to right, #000 85%, transparent);
   }
 
   .wc-chips .ledger-state {
     flex: none;
+    min-height: 32px;
   }
 
   .wc-selects {
     width: 100%;
     margin-left: 0;
+  }
+
+  /* No room to keep for it here: the menus take the row. */
+  .wc-selects .wc-hidden {
+    display: none;
   }
 
   .wc-select {
@@ -6818,10 +6826,6 @@ a.wc-pr:hover {
   }
 
   .ov-mode-btn {
-    min-height: 32px;
-  }
-
-  .wc-chips .ledger-state {
     min-height: 32px;
   }
 }
