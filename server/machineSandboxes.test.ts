@@ -1327,3 +1327,39 @@ test('w1668: a warm sandbox (slot1 on a build computer) is not trimmed when rele
   assert.deepEqual(trimmed, ['sb2'], 'slot1 keeps its Library caches');
   assert.deepEqual(swept.sort(), ['sb2', 'slot1'], 'both sweep their build output');
 });
+
+test('w1856: a release build hands its sandbox back: switch_branch onto urgent/<v> remembers the branch, build_plan done puts it back, and new work never starts on a release branch', async (t) => {
+  const { r, mm, sessions, agents, sbOf, path1, gitNow } = await twoSandboxes(t);
+  // The builder (here the worker that was in sb1 on feature/w1, as c28c5061's branch was in BEAST's slot1) puts the sandbox
+  // on the bump commit, as the urgent-release skill says (step 3.1).
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w1836: the 1.0.0.12 urgent release', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  const said = await agents.switchBranch({ sandbox: 'pc/sb1', branch: 'urgent/1.0.0.12', createFrom: 'origin/master', callerSessionId: w.info.id });
+  assert.match(said, /pc\/sb1 is on a release branch now: build_plan done puts it back on feature\/w1 \(w1856\); commit nothing on it\./);
+  assert.equal(r.git(path1, 'branch', '--show-current'), 'urgent/1.0.0.12');
+  assert.deepEqual({ from: w.info.releaseSwitch?.from, to: w.info.releaseSwitch?.to, sandbox: w.info.releaseSwitch?.sandbox }, { from: 'feature/w1', to: 'urgent/1.0.0.12', sandbox: 'sb1' });
+
+  // build_plan done: back on the branch it left, the record gone.
+  const plan = { machine: 'pc', what: 'the 1.0.0.12 urgent release', builder: w.info.id, requests: [], by: `worker ${w.info.id}`, declaredAt: Date.now(), dueAt: Date.now(), told: {}, paused: [], moved: [], kept: [] };
+  const notes = await agents.handBackRelease(plan, w.info.id);
+  assert.deepEqual(notes.map((n) => n.replace(/ \(.*\)$/, '')), ['pc/sb1 is back on feature/w1, off the release branch urgent/1.0.0.12']);
+  assert.equal(r.git(path1, 'branch', '--show-current'), 'feature/w1');
+  assert.equal(w.info.releaseSwitch, undefined);
+  assert.deepEqual(await agents.handBackRelease(plan, w.info.id), [], 'nothing left to put back');
+
+  // Left on a release branch with nobody there (the builder's request closed and it stopped): new work starts on a fresh
+  // branch, never on urgent/<v>.
+  await agents.switchBranch({ sandbox: 'pc/sb1', branch: 'urgent/1.0.0.12', callerSessionId: w.info.id });
+  w.stop();
+  await until('w stopped', () => !w.live);
+  // Its request closed, so the release pass released the sandbox (placeReleased), as after w1836.
+  delete w.info.releaseSwitch;
+  w.info.placeReleased = { at: new Date().toISOString(), sandbox: 'sb1', branch: 'urgent/1.0.0.12', why: 'its work is over: its request is closed (w1836 done)' };
+  await gitNow('sb1');
+  const prep = await agents.prepareForNewWork('pc/sb1', undefined, 'W1767');
+  assert.equal(prep.branch, 'sandbox/sb1-w1767', prep.note);
+  assert.match(prep.note, /^ Handed over first: pc\/sb1 was on the release branch urgent\/1\.0\.0\.12, which a release build left it on \(w1856\)/);
+  assert.equal(r.git(path1, 'branch', '--show-current'), 'sandbox/sb1-w1767');
+  assert.equal(sbOf('sb1')!.branch, 'sandbox/sb1-w1767');
+});

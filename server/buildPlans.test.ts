@@ -23,7 +23,7 @@ interface W {
   sandbox?: string;
 }
 
-function world(ws: W[], o: { moveTo?: Record<string, string | undefined>; moveFails?: string[]; bench?: BenchLock; file?: string; seat?: SeatResult[] } = {}) {
+function world(ws: W[], o: { moveTo?: Record<string, string | undefined>; moveFails?: string[]; bench?: BenchLock; file?: string; seat?: SeatResult[]; handBack?: BuildDeps['handBack'] } = {}) {
   let now = Date.parse('2026-10-20T05:00:00Z');
   const told: { id: string; text: string }[] = [];
   const notes: string[] = [];
@@ -59,6 +59,7 @@ function world(ws: W[], o: { moveTo?: Record<string, string | undefined>; moveFa
     log: () => {},
     now: () => now,
     ...(o.file ? { file: o.file } : {}),
+    ...(o.handBack ? { handBack: o.handBack } : {}),
     ...(o.seat
       ? {
           seat: async (_p, id) => {
@@ -176,7 +177,7 @@ test('w1656: a release build goes at once, waiting neither for workers finishing
   assert.doesNotMatch(await t.plans.start('builder', 'beast'), /bench queue/, 'no lock: no queue note');
   // Done: the hold lifts, the queue looks again, the worker paused mid-turn is told to carry on; one paused between turns resumes with its own next message.
   t.at(62);
-  const done = t.plans.done('beast', 'worker builder said it is done');
+  const done = await t.plans.done('beast', 'worker builder said it is done');
   assert.match(done, /^Done \(w1606\): beast takes work again; the build took 62 min\. 1 paused worker\(s\) told to carry on; 1 paused between turns/);
   assert.equal(t.plans.releaseBuilder('beast', 'builder'), false, 'no plan: back to its request\'s priority');
   assert.deepEqual(t.plans.holds(), {});
@@ -309,7 +310,44 @@ test('w1841 (a): the workers a build paused are known until done (their requests
   w.machine = 'lothdesktop';
   w.live = false;
   t.at(60);
-  t.plans.done('beast');
+  await t.plans.done('beast');
   assert.ok(t.told.some((x) => x.id === '83aa4ecd' && /The build on beast is done \(w1606\): carry on where you stopped/.test(x.text)), 'it is told to carry on wherever it is');
   assert.equal(t.plans.pausedFor('83aa4ecd'), undefined, 'done: no hold');
+});
+
+test('w1856: done puts the release sandbox back on its own branch BEFORE the workers paused there carry on, and says so', async () => {
+  const order: string[] = [];
+  const t = world(
+    [
+      { id: 'builder', machine: 'beast', midTurn: true, requests: ['w1836'], sandbox: 'slot1' },
+      { id: 'c28c5061', machine: 'beast', midTurn: true, requests: ['w1767'], sandbox: 'slot1' },
+    ],
+    {
+      handBack: async (p, caller) => {
+        order.push(`handBack ${p.what} by ${caller}`);
+        return ['beast/slot1 is back on w1767-circuit-visibility, off the release branch urgent/1.0.0.12'];
+      },
+    },
+  );
+  t.plans.declare({ machine: 'beast', minutes: 0, what: 'the 1.0.0.12 urgent release', builder: 'builder', requests: ['w1836'], by: 'worker builder' });
+  await t.plans.start('builder', 'beast');
+  const told = t.told.length;
+  const answer = await t.plans.done('beast', 'worker builder said it is done', 'builder');
+  order.push(...t.told.slice(told).filter((x) => /The build on beast is done/.test(x.text)).map((x) => `told ${x.id}`));
+  assert.deepEqual(order, ['handBack the 1.0.0.12 urgent release by builder', 'told c28c5061']);
+  assert.match(answer, /Hand-back \(w1856\): beast\/slot1 is back on w1767-circuit-visibility, off the release branch urgent\/1\.0\.0\.12\.$/);
+  assert.match(t.notes.at(-1)!, /^\[ledger\] BUILD DONE .*Hand-back \(w1856\): beast\/slot1 is back on w1767-circuit-visibility/);
+});
+
+test('w1856: a hand-back that throws still ends the build and says nothing was switched back', async () => {
+  const t = world([{ id: 'builder', machine: 'beast', requests: ['w1836'], sandbox: 'slot1' }], {
+    handBack: async () => {
+      throw new Error("beast's daemon is offline");
+    },
+  });
+  t.plans.declare({ machine: 'beast', minutes: 0, what: 'the 1.0.0.12 urgent release', builder: 'builder', requests: ['w1836'], by: 'worker builder' });
+  const answer = await t.plans.done('beast');
+  assert.match(answer, /^Done \(w1606\)/);
+  assert.match(answer, /the hand-back failed \(beast's daemon is offline\): no sandbox was switched back/);
+  assert.deepEqual(t.plans.holds(), {});
 });

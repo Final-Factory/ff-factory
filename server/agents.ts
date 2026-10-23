@@ -91,6 +91,7 @@ import type { CatalogTool, LaunchSpec } from './launch.ts';
 import { EFFORT_LEVELS, appDirOf, benchLockIn, machineKind, platformNoun, type EffortLevel, type Machine, type MachineSandbox } from '../shared/types.ts';
 import { describeTrigger } from './schedule.ts';
 import { describeGit } from './gitStatus.ts';
+import { branchNow, handBackBranch, isReleaseBranch, nextReleaseSwitch } from './releaseHandBack.ts';
 import { displayName } from '../shared/labels.ts';
 import type { StandingAgentInput, StandingTrigger } from '../shared/types.ts';
 import { collectResume, orchestratorWasBusy, readUpdateResult, restartSummary, resumeMessage, systemdSupervised, versionLine, waitingOnWakeLine, writeUpdateWanted, type AppNow, type RestartRequest, type ResumeFile, type ResumeOutcome } from './restart.ts';
@@ -576,6 +577,8 @@ export class Agents {
       move: (id, to, why) => this.moveWorker(id, to, why),
       // w1668: an urgent release builds in its computer's slot1: its builder is moved there first.
       seat: (p, id) => this.seatRelease(p, id),
+      // w1856: and at done its sandbox goes back on the branch it left for the release branch.
+      handBack: (p, caller) => this.handBackRelease(p, caller),
       // w1656: a release build's start stops a paused worker's editor (its compile or test run ends, to run again).
       stopEditor: async (id) => {
         const info = store.sessions.get(id);
@@ -1962,7 +1965,18 @@ export class Agents {
     if (b.length) throw new Error(midTurnRefusal(b, where));
     // The daemon checks again with what it runs, and must not count the caller either.
     const r = await this.machines.switchBranch(m.id, req.branch, req.createFrom, sb.id, req.callerSessionId, req.callerSessionId ? this.githubTokenFor(m.id, req.callerSessionId, `${req.callerSessionId}'s switch_branch`) : undefined);
-    return `${where}: ${r.from} → ${r.to}. ${r.notes.join('; ')}.`;
+    // w1856: a release build's switch onto urgent/<v> or release/<v> remembers the branch it left, for build_plan done.
+    const caller = req.callerSessionId ? this.store.sessions.get(req.callerSessionId) : undefined;
+    if (caller) {
+      const next = nextReleaseSwitch(caller.releaseSwitch, m.id, sb.id, r.from, r.to, new Date().toISOString());
+      if (JSON.stringify(next) !== JSON.stringify(caller.releaseSwitch)) {
+        if (next) caller.releaseSwitch = next;
+        else delete caller.releaseSwitch;
+        this.store.putSession(caller);
+      }
+    }
+    const back = isReleaseBranch(r.to) ? ` ${where} is on a release branch now: build_plan done puts it back on ${caller?.releaseSwitch?.from ?? 'a fresh branch'} (w1856); commit nothing on it.` : '';
+    return `${where}: ${r.from} → ${r.to}. ${r.notes.join('; ')}.${back}`;
   }
 
   // ---------------------------------------------------------------- workers on machines (docs/machines.md)
@@ -2307,6 +2321,52 @@ export class Agents {
     return { done: `moved its builder ${b.id} from ${from.id} to ${sb.id} on its branch ${branch}`, moved: true };
   }
 
+  /**
+   * w1856 (server/releaseHandBack.ts): at build_plan done, every sandbox on the build computer that the build's workers
+   * put on a release branch (their releaseSwitch, or the sandbox they are in) and that is still on one goes back on the
+   * branch it left (else a fresh hand-over branch), before the workers paused there carry on. `caller`: the worker that
+   * said done, which the daemon does not count as busy. -> one note per sandbox, for done's answer and the ledger line.
+   */
+  async handBackRelease(p: BuildPlan, caller?: string): Promise<string[]> {
+    const m = this.store.machines.get(p.machine);
+    if (!m) return [];
+    const ours = [...this.store.sessions.values()].filter((s) => s.kind === 'worker' && (s.id === p.builder || s.id === caller || (s.machineId === m.id && this.openWorkOf(s).some((w) => p.requests.includes(w.id)))));
+    const todo = new Map<string, { from?: string; who?: SessionInfo }>();
+    for (const s of ours) {
+      if (s.releaseSwitch?.machine === m.id) todo.set(s.releaseSwitch.sandbox, { from: s.releaseSwitch.from, who: s });
+      if (s.machineId === m.id && s.machineSandbox && !todo.has(s.machineSandbox)) todo.set(s.machineSandbox, { who: s });
+    }
+    const notes: string[] = [];
+    for (const [id, t] of todo) {
+      const sb = m.sandboxes?.find((x) => x.id === id);
+      const on = sb ? branchNow(sb) : undefined;
+      const forget = () => {
+        if (t.who?.releaseSwitch?.machine === m.id && t.who.releaseSwitch.sandbox === id) {
+          delete t.who.releaseSwitch;
+          this.store.putSession(t.who);
+        }
+      };
+      if (!sb || !isReleaseBranch(on)) {
+        forget();
+        continue;
+      }
+      const elsewhere = (b: string) => (m.sandboxes ?? []).some((x) => x.id !== id && branchNow(x) === b);
+      const branch = handBackBranch(id, on!, t.from, elsewhere);
+      try {
+        if (sb.unity.state !== 'stopped') await this.machines.unity(m.id, 'stop', false, id);
+        const r = await this.machines.switchBranch(m.id, branch, undefined, id, caller, caller ? this.githubTokenFor(m.id, caller, `${caller}'s release hand-back`) : undefined);
+        forget();
+        notes.push(`${m.id}/${id} is back on ${branch}, off the release branch ${on}${r.notes.length ? ` (${r.notes.join('; ')})` : ''}`);
+        console.log(`release hand-back: ${m.id}/${id} from ${on} to ${branch} for ${p.what}`);
+      } catch (e) {
+        const why = (e as Error).message;
+        notes.push(`${m.id}/${id} is STILL on the release branch ${on}: switching it to ${branch} failed (${why}). In it, with the editor stopped: \`python scripts/release/urgent_release.py handback --restore-tree\`, then switch_branch to ${branch}; nobody commits on ${on}`);
+        console.log(`release hand-back: could not switch ${m.id}/${id} from ${on} to ${branch}: ${why}`);
+      }
+    }
+    return notes;
+  }
+
   /** The open requests a worker serves (workIdsOf). */
   /**
    * Each worker on `machineId` with an open request, and its highest request priority (w1628), for that machine's bench
@@ -2412,7 +2472,7 @@ export class Agents {
     if (action === 'done') {
       const p = this.builds.plan(machine);
       if (info && p && p.builder !== info.id && !this.openWorkOf(info).some((w) => p.requests.includes(w.id))) return `Not yours: the build on ${machine} is ${p.by}'s.`;
-      return this.builds.done(machine, info ? `worker ${info.id} said it is done` : 'the dispatcher said it is done');
+      return this.builds.done(machine, info ? `worker ${info.id} said it is done` : 'the dispatcher said it is done', info?.id);
     }
     // Release builds only (w1628): a worker's own build clears nothing; a plan already declared goes on.
     if ((action === 'start' || action === 'coming') && a.release !== true && !this.builds.plan(machine)) return NOT_RELEASE;
@@ -2722,6 +2782,29 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     if (!m || !sb) return { note: '' };
     const claim = this.placeAgain.claimedBy(m.id, sb.id);
     if (claim) throw new Error(`sandbox ${m.id}/${sb.id} is spoken for: worker ${claim} released it while it waited and resumes there, ahead of new work (docs/machines.md, "Placing work"). Use another free sandbox.`);
+    // w1856: never new work on a release branch (urgent/<v>, release/<v>), whoever left it there.
+    const onBranch = branchNow(sb);
+    if (!agentSeat && isReleaseBranch(onBranch)) {
+      const label = `${m.id}/${sb.id}`;
+      const here = this.sessionsOf(sb.sessionIds).filter((x) => !x.placeReleased && occupies(x, !!this.sessions.sessions.get(x.id)?.live));
+      const busy = this.busyIn(m, sb);
+      const left = ` this worker's handover tells it to switch_branch to its own branch before it commits anything.`;
+      if (here.length || busy.length) {
+        const why = busy.length ? busy.join('; ') : here.map((x) => `${x.id} "${x.title}" (${agentStateText(x)}) is there on it`).join('; ');
+        return { note: ` Not handed over: ${label} is on the release branch ${onBranch} (w1856), but ${why}, so it was not switched under them;${left}` };
+      }
+      const tag = (name ?? new Date().toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-')).toLowerCase();
+      const branch = handOverBranch(sb.id, tag, sandboxBranchFor(source, `${sb.id}-${tag}`));
+      try {
+        if (sb.unity.state !== 'stopped') await this.machines.unity(m.id, 'stop', false, sb.id);
+        const res = await this.machines.switchBranch(m.id, branch, undefined, sb.id);
+        console.log(`release hand-back: switched ${label} off the release branch ${onBranch} to ${branch} for new work (w1856)`);
+        return { branch, note: ` Handed over first: ${label} was on the release branch ${onBranch}, which a release build left it on (w1856); FF Factory stopped its editor if it ran and switched it (${res.notes.join('; ')}), so this worker starts on ${branch}.` };
+      } catch (e) {
+        console.log(`release hand-back: could not switch ${label} off ${onBranch}: ${(e as Error).message}`);
+        return { note: ` Not handed over: ${label} is on the release branch ${onBranch} (w1856), and switching it failed (${(e as Error).message});${left}` };
+      }
+    }
     const r = releasedOn(sb, this.store.sessions.values(), (id) => !!this.sessions.sessions.get(id)?.live);
     if (!r?.placeReleased) return { note: '' };
     const label = `${m.id}/${sb.id}`;
