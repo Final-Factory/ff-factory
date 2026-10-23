@@ -2286,7 +2286,10 @@ export class Agents {
       if (!open.length) continue;
       const top = open.reduce((a, w) => (WORK_PRIORITIES.indexOf(w.priority) > WORK_PRIORITIES.indexOf(a) ? w.priority : a), 'low' as WorkPriority);
       // w1656: the builder of the release planned here takes the bench first, whatever its request's priority.
-      out[info.id] = { priority: this.builds?.releaseBuilder(machineId, info.id) ? 'urgent' : top, requests: open.map((w) => w.id) };
+      const release = !!this.builds?.releaseBuilder(machineId, info.id);
+      // w1832: the urgent release lane's builder and the scheduled nightly's worker are never pre-empted by the turn limits.
+      const exempt = release ? 'release' : open.some((w) => w.source?.kind === 'nightly-run') ? 'nightly' : undefined;
+      out[info.id] = { priority: release ? 'urgent' : top, requests: open.map((w) => w.id), ...(exempt ? { exempt } : {}) };
     }
     return out;
   }

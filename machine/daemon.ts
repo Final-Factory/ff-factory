@@ -61,6 +61,7 @@ import { prepareInbox } from '../server/attachments.ts';
 import { postTextFromFile } from '../server/ffboxPostFile.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { readBenchLock, readBenchQueue, writeBenchPriorities } from './benchLock.ts';
+import { readBenchWarnings } from './benchWarnings.ts';
 import { benchTicketFor } from './benchQueue.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import { PauseKeeper, pauseFile } from './pause.ts';
@@ -1334,7 +1335,9 @@ export class Daemon {
       const benchLock = readBenchLock(this.cfg.root);
       // Its timed legs, running or waiting (w1628): a release build goes to another build computer meanwhile.
       const benchQueue = readBenchQueue(this.cfg.root);
-      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}) });
+      // Holders warned that their turn ends (w1832): the portal messages each worker once per deadline.
+      const benchWarnings = readBenchWarnings(this.cfg.root);
+      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);
     }
@@ -2069,7 +2072,7 @@ export class Daemon {
         return;
       case 'bench_priorities':
         // Each worker's request priority (w1628): the game repo's bench_queue.py orders tickets by it first.
-        writeBenchPriorities(this.cfg.root, msg.sessions);
+        writeBenchPriorities(this.cfg.root, msg.sessions, new Date(), msg.singleWorker === true);
         return;
       case 'cleanup_now':
         void this.cleaner.run('asked', { dryRun: !!msg.dryRun }).then(

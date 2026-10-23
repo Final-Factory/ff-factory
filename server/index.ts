@@ -13,6 +13,7 @@ import { Agents } from './agents.ts';
 import { MachineManager, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
 import { LiveError, LiveHub } from './live.ts';
 import { LIVE_IDLE_DEFAULT_MINUTES, LiveIdleCloser, liveIdleStatusLine } from './liveIdle.ts';
+import { BenchWarner } from './benchWarnings.ts';
 import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationView } from './providers.ts';
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
@@ -424,6 +425,9 @@ const agents = new Agents(cfg, store, sessions, machines, identity);
 // Each machine's bench queue orders tickets by their worker's request priority first (w1628): at connect and each minute.
 machines.benchPrioritiesFor = (id) => agents.benchPriorities(id);
 setInterval(() => machines.pushBenchPriorities(), 60_000).unref();
+// A holder warned that its bench turn ends (w1832, server/benchWarnings.ts): its worker is messaged once per deadline.
+const benchWarner = new BenchWarner({ session: (id) => store.sessions.get(id), send: (id, text) => void sessions.send(id, text, 'system'), log: (line) => console.log(`[bench] ${line}`) });
+machines.onBenchWarnings = (id, warnings) => benchWarner.handle(id, warnings);
 // The live view (w1398, docs/live-view.md): a sandbox's game streamed beside its agent's chat, behind config live.enabled.
 const liveHub = new LiveHub({
   enabled: () => cfg.live?.enabled === true,

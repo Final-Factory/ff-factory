@@ -67,17 +67,19 @@ export function readBenchQueue(root: string | undefined, alive: (pid: number) =>
 
 /**
  * Write each worker's request priority where the bench queue reads it (w1628): <root>/tmp/bench.queue/priorities.json,
- * {at, sessions: {<session id>: {priority, requests}}}, replaced whole (a reader never sees half a file). A ticket whose
- * FF_SESSION_ID is not in it counts as normal. Errors are logged, never thrown: the queue then goes on in its old order.
+ * {at, v, sessions: {<session id>: {priority, requests, exempt?}}, single_worker}, replaced whole (a reader never sees
+ * half a file). A ticket whose FF_SESSION_ID is not in it counts as normal. v 2 (w1832) says the exempt marks and
+ * single_worker are this daemon's: bench_queue.py then honours a pre-empt ticket only from the session marked release.
+ * Errors are logged, never thrown: the queue then goes on in its old order.
  */
-export function writeBenchPriorities(root: string | undefined, sessions: Record<string, BenchPriority>, at = new Date()): string | undefined {
+export function writeBenchPriorities(root: string | undefined, sessions: Record<string, BenchPriority>, at = new Date(), singleWorker = false): string | undefined {
   if (!root) return undefined;
   const dir = benchQueueDir(benchLockDir(root));
   const file = path.join(dir, 'priorities.json');
   try {
     fs.mkdirSync(dir, { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ at: at.toISOString(), sessions }));
+    fs.writeFileSync(tmp, JSON.stringify({ at: at.toISOString(), v: 2, sessions, single_worker: singleWorker }));
     fs.renameSync(tmp, file);
     return file;
   } catch (e) {

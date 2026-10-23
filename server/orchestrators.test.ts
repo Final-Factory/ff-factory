@@ -4177,11 +4177,17 @@ test('w1628: each worker\'s bench priority is the highest of its open requests, 
   const real = agents.builds.releaseBuilder.bind(agents.builds);
   agents.builds.releaseBuilder = (m: string, id: string) => m === 'pc' && id === a.id;
   assert.equal(agents.benchPriorities('pc')[a.id].priority, 'urgent', 'the release builder\'s tickets count as urgent');
+  assert.equal(agents.benchPriorities('pc')[a.id].exempt, 'release', 'w1832: the urgent release lane is never pre-empted');
+  assert.equal(agents.benchPriorities('pc')[b.id].exempt, undefined, 'any other worker is');
   agents.builds.releaseBuilder = real;
+  assert.equal(agents.benchPriorities('pc')[a.id].exempt, undefined);
   assert.equal(agents.benchPriorities('pc')[a.id].priority, 'high');
   store.putWork({ ...store.work.get('w1')!, status: 'done' });
   assert.equal(agents.benchPriorities('pc')[a.id], undefined, 'no open request: its tickets count as normal');
   assert.deepEqual(agents.benchPriorities('elsewhere'), {});
+  // w1832: the worker of the scheduled nightly run (the portal's nightly schedule files it as source kind nightly-run).
+  store.putWork({ ...store.work.get('w2')!, source: { kind: 'nightly-run', untrusted: false, channel: 'nightly e2e', nightlyRun: { date: '2026-10-23', machine: 'pc' } } });
+  assert.equal(agents.benchPriorities('pc')[b.id].exempt, 'nightly');
 });
 
 // w1643, lothsahn: "let's make the setting the minimum priority work that can go to a machine. If normal (all work), if high,

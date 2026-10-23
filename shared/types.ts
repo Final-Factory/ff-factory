@@ -543,6 +543,34 @@ export interface MachineStats extends HostStats {
 export interface BenchPriority {
   priority: WorkPriority;
   requests: string[];
+  /**
+   * The work the bench queue never pre-empts (w1832; lothsahn: "Let's avoid preempting urgent release builds and the
+   * nightly"): `release`, the urgent release lane's builder (BuildPlans.releaseBuilder); `nightly`, the worker of the
+   * scheduled nightly run (a request filed by the portal's nightly schedule, source kind nightly-run). Set by the portal
+   * only: the game repo's bench_queue.py reads it from priorities.json, so no worker can mark its own job.
+   */
+  exempt?: 'release' | 'nightly';
+}
+
+/**
+ * A holder's turn warning (w1832): the game repo's bench_queue.py set a deadline on its ticket because another worker
+ * waits, and warned it five minutes before (the ticket's limit.json). The daemon reports each with its stats; the portal
+ * messages the worker once per deadline (server/benchWarnings.ts).
+ */
+export interface BenchWarning {
+  ticket: string;
+  session: string;
+  mode: 'shared' | 'exclusive';
+  what: string;
+  /** When its turn ends (epoch ms), and why (bench_queue.py's words). */
+  deadline: number;
+  why: string;
+  /** Set by an urgent release taking the machine (it cannot be waited out). */
+  release?: boolean;
+  /** Its checkout's state when the daemon read it: uncommitted files, commits not pushed (undefined: no upstream). */
+  dirty?: number;
+  unpushed?: number;
+  branch?: string;
 }
 
 export interface BenchQueueReport {
