@@ -249,7 +249,7 @@ export function cliTempFolders(tempRoot: string): string[] {
 /** A clean-up log entry for the portal: its item lists cut to 300 each, so one frame stays small. */
 export function trimLogEntry(e: object): Record<string, unknown> {
   const out: Record<string, unknown> = { ...(e as Record<string, unknown>) };
-  for (const k of ['removedAll', 'failedAll', 'plannedAll', 'listedAll', 'planned', 'listed']) if (Array.isArray(out[k])) out[k] = (out[k] as unknown[]).slice(0, 300);
+  for (const k of ['removedAll', 'failedAll', 'plannedAll', 'listedAll', 'heldAll', 'planned', 'listed', 'held']) if (Array.isArray(out[k])) out[k] = (out[k] as unknown[]).slice(0, 300);
   return out;
 }
 

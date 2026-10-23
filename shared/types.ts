@@ -1491,6 +1491,8 @@ export interface CleanupSummary {
   plannedBytes?: number;
   /** Stale-looking output it could not attribute to a closed request or a commit: kept, for a person. */
   listed?: { path: string; bytes: number; why: string }[];
+  /** Rebuildable caches a low pass saw in a worker's temp folder and kept, with the check that kept them (w1813). */
+  held?: { path: string; bytes: number; why: string }[];
   /** When it could not get above the soft threshold: the biggest remaining consumers. */
   consumers?: { path: string; bytes: number }[];
   /** Unity Libraries of projects not opened for a long time: reported, removed only past a longer age. */

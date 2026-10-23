@@ -109,6 +109,8 @@ export interface CleanupRun {
   planned?: { path: string; bytes: number; rule: string; why: string }[];
   /** Stale output it could not attribute: kept, for a person to look at (w459). */
   listed?: { path: string; bytes: number; why: string }[];
+  /** Rebuildable caches a low pass saw in a worker's temp folder and kept, with the check that kept them (w1813). */
+  held?: { path: string; bytes: number; why: string }[];
 }
 
 // Windows paths ("C:/x", "\\\\server\\x") are judged as Windows paths and "/x" as POSIX paths on any OS (CI runs
@@ -903,9 +905,10 @@ export class CleanupRunner {
         ...(dryRun ? { dryRun: true } : {}),
         ...(r.planned?.length ? { planned: r.planned.slice(0, 200), plannedBytes: r.planned.reduce((n, x) => n + x.bytes, 0) } : {}),
         ...(r.listed?.length ? { listed: r.listed.slice(0, 50) } : {}),
+        ...(r.held?.length ? { held: r.held.slice(0, 50) } : {}),
       };
       if (dryRun) {
-        this.d.log({ ...summary, freeBeforeBytes: before, plannedAll: r.planned, listedAll: r.listed });
+        this.d.log({ ...summary, freeBeforeBytes: before, plannedAll: r.planned, listedAll: r.listed, heldAll: r.held });
         return summary;
       }
       const stale = await this.d.stale?.().catch(() => []);
@@ -917,7 +920,7 @@ export class CleanupRunner {
         summary.consumers = await this.d.consumers().catch(() => []);
         notice = describeShortfall(summary);
       }
-      this.d.log({ ...summary, freeBeforeBytes: before, removedAll: r.removed, failedAll: r.failed.slice(0, 50), plannedAll: r.planned, listedAll: r.listed });
+      this.d.log({ ...summary, freeBeforeBytes: before, removedAll: r.removed, failedAll: r.failed.slice(0, 50), plannedAll: r.planned, listedAll: r.listed, heldAll: r.held });
       this.last = summary;
       this.d.done(summary, notice);
       return summary;
@@ -959,7 +962,8 @@ export function describeCleanup(s: CleanupSummary): string {
   const temp = s.temp?.length ? ` Temp, apart from the disk: ${s.temp.map((t) => `${t.path} ${t.freeBytes === undefined ? '?' : gb(t.freeBytes)} free of ${t.totalBytes === undefined ? '?' : gb(t.totalBytes)} (${t.ram ? 'RAM, tmpfs' : 'a disk volume of its own'})`).join(', ')}.` : '';
   const planned = s.planned?.length ? ` ${s.dryRun ? 'Would remove' : 'Stale output in dry-run mode, would remove'} ${s.planned.length} item(s), ${gb(s.plannedBytes ?? 0)}.` : '';
   const listed = s.listed?.length ? ` ${s.listed.length} stale-looking item(s) it kept for a person: not attributable to a request, or outside the worker install folder.` : '';
-  return `${s.at.slice(0, 16).replace('T', ' ')} (${s.trigger}${s.dryRun ? ', dry run' : ''}${s.stale ? ', with stale output' : ''}): ${s.removed} item(s), ${gb(s.freedBytes ?? 0)}${s.failed ? `, ${s.failed} skipped` : ''}${free}.${temp}${planned}${listed}${staleLine(s)}`;
+  const held = s.held?.length ? ` Rebuildable caches it kept in worker folders: ${s.held.length} place(s), ${gb(s.held.reduce((n, h) => n + h.bytes, 0))}, each with the check that kept it.` : '';
+  return `${s.at.slice(0, 16).replace('T', ' ')} (${s.trigger}${s.dryRun ? ', dry run' : ''}${s.stale ? ', with stale output' : ''}): ${s.removed} item(s), ${gb(s.freedBytes ?? 0)}${s.failed ? `, ${s.failed} skipped` : ''}${free}.${temp}${planned}${listed}${held}${staleLine(s)}`;
 }
 
 /** The newest passes of a cleanup-log.jsonl (appendCleanupLog), in full, for the cleanup_log tool. */
@@ -992,6 +996,7 @@ export function describeCleanupItems(s: CleanupSummary, removed: { path: string;
   if (!s.dryRun && removed.length) parts.push(`Removed (biggest first):`, ...removed.map(line));
   if (s.planned?.length) parts.push(`${s.dryRun ? 'Would remove' : 'Would remove (dry-run mode)'} (biggest first):`, ...s.planned.map(line));
   if (s.listed?.length) parts.push('Kept, for a person (not attributable to a request, or outside the worker install folder; look at these):', ...s.listed.map((x) => `- ${x.path}  ${gb(x.bytes)}  (${x.why})`));
+  if (s.held?.length) parts.push('Kept, rebuildable caches in worker folders (with the check that kept them, w1813):', ...s.held.map((x) => `- ${x.path}  ${gb(x.bytes)}  (${x.why})`));
   return parts.join('\n');
 }
 
