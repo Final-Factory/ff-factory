@@ -768,6 +768,16 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   state and FREE chip and shows no "Asked you". A member who did not ask for the worker sees no button. A person asked a
   question by another worker in the same slot (no view) sees "Asked you" and no button.
 
+  **Each computer's bench lock** (w1835, lothsahn: "Please display on FF factory's webpage for the machine view whether
+  each machine is in shared or exclusive lock mode"): under its counts, the group and the board card say **Bench lock
+  Exclusive** (amber: a timed leg, or an old-style `quiet_gate.sh` lock, holds it; its requests and worker, how long it has
+  held and how long its hold bound leaves), **Shared** (blue: only shared tickets run, builds, compiles, editor boots; how
+  many) or **Free**, then how many tickets wait and the next timed leg, which starts within the running tickets' longest
+  bound at the latest when nothing is ahead of it. The hover lists every holder and the next one; the machine's page has the
+  same row in its details. The daemon reads the queue with each stats report, every 15 s (`readBenchState`,
+  `machine/benchState.ts`, in the queue's own order: priority, then place), and the page words it (`benchGlance`,
+  `shared/benchGlance.ts`); an offline machine, or a daemon from before it, shows no line.
+
 ![The sidebar grouped by computer](images/fleet-sidebar-desktop-chromium.png)
 ![The Overview board](images/fleet-overview-desktop-chromium.png)
 

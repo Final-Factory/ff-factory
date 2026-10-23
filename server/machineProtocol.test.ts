@@ -80,7 +80,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w1832 (no bump): `singleWorker` on `bench_priorities` (an older daemon writes no single_worker: its queue applies the
 // turn limits), and `benchWarnings` on `stats`, the holders the queue warned (an older portal drops the field, and the
 // holder still sees the warning in its own command output).
-const DECIDED = { protocol: 9, fingerprint: '768227337d236e30' };
+// w1835 (no bump): `bench` on `stats`, the bench queue's mode, holders and waiters, which an older portal drops (it copies
+// the stats fields it knows); a newer portal with an older daemon gets none and shows no bench line.
+const DECIDED = { protocol: 9, fingerprint: '49d4ce570a9a3d7b' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

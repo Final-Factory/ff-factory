@@ -64,6 +64,7 @@ import { readBenchLock, readBenchQueue, timedHolder, writeBenchPriorities } from
 import { readBenchWarnings } from './benchWarnings.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, writeClosedFile } from './benchTurn.ts';
 import { benchTicketFor } from './benchQueue.ts';
+import { readBenchState } from './benchState.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import { PauseKeeper, pauseFile } from './pause.ts';
 import { trayView } from './pauseRules.ts';
@@ -1360,7 +1361,9 @@ export class Daemon {
       const benchQueue = readBenchQueue(this.cfg.root);
       // Holders warned that their turn ends (w1832): the portal messages each worker once per deadline.
       const benchWarnings = readBenchWarnings(this.cfg.root);
-      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}) });
+      // Its queue's mode, holders and waiters (w1835): the machine view shows them.
+      const bench = readBenchState(this.cfg.root);
+      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);
     }

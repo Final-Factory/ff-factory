@@ -6245,6 +6245,24 @@ body {
   white-space: nowrap;
 }
 
+.fl-bench {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+/* A long line wraps instead of cutting the time left or what waits: fonts differ in width by platform (w1835; the
+   sidebar's 280 px fits it whole on Windows and cut it on Linux). */
+.fl-bench-line {
+  overflow-wrap: anywhere;
+}
+
+.fl-bench b {
+  font-weight: 600;
+}
+
 .fl-places {
   display: flex;
   flex-direction: column;

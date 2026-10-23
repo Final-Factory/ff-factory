@@ -2,7 +2,7 @@
 // first (with its own daemon's sandboxes when it has one, as BEAST does; the portal itself holds none, w510), then each
 // machine, each with its sandboxes and the agents in them (every worker runs in a sandbox, w536). Pure, so the server's
 // tests can check it and the browser can run it.
-import type { AppState, HostStats, LiveViewInfo, Machine, MachineSandbox, MachinePlatform, PlayerSeen, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState, UserRole, WorkItem } from './types.ts';
+import type { AppState, BenchState, HostStats, LiveViewInfo, Machine, MachineSandbox, MachinePlatform, PlayerSeen, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState, UserRole, WorkItem } from './types.ts';
 import { AGENT_STATE_RANK, agentState, holdsSandbox, placeRank, sortAgents } from './agentState.ts';
 import { holdsOf, workLiveAll } from './workState.ts';
 import { newestFirst } from './blockers.ts';
@@ -130,6 +130,8 @@ export interface FleetComputer {
   platform?: MachinePlatform | string;
   online: boolean;
   stats?: HostStats & { unity?: UnitySlotsReport };
+  /** Its bench queue's mode, holders and waiters (w1835), from its daemon's stats; absent: no daemon, or one before it. */
+  bench?: BenchState;
   sandboxes: FleetSandbox[];
   /** max_sandboxes (machines) or limits.maxSandboxes (host), when known. */
   sandboxLimit?: number;
@@ -255,6 +257,7 @@ export function fleetOf(
       platform: app.system?.platform,
       online: true,
       stats: app.system,
+      ...(local && app.machineStats?.[local.id]?.bench ? { bench: app.machineStats[local.id].bench } : {}),
       sandboxes: inUseFirst(daemonSandboxes),
       sandboxLimit: local?.sandboxRoot ? (local.maxSandboxes ?? 3) : undefined,
       // Every Unity process there, as its daemon counts them (w469), else the sandbox editors it reports.
@@ -293,6 +296,7 @@ export function fleetOf(
       platform: m.platform ?? 'darwin',
       online: m.online,
       stats: app.machineStats?.[m.id],
+      ...(app.machineStats?.[m.id]?.bench ? { bench: app.machineStats[m.id].bench } : {}),
       sandboxes: inUseFirst(sandboxes),
       // Pool defaults as the daemon applies them (docs/machines.md): 3 sandboxes, 2 editors once sandbox_root is set.
       sandboxLimit: m.sandboxRoot ? (m.maxSandboxes ?? 3) : undefined,

@@ -8,7 +8,7 @@ import type { SessionOwner } from './resumable.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import type { GhLogin } from '../shared/ghLogin.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
-import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
+import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
  * Bumped when what the portal and a daemon send each other changes (machineProtocol.test.ts fails until someone
@@ -358,9 +358,10 @@ export type FromDaemon =
   /**
    * The Mac's CPU, RAM, GPU and disk (server/system.ts), every 15 s (protocol 4+). `unity` (w469): every Unity editor
    * there against max_unity, and the launches waiting for a slot (machine/unitySlots.ts); an older daemon sends none.
-   * `benchLock` (w1600): its bench lock while a timed run holds it (machine/benchLock.ts).
+   * `benchLock` (w1600): its bench lock while a timed run holds it (machine/benchLock.ts). `bench` (w1835): its bench
+   * queue's mode, holders and waiters (machine/benchState.ts), for the machine view.
    */
-  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[] }
+  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState }
   /** The plan usage of the Mac's own Claude login (not the host token), every config usagePollMinutes and on usage_now (protocol 4+). */
   | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
   /** A clean-up pass finished; `notice` only when it could not get above the soft threshold (then the orchestrator is told). */

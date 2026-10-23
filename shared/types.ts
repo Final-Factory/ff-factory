@@ -528,6 +528,8 @@ export interface MachineStats extends HostStats {
   benchLock?: BenchLock;
   /** The timed legs in its bench queue, running or waiting (w1628, machine/benchLock.ts readBenchQueue); absent: none. */
   benchQueue?: BenchQueueReport;
+  /** Its bench queue's mode, holders and waiters now (w1835, machine/benchState.ts); absent: a daemon before it. */
+  bench?: BenchState;
 }
 
 /**
@@ -573,6 +575,39 @@ export interface BenchWarning {
   dirty?: number;
   unpushed?: number;
   branch?: string;
+}
+
+/**
+ * One ticket in a machine's bench queue, as the machine view shows it (w1835): who took it, for what, and its times. `since`
+ * is when it was granted (a holder) or taken (a waiter); `until` a holder's hold bound (bench_queue.py max_min).
+ */
+export interface BenchTicketGlance {
+  ticket: string;
+  mode: 'shared' | 'exclusive';
+  what: string;
+  session?: string;
+  requests?: string[];
+  host?: string;
+  sandbox?: string;
+  since?: string;
+  until?: string;
+}
+
+/**
+ * What a machine's bench queue does now (w1835; lothsahn, 2026-10-23: "Please display on FF factory's webpage for the
+ * machine view whether each machine is in shared or exclusive lock mode"): `exclusive` while a timed leg (or an old-style
+ * bench lock, `legacy`) holds it, `shared` while only shared tickets run (builds, compiles, editor boots), else `free`.
+ * `running` lists the holders (at most BENCH_STATE_MAX_RUNNING; `runningCount` counts them all), `waiting` the tickets not
+ * granted yet, and `nextExclusive` the first timed leg among them in the queue's own order, with `ahead` waiters before it.
+ */
+export interface BenchState {
+  mode: 'free' | 'shared' | 'exclusive';
+  running: BenchTicketGlance[];
+  runningCount: number;
+  waiting: number;
+  nextExclusive?: BenchTicketGlance & { ahead: number };
+  /** An old-style lock's owner line (quiet_gate.sh before w1615): no ticket, so no request or worker. */
+  legacy?: { owner: string; since: string };
 }
 
 export interface BenchQueueReport {
