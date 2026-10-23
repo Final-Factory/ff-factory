@@ -66,6 +66,9 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     'fffctl apikey issue w1021-m3 --user w1021-test --create-member --machine m3 --path ~/.ff-factory/w1021-m3.key',
     'fffctl apikey list',
     'fffctl apikey revoke w1021-m3',
+    // w1864: the logins, and deleting a member login for the person whose job it is
+    'fffctl user list',
+    'fffctl user delete w1021-test --by lothsahn',
     // w676: the portal's machine ssh tool, through fff-ops-priv (which takes only --check, --key and --pin)
     'fff-machine-ssh --check',
     'fff-machine-ssh --key',
@@ -113,6 +116,8 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     ['fffctl machine-credential issue m5 --out f', /a person's/],
     ['fffctl apikey', /a person's/],
     ['fffctl apikey export w1021-m3', /a person's/],
+    ['fffctl user', /a person's/],
+    ['fffctl user add w1021-test', /a person's/],
     ['fffctl migrate --cut-over', /a person's/],
     ['fffctl migrate --key', /a person's/],
     // w1537: a secret's key or a token as a value never reaches sudo's log.
