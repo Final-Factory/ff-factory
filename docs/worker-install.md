@@ -873,8 +873,12 @@ Three fixes from LothLaptop's reset V: (w1918, 2026-10-23):
 intact, and the rest is made again by the update over the link and by the daemon: `machine_update` clones the repo again (the
 installer clones whenever `<root>\repo` has no `HEAD`, `worker.ts` `cloneRepo`) and recreates the root's folders, and the
 pool remakes each free sandbox whose folder is gone, once the sandbox root and the clone are there, on its branch (the clone's,
-else origin's, else its base; `machine/sandboxes.ts` `remakeGone`, once per sandbox per daemon run). Work never pushed went
-with the drive. While the drive is not attached there is no sandbox root, so nothing is remade then.
+else origin's, else its base; `machine/sandboxes.ts` `remakeGone`, once per sandbox per daemon run). A folder with no `.git`
+counts as gone: an agent placed there meanwhile makes its folder at its start, empty but for its own files (LothLaptop's slot1
+had the w1915 worker in it). The worktree is then added beside it and its `.git` moved in (`git worktree repair`), so the
+agent's files stay and it runs on in the checkout; a folder that holds a checkout's own files but no `.git` is left, as an
+error. Work never pushed went with the drive. While the drive is not attached there is no sandbox root, so nothing is remade
+then.
 
 The maximum of an existing drive cannot be lowered in place (ReFS cannot shrink a volume, and `Optimize-VHD` needs the Hyper-V
 tools; both measured on LothDesktop on 2026-10-12): an update keeps it and says so; a reinstall makes the drive again.

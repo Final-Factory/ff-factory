@@ -601,6 +601,61 @@ test("w1918: a free sandbox whose folder is gone (its drive reset) is made again
   assert.equal(fs.existsSync(dir), false);
 });
 
+test("w1918: a sandbox folder an agent start made again (no .git, only the agent's files) is remade in place, the agent's files kept; one holding a checkout's files is left", async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const lines: string[] = [];
+  const { p } = pool(r, { log: (l) => lines.push(l) });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await p.create({ id: 'sb2', branch: 'sandbox/sb2', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  await ready(p, 'sb2');
+  const dir = path.join(r.sbRoot, 'sb1');
+  const dir2 = path.join(r.sbRoot, 'sb2');
+  const tracked = r.git(dir, 'ls-tree', '--name-only', 'HEAD').split('\n')[0].trim();
+
+  // The drive was reset, then an agent started in sb1 (its folder made, with its Inbox); sb2 lost only its .git.
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(path.join(dir, 'Inbox'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'Inbox', 'a-save.zip'), 'save');
+  fs.rmSync(path.join(dir2, '.git'), { force: true });
+  await p.tick();
+  await ready(p, 'sb1');
+  assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/sb1');
+  assert.equal(fs.readFileSync(path.join(dir, 'Inbox', 'a-save.zip'), 'utf8'), 'save', "the agent's files stay");
+  assert.ok(fs.existsSync(path.join(dir, tracked)), 'checked out');
+  assert.equal(fs.existsSync(`${dir}.remake`), false, 'the folder beside it is gone');
+  assert.ok(r.git(r.main, 'worktree', 'list').includes('sb1'), r.git(r.main, 'worktree', 'list'));
+  assert.ok(lines.some((l) => /sandbox sb1: its folder .* has no checkout .*making its worktree again/.test(l)), lines.join('\n'));
+  for (let i = 0; i < 100 && p.list().find((x) => x.id === 'sb2')!.status === 'creating'; i++) await new Promise((res) => setTimeout(res, 50));
+  const sb2 = p.list().find((x) => x.id === 'sb2')!;
+  assert.equal(sb2.status, 'error');
+  assert.match(sb2.statusDetail ?? '', /holds a checkout's files/);
+  assert.ok(fs.existsSync(path.join(dir2, tracked)), 'its files are left');
+});
+
+test('w1915: a free sandbox whose folder came back empty (a worker started in it after the drive reset) is made again in that folder', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const { p } = pool(r);
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  r.git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+  // A folder with files in it is a sandbox: left alone.
+  await p.tick();
+  assert.equal(p.list()[0].status, 'ready');
+
+  // The drive was reset and the folder made again empty (LothLaptop's slot1: the worker's own directory).
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir);
+  await p.tick();
+  assert.equal(p.list()[0].status, 'creating');
+  await ready(p, 'sb1');
+  assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/sb1');
+});
+
 // ---------------------------------------------------------------- pure parts
 
 test('machine sandboxes: only a direct child of the root named after it can be deleted, never the main clone', () => {
