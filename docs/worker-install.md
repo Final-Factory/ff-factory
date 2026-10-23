@@ -737,17 +737,24 @@ free space than the file can still grow (below), so a ceiling the volume cannot 
 90 % of the volume's *size* up to 1 TB, gave LothLaptop (1 sandbox, 1 agent) a 1 TB drive on a D: with about 870 GB free:
 the guard refused every agent ("D:/ 841 GB free (the Dev Drive's file can still grow 996 GB there)").
 
-The need, in GB, measured on LothDesktop's V: on 2026-10-23 (6 sandboxes, 2 agents each) as logical sizes (`du -s`), so
-block clones and dedup count in full:
+The need, in GB (GiB): what each part takes on disk on its own, counted once (w1947). A sandbox's LFS files are block
+clones of the clone's LFS objects and its Library starts as a block clone of the seed, so those blocks count with the clone
+and the seed. Measured on LothDesktop's V: on 2026-10-23 (6 sandboxes, 2 agents each) with cluster maps
+(FSCTL_GET_RETRIEVAL_POINTERS: [sandbox-disk.md](sandbox-disk.md)'s `Phys.cs`): a sandbox's own part is its logical size
+less what it shares with the clone and the seed. Dedup's sharing between sandboxes is not taken off: a new machine runs none.
 
 | Part | GB | Rests on |
 |---|---|---|
-| Each sandbox | 44 | the largest of six, slot1: 40 (worktree 12, Library 28; the others 21 to 37), measured; its two player folders: 4 (19 for 6 sandboxes), measured, rounded up |
-| Each agent (sandboxes x agents per sandbox) | 10 | `tmp\` held 109.8 for 12 agent seats, unswept leftovers included: measured |
-| Once per install | 38 | the clone 20 (pack 1.4 and LFS 8.5 measured, checkout about 10 estimated), the seed 11, nightly-history 5, tools and steam 2: measured |
+| Each sandbox | 30 | the largest of six, slot3 (the median one takes 18): its worktree less the LFS blocks it shares with the clone, 8.4 (Builds, Temp; 1 to 3 in the others); its Library less what it shares with the seed, 17.0 (build caches, BurstCache, reimports; 9 to 16 in the others); its two player folders, 4 (3.7 logical). All measured. The 11 GB over the median sandbox is the room for a sandbox's growth: what days of player builds and imports added. |
+| Each agent (sandboxes x agents per sandbox) | 10 | `tmp\` held 109.2 (101.3 on disk) for 12 agent seats, unswept leftovers included: measured |
+| Once per install | 38 | the clone 20: bare, no checkout (`git worktree list`, measured); pack 1.4 (`git count-objects`; 1.3 on LothLaptop's new clone) and master's LFS objects 8.9 (`git lfs ls-files -s`), measured, plus 10 for the LFS objects other branches bring (*a guess*, under LothDesktop's ~25 after 11 days, measured by difference: V: used less every other folder). The seed 9 (8.5 on disk), nightly-history 5 (4.6), tools and steam 2, ReFS's own 2 (an empty 80 GB V: on LothLaptop used 1.8): measured |
 | Clean-up room | 20 | the pool's clean-up line, `disk_warn_gb` (lothsahn, w1910: "cleanup space should be 20G") |
 
-One sandbox with one agent needs **112 GB**, the smallest safe drive; 6 sandboxes with 2 agents each, 442. The cap: the
+w1910's first version summed logical sizes (`du -s`). That counted the seed's blocks again in every Library, the clone's
+LFS blocks again in every worktree, and a 10 GB checkout the bare clone does not have: 44 GB a sandbox, 112 for one sandbox
+with one agent.
+
+One sandbox with one agent needs **98 GB**, the smallest safe drive; 6 sandboxes with 2 agents each, 358. The cap: the
 root's volume keeps 30 GB free (the guard's 20 GB clean-up line plus its 10 GB hysteresis) or a tenth of its free space,
 whichever is more (*a guess*). Under the need, the drive gets the cap and the install says so; under Windows' 50 GB
 minimum (sourced: Microsoft Learn, "Set up a Dev Drive on Windows 11"), no drive is made and the install carries on
