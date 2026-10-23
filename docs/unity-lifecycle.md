@@ -254,6 +254,10 @@ node cannot take the OS file locks the queue lives on):
   timed leg back to the shared group's hour, warning first, and the exclusive turn below then closes it. So the machine
   view's Free means nothing runs. Game players hold one too, for their whole life (the game repo's
   `player_slots.py launch`, `hold_player_ticket`).
+  The sandbox shows `starting`, not `running`, until this editor's own bridge wrote its
+  `~/.unity-mcp/unity-mcp-status-*.json` after it was launched (`server/unityHang.ts` `bridgeUpSince`, w1829): the port
+  file outlives every editor, so before this a booting editor showed `running` ("MCP bridge up") at the pool's first
+  look, 12 s into a 199 s first import on BEAST's slot5, and its boot ticket went then too.
 - **`readBenchLock`** (`machine/benchLock.ts`): a holder whose owner line names a ticket (`[t00000042]`) counts while
   its helper process lives, however old; an old-style line keeps the 40-minute rule.
 
