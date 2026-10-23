@@ -2144,9 +2144,13 @@ test('w643: decide_work block records a structured blocker; the request reads Bl
 
   const watch = new BlockerWatch({ store, orchestrators: o });
   assert.equal((await watch.tick()).size, 0, 'w1 has not reported: still blocked');
-  // w1's worker reports (a turn ends after the block): w2 unblocks, back to the dispatcher, which is told to start it.
-  store.putSession({ id: 'k1', kind: 'worker', title: 'w1: timing table', status: 'idle', permissionMode: 'default', createdAt: T0, lastActivityAt: new Date(Date.now() + 1000).toISOString(), turns: 2, costUsd: 1, pendingPermissions: [], lastResult: 'Timing table in specs/633/timing.md.' });
+  // w1869: a progress report from w1's worker ("still open") leaves w2 blocked.
+  store.putSession({ id: 'k1', kind: 'worker', title: 'w1: timing table', status: 'idle', permissionMode: 'default', createdAt: T0, lastActivityAt: new Date(Date.now() + 1000).toISOString(), turns: 2, costUsd: 1, pendingPermissions: [], lastResult: 'Started the lab runs.\n\nw1: still open: the LothDesktop A/B is running, then the timing table' });
   store.work.get('w1')!.sessionIds = ['k1'];
+  assert.equal((await watch.tick()).size, 0, 'a progress report does not unblock it');
+  assert.equal(store.work.get('w2')!.status, 'blocked');
+  // w1's worker reports the table (a turn ends after the block): w2 unblocks, back to the dispatcher, which is told to start it.
+  store.putSession({ ...store.sessions.get('k1')!, lastActivityAt: new Date(Date.now() + 2000).toISOString(), lastResult: 'Timing table in specs/633/timing.md.' });
   const did = await watch.tick();
   assert.match(did.get('w2')!, /^clear: w1's worker reported/);
   assert.equal(store.work.get('w2')!.status, 'new');
@@ -2155,6 +2159,37 @@ test('w643: decide_work block records a structured blocker; the request reads Bl
   const told = heard(dispatcher().info.id, '[ledger] w2').map((e) => e.text).join('\n');
   assert.match(told, /\[ledger\] w2 "Speed up the nightly lab" \(Lothsahn, normal\) is unblocked: it waited on w1 reporting \(w1's timing table\), and w1's worker reported.*Start it now: start_agent with work_id "w2"/);
   await until("Lothsahn's orchestrator hears it unblocked", () => heard(chat(LOTH).info.id, '[dispatch] w2').some((e) => /unblocked: it waited on w1 reporting/.test(e.text)));
+});
+
+test("w1869: a request blocked on another's report: that request's worker is told what it waits for and how to mark it; its progress report leaves it blocked, the marked line unblocks it", async (t) => {
+  const { store, agents, o, dispatcher, call } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', by: BEN }, { id: 'w2', by: BEN }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Time A vs A', title: 'w1: timing', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'It needs the timing.', blocker: { kind: 'request', ref: 'w1', on: 'report', what: "dec9a619's LothDesktop timing of A vs A" } });
+  assert.equal(r.isError, false, r.text);
+  const notice = () => store.readTranscript(id).filter((e) => e.kind === 'user' && /For w2: <the result, or where it is>/.test((e as { text: string }).text));
+  await until("w1's worker is told", () => notice().length === 1);
+  assert.match((notice()[0] as { text: string }).text, /w2 \("Request w2"\) is blocked until a report of yours on w1 carries: dec9a619's LothDesktop timing of A vs A\./);
+  assert.match(store.work.get('w1')!.log.join('\n'), new RegExp(`w2 waits on its report \\(dec9a619's LothDesktop timing of A vs A\\): told ${id}`));
+  await until('that turn ends', () => info.status === 'idle');
+  // The same gate again (the dispatcher re-blocks): not told twice.
+  await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'Still.', blocker: { kind: 'request', ref: 'w1', on: 'report', what: "dec9a619's LothDesktop timing of A vs A" } });
+  await new Promise((res) => setTimeout(res, 200));
+  assert.equal(notice().length, 1);
+
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  const report = (text: string, ms: number) => store.putSession({ ...store.sessions.get(id)!, status: 'idle', lastActivityAt: new Date(Date.now() + ms).toISOString(), lastResult: text });
+  report('B is building.\n\nw1: still open: the LothDesktop A/B is running…', 1000);
+  assert.equal((await watch.tick()).size, 0, 'a still-open progress report does not unblock w2');
+  assert.equal(store.work.get('w2')!.status, 'blocked');
+  report('A vs A on LothDesktop: 41.2 ms and 41.0 ms per frame.\n\nFor w2: the timing is in specs/w1/timing.md (A 41.2 ms, A 41.0 ms)\n\nw1: still open: the transform-walk PR', 2000);
+  assert.match((await watch.tick()).get('w2') ?? '', /^clear: w1's worker reported \(dec9a619's LothDesktop timing of A vs A\)/);
+  assert.notEqual(store.work.get('w2')!.status, 'blocked');
 });
 
 /** The computers with room, as the dispatcher's tools see them (Agents.roomNow, read by Orchestrators' `room`). */
@@ -4510,6 +4545,8 @@ test('w1841: a worker on a real portal: a reporter wait is Waiting with no [need
   // (e) w1818: files another request's worker makes: blocked_on reports is a request gate that clears at that worker's report.
   const h = machines.hooks!.handlersFor(info, store.machines.get('pc')!);
   assert.match(String(await h.blocked_on!({ reports: ['w1'], what: "w1's Calculations window stills" })), /^Recorded: w2 is Blocked on w1/);
+  // w1869: w1's workers are told what w2 waits for and how to mark the report that carries it (w1 has none here).
+  assert.doesNotMatch(String(store.work.get('w1')!.log.join('\n')), /w2 waits on its report/);
   const g = store.work.get('w2')!.blocked!;
   assert.deepEqual([g.kind, g.ref, g.on], ['request', 'w1', 'report']);
   assert.match(await live(), /Blocked on w1/);
