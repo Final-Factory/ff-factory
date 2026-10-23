@@ -5,7 +5,8 @@ import { holdReload } from '../freshness';
 import { takeFocus } from '../keep';
 import type { ImageInput } from '../../../shared/types';
 import { attempt, clearReply, focusEvent, showLatest, startReply, toast, useStore } from '../store';
-import { clearPending, removePending, restorePending, startUpload, usePendingFiles, type PendingFile } from '../upload';
+import { ATTACH_DEFAULTS, attachProblem, clearPending, restorePending, startUpload, usePendingFiles, type PendingFile } from '../upload';
+import { PendingFileChips } from './PendingFiles';
 import { enterAction } from '../../../shared/keys';
 import { dropCaret, EDITABLE_MODE, insertPlainText, readText, setCaret, writeText } from '../editable';
 import { fmtBytes, isBusy, lsGet, lsSet, shrinkImage, useMediaQuery } from '../util';
@@ -17,8 +18,6 @@ import { VoiceModeButton, VoiceModeOverlay, useVoiceMode } from './VoiceMode';
 import { Icon, Menu } from './ui';
 import { glance } from './MessageActions';
 
-/** Without the app's settings yet: the server's defaults (config attachments). */
-const ATTACH_DEFAULTS = { maxBytes: 200 * 1024 * 1024, retentionDays: 30, maxPerMessage: 10 };
 /** Images go to the agent as images (converted when needed); one the browser cannot read is uploaded as a file. */
 const IMAGE_INPUT = /^image\//;
 /**
@@ -90,13 +89,7 @@ export const Composer = memo(function Composer({
 
   /** Start uploading `f` unless it breaks a limit (said in a toast); whether it started. */
   const attachFile = (f: File, pending: number) => {
-    const why = !f.size
-      ? `${f.name} is empty`
-      : f.size > limits.maxBytes
-        ? `${f.name} is ${fmtBytes(f.size)}; the limit is ${fmtBytes(limits.maxBytes)}`
-        : pending >= limits.maxPerMessage
-          ? `At most ${limits.maxPerMessage} files per message`
-          : undefined;
+    const why = attachProblem(f, pending, limits);
     if (why) {
       toast(why, 'error');
       return false;
@@ -381,33 +374,7 @@ ${cur}` : t));
             </button>
           </div>
         )}
-        {files.length > 0 && (
-          <div className="composer-files">
-            {files.map((f) => {
-              const pct = Math.floor((f.sent * 100) / f.file.size);
-              return (
-                <span key={f.key} className={`composer-file${f.error ? ' failed' : f.ref ? ' done' : ''}`} title={f.error ? `${f.file.name}: ${f.error}` : f.file.name}>
-                  <Icon name="file" size={14} />
-                  <span className="composer-file-name">{f.file.name}</span>
-                  <span className="composer-file-size">{f.error ? 'failed' : f.ref ? fmtBytes(f.file.size) : `${pct}%`}</span>
-                  {!f.ref && !f.error && (
-                    <span className="composer-file-bar" role="progressbar" aria-label={`Uploading ${f.file.name}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
-                      <i style={{ width: `${pct}%` }} />
-                    </span>
-                  )}
-                  {f.error && (
-                    <button className="composer-file-btn" onClick={() => startUpload(session.id, f.file, f.key)} title="Upload it again" aria-label={`Retry ${f.file.name}`}>
-                      <Icon name="refresh" size={12} />
-                    </button>
-                  )}
-                  <button className="composer-file-btn" onClick={() => removePending(session.id, f.key)} title="Remove" aria-label={`Remove ${f.file.name}`}>
-                    <Icon name="x" size={12} />
-                  </button>
-                </span>
-              );
-            })}
-          </div>
-        )}
+        <PendingFileChips ownerId={session.id} files={files} />
         {(images.length > 0 || reading > 0) && (
           <div className="composer-images">
             {images.map((img) => (

@@ -2835,6 +2835,8 @@ export interface AnswerRequest {
   seq: number;
   choice: number;
   clientId?: string;
+  /** Files uploaded first (POST /api/attachments) that go with the answer (w1912). */
+  attachments?: string[];
 }
 
 export interface PermissionDecisionRequest {

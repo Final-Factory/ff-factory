@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import type { AttachmentRef } from '../../shared/types';
 import { ApiError, api, notifyUnauthorized, UnauthorizedError } from './api';
+import { fmtBytes } from './util';
 
 /** An upload refused or broken: `received` (from the server) says where to resume, when it said. */
 class UploadError extends ApiError {
@@ -185,4 +186,20 @@ export function restorePending(sessionId: string, files: PendingFile[]) {
 export function clearPending(sessionId: string, sent: PendingFile[]) {
   const keys = new Set(sent.map((f) => f.key));
   update(sessionId, (xs) => xs.filter((x) => !keys.has(x.key)));
+}
+
+// ---------------------------------------------------------------- the limits, for every place that takes files
+
+/** Without the app's settings yet: the server's defaults (config attachments). */
+export const ATTACH_DEFAULTS = { maxBytes: 200 * 1024 * 1024, retentionDays: 30, maxPerMessage: 10 };
+
+/**
+ * Why `f` cannot be attached when `pending` files already are (empty, over the size limit, one too many); undefined when it
+ * can. The chat box and the question cards (w1912) share it.
+ */
+export function attachProblem(f: File, pending: number, limits: { maxBytes: number; maxPerMessage: number }): string | undefined {
+  if (!f.size) return `${f.name} is empty`;
+  if (f.size > limits.maxBytes) return `${f.name} is ${fmtBytes(f.size)}; the limit is ${fmtBytes(limits.maxBytes)}`;
+  if (pending >= limits.maxPerMessage) return `At most ${limits.maxPerMessage} files per message`;
+  return undefined;
 }

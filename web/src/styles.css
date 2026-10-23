@@ -7866,6 +7866,33 @@ a.wc-pr:hover {
   resize: vertical;
 }
 
+/* Files on an answer (w1912): a dragged file lights the answer row as it does the chat box; a picture shows as its own thumbnail. */
+.qc-free.dragging .qc-free-text {
+  border-color: var(--accent);
+}
+
+/* A narrow phone: with the paperclip too, the box takes the whole width and the buttons sit under it (as the chat's reply box does), so a dictated answer still shows whole. */
+@media (max-width: 520px) {
+  .qc-free-files {
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+  }
+
+  .qc-free-files > .qc-free-text {
+    flex-basis: 100%;
+  }
+}
+
+.composer-file-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  margin: -2px 0 -2px -4px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+
 .qc-live {
   justify-self: start;
 }

@@ -35,6 +35,28 @@ parsing, no preview.
 - In the transcript each file is a chip with its name and size. A click downloads it. Its tooltip has its kind, id,
   SHA-256 and, when an agent did not get its copy, why.
 
+## In the question cards (w1912)
+
+The answer box of a card on the **Waiting on input** tab takes files the way the chat box does (Ben: "i need to be able to
+attach files or paste images to the waiting on input fields"): a request's card ("Your answer") and a question your
+orchestrator asks with buttons (`ask_person`, its "Or type your own answer" box). A paperclip, a paste (Ctrl/Cmd+V of a
+screenshot, or files copied in Finder or Explorer) and a drop on the box all start the upload at once, through the chat
+box's own code (`web/src/upload.ts`, with its limits from `config.attachments`). Every file, pictures too, is uploaded
+and stored as an attachment (an `att_` id, name, size, type, SHA-256), so the orchestrator gets the same `[attachments]`
+block as for a chat message and can pass the ids on. Each file shows as a chip, a picture as its own thumbnail, with a
+retry for a failed upload and a remove control; Send waits for the uploads.
+
+- A request's card sends its answer to your orchestrator as a message (`POST /api/sessions/<id>/message`, `attachments:
+  [ids]`); a question's typed answer is the same message as a reply to it, and a click on one of its answers is
+  `POST /api/sessions/<id>/answer` with `attachments`. All three end in `Agents.sendWithAttachments`, which also gives a
+  worker its copy in `Inbox/` when a card ever answers one directly.
+- A file alone is an answer: the words then read "See the attached file." A card of several questions takes the files with
+  its last answer.
+- An intake card's "Or decline with a reason" box takes no files: a declined request is not worked on.
+- "Chat more about this" in the chat opens the chat box's reply box, which had files already.
+- Safari: a paste puts a screenshot in `clipboardData.files` and a drop in `dataTransfer.files`, the two the page reads
+  (web.dev "How to paste files": Safari 13.1 and later; the e2e runs the WebKit engine, `e2e/waitingAttach.spec.ts`, but not Safari's own clipboard).
+
 ## What the agents get
 
 The message text stays as written. The agent's prompt gets a block after it:
