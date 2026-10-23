@@ -966,6 +966,24 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   await new Promise((r) => setTimeout(r, 50));
   assert.match(told[1], /did not run: coosego refused it: an update job of this machine is still running/);
   ops.close();
+
+  // w1918: a connected daemon that offered no update over its link is never handed to ssh: the reason, and nothing run.
+  const ops2 = new OpsWorker({
+    sessions,
+    store,
+    options: () => ({}),
+    tellOrchestrator: (_p, text) => void told.push(text),
+    personTurn: () => false,
+    file: path.join(dir, 'ops-worker-2.json'),
+    workProblem: () => undefined,
+    machine: (id) => ({ id, root: 'V:/ffw', platform: 'win32', target: 'lothsahn@lothlaptop' }),
+    ownRequestProblem: () => undefined,
+    linkUpdate: () => undefined,
+    linkProblem: (id) => `${id}'s daemon is connected but did not offer updates over its link`,
+  });
+  assert.throws(() => ops2.machineInstall(ben, { machine: 'lothlaptop', workId: 'w847' }), /machine: lothlaptop's daemon is connected but did not offer updates over its link\. Nothing was run/);
+  assert.equal(store.readTranscript(OPS_ID, 20).filter((e) => e.kind === 'user').length, 0, 'no ssh job for the ops worker');
+  ops2.close();
 });
 
 test('w1106: a background poll is refused, in the command or in a scratch script it runs; a backgrounded installer and a foreground loop pass', async () => {

@@ -154,7 +154,7 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
           {bench && (
             <div className="unity-bar" data-testid="machine-bench" data-mode={bench.mode} title={bench.hint}>
               <Chip tone={bench.tone}>Bench lock {bench.label}</Chip>
-              <span className="dim small bench-row-text">{[bench.short, bench.times, bench.waiting, bench.next, bench.closed].filter(Boolean).join(' · ') || 'no ticket held or waiting'}</span>
+              <span className="dim small bench-row-text">{[bench.short, bench.times, bench.waiting, bench.next, bench.closed, bench.untimed].filter(Boolean).join(' · ') || 'no ticket held or waiting'}</span>
             </div>
           )}
           {/* A person playing Final Factory there (w1894): no new work, the agents' editors closed, players quit, builds at idle priority. */}

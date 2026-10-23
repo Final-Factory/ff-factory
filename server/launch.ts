@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
 import { editorBenchGateFor, GATE_HOOK_TIMEOUT_S } from '../machine/editorBenchGate.ts';
-import { foreignTimedHold } from '../machine/benchLock.ts';
+import { foreignTimedHold, ownTimedHold } from '../machine/benchLock.ts';
 import { personHoldReason } from '../machine/personPlay.ts';
 import { closedRefusalFor } from '../machine/benchTurn.ts';
 import { standingGuard } from './standingGuard.ts';
@@ -376,6 +376,9 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       ...(g.workerRoot ? { personBusy: () => personHoldReason(g.workerRoot) } : {}),
       // w1829: no Unity MCP call into an editor another worker's timed run closed; it says why and when it comes back.
       ...(g.workerRoot ? { benchClosed: () => closedRefusalFor(g.workerRoot, g.id) } : {}),
+      // w1923: no timing measurement (an editor snippet reading a clock, a Performance test, a profiler capture) without an
+      // exclusive bench ticket of the worker's own session.
+      ...(g.workerRoot ? { timingHold: () => ownTimedHold(g.workerRoot, agentEnv.FF_SESSION_ID), session: agentEnv.FF_SESSION_ID, host: os.hostname().split('.')[0].toLowerCase() } : {}),
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];

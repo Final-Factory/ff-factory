@@ -993,6 +993,22 @@ export class MachineManager {
   }
 
   /**
+   * Why a connected daemon's machine is not updated over its link, or undefined when it is, or when no daemon is connected (ssh
+   * is the way back for a stopped daemon). w1918, lothsahn: "Make sure you can do updates over the machine protocol": LothLaptop's
+   * daemon connected while its root.json was gone with its reset V:, offered no update in its hello, and machine_update and the
+   * rollout handed out ssh to a PC that joined without it (port 22 timed out, and nothing said why). A connected daemon is never
+   * sent to ssh: this says what to fix instead.
+   */
+  linkProblem(id: string): string | undefined {
+    if (!this.isOnline(id) || this.canLink(id)) return undefined;
+    const rec = this.store.machines.get(id);
+    if (!rec?.root) return `${id} is not a worker root install (its record names no root folder)`;
+    const daemon = this.hellos.get(id)?.daemon;
+    const file = (rec.platform === 'win32' ? path.win32 : path.posix).join(rec.root, 'root.json');
+    return `${id}'s daemon${daemon ? ` (${daemon.slice(0, 9)})` : ''} is connected but did not offer updates over its link when it connected: its install record ${file} was missing or unreadable then (a reset drive takes it). A daemon from w1918 on puts it back from its spare copy (root-backup.json in its daemon folder) and offers them by itself; for an older one, put the file back and restart the daemon. Not sent over ssh: a connected daemon is updated over its link`;
+  }
+
+  /**
    * Update a worker root machine over its daemon's link (w1596, server/machineLink.ts): the portal's own code, as a bundle the
    * daemon checks, run by its update job, which puts the old code back when the new daemon does not come back. Resolves with
    * the job's report (sent by the daemon that runs afterwards); rejects when the daemon refuses or nothing comes in time.

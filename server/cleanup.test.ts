@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   CleanupRunner,
+  softFreeBytes,
   DEFAULT_CLEANUP,
   cleanupRules,
   describeCleanup,
@@ -485,4 +486,33 @@ test("a sandbox's Library caches (w898): unused, over the cap, or all of them wh
   assert.ok(r.bytes > 0);
   for (const p of [...caches(unused), ...caches(recent), ...caches(bigRecent)]) assert.ok(!fs.existsSync(p), `removed: ${p}`);
   for (const p of [...caches(openOld), ...caches(bigBusy), unused.ArtifactDB, unused.lib]) assert.ok(fs.existsSync(p), `kept: ${p}`);
+});
+
+test("w1918: the soft threshold is at most a quarter of the volume's size, never below the 20 GB clean-up line: an empty 80 GB Dev Drive is not low", async () => {
+  assert.equal(softFreeBytes(80, 80 * GB), 20 * GB, "LothLaptop's 80 GB V:: the clean-up line");
+  assert.equal(softFreeBytes(80, 122 * GB), Math.floor((122 * GB) / 4), 'a drive sized for one sandbox (w1910): a quarter of it');
+  assert.equal(softFreeBytes(80, 900 * GB), 80 * GB, "BEAST's 900 GB: the setting");
+  assert.equal(softFreeBytes(80, undefined), 80 * GB, 'size unknown: the setting');
+  assert.equal(softFreeBytes(10, 80 * GB), 10 * GB, 'a lower setting stays');
+  let free = 76.9 * GB;
+  const notices: string[] = [];
+  const r = new CleanupRunner({
+    settings: () => ({ everyMinutes: 60, softFreeGB: 80 }),
+    fitSoftToVolume: true,
+    diskPaths: () => ['V:/ffw'],
+    statfs: async () => ({ free, total: 80 * GB }),
+    pass: async () => ({ removed: [], failed: [], bytes: 0 }),
+    consumers: async () => [],
+    log: () => undefined,
+    done: (_s, n) => void (n && notices.push(n)),
+    now: () => 0,
+  });
+  const s = await r.run('hourly');
+  assert.equal(s?.belowSoft, false);
+  assert.equal(s?.softFreeGB, 20);
+  assert.equal(notices.length, 0, 'no "cannot free enough" notice on an empty drive');
+  free = 15 * GB;
+  const low = await r.run('hourly');
+  assert.equal(low?.belowSoft, true);
+  assert.match(notices[0], /only 15\.0 GB is free on disk, below the soft threshold of 20 GB/);
 });

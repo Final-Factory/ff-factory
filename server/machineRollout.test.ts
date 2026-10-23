@@ -27,6 +27,8 @@ interface FakeMachine extends RolloutMachine {
   /** What a run of the installer's tools form does (w1476); default: published, ff-agents 1.29.19 -> 1.29.20. */
   tools?: (remote: string) => { code: number; out?: string; throws?: string };
   /** w1596: its daemon updates over its own link: what its update job reports (or throws), and the machine afterwards. */
+  /** w1918: why its connected daemon does not update over its link (server/machines.ts linkProblem). */
+  linkProblem?: string;
   linkRun?: (form: 'update' | 'tools', commit: string) => { report?: Partial<LinkUpdateReport>; throws?: string; after?: { online: boolean; daemon?: string } };
 }
 
@@ -86,6 +88,7 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
       return { code: r.code, stdout: r.out ?? '', stderr: '' };
     },
     link: (id) => find(id).online && !!find(id).linkRun,
+    linkProblem: (id) => (find(id).online && !find(id).linkRun ? find(id).linkProblem : undefined),
     linkUpdate: async (id, form, commit) => {
       linkCalls.push({ id, form, commit });
       const r = find(id).linkRun!(form, commit);
@@ -132,6 +135,16 @@ test('a deploy by hand (nobody asked through the ops worker) reports to the disp
   await w.make().tick();
   assert.equal(w.told.length, 1);
   assert.equal(w.told[0].to, undefined);
+});
+
+test('w1918: a connected daemon that offered no update over its link is not sent to ssh: it fails with the reason', async () => {
+  const laptop = mac('lothlaptop', { platform: 'win32', root: 'V:/ffw', target: 'lothsahn@lothlaptop', linkProblem: "lothlaptop's daemon is connected but did not offer updates over its link" });
+  const w = world([laptop], { requester: LOTH });
+  w.verify();
+  await w.make().tick();
+  assert.deepEqual(w.calls, [], 'no ssh run');
+  assert.deepEqual(w.toolCalls, [], 'no tools run over ssh either');
+  assert.match(w.told[0].text, /- lothlaptop: FAILED.*did not offer updates over its link/);
 });
 
 test('no marker, no update: a rolled-back deploy writes none', async () => {

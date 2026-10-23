@@ -333,6 +333,8 @@ export class SandboxPool {
   private readonly git = new Map<string, GitStatus | undefined>();
   private readonly provisioning = new Map<string, AbortController>();
   private readonly busy = new Set<string>();
+  /** Sandboxes remakeGone made again in this daemon run (once each). */
+  private readonly remade = new Set<string>();
   /** Sandboxes whose Library caches are being trimmed now (w898). */
   private readonly trimming = new Map<string, Promise<TrimResult>>();
   /** Per sandbox: whether it had a live agent at the last look, so the moment the last one goes is seen. */
@@ -621,7 +623,7 @@ export class SandboxPool {
     return this.list().find((x) => x.id === id)!;
   }
 
-  private async provision(r: Rec, seedLibrary: boolean, startUnity: boolean, signal: AbortSignal) {
+  private async provision(r: Rec, seedLibrary: boolean, startUnity: boolean, signal: AbortSignal, remake = false) {
     const step = (detail?: string) => {
       if (signal.aborted) throw new Error('cancelled');
       if (detail) this.changed(r, { statusDetail: detail });
@@ -639,9 +641,13 @@ export class SandboxPool {
       await withBaseRepoLock(async () => {
         step('fetching origin');
         await must(['fetch', '--prune', 'origin'], 15 * 60_000);
+        // A remade sandbox (remakeGone): the clone may still list the old folder as a worktree, which would refuse the add.
+        if (remake) await this.d.git(['worktree', 'prune'], { signal });
         step(`creating worktree on ${r.branch}`);
         const local = await this.d.git(['rev-parse', '--verify', '--quiet', `refs/heads/${r.branch}`], { signal });
         const remote = await this.d.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${r.branch}`], { signal });
+        // Its base may have been its own branch on origin (a create that tracked it), never pushed again: the default branch then.
+        if (remake && local.code !== 0 && remote.code !== 0 && (await this.d.git(['rev-parse', '--verify', '--quiet', `${r.base}^{commit}`], { signal })).code !== 0) r.base = 'HEAD';
         step();
         // --no-checkout keeps the lock short; the checkout below touches only this worktree.
         if (local.code === 0) await must(['worktree', 'add', '--no-checkout', r.path, r.branch], 10 * 60_000);
@@ -684,6 +690,38 @@ export class SandboxPool {
     } catch (e) {
       if (signal.aborted) return; // remove() owns it now
       this.changed(r, { status: 'error', statusDetail: (e as Error).message });
+    }
+  }
+
+  /**
+   * A free sandbox whose folder is gone while the sandbox root and the main clone are there: its worktree is made again, on its
+   * branch, as a create makes it (w1918: LothLaptop's V: was reset to an empty drive; the pool's records stayed on D:, the update
+   * cloned the repo again, and slot1 stayed "ready" with git "unknown", so no worker could start there). A drive that is not
+   * attached has no sandbox root, so nothing is remade then. The branch comes from the clone (a bare clone of origin has every
+   * pushed branch), else origin's, else its base, else the clone's default branch: work never pushed went with the drive.
+   * Once per sandbox per daemon run: a remake that fails shows the error, and delete_sandbox then create_sandbox takes over.
+   */
+  private remakeGone() {
+    const s = this.settings;
+    if (!s || !fs.existsSync(s.root)) return;
+    if (!fs.existsSync(path.join(this.o.repoPath, 'HEAD')) && !fs.existsSync(path.join(this.o.repoPath, '.git'))) return;
+    for (const r of this.recs.values()) {
+      if (r.status !== 'ready' || this.busy.has(r.id) || this.remade.has(r.id) || fs.existsSync(r.path)) continue;
+      if (!deletable(r.path, r.id, s.root, this.o.repoPath)) continue;
+      this.remade.add(r.id);
+      const live = this.o.liveAgents?.(r.id) ?? 0;
+      const text = `sandbox ${r.id}: its folder ${r.path} is gone (the drive was reset or emptied); making its worktree again on ${r.branch}${live ? ` (${live} agent(s) there now: they run on in the new folder once it is ready)` : ''}`;
+      this.o.log?.(text);
+      this.o.onEvent({ text, sandbox: r.id });
+      this.git.delete(r.id);
+      this.changed(r, { status: 'creating', statusDetail: 'its folder was gone: making it again' });
+      const abort = new AbortController();
+      this.provisioning.set(r.id, abort);
+      this.busy.add(r.id);
+      void this.provision(r, true, false, abort.signal, true).finally(() => {
+        this.provisioning.delete(r.id);
+        this.busy.delete(r.id);
+      });
     }
   }
 
@@ -1165,6 +1203,7 @@ export class SandboxPool {
     this.ticking = true;
     try {
       await this.look();
+      this.remakeGone();
       this.trimReleased();
       await this.reseedIdle();
     } catch (e) {

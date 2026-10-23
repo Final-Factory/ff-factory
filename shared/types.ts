@@ -671,6 +671,23 @@ export interface BenchState {
   /** What an exclusive turn closed for its run (w1829, machine/benchTurn.ts): the sandboxes whose editors it closed and the
    * game players it asked to quit. */
   closed?: { editors: string[]; players: number };
+  /**
+   * w1923: timing calls of the last hour made outside an exclusive ticket (the queue's timing.jsonl: refused, or let
+   * through by a `// ff-not-timing:` comment), newest first, at most BENCH_STATE_MAX_UNTIMED; `untimedCount` counts them all.
+   */
+  untimed?: UntimedTiming[];
+  untimedCount?: number;
+}
+
+/** One timing call outside an exclusive ticket (w1923; the game repo's scripts/bench/timing_gate.py log). */
+export interface UntimedTiming {
+  at: string;
+  via: string;
+  outcome: 'refused' | 'not-timing';
+  session?: string;
+  sandbox?: string;
+  markers?: string[];
+  why?: string;
 }
 
 export interface BenchQueueReport {

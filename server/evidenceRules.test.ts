@@ -363,3 +363,9 @@ test('w1482: the dispatcher and every orchestrator write briefs that speak of no
   assert.match(BRIEF_NOW_ONLY, /no provenance ids, quoted past corrections, "was X, now Y" or dates of rule changes unless the worker needs one to act/);
   assert.match(BRIEF_NOW_ONLY, /The harness adds the request as filed unless your brief quotes it/);
 });
+
+test('w1923: the worker prompt says every timing measurement holds an exclusive bench ticket, editor snippets included', async () => {
+  const { PROCESS_HYGIENE } = await import('./agents.ts');
+  assert.match(PROCESS_HYGIENE, /Every timing measurement holds an exclusive bench ticket on its machine, not only/);
+  assert.match(PROCESS_HYGIENE, /bench_queue\.py timed --what/);
+});
