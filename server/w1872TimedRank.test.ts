@@ -102,3 +102,13 @@ test('w1872: timedFacts gives the ledger m5 and why, and the computers that take
   assert.equal(needsTimed(work('w1789: UI main-thread cost', 'still open: waiting for a sandbox on m5 for the timed runs')), 'any');
   assert.equal(needsTimed(work('Timed A/B of the Mac player on m3')), 'darwin');
 });
+
+test('w1872: a negated or "not needed" mention does not make work timed (w1900: "no timing work, so no bench lock needed")', () => {
+  // w1900, as filed: correctness research, refused twice on m5/slot2 as timed work.
+  const w1900 = work('Find what broke blueprint paste of assembler recipes and connector filters', 'Bisect the commits. Constraints: no timing work, so no bench lock needed.');
+  assert.equal(needsTimed(w1900), false);
+  for (const s of ['Run it without a benchmark.', 'No need for a benchmark here.', 'This is not a timed run.', 'The bench lock is not needed.', 'An exclusive lock isn\'t required.', 'Never take an exclusive ticket.']) assert.equal(needsTimed(work('Fix the paste', s)), false, s);
+  // Timed work still is, even beside a negation in another clause or a "do not" about where.
+  for (const s of ['No editor needed, but run a benchmark of the paste.', 'Do not run benchmarks on BEAST; use a quiet machine.', 'Timed A/B, no other work on the machine.', 'Constraints: no UI change. Bench it twice.']) assert.notEqual(needsTimed(work('Speed up the paste', s)), false, s);
+  assert.equal(timedPinRefusal('m5', fleet(), {}, 'timed') !== undefined, true, 'a pin of real timed work to m5 is still refused');
+});

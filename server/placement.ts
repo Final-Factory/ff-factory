@@ -582,7 +582,14 @@ export function timedLine(places: readonly Computer[], last?: string, prefs: Pla
     .filter((x) => x.legs?.length)
     .map((x) => `${x.id}: ${legsText(x.legs!).replace(/^the ledger holds (legs|a leg) for it: /, '')}${hasRoom(x) && !hold.has(x.id) ? ` (${x.id} has ROOM: start ${x.legs!.length > 1 ? 'them' : 'it'} now, start_agent with its work_id in a FREE sandbox there)` : ''}${x.noTimedRuns ? ` (${x.id} takes no timed runs, w1861: a timed leg there goes elsewhere; drop_leg it and queue it for another)` : ''}`);
   const held = legs.length ? ` Legs the ledger holds for a named computer (w1863, decide_work queue with needs beside the request's own worker): ${legs.join('; ')}.` : '';
-  if (!p) return `No computer has room for timed work now${heldNote(places, prefs, 'game')}.${held}`;
+  if (!p) {
+    // w1872: still say where it goes when one frees, smallest first, so a busy fleet does not read as "anywhere" (or m5).
+    const next = places
+      .filter((x) => x.online && !x.noTimedRuns && !hold.has(x.id) && !avoidOf(prefs).has(x.id))
+      .sort((a, b) => a.maxAgents - b.maxAgents || (a.maxEditors ?? 0) - (b.maxEditors ?? 0) || a.id.localeCompare(b.id));
+    const order = next.length ? ` When one frees, timed work goes to the first of: ${next.map((x) => `${x.id} (${x.maxAgents} agent slot${x.maxAgents === 1 ? '' : 's'})`).join(' > ')} (w1872)${noTimedNote(places)}.` : '';
+    return `No computer has room for timed work now${heldNote(places, prefs, 'game')}.${order}${held}`;
+  }
   return `Next timed work (benchmarks, perf A/Bs and probes; on the platform it names, w1628): ${p.pick.id} (${p.why}).${held}`;
 }
 

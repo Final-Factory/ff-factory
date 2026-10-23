@@ -356,6 +356,10 @@ fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks f
   request that already waits there is re-placed by the ledger's watch (`Orchestrators.replaceNoTimedWaits`): that computer
   drops out of its needs, and one left with none waits on the computers "Next timed work" ranks. The dispatcher is told
   once, and the queued-with-room flag then starts it. stop_agent move_to refuses to move timed work there.
+- **A mention that rules timing out is not timed work** (w1872, w1900: "Constraints: no timing work, so no bench lock
+  needed" was refused on m5). `needsTimed` reads a timed word only when its own clause does not negate it just before
+  ("no", "without", "never", "not a") or say it is not needed just after (`shared/capacity.ts` `timedMention`).
+- **When every computer is full**, the line still says where timed work goes when one frees, smallest first, never m5.
 - **The line shows the whole ranking**: after the computers with room come those online without it, smallest first
   ("lothdesktop (10 agent slots, 3 editors, 5 live); no room now: m3 (4 agent slots), beast (12 agent slots); never m5").
 
