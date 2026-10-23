@@ -850,7 +850,9 @@ const USAGE = `unity-slot: take Unity slots on this machine before launching Uni
   unity-slot run [--count N] [--label TEXT] [--project PATH]... [--timeout MIN] [--bench shared|exclusive] -- <command> [args...]
       wait for N slots (default 1), then for a ticket in the machine's bench queue (w1615: shared, the default, for a
       build or batch compile; exclusive for a timed run), run the command, release both when it ends. A ticket revoked
-      under it ends the command and exits 75 (run it again); with no ticket it waits out another worker's timed run (w1860)
+      under it ends the command and exits 75 (run it again). A ticket it cannot take stops it before the command: exit 77
+      when the machine takes no exclusive tickets (w1861: hand the timed run back), 69 when the queue's helper fails
+      (w1860). FF_BENCH_TICKETS=off runs without one, and then it waits out another worker's timed run
   unity-slot acquire [--count N] [--label TEXT] [--project PATH]... [--ttl MIN] [--timeout MIN]
       wait for N slots and hold them in the background (prints the slot id) until release or the ttl (default 120)
   unity-slot release <id>
@@ -914,6 +916,10 @@ export function parseCli(argv: string[]): { cmd: string; o: CliOpts } {
 export const EXIT_REVOKED = 75;
 /** How long a revoked run's tree has to end on SIGTERM before it is stopped hard (bench_queue.py PREEMPT_GRACE_S). */
 export const REVOKED_GRACE_MS = 20_000;
+/** A run whose bench ticket could not be taken (its helper failed, no queue here) exits with this (EX_UNAVAILABLE, w1860). */
+export const EXIT_NO_TICKET = 69;
+/** A run refused an exclusive ticket on a machine that takes no timed runs (bench_queue.py EXIT_NO_TIMED_RUNS, w1861). */
+export const EXIT_NO_TIMED_RUNS = 77;
 
 /**
  * End a process and everything it started (w1860): SIGTERM to the tree, then a hard stop of what is left after `graceMs`
@@ -974,20 +980,35 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     let ticketName = inside?.ticket;
     if (!inside && held < o.count && env.FF_BENCH_TICKETS !== 'off') {
       const projectArg = o.rest.findIndex((a) => /^-projectpath$/i.test(a));
-      const t = benchTicketFor({ mode: o.bench ?? (env.FF_UNITY_SLOT_BENCH === 'exclusive' ? 'exclusive' : 'shared'), what: `unity: ${labelOf(o)}`, checkouts: [...o.projects, projectArg >= 0 ? o.rest[projectArg + 1] : undefined, env.FF_SANDBOX_PATH, process.cwd()], env });
-      if (t.why) d.say(`no bench ticket: ${t.why}`);
-      else {
+      const mode = o.bench ?? (env.FF_UNITY_SLOT_BENCH === 'exclusive' ? 'exclusive' : 'shared');
+      const t = benchTicketFor({ mode, what: `unity: ${labelOf(o)}`, checkouts: [...o.projects, projectArg >= 0 ? o.rest[projectArg + 1] : undefined, env.FF_SANDBOX_PATH, process.cwd()], env });
+      let refused = t.why;
+      if (!refused) {
         ticket = t.ticket;
         const s = await ticket!.wait(Infinity, (line) => d.say(`bench queue: ${line}`), d.sleep);
         if (s.kind === 'granted') ticketName = s.ticket;
         else {
-          d.say(`no bench ticket (${s.line}); running without one`);
+          refused = s.line;
           ticket!.release();
           ticket = undefined;
         }
       }
+      // w1860 (lothsahn: "builds or any compute intensive job needs a lock... If it's not possible to know if a job is
+      // compute intensive, it needs a lock"): a run whose ticket the queue refused (an exclusive one on a machine that
+      // takes no timed runs, w1861) or whose helper failed does not start without one. It used to run ticketless.
+      if (refused) {
+        h?.stop();
+        const noTimed = /takes no timed runs/i.test(refused);
+        d.say(
+          `no ${mode} bench ticket, so the run does not start (w1860: every build, test run or timed run holds one): ${refused}. ` +
+            (noTimed
+              ? 'Hand the timed work back to your orchestrator for another machine.'
+              : 'Run it again once the queue works here (`python scripts/bench/bench_queue.py status`); FF_BENCH_TICKETS=off runs it without a ticket, for a run outside FF Factory only.'),
+        );
+        return noTimed ? EXIT_NO_TIMED_RUNS : EXIT_NO_TICKET;
+      }
     }
-    // w1860: a run with no ticket of its own (none could be taken, or FF_BENCH_TICKETS=off) still never starts beside
+    // w1860: a run with no ticket of its own (FF_BENCH_TICKETS=off; one that cannot be taken stops above) still never starts beside
     // another worker's timed run: it waits for that turn to end, as its ticket would have.
     if (!inside && !ticket && held < o.count && env.FF_WORKER_ROOT) {
       let said = '';

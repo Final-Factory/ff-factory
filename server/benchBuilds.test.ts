@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BenchTurn, BUILD_LOOK_MS, type BenchTurnDeps, type Holder, type TurnBuild } from '../machine/benchTurn.ts';
-import { EXIT_REVOKED, main, stopTree } from '../machine/unitySlots.ts';
+import { EXIT_NO_TICKET, EXIT_NO_TIMED_RUNS, EXIT_REVOKED, main, stopTree } from '../machine/unitySlots.ts';
 
 /**
  * w1860 (lothsahn, 2026-10-23: "Make the shutdown of builds for the exclusive lock urgent"): while another worker's exclusive
@@ -127,4 +127,47 @@ test('w1860: unity-slot run ends its command and exits 75 when its bench ticket 
   });
   assert.equal(code, EXIT_REVOKED);
   assert.ok(Date.now() - started < 20_000, 'the command was stopped, not waited out');
+});
+
+/** A worker root with one sandbox whose bench_queue.py is `helper` (node, run through FF_PYTHON), and unity-slot run's env. */
+function fakeQueue(t: { after: (f: () => void) => void }, helper?: string) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1860-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const checkout = path.join(root, 'sandboxes', 'slot1');
+  fs.mkdirSync(path.join(checkout, 'scripts', 'bench'), { recursive: true });
+  if (helper !== undefined) fs.writeFileSync(path.join(checkout, 'scripts', 'bench', 'bench_queue.py'), helper);
+  const ran = path.join(root, 'ran.txt');
+  const env = { ...process.env, FF_PYTHON: process.execPath, FF_SANDBOX_PATH: checkout, FF_WORKER_ROOT: root, FF_UNITY_SLOTS: path.join(root, 'slots'), BENCH_LOCK: path.join(root, 'tmp', 'bench.lock'), FF_BENCH_TICKET: '', FF_UNITY_SLOT_HELD: '', FF_BENCH_TICKETS: '', FF_UNITY_SLOT_BENCH: '' };
+  // The command writes a file when it runs: it must not, without a ticket.
+  const cmd = [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(ran)}, 'ran')`];
+  return { root, env, cmd, ran, cwd: checkout };
+}
+
+test('w1860: unity-slot run --bench exclusive refused by the queue (a machine that takes no timed runs, w1861) does not run its command: exits 77 with the refusal', { timeout: 30_000 }, async (t) => {
+  const q = fakeQueue(
+    t,
+    `const fs = require('fs'); const a = process.argv; const st = a[a.indexOf('--status') + 1];
+     fs.writeFileSync(st, 'gave up: this machine takes no timed runs or other exclusive tickets (Ben runs stuff on it; w1861), so no exclusive ticket here.\\n');
+     process.exitCode = 77;`,
+  );
+  const code = await main(['run', '--bench', 'exclusive', '--label', 'timed leg', '--', ...q.cmd], q.env);
+  assert.equal(code, EXIT_NO_TIMED_RUNS);
+  assert.equal(fs.existsSync(q.ran), false, 'the timed run went ahead with no ticket');
+});
+
+test('w1860: unity-slot run whose bench helper fails (exclusive or shared) does not run its command: exits 69', { timeout: 30_000 }, async (t) => {
+  for (const mode of ['exclusive', 'shared'] as const) {
+    const q = fakeQueue(t, `process.stderr.write('Traceback: boom\\n'); process.exit(1);`);
+    const code = await main(['run', '--bench', mode, '--label', `${mode} job`, '--', ...q.cmd], q.env);
+    assert.equal(code, EXIT_NO_TICKET, mode);
+    assert.equal(fs.existsSync(q.ran), false, `${mode}: the run went ahead with no ticket`);
+  }
+});
+
+test('w1860: unity-slot run with no bench queue to take a ticket from does not run its command; FF_BENCH_TICKETS=off still runs it', { timeout: 30_000 }, async (t) => {
+  const q = fakeQueue(t);
+  assert.equal(await main(['run', '--label', 'build', '--', ...q.cmd], { ...q.env, FF_SANDBOX_PATH: path.join(q.root, 'nowhere') }), EXIT_NO_TICKET);
+  assert.equal(fs.existsSync(q.ran), false, 'the build went ahead with no ticket');
+  assert.equal(await main(['run', '--label', 'build', '--', ...q.cmd], { ...q.env, FF_SANDBOX_PATH: path.join(q.root, 'nowhere'), FF_BENCH_TICKETS: 'off' }), 0);
+  assert.equal(fs.existsSync(q.ran), true, 'FF_BENCH_TICKETS=off is the way to run without one');
 });

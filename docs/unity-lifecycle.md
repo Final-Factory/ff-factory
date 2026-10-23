@@ -268,7 +268,10 @@ node cannot take the OS file locks the queue lives on):
 
 A checkout without `bench_queue.py` (a branch from before w1615) takes its ticket with another sandbox's copy of the
 script (`sandboxBenchQueueScript`, w1628: the queue is its files, not its code); with none on the machine, or without
-python, it goes ahead without a ticket and logs why.
+python, a sandbox editor goes ahead without a ticket and logs why (it takes one within a minute once it can), while
+`unity-slot run` does not start: a run whose helper fails or whose ticket the queue refuses exits 69, or 77 for an
+exclusive ticket on a machine that takes no timed runs (w1861), with the reason, and never runs without a ticket
+(w1860: it used to).
 
 **Not covered by the tickets alone** (w1628): an editor's own refresh when its window gets focus (Unity's Auto Refresh),
 play mode started from the editor, and an editor or player that was already running. The exclusive turn below closes them.
@@ -319,7 +322,7 @@ w1832), the daemon:
   `BenchPriority.exempt`), and a Unity whose project is no sandbox (the main clone, a person's own).
 - **holds the rest as before**: `unity start` queues (a shared ticket), builds, batch compiles and the editor's compiles,
   imports and tests wait for their shared turn, and the guard refuses new players and screen grabs (w1750).
-  `unity-slot run` with no ticket of its own (none could be taken, `FF_BENCH_TICKETS=off`) waits for another worker's
+  `unity-slot run` with no ticket of its own (`FF_BENCH_TICKETS=off`; one that cannot be taken stops the run) waits for another worker's
   timed run to end before it starts (`foreignTimedHold`, w1860), and a run whose ticket is revoked under it ends its
   command (SIGTERM to the tree, a hard stop 20 s later; `taskkill /T /F` on Windows) and exits 75: its helper is a
   service owner that stops nothing itself, and until w1860 the build went on beside the timed run granted next.
