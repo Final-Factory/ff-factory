@@ -2438,6 +2438,13 @@ export interface LiveViewInfo {
   updatedAt: string;
   /** Frames the portal has passed on since the view started. */
   frames: number;
+  /**
+   * Why its computer takes no work now, while it does (w1838): a release build, a timed run's bench lock, a pause. The
+   * editor of a view that is not streaming cannot start meanwhile (shared/liveReady.ts says so on the badge and the panel).
+   */
+  hold?: string;
+  /** A person opened it while it was not streaming and its worker was asked to stage it again (w1838): who and when. */
+  wake?: { at: string; who: string };
 }
 
 /** One knob: a material's shader property (the game's look.material.list). */

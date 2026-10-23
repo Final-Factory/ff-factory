@@ -143,6 +143,8 @@ export class LiveSession {
   private timer?: NodeJS.Timeout;
   private stopped = false;
   private trying = false;
+  /** After a try that cost the editor work (the dev tier through its bridge, a refused stream), the next waits this long. */
+  private backoffUntil = 0;
   private lastState: LiveState | undefined;
   private lastDetail = '';
   frames = 0;
@@ -154,12 +156,19 @@ export class LiveSession {
   readonly width: number;
   private readonly deps: LiveSessionDeps;
   private readonly retryMs: number;
+  private readonly backoffMs: number;
 
-  constructor(fps: number, width: number, deps: LiveSessionDeps, retryMs = 3000) {
+  /**
+   * retryMs: how often it looks for the game while nothing streams. 1 s since w1838 (it was 3 s, an average 1.5 s between the
+   * game entering play mode and the stream asked for): a look reads the editor's pid and a session file, nothing more. A
+   * try that asked the editor for something and failed waits backoffMs before the next.
+   */
+  constructor(fps: number, width: number, deps: LiveSessionDeps, retryMs = 1000, backoffMs = 3000) {
     this.fps = fps;
     this.width = width;
     this.deps = deps;
     this.retryMs = retryMs;
+    this.backoffMs = backoffMs;
   }
 
   async start(): Promise<void> {
@@ -244,7 +253,7 @@ export class LiveSession {
 
   /** While nothing streams: find the game, give it the dev tier if it lacks it, and ask it to stream here. */
   private async tick() {
-    if (this.stopped || this.trying || this.socket) return;
+    if (this.stopped || this.trying || this.socket || this.deps.now() < this.backoffUntil) return;
     this.trying = true;
     try {
       const pid = this.deps.editorPid();
@@ -254,10 +263,16 @@ export class LiveSession {
       if (ch.tier !== 'all') {
         const answer = await this.deps.devTier();
         ch = this.deps.channel(pid);
-        if (!ch || ch.tier !== 'all') return this.report('holding', `the game's agent channel is not in the dev tier (${answer})`);
+        if (!ch || ch.tier !== 'all') {
+          this.backoffUntil = this.deps.now() + this.backoffMs;
+          return this.report('holding', `the game's agent channel is not in the dev tier (${answer})`);
+        }
       }
       const reply = await this.deps.command(ch, `live.frames|on|${this.fps}|${this.width}|${this.port}`);
-      if (!reply.ok) this.report('holding', `the game refused the stream: ${reply.result || reply.status}`);
+      if (!reply.ok) {
+        this.backoffUntil = this.deps.now() + this.backoffMs;
+        this.report('holding', `the game refused the stream: ${reply.result || reply.status}`);
+      }
     } finally {
       this.trying = false;
     }

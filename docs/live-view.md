@@ -36,8 +36,9 @@ flowchart LR
   `AgentControl/session-<pid>.json`, using the pid of the sandbox editor.
   - It gives the play session's channel the dev tier once, through the editor's MCP bridge (`DEV_TIER_SNIPPET`).
   - It asks the game to stream to a loopback port, answers every frame at once, and keeps only the newest one.
-  - Whenever the stream drops, it reports `holding` with the reason and tries again every 3 s. A stream drops when
-    the editor leaves play mode, reloads scripts, or starts a new session on a new port.
+  - Whenever the stream drops, it reports `holding` with the reason and looks again every second (3 s before w1838; a
+    try that asked the editor for something and failed waits 3 s). A stream drops when the editor leaves play mode,
+    reloads scripts, or starts a new session on a new port.
 - **The portal half** is `server/live.ts`. It holds the views, takes each daemon's frame socket and passes the newest
   frame to each watching page. A page that is behind gets the next frame, never a queue.
   - Compression is off: JPEG does not compress.
@@ -89,7 +90,8 @@ frames that pile up in socket buffers on a link slower than the stream.
   it ([machines.md](machines.md), "In the web UI"), and the request's card on the Dispatcher's "Waiting on input" tab has
   the same button. Since w1599 every person who may watch a running view (the requester and the owners, below) sees the
   button on the slot's row whenever the view is up, quiet and outlined when it is not waiting on them; the amber one stays
-  for the person it waits on. Anyone else sees none.
+  for the person it waits on. Anyone else sees none. Since w1838 the button says "go" only while the view can be used, and
+  otherwise what it waits on ("Ready or not" below).
 
 | Route | What it does |
 |---|---|
@@ -132,6 +134,52 @@ it runs (`liveViews`), and the portal acts on the hello:
 
 Before this, the page kept showing the view as live with the last frame. Every knob was then refused with "this live
 view is not running on the machine".
+
+## Ready or not (w1838)
+
+Ben, 2026-10-23: "a lot of times when I click it, I get this kind of situation where it's just not ready. Or maybe ... it's
+queued up. In that case, don't show the live view go sticker thing on the slot. Only show that when it's ready and can be
+used." His case: the w1466 view on beast/slot5 showed "Live view: go" on the slot while the panel said "Holding the last
+frame. The sandbox editor is not running. It comes back by itself; knobs still work", and every knob was red ("the game is
+not running in play mode"). The portal journal shows its editor stopped since 07:07Z (its worker stopped it at its turn's
+end), then the w1836 urgent release build cleared BEAST at 07:37Z. Nothing would have started that editor: only an idle
+close (above) woke the worker when a person opened the view.
+
+- **One readiness** (`liveReady`, `shared/liveReady.ts`) reads the view's state, its sandbox's editor (the machine record:
+  `unity.state` and `unity.detail`, `idleClosed`), the computer's hold (`LiveViewInfo.hold`) and its worker. The slot's
+  badge (`slotCall`, `shared/fleet.ts`), the panel's header, the stage's chip and hold card (`LiveStage`) and the knobs all
+  say what it returns.
+
+  | Kind | Badge | When |
+  |---|---|---|
+  | go | Live view: go | frames flow (`live`). The only "go" |
+  | starting | Live view: starting | asked the game to stream; no frame yet |
+  | held | Live view: paused for a build / waiting on a timed run / paused | the editor is down and the computer is held: a build plan, a bench lock, a pause (`hold`) |
+  | idle-closed | Live view: editor closed | the idle close shut its editor |
+  | queued | Live view: queued / waiting on a slot | its editor's start waits in the bench queue, or found no Unity slot |
+  | editor-starting | Live view: editor starting | the editor is loading |
+  | editor-stopped | Live view: editor stopped / editor crashed | the editor is not running, any other way |
+  | no-play | Live view: not in play mode | the editor runs, the game is not in play mode |
+  | stalled | Live view: no frames | it streamed, then no frame for `LIVE_STALL_MS` (10 s) with the socket open |
+  | holding | Live view: holding | any other drop (a script reload): it comes back by itself |
+
+  Each says why and what brings it back, and when ("Opening it asks its worker to start the editor and set the view up
+  (usually a few minutes)", "Ben opened it at 07:50Z: its worker was asked to set the view up again"). A view that is not "go" is the
+  quiet outlined chip with its state's dot, never the amber pill with the green mark.
+- **The knobs** are read only while the view is live. Otherwise the panel says once, calmly, which materials' knobs come
+  back when it is live; it no longer asks the game every 5 s and shows each material in red.
+- **The hold** is the computer's placement hold (`Agents.placement().hold`: a build plan, a pause, `placement.hold`), else
+  its bench lock (`benchText`), set on each view as the pages get it (`LiveHub.viewsFor`). `LiveHub.tick` runs every 5 s
+  (`server/index.ts`): it tells the pages when a hold starts or ends, and runs the stall watch.
+- **Opening it wakes its worker** (`LiveIdleCloser.viewerOpened`, `nudge`, `server/liveIdle.ts`): a person who opens a view
+  whose editor is stopped or crashed, or whose game is not in play mode, wakes its worker with a `[live view]` line to start
+  the editor and stage it again, once per stop (again after `LIVE_WAKE_AGAIN_MS`, 20 min, if it still does not stream). Not
+  while the worker is mid-turn (it is on it), the editor is starting, or the computer is held: then the journal says why
+  (`portal_logs` grep `live idle`), and the end of a build tells the worker whose view was left open to stage it again
+  (`BuildPlans.done`). The view carries the wake (`LiveViewInfo.wake`) until it streams again, so the panel says who woke it.
+- **Timings in the journal.** Each state change is logged with how long the last state lasted: `[live] live view
+  beast/slot5 (<session>): holding -> live after 412.3 s` (`portal_logs` grep `live view`), so a click-to-first-frame or a
+  resume can be read back.
 
 ## While it waits on you (w1582)
 

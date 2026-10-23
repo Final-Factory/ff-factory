@@ -28,6 +28,7 @@ import { MasterBatchWatch } from './masterBatch.ts';
 import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
+import { benchText } from './placement.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { Notifier } from './notify.ts';
 import { describeBusy } from './wake.ts';
@@ -436,8 +437,22 @@ const liveHub = new LiveHub({
     for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
   },
   viewerOpened: (info, who) => liveIdle.viewerOpened(info, who),
+  hold: (machineId) => liveHold(machineId),
+  log: (line) => console.log(`[live] ${line}`),
 });
 agents.liveHub = liveHub;
+/**
+ * Why a computer takes no work now, for a Live view there (w1838): a build plan or a pause (placement holds), else a timed
+ * run's bench lock, which refuses a Live view worker's editor start (docs/live-view.md "On BEAST first").
+ */
+function liveHold(machineId: string): string | undefined {
+  const held = agents.placement().hold?.[machineId];
+  if (held) return held;
+  const lock = machines.statsOf(machineId)?.benchLock;
+  return lock ? benchText(lock) : undefined;
+}
+// The stall watch and the holds the pages show (w1838).
+setInterval(() => liveHub.tick(), 5_000).unref();
 // A Live view's idle editor closed, and opened again at the next turn (w1746, server/liveIdle.ts, docs/live-view.md).
 const liveIdle = new LiveIdleCloser({
   minutes: () => cfg.live?.idleCloseMinutes ?? LIVE_IDLE_DEFAULT_MINUTES,
@@ -448,6 +463,8 @@ const liveIdle = new LiveIdleCloser({
   canClose: (machineId) => machines.canLiveIdleClose(machineId),
   close: (v, minutes) => machines.live(v.machineId, { op: 'idleClose', liveId: v.liveId, sessionId: v.sessionId, sandbox: v.sandbox, minutes }, 8 * 60_000),
   send: (sessionId, text) => sessions.send(sessionId, text, 'system'),
+  hold: (machineId) => liveHold(machineId),
+  woke: (liveId, who) => liveHub.woken(liveId, who),
   log: (line) => console.log(`[live] ${line}`),
   now: () => Date.now(),
 });

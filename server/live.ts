@@ -15,6 +15,12 @@ const VIEWER_BACKLOG_BYTES = 1024 * 1024;
  * screen nobody looks at, or whose link died without a close, stops counting after this, so the view can go idle.
  */
 export const LIVE_PRESENT_MS = 90_000;
+/**
+ * A view that streamed and got no frame for this long goes to holding with why (w1838): its daemon's socket to the game can
+ * stay open while the editor is busy, minimized (12.6 fps) or hung, and the view said "live" over a still picture. A late
+ * save at 0.5 fps (w1604) still sends a frame every 2 s.
+ */
+export const LIVE_STALL_MS = 10_000;
 export const LIVE_FPS = { default: 15, max: 30 };
 export const LIVE_WIDTH = { default: 960, min: 320, max: 1920 };
 /**
@@ -39,6 +45,10 @@ export interface LiveHubDeps {
   switched?(): void;
   /** A person opened a view (w1746): an editor closed idle wakes its worker (server/liveIdle.ts viewerOpened). */
   viewerOpened?(info: LiveViewInfo, who: string | undefined): void;
+  /** Why its computer takes no work now (a release build, a bench lock, a pause), or undefined (w1838: LiveViewInfo.hold). */
+  hold?(machineId: string): string | undefined;
+  /** The portal journal: each view's state changes, with how long the last state lasted (w1838). */
+  log?(line: string): void;
   now?(): number;
 }
 
@@ -55,6 +65,11 @@ interface View {
   /** The last time a page opened or left it, and the last knob move or reset (ms): a watched or tuned view is not idle (w1746). */
   watchedAt?: number;
   touchedAt?: number;
+  /** When the last frame came from the daemon (ms), and whether the stall watch put the view to holding (w1838). */
+  frameAt?: number;
+  stalled?: boolean;
+  /** When it entered its state (ms), for the journal's timings (w1838). */
+  stateAt?: number;
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -83,7 +98,53 @@ export class LiveHub {
   /** The views a person may watch, for their page. */
   viewsFor(userId: string | undefined): LiveViewInfo[] {
     if (!this.deps.enabled()) return [];
-    return [...this.views.values()].map((v) => v.info).filter((i) => this.canWatch(i.sessionId, userId));
+    return [...this.views.values()]
+      .map((v) => v.info)
+      .filter((i) => this.canWatch(i.sessionId, userId))
+      .map((i) => {
+        const hold = this.deps.hold?.(i.machineId);
+        return hold ? { ...i, hold } : i;
+      });
+  }
+
+  /** The holds the pages last heard of, per view (tick). */
+  private holdsKey = '';
+
+  /**
+   * Every few seconds (server/index.ts): the stall watch, and the computers' holds the pages show (w1838). A hold starts and
+   * ends outside this hub (a build plan, a bench lock, a pause), so the pages hear of it here.
+   */
+  tick() {
+    if (!this.deps.enabled()) return;
+    const now = this.now();
+    for (const v of this.views.values()) {
+      if (v.info.state !== 'live' || v.stalled || v.frameAt === undefined || now - v.frameAt < LIVE_STALL_MS) continue;
+      v.stalled = true;
+      this.setState(v, 'holding', `no frame from the game for ${Math.round((now - v.frameAt) / 1000)} s (its editor may be busy, minimized or hung)`);
+    }
+    const key = [...this.views.values()].map((v) => `${v.info.liveId}=${this.deps.hold?.(v.info.machineId) ?? ''}`).join('|');
+    if (key === this.holdsKey) return;
+    this.holdsKey = key;
+    this.deps.changed();
+  }
+
+  /** A person opened the view while it was not streaming, and its worker was asked to stage it again (server/liveIdle.ts). */
+  woken(liveId: string, who: string) {
+    const v = this.views.get(liveId);
+    if (v) this.touch(v, { wake: { at: iso(this.now()), who } });
+  }
+
+  /** A state change: the journal says how long the last one lasted (so the first frame's time after a start or a hold). */
+  private setState(v: View, state: LiveViewInfo['state'], detail: string) {
+    const was = v.info.state;
+    const now = this.now();
+    if (was !== state) {
+      const took = v.stateAt !== undefined ? ` after ${((now - v.stateAt) / 1000).toFixed(1)} s` : '';
+      this.deps.log?.(`live view ${v.info.machineId}/${v.info.sandbox} (${v.info.sessionId}): ${was} -> ${state}${took}${detail ? `: ${detail}` : ''}`);
+      v.stateAt = now;
+    }
+    // Streaming again: the wake it had is done.
+    this.touch(v, state === 'live' ? { state, detail, wake: undefined } : { state, detail });
   }
 
   private bySession(sessionId: string): View | undefined {
@@ -100,6 +161,7 @@ export class LiveHub {
 
   private touch(v: View, patch: Partial<LiveViewInfo>) {
     Object.assign(v.info, patch, { updatedAt: iso(this.now()) });
+    if ('wake' in patch && !patch.wake) delete v.info.wake;
     this.deps.changed();
   }
 
@@ -138,6 +200,7 @@ export class LiveHub {
       info: { liveId: randomUUID(), sessionId: info.id, machineId, sandbox, state: 'starting', detail: 'asking the game to stream', fps, width, materials, startedAt: at, updatedAt: at, frames: 0 },
       viewers: new Map(),
       present: new Map(),
+      stateAt: this.now(),
     };
     this.views.set(v.info.liveId, v);
     this.deps.changed();
@@ -182,11 +245,11 @@ export class LiveHub {
     for (const v of [...this.views.values()]) {
       if (v.info.machineId !== machineId || ids.has(v.info.liveId)) continue;
       const { liveId, sessionId, sandbox, fps, width, materials } = v.info;
-      if (running) this.touch(v, { state: 'starting', detail: "the machine's daemon restarted: starting the stream again" });
+      if (running) this.setState(v, 'starting', "the machine's daemon restarted: starting the stream again");
       try {
         await this.deps.machines.live(machineId, { op: 'start', liveId, sessionId, sandbox, fps, width, materials });
       } catch (e) {
-        if (this.views.get(liveId) === v) this.touch(v, { state: 'holding', detail: `the machine's daemon restarted and the view did not start again: ${(e as Error).message}` });
+        if (this.views.get(liveId) === v) this.setState(v, 'holding', `the machine's daemon restarted and the view did not start again: ${(e as Error).message}`);
       }
     }
     for (const r of running ?? []) {
@@ -240,6 +303,7 @@ export class LiveHub {
           sessionId: v.info.sessionId,
           machineId: v.info.machineId,
           sandbox: v.info.sandbox,
+          state: v.info.state,
           startedAtMs: v.takenBack ? 0 : Date.parse(v.info.startedAt) || 0,
           viewers: seen.filter((t) => now - t < LIVE_PRESENT_MS).length,
           pagesOpen: v.viewers.size,
@@ -260,18 +324,20 @@ export class LiveHub {
   /** The view's materials' knobs, read from the game now. */
   async knobs(sessionId: string): Promise<LiveMaterialKnobs[]> {
     const v = this.require(sessionId);
-    const out: LiveMaterialKnobs[] = [];
-    for (const material of v.info.materials) {
-      try {
-        const text = await this.command(v, `look.material.list|${material}`);
-        const j = JSON.parse(text) as { material?: string; shader?: string; knobs?: LiveMaterialKnobs['knobs'] };
-        // The name the view was started with, not the game's: a knob move must name one of the view's materials.
-        out.push({ material, ...(j.shader ? { shader: j.shader } : {}), knobs: Array.isArray(j.knobs) ? j.knobs : [] });
-      } catch (e) {
-        out.push({ material, knobs: [], error: (e as Error).message });
-      }
-    }
-    return out;
+    // All at once (w1838): each is a round trip to the game through the daemon, and three materials read one after another
+    // tripled the wait for the panel's first knobs.
+    return Promise.all(
+      v.info.materials.map(async (material): Promise<LiveMaterialKnobs> => {
+        try {
+          const text = await this.command(v, `look.material.list|${material}`);
+          const j = JSON.parse(text) as { material?: string; shader?: string; knobs?: LiveMaterialKnobs['knobs'] };
+          // The name the view was started with, not the game's: a knob move must name one of the view's materials.
+          return { material, ...(j.shader ? { shader: j.shader } : {}), knobs: Array.isArray(j.knobs) ? j.knobs : [] };
+        } catch (e) {
+          return { material, knobs: [], error: (e as Error).message };
+        }
+      }),
+    );
   }
 
   /** One knob move from a page: checked against the view's materials, then the game's look.material.set. */
@@ -310,7 +376,8 @@ export class LiveHub {
   onState(machineId: string, msg: Extract<FromDaemon, { type: 'live_state' }>) {
     const v = this.views.get(msg.liveId);
     if (!v || v.info.machineId !== machineId) return;
-    this.touch(v, { state: msg.state, detail: String(msg.detail ?? '') });
+    v.stalled = false;
+    this.setState(v, msg.state, String(msg.detail ?? ''));
   }
 
   /** A daemon's frame socket for a view (/machine/live/<liveId>); false when the view is not that machine's. */
@@ -327,6 +394,12 @@ export class LiveHub {
       if (ws.readyState === ws.OPEN) ws.send(`a${++taken}`);
       v.latest = frame;
       v.info.frames++;
+      v.frameAt = this.now();
+      // Frames again after the stall watch held it: live once more (its daemon still thinks it is, so it says nothing).
+      if (v.stalled) {
+        v.stalled = false;
+        this.setState(v, 'live', `${v.info.fps} fps at ${v.info.width} px`);
+      }
       for (const pump of v.viewers.values()) pump.push(frame);
     });
     ws.on('close', () => {
