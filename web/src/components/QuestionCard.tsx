@@ -141,8 +141,21 @@ export function QuestionCard(p: QuestionCardProps) {
   useLayoutEffect(() => {
     const el = freeBox.current;
     if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight + el.offsetHeight - el.clientHeight, 160)}px`;
+    const fit = () => {
+      el.style.height = 'auto';
+      el.style.height = `${Math.min(el.scrollHeight + el.offsetHeight - el.clientHeight, 160)}px`;
+    };
+    fit();
+    // The buttons beside the box (paperclip, mic) can settle after this runs and narrow it: the text wraps again, so fit again.
+    let width = el.clientWidth;
+    const watch = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => {
+      if (el.clientWidth !== width) {
+        width = el.clientWidth;
+        fit();
+      }
+    });
+    watch?.observe(el);
+    return () => watch?.disconnect();
   }, [typed, kept]);
   useEffect(() => {
     holdReload(`qc:${p.id}`, sending);

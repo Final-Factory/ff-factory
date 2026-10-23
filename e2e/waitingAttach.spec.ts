@@ -191,11 +191,11 @@ test('w1912: a request card sends the answer to your orchestrator with the files
   await signIn(page);
   const me = await appState(page.request);
   await page.goto('/#/dispatcher/waiting');
-  // A request's card that takes files (an intake card's decline reason does not: a declined request goes nowhere), pinned by its id:
-  // the questions other tests left open come and go around it.
-  const first = page.locator('[data-testid^="wait-w"]').filter({ has: page.getByRole('button', { name: 'Attach files' }) }).first();
-  await expect(first).toBeVisible();
-  const card = page.getByTestId((await first.getAttribute('data-testid'))!);
+  // A request's card that takes files (an intake card's decline reason does not: a declined request goes nowhere), pinned by the
+  // fixture's own id: the requests other tests filed show for a moment before the state override replaces them.
+  const mineCase = cases.find(({ w, session }) => session && w.needsYou)!;
+  const card = page.getByTestId(`wait-${mineCase.w.id}`);
+  await expect(card.getByRole('button', { name: 'Attach files' })).toBeVisible();
   await card.locator('.qc-free-text').evaluate((el) => el.setAttribute('data-w1912', '1'));
   await fire(page, '[data-w1912]', 'paste', [{ name: 'image.png', type: 'image/png', base64: RED_PNG }]);
   await expect(card.locator('.composer-file.done')).toHaveCount(1, { timeout: 20_000 });
