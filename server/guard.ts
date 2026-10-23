@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { repoIsPublic } from './publicGit.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
+import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
 import os from 'node:os';
 import path from 'node:path';
@@ -54,6 +55,8 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *     GitHub reports as public, server/publicGit.ts): a push is refused when a commit it would publish has
  *     an author or committer email that is neither a GitHub noreply address nor the configured public
  *     email, so nobody's private address ends up in public history.
+ *   - release branches (w1856): no commit, merge, cherry-pick, revert, am, pull or rebase in a sandbox on urgent/<v>, the
+ *     urgent release lane's pointer at the commit it builds (checkReleaseBranchCommit, server/releaseHandBack.ts).
  *   - branch switches: while the sandbox's editor runs, no `git switch` / `git checkout <branch>` in the
  *     sandbox (Unity would stop on "The open scene(s) have been modified externally"); the worker's
  *     switch_branch tool does it safely. `git checkout -- <paths>` and `git restore` stay allowed.
@@ -129,6 +132,7 @@ export function sandboxGuard(opts: {
       const reason =
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, prBase: opts.prBase ?? ghPrBase, publicIdentity: opts.publicIdentity, env: opts.env }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
+        checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) ??
         checkPlayerLaunch(cmd, opts.sandboxId) ??
         (opts.benchBusy ? checkBenchBusyLaunch(cmd, opts.benchBusy) : undefined) ??
         checkRawUnityBatch(cmd) ??
@@ -360,6 +364,46 @@ export function checkEditorSwitch(cmd: string, cwd: string | undefined, sandboxP
     if (sub === 'checkout' && rest.some((w) => w === '--' || w === '-p' || w === '--patch')) continue; // paths, not a branch
     if (!inside(gitDir)) continue;
     return `git ${sub} to another branch is blocked while this sandbox's Unity editor is running: Unity would stop on "The open scene(s) have been modified externally". Use mcp__machine__switch_branch instead (it checks the editor and switches safely). To restore files, use git restore <path> or git checkout -- <path>.`;
+  }
+  return undefined;
+}
+
+/** The git commands that put a commit on the branch checked out (w1856). */
+const COMMITTING = new Set(['commit', 'merge', 'cherry-pick', 'revert', 'am', 'pull', 'rebase']);
+
+/**
+ * Why a shell command is refused because it would commit on urgent/<v> in the sandbox, or undefined (w1856). urgent/<v> is
+ * the urgent release lane's pointer at the commit it builds (the ci-release skill's urgent-release.md): nobody commits on
+ * it, and after 1.0.0.12 a worker that found BEAST's slot1 left on urgent/1.0.0.12 committed its work there. `branchOf`
+ * reads the branch checked out in a folder (releaseHandBack.headBranch). Exported for tests.
+ */
+export function checkReleaseBranchCommit(cmd: string, cwd: string | undefined, sandboxPath: string, branchOf: (dir: string) => string | undefined = headBranch): string | undefined {
+  const n = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const inside = (d: string | undefined) => !d || n(d) === n(sandboxPath) || n(d).startsWith(n(sandboxPath) + '/');
+  let dir = cwd;
+  for (const seg of cmd.split(/&&|\|\||[;|\n]/)) {
+    const raw = seg
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => w.replace(/^["']|["']$/g, ''));
+    const lower = raw.map((w) => w.toLowerCase());
+    if (['cd', 'pushd', 'chdir', 'set-location', 'sl'].includes(lower[0] ?? '')) dir = resolveDir(dir, raw[1]);
+    const g = lower.findIndex((w) => w === 'git' || w.endsWith('/git') || w.endsWith('git.exe'));
+    if (g < 0) continue;
+    let gitDir = dir;
+    let i = g + 1;
+    while (i < raw.length && raw[i].startsWith('-')) {
+      if (raw[i] === '-C') gitDir = resolveDir(gitDir, raw[i + 1]);
+      i += raw[i] === '-C' || raw[i] === '-c' ? 2 : 1;
+    }
+    const sub = lower[i];
+    if (!sub || !COMMITTING.has(sub)) continue;
+    if (lower.slice(i + 1).some((w) => w === '-h' || w === '--help' || w === '--abort')) continue;
+    if (!inside(gitDir)) continue;
+    const branch = branchOf(sandboxPath);
+    if (!isUrgentBranch(branch)) continue;
+    return `git ${sub} is blocked here: this sandbox is on ${branch}, the urgent release lane's pointer at the commit it builds, which nobody commits on (w1856). A release build left the sandbox on it. Put your work on your own branch first: mcp__machine__switch_branch with your branch (create_from origin/master for new work; it refuses uncommitted changes, so with the editor stopped \`git switch -c <your-branch>\` takes them along instead).`;
   }
   return undefined;
 }

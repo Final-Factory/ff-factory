@@ -6,6 +6,7 @@ import { sourceTag } from './intakeRules.ts';
 import { WORK_OPEN, type AttachmentRef, type Requester, type WorkItem, type WorkOverlap, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { fmtBytes } from '../shared/attachments.ts';
 import { needsBuild, needsLive, needsTimed } from '../shared/capacity.ts';
+import { isReleaseBranch, releaseBranchWarning } from './releaseHandBack.ts';
 
 /** An overlap at or above this is strong: the dispatcher must give a reason to start work on the request anyway. */
 export const STRONG = 0.8;
@@ -549,6 +550,8 @@ export interface Handover {
 export function handoverNote(w: Pick<WorkItem, 'id'>, h: Handover): string {
   const lines = [`\n\n---\nHandover (added by the harness): this is a NEW session for ${w.id}. You have no earlier conversation, and nothing in this sandbox was said to you before. What you need is in this message, the request's ledger entry (read_work ${w.id}) and the repo.`];
   if (h.sandbox) lines.push(`Sandbox ${h.sandbox.id}: ${h.sandbox.git || (h.sandbox.branch ? `branch ${h.sandbox.branch}` : 'branch unknown')}. Check \`git status\` and the branch before you commit; work that is not yours may be there.`);
+  // w1856: a release build left it on its release branch, and nothing could switch it off first.
+  if (h.sandbox && isReleaseBranch(h.sandbox.branch)) lines.push(releaseBranchWarning(h.sandbox.branch!));
   if (h.previous) {
     const on = h.previous.requests.length ? h.previous.requests.map((r) => `${r.id} "${clip(r.title, 80)}" (${r.status})`).join(', ') : 'nothing open';
     lines.push(`The sandbox was last used by session ${h.previous.id} "${clip(h.previous.title, 80)}", on ${on}. That session keeps those requests; do not touch their branches or PRs unless ${w.id} says so.`);

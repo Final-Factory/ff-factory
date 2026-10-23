@@ -326,6 +326,11 @@ export interface SessionInfo {
    */
   placeReleased?: { at: string; sandbox: string; branch: string; why: string };
   /**
+   * w1856 (server/releaseHandBack.ts): its switch_branch put a sandbox on a release branch (urgent/<v>, release/<v>) from
+   * `from`; build_plan done switches the sandbox back to `from` if it is still on `to`, then this goes.
+   */
+  releaseSwitch?: { machine: string; sandbox: string; from: string; to: string; at: string };
+  /**
    * Its uncommitted work was committed on its branch before its sandbox was released (w656, server/saveWork.ts): its
    * next message says so, then this goes.
    */

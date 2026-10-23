@@ -308,10 +308,26 @@ Then:
      (its own sandbox to a fresh hand-over branch, slot1 to the builder's branch) and resumes it with `You are in
      <computer>/slot1 now`. PlaceAgain keeps slot1 for it meanwhile (`BuildPlans.seats`). Not empty within 10 minutes:
      the builder is told to build where it is.
-4. **`build_plan done`** (by its worker right after the build, done or failed) ends it: the hold lifts, the queued resumes
-   go, the paused workers are told to carry on, and the dispatcher hears `[ledger] BUILD DONE (w1606)` with how long
-   the build took. A plan nobody ends is ended 3 hours after it was due (`PLAN_MAX_MS`). Plans live in
-   `data/builds.json`, so a portal restart keeps the hold and the resumes.
+4. **`build_plan done`** (by its worker right after the build, done or failed) ends it: the hold lifts, **the release's
+   sandbox goes back on its own branch**, the queued resumes go, the paused workers are told to carry on, and the
+   dispatcher hears `[ledger] BUILD DONE (w1606)` with how long the build took and what the hand-back did. A plan nobody
+   ends is ended 3 hours after it was due (`PLAN_MAX_MS`). Plans live in `data/builds.json`, so a portal restart keeps the
+   hold and the resumes.
+   - **The hand-back** (w1856, `server/releaseHandBack.ts`; Ben's request after 1.0.0.12 left beast/slot1 on
+     `urgent/1.0.0.12` and the next worker there committed on it). The builder puts its sandbox on the bump with
+     switch_branch (`urgent/<v>`); that switch records the branch the sandbox left on the builder
+     (`SessionInfo.releaseSwitch`; one release after another keeps the first). `done` (`Agents.handBackRelease`) switches
+     every sandbox of the build's workers still on a release branch back to it, or to a fresh `sandbox/<id>-after-<branch>`
+     from origin/master when it is unknown or checked out elsewhere, before the paused workers carry on, and says so in
+     its answer. A switch that fails (uncommitted build output: the game repo's `urgent_release.py` hands the tree back
+     clean first, `handback --restore-tree` does it by hand) is named there with the step for the builder. Two more
+     guards: `prepareForNewWork` switches a sandbox on `urgent/*` or `release/<v>` to a fresh branch before new work
+     starts in it (the handover of a worker that still lands on one carries a WARNING), and the shell guard refuses a
+     commit, merge, cherry-pick, revert, am, pull or rebase in a sandbox on `urgent/*` (`checkReleaseBranchCommit`).
+     The Library caches are the game repo's: `urgent_release.py` clears `Library/Bee`, `ScriptAssemblies` and
+     `ScriptMapper` (the stale state that failed the next worker's player builds in `EntitiesILPostProcessors` on
+     `Unity.Jobs.dll`) and opens the project again on the computer's own build target (Release-Lanes.md, "The
+     hand-back").
 
 One build at a time per computer. A worker off BEAST that declares a release build builds where it is (nothing is cleared
 there); its request is marked build work, so its next placement is BEAST first.
