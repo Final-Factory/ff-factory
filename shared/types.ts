@@ -2372,6 +2372,16 @@ export interface AppVersion {
   web?: string;
 }
 
+/**
+ * A worker an urgent release's build paused (w1841, server/buildPlans.ts): the build, its computer, and whether it was asked
+ * to pause mid-turn (told: the build's done tells it to carry on) or paused between turns (its own next message resumes it).
+ */
+export interface BuildHold {
+  what: string;
+  machine: string;
+  told: boolean;
+}
+
 export interface AppState {
   /** The running server's version; absent from a server older than 0.1.0. */
   app?: AppVersion;
@@ -2408,6 +2418,8 @@ export interface AppState {
   heldRoom?: { id: string; why: string; for: ('game' | 'agent')[] }[];
   /** Computers with room that placement.minPriority reserves for higher work (w1643), with their lowest priority: a request at that level may use them. */
   reservedRoom?: { id: string; min: 'normal' | 'high' | 'urgent'; for: readonly ('game' | 'agent')[] }[];
+  /** The workers an urgent release's build paused (w1841, server/buildPlans.ts pausedFor), by session id: their requests show Blocked on it. */
+  buildHolds?: Record<string, BuildHold>;
   /** Discord and FFBox intake into the ledger (docs/intake.md); absent from a server older than this field. */
   intake?: IntakeSummary;
   /** The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): its switches and its last run. */
